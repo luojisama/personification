@@ -101,6 +101,7 @@ def register_reply_matchers(
     message_cls: Any,
     message_segment_cls: Any,
     logger: Any,
+    plugin_config: Any,
     finished_exception_cls: Any = None,
 ) -> Dict[str, Any]:
     response_timeout_seconds = max(
