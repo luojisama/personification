@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import inspect
+import json
 import mimetypes
 import random
 import re
@@ -40,6 +42,15 @@ TTS_MODEL_BY_MODE = {
     TTS_MODE_CLONE: "mimo-v2.5-tts-voiceclone",
 }
 MAX_CLONE_VOICE_BYTES = 10 * 1024 * 1024
+TTS_DELIVERY_ACTIONS = {"voice", "text", "block"}
+BUILTIN_TTS_SAFETY_POLICY = """内置禁止合成语音的内容类型：
+- 明确色情内容、涉及未成年人的性内容、非自愿性内容；
+- 煽动仇恨、严重骚扰、针对受保护群体的侮辱或去人化表达；
+- 鼓励现实暴力、极端主义、恐怖主义、违法犯罪或规避执法的操作性内容；
+- 自残自杀的鼓励、指令或美化；
+- 泄露隐私、凭证、住址、手机号、身份证号等敏感个人信息；
+- 诱导冒充真人进行欺骗、诈骗、威胁、勒索或其他高风险行为。
+如果只是普通吐槽、玩笑、轻微脏话、虚构角色台词，且不落入上述高风险类型，不要过度阻断。"""
 
 
 @dataclass
@@ -51,6 +62,14 @@ class TtsStyleDecision:
     voice_prompt: str | None = None
     voice_clone: str | None = None
     model: str | None = None
+
+
+@dataclass
+class TtsDeliveryDecision:
+    action: str = "text"
+    style_hint: str | None = None
+    reason: str = ""
+    visible_message: str = ""
 
 
 def extract_persona_tts_config(base_prompt: Any) -> dict[str, str]:
@@ -87,7 +106,9 @@ class TtsService:
         self.style_planner = style_planner
 
     def is_enabled(self) -> bool:
-        return bool(getattr(self.plugin_config, "personification_tts_enabled", False))
+        return bool(getattr(self.plugin_config, "personification_tts_enabled", False)) and bool(
+            getattr(self.plugin_config, "personification_tts_global_enabled", True)
+        )
 
     def is_configured(self) -> bool:
         return bool(str(getattr(self.plugin_config, "personification_tts_api_key", "") or "").strip())
@@ -96,7 +117,7 @@ class TtsService:
         return self.is_enabled() and self.is_configured()
 
     def is_style_planner_enabled(self) -> bool:
-        return False
+        return bool(getattr(self.plugin_config, "personification_tts_llm_decision_enabled", True)) and self.style_planner is not None
 
     def is_group_auto_enabled(self, group_config: dict[str, Any] | None = None) -> bool:
         config = group_config or {}
@@ -131,6 +152,283 @@ class TtsService:
         if probability <= 0:
             return False
         return random.random() < probability
+
+    def can_consider_auto_tts(
+        self,
+        *,
+        is_private: bool,
+        group_config: dict[str, Any] | None,
+        text: str,
+        has_rich_content: bool = False,
+    ) -> bool:
+        if not self.is_available():
+            return False
+        if not getattr(self.plugin_config, "personification_tts_auto_enabled", True):
+            return False
+        if has_rich_content:
+            return False
+        if not str(text or "").strip():
+            return False
+        if not is_private and not self.is_group_auto_enabled(group_config):
+            return False
+        return True
+
+    async def decide_tts_delivery(
+        self,
+        *,
+        text: str,
+        is_private: bool,
+        group_config: dict[str, Any] | None = None,
+        has_rich_content: bool = False,
+        command_triggered: bool = False,
+        raw_message_text: str = "",
+        recent_context: str = "",
+        relationship_hint: str = "",
+        group_style: str = "",
+        semantic_frame: Any = None,
+        fallback_style_hint: str = "",
+        command_options: dict[str, Any] | None = None,
+        persona_tts: dict[str, str] | None = None,
+    ) -> TtsDeliveryDecision:
+        final_text = str(text or "").strip()
+        if not final_text:
+            return TtsDeliveryDecision(action="text", reason="empty_text")
+        if not self.is_available():
+            return TtsDeliveryDecision(action="text", reason="tts_unavailable")
+        if not command_triggered and not self.can_consider_auto_tts(
+            is_private=is_private,
+            group_config=group_config,
+            text=final_text,
+            has_rich_content=has_rich_content,
+        ):
+            return TtsDeliveryDecision(action="text", reason="auto_gate_closed")
+        if not bool(getattr(self.plugin_config, "personification_tts_llm_decision_enabled", True)):
+            if command_triggered or self.should_auto_tts(
+                is_private=is_private,
+                group_config=group_config,
+                text=final_text,
+                has_rich_content=has_rich_content,
+            ):
+                return TtsDeliveryDecision(
+                    action="voice",
+                    style_hint=self._resolve_tts_style_hint(semantic_frame, fallback_style_hint),
+                    reason="llm_decision_disabled",
+                )
+            return TtsDeliveryDecision(action="text", reason="legacy_probability_skipped")
+        if self.style_planner is None:
+            return TtsDeliveryDecision(
+                action="text",
+                reason="decision_model_unavailable",
+                visible_message="语音审查暂时不可用，先不合成语音。",
+            )
+
+        timeout = self._decision_timeout()
+        messages = self._build_delivery_decision_messages(
+            text=final_text,
+            is_private=is_private,
+            command_triggered=command_triggered,
+            raw_message_text=raw_message_text,
+            recent_context=recent_context,
+            relationship_hint=relationship_hint,
+            group_style=group_style,
+            semantic_frame=semantic_frame,
+            fallback_style_hint=fallback_style_hint,
+            command_options=command_options,
+            persona_tts=persona_tts,
+        )
+        try:
+            raw_result = self.style_planner(messages)
+            if inspect.isawaitable(raw_result):
+                raw_result = await asyncio.wait_for(raw_result, timeout=timeout)
+        except Exception as exc:
+            self.logger.warning(f"[tts] LLM 语音决策失败，回退文字: {exc}")
+            return TtsDeliveryDecision(
+                action="text",
+                style_hint=self._resolve_tts_style_hint(semantic_frame, fallback_style_hint),
+                reason=f"decision_failed:{type(exc).__name__}",
+                visible_message="语音审查暂时失败，先不合成语音。",
+            )
+        decision = self._parse_delivery_decision(raw_result)
+        if decision is None:
+            return TtsDeliveryDecision(
+                action="text",
+                style_hint=self._resolve_tts_style_hint(semantic_frame, fallback_style_hint),
+                reason="decision_unparseable",
+                visible_message="语音审查结果无法解析，先不合成语音。",
+            )
+        if not decision.style_hint:
+            decision.style_hint = self._resolve_tts_style_hint(semantic_frame, fallback_style_hint)
+        return decision
+
+    def _decision_timeout(self) -> float:
+        try:
+            value = float(getattr(self.plugin_config, "personification_tts_decision_timeout", 8) or 8)
+        except (TypeError, ValueError):
+            value = 8.0
+        return max(2.0, min(30.0, value))
+
+    def _resolve_tts_style_hint(self, semantic_frame: Any = None, fallback_style_hint: str = "") -> str | None:
+        semantic_hint = str(getattr(semantic_frame, "tts_style_hint", "") or "").strip()
+        fallback = str(fallback_style_hint or "").strip()
+        return semantic_hint or fallback or None
+
+    def _build_delivery_decision_messages(
+        self,
+        *,
+        text: str,
+        is_private: bool,
+        command_triggered: bool,
+        raw_message_text: str = "",
+        recent_context: str = "",
+        relationship_hint: str = "",
+        group_style: str = "",
+        semantic_frame: Any = None,
+        fallback_style_hint: str = "",
+        command_options: dict[str, Any] | None = None,
+        persona_tts: dict[str, str] | None = None,
+    ) -> list[dict[str, str]]:
+        builtin_policy = (
+            BUILTIN_TTS_SAFETY_POLICY
+            if bool(getattr(self.plugin_config, "personification_tts_builtin_safety_enabled", True))
+            else "内置安全分类未启用。"
+        )
+        custom_policy = str(getattr(self.plugin_config, "personification_tts_forbidden_policy", "") or "").strip()
+        if not custom_policy:
+            custom_policy = "无额外自定义违禁策略。"
+        payload = {
+            "scene": "private" if is_private else "group",
+            "trigger": "command" if command_triggered else "auto_reply",
+            "final_text": str(text or "").strip()[:1200],
+            "user_message": str(raw_message_text or "").strip()[:500],
+            "recent_context": str(recent_context or "").strip()[:800],
+            "relationship_hint": str(relationship_hint or "").strip()[:500],
+            "group_style": str(group_style or "").strip()[:300],
+            "semantic_frame": self._render_semantic_frame_for_tts(semantic_frame),
+            "fallback_style_hint": str(fallback_style_hint or "").strip()[:80],
+            "command_options": self._safe_command_options(command_options),
+            "persona_tts": self._safe_persona_tts(persona_tts),
+        }
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "你是 TTS 语音发送审查器。只判断是否把最终文本合成为语音，不改写聊天正文。"
+                    "你必须基于语义判断，不要做机械关键词匹配。"
+                    "输出严格 JSON，不要 markdown，不要解释。"
+                    'JSON 字段：{"action":"voice|text|block","style_hint":"简短语音风格或空",'
+                    '"visible_message":"命令被拒读/不读时给用户看的短句，自动回复场景可空","reason":"极短原因"}。'
+                    "action=voice 表示内容适合且安全，可以合成语音；"
+                    "action=text 表示内容可以文字发送但不适合读成语音；"
+                    "action=block 表示不应合成为语音，尤其命中安全策略或自定义违禁策略。"
+                    "显式命令场景下用户确实想让你读，但你仍可选择 text 或 block。"
+                    "普通自动回复场景下，text/block 都只表示不要合成语音，外层仍会发送文字。"
+                    "\n\n[内置安全策略]\n"
+                    f"{builtin_policy}\n\n"
+                    "[自定义违禁策略]\n"
+                    f"{custom_policy}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(payload, ensure_ascii=False),
+            },
+        ]
+
+    def _render_semantic_frame_for_tts(self, semantic_frame: Any) -> dict[str, str]:
+        if semantic_frame is None:
+            return {}
+        fields = (
+            "chat_intent",
+            "ambiguity_level",
+            "requires_emotional_care",
+            "domain_focus",
+            "user_attitude",
+            "bot_emotion",
+            "emotion_intensity",
+            "expression_style",
+            "tts_style_hint",
+        )
+        result: dict[str, str] = {}
+        for field in fields:
+            value = str(getattr(semantic_frame, field, "") or "").strip()
+            if value:
+                result[field] = value[:120]
+        return result
+
+    def _safe_command_options(self, command_options: dict[str, Any] | None) -> dict[str, str]:
+        if not isinstance(command_options, dict):
+            return {}
+        result: dict[str, str] = {}
+        for key in ("mode", "voice", "style", "voice_prompt", "model"):
+            value = str(command_options.get(key, "") or "").strip()
+            if value:
+                result[key] = value[:160]
+        for key in ("voice_clone", "voice_clone_path"):
+            value = str(command_options.get(key, "") or "").strip()
+            if value:
+                result[key] = "[configured]"
+        return result
+
+    def _safe_persona_tts(self, persona_tts: dict[str, str] | None) -> dict[str, str]:
+        if not isinstance(persona_tts, dict):
+            return {}
+        result: dict[str, str] = {}
+        for key in ("mode", "voice", "style", "user_hint", "voice_prompt", "model"):
+            value = str(persona_tts.get(key, "") or "").strip()
+            if value:
+                result[key] = value[:160]
+        for key in ("voice_clone", "voice_clone_path"):
+            if str(persona_tts.get(key, "") or "").strip():
+                result[key] = "[configured]"
+        return result
+
+    def _parse_delivery_decision(self, raw_result: Any) -> TtsDeliveryDecision | None:
+        if hasattr(raw_result, "content"):
+            raw_result = getattr(raw_result, "content", "")
+        if isinstance(raw_result, dict):
+            payload = raw_result
+        else:
+            payload = self._extract_json_payload(str(raw_result or ""))
+        if not isinstance(payload, dict):
+            return None
+        action = str(payload.get("action", "") or "").strip().lower()
+        if action not in TTS_DELIVERY_ACTIONS:
+            return None
+        style_hint = str(payload.get("style_hint", "") or "").strip() or None
+        visible_message = str(payload.get("visible_message", "") or "").strip()
+        reason = str(payload.get("reason", "") or "").strip()
+        return TtsDeliveryDecision(
+            action=action,
+            style_hint=style_hint[:80] if style_hint else None,
+            reason=reason[:120],
+            visible_message=visible_message[:120],
+        )
+
+    def _extract_json_payload(self, raw: str) -> dict[str, Any] | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            pass
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+            text = re.sub(r"\s*```$", "", text).strip()
+            try:
+                parsed = json.loads(text)
+                return parsed if isinstance(parsed, dict) else None
+            except Exception:
+                pass
+        match = re.search(r"\{[\s\S]*\}", text)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     def split_text(self, text: str) -> list[str]:
         raw = str(text or "").strip()
@@ -534,4 +832,4 @@ class TtsService:
             merged.append(value)
         return merged
 
-__all__ = ["TtsService", "TtsStyleDecision", "extract_persona_tts_config"]
+__all__ = ["TtsDeliveryDecision", "TtsService", "TtsStyleDecision", "extract_persona_tts_config"]

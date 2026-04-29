@@ -118,6 +118,31 @@ def register_tts_matchers(
             except Exception as e:
                 logger.debug(f"[tts] 读取人设配置失败: {e}")
 
+        persona_tts = extract_persona_tts_config(base_prompt)
+        tts_decision = None
+        try:
+            tts_decision = await tts_service.decide_tts_delivery(
+                text=text,
+                is_private=is_private,
+                command_triggered=True,
+                raw_message_text=text,
+                group_style=group_style,
+                fallback_style_hint=str(parsed.get("style") or ""),
+                command_options=parsed,
+                persona_tts=persona_tts,
+            )
+        except Exception as e:
+            logger.warning(f"[tts] 命令语音审查失败: {e}")
+            await tts_cmd.finish("语音审查暂时失败，先不合成语音。")
+        if tts_decision is None:
+            await tts_cmd.finish("语音审查暂时失败，先不合成语音。")
+        if tts_decision.action != "voice":
+            fallback_message = (
+                tts_decision.visible_message
+                or ("这段内容不适合合成语音。" if tts_decision.action == "block" else "这段我先不发语音。")
+            )
+            await tts_cmd.finish(fallback_message)
+
         try:
             sent = await tts_service.send_tts(
                 bot=bot,
@@ -126,7 +151,7 @@ def register_tts_matchers(
                 text=text,
                 mode_hint=parsed.get("mode"),
                 voice_hint=parsed.get("voice"),
-                style_hint=parsed.get("style"),
+                style_hint=tts_decision.style_hint or parsed.get("style"),
                 voice_prompt_hint=parsed.get("voice_prompt"),
                 voice_clone_hint=parsed.get("voice_clone"),
                 voice_clone_path_hint=parsed.get("voice_clone_path"),
@@ -134,7 +159,7 @@ def register_tts_matchers(
                 user_hint="请自然朗读下面的内容，整体语速略快一点，但保持自然清晰。",
                 is_private=is_private,
                 group_style=group_style,
-                persona_tts=extract_persona_tts_config(base_prompt),
+                persona_tts=persona_tts,
             )
         except Exception as e:
             logger.warning(f"[tts] 命令合成失败: {e}")

@@ -1281,24 +1281,35 @@ async def process_yaml_response_logic(
         and not has_generated_image
         and not stickers_sent
         and tts_service is not None
-        and tts_service.should_auto_tts(
-            is_private=is_private_session,
-            group_config=group_config,
-            text=assistant_text,
-            has_rich_content=False,
-        )
     ):
         try:
-            sent_as_tts = await tts_service.send_tts(
-                bot=bot,
-                event=event,
-                message_segment_cls=message_segment_cls,
+            tts_user_hint = _build_tts_user_hint(is_private=is_private_session)
+            persona_tts = extract_persona_tts_config(prompt_config)
+            tts_decision = await tts_service.decide_tts_delivery(
                 text=assistant_text,
-                user_hint=_build_tts_user_hint(is_private=is_private_session),
                 is_private=is_private_session,
-                persona_tts=extract_persona_tts_config(prompt_config),
-                pause_range=(0.8, 1.5),
+                group_config=group_config,
+                has_rich_content=has_generated_image,
+                command_triggered=False,
+                raw_message_text=raw_message_text or history_last_text or trigger_reason,
+                recent_context=recent_context_hint,
+                relationship_hint=relationship_hint,
+                semantic_frame=semantic_frame,
+                fallback_style_hint=str(getattr(semantic_frame, "tts_style_hint", "") or ""),
+                persona_tts=persona_tts,
             )
+            if tts_decision.action == "voice":
+                sent_as_tts = await tts_service.send_tts(
+                    bot=bot,
+                    event=event,
+                    message_segment_cls=message_segment_cls,
+                    text=assistant_text,
+                    style_hint=tts_decision.style_hint,
+                    user_hint=tts_user_hint,
+                    is_private=is_private_session,
+                    persona_tts=persona_tts,
+                    pause_range=(0.8, 1.5),
+                )
         except Exception as e:
             logger.warning(f"[tts] YAML 自动语音发送失败，回退文字: {e}")
 

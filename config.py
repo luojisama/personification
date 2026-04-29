@@ -151,6 +151,10 @@ class Config(BaseModel):
     personification_tts_enabled: bool = False
     personification_tts_auto_enabled: bool = False
     personification_tts_auto_probability: float = 0.2
+    personification_tts_llm_decision_enabled: bool = True
+    personification_tts_decision_timeout: int = 8
+    personification_tts_builtin_safety_enabled: bool = True
+    personification_tts_forbidden_policy: str = ""
     personification_tts_api_key: str = ""
     personification_tts_api_url: str = "https://api.xiaomimimo.com/v1"
     personification_tts_model: str = "mimo-v2.5-tts"
