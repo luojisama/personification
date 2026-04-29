@@ -72,26 +72,18 @@ def schema_tool_name(schema: dict) -> str:
     return str(function.get("name", "") or "").strip()
 
 
-def requires_forced_lookup(query: str) -> bool:
-    _ = query
-    return False
-
-
 def select_tool_schemas(
     registry: ToolRegistry,
     *,
     has_images: bool,
     chat_intent: str = "",
     plugin_question_intent: str = "",
-    force_lookup: bool = False,
 ) -> list[dict]:
     schemas = registry.openai_schemas()
     if not schemas:
         return []
     result_schemas: list[dict]
     effective_chat_intent = str(chat_intent or "").strip()
-    if force_lookup and effective_chat_intent == "banter":
-        effective_chat_intent = "lookup"
     if effective_chat_intent == "banter":
         if not has_images:
             return []
@@ -150,7 +142,6 @@ __all__ = [
     "MAX_AGENT_MAX_STEPS",
     "MIN_AGENT_MAX_STEPS",
     "normalize_agent_max_steps",
-    "requires_forced_lookup",
     "schema_tool_name",
     "select_tool_schemas",
     "semantic_tool_guidance",

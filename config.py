@@ -38,7 +38,8 @@ class Config(BaseModel):
     personification_tts_global_enabled: bool = True
 
     personification_agent_enabled: bool = True
-    personification_agent_max_steps: int = 7
+    personification_agent_max_steps: int = 10
+    personification_response_timeout: int = 180
     personification_image_input_mode: str = "auto"
     personification_image_detail: str = "auto"
     personification_builtin_search: bool = True
@@ -109,6 +110,7 @@ class Config(BaseModel):
     personification_image_gen_timeout: int = 180
     personification_qzone_enabled: bool = False
     personification_qzone_cookie: str = ""
+    # DEPRECATED: use personification_qzone_cookie.
     qzone_cookie: str = ""
     personification_qzone_proactive_enabled: bool = False
     personification_qzone_check_interval: int = 180
@@ -145,8 +147,12 @@ class Config(BaseModel):
     personification_tts_auto_probability: float = 0.2
     personification_tts_api_key: str = ""
     personification_tts_api_url: str = "https://api.xiaomimimo.com/v1"
-    personification_tts_model: str = "mimo-v2-tts"
+    personification_tts_model: str = "mimo-v2.5-tts"
+    personification_tts_mode: str = "preset"
     personification_tts_default_voice: str = "mimo_default"
+    personification_tts_voice_design_prompt: str = ""
+    personification_tts_voice_clone: str = ""
+    personification_tts_voice_clone_path: str = ""
     personification_tts_default_format: str = "wav"
     personification_tts_max_chars_per_segment: int = 120
     personification_tts_timeout: int = 60
@@ -262,7 +268,15 @@ class Config(BaseModel):
             self.personification_tool_web_search_enabled = bool(self.personification_web_search)
         elif "personification_tool_web_search_enabled" in fields_set and "personification_web_search" not in fields_set:
             self.personification_web_search = bool(self.personification_tool_web_search_enabled)
-        if getattr(self, "personification_web_search", None) is not None:
+        if "qzone_cookie" in fields_set:
+            if "personification_qzone_cookie" not in fields_set:
+                self.personification_qzone_cookie = str(self.qzone_cookie or "")
+            warnings.warn(
+                "qzone_cookie 已废弃，请改用 personification_qzone_cookie",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if "personification_web_search" in fields_set:
             warnings.warn(
                 "personification_web_search 已废弃，请改用 skill 配置控制联网搜索",
                 DeprecationWarning,

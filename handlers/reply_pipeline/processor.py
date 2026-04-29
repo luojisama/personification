@@ -1051,6 +1051,12 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             )
         return recovered_direct_mention_reply
 
+    fallback_model_messages = (
+        agent_messages
+        if tool_image_urls and agent_direct_image_input and direct_image_input
+        else messages
+    )
+
     try:
         if is_private_session:
             try:
@@ -1089,6 +1095,9 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                         precomputed_intent=intent_decision,
                         started_at=started_at,
                         is_direct_mention=is_direct_mention,
+                        response_timeout_seconds=float(
+                            getattr(runtime.plugin_config, "personification_response_timeout", 180) or 180
+                        ),
                         task_exc_logger=_task_exc_logger,
                     )
                 except Exception as exc:
@@ -1121,7 +1130,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                 reply_content = ""
                 bypass_length_limits = False
         if not used_agent:
-            reply_content = await _call_text_model_with_retry(messages)
+            reply_content = await _call_text_model_with_retry(fallback_model_messages)
             bypass_length_limits = False
             if not reply_content:
                 recovered_reply = await _recover_direct_mention_reply_now()
@@ -1216,7 +1225,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                 return
             else:
                 runtime.logger.info("拟人插件：Agent 文本含 NO_REPLY 标记，回退基础模型重试。")
-                reply_content = await _call_text_model_with_retry(messages)
+                reply_content = await _call_text_model_with_retry(fallback_model_messages)
                 bypass_length_limits = False
                 if not reply_content:
                     recovered_reply = await _recover_direct_mention_reply_now()
@@ -1468,7 +1477,6 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                     event=event,
                     message_segment_cls=runtime.message_segment_cls,
                     text=final_reply,
-                    style_hint=str(getattr(semantic_frame, "tts_style_hint", "") or "").strip() or None,
                     user_hint=_build_tts_user_hint(
                         is_private=is_private_session,
                         group_style=persona.get_group_style(str(group_id)),

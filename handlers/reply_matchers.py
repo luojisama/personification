@@ -103,6 +103,11 @@ def register_reply_matchers(
     logger: Any,
     finished_exception_cls: Any = None,
 ) -> Dict[str, Any]:
+    response_timeout_seconds = max(
+        30.0,
+        float(getattr(plugin_config, "personification_response_timeout", 180) or 180),
+    )
+
     async def _direct_reply_rule(event: Event, state: T_State) -> bool:
         result = await _evaluate_personification_rule(
             personification_rule=personification_rule,
@@ -148,6 +153,7 @@ def register_reply_matchers(
             logger=logger,
             finished_exception_cls=finished_exception_cls,
             delay=wait_seconds,
+            response_timeout_seconds=response_timeout_seconds,
         )
 
     @direct_reply_matcher.handle()

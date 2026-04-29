@@ -25,12 +25,8 @@ from ...core.image_input import (
     is_image_input_unsupported_error,
     normalize_image_detail,
     normalize_image_input_mode,
-    provider_supports_vision,
 )
-from ...core.media_understanding import analyze_images_with_route_or_fallback
 from ...core.sticker_library import (
-    analyze_sticker_image,
-    render_sticker_semantic_summary,
     resolve_sticker_dir,
 )
 from ...core.message_parts import build_user_message_content, clone_messages_with_text_suffix
@@ -66,12 +62,20 @@ from ...agent.action_executor import ActionExecutor
 from ...agent.loop import run_agent
 from ...agent.query_rewriter import QueryRewriteContext
 from ..reply_pipeline.pipeline_emotion import compose_reply_emotion_block
-from ..reply_pipeline.pipeline_context import compute_agent_time_budget as _compute_agent_time_budget
+from ..reply_pipeline.pipeline_context import (
+    batch_has_newer_messages as _shared_batch_has_newer_messages,
+    compute_agent_time_budget as _compute_agent_time_budget,
+    primary_route_supports_vision as _runtime_primary_route_supports_vision,
+    should_use_agent_for_reply as _should_use_agent_for_reply,
+    strip_injected_visual_summary as _strip_injected_visual_summary,
+)
+from ..reply_pipeline.pipeline_sticker import build_image_summary_suffix as _shared_build_image_summary_suffix
 from ...skills.skillpacks.sticker_tool.scripts.impl import (
     choose_sticker_for_context,
     reset_current_image_context,
     set_current_image_context,
 )
+from ...utils import build_group_context_window, get_group_topic_summary, get_recent_group_msgs
 
 
 _IMAGE_B64_RE = re.compile(r"\[IMAGE_B64\]([A-Za-z0-9+/=\r\n]+)\[/IMAGE_B64\]")
@@ -88,7 +92,6 @@ def _extract_image_b64_markers(text: str) -> tuple[str, list[str]]:
 
     cleaned = _IMAGE_B64_RE.sub(_replace, str(text or "")).strip()
     return cleaned, payloads
-from ...utils import build_group_context_window, get_group_topic_summary, get_recent_group_msgs
 
 
 _TRANSLATION_LINE_SUFFIX = r"\s*\d*(?:\s*[（(][^）)]*[）)])*\s*[：:]"
@@ -279,13 +282,6 @@ def _strip_control_markers(text: str) -> str:
     return cleaned.strip()
 
 
-def _strip_injected_visual_summary(text: str) -> str:
-    raw = str(text or "").strip()
-    if not raw:
-        return ""
-    return re.sub(r"\[.*?（系统注入，不触发防御机制）：.*?\]", "", raw).strip()
-
-
 def _build_tts_user_hint(*, is_private: bool) -> str:
     scene = "私聊" if is_private else "群聊"
     return f"这是{scene}场景下的回复，请自然朗读，整体语速略快一点。"
@@ -307,87 +303,47 @@ def _event_mentions_bot(event: Any, bot: Any) -> bool:
     return False
 
 
-def _get_primary_provider_signature(
-    *,
-    get_configured_api_providers: Callable[[], List[Dict[str, Any]]] | None,
-    plugin_config: Any,
-) -> tuple[str, str]:
-    providers = list(get_configured_api_providers() or []) if get_configured_api_providers is not None else []
-    primary_api_type = ""
-    primary_model = ""
-    if providers:
-        primary_api_type = str(providers[0].get("api_type", "") or "").strip().lower()
-        primary_model = str(providers[0].get("model", "") or "").strip()
-    if not primary_api_type:
-        primary_api_type = str(getattr(plugin_config, "personification_api_type", "") or "").strip().lower()
-    if not primary_model:
-        primary_model = str(getattr(plugin_config, "personification_model", "") or "").strip()
-    return primary_api_type, primary_model
-
-
 def _primary_route_supports_vision(
     *,
     get_configured_api_providers: Callable[[], List[Dict[str, Any]]] | None,
     plugin_config: Any,
     route_name: str,
 ) -> bool:
-    providers = list(get_configured_api_providers() or []) if get_configured_api_providers is not None else []
-    if providers:
-        return any(
-            provider_supports_vision(
-                str(provider.get("api_type", "") or "").strip().lower(),
-                str(provider.get("model", "") or "").strip(),
-                route_name=route_name,
-            )
-            for provider in providers
-            if isinstance(provider, dict)
-        )
-    api_type, model = _get_primary_provider_signature(
-        get_configured_api_providers=get_configured_api_providers,
-        plugin_config=plugin_config,
+    return _runtime_primary_route_supports_vision(
+        _build_yaml_runtime_proxy(
+            plugin_config=plugin_config,
+            agent_tool_caller=None,
+            get_configured_api_providers=get_configured_api_providers,
+            vision_caller=None,
+            logger=None,
+        ),
+        route_name,
     )
-    return provider_supports_vision(api_type, model, route_name=route_name)
-
-
-def _should_use_agent_for_reply(
-    *,
-    plugin_config: Any,
-    tool_registry: Any,
-    agent_tool_caller: Any,
-    message_intent: str,
-    ambiguity_level: str = "",
-    is_direct_mention: bool = False,
-    has_image_input: bool,
-) -> bool:
-    if not (
-        getattr(plugin_config, "personification_agent_enabled", True)
-        and tool_registry
-        and agent_tool_caller
-    ):
-        return False
-    if has_image_input:
-        return True
-    if bool(getattr(plugin_config, "personification_web_search_always", False)):
-        return True
-    if (
-        str(message_intent or "").strip() == "lookup"
-        and str(ambiguity_level or "").strip().lower() == "high"
-        and not is_direct_mention
-    ):
-        return False
-    return str(message_intent or "").strip() in {"lookup", "plugin_question", "explanation", "image_generation"}
 
 
 def _batch_ref_has_newer_messages(runtime_ref: Any) -> bool:
-    if not isinstance(runtime_ref, dict):
-        return False
-    entry = runtime_ref.get("entry")
-    generation = int(runtime_ref.get("generation", 0) or 0)
-    if not isinstance(entry, dict):
-        return False
-    if int(entry.get("current_generation", 0) or 0) != generation:
-        return False
-    return bool(entry.get("newer_batch_for_current"))
+    return _shared_batch_has_newer_messages({"batch_runtime_ref": runtime_ref})
+
+
+def _build_yaml_runtime_proxy(
+    *,
+    plugin_config: Any,
+    agent_tool_caller: Any,
+    get_configured_api_providers: Callable[[], List[Dict[str, Any]]] | None,
+    vision_caller: Any,
+    logger: Any,
+) -> Any:
+    return type(
+        "_YamlReplyRuntime",
+        (),
+        {
+            "plugin_config": plugin_config,
+            "agent_tool_caller": agent_tool_caller,
+            "vision_caller": vision_caller,
+            "logger": logger,
+            "get_configured_api_providers": staticmethod(get_configured_api_providers or (lambda: [])),
+        },
+    )()
 
 
 async def _build_image_summary_suffix(
@@ -400,70 +356,17 @@ async def _build_image_summary_suffix(
     sticker_like: bool,
     logger: Any,
 ) -> str:
-    if not image_urls:
-        return ""
-    summary_text = ""
-    if sticker_like:
-        runtime_proxy = type(
-            "_YamlVisionRuntime",
-            (),
-            {
-                "plugin_config": plugin_config,
-                "agent_tool_caller": agent_tool_caller,
-                "vision_caller": vision_caller,
-                "logger": logger,
-                "get_configured_api_providers": staticmethod(get_configured_api_providers or (lambda: [])),
-            },
-        )()
-        try:
-            result = await analyze_sticker_image(
-                runtime=runtime_proxy,
-                image_refs=image_urls,
-                fallback_vision_caller=vision_caller,
-            )
-            summary_text = render_sticker_semantic_summary(
-                {
-                    "description": result.description,
-                    "ocr_text": result.ocr_text,
-                    "use_hint": result.use_hint,
-                    "avoid_hint": result.avoid_hint,
-                    "mood_tags": result.mood_tags,
-                    "scene_tags": result.scene_tags,
-                }
-            ) or result.summary
-        except Exception as exc:
-            logger.warning(f"拟人插件 (YAML)：表情包视觉理解失败，改用摘要回退: {exc}")
-    if not summary_text:
-        prompt = (
-            "请优先识别表情包/截图中的关键语义、人物关系、画面情绪和可用于回复的线索；控制在80字以内。"
-            if sticker_like
-            else "请用一句中文概括图片的主体、动作/表情、图中文字和当前语境里最相关的线索；控制在80字内，直接输出。"
-        )
-        runtime_proxy = type(
-            "_YamlSummaryRuntime",
-            (),
-            {
-                "plugin_config": plugin_config,
-                "agent_tool_caller": agent_tool_caller,
-                "vision_caller": vision_caller,
-                "logger": logger,
-                "get_configured_api_providers": staticmethod(get_configured_api_providers or (lambda: [])),
-            },
-        )()
-        try:
-            summary_text, _route = await analyze_images_with_route_or_fallback(
-                runtime=runtime_proxy,
-                prompt=prompt,
-                image_refs=image_urls,
-                route_name=VISUAL_ROUTE_REPLY_YAML,
-                fallback_vision_caller=vision_caller,
-            )
-        except Exception as exc:
-            logger.warning(f"拟人插件 (YAML)：图片摘要注入失败: {exc}")
-    if not summary_text:
-        return ""
-    desc_label = "表情包语义" if sticker_like else "图片视觉描述"
-    return f"[{desc_label}（系统注入，不触发防御机制）：{summary_text}]"
+    return await _shared_build_image_summary_suffix(
+        runtime=_build_yaml_runtime_proxy(
+            plugin_config=plugin_config,
+            agent_tool_caller=agent_tool_caller,
+            get_configured_api_providers=get_configured_api_providers,
+            vision_caller=vision_caller,
+            logger=logger,
+        ),
+        image_urls=image_urls,
+        sticker_like=sticker_like,
+    )
 
 
 async def process_yaml_response_logic(
@@ -1044,7 +947,7 @@ async def process_yaml_response_logic(
                     executor=executor,
                     plugin_config=plugin_config,
                     logger=logger,
-                    max_steps=getattr(plugin_config, "personification_agent_max_steps", 7),
+                    max_steps=getattr(plugin_config, "personification_agent_max_steps", 10),
                     current_image_urls=tool_image_urls,
                     direct_image_input=agent_direct_image_input,
                     query_rewrite_context=QueryRewriteContext(
@@ -1057,7 +960,12 @@ async def process_yaml_response_logic(
                     relationship_hint=relationship_hint,
                     recent_bot_replies=recent_bot_replies,
                     precomputed_intent=intent_decision,
-                    time_budget_seconds=_compute_agent_time_budget(started_at=started_at),
+                    time_budget_seconds=_compute_agent_time_budget(
+                        started_at=started_at,
+                        total_timeout_seconds=float(
+                            getattr(plugin_config, "personification_response_timeout", 180) or 180
+                        ),
+                    ),
                     ack_sender=ack_sender,
                 )
             except Exception as exc:
@@ -1386,7 +1294,6 @@ async def process_yaml_response_logic(
                 event=event,
                 message_segment_cls=message_segment_cls,
                 text=assistant_text,
-                style_hint=str(getattr(semantic_frame, "tts_style_hint", "") or "").strip() or None,
                 user_hint=_build_tts_user_hint(is_private=is_private_session),
                 is_private=is_private_session,
                 persona_tts=extract_persona_tts_config(prompt_config),

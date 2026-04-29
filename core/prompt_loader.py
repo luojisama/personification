@@ -82,7 +82,7 @@ def _append_agent_guidance(
         return content
 
     guidance = AGENT_GUIDANCE_TEMPLATE.format(
-        max_steps=getattr(plugin_config, "personification_agent_max_steps", 5),
+        max_steps=getattr(plugin_config, "personification_agent_max_steps", 10),
     )
     skills_guide = SKILLS_DIRECTORY_GUIDE.strip()
     full_guidance = guidance if not skills_guide else f"{guidance}\n\n{skills_guide}"

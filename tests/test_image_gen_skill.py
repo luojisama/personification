@@ -111,8 +111,10 @@ def test_image_gen_skill_uses_configured_timeout_on_dedicated_caller() -> None:
 
     assert tool is not None
     result = asyncio.run(tool.handler("poster", size="1024x1024"))
+    result2 = asyncio.run(tool.handler("poster 2", size="横版"))
 
     assert result == "[IMAGE_B64]QUJD[/IMAGE_B64]"
+    assert result2 == "[IMAGE_B64]QUJD[/IMAGE_B64]"
     assert caller.calls == []
     assert len(instances) == 2
     dedicated = instances[1]
@@ -122,6 +124,11 @@ def test_image_gen_skill_uses_configured_timeout_on_dedicated_caller() -> None:
         {
             "prompt": "poster",
             "size": "1024x1024",
+            "image_model": "gpt-image-2",
+        },
+        {
+            "prompt": "poster 2",
+            "size": "1536x1024",
             "image_model": "gpt-image-2",
         }
     ]

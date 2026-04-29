@@ -32,6 +32,7 @@ _IMAGE_SIZE_ALIASES = {
     "4:3": "1536x1024",
     "3:2": "1536x1024",
 }
+_DEDICATED_CODEX_CALLERS: dict[tuple[type, str, str, float], Any] = {}
 
 
 def normalize_image_generation_size(size: str) -> str:
@@ -88,11 +89,21 @@ async def generate_image(
             and hasattr(caller, "timeout")
             and hasattr(caller, "auth_path_override")
         ):
-            caller = caller.__class__(
-                model=str(getattr(caller, "model", "") or ""),
-                auth_path=str(getattr(caller, "auth_path_override", "") or ""),
-                timeout=timeout_value,
+            key = (
+                caller.__class__,
+                str(getattr(caller, "model", "") or ""),
+                str(getattr(caller, "auth_path_override", "") or ""),
+                timeout_value,
             )
+            dedicated = _DEDICATED_CODEX_CALLERS.get(key)
+            if dedicated is None:
+                dedicated = caller.__class__(
+                    model=key[1],
+                    auth_path=key[2],
+                    timeout=timeout_value,
+                )
+                _DEDICATED_CODEX_CALLERS[key] = dedicated
+            caller = dedicated
     result = await caller.generate_image(
         prompt_text,
         size=normalize_image_generation_size(str(size or "1024x1024")),

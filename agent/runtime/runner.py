@@ -20,19 +20,20 @@ from ...skills.skillpacks.tool_caller.scripts.impl import (
     OpenAICodexToolCaller,
     ToolCaller,
 )
-from .constants import DEFAULT_AGENT_MAX_STEPS, MAX_EMPTY_LOOKUP_RECOVERY_ROUNDS
+from .constants import (
+    DEFAULT_AGENT_MAX_STEPS,
+    MAX_EMPTY_LOOKUP_RECOVERY_ROUNDS,
+    MAX_PROMISED_LOOKUP_NO_TOOL_ROUNDS,
+)
 from .intent import (
     _clean_user_query_text,
-    _compact_lookup_query,
     _derive_query_rewrite_context,
     _extract_focus_query_text,
     _extract_group_topic_hint,
     _extract_latest_user_images,
     _extract_latest_user_text,
-    _extract_quoted_message_text,
     _infer_chat_intent,
     _infer_intent_decision_with_context,
-    _messages_indicate_private_scene,
     _recover_followup_query_from_context,
     _render_message_text,
 )
@@ -45,7 +46,6 @@ from .tool_args import (
 )
 from .tool_selection import (
     _normalize_agent_max_steps,
-    _requires_forced_lookup,
     _schema_tool_name,
     _select_tool_schemas,
     _semantic_tool_guidance,
@@ -152,26 +152,6 @@ _BANTER_BLOCKED_TOOL_NAMES = frozenset(
     set(_NETWORK_TOOL_NAMES)
     | set(_PLUGIN_KNOWLEDGE_TOOL_NAMES)
     | {"vision_analyze", "analyze_image", "resolve_acg_entity"}
-)
-_PLAIN_EMPTY_TOOL_RESULT_MARKERS = (
-    "未找到足够可靠的wiki条目",
-    "没有找到足够可靠的wiki条目",
-    "未找到可靠wiki条目",
-    "未找到相关wiki条目",
-    "未找到可靠结果",
-    "没有找到可靠结果",
-    "no_results",
-)
-_FORCED_LOOKUP_PATTERNS = (
-    re.compile(r"(最新|现在|当前|今天|刚刚|最近|多少钱|多少|天气|汇率|股价|票房|热搜|新闻|价格)"),
-)
-_LOOKUP_QUERY_LEADING_RE = re.compile(
-    r"^(?:我问的是|我想问的是|我想问下|我想问一下|我想知道|我问下|我问一下|"
-    r"请问|想问下|想问一下|帮我查下|帮我查一下|帮我搜下|帮我搜一下|查一下|搜一下)\s*"
-)
-_LOOKUP_QUERY_TRAILING_RE = re.compile(
-    r"(?:到底)?(?:算|指)?(?:是)?(?:什么(?:东西|意思|玩意儿?|来着)?|啥(?:意思|东西)?|"
-    r"指什么|是什么(?:东西|意思|玩意儿?)?|怎么回事)\s*[?？!！.。]*$"
 )
 
 
@@ -447,7 +427,6 @@ async def _run_background_image_generation(
             has_images=bool(user_images),
             chat_intent="image_generation",
             plugin_question_intent="",
-            force_lookup=False,
         )
         try:
             response = await tool_caller.chat_with_tools(
@@ -871,6 +850,7 @@ async def run_agent(
     empty_lookup_tools: set[str] = set()
     semantic_fallback_attempted = False
     empty_lookup_recovery_rounds = 0
+    promised_lookup_no_tool_rounds = 0
     user_text = _extract_latest_user_text(messages)
     focus_query_text = _clean_user_query_text(_extract_focus_query_text(user_text))
     contextual_query_text = _recover_followup_query_from_context(user_text, focus_query_text)
@@ -897,8 +877,7 @@ async def run_agent(
         )
     chat_intent = intent_decision.chat_intent
     plugin_query_intent = intent_decision.plugin_question_intent if chat_intent == "plugin_question" else ""
-    force_lookup = _requires_forced_lookup(preliminary_query_text or user_text)
-    runtime_chat_intent = "lookup" if chat_intent == "banter" and force_lookup else chat_intent
+    runtime_chat_intent = chat_intent
     effective_max_steps = _normalize_agent_max_steps(
         max_steps if max_steps is not None else getattr(plugin_config, "personification_agent_max_steps", DEFAULT_AGENT_MAX_STEPS)
     )
@@ -940,7 +919,6 @@ async def run_agent(
     )
     has_tool_call = False
     ack_sent = False
-    vision_fallback_task: asyncio.Task | None = None
     budget_deadline = (
         time.monotonic() + max(0.0, float(time_budget_seconds or 0.0))
         if time_budget_seconds is not None
@@ -1084,7 +1062,6 @@ async def run_agent(
                 "content": image_prompt,
             }
         )
-        vision_fallback_task = None
 
     for _step in range(effective_max_steps):
         if budget_deadline is not None and time.monotonic() >= budget_deadline:
@@ -1125,7 +1102,6 @@ async def run_agent(
             has_images=bool(user_images),
             chat_intent=runtime_chat_intent,
             plugin_question_intent=plugin_query_intent,
-            force_lookup=force_lookup,
         )
         selected_names = [
             _schema_tool_name(schema)
@@ -1206,6 +1182,7 @@ async def run_agent(
                         step=_step + 1,
                     )
                     has_tool_call = True
+                    promised_lookup_no_tool_rounds = 0
                     last_tool_name = bg_name
                     last_tool_result_text = bg_result
                     logger.info("[agent] injected background vision fallback result")
@@ -1235,7 +1212,6 @@ async def run_agent(
                     has_images=bool(user_images),
                     chat_intent=runtime_chat_intent,
                     plugin_question_intent=plugin_query_intent,
-                    force_lookup=force_lookup,
                     user_images=user_images,
                     previous_tool_name=last_tool_name,
                     previous_tool_result_text=last_tool_result_text,
@@ -1297,6 +1273,7 @@ async def run_agent(
                         if str(fallback_result or "").strip():
                             last_tool_result_text = str(fallback_result).strip()
                         has_tool_call = True
+                        promised_lookup_no_tool_rounds = 0
                         semantic_fallback_attempted = False
                         logger.info(f"[agent] fallback tool_call name={fallback_name}")
                         continue
@@ -1333,15 +1310,30 @@ async def run_agent(
                         step=_step + 1,
                     )
                     has_tool_call = True
+                    promised_lookup_no_tool_rounds = 0
                     last_tool_name = bg_name
                     last_tool_result_text = bg_result
                     logger.info("[agent] awaited background vision fallback result")
                     continue
             if promised_lookup and not has_tool_call:
+                if promised_lookup_no_tool_rounds >= MAX_PROMISED_LOOKUP_NO_TOOL_ROUNDS:
+                    logger.info("[agent] deferred lookup no-tool retry exhausted, returning current content")
+                    if content_len > 0:
+                        return AgentResult(
+                            text=str(response.content or "").strip(),
+                            pending_actions=pending_actions,
+                            bypass_length_limits=False,
+                        )
+                    return AgentResult(
+                        text="[NO_REPLY]",
+                        pending_actions=pending_actions,
+                    )
+                promised_lookup_no_tool_rounds += 1
                 messages.append(
                     {
                         "role": "system",
                         "content": (
+                            f"你刚才口头承诺要查，但没有调用工具。这是第 {promised_lookup_no_tool_rounds}/{MAX_PROMISED_LOOKUP_NO_TOOL_ROUNDS} 次纠正。"
                             "不要口头承诺你会去查。"
                             "如果不需要工具，就直接基于现有上下文回答；"
                             "如果需要工具，就直接调用。"
@@ -1455,6 +1447,7 @@ async def run_agent(
 
         for tool_call in response.tool_calls:
             has_tool_call = True
+            promised_lookup_no_tool_rounds = 0
             logger.info(f"[agent] tool_call name={tool_call.name}")
             tool = registry.get(tool_call.name)
             if tool is None:

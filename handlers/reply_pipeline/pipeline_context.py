@@ -30,7 +30,7 @@ from ...skills.skillpacks.group_info_tool.scripts.main import build_group_info_t
 _FRIEND_IDS_CACHE: Dict[str, tuple[float, set[str]]] = {}
 _IMAGE_CLASSIFY_CACHE: Dict[str, IncomingImageClassification] = {}
 _IMAGE_CLASSIFY_CACHE_MAX = 256
-_DEFAULT_RESPONSE_TIMEOUT_SECONDS = 120.0
+_DEFAULT_RESPONSE_TIMEOUT_SECONDS = 180.0
 _AGENT_TIME_BUDGET_RESERVE_SECONDS = 30.0
 
 
@@ -639,7 +639,7 @@ async def run_agent_if_enabled(
         executor=executor,
         plugin_config=runtime.plugin_config,
         logger=runtime.logger,
-        max_steps=getattr(runtime.plugin_config, "personification_agent_max_steps", 7),
+        max_steps=getattr(runtime.plugin_config, "personification_agent_max_steps", 10),
         current_image_urls=current_image_urls,
         direct_image_input=direct_image_input,
         query_rewrite_context=QueryRewriteContext(

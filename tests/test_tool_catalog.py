@@ -31,7 +31,6 @@ def test_select_tool_schemas_filters_admin_tools_but_keeps_real_image_tools() ->
         has_images=True,
         chat_intent="lookup",
         plugin_question_intent="capability",
-        force_lookup=False,
     )
     names = {tool_catalog.schema_tool_name(schema) for schema in schemas}
 
@@ -52,7 +51,6 @@ def test_select_tool_schemas_exposes_image_generation_planning_tools_for_generat
         has_images=False,
         chat_intent="image_generation",
         plugin_question_intent="",
-        force_lookup=False,
     )
     names = {tool_catalog.schema_tool_name(schema) for schema in schemas}
 
@@ -69,7 +67,6 @@ def test_select_tool_schemas_adds_visual_context_tools_for_image_generation_with
         has_images=True,
         chat_intent="image_generation",
         plugin_question_intent="",
-        force_lookup=False,
     )
     names = {tool_catalog.schema_tool_name(schema) for schema in schemas}
 

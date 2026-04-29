@@ -65,7 +65,7 @@ PERSONIFICATION_USAGE = (
     "画像与语音命令：\n"
     "  - 查看画像：查看当前用户画像\n"
     "  - 刷新画像：重建当前用户画像\n"
-    "  - 说/朗读/配音 [--voice 音色] [--style 风格] 文本：输出语音\n\n"
+    "  - 说/朗读/配音 [--mode preset|design|clone] [--voice 音色] [--style 风格] [--voice-prompt 音色描述] [--clone-voice data:...] [--clone-path 样本路径] 文本：输出语音\n\n"
     "其他命令（超管）：\n"
     "  - 发个说说：触发动态/日记类输出\n\n"
     "帮助命令：\n"
