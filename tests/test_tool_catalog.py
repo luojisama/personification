@@ -43,7 +43,7 @@ def test_select_tool_schemas_filters_admin_tools_but_keeps_real_image_tools() ->
 
 def test_select_tool_schemas_exposes_image_generation_planning_tools_for_generation_intent() -> None:
     registry = tool_registry.ToolRegistry()
-    for name in ("generate_image", "search_web", "search_images", "collect_resources", "vision_analyze"):
+    for name in ("generate_image", "parallel_research", "search_web", "search_images", "collect_resources", "vision_analyze"):
         _register(registry, name)
 
     schemas = tool_catalog.select_tool_schemas(
@@ -54,12 +54,12 @@ def test_select_tool_schemas_exposes_image_generation_planning_tools_for_generat
     )
     names = {tool_catalog.schema_tool_name(schema) for schema in schemas}
 
-    assert names == {"generate_image", "search_web", "search_images", "collect_resources"}
+    assert names == {"generate_image", "parallel_research", "search_web", "search_images", "collect_resources"}
 
 
 def test_select_tool_schemas_adds_visual_context_tools_for_image_generation_with_images() -> None:
     registry = tool_registry.ToolRegistry()
-    for name in ("generate_image", "search_web", "vision_analyze", "analyze_image"):
+    for name in ("generate_image", "parallel_research", "search_web", "vision_analyze", "analyze_image"):
         _register(registry, name)
 
     schemas = tool_catalog.select_tool_schemas(
@@ -70,4 +70,22 @@ def test_select_tool_schemas_adds_visual_context_tools_for_image_generation_with
     )
     names = {tool_catalog.schema_tool_name(schema) for schema in schemas}
 
-    assert names == {"generate_image", "search_web", "vision_analyze", "analyze_image"}
+    assert names == {"generate_image", "parallel_research", "search_web", "vision_analyze", "analyze_image"}
+
+
+def test_select_tool_schemas_exposes_parallel_research_for_lookup() -> None:
+    registry = tool_registry.ToolRegistry()
+    for name in ("parallel_research", "search_web", "vision_analyze"):
+        _register(registry, name)
+
+    schemas = tool_catalog.select_tool_schemas(
+        registry,
+        has_images=False,
+        chat_intent="lookup",
+        plugin_question_intent="",
+    )
+    names = {tool_catalog.schema_tool_name(schema) for schema in schemas}
+
+    assert "parallel_research" in names
+    assert "search_web" in names
+    assert "vision_analyze" not in names

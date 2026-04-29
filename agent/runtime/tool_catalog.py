@@ -16,6 +16,7 @@ _IMAGE_REQUIRED_TOOL_NAMES = frozenset(
 _IMAGE_GENERATION_TOOL_NAMES = frozenset({"generate_image"})
 _IMAGE_GENERATION_CONTEXT_TOOL_NAMES = frozenset(
     {
+        "parallel_research",
         "web_search",
         "search_web",
         "search_images",

@@ -108,6 +108,12 @@ class Config(BaseModel):
     personification_image_gen_model: str = "gpt-image-2"
     personification_image_gen_background_enabled: bool = True
     personification_image_gen_timeout: int = 180
+    personification_parallel_research_enabled: bool = True
+    personification_parallel_research_lookup_enabled: bool = True
+    personification_parallel_research_max_workers: int = 6
+    personification_parallel_research_worker_timeout: int = 35
+    personification_parallel_research_total_timeout: int = 90
+    personification_parallel_research_max_tool_rounds: int = 2
     personification_qzone_enabled: bool = False
     personification_qzone_cookie: str = ""
     # DEPRECATED: use personification_qzone_cookie.

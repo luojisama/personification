@@ -79,6 +79,7 @@ _LOOKUP_FINAL_REPLY_HINTS = (
 )
 _QUERY_REWRITE_TOOL_NAMES = frozenset(
     {
+        "parallel_research",
         "web_search",
         "search_web",
         "wiki_lookup",
@@ -90,7 +91,7 @@ _QUERY_REWRITE_TOOL_NAMES = frozenset(
     }
 )
 _RETRYABLE_LOOKUP_TOOLS = frozenset(
-    {"web_search", "search_web", "wiki_lookup", "resolve_acg_entity", "collect_resources", "search_images"}
+    {"parallel_research", "web_search", "search_web", "wiki_lookup", "resolve_acg_entity", "collect_resources", "search_images"}
 )
 _TIME_SENSITIVE_SEARCH_TOOLS = frozenset({"web_search", "search_web"})
 _TIME_SENSITIVE_RE = re.compile("\u6700\u65b0|\u8fd1\u671f|\u73b0\u5728|\u4eca\u5e74|\u4eca\u5929|\u5f53\u524d|latest|recent|now", re.IGNORECASE)
@@ -128,6 +129,7 @@ _PLUGIN_KNOWLEDGE_TOOL_NAMES = frozenset(
 _PLUGIN_LATEST_EXTRA_TOOL_NAMES = frozenset({"web_search", "search_official_site", "search_github_repos"})
 _NETWORK_TOOL_NAMES = frozenset(
     {
+        "parallel_research",
         "web_search",
         "search_web",
         "multi_search_engine",
@@ -374,14 +376,16 @@ def _build_background_image_generation_messages(
             "content": (
                 "你现在负责准备并执行图片生成，不是在写聊天回复。"
                 "先理解用户真正想要的画面、主体、风格、用途、文字和限制。"
-                "如有必要，可自行调用联网搜索、图片搜索、资源搜集、百科/实体解析、视觉理解等工具补充事实和参考图线索；"
+                "如有必要，优先调用 parallel_research 并行聚合图片参考、百科/设定和联网资料；"
+                "也可自行调用联网搜索、图片搜索、资源搜集、百科/实体解析、视觉理解等工具补充事实和参考图线索；"
                 "如果需求已经足够明确，也可以不检索。"
                 "拿到足够上下文后，必须调用 generate_image。"
                 "调用 generate_image 时，由你组装完整、可执行的生图 prompt，"
                 "把检索/参考图得到的关键信息消化进画面描述，不要只原样转述用户一句话。"
                 "size 也由你根据构图需求从工具允许值中选择。"
                 "不要向用户输出制作步骤；图片生成失败或需要澄清时，才输出一句自然说明。"
-                "如果调用了上下文工具，请先阅读结果，再决定最终 prompt。"
+                "如果调用了 parallel_research 或其他上下文工具，请先阅读结果，"
+                "把 must_include、must_avoid、prompt_hints 等关键约束吸收到最终 prompt，再调用 generate_image。"
                 f"\n用户图片需求：{str(user_request or '').strip()[:1000]}"
             ),
         }
