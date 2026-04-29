@@ -9,9 +9,9 @@ def test_normalize_intent_text_strips_whitespace_and_newlines() -> None:
     assert chat_intent.normalize_intent_text("  你好\n\n 世界 \r\n ") == "你好 世界"
 
 
-def test_heuristic_turn_semantic_frame_respects_group_metadata() -> None:
-    group_frame = chat_intent.heuristic_turn_semantic_frame("随便说说", is_group=True, is_random_chat=True)
-    private_frame = chat_intent.heuristic_turn_semantic_frame("随便说说", is_group=False, is_random_chat=False)
+def test_metadata_fallback_turn_semantic_frame_respects_group_metadata() -> None:
+    group_frame = chat_intent.metadata_fallback_turn_semantic_frame_for_session(is_group=True, is_random_chat=True)
+    private_frame = chat_intent.metadata_fallback_turn_semantic_frame_for_session(is_group=False, is_random_chat=False)
 
     assert group_frame.chat_intent == "banter"
     assert group_frame.ambiguity_level == "high"

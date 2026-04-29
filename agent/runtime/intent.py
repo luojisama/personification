@@ -222,11 +222,6 @@ def messages_indicate_private_scene(messages: List[dict]) -> bool:
     return False
 
 
-def infer_chat_intent(query: str, messages: List[dict]) -> tuple[str, str]:
-    _ = query, messages
-    return "banter", ""
-
-
 async def infer_intent_decision_with_context(
     query: str,
     messages: List[dict],
@@ -278,29 +273,21 @@ _extract_latest_user_text = extract_latest_user_text
 _render_message_text = render_message_text
 _extract_focus_query_text = extract_focus_query_text
 _clean_user_query_text = clean_user_query_text
-_compact_lookup_query = compact_lookup_query
 _extract_latest_user_images = extract_latest_user_images
 _extract_group_topic_hint = extract_group_topic_hint
-_extract_quoted_message_text = extract_quoted_message_text
 _derive_query_rewrite_context = derive_query_rewrite_context
-_messages_indicate_private_scene = messages_indicate_private_scene
-_infer_chat_intent = infer_chat_intent
 _infer_intent_decision_with_context = infer_intent_decision_with_context
 _recover_followup_query_from_context = recover_followup_query_from_context
 
 
 __all__ = [
-    "_compact_lookup_query",
     "_derive_query_rewrite_context",
     "_extract_focus_query_text",
     "_extract_group_topic_hint",
     "extract_group_relationship_hint",
     "_extract_latest_user_images",
     "_extract_latest_user_text",
-    "_extract_quoted_message_text",
-    "_infer_chat_intent",
     "_infer_intent_decision_with_context",
-    "_messages_indicate_private_scene",
     "_recover_followup_query_from_context",
     "_render_message_text",
     "_clean_user_query_text",
@@ -311,7 +298,6 @@ __all__ = [
     "extract_latest_user_images",
     "extract_latest_user_text",
     "extract_quoted_message_text",
-    "infer_chat_intent",
     "infer_intent_decision_with_context",
     "messages_indicate_private_scene",
     "recover_followup_query_from_context",

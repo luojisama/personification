@@ -75,45 +75,11 @@ def normalize_intent_text(text: str) -> str:
 
 
 
-def classify_chat_intent(
-    text: str,
-    *,
-    is_group: bool = False,
-    is_random_chat: bool = False,
-) -> ChatIntent:
-    return heuristic_turn_semantic_frame(
-        text,
-        is_group=is_group,
-        is_random_chat=is_random_chat,
-    ).chat_intent
-
-
-def is_plugin_question(
-    text: str,
-    *,
-    is_group: bool = False,
-    is_random_chat: bool = False,
-) -> bool:
-    return (
-        classify_chat_intent(
-            text,
-            is_group=is_group,
-            is_random_chat=is_random_chat,
-        )
-        == "plugin_question"
-    )
-
-
 def looks_like_explanatory_output(text: str) -> bool:
     normalized = normalize_intent_text(text)
     if not normalized:
         return False
     return any(pattern in normalized for pattern in _EXPLANATORY_REPLY_PATTERNS)
-
-
-def looks_like_presence_check(text: str) -> bool:
-    _ = text
-    return False
 
 
 def _metadata_fallback_turn_semantic_frame(
@@ -160,30 +126,15 @@ def _metadata_fallback_turn_semantic_frame(
     )
 
 
-def heuristic_turn_semantic_frame(
-    text: str,
+def metadata_fallback_turn_semantic_frame_for_session(
     *,
     is_group: bool = False,
     is_random_chat: bool = False,
 ) -> TurnSemanticFrame:
-    _ = text
     return _metadata_fallback_turn_semantic_frame(
         is_group=is_group,
         is_random_chat=is_random_chat,
     )
-
-
-def heuristic_intent_decision(
-    text: str,
-    *,
-    is_group: bool = False,
-    is_random_chat: bool = False,
-) -> IntentDecision:
-    return heuristic_turn_semantic_frame(
-        text,
-        is_group=is_group,
-        is_random_chat=is_random_chat,
-    ).to_intent_decision()
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -386,13 +337,9 @@ __all__ = [
     "IntentDecision",
     "PluginQuestionIntent",
     "TurnSemanticFrame",
-    "classify_chat_intent",
-    "heuristic_intent_decision",
-    "heuristic_turn_semantic_frame",
     "infer_intent_decision_with_llm",
     "infer_turn_semantic_frame_with_llm",
-    "is_plugin_question",
     "looks_like_explanatory_output",
-    "looks_like_presence_check",
+    "metadata_fallback_turn_semantic_frame_for_session",
     "normalize_intent_text",
 ]

@@ -32,7 +32,6 @@ from .intent import (
     _extract_group_topic_hint,
     _extract_latest_user_images,
     _extract_latest_user_text,
-    _infer_chat_intent,
     _infer_intent_decision_with_context,
     _recover_followup_query_from_context,
     _render_message_text,
