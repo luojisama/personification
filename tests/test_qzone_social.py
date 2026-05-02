@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -17,6 +18,20 @@ class _PersonaStore:
 
     def get_persona_snippet(self, user_id: str, max_chars: int = 150) -> str:
         return self.snippets.get(str(user_id), "")[:max_chars]
+
+
+class _RecordingPersonaStore(_PersonaStore):
+    def __init__(self) -> None:
+        super().__init__({})
+        self.records: list[tuple[str, str]] = []
+
+    async def record_message(self, user_id: str, text: str) -> None:
+        self.records.append((str(user_id), str(text)))
+
+
+class _Logger:
+    def warning(self, _message: str) -> None:
+        return None
 
 
 def test_proactive_candidates_require_profile_and_not_favorability_threshold() -> None:
@@ -132,6 +147,44 @@ def test_qzone_regular_scan_falls_back_to_bot_friends_without_private_state() ->
     assert [item["user_id"] for item in candidates] == ["20001", "20002"]
     assert candidates[0]["is_friend"] is True
     assert candidates[0]["persona_snippet"] == "画像一"
+
+
+def test_qzone_profile_evidence_records_once_with_source_label() -> None:
+    store = _RecordingPersonaStore()
+    state: dict[str, object] = {}
+    result: dict[str, object] = {}
+
+    asyncio.run(
+        qzone_flow._record_qzone_profile_evidence(
+            persona_store=store,
+            user_id="20001",
+            evidence_key="feed:20001:abc",
+            kind="动态",
+            content="今天去了便利店",
+            image_summary="一张饮料和便当的照片",
+            state=state,
+            result=result,
+            logger=_Logger(),
+        )
+    )
+    asyncio.run(
+        qzone_flow._record_qzone_profile_evidence(
+            persona_store=store,
+            user_id="20001",
+            evidence_key="feed:20001:abc",
+            kind="动态",
+            content="今天去了便利店",
+            state=state,
+            result=result,
+            logger=_Logger(),
+        )
+    )
+
+    assert len(store.records) == 1
+    assert store.records[0][0] == "20001"
+    assert "[QQ空间动态]" in store.records[0][1]
+    assert "图片摘要：一张饮料和便当的照片" in store.records[0][1]
+    assert result["profile_records"] == 1
 
 
 def test_qzone_social_limits_use_zero_as_unlimited() -> None:

@@ -137,6 +137,7 @@ def _normalize_state(now: datetime) -> dict[str, Any]:
     state.setdefault("seen", {})
     state.setdefault("reacted", {})
     state.setdefault("comment_replies", {})
+    state.setdefault("profile_records", {})
     state.setdefault("per_friend", {})
     state.setdefault("like_count", 0)
     state.setdefault("comment_count", 0)
@@ -144,7 +145,7 @@ def _normalize_state(now: datetime) -> dict[str, Any]:
 
 
 def _prune_state_maps(state: dict[str, Any], *, max_items: int = 500) -> None:
-    for key in ("seen", "reacted", "comment_replies"):
+    for key in ("seen", "reacted", "comment_replies", "profile_records"):
         value = state.get(key)
         if not isinstance(value, dict) or len(value) <= max_items:
             continue
@@ -205,6 +206,54 @@ def _mark_comment_replied(state: dict[str, Any], comment_key: str, *, reply: str
     replies = state.setdefault("comment_replies", {})
     if isinstance(replies, dict):
         replies[comment_key] = {"at": time.time(), "reply": reply}
+
+
+def _profile_evidence_already_recorded(state: dict[str, Any], evidence_key: str) -> bool:
+    records = state.get("profile_records")
+    return isinstance(records, dict) and evidence_key in records
+
+
+def _mark_profile_evidence_recorded(state: dict[str, Any], evidence_key: str) -> None:
+    records = state.setdefault("profile_records", {})
+    if isinstance(records, dict):
+        records[evidence_key] = {"at": time.time()}
+
+
+async def _record_qzone_profile_evidence(
+    *,
+    persona_store: Any,
+    user_id: str,
+    evidence_key: str,
+    kind: str,
+    content: str,
+    image_summary: str = "",
+    state: dict[str, Any],
+    result: dict[str, Any],
+    logger: Any,
+) -> None:
+    if persona_store is None or not user_id or not evidence_key:
+        return
+    if _profile_evidence_already_recorded(state, evidence_key):
+        return
+    text = str(content or "").strip()
+    visual = str(image_summary or "").strip()
+    if not text and not visual:
+        return
+    lines = [f"[QQ空间{kind}]"]
+    if text:
+        lines.append(text[:240])
+    if visual:
+        lines.append(f"图片摘要：{visual[:180]}")
+    record_message = getattr(persona_store, "record_message", None)
+    if not callable(record_message):
+        return
+    try:
+        await record_message(str(user_id), "\n".join(lines))
+    except Exception as exc:
+        logger.warning(f"[qzone_social] record qzone profile evidence failed for {user_id}: {exc}")
+        return
+    _mark_profile_evidence_recorded(state, evidence_key)
+    result["profile_records"] = int(result.get("profile_records", 0) or 0) + 1
 
 
 def _collect_candidates(
@@ -479,6 +528,16 @@ async def _scan_bot_space_comments(
             if _comment_already_replied(state, comment_key):
                 continue
             result["inbound_comments"] = int(result.get("inbound_comments", 0) or 0) + 1
+            await _record_qzone_profile_evidence(
+                persona_store=persona_store,
+                user_id=commenter_id,
+                evidence_key=f"comment:{comment_key}",
+                kind="留言",
+                content=str(comment.get("content", "") or ""),
+                state=state,
+                result=result,
+                logger=logger,
+            )
             profile = friend_profiles.get(commenter_id, {})
             persona_snippet = _get_persona_snippet(persona_store, commenter_id, persona_snippet_max_chars)
             commenter_profile = {
@@ -552,6 +611,7 @@ async def scan_qzone_social_feeds(
             "failed": 0,
             "inbound_comments": 0,
             "replied": 0,
+            "profile_records": 0,
             "last_error": "",
         }
         try:
@@ -630,6 +690,17 @@ async def scan_qzone_social_feeds(
                     image_summary = await _summarize_images(
                         vision_caller=vision_caller,
                         images=list(feed.get("images") or []),
+                        logger=logger,
+                    )
+                    await _record_qzone_profile_evidence(
+                        persona_store=persona_store,
+                        user_id=str(candidate["user_id"]),
+                        evidence_key=f"feed:{feed_key}",
+                        kind="动态",
+                        content=str(feed.get("content", "") or ""),
+                        image_summary=image_summary,
+                        state=state,
+                        result=result,
                         logger=logger,
                     )
                     emotion_memory = describe_user_emotion_memory(emotion_state or {}, str(candidate["user_id"]))
