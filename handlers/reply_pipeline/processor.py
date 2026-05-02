@@ -20,7 +20,11 @@ from ...core.image_input import (
 from ...core.metrics import record_counter, record_timing
 from ...core.message_parts import build_user_message_content, clone_messages_with_text_suffix
 from ...core.message_relations import extract_send_message_id
-from ...core.context_policy import compress_context_if_needed
+from ...core.context_policy import (
+    compress_context_if_needed,
+    has_silence_control_marker,
+    strip_response_control_markers,
+)
 from ...core.prompt_hooks import HookContext, get_hook_registry
 from ...core.group_relations import summarize_group_relationships
 from ...core.group_context import render_group_context_structured
@@ -1414,6 +1418,19 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                 return
         if review_decision.action == "rewrite" and review_decision.text:
             reply_content = review_decision.text.strip()
+
+        if has_silence_control_marker(reply_content):
+            recovered_reply = await _recover_direct_mention_reply_now()
+            runtime.logger.info(
+                f"拟人插件：最终回复含沉默控制标记，group={group_id} user={user_id}"
+            )
+            if recovered_reply:
+                reply_content = recovered_reply
+            else:
+                return
+        reply_content = strip_response_control_markers(reply_content)
+        if not reply_content and not _IMAGE_B64_RE.search(str(reply_content or "")):
+            return
 
         stale_reason = _stale_reply_abort_reason(state)
         if stale_reason:

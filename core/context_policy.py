@@ -7,6 +7,7 @@ _HISTORY_MARKER_PATTERNS = (
     r"\[发送了一张表情包:[^\]]*\]",
     r"\[发送了表情包[^\]]*\]",
 )
+_SILENCE_MARKERS = ("[SILENCE]", "<SILENCE>", "[NO_REPLY]", "<NO_REPLY>")
 _PRIVATE_COMMAND_PREFIXES = ("/", "!", "！", "#", "＃", ".", "。")
 _PRIVATE_COMMAND_KEYWORDS: Set[str] = set()
 
@@ -32,11 +33,31 @@ def get_private_command_keywords() -> Set[str]:
 
 
 def sanitize_history_text(text: Any) -> str:
-    cleaned = str(text or "")
+    cleaned = strip_response_control_markers(str(text or ""))
     for pattern in _HISTORY_MARKER_PATTERNS:
         cleaned = re.sub(pattern, "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
+
+def has_silence_control_marker(text: Any) -> bool:
+    raw = str(text or "")
+    return any(marker in raw for marker in _SILENCE_MARKERS)
+
+
+def strip_response_control_markers(text: Any) -> str:
+    cleaned = str(text or "")
+    cleaned = re.sub(
+        r"<\s*(?:think|status|action)\b[^>]*>.*?</\s*(?:think|status|action)\s*>",
+        "",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = re.sub(r"</?\s*(?:output|message)\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"</?\s*(?:think|status|action)\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    for marker in _SILENCE_MARKERS:
+        cleaned = cleaned.replace(marker, "")
+    return cleaned.strip()
 
 
 def build_prompt_injection_guard() -> str:

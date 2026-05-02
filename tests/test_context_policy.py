@@ -57,3 +57,9 @@ def test_compress_context_if_needed_summarizes_long_context() -> None:
     assert called is True
     assert result[0].startswith("## 较早上下文摘要")
     assert context_policy._estimate_chunks_tokens(result) <= 80
+
+
+def test_response_control_markers_are_stripped_from_history() -> None:
+    assert context_policy.has_silence_control_marker("[SILENCE]") is True
+    assert context_policy.strip_response_control_markers("<think>内部推理</think><message>能看到吗</message>") == "能看到吗"
+    assert context_policy.sanitize_history_text("前缀 [NO_REPLY] <status>休息</status> 后缀") == "前缀 后缀"

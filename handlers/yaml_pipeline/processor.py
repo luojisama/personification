@@ -30,7 +30,11 @@ from ...core.sticker_library import (
     resolve_sticker_dir,
 )
 from ...core.message_parts import build_user_message_content, clone_messages_with_text_suffix
-from ...core.context_policy import build_prompt_injection_guard
+from ...core.context_policy import (
+    build_prompt_injection_guard,
+    has_silence_control_marker,
+    strip_response_control_markers,
+)
 from ...core.repeat_follow import maybe_follow_repeat_cluster
 from ...core.reply_style_policy import (
     build_direct_visual_identity_guard,
@@ -1235,6 +1239,21 @@ async def process_yaml_response_logic(
     if review_decision.action == "rewrite" and review_decision.text:
         assistant_text = sanitize_history_text(review_decision.text.strip())
         parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
+
+    if has_silence_control_marker(assistant_text):
+        recovered_reply = await _recover_direct_mention_reply_now()
+        logger.info(f"拟人插件 (YAML)：最终回复含沉默控制标记，group={group_id} user={user_id}")
+        if recovered_reply:
+            assistant_text = sanitize_history_text(recovered_reply)
+            parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
+        else:
+            return
+    cleaned_assistant_text = strip_response_control_markers(assistant_text)
+    if not cleaned_assistant_text:
+        return
+    if cleaned_assistant_text != assistant_text:
+        parsed = {"messages": [{"text": cleaned_assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
+    assistant_text = cleaned_assistant_text
 
     assistant_text, history_image_payloads = _extract_image_b64_markers(assistant_text)
     has_generated_image = bool(history_image_payloads)
