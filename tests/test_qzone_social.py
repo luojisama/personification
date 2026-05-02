@@ -118,6 +118,22 @@ def test_qzone_non_test_target_still_requires_bot_friend() -> None:
     assert candidates == []
 
 
+def test_qzone_regular_scan_falls_back_to_bot_friends_without_private_state() -> None:
+    candidates = qzone_flow._collect_candidates(
+        friend_profiles={
+            "20002": {"nickname": "二号好友"},
+            "20001": {"nickname": "一号好友"},
+        },
+        proactive_state={},
+        persona_store=_PersonaStore({"20001": "画像一"}),
+        persona_snippet_max_chars=80,
+    )
+
+    assert [item["user_id"] for item in candidates] == ["20001", "20002"]
+    assert candidates[0]["is_friend"] is True
+    assert candidates[0]["persona_snippet"] == "画像一"
+
+
 def test_qzone_social_limits_use_zero_as_unlimited() -> None:
     assert qzone_flow._limit_reached(0, 9999) is False
     assert qzone_flow._limit_reached(2, 2) is True

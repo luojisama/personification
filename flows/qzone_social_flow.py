@@ -254,7 +254,29 @@ def _collect_candidates(
             }
         )
     candidates.sort(key=lambda item: float(item.get("last_interaction", 0) or 0), reverse=True)
-    return candidates[:12]
+    if candidates:
+        return candidates[:12]
+
+    # Fresh deployments may have friend access and Qzone permission before private
+    # proactive_state has any last_interaction records. Still keep the hard bot-friend
+    # boundary; unreadable spaces are filtered by fetch_user_feeds permissions.
+    fallback: list[dict[str, Any]] = []
+    for uid, profile in friend_profiles.items():
+        user_id = str(uid)
+        if not user_id or user_id.startswith("group_"):
+            continue
+        snippet = _get_persona_snippet(persona_store, user_id, persona_snippet_max_chars)
+        fallback.append(
+            {
+                "user_id": user_id,
+                "nickname": str(profile.get("nickname", "") or user_id),
+                "persona_snippet": snippet,
+                "last_interaction": 0.0,
+                "is_friend": True,
+            }
+        )
+    fallback.sort(key=lambda item: item["user_id"])
+    return fallback[:12]
 
 
 async def _summarize_images(
