@@ -48,8 +48,10 @@ def test_qzone_social_and_frequency_defaults() -> None:
     assert cfg.personification_qzone_check_interval == 90
     assert cfg.personification_qzone_daily_limit == 3
     assert cfg.personification_qzone_min_interval_hours == 6.0
-    assert cfg.personification_qzone_social_enabled is False
+    assert cfg.personification_qzone_social_enabled is True
+    assert cfg.personification_qzone_social_check_interval == 60
     assert cfg.personification_qzone_social_scope == "recent_interactions"
     assert cfg.personification_qzone_social_like_limit == 0
     assert cfg.personification_qzone_social_comment_limit == 0
+    assert cfg.personification_qzone_social_max_feeds_per_scan == 5
     assert cfg.personification_proactive_require_user_profile is True
