@@ -577,7 +577,9 @@ def render_qzone_status(bundle: Any) -> str:
         f"今日点赞/评论：{int(social_state.get('like_count', 0) or 0)} / {int(social_state.get('comment_count', 0) or 0)}",
         f"上次扫描：{format_timestamp(float(social_state.get('last_scan_at', 0) or 0))}",
         f"上次结果：用户 {last_result.get('scanned_users', 0)}，动态 {last_result.get('feeds_seen', 0)}，"
-        f"点赞 {last_result.get('liked', 0)}，评论 {last_result.get('commented', 0)}，忽略 {last_result.get('ignored', 0)}，失败 {last_result.get('failed', 0)}",
+        f"点赞 {last_result.get('liked', 0)}，评论 {last_result.get('commented', 0)}，"
+        f"留言 {last_result.get('inbound_comments', 0)}，回复 {last_result.get('replied', 0)}，"
+        f"忽略 {last_result.get('ignored', 0)}，失败 {last_result.get('failed', 0)}",
         f"最近失败：{social_state.get('last_error') or '无'}",
     ]
     return "\n".join(lines)
@@ -628,6 +630,8 @@ def _format_qzone_scan_result(result: dict[str, Any]) -> str:
         f"读取动态：{result.get('feeds_seen', 0)}",
         f"点赞：{result.get('liked', 0)}",
         f"评论：{result.get('commented', 0)}",
+        f"收到留言：{result.get('inbound_comments', 0)}",
+        f"回复留言：{result.get('replied', 0)}",
         f"忽略：{result.get('ignored', 0)}",
         f"失败：{result.get('failed', 0)}",
     ]

@@ -199,6 +199,65 @@ def _extract_qzone_images(feed: dict[str, Any]) -> list[str]:
     return unique
 
 
+def _extract_qzone_comments(feed: dict[str, Any]) -> list[dict[str, Any]]:
+    comments: list[dict[str, Any]] = []
+    candidates: list[Any] = []
+    for key in ("commentlist", "comments", "comment_list", "replylist", "replys", "replies"):
+        value = feed.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+        elif isinstance(value, dict):
+            nested = value.get("items") or value.get("list") or value.get("comments")
+            if isinstance(nested, list):
+                candidates.extend(nested)
+            else:
+                candidates.append(value)
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        user_obj = item.get("user") if isinstance(item.get("user"), dict) else {}
+        user_id = str(
+            item.get("uin")
+            or item.get("user_id")
+            or item.get("posterid")
+            or item.get("poster_id")
+            or user_obj.get("uin")
+            or user_obj.get("id")
+            or ""
+        ).strip()
+        content = _first_text(item, ("content", "con", "text", "msg", "comment"))
+        if not user_id or not content:
+            continue
+        comment_id = str(
+            item.get("tid")
+            or item.get("id")
+            or item.get("commentid")
+            or item.get("comment_id")
+            or item.get("replyid")
+            or ""
+        ).strip()
+        nickname = _first_text(item, ("nickname", "nick", "name", "username")) or _clean_qzone_text(
+            user_obj.get("nickname") or user_obj.get("name") or user_obj.get("nick") or ""
+        )
+        created_at = item.get("created_time") or item.get("abstime") or item.get("time") or item.get("create_time") or 0
+        try:
+            created_at_int = int(float(created_at or 0))
+        except Exception:
+            created_at_int = 0
+        comments.append(
+            {
+                "comment_key": f"{user_id}:{comment_id or created_at_int}:{content[:24]}",
+                "comment_id": comment_id,
+                "user_id": user_id,
+                "nickname": nickname or user_id,
+                "content": content,
+                "created_at": created_at_int,
+                "raw": item,
+            }
+        )
+    return comments
+
+
 def _first_text(feed: dict[str, Any], keys: tuple[str, ...]) -> str:
     for key in keys:
         value = feed.get(key)
@@ -309,6 +368,7 @@ class QzoneSocialService:
         target_uin: str,
         bot_id: str,
         count: int = 10,
+        include_comments: bool = False,
     ) -> tuple[bool, str, list[dict[str, Any]]]:
         ok, msg, ctx = self._context(bot_id)
         if not ok:
@@ -323,7 +383,7 @@ class QzoneSocialService:
             "sort": "0",
             "pos": "0",
             "num": str(max(1, min(40, int(count or 10)))),
-            "replynum": "0",
+            "replynum": "20" if include_comments else "0",
             "g_tk": str(ctx["g_tk"]),
             "callback": "_Callback",
             "code_version": "1",

@@ -223,7 +223,11 @@ async def run_qzone_social_scan(
     else:
         if not cookie_ok:
             logger.warning(f"拟人插件：空间互动刷新 Cookie 失败（{cookie_msg}），尝试使用旧 Cookie。")
-    result = await scan_qzone_social_feeds(bot, target_user_id=str(target_user_id or ""))
+    result = await scan_qzone_social_feeds(
+        bot,
+        target_user_id=str(target_user_id or ""),
+        allow_open_user=bool(force),
+    )
     if result.get("ok"):
         logger.info(
             "拟人插件：空间互动扫描完成，"

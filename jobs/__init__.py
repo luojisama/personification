@@ -143,7 +143,11 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                 logger=deps.logger,
             )
         if deps.qzone_social_scan_flow is not None and deps.qzone_social_service is not None:
-            async def _scan_qzone_social_feeds(bot: Any, target_user_id: str = "") -> dict[str, Any]:
+            async def _scan_qzone_social_feeds(
+                bot: Any,
+                target_user_id: str = "",
+                allow_open_user: bool = False,
+            ) -> dict[str, Any]:
                 return await deps.qzone_social_scan_flow(
                     bot=bot,
                     plugin_config=getattr(deps, "plugin_config", None),
@@ -157,6 +161,7 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                     vision_caller=deps.vision_caller,
                     agent_data_dir=deps.agent_data_dir,
                     target_user_id=target_user_id,
+                    allow_open_user=allow_open_user,
                 )
 
             qzone_social_scan = build_qzone_social_scan_task(

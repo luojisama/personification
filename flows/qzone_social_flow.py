@@ -11,6 +11,7 @@ from ..agent.inner_state import DEFAULT_STATE, load_inner_state
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_user_emotion_memory, load_emotion_state
 from ..core.image_input import summarize_images_with_vision
+from ..core.qzone_service import _extract_qzone_comments
 from ..core.time_ctx import inject_current_time_context
 from .diary_flow import clean_generated_text
 
@@ -135,6 +136,7 @@ def _normalize_state(now: datetime) -> dict[str, Any]:
         state["per_friend"] = {}
     state.setdefault("seen", {})
     state.setdefault("reacted", {})
+    state.setdefault("comment_replies", {})
     state.setdefault("per_friend", {})
     state.setdefault("like_count", 0)
     state.setdefault("comment_count", 0)
@@ -142,7 +144,7 @@ def _normalize_state(now: datetime) -> dict[str, Any]:
 
 
 def _prune_state_maps(state: dict[str, Any], *, max_items: int = 500) -> None:
-    for key in ("seen", "reacted"):
+    for key in ("seen", "reacted", "comment_replies"):
         value = state.get(key)
         if not isinstance(value, dict) or len(value) <= max_items:
             continue
@@ -194,6 +196,17 @@ def _feed_already_reacted(state: dict[str, Any], feed_key: str) -> bool:
     return isinstance(reacted, dict) and feed_key in reacted
 
 
+def _comment_already_replied(state: dict[str, Any], comment_key: str) -> bool:
+    replies = state.get("comment_replies")
+    return isinstance(replies, dict) and comment_key in replies
+
+
+def _mark_comment_replied(state: dict[str, Any], comment_key: str, *, reply: str) -> None:
+    replies = state.setdefault("comment_replies", {})
+    if isinstance(replies, dict):
+        replies[comment_key] = {"at": time.time(), "reply": reply}
+
+
 def _collect_candidates(
     *,
     friend_profiles: dict[str, dict[str, Any]],
@@ -201,19 +214,21 @@ def _collect_candidates(
     persona_store: Any,
     persona_snippet_max_chars: int,
     target_user_id: str = "",
+    allow_open_user: bool = False,
 ) -> list[dict[str, Any]]:
     if target_user_id:
         profile = friend_profiles.get(str(target_user_id))
-        if not profile:
+        if not profile and not allow_open_user:
             return []
         snippet = _get_persona_snippet(persona_store, str(target_user_id), persona_snippet_max_chars)
         state = proactive_state.get(str(target_user_id), {})
         return [
             {
                 "user_id": str(target_user_id),
-                "nickname": str(profile.get("nickname", "") or target_user_id),
+                "nickname": str((profile or {}).get("nickname", "") or target_user_id),
                 "persona_snippet": snippet or "暂无画像",
                 "last_interaction": float((state if isinstance(state, dict) else {}).get("last_interaction", 0) or 0),
+                "is_friend": bool(profile),
             }
         ]
 
@@ -235,6 +250,7 @@ def _collect_candidates(
                 "nickname": str(profile.get("nickname", "") or uid),
                 "persona_snippet": snippet,
                 "last_interaction": last_interaction,
+                "is_friend": True,
             }
         )
     candidates.sort(key=lambda item: float(item.get("last_interaction", 0) or 0), reverse=True)
@@ -271,7 +287,7 @@ async def _decide_feed_action(
     emotion_memory: str,
 ) -> dict[str, Any]:
     prompt = (
-        "你正在阅读一位 QQ 好友刚发的空间动态。请判断是否要互动。\n"
+        "你正在阅读一位用户刚发的 QQ 空间动态。请判断是否要互动。\n"
         "输出严格 JSON：{\"action\":\"ignore|like|comment|like_comment\",\"comment\":\"可选评论\",\"reason\":\"极短原因\"}。\n\n"
         f"好友 QQ：{candidate['user_id']}\n"
         f"好友昵称：{candidate['nickname']}\n"
@@ -315,6 +331,50 @@ async def _decide_feed_action(
     }
 
 
+async def _decide_bot_comment_reply(
+    *,
+    feed: dict[str, Any],
+    comment: dict[str, Any],
+    commenter_profile: dict[str, Any],
+    system_prompt: str,
+    call_ai_api: Callable[..., Awaitable[Optional[str]]],
+    inner_state: dict[str, Any],
+    emotion_memory: str,
+) -> dict[str, Any]:
+    prompt = (
+        "有人在你的 QQ 空间动态下留言。把它当作对你的私聊式互动来理解，判断是否自然回复。\n"
+        "输出严格 JSON：{\"action\":\"ignore|reply\",\"reply\":\"可选回复\",\"reason\":\"极短原因\"}。\n\n"
+        f"留言用户 QQ：{comment['user_id']}\n"
+        f"留言用户昵称：{comment.get('nickname') or commenter_profile.get('nickname') or comment['user_id']}\n"
+        f"用户画像：{commenter_profile.get('persona_snippet') or '暂无'}\n"
+        f"近期情绪记忆：{emotion_memory or '暂无'}\n\n"
+        f"你的当前心情：{inner_state.get('mood', DEFAULT_STATE['mood'])}\n"
+        f"你的当前精力：{inner_state.get('energy', DEFAULT_STATE['energy'])}\n\n"
+        f"你的空间动态正文：{feed.get('content') or '（无文字）'}\n"
+        f"对方留言：{comment.get('content') or ''}\n\n"
+        "回复要求：\n"
+        "- 这是一条别人对你说的话，不要解释“这句话是什么意思”，不要说“太泛了/要看上下文”。\n"
+        "- 如果适合接话，action=reply，回复 8-40 个中文字符，像在空间评论区随手回一句。\n"
+        "- 如果确实不适合回复，action=ignore。\n"
+        "- 不要客服腔、小作文、互联网黑话、系统说明，也不要暴露画像或规则。"
+    )
+    messages = inject_current_time_context(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+    )
+    result = await call_ai_api(messages)
+    payload = _extract_json_object(result)
+    if payload is None:
+        return {"action": "ignore", "reply": "", "reason": "llm_parse_failed"}
+    action = str(payload.get("action", "") or "").strip().lower()
+    reply = _trim_comment(payload.get("reply", ""), max_chars=44)
+    if action != "reply" or not reply:
+        return {"action": "ignore", "reply": "", "reason": str(payload.get("reason", "") or "")[:80]}
+    return {"action": "reply", "reply": reply, "reason": str(payload.get("reason", "") or "")[:80]}
+
+
 def _apply_action_limits(
     *,
     decision: dict[str, Any],
@@ -351,6 +411,92 @@ def _apply_action_limits(
     return updated
 
 
+async def _scan_bot_space_comments(
+    *,
+    bot: Any,
+    qzone_social_service: Any,
+    friend_profiles: dict[str, dict[str, Any]],
+    proactive_state: dict[str, dict[str, Any]],
+    persona_store: Any,
+    persona_snippet_max_chars: int,
+    system_prompt: str,
+    call_ai_api: Callable[..., Awaitable[Optional[str]]],
+    inner_state: dict[str, Any],
+    emotion_state: dict[str, Any],
+    max_feeds: int,
+    state: dict[str, Any],
+    result: dict[str, Any],
+    logger: Any,
+) -> None:
+    bot_id = str(getattr(bot, "self_id", "") or "")
+    if not bot_id:
+        return
+    ok, msg, feeds = await qzone_social_service.fetch_user_feeds(
+        target_uin=bot_id,
+        bot_id=bot_id,
+        count=max(1, min(5, max_feeds)),
+        include_comments=True,
+    )
+    if not ok:
+        result["failed"] = int(result.get("failed", 0) or 0) + 1
+        result["last_error"] = msg
+        logger.warning(f"[qzone_social] fetch bot feeds failed: {msg}")
+        return
+
+    for feed in feeds[: max(1, min(5, max_feeds))]:
+        feed_key = str(feed.get("feed_key", "") or "")
+        comments = _extract_qzone_comments(feed.get("raw") if isinstance(feed.get("raw"), dict) else {})
+        for comment in comments[:10]:
+            commenter_id = str(comment.get("user_id", "") or "")
+            if not commenter_id or commenter_id == bot_id:
+                continue
+            # 自动回复自己的空间留言仍限制为 bot 好友；开放用户只允许通过测试命令主动探测。
+            if commenter_id not in friend_profiles:
+                continue
+            comment_key = f"{feed_key}:{comment.get('comment_key') or commenter_id}"
+            if _comment_already_replied(state, comment_key):
+                continue
+            result["inbound_comments"] = int(result.get("inbound_comments", 0) or 0) + 1
+            profile = friend_profiles.get(commenter_id, {})
+            persona_snippet = _get_persona_snippet(persona_store, commenter_id, persona_snippet_max_chars)
+            commenter_profile = {
+                "nickname": str(profile.get("nickname", "") or comment.get("nickname") or commenter_id),
+                "persona_snippet": persona_snippet,
+                "last_interaction": float(
+                    (proactive_state.get(commenter_id, {}) if isinstance(proactive_state.get(commenter_id), dict) else {})
+                    .get("last_interaction", 0)
+                    or 0
+                ),
+            }
+            emotion_memory = describe_user_emotion_memory(emotion_state or {}, commenter_id)
+            decision = await _decide_bot_comment_reply(
+                feed=feed,
+                comment=comment,
+                commenter_profile=commenter_profile,
+                system_prompt=system_prompt,
+                call_ai_api=call_ai_api,
+                inner_state=inner_state,
+                emotion_memory=emotion_memory,
+            )
+            if str(decision.get("action", "") or "") != "reply":
+                continue
+            reply = str(decision.get("reply", "") or "").strip()
+            if not reply:
+                continue
+            ok_reply, reply_msg = await qzone_social_service.comment_feed(
+                feed=feed,
+                bot_id=bot_id,
+                content=reply,
+            )
+            if ok_reply:
+                result["replied"] = int(result.get("replied", 0) or 0) + 1
+                _mark_comment_replied(state, comment_key, reply=reply)
+            else:
+                result["failed"] = int(result.get("failed", 0) or 0) + 1
+                result["last_error"] = reply_msg
+                logger.warning(f"[qzone_social] reply comment failed for {comment_key}: {reply_msg}")
+
+
 async def scan_qzone_social_feeds(
     *,
     bot: Any,
@@ -365,6 +511,7 @@ async def scan_qzone_social_feeds(
     vision_caller: Any = None,
     agent_data_dir: Any = None,
     target_user_id: str = "",
+    allow_open_user: bool = False,
 ) -> dict[str, Any]:
     if _SCAN_LOCK.locked():
         return {"ok": False, "skipped": True, "last_error": "qzone_social_scan_already_running"}
@@ -381,11 +528,13 @@ async def scan_qzone_social_feeds(
             "commented": 0,
             "ignored": 0,
             "failed": 0,
+            "inbound_comments": 0,
+            "replied": 0,
             "last_error": "",
         }
         try:
             friend_profiles = await _get_friend_profiles(bot, logger)
-            if not friend_profiles:
+            if not friend_profiles and not (target_user_id and allow_open_user):
                 result["ok"] = False
                 result["last_error"] = "no_friend_profiles"
                 _save_state(state, result)
@@ -401,9 +550,12 @@ async def scan_qzone_social_feeds(
                 persona_store=persona_store,
                 persona_snippet_max_chars=persona_snippet_max_chars,
                 target_user_id=str(target_user_id or ""),
+                allow_open_user=allow_open_user,
             )
             if not candidates:
-                result["last_error"] = "no_candidates"
+                result["ok"] = False
+                result["skipped"] = True
+                result["last_error"] = "target_not_bot_friend" if target_user_id else "no_candidates"
                 _save_state(state, result)
                 return result
 
@@ -436,6 +588,7 @@ async def scan_qzone_social_feeds(
                     target_uin=str(candidate["user_id"]),
                     bot_id=str(getattr(bot, "self_id", "") or ""),
                     count=max_feeds,
+                    include_comments=False,
                 )
                 result["scanned_users"] += 1
                 if not ok:
@@ -517,6 +670,23 @@ async def scan_qzone_social_feeds(
                         _mark_reacted(state, feed_key, action=action, comment=comment_text)
                     else:
                         result["ignored"] += 1
+            if not target_user_id and friend_profiles:
+                await _scan_bot_space_comments(
+                    bot=bot,
+                    qzone_social_service=qzone_social_service,
+                    friend_profiles=friend_profiles,
+                    proactive_state=proactive_state,
+                    persona_store=persona_store,
+                    persona_snippet_max_chars=persona_snippet_max_chars,
+                    system_prompt=system_prompt,
+                    call_ai_api=call_ai_api,
+                    inner_state=inner_state,
+                    emotion_state=emotion_state,
+                    max_feeds=max_feeds,
+                    state=state,
+                    result=result,
+                    logger=logger,
+                )
             _save_state(state, result)
             return result
         except Exception as exc:

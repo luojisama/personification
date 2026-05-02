@@ -64,6 +64,60 @@ def test_qzone_feed_normalization_extracts_text_images_and_keys() -> None:
     assert feed["topic_id"] == "12345_abc__1"
 
 
+def test_qzone_comment_extraction_normalizes_user_and_content() -> None:
+    comments = qzone_service._extract_qzone_comments(
+        {
+            "commentlist": [
+                {
+                    "uin": "22222",
+                    "nickname": "留言者",
+                    "content": "看到啦<br>挺好",
+                    "created_time": 1710000010,
+                    "commentid": "c1",
+                }
+            ]
+        }
+    )
+
+    assert comments[0]["comment_key"].startswith("22222:c1")
+    assert comments[0]["nickname"] == "留言者"
+    assert comments[0]["content"] == "看到啦 挺好"
+
+
+def test_qzone_test_target_can_use_open_user_without_friend_profile() -> None:
+    candidates = qzone_flow._collect_candidates(
+        friend_profiles={},
+        proactive_state={},
+        persona_store=_PersonaStore({}),
+        persona_snippet_max_chars=80,
+        target_user_id="3330186224",
+        allow_open_user=True,
+    )
+
+    assert candidates == [
+        {
+            "user_id": "3330186224",
+            "nickname": "3330186224",
+            "persona_snippet": "暂无画像",
+            "last_interaction": 0.0,
+            "is_friend": False,
+        }
+    ]
+
+
+def test_qzone_non_test_target_still_requires_bot_friend() -> None:
+    candidates = qzone_flow._collect_candidates(
+        friend_profiles={},
+        proactive_state={},
+        persona_store=_PersonaStore({}),
+        persona_snippet_max_chars=80,
+        target_user_id="3330186224",
+        allow_open_user=False,
+    )
+
+    assert candidates == []
+
+
 def test_qzone_social_limits_use_zero_as_unlimited() -> None:
     assert qzone_flow._limit_reached(0, 9999) is False
     assert qzone_flow._limit_reached(2, 2) is True
