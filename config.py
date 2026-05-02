@@ -121,10 +121,17 @@ class Config(BaseModel):
     # DEPRECATED: use personification_qzone_cookie.
     qzone_cookie: str = ""
     personification_qzone_proactive_enabled: bool = False
-    personification_qzone_check_interval: int = 180
-    personification_qzone_daily_limit: int = 2
+    personification_qzone_check_interval: int = 90
+    personification_qzone_daily_limit: int = 3
     personification_qzone_probability: float = 0.35
-    personification_qzone_min_interval_hours: float = 8.0
+    personification_qzone_min_interval_hours: float = 6.0
+    personification_qzone_social_enabled: bool = False
+    personification_qzone_social_check_interval: int = 120
+    personification_qzone_social_scope: str = "recent_interactions"
+    personification_qzone_social_like_limit: int = 0
+    personification_qzone_social_comment_limit: int = 0
+    personification_qzone_social_per_friend_limit: int = 0
+    personification_qzone_social_max_feeds_per_scan: int = 10
     personification_image_search_api_key: str = ""
     personification_github_token: str = ""
     personification_web_search_always: bool = False
@@ -218,6 +225,7 @@ class Config(BaseModel):
 
     personification_proactive_enabled: bool = False
     personification_proactive_threshold: float = 60.0
+    personification_proactive_require_user_profile: bool = True
     personification_proactive_daily_limit: int = 3
     personification_proactive_interval: int = 30
     personification_proactive_probability: float = 0.18

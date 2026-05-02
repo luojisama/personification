@@ -38,7 +38,7 @@ PROACTIVE_DECISION_PROMPT = """[角色设定]
 
 [候选联系人]
 {candidates_formatted}
-（格式：昵称 / 好感度{fav} / 上次聊天：{last_chat} / 关系温度：{warmth}）
+（格式：昵称 / 好感度{fav} / 上次聊天：{last_chat} / 关系温度：{warmth}；好感度只作语气参考，不是联系门槛）
 
 [今日发送限制]
 今天已主动发送：{today_count} 次（上限 {daily_limit} 次）
@@ -189,7 +189,9 @@ def _build_candidates(
     friend_ids: set[str],
     persona_store: Any = None,
     persona_snippet_max_chars: int = 80,
+    require_user_profile: bool = True,
 ) -> list[dict]:
+    _ = threshold  # 兼容旧配置；主动私聊不再按高好感度准入。
     candidates: list[dict] = []
     now_ts = now.timestamp()
     idle_seconds = max(0.0, float(idle_hours)) * 3600
@@ -205,8 +207,6 @@ def _build_candidates(
             continue
 
         favorability = float(user_data.get("favorability", 0.0) or 0.0)
-        if favorability < float(threshold):
-            continue
 
         user_state = _normalize_user_state(now, proactive_state.get(str(user_id), {}))
         last_interaction = float(user_state.get("last_interaction", 0) or 0)
@@ -221,6 +221,8 @@ def _build_candidates(
                 str(user_id),
                 max_chars=max(1, int(persona_snippet_max_chars)),
             )
+        if require_user_profile and not persona_snippet:
+            continue
         candidates.append(
             {
                 "user_id": str(user_id),
@@ -230,10 +232,18 @@ def _build_candidates(
                 "warmth": _find_relation_warmth(inner_state, nickname, str(user_id)),
                 "persona_snippet": persona_snippet,
                 "emotion_memory": describe_user_emotion_memory(emotion_state or {}, str(user_id)),
+                "last_interaction_ts": last_interaction,
             }
         )
 
-    candidates.sort(key=lambda item: item["favorability"], reverse=True)
+    candidates.sort(
+        key=lambda item: (
+            bool(item.get("persona_snippet")),
+            bool(item.get("emotion_memory")),
+            float(item.get("last_interaction_ts", 0) or 0),
+        ),
+        reverse=True,
+    )
     return candidates[:10]
 
 
@@ -247,6 +257,7 @@ def _build_fallback_candidates(
     idle_hours: float,
     persona_store: Any = None,
     persona_snippet_max_chars: int = 80,
+    require_user_profile: bool = True,
 ) -> list[dict]:
     candidates: list[dict] = []
     now_ts = now.timestamp()
@@ -267,6 +278,8 @@ def _build_fallback_candidates(
                 str(user_id),
                 max_chars=max(1, int(persona_snippet_max_chars)),
             )
+        if require_user_profile and not persona_snippet:
+            continue
         candidates.append(
             {
                 "user_id": str(user_id),
@@ -283,6 +296,7 @@ def _build_fallback_candidates(
     candidates.sort(
         key=lambda item: (
             bool(item.get("persona_snippet")),
+            bool(item.get("emotion_memory")),
             float(item.get("last_interaction_ts", 0) or 0),
         ),
         reverse=True,
@@ -543,6 +557,7 @@ async def run_proactive_messaging(
         getattr(plugin_config, "personification_persona_snippet_max_chars", 150)
     )
     idle_hours = float(getattr(plugin_config, "personification_proactive_idle_hours", 24.0))
+    require_user_profile = bool(getattr(plugin_config, "personification_proactive_require_user_profile", True))
     if sign_in_available:
         all_user_data = load_data() or {}
         candidates = _build_candidates(
@@ -556,6 +571,7 @@ async def run_proactive_messaging(
             friend_ids=friend_ids,
             persona_store=persona_store,
             persona_snippet_max_chars=persona_snippet_max_chars,
+            require_user_profile=require_user_profile,
         )
     else:
         candidates = _build_fallback_candidates(
@@ -567,6 +583,7 @@ async def run_proactive_messaging(
             idle_hours=idle_hours,
             persona_store=persona_store,
             persona_snippet_max_chars=persona_snippet_max_chars,
+            require_user_profile=require_user_profile,
         )
     if not candidates:
         save_proactive_state(proactive_state)

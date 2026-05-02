@@ -284,6 +284,7 @@ async def _init_personification_runtime() -> None:
             check_group_idle_topic=flow_handles.get("check_group_idle_topic"),
         ),
     )
+    runtime_bundle.qzone_social_scan = job_handles.get("qzone_social_scan")
 
     matcher_handles = setup_all_matchers(
         deps=runtime_bundle.make_matcher_setup_deps(

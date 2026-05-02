@@ -63,7 +63,7 @@ def _extract_json_object(raw: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _trim_qzone_content(text: str, *, max_chars: int = 90) -> str:
+def _trim_qzone_content(text: str, *, max_chars: int = 50) -> str:
     cleaned = clean_generated_text(text)
     cleaned = re.sub(r"^(POST|SKIP)\s*[|：:]\s*", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"#[^#\s]{1,24}", "", cleaned).strip()
@@ -239,11 +239,11 @@ async def generate_ai_diary(
     base_requirements = (
         "请写一条自然、像真人随手发的 QQ 空间说说，不要写周记小作文。\n"
         "输出严格 JSON：{\"content\":\"正文\",\"image_prompt\":\"可选英文配图提示词\"}。\n"
-        "1. 正文 20-80 个中文字符，短一点，像日常碎碎念。\n"
-        "2. 语气符合当前角色设定，不要像总结报告、日报、作文或公告。\n"
-        "3. 可以写聊天里看到的小事、自己的心情、突然冒出的念头。\n"
+        "1. 正文 12-50 个中文字符，像随手发的一句日常碎碎念。\n"
+        "2. 只抓一个很小的生活瞬间或念头，不要总结聊天、日报、作文或公告。\n"
+        "3. 语气贴合角色，但不要互联网黑话、热梗和夸张营业感。\n"
         "4. 不要列条目、不要标题、不要 hashtag、不要说自己是 AI。\n"
-        "5. image_prompt 只有在这条说说适合配一张氛围图时填写英文画面描述；不适合就留空。"
+        "5. image_prompt 只有在适合配一张日常氛围图时填写英文画面描述；不适合就留空。"
     )
 
     if chat_context:
@@ -370,9 +370,9 @@ async def maybe_generate_proactive_qzone_post(
         "要求：\n"
         "1. 如果没有明确想说的话，action=skip。\n"
         "2. 如果想发，action=post，并给出 content。\n"
-        "3. 正文 15-70 个中文字符，像真人随手发的空间碎碎念，别写长篇大段。\n"
-        "4. 可以带一点吐槽、感慨、突然想到的念头，但不要列表、不要标题、不要 hashtag。\n"
-        "5. 不要为了发而发，不要重复最近已经说过很多遍的话题。\n"
+        "3. 正文 12-50 个中文字符，像真人随手发的一句话，别写长篇大段。\n"
+        "4. 只写一个小瞬间、小吐槽或突然想到的念头，不要列表、标题、hashtag 或总结腔。\n"
+        "5. 不要为了发而发，不要重复最近已经说过很多遍的话题，不要互联网黑话和热梗。\n"
         "6. 如果适合配图，image_prompt 写英文画面描述，要求贴合人设和正文氛围；不适合就留空。"
     )
     result = await _generate_once(

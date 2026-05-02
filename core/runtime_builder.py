@@ -127,7 +127,7 @@ from .builtin_hooks import register_all_builtin_hooks
 from .plugin_meta import build_plugin_metadata, build_plugin_usage_text
 from .proactive_store import load_proactive_state, save_proactive_state, update_private_interaction_time
 from .profile_service import ProfileService
-from .qzone_service import build_qzone_services
+from .qzone_service import build_qzone_services, build_qzone_social_service
 from .runtime_assembly import PluginRuntimeBundle
 from .memory_defaults import DEFAULT_PERSONA_HISTORY_MAX
 from .model_router import (
@@ -202,6 +202,7 @@ def build_plugin_runtime(
         plugin_config=plugin_config,
         logger=logger,
     )
+    qzone_social_service = build_qzone_social_service(plugin_config=plugin_config, logger=logger)
     data_dir = get_personification_data_dir(plugin_config)
     knowledge_store = PluginKnowledgeStore(data_dir)
 
@@ -676,6 +677,7 @@ def build_plugin_runtime(
         qzone_publish_available=qzone_publish_available,
         publish_qzone_shuo=publish_qzone_shuo,
         update_qzone_cookie=update_qzone_cookie,
+        qzone_social_service=qzone_social_service,
         get_user_data=get_user_data,
         update_user_data=update_user_data,
         load_data=load_data,

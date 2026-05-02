@@ -196,3 +196,40 @@ async def run_proactive_qzone_post(
     store.save_sync("qzone_post_state", state)
     logger.info("拟人插件：已根据当前状态主动发布一条空间说说。")
     return True
+
+
+async def run_qzone_social_scan(
+    *,
+    qzone_publish_available: bool,
+    qzone_social_enabled: bool,
+    get_bots: Callable[[], Dict[str, Any]],
+    update_qzone_cookie: Callable[..., Any],
+    scan_qzone_social_feeds: Callable[..., Any],
+    logger: Any,
+    target_user_id: str = "",
+    force: bool = False,
+) -> dict[str, Any]:
+    """Scan friend Qzone feeds and let the LLM decide lightweight interactions."""
+    if not qzone_publish_available or (not qzone_social_enabled and not force):
+        return {"ok": False, "skipped": True, "last_error": "qzone_social_disabled"}
+    bots = get_bots()
+    if not bots:
+        return {"ok": False, "skipped": True, "last_error": "no_bot"}
+    bot = list(bots.values())[0]
+    try:
+        cookie_ok, cookie_msg = await update_qzone_cookie(bot)
+    except Exception as exc:
+        logger.warning(f"拟人插件：空间互动刷新 Cookie 失败（{exc}），尝试使用旧 Cookie。")
+    else:
+        if not cookie_ok:
+            logger.warning(f"拟人插件：空间互动刷新 Cookie 失败（{cookie_msg}），尝试使用旧 Cookie。")
+    result = await scan_qzone_social_feeds(bot, target_user_id=str(target_user_id or ""))
+    if result.get("ok"):
+        logger.info(
+            "拟人插件：空间互动扫描完成，"
+            f"用户 {result.get('scanned_users', 0)}，动态 {result.get('feeds_seen', 0)}，"
+            f"点赞 {result.get('liked', 0)}，评论 {result.get('commented', 0)}。"
+        )
+    else:
+        logger.warning(f"拟人插件：空间互动扫描跳过或失败：{result.get('last_error')}")
+    return result

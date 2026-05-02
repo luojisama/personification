@@ -36,6 +36,7 @@ def register_persona_admin_matchers(
             bundle=runtime_bundle,
             event=event,
             arg_text=args.extract_plain_text().strip(),
+            arg_message=args,
         )
 
     return {

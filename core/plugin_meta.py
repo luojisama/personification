@@ -18,6 +18,7 @@ PERSONIFICATION_USAGE = (
     "  - 拟人 记忆 状态|补建|衰减|演化|结晶 执行：管理记忆系统\n"
     "  - 拟人 迁移 状态|执行：查看或执行旧数据迁移\n"
     "  - 拟人 召回 统计：查看长期记忆召回统计\n"
+    "  - 拟人 空间 状态|测试 <QQ号/@用户>：查看 QQ 空间任务或测试指定好友空间互动\n"
     "  - 英文前缀：/persona；中文前缀：拟人 / 人格\n"
     "  - 兼容简写：拟人 配置列表 / 配置查看 / 配置设置 / 配置重置 / 记忆状态 / 召回统计\n\n"
     "全局开关命令（超管）：\n"
@@ -68,6 +69,9 @@ PERSONIFICATION_USAGE = (
     "  - 说/朗读/配音 [--mode preset|design|clone] [--voice 音色] [--style 风格] [--voice-prompt 音色描述] [--clone-voice data:...] [--clone-path 样本路径] 文本：输出语音\n\n"
     "其他命令（超管）：\n"
     "  - 发个说说：触发动态/日记类输出\n\n"
+    "QQ 空间命令（超管）：\n"
+    "  - 拟人 空间 状态：查看主动发空间与好友空间互动状态\n"
+    "  - 拟人 空间 测试 <QQ号/@用户>：指定好友执行一次空间读取与 LLM 互动测试\n\n"
     "帮助命令：\n"
     "  - 拟人帮助\n"
     "  - 拟人命令\n"
@@ -100,6 +104,7 @@ def build_plugin_metadata(config_cls: type) -> PluginMetadata:
                     "/persona memory",
                     "/persona migrate",
                     "/persona recall",
+                    "/persona qzone",
                 ],
                 "global_admin": [
                     "拟人开关",
@@ -156,6 +161,8 @@ def build_plugin_metadata(config_cls: type) -> PluginMetadata:
                 ],
                 "diary_admin": [
                     "发个说说",
+                    "拟人 空间 状态",
+                    "拟人 空间 测试",
                 ],
             },
             "dev_doc": "D:/bot/nonebot/shiro002/dev/拟人.md",

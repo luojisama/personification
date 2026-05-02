@@ -79,6 +79,31 @@ def build_proactive_qzone_post_task(
     return _proactive_qzone_post
 
 
+def build_qzone_social_scan_task(
+    *,
+    run_qzone_social_scan: Callable[..., Awaitable[dict[str, Any]]],
+    qzone_publish_available: bool,
+    qzone_social_enabled: bool,
+    get_bots: Callable[[], dict[str, Any]],
+    update_qzone_cookie: Any,
+    scan_qzone_social_feeds: Callable[..., Awaitable[dict[str, Any]]],
+    logger: Any,
+) -> Callable[..., Awaitable[dict[str, Any]]]:
+    async def _qzone_social_scan(target_user_id: str = "", force: bool = False) -> dict[str, Any]:
+        return await run_qzone_social_scan(
+            qzone_publish_available=qzone_publish_available,
+            qzone_social_enabled=qzone_social_enabled,
+            get_bots=get_bots,
+            update_qzone_cookie=update_qzone_cookie,
+            scan_qzone_social_feeds=scan_qzone_social_feeds,
+            logger=logger,
+            target_user_id=target_user_id,
+            force=force,
+        )
+
+    return _qzone_social_scan
+
+
 def build_maybe_generate_qzone_post_task(
     *,
     maybe_generate_proactive_qzone_post_flow: Callable[..., Awaitable[str]],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import html
 import json
 import re
 from pathlib import Path
@@ -88,6 +89,343 @@ def _parse_qzone_jsonp(text: str) -> dict[str, Any]:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _format_cookie_for_qzone(cookie: str, qq: str, p_skey: str) -> str:
+    formatted_cookie = f"uin=o{qq}; p_skey={p_skey};"
+    if "skey=" in cookie:
+        skey_match = re.search(r"skey=([^; ]+)", cookie)
+        if skey_match:
+            formatted_cookie += f" skey={skey_match.group(1)};"
+    return formatted_cookie
+
+
+def _resolve_qzone_context(plugin_config: Any, bot_id: str) -> tuple[bool, str, dict[str, Any]]:
+    cookie = _get_cookie_from_config(plugin_config)
+    if not cookie:
+        return False, "未配置 Qzone Cookie", {}
+    pskey_match = re.search(r"p_skey=([^; ]+)", cookie)
+    if not pskey_match:
+        return False, "Cookie 缺少 p_skey 字段", {}
+    p_skey = pskey_match.group(1)
+    uin_match = re.search(r"uin=[o0]*(\d+)", cookie)
+    qq = uin_match.group(1) if uin_match else str(bot_id)
+    formatted_cookie = _format_cookie_for_qzone(cookie, qq, p_skey)
+    return True, "", {
+        "cookie": cookie,
+        "formatted_cookie": formatted_cookie,
+        "p_skey": p_skey,
+        "qq": qq,
+        "g_tk": _get_g_tk(p_skey),
+    }
+
+
+def _qzone_headers(ctx: dict[str, Any], *, referer_uin: str) -> dict[str, str]:
+    return {
+        "Cookie": str(ctx.get("formatted_cookie", "")),
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        ),
+        "Referer": f"https://user.qzone.qq.com/{referer_uin}",
+        "Origin": "https://user.qzone.qq.com",
+    }
+
+
+def _clean_qzone_text(value: Any) -> str:
+    if isinstance(value, list):
+        raw = "".join(str(item.get("text", "") if isinstance(item, dict) else item) for item in value)
+    else:
+        raw = str(value or "")
+    raw = re.sub(r"<br\s*/?>", "\n", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"<[^>]+>", "", raw)
+    raw = html.unescape(raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    return raw
+
+
+def _normalize_qzone_image_url(value: Any) -> str:
+    url = str(value or "").strip()
+    if not url:
+        return ""
+    if url.startswith("//"):
+        return "https:" + url
+    if url.startswith("http://") or url.startswith("https://") or url.startswith("data:image/"):
+        return url
+    return ""
+
+
+def _extract_qzone_images(feed: dict[str, Any]) -> list[str]:
+    images: list[str] = []
+    candidates: list[Any] = []
+    for key in ("pic", "pics", "images", "picdata"):
+        value = feed.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+        elif isinstance(value, dict):
+            candidates.append(value)
+    for item in candidates:
+        if isinstance(item, str):
+            url = _normalize_qzone_image_url(item)
+            if url:
+                images.append(url)
+            continue
+        if not isinstance(item, dict):
+            continue
+        for key in (
+            "url1",
+            "url2",
+            "url3",
+            "url",
+            "raw",
+            "origin_url",
+            "pic_url",
+            "photourl",
+            "smallurl",
+            "bigurl",
+            "image_url",
+        ):
+            url = _normalize_qzone_image_url(item.get(key))
+            if url:
+                images.append(url)
+                break
+    seen: set[str] = set()
+    unique: list[str] = []
+    for url in images:
+        if url in seen:
+            continue
+        seen.add(url)
+        unique.append(url)
+    return unique
+
+
+def _first_text(feed: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = feed.get(key)
+        text = _clean_qzone_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _normalize_qzone_feed(raw_feed: Any, *, target_uin: str) -> dict[str, Any] | None:
+    if not isinstance(raw_feed, dict):
+        return None
+    owner_uin = str(
+        raw_feed.get("uin")
+        or raw_feed.get("hostuin")
+        or raw_feed.get("host_uin")
+        or raw_feed.get("owner_uin")
+        or target_uin
+    ).strip()
+    feed_id = str(
+        raw_feed.get("tid")
+        or raw_feed.get("id")
+        or raw_feed.get("feedid")
+        or raw_feed.get("feed_id")
+        or raw_feed.get("cellid")
+        or raw_feed.get("ugc_key")
+        or ""
+    ).strip()
+    content = _first_text(raw_feed, ("content", "con", "summary", "cell_summary", "msg", "text"))
+    images = _extract_qzone_images(raw_feed)
+    if not feed_id and not content and not images:
+        return None
+    created_at = raw_feed.get("created_time") or raw_feed.get("abstime") or raw_feed.get("time") or 0
+    try:
+        created_at_int = int(float(created_at or 0))
+    except Exception:
+        created_at_int = 0
+    appid = str(raw_feed.get("appid") or raw_feed.get("appidlist") or "311").strip() or "311"
+    nickname = _first_text(raw_feed, ("nickname", "name", "nick", "username")) or owner_uin
+    topic_id = str(raw_feed.get("topicId") or raw_feed.get("topicid") or "").strip()
+    if not topic_id and owner_uin and feed_id:
+        topic_id = f"{owner_uin}_{feed_id}__1"
+    unikey = str(raw_feed.get("unikey") or raw_feed.get("curkey") or "").strip()
+    if not unikey and owner_uin and feed_id:
+        unikey = f"http://user.qzone.qq.com/{owner_uin}/mood/{feed_id}"
+    return {
+        "feed_key": f"{owner_uin}:{feed_id or created_at_int}",
+        "feed_id": feed_id,
+        "owner_uin": owner_uin,
+        "nickname": nickname,
+        "content": content,
+        "images": images,
+        "created_at": created_at_int,
+        "topic_id": topic_id,
+        "unikey": unikey,
+        "curkey": unikey,
+        "appid": appid,
+        "raw": raw_feed,
+    }
+
+
+def _extract_msglist_payload(payload: dict[str, Any]) -> list[Any]:
+    for key in ("msglist", "feeds", "feedlist", "data"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            for nested_key in ("msglist", "feeds", "feedlist"):
+                nested = value.get(nested_key)
+                if isinstance(nested, list):
+                    return nested
+    return []
+
+
+def _qzone_payload_success(payload: dict[str, Any], raw_text: str = "") -> tuple[bool, str]:
+    if not payload:
+        raw_lower = str(raw_text or "").strip().lower()
+        if raw_lower.startswith("<html") or raw_lower.startswith("<!doctype"):
+            return False, "Qzone 返回了登录页面或验证码，请刷新 Cookie"
+        return False, "Qzone 返回无法解析"
+    for key in ("code", "ret", "subcode"):
+        if key in payload:
+            try:
+                code = int(payload.get(key) or 0)
+            except Exception:
+                code = 0
+            if code != 0:
+                return False, str(payload.get("message") or payload.get("msg") or payload)[:180]
+    return True, "ok"
+
+
+class QzoneSocialService:
+    """Read and react to Qzone feeds through the same cookie used by shuoshuo publishing."""
+
+    def __init__(self, plugin_config: Any, logger: Any) -> None:
+        self.plugin_config = plugin_config
+        self.logger = logger
+        self.enabled = bool(getattr(plugin_config, "personification_qzone_enabled", False))
+
+    def _context(self, bot_id: str) -> tuple[bool, str, dict[str, Any]]:
+        if not self.enabled:
+            return False, "Qzone 功能未启用", {}
+        return _resolve_qzone_context(self.plugin_config, bot_id)
+
+    async def fetch_user_feeds(
+        self,
+        *,
+        target_uin: str,
+        bot_id: str,
+        count: int = 10,
+    ) -> tuple[bool, str, list[dict[str, Any]]]:
+        ok, msg, ctx = self._context(bot_id)
+        if not ok:
+            return False, msg, []
+        target = str(target_uin or "").strip()
+        if not target:
+            return False, "目标 QQ 为空", []
+        url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
+        params = {
+            "uin": target,
+            "ftype": "0",
+            "sort": "0",
+            "pos": "0",
+            "num": str(max(1, min(40, int(count or 10)))),
+            "replynum": "0",
+            "g_tk": str(ctx["g_tk"]),
+            "callback": "_Callback",
+            "code_version": "1",
+            "format": "jsonp",
+            "need_private_comment": "1",
+        }
+        headers = _qzone_headers(ctx, referer_uin=target)
+        try:
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                resp = await client.get(url, params=params, headers=headers)
+        except Exception as exc:
+            return False, f"读取动态失败：{exc}", []
+        if resp.status_code != 200:
+            return False, f"读取动态失败，状态码：{resp.status_code}", []
+        payload = _parse_qzone_jsonp(resp.text)
+        payload_ok, payload_msg = _qzone_payload_success(payload, resp.text)
+        if not payload_ok:
+            return False, payload_msg, []
+        feeds: list[dict[str, Any]] = []
+        for item in _extract_msglist_payload(payload):
+            normalized = _normalize_qzone_feed(item, target_uin=target)
+            if normalized is not None:
+                feeds.append(normalized)
+        return True, "ok", feeds
+
+    async def like_feed(self, *, feed: dict[str, Any], bot_id: str) -> tuple[bool, str]:
+        ok, msg, ctx = self._context(bot_id)
+        if not ok:
+            return False, msg
+        owner = str(feed.get("owner_uin", "") or "").strip()
+        unikey = str(feed.get("unikey", "") or "").strip()
+        if not owner or not unikey:
+            return False, "动态缺少点赞所需字段"
+        url = "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app"
+        data = {
+            "qzreferrer": f"https://user.qzone.qq.com/{owner}",
+            "opuin": str(ctx["qq"]),
+            "unikey": unikey,
+            "curkey": str(feed.get("curkey", "") or unikey),
+            "from": "1",
+            "appid": str(feed.get("appid", "") or "311"),
+            "typeid": "0",
+            "abstime": str(feed.get("created_at", "") or ""),
+            "fid": str(feed.get("feed_id", "") or ""),
+            "active": "0",
+            "fupdate": "1",
+            "format": "json",
+        }
+        headers = _qzone_headers(ctx, referer_uin=owner)
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, params={"g_tk": str(ctx["g_tk"])}, data=data, headers=headers)
+        except Exception as exc:
+            return False, f"点赞失败：{exc}"
+        if resp.status_code != 200:
+            return False, f"点赞失败，状态码：{resp.status_code}"
+        payload = _parse_qzone_jsonp(resp.text)
+        return _qzone_payload_success(payload, resp.text)
+
+    async def comment_feed(
+        self,
+        *,
+        feed: dict[str, Any],
+        bot_id: str,
+        content: str,
+    ) -> tuple[bool, str]:
+        text = str(content or "").strip()
+        if not text:
+            return False, "评论内容为空"
+        ok, msg, ctx = self._context(bot_id)
+        if not ok:
+            return False, msg
+        owner = str(feed.get("owner_uin", "") or "").strip()
+        topic_id = str(feed.get("topic_id", "") or "").strip()
+        if not owner or not topic_id:
+            return False, "动态缺少评论所需字段"
+        url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
+        data = {
+            "uin": str(ctx["qq"]),
+            "hostUin": owner,
+            "topicId": topic_id,
+            "content": text[:80],
+            "private": "0",
+            "paramstr": "1",
+            "format": "json",
+            "feedsType": "100",
+            "inCharset": "utf-8",
+            "outCharset": "utf-8",
+            "qzreferrer": f"https://user.qzone.qq.com/{owner}",
+        }
+        headers = _qzone_headers(ctx, referer_uin=owner)
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, params={"g_tk": str(ctx["g_tk"])}, data=data, headers=headers)
+        except Exception as exc:
+            return False, f"评论失败：{exc}"
+        if resp.status_code != 200:
+            return False, f"评论失败，状态码：{resp.status_code}"
+        payload = _parse_qzone_jsonp(resp.text)
+        return _qzone_payload_success(payload, resp.text)
 
 
 async def _upload_qzone_image(
@@ -288,3 +626,7 @@ def build_qzone_services(
             return False, f"发生异常：{e}"
 
     return qzone_enabled, publish_qzone_shuo, update_qzone_cookie
+
+
+def build_qzone_social_service(plugin_config: Any, logger: Any) -> QzoneSocialService:
+    return QzoneSocialService(plugin_config=plugin_config, logger=logger)

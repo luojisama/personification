@@ -1,13 +1,19 @@
 from dataclasses import dataclass
 from typing import Any, Dict
 
-from .periodic_jobs import run_auto_post_diary, run_daily_group_fav_report, run_proactive_qzone_post
+from .periodic_jobs import (
+    run_auto_post_diary,
+    run_daily_group_fav_report,
+    run_proactive_qzone_post,
+    run_qzone_social_scan,
+)
 from .scheduler_registration import (
     register_background_intelligence_job,
     register_daily_group_fav_report_job,
     register_group_idle_topic_job,
     register_proactive_messaging_job,
     register_proactive_qzone_job,
+    register_qzone_social_scan_job,
     register_weekly_diary_job,
 )
 from .task_builders import (
@@ -17,13 +23,16 @@ from .task_builders import (
     build_group_idle_topic_task,
     build_maybe_generate_qzone_post_task,
     build_proactive_qzone_post_task,
+    build_qzone_social_scan_task,
 )
 
 
 @dataclass
 class JobSetupDeps:
+    plugin_config: Any
     sign_in_available: bool
     load_data: Any
+    load_proactive_state: Any
     get_now: Any
     get_bots: Any
     superusers: set[str]
@@ -42,10 +51,16 @@ class JobSetupDeps:
     group_idle_enabled: bool = True
     group_idle_check_interval_minutes: int = 15
     qzone_proactive_enabled: bool = False
-    qzone_check_interval_minutes: int = 180
-    qzone_daily_limit: int = 2
+    qzone_check_interval_minutes: int = 90
+    qzone_daily_limit: int = 3
     qzone_probability: float = 0.35
-    qzone_min_interval_hours: float = 8.0
+    qzone_min_interval_hours: float = 6.0
+    qzone_social_enabled: bool = False
+    qzone_social_check_interval_minutes: int = 120
+    qzone_social_scan_flow: Any = None
+    qzone_social_service: Any = None
+    persona_store: Any = None
+    vision_caller: Any = None
     agent_tool_caller: Any = None
     agent_data_dir: Any = None
     background_intelligence: Any = None
@@ -77,6 +92,7 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
     )
     auto_post_diary = None
     proactive_qzone_post = None
+    qzone_social_scan = None
     if not deps.qzone_publish_available:
         deps.logger.info(
             "拟人插件：Qzone 说说功能未启用（personification_qzone_enabled=False），跳过定时注册"
@@ -126,6 +142,39 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                 interval_minutes=deps.qzone_check_interval_minutes,
                 logger=deps.logger,
             )
+        if deps.qzone_social_scan_flow is not None and deps.qzone_social_service is not None:
+            async def _scan_qzone_social_feeds(bot: Any, target_user_id: str = "") -> dict[str, Any]:
+                return await deps.qzone_social_scan_flow(
+                    bot=bot,
+                    plugin_config=getattr(deps, "plugin_config", None),
+                    qzone_social_service=deps.qzone_social_service,
+                    load_prompt=deps.load_prompt,
+                    call_ai_api=deps.call_ai_api,
+                    load_proactive_state=getattr(deps, "load_proactive_state", lambda: {}),
+                    get_now=deps.get_now,
+                    logger=deps.logger,
+                    persona_store=deps.persona_store,
+                    vision_caller=deps.vision_caller,
+                    agent_data_dir=deps.agent_data_dir,
+                    target_user_id=target_user_id,
+                )
+
+            qzone_social_scan = build_qzone_social_scan_task(
+                run_qzone_social_scan=run_qzone_social_scan,
+                qzone_publish_available=deps.qzone_publish_available,
+                qzone_social_enabled=deps.qzone_social_enabled,
+                get_bots=deps.get_bots,
+                update_qzone_cookie=deps.update_qzone_cookie,
+                scan_qzone_social_feeds=_scan_qzone_social_feeds,
+                logger=deps.logger,
+            )
+            if deps.qzone_social_enabled:
+                register_qzone_social_scan_job(
+                    scheduler=scheduler,
+                    qzone_social_scan_job=qzone_social_scan,
+                    interval_minutes=deps.qzone_social_check_interval_minutes,
+                    logger=deps.logger,
+                )
     if getattr(deps, "proactive_enabled", True):
         register_proactive_messaging_job(
             scheduler=scheduler,
@@ -158,6 +207,7 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
         "generate_ai_diary": generate_ai_diary,
         "auto_post_diary": auto_post_diary,
         "proactive_qzone_post": proactive_qzone_post,
+        "qzone_social_scan": qzone_social_scan,
         "background_intelligence": getattr(deps, "background_intelligence", None),
     }
 
@@ -166,17 +216,20 @@ __all__ = [
     "run_auto_post_diary",
     "run_daily_group_fav_report",
     "run_proactive_qzone_post",
+    "run_qzone_social_scan",
     "register_weekly_diary_job",
     "register_daily_group_fav_report_job",
     "register_group_idle_topic_job",
     "register_proactive_messaging_job",
     "register_proactive_qzone_job",
+    "register_qzone_social_scan_job",
     "build_auto_post_diary_task",
     "build_daily_group_fav_report_task",
     "build_generate_ai_diary_task",
     "build_group_idle_topic_task",
     "build_maybe_generate_qzone_post_task",
     "build_proactive_qzone_post_task",
+    "build_qzone_social_scan_task",
     "JobSetupDeps",
     "setup_jobs",
 ]

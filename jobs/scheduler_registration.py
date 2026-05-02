@@ -107,6 +107,27 @@ def register_proactive_qzone_job(
         logger.error(f"拟人插件：注册主动空间动态任务失败: {e}")
 
 
+def register_qzone_social_scan_job(
+    *,
+    scheduler: Any,
+    qzone_social_scan_job: Any,
+    interval_minutes: int,
+    logger: Any,
+) -> None:
+    safe_interval = max(30, int(interval_minutes))
+    try:
+        scheduler.add_job(
+            qzone_social_scan_job,
+            "interval",
+            minutes=safe_interval,
+            id="personification_qzone_social_scan",
+            replace_existing=True,
+        )
+        logger.info(f"拟人插件：好友空间互动扫描任务已注册，检测间隔 {safe_interval} 分钟")
+    except Exception as e:
+        logger.error(f"拟人插件：注册好友空间互动扫描任务失败: {e}")
+
+
 def register_background_intelligence_job(
     *,
     scheduler: Any,

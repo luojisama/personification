@@ -33,6 +33,7 @@ def _bundle(jobs: list[_Job]) -> SimpleNamespace:
             personification_proactive_enabled=True,
             personification_group_idle_enabled=False,
             personification_qzone_proactive_enabled=False,
+            personification_qzone_social_enabled=False,
         ),
     )
 
@@ -53,6 +54,15 @@ def test_render_scheduler_status_lists_registered_jobs_and_missing_enabled_jobs(
     assert "每日群好感统计：已注册" in text
     assert "主动私聊：未注册（开关：开" in text
     assert "后台智能维护：已注册" in text
+
+
+def test_render_scheduler_status_lists_qzone_social_job_when_enabled() -> None:
+    bundle = _bundle([_Job("personification_qzone_social_scan")])
+    bundle.plugin_config.personification_qzone_social_enabled = True
+
+    text = admin_commands.render_scheduler_status(bundle)
+
+    assert "好友空间互动：已注册" in text
 
 
 def test_scheduler_status_summary_counts_missing_enabled_jobs() -> None:

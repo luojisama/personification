@@ -40,3 +40,16 @@ def test_llm_review_features_default_disabled() -> None:
     assert cfg.personification_tts_llm_decision_enabled is False
     assert cfg.personification_response_review_model_role == "review"
     assert cfg.personification_tts_llm_decision_model_role == "agent"
+
+
+def test_qzone_social_and_frequency_defaults() -> None:
+    cfg = config_mod.Config()
+
+    assert cfg.personification_qzone_check_interval == 90
+    assert cfg.personification_qzone_daily_limit == 3
+    assert cfg.personification_qzone_min_interval_hours == 6.0
+    assert cfg.personification_qzone_social_enabled is False
+    assert cfg.personification_qzone_social_scope == "recent_interactions"
+    assert cfg.personification_qzone_social_like_limit == 0
+    assert cfg.personification_qzone_social_comment_limit == 0
+    assert cfg.personification_proactive_require_user_profile is True

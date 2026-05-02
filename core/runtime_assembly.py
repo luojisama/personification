@@ -118,6 +118,7 @@ class PluginRuntimeBundle:
     qzone_publish_available: bool
     publish_qzone_shuo: Any
     update_qzone_cookie: Any
+    qzone_social_service: Any
     get_user_data: Any
     update_user_data: Any
     load_data: Any
@@ -144,6 +145,7 @@ class PluginRuntimeBundle:
     memory_curator: Any = None
     memory_decay_scheduler: Any = None
     background_intelligence: Any = None
+    qzone_social_scan: Any = None
     get_knowledge_build_task: Any = None
     set_knowledge_build_task: Any = None
 
@@ -210,6 +212,12 @@ class PluginRuntimeBundle:
         return maybe_generate_proactive_qzone_post
 
     @property
+    def qzone_social_scan_flow(self) -> Any:
+        from ..flows import scan_qzone_social_feeds
+
+        return scan_qzone_social_feeds
+
+    @property
     def collect_perm_blacklist_items(self) -> Any:
         from ..flows import collect_perm_blacklist_items
 
@@ -240,8 +248,10 @@ class PluginRuntimeBundle:
         check_group_idle_topic: Any = None,
     ) -> JobSetupDeps:
         return JobSetupDeps(
+            plugin_config=self.plugin_config,
             sign_in_available=self.sign_in_available,
             load_data=self.load_data,
+            load_proactive_state=load_proactive_state,
             get_now=get_current_local_time,
             get_bots=self.get_bots,
             superusers=self.superusers,
@@ -267,13 +277,23 @@ class PluginRuntimeBundle:
                 getattr(self.plugin_config, "personification_qzone_proactive_enabled", False)
             ),
             qzone_check_interval_minutes=int(
-                getattr(self.plugin_config, "personification_qzone_check_interval", 180)
+                getattr(self.plugin_config, "personification_qzone_check_interval", 90)
             ),
-            qzone_daily_limit=int(getattr(self.plugin_config, "personification_qzone_daily_limit", 2)),
+            qzone_daily_limit=int(getattr(self.plugin_config, "personification_qzone_daily_limit", 3)),
             qzone_probability=float(getattr(self.plugin_config, "personification_qzone_probability", 0.35)),
             qzone_min_interval_hours=float(
-                getattr(self.plugin_config, "personification_qzone_min_interval_hours", 8.0)
+                getattr(self.plugin_config, "personification_qzone_min_interval_hours", 6.0)
             ),
+            qzone_social_enabled=bool(
+                getattr(self.plugin_config, "personification_qzone_social_enabled", False)
+            ),
+            qzone_social_check_interval_minutes=int(
+                getattr(self.plugin_config, "personification_qzone_social_check_interval", 120)
+            ),
+            qzone_social_scan_flow=self.qzone_social_scan_flow,
+            qzone_social_service=self.qzone_social_service,
+            persona_store=self.persona_store,
+            vision_caller=self.reply_processor_deps.runtime.vision_caller,
             agent_tool_caller=self.reply_processor_deps.runtime.agent_tool_caller,
             agent_data_dir=get_personification_data_dir(self.plugin_config),
             background_intelligence=self.background_intelligence,
