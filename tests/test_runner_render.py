@@ -909,3 +909,67 @@ def test_codex_image_generation_size_alias_updates_tool_size_and_prompt_hint() -
     assert payload["tools"][0]["size"] == "1024x1536"
     user_text = payload["input"][0]["content"][0]["text"]
     assert "Requested aspect/size: portrait (竖版)." in user_text
+
+
+def test_codex_image_generation_passes_reference_images_as_input_image() -> None:
+    image_b64 = "QUJD" * 44
+
+    class _CaptureCodexCaller(tool_impl.OpenAICodexToolCaller):
+        def __init__(self) -> None:
+            super().__init__(model="gpt-5.3-codex")
+            self.payloads: list[dict[str, object]] = []
+
+        async def _get_access_token(self):  # noqa: ANN001
+            return "token", None
+
+        async def _request_codex_response(self, payload, **_kwargs):  # noqa: ANN001
+            self.payloads.append(payload)
+            return {"output": [{"type": "image_generation_call", "result": image_b64}]}
+
+    caller = _CaptureCodexCaller()
+
+    result = asyncio.run(
+        caller.generate_image(
+            "按参考图画海报",
+            size="1024x1024",
+            images=["https://example.com/ref.png"],
+            reference_mode="input_image",
+        )
+    )
+
+    assert result == {"b64_json": image_b64}
+    content = caller.payloads[0]["input"][0]["content"]
+    assert any(part.get("type") == "input_image" and part.get("image_url") == "https://example.com/ref.png" for part in content)
+
+
+def test_codex_image_generation_auto_reference_falls_back_to_text_prompt() -> None:
+    image_b64 = "QUJD" * 44
+
+    class _CaptureCodexCaller(tool_impl.OpenAICodexToolCaller):
+        def __init__(self) -> None:
+            super().__init__(model="gpt-5.3-codex")
+            self.payloads: list[dict[str, object]] = []
+
+        async def _get_access_token(self):  # noqa: ANN001
+            return "token", None
+
+        async def _request_codex_response(self, payload, **_kwargs):  # noqa: ANN001
+            self.payloads.append(payload)
+            if len(self.payloads) == 1:
+                raise RuntimeError("image input not supported")
+            return {"output": [{"type": "image_generation_call", "result": image_b64}]}
+
+    caller = _CaptureCodexCaller()
+
+    result = asyncio.run(
+        caller.generate_image(
+            "按参考图画海报",
+            images=["https://example.com/ref.png"],
+            reference_mode="auto",
+        )
+    )
+
+    assert result["b64_json"] == image_b64
+    assert "reference images were rejected" in result["warning"]
+    fallback_content = caller.payloads[1]["input"][0]["content"][0]["text"]
+    assert "Reference image mode: unavailable" in fallback_content

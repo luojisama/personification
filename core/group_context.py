@@ -89,6 +89,17 @@ def render_group_context_structured(messages: list[dict[str, Any]], trigger_msg_
         }
         if scene in scene_map:
             relation_parts.append(f"场景={scene_map[scene]}")
+        source_kind = str(msg.get("source_kind", "") or "").strip().lower()
+        source_map = {
+            "bot_reply": "拟人回复",
+            "plugin": "其他插件输出",
+            "system": "系统消息",
+            "bot": "机器人消息",
+            "mface": "表情包",
+            "image": "图片",
+        }
+        if source_kind in source_map:
+            relation_parts.append(f"来源={source_map[source_kind]}")
 
         relation = "|".join(relation_parts) if relation_parts else "普通发言"
         lines.append(f"[{label}][{nickname}|uid={user_id}|{relation}] {content}")

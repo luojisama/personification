@@ -21,8 +21,16 @@ class OpenAICodexToolCaller:
         self.model = "gpt-5.3-codex"
         self.calls: list[dict[str, str]] = []
 
-    async def generate_image(self, prompt: str, *, size: str, image_model: str):  # noqa: ANN001
-        self.calls.append({"prompt": prompt, "size": size, "image_model": image_model})
+    async def generate_image(self, prompt: str, *, size: str, image_model: str, images=None, reference_mode="auto"):  # noqa: ANN001
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "size": size,
+                "image_model": image_model,
+                "images": list(images or []),
+                "reference_mode": reference_mode,
+            }
+        )
         return {"b64_json": "QUJD"}
 
 
@@ -54,6 +62,8 @@ def test_image_gen_skill_registers_codex_only_and_passes_image2_model() -> None:
             "prompt": "poster",
             "size": "1536x1024",
             "image_model": "gpt-image-2",
+            "images": [],
+            "reference_mode": "auto",
         }
     ]
 
@@ -71,6 +81,8 @@ def test_image_gen_skill_normalizes_size_aliases() -> None:
             "prompt": "poster",
             "size": "1024x1536",
             "image_model": "gpt-image-2",
+            "images": [],
+            "reference_mode": "auto",
         }
     ]
 
@@ -85,8 +97,16 @@ def test_image_gen_skill_uses_configured_timeout_on_dedicated_caller() -> None:
         self.calls = []
         instances.append(self)
 
-    async def _generate_image(self, prompt: str, *, size: str, image_model: str):  # noqa: ANN001
-        self.calls.append({"prompt": prompt, "size": size, "image_model": image_model})
+    async def _generate_image(self, prompt: str, *, size: str, image_model: str, images=None, reference_mode="auto"):  # noqa: ANN001
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "size": size,
+                "image_model": image_model,
+                "images": list(images or []),
+                "reference_mode": reference_mode,
+            }
+        )
         return {"b64_json": "QUJD"}
 
     codex_cls = type(
@@ -125,10 +145,33 @@ def test_image_gen_skill_uses_configured_timeout_on_dedicated_caller() -> None:
             "prompt": "poster",
             "size": "1024x1024",
             "image_model": "gpt-image-2",
+            "images": [],
+            "reference_mode": "auto",
         },
         {
             "prompt": "poster 2",
             "size": "1536x1024",
             "image_model": "gpt-image-2",
+            "images": [],
+            "reference_mode": "auto",
         }
     ]
+
+
+def test_image_gen_skill_passes_reference_images() -> None:
+    caller = OpenAICodexToolCaller()
+    tool = image_gen_main.build_image_gen_tool(_runtime(caller))
+
+    assert tool is not None
+    result = asyncio.run(
+        tool.handler(
+            "按参考图画海报",
+            size="方图",
+            image_urls=["https://example.com/ref.png"],
+            reference_mode="input_image",
+        )
+    )
+
+    assert result == "[IMAGE_B64]QUJD[/IMAGE_B64]"
+    assert caller.calls[-1]["images"] == ["https://example.com/ref.png"]
+    assert caller.calls[-1]["reference_mode"] == "input_image"

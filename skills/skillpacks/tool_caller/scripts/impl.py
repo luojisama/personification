@@ -13,6 +13,7 @@ import httpx
 
 from plugin.personification.core.image_refs import normalize_image_ref
 from plugin.personification.core.message_parts import extract_text_from_parts, normalize_message_parts
+from plugin.personification.core.time_ctx import build_current_time_context_block, inject_current_time_context
 
 
 OPENAI_REASONING_MAP = {
@@ -653,6 +654,7 @@ class OpenAIToolCaller(ToolCaller):
         tools: List[dict],
         use_builtin_search: bool,
     ) -> ToolCallerResponse:
+        messages = inject_current_time_context(messages)
         from openai import AsyncOpenAI
 
         contains_image_input = _messages_contain_images(messages)
@@ -823,6 +825,7 @@ class GeminiToolCaller(ToolCaller):
         tools: List[dict],
         use_builtin_search: bool,
     ) -> ToolCallerResponse:
+        messages = inject_current_time_context(messages)
         import google.generativeai as genai
 
         contains_image_input = _messages_contain_images(messages)
@@ -921,6 +924,7 @@ class AnthropicToolCaller(ToolCaller):
         tools: List[dict],
         use_builtin_search: bool,
     ) -> ToolCallerResponse:
+        messages = inject_current_time_context(messages)
         from anthropic import AsyncAnthropic
 
         contains_image_input = _messages_contain_images(messages)
@@ -1554,6 +1558,7 @@ class OpenAICodexToolCaller(ToolCaller):
         tools: List[dict],
         use_builtin_search: bool,
     ) -> ToolCallerResponse:
+        messages = inject_current_time_context(messages)
         contains_image_input = self._contains_image_input(messages)
 
         payload: Dict[str, Any] = {
@@ -1797,6 +1802,8 @@ class OpenAICodexToolCaller(ToolCaller):
         *,
         size: str = "1024x1024",
         image_model: str = "gpt-image-2",
+        images: List[str] | None = None,
+        reference_mode: str = "auto",
     ) -> dict[str, str]:
         prompt_text = str(prompt or "").strip()
         if not prompt_text:
@@ -1806,16 +1813,34 @@ class OpenAICodexToolCaller(ToolCaller):
         generation_size = self._normalize_image_generation_size(requested_size)
         size_hint = self._normalize_image_size_hint(generation_size)
         requested_image_model = self._normalize_image_generation_model(image_model)
-        messages = [
+        mode = str(reference_mode or "auto").strip().lower() or "auto"
+        reference_images = [str(item or "").strip() for item in list(images or []) if str(item or "").strip()]
+        use_reference_images = bool(reference_images) and mode not in {"off", "none", "text_only", "vision_prompt"}
+        prompt_parts: list[dict[str, Any]] = [
             {
-                "role": "user",
-                "content": (
+                "type": "text",
+                "text": (
                     "Generate exactly one image for the user. "
                     "Use the image_generation tool and return no prose-only substitute.\n"
                     f"Requested image model: {requested_image_model}.\n"
                     f"Requested aspect/size: {size_hint} ({requested_size}).\n"
+                    f"Reference image mode: {'input_image' if use_reference_images else mode}.\n"
                     f"Prompt: {prompt_text}"
                 ),
+            }
+        ]
+        if use_reference_images:
+            for image_url in reference_images[:3]:
+                prompt_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url, "detail": "high"},
+                    }
+                )
+        messages = [
+            {
+                "role": "user",
+                "content": prompt_parts,
             }
         ]
         image_tool: Dict[str, Any] = {
@@ -1831,6 +1856,7 @@ class OpenAICodexToolCaller(ToolCaller):
             "stream": True,
             "instructions": (
                 f"{_CODEX_SYSTEM_PREFIX}\n\n"
+                f"{build_current_time_context_block()}\n\n"
                 "You are generating a single image for a chat bot. "
                 f"Call the built-in image_generation tool using {requested_image_model} when available. "
                 "Do not answer with a prompt or instructions."
@@ -1839,17 +1865,39 @@ class OpenAICodexToolCaller(ToolCaller):
             "tool_choice": {"type": "image_generation"},
             "tools": [image_tool],
         }
+        reference_warning = ""
         try:
             data = await self._request_codex_response(payload, access_token=access_token)
         except Exception as exc:
             error_text = str(exc).lower()
-            if "model" not in error_text:
+            if "model" in error_text:
+                fallback_tool = dict(image_tool)
+                fallback_tool.pop("model", None)
+                payload = dict(payload)
+                payload["tools"] = [fallback_tool]
+                data = await self._request_codex_response(payload, access_token=access_token)
+            elif use_reference_images and mode in {"auto", ""}:
+                fallback_messages = [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Generate exactly one image for the user. "
+                            "Use the image_generation tool and return no prose-only substitute.\n"
+                            f"Requested image model: {requested_image_model}.\n"
+                            f"Requested aspect/size: {size_hint} ({requested_size}).\n"
+                            "Reference image mode: unavailable; generate from the text prompt only.\n"
+                            f"Reference image pass-through failed: {str(exc)[:240]}\n"
+                            f"Prompt: {prompt_text}"
+                        ),
+                    }
+                ]
+                fallback_payload = dict(payload)
+                fallback_payload["input"] = self._build_input(fallback_messages)
+                data = await self._request_codex_response(fallback_payload, access_token=access_token)
+                payload = fallback_payload
+                reference_warning = "reference images were rejected by Codex image_generation; generated from text prompt only"
+            else:
                 raise
-            fallback_tool = dict(image_tool)
-            fallback_tool.pop("model", None)
-            payload = dict(payload)
-            payload["tools"] = [fallback_tool]
-            data = await self._request_codex_response(payload, access_token=access_token)
         output_items = list(data.get("output", []) or []) if isinstance(data, dict) else []
         for item in output_items:
             if not isinstance(item, dict) or item.get("type") != "image_generation_call":
@@ -1860,12 +1908,18 @@ class OpenAICodexToolCaller(ToolCaller):
             if not b64 and url:
                 b64 = await self._download_codex_image_result(url, access_token)
             if b64:
-                return {"b64_json": b64}
+                result = {"b64_json": b64}
+                if reference_warning:
+                    result["warning"] = reference_warning
+                return result
         b64, url = self._extract_image_payload_candidate(data)
         if not b64 and url:
             b64 = await self._download_codex_image_result(url, access_token)
         if b64:
-            return {"b64_json": b64}
+            result = {"b64_json": b64}
+            if reference_warning:
+                result["warning"] = reference_warning
+            return result
         return {"error": f"empty image response ({self._summarize_image_generation_response(data)})"}
 
     def build_tool_result_message(

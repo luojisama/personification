@@ -104,6 +104,7 @@ class PluginRuntimeBundle:
     logger: Any
     get_driver: Callable[[], Any]
     get_bots: Callable[[], dict[str, Any]]
+    scheduler: Any
     superuser_permission: Any
     finished_exception_cls: Any
     group_message_event_cls: Any

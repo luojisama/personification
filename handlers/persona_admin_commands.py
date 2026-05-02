@@ -69,6 +69,10 @@ _COMMAND_ALIASES = {
     "召回": "recall",
     "model": "model",
     "模型": "model",
+    "scheduler": "scheduler",
+    "schedule": "scheduler",
+    "定时": "scheduler",
+    "任务": "scheduler",
 }
 _SUBCOMMAND_ALIASES = {
     "list": "list",
@@ -120,6 +124,8 @@ _COMPOUND_TOKEN_ALIASES = {
     "迁移状态": ("迁移", "状态"),
     "迁移执行": ("迁移", "执行"),
     "召回统计": ("召回", "统计"),
+    "定时状态": ("定时", "状态"),
+    "任务状态": ("定时", "状态"),
 }
 
 
@@ -189,6 +195,7 @@ def _root_help_text() -> str:
         "- 拟人 迁移 状态|执行：查看或执行旧数据迁移。",
         "- 拟人 召回 统计：查看长期记忆召回统计。",
         "- 拟人 模型 列表|使用|设置|重置：QQ 内热更新 intent/review/agent/sticker 四类 LLM 模型。",
+        "- 拟人 定时 状态：查看定时任务注册状态、下次运行时间和功能开关。",
         "",
         "旧命令兼容（仍可用，下面直接说明用途）：",
         "- 拟人配置：发送聊天记录形式的配置总览。",
@@ -251,6 +258,7 @@ def _format_category_help(category: str) -> str:
         "status": "状态",
         "recall": "召回",
         "model": "模型",
+        "scheduler": "定时任务",
     }
     lines = [f"{category_names.get(category, category)}："]
     for entry in entries:
@@ -466,6 +474,11 @@ async def dispatch_persona_admin_command(
             await matcher.finish(_admin_error())
         await matcher.finish(handle_model_command(bundle, tokens=rest))
 
+    if command == "scheduler":
+        if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):
+            await matcher.finish(_admin_error())
+        await matcher.finish(handle_scheduler_command(bundle, tokens=rest))
+
     await matcher.finish("未识别的子命令。可用“拟人 帮助”或“/persona help”查看帮助。")
 
 
@@ -483,7 +496,7 @@ def render_help(bundle: Any, *, event: Any, tokens: list[str]) -> str:
         entry = find_command_help(tuple(normalized[:2]))
         if entry is not None:
             return _format_command_help(entry.path)
-    if normalized[0] in {"config", "admin", "memory", "migrate", "help", "status", "recall", "model"}:
+    if normalized[0] in {"config", "admin", "memory", "migrate", "help", "status", "recall", "model", "scheduler"}:
         return _format_category_help(normalized[0])
     config_entry = resolve_config_entry(" ".join(tokens))
     if config_entry is None:
@@ -526,7 +539,95 @@ def render_status(bundle: Any) -> str:
         "模型覆盖：" + "；".join(format_model_overrides(bundle.plugin_config)).replace("- ", ""),
         f"联网模式：{getattr(bundle.plugin_config, 'personification_tool_web_search_mode', 'enabled')}",
         f"最近后台维护：{format_timestamp(background_status.get('last_periodic_at', 0))}",
+        _render_scheduler_status_summary(bundle),
     ]
+    return "\n".join(lines)
+
+
+_SCHEDULER_EXPECTED_JOBS: tuple[tuple[str, str, str], ...] = (
+    ("personification_daily_fav_report", "每日群好感统计", ""),
+    ("ai_weekly_diary", "每周空间说说", "personification_qzone_enabled"),
+    ("personification_proactive_messaging", "主动私聊", "personification_proactive_enabled"),
+    ("personification_group_idle_topic", "群空闲发话", "personification_group_idle_enabled"),
+    ("personification_proactive_qzone", "主动空间动态", "personification_qzone_proactive_enabled"),
+    ("personification_background_intelligence", "后台智能维护", ""),
+)
+
+
+def _format_scheduler_time(value: Any) -> str:
+    if value is None:
+        return "未计划"
+    if hasattr(value, "strftime"):
+        try:
+            return value.strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+        except Exception:
+            pass
+    return str(value)
+
+
+def _get_scheduler_jobs(bundle: Any) -> list[Any]:
+    scheduler = getattr(bundle, "scheduler", None)
+    if scheduler is None:
+        return []
+    getter = getattr(scheduler, "get_jobs", None)
+    if not callable(getter):
+        return []
+    try:
+        return list(getter() or [])
+    except Exception:
+        return []
+
+
+def _scheduler_running_text(bundle: Any) -> str:
+    scheduler = getattr(bundle, "scheduler", None)
+    if scheduler is None:
+        return "未初始化"
+    running = getattr(scheduler, "running", None)
+    if running is None:
+        state = getattr(scheduler, "state", None)
+        return f"未知(state={state})" if state is not None else "未知"
+    return "运行中" if bool(running) else "未运行"
+
+
+def _expected_job_enabled(bundle: Any, flag_field: str) -> str:
+    if not flag_field:
+        return "应注册"
+    enabled = bool(getattr(bundle.plugin_config, flag_field, False))
+    return "开" if enabled else "关"
+
+
+def _render_scheduler_status_summary(bundle: Any) -> str:
+    jobs = _get_scheduler_jobs(bundle)
+    job_ids = {str(getattr(job, "id", "") or "") for job in jobs}
+    expected_ids = {job_id for job_id, _, flag in _SCHEDULER_EXPECTED_JOBS if not flag or bool(getattr(bundle.plugin_config, flag, False))}
+    missing = sorted(job_id for job_id in expected_ids if job_id not in job_ids)
+    return f"定时任务：{_scheduler_running_text(bundle)}，已注册 {len(jobs)} 个，缺失 {len(missing)} 个"
+
+
+def render_scheduler_status(bundle: Any) -> str:
+    jobs = _get_scheduler_jobs(bundle)
+    by_id = {str(getattr(job, "id", "") or ""): job for job in jobs}
+    lines = [
+        "定时任务状态",
+        f"Scheduler：{_scheduler_running_text(bundle)}",
+        f"已注册任务数：{len(jobs)}",
+    ]
+    for job_id, label, flag_field in _SCHEDULER_EXPECTED_JOBS:
+        job = by_id.get(job_id)
+        enabled_text = _expected_job_enabled(bundle, flag_field)
+        if job is None:
+            lines.append(f"- {label}：未注册（开关：{enabled_text}，id={job_id}）")
+            continue
+        trigger = str(getattr(job, "trigger", "") or "未知触发器")
+        next_run = _format_scheduler_time(getattr(job, "next_run_time", None))
+        lines.append(f"- {label}：已注册（开关：{enabled_text}，下次：{next_run}，触发：{trigger}，id={job_id}）")
+    extra_jobs = [job for job in jobs if str(getattr(job, "id", "") or "") not in {item[0] for item in _SCHEDULER_EXPECTED_JOBS}]
+    if extra_jobs:
+        lines.append("其他任务：")
+        for job in extra_jobs[:12]:
+            lines.append(
+                f"- {getattr(job, 'id', 'unknown')}：下次 {_format_scheduler_time(getattr(job, 'next_run_time', None))}"
+            )
     return "\n".join(lines)
 
 
@@ -642,6 +743,13 @@ def handle_model_command(bundle: Any, *, tokens: list[str]) -> str:
         return f"已重置：{role}（{MODEL_ROLE_LABELS[role]}）\n生效：立即生效"
 
     return "用法：拟人 模型 列表｜使用 <model>｜设置 <intent|review|agent|sticker> <model>｜重置 [role|全部]"
+
+
+def handle_scheduler_command(bundle: Any, *, tokens: list[str]) -> str:
+    action = normalize_command_word(tokens[0]) if tokens else "status"
+    if action in {"status", "list", "get"}:
+        return render_scheduler_status(bundle)
+    return "用法：拟人 定时 状态"
 
 
 def handle_config_command(bundle: Any, *, event: Any, tokens: list[str]) -> str:

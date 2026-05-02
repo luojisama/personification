@@ -220,6 +220,7 @@ def build_plugin_runtime(
     memory_store = init_memory_store(plugin_config, logger=logger)
     profile_service = ProfileService(memory_store)
     memory_decay_scheduler = MemoryDecayScheduler(memory_store, logger=logger)
+    scheduler = get_scheduler()
     background_intelligence = BackgroundIntelligence(
         plugin_config=plugin_config,
         memory_store=memory_store,
@@ -378,7 +379,7 @@ def build_plugin_runtime(
         get_now=get_current_local_time,
         persona_store=persona_store,
         vision_caller=vision_caller,
-        scheduler=get_scheduler(),
+        scheduler=scheduler,
         data_dir=data_dir,
         get_bots=get_bots,
         knowledge_store=knowledge_store,
@@ -661,6 +662,7 @@ def build_plugin_runtime(
         logger=logger,
         get_driver=get_driver,
         get_bots=get_bots,
+        scheduler=scheduler,
         superuser_permission=superuser_permission,
         finished_exception_cls=finished_exception_cls,
         group_message_event_cls=group_message_event_cls,

@@ -162,7 +162,7 @@ def _record_muted_group_message(
         **build_event_relation_metadata(
             event,
             bot_self_id=bot_self_id,
-            source_kind="bot" if bot_self_id and user_id == bot_self_id else "user",
+            source_kind="plugin" if bot_self_id and user_id == bot_self_id else "user",
         ),
     )
     try:

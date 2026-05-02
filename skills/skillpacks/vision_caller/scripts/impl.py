@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 import httpx
 
 from plugin.personification.core.image_refs import normalize_image_ref
+from plugin.personification.core.time_ctx import build_current_time_context_block
 from plugin.personification.skills.skillpacks.tool_caller.scripts.impl import (
     OpenAICodexToolCaller,
     _convert_openai_tool_to_gemini,
@@ -22,6 +23,10 @@ from plugin.personification.skills.skillpacks.tool_caller.scripts.impl import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _prompt_with_time_context(prompt: str) -> str:
+    return f"{build_current_time_context_block()}\n\n{str(prompt or '').strip()}"
 
 
 def _provider_model_is_compatible(api_type: str, model: str) -> bool:
@@ -86,7 +91,7 @@ class OpenAIVisionCaller(VisionCaller):
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": prompt},
+                            {"type": "text", "text": _prompt_with_time_context(prompt)},
                             {"type": "image_url", "image_url": {"url": normalized_image_url}},
                         ],
                     }
@@ -113,7 +118,7 @@ class OpenAIVisionCaller(VisionCaller):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": prompt},
+                    {"type": "text", "text": _prompt_with_time_context(prompt)},
                     {"type": "image_url", "image_url": {"url": normalized_image_url}},
                 ],
             }
@@ -247,7 +252,7 @@ class GeminiVisionCaller(VisionCaller):
 
     def _request_parts(self, prompt: str, image_url: str) -> List[Dict[str, Any]]:
         return [
-            {"text": prompt},
+            {"text": _prompt_with_time_context(prompt)},
             self._gemini_image_part(image_url),
         ]
 
@@ -385,7 +390,7 @@ class AnthropicVisionCaller(VisionCaller):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt},
+                        {"type": "text", "text": _prompt_with_time_context(prompt)},
                         _anthropic_image_block(normalized_image_url),
                     ],
                 }

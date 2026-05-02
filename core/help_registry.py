@@ -35,6 +35,15 @@ _COMMANDS: list[CommandHelpEntry] = [
         scope="global",
     ),
     CommandHelpEntry(
+        path=("scheduler", "status"),
+        category="scheduler",
+        summary="查看定时任务注册状态、下次运行时间和相关开关。",
+        usage="拟人 定时 状态",
+        examples=("拟人 定时 状态", "/persona scheduler status"),
+        permission="管理员",
+        scope="global",
+    ),
+    CommandHelpEntry(
         path=("config", "list"),
         category="config",
         summary="查看所有可配置项、当前值、默认值和用途。",

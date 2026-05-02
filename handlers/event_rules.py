@@ -354,7 +354,7 @@ def resolve_record_message(
     relation_metadata = build_event_relation_metadata(
         event,
         bot_self_id=self_id,
-        source_kind="bot" if is_bot_message else "user",
+        source_kind="plugin" if is_bot_message else "user",
     )
     count = record_group_msg(
         group_id,
