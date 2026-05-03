@@ -137,6 +137,7 @@ def _normalize_state(now: datetime) -> dict[str, Any]:
     state.setdefault("seen", {})
     state.setdefault("reacted", {})
     state.setdefault("comment_replies", {})
+    state.setdefault("comment_actions", {})
     state.setdefault("profile_records", {})
     state.setdefault("per_friend", {})
     state.setdefault("like_count", 0)
@@ -144,8 +145,8 @@ def _normalize_state(now: datetime) -> dict[str, Any]:
     return state
 
 
-def _prune_state_maps(state: dict[str, Any], *, max_items: int = 500) -> None:
-    for key in ("seen", "reacted", "comment_replies", "profile_records"):
+def _prune_state_maps(state: dict[str, Any], *, max_items: int = 2000) -> None:
+    for key in ("seen", "reacted", "comment_replies", "comment_actions", "profile_records"):
         value = state.get(key)
         if not isinstance(value, dict) or len(value) <= max_items:
             continue
@@ -164,6 +165,17 @@ def _save_state(state: dict[str, Any], result: dict[str, Any]) -> None:
         state["last_error"] = str(result.get("last_error") or "")[:240]
     else:
         state["last_error"] = ""
+    _prune_state_maps(state)
+    get_data_store().save_sync(_STORE_NAME, state)
+
+
+def _save_inbound_state(state: dict[str, Any], result: dict[str, Any]) -> None:
+    state["last_inbound_scan_at"] = time.time()
+    state["last_inbound_result"] = dict(result)
+    if result.get("last_error"):
+        state["last_inbound_error"] = str(result.get("last_error") or "")[:240]
+    else:
+        state["last_inbound_error"] = ""
     _prune_state_maps(state)
     get_data_store().save_sync(_STORE_NAME, state)
 
@@ -206,6 +218,33 @@ def _mark_comment_replied(state: dict[str, Any], comment_key: str, *, reply: str
     replies = state.setdefault("comment_replies", {})
     if isinstance(replies, dict):
         replies[comment_key] = {"at": time.time(), "reply": reply}
+
+
+def _comment_already_processed(state: dict[str, Any], comment_key: str) -> bool:
+    actions = state.get("comment_actions")
+    if isinstance(actions, dict) and comment_key in actions:
+        return True
+    return _comment_already_replied(state, comment_key)
+
+
+def _mark_comment_processed(
+    state: dict[str, Any],
+    comment_key: str,
+    *,
+    action: str,
+    reply: str = "",
+    reason: str = "",
+) -> None:
+    actions = state.setdefault("comment_actions", {})
+    if isinstance(actions, dict):
+        actions[comment_key] = {
+            "at": time.time(),
+            "action": str(action or "ignore"),
+            "reply": str(reply or "")[:80],
+            "reason": str(reason or "")[:120],
+        }
+    if action == "reply" and reply:
+        _mark_comment_replied(state, comment_key, reply=reply)
 
 
 def _profile_evidence_already_recorded(state: dict[str, Any], evidence_key: str) -> bool:
@@ -495,6 +534,8 @@ async def _scan_bot_space_comments(
     inner_state: dict[str, Any],
     emotion_state: dict[str, Any],
     max_feeds: int,
+    max_comments_per_feed: int = 20,
+    count_checked_feeds: bool = False,
     state: dict[str, Any],
     result: dict[str, Any],
     logger: Any,
@@ -505,8 +546,9 @@ async def _scan_bot_space_comments(
     ok, msg, feeds = await qzone_social_service.fetch_user_feeds(
         target_uin=bot_id,
         bot_id=bot_id,
-        count=max(1, min(5, max_feeds)),
+        count=max(1, min(100, int(max_feeds or 20))),
         include_comments=True,
+        comment_count=max_comments_per_feed,
     )
     if not ok:
         result["failed"] = int(result.get("failed", 0) or 0) + 1
@@ -514,10 +556,15 @@ async def _scan_bot_space_comments(
         logger.warning(f"[qzone_social] fetch bot feeds failed: {msg}")
         return
 
-    for feed in feeds[: max(1, min(5, max_feeds))]:
+    checked_feeds = feeds[: max(1, min(100, int(max_feeds or 20)))]
+    if count_checked_feeds:
+        result["scanned_users"] = int(result.get("scanned_users", 0) or 0) + 1
+        result["feeds_seen"] = int(result.get("feeds_seen", 0) or 0) + len(checked_feeds)
+
+    for feed in checked_feeds:
         feed_key = str(feed.get("feed_key", "") or "")
         comments = _extract_qzone_comments(feed.get("raw") if isinstance(feed.get("raw"), dict) else {})
-        for comment in comments[:10]:
+        for comment in comments[: max(1, min(100, int(max_comments_per_feed or 20)))]:
             commenter_id = str(comment.get("user_id", "") or "")
             if not commenter_id or commenter_id == bot_id:
                 continue
@@ -525,7 +572,7 @@ async def _scan_bot_space_comments(
             if commenter_id not in friend_profiles:
                 continue
             comment_key = f"{feed_key}:{comment.get('comment_key') or commenter_id}"
-            if _comment_already_replied(state, comment_key):
+            if _comment_already_processed(state, comment_key):
                 continue
             result["inbound_comments"] = int(result.get("inbound_comments", 0) or 0) + 1
             await _record_qzone_profile_evidence(
@@ -560,9 +607,21 @@ async def _scan_bot_space_comments(
                 emotion_memory=emotion_memory,
             )
             if str(decision.get("action", "") or "") != "reply":
+                _mark_comment_processed(
+                    state,
+                    comment_key,
+                    action="ignore",
+                    reason=str(decision.get("reason", "") or ""),
+                )
                 continue
             reply = str(decision.get("reply", "") or "").strip()
             if not reply:
+                _mark_comment_processed(
+                    state,
+                    comment_key,
+                    action="ignore",
+                    reason=str(decision.get("reason", "") or "empty_reply"),
+                )
                 continue
             ok_reply, reply_msg = await qzone_social_service.comment_feed(
                 feed=feed,
@@ -571,7 +630,7 @@ async def _scan_bot_space_comments(
             )
             if ok_reply:
                 result["replied"] = int(result.get("replied", 0) or 0) + 1
-                _mark_comment_replied(state, comment_key, reply=reply)
+                _mark_comment_processed(state, comment_key, action="reply", reply=reply)
             else:
                 result["failed"] = int(result.get("failed", 0) or 0) + 1
                 result["last_error"] = reply_msg
@@ -787,4 +846,98 @@ async def scan_qzone_social_feeds(
             result["last_error"] = str(exc)
             _save_state(state, result)
             logger.warning(f"[qzone_social] scan failed: {exc}")
+            return result
+
+
+async def scan_qzone_inbound_messages(
+    *,
+    bot: Any,
+    plugin_config: Any,
+    qzone_social_service: Any,
+    load_prompt: Callable[[], Any],
+    call_ai_api: Callable[..., Awaitable[Optional[str]]],
+    load_proactive_state: Callable[[], dict[str, dict[str, Any]]],
+    get_now: Callable[[], datetime],
+    logger: Any,
+    persona_store: Any = None,
+    agent_data_dir: Any = None,
+) -> dict[str, Any]:
+    """Poll comments under the bot's own Qzone feeds and let the LLM decide replies."""
+    if _SCAN_LOCK.locked():
+        return {"ok": False, "skipped": True, "last_error": "qzone_scan_already_running"}
+    async with _SCAN_LOCK:
+        state = _normalize_state(get_now())
+        result: dict[str, Any] = {
+            "ok": True,
+            "target_user_id": str(getattr(bot, "self_id", "") or ""),
+            "scanned_users": 0,
+            "feeds_seen": 0,
+            "liked": 0,
+            "commented": 0,
+            "ignored": 0,
+            "failed": 0,
+            "inbound_comments": 0,
+            "replied": 0,
+            "profile_records": 0,
+            "last_error": "",
+        }
+        try:
+            friend_profiles = await _get_friend_profiles(bot, logger)
+            if not friend_profiles:
+                result["ok"] = False
+                result["skipped"] = True
+                result["last_error"] = "no_friend_profiles"
+                _save_inbound_state(state, result)
+                return result
+
+            proactive_state = load_proactive_state() or {}
+            persona_snippet_max_chars = int(
+                getattr(plugin_config, "personification_persona_snippet_max_chars", 150)
+            )
+            inner_state = dict(DEFAULT_STATE)
+            emotion_state = {}
+            if agent_data_dir is not None:
+                try:
+                    inner_state.update(await load_inner_state(agent_data_dir))
+                except Exception as exc:
+                    logger.warning(f"[qzone_inbound] load inner_state failed: {exc}")
+                try:
+                    emotion_state = await load_emotion_state(agent_data_dir)
+                except Exception as exc:
+                    logger.warning(f"[qzone_inbound] load emotion_state failed: {exc}")
+
+            max_feeds = max(
+                1,
+                int(getattr(plugin_config, "personification_qzone_inbound_max_feeds_per_scan", 20) or 20),
+            )
+            max_comments_per_feed = max(
+                1,
+                int(getattr(plugin_config, "personification_qzone_inbound_max_comments_per_feed", 20) or 20),
+            )
+            await _scan_bot_space_comments(
+                bot=bot,
+                qzone_social_service=qzone_social_service,
+                friend_profiles=friend_profiles,
+                proactive_state=proactive_state,
+                persona_store=persona_store,
+                persona_snippet_max_chars=persona_snippet_max_chars,
+                system_prompt=_extract_system_prompt(load_prompt()),
+                call_ai_api=call_ai_api,
+                inner_state=inner_state,
+                emotion_state=emotion_state,
+                max_feeds=max_feeds,
+                max_comments_per_feed=max_comments_per_feed,
+                count_checked_feeds=True,
+                state=state,
+                result=result,
+                logger=logger,
+            )
+            result["feeds_seen"] = max(0, int(result.get("feeds_seen", 0) or 0))
+            _save_inbound_state(state, result)
+            return result
+        except Exception as exc:
+            result["ok"] = False
+            result["last_error"] = str(exc)
+            _save_inbound_state(state, result)
+            logger.warning(f"[qzone_inbound] poll failed: {exc}")
             return result

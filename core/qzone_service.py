@@ -369,6 +369,7 @@ class QzoneSocialService:
         bot_id: str,
         count: int = 10,
         include_comments: bool = False,
+        comment_count: int = 20,
     ) -> tuple[bool, str, list[dict[str, Any]]]:
         ok, msg, ctx = self._context(bot_id)
         if not ok:
@@ -383,7 +384,7 @@ class QzoneSocialService:
             "sort": "0",
             "pos": "0",
             "num": str(max(1, min(40, int(count or 10)))),
-            "replynum": "20" if include_comments else "0",
+            "replynum": str(max(1, min(100, int(comment_count or 20)))) if include_comments else "0",
             "g_tk": str(ctx["g_tk"]),
             "callback": "_Callback",
             "code_version": "1",

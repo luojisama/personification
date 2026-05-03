@@ -285,6 +285,7 @@ async def _init_personification_runtime() -> None:
         ),
     )
     runtime_bundle.qzone_social_scan = job_handles.get("qzone_social_scan")
+    runtime_bundle.qzone_inbound_poll = job_handles.get("qzone_inbound_poll")
 
     matcher_handles = setup_all_matchers(
         deps=runtime_bundle.make_matcher_setup_deps(

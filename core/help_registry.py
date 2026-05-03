@@ -62,6 +62,15 @@ _COMMANDS: list[CommandHelpEntry] = [
         scope="global",
     ),
     CommandHelpEntry(
+        path=("qzone", "message"),
+        category="qzone",
+        summary="立即轮询 Bot 自己空间下的新留言，并由 LLM 判断是否回复。",
+        usage="拟人 空间 消息",
+        examples=("拟人 空间 消息", "/persona qzone message"),
+        permission="管理员",
+        scope="global",
+    ),
+    CommandHelpEntry(
         path=("config", "list"),
         category="config",
         summary="查看所有可配置项、当前值、默认值和用途。",

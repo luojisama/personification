@@ -104,6 +104,30 @@ def build_qzone_social_scan_task(
     return _qzone_social_scan
 
 
+def build_qzone_inbound_poll_task(
+    *,
+    run_qzone_inbound_poll: Callable[..., Awaitable[dict[str, Any]]],
+    qzone_publish_available: bool,
+    qzone_inbound_enabled: bool,
+    get_bots: Callable[[], dict[str, Any]],
+    update_qzone_cookie: Any,
+    poll_qzone_inbound_messages: Callable[[Any], Awaitable[dict[str, Any]]],
+    logger: Any,
+) -> Callable[..., Awaitable[dict[str, Any]]]:
+    async def _qzone_inbound_poll(force: bool = False) -> dict[str, Any]:
+        return await run_qzone_inbound_poll(
+            qzone_publish_available=qzone_publish_available,
+            qzone_inbound_enabled=qzone_inbound_enabled,
+            get_bots=get_bots,
+            update_qzone_cookie=update_qzone_cookie,
+            poll_qzone_inbound_messages=poll_qzone_inbound_messages,
+            logger=logger,
+            force=force,
+        )
+
+    return _qzone_inbound_poll
+
+
 def build_maybe_generate_qzone_post_task(
     *,
     maybe_generate_proactive_qzone_post_flow: Callable[..., Awaitable[str]],

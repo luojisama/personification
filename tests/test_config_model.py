@@ -54,4 +54,8 @@ def test_qzone_social_and_frequency_defaults() -> None:
     assert cfg.personification_qzone_social_like_limit == 0
     assert cfg.personification_qzone_social_comment_limit == 0
     assert cfg.personification_qzone_social_max_feeds_per_scan == 5
+    assert cfg.personification_qzone_inbound_enabled is True
+    assert cfg.personification_qzone_inbound_check_interval == 3
+    assert cfg.personification_qzone_inbound_max_feeds_per_scan == 20
+    assert cfg.personification_qzone_inbound_max_comments_per_feed == 20
     assert cfg.personification_proactive_require_user_profile is True

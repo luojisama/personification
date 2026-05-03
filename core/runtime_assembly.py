@@ -146,6 +146,7 @@ class PluginRuntimeBundle:
     memory_decay_scheduler: Any = None
     background_intelligence: Any = None
     qzone_social_scan: Any = None
+    qzone_inbound_poll: Any = None
     get_knowledge_build_task: Any = None
     set_knowledge_build_task: Any = None
 
@@ -216,6 +217,12 @@ class PluginRuntimeBundle:
         from ..flows import scan_qzone_social_feeds
 
         return scan_qzone_social_feeds
+
+    @property
+    def qzone_inbound_poll_flow(self) -> Any:
+        from ..flows import scan_qzone_inbound_messages
+
+        return scan_qzone_inbound_messages
 
     @property
     def collect_perm_blacklist_items(self) -> Any:
@@ -292,6 +299,13 @@ class PluginRuntimeBundle:
             ),
             qzone_social_scan_flow=self.qzone_social_scan_flow,
             qzone_social_service=self.qzone_social_service,
+            qzone_inbound_enabled=bool(
+                getattr(self.plugin_config, "personification_qzone_inbound_enabled", True)
+            ),
+            qzone_inbound_check_interval_minutes=int(
+                getattr(self.plugin_config, "personification_qzone_inbound_check_interval", 3)
+            ),
+            qzone_inbound_poll_flow=self.qzone_inbound_poll_flow,
             persona_store=self.persona_store,
             vision_caller=self.reply_processor_deps.runtime.vision_caller,
             agent_tool_caller=self.reply_processor_deps.runtime.agent_tool_caller,

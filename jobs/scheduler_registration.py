@@ -128,6 +128,27 @@ def register_qzone_social_scan_job(
         logger.error(f"拟人插件：注册好友空间互动扫描任务失败: {e}")
 
 
+def register_qzone_inbound_poll_job(
+    *,
+    scheduler: Any,
+    qzone_inbound_poll_job: Any,
+    interval_minutes: int,
+    logger: Any,
+) -> None:
+    safe_interval = max(1, int(interval_minutes))
+    try:
+        scheduler.add_job(
+            qzone_inbound_poll_job,
+            "interval",
+            minutes=safe_interval,
+            id="personification_qzone_inbound_poll",
+            replace_existing=True,
+        )
+        logger.info(f"拟人插件：空间消息轮询任务已注册，检测间隔 {safe_interval} 分钟")
+    except Exception as e:
+        logger.error(f"拟人插件：注册空间消息轮询任务失败: {e}")
+
+
 def register_background_intelligence_job(
     *,
     scheduler: Any,

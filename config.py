@@ -132,6 +132,10 @@ class Config(BaseModel):
     personification_qzone_social_comment_limit: int = 0
     personification_qzone_social_per_friend_limit: int = 0
     personification_qzone_social_max_feeds_per_scan: int = 5
+    personification_qzone_inbound_enabled: bool = True
+    personification_qzone_inbound_check_interval: int = 3
+    personification_qzone_inbound_max_feeds_per_scan: int = 20
+    personification_qzone_inbound_max_comments_per_feed: int = 20
     personification_image_search_api_key: str = ""
     personification_github_token: str = ""
     personification_web_search_always: bool = False

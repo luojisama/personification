@@ -97,6 +97,12 @@ _SUBCOMMAND_ALIASES = {
     "扫描": "run",
     "test": "test",
     "测试": "test",
+    "message": "message",
+    "messages": "message",
+    "inbox": "message",
+    "消息": "message",
+    "留言": "message",
+    "收消息": "message",
     "status": "status",
     "状态": "status",
     "stats": "stats",
@@ -137,6 +143,9 @@ _COMPOUND_TOKEN_ALIASES = {
     "空间状态": ("空间", "状态"),
     "空间扫描": ("空间", "扫描"),
     "空间测试": ("空间", "测试"),
+    "空间消息": ("空间", "消息"),
+    "空间留言": ("空间", "消息"),
+    "空间收消息": ("空间", "消息"),
 }
 
 
@@ -545,10 +554,12 @@ def _render_qzone_status_summary(bundle: Any) -> str:
     qzone_enabled = "开" if bool(getattr(bundle.plugin_config, "personification_qzone_enabled", False)) else "关"
     proactive_enabled = "开" if bool(getattr(bundle.plugin_config, "personification_qzone_proactive_enabled", False)) else "关"
     social_enabled = "开" if bool(getattr(bundle.plugin_config, "personification_qzone_social_enabled", False)) else "关"
+    inbound_enabled = "开" if bool(getattr(bundle.plugin_config, "personification_qzone_inbound_enabled", True)) else "关"
     return (
         f"QQ空间：总开关 {qzone_enabled}，主动发说说 {proactive_enabled}"
         f"（今日 {int(post_state.get('count', 0) or 0)} 条），好友互动 {social_enabled}"
-        f"（赞 {int(social_state.get('like_count', 0) or 0)} / 评 {int(social_state.get('comment_count', 0) or 0)}）"
+        f"（赞 {int(social_state.get('like_count', 0) or 0)} / 评 {int(social_state.get('comment_count', 0) or 0)}），"
+        f"空间消息 {inbound_enabled}"
     )
 
 
@@ -556,6 +567,11 @@ def render_qzone_status(bundle: Any) -> str:
     post_state = _load_data_store_namespace("qzone_post_state")
     social_state = _load_data_store_namespace("qzone_social_state")
     last_result = social_state.get("last_result") if isinstance(social_state.get("last_result"), dict) else {}
+    last_inbound_result = (
+        social_state.get("last_inbound_result")
+        if isinstance(social_state.get("last_inbound_result"), dict)
+        else {}
+    )
     lines = [
         "QQ 空间状态",
         f"总开关：{'开' if bool(getattr(bundle.plugin_config, 'personification_qzone_enabled', False)) else '关'}",
@@ -581,6 +597,17 @@ def render_qzone_status(bundle: Any) -> str:
         f"留言 {last_result.get('inbound_comments', 0)}，回复 {last_result.get('replied', 0)}，"
         f"画像补充 {last_result.get('profile_records', 0)}，忽略 {last_result.get('ignored', 0)}，失败 {last_result.get('failed', 0)}",
         f"最近失败：{social_state.get('last_error') or '无'}",
+        "",
+        f"空间消息轮询：{'开' if bool(getattr(bundle.plugin_config, 'personification_qzone_inbound_enabled', True)) else '关'}",
+        f"消息轮询间隔：{getattr(bundle.plugin_config, 'personification_qzone_inbound_check_interval', 3)} 分钟",
+        f"单次检查说说：{getattr(bundle.plugin_config, 'personification_qzone_inbound_max_feeds_per_scan', 20)}",
+        f"单说说留言：{getattr(bundle.plugin_config, 'personification_qzone_inbound_max_comments_per_feed', 20)}",
+        f"上次消息轮询：{format_timestamp(float(social_state.get('last_inbound_scan_at', 0) or 0))}",
+        f"上次消息结果：说说 {last_inbound_result.get('feeds_seen', 0)}，"
+        f"留言 {last_inbound_result.get('inbound_comments', 0)}，"
+        f"回复 {last_inbound_result.get('replied', 0)}，"
+        f"画像补充 {last_inbound_result.get('profile_records', 0)}，失败 {last_inbound_result.get('failed', 0)}",
+        f"最近消息失败：{social_state.get('last_inbound_error') or '无'}",
     ]
     return "\n".join(lines)
 
@@ -683,6 +710,7 @@ _SCHEDULER_EXPECTED_JOBS: tuple[tuple[str, str, str], ...] = (
     ("personification_group_idle_topic", "群空闲发话", "personification_group_idle_enabled"),
     ("personification_proactive_qzone", "主动空间动态", "personification_qzone_proactive_enabled"),
     ("personification_qzone_social_scan", "好友空间互动", "personification_qzone_social_enabled"),
+    ("personification_qzone_inbound_poll", "空间消息轮询", "personification_qzone_inbound_enabled"),
     ("personification_background_intelligence", "后台智能维护", ""),
 )
 
@@ -908,7 +936,13 @@ async def handle_qzone_command(
         except TypeError:
             result = await scanner(target_user_id)
         return _format_qzone_scan_result(result if isinstance(result, dict) else {})
-    return "用法：拟人 空间 状态｜扫描｜测试 <QQ号/@用户>"
+    if action == "message":
+        poller = getattr(bundle, "qzone_inbound_poll", None)
+        if not callable(poller):
+            return "空间消息轮询任务未初始化。请确认 personification_qzone_enabled=true 后重启。"
+        result = await poller(force=True)
+        return _format_qzone_scan_result(result if isinstance(result, dict) else {})
+    return "用法：拟人 空间 状态｜扫描｜测试 <QQ号/@用户>｜消息"
 
 
 def handle_config_command(bundle: Any, *, event: Any, tokens: list[str]) -> str:

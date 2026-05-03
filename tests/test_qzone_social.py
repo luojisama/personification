@@ -34,6 +34,41 @@ class _Logger:
         return None
 
 
+class _Bot:
+    self_id = "99999"
+
+
+class _InboundQzoneService:
+    def __init__(self) -> None:
+        self.replies: list[str] = []
+
+    async def fetch_user_feeds(self, **_kwargs):  # noqa: ANN003
+        return True, "ok", [
+            {
+                "feed_key": "99999:feed1",
+                "feed_id": "feed1",
+                "owner_uin": "99999",
+                "topic_id": "99999_feed1__1",
+                "content": "今天也普通地发一条",
+                "raw": {
+                    "commentlist": [
+                        {
+                            "uin": "20001",
+                            "nickname": "好友",
+                            "content": "真寻今天也在吗",
+                            "created_time": 1710000010,
+                            "commentid": "c1",
+                        }
+                    ]
+                },
+            }
+        ]
+
+    async def comment_feed(self, *, content: str, **_kwargs):  # noqa: ANN003
+        self.replies.append(str(content))
+        return True, "ok"
+
+
 def test_proactive_candidates_require_profile_and_not_favorability_threshold() -> None:
     candidates = proactive_flow._build_candidates(
         all_user_data={
@@ -185,6 +220,44 @@ def test_qzone_profile_evidence_records_once_with_source_label() -> None:
     assert "[QQ空间动态]" in store.records[0][1]
     assert "图片摘要：一张饮料和便当的照片" in store.records[0][1]
     assert result["profile_records"] == 1
+
+
+def test_qzone_inbound_comment_replies_once_and_records_profile() -> None:
+    store = _RecordingPersonaStore()
+    service = _InboundQzoneService()
+    state: dict[str, object] = {}
+    result: dict[str, object] = {"inbound_comments": 0, "replied": 0, "profile_records": 0}
+
+    async def _call_ai(_messages):  # noqa: ANN001
+        return '{"action":"reply","reply":"在呀，刚看到","reason":"自然接话"}'
+
+    kwargs = dict(
+        bot=_Bot(),
+        qzone_social_service=service,
+        friend_profiles={"20001": {"nickname": "好友"}},
+        proactive_state={},
+        persona_store=store,
+        persona_snippet_max_chars=80,
+        system_prompt="你是绪山真寻。",
+        call_ai_api=_call_ai,
+        inner_state={},
+        emotion_state={},
+        max_feeds=20,
+        max_comments_per_feed=20,
+        count_checked_feeds=True,
+        state=state,
+        result=result,
+        logger=_Logger(),
+    )
+
+    asyncio.run(qzone_flow._scan_bot_space_comments(**kwargs))
+    asyncio.run(qzone_flow._scan_bot_space_comments(**kwargs))
+
+    assert service.replies == ["在呀，刚看到"]
+    assert result["inbound_comments"] == 1
+    assert result["replied"] == 1
+    assert len(store.records) == 1
+    assert "[QQ空间留言]" in store.records[0][1]
 
 
 def test_qzone_social_limits_use_zero_as_unlimited() -> None:
