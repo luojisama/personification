@@ -94,6 +94,40 @@ def test_proactive_candidates_require_profile_and_not_favorability_threshold() -
     assert candidates[0]["favorability"] == 1.0
 
 
+def test_proactive_candidates_skip_unanswered_proactive_message() -> None:
+    candidates = proactive_flow._build_candidates(
+        all_user_data={
+            "10001": {"favorability": 99.0, "nickname": "no-reply"},
+            "10002": {"favorability": 1.0, "nickname": "replied"},
+        },
+        proactive_state={
+            "10001": {"last_interaction": 900, "last_proactive_at": 1000},
+            "10002": {"last_interaction": 1100, "last_proactive_at": 1000},
+        },
+        inner_state={},
+        emotion_state={},
+        now=datetime.fromtimestamp(100000),
+        threshold=60.0,
+        idle_hours=0,
+        friend_ids={"10001", "10002"},
+        persona_store=_PersonaStore({"10001": "已有画像", "10002": "已有画像"}),
+        require_user_profile=True,
+    )
+
+    assert [item["user_id"] for item in candidates] == ["10002"]
+
+
+def test_proactive_history_records_recent_messages() -> None:
+    state: dict[str, object] = {}
+
+    proactive_flow._append_proactive_history(state, message="第一句", sent_at=100)
+    proactive_flow._append_proactive_history(state, message="第二句", sent_at=200, max_items=1)
+
+    assert state["last_proactive_message"] == "第二句"
+    assert state["proactive_history"] == [{"at": 200.0, "message": "第二句"}]
+    assert "第二句" in proactive_flow._format_proactive_history_for_state(state)
+
+
 def test_qzone_feed_normalization_extracts_text_images_and_keys() -> None:
     feed = qzone_service._normalize_qzone_feed(
         {

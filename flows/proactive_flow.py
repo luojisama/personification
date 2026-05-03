@@ -13,6 +13,12 @@ from ..core.emotion_state import (
     describe_user_emotion_memory,
     load_emotion_state,
 )
+from ..core.session_store import (
+    append_session_message,
+    build_private_session_id,
+    get_session_messages,
+)
+from ..core.context_policy import stringify_history_content
 from ..skills.skillpacks.datetime_tool.scripts.impl import get_current_datetime_info
 from ..utils import get_group_topic_summary
 
@@ -40,6 +46,9 @@ PROACTIVE_DECISION_PROMPT = """[角色设定]
 {candidates_formatted}
 （格式：昵称 / 好感度{fav} / 上次聊天：{last_chat} / 关系温度：{warmth}；好感度只作语气参考，不是联系门槛）
 
+[最近主动私聊历史]
+{recent_proactive_history}
+
 [今日发送限制]
 今天已主动发送：{today_count} 次（上限 {daily_limit} 次）
 距上次主动消息：{elapsed_minutes} 分钟（最短间隔 {min_interval} 分钟）
@@ -56,14 +65,18 @@ SEND|{{user_id}}|{{消息内容}}
 SKIP|{{原因（给自己的备注，如"现在没什么想说的"）}}
 
 消息内容要求：
-- 不超过50字
-- 用角色口吻，自然、真实，像真人突然想到发消息
+- 12-42字，宁可短一点
+- 用角色口吻，自然、真实，像真人突然想到发一句，不像任务提醒或客服回访
 - 如果有悬挂念头与这个人有关，优先以此为话头
+- 如果没有新鲜、具体、轻量的理由联系，就输出 SKIP，不要硬找话题
+- 不要复读最近主动私聊历史里的话题、句式或疑问
+- 如果最近是你单方面发过消息而对方没接，应该 SKIP，不要继续追问
 - 不要发"你好""在吗""最近怎么样"这类没有内容的开场白
-- 可以分享刚刚看到的有意思的事、某个想法、问一个具体的问题
-- 如果候选人的画像摘要提到了对方的兴趣、职业或最近话题，优先以此为切入点
+- 可以分享刚刚看到的很小的日常、某个一闪而过的想法，或问一个具体但不压迫的问题
+- 如果候选人的画像摘要或最近私聊提到了对方的兴趣、职业或最近话题，可以轻轻接一下；不要编造对方没说过的"上次"
 - 禁止使用的开场句式："最近怎么样"、"在吗"、"你好"、"有没有..."、"大家..."
 - 禁止任何以"哇"或"哎呀"开头的句子
+- 避免模板感句式：不要连续使用"你之前不是..."、"上次那个..."、"我这边突然想到..."这类回访口吻
 """
 
 GROUP_IDLE_TOPIC_PROMPT = """[角色设定]
@@ -139,7 +152,109 @@ def _normalize_user_state(now: datetime, user_state: Dict[str, Any]) -> Dict[str
     normalized.setdefault("count", 0)
     normalized.setdefault("last_interaction", 0)
     normalized.setdefault("last_proactive_at", 0)
+    history = normalized.get("proactive_history")
+    normalized["proactive_history"] = history if isinstance(history, list) else []
+    normalized.setdefault("last_proactive_message", "")
     return normalized
+
+
+def _has_unanswered_proactive_message(user_state: dict[str, Any]) -> bool:
+    last_proactive_at = float(user_state.get("last_proactive_at", 0) or 0)
+    if last_proactive_at <= 0:
+        return False
+    last_interaction = float(user_state.get("last_interaction", 0) or 0)
+    return last_interaction <= last_proactive_at
+
+
+def _append_proactive_history(
+    user_state: dict[str, Any],
+    *,
+    message: str,
+    sent_at: float,
+    max_items: int = 8,
+) -> None:
+    text = str(message or "").strip()
+    if not text:
+        return
+    history = user_state.setdefault("proactive_history", [])
+    if not isinstance(history, list):
+        history = []
+        user_state["proactive_history"] = history
+    history.append({"at": float(sent_at or 0), "message": text[:120]})
+    user_state["proactive_history"] = history[-max(1, int(max_items)) :]
+    user_state["last_proactive_message"] = text[:120]
+
+
+def _format_proactive_history_for_state(user_state: dict[str, Any], *, max_items: int = 4) -> str:
+    history = user_state.get("proactive_history")
+    if not isinstance(history, list) or not history:
+        last_message = str(user_state.get("last_proactive_message", "") or "").strip()
+        return f"- {last_message}" if last_message else ""
+    lines: list[str] = []
+    for item in history[-max(1, int(max_items)) :]:
+        if not isinstance(item, dict):
+            continue
+        message = str(item.get("message", "") or "").strip()
+        if not message:
+            continue
+        ts = float(item.get("at", 0) or 0)
+        when = _format_last_chat(ts) if ts else "未知时间"
+        lines.append(f"- {when}：{message[:80]}")
+    return "\n".join(lines)
+
+
+def _format_recent_proactive_history(
+    proactive_state: dict[str, dict[str, Any]],
+    *,
+    max_users: int = 6,
+    max_items_per_user: int = 3,
+) -> str:
+    rows: list[tuple[float, str]] = []
+    for user_id, raw_state in proactive_state.items():
+        if str(user_id).startswith("group_") or not isinstance(raw_state, dict):
+            continue
+        state = _normalize_user_state(datetime(2000, 1, 1), raw_state)
+        last_at = float(state.get("last_proactive_at", 0) or 0)
+        rendered = _format_proactive_history_for_state(state, max_items=max_items_per_user)
+        if rendered:
+            rows.append((last_at, f"{user_id}：\n{rendered}"))
+    if not rows:
+        return "- 暂无"
+    rows.sort(key=lambda item: item[0], reverse=True)
+    return "\n".join(text for _, text in rows[: max(1, int(max_users))])
+
+
+def _format_recent_private_context(user_id: str, *, limit: int = 6, max_chars: int = 280) -> str:
+    try:
+        messages = get_session_messages(build_private_session_id(str(user_id)))
+    except Exception:
+        return ""
+    lines: list[str] = []
+    for msg in messages[-max(1, int(limit)) :]:
+        if not isinstance(msg, dict):
+            continue
+        content = stringify_history_content(msg.get("content", "")).strip()
+        if not content:
+            continue
+        role = str(msg.get("role", "") or "")
+        speaker = "对方" if role == "user" else "你" if role == "assistant" else "上下文"
+        lines.append(f"{speaker}: {content[:80]}")
+    text = "\n".join(lines).strip()
+    return text[:max(1, int(max_chars))]
+
+
+def _enrich_candidates_with_recent_context(
+    candidates: list[dict],
+    proactive_state: dict[str, dict[str, Any]],
+) -> None:
+    for item in candidates:
+        user_id = str(item.get("user_id", "") or "")
+        if not user_id:
+            continue
+        raw_state = proactive_state.get(user_id, {})
+        state = _normalize_user_state(datetime(2000, 1, 1), raw_state if isinstance(raw_state, dict) else {})
+        item["recent_proactive_history"] = _format_proactive_history_for_state(state)
+        item["recent_private_context"] = _format_recent_private_context(user_id)
 
 
 def _format_pending_thoughts(pending_thoughts: Iterable[dict]) -> str:
@@ -209,6 +324,8 @@ def _build_candidates(
         favorability = float(user_data.get("favorability", 0.0) or 0.0)
 
         user_state = _normalize_user_state(now, proactive_state.get(str(user_id), {}))
+        if _has_unanswered_proactive_message(user_state):
+            continue
         last_interaction = float(user_state.get("last_interaction", 0) or 0)
         if idle_seconds and last_interaction and now_ts - last_interaction < idle_seconds:
             continue
@@ -265,6 +382,8 @@ def _build_fallback_candidates(
 
     for user_id, profile in friend_profiles.items():
         user_state = _normalize_user_state(now, proactive_state.get(str(user_id), {}))
+        if _has_unanswered_proactive_message(user_state):
+            continue
         last_interaction = float(user_state.get("last_interaction", 0) or 0)
         if not last_interaction:
             continue
@@ -346,6 +465,12 @@ def _format_candidates(candidates: Iterable[dict]) -> str:
         emotion_memory = str(item.get("emotion_memory", "") or "").strip()
         if emotion_memory:
             line += f" / 近期情绪：{emotion_memory}"
+        private_context = str(item.get("recent_private_context", "") or "").strip()
+        if private_context:
+            line += f"\n  最近私聊：{private_context}"
+        proactive_history = str(item.get("recent_proactive_history", "") or "").strip()
+        if proactive_history:
+            line += f"\n  你最近主动发过：{proactive_history}"
         lines.append(line)
     return "\n".join(lines) if lines else "- 无可联系对象"
 
@@ -588,6 +713,7 @@ async def run_proactive_messaging(
     if not candidates:
         save_proactive_state(proactive_state)
         return False
+    _enrich_candidates_with_recent_context(candidates, proactive_state)
 
     system_prompt = _extract_system_prompt(load_prompt())
     timezone_name = getattr(plugin_config, "personification_timezone", "Asia/Shanghai")
@@ -609,6 +735,7 @@ async def run_proactive_messaging(
         emotion_memory_formatted=emotion_memory_formatted,
         datetime_info=datetime_info,
         candidates_formatted=_format_candidates(candidates),
+        recent_proactive_history=_format_recent_proactive_history(proactive_state),
         fav="fav",
         last_chat="last_chat",
         warmth="warmth",
@@ -654,7 +781,18 @@ async def run_proactive_messaging(
     user_state = _normalize_user_state(now, proactive_state.get(target_user_id, {}))
     user_state["count"] = int(user_state.get("count", 0) or 0) + 1
     user_state["last_proactive_at"] = now_ts
+    _append_proactive_history(user_state, message=payload, sent_at=now_ts)
     proactive_state[target_user_id] = user_state
+    try:
+        append_session_message(
+            build_private_session_id(target_user_id),
+            "assistant",
+            payload,
+            source_kind="proactive_private",
+            speaker="你",
+        )
+    except Exception as e:
+        logger.warning(f"[proactive] append proactive private history failed: {e}")
     save_proactive_state(proactive_state)
     return True
 
