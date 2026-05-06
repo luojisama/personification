@@ -680,7 +680,7 @@ class QzoneSocialService:
             )
             if ok_reply:
                 return True, reply_msg
-            return False, f"{reply_msg}；未降级为普通评论，避免回复错位"
+            self.logger.warning(f"[qzone] 移动端回复失败（{reply_msg}），降级到 PC 端带目标评论")
         url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
         send_text = _format_qzone_reply_content(text, reply_to_comment)
         data = {

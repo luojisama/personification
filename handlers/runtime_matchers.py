@@ -5,6 +5,8 @@ from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent
 from nonebot.params import CommandArg
 
+from .runtime_commands import handle_git_update_command as _handle_git_update_command_fn
+
 
 def register_runtime_switch_matchers(
     *,
@@ -273,6 +275,18 @@ def register_runtime_switch_matchers(
             get_knowledge_build_task=get_knowledge_build_task,
         )
 
+    git_update_cmd = _register_command(
+        "拟人更新",
+        aliases={"插件更新", "拟人插件更新"},
+        permission=superuser_permission,
+        priority=5,
+        block=True,
+    )
+
+    @git_update_cmd.handle()
+    async def _handle_git_update(_bot: Bot, _event: MessageEvent):
+        await _handle_git_update_command_fn(git_update_cmd, logger=logger)
+
     return {
         "personification_help_cmd": personification_help_cmd,
         "reload_config_cmd": reload_config_cmd,
@@ -288,4 +302,5 @@ def register_runtime_switch_matchers(
         "clear_plugin_knowledge_cmd": clear_plugin_knowledge_cmd,
         "plugin_knowledge_status_cmd": plugin_knowledge_status_cmd,
         "plugin_knowledge_error_cmd": plugin_knowledge_error_cmd,
+        "git_update_cmd": git_update_cmd,
     }

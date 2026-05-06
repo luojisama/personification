@@ -1,5 +1,6 @@
 import json
 import re
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
 
@@ -1196,3 +1197,95 @@ async def handle_view_plugin_knowledge_error_command(
                 f"- [{str(item.get('phase', '') or 'unknown')}] {str(item.get('error_message', '') or '未知错误')} @ {str(item.get('updated_at', '') or 'unknown')}"
             )
     await matcher.finish("\n".join(lines))
+
+
+_PLUGIN_GIT_DIR = str(Path(__file__).resolve().parent.parent)
+
+
+async def _run_git_command(args: list[str], *, cwd: str) -> tuple[int, str, str]:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        return (
+            proc.returncode or 0,
+            stdout.decode("utf-8", errors="replace").strip(),
+            stderr.decode("utf-8", errors="replace").strip(),
+        )
+    except asyncio.TimeoutError:
+        return -1, "", "git 命令超时（60s）"
+    except FileNotFoundError:
+        return -1, "", "找不到 git 命令，请确认已安装 git"
+    except Exception as exc:
+        return -1, "", str(exc)
+
+
+async def check_git_update_available(*, plugin_dir: str | None = None) -> tuple[bool, str, str]:
+    """Fetch remote and compare; returns (has_update, local_hash, remote_hash_or_error)."""
+    cwd = str(plugin_dir or _PLUGIN_GIT_DIR)
+    rc, _, err = await _run_git_command(["fetch", "--prune"], cwd=cwd)
+    if rc != 0:
+        return False, "", f"fetch 失败: {err}"
+    _, local_hash, _ = await _run_git_command(["rev-parse", "HEAD"], cwd=cwd)
+    rc_remote, remote_hash, remote_err = await _run_git_command(["rev-parse", "@{u}"], cwd=cwd)
+    if rc_remote != 0:
+        return False, local_hash, f"无法解析上游分支: {remote_err}"
+    return local_hash != remote_hash, local_hash, remote_hash
+
+
+async def perform_git_pull(*, plugin_dir: str | None = None) -> tuple[bool, str]:
+    """Pull latest commits; returns (ok, message)."""
+    cwd = str(plugin_dir or _PLUGIN_GIT_DIR)
+    rc, out, err = await _run_git_command(["pull", "--ff-only"], cwd=cwd)
+    if rc != 0:
+        return False, err or out or "pull 失败"
+    return True, out or "已更新"
+
+
+async def handle_git_update_command(
+    matcher: Any,
+    *,
+    logger: Any,
+    plugin_dir: str | None = None,
+) -> None:
+    cwd = str(plugin_dir or _PLUGIN_GIT_DIR)
+    await matcher.send("正在检查拟人插件更新，请稍候…")
+
+    rc_fetch, _, fetch_err = await _run_git_command(["fetch", "--prune"], cwd=cwd)
+    if rc_fetch != 0:
+        await matcher.finish(f"检查远程仓库失败：{fetch_err or '未知错误'}")
+
+    _, local_hash, _ = await _run_git_command(["rev-parse", "HEAD"], cwd=cwd)
+    rc_remote, remote_hash, remote_err = await _run_git_command(["rev-parse", "@{u}"], cwd=cwd)
+    if rc_remote != 0:
+        await matcher.finish(f"无法获取上游分支信息：{remote_err or '未配置上游分支'}")
+
+    _, current_log, _ = await _run_git_command(["log", "--oneline", "-1", "HEAD"], cwd=cwd)
+
+    if local_hash == remote_hash:
+        await matcher.finish(f"已是最新版本。\n当前：{current_log}")
+
+    _, new_commits_raw, _ = await _run_git_command(["log", "--oneline", "HEAD..@{u}"], cwd=cwd)
+    commits_text = "\n".join(
+        f"  • {line}" for line in (new_commits_raw or "").splitlines()[:10]
+    ) or "  （无可展示的提交）"
+
+    rc_pull, pull_out, pull_err = await _run_git_command(["pull", "--ff-only"], cwd=cwd)
+    if rc_pull != 0:
+        await matcher.finish(
+            f"更新失败（可能存在本地修改冲突）：\n{pull_err or pull_out or '未知错误'}\n"
+            f"当前版本：{current_log}"
+        )
+
+    _, new_log, _ = await _run_git_command(["log", "--oneline", "-1", "HEAD"], cwd=cwd)
+    await matcher.finish(
+        f"✅ 拟人插件已更新！\n"
+        f"新版本：{new_log}\n"
+        f"更新内容：\n{commits_text}\n"
+        "请重启 Bot 使更改生效。"
+    )
