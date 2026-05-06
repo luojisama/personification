@@ -51,6 +51,7 @@ def _persist_cookie_to_env(cookie: str, logger: Any) -> None:
 
 
 _IMAGE_B64_RE = re.compile(r"\[IMAGE_B64\]([A-Za-z0-9+/=\r\n]+)\[/IMAGE_B64\]")
+_IOS_QQ_UA = "Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 Mobile/15E148 QQ/8.9.28.635"
 
 
 def _extract_image_b64_markers(text: str) -> tuple[str, list[str]]:
@@ -132,6 +133,16 @@ def _qzone_headers(ctx: dict[str, Any], *, referer_uin: str) -> dict[str, str]:
     }
 
 
+def _qzone_mobile_headers(ctx: dict[str, Any], *, referer_uin: str) -> dict[str, str]:
+    _ = referer_uin
+    return {
+        "Cookie": str(ctx.get("cookie", "") or ctx.get("formatted_cookie", "")),
+        "User-Agent": _IOS_QQ_UA,
+        "Referer": "https://m.qzone.qq.com/",
+        "Origin": "https://m.qzone.qq.com",
+    }
+
+
 def _clean_qzone_text(value: Any) -> str:
     if isinstance(value, list):
         raw = "".join(str(item.get("text", "") if isinstance(item, dict) else item) for item in value)
@@ -167,6 +178,53 @@ def _format_qzone_reply_content(text: str, reply_to_comment: dict[str, Any] | No
     if not target:
         return cleaned[:80]
     return f"回复 {target}: {cleaned}"[:80]
+
+
+def _qzone_comment_reply_target(reply_to_comment: dict[str, Any] | None) -> dict[str, str]:
+    if not isinstance(reply_to_comment, dict):
+        return {}
+    raw = reply_to_comment.get("raw") if isinstance(reply_to_comment.get("raw"), dict) else {}
+    user_id = str(
+        reply_to_comment.get("user_id")
+        or reply_to_comment.get("uin")
+        or reply_to_comment.get("useruin")
+        or raw.get("uin")
+        or raw.get("useruin")
+        or raw.get("replyuin")
+        or ""
+    ).strip()
+    comment_id = str(
+        reply_to_comment.get("comment_id")
+        or reply_to_comment.get("commentid")
+        or reply_to_comment.get("commentId")
+        or reply_to_comment.get("replyid")
+        or raw.get("commentid")
+        or raw.get("commentId")
+        or raw.get("replyid")
+        or raw.get("id")
+        or raw.get("tid")
+        or ""
+    ).strip()
+    nickname = _clean_qzone_text(
+        reply_to_comment.get("nickname")
+        or reply_to_comment.get("nick")
+        or reply_to_comment.get("name")
+        or raw.get("nickname")
+        or raw.get("nick")
+        or raw.get("name")
+    )
+    return {"user_id": user_id, "comment_id": comment_id, "nickname": nickname}
+
+
+def _qzone_feed_reply_identity(feed: dict[str, Any]) -> dict[str, str]:
+    raw = feed.get("raw") if isinstance(feed.get("raw"), dict) else {}
+    owner = str(feed.get("owner_uin") or raw.get("uin") or raw.get("owner_uin") or "").strip()
+    feed_id = str(feed.get("feed_id") or raw.get("tid") or raw.get("id") or raw.get("feed_id") or "").strip()
+    topic_id = str(feed.get("topic_id") or raw.get("topicId") or raw.get("topicid") or "").strip()
+    appid = str(feed.get("appid") or raw.get("appid") or "311").strip() or "311"
+    if not topic_id and owner and feed_id:
+        topic_id = f"{owner}_{feed_id}__1"
+    return {"owner": owner, "feed_id": feed_id, "topic_id": topic_id, "appid": appid}
 
 
 def _normalize_qzone_image_url(value: Any) -> str:
@@ -506,6 +564,95 @@ class QzoneSocialService:
         payload = _parse_qzone_jsonp(resp.text)
         return _qzone_payload_success(payload, resp.text)
 
+    async def _reply_comment_mobile(
+        self,
+        *,
+        feed: dict[str, Any],
+        ctx: dict[str, Any],
+        content: str,
+        reply_to_comment: dict[str, Any],
+    ) -> tuple[bool, str]:
+        text = _clean_qzone_text(content)
+        if not text:
+            return False, "回复内容为空"
+        feed_identity = _qzone_feed_reply_identity(feed)
+        target = _qzone_comment_reply_target(reply_to_comment)
+        owner = feed_identity["owner"]
+        topic_id = feed_identity["topic_id"]
+        feed_id = feed_identity["feed_id"]
+        comment_id = target["comment_id"]
+        reply_uin = target["user_id"]
+        if not owner or not topic_id or not comment_id or not reply_uin:
+            return False, "缺少回复留言所需字段"
+
+        url = "https://m.qzone.qq.com/cgi-bin/new/add_reply"
+        data = {
+            "uin": str(ctx["qq"]),
+            "hostuin": owner,
+            "hostUin": owner,
+            "res_uin": owner,
+            "resuin": owner,
+            "topicId": topic_id,
+            "topicid": topic_id,
+            "tid": feed_id or topic_id,
+            "res_id": feed_id or topic_id,
+            "resid": feed_id or topic_id,
+            "appid": feed_identity["appid"],
+            "res_type": "2",
+            "resType": "2",
+            "feedsType": "100",
+            "feedstype": "100",
+            "commentId": comment_id,
+            "commentid": comment_id,
+            "comment_id": comment_id,
+            "replyId": comment_id,
+            "replyid": comment_id,
+            "reply_id": comment_id,
+            "parentid": comment_id,
+            "replyUin": reply_uin,
+            "replyuin": reply_uin,
+            "reply_uin": reply_uin,
+            "touin": reply_uin,
+            "toUin": reply_uin,
+            "targetuin": reply_uin,
+            "targetUin": reply_uin,
+            "content": text[:80],
+            "con": text[:80],
+            "msg": text[:80],
+            "format": "json",
+            "inCharset": "utf-8",
+            "outCharset": "utf-8",
+            "plat": "qzone",
+            "source": "ic",
+            "ref": "feeds",
+            "platformid": "52",
+            "private": "0",
+            "paramstr": "1",
+            "qzreferrer": f"https://user.qzone.qq.com/{owner}/311",
+        }
+        if target["nickname"]:
+            data.update(
+                {
+                    "replyNick": target["nickname"],
+                    "replynick": target["nickname"],
+                    "reply_nick": target["nickname"],
+                }
+            )
+        headers = _qzone_mobile_headers(ctx, referer_uin=owner)
+        headers["Content-Type"] = "application/x-www-form-urlencoded;charset=UTF-8"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, params={"g_tk": str(ctx["g_tk"])}, data=data, headers=headers)
+        except Exception as exc:
+            return False, f"回复留言失败：{exc}"
+        if resp.status_code != 200:
+            return False, f"回复留言失败，状态码：{resp.status_code}"
+        payload = _parse_qzone_jsonp(resp.text)
+        ok, msg = _qzone_payload_success(payload, resp.text)
+        if not ok:
+            return False, f"回复留言失败：{msg}"
+        return True, "ok"
+
     async def comment_feed(
         self,
         *,
@@ -524,6 +671,16 @@ class QzoneSocialService:
         topic_id = str(feed.get("topic_id", "") or "").strip()
         if not owner or not topic_id:
             return False, "动态缺少评论所需字段"
+        if isinstance(reply_to_comment, dict):
+            ok_reply, reply_msg = await self._reply_comment_mobile(
+                feed=feed,
+                ctx=ctx,
+                content=text,
+                reply_to_comment=reply_to_comment,
+            )
+            if ok_reply:
+                return True, reply_msg
+            return False, f"{reply_msg}；未降级为普通评论，避免回复错位"
         url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
         send_text = _format_qzone_reply_content(text, reply_to_comment)
         data = {

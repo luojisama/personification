@@ -96,6 +96,109 @@ def test_qzone_reply_content_does_not_double_prefix() -> None:
     assert text == "回复 白咲零: 已经收到了"
 
 
+def test_qzone_comment_feed_uses_mobile_reply_endpoint(monkeypatch) -> None:  # noqa: ANN001
+    calls: list[dict[str, object]] = []
+
+    class _Response:
+        status_code = 200
+        text = '{"code":0}'
+
+    class _Client:
+        def __init__(self, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args) -> None:  # noqa: ANN003
+            return None
+
+        async def post(self, url, *, params=None, data=None, headers=None):  # noqa: ANN001, ANN201
+            calls.append({"url": url, "params": params, "data": data, "headers": headers})
+            return _Response()
+
+    monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
+    service = qzone_service.QzoneSocialService(
+        SimpleNamespace(
+            personification_qzone_enabled=True,
+            personification_qzone_cookie="uin=o99999; skey=sk; p_uin=o99999; p_skey=ps;",
+        ),
+        _Logger(),
+    )
+
+    ok, msg = asyncio.run(
+        service.comment_feed(
+            feed={
+                "owner_uin": "99999",
+                "feed_id": "feed1",
+                "topic_id": "99999_feed1__1",
+                "appid": "311",
+            },
+            bot_id="99999",
+            content="测试收到",
+            reply_to_comment={"user_id": "20001", "comment_id": "c1", "nickname": "白咲零"},
+        )
+    )
+
+    assert ok is True
+    assert msg == "ok"
+    assert calls[0]["url"] == "https://m.qzone.qq.com/cgi-bin/new/add_reply"
+    data = calls[0]["data"]
+    assert data["commentId"] == "c1"
+    assert data["replyUin"] == "20001"
+    assert data["content"] == "测试收到"
+    assert not str(data["content"]).startswith("回复 ")
+
+
+def test_qzone_comment_feed_does_not_fallback_to_top_level_when_mobile_reply_fails(monkeypatch) -> None:  # noqa: ANN001
+    calls: list[dict[str, object]] = []
+
+    class _Response:
+        status_code = 200
+        text = '{"code":-1,"message":"bad reply"}'
+
+    class _Client:
+        def __init__(self, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args) -> None:  # noqa: ANN003
+            return None
+
+        async def post(self, url, *, params=None, data=None, headers=None):  # noqa: ANN001, ANN201
+            calls.append({"url": url, "params": params, "data": data, "headers": headers})
+            return _Response()
+
+    monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
+    service = qzone_service.QzoneSocialService(
+        SimpleNamespace(
+            personification_qzone_enabled=True,
+            personification_qzone_cookie="uin=o99999; skey=sk; p_uin=o99999; p_skey=ps;",
+        ),
+        _Logger(),
+    )
+
+    ok, msg = asyncio.run(
+        service.comment_feed(
+            feed={
+                "owner_uin": "99999",
+                "feed_id": "feed1",
+                "topic_id": "99999_feed1__1",
+                "appid": "311",
+            },
+            bot_id="99999",
+            content="测试收到",
+            reply_to_comment={"user_id": "20001", "comment_id": "c1", "nickname": "白咲零"},
+        )
+    )
+
+    assert ok is False
+    assert "未降级为普通评论" in msg
+    assert [call["url"] for call in calls] == ["https://m.qzone.qq.com/cgi-bin/new/add_reply"]
+
+
 def test_proactive_candidates_require_profile_and_not_favorability_threshold() -> None:
     candidates = proactive_flow._build_candidates(
         all_user_data={
