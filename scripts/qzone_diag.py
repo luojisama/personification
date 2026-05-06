@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
 QQ 空间子评论接口诊断脚本
-在 bot 服务器上运行: python scripts/qzone_diag.py
+在 bot 根目录（含 .env.prod 的那一层）运行：
+    python personification/scripts/qzone_diag.py
+或在 personification 目录内运行：
+    python scripts/qzone_diag.py
 """
 import asyncio
 import json
+import os
 import re
 import sys
+from pathlib import Path
 
 try:
     import httpx
@@ -15,17 +20,29 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx"])
     import httpx  # type: ignore
 
-# ─── 修改此处 ───────────────────────────────────────────────────────────────
-COOKIE = (
-    "pt2gguin=o3204586647; uin=o3204586647; skey=@9AFUa5wSp; "
-    "pt_recent_uins=fb2cec2009a3eae9081f239a6bb19d77948a660ad2a9fd16f12c8fa56ec5b3114bb5930f292d59cec38d4b7834958d2b962bd39d91f12266; "
-    "RK=9Lo3veFVyF; ptnick_3204586647=e799bde592b2e79c9fe5afbbe69cba; "
-    "ptcz=abaaa54874c185f3673379a192efc8713e352b1dd920c02419e6544343f94d22; "
-    "p_uin=o3204586647; pt4_token=7sPprwTfo*6lqGoHiIAZCaNqj0949NHjU-YRLWKW5lE_; "
-    "p_skey=3ge8D1s-IV90zp*LxE8q9X32Y6YxpT9vQFrgQxIC42s_"
-)
-QQ = "3204586647"
-# ────────────────────────────────────────────────────────────────────────────
+
+# ── 从 .env.prod / .env 读取 cookie ─────────────────────────────────────────
+def _load_cookie_from_env() -> str:
+    search_dirs = [
+        Path.cwd(),
+        Path(__file__).resolve().parent.parent,  # personification/
+        Path(__file__).resolve().parent.parent.parent,  # bot root
+    ]
+    for d in search_dirs:
+        for name in (".env.prod", ".env"):
+            path = d / name
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                line = line.strip()
+                if line.startswith("personification_qzone_cookie"):
+                    _, _, value = line.partition("=")
+                    cookie = value.strip().strip('"').strip("'")
+                    if cookie:
+                        print(f"[cookie] 读取自 {path}")
+                        return cookie
+    return ""
 
 
 def _g_tk(p_skey: str) -> int:
@@ -50,16 +67,28 @@ def _parse_jsonp(text: str) -> dict:
 
 
 async def main() -> None:
-    pskey_m = re.search(r"p_skey=([^; ]+)", COOKIE)
+    cookie = _load_cookie_from_env()
+    if not cookie:
+        print("ERROR: 未找到 personification_qzone_cookie，请确认 .env.prod 已配置")
+        sys.exit(1)
+
+    pskey_m = re.search(r"p_skey=([^; ]+)", cookie)
     if not pskey_m:
         print("ERROR: cookie 中找不到 p_skey")
-        return
+        sys.exit(1)
     p_skey = pskey_m.group(1)
+
+    uin_m = re.search(r"uin=[o0]*(\d+)", cookie)
+    QQ = uin_m.group(1) if uin_m else ""
+    if not QQ:
+        print("ERROR: cookie 中找不到 uin")
+        sys.exit(1)
+
     g_tk = _g_tk(p_skey)
     print(f"QQ={QQ}  g_tk={g_tk}")
 
-    pc_headers = {
-        "Cookie": COOKIE,
+    headers = {
+        "Cookie": cookie,
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -70,7 +99,7 @@ async def main() -> None:
 
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
 
-        # ── Step 1: 获取动态列表 ───────────────────────────────────────────
+        # ── Step 1: 获取动态列表 ─────────────────────────────────────────
         print("\n=== Step 1: 获取动态列表 ===")
         r = await client.get(
             "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6",
@@ -80,21 +109,20 @@ async def main() -> None:
                 "g_tk": str(g_tk), "callback": "_Cb",
                 "code_version": "1", "format": "jsonp", "need_private_comment": "1",
             },
-            headers=pc_headers,
+            headers=headers,
         )
         print(f"HTTP {r.status_code}")
         data = _parse_jsonp(r.text)
         code = data.get("code", data.get("ret", "?"))
         print(f"API code={code}  message={data.get('message', '')}")
         if code != 0:
-            print("Cookie 可能已过期，请刷新后重试")
+            print("Cookie 可能已过期，请重新获取后更新 .env.prod")
             print("原始响应:", r.text[:300])
             return
 
         msglist = data.get("msglist", [])
         print(f"获取到 {len(msglist)} 条动态")
 
-        # 找第一条有评论的动态
         test_feed = test_comment = None
         for feed in msglist:
             cl = feed.get("commentlist", [])
@@ -117,11 +145,16 @@ async def main() -> None:
         c_nick = str(test_comment.get("nickname", ""))
 
         print(f"\n选取的动态: uin={feed_uin} tid={feed_tid} appid={appid}")
-        print(f"  topicId(API)={topic_id_api!r}  computed={feed_uin}_{feed_tid}__1")
+        print(f"  topicId(API 返回)={topic_id_api!r}")
+        print(f"  topicId(计算值) ={feed_uin}_{feed_tid}__1")
+        print(f"  实际使用: topicId={topic_id!r}")
         print(f"  评论: uin={c_uin} tid={c_tid} nick={c_nick!r}")
-        print(f"  将使用 topicId={topic_id!r}")
 
-        # ── Step 2: 测试各子评论接口 ──────────────────────────────────────
+        if not c_tid or not c_uin:
+            print("评论缺少 tid/uin，无法测试")
+            return
+
+        # ── Step 2: 测试各子评论接口 ─────────────────────────────────────
         post_data = {
             "uin": QQ,
             "hostUin": feed_uin,
@@ -131,7 +164,7 @@ async def main() -> None:
             "commentId": c_tid,
             "replyUin": c_uin,
             "replyNick": c_nick,
-            "content": "【测试子回复，请忽略】",
+            "content": "[诊断测试，请忽略]",
             "private": "0",
             "paramstr": "1",
             "format": "json",
@@ -143,12 +176,11 @@ async def main() -> None:
             "platformid": "52",
             "qzreferrer": f"https://user.qzone.qq.com/{feed_uin}",
         }
-        post_headers = {**pc_headers, "Content-Type": "application/x-www-form-urlencoded"}
+        post_headers = {**headers, "Content-Type": "application/x-www-form-urlencoded"}
 
         endpoints = [
             "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6",
             "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6",
-            "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds",
         ]
 
         for url in endpoints:
@@ -161,15 +193,14 @@ async def main() -> None:
                     headers=post_headers,
                 )
                 print(f"HTTP {resp.status_code}")
-                print(f"响应: {resp.text[:500]}")
+                print(f"响应: {resp.text[:600]}")
                 d = _parse_jsonp(resp.text)
                 api_code = d.get("code", d.get("ret", "N/A"))
                 print(f"解析 code={api_code}  msg={d.get('message', d.get('msg', ''))}")
             except Exception as exc:
                 print(f"请求异常: {exc}")
 
-        print("\n=== 诊断完成 ===")
-        print("请把以上输出发给开发者以确定正确接口")
+        print("\n=== 诊断完成，请将以上输出发给开发者 ===")
 
 
 if __name__ == "__main__":

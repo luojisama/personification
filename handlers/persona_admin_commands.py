@@ -511,18 +511,18 @@ async def dispatch_persona_admin_command(
             await matcher.finish(_admin_error())
         await matcher.finish(handle_scheduler_command(bundle, tokens=rest))
 
-    if command == “qzone”:
+    if command == "qzone":
         if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):
             await matcher.finish(_admin_error())
         await matcher.finish(await handle_qzone_command(bundle, event=event, tokens=rest, arg_message=arg_message))
 
-    if command == “update”:
+    if command == "update":
         if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):
             await matcher.finish(_admin_error())
         await _handle_git_update_command(matcher, bot=bot, event=event, logger=bundle.logger)
         return
 
-    await matcher.finish(“未识别的子命令。可用”拟人 帮助”或”/persona help”查看帮助。”)
+    await matcher.finish("未识别的子命令。可用“拟人 帮助”或”/persona help”查看帮助。")
 
 
 def render_help(bundle: Any, *, event: Any, tokens: list[str]) -> str:
