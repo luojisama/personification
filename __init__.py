@@ -60,6 +60,7 @@ from .core.knowledge_builder import (
 )
 from .core.plugin_meta import build_plugin_metadata
 from .core.plugin_runtime import build_plugin_runtime
+from .core.qzone_startup import refresh_qzone_cookie_on_available_bot
 from .core.runtime_state import close_shared_http_client
 from .core.ai_routes import (
     build_routed_tool_caller,
@@ -96,6 +97,7 @@ _sticker_labeler_observer = None
 _knowledge_build_task: asyncio.Task | None = None
 _visual_probe_task: asyncio.Task | None = None
 _llm_warmup_task: asyncio.Task | None = None
+_qzone_cookie_refresh_task: asyncio.Task | None = None
 runtime_bundle = None
 flow_handles: dict[str, object] = {}
 job_handles: dict[str, object] = {}
@@ -240,6 +242,31 @@ def _start_llm_warmup_background() -> None:
     task.add_done_callback(_clear_warmup_task)
 
 
+async def _refresh_qzone_cookie_background() -> None:
+    bundle = _require_runtime_bundle()
+    await refresh_qzone_cookie_on_available_bot(
+        enabled=bool(getattr(plugin_config, "personification_qzone_enabled", False)),
+        get_bots=get_bots,
+        update_qzone_cookie=bundle.update_qzone_cookie,
+        logger=logger,
+    )
+
+
+def _start_qzone_cookie_refresh_background() -> None:
+    global _qzone_cookie_refresh_task
+    if _qzone_cookie_refresh_task is not None and not _qzone_cookie_refresh_task.done():
+        return
+    task = asyncio.create_task(_refresh_qzone_cookie_background())
+    _qzone_cookie_refresh_task = task
+
+    def _clear_qzone_cookie_refresh_task(done_task: asyncio.Task) -> None:
+        global _qzone_cookie_refresh_task
+        if _qzone_cookie_refresh_task is done_task:
+            _qzone_cookie_refresh_task = None
+
+    task.add_done_callback(_clear_qzone_cookie_refresh_task)
+
+
 @get_driver().on_startup
 async def _init_personification_runtime() -> None:
     global runtime_bundle, flow_handles, job_handles, matcher_handles
@@ -286,6 +313,7 @@ async def _init_personification_runtime() -> None:
     )
     runtime_bundle.qzone_social_scan = job_handles.get("qzone_social_scan")
     runtime_bundle.qzone_inbound_poll = job_handles.get("qzone_inbound_poll")
+    _start_qzone_cookie_refresh_background()
 
     matcher_handles = setup_all_matchers(
         deps=runtime_bundle.make_matcher_setup_deps(
@@ -495,7 +523,7 @@ async def _init_plugin_knowledge() -> None:
 
 @get_driver().on_shutdown
 async def _close_personification_runtime() -> None:
-    global _sticker_labeler_observer, _knowledge_build_task, _visual_probe_task, runtime_bundle
+    global _sticker_labeler_observer, _knowledge_build_task, _visual_probe_task, _qzone_cookie_refresh_task, runtime_bundle
     if _sticker_labeler_observer is not None:
         _sticker_labeler_observer.stop()
         _sticker_labeler_observer.join()
@@ -507,6 +535,13 @@ async def _close_personification_runtime() -> None:
         except asyncio.CancelledError:
             pass
     _visual_probe_task = None
+    if _qzone_cookie_refresh_task is not None and not _qzone_cookie_refresh_task.done():
+        _qzone_cookie_refresh_task.cancel()
+        try:
+            await _qzone_cookie_refresh_task
+        except asyncio.CancelledError:
+            pass
+    _qzone_cookie_refresh_task = None
     await stop_plugin_knowledge_builder(
         logger=logger,
         knowledge_store=(
