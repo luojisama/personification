@@ -25,12 +25,16 @@ _LOGGED_PROVIDER_CONFIG_SIGNATURES: set[tuple[str, tuple[tuple[str, str, str], .
 
 
 def normalize_api_type(api_type: Optional[str]) -> str:
-    value = (api_type or "openai").strip().lower()
-    if value == "gemini_official":
+    value = (api_type or "openai").strip().lower().replace("-", "_")
+    if value in {"gemini", "gemini_official"}:
         return "gemini"
     if value in {"openai_codex", "codex"}:
         return "openai_codex"
-    if value not in {"openai", "gemini", "anthropic", "openai_codex"}:
+    if value in {"gemini_cli", "geminicli"}:
+        return "gemini_cli"
+    if value in {"claude_code", "claudecode", "claude_cli"}:
+        return "claude_code"
+    if value not in {"openai", "gemini", "anthropic", "openai_codex", "gemini_cli", "claude_code"}:
         return "openai"
     return value
 
@@ -62,7 +66,7 @@ def _to_int(value: Any, default: int) -> int:
 
 
 def _provider_timeout(provider: Dict[str, Any]) -> float:
-    default_timeout = 120 if provider["api_type"] in {"gemini", "anthropic"} else 60
+    default_timeout = 120 if provider["api_type"] in {"gemini", "gemini_cli", "anthropic", "claude_code"} else 60
     try:
         return float(provider.get("timeout", default_timeout))
     except (TypeError, ValueError):
@@ -97,6 +101,19 @@ def _normalize_codex_model(model: str) -> str:
         "gpt-5": "gpt-5-codex",
     }
     return alias_map.get(lower, value)
+
+
+def _default_model_for_api_type(api_type: str, model: str = "") -> str:
+    value = str(model or "").strip()
+    if value:
+        return _normalize_codex_model(value) if api_type == "openai_codex" else value
+    if api_type == "openai_codex":
+        return "gpt-5.3-codex"
+    if api_type == "gemini_cli":
+        return "gemini-3.1-pro-preview"
+    if api_type == "claude_code":
+        return "claude-opus-4-7"
+    return ""
 
 
 def _provider_config_signature(
@@ -167,11 +184,13 @@ def load_api_pool_config(plugin_config: Any, logger: Any) -> List[Dict[str, Any]
         api_type = normalize_api_type(item.get("api_type"))
         api_key = str(item.get("api_key", "")).strip()
         api_url = str(item.get("api_url", "")).strip()
-        model = str(item.get("model", "")).strip()
+        model = _default_model_for_api_type(api_type, str(item.get("model", "")).strip())
         auth_path = str(item.get("auth_path", item.get("codex_auth_path", "")) or "").strip()
+        project = str(item.get("project", item.get("gemini_cli_project", "")) or "").strip()
 
-        if api_type == "openai_codex":
-            model = _normalize_codex_model(model)
+        if api_type in {"openai_codex", "gemini_cli", "claude_code"}:
+            if not model:
+                continue
         elif not api_key or not api_url or not model:
             continue
 
@@ -182,13 +201,17 @@ def load_api_pool_config(plugin_config: Any, logger: Any) -> List[Dict[str, Any]
             "api_key": api_key,
             "model": model,
             "auth_path": auth_path,
+            "project": project,
             "enabled": _to_bool(item.get("enabled", True), True),
             "priority": _to_int(item.get("priority", index), index),
             "timeout": _provider_timeout({"api_type": api_type, **item}),
             "max_retries": max(1, _to_int(item.get("max_retries", 2), 2)),
             "supports_native_search": _to_bool(
-                item.get("supports_native_search", api_type in {"gemini", "anthropic", "openai", "openai_codex"}),
-                api_type in {"gemini", "anthropic", "openai", "openai_codex"},
+                item.get(
+                    "supports_native_search",
+                    api_type in {"gemini", "gemini_cli", "anthropic", "claude_code", "openai", "openai_codex"},
+                ),
+                api_type in {"gemini", "gemini_cli", "anthropic", "claude_code", "openai", "openai_codex"},
             ),
             "supports_reasoning": item.get("supports_reasoning"),
         }
@@ -210,18 +233,30 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
         return providers
 
     legacy_type = normalize_api_type(getattr(plugin_config, "personification_api_type", "openai"))
-    if legacy_type == "openai_codex":
+    if legacy_type in {"openai_codex", "gemini_cli", "claude_code"}:
+        if legacy_type == "openai_codex":
+            auth_path = str(getattr(plugin_config, "personification_codex_auth_path", "") or "").strip()
+        elif legacy_type == "gemini_cli":
+            auth_path = str(getattr(plugin_config, "personification_gemini_cli_auth_path", "") or "").strip()
+        else:
+            auth_path = str(getattr(plugin_config, "personification_claude_code_auth_path", "") or "").strip()
         providers = [
             {
                 "name": "legacy_primary",
                 "api_type": legacy_type,
                 "api_url": "",
                 "api_key": "",
-                "model": str(getattr(plugin_config, "personification_model", "") or "").strip() or "gpt-5.3-codex",
-                "auth_path": str(getattr(plugin_config, "personification_codex_auth_path", "") or "").strip(),
+                "model": _default_model_for_api_type(
+                    legacy_type,
+                    str(getattr(plugin_config, "personification_model", "") or "").strip(),
+                ),
+                "auth_path": auth_path,
+                "project": str(getattr(plugin_config, "personification_gemini_cli_project", "") or "").strip()
+                if legacy_type == "gemini_cli"
+                else "",
                 "enabled": True,
                 "priority": 0,
-                "timeout": 60,
+                "timeout": 120 if legacy_type in {"gemini_cli", "claude_code"} else 60,
                 "max_retries": 2,
                 "supports_native_search": True,
             }
@@ -247,6 +282,7 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
             "api_key": api_key,
             "model": model,
             "auth_path": "",
+            "project": "",
             "enabled": True,
             "priority": 0,
             "timeout": 120 if legacy_type in {"gemini", "anthropic"} else 60,
@@ -588,9 +624,16 @@ async def call_ai_api(
         if fallback_signature not in primary_signatures:
             fallback_provider.setdefault("name", "configured_fallback")
             fallback_provider.setdefault("priority", 999)
-            fallback_provider.setdefault("timeout", 120 if fallback_provider["api_type"] in {"gemini", "anthropic"} else 60)
+            fallback_provider.setdefault(
+                "timeout",
+                120 if fallback_provider["api_type"] in {"gemini", "gemini_cli", "anthropic", "claude_code"} else 60,
+            )
             fallback_provider.setdefault("max_retries", 2)
-            fallback_provider.setdefault("supports_native_search", fallback_provider["api_type"] in {"gemini", "anthropic", "openai", "openai_codex"})
+            fallback_provider.setdefault(
+                "supports_native_search",
+                fallback_provider["api_type"]
+                in {"gemini", "gemini_cli", "anthropic", "claude_code", "openai", "openai_codex"},
+            )
             response, fallback_errors, fallback_saw_vision_unavailable = await _try_provider_chain(
                 [fallback_provider],
                 messages=messages,

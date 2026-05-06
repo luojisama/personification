@@ -193,6 +193,22 @@ def _save_inbound_state(state: dict[str, Any], result: dict[str, Any]) -> None:
     get_data_store().save_sync(_STORE_NAME, state)
 
 
+def _outbound_reply_scan_due(state: dict[str, Any], *, now_ts: float, interval_minutes: Any) -> bool:
+    try:
+        interval_seconds = max(1, int(interval_minutes or 1)) * 60
+    except Exception:
+        interval_seconds = 180
+    try:
+        last_scan_at = float(state.get("last_outbound_reply_scan_at", 0) or 0)
+    except Exception:
+        last_scan_at = 0.0
+    return last_scan_at <= 0 or float(now_ts or 0) - last_scan_at >= interval_seconds
+
+
+def _mark_outbound_reply_scan(state: dict[str, Any], *, now_ts: float) -> None:
+    state["last_outbound_reply_scan_at"] = float(now_ts or time.time())
+
+
 def _daily_friend_state(state: dict[str, Any], user_id: str, today: str) -> dict[str, Any]:
     per_friend = state.setdefault("per_friend", {})
     if not isinstance(per_friend, dict):
@@ -464,7 +480,13 @@ async def _decide_bot_comment_reply(
     call_ai_api: Callable[..., Awaitable[Optional[str]]],
     inner_state: dict[str, Any],
     emotion_memory: str,
+    allow_third_party_chime_in: bool = True,
 ) -> dict[str, Any]:
+    third_party_rule = (
+        "- 如果对方明显是在 @ 别人或接续别人的话，决策可以是 ignore，也可以选择以好友身份轻量插一句。\n"
+        if allow_third_party_chime_in
+        else "- 如果对方明显是在 @ 别人或接续别人的话，action=ignore；不要插入第三方对话。\n"
+    )
     prompt = (
         "有人在你的 QQ 空间动态下留言或评论区里聊天。判断是否自然回复或插一句话。\n"
         "输出严格 JSON：{\"action\":\"ignore|reply\",\"reply\":\"可选回复\",\"reason\":\"极短原因\"}。\n\n"
@@ -478,7 +500,7 @@ async def _decide_bot_comment_reply(
         f"对方留言：{comment.get('content') or ''}\n\n"
         "回复要求：\n"
         "- 留言可能是直接对你说，也可能是 ta 在和评论区里另一个人聊；先判断这条话锋指向谁。\n"
-        "- 如果对方明显是在 @ 别人或接续别人的话，决策可以是 ignore，也可以选择以好友身份轻量插一句。\n"
+        f"{third_party_rule}"
         "- 不要解释“这句话是什么意思”，不要说“太泛了/要看上下文”。\n"
         "- 默认倾向 reply；只有当留言只是表情、一个字、机器味很重的灌水或敏感内容时才 ignore。\n"
         "- 回复 6-30 个中文字符，像在空间评论区随手回一句；可以是半句话、反问、跳跃的小联想，不必工整。\n"
@@ -552,6 +574,7 @@ async def _scan_bot_space_comments(
     max_feeds: int,
     max_comments_per_feed: int = 20,
     count_checked_feeds: bool = False,
+    allow_third_party_chime_in: bool = True,
     state: dict[str, Any],
     result: dict[str, Any],
     logger: Any,
@@ -621,6 +644,7 @@ async def _scan_bot_space_comments(
                 call_ai_api=call_ai_api,
                 inner_state=inner_state,
                 emotion_memory=emotion_memory,
+                allow_third_party_chime_in=allow_third_party_chime_in,
             )
             if str(decision.get("action", "") or "") != "reply":
                 _mark_comment_processed(
@@ -669,6 +693,7 @@ async def _scan_bot_outbound_comment_replies(
     state: dict[str, Any],
     result: dict[str, Any],
     logger: Any,
+    allow_third_party_chime_in: bool = True,
 ) -> None:
     """对 Bot 之前在好友空间评论过的动态进行 3 分钟近实时反查，看是否有人回复 Bot。"""
     bot_id = str(getattr(bot, "self_id", "") or "")
@@ -781,6 +806,7 @@ async def _scan_bot_outbound_comment_replies(
                     call_ai_api=call_ai_api,
                     inner_state=inner_state,
                     emotion_memory=emotion_memory,
+                    allow_third_party_chime_in=allow_third_party_chime_in,
                 )
                 if str(decision.get("action", "") or "") != "reply":
                     bot_replies_state[comment_key] = {
@@ -902,6 +928,9 @@ async def scan_qzone_social_feeds(
                     logger.warning(f"[qzone_social] load emotion_state failed: {exc}")
 
             system_prompt = _extract_system_prompt(load_prompt())
+            allow_third_party_chime_in = bool(
+                getattr(plugin_config, "personification_qzone_third_party_chime_in_enabled", True)
+            )
             max_feeds = max(1, int(getattr(plugin_config, "personification_qzone_social_max_feeds_per_scan", 10)))
             like_limit = _normalize_limit(getattr(plugin_config, "personification_qzone_social_like_limit", 0))
             comment_limit = _normalize_limit(getattr(plugin_config, "personification_qzone_social_comment_limit", 0))
@@ -1051,6 +1080,7 @@ async def scan_qzone_social_feeds(
                     inner_state=inner_state,
                     emotion_state=emotion_state,
                     max_feeds=max_feeds,
+                    allow_third_party_chime_in=allow_third_party_chime_in,
                     state=state,
                     result=result,
                     logger=logger,
@@ -1131,6 +1161,9 @@ async def scan_qzone_inbound_messages(
                 int(getattr(plugin_config, "personification_qzone_inbound_max_comments_per_feed", 20) or 20),
             )
             system_prompt = _extract_system_prompt(load_prompt())
+            allow_third_party_chime_in = bool(
+                getattr(plugin_config, "personification_qzone_third_party_chime_in_enabled", True)
+            )
             await _scan_bot_space_comments(
                 bot=bot,
                 qzone_social_service=qzone_social_service,
@@ -1145,32 +1178,39 @@ async def scan_qzone_inbound_messages(
                 max_feeds=max_feeds,
                 max_comments_per_feed=max_comments_per_feed,
                 count_checked_feeds=True,
+                allow_third_party_chime_in=allow_third_party_chime_in,
                 state=state,
                 result=result,
                 logger=logger,
             )
             if bool(getattr(plugin_config, "personification_qzone_outbound_reply_enabled", True)):
-                try:
-                    await _scan_bot_outbound_comment_replies(
-                        bot=bot,
-                        qzone_social_service=qzone_social_service,
-                        plugin_config=plugin_config,
-                        friend_profiles=friend_profiles,
-                        proactive_state=proactive_state,
-                        persona_store=persona_store,
-                        persona_snippet_max_chars=persona_snippet_max_chars,
-                        system_prompt=system_prompt,
-                        call_ai_api=call_ai_api,
-                        inner_state=inner_state,
-                        emotion_state=emotion_state,
-                        state=state,
-                        result=result,
-                        logger=logger,
-                    )
-                except Exception as exc:
-                    result["failed"] = int(result.get("failed", 0) or 0) + 1
-                    result["last_error"] = f"outbound scan failed: {exc}"
-                    logger.warning(f"[qzone_outbound] scan failed: {exc}")
+                now_ts = time.time()
+                outbound_interval = getattr(plugin_config, "personification_qzone_outbound_reply_check_interval", 3)
+                if _outbound_reply_scan_due(state, now_ts=now_ts, interval_minutes=outbound_interval):
+                    try:
+                        await _scan_bot_outbound_comment_replies(
+                            bot=bot,
+                            qzone_social_service=qzone_social_service,
+                            plugin_config=plugin_config,
+                            friend_profiles=friend_profiles,
+                            proactive_state=proactive_state,
+                            persona_store=persona_store,
+                            persona_snippet_max_chars=persona_snippet_max_chars,
+                            system_prompt=system_prompt,
+                            call_ai_api=call_ai_api,
+                            inner_state=inner_state,
+                            emotion_state=emotion_state,
+                            state=state,
+                            result=result,
+                            logger=logger,
+                            allow_third_party_chime_in=allow_third_party_chime_in,
+                        )
+                    except Exception as exc:
+                        result["failed"] = int(result.get("failed", 0) or 0) + 1
+                        result["last_error"] = f"outbound scan failed: {exc}"
+                        logger.warning(f"[qzone_outbound] scan failed: {exc}")
+                    finally:
+                        _mark_outbound_reply_scan(state, now_ts=time.time())
             result["feeds_seen"] = max(0, int(result.get("feeds_seen", 0) or 0))
             _save_inbound_state(state, result)
             return result

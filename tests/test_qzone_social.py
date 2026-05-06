@@ -294,6 +294,39 @@ def test_qzone_inbound_comment_replies_once_and_records_profile() -> None:
     assert "[QQ空间留言]" in store.records[0][1]
 
 
+def test_qzone_outbound_reply_interval_gate_uses_config_minutes() -> None:
+    state: dict[str, object] = {}
+
+    assert qzone_flow._outbound_reply_scan_due(state, now_ts=1000.0, interval_minutes=3) is True
+    qzone_flow._mark_outbound_reply_scan(state, now_ts=1000.0)
+    assert qzone_flow._outbound_reply_scan_due(state, now_ts=1179.0, interval_minutes=3) is False
+    assert qzone_flow._outbound_reply_scan_due(state, now_ts=1180.0, interval_minutes=3) is True
+
+
+def test_qzone_comment_reply_prompt_respects_third_party_chime_switch() -> None:
+    captured: dict[str, str] = {}
+
+    async def _call_ai(messages):  # noqa: ANN001
+        captured["prompt"] = str(messages[-1]["content"])
+        return '{"action":"ignore","reply":"","reason":"third party"}'
+
+    decision = asyncio.run(
+        qzone_flow._decide_bot_comment_reply(
+            feed={"content": "今天发一条"},
+            comment={"user_id": "20001", "nickname": "好友", "content": "你们刚才说的那个呢"},
+            commenter_profile={"nickname": "好友", "persona_snippet": "熟人"},
+            system_prompt="你是绪山真寻。",
+            call_ai_api=_call_ai,
+            inner_state={},
+            emotion_memory="",
+            allow_third_party_chime_in=False,
+        )
+    )
+
+    assert decision["action"] == "ignore"
+    assert "不要插入第三方对话" in captured["prompt"]
+
+
 def test_qzone_social_limits_use_zero_as_unlimited() -> None:
     assert qzone_flow._limit_reached(0, 9999) is False
     assert qzone_flow._limit_reached(2, 2) is True

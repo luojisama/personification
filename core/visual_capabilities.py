@@ -189,6 +189,12 @@ def _clone_provider_config(original: Any, provider: Dict[str, Any]) -> Any:
                 return self._selected.get("model", "")
             if name == "personification_codex_auth_path":
                 return self._selected.get("auth_path", "")
+            if name == "personification_gemini_cli_auth_path":
+                return self._selected.get("auth_path", "")
+            if name == "personification_gemini_cli_project":
+                return self._selected.get("project", "")
+            if name == "personification_claude_code_auth_path":
+                return self._selected.get("auth_path", "")
             return getattr(self._base, name)
 
     return _ConfigProxy(original, provider)
