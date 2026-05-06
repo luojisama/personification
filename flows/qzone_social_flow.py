@@ -721,19 +721,18 @@ async def _scan_bot_space_comments(
                     reason=str(decision.get("reason", "") or "empty_reply"),
                 )
                 continue
-            ok_reply, reply_msg = await qzone_social_service.comment_feed(
-                feed=feed,
-                bot_id=bot_id,
-                content=reply,
-                reply_to_comment=comment,
-            )
+            try:
+                await bot.send_private_msg(user_id=int(commenter_id), message=reply)
+                ok_reply, reply_msg = True, "ok"
+            except Exception as _send_exc:
+                ok_reply, reply_msg = False, str(_send_exc)
             if ok_reply:
                 result["replied"] = int(result.get("replied", 0) or 0) + 1
                 _mark_comment_processed(state, comment_key, action="reply", reply=reply)
             else:
                 result["failed"] = int(result.get("failed", 0) or 0) + 1
                 result["last_error"] = reply_msg
-                logger.warning(f"[qzone_social] reply comment failed for {comment_key}: {reply_msg}")
+                logger.warning(f"[qzone_social] send private reply failed for {comment_key}: {reply_msg}")
 
 
 async def _scan_bot_outbound_comment_replies(
