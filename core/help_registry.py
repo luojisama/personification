@@ -210,6 +210,15 @@ _COMMANDS: list[CommandHelpEntry] = [
         scope="global",
     ),
     CommandHelpEntry(
+        path=("model", "route"),
+        category="model",
+        summary="热切主回复 provider，可在 gemini-cli、claude-code、codex 等 provider 间切换。",
+        usage="拟人 模型 路由 <provider_name|api_type> [model]",
+        examples=("拟人 模型 路由 gemini_cli_primary", "拟人 模型 路由 gemini_cli gemini-3-flash-preview"),
+        permission="管理员",
+        scope="global",
+    ),
+    CommandHelpEntry(
         path=("model", "set"),
         category="model",
         summary="只覆盖某一类 LLM 调用的模型。",

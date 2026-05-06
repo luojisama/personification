@@ -80,6 +80,19 @@ def _json_object_parser(raw: str) -> dict[str, Any]:
     return parsed
 
 
+def _json_array_parser(raw: str) -> list[Any]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception as exc:
+        raise ValueError("需要 JSON 数组") from exc
+    if not isinstance(parsed, list):
+        raise ValueError("需要 JSON 数组")
+    return parsed
+
+
 def _web_search_mode_parser(raw: str) -> str:
     text = str(raw or "").strip().lower()
     mapping = {
@@ -201,6 +214,18 @@ def _build_entries() -> list[ConfigEntry]:
             category="config",
             help_aliases=("模型覆盖", "model_overrides", "模型路由"),
             parser=lambda raw: normalize_model_overrides(_json_object_parser(raw)),
+        ),
+        ConfigEntry(
+            key="api_pools",
+            field_name="personification_api_pools",
+            display_name="API Provider 池",
+            value_type="list",
+            default=None,
+            scope=GLOBAL_SCOPE,
+            description="主回复模型 provider 池。推荐用“拟人 模型 路由”命令热切换；环境变量显式设置时重启后以环境变量为准。",
+            category="config",
+            help_aliases=("provider池", "api_pools", "api_pool", "模型路由池", "provider_route"),
+            parser=_json_array_parser,
         ),
         ConfigEntry(
             key="response_review_enabled",
@@ -1411,6 +1436,8 @@ def describe_choices(entry: ConfigEntry) -> str:
         return f"数字 ({lower}..{upper})"
     if entry.value_type == "dict":
         return "JSON 对象"
+    if entry.value_type == "list":
+        return "JSON 数组"
     return "自由文本"
 
 
@@ -1420,6 +1447,8 @@ def format_config_value(value: Any) -> str:
     if value is None:
         return "未设置"
     if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, list):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return str(value)
 

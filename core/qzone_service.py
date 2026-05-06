@@ -144,6 +144,31 @@ def _clean_qzone_text(value: Any) -> str:
     return raw
 
 
+def _format_qzone_reply_content(text: str, reply_to_comment: dict[str, Any] | None) -> str:
+    cleaned = _clean_qzone_text(text)
+    if not isinstance(reply_to_comment, dict):
+        return cleaned[:80]
+    if cleaned.startswith(("回复 ", "回复　")):
+        return cleaned[:80]
+
+    nickname = _clean_qzone_text(
+        reply_to_comment.get("nickname")
+        or reply_to_comment.get("nick")
+        or reply_to_comment.get("name")
+        or reply_to_comment.get("user_name")
+    )
+    user_id = str(
+        reply_to_comment.get("user_id")
+        or reply_to_comment.get("uin")
+        or reply_to_comment.get("useruin")
+        or ""
+    ).strip()
+    target = nickname or user_id
+    if not target:
+        return cleaned[:80]
+    return f"回复 {target}: {cleaned}"[:80]
+
+
 def _normalize_qzone_image_url(value: Any) -> str:
     url = str(value or "").strip()
     if not url:
@@ -500,15 +525,22 @@ class QzoneSocialService:
         if not owner or not topic_id:
             return False, "动态缺少评论所需字段"
         url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
+        send_text = _format_qzone_reply_content(text, reply_to_comment)
         data = {
             "uin": str(ctx["qq"]),
             "hostUin": owner,
             "topicId": topic_id,
-            "content": text[:80],
+            "content": send_text[:80],
             "private": "0",
             "paramstr": "1",
             "format": "json",
             "feedsType": "100",
+            "plat": "qzone",
+            "source": "ic",
+            "ref": "feeds",
+            "platformid": "52",
+            "richtype": "",
+            "richval": "",
             "inCharset": "utf-8",
             "outCharset": "utf-8",
             "qzreferrer": f"https://user.qzone.qq.com/{owner}",
@@ -524,6 +556,10 @@ class QzoneSocialService:
                         "replyuin": reply_uin,
                         "reply_uin": reply_uin,
                         "touin": reply_uin,
+                        "toUin": reply_uin,
+                        "targetuin": reply_uin,
+                        "targetUin": reply_uin,
+                        "sourceUin": reply_uin,
                     }
                 )
             if reply_id:

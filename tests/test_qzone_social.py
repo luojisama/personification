@@ -80,6 +80,22 @@ class _InboundQzoneService:
         return True, "ok"
 
 
+def test_qzone_reply_content_targets_commenter_name() -> None:
+    text = qzone_service._format_qzone_reply_content(
+        "你木飞了",
+        {"nickname": "白咲零", "user_id": "20001"},
+    )
+    assert text == "回复 白咲零: 你木飞了"
+
+
+def test_qzone_reply_content_does_not_double_prefix() -> None:
+    text = qzone_service._format_qzone_reply_content(
+        "回复 白咲零: 已经收到了",
+        {"nickname": "白咲零", "user_id": "20001"},
+    )
+    assert text == "回复 白咲零: 已经收到了"
+
+
 def test_proactive_candidates_require_profile_and_not_favorability_threshold() -> None:
     candidates = proactive_flow._build_candidates(
         all_user_data={

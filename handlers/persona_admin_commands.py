@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from typing import Any
@@ -46,6 +47,7 @@ from ..core.model_router import (
     normalize_model_overrides,
     resolve_model_role,
 )
+from ..core.provider_router import normalize_api_type
 from ..core.runtime_config import get_runtime_load_info
 from ..utils import get_group_config, is_group_whitelisted
 
@@ -146,6 +148,8 @@ _COMPOUND_TOKEN_ALIASES = {
     "空间消息": ("空间", "消息"),
     "空间留言": ("空间", "消息"),
     "空间收消息": ("空间", "消息"),
+    "模型路由": ("模型", "路由"),
+    "模型调用": ("模型", "路由"),
 }
 
 
@@ -214,7 +218,7 @@ def _root_help_text() -> str:
         "- 拟人 管理员 列表|添加|删除：管理插件管理员。",
         "- 拟人 迁移 状态|执行：查看或执行旧数据迁移。",
         "- 拟人 召回 统计：查看长期记忆召回统计。",
-        "- 拟人 模型 列表|使用|设置|重置：QQ 内热更新 intent/review/agent/sticker 四类 LLM 模型。",
+        "- 拟人 模型 列表|路由|使用|设置|重置：QQ 内热更新主 provider 和各阶段模型。",
         "- 拟人 定时 状态：查看定时任务注册状态、下次运行时间和功能开关。",
         "- 拟人 空间 状态|测试 <QQ号/@用户>：查看空间任务状态，或对指定好友空间执行一次测试互动扫描。",
         "",
@@ -817,8 +821,181 @@ def _default_model_for_role(bundle: Any, role: str) -> str:
     return primary
 
 
+def _parse_api_pool_config(raw_config: Any) -> list[dict[str, Any]]:
+    if not raw_config:
+        return []
+    parsed = raw_config
+    if isinstance(raw_config, str):
+        text = raw_config.strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+            text = text[1:-1].strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return []
+    if not isinstance(parsed, list):
+        return []
+    return [dict(item) for item in parsed if isinstance(item, dict)]
+
+
+def _current_api_pool_config(bundle: Any) -> list[dict[str, Any]]:
+    pools = _parse_api_pool_config(getattr(bundle.plugin_config, "personification_api_pools", None))
+    if pools:
+        return pools
+    provider_getter = getattr(bundle, "get_configured_api_providers", None)
+    if not callable(provider_getter):
+        return []
+    try:
+        providers = list(provider_getter() or [])
+    except Exception:
+        return []
+    return [dict(item) for item in providers if isinstance(item, dict)]
+
+
+def _default_route_model(api_type: str, config: Any) -> str:
+    normalized = normalize_api_type(api_type)
+    if normalized == "openai_codex":
+        return str(getattr(config, "personification_model", "") or "").strip() or "gpt-5.3-codex"
+    if normalized == "gemini_cli":
+        return "gemini-3.1-pro-preview"
+    if normalized == "claude_code":
+        return "claude-opus-4-7"
+    return str(getattr(config, "personification_model", "") or "").strip()
+
+
+def _default_route_auth_path(api_type: str, config: Any) -> str:
+    normalized = normalize_api_type(api_type)
+    if normalized == "openai_codex":
+        return str(getattr(config, "personification_codex_auth_path", "") or "").strip() or "~/.codex/auth.json"
+    if normalized == "gemini_cli":
+        return str(getattr(config, "personification_gemini_cli_auth_path", "") or "").strip() or "~/.gemini/oauth_creds.json"
+    if normalized == "claude_code":
+        return str(getattr(config, "personification_claude_code_auth_path", "") or "").strip() or "~/.claude/.credentials.json"
+    return ""
+
+
+def _route_target_matches(provider: dict[str, Any], target: str, normalized_target: str) -> bool:
+    name = str(provider.get("name", "") or "").strip().lower()
+    api_type = normalize_api_type(provider.get("api_type"))
+    raw = str(target or "").strip().lower()
+    return bool(raw and name == raw) or bool(normalized_target and api_type == normalized_target)
+
+
+def _new_route_provider(api_type: str, model: str, config: Any) -> dict[str, Any]:
+    normalized = normalize_api_type(api_type)
+    provider = {
+        "name": f"{normalized}_primary" if normalized else "custom_primary",
+        "api_type": normalized,
+        "api_url": "",
+        "api_key": "",
+        "model": model or _default_route_model(normalized, config),
+        "auth_path": _default_route_auth_path(normalized, config),
+        "enabled": True,
+        "supports_native_search": True,
+        "priority": 1,
+    }
+    if normalized == "gemini_cli":
+        provider["project"] = str(getattr(config, "personification_gemini_cli_project", "") or "").strip()
+    return provider
+
+
+def _format_provider_line(provider: dict[str, Any]) -> str:
+    name = str(provider.get("name", "") or "unnamed")
+    api_type = str(provider.get("api_type", "") or "unset")
+    model = str(provider.get("model", "") or "未配置")
+    priority = provider.get("priority", "-")
+    enabled = "开" if provider.get("enabled", True) else "关"
+    return f"- {name}（{api_type}:{model}，priority={priority}，enabled={enabled}）"
+
+
+def _save_route_config(bundle: Any, providers: list[dict[str, Any]]) -> None:
+    setattr(bundle.plugin_config, "personification_api_pools", providers)
+    setattr(bundle.plugin_config, "personification_model_overrides", {})
+    if callable(getattr(bundle, "save_plugin_runtime_config", None)):
+        bundle.save_plugin_runtime_config()
+    reload_services = getattr(bundle, "reload_runtime_services", None)
+    if callable(reload_services):
+        reload_services()
+
+
+def _switch_primary_provider_route(bundle: Any, *, target: str, model: str = "") -> str:
+    raw_target = str(target or "").strip()
+    normalized_target = normalize_api_type(raw_target)
+    if not raw_target:
+        return "用法：拟人 模型 路由 <provider_name|api_type> [model]"
+    if normalized_target == "openai" and raw_target.lower() not in {"openai", "openai_official"}:
+        normalized_target = ""
+
+    existing = _current_api_pool_config(bundle)
+    selected_index: int | None = None
+    for index, provider in enumerate(existing):
+        if _route_target_matches(provider, raw_target, normalized_target):
+            selected_index = index
+            break
+
+    if selected_index is None:
+        if not normalized_target:
+            names = [str(item.get("name", "") or "").strip() for item in existing if item.get("name")]
+            hint = "、".join(names[:8]) if names else "无"
+            return f"没找到这个 provider：{raw_target}\n可用 provider：{hint}\n也可以直接写 api_type：gemini_cli、claude_code、openai_codex。"
+        selected = _new_route_provider(normalized_target, model, bundle.plugin_config)
+        existing.insert(0, selected)
+        selected_index = 0
+    else:
+        selected = dict(existing[selected_index])
+        selected["api_type"] = normalize_api_type(selected.get("api_type"))
+        if model:
+            selected["model"] = model
+        elif not str(selected.get("model", "") or "").strip():
+            selected["model"] = _default_route_model(selected["api_type"], bundle.plugin_config)
+        if not str(selected.get("auth_path", "") or "").strip():
+            auth_path = _default_route_auth_path(selected["api_type"], bundle.plugin_config)
+            if auth_path:
+                selected["auth_path"] = auth_path
+        if selected["api_type"] == "gemini_cli" and "project" not in selected:
+            selected["project"] = str(getattr(bundle.plugin_config, "personification_gemini_cli_project", "") or "").strip()
+        selected["enabled"] = True
+        existing[selected_index] = selected
+
+    ordered: list[dict[str, Any]] = []
+    selected = dict(existing[selected_index])
+    selected["priority"] = 1
+    selected["enabled"] = True
+    ordered.append(selected)
+    next_priority = 2
+    selected_name = str(selected.get("name", "") or "")
+    for index, provider in enumerate(existing):
+        if index == selected_index:
+            continue
+        item = dict(provider)
+        if selected_name and str(item.get("name", "") or "") == selected_name:
+            continue
+        item["api_type"] = normalize_api_type(item.get("api_type"))
+        item["priority"] = next_priority
+        next_priority += 1
+        ordered.append(item)
+
+    _save_route_config(bundle, ordered)
+    return (
+        "已热切主 provider："
+        f"{selected.get('name')}（{selected.get('api_type')}:{selected.get('model') or '未配置'}）\n"
+        "已清空模型覆盖，避免把旧 GPT 模型名套到新 provider。\n"
+        "生效：立即生效；如果 .env.prod 显式设置 personification_api_pools，重启后仍以 .env.prod 为准。"
+    )
+
+
 def _format_model_status(bundle: Any) -> str:
     lines = ["模型路由"]
+    providers = _current_api_pool_config(bundle)
+    lines.append("当前 provider：")
+    if providers:
+        for provider in providers[:8]:
+            lines.append(_format_provider_line(provider))
+    else:
+        lines.append("- 未配置")
+    lines.append("")
     lines.append("当前生效：")
     for role in MODEL_OVERRIDE_ROLES:
         effective = get_model_for_role(
@@ -842,7 +1019,7 @@ def _format_model_status(bundle: Any) -> str:
     else:
         lines.append("- 未发现已配置模型")
     lines.append("")
-    lines.append("用法：拟人 模型 使用 <model>；拟人 模型 设置 <intent|review|agent|sticker> <model>；拟人 模型 重置 [role|全部]")
+    lines.append("用法：拟人 模型 路由 <provider_name|api_type> [model]；拟人 模型 使用 <model>；拟人 模型 设置 <intent|review|agent|sticker> <model>；拟人 模型 重置 [role|全部]")
     return "\n".join(lines)
 
 
@@ -861,6 +1038,13 @@ def handle_model_command(bundle: Any, *, tokens: list[str]) -> str:
     raw_action = str(tokens[0] if tokens else "").strip().lower()
     if action in {"list", "get", "status"} or raw_action in {"列表", "查看", "状态", ""}:
         return _format_model_status(bundle)
+
+    if raw_action in {"route", "路由", "主路由", "provider", "供应商", "调用"}:
+        if len(tokens) < 2:
+            return "用法：拟人 模型 路由 <provider_name|api_type> [model]"
+        target = str(tokens[1] or "").strip()
+        model = " ".join(str(token) for token in tokens[2:]).strip()
+        return _switch_primary_provider_route(bundle, target=target, model=model)
 
     current = normalize_model_overrides(
         getattr(bundle.plugin_config, "personification_model_overrides", {}) or {}
@@ -903,7 +1087,7 @@ def handle_model_command(bundle: Any, *, tokens: list[str]) -> str:
         _save_model_overrides(bundle, current)
         return f"已重置：{role}（{MODEL_ROLE_LABELS[role]}）\n生效：立即生效"
 
-    return "用法：拟人 模型 列表｜使用 <model>｜设置 <intent|review|agent|sticker> <model>｜重置 [role|全部]"
+    return "用法：拟人 模型 列表｜路由 <provider_name|api_type> [model]｜使用 <model>｜设置 <intent|review|agent|sticker> <model>｜重置 [role|全部]"
 
 
 def handle_scheduler_command(bundle: Any, *, tokens: list[str]) -> str:
