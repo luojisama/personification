@@ -68,7 +68,8 @@ PERSONIFICATION_USAGE = (
     "  - 刷新画像：重建当前用户画像\n"
     "  - 说/朗读/配音 [--mode preset|design|clone] [--voice 音色] [--style 风格] [--voice-prompt 音色描述] [--clone-voice data:...] [--clone-path 样本路径] 文本：输出语音\n\n"
     "其他命令（超管）：\n"
-    "  - 发个说说：触发动态/日记类输出\n\n"
+    "  - 发个说说：触发动态/日记类输出\n"
+    "  - 拟人 更新 / 拟人更新：检查并拉取插件最新版本\n\n"
     "QQ 空间命令（超管）：\n"
     "  - 拟人 空间 状态：查看主动发空间与好友空间互动状态\n"
     "  - 拟人 空间 测试 <QQ号/@用户>：指定好友执行一次空间读取与 LLM 互动测试\n"
@@ -119,6 +120,7 @@ def build_plugin_metadata(config_cls: type) -> PluginMetadata:
                     "插件知识库错误",
                     "删除插件知识库",
                     "清空插件知识库",
+                    "拟人更新",
                 ],
                 "group_admin": [
                     "开启拟人",

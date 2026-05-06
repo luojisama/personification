@@ -50,6 +50,7 @@ from ..core.model_router import (
 from ..core.provider_router import normalize_api_type
 from ..core.runtime_config import get_runtime_load_info
 from ..utils import get_group_config, is_group_whitelisted
+from .runtime_commands import handle_git_update_command as _handle_git_update_command
 
 
 _GROUP_CONFIG_NAMESPACE = "group_config"
@@ -79,6 +80,9 @@ _COMMAND_ALIASES = {
     "qzone": "qzone",
     "空间": "qzone",
     "说说": "qzone",
+    "update": "update",
+    "更新": "update",
+    "升级": "update",
 }
 _SUBCOMMAND_ALIASES = {
     "list": "list",
@@ -506,12 +510,18 @@ async def dispatch_persona_admin_command(
             await matcher.finish(_admin_error())
         await matcher.finish(handle_scheduler_command(bundle, tokens=rest))
 
-    if command == "qzone":
+    if command == “qzone”:
         if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):
             await matcher.finish(_admin_error())
         await matcher.finish(await handle_qzone_command(bundle, event=event, tokens=rest, arg_message=arg_message))
 
-    await matcher.finish("未识别的子命令。可用“拟人 帮助”或“/persona help”查看帮助。")
+    if command == “update”:
+        if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):
+            await matcher.finish(_admin_error())
+        await _handle_git_update_command(matcher, logger=bundle.logger)
+        return
+
+    await matcher.finish(“未识别的子命令。可用”拟人 帮助”或”/persona help”查看帮助。”)
 
 
 def render_help(bundle: Any, *, event: Any, tokens: list[str]) -> str:
@@ -528,7 +538,7 @@ def render_help(bundle: Any, *, event: Any, tokens: list[str]) -> str:
         entry = find_command_help(tuple(normalized[:2]))
         if entry is not None:
             return _format_command_help(entry.path)
-    if normalized[0] in {"config", "admin", "memory", "migrate", "help", "status", "recall", "model", "scheduler", "qzone"}:
+    if normalized[0] in {"config", "admin", "memory", "migrate", "help", "status", "recall", "model", "scheduler", "qzone", "update"}:
         return _format_category_help(normalized[0])
     config_entry = resolve_config_entry(" ".join(tokens))
     if config_entry is None:
