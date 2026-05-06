@@ -80,6 +80,7 @@ from .core.visual_capabilities import (
 from .flows import setup_flows
 from .handlers import setup_all_matchers
 from .handlers.persona_commands import setup_persona_matchers
+from .handlers.runtime_commands import check_git_update_available, perform_git_pull
 from .jobs import setup_jobs
 from .schedule import get_current_local_time
 from .agent.inner_state import get_personification_data_dir
@@ -314,6 +315,48 @@ async def _init_personification_runtime() -> None:
     runtime_bundle.qzone_social_scan = job_handles.get("qzone_social_scan")
     runtime_bundle.qzone_inbound_poll = job_handles.get("qzone_inbound_poll")
     _start_qzone_cookie_refresh_background()
+
+    if bool(getattr(plugin_config, "personification_git_auto_update", False)):
+        _git_update_interval = max(
+            10,
+            int(getattr(plugin_config, "personification_git_auto_update_interval", 60) or 60),
+        )
+
+        async def _auto_git_update_job() -> None:
+            try:
+                has_update, _local, _remote = await check_git_update_available()
+                if not has_update:
+                    return
+                ok, msg = await perform_git_pull()
+                if ok:
+                    logger.info(f"[git_auto_update] 已自动更新拟人插件：{msg}")
+                    _bots = get_bots()
+                    for _bot in _bots.values():
+                        for _su in superusers:
+                            try:
+                                await _bot.send_private_msg(
+                                    user_id=int(_su),
+                                    message=f"✅ 拟人插件已自动更新，请重启 Bot 生效。\n{msg}",
+                                )
+                            except Exception:
+                                pass
+                        break
+                else:
+                    logger.warning(f"[git_auto_update] 自动更新失败：{msg}")
+            except Exception as _exc:
+                logger.warning(f"[git_auto_update] 检查或拉取失败：{_exc}")
+
+        try:
+            scheduler.add_job(
+                _auto_git_update_job,
+                "interval",
+                minutes=_git_update_interval,
+                id="personification_git_auto_update",
+                replace_existing=True,
+            )
+            logger.info(f"拟人插件：已注册 git 自动更新任务，间隔 {_git_update_interval} 分钟")
+        except Exception as _e:
+            logger.warning(f"拟人插件：注册 git 自动更新任务失败：{_e}")
 
     matcher_handles = setup_all_matchers(
         deps=runtime_bundle.make_matcher_setup_deps(

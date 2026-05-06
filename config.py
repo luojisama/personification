@@ -278,6 +278,10 @@ class Config(BaseModel):
     personification_60s_local_api_base: str = "http://127.0.0.1:4399"
     personification_60s_enabled: bool = True
 
+    # git 自动更新配置
+    personification_git_auto_update: bool = False
+    personification_git_auto_update_interval: int = 60
+
     # OpenAI Codex OAuth 配置
     # personification_api_type = "openai_codex" 时生效
     # 留空则自动按优先级查找 ~/.codex/auth.json
