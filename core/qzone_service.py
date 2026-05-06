@@ -487,6 +487,7 @@ class QzoneSocialService:
         feed: dict[str, Any],
         bot_id: str,
         content: str,
+        reply_to_comment: dict[str, Any] | None = None,
     ) -> tuple[bool, str]:
         text = str(content or "").strip()
         if not text:
@@ -512,6 +513,36 @@ class QzoneSocialService:
             "outCharset": "utf-8",
             "qzreferrer": f"https://user.qzone.qq.com/{owner}",
         }
+        if isinstance(reply_to_comment, dict):
+            reply_uin = str(reply_to_comment.get("user_id", "") or "").strip()
+            reply_id = str(reply_to_comment.get("comment_id", "") or "").strip()
+            reply_nick = str(reply_to_comment.get("nickname", "") or "").strip()
+            if reply_uin:
+                data.update(
+                    {
+                        "replyUin": reply_uin,
+                        "replyuin": reply_uin,
+                        "reply_uin": reply_uin,
+                        "touin": reply_uin,
+                    }
+                )
+            if reply_id:
+                data.update(
+                    {
+                        "commentid": reply_id,
+                        "commentId": reply_id,
+                        "replyid": reply_id,
+                        "parentid": reply_id,
+                    }
+                )
+            if reply_nick:
+                data.update(
+                    {
+                        "replyNick": reply_nick,
+                        "replynick": reply_nick,
+                        "reply_nick": reply_nick,
+                    }
+                )
         headers = _qzone_headers(ctx, referer_uin=owner)
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         try:

@@ -48,6 +48,7 @@ class _NoFriendBot:
 class _InboundQzoneService:
     def __init__(self) -> None:
         self.replies: list[str] = []
+        self.reply_targets: list[str] = []
 
     async def fetch_user_feeds(self, **_kwargs):  # noqa: ANN003
         return True, "ok", [
@@ -73,6 +74,9 @@ class _InboundQzoneService:
 
     async def comment_feed(self, *, content: str, **_kwargs):  # noqa: ANN003
         self.replies.append(str(content))
+        reply_to_comment = _kwargs.get("reply_to_comment")
+        if isinstance(reply_to_comment, dict):
+            self.reply_targets.append(str(reply_to_comment.get("comment_id", "") or ""))
         return True, "ok"
 
 
@@ -317,6 +321,7 @@ def test_qzone_inbound_comment_replies_once_and_records_profile() -> None:
     asyncio.run(qzone_flow._scan_bot_space_comments(**kwargs))
 
     assert service.replies == ["在呀，刚看到"]
+    assert service.reply_targets == ["c1"]
     assert result["inbound_comments"] == 1
     assert result["replied"] == 1
     assert len(store.records) == 1
@@ -332,7 +337,14 @@ def test_qzone_inbound_comment_does_not_require_friend_profile() -> None:
 
     original_normalize_state = qzone_flow._normalize_state
     original_save_inbound_state = qzone_flow._save_inbound_state
-    qzone_flow._normalize_state = lambda _now: {}
+    qzone_flow._normalize_state = lambda _now: {
+        "bot_space_comment_baselines": {
+            "99999:feed1": {"at": 1710000000.0, "max_created_at": 1710000000.0}
+        },
+        "comment_actions": {},
+        "comment_replies": {},
+        "profile_records": {},
+    }
     qzone_flow._save_inbound_state = lambda _state, _result: None
     try:
         result = asyncio.run(
@@ -363,6 +375,46 @@ def test_qzone_inbound_comment_does_not_require_friend_profile() -> None:
     assert result["inbound_comments"] == 1
     assert result["replied"] == 1
     assert service.replies == ["刚看见这条"]
+
+
+def test_qzone_inbound_first_scan_baselines_existing_comments() -> None:
+    store = _RecordingPersonaStore()
+    service = _InboundQzoneService()
+    state: dict[str, object] = {}
+    result: dict[str, object] = {"inbound_comments": 0, "replied": 0, "profile_records": 0}
+    calls: list[object] = []
+
+    async def _call_ai(_messages):  # noqa: ANN001
+        calls.append(_messages)
+        return '{"action":"reply","reply":"不该补回旧留言","reason":"old"}'
+
+    kwargs = dict(
+        bot=_Bot(),
+        qzone_social_service=service,
+        friend_profiles={},
+        proactive_state={},
+        persona_store=store,
+        persona_snippet_max_chars=80,
+        system_prompt="你是绪山真寻。",
+        call_ai_api=_call_ai,
+        inner_state={},
+        emotion_state={},
+        max_feeds=20,
+        max_comments_per_feed=20,
+        count_checked_feeds=True,
+        process_existing_comments=False,
+        state=state,
+        result=result,
+        logger=_Logger(),
+    )
+
+    asyncio.run(qzone_flow._scan_bot_space_comments(**kwargs))
+    asyncio.run(qzone_flow._scan_bot_space_comments(**kwargs))
+
+    assert calls == []
+    assert service.replies == []
+    assert result["inbound_comments"] == 0
+    assert "99999:feed1" in state["bot_space_comment_baselines"]
 
 
 def test_qzone_outbound_reply_interval_gate_uses_config_minutes() -> None:

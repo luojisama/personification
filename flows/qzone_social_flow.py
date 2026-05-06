@@ -144,6 +144,7 @@ def _normalize_state(now: datetime) -> dict[str, Any]:
     state.setdefault("profile_records", {})
     state.setdefault("bot_outbound_comments", {})
     state.setdefault("bot_outbound_replies", {})
+    state.setdefault("bot_space_comment_baselines", {})
     state.setdefault("per_friend", {})
     state.setdefault("like_count", 0)
     state.setdefault("comment_count", 0)
@@ -159,6 +160,7 @@ def _prune_state_maps(state: dict[str, Any], *, max_items: int = 2000) -> None:
         "profile_records",
         "bot_outbound_comments",
         "bot_outbound_replies",
+        "bot_space_comment_baselines",
     ):
         value = state.get(key)
         if not isinstance(value, dict) or len(value) <= max_items:
@@ -274,6 +276,48 @@ def _mark_comment_processed(
         }
     if action == "reply" and reply:
         _mark_comment_replied(state, comment_key, reply=reply)
+
+
+def _bot_space_feed_has_baseline(state: dict[str, Any], feed_key: str) -> bool:
+    baselines = state.get("bot_space_comment_baselines")
+    return isinstance(baselines, dict) and feed_key in baselines
+
+
+def _mark_bot_space_feed_baseline(
+    state: dict[str, Any],
+    feed_key: str,
+    comments: list[dict[str, Any]],
+) -> None:
+    baselines = state.setdefault("bot_space_comment_baselines", {})
+    if not isinstance(baselines, dict):
+        baselines = {}
+        state["bot_space_comment_baselines"] = baselines
+    max_created_at = 0.0
+    for comment in comments:
+        try:
+            max_created_at = max(max_created_at, float(comment.get("created_at", 0) or 0))
+        except Exception:
+            continue
+    baselines[feed_key] = {"at": time.time(), "max_created_at": max_created_at}
+
+
+def _bot_space_comment_is_before_baseline(
+    state: dict[str, Any],
+    feed_key: str,
+    comment: dict[str, Any],
+) -> bool:
+    baselines = state.get("bot_space_comment_baselines")
+    if not isinstance(baselines, dict):
+        return False
+    baseline = baselines.get(feed_key)
+    if not isinstance(baseline, dict):
+        return False
+    try:
+        max_created_at = float(baseline.get("max_created_at", 0) or 0)
+        created_at = float(comment.get("created_at", 0) or 0)
+    except Exception:
+        return False
+    return bool(max_created_at and created_at and created_at < max_created_at)
 
 
 def _profile_evidence_already_recorded(state: dict[str, Any], evidence_key: str) -> bool:
@@ -575,6 +619,7 @@ async def _scan_bot_space_comments(
     max_comments_per_feed: int = 20,
     count_checked_feeds: bool = False,
     allow_third_party_chime_in: bool = True,
+    process_existing_comments: bool = True,
     state: dict[str, Any],
     result: dict[str, Any],
     logger: Any,
@@ -603,12 +648,28 @@ async def _scan_bot_space_comments(
     for feed in checked_feeds:
         feed_key = str(feed.get("feed_key", "") or "")
         comments = _extract_qzone_comments(feed.get("raw") if isinstance(feed.get("raw"), dict) else {})
+        if not process_existing_comments and feed_key and not _bot_space_feed_has_baseline(state, feed_key):
+            for comment in comments[: max(1, min(100, int(max_comments_per_feed or 20)))]:
+                commenter_id = str(comment.get("user_id", "") or "")
+                if not commenter_id or commenter_id == bot_id:
+                    continue
+                comment_key = f"{feed_key}:{comment.get('comment_key') or commenter_id}"
+                _mark_comment_processed(state, comment_key, action="baseline", reason="existing_before_first_scan")
+            _mark_bot_space_feed_baseline(state, feed_key, comments)
+            continue
         for comment in comments[: max(1, min(100, int(max_comments_per_feed or 20)))]:
             commenter_id = str(comment.get("user_id", "") or "")
             if not commenter_id or commenter_id == bot_id:
                 continue
             comment_key = f"{feed_key}:{comment.get('comment_key') or commenter_id}"
             if _comment_already_processed(state, comment_key):
+                continue
+            if (
+                not process_existing_comments
+                and feed_key
+                and _bot_space_comment_is_before_baseline(state, feed_key, comment)
+            ):
+                _mark_comment_processed(state, comment_key, action="baseline", reason="before_feed_baseline")
                 continue
             result["inbound_comments"] = int(result.get("inbound_comments", 0) or 0) + 1
             await _record_qzone_profile_evidence(
@@ -664,6 +725,7 @@ async def _scan_bot_space_comments(
                 feed=feed,
                 bot_id=bot_id,
                 content=reply,
+                reply_to_comment=comment,
             )
             if ok_reply:
                 result["replied"] = int(result.get("replied", 0) or 0) + 1
@@ -828,6 +890,7 @@ async def _scan_bot_outbound_comment_replies(
                     feed=feed,
                     bot_id=bot_id,
                     content=reply_text,
+                    reply_to_comment=comment,
                 )
                 if ok_reply:
                     result["replied"] = int(result.get("replied", 0) or 0) + 1
@@ -1078,6 +1141,7 @@ async def scan_qzone_social_feeds(
                     emotion_state=emotion_state,
                     max_feeds=max_feeds,
                     allow_third_party_chime_in=allow_third_party_chime_in,
+                    process_existing_comments=False,
                     state=state,
                     result=result,
                     logger=logger,
@@ -1170,6 +1234,7 @@ async def scan_qzone_inbound_messages(
                 max_comments_per_feed=max_comments_per_feed,
                 count_checked_feeds=True,
                 allow_third_party_chime_in=allow_third_party_chime_in,
+                process_existing_comments=False,
                 state=state,
                 result=result,
                 logger=logger,
