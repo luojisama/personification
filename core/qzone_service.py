@@ -564,7 +564,7 @@ class QzoneSocialService:
         payload = _parse_qzone_jsonp(resp.text)
         return _qzone_payload_success(payload, resp.text)
 
-    async def _reply_comment_mobile(
+    async def _reply_comment_sub(
         self,
         *,
         feed: dict[str, Any],
@@ -572,6 +572,7 @@ class QzoneSocialService:
         content: str,
         reply_to_comment: dict[str, Any],
     ) -> tuple[bool, str]:
+        """Post a level-2 threaded sub-comment under a parent comment via emotion_cgi_reply_v6."""
         text = _clean_qzone_text(content)
         if not text:
             return False, "回复内容为空"
@@ -579,46 +580,31 @@ class QzoneSocialService:
         target = _qzone_comment_reply_target(reply_to_comment)
         owner = feed_identity["owner"]
         topic_id = feed_identity["topic_id"]
-        feed_id = feed_identity["feed_id"]
         comment_id = target["comment_id"]
         reply_uin = target["user_id"]
         if not owner or not topic_id or not comment_id or not reply_uin:
-            return False, "缺少回复留言所需字段"
+            missing = []
+            if not owner:
+                missing.append("owner")
+            if not topic_id:
+                missing.append("topicId")
+            if not comment_id:
+                missing.append("commentId")
+            if not reply_uin:
+                missing.append("replyUin")
+            self.logger.warning(f"[qzone] 子评论回复缺少字段: {missing}，feed={feed_identity}，target={target}")
+            return False, f"缺少回复留言所需字段: {missing}"
 
-        url = "https://m.qzone.qq.com/cgi-bin/new/add_reply"
-        data = {
+        url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6"
+        data: dict[str, str] = {
             "uin": str(ctx["qq"]),
-            "hostuin": owner,
             "hostUin": owner,
-            "res_uin": owner,
-            "resuin": owner,
             "topicId": topic_id,
-            "topicid": topic_id,
-            "tid": feed_id or topic_id,
-            "res_id": feed_id or topic_id,
-            "resid": feed_id or topic_id,
-            "appid": feed_identity["appid"],
-            "res_type": "2",
-            "resType": "2",
-            "feedsType": "100",
-            "feedstype": "100",
-            "commentId": comment_id,
-            "commentid": comment_id,
-            "comment_id": comment_id,
             "replyId": comment_id,
-            "replyid": comment_id,
-            "reply_id": comment_id,
-            "parentid": comment_id,
             "replyUin": reply_uin,
-            "replyuin": reply_uin,
-            "reply_uin": reply_uin,
-            "touin": reply_uin,
-            "toUin": reply_uin,
-            "targetuin": reply_uin,
-            "targetUin": reply_uin,
             "content": text[:80],
-            "con": text[:80],
-            "msg": text[:80],
+            "private": "0",
+            "paramstr": "1",
             "format": "json",
             "inCharset": "utf-8",
             "outCharset": "utf-8",
@@ -626,30 +612,28 @@ class QzoneSocialService:
             "source": "ic",
             "ref": "feeds",
             "platformid": "52",
-            "private": "0",
-            "paramstr": "1",
-            "qzreferrer": f"https://user.qzone.qq.com/{owner}/311",
+            "qzreferrer": f"https://user.qzone.qq.com/{owner}",
         }
         if target["nickname"]:
-            data.update(
-                {
-                    "replyNick": target["nickname"],
-                    "replynick": target["nickname"],
-                    "reply_nick": target["nickname"],
-                }
-            )
-        headers = _qzone_mobile_headers(ctx, referer_uin=owner)
-        headers["Content-Type"] = "application/x-www-form-urlencoded;charset=UTF-8"
+            data["replyNick"] = target["nickname"]
+        headers = _qzone_headers(ctx, referer_uin=owner)
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        self.logger.debug(
+            f"[qzone] emotion_cgi_reply_v6 topicId={topic_id} replyId={comment_id} replyUin={reply_uin}"
+        )
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, params={"g_tk": str(ctx["g_tk"])}, data=data, headers=headers)
         except Exception as exc:
             return False, f"回复留言失败：{exc}"
         if resp.status_code != 200:
+            self.logger.warning(f"[qzone] emotion_cgi_reply_v6 状态码 {resp.status_code}，响应：{resp.text[:200]}")
             return False, f"回复留言失败，状态码：{resp.status_code}"
+        self.logger.debug(f"[qzone] emotion_cgi_reply_v6 响应：{resp.text[:300]}")
         payload = _parse_qzone_jsonp(resp.text)
         ok, msg = _qzone_payload_success(payload, resp.text)
         if not ok:
+            self.logger.warning(f"[qzone] emotion_cgi_reply_v6 失败：{msg}，完整响应：{resp.text[:300]}")
             return False, f"回复留言失败：{msg}"
         return True, "ok"
 
@@ -672,7 +656,7 @@ class QzoneSocialService:
         if not owner or not topic_id:
             return False, "动态缺少评论所需字段"
         if isinstance(reply_to_comment, dict):
-            ok_reply, reply_msg = await self._reply_comment_mobile(
+            ok_reply, reply_msg = await self._reply_comment_sub(
                 feed=feed,
                 ctx=ctx,
                 content=text,
@@ -680,7 +664,7 @@ class QzoneSocialService:
             )
             if ok_reply:
                 return True, reply_msg
-            self.logger.warning(f"[qzone] 移动端回复失败（{reply_msg}），降级到 PC 端带目标评论")
+            self.logger.warning(f"[qzone] 子评论回复失败（{reply_msg}），降级到普通评论")
         url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
         send_text = _format_qzone_reply_content(text, reply_to_comment)
         data = {
