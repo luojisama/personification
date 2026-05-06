@@ -25,6 +25,7 @@ from ...core.context_policy import (
     has_silence_control_marker,
     strip_response_control_markers,
 )
+from ...flows.yaml_parser import parse_yaml_response
 from ...core.prompt_hooks import HookContext, get_hook_registry
 from ...core.group_relations import summarize_group_relationships
 from ...core.group_context import render_group_context_structured
@@ -1428,6 +1429,20 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                 reply_content = recovered_reply
             else:
                 return
+        # 兼容 yaml_pipeline prompt 的 <output><message>...</message></output> 思维链结构：
+        # 若 LLM 把回复包在 <message> 里（多条），用 \n\n 串接保留分段，下游 _split_segments 会再拆。
+        try:
+            parsed_yaml = parse_yaml_response(reply_content)
+        except Exception:
+            parsed_yaml = {"messages": []}
+        if parsed_yaml.get("messages"):
+            joined = "\n\n".join(
+                str(item.get("text", "")).strip()
+                for item in parsed_yaml["messages"]
+                if str(item.get("text", "")).strip()
+            )
+            if joined:
+                reply_content = joined
         reply_content = strip_response_control_markers(reply_content)
         if not reply_content and not _IMAGE_B64_RE.search(str(reply_content or "")):
             return

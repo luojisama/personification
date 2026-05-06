@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 
 from ..agent.inner_state import DEFAULT_STATE, load_inner_state
+from ..core.context_policy import strip_response_control_markers
 from ..core.emotion_state import (
     describe_group_emotion_memory,
     describe_user_emotion_memory,
@@ -478,6 +479,11 @@ def _format_candidates(candidates: Iterable[dict]) -> str:
 
 def _parse_decision(result: str) -> tuple[str, str, str]:
     text = (result or "").strip()
+    # 先把 LLM 可能加的思维链 XML 剥掉，让 SEND|/SKIP| 协议在裸文本上识别。
+    inner = _strip_xml_message_content(text)
+    if inner and ("SEND|" in inner or "SKIP|" in inner):
+        text = inner
+    text = strip_response_control_markers(text)
     if text.startswith("SEND|"):
         _, user_id, message = (text.split("|", 2) + ["", ""])[:3]
         return "SEND", user_id.strip(), message.strip()

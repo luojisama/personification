@@ -8,8 +8,15 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from ..agent.inner_state import load_inner_state, update_state_from_diary
+from ..core.context_policy import strip_response_control_markers
 from ..core.emotion_state import describe_group_emotion_memory, load_emotion_state
 from ..skills.skillpacks.image_gen.scripts.impl import generate_image as generate_codex_image
+
+
+_FLOW_OUTPUT_GUARD = (
+    "\n\n本轮你不在群聊中扮演角色，按这条用户消息里要求的纯文本/JSON 输出，"
+    "不要使用 <status>/<think>/<action>/<output>/<message> 等思维链 XML 包装。"
+)
 
 
 def filter_sensitive_content(text: str) -> str:
@@ -181,14 +188,25 @@ async def _generate_once(
     *,
     call_ai_api: Callable[..., Awaitable[Optional[str]]],
 ) -> str:
+    if isinstance(system_prompt, str):
+        system_text = system_prompt + _FLOW_OUTPUT_GUARD
+    elif isinstance(system_prompt, dict):
+        copied = dict(system_prompt)
+        sys_text = str(copied.get("system", "") or "")
+        copied["system"] = sys_text + _FLOW_OUTPUT_GUARD
+        system_text = copied
+    else:
+        system_text = system_prompt
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": system_text},
         {"role": "user", "content": user_prompt},
     ]
     result = await call_ai_api(messages)
     if not result:
         return ""
-    return clean_generated_text(result)
+    # 兜底：若 LLM 仍输出思维链 XML，剥除标签再走 clean_generated_text
+    stripped = strip_response_control_markers(result)
+    return clean_generated_text(stripped or result)
 
 
 def _schedule_diary_state_update(

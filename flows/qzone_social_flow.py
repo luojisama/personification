@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
 from ..agent.inner_state import DEFAULT_STATE, load_inner_state
+from ..core.context_policy import strip_response_control_markers
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_user_emotion_memory, load_emotion_state
 from ..core.image_input import summarize_images_with_vision
@@ -32,7 +33,9 @@ def _extract_system_prompt(prompt_data: Any) -> str:
 
 
 def _extract_json_object(raw: Any) -> dict[str, Any] | None:
-    text = clean_generated_text(str(raw or "")).strip()
+    # 兜底：先剥掉 yaml prompt 的思维链 XML 包装，避免 JSON 被 <output><message>...</message></output> 吞掉
+    text = strip_response_control_markers(str(raw or ""))
+    text = clean_generated_text(text).strip()
     if not text:
         return None
     if text.startswith("```"):

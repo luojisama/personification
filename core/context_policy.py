@@ -47,14 +47,27 @@ def has_silence_control_marker(text: Any) -> bool:
 
 def strip_response_control_markers(text: Any) -> str:
     cleaned = str(text or "")
+    # 1) 完整闭合的思维链块，连同内容一并删除
     cleaned = re.sub(
         r"<\s*(?:think|status|action)\b[^>]*>.*?</\s*(?:think|status|action)\s*>",
         "",
         cleaned,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    cleaned = re.sub(r"</?\s*(?:output|message)\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"</?\s*(?:think|status|action)\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    # 2) 未闭合的 think/status/action：从开标签吃到下一个标签或文本结尾，避免内部内容漏出
+    cleaned = re.sub(
+        r"<\s*(?:think|status|action)\b[^>]*>[\s\S]*?(?=<\s*[A-Za-z/]|\Z)",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    # 3) 单独的 output/message/think/status/action 残留标签
+    cleaned = re.sub(
+        r"</?\s*(?:output|message|think|status|action)\b[^>]*>",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     for marker in _SILENCE_MARKERS:
         cleaned = cleaned.replace(marker, "")
     return cleaned.strip()
