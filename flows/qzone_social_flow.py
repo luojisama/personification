@@ -607,9 +607,6 @@ async def _scan_bot_space_comments(
             commenter_id = str(comment.get("user_id", "") or "")
             if not commenter_id or commenter_id == bot_id:
                 continue
-            # 自动回复自己的空间留言仍限制为 bot 好友；开放用户只允许通过测试命令主动探测。
-            if commenter_id not in friend_profiles:
-                continue
             comment_key = f"{feed_key}:{comment.get('comment_key') or commenter_id}"
             if _comment_already_processed(state, comment_key):
                 continue
@@ -1129,12 +1126,6 @@ async def scan_qzone_inbound_messages(
         }
         try:
             friend_profiles = await _get_friend_profiles(bot, logger)
-            if not friend_profiles:
-                result["ok"] = False
-                result["skipped"] = True
-                result["last_error"] = "no_friend_profiles"
-                _save_inbound_state(state, result)
-                return result
 
             proactive_state = load_proactive_state() or {}
             persona_snippet_max_chars = int(

@@ -38,6 +38,13 @@ class _Bot:
     self_id = "99999"
 
 
+class _NoFriendBot:
+    self_id = "99999"
+
+    async def get_friend_list(self):  # noqa: ANN201
+        return []
+
+
 class _InboundQzoneService:
     def __init__(self) -> None:
         self.replies: list[str] = []
@@ -168,6 +175,28 @@ def test_qzone_comment_extraction_normalizes_user_and_content() -> None:
     assert comments[0]["content"] == "看到啦 挺好"
 
 
+def test_qzone_comment_extraction_accepts_runtime_alias_fields() -> None:
+    comments = qzone_service._extract_qzone_comments(
+        {
+            "commentlist": [
+                {
+                    "useruin": "22222",
+                    "postername": "留言者",
+                    "html": "看到啦<br>挺好",
+                    "createTime": 1710000010,
+                    "commentId": "c1",
+                }
+            ]
+        }
+    )
+
+    assert len(comments) == 1
+    assert comments[0]["comment_key"].startswith("22222:c1")
+    assert comments[0]["nickname"] == "留言者"
+    assert comments[0]["content"] == "看到啦 挺好"
+    assert comments[0]["created_at"] == 1710000010
+
+
 def test_qzone_test_target_can_use_open_user_without_friend_profile() -> None:
     candidates = qzone_flow._collect_candidates(
         friend_profiles={},
@@ -292,6 +321,48 @@ def test_qzone_inbound_comment_replies_once_and_records_profile() -> None:
     assert result["replied"] == 1
     assert len(store.records) == 1
     assert "[QQ空间留言]" in store.records[0][1]
+
+
+def test_qzone_inbound_comment_does_not_require_friend_profile() -> None:
+    store = _RecordingPersonaStore()
+    service = _InboundQzoneService()
+
+    async def _call_ai(_messages):  # noqa: ANN001
+        return '{"action":"reply","reply":"刚看见这条","reason":"自然接话"}'
+
+    original_normalize_state = qzone_flow._normalize_state
+    original_save_inbound_state = qzone_flow._save_inbound_state
+    qzone_flow._normalize_state = lambda _now: {}
+    qzone_flow._save_inbound_state = lambda _state, _result: None
+    try:
+        result = asyncio.run(
+            qzone_flow.scan_qzone_inbound_messages(
+                bot=_NoFriendBot(),
+                plugin_config=SimpleNamespace(
+                    personification_persona_snippet_max_chars=80,
+                    personification_qzone_inbound_max_feeds_per_scan=20,
+                    personification_qzone_inbound_max_comments_per_feed=20,
+                    personification_qzone_third_party_chime_in_enabled=True,
+                    personification_qzone_outbound_reply_enabled=False,
+                ),
+                qzone_social_service=service,
+                load_prompt=lambda: "你是绪山真寻。",
+                call_ai_api=_call_ai,
+                load_proactive_state=lambda: {},
+                get_now=lambda: datetime.fromtimestamp(1710000100),
+                logger=_Logger(),
+                persona_store=store,
+            )
+        )
+    finally:
+        qzone_flow._normalize_state = original_normalize_state
+        qzone_flow._save_inbound_state = original_save_inbound_state
+
+    assert result["ok"] is True
+    assert result.get("skipped") is not True
+    assert result["inbound_comments"] == 1
+    assert result["replied"] == 1
+    assert service.replies == ["刚看见这条"]
 
 
 def test_qzone_outbound_reply_interval_gate_uses_config_minutes() -> None:

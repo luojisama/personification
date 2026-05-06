@@ -219,13 +219,37 @@ def _extract_qzone_comments(feed: dict[str, Any]) -> list[dict[str, Any]]:
         user_id = str(
             item.get("uin")
             or item.get("user_id")
+            or item.get("useruin")
+            or item.get("user_uin")
+            or item.get("commentuin")
+            or item.get("comment_uin")
+            or item.get("replyuin")
+            or item.get("reply_uin")
             or item.get("posterid")
             or item.get("poster_id")
+            or item.get("poster_uin")
+            or item.get("owner")
             or user_obj.get("uin")
             or user_obj.get("id")
+            or user_obj.get("user_id")
+            or user_obj.get("useruin")
             or ""
         ).strip()
-        content = _first_text(item, ("content", "con", "text", "msg", "comment"))
+        content = _first_text(
+            item,
+            (
+                "content",
+                "con",
+                "text",
+                "msg",
+                "comment",
+                "html",
+                "ubbContent",
+                "ubb_content",
+                "richContent",
+                "rich_content",
+            ),
+        )
         if not user_id or not content:
             continue
         comment_id = str(
@@ -233,13 +257,25 @@ def _extract_qzone_comments(feed: dict[str, Any]) -> list[dict[str, Any]]:
             or item.get("id")
             or item.get("commentid")
             or item.get("comment_id")
+            or item.get("commentId")
             or item.get("replyid")
+            or item.get("reply_id")
+            or item.get("replyId")
             or ""
         ).strip()
-        nickname = _first_text(item, ("nickname", "nick", "name", "username")) or _clean_qzone_text(
+        nickname = _first_text(item, ("nickname", "nick", "name", "username", "postername", "poster_name")) or _clean_qzone_text(
             user_obj.get("nickname") or user_obj.get("name") or user_obj.get("nick") or ""
         )
-        created_at = item.get("created_time") or item.get("abstime") or item.get("time") or item.get("create_time") or 0
+        created_at = (
+            item.get("created_time")
+            or item.get("abstime")
+            or item.get("time")
+            or item.get("create_time")
+            or item.get("createTime")
+            or item.get("pubtime")
+            or item.get("pub_time")
+            or 0
+        )
         try:
             created_at_int = int(float(created_at or 0))
         except Exception:
