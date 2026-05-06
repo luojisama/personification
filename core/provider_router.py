@@ -322,10 +322,24 @@ def get_provider_candidates(plugin_config: Any, logger: Any) -> List[Dict[str, A
     if len(available) <= 1:
         return available
 
+    top_priority = min(_to_int(provider.get("priority", 0), 0) for provider in available)
+    top_tier = [
+        provider
+        for provider in available
+        if _to_int(provider.get("priority", 0), 0) == top_priority
+    ]
+    lower_tiers = [
+        provider
+        for provider in available
+        if _to_int(provider.get("priority", 0), 0) != top_priority
+    ]
+    if len(top_tier) <= 1:
+        return top_tier + lower_tiers
+
     with _PROVIDER_STATE_LOCK:
-        cursor = PROVIDER_ROTATION_CURSOR % len(available)
-        PROVIDER_ROTATION_CURSOR = (PROVIDER_ROTATION_CURSOR + 1) % len(available)
-    return available[cursor:] + available[:cursor]
+        cursor = PROVIDER_ROTATION_CURSOR % len(top_tier)
+        PROVIDER_ROTATION_CURSOR = (PROVIDER_ROTATION_CURSOR + 1) % len(top_tier)
+    return top_tier[cursor:] + top_tier[:cursor] + lower_tiers
 
 
 def _mark_provider_success(provider_name: str) -> None:

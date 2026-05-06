@@ -116,6 +116,44 @@ def test_provider_router_accepts_cli_pool_routes_without_api_key() -> None:
     assert providers[0]["project"] == "cloud-project"
 
 
+def test_provider_candidates_preserve_priority_over_rotation() -> None:
+    cfg = _DummyConfig(
+        personification_api_pools=(
+            '[{"name":"gemini_cli_primary","api_type":"gemini_cli","model":"gemini-3-flash-preview",'
+            '"auth_path":"~/.gemini/oauth_creds.json","priority":1},'
+            '{"name":"codex_primary","api_type":"openai_codex","model":"gpt-5.4-mini",'
+            '"auth_path":"~/.codex/auth.json","priority":2}]'
+        )
+    )
+    provider_router.PROVIDER_FAILURE_STATE.clear()
+    provider_router.PROVIDER_ROTATION_CURSOR = 1
+
+    first = provider_router.get_provider_candidates(cfg, _Logger())
+    second = provider_router.get_provider_candidates(cfg, _Logger())
+
+    assert [item["name"] for item in first] == ["gemini_cli_primary", "codex_primary"]
+    assert [item["name"] for item in second] == ["gemini_cli_primary", "codex_primary"]
+
+
+def test_provider_candidates_rotate_only_same_priority_tier() -> None:
+    cfg = _DummyConfig(
+        personification_api_pools=(
+            '[{"name":"gemini_a","api_type":"gemini_cli","model":"gemini-3-flash-preview",'
+            '"auth_path":"~/.gemini/oauth_creds.json","priority":1},'
+            '{"name":"gemini_b","api_type":"gemini_cli","model":"gemini-3-flash-preview",'
+            '"auth_path":"~/.gemini/oauth_creds.json","priority":1},'
+            '{"name":"codex_fallback","api_type":"openai_codex","model":"gpt-5.4-mini",'
+            '"auth_path":"~/.codex/auth.json","priority":2}]'
+        )
+    )
+    provider_router.PROVIDER_FAILURE_STATE.clear()
+    provider_router.PROVIDER_ROTATION_CURSOR = 1
+
+    candidates = provider_router.get_provider_candidates(cfg, _Logger())
+
+    assert [item["name"] for item in candidates] == ["gemini_b", "gemini_a", "codex_fallback"]
+
+
 def test_routed_config_proxy_passes_cli_auth_fields_to_tool_caller() -> None:
     base = _DummyConfig()
     gemini_proxy = ai_routes._ProviderConfigProxy(
