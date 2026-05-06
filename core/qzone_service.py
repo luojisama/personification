@@ -595,10 +595,12 @@ class QzoneSocialService:
             self.logger.warning(f"[qzone] 子评论回复缺少字段: {missing}，feed={feed_identity}，target={target}")
             return False, f"缺少回复留言所需字段: {missing}"
 
+        appid = feed_identity["appid"] or "311"
         url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6"
         data: dict[str, str] = {
             "uin": str(ctx["qq"]),
             "hostUin": owner,
+            "appid": appid,
             "topicId": topic_id,
             "replyId": comment_id,
             "replyUin": reply_uin,
@@ -616,10 +618,13 @@ class QzoneSocialService:
         }
         if target["nickname"]:
             data["replyNick"] = target["nickname"]
+        # Use full cookie string for complete session auth on this endpoint
         headers = _qzone_headers(ctx, referer_uin=owner)
+        headers["Cookie"] = str(ctx.get("cookie", "") or ctx.get("formatted_cookie", ""))
         headers["Content-Type"] = "application/x-www-form-urlencoded"
-        self.logger.debug(
-            f"[qzone] emotion_cgi_reply_v6 topicId={topic_id} replyId={comment_id} replyUin={reply_uin}"
+        self.logger.info(
+            f"[qzone] emotion_cgi_reply_v6 owner={owner} topicId={topic_id} "
+            f"appid={appid} replyId={comment_id} replyUin={reply_uin}"
         )
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -627,13 +632,15 @@ class QzoneSocialService:
         except Exception as exc:
             return False, f"回复留言失败：{exc}"
         if resp.status_code != 200:
-            self.logger.warning(f"[qzone] emotion_cgi_reply_v6 状态码 {resp.status_code}，响应：{resp.text[:200]}")
+            self.logger.warning(
+                f"[qzone] emotion_cgi_reply_v6 状态码 {resp.status_code}，响应：{resp.text[:300]}"
+            )
             return False, f"回复留言失败，状态码：{resp.status_code}"
-        self.logger.debug(f"[qzone] emotion_cgi_reply_v6 响应：{resp.text[:300]}")
+        self.logger.info(f"[qzone] emotion_cgi_reply_v6 原始响应：{resp.text[:400]}")
         payload = _parse_qzone_jsonp(resp.text)
         ok, msg = _qzone_payload_success(payload, resp.text)
         if not ok:
-            self.logger.warning(f"[qzone] emotion_cgi_reply_v6 失败：{msg}，完整响应：{resp.text[:300]}")
+            self.logger.warning(f"[qzone] emotion_cgi_reply_v6 失败：{msg}，完整响应：{resp.text[:400]}")
             return False, f"回复留言失败：{msg}"
         return True, "ok"
 
