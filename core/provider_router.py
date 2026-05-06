@@ -8,6 +8,8 @@ from .message_parts import normalize_message_parts
 from .visual_capabilities import error_indicates_vision_unavailable, heuristic_supports_vision
 from ..skills.skillpacks.tool_caller.scripts.impl import (
     AnthropicToolCaller,
+    ClaudeCodeToolCaller,
+    GeminiCliToolCaller,
     GeminiToolCaller,
     OpenAICodexToolCaller,
     OpenAIToolCaller,
@@ -320,6 +322,21 @@ def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
             auth_path=str(provider.get("auth_path", "") or "").strip(),
             timeout=_provider_timeout(provider),
         )
+    if provider["api_type"] == "gemini_cli":
+        return GeminiCliToolCaller(
+            model=provider["model"] or "gemini-3.1-pro-preview",
+            auth_path=str(provider.get("auth_path", "") or "").strip(),
+            project=str(provider.get("project", "") or "").strip(),
+            thinking_mode=_get_thinking_mode(plugin_config),
+            timeout=_provider_timeout(provider),
+        )
+    if provider["api_type"] == "claude_code":
+        return ClaudeCodeToolCaller(
+            model=provider["model"] or "claude-opus-4-7",
+            auth_path=str(provider.get("auth_path", "") or "").strip(),
+            thinking_mode=_get_thinking_mode(plugin_config),
+            timeout=_provider_timeout(provider),
+        )
 
     thinking_mode = _get_thinking_mode(plugin_config)
     supports_reasoning_raw = provider.get("supports_reasoning")
@@ -349,7 +366,14 @@ def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
 def _should_use_builtin_search(provider: Dict[str, Any], use_builtin_search: bool) -> bool:
     if not use_builtin_search:
         return False
-    if provider["api_type"] not in {"gemini", "anthropic", "openai", "openai_codex"}:
+    if provider["api_type"] not in {
+        "gemini",
+        "gemini_cli",
+        "anthropic",
+        "claude_code",
+        "openai",
+        "openai_codex",
+    }:
         return False
     return bool(provider.get("supports_native_search", True))
 

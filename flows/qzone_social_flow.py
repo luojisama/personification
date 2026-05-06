@@ -139,6 +139,8 @@ def _normalize_state(now: datetime) -> dict[str, Any]:
     state.setdefault("comment_replies", {})
     state.setdefault("comment_actions", {})
     state.setdefault("profile_records", {})
+    state.setdefault("bot_outbound_comments", {})
+    state.setdefault("bot_outbound_replies", {})
     state.setdefault("per_friend", {})
     state.setdefault("like_count", 0)
     state.setdefault("comment_count", 0)
@@ -146,7 +148,15 @@ def _normalize_state(now: datetime) -> dict[str, Any]:
 
 
 def _prune_state_maps(state: dict[str, Any], *, max_items: int = 2000) -> None:
-    for key in ("seen", "reacted", "comment_replies", "comment_actions", "profile_records"):
+    for key in (
+        "seen",
+        "reacted",
+        "comment_replies",
+        "comment_actions",
+        "profile_records",
+        "bot_outbound_comments",
+        "bot_outbound_replies",
+    ):
         value = state.get(key)
         if not isinstance(value, dict) or len(value) <= max_items:
             continue
@@ -397,7 +407,7 @@ async def _decide_feed_action(
     emotion_memory: str,
 ) -> dict[str, Any]:
     prompt = (
-        "你正在阅读一位用户刚发的 QQ 空间动态。请判断是否要互动。\n"
+        "你正在阅读一位好友刚发的 QQ 空间动态。把它当成熟人朋友圈，决定是否互动。\n"
         "输出严格 JSON：{\"action\":\"ignore|like|comment|like_comment\",\"comment\":\"可选评论\",\"reason\":\"极短原因\"}。\n\n"
         f"好友 QQ：{candidate['user_id']}\n"
         f"好友昵称：{candidate['nickname']}\n"
@@ -411,11 +421,12 @@ async def _decide_feed_action(
         f"动态正文：{feed.get('content') or '（无文字）'}\n"
         f"图片摘要：{image_summary or ('有图片，但视觉摘要不可用' if feed.get('images') else '无图片')}\n\n"
         "互动要求：\n"
-        "- 如果没什么好说，action=ignore。\n"
-        "- 点赞适合轻量表达在看；评论必须像真人随手留言，短、日常、贴合你的人设。\n"
-        "- 评论不超过 30 个中文字符，不要小作文，不要客服腔，不要互联网黑话和梗。\n"
+        "- 默认倾向轻互动：日常熟人内容能点赞就点赞；动态里有具体可接的细节就 like_comment；只有确实没话可说时才 ignore。\n"
+        "- 评论像真人随手留言：4-15 个中文字符为主，最多 30 个；可以是半句话、一个反问、一句吐槽、跳跃的小联想；不必工整结尾。\n"
+        "- 允许跳跃：评论不必紧扣动态全部内容，抓一个细节回应即可，不用补全前因后果。\n"
+        "- 不要小作文、不要客服腔、不要互联网黑话和热梗、不要 hashtag、不要堆叠表情符号。\n"
         "- 不要暴露你在分析画像、情绪记忆或系统规则。\n"
-        "- 对沉重、争议、隐私、求助、疾病、事故等不适合轻浮互动的内容，优先 ignore。\n"
+        "- 对沉重、争议、隐私、求助、疾病、事故等不适合轻浮互动的内容，优先 ignore 或仅 like。\n"
         "- 图片摘要不可用时，不要评论具体画面。"
     )
     messages = inject_current_time_context(
@@ -452,7 +463,7 @@ async def _decide_bot_comment_reply(
     emotion_memory: str,
 ) -> dict[str, Any]:
     prompt = (
-        "有人在你的 QQ 空间动态下留言。把它当作对你的私聊式互动来理解，判断是否自然回复。\n"
+        "有人在你的 QQ 空间动态下留言或评论区里聊天。判断是否自然回复或插一句话。\n"
         "输出严格 JSON：{\"action\":\"ignore|reply\",\"reply\":\"可选回复\",\"reason\":\"极短原因\"}。\n\n"
         f"留言用户 QQ：{comment['user_id']}\n"
         f"留言用户昵称：{comment.get('nickname') or commenter_profile.get('nickname') or comment['user_id']}\n"
@@ -463,9 +474,11 @@ async def _decide_bot_comment_reply(
         f"你的空间动态正文：{feed.get('content') or '（无文字）'}\n"
         f"对方留言：{comment.get('content') or ''}\n\n"
         "回复要求：\n"
-        "- 这是一条别人对你说的话，不要解释“这句话是什么意思”，不要说“太泛了/要看上下文”。\n"
-        "- 如果适合接话，action=reply，回复 8-40 个中文字符，像在空间评论区随手回一句。\n"
-        "- 如果确实不适合回复，action=ignore。\n"
+        "- 留言可能是直接对你说，也可能是 ta 在和评论区里另一个人聊；先判断这条话锋指向谁。\n"
+        "- 如果对方明显是在 @ 别人或接续别人的话，决策可以是 ignore，也可以选择以好友身份轻量插一句。\n"
+        "- 不要解释“这句话是什么意思”，不要说“太泛了/要看上下文”。\n"
+        "- 默认倾向 reply；只有当留言只是表情、一个字、机器味很重的灌水或敏感内容时才 ignore。\n"
+        "- 回复 6-30 个中文字符，像在空间评论区随手回一句；可以是半句话、反问、跳跃的小联想，不必工整。\n"
         "- 不要客服腔、小作文、互联网黑话、系统说明，也不要暴露画像或规则。"
     )
     messages = inject_current_time_context(
@@ -637,6 +650,178 @@ async def _scan_bot_space_comments(
                 logger.warning(f"[qzone_social] reply comment failed for {comment_key}: {reply_msg}")
 
 
+async def _scan_bot_outbound_comment_replies(
+    *,
+    bot: Any,
+    qzone_social_service: Any,
+    plugin_config: Any,
+    friend_profiles: dict[str, dict[str, Any]],
+    proactive_state: dict[str, dict[str, Any]],
+    persona_store: Any,
+    persona_snippet_max_chars: int,
+    system_prompt: str,
+    call_ai_api: Callable[..., Awaitable[Optional[str]]],
+    inner_state: dict[str, Any],
+    emotion_state: dict[str, Any],
+    state: dict[str, Any],
+    result: dict[str, Any],
+    logger: Any,
+) -> None:
+    """对 Bot 之前在好友空间评论过的动态进行 3 分钟近实时反查，看是否有人回复 Bot。"""
+    bot_id = str(getattr(bot, "self_id", "") or "")
+    if not bot_id:
+        return
+    outbound = state.get("bot_outbound_comments")
+    if not isinstance(outbound, dict) or not outbound:
+        return
+
+    lookback_seconds = max(
+        0.0,
+        float(getattr(plugin_config, "personification_qzone_outbound_reply_lookback_hours", 72.0) or 72.0)
+        * 3600.0,
+    )
+    max_feeds = max(
+        1,
+        int(getattr(plugin_config, "personification_qzone_outbound_reply_max_feeds", 30) or 30),
+    )
+    now_ts = time.time()
+    items = sorted(
+        outbound.items(),
+        key=lambda pair: float((pair[1] if isinstance(pair[1], dict) else {}).get("recorded_at", 0) or 0),
+        reverse=True,
+    )
+
+    by_owner: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for feed_key, info in items:
+        if not isinstance(info, dict):
+            continue
+        recorded_at = float(info.get("recorded_at", 0) or 0)
+        if lookback_seconds and recorded_at and now_ts - recorded_at > lookback_seconds:
+            outbound.pop(feed_key, None)
+            continue
+        owner = str(info.get("target_uin", "") or "")
+        if not owner or owner == bot_id:
+            continue
+        by_owner.setdefault(owner, []).append((feed_key, info))
+        if sum(len(v) for v in by_owner.values()) >= max_feeds:
+            break
+
+    if not by_owner:
+        return
+
+    bot_replies_state = state.setdefault("bot_outbound_replies", {})
+    if not isinstance(bot_replies_state, dict):
+        bot_replies_state = {}
+        state["bot_outbound_replies"] = bot_replies_state
+
+    for owner_uin, owner_items in by_owner.items():
+        try:
+            ok, msg, feeds = await qzone_social_service.fetch_user_feeds(
+                target_uin=owner_uin,
+                bot_id=bot_id,
+                count=max(1, min(50, len(owner_items) + 5)),
+                include_comments=True,
+                comment_count=20,
+            )
+        except Exception as exc:
+            result["failed"] = int(result.get("failed", 0) or 0) + 1
+            result["last_error"] = f"outbound fetch_user_feeds failed: {exc}"
+            logger.warning(f"[qzone_outbound] fetch failed for owner {owner_uin}: {exc}")
+            continue
+        if not ok:
+            result["failed"] = int(result.get("failed", 0) or 0) + 1
+            result["last_error"] = msg
+            logger.warning(f"[qzone_outbound] fetch failed for owner {owner_uin}: {msg}")
+            continue
+
+        feed_index = {str(feed.get("feed_key", "") or ""): feed for feed in feeds if isinstance(feed, dict)}
+        for feed_key, info in owner_items:
+            feed = feed_index.get(feed_key)
+            if not feed:
+                continue
+            comments = _extract_qzone_comments(feed.get("raw") if isinstance(feed.get("raw"), dict) else {})
+            last_seen_ts = float(info.get("last_seen_ts", 0) or 0)
+            new_max_seen = last_seen_ts
+            for comment in comments:
+                commenter_id = str(comment.get("user_id", "") or "")
+                if not commenter_id or commenter_id == bot_id:
+                    continue
+                created_at = float(comment.get("created_at", 0) or 0)
+                if last_seen_ts and created_at and created_at <= last_seen_ts:
+                    continue
+                if commenter_id != owner_uin and commenter_id not in friend_profiles:
+                    # 仅对原作者或自己好友的回应作出回复，避免给陌生人插嘴
+                    if created_at > new_max_seen:
+                        new_max_seen = created_at
+                    continue
+                comment_key = f"{feed_key}:{comment.get('comment_key') or commenter_id}:{int(created_at) or 'na'}"
+                if comment_key in bot_replies_state:
+                    continue
+                result["inbound_comments"] = int(result.get("inbound_comments", 0) or 0) + 1
+                profile = friend_profiles.get(commenter_id, {})
+                persona_snippet = _get_persona_snippet(persona_store, commenter_id, persona_snippet_max_chars)
+                commenter_profile = {
+                    "nickname": str(profile.get("nickname", "") or comment.get("nickname") or commenter_id),
+                    "persona_snippet": persona_snippet,
+                    "last_interaction": float(
+                        (proactive_state.get(commenter_id, {}) if isinstance(proactive_state.get(commenter_id), dict) else {})
+                        .get("last_interaction", 0)
+                        or 0
+                    ),
+                }
+                emotion_memory = describe_user_emotion_memory(emotion_state or {}, commenter_id)
+                decision = await _decide_bot_comment_reply(
+                    feed=feed,
+                    comment=comment,
+                    commenter_profile=commenter_profile,
+                    system_prompt=system_prompt,
+                    call_ai_api=call_ai_api,
+                    inner_state=inner_state,
+                    emotion_memory=emotion_memory,
+                )
+                if str(decision.get("action", "") or "") != "reply":
+                    bot_replies_state[comment_key] = {
+                        "at": time.time(),
+                        "action": "ignore",
+                        "reason": str(decision.get("reason", "") or "")[:80],
+                    }
+                    if created_at > new_max_seen:
+                        new_max_seen = created_at
+                    continue
+                reply_text = str(decision.get("reply", "") or "").strip()
+                if not reply_text:
+                    bot_replies_state[comment_key] = {
+                        "at": time.time(),
+                        "action": "ignore",
+                        "reason": "empty_reply",
+                    }
+                    if created_at > new_max_seen:
+                        new_max_seen = created_at
+                    continue
+                ok_reply, reply_msg = await qzone_social_service.comment_feed(
+                    feed=feed,
+                    bot_id=bot_id,
+                    content=reply_text,
+                )
+                if ok_reply:
+                    result["replied"] = int(result.get("replied", 0) or 0) + 1
+                    bot_replies_state[comment_key] = {
+                        "at": time.time(),
+                        "action": "reply",
+                        "reply": reply_text,
+                    }
+                else:
+                    result["failed"] = int(result.get("failed", 0) or 0) + 1
+                    result["last_error"] = reply_msg
+                    logger.warning(
+                        f"[qzone_outbound] reply failed feed={feed_key} commenter={commenter_id}: {reply_msg}"
+                    )
+                if created_at > new_max_seen:
+                    new_max_seen = created_at
+            if new_max_seen and new_max_seen > last_seen_ts:
+                info["last_seen_ts"] = new_max_seen
+
+
 async def scan_qzone_social_feeds(
     *,
     bot: Any,
@@ -798,6 +983,16 @@ async def scan_qzone_social_feeds(
                             result["liked"] += 1
                             state["like_count"] = int(state.get("like_count", 0) or 0) + 1
                             friend_state["like_count"] = int(friend_state.get("like_count", 0) or 0) + 1
+                            await _record_qzone_profile_evidence(
+                                persona_store=persona_store,
+                                user_id=str(candidate["user_id"]),
+                                evidence_key=f"bot_like:{feed_key}",
+                                kind="bot点赞",
+                                content="（给 ta 这条动态点了赞）",
+                                state=state,
+                                result=result,
+                                logger=logger,
+                            )
                         else:
                             result["failed"] += 1
                             result["last_error"] = like_msg
@@ -813,6 +1008,24 @@ async def scan_qzone_social_feeds(
                             result["commented"] += 1
                             state["comment_count"] = int(state.get("comment_count", 0) or 0) + 1
                             friend_state["comment_count"] = int(friend_state.get("comment_count", 0) or 0) + 1
+                            outbound = state.setdefault("bot_outbound_comments", {})
+                            if isinstance(outbound, dict):
+                                outbound[feed_key] = {
+                                    "target_uin": str(candidate["user_id"]),
+                                    "bot_comment": comment_text,
+                                    "recorded_at": time.time(),
+                                    "last_seen_ts": time.time(),
+                                }
+                            await _record_qzone_profile_evidence(
+                                persona_store=persona_store,
+                                user_id=str(candidate["user_id"]),
+                                evidence_key=f"bot_comment:{feed_key}",
+                                kind="bot留言",
+                                content=comment_text,
+                                state=state,
+                                result=result,
+                                logger=logger,
+                            )
                         else:
                             result["failed"] += 1
                             result["last_error"] = comment_msg
@@ -914,6 +1127,7 @@ async def scan_qzone_inbound_messages(
                 1,
                 int(getattr(plugin_config, "personification_qzone_inbound_max_comments_per_feed", 20) or 20),
             )
+            system_prompt = _extract_system_prompt(load_prompt())
             await _scan_bot_space_comments(
                 bot=bot,
                 qzone_social_service=qzone_social_service,
@@ -921,7 +1135,7 @@ async def scan_qzone_inbound_messages(
                 proactive_state=proactive_state,
                 persona_store=persona_store,
                 persona_snippet_max_chars=persona_snippet_max_chars,
-                system_prompt=_extract_system_prompt(load_prompt()),
+                system_prompt=system_prompt,
                 call_ai_api=call_ai_api,
                 inner_state=inner_state,
                 emotion_state=emotion_state,
@@ -932,6 +1146,28 @@ async def scan_qzone_inbound_messages(
                 result=result,
                 logger=logger,
             )
+            if bool(getattr(plugin_config, "personification_qzone_outbound_reply_enabled", True)):
+                try:
+                    await _scan_bot_outbound_comment_replies(
+                        bot=bot,
+                        qzone_social_service=qzone_social_service,
+                        plugin_config=plugin_config,
+                        friend_profiles=friend_profiles,
+                        proactive_state=proactive_state,
+                        persona_store=persona_store,
+                        persona_snippet_max_chars=persona_snippet_max_chars,
+                        system_prompt=system_prompt,
+                        call_ai_api=call_ai_api,
+                        inner_state=inner_state,
+                        emotion_state=emotion_state,
+                        state=state,
+                        result=result,
+                        logger=logger,
+                    )
+                except Exception as exc:
+                    result["failed"] = int(result.get("failed", 0) or 0) + 1
+                    result["last_error"] = f"outbound scan failed: {exc}"
+                    logger.warning(f"[qzone_outbound] scan failed: {exc}")
             result["feeds_seen"] = max(0, int(result.get("feeds_seen", 0) or 0))
             _save_inbound_state(state, result)
             return result

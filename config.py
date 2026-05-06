@@ -108,6 +108,7 @@ class Config(BaseModel):
     personification_plugin_knowledge_build_enabled: bool = False
     personification_image_gen_enabled: bool = True
     personification_image_gen_model: str = "gpt-image-2"
+    personification_image_gen_nanobanan_model: str = "gemini-3-pro-image-preview"
     personification_image_gen_background_enabled: bool = True
     personification_image_gen_timeout: int = 180
     personification_parallel_research_enabled: bool = True
@@ -120,22 +121,27 @@ class Config(BaseModel):
     personification_qzone_cookie: str = ""
     # DEPRECATED: use personification_qzone_cookie.
     qzone_cookie: str = ""
-    personification_qzone_proactive_enabled: bool = False
-    personification_qzone_check_interval: int = 90
+    personification_qzone_proactive_enabled: bool = True
+    personification_qzone_check_interval: int = 30
     personification_qzone_daily_limit: int = 3
     personification_qzone_probability: float = 0.35
     personification_qzone_min_interval_hours: float = 6.0
     personification_qzone_social_enabled: bool = True
-    personification_qzone_social_check_interval: int = 60
+    personification_qzone_social_check_interval: int = 30
     personification_qzone_social_scope: str = "recent_interactions"
     personification_qzone_social_like_limit: int = 0
     personification_qzone_social_comment_limit: int = 0
     personification_qzone_social_per_friend_limit: int = 0
     personification_qzone_social_max_feeds_per_scan: int = 5
+    personification_qzone_third_party_chime_in_enabled: bool = True
     personification_qzone_inbound_enabled: bool = True
     personification_qzone_inbound_check_interval: int = 3
     personification_qzone_inbound_max_feeds_per_scan: int = 20
     personification_qzone_inbound_max_comments_per_feed: int = 20
+    personification_qzone_outbound_reply_enabled: bool = True
+    personification_qzone_outbound_reply_check_interval: int = 3
+    personification_qzone_outbound_reply_max_feeds: int = 30
+    personification_qzone_outbound_reply_lookback_hours: float = 72.0
     personification_image_search_api_key: str = ""
     personification_github_token: str = ""
     personification_web_search_always: bool = False
@@ -227,7 +233,7 @@ class Config(BaseModel):
     personification_web_search: bool = True
     personification_schedule_global: bool = False
 
-    personification_proactive_enabled: bool = False
+    personification_proactive_enabled: bool = True
     personification_proactive_threshold: float = 60.0
     personification_proactive_require_user_profile: bool = True
     personification_proactive_daily_limit: int = 3
@@ -276,6 +282,18 @@ class Config(BaseModel):
     # personification_api_type = "openai_codex" 时生效
     # 留空则自动按优先级查找 ~/.codex/auth.json
     personification_codex_auth_path: str = ""
+
+    # gemini-cli OAuth 配置
+    # personification_api_type = "gemini_cli" 时生效
+    # 留空则按 ~/.gemini/oauth_creds.json、$GEMINI_HOME 等顺序查找
+    personification_gemini_cli_auth_path: str = ""
+    # cloudaicompanionProject；留空时通过 v1internal:loadCodeAssist 自动解析并缓存
+    personification_gemini_cli_project: str = ""
+
+    # claude-code OAuth 配置
+    # personification_api_type = "claude_code" 时生效
+    # 留空则按 ~/.claude/.credentials.json、$CLAUDE_CONFIG_DIR 等顺序查找
+    personification_claude_code_auth_path: str = ""
 
     def model_post_init(self, __context: Any) -> None:
         fields_set = getattr(self, "__pydantic_fields_set__", set())

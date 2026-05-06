@@ -102,8 +102,12 @@ def _normalize_api_type(api_type: Optional[str]) -> str:
     value = (api_type or "openai").strip().lower()
     if value in {"gemini", "gemini_official"}:
         return "gemini_official"
+    if value in {"gemini_cli", "gemini-cli", "geminicli"}:
+        return "gemini_cli"
     if value == "anthropic":
         return "anthropic"
+    if value in {"claude_code", "claude-code", "claudecode", "claude_cli", "claude-cli"}:
+        return "claude_code"
     if value in {"openai_codex", "codex"}:
         return "openai_codex"
     return "openai"
@@ -1940,6 +1944,394 @@ class OpenAICodexToolCaller(ToolCaller):
         }
 
 
+# ============================================================================
+# Gemini CLI / Claude Code 本地凭证调用
+# ============================================================================
+#
+# 复用 gemini-cli / claude-code 在本机保存的 OAuth token，直接 HTTP 调用云端，
+# 不再要求用户单独配 API key。token 过期由对应 cli 自身的下次启动负责刷新；
+# 这里失败时会抛出明确的错误提示让用户重新登录 cli。
+
+_GEMINI_CLI_BASE = "https://cloudcode-pa.googleapis.com"
+_GEMINI_CLI_LOAD_CODE_ASSIST = f"{_GEMINI_CLI_BASE}/v1internal:loadCodeAssist"
+_GEMINI_CLI_GENERATE_ENDPOINT = f"{_GEMINI_CLI_BASE}/v1internal:generateContent"
+_GEMINI_CLI_CLIENT_METADATA = {
+    "ideType": "IDE_UNSPECIFIED",
+    "platform": "PLATFORM_UNSPECIFIED",
+    "pluginType": "GEMINI",
+}
+_CLAUDE_CODE_API_ENDPOINT = "https://api.anthropic.com/v1/messages"
+_CLAUDE_CODE_OAUTH_BETA = "oauth-2025-04-20"
+
+
+def _find_gemini_cli_auth_file(override_path: str = "") -> _Path | None:
+    if override_path:
+        p = _Path(override_path).expanduser()
+        if p.exists():
+            return p
+    candidates = [
+        _os.environ.get("GEMINI_CLI_HOME", ""),
+        _os.environ.get("GEMINI_HOME", ""),
+    ]
+    for base in candidates:
+        if base:
+            p = _Path(base) / "oauth_creds.json"
+            if p.exists():
+                return p
+    for fallback in [
+        "~/.gemini/oauth_creds.json",
+        "~/AppData/Roaming/gemini-cli/oauth_creds.json",
+        "~/.config/gemini/oauth_creds.json",
+    ]:
+        p = _Path(fallback).expanduser()
+        if p.exists():
+            return p
+    return None
+
+
+def _load_gemini_cli_auth(auth_path: _Path) -> dict:
+    try:
+        return json.loads(auth_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"读取 gemini-cli oauth_creds.json 失败: {exc}") from exc
+
+
+def _get_gemini_cli_access_token(auth: dict) -> str:
+    for key in ("access_token", "accessToken"):
+        token = str(auth.get(key, "") or "").strip()
+        if token:
+            return token
+    nested = auth.get("credentials")
+    if isinstance(nested, dict):
+        return str(nested.get("access_token", "") or "").strip()
+    return ""
+
+
+class GeminiCliToolCaller(ToolCaller):
+    """复用 gemini-cli 本地 OAuth 凭证调用 cloudcode-pa 内部端点。
+
+    走 v1internal:generateContent 的 envelope 格式：
+        {"model": ..., "project": ..., "request": {...GenerateContentRequest...}}
+    project 字段必填，由 v1internal:loadCodeAssist 解析得到，缓存到实例。
+    """
+
+    _project_cache: dict[str, str] = {}
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        auth_path: str = "",
+        project: str = "",
+        thinking_mode: str = "none",
+        timeout: float = 120.0,
+    ) -> None:
+        self.model = (model or "gemini-3.1-pro-preview").strip() or "gemini-3.1-pro-preview"
+        self.auth_path_override = auth_path
+        self.project_override = (project or "").strip()
+        self.thinking_mode = _normalize_thinking_mode(thinking_mode)
+        self.timeout = timeout
+
+    async def _get_access_token(self) -> tuple[str, _Path]:
+        auth_file = _find_gemini_cli_auth_file(self.auth_path_override)
+        if auth_file is None:
+            raise RuntimeError(
+                "未找到 gemini-cli oauth_creds.json。"
+                "请先运行 `gemini auth login` 完成 Google OAuth 登录，"
+                "或在配置中设置 personification_gemini_cli_auth_path。"
+            )
+        auth = _load_gemini_cli_auth(auth_file)
+        token = _get_gemini_cli_access_token(auth)
+        if not token:
+            raise RuntimeError(
+                "gemini-cli oauth_creds.json 中 access_token 为空，请重新执行 `gemini auth login`。"
+            )
+        return token, auth_file
+
+    async def _resolve_project(self, access_token: str) -> str:
+        if self.project_override:
+            return self.project_override
+        cached = GeminiCliToolCaller._project_cache.get(access_token)
+        if cached:
+            return cached
+        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=15.0)) as client:
+            resp = await client.post(
+                _GEMINI_CLI_LOAD_CODE_ASSIST,
+                json={"metadata": dict(_GEMINI_CLI_CLIENT_METADATA)},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        project = str(data.get("cloudaicompanionProject", "") or "").strip()
+        if not project:
+            raise RuntimeError(
+                "loadCodeAssist 未返回 cloudaicompanionProject。"
+                "请在配置 personification_gemini_cli_project 中手动指定 GCP 项目 ID，"
+                "或先运行一次 `gemini` 完成 onboarding。"
+            )
+        GeminiCliToolCaller._project_cache[access_token] = project
+        return project
+
+    async def chat_with_tools(
+        self,
+        messages: List[dict],
+        tools: List[dict],
+        use_builtin_search: bool,
+    ) -> ToolCallerResponse:
+        messages = inject_current_time_context(messages)
+        contains_image_input = _messages_contain_images(messages)
+        try:
+            access_token, _auth_file = await self._get_access_token()
+            project = await self._resolve_project(access_token)
+            system_instruction, contents = _convert_messages_to_gemini(messages)
+
+            tool_payload: List[dict] = []
+            if tools:
+                tool_payload.append(
+                    {
+                        "function_declarations": [
+                            _convert_openai_tool_to_gemini(tool) for tool in tools
+                        ]
+                    }
+                )
+            if use_builtin_search:
+                tool_payload.append(_gemini_builtin_search_tool(self.model))
+
+            request_obj: Dict[str, Any] = {
+                "contents": contents,
+                "generationConfig": {
+                    "thinkingConfig": {
+                        "thinkingBudget": GEMINI_THINKING_BUDGET_MAP[self.thinking_mode]
+                    }
+                },
+            }
+            if system_instruction:
+                request_obj["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+            if tool_payload:
+                request_obj["tools"] = tool_payload
+
+            envelope = {
+                "model": self.model,
+                "project": project,
+                "request": request_obj,
+            }
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            }
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=15.0)) as client:
+                response = await client.post(
+                    _GEMINI_CLI_GENERATE_ENDPOINT, json=envelope, headers=headers
+                )
+                response.raise_for_status()
+                data = response.json()
+
+            inner_response = data.get("response") if isinstance(data, dict) else None
+            if isinstance(inner_response, dict):
+                payload = inner_response
+            else:
+                payload = data
+            candidates = list(payload.get("candidates", []) or [])
+            if not candidates:
+                return ToolCallerResponse("stop", "", [], data)
+            content = candidates[0].get("content") or {}
+            parts = list(content.get("parts", []) or [])
+            tool_calls = _extract_gemini_tool_calls(parts)
+            text = _extract_gemini_text(parts)
+            finish_reason = "tool_calls" if tool_calls else "stop"
+            grounding = candidates[0].get("groundingMetadata") or candidates[0].get("grounding_metadata")
+            return ToolCallerResponse(
+                finish_reason=finish_reason,
+                content=text,
+                tool_calls=tool_calls,
+                raw=data,
+                used_builtin_search=bool(grounding),
+            )
+        except Exception as exc:
+            if contains_image_input and _error_indicates_vision_unavailable(exc):
+                return _vision_unavailable_response(exc)
+            raise
+
+    def build_tool_result_message(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        result: str,
+    ) -> dict:
+        return {
+            "role": "user",
+            "parts": [
+                {
+                    "function_response": {
+                        "name": tool_name,
+                        "response": {"result": result},
+                    }
+                }
+            ],
+        }
+
+
+def _find_claude_code_auth_file(override_path: str = "") -> _Path | None:
+    if override_path:
+        p = _Path(override_path).expanduser()
+        if p.exists():
+            return p
+    candidates = [
+        _os.environ.get("CLAUDE_CODE_HOME", ""),
+        _os.environ.get("CLAUDE_HOME", ""),
+    ]
+    for base in candidates:
+        if base:
+            p = _Path(base) / ".credentials.json"
+            if p.exists():
+                return p
+    for fallback in [
+        "~/.claude/.credentials.json",
+        "~/AppData/Roaming/claude/.credentials.json",
+        "~/.config/claude/.credentials.json",
+    ]:
+        p = _Path(fallback).expanduser()
+        if p.exists():
+            return p
+    return None
+
+
+def _load_claude_code_auth(auth_path: _Path) -> dict:
+    try:
+        return json.loads(auth_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"读取 claude-code .credentials.json 失败: {exc}") from exc
+
+
+def _get_claude_code_access_token(auth: dict) -> str:
+    nested = auth.get("claudeAiOauth") if isinstance(auth, dict) else None
+    if isinstance(nested, dict):
+        token = str(nested.get("accessToken", "") or "").strip()
+        if token:
+            return token
+    for key in ("accessToken", "access_token"):
+        token = str(auth.get(key, "") or "").strip()
+        if token:
+            return token
+    return ""
+
+
+class ClaudeCodeToolCaller(AnthropicToolCaller):
+    """复用 claude-code 本地 OAuth 凭证调用 Anthropic Messages API。"""
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        auth_path: str = "",
+        thinking_mode: str = "none",
+        timeout: float = 120.0,
+    ) -> None:
+        super().__init__(
+            api_key="",
+            base_url="",
+            model=(model or "claude-opus-4-7").strip() or "claude-opus-4-7",
+            thinking_mode=thinking_mode,
+            timeout=timeout,
+        )
+        self.auth_path_override = auth_path
+
+    def _get_access_token(self) -> str:
+        auth_file = _find_claude_code_auth_file(self.auth_path_override)
+        if auth_file is None:
+            raise RuntimeError(
+                "未找到 claude-code .credentials.json。"
+                "请先运行 `claude login` 完成 Anthropic OAuth 登录，"
+                "或在配置中设置 personification_claude_code_auth_path。"
+            )
+        auth = _load_claude_code_auth(auth_file)
+        token = _get_claude_code_access_token(auth)
+        if not token:
+            raise RuntimeError(
+                "claude-code .credentials.json 中 accessToken 为空，请重新执行 `claude login`。"
+            )
+        return token
+
+    async def chat_with_tools(
+        self,
+        messages: List[dict],
+        tools: List[dict],
+        use_builtin_search: bool,
+    ) -> ToolCallerResponse:
+        from anthropic import AsyncAnthropic
+
+        messages = inject_current_time_context(messages)
+        contains_image_input = _messages_contain_images(messages)
+        try:
+            access_token = self._get_access_token()
+            system_instruction, anthropic_messages = _convert_messages_to_anthropic(messages)
+            filtered_tools = [
+                tool
+                for tool in tools
+                if not (
+                    use_builtin_search
+                    and str(_obj_get(_obj_get(tool, "function", {}), "name", "") or "") == "web_search"
+                )
+            ]
+            tool_payload = [_convert_openai_tool_to_anthropic(tool) for tool in filtered_tools]
+            if use_builtin_search:
+                tool_payload.append(dict(ANTHROPIC_BUILTIN_SEARCH_TOOL))
+
+            client = AsyncAnthropic(
+                auth_token=access_token,
+                timeout=self.timeout,
+                default_headers={"anthropic-beta": _CLAUDE_CODE_OAUTH_BETA},
+            )
+
+            payload: Dict[str, Any] = {
+                "model": self.model,
+                "messages": anthropic_messages,
+                "max_tokens": 1024,
+            }
+            if system_instruction:
+                payload["system"] = system_instruction
+            if tool_payload:
+                payload["tools"] = tool_payload
+            thinking = _maybe_anthropic_thinking(self.thinking_mode)
+            if thinking:
+                payload["thinking"] = thinking
+
+            response = await client.messages.create(**payload)
+
+            content_blocks = list(_obj_get(response, "content", []) or [])
+            text_parts: List[str] = []
+            tool_calls: List[ToolCall] = []
+            for block in content_blocks:
+                block_type = _obj_get(block, "type", "")
+                if block_type == "text":
+                    text_parts.append(str(_obj_get(block, "text", "")))
+                elif block_type == "tool_use":
+                    tool_calls.append(
+                        ToolCall(
+                            id=str(_obj_get(block, "id", "")),
+                            name=str(_obj_get(block, "name", "")),
+                            arguments=_parse_tool_arguments(_obj_get(block, "input", {}) or {}),
+                        )
+                    )
+
+            finish_reason = "tool_calls" if tool_calls else "stop"
+            used_builtin = _anthropic_used_builtin_search(content_blocks)
+            return ToolCallerResponse(
+                finish_reason=finish_reason,
+                content="".join(text_parts).strip(),
+                tool_calls=tool_calls,
+                raw=response,
+                used_builtin_search=used_builtin,
+            )
+        except Exception as exc:
+            if contains_image_input and _error_indicates_vision_unavailable(exc):
+                return _vision_unavailable_response(exc)
+            raise
+
+
 def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) -> ToolCaller:
     api_type = _normalize_api_type(getattr(config, "personification_api_type", "openai"))
     api_key = str(getattr(config, "personification_api_key", "") or "").strip()
@@ -1956,11 +2348,27 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
             model=model,
             thinking_mode=thinking_mode,
         )
+    if api_type == "gemini_cli":
+        auth_path = str(getattr(config, "personification_gemini_cli_auth_path", "") or "").strip()
+        project = str(getattr(config, "personification_gemini_cli_project", "") or "").strip()
+        return GeminiCliToolCaller(
+            model=model or "gemini-3.1-pro-preview",
+            auth_path=auth_path,
+            project=project,
+            thinking_mode=thinking_mode,
+        )
     if api_type == "anthropic":
         return AnthropicToolCaller(
             api_key=api_key,
             base_url=api_url,
             model=model,
+            thinking_mode=thinking_mode,
+        )
+    if api_type == "claude_code":
+        auth_path = str(getattr(config, "personification_claude_code_auth_path", "") or "").strip()
+        return ClaudeCodeToolCaller(
+            model=model or "claude-opus-4-7",
+            auth_path=auth_path,
             thinking_mode=thinking_mode,
         )
     if api_type == "openai_codex":
