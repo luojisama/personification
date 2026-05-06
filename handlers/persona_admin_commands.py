@@ -457,6 +457,7 @@ def _normalize_help_tokens(tokens: list[str]) -> list[str]:
 async def dispatch_persona_admin_command(
     matcher: Any,
     *,
+    bot: Any = None,
     bundle: Any,
     event: Any,
     arg_text: str,
@@ -518,7 +519,7 @@ async def dispatch_persona_admin_command(
     if command == “update”:
         if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):
             await matcher.finish(_admin_error())
-        await _handle_git_update_command(matcher, logger=bundle.logger)
+        await _handle_git_update_command(matcher, bot=bot, event=event, logger=bundle.logger)
         return
 
     await matcher.finish(“未识别的子命令。可用”拟人 帮助”或”/persona help”查看帮助。”)

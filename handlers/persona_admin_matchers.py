@@ -30,9 +30,10 @@ def register_persona_admin_matchers(
     )
 
     @persona_admin_cmd.handle()
-    async def _handle_persona_admin(_bot: Bot, event: MessageEvent, args: Message = CommandArg()) -> None:
+    async def _handle_persona_admin(bot: Bot, event: MessageEvent, args: Message = CommandArg()) -> None:
         await dispatch_persona_admin_command(
             persona_admin_cmd,
+            bot=bot,
             bundle=runtime_bundle,
             event=event,
             arg_text=args.extract_plain_text().strip(),

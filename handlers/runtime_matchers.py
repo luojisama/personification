@@ -284,8 +284,8 @@ def register_runtime_switch_matchers(
     )
 
     @git_update_cmd.handle()
-    async def _handle_git_update(_bot: Bot, _event: MessageEvent):
-        await _handle_git_update_command_fn(git_update_cmd, logger=logger)
+    async def _handle_git_update(bot: Bot, event: MessageEvent):
+        await _handle_git_update_command_fn(git_update_cmd, bot=bot, event=event, logger=logger)
 
     return {
         "personification_help_cmd": personification_help_cmd,

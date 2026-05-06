@@ -1247,14 +1247,60 @@ async def perform_git_pull(*, plugin_dir: str | None = None) -> tuple[bool, str]
     return True, out or "已更新"
 
 
+async def _git_send_notify(bot: Any, event: Any, msg: str, logger: Any) -> None:
+    """Send a follow-up message back to wherever the command was issued."""
+    try:
+        msg_type = str(getattr(event, "message_type", "private") or "private")
+        user_id = int(getattr(event, "user_id", 0) or 0)
+        group_id = int(getattr(event, "group_id", 0) or 0)
+        if msg_type == "group" and group_id:
+            await bot.send_group_msg(group_id=group_id, message=msg)
+        elif user_id:
+            await bot.send_private_msg(user_id=user_id, message=msg)
+    except Exception as exc:
+        logger.warning(f"[git_update] 后台通知发送失败: {exc}")
+
+
+async def _git_pull_background(
+    bot: Any,
+    event: Any,
+    local_short: str,
+    remote_short: str,
+    cwd: str,
+    logger: Any,
+) -> None:
+    """Background task: pull then notify result."""
+    try:
+        rc_pull, pull_out, pull_err = await _run_git_command(["pull", "--ff-only"], cwd=cwd)
+        if rc_pull != 0:
+            msg = (
+                f"❌ 拟人插件更新失败：\n{pull_err or pull_out or '未知错误'}\n"
+                f"当前版本仍为 {local_short}，可能存在本地修改冲突。"
+            )
+        else:
+            _, new_log, _ = await _run_git_command(["log", "--oneline", "-1", "HEAD"], cwd=cwd)
+            msg = (
+                f"✅ 拟人插件已更新！\n"
+                f"{local_short} → {remote_short}\n"
+                f"当前版本：{new_log}\n"
+                "请重启 Bot 使更改生效。"
+            )
+    except Exception as exc:
+        msg = f"❌ 拟人插件更新过程中发生异常：{exc}"
+        logger.error(f"[git_update] 后台拉取异常: {exc}")
+    await _git_send_notify(bot, event, msg, logger)
+
+
 async def handle_git_update_command(
     matcher: Any,
     *,
+    bot: Any = None,
+    event: Any = None,
     logger: Any,
     plugin_dir: str | None = None,
 ) -> None:
     cwd = str(plugin_dir or _PLUGIN_GIT_DIR)
-    await matcher.send("正在检查拟人插件更新，请稍候…")
+    await matcher.send("正在检查拟人插件更新…")
 
     rc_fetch, _, fetch_err = await _run_git_command(["fetch", "--prune"], cwd=cwd)
     if rc_fetch != 0:
@@ -1265,27 +1311,37 @@ async def handle_git_update_command(
     if rc_remote != 0:
         await matcher.finish(f"无法获取上游分支信息：{remote_err or '未配置上游分支'}")
 
+    local_short = (local_hash or "")[:7] or "unknown"
+    remote_short = (remote_hash or "")[:7] or "unknown"
+
     _, current_log, _ = await _run_git_command(["log", "--oneline", "-1", "HEAD"], cwd=cwd)
 
     if local_hash == remote_hash:
-        await matcher.finish(f"已是最新版本。\n当前：{current_log}")
+        await matcher.finish(f"已是最新版本（{local_short}）\n{current_log}")
 
     _, new_commits_raw, _ = await _run_git_command(["log", "--oneline", "HEAD..@{u}"], cwd=cwd)
     commits_text = "\n".join(
         f"  • {line}" for line in (new_commits_raw or "").splitlines()[:10]
     ) or "  （无可展示的提交）"
 
-    rc_pull, pull_out, pull_err = await _run_git_command(["pull", "--ff-only"], cwd=cwd)
-    if rc_pull != 0:
-        await matcher.finish(
-            f"更新失败（可能存在本地修改冲突）：\n{pull_err or pull_out or '未知错误'}\n"
-            f"当前版本：{current_log}"
+    if bot is not None and event is not None:
+        # Launch pull in background, release the matcher immediately
+        asyncio.create_task(
+            _git_pull_background(bot, event, local_short, remote_short, cwd, logger)
         )
-
-    _, new_log, _ = await _run_git_command(["log", "--oneline", "-1", "HEAD"], cwd=cwd)
-    await matcher.finish(
-        f"✅ 拟人插件已更新！\n"
-        f"新版本：{new_log}\n"
-        f"更新内容：\n{commits_text}\n"
-        "请重启 Bot 使更改生效。"
-    )
+        await matcher.finish(
+            f"发现更新：{local_short} → {remote_short}\n"
+            f"待更新内容：\n{commits_text}\n"
+            "已在后台开始拉取，完成后将发送通知。"
+        )
+    else:
+        # Fallback: blocking pull (no bot context for follow-up)
+        rc_pull, pull_out, pull_err = await _run_git_command(["pull", "--ff-only"], cwd=cwd)
+        if rc_pull != 0:
+            await matcher.finish(
+                f"更新失败：\n{pull_err or pull_out or '未知错误'}\n当前版本仍为 {local_short}"
+            )
+        _, new_log, _ = await _run_git_command(["log", "--oneline", "-1", "HEAD"], cwd=cwd)
+        await matcher.finish(
+            f"✅ 已更新至 {remote_short}！\n{new_log}\n更新内容：\n{commits_text}\n请重启 Bot。"
+        )
