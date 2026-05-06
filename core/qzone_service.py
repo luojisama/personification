@@ -596,13 +596,15 @@ class QzoneSocialService:
             return False, f"缺少回复留言所需字段: {missing}"
 
         appid = feed_identity["appid"] or "311"
-        url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6"
-        data: dict[str, str] = {
+        full_cookie = str(ctx.get("cookie", "") or ctx.get("formatted_cookie", ""))
+        base_data: dict[str, str] = {
             "uin": str(ctx["qq"]),
             "hostUin": owner,
             "appid": appid,
             "topicId": topic_id,
+            # Both field names used across API versions
             "replyId": comment_id,
+            "commentId": comment_id,
             "replyUin": reply_uin,
             "content": text[:80],
             "private": "0",
@@ -617,32 +619,42 @@ class QzoneSocialService:
             "qzreferrer": f"https://user.qzone.qq.com/{owner}",
         }
         if target["nickname"]:
-            data["replyNick"] = target["nickname"]
-        # Use full cookie string for complete session auth on this endpoint
-        headers = _qzone_headers(ctx, referer_uin=owner)
-        headers["Cookie"] = str(ctx.get("cookie", "") or ctx.get("formatted_cookie", ""))
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
-        self.logger.info(
-            f"[qzone] emotion_cgi_reply_v6 owner={owner} topicId={topic_id} "
-            f"appid={appid} replyId={comment_id} replyUin={reply_uin}"
-        )
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, params={"g_tk": str(ctx["g_tk"])}, data=data, headers=headers)
-        except Exception as exc:
-            return False, f"回复留言失败：{exc}"
-        if resp.status_code != 200:
-            self.logger.warning(
-                f"[qzone] emotion_cgi_reply_v6 状态码 {resp.status_code}，响应：{resp.text[:300]}"
+            base_data["replyNick"] = target["nickname"]
+
+        # Try two hosts; h5 sometimes works when user.qzone.qq.com rejects sub-comments
+        candidates = [
+            "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6",
+            "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6",
+        ]
+        last_err = "未知错误"
+        for url in candidates:
+            headers = _qzone_headers(ctx, referer_uin=owner)
+            headers["Cookie"] = full_cookie
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            self.logger.info(
+                f"[qzone] emotion_cgi_reply_v6 url={url} owner={owner} "
+                f"topicId={topic_id} appid={appid} commentId={comment_id} replyUin={reply_uin}"
             )
-            return False, f"回复留言失败，状态码：{resp.status_code}"
-        self.logger.info(f"[qzone] emotion_cgi_reply_v6 原始响应：{resp.text[:400]}")
-        payload = _parse_qzone_jsonp(resp.text)
-        ok, msg = _qzone_payload_success(payload, resp.text)
-        if not ok:
-            self.logger.warning(f"[qzone] emotion_cgi_reply_v6 失败：{msg}，完整响应：{resp.text[:400]}")
-            return False, f"回复留言失败：{msg}"
-        return True, "ok"
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(
+                        url, params={"g_tk": str(ctx["g_tk"])}, data=base_data, headers=headers
+                    )
+            except Exception as exc:
+                last_err = f"请求异常：{exc}"
+                self.logger.warning(f"[qzone] {url} 请求失败: {exc}")
+                continue
+            self.logger.info(f"[qzone] {url} 状态码={resp.status_code} 响应={resp.text[:400]}")
+            if resp.status_code != 200:
+                last_err = f"HTTP {resp.status_code}"
+                continue
+            payload = _parse_qzone_jsonp(resp.text)
+            ok, msg = _qzone_payload_success(payload, resp.text)
+            if ok:
+                return True, "ok"
+            last_err = msg
+            self.logger.warning(f"[qzone] {url} API 错误: {msg}")
+        return False, f"子评论回复失败（已尝试所有接口）：{last_err}"
 
     async def comment_feed(
         self,

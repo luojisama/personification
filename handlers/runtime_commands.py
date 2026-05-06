@@ -1300,32 +1300,72 @@ async def handle_git_update_command(
     plugin_dir: str | None = None,
 ) -> None:
     cwd = str(plugin_dir or _PLUGIN_GIT_DIR)
-    await matcher.send("正在检查拟人插件更新…")
+    try:
+        await _handle_git_update_impl(matcher, bot=bot, event=event, logger=logger, cwd=cwd)
+    except Exception as exc:
+        # Catch anything not already handled to guarantee a response
+        logger.error(f"[git_update] 未预期异常: {exc}", exc_info=True)
+        try:
+            await matcher.finish(f"拟人插件更新命令发生内部错误：{exc}")
+        except Exception:
+            pass
+
+
+async def _handle_git_update_impl(
+    matcher: Any,
+    *,
+    bot: Any,
+    event: Any,
+    logger: Any,
+    cwd: str,
+) -> None:
+    await matcher.send(f"正在检查拟人插件更新…（目录：{cwd}）")
+
+    # Verify it's actually a git repo
+    rc_repo, _, repo_err = await _run_git_command(["rev-parse", "--git-dir"], cwd=cwd)
+    if rc_repo != 0:
+        await matcher.finish(
+            f"插件目录不是 git 仓库，无法自动更新。\n"
+            f"目录：{cwd}\n"
+            f"错误：{repo_err or '未知'}\n"
+            "请手动执行 git pull 更新插件。"
+        )
 
     rc_fetch, _, fetch_err = await _run_git_command(["fetch", "--prune"], cwd=cwd)
     if rc_fetch != 0:
-        await matcher.finish(f"检查远程仓库失败：{fetch_err or '未知错误'}")
+        await matcher.finish(
+            f"拉取远程信息失败：{fetch_err or '未知错误（网络问题或无远程仓库）'}\n"
+            "请检查网络连接和 git remote 配置。"
+        )
 
     _, local_hash, _ = await _run_git_command(["rev-parse", "HEAD"], cwd=cwd)
-    rc_remote, remote_hash, remote_err = await _run_git_command(["rev-parse", "@{u}"], cwd=cwd)
-    if rc_remote != 0:
-        await matcher.finish(f"无法获取上游分支信息：{remote_err or '未配置上游分支'}")
-
     local_short = (local_hash or "")[:7] or "unknown"
-    remote_short = (remote_hash or "")[:7] or "unknown"
 
+    # Try upstream branch (@{u}), fall back to FETCH_HEAD
+    rc_upstream, remote_hash, upstream_err = await _run_git_command(["rev-parse", "@{u}"], cwd=cwd)
+    if rc_upstream != 0:
+        rc_fetch_head, remote_hash, _ = await _run_git_command(["rev-parse", "FETCH_HEAD"], cwd=cwd)
+        if rc_fetch_head != 0:
+            await matcher.finish(
+                f"当前版本：{local_short}\n"
+                f"无法确定上游分支（{upstream_err or '未配置上游'}）。\n"
+                "请确认已执行过 git push -u origin <branch> 或配置 tracking branch。"
+            )
+
+    remote_short = (remote_hash or "")[:7] or "unknown"
     _, current_log, _ = await _run_git_command(["log", "--oneline", "-1", "HEAD"], cwd=cwd)
 
-    if local_hash == remote_hash:
-        await matcher.finish(f"已是最新版本（{local_short}）\n{current_log}")
+    if local_hash and remote_hash and local_hash == remote_hash:
+        await matcher.finish(f"✅ 已是最新版本（{local_short}）\n{current_log}")
 
-    _, new_commits_raw, _ = await _run_git_command(["log", "--oneline", "HEAD..@{u}"], cwd=cwd)
+    _, new_commits_raw, _ = await _run_git_command(["log", "--oneline", "HEAD..FETCH_HEAD"], cwd=cwd)
+    if not new_commits_raw:
+        _, new_commits_raw, _ = await _run_git_command(["log", "--oneline", f"HEAD..{remote_hash}"], cwd=cwd)
     commits_text = "\n".join(
         f"  • {line}" for line in (new_commits_raw or "").splitlines()[:10]
     ) or "  （无可展示的提交）"
 
     if bot is not None and event is not None:
-        # Launch pull in background, release the matcher immediately
         asyncio.create_task(
             _git_pull_background(bot, event, local_short, remote_short, cwd, logger)
         )
@@ -1335,7 +1375,6 @@ async def handle_git_update_command(
             "已在后台开始拉取，完成后将发送通知。"
         )
     else:
-        # Fallback: blocking pull (no bot context for follow-up)
         rc_pull, pull_out, pull_err = await _run_git_command(["pull", "--ff-only"], cwd=cwd)
         if rc_pull != 0:
             await matcher.finish(
@@ -1343,5 +1382,6 @@ async def handle_git_update_command(
             )
         _, new_log, _ = await _run_git_command(["log", "--oneline", "-1", "HEAD"], cwd=cwd)
         await matcher.finish(
-            f"✅ 已更新至 {remote_short}！\n{new_log}\n更新内容：\n{commits_text}\n请重启 Bot。"
+            f"✅ 已更新至 {remote_short}！\n{new_log}\n"
+            f"更新内容：\n{commits_text}\n请重启 Bot。"
         )
