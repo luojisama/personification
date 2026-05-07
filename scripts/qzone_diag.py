@@ -288,43 +288,52 @@ def main() -> None:
         "qzreferrer": f"https://user.qzone.qq.com/{feed_uin}",
     }
 
-    # ── 已确认 emotion_cgi_addreply_v6 是真实端点（对照实验返回 500 vs 它返回 200+JSON）
-    # ── 本轮重点：测试加入 qzonetoken 是否能通过认证
-    target_url = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_addreply_v6"
+    # ── 路线确定：addreply_v6 因 g_qzonetoken='' 走不通
+    # ── 改测试 emotion_cgi_re_feeds + @{uin:XXX,nick:XXX,who:1} 富文本前缀
+    # ── QQ 客户端会把这种格式渲染为"回复某人"样式（实际仍是顶级评论）
 
-    test_variants = [
-        ("无 qzonetoken（基线）", {}, {}),
-        ("URL 参数加 qzonetoken", {"qzonetoken": qzonetoken}, {}),
-        ("body 加 qzonetoken", {}, {"qzonetoken": qzonetoken}),
-        ("URL+body 都加 qzonetoken", {"qzonetoken": qzonetoken}, {"qzonetoken": qzonetoken}),
-    ]
+    # 富文本 @ 格式
+    rich_at = f"@{{uin:{c_uin},nick:{c_nick},who:1}} "
+    rich_content = rich_at + "[诊断回复测试，请忽略]"
 
-    success_url = None
-    for idx, (label, extra_params, extra_body) in enumerate(test_variants):
-        if "qzonetoken" in str(extra_params) + str(extra_body) and not qzonetoken:
-            print(f"\n--- [{idx + 1}/{len(test_variants)}] 跳过（{label}：未提取到 qzonetoken）---")
-            continue
-        print(f"\n--- [{idx + 1}/{len(test_variants)}] {label} ---")
-        params = {"g_tk": str(g_tk), **extra_params}
-        data = {**base_post, "content": f"[诊断 #{idx + 1}，请忽略]", **extra_body}
-        try:
-            status, resp_text = _http_post(
-                target_url, params=params, data=data, headers=post_headers,
-            )
-            print(f"HTTP {status}")
-            preview = (resp_text[:400] + "...") if len(resp_text) > 400 else resp_text
-            print(f"响应: {preview if preview else '<空>'}")
-            d = _parse_jsonp(resp_text)
-            api_code = d.get("code", d.get("ret", "N/A"))
-            msg = d.get("message", d.get("msg", ""))
-            sub = d.get("subcode", "")
-            print(f"解析 code={api_code} subcode={sub} message={msg}")
-            if status == 200 and api_code == 0:
-                success_url = target_url
-                print(f"⭐ 命中！配置: {label}")
-                break
-        except Exception as exc:
-            print(f"请求异常: {exc}")
+    target_url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
+    print(f"\n=== 测试 emotion_cgi_re_feeds + @ 富文本（仅 1 次）===")
+    print(f"content = {rich_content!r}")
+
+    rich_data = {
+        **base_post,
+        "content": rich_content,
+        # @ 富文本通常需要标记 richtype/richval
+        "richtype": "",
+        "richval": "",
+        "feedsType": "100",
+    }
+    rich_data.pop("commentUin", None)
+    rich_data.pop("commentTid", None)
+    rich_data.pop("replyId", None)
+    rich_data.pop("commentId", None)
+
+    try:
+        status, resp_text = _http_post(
+            target_url, params={"g_tk": str(g_tk)}, data=rich_data, headers=post_headers,
+        )
+        print(f"HTTP {status}")
+        preview = (resp_text[:600] + "...") if len(resp_text) > 600 else resp_text
+        print(f"响应: {preview if preview else '<空>'}")
+        d = _parse_jsonp(resp_text)
+        api_code = d.get("code", d.get("ret", "N/A"))
+        if api_code == 0:
+            print("\n✅ 评论已发出，请打开 QQ 手机/电脑客户端的 QZone 看效果：")
+            print(f"   - 找到刚发的 [诊断回复测试，请忽略] 评论")
+            print(f"   - 看 '白咲雫' 是否显示为蓝色可点击链接")
+            print(f"   - 看是否出现在 '白咲雫' 那条评论的下方/嵌套位置")
+            print(f"   - 把视觉效果反馈给开发者")
+            success_url = target_url
+        else:
+            print(f"⚠️ 失败 code={api_code}")
+    except Exception as exc:
+        print(f"请求异常: {exc}")
+        success_url = None
 
     if not success_url:
         print("\n⚠️ 所有候选端点都失败，仍需进一步逆向")
