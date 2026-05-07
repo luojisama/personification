@@ -445,26 +445,11 @@ async def poke_notice_rule(
 
 
 def split_text_into_segments(text: str) -> list[str]:
-    pattern = r"([。！？!?\n]+|[…]{1,2}|[.]{3,6})"
-    parts = re.split(pattern, text)
-    segments = []
-    buffer = ""
-
-    for part in parts:
-        if not part:
-            continue
-        if re.match(pattern, part):
-            buffer += part
-            segments.append(buffer)
-            buffer = ""
-        else:
-            if buffer:
-                segments.append(buffer)
-                buffer = ""
-            buffer = part
-
-    if buffer:
-        segments.append(buffer)
+    # 只按 LLM 显式输出的段落分隔（连续 2+ 换行/空行）切分。
+    # 单个句号、问号、感叹号不再触发切分，避免一句完整回复被发成多条消息。
+    # 单换行（软分行）也不切，由下游 split_segment_if_long 按字数处理。
+    parts = re.split(r"\n\s*\n+", text)
+    segments = [p.strip() for p in parts if p.strip()]
     return segments
 
 

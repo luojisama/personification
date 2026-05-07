@@ -1965,28 +1965,36 @@ _CLAUDE_CODE_OAUTH_BETA = "oauth-2025-04-20"
 
 
 def _find_gemini_cli_auth_file(override_path: str = "") -> _Path | None:
+    return _find_gemini_cli_auth_file_with_log(override_path)[0]
+
+
+def _find_gemini_cli_auth_file_with_log(override_path: str = "") -> tuple[_Path | None, list[str]]:
+    """同时返回搜索过的所有路径，便于诊断"why gemini was skipped"。"""
+    searched: list[str] = []
     if override_path:
         p = _Path(override_path).expanduser()
+        searched.append(f"override={p}")
         if p.exists():
-            return p
-    candidates = [
-        _os.environ.get("GEMINI_CLI_HOME", ""),
-        _os.environ.get("GEMINI_HOME", ""),
-    ]
-    for base in candidates:
+            return p, searched
+    for env_name in ("GEMINI_CLI_HOME", "GEMINI_HOME"):
+        base = _os.environ.get(env_name, "")
         if base:
             p = _Path(base) / "oauth_creds.json"
+            searched.append(f"${env_name}={p}")
             if p.exists():
-                return p
+                return p, searched
+        else:
+            searched.append(f"${env_name}=<unset>")
     for fallback in [
         "~/.gemini/oauth_creds.json",
         "~/AppData/Roaming/gemini-cli/oauth_creds.json",
         "~/.config/gemini/oauth_creds.json",
     ]:
         p = _Path(fallback).expanduser()
+        searched.append(str(p))
         if p.exists():
-            return p
-    return None
+            return p, searched
+    return None, searched
 
 
 def _load_gemini_cli_auth(auth_path: _Path) -> dict:
@@ -2033,12 +2041,13 @@ class GeminiCliToolCaller(ToolCaller):
         self.timeout = timeout
 
     async def _get_access_token(self) -> tuple[str, _Path]:
-        auth_file = _find_gemini_cli_auth_file(self.auth_path_override)
+        auth_file, searched = _find_gemini_cli_auth_file_with_log(self.auth_path_override)
         if auth_file is None:
             raise RuntimeError(
                 "未找到 gemini-cli oauth_creds.json。"
                 "请先运行 `gemini auth login` 完成 Google OAuth 登录，"
                 "或在配置中设置 personification_gemini_cli_auth_path。"
+                f" 已搜索路径: {searched}"
             )
         auth = _load_gemini_cli_auth(auth_file)
         token = _get_gemini_cli_access_token(auth)
