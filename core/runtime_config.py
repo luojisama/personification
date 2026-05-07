@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -14,8 +15,36 @@ def get_runtime_config_path(plugin_config: Any) -> Path:
     return Path(get_data_dir(plugin_config)) / "runtime_config.json"
 
 
+def _collect_env_file_keys() -> set[str]:
+    """直接读取 .env.prod / .env 文件，提取显式设置的 personification_ 字段名。
+
+    不依赖 pydantic __pydantic_fields_set__（NoneBot2 通过文件加载时该 set 可能
+    不包含文件来源字段），改为直接扫描 env 文件，确保 .env.prod 里的字段拥有比
+    runtime_config.json 更高优先级。
+    """
+    found: set[str] = set()
+    search_dirs = [Path.cwd(), Path.cwd().parent]
+    for d in search_dirs:
+        for name in (".env.prod", ".env"):
+            p = d / name
+            if not p.exists():
+                continue
+            try:
+                for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = line.strip()
+                    if line.startswith("#") or "=" not in line:
+                        continue
+                    key = line.split("=", 1)[0].strip().lower()
+                    if key.startswith("personification_"):
+                        found.add(key)
+            except Exception:
+                pass
+    return found
+
+
 def _collect_explicit_env_fields(plugin_config: Any) -> set[str]:
     explicit: set[str] = set()
+    # 1. pydantic __pydantic_fields_set__（对 env 变量可靠，对 .env 文件不一定）
     raw_fields = getattr(plugin_config, "__pydantic_fields_set__", None)
     if isinstance(raw_fields, Iterable):
         explicit.update(
@@ -23,10 +52,13 @@ def _collect_explicit_env_fields(plugin_config: Any) -> set[str]:
             for field in raw_fields
             if str(field or "").strip().startswith("personification_")
         )
+    # 2. 操作系统环境变量
     for key in os.environ.keys():
         lowered = str(key or "").strip().lower()
         if lowered.startswith("personification_"):
             explicit.add(lowered)
+    # 3. 直接读取 .env.prod / .env 文件（确保 .env.prod 里的字段不被 runtime 覆盖）
+    explicit.update(_collect_env_file_keys())
     return explicit
 
 

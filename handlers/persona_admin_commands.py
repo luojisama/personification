@@ -998,9 +998,13 @@ def _switch_primary_provider_route(bundle: Any, *, target: str, model: str = "")
 
 
 def _format_model_status(bundle: Any) -> str:
+    from ..core.runtime_config import _collect_env_file_keys
     lines = ["模型路由"]
     providers = _current_api_pool_config(bundle)
-    lines.append("当前 provider：")
+    env_file_keys = _collect_env_file_keys()
+    pool_from_env = "personification_api_pools" in env_file_keys
+    source_label = "来源：.env.prod/.env" if pool_from_env else "来源：runtime_config（.env.prod 未设置此项）"
+    lines.append(f"当前 provider（{source_label}）：")
     if providers:
         for provider in providers[:8]:
             lines.append(_format_provider_line(provider))
