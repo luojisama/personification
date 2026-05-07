@@ -160,28 +160,53 @@ def main() -> None:
     appid = str(test_feed.get("appid", "311"))
     topic_id_api = str(test_feed.get("topicId") or test_feed.get("topicid") or "")
     topic_id = topic_id_api or f"{feed_uin}_{feed_tid}__1"
-    c_tid = str(test_comment.get("tid", ""))
-    c_uin = str(test_comment.get("uin", ""))
-    c_nick = str(test_comment.get("nickname", ""))
 
     print(f"\n选取的动态: uin={feed_uin} tid={feed_tid} appid={appid}")
     print(f"  topicId(API 返回)={topic_id_api!r}")
     print(f"  topicId(计算值) ={feed_uin}_{feed_tid}__1")
     print(f"  实际使用: topicId={topic_id!r}")
-    print(f"  评论: uin={c_uin} tid={c_tid} nick={c_nick!r}")
 
-    if not c_tid or not c_uin:
-        print("评论缺少 tid/uin，无法测试")
+    # 打印动态对象的所有顶层字段，便于排查
+    print("\n动态对象顶层字段:")
+    for k, v in test_feed.items():
+        if k == "commentlist":
+            print(f"  {k}: <list len={len(v)}>")
+            continue
+        sv = repr(v)
+        if len(sv) > 120:
+            sv = sv[:120] + "..."
+        print(f"  {k} = {sv}")
+
+    print("\n评论对象完整结构:")
+    print(json.dumps(test_comment, ensure_ascii=False, indent=2)[:1500])
+
+    # 评论 ID 字段尝试候选：tid / commentid / id
+    candidate_id_fields = ("commentid", "commentId", "id", "tid")
+    c_id = ""
+    c_id_field = ""
+    for field in candidate_id_fields:
+        v = test_comment.get(field)
+        if v not in (None, "", 0, "0"):
+            c_id = str(v)
+            c_id_field = field
+            break
+    c_uin = str(test_comment.get("uin", ""))
+    c_nick = str(test_comment.get("name") or test_comment.get("nickname") or "")
+    print(f"\n评论 ID 选取: 字段={c_id_field!r} 值={c_id!r}")
+    print(f"评论 uin={c_uin}  nick={c_nick!r}")
+
+    if not c_id or not c_uin:
+        print("评论缺少 ID/uin，无法测试")
         return
 
     # ── Step 2: 测试各子评论接口 ─────────────────────────────────────────────
-    post_data = {
+    post_headers = {**base_headers, "Content-Type": "application/x-www-form-urlencoded"}
+
+    base_post = {
         "uin": QQ,
         "hostUin": feed_uin,
         "appid": appid,
         "topicId": topic_id,
-        "replyId": c_tid,
-        "commentId": c_tid,
         "replyUin": c_uin,
         "replyNick": c_nick,
         "content": "[诊断测试，请忽略]",
@@ -196,29 +221,39 @@ def main() -> None:
         "platformid": "52",
         "qzreferrer": f"https://user.qzone.qq.com/{feed_uin}",
     }
-    post_headers = {**base_headers, "Content-Type": "application/x-www-form-urlencoded"}
 
-    endpoints = [
+    # 测试矩阵：URL × 评论 ID 字段名
+    url_variants = [
         "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6",
         "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6",
+        "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds",
+        "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds",
+    ]
+    field_variants = [
+        {"replyId": c_id, "commentId": c_id},   # 同时带两个
+        {"commentId": c_id},                     # 仅 commentId
+        {"replyId": c_id},                       # 仅 replyId
     ]
 
-    for url in endpoints:
-        print(f"\n=== POST {url} ===")
-        try:
-            status, resp_text = _http_post(
-                url,
-                params={"g_tk": str(g_tk)},
-                data=post_data,
-                headers=post_headers,
-            )
-            print(f"HTTP {status}")
-            print(f"响应: {resp_text[:600]}")
-            d = _parse_jsonp(resp_text)
-            api_code = d.get("code", d.get("ret", "N/A"))
-            print(f"解析 code={api_code}  msg={d.get('message', d.get('msg', ''))}")
-        except Exception as exc:
-            print(f"请求异常: {exc}")
+    for url in url_variants:
+        for fv in field_variants:
+            label = ",".join(f"{k}={v}" for k, v in fv.items())
+            print(f"\n=== POST {url}\n     fields=[{label}] ===")
+            data = {**base_post, **fv}
+            try:
+                status, resp_text = _http_post(
+                    url,
+                    params={"g_tk": str(g_tk)},
+                    data=data,
+                    headers=post_headers,
+                )
+                print(f"HTTP {status}")
+                print(f"响应: {resp_text[:400] if resp_text else '<空>'}")
+                d = _parse_jsonp(resp_text)
+                api_code = d.get("code", d.get("ret", "N/A"))
+                print(f"解析 code={api_code}  msg={d.get('message', d.get('msg', ''))}")
+            except Exception as exc:
+                print(f"请求异常: {exc}")
 
     print("\n=== 诊断完成，请将以上输出发给开发者 ===")
 
