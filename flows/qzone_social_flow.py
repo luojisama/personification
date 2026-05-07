@@ -515,6 +515,108 @@ async def _decide_feed_action(
     }
 
 
+def _comment_targets_user(comment: dict[str, Any], user_id: str) -> bool:
+    target = str(user_id or "").strip()
+    if not target:
+        return False
+    return any(
+        str(comment.get(key, "") or "").strip() == target
+        for key in ("reply_to_user_id", "parent_user_id")
+    )
+
+
+def _format_qzone_comment_thread(
+    comments: list[dict[str, Any]],
+    current_comment: dict[str, Any],
+    *,
+    bot_id: str,
+    max_items: int = 8,
+) -> str:
+    current_key = str(current_comment.get("comment_key", "") or "")
+    try:
+        current_ts = float(current_comment.get("created_at", 0) or 0)
+    except Exception:
+        current_ts = 0.0
+    ordered = sorted(
+        [item for item in comments if isinstance(item, dict)],
+        key=lambda item: float(item.get("created_at", 0) or 0),
+    )
+    selected: list[dict[str, Any]] = []
+    for item in ordered:
+        try:
+            item_ts = float(item.get("created_at", 0) or 0)
+        except Exception:
+            item_ts = 0.0
+        item_key = str(item.get("comment_key", "") or "")
+        if current_ts and item_ts and item_ts > current_ts:
+            continue
+        selected.append(item)
+        if current_key and item_key == current_key:
+            break
+    if not selected:
+        selected = [current_comment]
+
+    lines: list[str] = []
+    for item in selected[-max(1, int(max_items or 8)):]:
+        commenter_id = str(item.get("user_id", "") or "")
+        nickname = str(item.get("nickname", "") or commenter_id or "未知")
+        speaker = "我" if bot_id and commenter_id == bot_id else nickname
+        reply_to = str(item.get("reply_to_user_id", "") or item.get("parent_user_id", "") or "")
+        relation = ""
+        if reply_to:
+            if bot_id and reply_to == bot_id:
+                relation = " 回复我"
+            else:
+                relation_name = str(item.get("parent_nickname", "") or reply_to)
+                relation = f" 回复{relation_name}"
+        marker = "（当前）" if current_key and str(item.get("comment_key", "") or "") == current_key else ""
+        content = _trim_comment(item.get("content", ""), max_chars=60)
+        if content:
+            lines.append(f"{speaker}{relation}{marker}：{content}")
+    return "\n".join(lines) or "暂无评论链"
+
+
+def _latest_bot_reply_for_feed(state: dict[str, Any], feed_key: str) -> str:
+    prefix = f"{feed_key}:"
+    latest_at = 0.0
+    latest_reply = ""
+    for key in ("comment_actions", "bot_outbound_replies"):
+        values = state.get(key)
+        if not isinstance(values, dict):
+            continue
+        for item_key, item in values.items():
+            if feed_key and not str(item_key).startswith(prefix):
+                continue
+            if not isinstance(item, dict) or str(item.get("action", "") or "") != "reply":
+                continue
+            reply = str(item.get("reply", "") or "").strip()
+            if not reply:
+                continue
+            try:
+                at = float(item.get("at", 0) or 0)
+            except Exception:
+                at = 0.0
+            if at >= latest_at:
+                latest_at = at
+                latest_reply = reply
+    return latest_reply
+
+
+def _reply_count_for_feed(state: dict[str, Any], feed_key: str) -> int:
+    prefix = f"{feed_key}:"
+    count = 0
+    for key in ("comment_actions", "bot_outbound_replies"):
+        values = state.get(key)
+        if not isinstance(values, dict):
+            continue
+        for item_key, item in values.items():
+            if feed_key and not str(item_key).startswith(prefix):
+                continue
+            if isinstance(item, dict) and str(item.get("action", "") or "") == "reply":
+                count += 1
+    return count
+
+
 async def _decide_bot_comment_reply(
     *,
     feed: dict[str, Any],
@@ -525,28 +627,48 @@ async def _decide_bot_comment_reply(
     inner_state: dict[str, Any],
     emotion_memory: str,
     allow_third_party_chime_in: bool = True,
+    bot_id: str = "",
+    is_reply_to_bot: bool = False,
+    previous_bot_reply: str = "",
+    recent_thread: str = "",
+    interaction_rounds: int = 0,
 ) -> dict[str, Any]:
     third_party_rule = (
         "- 如果对方明显是在 @ 别人或接续别人的话，决策可以是 ignore，也可以选择以好友身份轻量插一句。\n"
         if allow_third_party_chime_in
         else "- 如果对方明显是在 @ 别人或接续别人的话，action=ignore；不要插入第三方对话。\n"
     )
+    continuation_block = ""
+    if is_reply_to_bot:
+        continuation_block = (
+            "当前是评论回响场景：对方这条留言是在回复你上一句空间评论。\n"
+            f"你上一句评论：{previous_bot_reply or '（未记录）'}\n"
+            f"这条评论链最近内容：\n{recent_thread or '暂无评论链'}\n"
+            f"你在这条动态下已连续回复轮数：{max(0, int(interaction_rounds or 0))}\n\n"
+            "继续互动判断：\n"
+            "- 不要默认必须回复；先判断对方这句是否还有继续聊下去的价值。\n"
+            "- 如果对方只是很短的敷衍、复读、补一个占位词、话题已经自然结束，action=ignore，让对话停住。\n"
+            "- 如果对方是在接你的话继续开玩笑、追问、补充信息，或你能自然回一句不尴尬，action=reply。\n"
+            "- 已经来回多轮时更克制，除非对方明显把话递给你。\n\n"
+        )
     prompt = (
-        "有人在你的 QQ 空间动态下留言或评论区里聊天。判断是否自然回复或插一句话。\n"
+        "有人在 QQ 空间动态下留言或评论区里聊天。判断是否自然回复或插一句话。\n"
         "输出严格 JSON：{\"action\":\"ignore|reply\",\"reply\":\"可选回复\",\"reason\":\"极短原因\"}。\n\n"
+        f"{continuation_block}"
+        f"你的 QQ：{bot_id or '未知'}\n"
         f"留言用户 QQ：{comment['user_id']}\n"
         f"留言用户昵称：{comment.get('nickname') or commenter_profile.get('nickname') or comment['user_id']}\n"
         f"用户画像：{commenter_profile.get('persona_snippet') or '暂无'}\n"
         f"近期情绪记忆：{emotion_memory or '暂无'}\n\n"
         f"你的当前心情：{inner_state.get('mood', DEFAULT_STATE['mood'])}\n"
         f"你的当前精力：{inner_state.get('energy', DEFAULT_STATE['energy'])}\n\n"
-        f"你的空间动态正文：{feed.get('content') or '（无文字）'}\n"
+        f"相关空间动态正文：{feed.get('content') or '（无文字）'}\n"
         f"对方留言：{comment.get('content') or ''}\n\n"
         "回复要求：\n"
         "- 留言可能是直接对你说，也可能是 ta 在和评论区里另一个人聊；先判断这条话锋指向谁。\n"
         f"{third_party_rule}"
         "- 不要解释“这句话是什么意思”，不要说“太泛了/要看上下文”。\n"
-        "- 默认倾向 reply；只有当留言只是表情、一个字、机器味很重的灌水或敏感内容时才 ignore。\n"
+        "- 非评论回响场景默认倾向 reply；评论回响场景由上面的“继续互动判断”决定，不要硬续。\n"
         "- 回复 6-30 个中文字符，像在空间评论区随手回一句；可以是半句话、反问、跳跃的小联想，不必工整。\n"
         "- 不要客服腔、小作文、互联网黑话、系统说明，也不要暴露画像或规则。"
     )
@@ -694,6 +816,8 @@ async def _scan_bot_space_comments(
                 ),
             }
             emotion_memory = describe_user_emotion_memory(emotion_state or {}, commenter_id)
+            is_reply_to_bot = _comment_targets_user(comment, bot_id)
+            previous_bot_reply = _latest_bot_reply_for_feed(state, feed_key) if is_reply_to_bot else ""
             decision = await _decide_bot_comment_reply(
                 feed=feed,
                 comment=comment,
@@ -703,6 +827,15 @@ async def _scan_bot_space_comments(
                 inner_state=inner_state,
                 emotion_memory=emotion_memory,
                 allow_third_party_chime_in=allow_third_party_chime_in,
+                bot_id=bot_id,
+                is_reply_to_bot=is_reply_to_bot,
+                previous_bot_reply=previous_bot_reply,
+                recent_thread=_format_qzone_comment_thread(
+                    comments,
+                    comment,
+                    bot_id=bot_id,
+                ),
+                interaction_rounds=_reply_count_for_feed(state, feed_key),
             )
             if str(decision.get("action", "") or "") != "reply":
                 _mark_comment_processed(
@@ -857,6 +990,12 @@ async def _scan_bot_outbound_comment_replies(
                     ),
                 }
                 emotion_memory = describe_user_emotion_memory(emotion_state or {}, commenter_id)
+                previous_bot_reply = str(
+                    info.get("last_bot_reply")
+                    or info.get("bot_comment")
+                    or ""
+                ).strip()
+                is_reply_to_bot = _comment_targets_user(comment, bot_id) or bool(previous_bot_reply)
                 decision = await _decide_bot_comment_reply(
                     feed=feed,
                     comment=comment,
@@ -866,6 +1005,15 @@ async def _scan_bot_outbound_comment_replies(
                     inner_state=inner_state,
                     emotion_memory=emotion_memory,
                     allow_third_party_chime_in=allow_third_party_chime_in,
+                    bot_id=bot_id,
+                    is_reply_to_bot=is_reply_to_bot,
+                    previous_bot_reply=previous_bot_reply,
+                    recent_thread=_format_qzone_comment_thread(
+                        comments,
+                        comment,
+                        bot_id=bot_id,
+                    ),
+                    interaction_rounds=int(info.get("reply_chain_count", 0) or 0),
                 )
                 if str(decision.get("action", "") or "") != "reply":
                     bot_replies_state[comment_key] = {
@@ -894,6 +1042,9 @@ async def _scan_bot_outbound_comment_replies(
                 )
                 if ok_reply:
                     result["replied"] = int(result.get("replied", 0) or 0) + 1
+                    info["last_bot_reply"] = reply_text
+                    info["last_reply_at"] = time.time()
+                    info["reply_chain_count"] = int(info.get("reply_chain_count", 0) or 0) + 1
                     bot_replies_state[comment_key] = {
                         "at": time.time(),
                         "action": "reply",
@@ -1105,8 +1256,10 @@ async def scan_qzone_social_feeds(
                                 outbound[feed_key] = {
                                     "target_uin": str(candidate["user_id"]),
                                     "bot_comment": comment_text,
+                                    "last_bot_reply": comment_text,
                                     "recorded_at": time.time(),
                                     "last_seen_ts": time.time(),
+                                    "reply_chain_count": 0,
                                 }
                             await _record_qzone_profile_evidence(
                                 persona_store=persona_store,

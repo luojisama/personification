@@ -297,42 +297,120 @@ def _extract_qzone_images(feed: dict[str, Any]) -> list[str]:
     return unique
 
 
-def _extract_qzone_comments(feed: dict[str, Any]) -> list[dict[str, Any]]:
-    comments: list[dict[str, Any]] = []
-    candidates: list[Any] = []
-    for key in ("commentlist", "comments", "comment_list", "replylist", "replys", "replies"):
-        value = feed.get(key)
+_QZONE_COMMENT_LIST_KEYS = ("commentlist", "comments", "comment_list", "replylist", "replys", "replies")
+
+
+def _raw_qzone_comment_user_id(item: dict[str, Any]) -> str:
+    user_obj = item.get("user") if isinstance(item.get("user"), dict) else {}
+    return str(
+        item.get("uin")
+        or item.get("user_id")
+        or item.get("useruin")
+        or item.get("user_uin")
+        or item.get("commentuin")
+        or item.get("comment_uin")
+        or item.get("replyuin")
+        or item.get("reply_uin")
+        or item.get("posterid")
+        or item.get("poster_id")
+        or item.get("poster_uin")
+        or item.get("owner")
+        or user_obj.get("uin")
+        or user_obj.get("id")
+        or user_obj.get("user_id")
+        or user_obj.get("useruin")
+        or ""
+    ).strip()
+
+
+def _raw_qzone_comment_id(item: dict[str, Any]) -> str:
+    return str(
+        item.get("tid")
+        or item.get("id")
+        or item.get("commentid")
+        or item.get("comment_id")
+        or item.get("commentId")
+        or item.get("replyid")
+        or item.get("reply_id")
+        or item.get("replyId")
+        or ""
+    ).strip()
+
+
+def _raw_qzone_reply_to_user_id(item: dict[str, Any]) -> str:
+    return str(
+        item.get("replyuin")
+        or item.get("reply_uin")
+        or item.get("replyUin")
+        or item.get("touin")
+        or item.get("toUin")
+        or item.get("targetuin")
+        or item.get("targetUin")
+        or item.get("sourceUin")
+        or ""
+    ).strip()
+
+
+def _iter_qzone_comment_candidates(
+    container: Any,
+    *,
+    parent: dict[str, str] | None = None,
+) -> list[tuple[dict[str, Any], dict[str, str]]]:
+    candidates: list[tuple[dict[str, Any], dict[str, str]]] = []
+    if not isinstance(container, dict):
+        return candidates
+    for key in _QZONE_COMMENT_LIST_KEYS:
+        value = container.get(key)
         if isinstance(value, list):
-            candidates.extend(value)
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                parent_meta = dict(parent or {})
+                candidates.append((item, parent_meta))
+                child_parent = {
+                    "parent_user_id": _raw_qzone_comment_user_id(item),
+                    "parent_comment_id": _raw_qzone_comment_id(item),
+                    "parent_nickname": _first_text(
+                        item,
+                        ("nickname", "nick", "name", "username", "postername", "poster_name"),
+                    ),
+                }
+                for nested_item, nested_parent in _iter_qzone_comment_candidates(
+                    item,
+                    parent=child_parent,
+                ):
+                    candidates.append((nested_item, nested_parent))
         elif isinstance(value, dict):
             nested = value.get("items") or value.get("list") or value.get("comments")
             if isinstance(nested, list):
-                candidates.extend(nested)
+                for item in nested:
+                    if not isinstance(item, dict):
+                        continue
+                    parent_meta = dict(parent or {})
+                    candidates.append((item, parent_meta))
+                    child_parent = {
+                        "parent_user_id": _raw_qzone_comment_user_id(item),
+                        "parent_comment_id": _raw_qzone_comment_id(item),
+                        "parent_nickname": _first_text(
+                            item,
+                            ("nickname", "nick", "name", "username", "postername", "poster_name"),
+                        ),
+                    }
+                    for nested_item, nested_parent in _iter_qzone_comment_candidates(
+                        item,
+                        parent=child_parent,
+                    ):
+                        candidates.append((nested_item, nested_parent))
             else:
-                candidates.append(value)
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
+                candidates.append((value, dict(parent or {})))
+    return candidates
+
+
+def _extract_qzone_comments(feed: dict[str, Any]) -> list[dict[str, Any]]:
+    comments: list[dict[str, Any]] = []
+    for item, parent_meta in _iter_qzone_comment_candidates(feed):
         user_obj = item.get("user") if isinstance(item.get("user"), dict) else {}
-        user_id = str(
-            item.get("uin")
-            or item.get("user_id")
-            or item.get("useruin")
-            or item.get("user_uin")
-            or item.get("commentuin")
-            or item.get("comment_uin")
-            or item.get("replyuin")
-            or item.get("reply_uin")
-            or item.get("posterid")
-            or item.get("poster_id")
-            or item.get("poster_uin")
-            or item.get("owner")
-            or user_obj.get("uin")
-            or user_obj.get("id")
-            or user_obj.get("user_id")
-            or user_obj.get("useruin")
-            or ""
-        ).strip()
+        user_id = _raw_qzone_comment_user_id(item)
         content = _first_text(
             item,
             (
@@ -350,20 +428,13 @@ def _extract_qzone_comments(feed: dict[str, Any]) -> list[dict[str, Any]]:
         )
         if not user_id or not content:
             continue
-        comment_id = str(
-            item.get("tid")
-            or item.get("id")
-            or item.get("commentid")
-            or item.get("comment_id")
-            or item.get("commentId")
-            or item.get("replyid")
-            or item.get("reply_id")
-            or item.get("replyId")
-            or ""
-        ).strip()
+        comment_id = _raw_qzone_comment_id(item)
         nickname = _first_text(item, ("nickname", "nick", "name", "username", "postername", "poster_name")) or _clean_qzone_text(
             user_obj.get("nickname") or user_obj.get("name") or user_obj.get("nick") or ""
         )
+        reply_to_user_id = _raw_qzone_reply_to_user_id(item)
+        if not reply_to_user_id:
+            reply_to_user_id = str(parent_meta.get("parent_user_id", "") or "")
         created_at = (
             item.get("created_time")
             or item.get("abstime")
@@ -386,6 +457,10 @@ def _extract_qzone_comments(feed: dict[str, Any]) -> list[dict[str, Any]]:
                 "nickname": nickname or user_id,
                 "content": content,
                 "created_at": created_at_int,
+                "parent_comment_id": str(parent_meta.get("parent_comment_id", "") or ""),
+                "parent_user_id": str(parent_meta.get("parent_user_id", "") or ""),
+                "parent_nickname": str(parent_meta.get("parent_nickname", "") or ""),
+                "reply_to_user_id": reply_to_user_id,
                 "raw": item,
             }
         )

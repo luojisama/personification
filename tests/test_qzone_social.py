@@ -334,6 +334,37 @@ def test_qzone_comment_extraction_accepts_runtime_alias_fields() -> None:
     assert comments[0]["created_at"] == 1710000010
 
 
+def test_qzone_comment_extraction_flattens_nested_reply_to_bot() -> None:
+    comments = qzone_service._extract_qzone_comments(
+        {
+            "commentlist": [
+                {
+                    "uin": "99999",
+                    "nickname": "白咲真寻",
+                    "content": "aaaa，明天我也想先躺平一下",
+                    "created_time": 1710000001,
+                    "commentid": "bot-c1",
+                    "replylist": [
+                        {
+                            "uin": "20001",
+                            "nickname": "白咲零",
+                            "content": "bbbb",
+                            "created_time": 1710000100,
+                            "commentid": "u-c2",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert [item["user_id"] for item in comments] == ["99999", "20001"]
+    assert comments[1]["content"] == "bbbb"
+    assert comments[1]["parent_user_id"] == "99999"
+    assert comments[1]["parent_comment_id"] == "bot-c1"
+    assert comments[1]["reply_to_user_id"] == "99999"
+
+
 def test_qzone_test_target_can_use_open_user_without_friend_profile() -> None:
     candidates = qzone_flow._collect_candidates(
         friend_profiles={},
@@ -581,6 +612,134 @@ def test_qzone_comment_reply_prompt_respects_third_party_chime_switch() -> None:
 
     assert decision["action"] == "ignore"
     assert "不要插入第三方对话" in captured["prompt"]
+
+
+def test_qzone_comment_reply_prompt_marks_reply_to_bot_continuation() -> None:
+    captured: dict[str, str] = {}
+
+    async def _call_ai(messages):  # noqa: ANN001
+        captured["prompt"] = str(messages[-1]["content"])
+        return '{"action":"ignore","reply":"","reason":"stop here"}'
+
+    decision = asyncio.run(
+        qzone_flow._decide_bot_comment_reply(
+            feed={"content": "aaaa"},
+            comment={
+                "user_id": "20001",
+                "nickname": "白咲零",
+                "content": "bbbb",
+                "reply_to_user_id": "99999",
+            },
+            commenter_profile={"nickname": "白咲零", "persona_snippet": "熟人"},
+            system_prompt="你是绪山真寻。",
+            call_ai_api=_call_ai,
+            inner_state={},
+            emotion_memory="",
+            bot_id="99999",
+            is_reply_to_bot=True,
+            previous_bot_reply="aaaa，明天我也想先躺平一下",
+            recent_thread="我：aaaa，明天我也想先躺平一下\n白咲零 回复我（当前）：bbbb",
+            interaction_rounds=1,
+        )
+    )
+
+    assert decision["action"] == "ignore"
+    assert "当前是评论回响场景" in captured["prompt"]
+    assert "你上一句评论：aaaa，明天我也想先躺平一下" in captured["prompt"]
+    assert "判断对方这句是否还有继续聊下去的价值" in captured["prompt"]
+    assert "白咲零 回复我（当前）：bbbb" in captured["prompt"]
+
+
+def test_qzone_outbound_reply_to_bot_can_be_ignored_by_llm() -> None:
+    class _OutboundService:
+        def __init__(self) -> None:
+            self.replies: list[str] = []
+
+        async def fetch_user_feeds(self, **_kwargs):  # noqa: ANN003
+            return True, "ok", [
+                {
+                    "feed_key": "20001:feed1",
+                    "feed_id": "feed1",
+                    "owner_uin": "20001",
+                    "topic_id": "20001_feed1__1",
+                    "content": "aaaa",
+                    "raw": {
+                        "commentlist": [
+                            {
+                                "uin": "99999",
+                                "nickname": "白咲真寻",
+                                "content": "aaaa，明天我也想先躺平一下",
+                                "created_time": 1710000001,
+                                "commentid": "bot-c1",
+                            },
+                            {
+                                "uin": "20001",
+                                "nickname": "白咲零",
+                                "content": "bbbb",
+                                "created_time": 1710000100,
+                                "commentid": "u-c2",
+                                "replyuin": "99999",
+                            },
+                        ]
+                    },
+                }
+            ]
+
+        async def comment_feed(self, *, content: str, **_kwargs):  # noqa: ANN003
+            self.replies.append(str(content))
+            return True, "ok"
+
+    service = _OutboundService()
+    captured: dict[str, str] = {}
+
+    async def _call_ai(messages):  # noqa: ANN001
+        captured["prompt"] = str(messages[-1]["content"])
+        return '{"action":"ignore","reply":"","reason":"no need"}'
+
+    state: dict[str, object] = {
+        "bot_outbound_comments": {
+            "20001:feed1": {
+                "target_uin": "20001",
+                "bot_comment": "aaaa，明天我也想先躺平一下",
+                "last_bot_reply": "aaaa，明天我也想先躺平一下",
+                "recorded_at": 1710000000,
+                "last_seen_ts": 1710000001,
+                "reply_chain_count": 0,
+            }
+        },
+        "bot_outbound_replies": {},
+    }
+    result: dict[str, object] = {"inbound_comments": 0, "replied": 0, "failed": 0}
+
+    asyncio.run(
+        qzone_flow._scan_bot_outbound_comment_replies(
+            bot=_Bot(),
+            qzone_social_service=service,
+            plugin_config=SimpleNamespace(
+                personification_qzone_outbound_reply_lookback_hours=999999,
+                personification_qzone_outbound_reply_max_feeds=30,
+            ),
+            friend_profiles={"20001": {"nickname": "白咲零"}},
+            proactive_state={},
+            persona_store=_PersonaStore({}),
+            persona_snippet_max_chars=80,
+            system_prompt="你是绪山真寻。",
+            call_ai_api=_call_ai,
+            inner_state={},
+            emotion_state={},
+            state=state,
+            result=result,
+            logger=_Logger(),
+        )
+    )
+
+    assert result["inbound_comments"] == 1
+    assert result["replied"] == 0
+    assert service.replies == []
+    assert "当前是评论回响场景" in captured["prompt"]
+    assert "对方留言：bbbb" in captured["prompt"]
+    assert "20001:feed1:20001:u-c2:bbbb:1710000100" in state["bot_outbound_replies"]
+    assert state["bot_outbound_replies"]["20001:feed1:20001:u-c2:bbbb:1710000100"]["action"] == "ignore"
 
 
 def test_qzone_social_limits_use_zero_as_unlimited() -> None:
