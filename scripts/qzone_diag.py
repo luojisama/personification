@@ -242,43 +242,46 @@ def main() -> None:
         "qzreferrer": f"https://user.qzone.qq.com/{feed_uin}",
     }
 
-    # 已确认 emotion_cgi_addreply_v6 是真正的子回复端点
-    # 上一轮返回 -3000 "请先登录空间"，说明是 g_tk/cookie/referer 校验失败
-    # 本轮固定该端点，扫描多种 g_tk × Referer 组合
-    target_url = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_addreply_v6"
+    # ── 对照实验：故意不存在的 cgi 名，看是否返回相同 -3000 ─────────────────
+    print("\n=== [对照] 故意不存在的 cgi 名 emotion_cgi_NOTEXIST_xxxxx ===")
+    bogus_url = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_NOTEXIST_xxxxx"
+    try:
+        s, t = _http_post(bogus_url, params={"g_tk": str(g_tk)}, data=base_post, headers=post_headers)
+        print(f"HTTP {s}  响应: {t[:200] if t else '<空>'}")
+        d = _parse_jsonp(t)
+        print(f"对照 code={d.get('code', 'N/A')} message={d.get('message','')} subcode={d.get('subcode','')}")
+        print("→ 若与 addreply_v6 返回完全相同，说明 addreply_v6 也不存在；否则说明它真实存在。")
+    except Exception as exc:
+        print(f"对照异常: {exc}")
 
-    variants = [
-        ("g_tk=p_skey, Referer=user", g_tk, f"https://user.qzone.qq.com/{QQ}"),
-        ("g_tk=p_skey, Referer=h5", g_tk, f"https://h5.qzone.qq.com/mqzone/index"),
-        ("g_tk=skey,   Referer=user", g_tk_skey, f"https://user.qzone.qq.com/{QQ}"),
-        ("g_tk=skey,   Referer=h5", g_tk_skey, f"https://h5.qzone.qq.com/mqzone/index"),
+    # ── 候选：H5 webapp 接口（QZone 移动 H5 实际使用的 RESTful 接口）─────────
+    print("\n=== 扫描 h5.qzone.qq.com/webapp/json/... 候选接口 ===")
+    h5_candidates = [
+        "https://h5.qzone.qq.com/webapp/json/mqzone_main/replyComment",
+        "https://h5.qzone.qq.com/webapp/json/mqzone_feedlist/replyComment",
+        "https://h5.qzone.qq.com/webapp/json/mqzone_main/comment",
+        "https://h5.qzone.qq.com/webapp/json/qzoneFeedV2/comment",
+        "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_addreply_v6",
     ]
 
     success_url = None
-    success_gtk = None
-    success_referer = None
-    for idx, (label, gtk_val, referer) in enumerate(variants):
-        if not gtk_val:
-            print(f"\n=== [{idx + 1}/{len(variants)}] 跳过（{label}：g_tk 为 0）===")
-            continue
-        print(f"\n=== [{idx + 1}/{len(variants)}] {label} ===")
-        h = {**post_headers, "Referer": referer}
+    for idx, url in enumerate(h5_candidates):
+        print(f"\n--- [{idx + 1}/{len(h5_candidates)}] {url} ---")
         data = {**base_post, "content": f"[诊断 #{idx + 1}，请忽略]"}
         try:
             status, resp_text = _http_post(
-                target_url, params={"g_tk": str(gtk_val)}, data=data, headers=h,
+                url, params={"g_tk": str(g_tk)}, data=data, headers=post_headers,
             )
             print(f"HTTP {status}")
-            preview = (resp_text[:400] + "...") if len(resp_text) > 400 else resp_text
+            preview = (resp_text[:300] + "...") if len(resp_text) > 300 else resp_text
             print(f"响应: {preview if preview else '<空>'}")
             d = _parse_jsonp(resp_text)
             api_code = d.get("code", d.get("ret", "N/A"))
-            print(f"解析 code={api_code}  message={d.get('message','')}  subcode={d.get('subcode','')}")
+            msg = d.get("message", d.get("msg", ""))
+            print(f"解析 code={api_code} message={msg}")
             if status == 200 and api_code == 0:
-                success_url = target_url
-                success_gtk = gtk_val
-                success_referer = referer
-                print(f"⭐ 命中！g_tk={gtk_val} referer={referer}")
+                success_url = url
+                print(f"⭐ 命中！")
                 break
         except Exception as exc:
             print(f"请求异常: {exc}")
