@@ -114,10 +114,13 @@ def main() -> None:
     print(f"QQ={QQ}")
     print(f"g_tk(p_skey)={g_tk}  g_tk(skey)={g_tk_skey}  skey存在={bool(skey)}")
 
-    # ── 提取 qzonetoken（写操作 cgi 通常要求）────────────────────────────────
+    # ── 列出 cookie 里所有字段名（不打印值，方便确认有哪些登录字段）─────────
+    cookie_keys = [seg.strip().split("=", 1)[0] for seg in cookie.split(";") if "=" in seg]
+    print(f"\n[cookie 字段] {sorted(set(cookie_keys))}")
+
+    # ── 提取 qzonetoken：用宽松搜索，把所有含 token/bkn 的位置都打印 ─────────
     qzonetoken = ""
     try:
-        # 先访问 QZone 主页 HTML，从中提取 g_qzonetoken
         home_headers = {
             "Cookie": cookie,
             "User-Agent": (
@@ -129,25 +132,33 @@ def main() -> None:
         req = urllib.request.Request(home_url, headers=home_headers)
         with urllib.request.urlopen(req, timeout=15) as resp:
             html = resp.read().decode("utf-8", errors="replace")
-        # 多种格式都试一下
+        print(f"\n[home HTML] 长度={len(html)}")
+
+        # 搜索所有 token 相关的位置
+        keywords = ["qzonetoken", "g_qzonetoken", "QZONETOKEN", "bkn", "QZ_TOKEN"]
+        for kw in keywords:
+            for m in re.finditer(kw, html):
+                start = max(0, m.start() - 30)
+                end = min(len(html), m.start() + 200)
+                snippet = html[start:end].replace("\n", " ")
+                print(f"  [{kw}] @{m.start()}: ...{snippet}...")
+
+        # 强尝试提取
         patterns = [
-            r"window\.g_qzonetoken\s*=\s*\(?function.*?return\s*[\"']([^\"']+)[\"']",
+            r"window\.g_qzonetoken\s*=\s*\(?function[^;]*?return\s*[\"']([^\"']+)[\"']",
             r"g_qzonetoken\s*=\s*[\"']([^\"']+)[\"']",
-            r"qzonetoken\s*=\s*[\"']([^\"']+)[\"']",
-            r"qzonetoken[\"']?\s*:\s*[\"']([^\"']+)[\"']",
+            r"qzonetoken\s*[:=]\s*[\"']([0-9a-f]{20,})[\"']",
+            r"QZONETOKEN\s*=\s*[\"']([^\"']+)[\"']",
         ]
         for p in patterns:
             m = re.search(p, html)
             if m:
                 qzonetoken = m.group(1)
-                print(f"[qzonetoken] 提取成功（pattern={p[:40]}...）: {qzonetoken[:50]}...")
+                print(f"[qzonetoken] 提取成功: {qzonetoken[:60]}...")
                 break
-        if not qzonetoken:
-            print(f"[qzonetoken] 主页 HTML 长度={len(html)}，未匹配到 token，前 600 字:")
-            print(html[:600])
     except Exception as exc:
         print(f"[qzonetoken] 获取异常: {exc}")
-    print(f"qzonetoken={qzonetoken[:60] + ('...' if len(qzonetoken) > 60 else '')!r}")
+    print(f"\nqzonetoken 最终 = {qzonetoken[:60] + ('...' if len(qzonetoken) > 60 else '')!r}")
 
     base_headers = {
         "Cookie": cookie,
