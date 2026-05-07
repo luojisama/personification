@@ -20,6 +20,7 @@ from ...core.message_parts import build_user_message_content
 from ...core.message_relations import build_event_relation_metadata
 from ...core.persona_profile import load_persona_profile, render_persona_snapshot
 from ...core.prompt_loader import pick_ack_phrase
+from ...core.gemini_profile import build_gemini_route_policy_prompt
 from ...core.reply_style_policy import build_reply_style_policy_prompt
 from ...core.visual_capabilities import VISUAL_ROUTE_REPLY_PLAIN
 from ...skill_runtime.runtime_api import SkillRuntime
@@ -728,7 +729,11 @@ def build_base_system_prompt(
     postlude_chunks: List[str],
     plugin_summary: str = "",
     has_visual_context: bool = False,
+    has_video_context: bool = False,
     photo_like: bool = False,
+    primary_api_type: str = "",
+    primary_model: str = "",
+    native_search_enabled: bool = False,
 ) -> str:
     profile = load_persona_profile(base_prompt)
     parts: List[str] = [base_prompt if isinstance(base_prompt, str) else ""]
@@ -774,6 +779,15 @@ def build_base_system_prompt(
             photo_like=photo_like,
         )
     )
+    gemini_policy = build_gemini_route_policy_prompt(
+        api_type=primary_api_type,
+        model=primary_model,
+        has_visual_context=has_visual_context,
+        has_video_context=has_video_context,
+        native_search_enabled=native_search_enabled,
+    )
+    if gemini_policy:
+        parts.append(gemini_policy)
     parts.append(build_prompt_injection_guard())
     parts.extend(chunk for chunk in context_chunks if chunk)
     parts.append(

@@ -228,6 +228,23 @@ async def _try_primary_video_routes(
     return ""
 
 
+def primary_route_supports_native_video(
+    runtime: Any,
+    *,
+    route_name: str = VISUAL_ROUTE_AGENT,
+) -> bool:
+    for provider in _primary_provider_candidates(runtime):
+        api_type = str(provider.get("api_type", "") or "")
+        model = str(provider.get("model", "") or "")
+        if _normalize_media_api_type(api_type) != "gemini_official":
+            continue
+        if not str(provider.get("api_key", "") or "").strip():
+            continue
+        if provider_supports_video(api_type, model, route_name=route_name):
+            return True
+    return False
+
+
 def get_primary_provider_signature(runtime: Any) -> tuple[str, str]:
     primary = get_primary_provider_config(runtime)
     return primary["api_type"], primary["model"]
@@ -410,7 +427,10 @@ async def analyze_videos_with_route_or_fallback(
     if not refs:
         return "", "missing_videos"
     plugin_config = getattr(runtime, "plugin_config", None)
-    if plugin_config is None or not bool(getattr(plugin_config, "personification_video_understanding_enabled", False)):
+    if plugin_config is None:
+        return "", "video_disabled"
+    video_enabled = bool(getattr(plugin_config, "personification_video_understanding_enabled", False))
+    if not video_enabled and not primary_route_supports_native_video(runtime, route_name=route_name):
         return "", "video_disabled"
 
     primary_result = await _try_primary_video_routes(
@@ -446,4 +466,5 @@ __all__ = [
     "analyze_videos_with_route_or_fallback",
     "get_primary_provider_config",
     "get_primary_provider_signature",
+    "primary_route_supports_native_video",
 ]

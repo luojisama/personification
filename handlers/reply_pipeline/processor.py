@@ -25,6 +25,11 @@ from ...core.context_policy import (
     has_silence_control_marker,
     strip_response_control_markers,
 )
+from ...core.gemini_profile import (
+    context_keep_recent_for_route,
+    context_token_budget_for_route,
+    should_enable_default_builtin_search,
+)
 from ...flows.yaml_parser import parse_yaml_response
 from ...core.prompt_hooks import HookContext, get_hook_registry
 from ...core.group_relations import summarize_group_relationships
@@ -924,8 +929,11 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
     hook_ctx.semantic_frame = semantic_frame
     prelude_chunks = await get_hook_registry().run_all(hook_ctx, phase="system_prelude")
     context_chunks = await get_hook_registry().run_all(hook_ctx, phase="system_context")
+    primary_api_type, primary_model = _get_primary_provider_signature(runtime)
     context_chunks = await compress_context_if_needed(
         context_chunks,
+        max_tokens=context_token_budget_for_route(primary_api_type, primary_model),
+        keep_recent=context_keep_recent_for_route(primary_api_type, primary_model),
         call_ai_api=runtime.lite_call_ai_api or runtime.call_ai_api,
     )
     postlude_chunks = await get_hook_registry().run_all(hook_ctx, phase="system_postlude")
@@ -948,6 +956,12 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
         plugin_summary=plugin_summary,
         has_visual_context=bool(tool_image_urls),
         photo_like=has_photo_input,
+        primary_api_type=primary_api_type,
+        primary_model=primary_model,
+        native_search_enabled=should_enable_default_builtin_search(
+            runtime.plugin_config,
+            get_configured_api_providers=runtime.get_configured_api_providers,
+        ),
     )
     if state.get("message_target") == TARGET_OTHERS:
         system_prompt += (

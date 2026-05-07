@@ -14,6 +14,8 @@ def test_reply_style_policy_keeps_visual_context_internal() -> None:
     assert "内部上下文" in prompt
     assert "不要主动讲图里是什么" in prompt
     assert "不要堆砌互联网热词" in prompt
+    assert "等下/等一下/你这也/这图也" in prompt
+    assert "。。。/……/..." in prompt
 
 
 def test_direct_visual_guard_does_not_ask_to_describe_image() -> None:

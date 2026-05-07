@@ -35,6 +35,11 @@ from ...core.context_policy import (
     has_silence_control_marker,
     strip_response_control_markers,
 )
+from ...core.gemini_profile import (
+    build_gemini_route_policy_prompt,
+    primary_route_signature,
+    should_enable_default_builtin_search,
+)
 from ...core.repeat_follow import maybe_follow_repeat_cluster
 from ...core.reply_style_policy import (
     build_direct_visual_identity_guard,
@@ -653,6 +658,21 @@ async def process_yaml_response_logic(
         has_visual_context=bool(last_images),
         photo_like=photo_like,
     )
+    primary_api_type, primary_model = primary_route_signature(
+        plugin_config,
+        get_configured_api_providers=get_configured_api_providers,
+    )
+    gemini_policy = build_gemini_route_policy_prompt(
+        api_type=primary_api_type,
+        model=primary_model,
+        has_visual_context=bool(last_images),
+        native_search_enabled=should_enable_default_builtin_search(
+            plugin_config,
+            get_configured_api_providers=get_configured_api_providers,
+        ),
+    )
+    if gemini_policy:
+        system_prompt += "\n\n" + gemini_policy
     if knowledge_store is not None:
         try:
             plugin_summary = knowledge_store.get_plugin_summary_for_prompt()
