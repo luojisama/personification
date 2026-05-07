@@ -159,7 +159,7 @@ def _format_qzone_reply_content(text: str, reply_to_comment: dict[str, Any] | No
     cleaned = _clean_qzone_text(text)
     if not isinstance(reply_to_comment, dict):
         return cleaned[:80]
-    if cleaned.startswith(("回复 ", "回复　")):
+    if cleaned.startswith(("@", "回复 ", "回复　")):
         return cleaned[:80]
 
     nickname = _clean_qzone_text(
@@ -174,10 +174,12 @@ def _format_qzone_reply_content(text: str, reply_to_comment: dict[str, Any] | No
         or reply_to_comment.get("useruin")
         or ""
     ).strip()
-    target = nickname or user_id
-    if not target:
+    if not user_id:
         return cleaned[:80]
-    return f"回复 {target}: {cleaned}"[:80]
+    # QZone 协议级 @ 富文本，QQ 客户端会渲染为蓝色可点击链接
+    nick_for_at = nickname or user_id
+    prefix = f"@{{uin:{user_id},nick:{nick_for_at},who:1}} "
+    return (prefix + cleaned)[:80]
 
 
 def _qzone_comment_reply_target(reply_to_comment: dict[str, Any] | None) -> dict[str, str]:
@@ -674,16 +676,10 @@ class QzoneSocialService:
         topic_id = str(feed.get("topic_id", "") or "").strip()
         if not owner or not topic_id:
             return False, "动态缺少评论所需字段"
-        if isinstance(reply_to_comment, dict):
-            ok_reply, reply_msg = await self._reply_comment_sub(
-                feed=feed,
-                ctx=ctx,
-                content=text,
-                reply_to_comment=reply_to_comment,
-            )
-            if ok_reply:
-                return True, reply_msg
-            self.logger.warning(f"[qzone] 子评论回复失败（{reply_msg}），降级到普通评论")
+        # 真正的嵌套子回复需 emotion_cgi_addreply_v6，要求 cookie 含非空 g_qzonetoken
+        # （即浏览器登录态）。QQ 扫码登录的 cookie 拿不到 g_qzonetoken，
+        # 故直接走顶级评论 + @{uin,nick,who:1} 富文本格式，QQ 客户端会把 @ 用户渲染为
+        # 蓝色可点击链接。如需真嵌套，请用浏览器登录 QZone 一次以获取完整 cookie。
         url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
         send_text = _format_qzone_reply_content(text, reply_to_comment)
         data = {
