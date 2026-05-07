@@ -1004,6 +1004,17 @@ def _format_model_status(bundle: Any) -> str:
     env_file_keys = _collect_env_file_keys()
     pool_from_env = "personification_api_pools" in env_file_keys
     source_label = "来源：.env.prod/.env" if pool_from_env else "来源：runtime_config（.env.prod 未设置此项）"
+    # 诊断信息：raw 配置的类型/长度/解析后数量，方便排查 .env 多行 JSON 解析失败问题
+    raw_pools = getattr(bundle.plugin_config, "personification_api_pools", None)
+    if raw_pools is None:
+        raw_info = "raw=None"
+    elif isinstance(raw_pools, str):
+        raw_info = f"raw=str(len={len(raw_pools)}) head={raw_pools[:80]!r}"
+    elif isinstance(raw_pools, list):
+        raw_info = f"raw=list(len={len(raw_pools)})"
+    else:
+        raw_info = f"raw={type(raw_pools).__name__}"
+    lines.append(f"诊断：{raw_info}; 解析后 provider 数={len(providers)}")
     lines.append(f"当前 provider（{source_label}）：")
     if providers:
         for provider in providers[:8]:
