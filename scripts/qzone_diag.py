@@ -18,16 +18,17 @@ from pathlib import Path
 
 # ── 从 .env.prod / .env 读取 cookie ─────────────────────────────────────────
 def _load_cookie_from_env() -> str:
-    search_dirs = [
-        Path.cwd(),
-        Path(__file__).resolve().parent.parent,  # personification/
-        Path(__file__).resolve().parent.parent.parent,  # bot root
-    ]
+    script_path = Path(__file__).resolve()
+    # 从脚本位置向上最多搜索 6 层目录
+    ancestors = [script_path.parents[i] for i in range(min(6, len(script_path.parents)))]
+    search_dirs = list(dict.fromkeys([Path.cwd()] + ancestors))  # 去重，cwd 优先
+    print(f"[cookie] 搜索目录: {[str(d) for d in search_dirs]}")
     for d in search_dirs:
         for name in (".env.prod", ".env"):
             path = d / name
             if not path.exists():
                 continue
+            print(f"[cookie] 找到配置文件: {path}")
             text = path.read_text(encoding="utf-8")
             for line in text.splitlines():
                 line = line.strip()
@@ -35,8 +36,9 @@ def _load_cookie_from_env() -> str:
                     _, _, value = line.partition("=")
                     cookie = value.strip().strip('"').strip("'")
                     if cookie:
-                        print(f"[cookie] 读取自 {path}")
+                        print(f"[cookie] 成功读取自 {path}")
                         return cookie
+            print(f"[cookie] {path} 中未找到 personification_qzone_cookie 字段")
     return ""
 
 
