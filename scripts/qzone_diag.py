@@ -114,6 +114,41 @@ def main() -> None:
     print(f"QQ={QQ}")
     print(f"g_tk(p_skey)={g_tk}  g_tk(skey)={g_tk_skey}  skey存在={bool(skey)}")
 
+    # ── 提取 qzonetoken（写操作 cgi 通常要求）────────────────────────────────
+    qzonetoken = ""
+    try:
+        # 先访问 QZone 主页 HTML，从中提取 g_qzonetoken
+        home_headers = {
+            "Cookie": cookie,
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+        }
+        home_url = f"https://user.qzone.qq.com/{QQ}"
+        req = urllib.request.Request(home_url, headers=home_headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        # 多种格式都试一下
+        patterns = [
+            r"window\.g_qzonetoken\s*=\s*\(?function.*?return\s*[\"']([^\"']+)[\"']",
+            r"g_qzonetoken\s*=\s*[\"']([^\"']+)[\"']",
+            r"qzonetoken\s*=\s*[\"']([^\"']+)[\"']",
+            r"qzonetoken[\"']?\s*:\s*[\"']([^\"']+)[\"']",
+        ]
+        for p in patterns:
+            m = re.search(p, html)
+            if m:
+                qzonetoken = m.group(1)
+                print(f"[qzonetoken] 提取成功（pattern={p[:40]}...）: {qzonetoken[:50]}...")
+                break
+        if not qzonetoken:
+            print(f"[qzonetoken] 主页 HTML 长度={len(html)}，未匹配到 token，前 600 字:")
+            print(html[:600])
+    except Exception as exc:
+        print(f"[qzonetoken] 获取异常: {exc}")
+    print(f"qzonetoken={qzonetoken[:60] + ('...' if len(qzonetoken) > 60 else '')!r}")
+
     base_headers = {
         "Cookie": cookie,
         "User-Agent": (
@@ -242,46 +277,40 @@ def main() -> None:
         "qzreferrer": f"https://user.qzone.qq.com/{feed_uin}",
     }
 
-    # ── 对照实验：故意不存在的 cgi 名，看是否返回相同 -3000 ─────────────────
-    print("\n=== [对照] 故意不存在的 cgi 名 emotion_cgi_NOTEXIST_xxxxx ===")
-    bogus_url = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_NOTEXIST_xxxxx"
-    try:
-        s, t = _http_post(bogus_url, params={"g_tk": str(g_tk)}, data=base_post, headers=post_headers)
-        print(f"HTTP {s}  响应: {t[:200] if t else '<空>'}")
-        d = _parse_jsonp(t)
-        print(f"对照 code={d.get('code', 'N/A')} message={d.get('message','')} subcode={d.get('subcode','')}")
-        print("→ 若与 addreply_v6 返回完全相同，说明 addreply_v6 也不存在；否则说明它真实存在。")
-    except Exception as exc:
-        print(f"对照异常: {exc}")
+    # ── 已确认 emotion_cgi_addreply_v6 是真实端点（对照实验返回 500 vs 它返回 200+JSON）
+    # ── 本轮重点：测试加入 qzonetoken 是否能通过认证
+    target_url = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_addreply_v6"
 
-    # ── 候选：H5 webapp 接口（QZone 移动 H5 实际使用的 RESTful 接口）─────────
-    print("\n=== 扫描 h5.qzone.qq.com/webapp/json/... 候选接口 ===")
-    h5_candidates = [
-        "https://h5.qzone.qq.com/webapp/json/mqzone_main/replyComment",
-        "https://h5.qzone.qq.com/webapp/json/mqzone_feedlist/replyComment",
-        "https://h5.qzone.qq.com/webapp/json/mqzone_main/comment",
-        "https://h5.qzone.qq.com/webapp/json/qzoneFeedV2/comment",
-        "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_addreply_v6",
+    test_variants = [
+        ("无 qzonetoken（基线）", {}, {}),
+        ("URL 参数加 qzonetoken", {"qzonetoken": qzonetoken}, {}),
+        ("body 加 qzonetoken", {}, {"qzonetoken": qzonetoken}),
+        ("URL+body 都加 qzonetoken", {"qzonetoken": qzonetoken}, {"qzonetoken": qzonetoken}),
     ]
 
     success_url = None
-    for idx, url in enumerate(h5_candidates):
-        print(f"\n--- [{idx + 1}/{len(h5_candidates)}] {url} ---")
-        data = {**base_post, "content": f"[诊断 #{idx + 1}，请忽略]"}
+    for idx, (label, extra_params, extra_body) in enumerate(test_variants):
+        if "qzonetoken" in str(extra_params) + str(extra_body) and not qzonetoken:
+            print(f"\n--- [{idx + 1}/{len(test_variants)}] 跳过（{label}：未提取到 qzonetoken）---")
+            continue
+        print(f"\n--- [{idx + 1}/{len(test_variants)}] {label} ---")
+        params = {"g_tk": str(g_tk), **extra_params}
+        data = {**base_post, "content": f"[诊断 #{idx + 1}，请忽略]", **extra_body}
         try:
             status, resp_text = _http_post(
-                url, params={"g_tk": str(g_tk)}, data=data, headers=post_headers,
+                target_url, params=params, data=data, headers=post_headers,
             )
             print(f"HTTP {status}")
-            preview = (resp_text[:300] + "...") if len(resp_text) > 300 else resp_text
+            preview = (resp_text[:400] + "...") if len(resp_text) > 400 else resp_text
             print(f"响应: {preview if preview else '<空>'}")
             d = _parse_jsonp(resp_text)
             api_code = d.get("code", d.get("ret", "N/A"))
             msg = d.get("message", d.get("msg", ""))
-            print(f"解析 code={api_code} message={msg}")
+            sub = d.get("subcode", "")
+            print(f"解析 code={api_code} subcode={sub} message={msg}")
             if status == 200 and api_code == 0:
-                success_url = url
-                print(f"⭐ 命中！")
+                success_url = target_url
+                print(f"⭐ 命中！配置: {label}")
                 break
         except Exception as exc:
             print(f"请求异常: {exc}")
