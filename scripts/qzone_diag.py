@@ -199,17 +199,20 @@ def main() -> None:
         print("评论缺少 ID/uin，无法测试")
         return
 
-    # ── Step 2: 测试各子评论接口 ─────────────────────────────────────────────
+    # ── Step 2: 测试子回复（仅发 1 条，通过 commentUin+commentTid 触发嵌套）──
     post_headers = {**base_headers, "Content-Type": "application/x-www-form-urlencoded"}
 
-    base_post = {
+    sub_reply_data = {
         "uin": QQ,
         "hostUin": feed_uin,
         "appid": appid,
         "topicId": topic_id,
+        # 关键：QZone 用同一 emotion_cgi_re_feeds，加 commentUin+commentTid 触发子回复
+        "commentUin": c_uin,
+        "commentTid": c_id,
         "replyUin": c_uin,
         "replyNick": c_nick,
-        "content": "[诊断测试，请忽略]",
+        "content": "[诊断子回复测试，请忽略]",
         "private": "0",
         "paramstr": "1",
         "format": "json",
@@ -222,38 +225,53 @@ def main() -> None:
         "qzreferrer": f"https://user.qzone.qq.com/{feed_uin}",
     }
 
-    # 测试矩阵：URL × 评论 ID 字段名
-    url_variants = [
-        "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6",
-        "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6",
-        "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds",
-        "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds",
-    ]
-    field_variants = [
-        {"replyId": c_id, "commentId": c_id},   # 同时带两个
-        {"commentId": c_id},                     # 仅 commentId
-        {"replyId": c_id},                       # 仅 replyId
-    ]
+    target_url = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
+    print(f"\n=== POST {target_url}（commentUin+commentTid 模式，只发 1 次）===")
+    try:
+        status, resp_text = _http_post(
+            target_url,
+            params={"g_tk": str(g_tk)},
+            data=sub_reply_data,
+            headers=post_headers,
+        )
+        print(f"HTTP {status}")
+        print(f"响应（前 800 字）: {resp_text[:800] if resp_text else '<空>'}")
+    except Exception as exc:
+        print(f"请求异常: {exc}")
+        return
 
-    for url in url_variants:
-        for fv in field_variants:
-            label = ",".join(f"{k}={v}" for k, v in fv.items())
-            print(f"\n=== POST {url}\n     fields=[{label}] ===")
-            data = {**base_post, **fv}
-            try:
-                status, resp_text = _http_post(
-                    url,
-                    params={"g_tk": str(g_tk)},
-                    data=data,
-                    headers=post_headers,
-                )
-                print(f"HTTP {status}")
-                print(f"响应: {resp_text[:400] if resp_text else '<空>'}")
-                d = _parse_jsonp(resp_text)
-                api_code = d.get("code", d.get("ret", "N/A"))
-                print(f"解析 code={api_code}  msg={d.get('message', d.get('msg', ''))}")
-            except Exception as exc:
-                print(f"请求异常: {exc}")
+    # ── Step 3: 重新拉取动态，对比 commentlist 结构变化 ──────────────────────
+    print("\n=== Step 3: 重新拉取动态对比 ===")
+    status2, text2 = _http_get(
+        "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6",
+        params={
+            "uin": QQ, "ftype": "0", "sort": "0", "pos": "0",
+            "num": "5", "replynum": "20",
+            "g_tk": str(g_tk), "callback": "_Cb",
+            "code_version": "1", "format": "jsonp", "need_private_comment": "1",
+        },
+        headers=base_headers,
+    )
+    data2 = _parse_jsonp(text2)
+    msglist2 = data2.get("msglist", [])
+    new_feed = next((f for f in msglist2 if str(f.get("tid", "")) == feed_tid), None)
+    if not new_feed:
+        print("未找到原动态，无法对比")
+        return
+    new_comments = new_feed.get("commentlist", [])
+    print(f"动态当前评论数 cmtnum={new_feed.get('cmtnum')}  commentlist len={len(new_comments)}")
+    target_comment = next((c for c in new_comments if str(c.get("tid", "")) == c_id), None)
+    if target_comment:
+        replies = target_comment.get("replyList") or target_comment.get("list_3") or target_comment.get("replies") or []
+        print(f"\n目标评论的 reply_num={target_comment.get('reply_num')}")
+        print(f"目标评论的子回复字段（replyList/list_3/replies）数量: {len(replies)}")
+        if replies:
+            print("✅ 子回复确认成功！子回复结构样例:")
+            print(json.dumps(replies[-1], ensure_ascii=False, indent=2)[:800])
+        else:
+            print("⚠️ 评论的 reply_num 没有增加，可能仍是顶级评论")
+            print("目标评论完整结构:")
+            print(json.dumps(target_comment, ensure_ascii=False, indent=2)[:1000])
 
     print("\n=== 诊断完成，请将以上输出发给开发者 ===")
 
