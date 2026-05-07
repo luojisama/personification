@@ -22,6 +22,8 @@ PROVIDER_ROTATION_CURSOR = 0
 _PROVIDER_STATE_LOCK = threading.RLock()
 _CURSOR_LOCK = _PROVIDER_STATE_LOCK
 _LOGGED_PROVIDER_CONFIG_SIGNATURES: set[tuple[str, tuple[tuple[str, str, str], ...]]] = set()
+_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS = 10 * 60
+_RATE_LIMIT_MAX_COOLDOWN_SECONDS = 30 * 60
 
 
 def normalize_api_type(api_type: Optional[str]) -> str:
@@ -347,17 +349,57 @@ def _mark_provider_success(provider_name: str) -> None:
         PROVIDER_FAILURE_STATE.pop(provider_name, None)
 
 
-def _mark_provider_failure(provider_name: str, error: Exception) -> None:
+def _error_http_status(error: Exception) -> int:
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    try:
+        return int(status or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _retry_after_seconds(error: Exception) -> float:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return 0.0
+    try:
+        raw = headers.get("retry-after") or headers.get("Retry-After") or ""
+    except Exception:
+        raw = ""
+    try:
+        return max(0.0, float(str(raw or "").strip()))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    if _error_http_status(error) == 429:
+        return True
+    text = str(error or "").lower()
+    return "429" in text and ("too many requests" in text or "rate" in text)
+
+
+def _mark_provider_failure(provider_name: str, error: Exception) -> float:
     now_ts = time.time()
     with _PROVIDER_STATE_LOCK:
         state = PROVIDER_FAILURE_STATE.get(provider_name, {})
         failures = int(state.get("failures", 0)) + 1
+        if _is_rate_limit_error(error):
+            retry_after = _retry_after_seconds(error)
+            cooldown = max(_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS, retry_after)
+            cooldown = min(_RATE_LIMIT_MAX_COOLDOWN_SECONDS, cooldown)
+        else:
+            cooldown = min(300, 30 * failures)
         PROVIDER_FAILURE_STATE[provider_name] = {
             "failures": failures,
-            "cooldown_until": now_ts + min(300, 30 * failures),
+            "cooldown_until": now_ts + cooldown,
             "last_error": str(error),
             "last_failed_at": now_ts,
+            "last_status": _error_http_status(error) or None,
+            "rate_limited": _is_rate_limit_error(error),
         }
+    return cooldown
 
 
 def _get_thinking_mode(plugin_config: Any) -> str:
@@ -564,6 +606,13 @@ async def _try_provider_chain(
                     break
                 error_text = _error_text(e)
                 errors.append(f"{provider['name']}#{attempt + 1}: {error_text}")
+                if _is_rate_limit_error(e):
+                    cooldown = _mark_provider_failure(provider["name"], e)
+                    logger.warning(
+                        f"personification: provider {provider['name']} rate limited "
+                        f"({attempt + 1}/{retries}); cooldown {int(cooldown)}s and switch: {error_text}"
+                    )
+                    break
                 logger.warning(
                     f"personification: provider {provider['name']} failed "
                     f"({attempt + 1}/{retries}): {error_text}"

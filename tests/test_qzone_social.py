@@ -85,7 +85,7 @@ def test_qzone_reply_content_targets_commenter_name() -> None:
         "你木飞了",
         {"nickname": "白咲零", "user_id": "20001"},
     )
-    assert text == "回复 白咲零: 你木飞了"
+    assert text == "@{uin:20001,nick:白咲零,who:1} 你木飞了"
 
 
 def test_qzone_reply_content_does_not_double_prefix() -> None:
@@ -96,7 +96,7 @@ def test_qzone_reply_content_does_not_double_prefix() -> None:
     assert text == "回复 白咲零: 已经收到了"
 
 
-def test_qzone_comment_feed_uses_mobile_reply_endpoint(monkeypatch) -> None:  # noqa: ANN001
+def test_qzone_comment_feed_uses_rich_mention_reply_payload(monkeypatch) -> None:  # noqa: ANN001
     calls: list[dict[str, object]] = []
 
     class _Response:
@@ -142,15 +142,14 @@ def test_qzone_comment_feed_uses_mobile_reply_endpoint(monkeypatch) -> None:  # 
 
     assert ok is True
     assert msg == "ok"
-    assert calls[0]["url"] == "https://m.qzone.qq.com/cgi-bin/new/add_reply"
+    assert calls[0]["url"] == "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
     data = calls[0]["data"]
-    assert data["commentId"] == "c1"
+    assert data["commentid"] == "c1"
     assert data["replyUin"] == "20001"
-    assert data["content"] == "测试收到"
-    assert not str(data["content"]).startswith("回复 ")
+    assert data["content"] == "@{uin:20001,nick:白咲零,who:1} 测试收到"
 
 
-def test_qzone_comment_feed_does_not_fallback_to_top_level_when_mobile_reply_fails(monkeypatch) -> None:  # noqa: ANN001
+def test_qzone_comment_feed_reports_top_level_rich_mention_failure(monkeypatch) -> None:  # noqa: ANN001
     calls: list[dict[str, object]] = []
 
     class _Response:
@@ -195,8 +194,10 @@ def test_qzone_comment_feed_does_not_fallback_to_top_level_when_mobile_reply_fai
     )
 
     assert ok is False
-    assert "未降级为普通评论" in msg
-    assert [call["url"] for call in calls] == ["https://m.qzone.qq.com/cgi-bin/new/add_reply"]
+    assert "bad reply" in msg
+    assert [call["url"] for call in calls] == [
+        "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds",
+    ]
 
 
 def test_proactive_candidates_require_profile_and_not_favorability_threshold() -> None:

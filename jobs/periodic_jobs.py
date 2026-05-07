@@ -12,6 +12,24 @@ def _compact_qzone_state_content(content: str) -> str:
     return _IMAGE_B64_RE.sub("[配图]", str(content or "")).strip()[:200]
 
 
+def _remember_qzone_post(state: dict[str, Any], content: str, *, max_items: int = 12) -> None:
+    compact = _compact_qzone_state_content(content)
+    if not compact:
+        return
+    recent_raw = state.get("recent_contents")
+    recent = list(recent_raw) if isinstance(recent_raw, list) else []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in recent + [compact]:
+        text = str(item.get("content") if isinstance(item, dict) else item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    state["recent_contents"] = normalized[-max(1, int(max_items)) :]
+    state["last_content"] = compact
+
+
 async def run_daily_group_fav_report(
     *,
     sign_in_available: bool,
@@ -125,6 +143,13 @@ async def run_auto_post_diary(
     logger.info("拟人插件：正在自动发布空间说说...")
     success, msg = await publish_qzone_shuo(diary_content, bot.self_id)
     if success:
+        store = get_data_store()
+        state = store.load_sync("qzone_post_state")
+        if not isinstance(state, dict):
+            state = {}
+        _remember_qzone_post(state, diary_content)
+        state["last_post_at"] = time.time()
+        store.save_sync("qzone_post_state", state)
         logger.info("拟人插件：空间说说发布成功！")
         return True
 
@@ -163,7 +188,15 @@ async def run_proactive_qzone_post(
     if not isinstance(state, dict):
         state = {}
     if state.get("date") != today:
-        state = {"date": today, "count": 0, "last_post_at": float(state.get("last_post_at", 0) or 0)}
+        state = {
+            "date": today,
+            "count": 0,
+            "last_post_at": float(state.get("last_post_at", 0) or 0),
+            "last_content": str(state.get("last_content", "") or ""),
+            "recent_contents": list(state.get("recent_contents", []))
+            if isinstance(state.get("recent_contents"), list)
+            else [],
+        }
 
     if int(state.get("count", 0) or 0) >= max(1, int(qzone_daily_limit)):
         return False
@@ -192,7 +225,7 @@ async def run_proactive_qzone_post(
     state["date"] = today
     state["count"] = int(state.get("count", 0) or 0) + 1
     state["last_post_at"] = now_ts
-    state["last_content"] = _compact_qzone_state_content(content)
+    _remember_qzone_post(state, content)
     store.save_sync("qzone_post_state", state)
     logger.info("拟人插件：已根据当前状态主动发布一条空间说说。")
     return True

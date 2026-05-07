@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import random
 import re
@@ -9,6 +10,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from ..agent.inner_state import load_inner_state, update_state_from_diary
 from ..core.context_policy import strip_response_control_markers
+from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_group_emotion_memory, load_emotion_state
 from ..skills.skillpacks.image_gen.scripts.impl import generate_image as generate_codex_image
 
@@ -84,6 +86,100 @@ def _trim_qzone_content(text: str, *, max_chars: int = 50) -> str:
     return candidate.rstrip("，、,. ") + "..."
 
 
+def _compact_qzone_history_content(content: str) -> str:
+    cleaned = re.sub(r"\[IMAGE_B64\][A-Za-z0-9+/=\r\n]+\[/IMAGE_B64\]", "", str(content or ""))
+    cleaned = _trim_qzone_content(cleaned, max_chars=80)
+    return cleaned.strip()
+
+
+def _load_recent_qzone_posts(limit: int = 8) -> list[str]:
+    try:
+        state = get_data_store().load_sync("qzone_post_state")
+    except Exception:
+        return []
+    if not isinstance(state, dict):
+        return []
+    candidates: list[Any] = []
+    recent = state.get("recent_contents")
+    if isinstance(recent, list):
+        candidates.extend(recent)
+    if state.get("last_content"):
+        candidates.append(state.get("last_content"))
+    items: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        raw = item.get("content") if isinstance(item, dict) else item
+        text = _compact_qzone_history_content(str(raw or ""))
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        items.append(text)
+    return items[-max(1, int(limit)) :]
+
+
+def _format_recent_qzone_posts(posts: list[str]) -> str:
+    if not posts:
+        return "- 暂无"
+    return "\n".join(f"- {item}" for item in posts[-8:])
+
+
+def _normalize_similarity_text(text: str) -> str:
+    cleaned = _compact_qzone_history_content(text)
+    cleaned = re.sub(r"[\s，。！？!?、,.；;：:~…·'\"“”‘’（）()【】\[\]#]+", "", cleaned)
+    return cleaned.lower()
+
+
+def _char_bigrams(text: str) -> set[str]:
+    value = _normalize_similarity_text(text)
+    if len(value) < 2:
+        return {value} if value else set()
+    return {value[index : index + 2] for index in range(len(value) - 1)}
+
+
+def _longest_common_substring_len(left: str, right: str) -> int:
+    a = _normalize_similarity_text(left)
+    b = _normalize_similarity_text(right)
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for ca in a:
+        curr = [0]
+        for index, cb in enumerate(b, start=1):
+            value = prev[index - 1] + 1 if ca == cb else 0
+            curr.append(value)
+            if value > best:
+                best = value
+        prev = curr
+    return best
+
+
+def _qzone_post_similarity(left: str, right: str) -> float:
+    a = _char_bigrams(left)
+    b = _char_bigrams(right)
+    if not a or not b:
+        return 0.0
+    return (2.0 * len(a & b)) / (len(a) + len(b))
+
+
+def _is_too_similar_to_recent_qzone_post(content: str, recent_posts: list[str]) -> bool:
+    text = _normalize_similarity_text(content)
+    if len(text) < 6:
+        return False
+    for recent in recent_posts or []:
+        other = _normalize_similarity_text(recent)
+        if not other:
+            continue
+        if text == other or text in other or other in text:
+            return True
+        longest = _longest_common_substring_len(text, other)
+        if longest >= 8:
+            return True
+        if longest >= 5 and _qzone_post_similarity(text, other) >= 0.42:
+            return True
+    return False
+
+
 async def _maybe_generate_qzone_image_marker(
     *,
     tool_caller: Any,
@@ -120,9 +216,13 @@ async def _build_qzone_post_with_optional_image(
     image_prompt: str,
     tool_caller: Any,
     logger: Any,
+    recent_posts: Optional[list[str]] = None,
 ) -> str:
     text = _trim_qzone_content(content)
     if not text:
+        return ""
+    if _is_too_similar_to_recent_qzone_post(text, recent_posts or []):
+        logger.info(f"[qzone] skip generated post because it repeats recent content: {text}")
         return ""
     image_marker = await _maybe_generate_qzone_image_marker(
         tool_caller=tool_caller,
@@ -187,6 +287,7 @@ async def _generate_once(
     user_prompt: str,
     *,
     call_ai_api: Callable[..., Awaitable[Optional[str]]],
+    use_builtin_search: bool = False,
 ) -> str:
     if isinstance(system_prompt, str):
         system_text = system_prompt + _FLOW_OUTPUT_GUARD
@@ -201,7 +302,19 @@ async def _generate_once(
         {"role": "system", "content": system_text},
         {"role": "user", "content": user_prompt},
     ]
-    result = await call_ai_api(messages)
+    supports_builtin_search = True
+    try:
+        signature = inspect.signature(call_ai_api)
+        supports_builtin_search = (
+            "use_builtin_search" in signature.parameters
+            or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+        )
+    except (TypeError, ValueError):
+        supports_builtin_search = True
+    if supports_builtin_search:
+        result = await call_ai_api(messages, use_builtin_search=use_builtin_search)
+    else:
+        result = await call_ai_api(messages)
     if not result:
         return ""
     # 兜底：若 LLM 仍输出思维链 XML，剥除标签再走 clean_generated_text
@@ -240,6 +353,7 @@ async def generate_ai_diary(
     """Generate a short Qzone post from recent chat context."""
     system_prompt = load_prompt()
     chat_context = await get_recent_chat_context(bot, logger)
+    recent_posts = _load_recent_qzone_posts()
     emotion_hint = ""
     if data_dir is not None:
         try:
@@ -263,8 +377,11 @@ async def generate_ai_diary(
         "4. 标点可以省略，可用空格、句号、问号代替逗号；可以是反问、牢骚、发现、未说完的半句；不必有结论。\n"
         "5. 语气贴合角色，但不要互联网黑话、热梗、夸张营业感、AI 客服腔、对仗工整的总结句。\n"
         "6. 不要列条目、不要标题、不要 hashtag、不要说自己是 AI。\n"
-        "7. image_prompt 只有在适合配一张日常氛围图时填写英文画面描述；不适合就留空。"
+        "7. 必须避开最近说说已经反复出现的具体意象、食物、动作和句式；如果最近写过，就换一个完全不同的触发点。\n"
+        "8. 可以从最近群聊、今天的游戏/动漫/轻新闻里抓一个很小的细节当触发点，但写成自己的即时反应，不要新闻播报。\n"
+        "9. image_prompt 只有在适合配一张日常氛围图时填写英文画面描述；不适合就留空。"
     )
+    recent_block = "最近已经发过的说说，禁止复读这些内容或近似句式：\n" + _format_recent_qzone_posts(recent_posts)
 
     if chat_context:
         rich_prompt = (
@@ -272,12 +389,14 @@ async def generate_ai_diary(
             "不要逐条复述聊天记录，而是把它们消化成自己的感受、吐槽或碎碎念。\n\n"
             f"{chat_context}\n\n"
             f"{emotion_hint}\n\n"
+            f"{recent_block}\n\n"
             f"{base_requirements}"
         )
         raw_rich_result = await _generate_once(
             system_prompt,
             rich_prompt,
             call_ai_api=call_ai_api,
+            use_builtin_search=True,
         )
         payload = _extract_json_object(raw_rich_result)
         rich_result = ""
@@ -287,9 +406,13 @@ async def generate_ai_diary(
                 image_prompt=str(payload.get("image_prompt", "") or ""),
                 tool_caller=tool_caller,
                 logger=logger,
+                recent_posts=recent_posts,
             )
         elif raw_rich_result:
             rich_result = _trim_qzone_content(raw_rich_result)
+            if _is_too_similar_to_recent_qzone_post(rich_result, recent_posts):
+                logger.info(f"[qzone] skip rich raw post because it repeats recent content: {rich_result}")
+                rich_result = ""
         if rich_result:
             _schedule_diary_state_update(
                 diary_text=rich_result,
@@ -302,13 +425,16 @@ async def generate_ai_diary(
         logger.warning("[diary] rich prompt generation failed, fallback to basic prompt")
 
     basic_prompt = (
-        "请直接写一条自然的短说说，像是角色自己随手发的碎碎念。\n\n"
+        "请直接写一条自然的短说说，像是角色自己随手发的碎碎念。\n"
+        "如果没有群聊素材，可以借助模型内置搜索/常识，从今天的游戏、动漫、轻新闻里挑一个小触发点。\n\n"
+        f"{recent_block}\n\n"
         f"{base_requirements}"
     )
     raw_result = await _generate_once(
         system_prompt,
         basic_prompt,
         call_ai_api=call_ai_api,
+        use_builtin_search=True,
     )
     payload = _extract_json_object(raw_result)
     if payload:
@@ -317,9 +443,13 @@ async def generate_ai_diary(
             image_prompt=str(payload.get("image_prompt", "") or ""),
             tool_caller=tool_caller,
             logger=logger,
+            recent_posts=recent_posts,
         )
     else:
         result = _trim_qzone_content(raw_result)
+        if _is_too_similar_to_recent_qzone_post(result, recent_posts):
+            logger.info(f"[qzone] skip basic raw post because it repeats recent content: {result}")
+            result = ""
     if result:
         _schedule_diary_state_update(
             diary_text=result,
@@ -343,7 +473,8 @@ async def maybe_generate_proactive_qzone_post(
     system_prompt = load_prompt()
     chat_context = await get_recent_chat_context(bot, logger)
     if not chat_context:
-        return ""
+        chat_context = "最近群聊可用文本很少；可以把今天的游戏、动漫、轻新闻或自己的状态当成触发点。"
+    recent_posts = _load_recent_qzone_posts()
 
     inner_state = {}
     if data_dir is not None:
@@ -387,18 +518,22 @@ async def maybe_generate_proactive_qzone_post(
         f"最近挂念：\n{pending_block}\n\n"
         f"近期群情绪记忆：\n{emotion_hint or '- 暂无明显群情绪记忆'}\n\n"
         f"最近聊天片段：\n{chat_context}\n\n"
+        "最近已经发过的说说，禁止复读这些内容或近似句式：\n"
+        f"{_format_recent_qzone_posts(recent_posts)}\n\n"
         "要求：\n"
         "1. 如果没有明确想说的话，action=skip。\n"
         "2. 如果想发，action=post，并给出 content。\n"
         "3. 正文 12-50 个中文字符，像真人随手发的一句话，别写长篇大段。\n"
         "4. 只写一个小瞬间、小吐槽或突然想到的念头，不要列表、标题、hashtag 或总结腔。\n"
         "5. 不要为了发而发，不要重复最近已经说过很多遍的话题，不要互联网黑话和热梗。\n"
-        "6. 如果适合配图，image_prompt 写英文画面描述，要求贴合人设和正文氛围；不适合就留空。"
+        "6. 可以从今天的游戏、动漫、轻新闻里抓一个细节，但必须写成自己的日常反应，不要像新闻标题。\n"
+        "7. 如果适合配图，image_prompt 写英文画面描述，要求贴合人设和正文氛围；不适合就留空。"
     )
     result = await _generate_once(
         system_prompt,
         decision_prompt,
         call_ai_api=call_ai_api,
+        use_builtin_search=True,
     )
     if not result:
         return ""
@@ -411,7 +546,12 @@ async def maybe_generate_proactive_qzone_post(
             image_prompt=str(payload.get("image_prompt", "") or ""),
             tool_caller=tool_caller,
             logger=logger,
+            recent_posts=recent_posts,
         )
     if result.startswith("POST|"):
-        return _trim_qzone_content(result.split("|", 1)[1])
+        text = _trim_qzone_content(result.split("|", 1)[1])
+        if _is_too_similar_to_recent_qzone_post(text, recent_posts):
+            logger.info(f"[qzone] skip POST raw post because it repeats recent content: {text}")
+            return ""
+        return text
     return ""

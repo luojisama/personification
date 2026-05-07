@@ -1,6 +1,7 @@
 """Tests for new gemini-cli / claude-code tool caller routing."""
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -152,6 +153,35 @@ def test_provider_candidates_rotate_only_same_priority_tier() -> None:
     candidates = provider_router.get_provider_candidates(cfg, _Logger())
 
     assert [item["name"] for item in candidates] == ["gemini_b", "gemini_a", "codex_fallback"]
+
+
+def test_provider_candidates_skip_rate_limited_gemini_cli_until_cooldown() -> None:
+    cfg = _DummyConfig(
+        personification_api_pools=(
+            '[{"name":"gemini_cli_primary","api_type":"gemini_cli","model":"gemini-3-flash-preview",'
+            '"auth_path":"~/.gemini/oauth_creds.json","priority":1},'
+            '{"name":"codex_primary","api_type":"openai_codex","model":"gpt-5.4-mini",'
+            '"auth_path":"~/.codex/auth.json","priority":2}]'
+        )
+    )
+
+    class _Response:
+        status_code = 429
+        headers = {"Retry-After": "900"}
+
+    class _RateLimitError(Exception):
+        response = _Response()
+
+    provider_router.PROVIDER_FAILURE_STATE.clear()
+    provider_router._mark_provider_failure("gemini_cli_primary", _RateLimitError("429 Too Many Requests"))
+
+    state = provider_router.PROVIDER_FAILURE_STATE["gemini_cli_primary"]
+    assert state["rate_limited"] is True
+    assert state["cooldown_until"] - time.time() > 850
+
+    candidates = provider_router.get_provider_candidates(cfg, _Logger())
+
+    assert [item["name"] for item in candidates] == ["codex_primary"]
 
 
 def test_routed_config_proxy_passes_cli_auth_fields_to_tool_caller() -> None:

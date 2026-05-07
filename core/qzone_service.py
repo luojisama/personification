@@ -633,10 +633,12 @@ class QzoneSocialService:
             headers = _qzone_headers(ctx, referer_uin=owner)
             headers["Cookie"] = full_cookie
             headers["Content-Type"] = "application/x-www-form-urlencoded"
-            self.logger.info(
-                f"[qzone] emotion_cgi_reply_v6 url={url} owner={owner} "
-                f"topicId={topic_id} appid={appid} commentId={comment_id} replyUin={reply_uin}"
-            )
+            log_info = getattr(self.logger, "info", None)
+            if callable(log_info):
+                log_info(
+                    f"[qzone] emotion_cgi_reply_v6 url={url} owner={owner} "
+                    f"topicId={topic_id} appid={appid} commentId={comment_id} replyUin={reply_uin}"
+                )
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     resp = await client.post(
@@ -646,7 +648,8 @@ class QzoneSocialService:
                 last_err = f"请求异常：{exc}"
                 self.logger.warning(f"[qzone] {url} 请求失败: {exc}")
                 continue
-            self.logger.info(f"[qzone] {url} 状态码={resp.status_code} 响应={resp.text[:400]}")
+            if callable(log_info):
+                log_info(f"[qzone] {url} 状态码={resp.status_code} 响应={resp.text[:400]}")
             if resp.status_code != 200:
                 last_err = f"HTTP {resp.status_code}"
                 continue
