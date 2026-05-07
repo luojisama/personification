@@ -21,10 +21,23 @@ def _collect_env_file_keys() -> set[str]:
     不依赖 pydantic __pydantic_fields_set__（NoneBot2 通过文件加载时该 set 可能
     不包含文件来源字段），改为直接扫描 env 文件，确保 .env.prod 里的字段拥有比
     runtime_config.json 更高优先级。
+
+    搜索范围：cwd 及其向上 5 层目录 + 插件文件位置向上 5 层目录。这样无论 bot
+    通过 systemd / cd / docker 等何种方式启动，cwd 不在 bot 根目录时也能找到
+    .env.prod。
     """
     found: set[str] = set()
-    search_dirs = [Path.cwd(), Path.cwd().parent]
-    for d in search_dirs:
+    candidates: list[Path] = []
+    cwd = Path.cwd()
+    candidates.extend([cwd] + list(cwd.parents)[:5])
+    plugin_root = Path(__file__).resolve().parent.parent
+    candidates.extend([plugin_root] + list(plugin_root.parents)[:5])
+    seen_dirs: set[str] = set()
+    for d in candidates:
+        key = str(d)
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
         for name in (".env.prod", ".env"):
             p = d / name
             if not p.exists():
@@ -34,9 +47,9 @@ def _collect_env_file_keys() -> set[str]:
                     line = line.strip()
                     if line.startswith("#") or "=" not in line:
                         continue
-                    key = line.split("=", 1)[0].strip().lower()
-                    if key.startswith("personification_"):
-                        found.add(key)
+                    key_field = line.split("=", 1)[0].strip().lower()
+                    if key_field.startswith("personification_"):
+                        found.add(key_field)
             except Exception:
                 pass
     return found
