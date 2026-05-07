@@ -1011,7 +1011,11 @@ def _format_model_status(bundle: Any) -> str:
     elif isinstance(raw_pools, str):
         raw_info = f"raw=str(len={len(raw_pools)}) head={raw_pools[:80]!r}"
     elif isinstance(raw_pools, list):
-        raw_info = f"raw=list(len={len(raw_pools)})"
+        names = []
+        for item in raw_pools[:5]:
+            if isinstance(item, dict):
+                names.append(str(item.get("name", "?")))
+        raw_info = f"raw=list(len={len(raw_pools)}) names={names}"
     else:
         raw_info = f"raw={type(raw_pools).__name__}"
     lines.append(f"诊断：{raw_info}; 解析后 provider 数={len(providers)}")
