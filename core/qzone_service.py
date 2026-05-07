@@ -224,9 +224,22 @@ def _qzone_feed_reply_identity(feed: dict[str, Any]) -> dict[str, str]:
     feed_id = str(feed.get("feed_id") or raw.get("tid") or raw.get("id") or raw.get("feed_id") or "").strip()
     topic_id = str(feed.get("topic_id") or raw.get("topicId") or raw.get("topicid") or "").strip()
     appid = str(feed.get("appid") or raw.get("appid") or "311").strip() or "311"
+    t1_source = str(feed.get("t1_source") or raw.get("t1_source") or "").strip()
+    subdotype = str(feed.get("subdotype") or raw.get("subdotype") or raw.get("t1_subtype") or "0").strip() or "0"
+    signin = str(feed.get("signin") or raw.get("signin") or "0").strip() or "0"
+    sceneid = str(feed.get("sceneid") or raw.get("sceneid") or "100").strip() or "100"
     if not topic_id and owner and feed_id:
         topic_id = f"{owner}_{feed_id}__1"
-    return {"owner": owner, "feed_id": feed_id, "topic_id": topic_id, "appid": appid}
+    return {
+        "owner": owner,
+        "feed_id": feed_id,
+        "topic_id": topic_id,
+        "appid": appid,
+        "t1_source": t1_source,
+        "subdotype": subdotype,
+        "signin": signin,
+        "sceneid": sceneid,
+    }
 
 
 def _normalize_qzone_image_url(value: Any) -> str:
@@ -574,20 +587,23 @@ class QzoneSocialService:
         content: str,
         reply_to_comment: dict[str, Any],
     ) -> tuple[bool, str]:
-        """Post a level-2 threaded sub-comment under a parent comment via emotion_cgi_reply_v6."""
+        """Post a level-2 threaded sub-comment under a parent comment."""
         text = _clean_qzone_text(content)
         if not text:
             return False, "回复内容为空"
         feed_identity = _qzone_feed_reply_identity(feed)
         target = _qzone_comment_reply_target(reply_to_comment)
         owner = feed_identity["owner"]
+        feed_id = feed_identity["feed_id"]
         topic_id = feed_identity["topic_id"]
         comment_id = target["comment_id"]
         reply_uin = target["user_id"]
-        if not owner or not topic_id or not comment_id or not reply_uin:
+        if not owner or not feed_id or not topic_id or not comment_id or not reply_uin:
             missing = []
             if not owner:
                 missing.append("owner")
+            if not feed_id:
+                missing.append("feedId")
             if not topic_id:
                 missing.append("topicId")
             if not comment_id:
@@ -602,16 +618,33 @@ class QzoneSocialService:
         base_data: dict[str, str] = {
             "uin": str(ctx["qq"]),
             "hostUin": owner,
+            "hostuin": owner,
             "appid": appid,
             "topicId": topic_id,
-            # Both field names used across API versions
+            "topicid": topic_id,
+            "t1_source": feed_identity["t1_source"],
+            "t1_uin": owner,
+            "t1_tid": feed_id,
+            "t2_uin": reply_uin,
+            "t2_tid": comment_id,
+            "subdotype": feed_identity["subdotype"],
+            "signin": feed_identity["signin"],
+            "sceneid": feed_identity["sceneid"],
+            "commentUin": reply_uin,
+            "commentuin": reply_uin,
+            "commentTid": comment_id,
+            "commenttid": comment_id,
             "replyId": comment_id,
+            "replyid": comment_id,
             "commentId": comment_id,
+            "commentid": comment_id,
             "replyUin": reply_uin,
+            "replyuin": reply_uin,
             "content": text[:80],
             "private": "0",
             "paramstr": "1",
             "format": "json",
+            "feedsType": "100",
             "inCharset": "utf-8",
             "outCharset": "utf-8",
             "plat": "qzone",
@@ -623,43 +656,28 @@ class QzoneSocialService:
         if target["nickname"]:
             base_data["replyNick"] = target["nickname"]
 
-        # Try two hosts; h5 sometimes works when user.qzone.qq.com rejects sub-comments
-        candidates = [
-            "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6",
-            "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply_v6",
-        ]
-        last_err = "未知错误"
-        for url in candidates:
-            headers = _qzone_headers(ctx, referer_uin=owner)
-            headers["Cookie"] = full_cookie
-            headers["Content-Type"] = "application/x-www-form-urlencoded"
-            log_info = getattr(self.logger, "info", None)
-            if callable(log_info):
-                log_info(
-                    f"[qzone] emotion_cgi_reply_v6 url={url} owner={owner} "
-                    f"topicId={topic_id} appid={appid} commentId={comment_id} replyUin={reply_uin}"
-                )
-            try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.post(
-                        url, params={"g_tk": str(ctx["g_tk"])}, data=base_data, headers=headers
-                    )
-            except Exception as exc:
-                last_err = f"请求异常：{exc}"
-                self.logger.warning(f"[qzone] {url} 请求失败: {exc}")
-                continue
-            if callable(log_info):
-                log_info(f"[qzone] {url} 状态码={resp.status_code} 响应={resp.text[:400]}")
-            if resp.status_code != 200:
-                last_err = f"HTTP {resp.status_code}"
-                continue
-            payload = _parse_qzone_jsonp(resp.text)
-            ok, msg = _qzone_payload_success(payload, resp.text)
-            if ok:
-                return True, "ok"
-            last_err = msg
-            self.logger.warning(f"[qzone] {url} API 错误: {msg}")
-        return False, f"子评论回复失败（已尝试所有接口）：{last_err}"
+        url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
+        headers = _qzone_headers(ctx, referer_uin=owner)
+        headers["Cookie"] = full_cookie
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        log_info = getattr(self.logger, "info", None)
+        if callable(log_info):
+            log_info(
+                f"[qzone] subreply re_feeds owner={owner} topicId={topic_id} "
+                f"feedId={feed_id} commentId={comment_id} replyUin={reply_uin}"
+            )
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, params={"g_tk": str(ctx["g_tk"])}, data=base_data, headers=headers)
+        except Exception as exc:
+            self.logger.warning(f"[qzone] 子评论回复请求失败: {exc}")
+            return False, f"子评论回复请求异常：{exc}"
+        if callable(log_info):
+            log_info(f"[qzone] subreply re_feeds 状态码={resp.status_code} 响应={resp.text[:400]}")
+        if resp.status_code != 200:
+            return False, f"子评论回复失败，状态码：{resp.status_code}"
+        payload = _parse_qzone_jsonp(resp.text)
+        return _qzone_payload_success(payload, resp.text)
 
     async def comment_feed(
         self,
@@ -679,10 +697,17 @@ class QzoneSocialService:
         topic_id = str(feed.get("topic_id", "") or "").strip()
         if not owner or not topic_id:
             return False, "动态缺少评论所需字段"
-        # 真正的嵌套子回复需 emotion_cgi_addreply_v6，要求 cookie 含非空 g_qzonetoken
-        # （即浏览器登录态）。QQ 扫码登录的 cookie 拿不到 g_qzonetoken，
-        # 故直接走顶级评论 + @{uin,nick,who:1} 富文本格式，QQ 客户端会把 @ 用户渲染为
-        # 蓝色可点击链接。如需真嵌套，请用浏览器登录 QZone 一次以获取完整 cookie。
+        if isinstance(reply_to_comment, dict):
+            sub_ok, sub_msg = await self._reply_comment_sub(
+                feed=feed,
+                ctx=ctx,
+                content=text,
+                reply_to_comment=reply_to_comment,
+            )
+            if sub_ok:
+                return True, "ok"
+            self.logger.warning(f"[qzone] 子评论回复失败，回退为顶级 @ 评论: {sub_msg}")
+
         url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
         send_text = _format_qzone_reply_content(text, reply_to_comment)
         data = {

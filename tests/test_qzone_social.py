@@ -96,7 +96,7 @@ def test_qzone_reply_content_does_not_double_prefix() -> None:
     assert text == "回复 白咲零: 已经收到了"
 
 
-def test_qzone_comment_feed_uses_rich_mention_reply_payload(monkeypatch) -> None:  # noqa: ANN001
+def test_qzone_comment_feed_uses_threaded_subreply_payload(monkeypatch) -> None:  # noqa: ANN001
     calls: list[dict[str, object]] = []
 
     class _Response:
@@ -133,6 +133,7 @@ def test_qzone_comment_feed_uses_rich_mention_reply_payload(monkeypatch) -> None
                 "feed_id": "feed1",
                 "topic_id": "99999_feed1__1",
                 "appid": "311",
+                "raw": {"t1_source": "", "t1_subtype": "55702"},
             },
             bot_id="99999",
             content="测试收到",
@@ -144,17 +145,24 @@ def test_qzone_comment_feed_uses_rich_mention_reply_payload(monkeypatch) -> None
     assert msg == "ok"
     assert calls[0]["url"] == "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
     data = calls[0]["data"]
+    assert data["t1_uin"] == "99999"
+    assert data["t1_tid"] == "feed1"
+    assert data["t2_uin"] == "20001"
+    assert data["t2_tid"] == "c1"
+    assert data["subdotype"] == "55702"
     assert data["commentid"] == "c1"
     assert data["replyUin"] == "20001"
-    assert data["content"] == "@{uin:20001,nick:白咲零,who:1} 测试收到"
+    assert data["content"] == "测试收到"
 
 
-def test_qzone_comment_feed_reports_top_level_rich_mention_failure(monkeypatch) -> None:  # noqa: ANN001
+def test_qzone_comment_feed_falls_back_to_top_level_rich_mention(monkeypatch) -> None:  # noqa: ANN001
     calls: list[dict[str, object]] = []
 
     class _Response:
         status_code = 200
-        text = '{"code":-1,"message":"bad reply"}'
+
+        def __init__(self, text: str) -> None:
+            self.text = text
 
     class _Client:
         def __init__(self, **_kwargs) -> None:  # noqa: ANN003
@@ -168,7 +176,9 @@ def test_qzone_comment_feed_reports_top_level_rich_mention_failure(monkeypatch) 
 
         async def post(self, url, *, params=None, data=None, headers=None):  # noqa: ANN001, ANN201
             calls.append({"url": url, "params": params, "data": data, "headers": headers})
-            return _Response()
+            if len(calls) == 1:
+                return _Response('{"code":-1,"message":"bad subreply"}')
+            return _Response('{"code":0}')
 
     monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
     service = qzone_service.QzoneSocialService(
@@ -193,11 +203,14 @@ def test_qzone_comment_feed_reports_top_level_rich_mention_failure(monkeypatch) 
         )
     )
 
-    assert ok is False
-    assert "bad reply" in msg
+    assert ok is True
+    assert msg == "ok"
     assert [call["url"] for call in calls] == [
         "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds",
+        "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds",
     ]
+    assert calls[0]["data"]["content"] == "测试收到"
+    assert calls[1]["data"]["content"] == "@{uin:20001,nick:白咲零,who:1} 测试收到"
 
 
 def test_proactive_candidates_require_profile_and_not_favorability_threshold() -> None:
