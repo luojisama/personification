@@ -100,6 +100,9 @@ def main() -> None:
         sys.exit(1)
     p_skey = pskey_m.group(1)
 
+    skey_m = re.search(r"(?<![a-zA-Z_])skey=([^; ]+)", cookie)
+    skey = skey_m.group(1) if skey_m else ""
+
     uin_m = re.search(r"uin=[o0]*(\d+)", cookie)
     QQ = uin_m.group(1) if uin_m else ""
     if not QQ:
@@ -107,7 +110,9 @@ def main() -> None:
         sys.exit(1)
 
     g_tk = _g_tk(p_skey)
-    print(f"QQ={QQ}  g_tk={g_tk}")
+    g_tk_skey = _g_tk(skey) if skey else 0
+    print(f"QQ={QQ}")
+    print(f"g_tk(p_skey)={g_tk}  g_tk(skey)={g_tk_skey}  skey存在={bool(skey)}")
 
     base_headers = {
         "Cookie": cookie,
@@ -237,35 +242,44 @@ def main() -> None:
         "qzreferrer": f"https://user.qzone.qq.com/{feed_uin}",
     }
 
-    # 仅扫描真正可能的子回复端点；emotion_cgi_re_feeds 已确认是顶级评论端点，跳过
-    candidate_urls = [
-        "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_addreply_v6",
-        "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_addreply_v6",
-        "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_addreply",
-        "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_addreply",
-        "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_reply",
-        "https://user.qzone.qq.com/proxy/domain/taotao.qzs.qq.com/cgi-bin/emotion_cgi_addreply_v6",
-        "https://h5.qzone.qq.com/proxy/domain/taotao.qzs.qq.com/cgi-bin/emotion_cgi_addreply_v6",
+    # 已确认 emotion_cgi_addreply_v6 是真正的子回复端点
+    # 上一轮返回 -3000 "请先登录空间"，说明是 g_tk/cookie/referer 校验失败
+    # 本轮固定该端点，扫描多种 g_tk × Referer 组合
+    target_url = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_addreply_v6"
+
+    variants = [
+        ("g_tk=p_skey, Referer=user", g_tk, f"https://user.qzone.qq.com/{QQ}"),
+        ("g_tk=p_skey, Referer=h5", g_tk, f"https://h5.qzone.qq.com/mqzone/index"),
+        ("g_tk=skey,   Referer=user", g_tk_skey, f"https://user.qzone.qq.com/{QQ}"),
+        ("g_tk=skey,   Referer=h5", g_tk_skey, f"https://h5.qzone.qq.com/mqzone/index"),
     ]
 
     success_url = None
-    for idx, url in enumerate(candidate_urls):
-        print(f"\n=== [{idx + 1}/{len(candidate_urls)}] POST {url} ===")
+    success_gtk = None
+    success_referer = None
+    for idx, (label, gtk_val, referer) in enumerate(variants):
+        if not gtk_val:
+            print(f"\n=== [{idx + 1}/{len(variants)}] 跳过（{label}：g_tk 为 0）===")
+            continue
+        print(f"\n=== [{idx + 1}/{len(variants)}] {label} ===")
+        h = {**post_headers, "Referer": referer}
         data = {**base_post, "content": f"[诊断 #{idx + 1}，请忽略]"}
         try:
             status, resp_text = _http_post(
-                url, params={"g_tk": str(g_tk)}, data=data, headers=post_headers,
+                target_url, params={"g_tk": str(gtk_val)}, data=data, headers=h,
             )
             print(f"HTTP {status}")
-            preview = (resp_text[:300] + "...") if len(resp_text) > 300 else resp_text
+            preview = (resp_text[:400] + "...") if len(resp_text) > 400 else resp_text
             print(f"响应: {preview if preview else '<空>'}")
             d = _parse_jsonp(resp_text)
             api_code = d.get("code", d.get("ret", "N/A"))
-            print(f"解析 code={api_code}")
+            print(f"解析 code={api_code}  message={d.get('message','')}  subcode={d.get('subcode','')}")
             if status == 200 and api_code == 0:
-                success_url = url
-                print("⭐ 此端点返回 code=0，可能是真正的子回复接口")
-                break  # 不再试其他端点，避免刷屏
+                success_url = target_url
+                success_gtk = gtk_val
+                success_referer = referer
+                print(f"⭐ 命中！g_tk={gtk_val} referer={referer}")
+                break
         except Exception as exc:
             print(f"请求异常: {exc}")
 
