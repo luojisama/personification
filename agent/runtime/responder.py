@@ -76,13 +76,26 @@ def with_persona_responder_instruction(
     relationship_hint: str = "",
     recent_bot_replies: list[str] | None = None,
     emotional_climate: str = "",
+    message_text: str = "",
+    lorebook_enabled: bool = False,
+    memory_store: Any = None,
 ) -> list[dict[str, Any]]:
+    lorebook_section = ""
+    if lorebook_enabled and message_text and memory_store:
+        try:
+            from ...core.persona_knowledge import match_lorebook_triggers, format_lorebook_injection
+            entries = memory_store.list_recent_memories(memory_type="persona_knowledge", limit=200)
+            matched = match_lorebook_triggers(message_text, entries)
+            lorebook_section = format_lorebook_injection(matched)
+        except Exception:
+            lorebook_section = ""
     instruction = _build_persona_responder_instruction(
         semantic_frame=semantic_frame,
         is_direct_mention=is_direct_mention,
         relationship_hint=relationship_hint,
         recent_bot_replies=recent_bot_replies,
         emotional_climate=emotional_climate,
+        lorebook_section=lorebook_section,
     )
     copied = [dict(item) for item in list(messages or [])]
     if copied and copied[0].get("role") == "system":
@@ -99,6 +112,7 @@ def _build_persona_responder_instruction(
     relationship_hint: str = "",
     recent_bot_replies: list[str] | None = None,
     emotional_climate: str = "",
+    lorebook_section: str = "",
 ) -> str:
     output_mode = str(getattr(semantic_frame, "output_mode", "") or "").strip() or "chat_short"
     min_chars, max_chars = OUTPUT_MODE_LENGTHS.get(output_mode, OUTPUT_MODE_LENGTHS["chat_short"])
@@ -121,7 +135,7 @@ def _build_persona_responder_instruction(
         "expression_style": expression_style or "自然口语",
         "recent_bot_replies": recent_replies,
     }
-    return (
+    instruction = (
         "## PersonaResponder JSON 输出要求\n"
         "作者旁白/角色方向："
         + json.dumps(direction, ensure_ascii=False, separators=(",", ":"))
@@ -148,6 +162,9 @@ def _build_persona_responder_instruction(
         "如果只是在复述用户语义，把 info_added 标为 tone_only；如果复用了用户原话连续片段，把 echoed_user_phrase 标为 true。"
         f"{no_reply_rule}"
     )
+    if lorebook_section:
+        instruction = f"{lorebook_section}\n\n{instruction}"
+    return instruction
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:

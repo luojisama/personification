@@ -253,6 +253,7 @@ async def plan_turn_with_llm(
     current_inner_state: str = "",
     current_emotion_state: str = "",
     available_tools: list[dict[str, Any]] | None = None,
+    group_knowledge_hint: str = "",
 ) -> TurnPlan:
     fallback = metadata_fallback_turn_plan(
         is_group=is_group,
@@ -316,6 +317,7 @@ async def plan_turn_with_llm(
         f"reply_action={fallback.reply_action}, memory={fallback.memory_need}, research={fallback.research_need}, "
         f"vision={fallback.vision_need}, output_mode={fallback.output_mode}, target={fallback.message_target}, "
         f"ambiguity={fallback.ambiguity_level}"
+        + (f"\n{group_knowledge_hint}" if group_knowledge_hint else "")
     )
     try:
         response = await tool_caller.chat_with_tools(

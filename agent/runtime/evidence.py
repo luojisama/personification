@@ -203,7 +203,40 @@ def _render_memories(candidate_memories: list[dict[str, Any]] | None) -> str:
     return "\n".join(lines) if lines else "无"
 
 
-def _render_tool_results(tool_results: list[dict[str, Any]] | None) -> str:
+_PARALLEL_RESEARCH_TOOL_NAMES = frozenset({"parallel_research"})
+_VERIFICATION_HINT_TEMPLATE = (
+    "\n[交叉验证标签] verified_facts（≥2子Agent一致，可断言）：{verified}\n"
+    "[交叉验证标签] single_source_facts（单源，需软化）：{single_source}\n"
+    "[交叉验证标签] conflicts（子Agent间冲突，必须明示不确定）：{conflicts}"
+)
+
+
+def _extract_verification_labels(tool_name: str, result_text: str) -> str:
+    if tool_name not in _PARALLEL_RESEARCH_TOOL_NAMES:
+        return ""
+    try:
+        data = json.loads(result_text) if isinstance(result_text, str) else result_text
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    verified = data.get("verified_facts", [])
+    single_source = data.get("single_source_facts", [])
+    conflicts = data.get("conflicts", [])
+    verified = [str(item) for item in (verified or []) if str(item).strip()]
+    single_source = [str(item) for item in (single_source or []) if str(item).strip()]
+    conflicts = [str(item) for item in (conflicts or []) if str(item).strip()]
+    if not verified and not single_source and not conflicts:
+        return ""
+    return _VERIFICATION_HINT_TEMPLATE.format(
+        verified="；".join(verified[:6]) if verified else "无",
+        single_source="；".join(single_source[:6]) if single_source else "无",
+        conflicts="；".join(conflicts[:6]) if conflicts else "无",
+    )
+    return ""
+
+
+def _render_tool_results(tool_results: list[dict[str, Any]] | None, *, cross_verify_enabled: bool = False) -> str:
     lines: list[str] = []
     for item in list(tool_results or [])[:8]:
         if not isinstance(item, dict):
@@ -211,9 +244,14 @@ def _render_tool_results(tool_results: list[dict[str, Any]] | None) -> str:
         name = str(item.get("tool_name", "") or item.get("name", "") or "").strip()
         args = item.get("args", {})
         result = re.sub(r"\s+", " ", str(item.get("result", "") or item.get("text", "") or "")).strip()
-        lines.append(
+        line = (
             f"- tool={name or 'unknown'} args={json.dumps(args, ensure_ascii=False)[:160]} result={result[:700] or '无'}"
         )
+        if cross_verify_enabled:
+            verification = _extract_verification_labels(name, result)
+            if verification:
+                line += "\n" + verification
+        lines.append(line)
     return "\n".join(lines) if lines else "无"
 
 
@@ -227,6 +265,7 @@ async def synthesize_evidence_with_llm(
     url_summaries: list[str] | None = None,
     group_context: str = "",
     quote_chain: list[dict[str, Any]] | None = None,
+    cross_verify_enabled: bool = False,
 ) -> EvidenceSynthesis:
     fallback = fallback_evidence_synthesis(
         candidate_memories=candidate_memories,
@@ -242,12 +281,21 @@ async def synthesize_evidence_with_llm(
         content = re.sub(r"\s+", " ", str(item.get("content", "") or "")).strip()
         if content:
             quote_lines.append(f"- {speaker or 'unknown'}: {content[:180]}")
+    cross_verify_instruction = ""
+    if cross_verify_enabled:
+        cross_verify_instruction = (
+            "\u4ea4\u53c9\u9a8c\u8bc1\u8bf4\u660e\uff1a\u5982\u679c\u5de5\u5177\u7ed3\u679c\u91cc\u51fa\u73b0\u4e86[\u4ea4\u53c9\u9a8c\u8bc1\u6807\u7b7e]\uff0c\u6309\u4ee5\u4e0b\u89c4\u5219\u5904\u7406\uff1a\n"
+            "- verified_facts\uff08\u22652\u4e2a\u5b50Agent\u72ec\u7acb\u786e\u8ba4\uff09\u2192 \u53ef\u5728 digest \u91cc\u76f4\u63a5\u65ad\u8a00\uff0c\u89c6\u4e3a\u9ad8\u53ef\u9760\uff1b\n"
+            "- single_source_facts\uff08\u4ec51\u4e2a\u5b50Agent\u63d0\u53ca\uff09\u2192 \u5fc5\u987b\u8f6f\u5316\u8868\u8fbe\uff0c\u6807\u6ce8\u201c\u636e\u5355\u4e00\u6765\u6e90\u201d\uff1b\n"
+            "- conflicts\uff08\u5b50Agent\u95f4\u6709\u77db\u76fe\uff09\u2192 \u5fc5\u987b\u5728 digest \u548c uncertainty_notes \u91cc\u660e\u793a\u4e0d\u786e\u5b9a\uff0c\u4e0d\u5f97\u9009\u8fb9\u7ad9\u3002\n"
+        )
     messages = [
         {
             "role": "system",
             "content": (
                 "你是证据综合器。根据 TurnPlan、候选记忆、工具结果、URL 摘要和群聊上下文，"
                 "选择哪些记忆适合注入，并把工具证据压缩成最终回复可用的摘要。"
+                f"{cross_verify_instruction}"
                 "只输出严格 JSON，不要 markdown。\n"
                 "JSON 结构："
                 '{"selected_memory_ids":["..."],'
@@ -265,7 +313,7 @@ async def synthesize_evidence_with_llm(
             "content": (
                 f"TurnPlan：{_render_turn_plan(turn_plan)}\n"
                 f"候选记忆：\n{_render_memories(candidate_memories)}\n"
-                f"工具结果：\n{_render_tool_results(tool_results)}\n"
+                f"工具结果：\n{_render_tool_results(tool_results, cross_verify_enabled=cross_verify_enabled)}\n"
                 f"assistant草稿：{str(draft_answer_text or '').strip()[:600] or '无'}\n"
                 f"URL摘要：{json.dumps(_coerce_text_list(url_summaries, limit=5, item_chars=400), ensure_ascii=False)}\n"
                 f"群聊上下文：{str(group_context or '').strip()[:900] or '无'}\n"

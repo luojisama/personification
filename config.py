@@ -54,6 +54,13 @@ class Config(BaseModel):
     personification_turn_planner_enabled: bool = False
     personification_turn_planner_shadow_enabled: bool = False
     personification_evidence_synthesizer_enabled: bool = False
+    personification_cross_verify_enabled: bool = False
+    personification_lorebook_enabled: bool = False
+    personification_group_knowledge_enabled: bool = False
+    personification_active_learning_enabled: bool = False
+    personification_active_learning_daily_quota: int = 5
+    personification_relation_evolution_enabled: bool = False
+    personification_relation_evolution_daily_quota: int = 10
     personification_persona_responder_json_enabled: bool = False
     personification_data_dir: str = ""
     personification_persona_enabled: bool = True
@@ -242,6 +249,9 @@ class Config(BaseModel):
     personification_sticker_collect_cooldown_seconds: int = 60
     personification_sticker_collect_sample_rate: float = 0.5
     personification_sticker_collect_min_confidence: float = 0.7
+    personification_sticker_second_judge_enabled: bool = False
+    personification_sticker_curator_enabled: bool = False
+    personification_sticker_curator_interval_days: int = 3
 
     personification_poke_probability: float = 0.35
     # DEPRECATED: replaced by the agent web_search skill configuration.

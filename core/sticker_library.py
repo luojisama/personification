@@ -59,7 +59,27 @@ STICKER_VISION_PROMPT = """你是表情包语义分析器。请完整理解这�
    语义明确、复用价值高、画面清晰、独特性强 → 0.8-1.0；
    一般可收藏但不出彩 → 0.5-0.8；
    模糊/普通/可能重复 → 0.0-0.5；
-   should_collect=false 时填 0.0。"""
+    should_collect=false 时填 0.0。"""
+
+STICKER_SECOND_JUDGE_PROMPT = """你是表情包库二次审核器。已有一张新表情包的视觉描述与标签，以及库中 N 张已有表情包的描述对照。
+你需要判断这张新图是否值得收集入库，还是重复/低价值/饱和。
+严格返回 JSON，不要 markdown。
+
+{
+  "decision": "collect",
+  "redundant_with": [],
+  "tag_correction": {"mood_tags": [], "scene_tags": []},
+  "reason": "..."
+}
+
+decision 四选一：
+- collect：新图不重复、有价值，建议入库；
+- skip_duplicate：与冗余候选高度重复（构图/文字/情绪几乎一致），把重复候选文件名写入 redundant_with；
+- skip_low_value：画面不清晰、文字无关、信息量低；
+- skip_oversaturated：同类情绪/场景在库中已很多。
+
+tag_correction 仅在一次标注有误时更正 mood_tags 和 scene_tags，否则填空数组。
+reason 20字内中文。"""
 
 
 @dataclass(frozen=True)
@@ -404,6 +424,101 @@ async def analyze_sticker_image(
     return normalize_sticker_vision_result(raw, vision_route=route, meme_policy=meme_policy)
 
 
+def recall_similar_stickers(
+    metadata: dict[str, Any],
+    mood_tags: list[str],
+    scene_tags: list[str],
+    *,
+    top_k: int = 12,
+) -> list[dict[str, Any]]:
+    mood_set = set(tag for tag in mood_tags if str(tag).strip())
+    scene_set = set(tag for tag in scene_tags if str(tag).strip())
+    scored: list[tuple[int, str, dict[str, Any]]] = []
+    for file_name, entry in (metadata or {}).items():
+        if file_name == "_meta" or not isinstance(entry, dict):
+            continue
+        entry_mood = set(tag for tag in (entry.get("mood_tags") or []) if str(tag).strip())
+        entry_scene = set(tag for tag in (entry.get("scene_tags") or []) if str(tag).strip())
+        overlap = len(mood_set & entry_mood) + len(scene_set & entry_scene)
+        if overlap > 0:
+            scored.append((overlap, file_name, entry))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [
+        {"file_name": file_name, "description": entry.get("description", ""), "use_hint": entry.get("use_hint", ""),
+         "mood_tags": entry.get("mood_tags", []), "scene_tags": entry.get("scene_tags", []),
+         "overlap_score": score}
+        for score, file_name, entry in scored[:top_k]
+    ]
+
+
+async def judge_sticker_against_library(
+    *,
+    runtime: Any,
+    sticker_data_url: str,
+    sticker_summary: str,
+    sticker_description: str,
+    sticker_mood_tags: list[str],
+    sticker_scene_tags: list[str],
+    similar_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    import re as _re
+    candidate_text = "\n".join(
+        f"- {item['file_name']}: {item['description'][:80]} | use_hint={item.get('use_hint', '')[:60]}"
+        for item in similar_candidates
+    ) or "无候选"
+
+    prompt = STICKER_SECOND_JUDGE_PROMPT + (
+        f"\n---\n新表情包：summary={sticker_summary}\n"
+        f"description={sticker_description}\n"
+        f"mood_tags={','.join(sticker_mood_tags)}\n"
+        f"scene_tags={','.join(sticker_scene_tags)}\n"
+        f"库中候选：\n{candidate_text}\n"
+        f"候选数量：{len(similar_candidates)} 张"
+    )
+    try:
+        from ...core.visual_capabilities import VISUAL_ROUTE_REPLY_PLAIN
+        raw, _route = await analyze_images_with_route_or_fallback(
+            runtime=runtime,
+            prompt=prompt,
+            image_refs=[sticker_data_url],
+            route_name=VISUAL_ROUTE_REPLY_PLAIN,
+            fallback_vision_caller=runtime.vision_caller,
+        )
+    except Exception:
+        return {"decision": "collect", "redundant_with": [], "tag_correction": {"mood_tags": [], "scene_tags": []}, "reason": "二次判断失败，放行"}
+
+    text = str(raw or "").strip()
+    try:
+        data = json.loads(text)
+    except Exception:
+        match = _re.search(r"\{.*\}", text, flags=_re.DOTALL)
+        if not match:
+            return {"decision": "collect", "redundant_with": [], "tag_correction": {"mood_tags": [], "scene_tags": []}, "reason": "解析失败，放行"}
+        try:
+            data = json.loads(match.group(0))
+        except Exception:
+            return {"decision": "collect", "redundant_with": [], "tag_correction": {"mood_tags": [], "scene_tags": []}, "reason": "解析失败，放行"}
+    if not isinstance(data, dict):
+        return {"decision": "collect", "redundant_with": [], "tag_correction": {"mood_tags": [], "scene_tags": []}, "reason": "非JSON，放行"}
+
+    decision = str(data.get("decision", "collect") or "collect").strip()
+    if decision not in {"collect", "skip_duplicate", "skip_low_value", "skip_oversaturated"}:
+        decision = "collect"
+    redundant = data.get("redundant_with", [])
+    if not isinstance(redundant, list):
+        redundant = []
+    tag_correction = data.get("tag_correction", {})
+    if not isinstance(tag_correction, dict):
+        tag_correction = {}
+    reason = str(data.get("reason", "") or "").strip()
+    return {
+        "decision": decision,
+        "redundant_with": [str(item) for item in redundant[:5]],
+        "tag_correction": tag_correction,
+        "reason": reason[:40],
+    }
+
+
 def render_sticker_semantic_summary(entry: dict[str, Any]) -> str:
     if not isinstance(entry, dict):
         return ""
@@ -467,6 +582,7 @@ __all__ = [
     "RESOLVABLE_STICKER_SUFFIXES",
     "STICKER_SCHEMA_VERSION",
     "STICKER_VISION_PROMPT",
+    "STICKER_SECOND_JUDGE_PROMPT",
     "SUPPORTED_STICKER_SUFFIXES",
     "StickerVisionResult",
     "analyze_sticker_image",
@@ -475,12 +591,14 @@ __all__ = [
     "find_sticker_by_hash",
     "image_bytes_to_data_url",
     "image_file_to_data_url",
+    "judge_sticker_against_library",
     "list_local_sticker_files",
     "load_sticker_metadata",
     "normalize_label_result",
     "normalize_sticker_entry",
     "normalize_sticker_metadata",
     "normalize_sticker_vision_result",
+    "recall_similar_stickers",
     "render_sticker_semantic_summary",
     "resolve_sticker_dir",
     "save_collected_sticker",

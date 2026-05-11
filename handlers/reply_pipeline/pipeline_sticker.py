@@ -17,9 +17,11 @@ from ...core.metrics import record_counter
 from ...core.sticker_library import (
     analyze_sticker_image,
     image_bytes_to_data_url,
+    judge_sticker_against_library,
     list_local_sticker_files,
     load_sticker_metadata,
     normalize_sticker_entry,
+    recall_similar_stickers,
     render_sticker_semantic_summary,
     resolve_sticker_dir,
     save_collected_sticker,
@@ -158,6 +160,7 @@ async def auto_collect_stickers(
     sample_rate = max(0.0, min(1.0, sample_rate))
     min_confidence = float(getattr(runtime.plugin_config, "personification_sticker_collect_min_confidence", 0.7) or 0.0)
     min_confidence = max(0.0, min(1.0, min_confidence))
+    second_judge_enabled = bool(getattr(runtime.plugin_config, "personification_sticker_second_judge_enabled", False))
     for candidate in candidates:
         try:
             current_files = list_local_sticker_files(sticker_dir)
@@ -202,6 +205,39 @@ async def auto_collect_stickers(
                     break
             if mood_over_limit:
                 continue
+
+            if second_judge_enabled and result.style != "meme":
+                metadata = load_sticker_metadata(sticker_dir)
+                similar = recall_similar_stickers(
+                    metadata,
+                    mood_tags=result.mood_tags,
+                    scene_tags=result.scene_tags,
+                    top_k=12,
+                )
+                if similar:
+                    judge = await judge_sticker_against_library(
+                        runtime=runtime,
+                        sticker_data_url=candidate.data_url,
+                        sticker_summary=result.summary,
+                        sticker_description=result.description,
+                        sticker_mood_tags=result.mood_tags,
+                        sticker_scene_tags=result.scene_tags,
+                        similar_candidates=similar,
+                    )
+                    decision = str(judge.get("decision", "collect") or "collect")
+                    record_counter(f"sticker.second_judge_{decision}")
+                    if decision != "collect":
+                        runtime.logger.debug(f"拟人插件：表情包二次判断 {decision}，跳过收集。原因：{judge.get('reason', '')}")
+                        continue
+                    tag_correction = judge.get("tag_correction", {})
+                    if isinstance(tag_correction, dict):
+                        corrected_mood = tag_correction.get("mood_tags", [])
+                        corrected_scene = tag_correction.get("scene_tags", [])
+                        if isinstance(corrected_mood, list) and corrected_mood:
+                            result = result.__class__(**{**result.__dict__, "mood_tags": [str(t) for t in corrected_mood[:4]]})
+                        if isinstance(corrected_scene, list) and corrected_scene:
+                            result = result.__class__(**{**result.__dict__, "scene_tags": [str(t) for t in corrected_scene[:4]]})
+
             saved_path, created, file_hash = await save_collected_sticker(
                 sticker_dir,
                 payload=candidate.payload,

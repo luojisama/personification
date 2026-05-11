@@ -83,6 +83,11 @@ _COMMAND_ALIASES = {
     "update": "update",
     "更新": "update",
     "升级": "update",
+    "sticker": "sticker",
+    "表情包": "sticker",
+    "lore": "lore",
+    "设定": "lore",
+    "lorebook": "lore",
 }
 _SUBCOMMAND_ALIASES = {
     "list": "list",
@@ -122,6 +127,13 @@ _SUBCOMMAND_ALIASES = {
     "crystal": "crystal",
     "结晶": "crystal",
     "运行": "run",
+    "curate": "curate",
+    "整理": "curate",
+    "clean": "clean",
+    "清理": "clean",
+    "rollback": "rollback",
+    "回滚": "rollback",
+    "设定": "set",
 }
 _COMPOUND_TOKEN_ALIASES = {
     "配置列表": ("配置", "列表"),
@@ -238,6 +250,7 @@ def _root_help_text() -> str:
         "- 拟人 模型 列表|路由|使用|设置|重置：QQ 内热更新主 provider 和各阶段模型。",
         "- 拟人 定时 状态：查看定时任务注册状态、下次运行时间和功能开关。",
         "- 拟人 空间 状态|测试 <QQ号/@用户>：查看空间任务状态，或对指定好友空间执行一次测试互动扫描。",
+        "- 拟人 表情包 整理|清理|回滚：整理表情包库（去重/去低质量）、清理过期 trash、回滚最近一次整理。",
         "",
         "旧命令兼容（仍可用，下面直接说明用途）：",
         "- 拟人配置：发送聊天记录形式的配置总览。",
@@ -467,6 +480,88 @@ def _normalize_help_tokens(tokens: list[str]) -> list[str]:
     return [normalize_command_word(token) for token in expanded if str(token or "").strip()]
 
 
+async def handle_sticker_command(bundle: Any, *, event: Any, tokens: list[str]) -> str:
+    subcommand = normalize_command_word(tokens[0]) if tokens else ""
+    if subcommand not in {"curate", "clean", "rollback"}:
+        return "用法：拟人 表情包 整理｜清理｜回滚"
+
+    if subcommand == "curate":
+        try:
+            from ..core.sticker_curator import run_sticker_curation
+        except ImportError:
+            return "表情包馆长模块加载失败。"
+        result = await run_sticker_curation(runtime=bundle.runtime)
+        return "\n".join(result.details) if result.details else "整理完成。"
+
+    if subcommand == "clean":
+        try:
+            from ..core.sticker_curator import clean_trash_expired
+            from ..core.sticker_library import resolve_sticker_dir
+        except ImportError:
+            return "表情包馆长模块加载失败。"
+        sticker_dir = resolve_sticker_dir(getattr(bundle.runtime.plugin_config, "personification_sticker_path", None))
+        removed = clean_trash_expired(sticker_dir)
+        return f"已清理过期 trash 目录，共删除 {removed} 个过期批次。"
+
+    if subcommand in {"rollback", "回滚"}:
+        try:
+            from ..core.sticker_curator import rollback_last_curation
+            from ..core.sticker_library import resolve_sticker_dir
+        except ImportError:
+            return "表情包馆长模块加载失败。"
+        sticker_dir = resolve_sticker_dir(getattr(bundle.runtime.plugin_config, "personification_sticker_path", None))
+        result = rollback_last_curation(sticker_dir)
+        return "\n".join(result.details) if result.details else "回滚完成。"
+
+    return "未知子命令。"
+
+
+async def handle_lore_command(bundle: Any, *, tokens: list[str]) -> str:
+    subcommand = normalize_command_word(tokens[0]) if tokens else ""
+    if subcommand not in {"set", "remove", "list"}:
+        return "用法：拟人 设定 <主题> <立场>｜列出设定｜删除设定 <主题>"
+
+    try:
+        from ..core.persona_knowledge import add_lorebook_entry, list_lorebook_entries, remove_lorebook_entry
+    except ImportError:
+        return "人格知识库模块加载失败。"
+
+    memory_store = getattr(bundle.runtime, "memory_store", None)
+    if not memory_store:
+        return "记忆存储不可用。"
+
+    if subcommand == "list":
+        entries = await list_lorebook_entries(memory_store)
+        if not entries:
+            return "当前没有人格设定。"
+        lines = ["当前人格设定："]
+        for entry in entries:
+            topic = str(entry.get("topic", "") or entry.get("summary", "")).strip()[:80]
+            stance = str(entry.get("stance", "") or "").strip()[:120]
+            lines.append(f"- {topic}: {stance}")
+        return "\n".join(lines)
+
+    if subcommand == "remove":
+        topic = " ".join(str(t) for t in tokens[1:]).strip() if len(tokens) > 1 else ""
+        if not topic:
+            return "请指定要删除的设定主题。"
+        success = await remove_lorebook_entry(memory_store, topic)
+        return f"已删除设定「{topic}」。" if success else f"未找到设定「{topic}」。"
+
+    if subcommand == "set":
+        if len(tokens) < 3:
+            return "用法：拟人 设定 <主题> <立场>"
+        topic = str(tokens[1] or "").strip()
+        stance = " ".join(str(t) for t in tokens[2:]).strip()
+        if not topic or not stance:
+            return "主题和立场均不能为空。"
+        triggers = " ".join(tokens[1:]).strip()
+        await add_lorebook_entry(memory_store, topic=topic, stance=stance, triggers=triggers)
+        return f"已设定「{topic}」：{stance}"
+
+    return "未知子命令。"
+
+
 async def dispatch_persona_admin_command(
     matcher: Any,
     *,
@@ -528,6 +623,18 @@ async def dispatch_persona_admin_command(
         if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):
             await matcher.finish(_admin_error())
         await matcher.finish(await handle_qzone_command(bundle, event=event, tokens=rest, arg_message=arg_message))
+
+    if command == "sticker":
+        if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):
+            await matcher.finish(_admin_error())
+        await matcher.finish(await handle_sticker_command(bundle, event=event, tokens=rest))
+        return
+
+    if command == "lore":
+        if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):
+            await matcher.finish(_admin_error())
+        await matcher.finish(await handle_lore_command(bundle, tokens=rest))
+        return
 
     if command == "update":
         if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):

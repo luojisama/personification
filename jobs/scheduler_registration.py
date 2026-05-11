@@ -166,3 +166,44 @@ def register_background_intelligence_job(
         logger.info("拟人插件：后台智能维护任务已注册，间隔 15 分钟")
     except Exception as e:
         logger.error(f"拟人插件：注册后台智能维护任务失败: {e}")
+
+
+def register_sticker_curator_job(
+    *,
+    scheduler: Any,
+    curator_job: Any,
+    interval_days: int,
+    logger: Any,
+) -> None:
+    safe_days = max(1, int(interval_days or 3))
+    try:
+        scheduler.add_job(
+            curator_job,
+            "interval",
+            days=safe_days,
+            id="personification_sticker_curator",
+            replace_existing=True,
+        )
+        logger.info(f"拟人插件：表情包馆长定时整理已注册，间隔 {safe_days} 天")
+    except Exception as e:
+        logger.error(f"拟人插件：注册表情包馆长任务失败: {e}")
+
+
+def register_sticker_trash_cleanup_job(
+    *,
+    scheduler: Any,
+    cleanup_job: Any,
+    logger: Any,
+) -> None:
+    try:
+        scheduler.add_job(
+            cleanup_job,
+            "cron",
+            hour=4,
+            minute=0,
+            id="personification_sticker_trash_cleanup",
+            replace_existing=True,
+        )
+        logger.info("拟人插件：表情包 trash 每日清理已注册，每天凌晨 4:00")
+    except Exception as e:
+        logger.error(f"拟人插件：注册表情包 trash 清理任务失败: {e}")

@@ -16,6 +16,8 @@ from .scheduler_registration import (
     register_proactive_qzone_job,
     register_qzone_inbound_poll_job,
     register_qzone_social_scan_job,
+    register_sticker_curator_job,
+    register_sticker_trash_cleanup_job,
     register_weekly_diary_job,
 )
 from .task_builders import (
@@ -244,6 +246,34 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
             maintenance_job=_background_maintenance,
             logger=deps.logger,
         )
+
+    curator_interval_days = int(getattr(deps.plugin_config, "personification_sticker_curator_interval_days", 3) or 3)
+    async def _sticker_curator_job() -> dict[str, Any]:
+        from ..core.sticker_curator import run_sticker_curation
+        result = await run_sticker_curation(runtime=deps.runtime)
+        deps.logger.info(f"拟人插件：表情包馆长定时整理完成: {'; '.join(result.details)}")
+        return {"details": result.details}
+
+    register_sticker_curator_job(
+        scheduler=scheduler,
+        curator_job=_sticker_curator_job,
+        interval_days=curator_interval_days,
+        logger=deps.logger,
+    )
+
+    async def _sticker_trash_cleanup_job() -> dict[str, Any]:
+        from ..core.sticker_curator import clean_trash_expired
+        from ..core.sticker_library import resolve_sticker_dir
+        sticker_dir = resolve_sticker_dir(getattr(deps.plugin_config, "personification_sticker_path", None))
+        removed = clean_trash_expired(sticker_dir)
+        deps.logger.info(f"拟人插件：表情包 trash 清理完成，移除 {removed} 个过期批次")
+        return {"removed": removed}
+
+    register_sticker_trash_cleanup_job(
+        scheduler=scheduler,
+        cleanup_job=_sticker_trash_cleanup_job,
+        logger=deps.logger,
+    )
 
     return {
         "daily_group_fav_report": daily_group_fav_report,

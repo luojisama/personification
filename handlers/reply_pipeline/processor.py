@@ -1056,6 +1056,9 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             is_direct_mention=is_direct_mention,
             relationship_hint=relationship_hint,
             recent_bot_replies=recent_bot_replies,
+            message_text=raw_message_text or message_text or message_content,
+            lorebook_enabled=bool(getattr(runtime.plugin_config, "personification_lorebook_enabled", False)),
+            memory_store=getattr(runtime, "memory_store", None),
         )
         raw = await _call_text_model_with_retry(json_messages)
         parsed = parse_persona_response(raw)
@@ -1587,6 +1590,31 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             assistant_text=final_visible_reply_text,
             is_private=is_private_session,
         )
+
+        if not is_private_session and bool(getattr(runtime.plugin_config, "personification_relation_evolution_enabled", False)):
+            async def _spawn_relation_evolution() -> None:
+                try:
+                    from ...core.evolve_group_relations import evolve_group_relations, list_group_relations
+                    current_relations = list_group_relations(runtime.memory_store, str(group_id))
+                    current_tags = list(set(
+                        str(r.get("tag", "")).strip()
+                        for r in current_relations
+                        if str(r.get("tag", "")).strip()
+                    ))
+                    turn_summary = f"回复: {str(final_visible_reply_text)[:200]} | 意图: {message_intent} | 原话: {str(raw_message_text or message_text or message_content)[:200]}"
+                    await evolve_group_relations(
+                        tool_caller=runtime.lite_tool_caller or runtime.agent_tool_caller,
+                        memory_store=runtime.memory_store,
+                        group_id=str(group_id),
+                        user_id=user_id,
+                        turn_summary=turn_summary,
+                        current_tags=current_tags,
+                        plugin_config=runtime.plugin_config,
+                    )
+                except Exception:
+                    pass
+            asyncio.create_task(_spawn_relation_evolution())
+
         if isinstance(event, types.group_message_event_cls):
             assistant_metadata.update(
                 {

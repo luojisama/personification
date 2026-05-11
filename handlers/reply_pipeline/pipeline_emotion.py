@@ -119,6 +119,20 @@ async def prepare_reply_semantics(
         except Exception:
             planner_available_tools = []
 
+    group_knowledge_hint = ""
+    if not is_private_session and bool(getattr(runtime.plugin_config, "personification_group_knowledge_enabled", False)):
+        try:
+            from ...core.group_knowledge import query_group_knowledge, format_group_knowledge_hint
+            entries = query_group_knowledge(
+                getattr(runtime, "memory_store", None),
+                str(group_id),
+                raw_message_text or current_agent_message_content,
+                top_k=8,
+            )
+            group_knowledge_hint = format_group_knowledge_hint(entries)
+        except Exception:
+            group_knowledge_hint = ""
+
     turn_plan = None
     if planner_enabled:
         started_at = time.monotonic()
@@ -136,6 +150,7 @@ async def prepare_reply_semantics(
             current_inner_state=render_inner_state_hint(inner_state),
             current_emotion_state=emotion_memory_hint,
             available_tools=planner_available_tools,
+            group_knowledge_hint=group_knowledge_hint,
         )
         record_counter(
             "turn_planner.plan_total",
@@ -184,6 +199,7 @@ async def prepare_reply_semantics(
                 current_inner_state=render_inner_state_hint(inner_state),
                 current_emotion_state=emotion_memory_hint,
                 available_tools=planner_available_tools,
+                group_knowledge_hint=group_knowledge_hint,
             )
             record_counter(
                 "turn_planner.plan_total",
