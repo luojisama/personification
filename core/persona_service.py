@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..skills.skillpacks.tool_caller.scripts.impl import ToolCaller
 from .db import connect_sync
 
 

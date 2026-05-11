@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
@@ -48,3 +49,28 @@ def test_is_agent_reply_ooc_detects_search_style_phrasing_and_urls() -> None:
     assert response_review.is_agent_reply_ooc("根据搜索结果，先给你两条相关链接：https://example.com/very/long/path")
     assert response_review.is_agent_reply_ooc("我查了一下，这个设定后来改过")
     assert not response_review.is_agent_reply_ooc("这事儿大概就是后来改设定了")
+
+
+def test_output_mode_hint_uses_turn_plan_lengths() -> None:
+    hint = response_review._output_mode_hint(SimpleNamespace(output_mode="structured_help"))
+
+    assert "structured_help" in hint
+    assert "80-300" in hint
+
+
+def test_review_blocks_no_reply_for_direct_mention() -> None:
+    async def _fake_call(messages):  # noqa: ANN001
+        assert "禁止输出 no_reply" in messages[0]["content"]
+        return '{"action":"no_reply","text":"","reason":"bad"}'
+
+    decision = asyncio.run(
+        response_review.review_response_text(
+            _fake_call,
+            candidate_text="我在",
+            raw_message_text="@bot 在吗",
+            is_direct_mention=True,
+        )
+    )
+
+    assert decision.action == "accept"
+    assert decision.text == "我在"

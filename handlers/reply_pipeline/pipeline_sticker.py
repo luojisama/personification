@@ -17,6 +17,7 @@ from ...core.metrics import record_counter
 from ...core.sticker_library import (
     analyze_sticker_image,
     image_bytes_to_data_url,
+    list_local_sticker_files,
     load_sticker_metadata,
     normalize_sticker_entry,
     render_sticker_semantic_summary,
@@ -37,6 +38,36 @@ _GROUP_STICKER_STATE: Dict[str, dict] = {}
 _STICKER_COOLDOWN_SECONDS = 180
 _STICKER_DEDUP_WINDOW = 5
 _STICKER_STATE_TTL_SECONDS = 86400
+_COLLECT_COOLDOWN_STATE: Dict[str, float] = {}
+_COLLECT_COOLDOWN_TTL_SECONDS = 3600
+
+
+def _cleanup_collect_cooldown(now_ts: float) -> None:
+    expired = [
+        key
+        for key, ts in _COLLECT_COOLDOWN_STATE.items()
+        if now_ts - float(ts or 0.0) >= _COLLECT_COOLDOWN_TTL_SECONDS
+    ]
+    for key in expired:
+        _COLLECT_COOLDOWN_STATE.pop(key, None)
+
+
+def _collect_cooldown_key(group_id: str, user_id: str) -> str:
+    return f"{str(group_id or '').strip()}::{str(user_id or '').strip()}"
+
+
+def _can_collect_after_cooldown(group_id: str, user_id: str, cooldown_seconds: int) -> bool:
+    if cooldown_seconds <= 0:
+        return True
+    now_ts = time.time()
+    _cleanup_collect_cooldown(now_ts)
+    key = _collect_cooldown_key(group_id, user_id)
+    last_ts = float(_COLLECT_COOLDOWN_STATE.get(key, 0.0) or 0.0)
+    return (now_ts - last_ts) >= cooldown_seconds
+
+
+def _mark_collect_cooldown(group_id: str, user_id: str) -> None:
+    _COLLECT_COOLDOWN_STATE[_collect_cooldown_key(group_id, user_id)] = time.time()
 _MAX_IMAGE_DOWNLOAD_BYTES = 8 * 1024 * 1024
 _BLOCKED_IMAGE_HOST_SUFFIXES = (".local", ".lan", ".home", ".internal", ".corp")
 _BLOCKED_IMAGE_HOSTS = {
@@ -118,14 +149,58 @@ async def auto_collect_stickers(
     sticker_dir = resolve_sticker_dir(getattr(runtime.plugin_config, "personification_sticker_path", None), create=True)
     if not candidates:
         return
+    hard_limit = int(getattr(runtime.plugin_config, "personification_sticker_library_hard_limit", 1200) or 1200)
+    soft_limit = int(getattr(runtime.plugin_config, "personification_sticker_library_soft_limit", 800) or 800)
+    per_mood_limit = int(getattr(runtime.plugin_config, "personification_sticker_per_mood_limit", 50) or 50)
+    meme_policy = str(getattr(runtime.plugin_config, "personification_sticker_collect_meme_policy", "reject") or "reject").strip().lower()
+    cooldown_seconds = int(getattr(runtime.plugin_config, "personification_sticker_collect_cooldown_seconds", 60) or 0)
+    sample_rate = float(getattr(runtime.plugin_config, "personification_sticker_collect_sample_rate", 0.5) or 0.0)
+    sample_rate = max(0.0, min(1.0, sample_rate))
+    min_confidence = float(getattr(runtime.plugin_config, "personification_sticker_collect_min_confidence", 0.7) or 0.0)
+    min_confidence = max(0.0, min(1.0, min_confidence))
     for candidate in candidates:
         try:
+            current_files = list_local_sticker_files(sticker_dir)
+            file_count = len(current_files)
+            if file_count >= hard_limit:
+                record_counter("sticker.collect_library_full", reason="hard_limit")
+                runtime.logger.warning(f"拟人插件：表情包库已达硬上限 {hard_limit} 张，停止收集。")
+                return
+            if not _can_collect_after_cooldown(group_id, user_id, cooldown_seconds):
+                record_counter("sticker.collect_skipped", reason="cooldown")
+                continue
+            if sample_rate < 1.0 and random.random() >= sample_rate:
+                record_counter("sticker.collect_skipped", reason="sample_rate")
+                continue
             result = await analyze_sticker_image(
                 runtime=runtime,
                 image_refs=[candidate.data_url],
                 fallback_vision_caller=runtime.vision_caller,
             )
+            record_counter("sticker.collect_attempt", style=result.style)
             if not result.is_sticker or not result.should_collect:
+                if result.style == "meme" and meme_policy == "reject":
+                    record_counter("sticker.collect_meme_rejected")
+                continue
+            if min_confidence > 0.0 and result.collect_confidence > 0.0 and result.collect_confidence < min_confidence:
+                record_counter("sticker.collect_skipped", reason="low_confidence")
+                continue
+            if file_count >= soft_limit:
+                runtime.logger.info(f"拟人插件：表情包库已达软上限 {soft_limit} 张，仍接受高质量收集但建议触发整理。")
+            metadata = load_sticker_metadata(sticker_dir)
+            mood_over_limit = False
+            for mood_tag in result.mood_tags:
+                mood_count = sum(
+                    1
+                    for entry in metadata.values()
+                    if isinstance(entry, dict) and mood_tag in (entry.get("mood_tags") or [])
+                )
+                if mood_count >= per_mood_limit:
+                    record_counter("sticker.collect_dedup", reason="per_mood_limit")
+                    runtime.logger.debug(f"拟人插件：表情包情绪标签 {mood_tag} 已达上限 {per_mood_limit} 张，跳过收集。")
+                    mood_over_limit = True
+                    break
+            if mood_over_limit:
                 continue
             saved_path, created, file_hash = await save_collected_sticker(
                 sticker_dir,
@@ -133,7 +208,10 @@ async def auto_collect_stickers(
                 mime_type=candidate.mime_type,
                 file_name_hint=result.summary or result.description or "sticker",
             )
-            metadata = load_sticker_metadata(sticker_dir)
+            if not created:
+                record_counter("sticker.collect_dedup", reason="hash_duplicate")
+                continue
+            _mark_collect_cooldown(group_id, user_id)
             metadata[saved_path.name] = normalize_sticker_entry(
                 {
                     "description": result.description,
@@ -154,8 +232,7 @@ async def auto_collect_stickers(
                 collected_at=time.strftime("%Y-%m-%d %H:%M"),
             )
             await save_sticker_metadata(sticker_dir, metadata)
-            if created:
-                runtime.logger.info(f"拟人插件：已自动收藏表情包 {saved_path.name}")
+            runtime.logger.info(f"拟人插件：已自动收藏表情包 {saved_path.name}")
         except Exception as exc:
             runtime.logger.debug(f"[reply_processor] auto collect sticker skipped: {exc}")
 

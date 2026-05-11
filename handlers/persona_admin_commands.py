@@ -47,7 +47,7 @@ from ..core.model_router import (
     normalize_model_overrides,
     resolve_model_role,
 )
-from ..core.provider_router import normalize_api_type
+from ..core.provider_router import get_provider_failure_snapshot, normalize_api_type, parse_api_pool_config
 from ..core.runtime_config import get_runtime_load_info
 from ..utils import get_group_config, is_group_whitelisted
 from .runtime_commands import handle_git_update_command as _handle_git_update_command
@@ -185,6 +185,19 @@ def format_timestamp(ts: float) -> str:
     if not ts:
         return "未记录"
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
+
+
+def _format_duration(seconds: float) -> str:
+    total = max(0, int(round(float(seconds or 0))))
+    if total <= 0:
+        return "0秒"
+    minutes, sec = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}时{minutes}分"
+    if minutes:
+        return f"{minutes}分{sec}秒"
+    return f"{sec}秒"
 
 
 def _scope_label(scope: str) -> str:
@@ -833,36 +846,24 @@ def _default_model_for_role(bundle: Any, role: str) -> str:
 
 
 def _parse_api_pool_config(raw_config: Any) -> list[dict[str, Any]]:
-    if not raw_config:
-        return []
-    parsed = raw_config
-    if isinstance(raw_config, str):
-        text = raw_config.strip()
-        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
-            text = text[1:-1].strip()
-        if not text:
-            return []
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            return []
-    if not isinstance(parsed, list):
-        return []
-    return [dict(item) for item in parsed if isinstance(item, dict)]
+    return [dict(item) for item in parse_api_pool_config(raw_config) if isinstance(item, dict)]
 
 
 def _current_api_pool_config(bundle: Any) -> list[dict[str, Any]]:
     pools = _parse_api_pool_config(getattr(bundle.plugin_config, "personification_api_pools", None))
-    if pools:
-        return pools
     provider_getter = getattr(bundle, "get_configured_api_providers", None)
     if not callable(provider_getter):
-        return []
+        return pools
     try:
         providers = list(provider_getter() or [])
     except Exception:
-        return []
-    return [dict(item) for item in providers if isinstance(item, dict)]
+        providers = []
+    normalized = [dict(item) for item in providers if isinstance(item, dict)]
+    if normalized and len(normalized) > len(pools):
+        return normalized
+    if pools:
+        return pools
+    return normalized
 
 
 def _default_route_model(api_type: str, config: Any) -> str:
@@ -870,7 +871,7 @@ def _default_route_model(api_type: str, config: Any) -> str:
     if normalized == "openai_codex":
         return str(getattr(config, "personification_model", "") or "").strip() or "gpt-5.3-codex"
     if normalized == "gemini_cli":
-        return "gemini-3.1-pro-preview"
+        return "auto-gemini-3"
     if normalized == "claude_code":
         return "claude-opus-4-7"
     return str(getattr(config, "personification_model", "") or "").strip()
@@ -912,13 +913,21 @@ def _new_route_provider(api_type: str, model: str, config: Any) -> dict[str, Any
     return provider
 
 
-def _format_provider_line(provider: dict[str, Any]) -> str:
+def _format_provider_line(provider: dict[str, Any], failure_state: dict[str, Any] | None = None) -> str:
     name = str(provider.get("name", "") or "unnamed")
     api_type = str(provider.get("api_type", "") or "unset")
     model = str(provider.get("model", "") or "未配置")
     priority = provider.get("priority", "-")
     enabled = "开" if provider.get("enabled", True) else "关"
-    return f"- {name}（{api_type}:{model}，priority={priority}，enabled={enabled}）"
+    status = ""
+    if failure_state:
+        remaining = float(failure_state.get("cooldown_remaining", 0) or 0)
+        if remaining > 0:
+            label = "限流冷却" if failure_state.get("rate_limited") else "失败冷却"
+            status = f"，状态={label} {_format_duration(remaining)}"
+        elif failure_state.get("last_error"):
+            status = "，状态=最近失败，已可重试"
+    return f"- {name}（{api_type}:{model}，priority={priority}，enabled={enabled}{status}）"
 
 
 def _save_route_config(bundle: Any, providers: list[dict[str, Any]]) -> None:
@@ -1020,9 +1029,11 @@ def _format_model_status(bundle: Any) -> str:
         raw_info = f"raw={type(raw_pools).__name__}"
     lines.append(f"诊断：{raw_info}; 解析后 provider 数={len(providers)}")
     lines.append(f"当前 provider（{source_label}）：")
+    provider_failures = get_provider_failure_snapshot()
     if providers:
         for provider in providers[:8]:
-            lines.append(_format_provider_line(provider))
+            provider_name = str(provider.get("name", "") or "")
+            lines.append(_format_provider_line(provider, provider_failures.get(provider_name)))
     else:
         lines.append("- 未配置")
     lines.append("")

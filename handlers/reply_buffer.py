@@ -518,9 +518,10 @@ async def handle_reply_event(
     entry["delay"] = delay
 
     bot_self_id = str(getattr(bot, "self_id", "") or "")
+    is_private_session = not isinstance(event, group_message_event_cls)
     is_direct_mention = _is_direct_mention(event, bot_self_id)
     is_reply_to_bot = _is_reply_to_bot(event, bot_self_id)
-    immediate_flush = bool(is_direct_mention or is_reply_to_bot)
+    immediate_flush = bool(is_private_session or is_direct_mention or is_reply_to_bot)
     now_ts = time.monotonic()
     item = {
         "event": event,

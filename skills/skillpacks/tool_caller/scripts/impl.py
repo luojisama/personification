@@ -1955,6 +1955,12 @@ class OpenAICodexToolCaller(ToolCaller):
 _GEMINI_CLI_BASE = "https://cloudcode-pa.googleapis.com"
 _GEMINI_CLI_LOAD_CODE_ASSIST = f"{_GEMINI_CLI_BASE}/v1internal:loadCodeAssist"
 _GEMINI_CLI_GENERATE_ENDPOINT = f"{_GEMINI_CLI_BASE}/v1internal:generateContent"
+_GEMINI_CLI_DEFAULT_MODEL = "auto-gemini-3"
+_GEMINI_CLI_AUTO_GEMINI3_MODELS = (
+    "gemini-2.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-2.5-pro",
+)
 _GEMINI_CLI_CLIENT_METADATA = {
     "ideType": "IDE_UNSPECIFIED",
     "platform": "PLATFORM_UNSPECIFIED",
@@ -2015,6 +2021,195 @@ def _get_gemini_cli_access_token(auth: dict) -> str:
     return ""
 
 
+_GEMINI_PROJECT_KEYS = {
+    "cloudaicompanionproject",
+    "cloud_ai_companion_project",
+    "cloudAiCompanionProject".lower(),
+    "googlecloudproject",
+    "google_cloud_project",
+    "project",
+    "projectid",
+    "project_id",
+    "quota_project_id",
+}
+
+
+def _looks_like_project_id(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text or len(text) > 128:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{2,127}", text))
+
+
+def _extract_project_from_json_payload(payload: Any) -> str:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized_key = str(key or "").strip().replace("-", "_").lower()
+            if normalized_key in _GEMINI_PROJECT_KEYS and isinstance(value, (str, int)):
+                candidate = str(value or "").strip()
+                if _looks_like_project_id(candidate):
+                    return candidate
+        for value in payload.values():
+            found = _extract_project_from_json_payload(value)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _extract_project_from_json_payload(value)
+            if found:
+                return found
+    return ""
+
+
+def _read_gemini_project_from_json(path: _Path) -> str:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    return _extract_project_from_json_payload(payload)
+
+
+def _gemini_project_config_candidates(auth_file: _Path | None = None) -> list[_Path]:
+    candidates: list[_Path] = []
+
+    def _add(path: _Path) -> None:
+        try:
+            resolved = path.expanduser()
+        except Exception:
+            resolved = path
+        if resolved not in candidates:
+            candidates.append(resolved)
+
+    if auth_file is not None:
+        _add(auth_file)
+        base = auth_file.parent
+        for name in ("settings.json", "config.json", "gemini.json"):
+            _add(base / name)
+    for env_name in ("GEMINI_CLI_HOME", "GEMINI_HOME"):
+        base = _os.environ.get(env_name, "")
+        if base:
+            for name in ("settings.json", "config.json", "oauth_creds.json"):
+                _add(_Path(base) / name)
+    for raw in (
+        "~/.gemini/settings.json",
+        "~/.gemini/config.json",
+        "~/.gemini/oauth_creds.json",
+        "~/AppData/Roaming/gemini-cli/settings.json",
+        "~/AppData/Roaming/gemini-cli/config.json",
+        "~/AppData/Roaming/gemini-cli/oauth_creds.json",
+        "~/.config/gemini/settings.json",
+        "~/.config/gemini/config.json",
+        "~/.config/gemini/oauth_creds.json",
+    ):
+        _add(_Path(raw))
+    return candidates
+
+
+def _read_gcloud_project() -> str:
+    try:
+        import configparser
+    except Exception:
+        return ""
+    raw_candidates = [
+        _os.environ.get("CLOUDSDK_CONFIG", ""),
+        "~/.config/gcloud",
+        "~/AppData/Roaming/gcloud",
+    ]
+    files: list[_Path] = []
+    for raw in raw_candidates:
+        if not raw:
+            continue
+        base = _Path(raw).expanduser()
+        files.append(base / "configurations" / "config_default")
+        files.append(base / "active_config")
+    for path in files:
+        if not path.exists() or path.name == "active_config":
+            continue
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(path, encoding="utf-8")
+            project = parser.get("core", "project", fallback="").strip()
+        except Exception:
+            project = ""
+        if _looks_like_project_id(project):
+            return project
+    return ""
+
+
+def _resolve_local_gemini_cli_project(auth_file: _Path | None = None) -> str:
+    for env_name in (
+        "GEMINI_CLI_PROJECT",
+        "GEMINI_PROJECT",
+        "GOOGLE_CLOUD_PROJECT",
+        "GCLOUD_PROJECT",
+        "CLOUDSDK_CORE_PROJECT",
+    ):
+        value = str(_os.environ.get(env_name, "") or "").strip()
+        if _looks_like_project_id(value):
+            return value
+    for path in _gemini_project_config_candidates(auth_file):
+        if not path.exists():
+            continue
+        project = _read_gemini_project_from_json(path)
+        if project:
+            return project
+    return _read_gcloud_project()
+
+
+def _gemini_cli_headers(access_token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "User-Agent": "GeminiCLI/v0.41.2 (personification; python) google-api-python-client",
+        "x-goog-api-client": "gl-python/3 personification",
+    }
+
+
+def _gemini_cli_model_candidates(model: str) -> list[str]:
+    primary = (model or _GEMINI_CLI_DEFAULT_MODEL).strip() or _GEMINI_CLI_DEFAULT_MODEL
+    lowered = primary.lower()
+    if lowered in {"auto", "auto-gemini-3"}:
+        candidates = list(_GEMINI_CLI_AUTO_GEMINI3_MODELS)
+    else:
+        candidates = [primary]
+    if lowered.startswith("gemini-3"):
+        candidates.extend(["gemini-2.5-flash", "gemini-2.5-pro"])
+    elif lowered.startswith("gemini-2.5-pro"):
+        candidates.append("gemini-2.5-flash")
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _gemini_cli_retry_with_fallback_model(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    try:
+        status_code = int(status or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+    if status_code in {404, 429, 500, 502, 503, 504}:
+        return True
+    text = str(exc or "").lower()
+    return any(
+        token in text
+        for token in (
+            "too many requests",
+            "resource exhausted",
+            "no capacity",
+            "overloaded",
+            "model was not found",
+            "model is invalid",
+        )
+    )
+
+
 class GeminiCliToolCaller(ToolCaller):
     """复用 gemini-cli 本地 OAuth 凭证调用 cloudcode-pa 内部端点。
 
@@ -2034,7 +2229,7 @@ class GeminiCliToolCaller(ToolCaller):
         thinking_mode: str = "none",
         timeout: float = 120.0,
     ) -> None:
-        self.model = (model or "gemini-3.1-pro-preview").strip() or "gemini-3.1-pro-preview"
+        self.model = (model or _GEMINI_CLI_DEFAULT_MODEL).strip() or _GEMINI_CLI_DEFAULT_MODEL
         self.auth_path_override = auth_path
         self.project_override = (project or "").strip()
         self.thinking_mode = _normalize_thinking_mode(thinking_mode)
@@ -2057,32 +2252,48 @@ class GeminiCliToolCaller(ToolCaller):
             )
         return token, auth_file
 
-    async def _resolve_project(self, access_token: str) -> str:
+    async def _resolve_project(self, access_token: str, auth_file: _Path | None = None) -> str:
         if self.project_override:
             return self.project_override
         cached = GeminiCliToolCaller._project_cache.get(access_token)
         if cached:
             return cached
+        load_error: Exception | None = None
         async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=15.0)) as client:
-            resp = await client.post(
-                _GEMINI_CLI_LOAD_CODE_ASSIST,
-                json={"metadata": dict(_GEMINI_CLI_CLIENT_METADATA)},
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            try:
+                resp = await client.post(
+                    _GEMINI_CLI_LOAD_CODE_ASSIST,
+                    json={"metadata": dict(_GEMINI_CLI_CLIENT_METADATA)},
+                    headers=_gemini_cli_headers(access_token),
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc:
+                load_error = exc
+                data = {}
         project = str(data.get("cloudaicompanionProject", "") or "").strip()
+        if project:
+            GeminiCliToolCaller._project_cache[access_token] = project
+            return project
+
+        local_project = _resolve_local_gemini_cli_project(auth_file)
+        if local_project:
+            GeminiCliToolCaller._project_cache[access_token] = local_project
+            return local_project
+        if load_error is not None:
+            raise RuntimeError(
+                "loadCodeAssist 获取 Gemini CLI companion project 失败。"
+                "如果本机 gemini 交互式 CLI 可用，请确认 bot 进程读取的是同一个 ~/.gemini/oauth_creds.json，"
+                "或在配置 personification_gemini_cli_project 中手动指定 project。"
+                f" 原始错误: {load_error}"
+            ) from load_error
         if not project:
             raise RuntimeError(
                 "loadCodeAssist 未返回 cloudaicompanionProject。"
+                "已尝试从 gemini-cli/gcloud 本地配置自动发现 project 但未找到。"
                 "请在配置 personification_gemini_cli_project 中手动指定 GCP 项目 ID，"
                 "或先运行一次 `gemini` 完成 onboarding。"
             )
-        GeminiCliToolCaller._project_cache[access_token] = project
-        return project
 
     async def chat_with_tools(
         self,
@@ -2093,8 +2304,8 @@ class GeminiCliToolCaller(ToolCaller):
         messages = inject_current_time_context(messages)
         contains_image_input = _messages_contain_images(messages)
         try:
-            access_token, _auth_file = await self._get_access_token()
-            project = await self._resolve_project(access_token)
+            access_token, auth_file = await self._get_access_token()
+            project = await self._resolve_project(access_token, auth_file)
             system_instruction, contents = _convert_messages_to_gemini(messages)
 
             tool_payload: List[dict] = []
@@ -2122,21 +2333,34 @@ class GeminiCliToolCaller(ToolCaller):
             if tool_payload:
                 request_obj["tools"] = tool_payload
 
-            envelope = {
-                "model": self.model,
-                "project": project,
-                "request": request_obj,
-            }
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            }
+            model_candidates = _gemini_cli_model_candidates(self.model)
+            last_exc: Exception | None = None
             async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=15.0)) as client:
-                response = await client.post(
-                    _GEMINI_CLI_GENERATE_ENDPOINT, json=envelope, headers=headers
-                )
-                response.raise_for_status()
-                data = response.json()
+                for model_index, model_name in enumerate(model_candidates):
+                    envelope = {
+                        "model": model_name,
+                        "project": project,
+                        "request": request_obj,
+                    }
+                    try:
+                        response = await client.post(
+                            _GEMINI_CLI_GENERATE_ENDPOINT,
+                            json=envelope,
+                            headers=_gemini_cli_headers(access_token),
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        has_next = model_index + 1 < len(model_candidates)
+                        if has_next and _gemini_cli_retry_with_fallback_model(exc):
+                            continue
+                        raise
+                else:
+                    if last_exc is not None:
+                        raise last_exc
+                    data = {}
 
             inner_response = data.get("response") if isinstance(data, dict) else None
             if isinstance(inner_response, dict):
@@ -2361,7 +2585,7 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
         auth_path = str(getattr(config, "personification_gemini_cli_auth_path", "") or "").strip()
         project = str(getattr(config, "personification_gemini_cli_project", "") or "").strip()
         return GeminiCliToolCaller(
-            model=model or "gemini-3.1-pro-preview",
+            model=model or _GEMINI_CLI_DEFAULT_MODEL,
             auth_path=auth_path,
             project=project,
             thinking_mode=thinking_mode,

@@ -288,6 +288,7 @@ def build_plugin_runtime(
         model_override_field_name="personification_labeler_model",
         model_role=MODEL_ROLE_STICKER,
     )
+    background_intelligence.set_evolves_call_ai_api(lite_call_ai_api)
 
     def _configured_model_role(field_name: str, default_role: str) -> str:
         raw_role = getattr(plugin_config, field_name, default_role)

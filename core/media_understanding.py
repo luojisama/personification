@@ -13,7 +13,12 @@ from .media_refs import normalize_video_ref
 from .message_parts import build_user_message_content
 from .model_router import MODEL_ROLE_STICKER, get_model_override_for_role
 from .visual_capabilities import VISUAL_ROUTE_AGENT, error_indicates_vision_unavailable, provider_supports_video
-from ..skills.skillpacks.tool_caller.scripts.impl import build_tool_caller
+
+
+def _build_tool_caller(config: Any) -> Any:
+    from ..skills.skillpacks.tool_caller.scripts.impl import build_tool_caller
+
+    return build_tool_caller(config)
 
 
 _VIDEO_INLINE_MAX_BYTES = 20 * 1024 * 1024
@@ -166,7 +171,7 @@ async def _try_primary_image_routes(
         if not provider_supports_vision(api_type, model, route_name=route_name):
             continue
         try:
-            caller = build_tool_caller(_ProviderConfigProxy(plugin_config, provider))
+            caller = _build_tool_caller(_ProviderConfigProxy(plugin_config, provider))
             response = await caller.chat_with_tools(
                 messages=[
                     {

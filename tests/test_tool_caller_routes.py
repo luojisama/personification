@@ -1,9 +1,14 @@
 """Tests for new gemini-cli / claude-code tool caller routing."""
 from __future__ import annotations
 
+import asyncio
+import json
+import shutil
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import pytest
 
@@ -38,6 +43,14 @@ class _Logger:
 
     def error(self, *_args, **_kwargs) -> None:
         return None
+
+
+def _make_workspace_temp_dir(prefix: str) -> Path:
+    base_dir = Path(__file__).resolve().parent / ".tmp"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir = base_dir / f"{prefix}{uuid4().hex}"
+    temp_dir.mkdir(parents=True, exist_ok=False)
+    return temp_dir
 
 
 def test_normalize_api_type_gemini_cli_aliases() -> None:
@@ -81,7 +94,8 @@ def test_build_tool_caller_returns_claude_code_instance() -> None:
     assert caller.model == "claude-opus-4-7"
 
 
-def test_provider_router_accepts_cli_legacy_routes_without_api_key() -> None:
+def test_provider_router_accepts_cli_legacy_routes_without_api_key(monkeypatch) -> None:
+    monkeypatch.setattr(provider_router, "_load_env_api_pool_config", lambda _logger: [])
     gemini_cfg = _DummyConfig(
         personification_api_type="gemini_cli",
         personification_model="gemini-3.1-pro-preview",
@@ -115,6 +129,98 @@ def test_provider_router_accepts_cli_pool_routes_without_api_key() -> None:
     providers = provider_router.get_configured_api_providers(cfg, _Logger())
     assert [item["api_type"] for item in providers] == ["gemini_cli", "claude_code"]
     assert providers[0]["project"] == "cloud-project"
+
+
+def test_provider_router_prefers_multiline_env_pool_when_runtime_value_is_truncated(monkeypatch) -> None:
+    temp_dir = _make_workspace_temp_dir("provider-env-")
+    try:
+        env_payload = [
+            {
+                "name": "gemini_cli_primary",
+                "api_type": "gemini_cli",
+                "model": "gemini-3-flash-preview",
+                "auth_path": "~/.gemini/oauth_creds.json",
+                "priority": 1,
+                "enabled": True,
+            },
+            {
+                "name": "codex_primary",
+                "api_type": "openai_codex",
+                "model": "gpt-5.4-mini",
+                "auth_path": "~/.codex/auth.json",
+                "priority": 2,
+                "enabled": True,
+            },
+        ]
+        (temp_dir / ".env.prod").write_text(
+            "personification_api_pools='"
+            + json.dumps(env_payload, ensure_ascii=False, indent=2)
+            + "'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(temp_dir)
+        cfg = _DummyConfig(
+            personification_api_pools=[
+                {
+                    "name": "codex_primary",
+                    "api_type": "openai_codex",
+                    "model": "gpt-5.4-mini",
+                    "auth_path": "~/.codex/auth.json",
+                    "priority": 1,
+                }
+            ]
+        )
+
+        providers = provider_router.get_configured_api_providers(cfg, _Logger())
+
+        assert [item["name"] for item in providers] == ["gemini_cli_primary", "codex_primary"]
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_provider_router_loads_multiline_env_pool_when_runtime_value_is_none(monkeypatch) -> None:
+    temp_dir = _make_workspace_temp_dir("provider-env-none-")
+    try:
+        env_payload = [
+            {
+                "name": "gemini_cli_primary",
+                "api_type": "gemini_cli",
+                "model": "gemini-3-flash-preview",
+                "auth_path": "~/.gemini/oauth_creds.json",
+                "priority": 1,
+                "enabled": True,
+            },
+            {
+                "name": "codex_primary",
+                "api_type": "openai_codex",
+                "model": "gpt-5.4-mini",
+                "auth_path": "~/.codex/auth.json",
+                "priority": 2,
+                "enabled": True,
+            },
+        ]
+        (temp_dir / ".env.prod").write_text(
+            "personification_api_pools='"
+            + json.dumps(env_payload, ensure_ascii=False, indent=2)
+            + "'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(temp_dir)
+        monkeypatch.setattr(
+            provider_router,
+            "_load_env_api_pool_config",
+            lambda logger: provider_router.parse_api_pool_config(
+                (temp_dir / ".env.prod").read_text(encoding="utf-8").split("=", 1)[1],
+                logger,
+            ),
+        )
+        cfg = _DummyConfig(personification_api_pools=None)
+
+        providers = provider_router.get_configured_api_providers(cfg, _Logger())
+
+        assert [item["name"] for item in providers] == ["gemini_cli_primary", "codex_primary"]
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def test_provider_candidates_preserve_priority_over_rotation() -> None:
@@ -211,6 +317,65 @@ def test_routed_config_proxy_passes_cli_auth_fields_to_tool_caller() -> None:
     claude_caller = caller_impl.build_tool_caller(claude_proxy)
     assert isinstance(claude_caller, caller_impl.ClaudeCodeToolCaller)
     assert claude_caller.auth_path_override == "C:/tmp/claude.json"
+
+
+def test_gemini_cli_resolves_project_from_load_code_assist_before_local_file(monkeypatch) -> None:
+    temp_dir = _make_workspace_temp_dir("gemini-project-")
+    try:
+        monkeypatch.delenv("GEMINI_CLI_PROJECT", raising=False)
+        monkeypatch.delenv("GEMINI_PROJECT", raising=False)
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+        monkeypatch.delenv("GCLOUD_PROJECT", raising=False)
+        monkeypatch.delenv("CLOUDSDK_CORE_PROJECT", raising=False)
+        auth_file = temp_dir / "oauth_creds.json"
+        auth_file.write_text(
+            json.dumps({"access_token": "token", "quota_project_id": "local-project-123"}),
+            encoding="utf-8",
+        )
+
+        class _Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self):  # noqa: ANN201
+                return {"cloudaicompanionProject": "server-project-123"}
+
+        class _Client:
+            def __init__(self, *_args, **_kwargs) -> None:
+                return None
+
+            async def __aenter__(self):  # noqa: ANN201
+                return self
+
+            async def __aexit__(self, *_args) -> None:
+                return None
+
+            async def post(self, *_args, **_kwargs):  # noqa: ANN201
+                return _Response()
+
+        monkeypatch.setattr(caller_impl.httpx, "AsyncClient", _Client)
+        caller_impl.GeminiCliToolCaller._project_cache.clear()
+        caller = caller_impl.GeminiCliToolCaller(model="gemini-3-flash-preview")
+
+        project = asyncio.run(caller._resolve_project("token", auth_file))
+
+        assert project == "server-project-123"
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_gemini_cli_model_candidates_expand_auto_to_backend_models() -> None:
+    assert caller_impl.GeminiCliToolCaller(model="").model == "auto-gemini-3"
+    assert caller_impl._gemini_cli_model_candidates("auto-gemini-3") == [
+        "gemini-2.5-flash",
+        "gemini-3-flash-preview",
+        "gemini-2.5-pro",
+    ]
+    assert caller_impl._gemini_cli_model_candidates("gemini-3-flash-preview") == [
+        "gemini-3-flash-preview",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+    ]
 
 
 @dataclass

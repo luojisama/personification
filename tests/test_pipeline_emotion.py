@@ -1,72 +1,57 @@
 from __future__ import annotations
 
-import asyncio
-from types import SimpleNamespace
-
 from ._loader import load_personification_module
 
 pipeline_emotion = load_personification_module("plugin.personification.handlers.reply_pipeline.pipeline_emotion")
 
 
-def test_should_speak_in_random_chat_accepts_recent_context_alias(monkeypatch) -> None:  # noqa: ANN001
-    captured: dict[str, object] = {}
+def test_should_speak_in_random_chat_solo_speaker_returns_true(monkeypatch) -> None:  # noqa: ANN001
+    def _fake_has_newer(state):  # noqa: ANN001
+        return False
 
-    async def _fake_decide(  # noqa: ANN001
-        _call_ai_api,
-        *,
-        raw_message_text,
-        recent_context,
-        relationship_hint,
-        repeat_clusters,
-        recent_bot_replies,
-        has_newer_batch,
-        message_intent,
-        ambiguity_level,
-        message_target,
-        solo_speaker_follow,
-    ) -> bool:
-        captured.update(
-            {
-                "raw_message_text": raw_message_text,
-                "recent_context": recent_context,
-                "relationship_hint": relationship_hint,
-                "repeat_clusters": repeat_clusters,
-                "recent_bot_replies": recent_bot_replies,
-                "has_newer_batch": has_newer_batch,
-                "message_intent": message_intent,
-                "ambiguity_level": ambiguity_level,
-                "message_target": message_target,
-                "solo_speaker_follow": solo_speaker_follow,
-            }
-        )
+    monkeypatch.setattr(pipeline_emotion, "batch_has_newer_messages", _fake_has_newer)
+    result = pipeline_emotion.should_speak_in_random_chat(
+        state={},
+        message_target="others",
+        solo_speaker_follow=True,
+    )
+    assert result is True
+
+
+def test_should_speak_in_random_chat_newer_batch_returns_false(monkeypatch) -> None:  # noqa: ANN001
+    def _fake_has_newer(state):  # noqa: ANN001
         return True
 
-    monkeypatch.setattr(pipeline_emotion, "decide_random_chat_speak", _fake_decide)
-
-    runtime = SimpleNamespace(
-        lite_call_ai_api=None,
-        call_ai_api=object(),
+    monkeypatch.setattr(pipeline_emotion, "batch_has_newer_messages", _fake_has_newer)
+    result = pipeline_emotion.should_speak_in_random_chat(
+        state={},
+        message_target="others",
+        solo_speaker_follow=False,
     )
+    assert result is False
 
-    result = asyncio.run(
-        pipeline_emotion.should_speak_in_random_chat(
-            runtime=runtime,
-            state={},
-            raw_message_text="吓哭了刚做噩梦了",
-            message_text="吓哭了刚做噩梦了",
-            message_content="吓哭了刚做噩梦了",
-            recent_context="群里刚在聊睡觉和做梦",
-            relationship_hint="你们平时会接这种情绪话题",
-            repeat_clusters=None,
-            recent_bot_replies=["前一条机器人回复"],
-            message_intent="banter",
-            ambiguity_level="low",
-            message_target="bot",
-            solo_speaker_follow=False,
-            knowledge_store=object(),
-        )
+
+def test_should_speak_in_random_chat_target_bot_returns_true(monkeypatch) -> None:  # noqa: ANN001
+    def _fake_has_newer(state):  # noqa: ANN001
+        return False
+
+    monkeypatch.setattr(pipeline_emotion, "batch_has_newer_messages", _fake_has_newer)
+    result = pipeline_emotion.should_speak_in_random_chat(
+        state={},
+        message_target="bot",
+        solo_speaker_follow=False,
     )
-
     assert result is True
-    assert captured["recent_context"] == "群里刚在聊睡觉和做梦"
-    assert captured["raw_message_text"] == "吓哭了刚做噩梦了"
+
+
+def test_should_speak_in_random_chat_default_returns_true(monkeypatch) -> None:  # noqa: ANN001
+    def _fake_has_newer(state):  # noqa: ANN001
+        return False
+
+    monkeypatch.setattr(pipeline_emotion, "batch_has_newer_messages", _fake_has_newer)
+    result = pipeline_emotion.should_speak_in_random_chat(
+        state={},
+        message_target="others",
+        solo_speaker_follow=False,
+    )
+    assert result is True

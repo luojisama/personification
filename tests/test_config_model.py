@@ -37,6 +37,14 @@ def test_llm_review_features_default_disabled() -> None:
     cfg = config_mod.Config()
 
     assert cfg.personification_response_review_enabled is False
+    assert cfg.personification_turn_planner_enabled is False
+    assert cfg.personification_turn_planner_shadow_enabled is False
+    assert cfg.personification_evidence_synthesizer_enabled is False
+    assert cfg.personification_persona_responder_json_enabled is False
+    assert cfg.personification_real_embedding_enabled is False
+    assert cfg.personification_embedding_provider == "hash_bow"
+    assert cfg.personification_deep_research_v2_enabled is False
+    assert cfg.personification_parallel_research_pages_per_worker == 20
     assert cfg.personification_tts_llm_decision_enabled is False
     assert cfg.personification_response_review_model_role == "review"
     assert cfg.personification_tts_llm_decision_model_role == "agent"

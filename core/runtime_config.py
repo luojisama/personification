@@ -15,6 +15,76 @@ def get_runtime_config_path(plugin_config: Any) -> Path:
     return Path(get_data_dir(plugin_config)) / "runtime_config.json"
 
 
+def _iter_env_file_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    cwd = Path.cwd()
+    candidates.extend([cwd] + list(cwd.parents)[:5])
+    plugin_root = Path(__file__).resolve().parent.parent
+    candidates.extend([plugin_root] + list(plugin_root.parents)[:5])
+    paths: list[Path] = []
+    seen_dirs: set[str] = set()
+    for d in candidates:
+        key = str(d)
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
+        for name in (".env.prod", ".env"):
+            p = d / name
+            if p.exists() and p not in paths:
+                paths.append(p)
+    return paths
+
+
+def _parse_env_assignment(lines: list[str], start: int) -> tuple[str, str, int] | None:
+    raw_line = lines[start]
+    stripped = raw_line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None
+    key, raw_value = stripped.split("=", 1)
+    key = key.strip()
+    if not key:
+        return None
+    value = raw_value.strip()
+    if value and value[0] in {"'", '"'}:
+        quote = value[0]
+        body = value[1:]
+        if body.endswith(quote) and not body.endswith("\\" + quote):
+            return key, body[:-1], start
+        collected = [body]
+        index = start + 1
+        while index < len(lines):
+            part = lines[index]
+            if part.rstrip().endswith(quote) and not part.rstrip().endswith("\\" + quote):
+                collected.append(part.rstrip()[:-1])
+                return key, "\n".join(collected), index
+            collected.append(part)
+            index += 1
+        return key, "\n".join(collected), index - 1
+    return key, value, start
+
+
+def read_env_file_value(key: str) -> str:
+    target = str(key or "").strip().lower()
+    if not target:
+        return ""
+    for path in _iter_env_file_candidates():
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            continue
+        index = 0
+        while index < len(lines):
+            parsed = _parse_env_assignment(lines, index)
+            if parsed is None:
+                index += 1
+                continue
+            parsed_key, value, end_index = parsed
+            if parsed_key.strip().lower() == target:
+                return value.strip()
+            index = max(index + 1, end_index + 1)
+    return ""
+
+
 def _collect_env_file_keys() -> set[str]:
     """直接读取 .env.prod / .env 文件，提取显式设置的 personification_ 字段名。
 
@@ -27,31 +97,22 @@ def _collect_env_file_keys() -> set[str]:
     .env.prod。
     """
     found: set[str] = set()
-    candidates: list[Path] = []
-    cwd = Path.cwd()
-    candidates.extend([cwd] + list(cwd.parents)[:5])
-    plugin_root = Path(__file__).resolve().parent.parent
-    candidates.extend([plugin_root] + list(plugin_root.parents)[:5])
-    seen_dirs: set[str] = set()
-    for d in candidates:
-        key = str(d)
-        if key in seen_dirs:
+    for path in _iter_env_file_candidates():
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
             continue
-        seen_dirs.add(key)
-        for name in (".env.prod", ".env"):
-            p = d / name
-            if not p.exists():
+        index = 0
+        while index < len(lines):
+            parsed = _parse_env_assignment(lines, index)
+            if parsed is None:
+                index += 1
                 continue
-            try:
-                for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-                    line = line.strip()
-                    if line.startswith("#") or "=" not in line:
-                        continue
-                    key_field = line.split("=", 1)[0].strip().lower()
-                    if key_field.startswith("personification_"):
-                        found.add(key_field)
-            except Exception:
-                pass
+            key_field, _value, end_index = parsed
+            key_field = key_field.strip().lower()
+            if key_field.startswith("personification_"):
+                found.add(key_field)
+            index = max(index + 1, end_index + 1)
     return found
 
 

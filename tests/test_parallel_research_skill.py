@@ -114,6 +114,8 @@ def _runtime(tool_caller=None, **config_overrides):  # noqa: ANN001, ANN003
         personification_parallel_research_worker_timeout=20,
         personification_parallel_research_total_timeout=30,
         personification_parallel_research_max_tool_rounds=1,
+        personification_parallel_research_pages_per_worker=20,
+        personification_deep_research_v2_enabled=False,
         personification_tool_web_search_enabled=True,
         personification_tool_web_search_mode="enabled",
         personification_wiki_enabled=True,
@@ -197,3 +199,51 @@ def test_parallel_research_tool_respects_lookup_switch() -> None:
     result = asyncio.run(tool.handler("查资料", purpose="lookup"))
 
     assert "lookup_disabled_by_config" in result
+
+
+def test_parallel_research_v2_high_profile_expands_limits() -> None:
+    runtime = _runtime(personification_deep_research_v2_enabled=True)
+
+    limits = parallel_impl._resolve_research_limits(
+        plugin_config=runtime.plugin_config,
+        max_workers=None,
+        research_level="high",
+    )
+
+    assert limits.max_workers == 8
+    assert limits.pages_per_worker == 40
+    assert limits.total_timeout == 300.0
+    assert limits.max_tool_rounds == 3
+
+
+def test_parallel_research_fallback_aggregate_cross_verifies_repeated_facts() -> None:
+    plans = [
+        parallel_impl.ResearchWorkerPlan(role="a", goal="查 A", focus=[], preferred_tools=[]),
+        parallel_impl.ResearchWorkerPlan(role="b", goal="查 B", focus=[], preferred_tools=[]),
+    ]
+
+    payload = parallel_impl._fallback_aggregate(
+        query="测试",
+        purpose="lookup",
+        plans=plans,
+        worker_results=[
+            {
+                "role": "a",
+                "facts": ["共同事实", "单源 A"],
+                "sources": ["https://example.com/a"],
+                "conflicts": [],
+            },
+            {
+                "role": "b",
+                "facts": ["共同事实", "单源 B"],
+                "sources": ["https://example.com/b"],
+                "conflicts": ["B 与 A 的年份说法不同"],
+            },
+        ],
+        notes=[],
+    )
+
+    assert payload["verified_facts"] == ["共同事实"]
+    assert payload["single_source_facts"] == ["单源 A", "单源 B"]
+    assert payload["sources"] == ["https://example.com/a", "https://example.com/b"]
+    assert payload["conflicts"] == ["B 与 A 的年份说法不同"]

@@ -11,7 +11,6 @@ from ..core.data_store import get_data_store
 from ..core.paths import get_data_dir
 from ..core.prompts import load_prompt
 from ..schedule import format_time_context, get_activity_status, get_current_local_time
-from ..skills.skillpacks.tool_caller.scripts.impl import ToolCaller
 
 
 DEFAULT_STATE = {

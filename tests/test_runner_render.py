@@ -344,8 +344,6 @@ def test_run_agent_sends_ack_when_first_tool_call_appears(monkeypatch) -> None: 
     async def _ack_sender(text: str) -> None:
         ack_calls.append(text)
 
-    monkeypatch.setattr(runner, "_looks_like_deferred_lookup_reply", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(runner, "_should_classify_deferred_lookup_reply", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         runner,
         "_select_semantic_fallback_tool",
@@ -402,13 +400,101 @@ def test_run_agent_sends_ack_when_first_tool_call_appears(monkeypatch) -> None: 
     assert ack_calls == [""]
 
 
+def test_run_agent_appends_evidence_guidance_after_tool_result(monkeypatch) -> None:  # noqa: ANN001
+    handled: list[dict[str, object]] = []
+
+    async def _handler(**kwargs):  # noqa: ANN001
+        handled.append(dict(kwargs))
+        assert "热搜" in kwargs["query"]
+        return "热搜结果：A"
+
+    monkeypatch.setattr(runner, "_evidence_synthesizer_enabled", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        runner,
+        "_select_semantic_fallback_tool",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=None),
+    )
+    synth_calls: list[dict[str, object]] = []
+
+    async def _fake_synthesize_evidence(**kwargs):  # noqa: ANN001
+        synth_calls.append(dict(kwargs))
+        return runner.EvidenceSynthesis(
+            selected_memory_ids=["m1"],
+            memory_inject_style="factual",
+            tool_evidence_digest="A 是当前可用结果",
+            uncertainty_notes=[],
+            needs_more_research=False,
+            research_followup_query="",
+        )
+
+    monkeypatch.setattr(runner, "synthesize_evidence_with_llm", _fake_synthesize_evidence)
+
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-1",
+                        name="search_web",
+                        arguments={"query": "热搜"},
+                    )
+                ],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="A 现在比较热。",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "帮我看看热搜"}],
+            registry=_register_query_tool(_handler),
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=3,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+                personification_evidence_synthesizer_enabled=True,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="capability",
+                ambiguity_level="low",
+            ),
+            candidate_memories=[{"memory_id": "m1", "summary": "以前聊过 A"}],
+        )
+    )
+
+    assert result.text == "A 现在比较热。"
+    assert len(caller.calls) == 2
+    assert handled == [{"query": "帮我看看热搜"}]
+    assert synth_calls
+    assert synth_calls[0]["candidate_memories"] == [{"memory_id": "m1", "summary": "以前聊过 A"}]
+    assert synth_calls[0]["tool_results"][0]["tool_name"] == "search_web"
+    final_messages = caller.calls[1]["messages"]
+    assert any(
+        "证据综合器给出的当前可用证据" in str(message.get("content", ""))
+        and "A 是当前可用结果" in str(message.get("content", ""))
+        for message in final_messages
+        if isinstance(message, dict)
+    )
+
+
 def test_run_agent_returns_generated_image_marker_without_rewrite(monkeypatch) -> None:  # noqa: ANN001
     async def _handler(**kwargs):  # noqa: ANN001
         assert kwargs["prompt"] == "Kobe Bryant iced tea poster"
         return "[IMAGE_B64]QUJD[/IMAGE_B64]"
-
-    monkeypatch.setattr(runner, "_looks_like_deferred_lookup_reply", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(runner, "_should_classify_deferred_lookup_reply", lambda *_args, **_kwargs: False)
 
     registry = tool_registry.ToolRegistry()
     registry.register(
@@ -474,9 +560,6 @@ def test_run_agent_returns_image_generation_failure_without_rewrite(monkeypatch)
             "图片生成失败：empty image response "
             "(status=failed raw_keys=id,error output_items=1 output_types=image_generation_call)"
         )
-
-    monkeypatch.setattr(runner, "_looks_like_deferred_lookup_reply", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(runner, "_should_classify_deferred_lookup_reply", lambda *_args, **_kwargs: False)
 
     registry = tool_registry.ToolRegistry()
     registry.register(
@@ -546,9 +629,6 @@ def test_run_agent_returns_image_generation_timeout_without_rewrite(monkeypatch)
         assert kwargs["prompt"] == "Kobe Bryant iced tea poster"
         await asyncio.sleep(0.2)
         return "[IMAGE_B64]QUJD[/IMAGE_B64]"
-
-    monkeypatch.setattr(runner, "_looks_like_deferred_lookup_reply", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(runner, "_should_classify_deferred_lookup_reply", lambda *_args, **_kwargs: False)
 
     registry = tool_registry.ToolRegistry()
     registry.register(

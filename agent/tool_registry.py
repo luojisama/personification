@@ -16,6 +16,7 @@ class AgentTool:
     handler: ToolHandler
     local: bool = True
     enabled: EnabledChecker = field(default=lambda: True)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ToolRegistry:
@@ -27,6 +28,9 @@ class ToolRegistry:
 
     def get(self, name: str) -> Optional[AgentTool]:
         return self._tools.get(name)
+
+    def all(self) -> List[AgentTool]:
+        return list(self._tools.values())
 
     def active(self) -> List[AgentTool]:
         active_tools: List[AgentTool] = []

@@ -1,9 +1,118 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from .context_policy import stringify_history_content
+from .group_relations import summarize_group_relationships
 from .group_roles import render_group_role_label
+
+
+@dataclass(frozen=True)
+class GroupConversationContext:
+    recent_messages: list[dict[str, Any]] = field(default_factory=list)
+    speaker_relations: dict[str, str] = field(default_factory=dict)
+    active_topics: list[str] = field(default_factory=list)
+    repeat_clusters: list[dict[str, Any]] = field(default_factory=list)
+    quote_chain: list[dict[str, Any]] = field(default_factory=list)
+    bot_recent_replies: list[str] = field(default_factory=list)
+    emotional_climate: str = "未评估"
+    rendered_context: str = ""
+    relationship_hint: str = ""
+
+
+def build_group_conversation_context(
+    *,
+    recent_messages: list[dict[str, Any]],
+    trigger_msg_id: str = "",
+    trigger_user_id: str = "",
+    bot_self_id: str = "",
+    repeat_clusters: list[dict[str, Any]] | None = None,
+    bot_recent_replies: list[str] | None = None,
+    emotional_climate: str = "未评估",
+) -> GroupConversationContext:
+    messages = [msg for msg in list(recent_messages or []) if isinstance(msg, dict)]
+    speaker_relations: dict[str, str] = {}
+    active_topics: list[str] = []
+    for msg in messages[-30:]:
+        user_id = str(msg.get("user_id", "") or "").strip()
+        nickname = str(
+            msg.get("nickname")
+            or msg.get("speaker")
+            or msg.get("user_name")
+            or msg.get("role")
+            or ""
+        ).strip()
+        if user_id and nickname:
+            speaker_relations[user_id] = nickname
+        content = stringify_history_content(msg.get("content", "")).strip()
+        if content and content not in active_topics:
+            active_topics.append(content[:80])
+    rendered_context = render_group_context_structured(messages, trigger_msg_id=trigger_msg_id)
+    relationship_hint = summarize_group_relationships(
+        messages,
+        trigger_msg_id=trigger_msg_id,
+        trigger_user_id=trigger_user_id,
+        bot_self_id=bot_self_id,
+    )
+    return GroupConversationContext(
+        recent_messages=messages[-30:],
+        speaker_relations=speaker_relations,
+        active_topics=active_topics[-6:],
+        repeat_clusters=list(repeat_clusters or [])[:5],
+        quote_chain=_build_quote_chain(messages, trigger_msg_id=trigger_msg_id),
+        bot_recent_replies=[
+            str(item or "").strip()[:120]
+            for item in list(bot_recent_replies or [])[:5]
+            if str(item or "").strip()
+        ],
+        emotional_climate=str(emotional_climate or "未评估").strip()[:80] or "未评估",
+        rendered_context=rendered_context,
+        relationship_hint=relationship_hint,
+    )
+
+
+def render_group_conversation_context(context: GroupConversationContext) -> str:
+    parts: list[str] = []
+    if context.rendered_context:
+        parts.append(context.rendered_context)
+    if context.active_topics:
+        parts.append("近段发言线索：" + "；".join(context.active_topics[:6]))
+    if context.quote_chain:
+        quote_lines = []
+        for item in context.quote_chain[-5:]:
+            speaker = str(item.get("nickname") or item.get("speaker") or item.get("user_id") or "未知").strip()
+            content = stringify_history_content(item.get("content", "")).strip()
+            if content:
+                quote_lines.append(f"- {speaker}: {content[:120]}")
+        if quote_lines:
+            parts.append("引用链：\n" + "\n".join(quote_lines))
+    if context.bot_recent_replies:
+        parts.append("bot 最近回复：" + "；".join(context.bot_recent_replies[:5]))
+    if context.emotional_climate:
+        parts.append(f"对话氛围：{context.emotional_climate}")
+    return "\n".join(part for part in parts if part).strip()
+
+
+def _build_quote_chain(messages: list[dict[str, Any]], *, trigger_msg_id: str = "") -> list[dict[str, Any]]:
+    by_id = {
+        str(msg.get("message_id", "") or "").strip(): msg
+        for msg in messages
+        if str(msg.get("message_id", "") or "").strip()
+    }
+    if not by_id:
+        return []
+    current_id = str(trigger_msg_id or "").strip()
+    if not current_id or current_id not in by_id:
+        current_id = str(messages[-1].get("message_id", "") or "").strip() if messages else ""
+    chain: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    while current_id and current_id in by_id and current_id not in seen and len(chain) < 8:
+        seen.add(current_id)
+        current = by_id[current_id]
+        chain.append(current)
+        current_id = str(current.get("reply_to_msg_id", "") or "").strip()
+    return list(reversed(chain))
 
 
 def render_group_context_structured(messages: list[dict[str, Any]], trigger_msg_id: str = "") -> str:
@@ -104,3 +213,11 @@ def render_group_context_structured(messages: list[dict[str, Any]], trigger_msg_
         relation = "|".join(relation_parts) if relation_parts else "普通发言"
         lines.append(f"[{label}][{nickname}|uid={user_id}|{relation}] {content}")
     return "\n".join(lines)
+
+
+__all__ = [
+    "GroupConversationContext",
+    "build_group_conversation_context",
+    "render_group_context_structured",
+    "render_group_conversation_context",
+]

@@ -7,6 +7,7 @@ from ...agent.inner_state import (
     update_inner_state_after_chat,
 )
 from ...agent.tool_registry import AgentTool, ToolRegistry
+from ...agent.runtime.tool_catalog import apply_tool_metadata_defaults
 from ...skill_runtime.loader import load_builtin_skillpacks_sync
 from ...skill_runtime.runtime_api import SkillRuntime
 from ..ai_routes import build_routed_tool_caller
@@ -274,6 +275,7 @@ def build_agent_tool_registry(
         registry.register(build_gold_price_tool(_60s_base, logger, _60s_local_base))
         registry.register(build_baike_tool(_60s_base, logger, _60s_local_base))
         registry.register(build_exchange_rate_tool(_60s_base, logger, _60s_local_base))
+    apply_tool_metadata_defaults(registry)
     return registry
 
 

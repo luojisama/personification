@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import struct
 import time
 import uuid
 from dataclasses import dataclass
@@ -67,6 +68,23 @@ def _json_loads(text: Any, default: Any) -> Any:
     return value
 
 
+def _pack_float16_vector(values: Any) -> bytes:
+    if not isinstance(values, list):
+        return b""
+    floats: list[float] = []
+    for value in values:
+        try:
+            floats.append(float(value))
+        except (TypeError, ValueError):
+            floats.append(0.0)
+    if not floats:
+        return b""
+    try:
+        return struct.pack(f"<{len(floats)}e", *floats)
+    except Exception:
+        return b""
+
+
 @dataclass
 class MemorySearchCandidate:
     memory_id: str
@@ -74,6 +92,48 @@ class MemorySearchCandidate:
     base_score: float
     match_reasons: list[str]
     source: str
+
+
+def _fuse_recall_candidates(
+    groups: list[list[MemorySearchCandidate]],
+    *,
+    limit: int,
+    rrf_k: int = 60,
+) -> list[MemorySearchCandidate]:
+    fused: dict[str, MemorySearchCandidate] = {}
+    source_names: dict[str, list[str]] = {}
+    for group in groups:
+        ranked = sorted(list(group or []), key=lambda item: item.base_score, reverse=True)
+        for rank, candidate in enumerate(ranked, start=1):
+            if not candidate.memory_id:
+                continue
+            bonus = 1.0 / float(max(1, rrf_k) + rank)
+            existing = fused.get(candidate.memory_id)
+            if existing is None:
+                fused[candidate.memory_id] = MemorySearchCandidate(
+                    memory_id=candidate.memory_id,
+                    payload=dict(candidate.payload),
+                    base_score=float(candidate.base_score) + bonus,
+                    match_reasons=list(candidate.match_reasons or []),
+                    source=str(candidate.source or "").strip(),
+                )
+                source_names[candidate.memory_id] = [str(candidate.source or "").strip()] if candidate.source else []
+                continue
+            existing.base_score = max(existing.base_score, float(candidate.base_score)) + bonus
+            for reason in list(candidate.match_reasons or []):
+                if reason and reason not in existing.match_reasons:
+                    existing.match_reasons.append(reason)
+            source = str(candidate.source or "").strip()
+            if source and source not in source_names.setdefault(candidate.memory_id, []):
+                source_names[candidate.memory_id].append(source)
+    for memory_id, candidate in fused.items():
+        sources = source_names.get(memory_id, [])
+        if len(sources) > 1:
+            candidate.source = "+".join(sources)
+            reason = "RRF混合召回:" + ",".join(sources[:4])
+            if reason not in candidate.match_reasons:
+                candidate.match_reasons.append(reason)
+    return sorted(fused.values(), key=lambda item: item.base_score, reverse=True)[: max(1, int(limit or 1))]
 
 
 class MemoryStore:
@@ -381,6 +441,10 @@ class MemoryStore:
                 VALUES (?, ?, ?, ?)
                 """,
                 (memory_id, EMBED_MODEL_VERSION, json.dumps(payload.get("_embedding", []), ensure_ascii=False), updated_at),
+            )
+            conn.execute(
+                "UPDATE memory_items SET embedding=?, embedding_model=? WHERE memory_id=?",
+                (_pack_float16_vector(payload.get("_embedding", [])), EMBED_MODEL_VERSION, memory_id),
             )
             conn.execute("DELETE FROM memory_entities WHERE memory_id=?", (memory_id,))
             for entity in payload.get("_entities", []):
@@ -1079,6 +1143,10 @@ class MemoryStore:
                     now_ts(),
                 ),
             )
+            conn.execute(
+                "UPDATE memory_items SET embedding=?, embedding_model=? WHERE memory_id=?",
+                (_pack_float16_vector(refreshed), EMBED_MODEL_VERSION, memory_id),
+            )
         return refreshed
 
     def _fts_projection(self, value: Any) -> str:
@@ -1122,12 +1190,13 @@ class MemoryStore:
         group_id: str,
         limit: int,
     ) -> list[MemorySearchCandidate]:
-        results: list[MemorySearchCandidate] = []
-        results.extend(self._search_by_fts(query=query, group_id=group_id, user_id=user_id, scope=scope, limit=limit))
-        results.extend(self._search_by_entity(query=query, group_id=group_id, user_id=user_id, scope=scope, limit=limit))
-        results.extend(self._search_by_embedding(query=query, group_id=group_id, user_id=user_id, scope=scope, limit=limit))
-        results.extend(self._search_by_time(query=query, group_id=group_id, user_id=user_id, scope=scope, limit=limit))
-        return results
+        groups = [
+            self._search_by_fts(query=query, group_id=group_id, user_id=user_id, scope=scope, limit=max(limit, 20)),
+            self._search_by_embedding(query=query, group_id=group_id, user_id=user_id, scope=scope, limit=max(limit, 20)),
+            self._search_by_entity(query=query, group_id=group_id, user_id=user_id, scope=scope, limit=max(limit, 10)),
+            self._search_by_time(query=query, group_id=group_id, user_id=user_id, scope=scope, limit=limit),
+        ]
+        return _fuse_recall_candidates(groups, limit=limit)
 
     def _rerank_deep(
         self,
@@ -1625,7 +1694,9 @@ class MemoryStore:
                     superseded_by TEXT NOT NULL DEFAULT '',
                     reinforcement_count INTEGER NOT NULL DEFAULT 0,
                     last_accessed_at REAL NOT NULL DEFAULT 0,
-                    access_count INTEGER NOT NULL DEFAULT 0
+                    access_count INTEGER NOT NULL DEFAULT 0,
+                    embedding BLOB,
+                    embedding_model TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -1646,6 +1717,8 @@ class MemoryStore:
                     "reinforcement_count": "INTEGER NOT NULL DEFAULT 0",
                     "last_accessed_at": "REAL NOT NULL DEFAULT 0",
                     "access_count": "INTEGER NOT NULL DEFAULT 0",
+                    "embedding": "BLOB",
+                    "embedding_model": "TEXT NOT NULL DEFAULT ''",
                 },
             )
             conn.execute(
@@ -1727,6 +1800,9 @@ class MemoryStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_items_recall ON memory_items(supports_recall, group_id, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_palace_zone ON memory_items(palace_zone)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_entities_lookup ON memory_entities(entity, updated_at)"

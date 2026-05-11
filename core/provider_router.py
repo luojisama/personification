@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import threading
@@ -6,15 +8,6 @@ from typing import Any, Dict, List, Optional
 
 from .message_parts import normalize_message_parts
 from .visual_capabilities import error_indicates_vision_unavailable, heuristic_supports_vision
-from ..skills.skillpacks.tool_caller.scripts.impl import (
-    AnthropicToolCaller,
-    ClaudeCodeToolCaller,
-    GeminiCliToolCaller,
-    GeminiToolCaller,
-    OpenAICodexToolCaller,
-    OpenAIToolCaller,
-    ToolCallerResponse,
-)
 
 
 PROVIDER_FAILURE_STATE: Dict[str, Dict[str, Any]] = {}
@@ -24,6 +17,12 @@ _CURSOR_LOCK = _PROVIDER_STATE_LOCK
 _LOGGED_PROVIDER_CONFIG_SIGNATURES: set[tuple[str, tuple[tuple[str, str, str], ...]]] = set()
 _RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS = 10 * 60
 _RATE_LIMIT_MAX_COOLDOWN_SECONDS = 30 * 60
+
+
+def _tool_caller_impl() -> Any:
+    from ..skills.skillpacks.tool_caller.scripts import impl
+
+    return impl
 
 
 def normalize_api_type(api_type: Optional[str]) -> str:
@@ -112,7 +111,7 @@ def _default_model_for_api_type(api_type: str, model: str = "") -> str:
     if api_type == "openai_codex":
         return "gpt-5.3-codex"
     if api_type == "gemini_cli":
-        return "gemini-3.1-pro-preview"
+        return "auto-gemini-3"
     if api_type == "claude_code":
         return "claude-opus-4-7"
     return ""
@@ -159,8 +158,7 @@ def _log_active_provider_config_once(
         pass
 
 
-def load_api_pool_config(plugin_config: Any, logger: Any) -> List[Dict[str, Any]]:
-    raw_config = getattr(plugin_config, "personification_api_pools", None)
+def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str, Any]]:
     if not raw_config:
         return []
 
@@ -172,11 +170,13 @@ def load_api_pool_config(plugin_config: Any, logger: Any) -> List[Dict[str, Any]
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError as e:
-            logger.error(f"personification: failed to parse personification_api_pools: {e}")
+            if logger is not None:
+                logger.error(f"personification: failed to parse personification_api_pools: {e}")
             return []
 
     if not isinstance(parsed, list):
-        logger.error("personification: personification_api_pools must be a JSON array")
+        if logger is not None:
+            logger.error("personification: personification_api_pools must be a JSON array")
         return []
 
     providers: List[Dict[str, Any]] = []
@@ -221,6 +221,30 @@ def load_api_pool_config(plugin_config: Any, logger: Any) -> List[Dict[str, Any]
             providers.append(provider)
 
     providers.sort(key=lambda p: (p["priority"], p["name"]))
+    return providers
+
+
+def _load_env_api_pool_config(logger: Any) -> List[Dict[str, Any]]:
+    try:
+        from .runtime_config import read_env_file_value
+    except Exception:
+        return []
+    raw_env = read_env_file_value("personification_api_pools")
+    if not raw_env:
+        return []
+    return parse_api_pool_config(raw_env, logger)
+
+
+def load_api_pool_config(plugin_config: Any, logger: Any) -> List[Dict[str, Any]]:
+    raw_config = getattr(plugin_config, "personification_api_pools", None)
+    providers = parse_api_pool_config(raw_config, logger)
+    env_providers = _load_env_api_pool_config(logger)
+    if env_providers and len(env_providers) > len(providers):
+        logger.warning(
+            "personification: using personification_api_pools directly from .env file "
+            f"because parsed runtime value has fewer providers ({len(providers)} < {len(env_providers)})"
+        )
+        return env_providers
     return providers
 
 
@@ -344,6 +368,18 @@ def get_provider_candidates(plugin_config: Any, logger: Any) -> List[Dict[str, A
     return top_tier[cursor:] + top_tier[:cursor] + lower_tiers
 
 
+def get_provider_failure_snapshot(now_ts: float | None = None) -> Dict[str, Dict[str, Any]]:
+    now_value = time.time() if now_ts is None else float(now_ts)
+    with _PROVIDER_STATE_LOCK:
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for name, state in PROVIDER_FAILURE_STATE.items():
+            item = dict(state)
+            cooldown_until = float(item.get("cooldown_until", 0) or 0)
+            item["cooldown_remaining"] = max(0.0, cooldown_until - now_value)
+            snapshot[str(name)] = item
+        return snapshot
+
+
 def _mark_provider_success(provider_name: str) -> None:
     with _PROVIDER_STATE_LOCK:
         PROVIDER_FAILURE_STATE.pop(provider_name, None)
@@ -408,22 +444,23 @@ def _get_thinking_mode(plugin_config: Any) -> str:
 
 
 def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
+    tool_impl = _tool_caller_impl()
     if provider["api_type"] == "openai_codex":
-        return OpenAICodexToolCaller(
+        return tool_impl.OpenAICodexToolCaller(
             model=provider["model"],
             auth_path=str(provider.get("auth_path", "") or "").strip(),
             timeout=_provider_timeout(provider),
         )
     if provider["api_type"] == "gemini_cli":
-        return GeminiCliToolCaller(
-            model=provider["model"] or "gemini-3.1-pro-preview",
+        return tool_impl.GeminiCliToolCaller(
+            model=provider["model"] or "auto-gemini-3",
             auth_path=str(provider.get("auth_path", "") or "").strip(),
             project=str(provider.get("project", "") or "").strip(),
             thinking_mode=_get_thinking_mode(plugin_config),
             timeout=_provider_timeout(provider),
         )
     if provider["api_type"] == "claude_code":
-        return ClaudeCodeToolCaller(
+        return tool_impl.ClaudeCodeToolCaller(
             model=provider["model"] or "claude-opus-4-7",
             auth_path=str(provider.get("auth_path", "") or "").strip(),
             thinking_mode=_get_thinking_mode(plugin_config),
@@ -442,13 +479,13 @@ def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
         "thinking_mode": thinking_mode,
     }
     if provider["api_type"] == "gemini":
-        return GeminiToolCaller(**common_kwargs)
+        return tool_impl.GeminiToolCaller(**common_kwargs)
     if provider["api_type"] == "anthropic":
-        return AnthropicToolCaller(
+        return tool_impl.AnthropicToolCaller(
             **common_kwargs,
             timeout=_provider_timeout(provider),
         )
-    return OpenAIToolCaller(
+    return tool_impl.OpenAIToolCaller(
         **common_kwargs,
         timeout=_provider_timeout(provider),
         supports_reasoning=supports_reasoning,
@@ -487,7 +524,7 @@ async def _call_provider_once(
 
 
 def _empty_response() -> ToolCallerResponse:
-    return ToolCallerResponse(
+    return _tool_caller_impl().ToolCallerResponse(
         finish_reason="stop",
         content="",
         tool_calls=[],
@@ -496,7 +533,7 @@ def _empty_response() -> ToolCallerResponse:
 
 
 def _empty_vision_unavailable_response() -> ToolCallerResponse:
-    return ToolCallerResponse(
+    return _tool_caller_impl().ToolCallerResponse(
         finish_reason="stop",
         content="",
         tool_calls=[],
@@ -550,6 +587,14 @@ def _error_text(error: Exception) -> str:
     if text:
         return text
     return f"{type(error).__name__}"
+
+
+def _errors_include_rate_limit(errors: List[str]) -> bool:
+    for error in errors:
+        lowered = str(error or "").lower()
+        if "429" in lowered or "too many requests" in lowered or "rate limit" in lowered:
+            return True
+    return False
 
 
 async def _try_provider_chain(
@@ -711,6 +756,11 @@ async def call_ai_api(
                 return response
 
     if errors:
+        if providers and len(providers) == 1 and _errors_include_rate_limit(errors):
+            logger.error(
+                "personification: only one primary provider is configured and it is rate limited; "
+                "configure a secondary provider or wait for the cooldown to expire"
+            )
         logger.error("personification: all providers failed: " + " | ".join(errors))
     if saw_vision_unavailable:
         return _empty_vision_unavailable_response()

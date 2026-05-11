@@ -107,6 +107,64 @@ def clear_image_classify_cache() -> None:
     _IMAGE_CLASSIFY_CACHE.clear()
 
 
+def _latest_user_text_for_agent_memory(messages: List[Dict[str, Any]]) -> str:
+    for message in reversed(list(messages or [])):
+        if str(message.get("role", "") or "") != "user":
+            continue
+        content = message.get("content", "")
+        if isinstance(content, str):
+            text = content.strip()
+            if text:
+                return text[:800]
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = str(item.get("text", "") or "").strip()
+                    if text:
+                        parts.append(text)
+            merged = " ".join(parts).strip()
+            if merged:
+                return merged[:800]
+    return ""
+
+
+async def _recall_agent_candidate_memories(
+    *,
+    runtime: Any,
+    event: Any,
+    messages: List[Dict[str, Any]],
+    turn_plan: Any = None,
+) -> list[dict[str, Any]]:
+    if not bool(getattr(runtime.plugin_config, "personification_evidence_synthesizer_enabled", False)):
+        return []
+    memory_store = getattr(runtime, "memory_store", None)
+    if memory_store is None or not bool(getattr(runtime.plugin_config, "personification_memory_palace_enabled", False)):
+        return []
+    memory_need = str(getattr(turn_plan, "memory_need", "") or "").strip()
+    if memory_need == "none":
+        return []
+    query = _latest_user_text_for_agent_memory(messages)
+    if not query:
+        return []
+    group_id = str(getattr(event, "group_id", "") or "").strip()
+    user_id = str(getattr(event, "user_id", "") or "").strip()
+    mode = "deep" if memory_need == "deep" else "auto"
+    try:
+        return await asyncio.to_thread(
+            memory_store.recall_memories,
+            query=query,
+            scope="auto",
+            user_id=user_id,
+            group_id=group_id,
+            limit=12,
+            mode=mode,
+        )
+    except Exception as exc:
+        runtime.logger.debug(f"[agent] evidence memory recall failed: {exc}")
+        return []
+
+
 def _remember_image_classification(
     cache_key: str,
     classification: IncomingImageClassification,
@@ -580,6 +638,7 @@ async def run_agent_if_enabled(
     relationship_hint: str = "",
     recent_bot_replies: list[str] | None = None,
     precomputed_intent: Any = None,
+    turn_plan: Any = None,
     started_at: float | None = None,
     is_direct_mention: bool = False,
     response_timeout_seconds: float = _DEFAULT_RESPONSE_TIMEOUT_SECONDS,
@@ -633,6 +692,12 @@ async def run_agent_if_enabled(
         async def _ack_sender(text: str, *, _phrase: str = ack_phrase) -> None:
             await bot.send(event, str(text or "").strip() or _phrase)
         ack_sender = _ack_sender
+    candidate_memories = await _recall_agent_candidate_memories(
+        runtime=runtime,
+        event=event,
+        messages=messages,
+        turn_plan=turn_plan,
+    )
     result = await run_agent(
         messages=messages,
         registry=runtime_registry,
@@ -651,6 +716,8 @@ async def run_agent_if_enabled(
         relationship_hint=relationship_hint,
         recent_bot_replies=list(recent_bot_replies or []),
         precomputed_intent=precomputed_intent,
+        turn_plan=turn_plan,
+        candidate_memories=candidate_memories,
         time_budget_seconds=compute_agent_time_budget(
             started_at=started_at,
             total_timeout_seconds=response_timeout_seconds,

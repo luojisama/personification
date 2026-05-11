@@ -14,6 +14,9 @@ class _Logger:
     def info(self, *_args, **_kwargs) -> None:
         return None
 
+    def warning(self, *_args, **_kwargs) -> None:
+        return None
+
     def error(self, *_args, **_kwargs) -> None:
         return None
 
@@ -98,3 +101,25 @@ def test_model_route_command_can_create_gemini_cli_pool() -> None:
     assert bundle.save_count == 1
     assert bundle.reload_count == 1
     assert "gemini_cli_primary" in result
+
+
+def test_model_status_shows_rate_limit_cooldown() -> None:
+    bundle = _Bundle()
+
+    class _Response:
+        status_code = 429
+        headers = {"Retry-After": "900"}
+
+    class _RateLimitError(Exception):
+        response = _Response()
+
+    provider_router.PROVIDER_FAILURE_STATE.clear()
+    try:
+        provider_router._mark_provider_failure("gemini_cli_primary", _RateLimitError("429 Too Many Requests"))
+
+        result = admin_commands.handle_model_command(bundle, tokens=[])
+
+        assert "gemini_cli_primary" in result
+        assert "限流冷却" in result
+    finally:
+        provider_router.PROVIDER_FAILURE_STATE.clear()

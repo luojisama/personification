@@ -10,13 +10,14 @@ async def _noop_handler(**_kwargs):  # noqa: ANN001
     return "ok"
 
 
-def _register(registry, name: str) -> None:  # noqa: ANN001
+def _register(registry, name: str, metadata: dict | None = None) -> None:  # noqa: ANN001
     registry.register(
         tool_registry.AgentTool(
             name=name,
             description="",
             parameters={"type": "object", "properties": {}, "required": []},
             handler=_noop_handler,
+            metadata=metadata or {},
         )
     )
 
@@ -89,3 +90,33 @@ def test_select_tool_schemas_exposes_parallel_research_for_lookup() -> None:
     assert "parallel_research" in names
     assert "search_web" in names
     assert "vision_analyze" not in names
+
+
+def test_select_tool_schemas_uses_metadata_for_new_lookup_tools() -> None:
+    registry = tool_registry.ToolRegistry()
+    _register(registry, "new_research_tool", {"intent_tags": ["lookup"], "requires_network": True})
+    _register(registry, "new_admin_tool", {"intent_tags": ["lookup"], "risk_level": "admin"})
+
+    schemas = tool_catalog.select_tool_schemas(
+        registry,
+        has_images=False,
+        chat_intent="lookup",
+        plugin_question_intent="",
+    )
+    names = {tool_catalog.schema_tool_name(schema) for schema in schemas}
+
+    assert "new_research_tool" in names
+    assert "new_admin_tool" not in names
+
+
+def test_registry_planner_metadata_applies_name_defaults() -> None:
+    registry = tool_registry.ToolRegistry()
+    _register(registry, "parallel_research")
+    _register(registry, "vision_analyze")
+
+    by_name = {item["name"]: item for item in tool_catalog.registry_planner_metadata(registry)}
+
+    assert by_name["parallel_research"]["requires_network"] is True
+    assert "lookup" in by_name["parallel_research"]["intent_tags"]
+    assert by_name["vision_analyze"]["requires_image"] is True
+    assert "vision" in by_name["vision_analyze"]["intent_tags"]

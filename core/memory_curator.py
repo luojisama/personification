@@ -47,6 +47,39 @@ class MemoryCurator:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    def schedule_turn_capture(
+        self,
+        *,
+        user_utterance: str,
+        bot_response: str,
+        user_id: str = "",
+        group_id: str = "",
+        evidence_refs: list[str] | None = None,
+        vision_summary: str = "",
+        semantic_frame: Any = None,
+        scope: str = "",
+    ) -> None:
+        if not self.memory_store.palace_enabled():
+            return
+        user_text = normalize_text(user_utterance)[:500]
+        bot_text = normalize_text(bot_response)[:500]
+        if not user_text and not bot_text:
+            return
+        task = asyncio.create_task(
+            self.capture_turn(
+                user_utterance=user_text,
+                bot_response=bot_text,
+                user_id=user_id,
+                group_id=group_id,
+                evidence_refs=list(evidence_refs or []),
+                vision_summary=vision_summary,
+                semantic_frame=semantic_frame,
+                scope=scope,
+            )
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
     async def capture(
         self,
         *,
@@ -107,6 +140,101 @@ class MemoryCurator:
                 "group_scope": "isolated" if group_id else "shared",
                 "cross_group_allowed": False,
                 "time_sensitivity": "high" if is_time_sensitive else "normal",
+                "conflict_refs": [],
+                "superseded_by": "",
+                "reinforcement_count": 1,
+            },
+        )
+        if self.background_intelligence is not None:
+            self.background_intelligence.schedule_new_memory(
+                memory_id=str(memory_id or ""),
+                group_id=str(group_id or ""),
+            )
+
+    async def capture_turn(
+        self,
+        *,
+        user_utterance: str,
+        bot_response: str,
+        user_id: str = "",
+        group_id: str = "",
+        evidence_refs: list[str] | None = None,
+        vision_summary: str = "",
+        semantic_frame: Any = None,
+        scope: str = "",
+    ) -> None:
+        user_text = normalize_text(user_utterance)[:500]
+        bot_text = normalize_text(bot_response)[:500]
+        if not user_text and not bot_text:
+            return
+        if user_text and bot_text:
+            summary = f"用户问/说：{user_text}；bot 回：{bot_text}"
+        elif user_text:
+            summary = f"用户问/说：{user_text}"
+        else:
+            summary = f"bot 回：{bot_text}"
+        summary = normalize_text(summary)[:800]
+        combined = f"{user_text} {bot_text}".strip()
+        topic_tags: list[str] = []
+        for token in tokenize(combined):
+            normalized = normalize_text(token)
+            if normalized and len(normalized) >= 2 and normalized not in topic_tags:
+                topic_tags.append(normalized)
+            if len(topic_tags) >= 8:
+                break
+        entity_tags = extract_entities(combined, topic_tags, [])[:10]
+        frame_payload = {
+            key: str(getattr(semantic_frame, key, "") or "").strip()
+            for key in (
+                "chat_intent",
+                "plugin_question_intent",
+                "ambiguity_level",
+                "domain_focus",
+                "output_mode",
+                "session_goal",
+            )
+            if str(getattr(semantic_frame, key, "") or "").strip()
+        }
+        memory_scope = str(scope or "").strip()
+        if not memory_scope:
+            memory_scope = f"group:{group_id}" if group_id else (f"user:{user_id}" if user_id else "both")
+        memory_id = await asyncio.to_thread(
+            self.memory_store.write_memory_item,
+            {
+                "memory_type": "episodic_turn",
+                "palace_zone": "recent_episode",
+                "summary": summary,
+                "user_utterance": user_text,
+                "bot_response": bot_text,
+                "evidence_refs": list(evidence_refs or [])[:8],
+                "vision_summary": normalize_text(vision_summary)[:240],
+                "semantic_frame": frame_payload,
+                "scope": memory_scope,
+                "source_kind": "conversation_turn",
+                "source_refs": list(evidence_refs or [])[:8],
+                "user_id": str(user_id or ""),
+                "group_id": str(group_id or ""),
+                "thread_id": "",
+                "topic_tags": topic_tags,
+                "entity_tags": entity_tags,
+                "snippets": [user_text[:120], bot_text[:120]],
+                "time_created": time.time(),
+                "last_accessed_at": 0,
+                "access_count": 0,
+                "confidence": 0.62,
+                "salience": min(0.9, 0.52 + min(len(entity_tags), 4) * 0.05),
+                "stability": 0.4,
+                "emotional_weight": 0.0,
+                "privacy_level": "default",
+                "expires_at": 0.0,
+                "supports_recall": True,
+                "supports_autofill": False,
+                "revision": 1,
+                "tone_risk": 0.08,
+                "irony_risk": 0.1,
+                "group_scope": "isolated" if group_id else "shared",
+                "cross_group_allowed": False,
+                "time_sensitivity": "normal",
                 "conflict_refs": [],
                 "superseded_by": "",
                 "reinforcement_count": 1,

@@ -153,6 +153,18 @@ def _model_role_parser(raw: str) -> str:
     return role
 
 
+def _embedding_provider_parser(raw: str) -> str:
+    text = str(raw or "").strip().lower().replace("-", "_")
+    mapping = {
+        "hash": "hash_bow",
+        "hashbow": "hash_bow",
+        "hash_bow": "hash_bow",
+        "gemini": "gemini",
+        "openai": "openai",
+    }
+    return mapping.get(text, text)
+
+
 @dataclass(frozen=True)
 class ConfigEntry:
     key: str
@@ -253,6 +265,42 @@ def _build_entries() -> list[ConfigEntry]:
             parser=_model_role_parser,
         ),
         ConfigEntry(
+            key="turn_planner_enabled",
+            field_name="personification_turn_planner_enabled",
+            display_name="TurnPlan 接管",
+            value_type="bool",
+            default=False,
+            scope=GLOBAL_SCOPE,
+            description="启用新的 TurnPlan 语义规划器接管主回复路径；默认关闭，建议先开启 shadow 观测。",
+            category="config",
+            help_aliases=("turn_planner", "TurnPlan", "回合规划", "语义规划器"),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="turn_planner_shadow_enabled",
+            field_name="personification_turn_planner_shadow_enabled",
+            display_name="TurnPlan 影子观测",
+            value_type="bool",
+            default=False,
+            scope=GLOBAL_SCOPE,
+            description="并行运行新的 TurnPlan 语义规划器并记录差异，不影响实际回复决策。",
+            category="config",
+            help_aliases=("turn_planner_shadow", "TurnPlan影子", "规划器观测"),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="evidence_synthesizer_enabled",
+            field_name="personification_evidence_synthesizer_enabled",
+            display_name="证据综合器",
+            value_type="bool",
+            default=False,
+            scope=GLOBAL_SCOPE,
+            description="启用 EvidenceSynthesizer 综合工具结果与候选记忆，默认关闭，建议在 TurnPlan 灰度稳定后开启。",
+            category="config",
+            help_aliases=("evidence_synthesizer", "证据综合", "证据合流", "EvidenceSynthesizer"),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
             key="model_builtin_search_enabled",
             field_name="personification_model_builtin_search_enabled",
             display_name="模型内置搜索",
@@ -304,6 +352,31 @@ def _build_entries() -> list[ConfigEntry]:
             parser=_int_parser,
         ),
         ConfigEntry(
+            key="real_embedding_enabled",
+            field_name="personification_real_embedding_enabled",
+            display_name="真实向量记忆",
+            value_type="bool",
+            default=False,
+            scope=GLOBAL_SCOPE,
+            description="允许记忆系统使用真实 embedding provider；关闭时继续使用 hash_bow 兼容路径。",
+            category="config",
+            help_aliases=("real_embedding", "真实embedding", "向量记忆"),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="embedding_provider",
+            field_name="personification_embedding_provider",
+            display_name="Embedding Provider",
+            value_type="str",
+            default="hash_bow",
+            scope=GLOBAL_SCOPE,
+            description="记忆 embedding provider，支持 hash_bow/gemini/openai。",
+            category="config",
+            choices=("hash_bow", "gemini", "openai"),
+            help_aliases=("embedding_provider", "向量模型", "embedding"),
+            parser=_embedding_provider_parser,
+        ),
+        ConfigEntry(
             key="response_timeout",
             field_name="personification_response_timeout",
             display_name="单轮回复超时",
@@ -316,6 +389,18 @@ def _build_entries() -> list[ConfigEntry]:
             max_value=600,
             help_aliases=("回复超时", "单轮超时", "response_timeout"),
             parser=_int_parser,
+        ),
+        ConfigEntry(
+            key="deep_research_v2_enabled",
+            field_name="personification_deep_research_v2_enabled",
+            display_name="深度研究 v2",
+            value_type="bool",
+            default=False,
+            scope=GLOBAL_SCOPE,
+            description="启用深度研究 v2 档位与多页抓取路径；默认关闭，保留旧 parallel_research 行为。",
+            category="config",
+            help_aliases=("deep_research_v2", "深度研究v2", "研究扩档"),
+            parser=_bool_parser,
         ),
         ConfigEntry(
             key="fallback_enabled",

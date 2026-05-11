@@ -51,6 +51,10 @@ class Config(BaseModel):
     personification_model_overrides: Dict[str, str] = {}
     personification_response_review_enabled: bool = False
     personification_response_review_model_role: str = "review"
+    personification_turn_planner_enabled: bool = False
+    personification_turn_planner_shadow_enabled: bool = False
+    personification_evidence_synthesizer_enabled: bool = False
+    personification_persona_responder_json_enabled: bool = False
     personification_data_dir: str = ""
     personification_persona_enabled: bool = True
     personification_persona_history_max: int = DEFAULT_PERSONA_HISTORY_MAX
@@ -59,6 +63,8 @@ class Config(BaseModel):
     personification_persona_prompt_max_chars: int = 120
     personification_memory_enabled: bool = True
     personification_memory_palace_enabled: bool = False
+    personification_real_embedding_enabled: bool = False
+    personification_embedding_provider: str = "hash_bow"
     personification_memory_decay_enabled: bool = True
     personification_memory_consolidation_enabled: bool = True
     personification_memory_recall_top_k: int = DEFAULT_MEMORY_RECALL_TOP_K
@@ -82,6 +88,7 @@ class Config(BaseModel):
     personification_use_skillpacks: bool = False
     personification_timezone: str = "Asia/Shanghai"
     personification_sticker_semantic: bool = True
+    personification_sticker_collect_meme_policy: str = "reject"
     personification_weather_api: str = "wttr"
     personification_labeler_enabled: bool = True
     personification_labeler_api_type: str = "openai"
@@ -112,11 +119,13 @@ class Config(BaseModel):
     personification_image_gen_background_enabled: bool = True
     personification_image_gen_timeout: int = 180
     personification_parallel_research_enabled: bool = True
+    personification_deep_research_v2_enabled: bool = False
     personification_parallel_research_lookup_enabled: bool = True
     personification_parallel_research_max_workers: int = 6
     personification_parallel_research_worker_timeout: int = 35
     personification_parallel_research_total_timeout: int = 90
     personification_parallel_research_max_tool_rounds: int = 2
+    personification_parallel_research_pages_per_worker: int = 20
     personification_qzone_enabled: bool = False
     personification_qzone_cookie: str = ""
     # DEPRECATED: use personification_qzone_cookie.
@@ -227,6 +236,12 @@ class Config(BaseModel):
 
     personification_sticker_path: Optional[str] = "data/stickers"
     personification_sticker_probability: float = 0.24
+    personification_sticker_library_soft_limit: int = 800
+    personification_sticker_library_hard_limit: int = 1200
+    personification_sticker_per_mood_limit: int = 50
+    personification_sticker_collect_cooldown_seconds: int = 60
+    personification_sticker_collect_sample_rate: float = 0.5
+    personification_sticker_collect_min_confidence: float = 0.7
 
     personification_poke_probability: float = 0.35
     # DEPRECATED: replaced by the agent web_search skill configuration.
