@@ -20,6 +20,170 @@ from .diary_flow import clean_generated_text
 _STORE_NAME = "qzone_social_state"
 _SCAN_LOCK = asyncio.Lock()
 
+# 权限保密用户黑名单：对方设置了"主人设置了保密"等访问限制时，记录 uin 跳过后续扫描。
+# 每 7 天自动重检一次，若仍无权限则继续保持在黑名单。
+_PERMISSION_BLOCK_RECHECK_SECONDS = 7 * 24 * 3600
+_PERMISSION_DENIED_HINTS = (
+    "主人设置了保密",
+    "您没有权限查看",
+    "没有权限查看",
+    "对不起",
+    "无权访问",
+    "access denied",
+    "private space",
+    "not authorized",
+)
+
+
+def _is_permission_denied_message(message: Any) -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(hint.lower() in lowered for hint in _PERMISSION_DENIED_HINTS)
+
+
+def _get_permission_block_bucket(state: dict[str, Any]) -> dict[str, Any]:
+    bucket = state.get("qzone_permission_blocked")
+    if not isinstance(bucket, dict):
+        bucket = {}
+        state["qzone_permission_blocked"] = bucket
+    return bucket
+
+
+def _is_qzone_user_blocked(state: dict[str, Any], user_id: str, *, now_ts: float | None = None) -> bool:
+    target = str(user_id or "").strip()
+    if not target:
+        return False
+    bucket = _get_permission_block_bucket(state)
+    entry = bucket.get(target)
+    if not isinstance(entry, dict):
+        return False
+    last_checked = float(entry.get("last_checked_ts", 0) or 0)
+    now = float(now_ts or time.time())
+    # 一周内不再重试，过期后允许 recheck（调用方调用 fetch 时若再次失败会重新刷新 last_checked_ts）
+    return (now - last_checked) < _PERMISSION_BLOCK_RECHECK_SECONDS
+
+
+def _mark_qzone_user_blocked(state: dict[str, Any], user_id: str, message: str) -> None:
+    target = str(user_id or "").strip()
+    if not target:
+        return
+    bucket = _get_permission_block_bucket(state)
+    now = time.time()
+    entry = bucket.get(target)
+    if not isinstance(entry, dict):
+        entry = {"first_blocked_ts": now, "blocked_count": 0}
+    entry["last_checked_ts"] = now
+    entry["last_error_message"] = str(message or "")[:240]
+    entry["blocked_count"] = int(entry.get("blocked_count", 0) or 0) + 1
+    bucket[target] = entry
+
+
+def _clear_qzone_user_block(state: dict[str, Any], user_id: str) -> None:
+    target = str(user_id or "").strip()
+    if not target:
+        return
+    bucket = _get_permission_block_bucket(state)
+    if target in bucket:
+        bucket.pop(target, None)
+
+
+def _handle_qzone_fetch_outcome(
+    *,
+    state: dict[str, Any],
+    user_id: str,
+    ok: bool,
+    msg: str,
+    logger: Any,
+) -> bool:
+    """根据 fetch_user_feeds 结果维护权限黑名单。返回值表示是否触发了 permission_block。"""
+    target = str(user_id or "").strip()
+    if not target:
+        return False
+    if ok:
+        _clear_qzone_user_block(state, target)
+        return False
+    if _is_permission_denied_message(msg):
+        bucket = _get_permission_block_bucket(state)
+        existed = target in bucket
+        _mark_qzone_user_blocked(state, target, msg)
+        if not existed:
+            logger.info(f"[qzone_social] user {target} marked as permission_blocked: {msg}")
+        else:
+            logger.debug(f"[qzone_social] user {target} still permission_blocked: {msg}")
+        return True
+    return False
+
+
+async def recheck_qzone_permission_blocked_users(
+    *,
+    bot: Any,
+    qzone_social_service: Any,
+    logger: Any,
+) -> dict[str, Any]:
+    """周期性重检 qzone_permission_blocked 中的用户，看 bot 是否重新获得查看权限。
+
+    每周运行一次。对每个 uid：
+    - 调用 fetch_user_feeds 探测一次
+    - 成功 → 从黑名单移除
+    - 仍被拒 → 刷新 last_checked_ts 维持黑名单
+    - 其他错误（cookie 失效、网络等）→ 不修改黑名单状态，避免误清
+    """
+    bot_id = str(getattr(bot, "self_id", "") or "")
+    result: dict[str, Any] = {
+        "checked": 0,
+        "unblocked": 0,
+        "still_blocked": 0,
+        "errors": 0,
+        "last_error": "",
+    }
+    if not bot_id:
+        result["last_error"] = "bot_id_missing"
+        return result
+    state = await get_data_store().load(_STORE_NAME, default=lambda: {})
+    if not isinstance(state, dict):
+        state = {}
+    bucket = state.get("qzone_permission_blocked")
+    if not isinstance(bucket, dict) or not bucket:
+        return result
+    targets = list(bucket.keys())
+    for target_uid in targets:
+        if not target_uid or target_uid == bot_id:
+            continue
+        result["checked"] += 1
+        try:
+            ok, msg, _feeds = await qzone_social_service.fetch_user_feeds(
+                target_uin=target_uid,
+                bot_id=bot_id,
+                count=1,
+                include_comments=False,
+            )
+        except Exception as exc:
+            result["errors"] += 1
+            result["last_error"] = f"recheck {target_uid} crashed: {exc}"
+            logger.warning(f"[qzone_permission_recheck] error checking {target_uid}: {exc}")
+            continue
+        if ok:
+            _clear_qzone_user_block(state, target_uid)
+            result["unblocked"] += 1
+            logger.info(f"[qzone_permission_recheck] unblocked {target_uid}, bot has access again")
+        elif _is_permission_denied_message(msg):
+            _mark_qzone_user_blocked(state, target_uid, msg)
+            result["still_blocked"] += 1
+        else:
+            # 非权限错误（cookie 失效、网络等），不修改黑名单状态
+            result["errors"] += 1
+            result["last_error"] = f"{target_uid}: {msg}"[:240]
+    state["last_permission_recheck_at"] = time.time()
+    get_data_store().save_sync(_STORE_NAME, state)
+    logger.info(
+        f"[qzone_permission_recheck] done: checked={result['checked']} "
+        f"unblocked={result['unblocked']} still_blocked={result['still_blocked']} "
+        f"errors={result['errors']}"
+    )
+    return result
+
 
 def _extract_system_prompt(prompt_data: Any) -> str:
     if isinstance(prompt_data, dict):
@@ -171,6 +335,15 @@ def _prune_state_maps(state: dict[str, Any], *, max_items: int = 2000) -> None:
             reverse=True,
         )
         state[key] = dict(items[:max_items])
+    # 权限黑名单按 last_checked_ts 排序裁剪
+    block_bucket = state.get("qzone_permission_blocked")
+    if isinstance(block_bucket, dict) and len(block_bucket) > max_items:
+        items = sorted(
+            block_bucket.items(),
+            key=lambda item: float((item[1] if isinstance(item[1], dict) else {}).get("last_checked_ts", 0) or 0),
+            reverse=True,
+        )
+        state["qzone_permission_blocked"] = dict(items[:max_items])
 
 
 def _save_state(state: dict[str, Any], result: dict[str, Any]) -> None:
@@ -935,6 +1108,9 @@ async def _scan_bot_outbound_comment_replies(
         state["bot_outbound_replies"] = bot_replies_state
 
     for owner_uin, owner_items in by_owner.items():
+        if _is_qzone_user_blocked(state, owner_uin):
+            logger.debug(f"[qzone_outbound] skip permission-blocked owner {owner_uin}")
+            continue
         try:
             ok, msg, feeds = await qzone_social_service.fetch_user_feeds(
                 target_uin=owner_uin,
@@ -947,6 +1123,8 @@ async def _scan_bot_outbound_comment_replies(
             result["failed"] = int(result.get("failed", 0) or 0) + 1
             result["last_error"] = f"outbound fetch_user_feeds failed: {exc}"
             logger.warning(f"[qzone_outbound] fetch failed for owner {owner_uin}: {exc}")
+            continue
+        if _handle_qzone_fetch_outcome(state=state, user_id=owner_uin, ok=ok, msg=msg, logger=logger):
             continue
         if not ok:
             result["failed"] = int(result.get("failed", 0) or 0) + 1
@@ -1153,17 +1331,23 @@ async def scan_qzone_social_feeds(
             for candidate in candidates:
                 if processed_feeds >= max_feeds:
                     break
+                candidate_uid = str(candidate["user_id"])
+                if _is_qzone_user_blocked(state, candidate_uid):
+                    logger.debug(f"[qzone_social] skip permission-blocked user {candidate_uid}")
+                    continue
                 ok, msg, feeds = await qzone_social_service.fetch_user_feeds(
-                    target_uin=str(candidate["user_id"]),
+                    target_uin=candidate_uid,
                     bot_id=str(getattr(bot, "self_id", "") or ""),
                     count=max_feeds,
                     include_comments=False,
                 )
                 result["scanned_users"] += 1
+                if _handle_qzone_fetch_outcome(state=state, user_id=candidate_uid, ok=ok, msg=msg, logger=logger):
+                    continue
                 if not ok:
                     result["failed"] += 1
                     result["last_error"] = msg
-                    logger.warning(f"[qzone_social] fetch feeds failed for {candidate['user_id']}: {msg}")
+                    logger.warning(f"[qzone_social] fetch feeds failed for {candidate_uid}: {msg}")
                     continue
                 for feed in feeds:
                     if processed_feeds >= max_feeds:

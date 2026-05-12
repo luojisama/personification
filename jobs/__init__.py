@@ -15,6 +15,7 @@ from .scheduler_registration import (
     register_proactive_messaging_job,
     register_proactive_qzone_job,
     register_qzone_inbound_poll_job,
+    register_qzone_permission_recheck_job,
     register_qzone_social_scan_job,
     register_sticker_curator_job,
     register_sticker_trash_cleanup_job,
@@ -220,6 +221,27 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                     interval_minutes=deps.qzone_inbound_check_interval_minutes,
                     logger=deps.logger,
                 )
+
+        # 每周重检 qzone 权限黑名单
+        if deps.qzone_social_service is not None:
+            async def _recheck_qzone_permissions() -> None:
+                from ..flows.qzone_social_flow import recheck_qzone_permission_blocked_users
+                bots = deps.get_bots() if callable(deps.get_bots) else []
+                for bot in (bots or []):
+                    try:
+                        await recheck_qzone_permission_blocked_users(
+                            bot=bot,
+                            qzone_social_service=deps.qzone_social_service,
+                            logger=deps.logger,
+                        )
+                    except Exception as exc:
+                        deps.logger.warning(f"[qzone_permission_recheck] bot {getattr(bot, 'self_id', '?')} failed: {exc}")
+
+            register_qzone_permission_recheck_job(
+                scheduler=scheduler,
+                permission_recheck_job=_recheck_qzone_permissions,
+                logger=deps.logger,
+            )
     if getattr(deps, "proactive_enabled", True):
         register_proactive_messaging_job(
             scheduler=scheduler,

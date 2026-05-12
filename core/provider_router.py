@@ -552,6 +552,47 @@ def _contains_image_input(messages: List[Dict[str, Any]]) -> bool:
     return False
 
 
+def _strip_image_parts_for_text_only_provider(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """把含 image_url / image_file 的多模态 content 降级成纯文本。
+
+    用于将消息转发给不支持视觉的 provider（如第三方网关下的 DeepSeek / Qwen / Kimi）。
+    保留 text 类 part，把图像 part 替换成 [图片] 占位符，避免上游 400
+    'unknown variant image_url, expected text'。视觉摘要文字通常已经由
+    pipeline_context 以 system message 形式注入，所以信息几乎不损失。
+    """
+    converted: List[Dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            converted.append(message)
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            image_count = 0
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                ptype = str(part.get("type", "") or "")
+                if ptype == "text":
+                    text = str(part.get("text", "") or "")
+                    if text:
+                        text_parts.append(text)
+                elif ptype in {"image_url", "image_file"}:
+                    image_count += 1
+            new_text = " ".join(text_parts).strip()
+            if image_count:
+                placeholder = f"[图片×{image_count}]" if image_count > 1 else "[图片]"
+                new_text = (new_text + " " + placeholder).strip() if new_text else placeholder
+            new_message = dict(message)
+            new_message["content"] = new_text
+            converted.append(new_message)
+        else:
+            converted.append(message)
+    return converted
+
+
 GENERIC_REFUSAL_TEXTS = {
     "i can't discuss that.",
     "i cant discuss that.",
@@ -609,18 +650,32 @@ async def _try_provider_chain(
     errors: List[str] = []
     contains_image_input = _contains_image_input(messages)
     saw_vision_unavailable = False
+    text_only_messages_cache: List[Dict[str, Any]] | None = None
     for provider in providers:
         logger.info(
             f"personification: try provider={provider['name']} "
             f"type={provider['api_type']} model={provider['model']}"
         )
+        # 对不支持视觉的 provider 自动 strip image_url，避免 400
+        # （视觉摘要文字已在 system message 中，信息不丢失）
+        provider_messages = messages
+        if contains_image_input and not heuristic_supports_vision(
+            provider.get("api_type"), provider.get("model")
+        ):
+            if text_only_messages_cache is None:
+                text_only_messages_cache = _strip_image_parts_for_text_only_provider(messages)
+            provider_messages = text_only_messages_cache
+            logger.info(
+                f"personification: provider {provider['name']} not vision-capable; "
+                "stripped image parts to text placeholders"
+            )
         retries = _provider_max_retries(provider)
         skip_provider = False
         for attempt in range(retries):
             try:
                 response = await _call_provider_once(
                     provider,
-                    messages,
+                    provider_messages,
                     plugin_config=plugin_config,
                     tools=tools,
                     use_builtin_search=use_builtin_search,

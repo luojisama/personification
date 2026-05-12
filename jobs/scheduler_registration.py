@@ -149,6 +149,26 @@ def register_qzone_inbound_poll_job(
         logger.error(f"拟人插件：注册空间消息轮询任务失败: {e}")
 
 
+def register_qzone_permission_recheck_job(
+    *,
+    scheduler: Any,
+    permission_recheck_job: Any,
+    logger: Any,
+) -> None:
+    """每周重检 qzone_permission_blocked 中的 uid 是否重新可访问。"""
+    try:
+        scheduler.add_job(
+            permission_recheck_job,
+            "interval",
+            days=7,
+            id="personification_qzone_permission_recheck",
+            replace_existing=True,
+        )
+        logger.info("拟人插件：空间权限重检任务已注册，间隔 7 天")
+    except Exception as e:
+        logger.error(f"拟人插件：注册空间权限重检任务失败: {e}")
+
+
 def register_background_intelligence_job(
     *,
     scheduler: Any,
