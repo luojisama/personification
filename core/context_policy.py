@@ -8,6 +8,28 @@ _HISTORY_MARKER_PATTERNS = (
     r"\[发送了表情包[^\]]*\]",
 )
 _SILENCE_MARKERS = ("[SILENCE]", "<SILENCE>", "[NO_REPLY]", "<NO_REPLY>")
+_SILENCE_BARE_WORDS = frozenset(
+    {
+        "silence",
+        "silent",
+        "no_reply",
+        "no-reply",
+        "noreply",
+        "沉默",
+        "不回复",
+        "无回复",
+        "静默",
+        "保持沉默",
+    }
+)
+_SILENCE_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:silence|silent|no[_\s\-]?reply|noreply|沉默|不回复|无回复|静默|保持沉默)\s*[:：]\s*",
+    re.IGNORECASE,
+)
+_SILENCE_LEADING_LINE_PATTERN = re.compile(
+    r"^\s*(?:silence|silent|no[_\s\-]?reply|noreply|沉默|不回复|无回复|静默|保持沉默)\s*(?:\r?\n)+",
+    re.IGNORECASE,
+)
 _PRIVATE_COMMAND_PREFIXES = ("/", "!", "！", "#", "＃", ".", "。")
 _PRIVATE_COMMAND_KEYWORDS: Set[str] = set()
 
@@ -42,7 +64,22 @@ def sanitize_history_text(text: Any) -> str:
 
 def has_silence_control_marker(text: Any) -> bool:
     raw = str(text or "")
-    return any(marker in raw for marker in _SILENCE_MARKERS)
+    if any(marker in raw for marker in _SILENCE_MARKERS):
+        return True
+    stripped = raw.strip()
+    if not stripped:
+        return False
+    if stripped.lower() in _SILENCE_BARE_WORDS:
+        return True
+    if _SILENCE_PREFIX_PATTERN.match(stripped):
+        leftover = _SILENCE_PREFIX_PATTERN.sub("", stripped, count=1).strip()
+        if not leftover:
+            return True
+    if _SILENCE_LEADING_LINE_PATTERN.match(stripped):
+        leftover = _SILENCE_LEADING_LINE_PATTERN.sub("", stripped, count=1).strip()
+        if not leftover:
+            return True
+    return False
 
 
 def strip_response_control_markers(text: Any) -> str:
@@ -70,7 +107,12 @@ def strip_response_control_markers(text: Any) -> str:
     )
     for marker in _SILENCE_MARKERS:
         cleaned = cleaned.replace(marker, "")
-    return cleaned.strip()
+    cleaned = _SILENCE_LEADING_LINE_PATTERN.sub("", cleaned, count=1)
+    cleaned = _SILENCE_PREFIX_PATTERN.sub("", cleaned, count=1)
+    bare = cleaned.strip()
+    if bare.lower() in _SILENCE_BARE_WORDS:
+        return ""
+    return bare
 
 
 def build_prompt_injection_guard() -> str:
