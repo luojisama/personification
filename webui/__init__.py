@@ -11,6 +11,7 @@ def install_webui(
     superusers: set[str] | list[str],
     get_bots: Callable[[], dict[str, Any]],
     logger: Any,
+    runtime_bundle: Any = None,
 ) -> bool:
     """在 NoneBot FastAPI driver 上挂载 WebUI 路由。
 
@@ -35,6 +36,7 @@ def install_webui(
         superusers=set(str(item) for item in (superusers or [])),
         get_bots=get_bots,
         logger=logger,
+        runtime_bundle=runtime_bundle,
     )
     router = build_router()
     app.include_router(router)

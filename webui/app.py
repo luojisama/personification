@@ -8,6 +8,9 @@ from fastapi.responses import HTMLResponse
 
 from .routes.auth_routes import build_auth_router
 from .routes.config_routes import build_config_router
+from .routes.group_routes import build_group_router
+from .routes.metrics_routes import build_metrics_router
+from .routes.persona_routes import build_persona_router
 
 
 @dataclass
@@ -16,6 +19,7 @@ class _RuntimeContext:
     superusers: set[str]
     get_bots: Callable[[], dict[str, Any]]
     logger: Any
+    runtime_bundle: Any = None
 
 
 _RUNTIME: _RuntimeContext | None = None
@@ -27,6 +31,7 @@ def set_runtime_context(
     superusers: set[str],
     get_bots: Callable[[], dict[str, Any]],
     logger: Any,
+    runtime_bundle: Any = None,
 ) -> None:
     global _RUNTIME
     _RUNTIME = _RuntimeContext(
@@ -34,6 +39,7 @@ def set_runtime_context(
         superusers=set(superusers or set()),
         get_bots=get_bots,
         logger=logger,
+        runtime_bundle=runtime_bundle,
     )
 
 
@@ -48,6 +54,9 @@ def build_router() -> APIRouter:
     router = APIRouter(prefix="/personification")
     router.include_router(build_auth_router(runtime=runtime))
     router.include_router(build_config_router(runtime=runtime))
+    router.include_router(build_metrics_router(runtime=runtime))
+    router.include_router(build_persona_router(runtime=runtime))
+    router.include_router(build_group_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -131,7 +140,14 @@ th { color:var(--muted); font-weight:500; font-size:12px; }
 <div id="app"></div>
 <script>
 const API = "/personification/api";
-let state = { logged: false, qq: "", view: "config", entries: [], groups: [], activeGroup: null, devices: [], alert: null };
+let state = {
+  logged: false, qq: "", view: "config",
+  entries: [], groups: [], activeGroup: null,
+  devices: [], alert: null,
+  dashboard: null, dashboardWindow: "month",
+  personas: [], selectedPersona: null,
+  groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupMemory: [],
+};
 
 async function api(path, opts = {}) {
   const res = await fetch(API + path, { credentials: "include", ...opts });
@@ -160,6 +176,14 @@ async function loadView() {
   } else if (state.view === "devices") {
     const data = await api("/auth/devices");
     state.devices = data.devices; state.currentDeviceId = data.current_device_id;
+  } else if (state.view === "dashboard") {
+    state.dashboard = await api("/metrics/summary?window=" + encodeURIComponent(state.dashboardWindow));
+  } else if (state.view === "personas") {
+    const data = await api("/personas");
+    state.personas = data.profiles; state.personasAvailable = data.available;
+  } else if (state.view === "groups") {
+    const data = await api("/groups");
+    state.groupList = data.groups; state.groupsAvailable = data.available;
   }
 }
 
@@ -200,11 +224,119 @@ function renderLayout() {
 function renderView() {
   if (state.view === "config") return renderConfig();
   if (state.view === "devices") return renderDevices();
-  return `<div class="card"><h2>${escapeHtml(viewTitle())}</h2><p class="muted">该视图在后续版本上线（M4-M5）。</p></div>`;
+  if (state.view === "dashboard") return renderDashboard();
+  if (state.view === "personas") return renderPersonas();
+  if (state.view === "groups") return renderGroups();
+  return `<div class="card"><h2>${escapeHtml(viewTitle())}</h2><p class="muted">该视图在后续版本上线（M5）。</p></div>`;
 }
 
 function viewTitle() {
   return ({dashboard:"仪表盘",personas:"用户画像",groups:"群信息",memory:"Agent 记忆",skills:"Skill 管理",test:"模型测试"})[state.view] || state.view;
+}
+
+function renderDashboard() {
+  const d = state.dashboard;
+  if (!d) return `<div class="card muted">加载中…</div>`;
+  const total = d.total || {};
+  const tabs = ["day","week","month"].map(w => `<button class="${state.dashboardWindow===w?'active':''}" onclick="switchDashboard('${w}')">${({day:'今日',week:'本周',month:'本月'})[w]}</button>`).join("");
+  const byDay = (d.by_day || []).map(row => {
+    const max = Math.max(...d.by_day.map(r => r.total_tokens || 1), 1);
+    const w = ((row.total_tokens || 0) / max * 100).toFixed(1);
+    return `<tr><td>${escapeHtml(row.bucket_day)}</td><td><div style="background:linear-gradient(90deg,var(--accent) ${w}%,transparent ${w}%);padding:4px 8px;border-radius:4px">${row.total_tokens.toLocaleString()}</div></td><td>${row.call_count}</td></tr>`;
+  }).join("");
+  const byModel = (d.by_model || []).map(row => `<tr><td>${escapeHtml(row.model)}</td><td>${row.total_tokens.toLocaleString()}</td><td>${row.call_count}</td></tr>`).join("");
+  const byGroup = (d.by_group || []).map(row => `<tr><td>${escapeHtml(row.group_id)}</td><td>${row.total_tokens.toLocaleString()}</td><td>${row.call_count}</td></tr>`).join("");
+  const empty = (total.total_tokens || 0) === 0;
+  return `<div class="group-bar">${tabs}</div>
+    <div class="card">
+      <h2>总览（${escapeHtml(({day:'今日',week:'本周',month:'本月'})[state.dashboardWindow])}）</h2>
+      <div class="row" style="gap:30px">
+        <div><div class="muted">总 token</div><div style="font-size:24px;margin-top:4px">${(total.total_tokens||0).toLocaleString()}</div></div>
+        <div><div class="muted">prompt</div><div style="font-size:18px;margin-top:4px">${(total.prompt_tokens||0).toLocaleString()}</div></div>
+        <div><div class="muted">completion</div><div style="font-size:18px;margin-top:4px">${(total.completion_tokens||0).toLocaleString()}</div></div>
+        <div><div class="muted">调用次数</div><div style="font-size:18px;margin-top:4px">${total.call_count||0}</div></div>
+      </div>
+      ${empty ? `<p class="muted" style="margin-top:14px">暂无数据。token 计量将在 LLM 调用拦截上线后开始记录（M6）。</p>` : ''}
+    </div>
+    <div class="card"><h2>按日期</h2><table><thead><tr><th>日期</th><th>总 token</th><th>调用</th></tr></thead><tbody>${byDay || `<tr><td colspan="3" class="muted">无</td></tr>`}</tbody></table></div>
+    <div class="card"><h2>按模型</h2><table><thead><tr><th>模型</th><th>总 token</th><th>调用</th></tr></thead><tbody>${byModel || `<tr><td colspan="3" class="muted">无</td></tr>`}</tbody></table></div>
+    <div class="card"><h2>按群</h2><table><thead><tr><th>群号</th><th>总 token</th><th>调用</th></tr></thead><tbody>${byGroup || `<tr><td colspan="3" class="muted">无</td></tr>`}</tbody></table></div>`;
+}
+
+async function switchDashboard(window) {
+  state.dashboardWindow = window;
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+function renderPersonas() {
+  if (state.personasAvailable === false) return `<div class="card muted">profile_service 未就绪</div>`;
+  if (state.selectedPersona) return renderPersonaDetail();
+  const rows = state.personas.map(p => `<tr>
+    <td><code>${escapeHtml(p.user_id)}</code></td>
+    <td>${escapeHtml(p.snippet)}</td>
+    <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
+    <td><button class="btn small" onclick="openPersona('${escapeAttr(p.user_id)}')">详情</button></td>
+  </tr>`).join("");
+  return `<div class="card"><h2>用户画像（${state.personas.length}）</h2>
+    <table><thead><tr><th>QQ</th><th>摘要</th><th>更新</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="muted">暂无画像</td></tr>'}</tbody></table></div>`;
+}
+
+async function openPersona(uid) {
+  try {
+    state.selectedPersona = await api("/personas/" + encodeURIComponent(uid));
+    render();
+  } catch (e) { alertFlash("err", e.message); }
+}
+
+function renderPersonaDetail() {
+  const p = state.selectedPersona;
+  const core = p.core_profile;
+  const locals = (p.local_profiles || []).map(lp => `<div class="card" style="background:#0e1117">
+    <div class="between"><strong>群 ${escapeHtml(lp.group_id)}</strong><span class="muted" style="font-size:12px">${new Date(lp.updated_at*1000).toLocaleString()}</span></div>
+    <pre style="white-space:pre-wrap;margin:6px 0 0;font-family:inherit">${escapeHtml(lp.profile_text)}</pre>
+  </div>`).join("");
+  return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedPersona=null;render()">返回列表</button><span class="muted">用户 ${escapeHtml(p.user_id)}</span></div>
+    <div class="card"><h2>全局印象</h2>${core ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(core.profile_text || '')}</pre>` : '<p class="muted">无全局画像</p>'}</div>
+    <h3 style="margin-bottom:10px">各群印象（${(p.local_profiles||[]).length}）</h3>
+    ${locals || '<p class="muted">无各群画像</p>'}`;
+}
+
+function renderGroups() {
+  if (state.groupsAvailable === false) return `<div class="card muted">profile_service 未就绪</div>`;
+  if (state.selectedGroup) return renderGroupDetail();
+  const rows = state.groupList.map(gid => `<tr>
+    <td><code>${escapeHtml(gid)}</code></td>
+    <td><button class="btn small" onclick="openGroup('${escapeAttr(gid)}')">查看</button></td>
+  </tr>`).join("");
+  return `<div class="card"><h2>群列表（${state.groupList.length}）</h2>
+    <table><thead><tr><th>群号</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="2" class="muted">暂无群数据</td></tr>'}</tbody></table></div>`;
+}
+
+async function openGroup(gid) {
+  try {
+    state.selectedGroup = gid;
+    const [personas, style] = await Promise.all([
+      api("/groups/" + encodeURIComponent(gid) + "/personas"),
+      api("/groups/" + encodeURIComponent(gid) + "/style"),
+    ]);
+    state.groupPersonas = personas.profiles;
+    state.groupStyle = style;
+    render();
+  } catch (e) { alertFlash("err", e.message); }
+}
+
+function renderGroupDetail() {
+  const gid = state.selectedGroup;
+  const rows = state.groupPersonas.map(p => `<tr>
+    <td><code>${escapeHtml(p.user_id)}</code></td>
+    <td>${escapeHtml(p.snippet)}</td>
+    <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
+  </tr>`).join("");
+  const style = state.groupStyle || {};
+  return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
+    <div class="card"><h2>群风格</h2>${style.style_text ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(style.style_text)}</pre>` : '<p class="muted">暂无群风格快照（待 M5 自主构建）</p>'}</div>
+    <div class="card"><h2>群内成员画像（${state.groupPersonas.length}）</h2>
+      <table><thead><tr><th>QQ</th><th>摘要</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="muted">无</td></tr>'}</tbody></table></div>`;
 }
 
 function renderConfig() {

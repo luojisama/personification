@@ -405,6 +405,7 @@ async def _install_personification_webui() -> None:
         superusers=superusers,
         get_bots=get_bots,
         logger=logger,
+        runtime_bundle=runtime_bundle,
     )
     if not installed:
         return

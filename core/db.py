@@ -119,6 +119,39 @@ DDL_STATEMENTS = (
         PRIMARY KEY (user_id, task_id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS token_usage_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bucket_day TEXT NOT NULL,
+        group_id TEXT NOT NULL DEFAULT '',
+        user_id TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        purpose TEXT NOT NULL DEFAULT '',
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        call_count INTEGER NOT NULL DEFAULT 0,
+        updated_at REAL NOT NULL
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_token_usage_bucket
+        ON token_usage_ledger(bucket_day, group_id, user_id, model, purpose)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_token_usage_day ON token_usage_ledger(bucket_day)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_token_usage_group ON token_usage_ledger(group_id, bucket_day)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS group_style_snapshots (
+        group_id TEXT PRIMARY KEY,
+        style_text TEXT NOT NULL DEFAULT '',
+        style_json TEXT NOT NULL DEFAULT '{}',
+        updated_at REAL NOT NULL DEFAULT 0
+    )
+    """,
 )
 
 

@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import time
+from datetime import datetime, timedelta
+from typing import Any
+
+from .db import connect_sync
+
+
+def _today() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _day_str(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d")
+
+
+def record_llm_call(
+    *,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    group_id: str = "",
+    user_id: str = "",
+    purpose: str = "",
+    bucket_day: str | None = None,
+) -> None:
+    """记录一次 LLM 调用，按 (day, group, user, model, purpose) 桶累加。"""
+    bucket = str(bucket_day or _today())
+    pt = max(0, int(prompt_tokens or 0))
+    ct = max(0, int(completion_tokens or 0))
+    if pt == 0 and ct == 0:
+        return
+    tt = pt + ct
+    now = time.time()
+    with connect_sync() as conn:
+        conn.execute(
+            """
+            INSERT INTO token_usage_ledger
+                (bucket_day, group_id, user_id, model, purpose,
+                 prompt_tokens, completion_tokens, total_tokens, call_count, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            ON CONFLICT(bucket_day, group_id, user_id, model, purpose) DO UPDATE SET
+                prompt_tokens = prompt_tokens + excluded.prompt_tokens,
+                completion_tokens = completion_tokens + excluded.completion_tokens,
+                total_tokens = total_tokens + excluded.total_tokens,
+                call_count = call_count + 1,
+                updated_at = excluded.updated_at
+            """,
+            (bucket, str(group_id or ""), str(user_id or ""), str(model or ""),
+             str(purpose or ""), pt, ct, tt, now),
+        )
+        conn.commit()
+
+
+def _range_start(window: str) -> datetime:
+    now = datetime.now()
+    today = datetime(now.year, now.month, now.day)
+    if window == "day":
+        return today
+    if window == "week":
+        return today - timedelta(days=6)
+    if window == "month":
+        return today - timedelta(days=29)
+    return today - timedelta(days=29)
+
+
+def query_summary(window: str = "month") -> dict[str, Any]:
+    """返回当前窗口的总 token 数 + 按 day/model/group 的分布。"""
+    start = _range_start(window)
+    start_str = _day_str(start)
+    with connect_sync() as conn:
+        total_row = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                COALESCE(SUM(call_count), 0) AS call_count
+            FROM token_usage_ledger
+            WHERE bucket_day >= ?
+            """,
+            (start_str,),
+        ).fetchone()
+        by_day = conn.execute(
+            """
+            SELECT bucket_day,
+                   SUM(prompt_tokens) AS prompt_tokens,
+                   SUM(completion_tokens) AS completion_tokens,
+                   SUM(total_tokens) AS total_tokens,
+                   SUM(call_count) AS call_count
+            FROM token_usage_ledger
+            WHERE bucket_day >= ?
+            GROUP BY bucket_day
+            ORDER BY bucket_day ASC
+            """,
+            (start_str,),
+        ).fetchall()
+        by_model = conn.execute(
+            """
+            SELECT model,
+                   SUM(prompt_tokens) AS prompt_tokens,
+                   SUM(completion_tokens) AS completion_tokens,
+                   SUM(total_tokens) AS total_tokens,
+                   SUM(call_count) AS call_count
+            FROM token_usage_ledger
+            WHERE bucket_day >= ? AND model != ''
+            GROUP BY model
+            ORDER BY total_tokens DESC
+            """,
+            (start_str,),
+        ).fetchall()
+        by_group = conn.execute(
+            """
+            SELECT group_id,
+                   SUM(prompt_tokens) AS prompt_tokens,
+                   SUM(completion_tokens) AS completion_tokens,
+                   SUM(total_tokens) AS total_tokens,
+                   SUM(call_count) AS call_count
+            FROM token_usage_ledger
+            WHERE bucket_day >= ? AND group_id != ''
+            GROUP BY group_id
+            ORDER BY total_tokens DESC
+            LIMIT 50
+            """,
+            (start_str,),
+        ).fetchall()
+    return {
+        "window": window,
+        "start_day": start_str,
+        "total": _row_to_dict(total_row, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count")),
+        "by_day": [_row_to_dict(r, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="bucket_day") for r in by_day],
+        "by_model": [_row_to_dict(r, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="model") for r in by_model],
+        "by_group": [_row_to_dict(r, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="group_id") for r in by_group],
+    }
+
+
+def query_group_detail(group_id: str, window: str = "month") -> dict[str, Any]:
+    """单个群在窗口内按 day/model 的明细。"""
+    start_str = _day_str(_range_start(window))
+    with connect_sync() as conn:
+        rows = conn.execute(
+            """
+            SELECT bucket_day, model,
+                   SUM(prompt_tokens) AS prompt_tokens,
+                   SUM(completion_tokens) AS completion_tokens,
+                   SUM(total_tokens) AS total_tokens,
+                   SUM(call_count) AS call_count
+            FROM token_usage_ledger
+            WHERE bucket_day >= ? AND group_id = ?
+            GROUP BY bucket_day, model
+            ORDER BY bucket_day ASC, total_tokens DESC
+            """,
+            (start_str, str(group_id or "")),
+        ).fetchall()
+    return {
+        "group_id": str(group_id or ""),
+        "window": window,
+        "rows": [
+            {
+                "bucket_day": str(r["bucket_day"]),
+                "model": str(r["model"]),
+                "prompt_tokens": int(r["prompt_tokens"] or 0),
+                "completion_tokens": int(r["completion_tokens"] or 0),
+                "total_tokens": int(r["total_tokens"] or 0),
+                "call_count": int(r["call_count"] or 0),
+            }
+            for r in rows
+        ],
+    }
+
+
+def _row_to_dict(row: Any, fields: tuple[str, ...], *, key: str | None = None) -> dict[str, Any]:
+    if row is None:
+        out = {f: 0 for f in fields}
+        if key:
+            out[key] = ""
+        return out
+    result = {f: int(row[f] or 0) for f in fields}
+    if key:
+        result[key] = str(row[key] or "")
+    return result
+
+
+__all__ = ["record_llm_call", "query_summary", "query_group_detail"]

@@ -340,6 +340,72 @@ class MemoryStore:
             "updated_at": float(row["updated_at"] or 0),
         }
 
+    def list_groups(self) -> list[str]:
+        """枚举 groups_dir 下所有已建立空间的 group_id。"""
+        if not self.groups_dir.exists():
+            return []
+        out: list[str] = []
+        for entry in self.groups_dir.iterdir():
+            if entry.is_dir():
+                out.append(entry.name)
+        out.sort()
+        return out
+
+    def list_core_profiles(self) -> list[dict[str, Any]]:
+        path = self.shared_dir / "core_user_profiles.db"
+        if not path.exists():
+            return []
+        with _connect(path) as conn:
+            rows = conn.execute(
+                "SELECT user_id, profile_text, profile_json, source, updated_at "
+                "FROM profiles ORDER BY updated_at DESC"
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["profile_json"] or "{}")
+            except Exception:
+                payload = {}
+            out.append(
+                {
+                    "user_id": str(row["user_id"] or ""),
+                    "profile_text": str(row["profile_text"] or ""),
+                    "profile_json": payload if isinstance(payload, dict) else {},
+                    "source": str(row["source"] or ""),
+                    "updated_at": float(row["updated_at"] or 0),
+                }
+            )
+        return out
+
+    def list_local_profiles(self, group_id: str) -> list[dict[str, Any]]:
+        safe_group_id = str(group_id or "").strip()
+        if not safe_group_id:
+            return []
+        group_dir = self.groups_dir / safe_group_id
+        path = group_dir / "local_user_profiles.db"
+        if not path.exists():
+            return []
+        with _connect(path) as conn:
+            rows = conn.execute(
+                "SELECT user_id, profile_text, profile_json, updated_at "
+                "FROM profiles ORDER BY updated_at DESC"
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["profile_json"] or "{}")
+            except Exception:
+                payload = {}
+            out.append(
+                {
+                    "user_id": str(row["user_id"] or ""),
+                    "profile_text": str(row["profile_text"] or ""),
+                    "profile_json": payload if isinstance(payload, dict) else {},
+                    "updated_at": float(row["updated_at"] or 0),
+                }
+            )
+        return out
+
     def write_memory_item(self, item: dict[str, Any]) -> str:
         payload = self._normalize_memory_item(item)
         memory_id = str(payload["memory_id"])
