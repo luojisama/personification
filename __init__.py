@@ -395,6 +395,46 @@ async def _init_personification_persona_store() -> None:
 
 
 @get_driver().on_startup
+async def _install_personification_webui() -> None:
+    from .webui import install_webui
+    from .core.admin_acl import load_plugin_admins
+    from .core.notify import startup_notify_admins
+
+    installed = install_webui(
+        plugin_config=plugin_config,
+        superusers=superusers,
+        get_bots=get_bots,
+        logger=logger,
+    )
+    if not installed:
+        return
+
+    driver_config = get_driver().config
+    host = str(getattr(driver_config, "host", "") or "127.0.0.1")
+    port = int(getattr(driver_config, "port", 8080) or 8080)
+    if host in {"0.0.0.0", "::"}:
+        display_host = "<本机或局域网 IP>"
+    else:
+        display_host = host
+    webui_url = f"http://{display_host}:{port}/personification/"
+    logger.info(f"拟人插件 WebUI: {webui_url}（监听 {host}:{port}）")
+    try:
+        notify_message = (
+            "【拟人插件 WebUI】已启动\n"
+            f"访问地址：{webui_url}\n"
+            "使用 QQ 号登录，验证码会通过本对话推送。"
+        )
+        await startup_notify_admins(
+            get_bots=get_bots,
+            superusers=superusers,
+            plugin_admins=load_plugin_admins(),
+            message=notify_message,
+        )
+    except Exception as exc:
+        logger.warning(f"拟人插件 WebUI 启动通知失败：{exc}")
+
+
+@get_driver().on_startup
 async def _restore_user_tasks() -> None:
     from .core.tasks_service import restore_tasks_on_startup
 
