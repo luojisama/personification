@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable
 
 from .model_router import MODEL_OVERRIDE_ROLES, normalize_model_overrides, resolve_model_role
@@ -183,6 +183,10 @@ class ConfigEntry:
     help_aliases: tuple[str, ...] = ()
     risk_note: str = ""
     parser: Callable[[str], Any] | None = None
+    required: bool = False
+    kind: str = ""
+    group: str = "其他"
+    secret: bool = False
 
     def normalize_value(self, raw: Any) -> Any:
         if isinstance(raw, bool) and self.value_type == "bool":
@@ -211,6 +215,90 @@ class ConfigEntry:
                 raise ValueError(f"不能大于 {self.max_value}")
             return number
         return value
+
+
+_GROUP_RULES: tuple[tuple[Callable[[str], bool], str], ...] = (
+    (lambda k: k == "global_enabled", "核心开关"),
+    (lambda k: k.startswith("response_review_"), "回复审阅"),
+    (lambda k: k.startswith("turn_planner_") or k == "evidence_synthesizer_enabled", "意图规划"),
+    (
+        lambda k: k.startswith("parallel_research_")
+        or k in {"deep_research_v2_enabled", "tool_web_search_enabled", "tool_web_search_mode", "model_builtin_search_enabled"},
+        "联网搜索",
+    ),
+    (lambda k: k.startswith("fallback_"), "模型回退"),
+    (lambda k: k.startswith("video_"), "视频理解"),
+    (lambda k: k.startswith("image_gen_"), "图像生成"),
+    (lambda k: k.startswith("tts_"), "TTS 语音"),
+    (lambda k: k.startswith("qzone_"), "QQ 空间"),
+    (lambda k: k.startswith("memory_") or k in {"real_embedding_enabled", "embedding_provider"}, "记忆"),
+    (lambda k: k in {"persona_history_max", "private_history_turns"}, "画像"),
+    (
+        lambda k: k in {
+            "history_len",
+            "compress_threshold",
+            "compress_keep_recent",
+            "message_expire_hours",
+            "group_context_expire_hours",
+            "group_summary_expire_hours",
+        },
+        "上下文压缩",
+    ),
+    (lambda k: k.startswith("background_"), "后台任务"),
+    (lambda k: k.startswith("wiki"), "百科工具"),
+    (lambda k: k == "plugin_knowledge_build_enabled", "知识库"),
+    (lambda k: k.startswith("proactive_"), "主动私聊"),
+    (lambda k: k in {"schedule_global", "group_schedule_enabled"}, "作息"),
+    (lambda k: k.startswith("group_"), "群作用域"),
+    (lambda k: k in {"api_pools", "model_overrides", "lite_model"}, "模型路由"),
+    (lambda k: k in {"agent_max_steps", "response_timeout"}, "Agent"),
+)
+
+_REQUIRED_KEYS: frozenset[str] = frozenset({"global_enabled", "api_pools"})
+
+_SECRET_FIELD_HINTS: tuple[str, ...] = ("_api_key", "_token", "_secret", "auth_path", "cookie")
+
+
+def _infer_group(key: str) -> str:
+    for predicate, name in _GROUP_RULES:
+        if predicate(key):
+            return name
+    return "其他"
+
+
+def _infer_secret(field_name: str) -> bool:
+    name = str(field_name or "").lower()
+    return any(hint in name for hint in _SECRET_FIELD_HINTS)
+
+
+def _infer_kind(entry: ConfigEntry, *, secret: bool) -> str:
+    if entry.value_type == "bool":
+        return "toggle"
+    if secret:
+        return "secret"
+    name = str(entry.field_name or "").lower()
+    if "_path" in name or name.endswith("_dir") or name.endswith("_root"):
+        return "path"
+    if entry.choices:
+        return "select"
+    if entry.value_type in {"dict", "list"}:
+        return "json"
+    if entry.value_type == "int":
+        return "int"
+    if entry.value_type == "float":
+        return "float"
+    return "text"
+
+
+def _enrich_entry(entry: ConfigEntry) -> ConfigEntry:
+    secret = entry.secret or _infer_secret(entry.field_name)
+    return replace(
+        entry,
+        group=entry.group if entry.group and entry.group != "其他" else _infer_group(entry.key),
+        secret=secret,
+        kind=entry.kind or _infer_kind(entry, secret=secret),
+        required=entry.required or (entry.key in _REQUIRED_KEYS),
+    )
 
 
 def _build_entries() -> list[ConfigEntry]:
@@ -1435,7 +1523,7 @@ def _build_entries() -> list[ConfigEntry]:
             parser=_bool_parser,
         ),
     ]
-    return entries
+    return [_enrich_entry(entry) for entry in entries]
 
 
 _ENTRIES = _build_entries()
