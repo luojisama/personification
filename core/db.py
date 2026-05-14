@@ -146,11 +146,35 @@ DDL_STATEMENTS = (
     """,
     """
     CREATE TABLE IF NOT EXISTS group_style_snapshots (
-        group_id TEXT PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL,
         style_text TEXT NOT NULL DEFAULT '',
         style_json TEXT NOT NULL DEFAULT '{}',
-        updated_at REAL NOT NULL DEFAULT 0
+        created_at REAL NOT NULL DEFAULT 0
     )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_group_style_gid_ts
+        ON group_style_snapshots(group_id, created_at DESC)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS webui_audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts REAL NOT NULL,
+        action TEXT NOT NULL,
+        qq TEXT NOT NULL DEFAULT '',
+        device_id TEXT NOT NULL DEFAULT '',
+        target TEXT NOT NULL DEFAULT '',
+        ip_hash TEXT NOT NULL DEFAULT '',
+        detail TEXT NOT NULL DEFAULT '{}',
+        outcome TEXT NOT NULL DEFAULT 'ok'
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_webui_audit_ts ON webui_audit_log(ts DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_webui_audit_action ON webui_audit_log(action, ts DESC)
     """,
 )
 
@@ -200,6 +224,31 @@ def _ensure_group_message_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE group_messages ADD COLUMN sender_role TEXT NOT NULL DEFAULT ''")
 
 
+def _ensure_group_style_schema(conn: sqlite3.Connection) -> None:
+    """旧版 group_style_snapshots 以 group_id 为 PK 仅存最新；新版改多行 + created_at 索引保留历史。
+    若检测到旧 schema（无 id 列）则 DROP 重建。旧表无写入方，无数据丢失风险。
+    """
+    columns = _table_columns(conn, "group_style_snapshots")
+    if not columns:
+        return
+    if "id" not in columns or "created_at" not in columns:
+        conn.execute("DROP TABLE IF EXISTS group_style_snapshots")
+        conn.execute(
+            """
+            CREATE TABLE group_style_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id TEXT NOT NULL,
+                style_text TEXT NOT NULL DEFAULT '',
+                style_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_group_style_gid_ts ON group_style_snapshots(group_id, created_at DESC)"
+        )
+
+
 def init_db_sync(data_dir: str | Path) -> Path:
     global _db_path
     _db_path = Path(data_dir) / DB_FILENAME
@@ -207,6 +256,7 @@ def init_db_sync(data_dir: str | Path) -> Path:
         for ddl in DDL_STATEMENTS:
             conn.execute(ddl)
         _ensure_group_message_schema(conn)
+        _ensure_group_style_schema(conn)
         conn.commit()
     return _db_path
 

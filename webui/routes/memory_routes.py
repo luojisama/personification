@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -7,11 +8,36 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from ..deps import AdminIdentity, require_admin
 
 
+# 默认从长期记忆视图中排除的 "bot 自言/自我日志" 来源；
+# 这些条目是 bot 自己回过的话，对管理员价值低，默认隐藏。
+_SELF_LOG_SOURCE_KINDS: frozenset[str] = frozenset({
+    "self_log",
+    "self_reply",
+    "self_say",
+    "bot_say",
+    "assistant_reply",
+})
+
+_SELF_LOG_MEMORY_TYPES: frozenset[str] = frozenset({
+    "episodic",  # bot 视角的事件日志，绝大多数是它说过的话
+})
+
+
 def _memory_store(runtime) -> Any | None:
     bundle = getattr(runtime, "runtime_bundle", None)
     if bundle is None:
         return None
     return getattr(bundle, "memory_store", None)
+
+
+def _looks_like_bot_self_entry(item: dict[str, Any]) -> bool:
+    source_kind = str(item.get("source_kind", "") or "").lower()
+    memory_type = str(item.get("memory_type", "") or "").lower()
+    if source_kind in _SELF_LOG_SOURCE_KINDS:
+        return True
+    if memory_type in _SELF_LOG_MEMORY_TYPES:
+        return True
+    return False
 
 
 def build_memory_router(*, runtime) -> APIRouter:
@@ -22,6 +48,8 @@ def build_memory_router(*, runtime) -> APIRouter:
         limit: int = Query(default=40, ge=1, le=200),
         memory_type: str = Query(default=""),
         group_id: str = Query(default=""),
+        source_kind: str = Query(default=""),
+        include_self: bool = Query(default=False),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict:
         store = _memory_store(runtime)
@@ -33,16 +61,23 @@ def build_memory_router(*, runtime) -> APIRouter:
             palace_on = False
         if not palace_on:
             return {"items": [], "palace_enabled": False}
+        # 默认拉略多一些，过滤 bot 自言后剩下的可能少于 limit
+        raw_limit = int(limit) if include_self else min(int(limit) * 3, 200)
         try:
             items = list(store.list_recent_memories(
                 group_id=str(group_id or "").strip(),
-                limit=int(limit),
+                limit=raw_limit,
                 memory_type=str(memory_type or "").strip(),
+                source_kind=str(source_kind or "").strip(),
             ))
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
         rendered = []
+        hidden = 0
         for item in items:
+            if not include_self and _looks_like_bot_self_entry(item):
+                hidden += 1
+                continue
             rendered.append({
                 "memory_id": str(item.get("memory_id", "") or ""),
                 "memory_type": str(item.get("memory_type", "") or ""),
@@ -54,7 +89,80 @@ def build_memory_router(*, runtime) -> APIRouter:
                 "salience": float(item.get("salience", 0) or 0),
                 "updated_at": float(item.get("updated_at", 0) or 0),
             })
-        return {"items": rendered, "palace_enabled": True}
+            if len(rendered) >= int(limit):
+                break
+        return {
+            "items": rendered,
+            "palace_enabled": True,
+            "hidden_self_count": hidden,
+            "include_self": bool(include_self),
+        }
+
+    @router.get("/raw-chat")
+    async def raw_chat(
+        group_id: str = Query(default=""),
+        limit: int = Query(default=80, ge=1, le=300),
+        before_ts: float = Query(default=0.0),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        """读 chat_history.db 的群对话原文（未蒸馏），按时间倒序返回。"""
+        store = _memory_store(runtime)
+        if store is None:
+            return {"messages": [], "available": False}
+        gid = str(group_id or "").strip()
+        if not gid:
+            raise HTTPException(status_code=400, detail="group_id 必填")
+        try:
+            from ...core.memory_store import _connect, _json_loads
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"memory_store 私有接口不可用：{exc}")
+        try:
+            group_dir = store.ensure_group_space(gid)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        db_path = group_dir / "chat_history.db"
+        if not db_path.exists():
+            return {"messages": [], "available": True, "group_id": gid}
+        cutoff = float(before_ts) if before_ts and before_ts > 0 else time.time() + 1
+        try:
+            with _connect(db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT role, content, metadata, created_at
+                    FROM messages
+                    WHERE created_at < ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (cutoff, int(limit)),
+                ).fetchall()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            content = _json_loads(row["content"], row["content"])
+            metadata = _json_loads(row["metadata"], {})
+            text = ""
+            if isinstance(content, list):
+                parts = [str(p.get("text", "")).strip() for p in content if isinstance(p, dict)]
+                text = " ".join(p for p in parts if p)
+            elif isinstance(content, dict):
+                text = str(content.get("text", "") or content.get("content", "")).strip()
+            else:
+                text = str(content or "").strip()
+            messages.append({
+                "role": str(row["role"] or ""),
+                "user_id": str(metadata.get("user_id", "") if isinstance(metadata, dict) else ""),
+                "sender_name": str(metadata.get("nickname", "") or metadata.get("sender_name", "") if isinstance(metadata, dict) else ""),
+                "text": text[:500],
+                "created_at": float(row["created_at"] or 0),
+            })
+        return {
+            "messages": messages,
+            "available": True,
+            "group_id": gid,
+            "next_before_ts": messages[-1]["created_at"] if messages else 0,
+        }
 
     @router.get("/inner-state")
     async def inner_state_view(_: AdminIdentity = Depends(require_admin)) -> dict:

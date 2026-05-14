@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 
-from ...core import skill_overrides
+from ...core import skill_overrides, webui_audit_log
 from ..deps import AdminIdentity, require_admin
 
 
@@ -48,7 +48,7 @@ def build_skill_router(*, runtime) -> APIRouter:
     async def toggle(
         name: str,
         body: dict = Body(default_factory=dict),
-        _: AdminIdentity = Depends(require_admin),
+        admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
         registry = _tool_registry(runtime)
         if registry is None:
@@ -59,6 +59,13 @@ def build_skill_router(*, runtime) -> APIRouter:
         disabled = bool(body.get("disabled", False))
         reason = str(body.get("reason", "") or "")
         skill_overrides.set_disabled(name, disabled, reason=reason)
+        webui_audit_log.record(
+            action="skill_toggle",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=name,
+            detail={"disabled": disabled, "reason": reason},
+        )
         return {"success": True, "name": name, "user_disabled": disabled}
 
     return router

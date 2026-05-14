@@ -415,6 +415,7 @@ async def _register_personification_group_knowledge() -> None:
             register_group_knowledge_autobuild_job,
             register_propose_group_knowledge_tool,
         )
+        from .core.group_style_autobuild import register_group_style_autobuild_job
     except Exception as exc:
         logger.warning(f"[group_knowledge] 加载失败：{exc}")
         return
@@ -431,6 +432,13 @@ async def _register_personification_group_knowledge() -> None:
     tool_caller = getattr(runtime_inner, "agent_tool_caller", None) if runtime_inner is not None else None
     if memory_store is not None and tool_caller is not None:
         register_group_knowledge_autobuild_job(
+            scheduler=scheduler,
+            plugin_config=plugin_config,
+            memory_store=memory_store,
+            tool_caller=tool_caller,
+            logger=logger,
+        )
+        register_group_style_autobuild_job(
             scheduler=scheduler,
             plugin_config=plugin_config,
             memory_store=memory_store,
@@ -454,6 +462,16 @@ async def _install_personification_webui() -> None:
     )
     if not installed:
         return
+    # 启动期清理过期设备 token 与旧审计日志
+    try:
+        from .core import webui_audit_log, webui_auth_store
+
+        pruned = webui_auth_store.prune_expired_devices()
+        if pruned:
+            logger.info(f"[webui] 启动期清理过期设备 token: {pruned} 条")
+        webui_audit_log.prune_old_entries()
+    except Exception as exc:
+        logger.warning(f"[webui] 启动期清理失败：{exc}")
 
     driver_config = get_driver().config
     host = str(getattr(driver_config, "host", "") or "127.0.0.1")

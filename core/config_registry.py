@@ -187,6 +187,8 @@ class ConfigEntry:
     kind: str = ""
     group: str = "其他"
     secret: bool = False
+    advanced: bool = False
+    example: str = ""
 
     def normalize_value(self, raw: Any) -> Any:
         if isinstance(raw, bool) and self.value_type == "bool":
@@ -218,7 +220,7 @@ class ConfigEntry:
 
 
 _GROUP_RULES: tuple[tuple[Callable[[str], bool], str], ...] = (
-    (lambda k: k in {"global_enabled", "image_host_allowlist"}, "核心开关"),
+    (lambda k: k in {"global_enabled", "image_host_allowlist", "probability", "poke_probability"}, "核心开关"),
     (lambda k: k.startswith("response_review_"), "回复审阅"),
     (lambda k: k.startswith("turn_planner_") or k == "evidence_synthesizer_enabled", "意图规划"),
     (
@@ -232,7 +234,18 @@ _GROUP_RULES: tuple[tuple[Callable[[str], bool], str], ...] = (
     (lambda k: k.startswith("tts_"), "TTS 语音"),
     (lambda k: k.startswith("qzone_"), "QQ 空间"),
     (lambda k: k.startswith("memory_") or k in {"real_embedding_enabled", "embedding_provider"}, "记忆"),
-    (lambda k: k in {"persona_history_max", "private_history_turns"}, "画像"),
+    (
+        lambda k: k in {"persona_history_max", "private_history_turns", "persona_enabled"},
+        "画像",
+    ),
+    (
+        lambda k: k.startswith("sticker_") or k in {"labeler_enabled", "labeler_concurrency"},
+        "表情包",
+    ),
+    (
+        lambda k: k in {"agent_enabled", "thinking_mode", "state_thinking_mode", "builtin_search"},
+        "Agent",
+    ),
     (
         lambda k: k in {
             "history_len",
@@ -246,7 +259,7 @@ _GROUP_RULES: tuple[tuple[Callable[[str], bool], str], ...] = (
     ),
     (lambda k: k.startswith("background_"), "后台任务"),
     (lambda k: k.startswith("wiki"), "百科工具"),
-    (lambda k: k == "plugin_knowledge_build_enabled" or k.startswith("group_knowledge"), "知识库"),
+    (lambda k: k == "plugin_knowledge_build_enabled" or k.startswith("group_knowledge") or k.startswith("group_style"), "知识库"),
     (lambda k: k.startswith("proactive_"), "主动私聊"),
     (lambda k: k in {"schedule_global", "group_schedule_enabled"}, "作息"),
     (lambda k: k.startswith("group_"), "群作用域"),
@@ -290,14 +303,206 @@ def _infer_kind(entry: ConfigEntry, *, secret: bool) -> str:
     return "text"
 
 
+# 关键字命中即视为"高级/调优"字段；前端默认折叠，需勾选「显示高级配置」才出现。
+# 普通用户日常关心的开关、模型、人设、表情包、画像保留为基础配置。
+# 重要配置项的"详细描述 + 示例"覆盖字典；以 ConfigEntry.key 为键。
+# 用于在 WebUI 中给基础字段提供新手友好的解释；未列入这里的字段沿用 entry 原 description。
+# 模板：「作用 + 取值范围 + 默认含义 + 实际影响」串成 1-2 句。
+_DETAILED_DESCRIPTIONS: dict[str, tuple[str, str]] = {
+    "global_enabled": (
+        "拟人插件的总开关。关闭后 bot 不再自动回复群消息（管理员指令仍可用）。",
+        "true",
+    ),
+    "api_pools": (
+        "多模型 API 池配置，按 priority 顺序尝试；某池连续失败会自动冷却 10 分钟。"
+        "每项包含 name/api_type/model/api_key/api_url/priority/enabled 等字段。",
+        '[{"name":"main","api_type":"openai","api_url":"...","api_key":"sk-...","model":"gpt-4o-mini","priority":1,"enabled":true}]',
+    ),
+    "agent_enabled": (
+        "Agent 工具调用模式总开关。关闭后回退到旧版「单次 LLM 调用」，无法用搜索/图像生成/记忆等工具。",
+        "true",
+    ),
+    "agent_max_steps": (
+        "Agent 一轮对话最多调用工具的步数（ReAct 循环深度）。超过则强制输出。"
+        "调大允许更复杂任务但成本上升；建议 3-8。",
+        "5",
+    ),
+    "probability": (
+        "群消息进入 Agent 处理的概率（0~1）。被 @ / 提及名字 / 戳一戳 时无视此概率必触发。"
+        "数值越高 bot 越主动接话，token 消耗越多。",
+        "0.35",
+    ),
+    "poke_probability": (
+        "收到 QQ 戳一戳事件时回复的概率。设 1 即每次必回，设 0 则不回。",
+        "0.5",
+    ),
+    "thinking_mode": (
+        "主对话推理档位。none=零额外开销适合群聊高频；adaptive=根据复杂度切换；low/high=固定推理预算。"
+        "高级用户调；普通群聊保持 none。",
+        "none",
+    ),
+    "state_thinking_mode": (
+        "inner_state（情绪/能量/好感度）更新的独立推理档位，不影响主对话。"
+        "adaptive 在多数场景下成本/质量平衡较好。",
+        "adaptive",
+    ),
+    "response_review_enabled": (
+        "在 bot 即将发送回复前用 review 模型再做一次审阅与改写。"
+        "可减少明显错误但每次回复多花一次 LLM 调用。",
+        "false",
+    ),
+    "builtin_search": (
+        "启用模型原生的内置搜索能力：Gemini 的 google_search、Anthropic 的 web_search_20250305。"
+        "比工具调用更省 token，但需对应 provider 支持。",
+        "true",
+    ),
+    "proactive_enabled": (
+        "主动私聊总开关。开启后 bot 会定期检查 inner_state 与好感度，自主决定是否给某用户发起私聊。",
+        "true",
+    ),
+    "proactive_threshold": (
+        "触发主动私聊所需的最低好感度（0~100）。低于此值的用户不会被主动联系。",
+        "50",
+    ),
+    "proactive_daily_limit": (
+        "每个用户每天最多被主动私聊的次数上限，防止打扰。",
+        "5",
+    ),
+    "proactive_interval": (
+        "两次主动消息之间的最短间隔（分钟）；调度器最小粒度 5 分钟。",
+        "10",
+    ),
+    "proactive_idle_hours": (
+        "用户超过多少小时未互动才纳入主动联系候选（避免打扰活跃用户）。",
+        "24.0",
+    ),
+    "memory_enabled": (
+        "长期记忆系统总开关。关闭后 bot 不再持久化对话上下文/记忆条目。",
+        "true",
+    ),
+    "memory_palace_enabled": (
+        "高级长期记忆：用向量化 + 衰减机制存储 fact/persona/事件/群知识等条目。"
+        "WebUI「Agent 记忆」需要此项为 true 才能看到数据。",
+        "false",
+    ),
+    "persona_enabled": (
+        "用户画像功能总开关。开启后 bot 会按消息累计自动生成/更新画像，并注入 system prompt。",
+        "true",
+    ),
+    "persona_history_max": (
+        "累积多少条消息后触发一次画像生成/更新。调大画像更稳定但更新延迟；调小更敏感但 LLM 调用多。",
+        "100",
+    ),
+    "sticker_path": (
+        "表情包根目录（绝对路径或相对项目根）。下面平铺 jpg/png/gif，stickers.json 存元数据。",
+        "/bot/shizuku/qqgif",
+    ),
+    "sticker_probability": (
+        "Agent 模式下退回的概率发送（仅在语义选择关闭时生效）。",
+        "0.1",
+    ),
+    "sticker_semantic": (
+        "启用基于 stickers.json 标签的语义选择（推荐）。关则回退到纯概率发送。",
+        "true",
+    ),
+    "tts_global_enabled": (
+        "语音合成总开关。开启后 bot 在合适场景会用 TTS 生成语音消息。",
+        "true",
+    ),
+    "tts_mode": (
+        "TTS 工作模式：preset 用内置音色；design 让模型按文字描述生成音色；clone 用 voice_clone_path 指定的音频复刻。",
+        "clone",
+    ),
+    "tts_model": (
+        "TTS 模型名称，需与 personification_tts_api_key 的服务对齐。",
+        "mimo-v2.5-tts-voiceclone",
+    ),
+    "qzone_social_enabled": (
+        "QQ 空间互动总开关。开启后 bot 会扫好友空间动态，根据好感度自动点赞/评论。",
+        "true",
+    ),
+    "wiki_enabled": (
+        "Wikipedia 查询工具开关。开启后 agent 可调 wiki_search 工具检索。",
+        "true",
+    ),
+    "fallback_enabled": (
+        "API 池全部失败时启用单独的 fallback 模型救援；需配 fallback_api_type/key/model 等。",
+        "false",
+    ),
+    "group_knowledge_autobuild_enabled": (
+        "群知识库定时扫描开关。开启后会按 interval_hours 周期扫描各群消息，LLM 抽取常用词/绰号/内部梗写入。",
+        "true",
+    ),
+    "image_host_allowlist": (
+        "可信图片域名后缀白名单（JSON 数组）；命中时跳过 SSRF 内网 IP 检查。"
+        "腾讯系 .qq.com/.qpic.cn 已内置。若你的 QQ 协议端用其他域名（如 Lagrange）需在此追加。",
+        '[".lagrange.app"]',
+    ),
+}
+
+
+_ADVANCED_FIELD_PATTERNS: tuple[str, ...] = (
+    "_concurrency",
+    "_timeout",
+    "_debounce",
+    "_cooldown",
+    "_workers",
+    "_max_steps",
+    "_max_tokens",
+    "_max_tool_rounds",
+    "_max_feeds",
+    "_max_comments",
+    "_min_interval",
+    "_min_messages",
+    "_ratio",
+    "_threshold",
+    "_decay",
+    "_keep_recent",
+    "_compress_",
+    "_history_len",
+    "_expire_hours",
+    "_check_interval",
+    "_response_timeout",
+    "thinking_mode",
+    "_shadow_enabled",
+    "_builtin_safety",
+    "_fallback_auth",
+    "_fallback_provider",
+    "_supports_native_search",
+    "_persona_history_max",
+    "_recall_top_k",
+    "_snippet_max_chars",
+    "_prompt_max_chars",
+)
+
+
+def _infer_advanced(field_name: str) -> bool:
+    name = str(field_name or "").lower()
+    for pattern in _ADVANCED_FIELD_PATTERNS:
+        if pattern in name:
+            return True
+    return False
+
+
 def _enrich_entry(entry: ConfigEntry) -> ConfigEntry:
     secret = entry.secret or _infer_secret(entry.field_name)
+    detailed = _DETAILED_DESCRIPTIONS.get(entry.key)
+    description = entry.description
+    example = entry.example
+    if detailed:
+        if detailed[0]:
+            description = detailed[0]
+        if detailed[1] and not example:
+            example = detailed[1]
     return replace(
         entry,
         group=entry.group if entry.group and entry.group != "其他" else _infer_group(entry.key),
         secret=secret,
         kind=entry.kind or _infer_kind(entry, secret=secret),
         required=entry.required or (entry.key in _REQUIRED_KEYS),
+        advanced=entry.advanced or _infer_advanced(entry.field_name),
+        description=description,
+        example=example,
     )
 
 
@@ -839,6 +1044,60 @@ def _build_entries() -> list[ConfigEntry]:
             parser=_int_parser,
         ),
         ConfigEntry(
+            key="group_style_autobuild_enabled",
+            field_name="personification_group_style_autobuild_enabled",
+            display_name="群风格自动总结",
+            value_type="bool",
+            default=True,
+            scope=GLOBAL_SCOPE,
+            description="启用后定时扫描各群对话，由 LLM 总结语气/节奏/口头禅/禁忌/句长 5 个维度并入库；最多保留最近 3 个快照。",
+            category="config",
+            help_aliases=("群风格", "style_autobuild"),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="group_style_interval_hours",
+            field_name="personification_group_style_interval_hours",
+            display_name="群风格扫描间隔（小时）",
+            value_type="int",
+            default=12,
+            scope=GLOBAL_SCOPE,
+            description="每多少小时扫一次群风格。默认 12 小时；风格变化较慢，不建议调小过低。",
+            category="config",
+            min_value=1,
+            max_value=72,
+            help_aliases=("群风格间隔",),
+            parser=_int_parser,
+        ),
+        ConfigEntry(
+            key="group_style_daily_limit",
+            field_name="personification_group_style_daily_limit",
+            display_name="单群每日风格构建上限",
+            value_type="int",
+            default=2,
+            scope=GLOBAL_SCOPE,
+            description="同一个群每天最多调用 LLM 总结风格的次数；超出后等次日重置。",
+            category="config",
+            min_value=1,
+            max_value=24,
+            help_aliases=("群风格上限",),
+            parser=_int_parser,
+        ),
+        ConfigEntry(
+            key="group_style_min_messages",
+            field_name="personification_group_style_min_messages",
+            display_name="群风格构建所需最少消息",
+            value_type="int",
+            default=100,
+            scope=GLOBAL_SCOPE,
+            description="自上次扫描以来累计新消息少于该值时跳过风格构建。",
+            category="config",
+            min_value=20,
+            max_value=500,
+            help_aliases=("群风格阈值",),
+            parser=_int_parser,
+        ),
+        ConfigEntry(
             key="group_knowledge_min_messages",
             field_name="personification_group_knowledge_min_messages",
             display_name="构建所需最少消息条数",
@@ -851,6 +1110,214 @@ def _build_entries() -> list[ConfigEntry]:
             max_value=500,
             help_aliases=("群知识阈值",),
             parser=_int_parser,
+        ),
+        ConfigEntry(
+            key="agent_enabled",
+            field_name="personification_agent_enabled",
+            display_name="Agent 模式",
+            value_type="bool",
+            default=True,
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            help_aliases=("agent", "工具调用模式"),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="probability",
+            field_name="personification_probability",
+            display_name="群消息触发概率",
+            value_type="float",
+            default=0.30,
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            min_value=0.0,
+            max_value=1.0,
+            help_aliases=("回复概率", "触发概率"),
+            parser=_float_parser,
+        ),
+        ConfigEntry(
+            key="poke_probability",
+            field_name="personification_poke_probability",
+            display_name="戳一戳回复概率",
+            value_type="float",
+            default=0.35,
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            min_value=0.0,
+            max_value=1.0,
+            help_aliases=("戳一戳",),
+            parser=_float_parser,
+        ),
+        ConfigEntry(
+            key="thinking_mode",
+            field_name="personification_thinking_mode",
+            display_name="推理档位（主对话）",
+            value_type="str",
+            default="none",
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            choices=("none", "adaptive", "low", "high"),
+            help_aliases=("thinking", "思考"),
+            parser=_str_parser,
+        ),
+        ConfigEntry(
+            key="state_thinking_mode",
+            field_name="personification_state_thinking_mode",
+            display_name="推理档位（情绪状态）",
+            value_type="str",
+            default="adaptive",
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            choices=("none", "adaptive", "low", "high"),
+            help_aliases=("情绪思考",),
+            parser=_str_parser,
+        ),
+        ConfigEntry(
+            key="builtin_search",
+            field_name="personification_builtin_search",
+            display_name="原生联网搜索",
+            value_type="bool",
+            default=True,
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            help_aliases=("内置搜索",),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="persona_enabled",
+            field_name="personification_persona_enabled",
+            display_name="用户画像",
+            value_type="bool",
+            default=True,
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            help_aliases=("画像", "persona"),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="sticker_path",
+            field_name="personification_sticker_path",
+            display_name="表情包目录",
+            value_type="str",
+            default="data/stickers",
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            help_aliases=("表情包路径",),
+            parser=_str_parser,
+        ),
+        ConfigEntry(
+            key="sticker_probability",
+            field_name="personification_sticker_probability",
+            display_name="表情包发送概率",
+            value_type="float",
+            default=0.24,
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            min_value=0.0,
+            max_value=1.0,
+            help_aliases=("表情包概率",),
+            parser=_float_parser,
+        ),
+        ConfigEntry(
+            key="sticker_semantic",
+            field_name="personification_sticker_semantic",
+            display_name="语义选表情包",
+            value_type="bool",
+            default=True,
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            help_aliases=("语义表情包",),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="labeler_enabled",
+            field_name="personification_labeler_enabled",
+            display_name="表情包自动打标",
+            value_type="bool",
+            default=True,
+            scope=GLOBAL_SCOPE,
+            description="启动时扫描表情包目录，用视觉模型为新增/未打标的表情包生成 description/mood_tags 等元数据，写入 stickers.json。",
+            category="config",
+            help_aliases=("labeler", "打标"),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="qzone_proactive_enabled",
+            field_name="personification_qzone_proactive_enabled",
+            display_name="QQ空间主动发表",
+            value_type="bool",
+            default=False,
+            scope=GLOBAL_SCOPE,
+            description="开启后 bot 会按 inner_state / 主动发表节奏自主发空间说说，受 daily_limit 与 min_interval_hours 约束。",
+            category="config",
+            help_aliases=("qzone主动发表", "空间主动"),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="proactive_threshold",
+            field_name="personification_proactive_threshold",
+            display_name="主动私聊好感度阈值",
+            value_type="float",
+            default=60.0,
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            min_value=0.0,
+            max_value=100.0,
+            help_aliases=("主动阈值",),
+            parser=_float_parser,
+        ),
+        ConfigEntry(
+            key="proactive_daily_limit",
+            field_name="personification_proactive_daily_limit",
+            display_name="主动私聊日上限",
+            value_type="int",
+            default=3,
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            min_value=0,
+            max_value=50,
+            help_aliases=("主动日限",),
+            parser=_int_parser,
+        ),
+        ConfigEntry(
+            key="proactive_interval",
+            field_name="personification_proactive_interval",
+            display_name="主动私聊间隔（分钟）",
+            value_type="int",
+            default=30,
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            min_value=5,
+            max_value=720,
+            help_aliases=("主动间隔",),
+            parser=_int_parser,
+        ),
+        ConfigEntry(
+            key="proactive_idle_hours",
+            field_name="personification_proactive_idle_hours",
+            display_name="主动私聊空闲门槛（小时）",
+            value_type="float",
+            default=24.0,
+            scope=GLOBAL_SCOPE,
+            description="（占位）",
+            category="config",
+            min_value=0.0,
+            max_value=720.0,
+            help_aliases=("主动空闲",),
+            parser=_float_parser,
         ),
         ConfigEntry(
             key="image_host_allowlist",

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
+from ...core import webui_audit_log
 from ...core.db import connect_sync
-from ..deps import AdminIdentity, require_admin
+from ..deps import AdminIdentity, get_client_ip, require_admin
 
 
 def _profile_service(runtime) -> Any | None:
@@ -24,40 +26,9 @@ def _memory_store(runtime) -> Any | None:
     return getattr(bundle, "memory_store", None)
 
 
-def _load_group_style(group_id: str) -> dict[str, Any]:
-    with connect_sync() as conn:
-        row = conn.execute(
-            "SELECT style_text, style_json, updated_at FROM group_style_snapshots WHERE group_id=?",
-            (str(group_id or ""),),
-        ).fetchone()
-    if not row:
-        return {"style_text": "", "style_json": {}, "updated_at": 0}
-    try:
-        payload = json.loads(row["style_json"] or "{}")
-    except Exception:
-        payload = {}
-    return {
-        "style_text": str(row["style_text"] or ""),
-        "style_json": payload if isinstance(payload, dict) else {},
-        "updated_at": float(row["updated_at"] or 0),
-    }
-
-
-def _save_group_style(group_id: str, style_text: str, style_json: dict[str, Any]) -> None:
-    payload = json.dumps(style_json or {}, ensure_ascii=False)
-    with connect_sync() as conn:
-        conn.execute(
-            """
-            INSERT INTO group_style_snapshots(group_id, style_text, style_json, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET
-                style_text=excluded.style_text,
-                style_json=excluded.style_json,
-                updated_at=excluded.updated_at
-            """,
-            (str(group_id or ""), str(style_text or ""), payload, time.time()),
-        )
-        conn.commit()
+_REBUILD_RATELIMIT_NS = "group_style_rebuild_ratelimit"
+_REBUILD_WINDOW_SECONDS = 300
+_REBUILD_MAX_PER_WINDOW = 3
 
 
 def build_group_router(*, runtime) -> APIRouter:
@@ -91,9 +62,88 @@ def build_group_router(*, runtime) -> APIRouter:
 
     @router.get("/{group_id}/style")
     async def style(group_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
-        data = _load_group_style(group_id)
-        data["group_id"] = group_id
-        return data
+        from ...core.group_style_autobuild import list_style_snapshots
+
+        snapshots = list_style_snapshots(group_id, limit=3)
+        latest = snapshots[0] if snapshots else None
+        return {
+            "group_id": group_id,
+            "snapshots": snapshots,
+            "style_text": latest["style_text"] if latest else "",
+            "style_json": latest["style_json"] if latest else {},
+            "updated_at": latest["created_at"] if latest else 0,
+        }
+
+    @router.post("/{group_id}/style/rebuild")
+    async def style_rebuild(
+        group_id: str,
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        # 限流：同设备 5 分钟最多 3 次（避免误点滥用 token）
+        from ...core.data_store import get_data_store
+
+        rate_key = hashlib.sha256(f"{admin.device_id}:{group_id}".encode("utf-8")).hexdigest()[:24]
+        store = get_data_store()
+        now_ts = time.time()
+        rl_data = store.load_sync(_REBUILD_RATELIMIT_NS) or {}
+        if not isinstance(rl_data, dict):
+            rl_data = {}
+        bucket = rl_data.get(rate_key) if isinstance(rl_data.get(rate_key), dict) else {}
+        if not isinstance(bucket, dict) or now_ts - float(bucket.get("window_start", 0) or 0) > _REBUILD_WINDOW_SECONDS:
+            bucket = {"window_start": now_ts, "count": 0}
+        if int(bucket.get("count", 0) or 0) >= _REBUILD_MAX_PER_WINDOW:
+            raise HTTPException(status_code=429, detail=f"重建过于频繁，请 {int(_REBUILD_WINDOW_SECONDS / 60)} 分钟后重试")
+        bucket["count"] = int(bucket.get("count", 0) or 0) + 1
+        rl_data[rate_key] = bucket
+        store.save_sync(_REBUILD_RATELIMIT_NS, rl_data)
+
+        from ...core.group_style_autobuild import build_group_style, _load_messages_since, _format_chat_summary
+
+        store_mem = _memory_store(runtime)
+        if store_mem is None:
+            raise HTTPException(status_code=503, detail="memory_store 未就绪")
+        bundle = getattr(runtime, "runtime_bundle", None)
+        deps = getattr(bundle, "reply_processor_deps", None) if bundle else None
+        runtime_inner = getattr(deps, "runtime", None) if deps else None
+        tool_caller = getattr(runtime_inner, "agent_tool_caller", None) if runtime_inner else None
+        if tool_caller is None:
+            raise HTTPException(status_code=503, detail="tool_caller 未就绪")
+        # 取最近 250 条对话强行喂给 LLM；跳过 daily_limit
+        rows = _load_messages_since(memory_store=store_mem, group_id=group_id, since_ts=0, limit=250)
+        if len(rows) < 20:
+            raise HTTPException(status_code=400, detail=f"该群消息不足 20 条（当前 {len(rows)}），样本太少不构建")
+        chat_summary = _format_chat_summary(rows)
+        built = await build_group_style(
+            tool_caller=tool_caller,
+            memory_store=store_mem,
+            group_id=group_id,
+            chat_summary=chat_summary,
+        )
+        if not built:
+            webui_audit_log.record(
+                action="style_rebuild",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=group_id,
+                outcome="llm_failed",
+            )
+            raise HTTPException(status_code=500, detail="LLM 返回的风格 JSON 解析失败")
+        from ...core.group_style_autobuild import list_style_snapshots
+
+        webui_audit_log.record(
+            action="style_rebuild",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=group_id,
+            detail={"snapshot_id": built.get("id")},
+        )
+        return {
+            "success": True,
+            "new_snapshot": built,
+            "snapshots": list_style_snapshots(group_id, limit=3),
+        }
 
     @router.get("/{group_id}/memory/recent")
     async def memory_recent(

@@ -54,6 +54,33 @@ def test_group_routing() -> None:
     assert entries["turn_planner_enabled"].group == "意图规划"
 
 
+def test_advanced_inference_from_field_name() -> None:
+    entries = {entry.key: entry for entry in config_registry.get_config_entries()}
+    # 关键词匹配字段会被自动标 advanced
+    assert entries["agent_max_steps"].advanced is True  # _max_steps 命中
+    assert entries["parallel_research_max_workers"].advanced is True  # _workers 命中
+    assert entries["response_timeout"].advanced is True  # _timeout 命中
+    # 基础字段不应被误标
+    assert entries["global_enabled"].advanced is False
+    assert entries["api_pools"].advanced is False
+    assert entries["sticker_path"].advanced is False
+    assert entries["tts_global_enabled"].advanced is False
+
+
+def test_detailed_descriptions_applied_to_core_entries() -> None:
+    entries = {entry.key: entry for entry in config_registry.get_config_entries()}
+    # 27 项重写过的描述都应不为空且超过 30 字
+    must_have = ["global_enabled", "api_pools", "agent_max_steps", "probability",
+                 "memory_palace_enabled", "persona_enabled", "tts_mode", "image_host_allowlist"]
+    for key in must_have:
+        desc = entries[key].description
+        assert len(desc) >= 30, f"{key} description too short: {desc}"
+    # 这些字段应当带 example
+    assert entries["api_pools"].example  # 应有示例
+    assert entries["probability"].example
+    assert entries["agent_max_steps"].example
+
+
 def test_secret_inference_for_key_and_auth_path_fields() -> None:
     entries = {entry.key: entry for entry in config_registry.get_config_entries()}
     # api_key 后缀字段必须 secret

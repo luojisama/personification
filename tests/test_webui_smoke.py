@@ -122,6 +122,9 @@ def _login_as_admin(client, runtime_context) -> None:
         json={"qq": "10001", "code": code, "device_label": "测试"},
     )
     assert res2.status_code == 200, res2.text
+    csrf = client.cookies.get("personification_webui_csrf", "")
+    if csrf:
+        client.headers["X-Personification-CSRF"] = csrf
 
 
 def test_config_entries_authenticated_returns_groups(_runtime_context) -> None:

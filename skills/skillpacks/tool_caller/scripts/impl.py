@@ -586,22 +586,64 @@ def _response_to_dict(response: Any) -> dict:
     return {}
 
 
+_USAGE_PROMPT_KEYS = ("prompt_tokens", "input_tokens", "promptTokenCount", "promptTokens")
+_USAGE_COMPLETION_KEYS = ("completion_tokens", "output_tokens", "candidatesTokenCount", "completionTokens", "outputTokens")
+_USAGE_TOTAL_KEYS = ("total_tokens", "totalTokenCount", "totalTokens")
+_USAGE_CONTAINER_KEYS = ("usage", "usageMetadata", "usage_metadata")
+
+
+def _read_usage_value(source: Any, keys: tuple[str, ...]) -> int:
+    """从 dict / pydantic 对象任一支持的键名读 token 计数。"""
+    if isinstance(source, dict):
+        for key in keys:
+            if key in source and source[key] is not None:
+                try:
+                    return int(source[key])
+                except (TypeError, ValueError):
+                    return 0
+        return 0
+    for key in keys:
+        value = getattr(source, key, None)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
 def _extract_usage(response: Any) -> dict:
-    """从 OpenAI / Responses API 响应里提取 token 用量；兼容 dict 与 Pydantic 对象。"""
+    """从任意 LLM provider 响应提取 token 用量。
+
+    兼容三种字段命名族：
+      - OpenAI:    prompt_tokens / completion_tokens / total_tokens
+      - Anthropic: input_tokens / output_tokens
+      - Gemini:    promptTokenCount / candidatesTokenCount / totalTokenCount
+
+    兼容三种容器键：response.usage / response.usageMetadata / response.usage_metadata
+    （chat.completions、Responses、generateContent 三套 API 各用一种）
+
+    response 可以是 dict、Pydantic 对象、嵌套结构。无法定位时返回 {}。
+    """
     try:
-        u = getattr(response, "usage", None)
-        if u is None and isinstance(response, dict):
-            u = response.get("usage")
-        if u is None:
+        usage_obj: Any = None
+        for container_key in _USAGE_CONTAINER_KEYS:
+            if isinstance(response, dict):
+                if container_key in response and response[container_key] is not None:
+                    usage_obj = response[container_key]
+                    break
+            else:
+                candidate = getattr(response, container_key, None)
+                if candidate is not None:
+                    usage_obj = candidate
+                    break
+        if usage_obj is None:
             return {}
-        if isinstance(u, dict):
-            prompt = int(u.get("prompt_tokens", u.get("input_tokens", 0)) or 0)
-            completion = int(u.get("completion_tokens", u.get("output_tokens", 0)) or 0)
-            total = int(u.get("total_tokens", prompt + completion) or 0)
-        else:
-            prompt = int(getattr(u, "prompt_tokens", 0) or getattr(u, "input_tokens", 0) or 0)
-            completion = int(getattr(u, "completion_tokens", 0) or getattr(u, "output_tokens", 0) or 0)
-            total = int(getattr(u, "total_tokens", 0) or (prompt + completion))
+        prompt = _read_usage_value(usage_obj, _USAGE_PROMPT_KEYS)
+        completion = _read_usage_value(usage_obj, _USAGE_COMPLETION_KEYS)
+        total = _read_usage_value(usage_obj, _USAGE_TOTAL_KEYS) or (prompt + completion)
+        if prompt == 0 and completion == 0 and total == 0:
+            return {}
         return {
             "prompt_tokens": prompt,
             "completion_tokens": completion,
@@ -914,6 +956,8 @@ class GeminiToolCaller(ToolCaller):
                 tool_calls=tool_calls,
                 raw=response,
                 used_builtin_search=used_builtin,
+                usage=_extract_usage(response),
+                model_used=str(self.model or ""),
             )
         except Exception as exc:
             if contains_image_input and _error_indicates_vision_unavailable(exc):
@@ -1026,6 +1070,8 @@ class AnthropicToolCaller(ToolCaller):
                 tool_calls=tool_calls,
                 raw=response,
                 used_builtin_search=used_builtin,
+                usage=_extract_usage(response),
+                model_used=str(self.model or ""),
             )
         except Exception as exc:
             if contains_image_input and _error_indicates_vision_unavailable(exc):
@@ -1422,6 +1468,8 @@ class OpenAICodexToolCaller(ToolCaller):
             tool_calls=tool_calls,
             raw=data,
             used_builtin_search=web_search_used,
+            usage=_extract_usage(data),
+            model_used=str(getattr(self, "model", "") or ""),
         )
 
     def _parse_sse_response(self, raw_text: str) -> dict:
@@ -2640,12 +2688,16 @@ class GeminiCliToolCaller(ToolCaller):
             text = _extract_gemini_text(parts)
             finish_reason = "tool_calls" if tool_calls else "stop"
             grounding = candidates[0].get("groundingMetadata") or candidates[0].get("grounding_metadata")
+            # Gemini CLI 的 usageMetadata 同时在 payload（inner_response）和外层 data 里出现，优先取里层
+            usage = _extract_usage(payload) or _extract_usage(data)
             return ToolCallerResponse(
                 finish_reason=finish_reason,
                 content=text,
                 tool_calls=tool_calls,
                 raw=data,
                 used_builtin_search=bool(grounding),
+                usage=usage,
+                model_used=str(self.model or _GEMINI_CLI_DEFAULT_MODEL),
             )
         except Exception as exc:
             if contains_image_input and _error_indicates_vision_unavailable(exc):
@@ -2822,6 +2874,8 @@ class ClaudeCodeToolCaller(AnthropicToolCaller):
                 tool_calls=tool_calls,
                 raw=response,
                 used_builtin_search=used_builtin,
+                usage=_extract_usage(response),
+                model_used=str(getattr(self, "model", "") or ""),
             )
         except Exception as exc:
             if contains_image_input and _error_indicates_vision_unavailable(exc):

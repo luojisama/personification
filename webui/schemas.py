@@ -50,6 +50,8 @@ class ConfigEntryView(BaseModel):
     value_type: str
     required: bool
     secret: bool
+    advanced: bool = False
+    example: str = ""
     default: Any = None
     current: Any = None
     active_source: str = "default"

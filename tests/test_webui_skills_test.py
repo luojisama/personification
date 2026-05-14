@@ -81,6 +81,9 @@ def _login(client, rt) -> None:
     code = re.search(r"\b(\d{6})\b", str(sent[-1].get("message", ""))).group(1)
     res2 = client.post("/personification/api/auth/verify", json={"qq": "10001", "code": code, "device_label": "t"})
     assert res2.status_code == 200, res2.text
+    csrf = client.cookies.get("personification_webui_csrf", "")
+    if csrf:
+        client.headers["X-Personification-CSRF"] = csrf
 
 
 def test_skills_listing_and_toggle(_runtime_context) -> None:

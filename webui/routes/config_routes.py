@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from ...core import config_registry, env_writer
+from ...core import config_registry, env_writer, webui_audit_log
 from ..deps import AdminIdentity, require_admin
 from ..schemas import (
     ConfigEntriesResponse,
@@ -63,6 +63,8 @@ def _entry_to_view(entry: Any, *, plugin_config: Any) -> ConfigEntryView:
         value_type=entry.value_type,
         required=bool(entry.required),
         secret=bool(entry.secret),
+        advanced=bool(getattr(entry, "advanced", False)),
+        example=str(getattr(entry, "example", "") or ""),
         default=getattr(type(plugin_config), entry.field_name, entry.default),
         current=sources.get("current"),
         active_source=sources.get("active_source", "default"),
@@ -107,7 +109,7 @@ def build_config_router(*, runtime) -> APIRouter:
     @router.post("/apply-recommended")
     async def apply_recommended(
         body: dict | None = None,
-        _: AdminIdentity = Depends(require_admin),
+        admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
         fields = (body or {}).get("fields")
         applied: list[str] = []
@@ -137,12 +139,18 @@ def build_config_router(*, runtime) -> APIRouter:
             except Exception:
                 pass
             applied.append(field_name)
+        webui_audit_log.record(
+            action="config_apply_recommended",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            detail={"applied": applied, "skipped_count": len(skipped)},
+        )
         return {"applied": applied, "skipped": skipped}
 
     @router.post("/value", response_model=ConfigUpdateResponse)
     async def update_value(
         payload: ConfigUpdateRequest,
-        _: AdminIdentity = Depends(require_admin),
+        admin: AdminIdentity = Depends(require_admin),
     ) -> ConfigUpdateResponse:
         field_name = payload.field_name.strip()
         if not field_name:
@@ -164,6 +172,14 @@ def build_config_router(*, runtime) -> APIRouter:
             setattr(runtime.plugin_config, field_name, normalized)
         except Exception as exc:
             result["errors"].append(f"运行时同步失败：{exc}")
+        webui_audit_log.record(
+            action="config_update",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=field_name,
+            detail={"errors": result.get("errors", []), "secret": bool(entry.secret)},
+            outcome="ok" if not result["errors"] else "partial",
+        )
         return ConfigUpdateResponse(
             success=not result["errors"],
             errors=list(result["errors"]),

@@ -6,6 +6,7 @@ from typing import Any, Callable
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from .routes.audit_routes import build_audit_router
 from .routes.auth_routes import build_auth_router
 from .routes.config_routes import build_config_router
 from .routes.group_routes import build_group_router
@@ -13,6 +14,7 @@ from .routes.memory_routes import build_memory_router
 from .routes.metrics_routes import build_metrics_router
 from .routes.persona_routes import build_persona_router
 from .routes.skill_routes import build_skill_router
+from .routes.sticker_routes import build_sticker_router
 from .routes.test_routes import build_test_router
 
 
@@ -63,6 +65,8 @@ def build_router() -> APIRouter:
     router.include_router(build_skill_router(runtime=runtime))
     router.include_router(build_test_router(runtime=runtime))
     router.include_router(build_memory_router(runtime=runtime))
+    router.include_router(build_sticker_router(runtime=runtime))
+    router.include_router(build_audit_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -82,20 +86,39 @@ _INDEX_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>拟人插件 控制台</title>
 <style>
-:root { --bg:#0f1115; --panel:#171a21; --line:#262a33; --text:#e6e8ef; --muted:#8a91a3; --accent:#6aa8ff; --danger:#f87171; --warn:#f59e0b; --ok:#34d399; }
+:root {
+  --bg:#0f1115; --panel:#171a21; --line:#262a33;
+  --text:#e6e8ef; --muted:#8a91a3; --input-bg:#0b0d12;
+  --accent:#6aa8ff; --danger:#f87171; --warn:#f59e0b; --ok:#34d399;
+  --hover-bg:#1f242c; --zebra:#13161c;
+}
+[data-theme="light"] {
+  --bg:#f6f8fb; --panel:#ffffff; --line:#e3e8ef;
+  --text:#1c2230; --muted:#6b7280; --input-bg:#ffffff;
+  --accent:#2563eb; --danger:#dc2626; --warn:#d97706; --ok:#059669;
+  --hover-bg:#eef2f7; --zebra:#f9fafc;
+}
 * { box-sizing:border-box; }
-html,body { margin:0; padding:0; background:var(--bg); color:var(--text); font:14px/1.55 -apple-system,Segoe UI,Roboto,"Noto Sans CJK SC","Microsoft YaHei",sans-serif; }
+html,body { margin:0; padding:0; background:var(--bg); color:var(--text); font:13.5px/1.55 -apple-system,Segoe UI,Roboto,"Noto Sans CJK SC","Microsoft YaHei",sans-serif; transition:background .2s, color .2s; }
 a { color:var(--accent); text-decoration:none; }
 button { font:inherit; cursor:pointer; }
-input,select,textarea { font:inherit; background:#0b0d12; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; }
+input,select,textarea { font:inherit; background:var(--input-bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; transition:border-color .15s; }
 input:focus, textarea:focus, select:focus { outline:none; border-color:var(--accent); }
 .layout { display:grid; grid-template-columns:220px 1fr; min-height:100vh; }
 aside { background:var(--panel); border-right:1px solid var(--line); padding:18px 0; }
-aside h1 { font-size:14px; padding:0 18px 14px; color:var(--muted); margin:0; letter-spacing:1px; border-bottom:1px solid var(--line); }
+aside h1 { font-size:13px; padding:0 18px 14px; color:var(--muted); margin:0; letter-spacing:1px; border-bottom:1px solid var(--line); }
 aside nav { display:flex; flex-direction:column; padding:10px 0; }
-aside nav a { padding:9px 18px; color:var(--text); border-left:3px solid transparent; }
-aside nav a.active { background:#1f242c; border-left-color:var(--accent); }
-main { padding:22px 28px; }
+aside nav a { padding:9px 18px; color:var(--text); border-left:3px solid transparent; transition:background .12s, border-color .12s; }
+aside nav a:hover { background:var(--hover-bg); }
+aside nav a.active { background:var(--hover-bg); border-left-color:var(--accent); }
+main { padding:20px 26px; max-width:1400px; }
+.mobile-nav-toggle { display:none; }
+.progress-bar { position:fixed; top:0; left:0; right:0; height:2px; background:linear-gradient(90deg, transparent, var(--accent), transparent); background-size:200% 100%; animation:progress 1.2s linear infinite; z-index:100; }
+@keyframes progress { 0% { background-position:200% 0; } 100% { background-position:-200% 0; } }
+.breadcrumb { color:var(--muted); font-size:12.5px; margin-bottom:4px; }
+.breadcrumb a { color:var(--muted); }
+.breadcrumb a:hover { color:var(--accent); }
+.breadcrumb span.sep { margin:0 6px; opacity:.5; }
 .row { display:flex; gap:14px; align-items:center; }
 .between { display:flex; justify-content:space-between; align-items:center; }
 .muted { color:var(--muted); }
@@ -117,11 +140,15 @@ main { padding:22px 28px; }
 .field-input { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 .field-input input[type=text], .field-input input[type=number], .field-input textarea { min-width:260px; flex:1; max-width:560px; }
 .field-input textarea { min-height:60px; font-family:ui-monospace,Consolas,monospace; }
-.btn { padding:7px 14px; border-radius:6px; border:1px solid var(--line); background:#1d212a; color:var(--text); }
-.btn:hover { border-color:var(--accent); }
-.btn.primary { background:var(--accent); color:#0b0d12; border-color:transparent; }
+.btn { padding:7px 14px; border-radius:6px; border:1px solid var(--line); background:var(--panel); color:var(--text); transition:border-color .15s, background .15s, transform .05s; }
+.btn:hover { border-color:var(--accent); background:var(--hover-bg); }
+.btn:active { transform:translateY(1px); }
+.btn.primary { background:var(--accent); color:#ffffff; border-color:transparent; }
+[data-theme="light"] .btn.primary { color:#ffffff; }
+.btn.primary:hover { background:var(--accent); opacity:.9; }
 .btn.danger { background:transparent; color:var(--danger); border-color:rgba(248,113,113,0.4); }
-.btn.small { padding:3px 9px; font-size:12px; }
+.btn.small { padding:3px 9px; font-size:12px; min-height:0; }
+.btn:disabled { opacity:.5; cursor:not-allowed; }
 .toggle { display:inline-flex; gap:4px; padding:3px; background:#0b0d12; border:1px solid var(--line); border-radius:99px; }
 .toggle button { padding:4px 14px; border:none; border-radius:99px; background:transparent; color:var(--muted); }
 .toggle button.on { background:var(--accent); color:#0b0d12; }
@@ -134,6 +161,13 @@ main { padding:22px 28px; }
 .group-bar button:hover { color:var(--text); border-color:var(--accent); }
 .group-bar button.active { background:var(--accent); color:#0b0d12; border-color:transparent; }
 .toolbar { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
+.sticker-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:14px; }
+.sticker-card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px; cursor:pointer; transition:border-color .15s; }
+.sticker-card:hover { border-color:var(--accent); }
+.sticker-card img { width:100%; aspect-ratio:1; object-fit:contain; background:#0b0d12; border-radius:4px; }
+.sticker-meta { padding:6px 2px 0; }
+.sticker-name { font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
+.sticker-desc { font-size:13px; margin:4px 0; min-height:20px; }
 .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; vertical-align:middle; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .topbar { position:sticky; top:0; z-index:5; background:var(--bg); padding-bottom:10px; margin-bottom:14px; }
@@ -144,7 +178,29 @@ main { padding:22px 28px; }
 .login-wrap input { width:100%; }
 table { width:100%; border-collapse:collapse; }
 th, td { padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; }
-th { color:var(--muted); font-weight:500; font-size:12px; }
+th { color:var(--muted); font-weight:500; font-size:12px; background:var(--bg); position:sticky; top:0; }
+tbody tr:nth-child(even) td { background:var(--zebra); }
+tbody tr:hover td { background:var(--hover-bg); }
+
+/* Mobile 响应式 */
+@media (max-width: 768px) {
+  .layout { grid-template-columns:1fr; }
+  aside { position:fixed; top:0; left:-100%; bottom:0; width:240px; z-index:50; transition:left .2s; padding-top:60px; }
+  aside.open { left:0; box-shadow:2px 0 12px rgba(0,0,0,.3); }
+  main { padding:14px 14px 60px; }
+  .mobile-nav-toggle { display:inline-flex; align-items:center; justify-content:center; width:36px; height:36px; border-radius:6px; border:1px solid var(--line); background:var(--panel); color:var(--text); margin-right:10px; }
+  .topbar { padding:8px 0 10px; }
+  .topbar > div:first-child { flex:1; min-width:0; }
+  .topbar strong { font-size:15px !important; }
+  table { font-size:12.5px; }
+  th, td { padding:6px 8px; }
+  .field-input input[type=text], .field-input input[type=number], .field-input textarea { min-width:0; max-width:100%; width:100%; }
+  .sticker-grid { grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); }
+  .scrim { position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:40; }
+}
+@media (min-width: 769px) {
+  .scrim { display:none !important; }
+}
 </style>
 </head>
 <body>
@@ -160,11 +216,28 @@ let state = {
   groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [],
   skills: [], skillFilter: "",
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null,
-  memory: null, memoryFilter: "", memoryInnerState: null,
+  memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false,
+  groupRawChat: null, groupStyleSnapIdx: 0, groupStyleRebuilding: false,
+  showAdvancedConfig: false,
+  stickers: null, stickerSearch: "", selectedSticker: null,
+  theme: "dark", mobileNavOpen: false, eligibleAdmins: [],
+  audit: null, auditFilter: "",
 };
 
+function readCookie(name) {
+  const m = document.cookie.match(new RegExp("(?:^|; )" + name.replace(/([.$?*|{}()\\[\\]\\\\/+^])/g, "\\$1") + "=([^;]*)"));
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
 async function api(path, opts = {}) {
-  const res = await fetch(API + path, { credentials: "include", ...opts });
+  const method = (opts.method || "GET").toUpperCase();
+  const headers = { ...(opts.headers || {}) };
+  // 非 safe method：自动从 cookie 读 CSRF token 并注入 header
+  if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+    const csrf = readCookie("personification_webui_csrf");
+    if (csrf) headers["X-Personification-CSRF"] = csrf;
+  }
+  const res = await fetch(API + path, { credentials: "include", ...opts, headers });
   if (res.status === 401) { state.logged = false; render(); throw new Error("未登录"); }
   if (!res.ok) {
     let detail = res.statusText;
@@ -177,8 +250,27 @@ async function api(path, opts = {}) {
 function alertFlash(kind, text) { state.alert = { kind, text }; render(); setTimeout(() => { state.alert = null; render(); }, 4000); }
 
 async function bootstrap() {
+  // 主题
+  const savedTheme = localStorage.getItem("personification_theme") || "dark";
+  state.theme = savedTheme;
+  document.documentElement.setAttribute("data-theme", savedTheme);
   try { const me = await api("/auth/me"); state.logged = true; state.qq = me.qq; await loadView(); }
   catch { state.logged = false; }
+  if (!state.logged) {
+    try { const ea = await fetch(API + "/auth/eligible-admins").then(r=>r.json()); state.eligibleAdmins = ea.admins||[]; } catch {}
+  }
+  render();
+}
+
+function toggleTheme() {
+  state.theme = state.theme === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", state.theme);
+  localStorage.setItem("personification_theme", state.theme);
+  render();
+}
+
+function toggleMobileNav() {
+  state.mobileNavOpen = !state.mobileNavOpen;
   render();
 }
 
@@ -205,9 +297,18 @@ async function loadView() {
       state.skills = data.skills; state.skillsAvailable = data.available;
     } else if (state.view === "test") {
       /* nothing to preload */
+    } else if (state.view === "audit") {
+      const qs = new URLSearchParams({ limit: "150" });
+      if (state.auditFilter) qs.set("action", state.auditFilter);
+      state.audit = await api("/audit/recent?" + qs.toString());
+    } else if (state.view === "stickers") {
+      state.stickers = await api("/stickers");
     } else if (state.view === "memory") {
+      const qs = new URLSearchParams({ limit: "80" });
+      if (state.memoryFilter) qs.set("memory_type", state.memoryFilter);
+      if (state.memoryIncludeSelf) qs.set("include_self", "true");
       const [mem, inner] = await Promise.all([
-        api("/memory/recent?limit=80" + (state.memoryFilter?`&memory_type=${encodeURIComponent(state.memoryFilter)}`:"")),
+        api("/memory/recent?" + qs.toString()),
         api("/memory/inner-state").catch(() => ({available: false})),
       ]);
       state.memory = mem;
@@ -224,9 +325,12 @@ function render() {
 }
 
 function renderLayout() {
-  const navItem = (v, label) => `<a href="#${v}" class="${state.view===v?'active':''}">${label}</a>`;
-  return `<div class="layout">
-    <aside>
+  const navItem = (v, label) => `<a href="#${v}" class="${state.view===v?'active':''}" onclick="state.mobileNavOpen=false">${label}</a>`;
+  const themeIcon = state.theme === "dark" ? "🌙" : "☀";
+  return `${state.loading ? '<div class="progress-bar"></div>' : ''}
+    <div class="layout">
+    ${state.mobileNavOpen ? '<div class="scrim" onclick="toggleMobileNav()"></div>' : ''}
+    <aside class="${state.mobileNavOpen?'open':''}">
       <h1>拟人插件控制台</h1>
       <nav>
         ${navItem('dashboard','仪表盘')}
@@ -234,19 +338,25 @@ function renderLayout() {
         ${navItem('personas','用户画像')}
         ${navItem('groups','群信息')}
         ${navItem('memory','Agent 记忆')}
+        ${navItem('stickers','表情包')}
         ${navItem('skills','Skill 管理')}
         ${navItem('test','模型测试')}
+        ${navItem('audit','审计日志')}
         ${navItem('devices','设备管理')}
       </nav>
     </aside>
     <main>
       <div class="topbar between">
-        <div>
-          <strong style="font-size:18px">${escapeHtml(viewTitle())}</strong>
-          ${state.loading ? '<span class="spinner" style="margin-left:10px"></span>' : ''}
+        <div style="display:flex;align-items:center;min-width:0;flex:1">
+          <button class="mobile-nav-toggle" onclick="toggleMobileNav()" aria-label="菜单">≡</button>
+          <div style="min-width:0">
+            <div class="breadcrumb">控制台 <span class="sep">›</span> ${escapeHtml(viewTitle())}</div>
+            <strong style="font-size:17px">${escapeHtml(viewTitle())}</strong>
+          </div>
         </div>
         <div class="row">
-          <span class="muted">${escapeHtml(state.qq)}</span>
+          <button class="btn small" onclick="toggleTheme()" title="切换主题">${themeIcon}</button>
+          <span class="muted" title="登录 QQ">${escapeHtml(state.qq)}</span>
           <button class="btn small" onclick="doLogout()">退出</button>
         </div>
       </div>
@@ -265,7 +375,183 @@ function renderView() {
   if (state.view === "skills") return renderSkills();
   if (state.view === "test") return renderTest();
   if (state.view === "memory") return renderMemory();
+  if (state.view === "stickers") return renderStickers();
+  if (state.view === "audit") return renderAudit();
   return `<div class="card"><h2>${escapeHtml(viewTitle())}</h2><p class="muted">该视图暂未实现。</p></div>`;
+}
+
+function renderAudit() {
+  const data = state.audit;
+  if (!data) return `<div class="card muted">加载中…</div>`;
+  const actionFilters = [
+    {key:"", label:"全部"},
+    {key:"login_verify", label:"登录"},
+    {key:"config_update", label:"配置修改"},
+    {key:"device_revoke", label:"设备撤销"},
+    {key:"sticker_delete", label:"表情删除"},
+    {key:"sticker_upload", label:"表情上传"},
+    {key:"skill_toggle", label:"Skill 启停"},
+    {key:"style_rebuild", label:"风格重建"},
+  ];
+  const filterBar = actionFilters.map(f => `<button class="${state.auditFilter===f.key?'active':''}" onclick="pickAuditFilter('${f.key}')">${escapeHtml(f.label)}</button>`).join("");
+  const rows = (data.entries || []).map(e => {
+    const time = new Date(e.ts * 1000).toLocaleString();
+    const outcome = e.outcome === "ok"
+      ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">成功</span>'
+      : `<span class="tag" style="background:rgba(248,113,113,0.18);color:var(--danger)">${escapeHtml(e.outcome)}</span>`;
+    return `<tr>
+      <td class="muted" style="font-size:12px;white-space:nowrap">${escapeHtml(time)}</td>
+      <td><code style="font-size:11px">${escapeHtml(e.action)}</code></td>
+      <td>${escapeHtml(e.qq||'-')}</td>
+      <td>${escapeHtml(e.target||'-')}</td>
+      <td>${outcome}</td>
+    </tr>`;
+  }).join("");
+  return `<div class="group-bar">${filterBar}</div>
+    <div class="card">
+      <h2>审计日志（最近 ${(data.entries||[]).length} 条）</h2>
+      <p class="muted" style="font-size:12px;margin:-6px 0 10px">记录登录、配置修改、表情包/Skill/风格等敏感动作；保留 90 天。</p>
+      <table><thead><tr><th>时间</th><th>动作</th><th>QQ</th><th>对象</th><th>结果</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="5" class="muted">暂无</td></tr>'}</tbody></table>
+    </div>`;
+}
+
+async function pickAuditFilter(action) {
+  state.auditFilter = action;
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+function renderStickers() {
+  const data = state.stickers;
+  if (!data) return `<div class="card muted">加载中…</div>`;
+  const items = data.stickers || [];
+  const search = (state.stickerSearch || "").trim().toLowerCase();
+  const filtered = search
+    ? items.filter(s => s.filename.toLowerCase().includes(search)
+        || (s.description||"").toLowerCase().includes(search)
+        || (s.mood_tags||[]).join(",").includes(search)
+        || (s.scene_tags||[]).join(",").includes(search))
+    : items;
+  const grid = filtered.map(s => {
+    const tags = [...(s.mood_tags||[]), ...(s.scene_tags||[])].slice(0, 5).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("");
+    const labelTag = s.labeled
+      ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">已标</span>'
+      : '<span class="tag" style="background:rgba(245,158,11,0.18);color:var(--warn)">待标</span>';
+    return `<div class="sticker-card" onclick="openStickerEdit('${escapeAttr(s.filename)}')">
+      <img src="${escapeAttr(s.thumbnail_url)}" loading="lazy" alt="${escapeAttr(s.filename)}">
+      <div class="sticker-meta">
+        <div class="sticker-name" title="${escapeAttr(s.filename)}">${escapeHtml(s.filename)}</div>
+        <div class="sticker-desc">${escapeHtml((s.description||'').slice(0,40))}</div>
+        <div>${labelTag} ${tags}</div>
+      </div>
+    </div>`;
+  }).join("");
+  return `<div class="toolbar">
+      <input type="search" placeholder="按文件名/描述/标签搜索…" value="${escapeAttr(state.stickerSearch)}" oninput="state.stickerSearch=this.value;render()" style="flex:1;max-width:340px">
+      <span class="muted">共 ${data.total} 张，已标 ${data.labeled_count}</span>
+      <button class="btn" onclick="document.getElementById('sticker-upload-input').click()">上传</button>
+      <input id="sticker-upload-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" onchange="uploadStickerFromInput(this)">
+      <button class="btn" onclick="rescanStickers('missing_only')">扫描未打标</button>
+      <button class="btn" onclick="rescanStickers('force_all')" style="color:var(--warn)">全部重打标</button>
+    </div>
+    <p class="muted" style="font-size:12px;margin:0 0 12px">表情包目录：<code>${escapeHtml(data.sticker_dir)}</code>。删除会移到 trash/YYYYMMDD/ 子目录，可手动恢复。</p>
+    <div class="sticker-grid">${grid || '<p class="muted">暂无表情包</p>'}</div>
+    ${state.selectedSticker ? renderStickerEdit() : ''}`;
+}
+
+async function uploadStickerFromInput(input) {
+  if (!input.files || !input.files.length) return;
+  const file = input.files[0];
+  const form = new FormData();
+  form.append("file", file);
+  try {
+    const res = await fetch(API + "/stickers/upload", { method: "POST", credentials: "include", body: form });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { detail = (await res.json()).detail || detail; } catch {}
+      throw new Error(detail);
+    }
+    const out = await res.json();
+    alertFlash("ok", `上传成功：${out.filename}${out.needs_labeling?'（待打标）':''}`);
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "上传失败：" + e.message); }
+  input.value = "";
+}
+
+async function rescanStickers(mode) {
+  const label = mode === "force_all" ? "全部重打标" : "扫描未打标";
+  if (!confirm(`${label}：将清空对应表情包的标签元数据，等待下次启动或后台 labeler 扫描时重打。继续？`)) return;
+  try {
+    const out = await api("/stickers/rescan", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({mode}) });
+    alertFlash("ok", `${label}：已清空 ${out.scheduled} 个条目`);
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "操作失败：" + e.message); }
+}
+
+function openStickerEdit(name) {
+  const item = (state.stickers?.stickers || []).find(x => x.filename === name);
+  if (!item) return;
+  state.selectedSticker = JSON.parse(JSON.stringify(item));
+  render();
+}
+
+function renderStickerEdit() {
+  const s = state.selectedSticker;
+  return `<div class="card" style="margin-top:14px">
+    <div class="between"><h2 style="margin:0">编辑 ${escapeHtml(s.filename)}</h2>
+      <button class="btn small" onclick="state.selectedSticker=null;render()">关闭</button></div>
+    <div style="display:flex;gap:20px;margin-top:14px;flex-wrap:wrap">
+      <img src="${escapeAttr(s.thumbnail_url)}" style="max-width:200px;max-height:200px;border-radius:6px;object-fit:contain;background:#0b0d12">
+      <div style="flex:1;min-width:280px">
+        <label class="muted">描述</label>
+        <textarea oninput="state.selectedSticker.description=this.value" style="width:100%;min-height:50px;margin:4px 0 10px">${escapeHtml(s.description)}</textarea>
+        <label class="muted">心情标签（逗号分隔）</label>
+        <input type="text" value="${escapeAttr((s.mood_tags||[]).join(','))}" oninput="state.selectedSticker.mood_tags=this.value.split(',').map(x=>x.trim()).filter(Boolean)" style="width:100%;margin:4px 0 10px">
+        <label class="muted">场景标签（逗号分隔）</label>
+        <input type="text" value="${escapeAttr((s.scene_tags||[]).join(','))}" oninput="state.selectedSticker.scene_tags=this.value.split(',').map(x=>x.trim()).filter(Boolean)" style="width:100%;margin:4px 0 10px">
+        <label class="muted">使用建议</label>
+        <input type="text" value="${escapeAttr(s.use_hint||'')}" oninput="state.selectedSticker.use_hint=this.value" style="width:100%;margin:4px 0 10px">
+        <label class="muted">避免使用</label>
+        <input type="text" value="${escapeAttr(s.avoid_hint||'')}" oninput="state.selectedSticker.avoid_hint=this.value" style="width:100%;margin:4px 0 10px">
+        <label class="muted" style="display:flex;align-items:center;gap:6px"><input type="checkbox" ${s.proactive_send?'checked':''} onchange="state.selectedSticker.proactive_send=this.checked" style="width:auto">允许在主动场景发送</label>
+        <label class="muted" style="display:block;margin-top:10px">权重（0-3）</label>
+        <input type="number" step="0.1" min="0" max="3" value="${s.weight}" oninput="state.selectedSticker.weight=parseFloat(this.value)" style="width:100px">
+        <div class="row" style="margin-top:14px">
+          <button class="btn primary" onclick="saveSticker()">保存</button>
+          <button class="btn danger" onclick="deleteSticker()">移到回收</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function saveSticker() {
+  const s = state.selectedSticker;
+  try {
+    await api("/stickers/" + encodeURIComponent(s.filename), {
+      method:"PATCH",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({
+        description: s.description, mood_tags: s.mood_tags, scene_tags: s.scene_tags,
+        proactive_send: s.proactive_send, use_hint: s.use_hint, avoid_hint: s.avoid_hint,
+        weight: s.weight,
+      }),
+    });
+    alertFlash("ok", "已保存");
+    state.selectedSticker = null;
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "保存失败：" + e.message); }
+}
+
+async function deleteSticker() {
+  const s = state.selectedSticker;
+  if (!confirm(`将 ${s.filename} 移到 trash 目录？可手动恢复。`)) return;
+  try {
+    await api("/stickers/" + encodeURIComponent(s.filename), { method:"DELETE" });
+    alertFlash("ok", "已移到回收");
+    state.selectedSticker = null;
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "删除失败：" + e.message); }
 }
 
 function renderMemory() {
@@ -276,8 +562,8 @@ function renderMemory() {
     return `<div class="card"><h2>Agent 记忆</h2>
       <p class="muted">memory palace 未启用。要查看长期记忆，需在配置中开启 <code>personification_memory_palace_enabled</code>。</p></div>`;
   }
-  const filters = ["", "group_knowledge", "user_persona", "event", "fact"].map(t =>
-    `<button class="${state.memoryFilter===t?'active':''}" onclick="pickMemoryFilter('${t}')">${t || '全部'}</button>`
+  const filters = ["", "group_knowledge", "user_persona", "fact"].map(t =>
+    `<button class="${state.memoryFilter===t?'active':''}" onclick="pickMemoryFilter('${t}')">${t || '全部类型'}</button>`
   ).join("");
   const rows = (mem.items || []).map(it => `<tr>
     <td><span class="tag">${escapeHtml(it.memory_type||'-')}</span></td>
@@ -286,6 +572,9 @@ function renderMemory() {
     <td class="muted" style="font-size:12px">conf=${it.confidence.toFixed(2)}<br>sal=${it.salience.toFixed(2)}</td>
     <td class="muted" style="font-size:12px">${it.updated_at?new Date(it.updated_at*1000).toLocaleString():'-'}</td>
   </tr>`).join("");
+  const hiddenNote = mem.hidden_self_count
+    ? `<span class="muted" style="font-size:12px;margin-left:10px">已默认隐藏 ${mem.hidden_self_count} 条 bot 自言条目</span>`
+    : '';
   let innerBlock = '';
   if (inner && inner.available) {
     const s = inner.state || {};
@@ -300,8 +589,20 @@ function renderMemory() {
       ${warmRows ? `<h3 style="margin-top:14px;margin-bottom:6px;font-size:13px">用户好感度</h3><table style="max-width:420px"><thead><tr><th>用户</th><th>好感</th></tr></thead><tbody>${warmRows}</tbody></table>`:''}</div>`;
   }
   return `${innerBlock}
-    <div class="group-bar">${filters}</div>
+    <div class="toolbar">
+      <div class="group-bar" style="margin-bottom:0">${filters}</div>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+        <input type="checkbox" ${state.memoryIncludeSelf?'checked':''} onchange="toggleMemoryIncludeSelf(this.checked)" style="width:auto">
+        包含 bot 自己的发言
+      </label>
+      ${hiddenNote}
+    </div>
     <div class="card"><h2>长期记忆（${(mem.items||[]).length}）</h2>
+      <p class="muted" style="font-size:12px;margin:-6px 0 10px">
+        从 memory_palace 数据库蒸馏后的记忆条目（用户画像、群知识、事实等）；
+        ${state.memoryIncludeSelf ? '当前显示 bot 自言条目。' : 'bot 自己的发言默认隐藏，勾选上方复选框可显示。'}
+        要看群里的原始对话历史，请进入「群信息」→ 选择群 → 切「对话原文」tab。
+      </p>
       <table><thead><tr><th>类型</th><th>作用域</th><th>摘要</th><th>分数</th><th>更新</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5" class="muted">暂无记忆条目</td></tr>'}</tbody></table>
     </div>`;
@@ -309,6 +610,11 @@ function renderMemory() {
 
 async function pickMemoryFilter(t) {
   state.memoryFilter = t;
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+async function toggleMemoryIncludeSelf(checked) {
+  state.memoryIncludeSelf = !!checked;
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
 
@@ -397,6 +703,7 @@ function renderGroups() {
 async function openGroup(gid) {
   try {
     state.selectedGroup = gid;
+    state.groupRawChat = null;
     const [personas, style, knowledge] = await Promise.all([
       api("/groups/" + encodeURIComponent(gid) + "/personas"),
       api("/groups/" + encodeURIComponent(gid) + "/style"),
@@ -407,6 +714,16 @@ async function openGroup(gid) {
     state.groupKnowledge = knowledge.knowledge || [];
     render();
   } catch (e) { alertFlash("err", e.message); }
+}
+
+async function loadGroupRawChat() {
+  const gid = state.selectedGroup;
+  if (!gid) return;
+  try {
+    const data = await api("/memory/raw-chat?group_id=" + encodeURIComponent(gid) + "&limit=80");
+    state.groupRawChat = data;
+    render();
+  } catch (e) { alertFlash("err", "加载对话原文失败：" + e.message); }
 }
 
 function renderGroupDetail() {
@@ -423,12 +740,93 @@ function renderGroupDetail() {
     <td class="muted" style="font-size:12px">${escapeHtml(k.source_kind || '')}</td>
     <td class="muted" style="font-size:12px">${k.updated_at ? new Date(k.updated_at*1000).toLocaleDateString() : '-'}</td>
   </tr>`).join("");
-  return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
-    <div class="card"><h2>群风格</h2>${style.style_text ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(style.style_text)}</pre>` : '<p class="muted">暂无群风格快照（待自主总结产出）</p>'}</div>
+  return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;state.groupRawChat=null;state.groupStyleSnapIdx=0;render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
+    ${renderGroupStyle(style)}
     <div class="card"><h2>群知识库（${(state.groupKnowledge||[]).length}）</h2>
       ${knowledgeRows ? `<table><thead><tr><th>术语</th><th>解释</th><th>来源</th><th>更新</th></tr></thead><tbody>${knowledgeRows}</tbody></table>` : '<p class="muted">暂无群知识。开启「群知识库自动构建」后会定时扫描并写入。</p>'}</div>
     <div class="card"><h2>群内成员画像（${state.groupPersonas.length}）</h2>
-      <table><thead><tr><th>QQ</th><th>摘要</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="muted">无</td></tr>'}</tbody></table></div>`;
+      <table><thead><tr><th>QQ</th><th>摘要</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="muted">无</td></tr>'}</tbody></table></div>
+    ${renderGroupRawChat()}`;
+}
+
+function renderGroupStyle(style) {
+  const snapshots = (style && style.snapshots) || [];
+  const idx = Math.min(state.groupStyleSnapIdx || 0, Math.max(0, snapshots.length - 1));
+  const active = snapshots[idx];
+  const rebuilding = state.groupStyleRebuilding;
+  if (!snapshots.length) {
+    return `<div class="card"><h2>群风格</h2>
+      <p class="muted">暂无群风格快照。可手动触发分析（需该群至少有 20 条对话历史）。</p>
+      <button class="btn ${rebuilding?'':'primary'}" onclick="rebuildGroupStyle()" ${rebuilding?'disabled':''}>${rebuilding?'分析中…':'立即分析风格'}</button></div>`;
+  }
+  const tabs = snapshots.map((s, i) => {
+    const dt = new Date(s.created_at * 1000).toLocaleString();
+    return `<button class="${i===idx?'active':''}" onclick="state.groupStyleSnapIdx=${i};render()">${i===0?'最新':'#'+(i+1)} <span class="muted" style="font-size:11px">${dt}</span></button>`;
+  }).join("");
+  const styleJson = active.style_json || {};
+  const detailRows = ["tone","pace","catchphrases","taboos","typical_length"].map(k => {
+    const label = ({tone:"语气",pace:"节奏",catchphrases:"口头禅",taboos:"禁忌",typical_length:"典型句长"})[k];
+    let value = styleJson[k];
+    if (Array.isArray(value)) value = value.join("、") || "—";
+    if (!value) value = "—";
+    return `<tr><td class="muted" style="width:80px">${escapeHtml(label)}</td><td>${escapeHtml(String(value))}</td></tr>`;
+  }).join("");
+  return `<div class="card"><div class="between"><h2 style="margin:0">群风格（${snapshots.length} 个快照）</h2>
+    <button class="btn small ${rebuilding?'':'primary'}" onclick="rebuildGroupStyle()" ${rebuilding?'disabled':''}>${rebuilding?'分析中…':'立即重新分析'}</button></div>
+    <div class="group-bar" style="margin-top:10px">${tabs}</div>
+    <table style="margin-top:8px"><tbody>${detailRows}</tbody></table>
+    ${active.style_text ? `<details style="margin-top:8px"><summary class="muted" style="cursor:pointer;font-size:12px">展示原始 prompt 段</summary>
+      <pre style="white-space:pre-wrap;margin:8px 0 0;font-family:inherit;font-size:12.5px">${escapeHtml(active.style_text)}</pre></details>` : ''}
+  </div>`;
+}
+
+async function rebuildGroupStyle() {
+  const gid = state.selectedGroup;
+  if (!gid) return;
+  state.groupStyleRebuilding = true; render();
+  try {
+    const out = await api("/groups/" + encodeURIComponent(gid) + "/style/rebuild", { method:"POST", headers:{"content-type":"application/json"}, body: "{}" });
+    state.groupStyle = { ...state.groupStyle, snapshots: out.snapshots };
+    state.groupStyleSnapIdx = 0;
+    alertFlash("ok", "已生成新群风格快照");
+  } catch (e) { alertFlash("err", "分析失败：" + e.message); }
+  state.groupStyleRebuilding = false; render();
+}
+
+function renderGroupRawChat() {
+  const chat = state.groupRawChat;
+  if (!chat) {
+    return `<div class="card"><h2>对话原文</h2>
+      <p class="muted" style="margin:0 0 10px">本群在 chat_history.db 里的原始消息流（未经蒸馏）。点击下方按钮按需加载。</p>
+      <button class="btn" onclick="loadGroupRawChat()">加载最近 80 条</button></div>`;
+  }
+  if (!chat.available) {
+    return `<div class="card muted"><h2>对话原文</h2>memory_store 未就绪</div>`;
+  }
+  if (!chat.messages.length) {
+    return `<div class="card"><h2>对话原文</h2><p class="muted">该群没有任何消息记录（chat_history.db 不存在或为空）</p></div>`;
+  }
+  // 反转为时间正序，看着更自然
+  const ordered = [...chat.messages].reverse();
+  const rows = ordered.map(m => {
+    const isBot = m.role === "assistant";
+    const tag = isBot ? '<span class="tag" style="background:rgba(106,168,255,0.18);color:var(--accent)">bot</span>' : '<span class="tag">user</span>';
+    const sender = m.sender_name || m.user_id || '匿名';
+    const time = m.created_at ? new Date(m.created_at*1000).toLocaleString() : '-';
+    return `<tr><td style="white-space:nowrap">${tag}</td>
+      <td class="muted" style="font-size:12px;white-space:nowrap">${escapeHtml(sender)}</td>
+      <td>${escapeHtml(m.text)}</td>
+      <td class="muted" style="font-size:11px;white-space:nowrap">${escapeHtml(time)}</td></tr>`;
+  }).join("");
+  return `<div class="card"><h2>对话原文（${chat.messages.length}）</h2>
+    <p class="muted" style="font-size:12px;margin:-6px 0 10px">按时间正序显示；不参与 LLM 上下文，仅供管理员查看。</p>
+    <table><thead><tr><th></th><th>发送者</th><th>内容</th><th>时间</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div style="margin-top:10px">
+      <button class="btn small" onclick="state.groupRawChat=null;render()">收起</button>
+      <button class="btn small" onclick="loadGroupRawChat()">刷新</button>
+    </div>
+  </div>`;
 }
 
 function renderSkills() {
@@ -510,18 +908,29 @@ function renderConfig() {
   } else if (activeGroup) {
     items = items.filter(e => e.group === activeGroup);
   }
+  // advanced 折叠：默认隐藏 advanced=true 字段
+  const totalBeforeAdvanced = items.length;
+  if (!state.showAdvancedConfig) {
+    items = items.filter(e => !e.advanced);
+  }
+  const hiddenAdvanced = totalBeforeAdvanced - items.length;
   const groupBar = !search ? state.groups.map(g => {
-    const count = state.entries.filter(e => e.group === g).length;
-    return `<button class="${g===activeGroup?'active':''}" onclick="pickGroup('${escapeAttr(g)}')">${escapeHtml(g)} <span class="muted" style="font-size:11px">${count}</span></button>`;
+    const groupEntries = state.entries.filter(e => e.group === g);
+    const visibleCount = state.showAdvancedConfig ? groupEntries.length : groupEntries.filter(e => !e.advanced).length;
+    return `<button class="${g===activeGroup?'active':''}" onclick="pickGroup('${escapeAttr(g)}')">${escapeHtml(g)} <span class="muted" style="font-size:11px">${visibleCount}/${groupEntries.length}</span></button>`;
   }).join("") : "";
   const heading = search ? `搜索结果（${items.length}）` : (activeGroup || '配置');
   return `<div class="toolbar">
       <input type="search" placeholder="搜索字段名 / 标签 / 描述…" value="${escapeAttr(state.configSearch)}" oninput="state.configSearch=this.value;render()" style="flex:1;max-width:340px">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+        <input type="checkbox" ${state.showAdvancedConfig?'checked':''} onchange="state.showAdvancedConfig=this.checked;render()" style="width:auto">
+        显示高级配置
+      </label>
       <button class="btn" onclick="applyRecommended()">应用推荐默认值</button>
     </div>
     ${groupBar ? `<div class="group-bar">${groupBar}</div>` : ''}
     <div class="card">
-      <h2>${escapeHtml(heading)}</h2>
+      <h2>${escapeHtml(heading)} ${hiddenAdvanced ? `<span class="muted" style="font-size:12px;font-weight:normal">（已折叠 ${hiddenAdvanced} 项高级配置）</span>` : ''}</h2>
       ${items.length ? items.map(renderField).join("") : '<p class="muted">无匹配字段</p>'}
     </div>`;
 }
@@ -541,14 +950,17 @@ function renderField(e) {
   const tags = [];
   if (e.required) tags.push(`<span class="tag required">必填</span>`);
   if (e.secret) tags.push(`<span class="tag secret">敏感</span>`);
+  if (e.advanced) tags.push(`<span class="tag">高级</span>`);
   tags.push(`<span class="tag source-${escapeAttr(e.active_source)}">当前来源：${activeSourceLabel(e.active_source)}</span>`);
   const inputHtml = renderInput(e);
   const defaultLine = e.default !== null && e.default !== "" && !e.secret ? `<div class="muted" style="font-size:12px;margin-top:6px">默认值：<code>${escapeHtml(JSON.stringify(e.default))}</code></div>` : '';
+  const exampleLine = e.example ? `<div class="muted" style="font-size:12px;margin-top:4px">示例：<code>${escapeHtml(e.example)}</code></div>` : '';
   return `<div class="field" data-field="${escapeAttr(e.field_name)}">
     <div class="field-head"><strong>${escapeHtml(e.label)}</strong><code>${escapeHtml(e.field_name)}</code>${tags.join("")}</div>
     <div class="field-desc">${escapeHtml(e.description)}</div>
     <div class="field-input">${inputHtml}</div>
     ${defaultLine}
+    ${exampleLine}
   </div>`;
 }
 
@@ -651,12 +1063,25 @@ function attachLayout() {
 }
 
 function renderLogin() {
-  return `<div class="login-wrap"><div class="card"><h2>拟人插件 WebUI 登录</h2>
+  const themeIcon = state.theme === "dark" ? "🌙" : "☀";
+  const eligible = (state.eligibleAdmins || []).slice(0, 8);
+  const eligibleBlock = eligible.length
+    ? `<div class="muted" style="font-size:12px;margin-top:12px;padding:10px;background:var(--zebra);border-radius:6px;border:1px solid var(--line)">
+        <div style="margin-bottom:4px">可登录的 QQ：</div>
+        ${eligible.map(e => `<div style="font-family:ui-monospace,Consolas,monospace">· ${escapeHtml(e.qq)} <span class="muted" style="font-size:11px">${escapeHtml(e.source)}</span></div>`).join("")}
+        ${state.eligibleAdmins.length > 8 ? `<div style="margin-top:4px">… 还有 ${state.eligibleAdmins.length - 8} 个</div>` : ''}
+      </div>`
+    : `<div class="muted" style="font-size:12px;margin-top:12px">未检测到管理员 QQ。请在 .env.prod 配置 <code>SUPERUSERS=["你的QQ"]</code>。</div>`;
+  return `<div class="login-wrap"><div class="card"><div class="between">
+      <h2 style="margin:0">拟人插件 WebUI 登录</h2>
+      <button class="btn small" onclick="toggleTheme()" title="切换主题">${themeIcon}</button>
+    </div>
     <div id="login-step1">
       <label>管理员 QQ</label>
       <input id="login-qq" type="text" placeholder="例如 10001">
       <div style="margin-top:14px"><button class="btn primary" onclick="sendCode()">发送验证码</button></div>
       <p class="muted" style="margin-top:14px;font-size:12.5px">点击发送后，Bot 会向该 QQ 私聊推送 6 位数验证码，5 分钟内有效。</p>
+      ${eligibleBlock}
     </div>
     <div id="login-step2" style="display:none">
       <label>验证码（来自 Bot 私聊）</label>

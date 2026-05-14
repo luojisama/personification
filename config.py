@@ -61,6 +61,10 @@ class Config(BaseModel):
     personification_group_knowledge_interval_hours: int = 4
     personification_group_knowledge_daily_limit: int = 6
     personification_group_knowledge_min_messages: int = 50
+    personification_group_style_autobuild_enabled: bool = True
+    personification_group_style_interval_hours: int = 12
+    personification_group_style_daily_limit: int = 2
+    personification_group_style_min_messages: int = 100
     personification_image_host_allowlist: List[str] = []
     personification_active_learning_enabled: bool = False
     personification_active_learning_daily_quota: int = 5

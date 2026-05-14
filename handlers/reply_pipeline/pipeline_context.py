@@ -709,6 +709,20 @@ async def run_agent_if_enabled(
                     messages.append({"role": "system", "content": _block})
     except Exception:
         pass
+    # 注入群风格摘要（最近一次 group_style_autobuild 产出）
+    try:
+        _gid = str(getattr(event, "group_id", "") or "")
+        if _gid:
+            from ...core.group_style_autobuild import get_latest_style_text
+
+            _style_text = get_latest_style_text(_gid)
+            if _style_text:
+                messages.append({
+                    "role": "system",
+                    "content": f"## 本群风格画像\n{_style_text}\n\n回复时请贴合该群的语气、节奏和用语习惯。",
+                })
+    except Exception:
+        pass
     result = await run_agent(
         messages=messages,
         registry=runtime_registry,
