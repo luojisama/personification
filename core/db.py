@@ -253,10 +253,13 @@ def init_db_sync(data_dir: str | Path) -> Path:
     global _db_path
     _db_path = Path(data_dir) / DB_FILENAME
     with connect_sync(_db_path) as conn:
+        # 先迁移老表 schema，避免 DDL 循环里 CREATE INDEX 引用新列时
+        # 老表（缺该列）抛 OperationalError。
+        _ensure_group_style_schema(conn)
+        conn.commit()  # 让 DROP/CREATE 立即可见，下面的 DDL 才看到正确表
         for ddl in DDL_STATEMENTS:
             conn.execute(ddl)
         _ensure_group_message_schema(conn)
-        _ensure_group_style_schema(conn)
         conn.commit()
     return _db_path
 

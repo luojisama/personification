@@ -26,6 +26,45 @@ def _runtime_with_style(tmp_path: Path, monkeypatch):
     return SimpleNamespace(plugin_config=cfg, tmp_path=tmp_path)
 
 
+def test_init_db_migrates_old_group_style_schema(tmp_path: Path) -> None:
+    """旧版 group_style_snapshots 以 group_id 为 PK 单行；
+    init_db_sync 在升级时应自动 DROP 重建，避免 CREATE INDEX(created_at) 失败。
+    """
+    import sqlite3
+
+    db_mod = load_personification_module("plugin.personification.core.db")
+    db_path = tmp_path / db_mod.DB_FILENAME
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    # 模拟旧 schema：group_id 为 PK，没有 id/created_at
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE group_style_snapshots (
+                group_id TEXT PRIMARY KEY,
+                style_text TEXT NOT NULL DEFAULT '',
+                style_json TEXT NOT NULL DEFAULT '{}',
+                updated_at REAL NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.commit()
+
+    # 升级路径：不应抛 "no such column: created_at"
+    db_mod.init_db_sync(tmp_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("PRAGMA table_info(group_style_snapshots)").fetchall()
+        cols = [r[1] for r in rows]
+        assert "id" in cols
+        assert "created_at" in cols
+        idx_names = [
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='group_style_snapshots'"
+            ).fetchall()
+        ]
+        assert "idx_group_style_gid_ts" in idx_names
+
+
 def test_save_snapshot_caps_at_keep_n(_runtime_with_style) -> None:
     style_mod = load_personification_module("plugin.personification.core.group_style_autobuild")
     for i in range(5):

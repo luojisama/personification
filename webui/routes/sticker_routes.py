@@ -43,6 +43,21 @@ _ALLOWED_UPLOAD_SUFFIXES: frozenset[str] = frozenset({
 _MAX_UPLOAD_BYTES = 4 * 1024 * 1024
 
 
+def _multipart_available() -> bool:
+    """FastAPI 的 File/Form 依赖 python-multipart；缺失时不能注册 upload 端点，
+    否则 startup 会失败。这里探测一次，缺包则降级跳过上传功能（其他端点照常）。
+    """
+    try:
+        import multipart  # noqa: F401  python-multipart 包名是 multipart
+        return True
+    except Exception:
+        try:
+            import python_multipart  # 新版命名
+            return True
+        except Exception:
+            return False
+
+
 def _sticker_dir(runtime) -> Path:
     cfg = getattr(runtime, "plugin_config", None)
     raw_path = getattr(cfg, "personification_sticker_path", None) or "data/stickers"
@@ -171,51 +186,66 @@ def build_sticker_router(*, runtime) -> APIRouter:
         )
         return {"success": True, "trash_path": str(dest)}
 
-    @router.post("/upload")
-    async def upload_sticker(
-        file: UploadFile = File(...),
-        description: str = Form(default=""),
-        admin: AdminIdentity = Depends(require_admin),
-    ) -> dict:
-        filename = (file.filename or "").strip() or f"sticker_{int(time.time())}.png"
-        suffix = Path(filename).suffix.lower()
-        if suffix not in _ALLOWED_UPLOAD_SUFFIXES:
-            raise HTTPException(status_code=400, detail=f"不支持的扩展名：{suffix}")
-        payload = await file.read()
-        if not payload:
-            raise HTTPException(status_code=400, detail="空文件")
-        if len(payload) > _MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail=f"文件过大（>{_MAX_UPLOAD_BYTES // 1024 // 1024}MB）")
-        sticker_dir = _sticker_dir(runtime)
-        # 防覆盖：若同名存在加时间戳后缀
-        target = sticker_dir / filename
-        if target.exists():
-            target = sticker_dir / f"{Path(filename).stem}_{int(time.time())}{suffix}"
-        try:
-            target.write_bytes(payload)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"写入失败：{exc}")
-        # manifest 加占位条目（description 可由用户填或后续 labeler 补）
-        metadata = load_sticker_metadata(sticker_dir)
-        metadata[target.name] = normalize_sticker_entry(
-            {"description": description},
-            file_name=target.name,
-            file_hash=compute_file_hash(payload),
-        )
-        save_sticker_metadata_sync(sticker_dir, metadata)
-        webui_audit_log.record(
-            action="sticker_upload",
-            qq=admin.qq,
-            device_id=admin.device_id,
-            target=target.name,
-            detail={"size_bytes": len(payload), "has_description": bool(description)},
-        )
-        return {
-            "success": True,
-            "filename": target.name,
-            "size_bytes": len(payload),
-            "needs_labeling": not description,
-        }
+    if _multipart_available():
+        @router.post("/upload")
+        async def upload_sticker(
+            file: UploadFile = File(...),
+            description: str = Form(default=""),
+            admin: AdminIdentity = Depends(require_admin),
+        ) -> dict:
+            filename = (file.filename or "").strip() or f"sticker_{int(time.time())}.png"
+            suffix = Path(filename).suffix.lower()
+            if suffix not in _ALLOWED_UPLOAD_SUFFIXES:
+                raise HTTPException(status_code=400, detail=f"不支持的扩展名：{suffix}")
+            payload = await file.read()
+            if not payload:
+                raise HTTPException(status_code=400, detail="空文件")
+            if len(payload) > _MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail=f"文件过大（>{_MAX_UPLOAD_BYTES // 1024 // 1024}MB）")
+            sticker_dir = _sticker_dir(runtime)
+            # 防覆盖：若同名存在加时间戳后缀
+            target = sticker_dir / filename
+            if target.exists():
+                target = sticker_dir / f"{Path(filename).stem}_{int(time.time())}{suffix}"
+            try:
+                target.write_bytes(payload)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"写入失败：{exc}")
+            # manifest 加占位条目（description 可由用户填或后续 labeler 补）
+            metadata = load_sticker_metadata(sticker_dir)
+            metadata[target.name] = normalize_sticker_entry(
+                {"description": description},
+                file_name=target.name,
+                file_hash=compute_file_hash(payload),
+            )
+            save_sticker_metadata_sync(sticker_dir, metadata)
+            webui_audit_log.record(
+                action="sticker_upload",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=target.name,
+                detail={"size_bytes": len(payload), "has_description": bool(description)},
+            )
+            return {
+                "success": True,
+                "filename": target.name,
+                "size_bytes": len(payload),
+                "needs_labeling": not description,
+            }
+    else:
+        # 优雅降级：缺 python-multipart 时只注册占位端点，
+        # 用户调用 /upload 会得到 503 + 安装提示；其他端点（列表 / 编辑 / 删除 / 重扫）保持可用。
+        @router.post("/upload")
+        async def upload_sticker_unavailable(
+            admin: AdminIdentity = Depends(require_admin),
+        ) -> dict:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "上传功能未启用：bot 进程缺少 python-multipart 依赖。"
+                    "在 bot 的 venv 中执行：pip install python-multipart 后重启。"
+                ),
+            )
 
     @router.post("/rescan")
     async def rescan_stickers(
