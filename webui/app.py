@@ -225,8 +225,13 @@ let state = {
 };
 
 function readCookie(name) {
-  const m = document.cookie.match(new RegExp("(?:^|; )" + name.replace(/([.$?*|{}()\\[\\]\\\\/+^])/g, "\\$1") + "=([^;]*)"));
-  return m ? decodeURIComponent(m[1]) : "";
+  const items = (document.cookie || "").split("; ");
+  for (const it of items) {
+    if (it.startsWith(name + "=")) {
+      return decodeURIComponent(it.slice(name.length + 1));
+    }
+  }
+  return "";
 }
 
 async function api(path, opts = {}) {
