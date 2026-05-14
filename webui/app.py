@@ -162,12 +162,17 @@ main { padding:20px 26px; max-width:1400px; }
 .group-bar button.active { background:var(--accent); color:#0b0d12; border-color:transparent; }
 .toolbar { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
 .sticker-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:14px; }
-.sticker-card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px; cursor:pointer; transition:border-color .15s; }
+.sticker-card { position:relative; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px; cursor:pointer; transition:border-color .15s; }
 .sticker-card:hover { border-color:var(--accent); }
 .sticker-card img { width:100%; aspect-ratio:1; object-fit:contain; background:#0b0d12; border-radius:4px; }
+[data-theme="light"] .sticker-card img { background:#f3f5f8; }
 .sticker-meta { padding:6px 2px 0; }
 .sticker-name { font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
 .sticker-desc { font-size:13px; margin:4px 0; min-height:20px; }
+.sticker-delete-btn { position:absolute; top:6px; right:6px; width:24px; height:24px; border-radius:50%; border:none; background:rgba(0,0,0,0.55); color:#fff; font-size:14px; line-height:1; display:flex; align-items:center; justify-content:center; cursor:pointer; opacity:0; transition:opacity .15s, background .15s; }
+.sticker-card:hover .sticker-delete-btn, .sticker-delete-btn:focus { opacity:1; }
+.sticker-delete-btn:hover { background:var(--danger); }
+@media (hover:none) { .sticker-delete-btn { opacity:0.85; } }
 .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; vertical-align:middle; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .topbar { position:sticky; top:0; z-index:5; background:var(--bg); padding-bottom:10px; margin-bottom:14px; }
@@ -443,6 +448,7 @@ function renderStickers() {
       ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">已标</span>'
       : '<span class="tag" style="background:rgba(245,158,11,0.18);color:var(--warn)">待标</span>';
     return `<div class="sticker-card" onclick="openStickerEdit('${escapeAttr(s.filename)}')">
+      <button class="sticker-delete-btn" title="移到回收" onclick="event.stopPropagation();deleteStickerByName('${escapeAttr(s.filename)}')">×</button>
       <img src="${escapeAttr(s.thumbnail_url)}" loading="lazy" alt="${escapeAttr(s.filename)}">
       <div class="sticker-meta">
         <div class="sticker-name" title="${escapeAttr(s.filename)}">${escapeHtml(s.filename)}</div>
@@ -550,11 +556,19 @@ async function saveSticker() {
 
 async function deleteSticker() {
   const s = state.selectedSticker;
-  if (!confirm(`将 ${s.filename} 移到 trash 目录？可手动恢复。`)) return;
+  if (!s) return;
+  await deleteStickerByName(s.filename);
+  state.selectedSticker = null;
+}
+
+async function deleteStickerByName(name) {
+  if (!confirm(`将 ${name} 移到 trash 目录？可手动恢复。`)) return;
   try {
-    await api("/stickers/" + encodeURIComponent(s.filename), { method:"DELETE" });
-    alertFlash("ok", "已移到回收");
-    state.selectedSticker = null;
+    await api("/stickers/" + encodeURIComponent(name), { method:"DELETE" });
+    alertFlash("ok", `已移到回收：${name}`);
+    if (state.selectedSticker && state.selectedSticker.filename === name) {
+      state.selectedSticker = null;
+    }
     await loadView(); render();
   } catch (e) { alertFlash("err", "删除失败：" + e.message); }
 }
