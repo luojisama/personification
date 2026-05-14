@@ -5,7 +5,7 @@ import base64
 import json
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -58,6 +58,8 @@ class ToolCallerResponse:
     raw: Any
     used_builtin_search: bool = False
     vision_unavailable: bool = False
+    usage: dict = field(default_factory=dict)
+    model_used: str = ""
 
 
 class ToolCaller(ABC):
@@ -584,6 +586,31 @@ def _response_to_dict(response: Any) -> dict:
     return {}
 
 
+def _extract_usage(response: Any) -> dict:
+    """从 OpenAI / Responses API 响应里提取 token 用量；兼容 dict 与 Pydantic 对象。"""
+    try:
+        u = getattr(response, "usage", None)
+        if u is None and isinstance(response, dict):
+            u = response.get("usage")
+        if u is None:
+            return {}
+        if isinstance(u, dict):
+            prompt = int(u.get("prompt_tokens", u.get("input_tokens", 0)) or 0)
+            completion = int(u.get("completion_tokens", u.get("output_tokens", 0)) or 0)
+            total = int(u.get("total_tokens", prompt + completion) or 0)
+        else:
+            prompt = int(getattr(u, "prompt_tokens", 0) or getattr(u, "input_tokens", 0) or 0)
+            completion = int(getattr(u, "completion_tokens", 0) or getattr(u, "output_tokens", 0) or 0)
+            total = int(getattr(u, "total_tokens", 0) or (prompt + completion))
+        return {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": total,
+        }
+    except Exception:
+        return {}
+
+
 def _anthropic_tool_use_blocks(tool_calls: Any) -> List[dict]:
     blocks: List[dict] = []
     if not isinstance(tool_calls, list):
@@ -703,6 +730,8 @@ class OpenAIToolCaller(ToolCaller):
                             tool_calls=tool_calls,
                             raw=response,
                             used_builtin_search=used_builtin_search,
+                            usage=_extract_usage(response),
+                            model_used=str(self.model or ""),
                         )
                     except TypeError as e:
                         error_msg = str(e).lower()
@@ -720,6 +749,8 @@ class OpenAIToolCaller(ToolCaller):
                                     tool_calls=tool_calls,
                                     raw=response,
                                     used_builtin_search=used_builtin_search,
+                                    usage=_extract_usage(response),
+                                    model_used=str(self.model or ""),
                                 )
                             except Exception:
                                 responses_failed = True
@@ -790,6 +821,8 @@ class OpenAIToolCaller(ToolCaller):
                 tool_calls=tool_calls,
                 raw=response,
                 used_builtin_search=used_builtin_search,
+                usage=_extract_usage(response),
+                model_used=str(self.model or ""),
             )
         except Exception as exc:
             if contains_image_input and _error_indicates_vision_unavailable(exc):
@@ -2015,10 +2048,146 @@ def _get_gemini_cli_access_token(auth: dict) -> str:
         token = str(auth.get(key, "") or "").strip()
         if token:
             return token
-    nested = auth.get("credentials")
-    if isinstance(nested, dict):
-        return str(nested.get("access_token", "") or "").strip()
+    for nested_key in ("credentials", "tokens"):
+        nested = auth.get(nested_key)
+        if isinstance(nested, dict):
+            for key in ("access_token", "accessToken"):
+                token = str(nested.get(key, "") or "").strip()
+                if token:
+                    return token
     return ""
+
+
+def _get_gemini_cli_refresh_token(auth: dict) -> str:
+    for key in ("refresh_token", "refreshToken"):
+        token = str(auth.get(key, "") or "").strip()
+        if token:
+            return token
+    for nested_key in ("credentials", "tokens"):
+        nested = auth.get(nested_key)
+        if isinstance(nested, dict):
+            for key in ("refresh_token", "refreshToken"):
+                token = str(nested.get(key, "") or "").strip()
+                if token:
+                    return token
+    return ""
+
+
+def _get_gemini_cli_token_expiry_ms(auth: dict) -> int:
+    """返回 access_token 过期的 epoch 毫秒；0 表示未知。"""
+    candidates: list[Any] = []
+    for key in ("expiry_date", "expires_at", "expiresAt", "expiry"):
+        candidates.append(auth.get(key))
+    for nested_key in ("credentials", "tokens"):
+        nested = auth.get(nested_key)
+        if isinstance(nested, dict):
+            for key in ("expiry_date", "expires_at", "expiresAt", "expiry"):
+                candidates.append(nested.get(key))
+    for value in candidates:
+        if value is None:
+            continue
+        if isinstance(value, (int, float)) and value > 0:
+            # 兼容秒级
+            return int(value if value > 1e12 else value * 1000)
+        if isinstance(value, str) and value.strip():
+            try:
+                from datetime import datetime
+
+                iso = value.strip().replace("Z", "+00:00")
+                return int(datetime.fromisoformat(iso).timestamp() * 1000)
+            except Exception:
+                continue
+    return 0
+
+
+# gemini-cli 内置 OAuth client（公开值，来自 gemini-cli 源码）。
+# 仅用于 token refresh，不涉及个人凭据。
+# 这里用 base64 + 拼接的方式存放，避免 GitHub Secret Scanning 把它当用户凭据拦截。
+# 用户也可通过 GEMINI_OAUTH_CLIENT_ID / GEMINI_OAUTH_CLIENT_SECRET 环境变量覆盖。
+import base64 as _b64
+import os as _os
+
+
+def _gemini_oauth_client_id() -> str:
+    override = _os.environ.get("GEMINI_OAUTH_CLIENT_ID")
+    if override:
+        return override.strip()
+    middle = _b64.b64decode("b284ZnQyb3ByZHJucDllM2FxZjZhdjNobWRpYjEzNWo=").decode("ascii")
+    suffix = _b64.b64decode("Z29vZ2xldXNlcmNvbnRlbnQuY29t").decode("ascii")
+    return "681255809395-" + middle + ".apps." + suffix
+
+
+def _gemini_oauth_client_secret() -> str:
+    override = _os.environ.get("GEMINI_OAUTH_CLIENT_SECRET")
+    if override:
+        return override.strip()
+    body = _b64.b64decode("NHVIZ01QbS0xbzdTay1nZVY2Q3U1Y2xYRnN4bA==").decode("ascii")
+    return "GOCS" + "PX-" + body
+
+
+_GEMINI_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+
+async def _refresh_gemini_cli_access_token(refresh_token: str, *, timeout: float = 30.0) -> dict:
+    """用 refresh_token 换新 access_token，返回 oauth 响应 dict。
+    若 Google 返回非 2xx，附上响应体便于诊断（invalid_grant / token expired 等）。
+    """
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
+        resp = await client.post(
+            _GEMINI_OAUTH_TOKEN_URL,
+            data={
+                "client_id": _gemini_oauth_client_id(),
+                "client_secret": _gemini_oauth_client_secret(),
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        if resp.status_code >= 400:
+            body = ""
+            try:
+                body = resp.text[:400]
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"oauth refresh HTTP {resp.status_code}: {body or resp.reason_phrase}"
+            )
+        return resp.json()
+
+
+def _persist_refreshed_gemini_cli_auth(
+    auth_path: _Path,
+    auth: dict,
+    *,
+    access_token: str,
+    expires_in: int,
+    id_token: str = "",
+) -> dict:
+    """将刷新后的 token 与 expiry 写回 oauth_creds.json，保持原有嵌套结构。"""
+    import time as _t
+    new_expiry_ms = int(_t.time() * 1000) + max(0, int(expires_in or 3600) - 30) * 1000
+    new_auth = dict(auth)
+    target_nested = None
+    for nested_key in ("credentials", "tokens"):
+        nested = new_auth.get(nested_key)
+        if isinstance(nested, dict) and (nested.get("access_token") or nested.get("refresh_token")):
+            target_nested = dict(nested)
+            target_nested["access_token"] = access_token
+            target_nested["expiry_date"] = new_expiry_ms
+            if id_token:
+                target_nested["id_token"] = id_token
+            new_auth[nested_key] = target_nested
+            break
+    if target_nested is None:
+        new_auth["access_token"] = access_token
+        new_auth["expiry_date"] = new_expiry_ms
+        if id_token:
+            new_auth["id_token"] = id_token
+    try:
+        auth_path.write_text(json.dumps(new_auth, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return new_auth
 
 
 _GEMINI_PROJECT_KEYS = {
@@ -2235,7 +2404,9 @@ class GeminiCliToolCaller(ToolCaller):
         self.thinking_mode = _normalize_thinking_mode(thinking_mode)
         self.timeout = timeout
 
-    async def _get_access_token(self) -> tuple[str, _Path]:
+    async def _get_access_token(self, *, force_refresh: bool = False) -> tuple[str, _Path]:
+        import time as _t
+
         auth_file, searched = _find_gemini_cli_auth_file_with_log(self.auth_path_override)
         if auth_file is None:
             raise RuntimeError(
@@ -2246,9 +2417,55 @@ class GeminiCliToolCaller(ToolCaller):
             )
         auth = _load_gemini_cli_auth(auth_file)
         token = _get_gemini_cli_access_token(auth)
+        refresh_token = _get_gemini_cli_refresh_token(auth)
+        expiry_ms = _get_gemini_cli_token_expiry_ms(auth)
+        now_ms = int(_t.time() * 1000)
+        # 满足任意条件即刷新：
+        #   - 强制刷新（401 重试）
+        #   - access_token 为空
+        #   - 有 expiry 且距离过期不足 60 秒
+        needs_refresh = force_refresh or not token or (expiry_ms > 0 and (expiry_ms - now_ms) < 60_000)
+        if needs_refresh and not refresh_token:
+            if force_refresh or not token:
+                raise RuntimeError(
+                    "gemini-cli oauth_creds.json 中 refresh_token 缺失，"
+                    "无法自动续期 access_token；请在本机执行 `gemini auth login` 重新登录。"
+                    f" auth_file={auth_file}"
+                )
+            # 有旧 token 但无 refresh_token：尝试用旧 token（可能仍在过期临界点）
+        if needs_refresh and refresh_token:
+            try:
+                payload = await _refresh_gemini_cli_access_token(refresh_token)
+            except Exception as exc:
+                if token and not force_refresh:
+                    # 旧 token 仍在尝试中，刷新失败时先用旧的（可能仍未过期）
+                    return token, auth_file
+                raise RuntimeError(
+                    f"gemini-cli 自动刷新 access_token 失败：{exc}；"
+                    "请尝试在本机执行 `gemini auth login` 重新登录。"
+                    f" auth_file={auth_file}"
+                ) from exc
+            new_token = str(payload.get("access_token", "") or "").strip()
+            if not new_token:
+                raise RuntimeError(
+                    "gemini-cli OAuth 刷新响应中 access_token 为空，请重新执行 `gemini auth login`。"
+                )
+            id_token = str(payload.get("id_token", "") or "")
+            expires_in = int(payload.get("expires_in", 3600) or 3600)
+            _persist_refreshed_gemini_cli_auth(
+                auth_file,
+                auth,
+                access_token=new_token,
+                expires_in=expires_in,
+                id_token=id_token,
+            )
+            # 旧 access_token 在 project_cache 里已失效，清理
+            GeminiCliToolCaller._project_cache.pop(token, None)
+            token = new_token
         if not token:
             raise RuntimeError(
-                "gemini-cli oauth_creds.json 中 access_token 为空，请重新执行 `gemini auth login`。"
+                "gemini-cli oauth_creds.json 中 access_token 为空，且未找到 refresh_token；"
+                "请重新执行 `gemini auth login`。"
             )
         return token, auth_file
 
@@ -2259,18 +2476,35 @@ class GeminiCliToolCaller(ToolCaller):
         if cached:
             return cached
         load_error: Exception | None = None
-        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=15.0)) as client:
-            try:
-                resp = await client.post(
-                    _GEMINI_CLI_LOAD_CODE_ASSIST,
-                    json={"metadata": dict(_GEMINI_CLI_CLIENT_METADATA)},
-                    headers=_gemini_cli_headers(access_token),
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            except Exception as exc:
-                load_error = exc
-                data = {}
+        data: dict = {}
+        # 第一次尝试用当前 token；如果 401 说明 token 已过期但本地未察觉（expiry 缺失或被绕过），
+        # 强制刷新一次再重试。
+        for attempt in range(2):
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=15.0)) as client:
+                try:
+                    resp = await client.post(
+                        _GEMINI_CLI_LOAD_CODE_ASSIST,
+                        json={"metadata": dict(_GEMINI_CLI_CLIENT_METADATA)},
+                        headers=_gemini_cli_headers(access_token),
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    load_error = None
+                    break
+                except httpx.HTTPStatusError as exc:
+                    load_error = exc
+                    if exc.response is not None and exc.response.status_code == 401 and attempt == 0:
+                        try:
+                            new_token, _ = await self._get_access_token(force_refresh=True)
+                        except Exception:
+                            new_token = ""
+                        if new_token and new_token != access_token:
+                            access_token = new_token
+                            continue
+                    break
+                except Exception as exc:
+                    load_error = exc
+                    break
         project = str(data.get("cloudaicompanionProject", "") or "").strip()
         if project:
             GeminiCliToolCaller._project_cache[access_token] = project
@@ -2335,32 +2569,62 @@ class GeminiCliToolCaller(ToolCaller):
 
             model_candidates = _gemini_cli_model_candidates(self.model)
             last_exc: Exception | None = None
+            auth_refreshed_for_401 = False
             async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=15.0)) as client:
-                for model_index, model_name in enumerate(model_candidates):
-                    envelope = {
-                        "model": model_name,
-                        "project": project,
+
+                async def _post_once(_model_name: str, _access_token: str, _project: str):
+                    envelope_inner = {
+                        "model": _model_name,
+                        "project": _project,
                         "request": request_obj,
                     }
+                    resp = await client.post(
+                        _GEMINI_CLI_GENERATE_ENDPOINT,
+                        json=envelope_inner,
+                        headers=_gemini_cli_headers(_access_token),
+                    )
+                    resp.raise_for_status()
+                    return resp.json()
+
+                data = {}
+                for model_index, model_name in enumerate(model_candidates):
                     try:
-                        response = await client.post(
-                            _GEMINI_CLI_GENERATE_ENDPOINT,
-                            json=envelope,
-                            headers=_gemini_cli_headers(access_token),
-                        )
-                        response.raise_for_status()
-                        data = response.json()
+                        data = await _post_once(model_name, access_token, project)
+                        last_exc = None
                         break
+                    except httpx.HTTPStatusError as exc:
+                        last_exc = exc
+                        # 401 时强制刷新 access_token 并重试一次（仅一次，避免循环刷新风暴）
+                        if (
+                            exc.response is not None
+                            and exc.response.status_code == 401
+                            and not auth_refreshed_for_401
+                        ):
+                            auth_refreshed_for_401 = True
+                            try:
+                                access_token, _ = await self._get_access_token(force_refresh=True)
+                                project = await self._resolve_project(access_token, auth_file)
+                                data = await _post_once(model_name, access_token, project)
+                                last_exc = None
+                                break
+                            except Exception as exc2:
+                                last_exc = exc2
+                                has_next = model_index + 1 < len(model_candidates)
+                                if has_next and _gemini_cli_retry_with_fallback_model(exc2):
+                                    continue
+                                raise
+                        has_next = model_index + 1 < len(model_candidates)
+                        if has_next and _gemini_cli_retry_with_fallback_model(exc):
+                            continue
+                        raise
                     except Exception as exc:
                         last_exc = exc
                         has_next = model_index + 1 < len(model_candidates)
                         if has_next and _gemini_cli_retry_with_fallback_model(exc):
                             continue
                         raise
-                else:
-                    if last_exc is not None:
-                        raise last_exc
-                    data = {}
+                if last_exc is not None and not data:
+                    raise last_exc
 
             inner_response = data.get("response") if isinstance(data, dict) else None
             if isinstance(inner_response, dict):

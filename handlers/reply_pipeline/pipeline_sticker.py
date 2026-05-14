@@ -79,7 +79,58 @@ _BLOCKED_IMAGE_HOSTS = {
     "0.0.0.0",
     "host.docker.internal",
 }
+# QQ 协议常见图片下载域名。NTQQ 客户端会把图片下载请求重定向到
+# 198.18.0.0/15 这种 RFC2544 测试网段（实际是客户端内部代理），按通用 SSRF
+# 规则会被当作"内网/保留 IP"拒绝。这里把腾讯系图床显式信任，跳过 IP 解析检查。
+_TRUSTED_IMAGE_HOST_SUFFIXES: tuple[str, ...] = (
+    ".qq.com",
+    ".qq.com.cn",
+    ".qpic.cn",
+    ".gtimg.com",
+    ".gtimg.cn",
+    ".myqcloud.com",
+    ".tencent-cloud.net",
+)
+# 由 set_image_host_allowlist() 在插件启动时填充，反映用户的
+# personification_image_host_allowlist 配置项。
+_USER_IMAGE_HOST_ALLOWLIST: tuple[str, ...] = ()
 _MAX_IMAGE_REDIRECTS = 5
+
+
+def set_image_host_allowlist(suffixes: list[str] | tuple[str, ...] | str | None) -> None:
+    """配置由用户追加的可信图片域名后缀列表。
+
+    入参可以是 list / tuple / 逗号分隔字符串；空值会清空覆盖。
+    每项会被自动 lowercase + 加前导 "."（如果缺失）。
+    """
+    global _USER_IMAGE_HOST_ALLOWLIST
+    items: list[str] = []
+    raw_iter: list[str]
+    if suffixes is None:
+        raw_iter = []
+    elif isinstance(suffixes, str):
+        raw_iter = [part.strip() for part in suffixes.split(",")]
+    else:
+        raw_iter = [str(part or "") for part in suffixes]
+    for raw in raw_iter:
+        cleaned = raw.strip().lower()
+        if not cleaned:
+            continue
+        if not cleaned.startswith("."):
+            cleaned = "." + cleaned
+        if cleaned not in items:
+            items.append(cleaned)
+    _USER_IMAGE_HOST_ALLOWLIST = tuple(items)
+
+
+def _is_image_host_trusted(host: str) -> bool:
+    if not host:
+        return False
+    target = host.lower()
+    for suffix in _TRUSTED_IMAGE_HOST_SUFFIXES + _USER_IMAGE_HOST_ALLOWLIST:
+        if target.endswith(suffix):
+            return True
+    return False
 
 
 @dataclass
@@ -320,6 +371,10 @@ async def _is_safe_remote_image_url(url: str, logger: Any) -> bool:
     if host in _BLOCKED_IMAGE_HOSTS or host.endswith(_BLOCKED_IMAGE_HOST_SUFFIXES):
         logger.warning(f"拟人插件：拒绝访问高风险图片地址 host={host}")
         return False
+    # 信任的图床域名（QQ 系 + 用户配置 allowlist）跳过 IP 解析检查，
+    # 解决 NTQQ 把图片重定向到 198.18.0.0/15 客户端代理时被误判为内网的问题。
+    if _is_image_host_trusted(host):
+        return True
 
     try:
         literal_ip = ipaddress.ip_address(host)

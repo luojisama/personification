@@ -698,6 +698,17 @@ async def run_agent_if_enabled(
         messages=messages,
         turn_plan=turn_plan,
     )
+    try:
+        profile_service = getattr(runtime, "profile_service", None)
+        if profile_service is not None:
+            _gid = str(getattr(event, "group_id", "") or "")
+            _uid = str(getattr(event, "user_id", "") or "")
+            if _uid:
+                _block = profile_service.build_prompt_block(user_id=_uid, group_id=_gid)
+                if _block:
+                    messages.append({"role": "system", "content": _block})
+    except Exception:
+        pass
     result = await run_agent(
         messages=messages,
         registry=runtime_registry,

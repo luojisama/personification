@@ -57,6 +57,11 @@ class Config(BaseModel):
     personification_cross_verify_enabled: bool = False
     personification_lorebook_enabled: bool = False
     personification_group_knowledge_enabled: bool = False
+    personification_group_knowledge_autobuild_enabled: bool = True
+    personification_group_knowledge_interval_hours: int = 4
+    personification_group_knowledge_daily_limit: int = 6
+    personification_group_knowledge_min_messages: int = 50
+    personification_image_host_allowlist: List[str] = []
     personification_active_learning_enabled: bool = False
     personification_active_learning_daily_quota: int = 5
     personification_relation_evolution_enabled: bool = False

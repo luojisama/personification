@@ -9,8 +9,11 @@ from fastapi.responses import HTMLResponse
 from .routes.auth_routes import build_auth_router
 from .routes.config_routes import build_config_router
 from .routes.group_routes import build_group_router
+from .routes.memory_routes import build_memory_router
 from .routes.metrics_routes import build_metrics_router
 from .routes.persona_routes import build_persona_router
+from .routes.skill_routes import build_skill_router
+from .routes.test_routes import build_test_router
 
 
 @dataclass
@@ -57,6 +60,9 @@ def build_router() -> APIRouter:
     router.include_router(build_metrics_router(runtime=runtime))
     router.include_router(build_persona_router(runtime=runtime))
     router.include_router(build_group_router(runtime=runtime))
+    router.include_router(build_skill_router(runtime=runtime))
+    router.include_router(build_test_router(runtime=runtime))
+    router.include_router(build_memory_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -124,8 +130,13 @@ main { padding:22px 28px; }
 .alert.err { background:rgba(248,113,113,0.14); color:var(--danger); }
 .alert.info { background:rgba(106,168,255,0.14); color:var(--accent); }
 .group-bar { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
-.group-bar button { padding:5px 12px; border-radius:99px; border:1px solid var(--line); background:transparent; color:var(--muted); }
+.group-bar button { padding:5px 12px; border-radius:99px; border:1px solid var(--line); background:transparent; color:var(--muted); cursor:pointer; }
+.group-bar button:hover { color:var(--text); border-color:var(--accent); }
 .group-bar button.active { background:var(--accent); color:#0b0d12; border-color:transparent; }
+.toolbar { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
+.spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; vertical-align:middle; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.topbar { position:sticky; top:0; z-index:5; background:var(--bg); padding-bottom:10px; margin-bottom:14px; }
 .login-wrap { max-width:380px; margin:80px auto 0; }
 .login-wrap .card { padding:28px; }
 .login-wrap h2 { margin:0 0 16px; }
@@ -141,12 +152,15 @@ th { color:var(--muted); font-weight:500; font-size:12px; }
 <script>
 const API = "/personification/api";
 let state = {
-  logged: false, qq: "", view: "config",
-  entries: [], groups: [], activeGroup: null,
-  devices: [], alert: null,
+  logged: false, qq: "", view: "dashboard",
+  entries: [], groups: [], activeGroup: null, configSearch: "",
+  devices: [], alert: null, loading: false,
   dashboard: null, dashboardWindow: "month",
-  personas: [], selectedPersona: null,
-  groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupMemory: [],
+  personas: [], selectedPersona: null, personaSearch: "",
+  groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [],
+  skills: [], skillFilter: "",
+  testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null,
+  memory: null, memoryFilter: "", memoryInnerState: null,
 };
 
 async function api(path, opts = {}) {
@@ -169,22 +183,37 @@ async function bootstrap() {
 }
 
 async function loadView() {
-  if (state.view === "config") {
-    const data = await api("/config/entries");
-    state.entries = data.entries; state.groups = data.groups;
-    if (!state.activeGroup || !state.groups.includes(state.activeGroup)) state.activeGroup = state.groups[0] || null;
-  } else if (state.view === "devices") {
-    const data = await api("/auth/devices");
-    state.devices = data.devices; state.currentDeviceId = data.current_device_id;
-  } else if (state.view === "dashboard") {
-    state.dashboard = await api("/metrics/summary?window=" + encodeURIComponent(state.dashboardWindow));
-  } else if (state.view === "personas") {
-    const data = await api("/personas");
-    state.personas = data.profiles; state.personasAvailable = data.available;
-  } else if (state.view === "groups") {
-    const data = await api("/groups");
-    state.groupList = data.groups; state.groupsAvailable = data.available;
-  }
+  state.loading = true;
+  try {
+    if (state.view === "config") {
+      const data = await api("/config/entries");
+      state.entries = data.entries; state.groups = data.groups;
+      if (!state.activeGroup || !state.groups.includes(state.activeGroup)) state.activeGroup = state.groups[0] || null;
+    } else if (state.view === "devices") {
+      const data = await api("/auth/devices");
+      state.devices = data.devices; state.currentDeviceId = data.current_device_id;
+    } else if (state.view === "dashboard") {
+      state.dashboard = await api("/metrics/summary?window=" + encodeURIComponent(state.dashboardWindow));
+    } else if (state.view === "personas") {
+      const data = await api("/personas");
+      state.personas = data.profiles; state.personasAvailable = data.available;
+    } else if (state.view === "groups") {
+      const data = await api("/groups");
+      state.groupList = data.groups; state.groupsAvailable = data.available;
+    } else if (state.view === "skills") {
+      const data = await api("/skills");
+      state.skills = data.skills; state.skillsAvailable = data.available;
+    } else if (state.view === "test") {
+      /* nothing to preload */
+    } else if (state.view === "memory") {
+      const [mem, inner] = await Promise.all([
+        api("/memory/recent?limit=80" + (state.memoryFilter?`&memory_type=${encodeURIComponent(state.memoryFilter)}`:"")),
+        api("/memory/inner-state").catch(() => ({available: false})),
+      ]);
+      state.memory = mem;
+      state.memoryInnerState = inner;
+    }
+  } finally { state.loading = false; }
 }
 
 function render() {
@@ -211,11 +240,17 @@ function renderLayout() {
       </nav>
     </aside>
     <main>
-      ${state.alert ? `<div class="alert ${state.alert.kind}">${escapeHtml(state.alert.text)}</div>` : ''}
-      <div class="between" style="margin-bottom:14px">
-        <div class="muted">登录 QQ：${escapeHtml(state.qq)}</div>
-        <button class="btn small" onclick="doLogout()">退出登录</button>
+      <div class="topbar between">
+        <div>
+          <strong style="font-size:18px">${escapeHtml(viewTitle())}</strong>
+          ${state.loading ? '<span class="spinner" style="margin-left:10px"></span>' : ''}
+        </div>
+        <div class="row">
+          <span class="muted">${escapeHtml(state.qq)}</span>
+          <button class="btn small" onclick="doLogout()">退出</button>
+        </div>
       </div>
+      ${state.alert ? `<div class="alert ${state.alert.kind}">${escapeHtml(state.alert.text)}</div>` : ''}
       ${renderView()}
     </main>
   </div>`;
@@ -227,11 +262,58 @@ function renderView() {
   if (state.view === "dashboard") return renderDashboard();
   if (state.view === "personas") return renderPersonas();
   if (state.view === "groups") return renderGroups();
-  return `<div class="card"><h2>${escapeHtml(viewTitle())}</h2><p class="muted">该视图在后续版本上线（M5）。</p></div>`;
+  if (state.view === "skills") return renderSkills();
+  if (state.view === "test") return renderTest();
+  if (state.view === "memory") return renderMemory();
+  return `<div class="card"><h2>${escapeHtml(viewTitle())}</h2><p class="muted">该视图暂未实现。</p></div>`;
+}
+
+function renderMemory() {
+  const mem = state.memory;
+  const inner = state.memoryInnerState;
+  if (!mem) return `<div class="card muted">加载中…</div>`;
+  if (!mem.palace_enabled) {
+    return `<div class="card"><h2>Agent 记忆</h2>
+      <p class="muted">memory palace 未启用。要查看长期记忆，需在配置中开启 <code>personification_memory_palace_enabled</code>。</p></div>`;
+  }
+  const filters = ["", "group_knowledge", "user_persona", "event", "fact"].map(t =>
+    `<button class="${state.memoryFilter===t?'active':''}" onclick="pickMemoryFilter('${t}')">${t || '全部'}</button>`
+  ).join("");
+  const rows = (mem.items || []).map(it => `<tr>
+    <td><span class="tag">${escapeHtml(it.memory_type||'-')}</span></td>
+    <td><code style="font-size:11px">${escapeHtml(it.group_id||'')}${it.user_id ? '/'+escapeHtml(it.user_id) : ''}</code></td>
+    <td>${escapeHtml(it.summary)}</td>
+    <td class="muted" style="font-size:12px">conf=${it.confidence.toFixed(2)}<br>sal=${it.salience.toFixed(2)}</td>
+    <td class="muted" style="font-size:12px">${it.updated_at?new Date(it.updated_at*1000).toLocaleString():'-'}</td>
+  </tr>`).join("");
+  let innerBlock = '';
+  if (inner && inner.available) {
+    const s = inner.state || {};
+    const warm = s.relation_warmth || {};
+    const warmRows = Object.keys(warm).slice(0,12).map(k => `<tr><td><code>${escapeHtml(k)}</code></td><td>${typeof warm[k]==='number'?warm[k].toFixed(2):escapeHtml(String(warm[k]))}</td></tr>`).join("");
+    innerBlock = `<div class="card"><h2>Inner State（情绪/能量/关系）</h2>
+      <div class="row" style="gap:30px;flex-wrap:wrap">
+        <div><div class="muted">mood</div><div style="font-size:18px;margin-top:4px">${escapeHtml(String(s.mood||'-'))}</div></div>
+        <div><div class="muted">energy</div><div style="font-size:18px;margin-top:4px">${escapeHtml(String(s.energy||'-'))}</div></div>
+        <div><div class="muted">pending</div><div style="font-size:13px;margin-top:4px">${escapeHtml(String(s.pending_thoughts||'-')).slice(0,80)||'-'}</div></div>
+      </div>
+      ${warmRows ? `<h3 style="margin-top:14px;margin-bottom:6px;font-size:13px">用户好感度</h3><table style="max-width:420px"><thead><tr><th>用户</th><th>好感</th></tr></thead><tbody>${warmRows}</tbody></table>`:''}</div>`;
+  }
+  return `${innerBlock}
+    <div class="group-bar">${filters}</div>
+    <div class="card"><h2>长期记忆（${(mem.items||[]).length}）</h2>
+      <table><thead><tr><th>类型</th><th>作用域</th><th>摘要</th><th>分数</th><th>更新</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="5" class="muted">暂无记忆条目</td></tr>'}</tbody></table>
+    </div>`;
+}
+
+async function pickMemoryFilter(t) {
+  state.memoryFilter = t;
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
 
 function viewTitle() {
-  return ({dashboard:"仪表盘",personas:"用户画像",groups:"群信息",memory:"Agent 记忆",skills:"Skill 管理",test:"模型测试"})[state.view] || state.view;
+  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",skills:"Skill 管理",test:"模型测试",devices:"设备管理"})[state.view] || state.view;
 }
 
 function renderDashboard() {
@@ -315,12 +397,14 @@ function renderGroups() {
 async function openGroup(gid) {
   try {
     state.selectedGroup = gid;
-    const [personas, style] = await Promise.all([
+    const [personas, style, knowledge] = await Promise.all([
       api("/groups/" + encodeURIComponent(gid) + "/personas"),
       api("/groups/" + encodeURIComponent(gid) + "/style"),
+      api("/groups/" + encodeURIComponent(gid) + "/knowledge").catch(() => ({knowledge: []})),
     ]);
     state.groupPersonas = personas.profiles;
     state.groupStyle = style;
+    state.groupKnowledge = knowledge.knowledge || [];
     render();
   } catch (e) { alertFlash("err", e.message); }
 }
@@ -333,20 +417,124 @@ function renderGroupDetail() {
     <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
   </tr>`).join("");
   const style = state.groupStyle || {};
+  const knowledgeRows = (state.groupKnowledge || []).map(k => `<tr>
+    <td><strong>${escapeHtml(k.term)}</strong></td>
+    <td>${escapeHtml(k.definition)}</td>
+    <td class="muted" style="font-size:12px">${escapeHtml(k.source_kind || '')}</td>
+    <td class="muted" style="font-size:12px">${k.updated_at ? new Date(k.updated_at*1000).toLocaleDateString() : '-'}</td>
+  </tr>`).join("");
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
-    <div class="card"><h2>群风格</h2>${style.style_text ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(style.style_text)}</pre>` : '<p class="muted">暂无群风格快照（待 M5 自主构建）</p>'}</div>
+    <div class="card"><h2>群风格</h2>${style.style_text ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(style.style_text)}</pre>` : '<p class="muted">暂无群风格快照（待自主总结产出）</p>'}</div>
+    <div class="card"><h2>群知识库（${(state.groupKnowledge||[]).length}）</h2>
+      ${knowledgeRows ? `<table><thead><tr><th>术语</th><th>解释</th><th>来源</th><th>更新</th></tr></thead><tbody>${knowledgeRows}</tbody></table>` : '<p class="muted">暂无群知识。开启「群知识库自动构建」后会定时扫描并写入。</p>'}</div>
     <div class="card"><h2>群内成员画像（${state.groupPersonas.length}）</h2>
       <table><thead><tr><th>QQ</th><th>摘要</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="muted">无</td></tr>'}</tbody></table></div>`;
 }
 
-function renderConfig() {
-  const groupBar = state.groups.map(g => `<button class="${g===state.activeGroup?'active':''}" onclick="pickGroup('${escapeAttr(g)}')">${escapeHtml(g)}</button>`).join("");
-  const items = state.entries.filter(e => e.group === state.activeGroup);
-  return `<div class="group-bar">${groupBar}</div>
-    <div class="card">
-      <h2>${escapeHtml(state.activeGroup || '配置')}</h2>
-      ${items.map(renderField).join("")}
+function renderSkills() {
+  if (state.skillsAvailable === false) return `<div class="card muted">tool_registry 未就绪</div>`;
+  const search = (state.skillFilter || "").trim().toLowerCase();
+  const items = search ? state.skills.filter(s => s.name.toLowerCase().includes(search) || (s.description||"").toLowerCase().includes(search)) : state.skills;
+  const rows = items.map(s => {
+    const active = s.enabled_by_config && !s.user_disabled;
+    return `<tr>
+      <td><strong>${escapeHtml(s.name)}</strong>${s.category ? ` <span class="tag">${escapeHtml(s.category)}</span>` : ''}</td>
+      <td class="muted" style="font-size:12.5px">${escapeHtml((s.description||"").slice(0,140))}</td>
+      <td>${active ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">启用</span>' : '<span class="tag" style="background:rgba(248,113,113,0.18);color:var(--danger)">禁用</span>'}</td>
+      <td>
+        <div class="toggle">
+          <button class="${!s.user_disabled?'on':''}" onclick="toggleSkill('${escapeAttr(s.name)}', false)">开</button>
+          <button class="${s.user_disabled?'on':''}" onclick="toggleSkill('${escapeAttr(s.name)}', true)">关</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+  return `<div class="toolbar">
+      <input type="search" placeholder="搜索 skill 名称…" value="${escapeAttr(state.skillFilter)}" oninput="state.skillFilter=this.value;render()" style="flex:1;max-width:340px">
+      <span class="muted">共 ${state.skills.length} 个 skill</span>
+    </div>
+    <div class="card"><h2>Skill 启停</h2>
+      <table><thead><tr><th>名称</th><th>说明</th><th>状态</th><th>开关</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">无 skill</td></tr>'}</tbody></table>
+      <p class="muted" style="margin-top:10px;font-size:12px">仅启停内置 skillpack；新增 skillpack 仍需在文件系统放入 plugin/personification/skills/skillpacks/ 后重启。</p>
     </div>`;
+}
+
+async function toggleSkill(name, disabled) {
+  try {
+    await api(`/skills/${encodeURIComponent(name)}/toggle`, { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({disabled}) });
+    alertFlash("ok", `${name} 已${disabled?'禁用':'启用'}`);
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "切换失败：" + e.message); }
+}
+
+function renderTest() {
+  const r = state.testResult;
+  return `<div class="card">
+    <h2>模型调用测试</h2>
+    <label class="muted">system prompt</label>
+    <textarea oninput="state.testSystem=this.value" style="width:100%;min-height:60px;margin:6px 0">${escapeHtml(state.testSystem)}</textarea>
+    <label class="muted">用户消息</label>
+    <textarea oninput="state.testPrompt=this.value" style="width:100%;min-height:80px;margin:6px 0">${escapeHtml(state.testPrompt)}</textarea>
+    <div class="row" style="margin-top:10px"><button class="btn primary" onclick="runTest()">发送</button>${state.testLoading?'<span class="muted">调用中…</span>':''}</div>
+  </div>
+  ${r ? `<div class="card"><h2>响应</h2>
+    <div class="row muted" style="font-size:12px;margin-bottom:8px">
+      <span>模型 <code>${escapeHtml(r.model_used||'未知')}</code></span>
+      <span>finish=${escapeHtml(r.finish_reason||'')}</span>
+      <span>${r.duration_ms}ms</span>
+      <span>tokens prompt=${r.usage?.prompt_tokens||0} completion=${r.usage?.completion_tokens||0}</span>
+    </div>
+    <pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(r.content||'(无内容)')}</pre>
+  </div>` : ''}`;
+}
+
+async function runTest() {
+  state.testLoading = true; render();
+  try {
+    state.testResult = await api("/test/chat", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({prompt: state.testPrompt, system: state.testSystem}) });
+  } catch (e) { alertFlash("err", "调用失败：" + e.message); }
+  state.testLoading = false; render();
+}
+
+function renderConfig() {
+  const search = (state.configSearch || "").trim().toLowerCase();
+  let items = state.entries;
+  let activeGroup = state.activeGroup;
+  if (search) {
+    items = items.filter(e =>
+      e.field_name.toLowerCase().includes(search)
+      || (e.label || "").toLowerCase().includes(search)
+      || (e.description || "").toLowerCase().includes(search)
+    );
+    activeGroup = null;
+  } else if (activeGroup) {
+    items = items.filter(e => e.group === activeGroup);
+  }
+  const groupBar = !search ? state.groups.map(g => {
+    const count = state.entries.filter(e => e.group === g).length;
+    return `<button class="${g===activeGroup?'active':''}" onclick="pickGroup('${escapeAttr(g)}')">${escapeHtml(g)} <span class="muted" style="font-size:11px">${count}</span></button>`;
+  }).join("") : "";
+  const heading = search ? `搜索结果（${items.length}）` : (activeGroup || '配置');
+  return `<div class="toolbar">
+      <input type="search" placeholder="搜索字段名 / 标签 / 描述…" value="${escapeAttr(state.configSearch)}" oninput="state.configSearch=this.value;render()" style="flex:1;max-width:340px">
+      <button class="btn" onclick="applyRecommended()">应用推荐默认值</button>
+    </div>
+    ${groupBar ? `<div class="group-bar">${groupBar}</div>` : ''}
+    <div class="card">
+      <h2>${escapeHtml(heading)}</h2>
+      ${items.length ? items.map(renderField).join("") : '<p class="muted">无匹配字段</p>'}
+    </div>`;
+}
+
+async function applyRecommended() {
+  if (!confirm("将一组推荐配置写入 .env.prod 与 env.json，覆盖现有值。继续？")) return;
+  try {
+    const result = await api("/config/apply-recommended", { method:"POST", headers:{"content-type":"application/json"}, body: "{}" });
+    const lines = [`已应用 ${result.applied.length} 项`];
+    if (result.skipped.length) lines.push(`跳过 ${result.skipped.length}：` + result.skipped.map(s=>s.field_name).slice(0,3).join("、"));
+    alertFlash("ok", lines.join("；"));
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "应用失败：" + e.message); }
 }
 
 function renderField(e) {

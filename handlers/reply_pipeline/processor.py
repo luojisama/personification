@@ -289,6 +289,16 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
     types = deps.types
     started_at = time.monotonic()
 
+    try:
+        from ...core.llm_context import set_llm_context
+        set_llm_context(
+            group_id=str(getattr(event, "group_id", "") or ""),
+            user_id=str(getattr(event, "user_id", "") or ""),
+            purpose="reply",
+        )
+    except Exception:
+        pass
+
     if hasattr(event, "message_id") and runtime.is_msg_processed(event.message_id):
         return
 

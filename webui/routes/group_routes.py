@@ -110,4 +110,36 @@ def build_group_router(*, runtime) -> APIRouter:
             raise HTTPException(status_code=500, detail=str(exc))
         return {"group_id": group_id, "items": items}
 
+    @router.get("/{group_id}/knowledge")
+    async def group_knowledge(
+        group_id: str,
+        limit: int = 50,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        store = _memory_store(runtime)
+        if store is None:
+            raise HTTPException(status_code=503, detail="memory_store 未就绪")
+        try:
+            items = list(
+                store.list_recent_memories(
+                    group_id=group_id,
+                    limit=max(1, min(int(limit), 200)),
+                    memory_type="group_knowledge",
+                )
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        knowledge = []
+        for item in items:
+            knowledge.append(
+                {
+                    "term": item.get("term", "") or item.get("summary", "").split(":")[0],
+                    "definition": item.get("definition", "") or item.get("summary", ""),
+                    "source_kind": item.get("source_kind", ""),
+                    "confidence": float(item.get("confidence", 0) or 0),
+                    "updated_at": float(item.get("updated_at", 0) or 0),
+                }
+            )
+        return {"group_id": group_id, "knowledge": knowledge}
+
     return router

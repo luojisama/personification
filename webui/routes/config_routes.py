@@ -14,6 +14,43 @@ from ..schemas import (
 )
 
 
+_RECOMMENDED_DEFAULTS: dict[str, Any] = {
+    "personification_tts_global_enabled": True,
+    "personification_tts_mode": "clone",
+    "personification_tts_model": "mimo-v2.5-tts-voiceclone",
+    "personification_persona_history_max": 100,
+    "personification_persona_snippet_max_chars": 200,
+    "personification_persona_enabled": True,
+    "personification_sticker_probability": 0.1,
+    "personification_qzone_enabled": True,
+    "personification_qzone_proactive_enabled": True,
+    "personification_qzone_check_interval": 90,
+    "personification_qzone_daily_limit": 3,
+    "personification_qzone_min_interval_hours": 6,
+    "personification_labeler_enabled": True,
+    "personification_labeler_concurrency": 3,
+    "personification_proactive_enabled": True,
+    "personification_proactive_threshold": 50,
+    "personification_proactive_daily_limit": 5,
+    "personification_proactive_interval": 10,
+    "personification_proactive_probability": 1,
+    "personification_proactive_idle_hours": 24.0,
+    "personification_probability": 0.35,
+    "personification_poke_probability": 0.5,
+    "personification_agent_enabled": True,
+    "personification_agent_max_steps": 5,
+    "personification_builtin_search": True,
+    "personification_thinking_mode": "none",
+    "personification_state_thinking_mode": "adaptive",
+    "personification_60s_enabled": True,
+    "personification_60s_api_base": "https://60s.viki.moe",
+    "personification_group_knowledge_autobuild_enabled": True,
+    "personification_group_knowledge_interval_hours": 4,
+    "personification_group_knowledge_daily_limit": 6,
+    "personification_group_knowledge_min_messages": 50,
+}
+
+
 def _entry_to_view(entry: Any, *, plugin_config: Any) -> ConfigEntryView:
     sources = env_writer.resolve_value_sources(entry.field_name, plugin_config)
     return ConfigEntryView(
@@ -62,6 +99,45 @@ def build_config_router(*, runtime) -> APIRouter:
                     view.sources["env_json"] = "***"
         groups = sorted({view.group for view in entries})
         return ConfigEntriesResponse(entries=entries, groups=groups)
+
+    @router.get("/recommended-defaults")
+    async def recommended_defaults(_: AdminIdentity = Depends(require_admin)) -> dict:
+        return {"defaults": _RECOMMENDED_DEFAULTS}
+
+    @router.post("/apply-recommended")
+    async def apply_recommended(
+        body: dict | None = None,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        fields = (body or {}).get("fields")
+        applied: list[str] = []
+        skipped: list[dict] = []
+        for field_name, value in _RECOMMENDED_DEFAULTS.items():
+            if isinstance(fields, list) and field_name not in fields:
+                continue
+            entry = None
+            for candidate in config_registry.get_config_entries("global"):
+                if candidate.field_name == field_name:
+                    entry = candidate
+                    break
+            if entry is None:
+                skipped.append({"field_name": field_name, "reason": "未注册到 ConfigEntry"})
+                continue
+            try:
+                normalized = entry.normalize_value(value)
+            except ValueError as exc:
+                skipped.append({"field_name": field_name, "reason": str(exc)})
+                continue
+            result = env_writer.write_both(field_name, normalized, runtime.plugin_config)
+            if result["errors"]:
+                skipped.append({"field_name": field_name, "reason": "；".join(result["errors"])})
+                continue
+            try:
+                setattr(runtime.plugin_config, field_name, normalized)
+            except Exception:
+                pass
+            applied.append(field_name)
+        return {"applied": applied, "skipped": skipped}
 
     @router.post("/value", response_model=ConfigUpdateResponse)
     async def update_value(

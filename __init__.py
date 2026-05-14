@@ -395,6 +395,51 @@ async def _init_personification_persona_store() -> None:
 
 
 @get_driver().on_startup
+async def _apply_personification_image_host_allowlist() -> None:
+    try:
+        from .handlers.reply_pipeline.pipeline_sticker import set_image_host_allowlist
+
+        raw = getattr(plugin_config, "personification_image_host_allowlist", []) or []
+        set_image_host_allowlist(raw)
+        if raw:
+            logger.info(f"[image_safety] 已加载用户图片域名白名单: {list(raw)}")
+    except Exception as exc:
+        logger.warning(f"[image_safety] 加载图片域名白名单失败: {exc}")
+
+
+@get_driver().on_startup
+async def _register_personification_group_knowledge() -> None:
+    bundle = _require_runtime_bundle()
+    try:
+        from .core.group_knowledge_autobuild import (
+            register_group_knowledge_autobuild_job,
+            register_propose_group_knowledge_tool,
+        )
+    except Exception as exc:
+        logger.warning(f"[group_knowledge] 加载失败：{exc}")
+        return
+    registry = getattr(bundle, "tool_registry", None)
+    memory_store = getattr(bundle, "memory_store", None)
+    if registry is not None and memory_store is not None:
+        register_propose_group_knowledge_tool(
+            registry=registry,
+            memory_store=memory_store,
+            logger=logger,
+        )
+    deps = getattr(bundle, "reply_processor_deps", None)
+    runtime_inner = getattr(deps, "runtime", None) if deps is not None else None
+    tool_caller = getattr(runtime_inner, "agent_tool_caller", None) if runtime_inner is not None else None
+    if memory_store is not None and tool_caller is not None:
+        register_group_knowledge_autobuild_job(
+            scheduler=scheduler,
+            plugin_config=plugin_config,
+            memory_store=memory_store,
+            tool_caller=tool_caller,
+            logger=logger,
+        )
+
+
+@get_driver().on_startup
 async def _install_personification_webui() -> None:
     from .webui import install_webui
     from .core.admin_acl import load_plugin_admins

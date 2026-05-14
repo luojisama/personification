@@ -646,6 +646,23 @@ async def run_agent(
             use_builtin_search,
         )
         model_elapsed_ms = int((time.monotonic() - model_started_at) * 1000)
+        try:
+            usage = getattr(response, "usage", None) or {}
+            if isinstance(usage, dict) and (usage.get("prompt_tokens") or usage.get("completion_tokens")):
+                from ...core import llm_context as _llm_ctx
+                from ...core import token_ledger as _ledger
+
+                ctx = _llm_ctx.current_llm_context()
+                _ledger.record_llm_call(
+                    model=str(getattr(response, "model_used", "") or ""),
+                    prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+                    completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+                    group_id=str(ctx.get("group_id", "") or ""),
+                    user_id=str(ctx.get("user_id", "") or ""),
+                    purpose=str(ctx.get("purpose", "") or "agent"),
+                )
+        except Exception:
+            pass
         content_len = len(str(response.content or "").strip())
         logger.info(
             f"[agent] step={_step + 1} finish_reason={response.finish_reason} "
