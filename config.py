@@ -291,6 +291,8 @@ class Config(BaseModel):
     personification_group_idle_check_interval: int = 15
     # 每个群每天最多主动发话次数（默认 1）
     personification_group_idle_daily_limit: int = 1
+    # J4: 主动水群两阶段——多大概率额外跑一次"决定模式"LLM call，0=永远纯文本（旧行为）
+    personification_group_idle_mode_decision_prob: float = 0.4
     # Bot 刚接过话后，保留一段“活跃窗口”，更容易继续顺着当前话题聊
     personification_group_chat_active_minutes: int = 12
     personification_group_chat_follow_probability: float = 0.96

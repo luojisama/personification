@@ -22,6 +22,13 @@ async def build_group_knowledge(
 ) -> int:
     if not tool_caller or not memory_store or not chat_summary:
         return 0
+    token = None
+    try:
+        from .llm_context import reset_llm_context, set_llm_context
+
+        token = set_llm_context(purpose="group_knowledge", group_id=str(group_id or ""))
+    except Exception:
+        token = None
     try:
         response = await tool_caller.chat_with_tools(
             messages=[
@@ -31,8 +38,19 @@ async def build_group_knowledge(
             tools=[],
             use_builtin_search=False,
         )
+        try:
+            from .token_ledger import record_response_usage
+            record_response_usage(response)
+        except Exception:
+            pass
     except Exception:
         return 0
+    finally:
+        if token is not None:
+            try:
+                reset_llm_context(token)
+            except Exception:
+                pass
 
     content = str(getattr(response, "content", "") or "").strip()
     try:

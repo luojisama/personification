@@ -151,12 +151,24 @@ async def update_inner_state_after_chat(
             "{conversation_summary}",
             f"{recent_summary}{persona_context}",
         )
+        token = None
+        try:
+            from ..core.llm_context import reset_llm_context, set_llm_context
+
+            token = set_llm_context(purpose="inner_state_chat")
+        except Exception:
+            token = None
         try:
             response = await tool_caller.chat_with_tools(
                 messages=[{"role": "user", "content": prompt}],
                 tools=[],
                 use_builtin_search=False,
             )
+            try:
+                from ..core.token_ledger import record_response_usage
+                record_response_usage(response)
+            except Exception:
+                pass
             updated_fields = json.loads(response.content or "{}")
             if not isinstance(updated_fields, dict):
                 raise ValueError("inner state update is not a JSON object")
@@ -167,6 +179,12 @@ async def update_inner_state_after_chat(
             )
         except Exception as e:
             logger.warning(f"[inner_state] update failed: {e}")
+        finally:
+            if token is not None:
+                try:
+                    reset_llm_context(token)
+                except Exception:
+                    pass
 
 
 async def update_state_from_diary(
@@ -193,12 +211,24 @@ async def update_state_from_diary(
             "{today}",
             datetime.now().strftime("%Y-%m-%d"),
         )
+        token = None
+        try:
+            from ..core.llm_context import reset_llm_context, set_llm_context
+
+            token = set_llm_context(purpose="inner_state_diary")
+        except Exception:
+            token = None
         try:
             response = await tool_caller.chat_with_tools(
                 messages=[{"role": "user", "content": prompt}],
                 tools=[],
                 use_builtin_search=False,
             )
+            try:
+                from ..core.token_ledger import record_response_usage
+                record_response_usage(response)
+            except Exception:
+                pass
             updated_fields = json.loads(response.content or "{}")
             if not isinstance(updated_fields, dict):
                 raise ValueError("diary state update is not a JSON object")
@@ -209,3 +239,9 @@ async def update_state_from_diary(
             )
         except Exception as e:
             logger.warning(f"[inner_state] diary update failed: {e}")
+        finally:
+            if token is not None:
+                try:
+                    reset_llm_context(token)
+                except Exception:
+                    pass

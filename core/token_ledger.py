@@ -5,6 +5,50 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .db import connect_sync
+from .llm_context import current_llm_context
+
+
+def record_response_usage(
+    response: Any,
+    *,
+    purpose: str = "",
+    model_fallback: str = "",
+) -> None:
+    """便捷 helper：拿到 ToolCallerResponse 后调一次，自动从 llm_context 取 group/user/purpose。
+
+    用法：
+        from ..core.llm_context import set_llm_context, reset_llm_context
+        from ..core.token_ledger import record_response_usage
+
+        token = set_llm_context(purpose="user_persona", user_id=uid)
+        try:
+            response = await tool_caller.chat_with_tools(...)
+            record_response_usage(response, model_fallback=tool_caller.model)
+        finally:
+            reset_llm_context(token)
+
+    `purpose` 参数为空时从 contextvar 读，让 callers 既能 set_llm_context（推荐），
+    也能直接调 record_response_usage(response, purpose="...") 一行搞定。
+    """
+    try:
+        usage = getattr(response, "usage", None) or {}
+        if not isinstance(usage, dict):
+            return
+        prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+        completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+        if prompt_tokens == 0 and completion_tokens == 0:
+            return
+        ctx = current_llm_context()
+        record_llm_call(
+            model=str(getattr(response, "model_used", "") or model_fallback or ""),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            group_id=str(ctx.get("group_id", "") or ""),
+            user_id=str(ctx.get("user_id", "") or ""),
+            purpose=str(purpose or ctx.get("purpose", "") or "direct_call"),
+        )
+    except Exception:
+        pass
 
 
 def _today() -> str:
@@ -201,6 +245,37 @@ def query_summary(window: str = "month") -> dict[str, Any]:
             """,
             (start_str,),
         ).fetchall()
+        # purpose 维度：从 purpose 字段抽 functional 部分（剥离 `|provider=xxx` 尾巴）
+        by_purpose_rows = conn.execute(
+            """
+            SELECT purpose,
+                   SUM(prompt_tokens) AS prompt_tokens,
+                   SUM(completion_tokens) AS completion_tokens,
+                   SUM(total_tokens) AS total_tokens,
+                   SUM(call_count) AS call_count
+            FROM token_usage_ledger
+            WHERE bucket_day >= ? AND purpose != ''
+            GROUP BY purpose
+            ORDER BY total_tokens DESC
+            LIMIT 50
+            """,
+            (start_str,),
+        ).fetchall()
+    by_purpose_agg: dict[str, dict[str, int]] = {}
+    for row in by_purpose_rows:
+        raw_purpose = str(row["purpose"] or "")
+        # 提取 functional 段（如 `user_persona|provider=openai` → `user_persona`）
+        functional = raw_purpose.split("|", 1)[0].strip() or "unknown"
+        bucket_row = by_purpose_agg.setdefault(
+            functional,
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "call_count": 0},
+        )
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"):
+            bucket_row[key] = int(bucket_row[key]) + int(row[key] or 0)
+    by_purpose_list = [
+        {"purpose": k, **v}
+        for k, v in sorted(by_purpose_agg.items(), key=lambda kv: -kv[1]["total_tokens"])
+    ]
     return {
         "window": window,
         "start_day": start_str,
@@ -208,6 +283,7 @@ def query_summary(window: str = "month") -> dict[str, Any]:
         "by_day": [_row_to_dict(r, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="bucket_day") for r in by_day],
         "by_model": [_row_to_dict(r, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="model") for r in by_model],
         "by_group": [_row_to_dict(r, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="group_id") for r in by_group],
+        "by_purpose": by_purpose_list,
     }
 
 

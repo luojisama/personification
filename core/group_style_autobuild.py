@@ -181,6 +181,13 @@ async def build_group_style(
     """调 LLM 抽取群风格 5 维度 JSON，写 snapshot 并返回。"""
     if not tool_caller or not chat_summary:
         return {}
+    token = None
+    try:
+        from .llm_context import reset_llm_context, set_llm_context
+
+        token = set_llm_context(purpose="group_style", group_id=str(group_id or ""))
+    except Exception:
+        token = None
     try:
         response = await tool_caller.chat_with_tools(
             messages=[
@@ -190,8 +197,19 @@ async def build_group_style(
             tools=[],
             use_builtin_search=False,
         )
+        try:
+            from .token_ledger import record_response_usage
+            record_response_usage(response)
+        except Exception:
+            pass
     except Exception:
         return {}
+    finally:
+        if token is not None:
+            try:
+                reset_llm_context(token)
+            except Exception:
+                pass
     content = str(getattr(response, "content", "") or "").strip()
     style_json: dict[str, Any] = {}
     try:

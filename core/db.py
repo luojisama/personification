@@ -176,6 +176,23 @@ DDL_STATEMENTS = (
     """
     CREATE INDEX IF NOT EXISTS idx_webui_audit_action ON webui_audit_log(action, ts DESC)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS proactive_diagnostics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts REAL NOT NULL,
+        scope TEXT NOT NULL,            -- 'private' / 'group_idle' / 'qzone'
+        target TEXT NOT NULL DEFAULT '', -- user_id / group_id / ''
+        outcome TEXT NOT NULL,          -- 'sent' / 'skip_X' (X = reason code)
+        detail TEXT NOT NULL DEFAULT '{}',
+        next_eligible_at REAL DEFAULT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_proactive_diag_ts ON proactive_diagnostics(ts DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_proactive_diag_scope ON proactive_diagnostics(scope, ts DESC)
+    """,
 )
 
 

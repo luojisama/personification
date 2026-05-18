@@ -1004,6 +1004,24 @@ def _build_entries() -> list[ConfigEntry]:
             parser=_bool_parser,
         ),
         ConfigEntry(
+            key="group_idle_mode_decision_prob",
+            field_name="personification_group_idle_mode_decision_prob",
+            display_name="水群模式决策概率",
+            value_type="float",
+            default=0.4,
+            scope=GLOBAL_SCOPE,
+            description=(
+                "主动水群触发时，多大概率额外调一次 LLM 决定模式（纯文本 / 仅表情包 / 文本+表情包）。"
+                "0 表示永远纯文本（与 J4 之前的行为一致）；1 表示每次都决策。"
+                "决策会多花一次 LLM 调用，但能让 bot 像真人一样偶尔只丢个表情包。"
+            ),
+            category="config",
+            min_value=0.0,
+            max_value=1.0,
+            help_aliases=("两阶段水群", "水群模式概率"),
+            parser=_float_parser,
+        ),
+        ConfigEntry(
             key="group_knowledge_autobuild_enabled",
             field_name="personification_group_knowledge_autobuild_enabled",
             display_name="群知识库自动构建",

@@ -182,7 +182,7 @@ class PersonaStore:
         self._generating.add(uid)
         try:
             previous = self.get_persona(uid)
-            result = await self._call_persona_llm(history, previous)
+            result = await self._call_persona_llm(history, previous, user_id=str(user_id))
             if not result:
                 return None
             entry = PersonaEntry(data=result, time=int(time.time()))
@@ -194,7 +194,7 @@ class PersonaStore:
     async def _generate_and_save(self, user_id: str, history: list[str]) -> None:
         try:
             previous = self.get_persona(user_id)
-            result = await self._call_persona_llm(history, previous)
+            result = await self._call_persona_llm(history, previous, user_id=str(user_id))
             if result:
                 entry = PersonaEntry(data=result, time=int(time.time()))
                 await asyncio.to_thread(self._save_persona_sync, user_id, entry, True)
@@ -227,17 +227,41 @@ class PersonaStore:
                 conn.execute("DELETE FROM persona_histories WHERE user_id=?", (user_id,))
             conn.commit()
 
-    async def _call_persona_llm(self, messages: list[str], previous: PersonaEntry | None) -> str | None:
+    async def _call_persona_llm(
+        self,
+        messages: list[str],
+        previous: PersonaEntry | None,
+        *,
+        user_id: str = "",
+    ) -> str | None:
         prompt = build_persona_prompt(messages, previous.data if previous else None)
+        token = None
+        try:
+            from .llm_context import reset_llm_context, set_llm_context
+
+            token = set_llm_context(purpose="user_persona", user_id=str(user_id or ""))
+        except Exception:
+            token = None
         try:
             response = await self._tool_caller.chat_with_tools(
                 messages=[{"role": "user", "content": prompt}],
                 tools=[],
                 use_builtin_search=False,
             )
+            try:
+                from .token_ledger import record_response_usage
+                record_response_usage(response)
+            except Exception:
+                pass
         except Exception as e:
             self._logger.warning(f"[user_persona] LLM 调用失败: {e}")
             return None
+        finally:
+            if token is not None:
+                try:
+                    reset_llm_context(token)
+                except Exception:
+                    pass
         text = str(getattr(response, "content", "") or "").strip()
         return text or None
 

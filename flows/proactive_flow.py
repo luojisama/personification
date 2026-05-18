@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio as _asyncio
 import random
 import re as _re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 
@@ -80,6 +80,17 @@ SKIP|{{原因（给自己的备注，如"现在没什么想说的"）}}
 - 禁止任何以"哇"或"哎呀"开头的句子
 - 避免模板感句式：不要连续使用"你之前不是..."、"上次那个..."、"我这边突然想到..."这类回访口吻
 """
+
+GROUP_IDLE_MODE_DECISION_PROMPT = """你正在决定怎样回应群里的冷场，已经准备好一段话题：「{topic}」。
+群风格：{group_style}
+
+你的任务：从下面三种模式选一种，输出严格 JSON（不带 ```、不带额外解释）：
+1) text  —— 只发文字话题（适合需要明确表达的场景）
+2) sticker —— 只发一张表情包替代文字（适合纯气氛带动、群已经在玩梗时）
+3) combo —— 文字 + 一张配图表情包（适合情绪强烈、想强化效果时）
+
+输出格式：{{"mode":"text|sticker|combo","mood":"<2-6 字情绪/场景标签，如 调侃 / 困倦 / 兴奋 / 无奈>"}}"""
+
 
 GROUP_IDLE_TOPIC_PROMPT = """[角色设定]
 {system_prompt}
@@ -595,6 +606,149 @@ def _increment_group_idle_count(
     proactive_state[key] = state
 
 
+async def _decide_idle_output_mode(
+    *,
+    call_ai_api: Callable[..., Awaitable[Optional[str]]],
+    topic: str,
+    group_style: str,
+    logger: Any,
+    group_id: str,
+) -> tuple[str, str]:
+    """J4 phase-1: 用 LLM 决定群水群输出模式 (text/sticker/combo) 和情绪标签。
+    返回 (mode, mood_hint)；任何失败都 fallback 到 ('text', '')。
+    """
+    prompt = GROUP_IDLE_MODE_DECISION_PROMPT.format(
+        topic=str(topic or "")[:120],
+        group_style=str(group_style or "")[:60],
+    )
+    token = None
+    try:
+        from ..core.llm_context import reset_llm_context, set_llm_context
+
+        token = set_llm_context(
+            purpose="proactive_group_idle_mode",
+            group_id=str(group_id or ""),
+        )
+    except Exception:
+        token = None
+    try:
+        raw = await call_ai_api([{"role": "user", "content": prompt}])
+    except Exception as e:
+        logger.debug(f"[group_idle] mode decision LLM call failed: {e}")
+        return ("text", "")
+    finally:
+        if token is not None:
+            try:
+                reset_llm_context(token)
+            except Exception:
+                pass
+    if not raw:
+        return ("text", "")
+    import json as _json
+    import re as _re
+
+    candidate = str(raw).strip()
+    # 容错：剥掉可能的 ```json 包装
+    candidate = _re.sub(r"^```(?:json)?\s*", "", candidate)
+    candidate = _re.sub(r"\s*```\s*$", "", candidate)
+    try:
+        data = _json.loads(candidate)
+    except Exception:
+        match = _re.search(r"\{[^{}]*\}", candidate)
+        if not match:
+            return ("text", "")
+        try:
+            data = _json.loads(match.group(0))
+        except Exception:
+            return ("text", "")
+    if not isinstance(data, dict):
+        return ("text", "")
+    mode = str(data.get("mode", "text") or "text").strip().lower()
+    if mode not in {"text", "sticker", "combo"}:
+        mode = "text"
+    mood = str(data.get("mood", "") or "").strip()[:24]
+    return (mode, mood)
+
+
+async def _try_send_idle_sticker(
+    *,
+    bot: Any,
+    group_id: str,
+    runtime_bundle: Any,
+    plugin_config: Any,
+    mood_hint: str,
+    topic_text_fallback: str,
+    logger: Any,
+) -> bool:
+    """J4: 在群里发一张语义匹配 mood_hint 的表情包；失败返 False 让调用方回退到文本。"""
+    try:
+        from ..core.sticker_library import (
+            list_local_sticker_files,
+            load_sticker_metadata,
+            resolve_sticker_dir,
+        )
+        from ..core.sticker_feedback import (
+            get_sticker_decay_multiplier,
+            load_sticker_feedback,
+            record_sticker_sent,
+        )
+    except Exception as e:
+        logger.debug(f"[group_idle] sticker imports failed: {e}")
+        return False
+    try:
+        sticker_dir = resolve_sticker_dir(getattr(plugin_config, "personification_sticker_path", None))
+        files = list_local_sticker_files(sticker_dir, include_gif=True)
+        if not files:
+            return False
+        metadata = load_sticker_metadata(sticker_dir)
+        # 拉一次 feedback state 算衰减倍数
+        try:
+            feedback_state = await load_sticker_feedback()
+        except Exception:
+            feedback_state = {}
+        # 简单匹配：按 mood_tags / scene_tags 命中 hint 关键字，结合衰减权重
+        hint_text = (str(mood_hint or "") + " " + str(topic_text_fallback or "")).strip()
+        scored: list[tuple[float, str]] = []
+        for file_path in files:
+            entry = metadata.get(file_path.name) or {}
+            if not isinstance(entry, dict):
+                continue
+            score = 0.0
+            for tag in list(entry.get("mood_tags", []) or []) + list(entry.get("scene_tags", []) or []):
+                if str(tag).strip() and str(tag).strip() in hint_text:
+                    score += 1.0
+            if not score:
+                # 至少要有 description 才候选，跳过未打标
+                if not entry.get("description"):
+                    continue
+                score = 0.2
+            weight = float(entry.get("weight", 1.0) or 1.0)
+            try:
+                decay = float(get_sticker_decay_multiplier(file_path.name, feedback_state))
+            except Exception:
+                decay = 1.0
+            scored.append((score * weight * decay, file_path.name))
+        if not scored:
+            return False
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_name = scored[0][1]
+        best_path = sticker_dir / best_name
+        if not best_path.exists():
+            return False
+        # OneBot v11 CQ 码发送
+        cq = f"[CQ:image,file=file:///{best_path.resolve().as_posix().lstrip('/')}]"
+        await bot.send_group_msg(group_id=int(group_id), message=cq)
+        try:
+            await record_sticker_sent(best_name)
+        except Exception:
+            pass
+        logger.info(f"[group_idle] 群 {group_id} 选发表情包 {best_name}（mood_hint='{mood_hint[:20]}'）")
+        return True
+    except Exception as e:
+        logger.warning(f"[group_idle] sticker send failed for group {group_id}: {e}")
+        return False
+
+
 async def run_proactive_messaging(
     *,
     plugin_config: Any,
@@ -618,11 +772,15 @@ async def run_proactive_messaging(
 ) -> bool:
     _ = get_user_data, get_level_name, get_activity_status, parse_yaml_response, agent_tool_caller
 
+    from ..core import proactive_diagnostics as _diag
+
     if not getattr(plugin_config, "personification_proactive_enabled", True):
+        _diag.record(scope="private", outcome=_diag.SKIP_DISABLED, detail={"reason": "proactive_enabled=False"})
         return False
     if not sign_in_available and not bool(
         getattr(plugin_config, "personification_proactive_without_signin", True)
     ):
+        _diag.record(scope="private", outcome=_diag.SKIP_OTHER, detail={"reason": "no_signin"})
         return False
     allow_unsuitable_prob = float(
         max(
@@ -665,11 +823,26 @@ async def run_proactive_messaging(
     min_interval = max(1, int(getattr(plugin_config, "personification_proactive_interval", 30)))
     if total_today_count >= daily_limit:
         save_proactive_state(proactive_state)
+        _diag.record(
+            scope="private",
+            outcome=_diag.SKIP_DAILY_LIMIT,
+            detail={"today_count": total_today_count, "daily_limit": daily_limit},
+            next_eligible_at=(now.replace(hour=0, minute=0, second=0) + timedelta(days=1)).timestamp(),
+        )
         return False
 
     now_ts = now.timestamp()
     if last_proactive_at and now_ts - last_proactive_at < min_interval * 60:
         save_proactive_state(proactive_state)
+        _diag.record(
+            scope="private",
+            outcome=_diag.SKIP_COOLDOWN,
+            detail={
+                "since_last_seconds": int(now_ts - last_proactive_at),
+                "min_interval_minutes": min_interval,
+            },
+            next_eligible_at=last_proactive_at + min_interval * 60,
+        )
         return False
 
     inner_state = dict(DEFAULT_STATE)
@@ -753,16 +926,36 @@ async def run_proactive_messaging(
         user_id="user_id",
     )
 
-    decision = await call_ai_api(
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-    )
+    _purpose_token = None
+    try:
+        from ..core.llm_context import reset_llm_context, set_llm_context
+
+        _purpose_token = set_llm_context(purpose="proactive_private")
+    except Exception:
+        _purpose_token = None
+    try:
+        decision = await call_ai_api(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+    finally:
+        if _purpose_token is not None:
+            try:
+                reset_llm_context(_purpose_token)
+            except Exception:
+                pass
     action, target_user_id, payload = _parse_decision(decision or "")
     payload = _strip_xml_message_content(payload)
     if action != "SEND" or not target_user_id or not payload:
         save_proactive_state(proactive_state)
+        _diag.record(
+            scope="private",
+            outcome=_diag.SKIP_LLM_DECIDED,
+            target=target_user_id,
+            detail={"action": action, "raw_decision_len": len(str(decision or ""))},
+        )
         return False
 
     target = next((item for item in candidates if item["user_id"] == target_user_id), None)
@@ -781,9 +974,21 @@ async def run_proactive_messaging(
     )
     if random.random() > proactive_probability:
         save_proactive_state(proactive_state)
+        _diag.record(
+            scope="private",
+            outcome=_diag.SKIP_PROBABILITY,
+            target=target_user_id,
+            detail={"probability": proactive_probability},
+        )
         return False
 
     await bot.send_private_msg(user_id=int(target_user_id), message=payload)
+    _diag.record(
+        scope="private",
+        outcome=_diag.OUTCOME_SENT,
+        target=target_user_id,
+        detail={"len": len(payload)},
+    )
 
     user_state = _normalize_user_state(now, proactive_state.get(target_user_id, {}))
     user_state["count"] = int(user_state.get("count", 0) or 0) + 1
@@ -968,6 +1173,16 @@ async def run_group_idle_topic(
                 superuser_context=superuser_context,
             )
 
+            _gi_token = None
+            try:
+                from ..core.llm_context import reset_llm_context, set_llm_context
+
+                _gi_token = set_llm_context(
+                    purpose="proactive_group_idle",
+                    group_id=str(group_id or ""),
+                )
+            except Exception:
+                _gi_token = None
             try:
                 topic = await call_ai_api(
                     [
@@ -978,6 +1193,12 @@ async def run_group_idle_topic(
             except Exception as e:
                 logger.warning(f"[group_idle] call_ai_api failed for group {group_id}: {e}")
                 continue
+            finally:
+                if _gi_token is not None:
+                    try:
+                        reset_llm_context(_gi_token)
+                    except Exception:
+                        pass
 
             topic = _strip_xml_message_content(topic or "")
             if not topic or topic.startswith("[") or len(topic) < 2:
@@ -990,8 +1211,57 @@ async def run_group_idle_topic(
             if random.random() > proactive_probability:
                 continue
 
+            # J4 阶段二：决定模式 text / sticker / combo（按概率门控避免每次都多花 token）
+            mode_decision_prob = float(
+                max(0.0, min(1.0, getattr(
+                    plugin_config,
+                    "personification_group_idle_mode_decision_prob",
+                    0.4,
+                )))
+            )
+            chosen_mode = "text"
+            sticker_mood_hint = ""
+            if random.random() < mode_decision_prob:
+                chosen_mode, sticker_mood_hint = await _decide_idle_output_mode(
+                    call_ai_api=call_ai_api,
+                    topic=topic,
+                    group_style=group_style,
+                    logger=logger,
+                    group_id=group_id,
+                )
+
             try:
-                await bot.send_group_msg(group_id=int(group_id), message=topic)
+                # 根据 chosen_mode 决定发送方式
+                if chosen_mode == "sticker":
+                    sticker_sent = await _try_send_idle_sticker(
+                        bot=bot,
+                        group_id=group_id,
+                        runtime_bundle=getattr(plugin_config, "_runtime_bundle_ref", None),
+                        plugin_config=plugin_config,
+                        mood_hint=sticker_mood_hint or topic,
+                        topic_text_fallback=topic,
+                        logger=logger,
+                    )
+                    if not sticker_sent:
+                        # 表情包发送失败回退到文本
+                        await bot.send_group_msg(group_id=int(group_id), message=topic)
+                    elif chosen_mode == "combo":
+                        # combo 已在 _try_send_idle_sticker 内发了表情，这里不再补
+                        pass
+                elif chosen_mode == "combo":
+                    await bot.send_group_msg(group_id=int(group_id), message=topic)
+                    # 异步追加 sticker（不阻塞回 sent_count 计数）
+                    await _try_send_idle_sticker(
+                        bot=bot,
+                        group_id=group_id,
+                        runtime_bundle=getattr(plugin_config, "_runtime_bundle_ref", None),
+                        plugin_config=plugin_config,
+                        mood_hint=sticker_mood_hint or topic,
+                        topic_text_fallback="",
+                        logger=logger,
+                    )
+                else:
+                    await bot.send_group_msg(group_id=int(group_id), message=topic)
                 sent_now = get_now()
                 sent_now_ts = sent_now.timestamp()
                 sent_today = sent_now.strftime("%Y-%m-%d")

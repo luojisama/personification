@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 
 from .routes.audit_routes import build_audit_router
 from .routes.auth_routes import build_auth_router
+from .routes.proactive_routes import build_proactive_router
 from .routes.config_routes import build_config_router
 from .routes.group_routes import build_group_router
 from .routes.memory_routes import build_memory_router
@@ -68,6 +69,7 @@ def build_router() -> APIRouter:
     router.include_router(build_memory_router(runtime=runtime))
     router.include_router(build_sticker_router(runtime=runtime))
     router.include_router(build_audit_router(runtime=runtime))
+    router.include_router(build_proactive_router(runtime=runtime))
     router.include_router(build_quota_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
@@ -229,6 +231,7 @@ let state = {
   stickers: null, stickerSearch: "", selectedSticker: null,
   theme: "dark", mobileNavOpen: false, eligibleAdmins: [],
   audit: null, auditFilter: "",
+  proactiveStats: null, proactiveRecent: null, proactiveScope: "",
 };
 
 function readCookie(name) {
@@ -309,6 +312,15 @@ async function loadView() {
       state.skills = data.skills; state.skillsAvailable = data.available;
     } else if (state.view === "test") {
       /* nothing to preload */
+    } else if (state.view === "proactive") {
+      const qs = new URLSearchParams({ since_hours: "72" });
+      if (state.proactiveScope) qs.set("scope", state.proactiveScope);
+      const [stats, recent] = await Promise.all([
+        api("/proactive/stats?" + qs.toString()),
+        api("/proactive/recent?limit=80" + (state.proactiveScope?`&scope=${encodeURIComponent(state.proactiveScope)}`:"")),
+      ]);
+      state.proactiveStats = stats;
+      state.proactiveRecent = recent;
     } else if (state.view === "audit") {
       const qs = new URLSearchParams({ limit: "150" });
       if (state.auditFilter) qs.set("action", state.auditFilter);
@@ -353,6 +365,7 @@ function renderLayout() {
         ${navItem('stickers','表情包')}
         ${navItem('skills','Skill 管理')}
         ${navItem('test','模型测试')}
+        ${navItem('proactive','主动诊断')}
         ${navItem('audit','审计日志')}
         ${navItem('devices','设备管理')}
       </nav>
@@ -389,7 +402,96 @@ function renderView() {
   if (state.view === "memory") return renderMemory();
   if (state.view === "stickers") return renderStickers();
   if (state.view === "audit") return renderAudit();
+  if (state.view === "proactive") return renderProactive();
   return `<div class="card"><h2>${escapeHtml(viewTitle())}</h2><p class="muted">该视图暂未实现。</p></div>`;
+}
+
+function renderProactive() {
+  const stats = state.proactiveStats;
+  const recent = state.proactiveRecent;
+  if (!stats || !recent) return `<div class="card muted">加载中…</div>`;
+  const counts = stats.counts || {};
+  const total = stats.total || 0;
+  const reasonLabels = {
+    sent: "已发送",
+    skip_daily_limit: "日上限",
+    skip_cooldown: "冷却中",
+    skip_idle_not_reached: "用户未空闲",
+    skip_probability: "概率未中",
+    skip_quiet_hour: "深夜禁言",
+    skip_no_candidate: "无候选人",
+    skip_llm_failed: "LLM 调用失败",
+    skip_llm_decided: "LLM 决定跳过",
+    skip_unread: "上条未读",
+    skip_disabled: "功能禁用",
+    skip_no_profile: "缺画像",
+    skip_other: "其他",
+  };
+  const scopeFilter = [
+    {k: "", label: "全部"},
+    {k: "private", label: "主动私聊"},
+    {k: "group_idle", label: "群主动接话"},
+    {k: "qzone", label: "QQ 空间"},
+  ];
+  const scopeBar = scopeFilter.map(s =>
+    `<button class="${state.proactiveScope===s.k?'active':''}" onclick="pickProactiveScope('${s.k}')">${escapeHtml(s.label)}</button>`
+  ).join("");
+
+  // 统计卡片
+  const reasonRows = Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([reason, cnt]) => {
+      const pct = total > 0 ? Math.round(cnt / total * 100) : 0;
+      const label = reasonLabels[reason] || reason;
+      const barColor = reason === "sent" ? "var(--ok)" : "var(--muted)";
+      return `<tr>
+        <td>${escapeHtml(label)} <code style="font-size:11px;opacity:.6">${escapeHtml(reason)}</code></td>
+        <td style="width:60%"><div style="background:${barColor};height:6px;border-radius:3px;width:${pct}%;min-width:2px"></div></td>
+        <td style="text-align:right">${cnt} <span class="muted">/ ${pct}%</span></td>
+      </tr>`;
+    }).join("");
+  const summary = total === 0
+    ? `<p class="muted">最近 72 小时没有主动触发尝试记录。可能 bot 刚启动，或 personification_proactive_enabled / personification_group_idle_topic_enabled 都关闭了。</p>`
+    : `<table style="margin-top:8px"><thead><tr><th>结果 / Reason</th><th style="width:60%">占比</th><th style="text-align:right">次数</th></tr></thead><tbody>${reasonRows}</tbody></table>`;
+
+  // 最近事件流
+  const eventRows = (recent.entries || []).map(e => {
+    const time = new Date(e.ts * 1000).toLocaleString();
+    const outcomeColor = e.outcome === "sent"
+      ? `<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">${escapeHtml(reasonLabels[e.outcome]||e.outcome)}</span>`
+      : `<span class="tag" style="background:rgba(248,113,113,0.12);color:var(--danger)">${escapeHtml(reasonLabels[e.outcome]||e.outcome)}</span>`;
+    const next = e.next_eligible_at
+      ? `下次可触发：${new Date(e.next_eligible_at * 1000).toLocaleString()}`
+      : "";
+    const detailParts = Object.entries(e.detail || {}).map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(String(v).slice(0,40))}`);
+    return `<tr>
+      <td class="muted" style="font-size:11px;white-space:nowrap">${escapeHtml(time)}</td>
+      <td><code style="font-size:11px">${escapeHtml(e.scope)}</code></td>
+      <td>${outcomeColor}</td>
+      <td>${escapeHtml(e.target || "-")}</td>
+      <td class="muted" style="font-size:11px">${detailParts.slice(0,3).join(" · ")}${next ? "<br>"+escapeHtml(next):""}</td>
+    </tr>`;
+  }).join("");
+
+  return `<div class="group-bar">${scopeBar}</div>
+    <div class="card"><h2>主动行为统计（最近 72 小时）</h2>
+      <p class="muted" style="font-size:12px;margin:-4px 0 8px">
+        记录每次主动私聊 / 群接话 / QQ 空间发表的触发尝试。如果 "sent" 占比偏低或某 skip 原因频繁出现，
+        参考下方配置中心调整：proactive_probability / proactive_daily_limit / proactive_idle_hours 等。
+      </p>
+      ${summary}
+    </div>
+    <div class="card"><h2>最近 ${(recent.entries||[]).length} 条触发记录</h2>
+      <table>
+        <thead><tr><th>时间</th><th>类型</th><th>结果</th><th>对象</th><th>详情</th></tr></thead>
+        <tbody>${eventRows || '<tr><td colspan="5" class="muted">无</td></tr>'}</tbody>
+      </table>
+    </div>`;
+}
+
+async function pickProactiveScope(scope) {
+  state.proactiveScope = scope;
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
 
 function renderAudit() {
@@ -640,7 +742,7 @@ async function toggleMemoryIncludeSelf(checked) {
 }
 
 function viewTitle() {
-  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",skills:"Skill 管理",test:"模型测试",devices:"设备管理"})[state.view] || state.view;
+  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",memory:"Agent 记忆",stickers:"表情包",skills:"Skill 管理",test:"模型测试",audit:"审计日志",proactive:"主动诊断",devices:"设备管理"})[state.view] || state.view;
 }
 
 function renderDashboard() {

@@ -314,10 +314,24 @@ async def _generate_once(
         )
     except (TypeError, ValueError):
         supports_builtin_search = True
-    if supports_builtin_search:
-        result = await call_ai_api(messages, use_builtin_search=use_builtin_search)
-    else:
-        result = await call_ai_api(messages)
+    _qz_token = None
+    try:
+        from ..core.llm_context import reset_llm_context, set_llm_context
+
+        _qz_token = set_llm_context(purpose="qzone_diary")
+    except Exception:
+        _qz_token = None
+    try:
+        if supports_builtin_search:
+            result = await call_ai_api(messages, use_builtin_search=use_builtin_search)
+        else:
+            result = await call_ai_api(messages)
+    finally:
+        if _qz_token is not None:
+            try:
+                reset_llm_context(_qz_token)
+            except Exception:
+                pass
     if not result:
         return ""
     # 兜底：若 LLM 仍输出思维链 XML，剥除标签再走 clean_generated_text

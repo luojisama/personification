@@ -516,11 +516,33 @@ async def _call_provider_once(
     use_builtin_search: bool = False,
 ) -> ToolCallerResponse:
     caller = _build_provider_caller(provider, plugin_config)
-    return await caller.chat_with_tools(
+    response = await caller.chat_with_tools(
         messages=messages,
         tools=list(tools or []),
         use_builtin_search=_should_use_builtin_search(provider, use_builtin_search),
     )
+    # 中央 token 拦截：所有走 call_ai_api → _call_provider_once 的调用统一在这里
+    # 记账，覆盖 user_persona / group_style / group_knowledge / proactive / qzone /
+    # inner_state / review / intent / planner / vision 等所有非-runner 路径。
+    # runner.py 走 runtime.agent_tool_caller，独立拦截。
+    try:
+        usage = getattr(response, "usage", None) or {}
+        if isinstance(usage, dict) and (usage.get("prompt_tokens") or usage.get("completion_tokens")):
+            from . import llm_context as _llm_ctx
+            from . import token_ledger as _ledger
+
+            ctx = _llm_ctx.current_llm_context()
+            _ledger.record_llm_call(
+                model=str(getattr(response, "model_used", "") or provider.get("model", "") or ""),
+                prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+                completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+                group_id=str(ctx.get("group_id", "") or ""),
+                user_id=str(ctx.get("user_id", "") or ""),
+                purpose=str(ctx.get("purpose", "") or "ai_route"),
+            )
+    except Exception:
+        pass
+    return response
 
 
 def _empty_response() -> ToolCallerResponse:
