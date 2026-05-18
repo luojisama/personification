@@ -61,6 +61,13 @@ class Config(BaseModel):
     personification_group_knowledge_interval_hours: int = 4
     personification_group_knowledge_daily_limit: int = 6
     personification_group_knowledge_min_messages: int = 50
+    personification_qzone_quiet_hour_start: int = 0
+    personification_qzone_quiet_hour_end: int = 7
+    # Provider 月度额度（本地记账，3 家 provider 无官方 quota API；0=不限额仅显示用量）
+    personification_quota_anthropic_monthly_tokens: int = 0
+    personification_quota_openai_monthly_tokens: int = 0
+    personification_quota_gemini_cli_monthly_tokens: int = 0
+    personification_quota_codex_monthly_tokens: int = 0
     personification_group_style_autobuild_enabled: bool = True
     personification_group_style_interval_hours: int = 12
     personification_group_style_daily_limit: int = 2

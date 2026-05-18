@@ -34,6 +34,7 @@ def build_group_conversation_context(
     messages = [msg for msg in list(recent_messages or []) if isinstance(msg, dict)]
     speaker_relations: dict[str, str] = {}
     active_topics: list[str] = []
+    seen_topics: set[str] = set()
     for msg in messages[-30:]:
         user_id = str(msg.get("user_id", "") or "").strip()
         nickname = str(
@@ -46,8 +47,15 @@ def build_group_conversation_context(
         if user_id and nickname:
             speaker_relations[user_id] = nickname
         content = stringify_history_content(msg.get("content", "")).strip()
-        if content and content not in active_topics:
-            active_topics.append(content[:80])
+        if not content:
+            continue
+        # 带 nickname 一起存，防止 LLM 把无关消息内容串起来误关联
+        # （如"鑫仔说地震"+"流影说自己在浙江" 被合成"地震在浙江"）
+        speaker_label = nickname or user_id or "未知"
+        topic = f"{speaker_label}: {content[:80]}"
+        if topic not in seen_topics:
+            seen_topics.add(topic)
+            active_topics.append(topic)
     rendered_context = render_group_context_structured(messages, trigger_msg_id=trigger_msg_id)
     relationship_hint = summarize_group_relationships(
         messages,
@@ -77,7 +85,12 @@ def render_group_conversation_context(context: GroupConversationContext) -> str:
     if context.rendered_context:
         parts.append(context.rendered_context)
     if context.active_topics:
-        parts.append("近段发言线索：" + "；".join(context.active_topics[:6]))
+        # 每条话题单独一行 + 显式 speaker 标签，避免 LLM 把不同人说的话题串起来
+        topics_block = "\n".join(f"- {topic}" for topic in context.active_topics[:8])
+        parts.append(
+            "近段发言线索（每行是不同发言者的一句话；不要把不同人说的内容关联成同一件事）：\n"
+            + topics_block
+        )
     if context.quote_chain:
         quote_lines = []
         for item in context.quote_chain[-5:]:

@@ -530,6 +530,50 @@ async def extract_images_from_segment(
     if not url:
         return
 
+    # OneBot v11 / NTQQ：sub_type=1 表示这是表情包（非真实照片）。
+    # 直接走快速路径：不调 vision 分类、不把 data_url 注入 image_urls
+    #（避免主对话 LLM 把表情包像素当成真实图片去"解释内容"）。
+    # 兼容协议端字段类型差异：int、str、None 都判一遍。
+    raw_sub_type = data.get("sub_type", data.get("subType", 0))
+    try:
+        sub_type_int = int(raw_sub_type) if raw_sub_type is not None else 0
+    except (TypeError, ValueError):
+        sub_type_int = 0
+    is_protocol_sticker = sub_type_int == 1
+
+    if is_protocol_sticker:
+        summary = str(data.get("summary") or data.get("emoji_id") or "").strip()
+        placeholder = f"[对方发送了一个表情包：{summary}]" if summary else "[对方发送了一个表情包]"
+        message_text_ref.append(placeholder)
+        record_counter(
+            "incoming_image.classified_total",
+            kind="sticker",
+            source="onebot_subtype",
+        )
+        # 仍尝试下载用于 sticker_candidates_ref（让插件能学习用户常用的表情包）；
+        # 但不把 data_url 注入 image_urls，避免 LLM vision 处理。
+        try:
+            mime_type, payload, _is_gif = await download_safe_image_bytes(
+                url=url,
+                file_name=file_name,
+                http_client=http_client,
+                logger=logger,
+            )
+        except Exception:
+            mime_type, payload = None, None
+        if payload is not None and mime_type is not None:
+            data_url = image_bytes_to_data_url(payload, mime_type)
+            sticker_candidates_ref.append(
+                IncomingStickerCandidate(
+                    data_url=data_url,
+                    payload=payload,
+                    mime_type=mime_type,
+                    source_kind="onebot_sticker",
+                    summary_hint=summary or "动画表情",
+                )
+            )
+        return
+
     mime_type, payload, is_gif = await download_safe_image_bytes(
         url=url,
         file_name=file_name,
@@ -555,7 +599,9 @@ async def extract_images_from_segment(
     )
     is_sticker_like = classification.is_sticker_like
     message_text_ref.append(classification.text_label)
-    image_urls.append(data_url)
+    # 若启发式分类判定为表情包，同样不放 image_urls（避免 vision 二次解释）
+    if not is_sticker_like:
+        image_urls.append(data_url)
     record_counter(
         "incoming_image.classified_total",
         kind=classification.kind,

@@ -61,6 +61,8 @@ class JobSetupDeps:
     qzone_daily_limit: int = 3
     qzone_probability: float = 0.35
     qzone_min_interval_hours: float = 6.0
+    qzone_quiet_hour_start: int = 0
+    qzone_quiet_hour_end: int = 7
     qzone_social_enabled: bool = False
     qzone_social_check_interval_minutes: int = 120
     qzone_social_scan_flow: Any = None
@@ -145,6 +147,8 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                 maybe_generate_qzone_post=maybe_generate_qzone_post,
                 publish_qzone_shuo=deps.publish_qzone_shuo,
                 logger=deps.logger,
+                qzone_quiet_hour_start=getattr(deps, "qzone_quiet_hour_start", 0),
+                qzone_quiet_hour_end=getattr(deps, "qzone_quiet_hour_end", 7),
             )
             register_proactive_qzone_job(
                 scheduler=scheduler,

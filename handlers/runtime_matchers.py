@@ -96,6 +96,20 @@ def register_runtime_switch_matchers(
             plugin_config=plugin_config,
         )
 
+    quota_cmd = _register_command(
+        "拟人额度",
+        aliases={"拟人 额度", "quota", "额度"},
+        permission=superuser_permission,
+        priority=5,
+        block=True,
+    )
+
+    @quota_cmd.handle()
+    async def _handle_quota(_bot: Bot, _event: MessageEvent):
+        from .runtime_commands import handle_quota_command
+
+        await handle_quota_command(quota_cmd, plugin_config=plugin_config)
+
     install_remote_skill_cmd = _register_command(
         "安装远程技能",
         aliases={"添加远程技能"},

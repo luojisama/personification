@@ -262,6 +262,58 @@ async def handle_stats_command(
     await matcher.finish("\n".join(lines))
 
 
+_QUOTA_FIELD_MAP = {
+    "anthropic": ("Anthropic", "personification_quota_anthropic_monthly_tokens"),
+    "openai": ("OpenAI", "personification_quota_openai_monthly_tokens"),
+    "gemini": ("Gemini CLI", "personification_quota_gemini_cli_monthly_tokens"),
+    "codex": ("Codex/ChatGPT", "personification_quota_codex_monthly_tokens"),
+}
+
+
+def _format_token_count(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+async def handle_quota_command(
+    matcher: Any,
+    *,
+    plugin_config: Any,
+) -> None:
+    """`拟人额度` 命令：返回 4 家 provider 本月本地累计 token 用量 + 配置的上限。"""
+    from ..core.token_ledger import query_provider_summary
+
+    summary = query_provider_summary("month")
+    providers_used = {p["provider"]: p for p in summary.get("providers", [])}
+
+    lines = ["本月 Provider 额度（本地记账，非官方 quota API）："]
+    for key, (label, field_name) in _QUOTA_FIELD_MAP.items():
+        usage = providers_used.get(key, {"total_tokens": 0, "call_count": 0})
+        used = int(usage.get("total_tokens", 0))
+        try:
+            limit = int(getattr(plugin_config, field_name, 0) or 0)
+        except Exception:
+            limit = 0
+        if limit > 0:
+            ratio = used / limit * 100
+            lines.append(
+                f"· {label:<14}: {_format_token_count(used)} / {_format_token_count(limit)} ({ratio:.0f}%)"
+            )
+        else:
+            lines.append(f"· {label:<14}: {_format_token_count(used)} / ∞（未设上限）")
+    # 未识别的 provider 也显示
+    for p in summary.get("providers", []):
+        if p["provider"] not in _QUOTA_FIELD_MAP:
+            lines.append(
+                f"· {p['provider']:<14}: {_format_token_count(p['total_tokens'])} / ∞"
+            )
+    lines.append("提示：3 家 CLI provider 都不提供官方 quota API，上述数据来自本插件 LLM 调用累加。")
+    await matcher.finish("\n".join(lines))
+
+
 def _extract_github_source_name(url: str) -> str:
     parts = [part for part in urlparse(url).path.strip("/").split("/") if part]
     if len(parts) >= 2:

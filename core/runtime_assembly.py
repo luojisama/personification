@@ -291,6 +291,12 @@ class PluginRuntimeBundle:
             qzone_min_interval_hours=float(
                 getattr(self.plugin_config, "personification_qzone_min_interval_hours", 6.0)
             ),
+            qzone_quiet_hour_start=int(
+                getattr(self.plugin_config, "personification_qzone_quiet_hour_start", 0)
+            ),
+            qzone_quiet_hour_end=int(
+                getattr(self.plugin_config, "personification_qzone_quiet_hour_end", 7)
+            ),
             qzone_social_enabled=bool(
                 getattr(self.plugin_config, "personification_qzone_social_enabled", False)
             ),

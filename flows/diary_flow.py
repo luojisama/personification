@@ -163,6 +163,9 @@ def _qzone_post_similarity(left: str, right: str) -> float:
 
 
 def _is_too_similar_to_recent_qzone_post(content: str, recent_posts: list[str]) -> bool:
+    """字面级去重兜底（prompt 内已要求 LLM 主题级避开重复，这里做硬护栏）。
+    收紧后阈值：公共子串 ≥6 / 公共子串 ≥4 + 相似度 ≥0.35。
+    """
     text = _normalize_similarity_text(content)
     if len(text) < 6:
         return False
@@ -173,9 +176,9 @@ def _is_too_similar_to_recent_qzone_post(content: str, recent_posts: list[str]) 
         if text == other or text in other or other in text:
             return True
         longest = _longest_common_substring_len(text, other)
-        if longest >= 8:
+        if longest >= 6:
             return True
-        if longest >= 5 and _qzone_post_similarity(text, other) >= 0.42:
+        if longest >= 4 and _qzone_post_similarity(text, other) >= 0.35:
             return True
     return False
 

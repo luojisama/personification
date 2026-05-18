@@ -60,6 +60,8 @@ def build_proactive_qzone_post_task(
     maybe_generate_qzone_post: Callable[[Any], Awaitable[str]],
     publish_qzone_shuo: Any,
     logger: Any,
+    qzone_quiet_hour_start: int = 0,
+    qzone_quiet_hour_end: int = 7,
 ) -> Callable[[], Awaitable[bool]]:
     async def _proactive_qzone_post() -> bool:
         return await run_proactive_qzone_post(
@@ -74,6 +76,8 @@ def build_proactive_qzone_post_task(
             maybe_generate_qzone_post=maybe_generate_qzone_post,
             publish_qzone_shuo=publish_qzone_shuo,
             logger=logger,
+            quiet_hour_start=qzone_quiet_hour_start,
+            quiet_hour_end=qzone_quiet_hour_end,
         )
 
     return _proactive_qzone_post

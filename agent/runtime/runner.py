@@ -442,6 +442,22 @@ async def run_agent(
             ),
         }
     )
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "群聊里通常多个话题并行：A 群友讨论地震、B 群友讨论自己的近况、C 群友在闲扯，"
+                "时间相近不代表语义相关。\n"
+                "硬性规则：\n"
+                "1. 你回复的是上下文中标记为「当前消息」的那一条；其它发言只是背景，不要把它们的内容拿来回答当前问题。\n"
+                "2. 不要把不同人说的关键词（地名、人名、状态）跨话题拼接。"
+                "比如 A 在说地震位置是「广西柳州」，同时 B 在说「我家在浙江」，"
+                "当 C 问「这次地震严重吗」时，你只能基于 A 的位置信息回答，绝不能说「浙江有震感」。\n"
+                "3. 引用某人状态前先问自己：这个状态是不是当前消息的语境？如果不是，就不要写进去。\n"
+                "4. 拿不准时宁可简短、含糊或承认不知道，也不要把无关上下文糊上去。"
+            ),
+        }
+    )
     if runtime_chat_intent == "banter":
         messages.append(
             {
@@ -653,6 +669,21 @@ async def run_agent(
                 from ...core import token_ledger as _ledger
 
                 ctx = _llm_ctx.current_llm_context()
+                # 从 tool_caller 类名推导 provider，比从 model 名推导更准确
+                # （特别针对 Codex 使用 chatgpt OAuth、model 字段含 "gpt" 易误判的情况）
+                caller_cls = type(tool_caller).__name__.lower()
+                if "codex" in caller_cls:
+                    provider_label = "codex"
+                elif "anthropic" in caller_cls or "claudecode" in caller_cls or "claude" in caller_cls:
+                    provider_label = "anthropic"
+                elif "geminicli" in caller_cls:
+                    provider_label = "gemini"
+                elif "gemini" in caller_cls:
+                    provider_label = "gemini"
+                elif "openai" in caller_cls:
+                    provider_label = "openai"
+                else:
+                    provider_label = ""  # 让 token_ledger 从 model 名自行推导
                 _ledger.record_llm_call(
                     model=str(getattr(response, "model_used", "") or ""),
                     prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
@@ -660,6 +691,7 @@ async def run_agent(
                     group_id=str(ctx.get("group_id", "") or ""),
                     user_id=str(ctx.get("user_id", "") or ""),
                     purpose=str(ctx.get("purpose", "") or "agent"),
+                    provider=provider_label,
                 )
         except Exception:
             pass

@@ -15,6 +15,22 @@ def _day_str(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
+def _infer_provider(model: str, explicit: str = "") -> str:
+    """从 explicit 参数或 model 名推导 provider 标签。"""
+    if explicit:
+        return str(explicit).strip().lower()
+    name = str(model or "").lower()
+    if "claude" in name or "anthropic" in name:
+        return "anthropic"
+    if "gemini" in name:
+        return "gemini"
+    if "gpt" in name or "openai" in name or name.startswith("o1") or name.startswith("o3"):
+        return "openai"
+    if "codex" in name:
+        return "codex"
+    return ""
+
+
 def record_llm_call(
     *,
     model: str,
@@ -23,15 +39,25 @@ def record_llm_call(
     group_id: str = "",
     user_id: str = "",
     purpose: str = "",
+    provider: str = "",
     bucket_day: str | None = None,
 ) -> None:
-    """记录一次 LLM 调用，按 (day, group, user, model, purpose) 桶累加。"""
+    """记录一次 LLM 调用，按 (day, group, user, model, purpose) 桶累加。
+    `provider` 显式提供时优先；否则从 model 名推导（anthropic/gemini/openai/codex）。
+    purpose 内已编码 provider 信息：写入时实际 purpose=`{original}|provider={p}`，
+    查询时按子串匹配（简单 schema 兼容）。
+    """
     bucket = str(bucket_day or _today())
     pt = max(0, int(prompt_tokens or 0))
     ct = max(0, int(completion_tokens or 0))
     if pt == 0 and ct == 0:
         return
     tt = pt + ct
+    resolved_provider = _infer_provider(model, provider)
+    # 把 provider 编码到 purpose 字段（向后兼容，不改 schema）
+    purpose_str = str(purpose or "")
+    if resolved_provider and "provider=" not in purpose_str:
+        purpose_str = f"{purpose_str}|provider={resolved_provider}" if purpose_str else f"provider={resolved_provider}"
     now = time.time()
     with connect_sync() as conn:
         conn.execute(
@@ -48,9 +74,59 @@ def record_llm_call(
                 updated_at = excluded.updated_at
             """,
             (bucket, str(group_id or ""), str(user_id or ""), str(model or ""),
-             str(purpose or ""), pt, ct, tt, now),
+             purpose_str, pt, ct, tt, now),
         )
         conn.commit()
+
+
+def query_provider_summary(window: str = "month") -> dict[str, Any]:
+    """按 provider 维度聚合最近窗口的 token 用量。返回 {provider: totals}。
+    provider 从 purpose 字段中的 `provider=xxx` 子串解析，或从 model 名兜底推导。
+    """
+    start_str = _day_str(_range_start(window))
+    providers: dict[str, dict[str, int]] = {}
+    with connect_sync() as conn:
+        rows = conn.execute(
+            """
+            SELECT model, purpose,
+                   SUM(prompt_tokens) AS pt,
+                   SUM(completion_tokens) AS ct,
+                   SUM(total_tokens) AS tt,
+                   SUM(call_count) AS cc
+            FROM token_usage_ledger
+            WHERE bucket_day >= ?
+            GROUP BY model, purpose
+            """,
+            (start_str,),
+        ).fetchall()
+    for row in rows:
+        model = str(row["model"] or "")
+        purpose = str(row["purpose"] or "")
+        # 优先从 purpose 解析 provider=xxx
+        provider = ""
+        if "provider=" in purpose:
+            for part in purpose.split("|"):
+                if part.startswith("provider="):
+                    provider = part[len("provider="):].strip().lower()
+                    break
+        if not provider:
+            provider = _infer_provider(model) or "unknown"
+        bucket = providers.setdefault(provider, {
+            "prompt_tokens": 0, "completion_tokens": 0,
+            "total_tokens": 0, "call_count": 0,
+        })
+        bucket["prompt_tokens"] += int(row["pt"] or 0)
+        bucket["completion_tokens"] += int(row["ct"] or 0)
+        bucket["total_tokens"] += int(row["tt"] or 0)
+        bucket["call_count"] += int(row["cc"] or 0)
+    return {
+        "window": window,
+        "start_day": start_str,
+        "providers": [
+            {"provider": p, **vals}
+            for p, vals in sorted(providers.items(), key=lambda kv: -kv[1]["total_tokens"])
+        ],
+    }
 
 
 def _range_start(window: str) -> datetime:
@@ -182,4 +258,4 @@ def _row_to_dict(row: Any, fields: tuple[str, ...], *, key: str | None = None) -
     return result
 
 
-__all__ = ["record_llm_call", "query_summary", "query_group_detail"]
+__all__ = ["record_llm_call", "query_summary", "query_group_detail", "query_provider_summary"]

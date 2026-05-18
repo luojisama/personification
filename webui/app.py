@@ -13,6 +13,7 @@ from .routes.group_routes import build_group_router
 from .routes.memory_routes import build_memory_router
 from .routes.metrics_routes import build_metrics_router
 from .routes.persona_routes import build_persona_router
+from .routes.quota_routes import build_quota_router
 from .routes.skill_routes import build_skill_router
 from .routes.sticker_routes import build_sticker_router
 from .routes.test_routes import build_test_router
@@ -67,6 +68,7 @@ def build_router() -> APIRouter:
     router.include_router(build_memory_router(runtime=runtime))
     router.include_router(build_sticker_router(runtime=runtime))
     router.include_router(build_audit_router(runtime=runtime))
+    router.include_router(build_quota_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:

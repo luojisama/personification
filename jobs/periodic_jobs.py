@@ -157,6 +157,24 @@ async def run_auto_post_diary(
     return False
 
 
+def _in_qzone_quiet_hour(now_dt: Any, start: int, end: int) -> bool:
+    """判断当前小时是否落在 [start, end) 内（支持跨午夜窗口）。
+    start==end → 始终返回 False（无静默期）。
+    """
+    try:
+        hour = int(now_dt.hour)
+    except Exception:
+        return False
+    start = max(0, min(23, int(start)))
+    end = max(0, min(24, int(end)))
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    # 跨午夜（如 22 → 7）
+    return hour >= start or hour < end
+
+
 async def run_proactive_qzone_post(
     *,
     qzone_publish_available: bool,
@@ -170,8 +188,12 @@ async def run_proactive_qzone_post(
     maybe_generate_qzone_post: Callable[[Any], Any],
     publish_qzone_shuo: Callable[..., Any],
     logger: Any,
+    quiet_hour_start: int = 0,
+    quiet_hour_end: int = 7,
 ) -> bool:
-    """按内心状态和近期聊天判断，是否主动发一条更日常的空间动态。"""
+    """按内心状态和近期聊天判断，是否主动发一条更日常的空间动态。
+    在 [quiet_hour_start, quiet_hour_end) 时间窗口内不触发（避免半夜打扰）。
+    """
     if not qzone_publish_available or not qzone_proactive_enabled:
         return False
     _ = qzone_probability  # 兼容旧配置；是否发布交给 LLM 决定，仍受每日上限与最小间隔限制。
@@ -180,6 +202,12 @@ async def run_proactive_qzone_post(
         return False
     bot = list(bots.values())[0]
     now = get_now()
+    # 半夜避开：在 quiet_hour 窗口内直接 skip（不消耗 daily quota）
+    if _in_qzone_quiet_hour(now, quiet_hour_start, quiet_hour_end):
+        logger.debug(
+            f"[qzone] skip proactive post in quiet hour {quiet_hour_start}-{quiet_hour_end}"
+        )
+        return False
     today = now.strftime("%Y-%m-%d")
     now_ts = time.time()
 
