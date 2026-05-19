@@ -151,6 +151,48 @@ async def _user_persona_hook(ctx: HookContext) -> Optional[str]:
     )
 
 
+async def _private_memory_recall_hook(ctx: HookContext) -> Optional[str]:
+    if not ctx.is_private:
+        return None
+    memory_store = getattr(ctx.runtime, "memory_store", None)
+    if not memory_store:
+        return None
+    if not bool(getattr(ctx.plugin_config, "personification_memory_enabled", True)):
+        return None
+    message_text = (ctx.message_text or ctx.message_content or "").strip()
+    if not message_text:
+        return None
+    try:
+        memories = memory_store.recall_memories(
+            query=message_text,
+            scope="auto",
+            user_id=ctx.user_id,
+            limit=6,
+            mode="auto",
+        )
+    except Exception:
+        return None
+    if not memories:
+        return None
+    from .search_ranker import build_time_hint
+
+    items: list[str] = []
+    for m in memories[:6]:
+        summary = str(m.get("summary", "") or "").strip()
+        if not summary:
+            continue
+        time_hint = str(m.get("time_hint", "") or build_time_hint(float(m.get("time_created", 0) or 0))).strip()
+        memory_type = str(m.get("memory_type", "") or "").strip()
+        items.append(f"[{time_hint}] {summary}（{memory_type}）")
+    if not items:
+        return None
+    return (
+        "## 关于对方的记忆片段（私聊自动注入）\n"
+        "以下是关于对方的部分记忆，仅供参考，不要逐条复述：\n"
+        + "\n".join(f"- {item}" for item in items)
+    )
+
+
 async def _group_style_hook(ctx: HookContext) -> Optional[str]:
     if ctx.is_private:
         return None
@@ -436,6 +478,7 @@ def register_all_builtin_hooks() -> None:
     register_prompt_hook("anti_loop", _anti_loop_hook, priority=40, phase="system_context")
     register_prompt_hook("group_anti_loop", _group_anti_loop_hook, priority=41, phase="system_context")
     register_prompt_hook("user_persona", _user_persona_hook, priority=20, phase="system_context")
+    register_prompt_hook("private_memory_recall", _private_memory_recall_hook, priority=21, phase="system_context")
     register_prompt_hook("group_style", _group_style_hook, priority=25, phase="system_context")
     register_prompt_hook("recent_group_context", _recent_group_context_hook, priority=26, phase="system_context")
     register_prompt_hook("group_relationship", _group_relationship_hook, priority=27, phase="system_context")

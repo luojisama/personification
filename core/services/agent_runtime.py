@@ -12,6 +12,7 @@ from ...skill_runtime.loader import load_builtin_skillpacks_sync
 from ...skill_runtime.runtime_api import SkillRuntime
 from ..ai_routes import build_routed_tool_caller
 from ..file_sender import build_file_sender
+from ..llm_context import current_llm_context
 from ..model_router import (
     MODEL_ROLE_AGENT,
     MODEL_ROLE_INTENT,
@@ -186,6 +187,11 @@ def build_agent_tool_registry(
             )
         )
 
+    if memory_store is not None and bool(getattr(plugin_config, "personification_memory_enabled", True)):
+        registry.register(
+            _build_recall_user_memory_tool(memory_store, plugin_config, logger)
+        )
+
     if scheduler is not None and data_dir is not None:
         _bot_caller: Callable[[dict], Any] | None = None
         if get_bots is not None:
@@ -305,6 +311,61 @@ def _build_get_persona_tool(persona_store: Any, max_chars: int = 120) -> AgentTo
         },
         handler=_handler,
         local=True,
+    )
+
+
+def _build_recall_user_memory_tool(memory_store: Any, plugin_config: Any, logger: Any) -> AgentTool:
+    import json as _json
+
+    async def _handler(query: str, days: int = 30, limit: int = 8) -> str:
+        ctx = current_llm_context()
+        user_id = str(ctx.get("user_id", "") or "").strip()
+        if not user_id:
+            return _json.dumps({"query": query, "memories": [], "note": "无法确定当前用户，跳过记忆召回"}, ensure_ascii=False)
+        try:
+            memories = memory_store.recall_memories(
+                query=query,
+                scope="auto",
+                user_id=user_id,
+                limit=max(1, min(int(limit or 8), 20)),
+                mode="auto",
+            )
+        except Exception as exc:
+            logger.debug(f"[recall_user_memory] recall failed: {exc}")
+            memories = []
+        from ..search_ranker import build_time_hint
+        items = []
+        for m in memories[:max(1, int(limit or 8))]:
+            summary = str(m.get("summary", "") or "").strip()
+            if not summary:
+                continue
+            time_hint = str(m.get("time_hint", "") or build_time_hint(float(m.get("time_created", 0) or 0))).strip()
+            memory_type = str(m.get("memory_type", "") or "").strip()
+            items.append(f"[{time_hint}] {summary}（{memory_type}）")
+        if not items:
+            return _json.dumps({"query": query, "memories": []}, ensure_ascii=False)
+        return _json.dumps({"query": query, "memories": items}, ensure_ascii=False)
+
+    return AgentTool(
+        name="recall_user_memory",
+        description=(
+            "当用户询问 '你记得我...吗/上次/之前/前几天/复述' 等涉及"
+            "跨对话历史时调用。按 user_id 召回该用户在过去 N 天内的 episodic"
+            "记忆与所有 semantic 记忆，用于回答记忆类问题。"
+            "不要用 search_plugin_knowledge 处理用户记忆问题。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "自然语言查询，例如用户原话"},
+                "days": {"type": "integer", "description": "回溯天数，默认30", "default": 30},
+                "limit": {"type": "integer", "description": "返回记忆条数上限，默认8", "default": 8},
+            },
+            "required": ["query"],
+        },
+        handler=_handler,
+        local=True,
+        enabled=lambda: bool(getattr(plugin_config, "personification_memory_enabled", True)),
     )
 
 

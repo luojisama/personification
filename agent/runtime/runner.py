@@ -816,7 +816,7 @@ async def run_agent(
                         messages.append(
                             {
                                 "role": "assistant",
-                                "content": "",
+                                "content": None,
                                 "tool_calls": [
                                     {
                                         "id": fallback_id,
@@ -907,7 +907,7 @@ async def run_agent(
             messages.append(
                 {
                     "role": "assistant",
-                    "content": response.content or "",
+                    "content": response.content if response.content else None,
                     "tool_calls": [
                         {
                             "id": tool_call.id,
