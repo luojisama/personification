@@ -48,6 +48,8 @@ def build_memory_router(*, runtime) -> APIRouter:
         limit: int = Query(default=40, ge=1, le=200),
         memory_type: str = Query(default=""),
         group_id: str = Query(default=""),
+        user_id: str = Query(default=""),
+        palace_zone: str = Query(default=""),
         source_kind: str = Query(default=""),
         include_self: bool = Query(default=False),
         _: AdminIdentity = Depends(require_admin),
@@ -66,6 +68,8 @@ def build_memory_router(*, runtime) -> APIRouter:
         try:
             items = list(store.list_recent_memories(
                 group_id=str(group_id or "").strip(),
+                user_id=str(user_id or "").strip(),
+                palace_zone=str(palace_zone or "").strip(),
                 limit=raw_limit,
                 memory_type=str(memory_type or "").strip(),
                 source_kind=str(source_kind or "").strip(),
@@ -175,5 +179,46 @@ def build_memory_router(*, runtime) -> APIRouter:
             return {"available": True, "state": data}
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
+
+    @router.get("/detail/{memory_id}")
+    async def detail(memory_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
+        store = _memory_store(runtime)
+        if store is None:
+            raise HTTPException(status_code=503, detail="memory_store 未就绪")
+        try:
+            item = store.get_memory_item(memory_id)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        if not isinstance(item, dict) or not item:
+            raise HTTPException(status_code=404, detail=f"找不到记忆 {memory_id}")
+        related: list[dict[str, Any]] = []
+        try:
+            related = list(store.list_related_memory_candidates(memory_id=memory_id, limit=8))
+        except Exception:
+            related = []
+        return {"memory_id": memory_id, "item": item, "related": related}
+
+    @router.get("/palace-zones")
+    async def palace_zones(_: AdminIdentity = Depends(require_admin)) -> dict:
+        store = _memory_store(runtime)
+        if store is None:
+            return {"zones": [], "available": False}
+        try:
+            from ...core.memory_store import _connect
+
+            db_path = store.memory_palace_dir / "memory_palace.db"
+        except Exception:
+            return {"zones": [], "available": False}
+        if not db_path.exists():
+            return {"zones": [], "available": True}
+        try:
+            with _connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT palace_zone FROM memory_items WHERE palace_zone IS NOT NULL AND palace_zone != '' ORDER BY palace_zone"
+                ).fetchall()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        zones = [str(row[0]) for row in rows if row and row[0]]
+        return {"zones": zones, "available": True}
 
     return router

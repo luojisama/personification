@@ -335,12 +335,17 @@ async function loadView() {
       const qs = new URLSearchParams({ limit: "80" });
       if (state.memoryFilter) qs.set("memory_type", state.memoryFilter);
       if (state.memoryIncludeSelf) qs.set("include_self", "true");
-      const [mem, inner] = await Promise.all([
+      if (state.memoryUserId) qs.set("user_id", state.memoryUserId);
+      if (state.memoryGroupId) qs.set("group_id", state.memoryGroupId);
+      if (state.memoryPalaceZone) qs.set("palace_zone", state.memoryPalaceZone);
+      const [mem, inner, zones] = await Promise.all([
         api("/memory/recent?" + qs.toString()),
         api("/memory/inner-state").catch(() => ({available: false})),
+        api("/memory/palace-zones").catch(() => ({zones: []})),
       ]);
       state.memory = mem;
       state.memoryInnerState = inner;
+      state.memoryPalaceZones = zones.zones || [];
     } else if (state.view === "plugin_knowledge") {
       const data = await api("/plugin-knowledge/list");
       state.pluginKnowledgeList = data.plugins || [];
@@ -691,6 +696,7 @@ async function deleteStickerByName(name) {
 function renderMemory() {
   const mem = state.memory;
   const inner = state.memoryInnerState;
+  if (state.selectedMemory) return renderMemoryDetail();
   if (!mem) return `<div class="card muted">加载中…</div>`;
   if (!mem.palace_enabled) {
     return `<div class="card"><h2>Agent 记忆</h2>
@@ -699,12 +705,16 @@ function renderMemory() {
   const filters = ["", "group_knowledge", "user_persona", "fact"].map(t =>
     `<button class="${state.memoryFilter===t?'active':''}" onclick="pickMemoryFilter('${t}')">${t || '全部类型'}</button>`
   ).join("");
+  const zoneOptions = ['<option value="">全部分区</option>'].concat(
+    (state.memoryPalaceZones || []).map(z => `<option value="${escapeAttr(z)}" ${state.memoryPalaceZone===z?'selected':''}>${escapeHtml(z)}</option>`)
+  ).join("");
   const rows = (mem.items || []).map(it => `<tr>
     <td><span class="tag">${escapeHtml(it.memory_type||'-')}</span></td>
     <td><code style="font-size:11px">${escapeHtml(it.group_id||'')}${it.user_id ? '/'+escapeHtml(it.user_id) : ''}</code></td>
     <td>${escapeHtml(it.summary)}</td>
     <td class="muted" style="font-size:12px">conf=${it.confidence.toFixed(2)}<br>sal=${it.salience.toFixed(2)}</td>
     <td class="muted" style="font-size:12px">${it.updated_at?new Date(it.updated_at*1000).toLocaleString():'-'}</td>
+    <td><button class="btn small" onclick="openMemoryDetail('${escapeAttr(it.memory_id)}')">详情</button></td>
   </tr>`).join("");
   const hiddenNote = mem.hidden_self_count
     ? `<span class="muted" style="font-size:12px;margin-left:10px">已默认隐藏 ${mem.hidden_self_count} 条 bot 自言条目</span>`
@@ -731,14 +741,22 @@ function renderMemory() {
       </label>
       ${hiddenNote}
     </div>
-    <div class="card"><h2>长期记忆（${(mem.items||[]).length}）</h2>
+    <div class="card">
+      <div class="row" style="gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+        <input id="mem-user-input" placeholder="按 user_id 过滤" value="${escapeAttr(state.memoryUserId || '')}" onkeydown="if(event.key==='Enter')applyMemoryFilters()" style="width:160px">
+        <input id="mem-group-input" placeholder="按 group_id 过滤" value="${escapeAttr(state.memoryGroupId || '')}" onkeydown="if(event.key==='Enter')applyMemoryFilters()" style="width:160px">
+        <select id="mem-zone-select" onchange="pickPalaceZone(this.value)">${zoneOptions}</select>
+        <button class="btn" onclick="applyMemoryFilters()">应用</button>
+        ${(state.memoryUserId || state.memoryGroupId || state.memoryPalaceZone) ? '<button class="btn small" onclick="clearMemoryFilters()">清除过滤</button>' : ''}
+      </div>
+      <h2>长期记忆（${(mem.items||[]).length}）</h2>
       <p class="muted" style="font-size:12px;margin:-6px 0 10px">
         从 memory_palace 数据库蒸馏后的记忆条目（用户画像、群知识、事实等）；
         ${state.memoryIncludeSelf ? '当前显示 bot 自言条目。' : 'bot 自己的发言默认隐藏，勾选上方复选框可显示。'}
         要看群里的原始对话历史，请进入「群信息」→ 选择群 → 切「对话原文」tab。
       </p>
-      <table><thead><tr><th>类型</th><th>作用域</th><th>摘要</th><th>分数</th><th>更新</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5" class="muted">暂无记忆条目</td></tr>'}</tbody></table>
+      <table><thead><tr><th>类型</th><th>作用域</th><th>摘要</th><th>分数</th><th>更新</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" class="muted">暂无记忆条目</td></tr>'}</tbody></table>
     </div>`;
 }
 
@@ -750,6 +768,65 @@ async function pickMemoryFilter(t) {
 async function toggleMemoryIncludeSelf(checked) {
   state.memoryIncludeSelf = !!checked;
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+async function applyMemoryFilters() {
+  state.memoryUserId = (document.getElementById("mem-user-input")?.value || "").trim();
+  state.memoryGroupId = (document.getElementById("mem-group-input")?.value || "").trim();
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+async function pickPalaceZone(zone) {
+  state.memoryPalaceZone = zone || "";
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+async function clearMemoryFilters() {
+  state.memoryUserId = "";
+  state.memoryGroupId = "";
+  state.memoryPalaceZone = "";
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+async function openMemoryDetail(memoryId) {
+  if (!memoryId) return;
+  try {
+    state.selectedMemory = await api("/memory/detail/" + encodeURIComponent(memoryId));
+    render();
+  } catch (e) { alertFlash("err", e.message); }
+}
+
+function renderMemoryDetail() {
+  const d = state.selectedMemory;
+  const it = d.item || {};
+  const related = d.related || [];
+  const tagLine = (label, arr) => arr && arr.length ? `<div style="margin:4px 0"><span class="muted" style="font-size:12px">${escapeHtml(label)}：</span>${arr.map(v => `<span class="tag">${escapeHtml(String(v))}</span>`).join("")}</div>` : '';
+  const relatedRows = related.map(r => `<tr>
+    <td><span class="tag">${escapeHtml(r.memory_type||'-')}</span></td>
+    <td>${escapeHtml((r.summary||'').slice(0,120))}</td>
+    <td><button class="btn small" onclick="openMemoryDetail('${escapeAttr(r.memory_id||'')}')">查看</button></td>
+  </tr>`).join("");
+  return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedMemory=null;render()">返回列表</button><span class="muted">记忆 ${escapeHtml(d.memory_id)}</span></div>
+    <div class="card">
+      <h2>${escapeHtml(it.memory_type || '-')} <code style="font-size:13px;color:var(--muted)">${escapeHtml(d.memory_id)}</code></h2>
+      <div class="row" style="gap:20px;flex-wrap:wrap;font-size:13px">
+        ${it.palace_zone ? `<div><span class="muted">palace_zone：</span><strong>${escapeHtml(it.palace_zone)}</strong></div>` : ''}
+        ${it.group_id ? `<div><span class="muted">group_id：</span><code>${escapeHtml(it.group_id)}</code></div>` : ''}
+        ${it.user_id ? `<div><span class="muted">user_id：</span><code>${escapeHtml(it.user_id)}</code></div>` : ''}
+        <div><span class="muted">confidence：</span>${(it.confidence||0).toFixed(2)}</div>
+        <div><span class="muted">salience：</span>${(it.salience||0).toFixed(2)}</div>
+        ${typeof it.stability === 'number' ? `<div><span class="muted">stability：</span>${it.stability.toFixed(2)}</div>` : ''}
+      </div>
+      <h3 style="margin-top:14px">摘要</h3>
+      <pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(it.summary || '')}</pre>
+      ${tagLine('topic_tags', it.topic_tags)}
+      ${tagLine('entity_tags', it.entity_tags)}
+      ${tagLine('aliases', it.aliases)}
+      ${it.why_relevant ? `<h3>关联说明</h3><p>${escapeHtml(it.why_relevant)}</p>` : ''}
+      ${it.time_hint ? `<p class="muted" style="font-size:12px">时间提示：${escapeHtml(it.time_hint)}</p>` : ''}
+      <details style="margin-top:12px"><summary class="muted">完整 payload</summary><pre style="white-space:pre-wrap;font-size:12px;background:#0b0d12;padding:10px;border-radius:6px;overflow-x:auto">${escapeHtml(JSON.stringify(it, null, 2))}</pre></details>
+    </div>
+    ${related.length ? `<div class="card"><h3>关联记忆（${related.length}）</h3><table><tbody>${relatedRows}</tbody></table></div>` : ''}`;
 }
 
 function viewTitle() {

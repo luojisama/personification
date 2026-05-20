@@ -771,6 +771,8 @@ class MemoryStore:
         self,
         *,
         group_id: str = "",
+        user_id: str = "",
+        palace_zone: str = "",
         limit: int = 20,
         min_confidence: float = 0.0,
         source_kind: str = "",
@@ -783,6 +785,12 @@ class MemoryStore:
         if group_id:
             clauses.append("(group_id=? OR group_id='')")
             params.append(str(group_id))
+        if user_id:
+            clauses.append("user_id = ?")
+            params.append(str(user_id))
+        if palace_zone:
+            clauses.append("palace_zone = ?")
+            params.append(str(palace_zone))
         if source_kind:
             clauses.append("json_extract(payload, '$.source_kind') = ?")
             params.append(str(source_kind))
