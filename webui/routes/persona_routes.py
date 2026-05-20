@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from ...core.onebot_cache import get_user_nickname
 from ..deps import AdminIdentity, require_admin
 
 
@@ -12,6 +13,20 @@ def _profile_service(runtime) -> Any | None:
     if bundle is None:
         return None
     return getattr(bundle, "profile_service", None)
+
+
+def _get_first_bot(runtime) -> Any | None:
+    bundle = getattr(runtime, "runtime_bundle", None)
+    if bundle is None:
+        return None
+    get_bots = getattr(bundle, "get_bots", None)
+    if not callable(get_bots):
+        return None
+    try:
+        bots = get_bots() or {}
+    except Exception:
+        return None
+    return next(iter(bots.values()), None) if bots else None
 
 
 def build_persona_router(*, runtime) -> APIRouter:
@@ -23,18 +38,20 @@ def build_persona_router(*, runtime) -> APIRouter:
         if svc is None:
             return {"profiles": [], "available": False}
         profiles = svc.list_core_profiles()
-        return {
-            "profiles": [
+        bot = _get_first_bot(runtime)
+        items: list[dict[str, Any]] = []
+        for p in profiles:
+            uid = p["user_id"]
+            items.append(
                 {
-                    "user_id": p["user_id"],
+                    "user_id": uid,
+                    "nickname": await get_user_nickname(bot, uid),
                     "snippet": (p["profile_text"] or "")[:140],
                     "updated_at": p.get("updated_at", 0),
                     "source": p.get("source", ""),
                 }
-                for p in profiles
-            ],
-            "available": True,
-        }
+            )
+        return {"profiles": items, "available": True}
 
     @router.get("/{user_id}")
     async def detail(user_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:

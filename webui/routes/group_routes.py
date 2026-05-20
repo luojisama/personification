@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from ...core import webui_audit_log
 from ...core.db import connect_sync
+from ...core.onebot_cache import get_group_name, get_user_nickname
 from ..deps import AdminIdentity, get_client_ip, require_admin
 
 
@@ -26,6 +27,20 @@ def _memory_store(runtime) -> Any | None:
     return getattr(bundle, "memory_store", None)
 
 
+def _get_first_bot(runtime) -> Any | None:
+    bundle = getattr(runtime, "runtime_bundle", None)
+    if bundle is None:
+        return None
+    get_bots = getattr(bundle, "get_bots", None)
+    if not callable(get_bots):
+        return None
+    try:
+        bots = get_bots() or {}
+    except Exception:
+        return None
+    return next(iter(bots.values()), None) if bots else None
+
+
 _REBUILD_RATELIMIT_NS = "group_style_rebuild_ratelimit"
 _REBUILD_WINDOW_SECONDS = 300
 _REBUILD_MAX_PER_WINDOW = 3
@@ -40,7 +55,17 @@ def build_group_router(*, runtime) -> APIRouter:
         if svc is None:
             return {"groups": [], "available": False}
         groups = svc.list_groups()
-        return {"groups": groups, "available": True}
+        bot = _get_first_bot(runtime)
+        items: list[dict[str, Any]] = []
+        for gid in groups:
+            gid_str = str(gid)
+            items.append(
+                {
+                    "group_id": gid_str,
+                    "group_name": await get_group_name(bot, gid_str),
+                }
+            )
+        return {"groups": items, "available": True}
 
     @router.get("/{group_id}/personas")
     async def personas(group_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
@@ -48,17 +73,19 @@ def build_group_router(*, runtime) -> APIRouter:
         if svc is None:
             raise HTTPException(status_code=503, detail="profile_service 未就绪")
         profiles = svc.list_local_profiles(group_id)
-        return {
-            "group_id": group_id,
-            "profiles": [
+        bot = _get_first_bot(runtime)
+        items: list[dict[str, Any]] = []
+        for p in profiles:
+            uid = p["user_id"]
+            items.append(
                 {
-                    "user_id": p["user_id"],
+                    "user_id": uid,
+                    "nickname": await get_user_nickname(bot, uid),
                     "snippet": (p["profile_text"] or "")[:140],
                     "updated_at": p.get("updated_at", 0),
                 }
-                for p in profiles
-            ],
-        }
+            )
+        return {"group_id": group_id, "profiles": items}
 
     @router.get("/{group_id}/style")
     async def style(group_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:

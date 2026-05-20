@@ -787,12 +787,13 @@ function renderPersonas() {
   const rows = state.personas.map(p => `<tr>
     <td><img class="avatar" src="https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
     <td><code>${escapeHtml(p.user_id)}</code></td>
+    <td>${escapeHtml(p.nickname || '')}</td>
     <td>${escapeHtml(p.snippet)}</td>
     <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
     <td><button class="btn small" onclick="openPersona('${escapeAttr(p.user_id)}')">详情</button></td>
   </tr>`).join("");
   return `<div class="card"><h2>用户画像（${state.personas.length}）</h2>
-    <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>摘要</th><th>更新</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">暂无画像</td></tr>'}</tbody></table></div>`;
+    <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>昵称</th><th>摘要</th><th>更新</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="muted">暂无画像</td></tr>'}</tbody></table></div>`;
 }
 
 async function openPersona(uid) {
@@ -818,13 +819,14 @@ function renderPersonaDetail() {
 function renderGroups() {
   if (state.groupsAvailable === false) return `<div class="card muted">profile_service 未就绪</div>`;
   if (state.selectedGroup) return renderGroupDetail();
-  const rows = state.groupList.map(gid => `<tr>
-    <td><img class="avatar" src="https://p.qlogo.cn/gh/${encodeURIComponent(gid)}/${encodeURIComponent(gid)}/100/" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
-    <td><code>${escapeHtml(gid)}</code></td>
-    <td><button class="btn small" onclick="openGroup('${escapeAttr(gid)}')">查看</button></td>
+  const rows = state.groupList.map(g => `<tr>
+    <td><img class="avatar" src="https://p.qlogo.cn/gh/${encodeURIComponent(g.group_id)}/${encodeURIComponent(g.group_id)}/100/" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
+    <td><code>${escapeHtml(g.group_id)}</code></td>
+    <td>${escapeHtml(g.group_name || '')}</td>
+    <td><button class="btn small" onclick="openGroup('${escapeAttr(g.group_id)}')">查看</button></td>
   </tr>`).join("");
   return `<div class="card"><h2>群列表（${state.groupList.length}）</h2>
-    <table><thead><tr><th style="width:40px"></th><th>群号</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="muted">暂无群数据</td></tr>'}</tbody></table></div>`;
+    <table><thead><tr><th style="width:40px"></th><th>群号</th><th>群名</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="muted">暂无群数据</td></tr>'}</tbody></table></div>`;
 }
 
 async function openGroup(gid) {
@@ -858,6 +860,7 @@ function renderGroupDetail() {
   const rows = state.groupPersonas.map(p => `<tr>
     <td><img class="avatar" src="https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
     <td><code>${escapeHtml(p.user_id)}</code></td>
+    <td>${escapeHtml(p.nickname || '')}</td>
     <td>${escapeHtml(p.snippet)}</td>
     <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
   </tr>`).join("");
@@ -873,7 +876,7 @@ function renderGroupDetail() {
     <div class="card"><h2>群知识库（${(state.groupKnowledge||[]).length}）</h2>
       ${knowledgeRows ? `<table><thead><tr><th>术语</th><th>解释</th><th>来源</th><th>更新</th></tr></thead><tbody>${knowledgeRows}</tbody></table>` : '<p class="muted">暂无群知识。开启「群知识库自动构建」后会定时扫描并写入。</p>'}</div>
     <div class="card"><h2>群内成员画像（${state.groupPersonas.length}）</h2>
-      <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>摘要</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="muted">无</td></tr>'}</tbody></table></div>
+      <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>昵称</th><th>摘要</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">无</td></tr>'}</tbody></table></div>
     ${renderGroupRawChat()}`;
 }
 
