@@ -179,6 +179,8 @@ main { padding:20px 26px; max-width:1400px; }
 @media (hover:none) { .sticker-delete-btn { opacity:0.85; } }
 .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; vertical-align:middle; }
 @keyframes spin { to { transform:rotate(360deg); } }
+.avatar { width:28px; height:28px; border-radius:50%; vertical-align:middle; background:#0b0d12; object-fit:cover; display:inline-block; }
+[data-theme="light"] .avatar { background:#f3f5f8; }
 .topbar { position:sticky; top:0; z-index:5; background:var(--bg); padding-bottom:10px; margin-bottom:14px; }
 .login-wrap { max-width:380px; margin:80px auto 0; }
 .login-wrap .card { padding:28px; }
@@ -783,13 +785,14 @@ function renderPersonas() {
   if (state.personasAvailable === false) return `<div class="card muted">profile_service 未就绪</div>`;
   if (state.selectedPersona) return renderPersonaDetail();
   const rows = state.personas.map(p => `<tr>
+    <td><img class="avatar" src="https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
     <td><code>${escapeHtml(p.user_id)}</code></td>
     <td>${escapeHtml(p.snippet)}</td>
     <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
     <td><button class="btn small" onclick="openPersona('${escapeAttr(p.user_id)}')">详情</button></td>
   </tr>`).join("");
   return `<div class="card"><h2>用户画像（${state.personas.length}）</h2>
-    <table><thead><tr><th>QQ</th><th>摘要</th><th>更新</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="muted">暂无画像</td></tr>'}</tbody></table></div>`;
+    <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>摘要</th><th>更新</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">暂无画像</td></tr>'}</tbody></table></div>`;
 }
 
 async function openPersona(uid) {
@@ -816,11 +819,12 @@ function renderGroups() {
   if (state.groupsAvailable === false) return `<div class="card muted">profile_service 未就绪</div>`;
   if (state.selectedGroup) return renderGroupDetail();
   const rows = state.groupList.map(gid => `<tr>
+    <td><img class="avatar" src="https://p.qlogo.cn/gh/${encodeURIComponent(gid)}/${encodeURIComponent(gid)}/100/" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
     <td><code>${escapeHtml(gid)}</code></td>
     <td><button class="btn small" onclick="openGroup('${escapeAttr(gid)}')">查看</button></td>
   </tr>`).join("");
   return `<div class="card"><h2>群列表（${state.groupList.length}）</h2>
-    <table><thead><tr><th>群号</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="2" class="muted">暂无群数据</td></tr>'}</tbody></table></div>`;
+    <table><thead><tr><th style="width:40px"></th><th>群号</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="muted">暂无群数据</td></tr>'}</tbody></table></div>`;
 }
 
 async function openGroup(gid) {
@@ -852,6 +856,7 @@ async function loadGroupRawChat() {
 function renderGroupDetail() {
   const gid = state.selectedGroup;
   const rows = state.groupPersonas.map(p => `<tr>
+    <td><img class="avatar" src="https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
     <td><code>${escapeHtml(p.user_id)}</code></td>
     <td>${escapeHtml(p.snippet)}</td>
     <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
@@ -868,7 +873,7 @@ function renderGroupDetail() {
     <div class="card"><h2>群知识库（${(state.groupKnowledge||[]).length}）</h2>
       ${knowledgeRows ? `<table><thead><tr><th>术语</th><th>解释</th><th>来源</th><th>更新</th></tr></thead><tbody>${knowledgeRows}</tbody></table>` : '<p class="muted">暂无群知识。开启「群知识库自动构建」后会定时扫描并写入。</p>'}</div>
     <div class="card"><h2>群内成员画像（${state.groupPersonas.length}）</h2>
-      <table><thead><tr><th>QQ</th><th>摘要</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="muted">无</td></tr>'}</tbody></table></div>
+      <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>摘要</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="muted">无</td></tr>'}</tbody></table></div>
     ${renderGroupRawChat()}`;
 }
 
