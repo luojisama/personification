@@ -20,6 +20,7 @@ from ..model_router import (
 )
 from ..session_store import init_session_store
 from ..tasks_service import make_cancel_task_tool, make_create_task_tool
+from ..web_fetch import WebFetchError, fetch_web_page
 from ..web_grounding import do_web_search as do_web_search_core
 from ...utils import init_utils_config
 from ..sticker_library import resolve_sticker_dir
@@ -191,6 +192,9 @@ def build_agent_tool_registry(
         registry.register(
             _build_recall_user_memory_tool(memory_store, plugin_config, logger)
         )
+
+    if bool(getattr(plugin_config, "personification_tool_web_fetch_enabled", True)):
+        registry.register(_build_web_fetch_tool(plugin_config, logger))
 
     if scheduler is not None and data_dir is not None:
         _bot_caller: Callable[[dict], Any] | None = None
@@ -366,6 +370,68 @@ def _build_recall_user_memory_tool(memory_store: Any, plugin_config: Any, logger
         handler=_handler,
         local=True,
         enabled=lambda: bool(getattr(plugin_config, "personification_memory_enabled", True)),
+    )
+
+
+def _build_web_fetch_tool(plugin_config: Any, logger: Any) -> AgentTool:
+    import json as _json
+
+    async def _handler(url: str, max_chars: int = 3000) -> str:
+        blocked = list(
+            getattr(plugin_config, "personification_tool_web_fetch_blocked_domains", []) or []
+        )
+        timeout = float(
+            getattr(plugin_config, "personification_tool_web_fetch_timeout", 60.0) or 60.0
+        )
+        try:
+            result = await fetch_web_page(
+                url,
+                timeout=timeout,
+                max_chars=int(max_chars or 3000),
+                blocked_domains=blocked or None,
+            )
+        except WebFetchError as exc:
+            logger.debug(f"[web_fetch] {exc}")
+            return _json.dumps({"error": str(exc), "url": str(url or "")}, ensure_ascii=False)
+        except Exception as exc:
+            logger.warning(f"[web_fetch] unexpected error: {exc}")
+            return _json.dumps(
+                {"error": f"未知错误：{exc}", "url": str(url or "")}, ensure_ascii=False
+            )
+        return _json.dumps(result, ensure_ascii=False)
+
+    return AgentTool(
+        name="web_fetch",
+        description=(
+            "抓取指定 URL 的网页正文。"
+            "当用户给出具体链接（含 http/https 的 URL）希望你阅读、总结、解释"
+            "或回答页面里的具体内容时调用。"
+            "与 web_search 的区别：web_search 是按关键词搜索摘要，"
+            "web_fetch 是直接打开用户给的 URL 把正文抓回来。"
+            "默认抓取 3000 字（max_chars 可调，上限 8000），整体超时 60 秒；"
+            "拒绝内网/本地地址，仅支持 http/https。"
+            "返回 JSON 含 url/title/text/status_code，失败时含 error 字段。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "要抓取的完整 URL，必须以 http:// 或 https:// 开头",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "返回正文的最大字符数，默认 3000，上限 8000",
+                    "default": 3000,
+                },
+            },
+            "required": ["url"],
+        },
+        handler=_handler,
+        local=True,
+        enabled=lambda: bool(
+            getattr(plugin_config, "personification_tool_web_fetch_enabled", True)
+        ),
     )
 
 

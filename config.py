@@ -46,6 +46,8 @@ class Config(BaseModel):
     personification_model_builtin_search_enabled: bool = False
     personification_tool_web_search_enabled: bool = True
     personification_tool_web_search_mode: str = "enabled"
+    personification_tool_web_fetch_enabled: bool = True
+    personification_tool_web_fetch_timeout: int = 60
     personification_thinking_mode: str = "none"
     personification_state_thinking_mode: str = "adaptive"
     personification_model_overrides: Dict[str, str] = {}
