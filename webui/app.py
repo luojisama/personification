@@ -14,6 +14,7 @@ from .routes.group_routes import build_group_router
 from .routes.memory_routes import build_memory_router
 from .routes.metrics_routes import build_metrics_router
 from .routes.persona_routes import build_persona_router
+from .routes.plugin_knowledge_routes import build_plugin_knowledge_router
 from .routes.quota_routes import build_quota_router
 from .routes.skill_routes import build_skill_router
 from .routes.sticker_routes import build_sticker_router
@@ -71,6 +72,7 @@ def build_router() -> APIRouter:
     router.include_router(build_audit_router(runtime=runtime))
     router.include_router(build_proactive_router(runtime=runtime))
     router.include_router(build_quota_router(runtime=runtime))
+    router.include_router(build_plugin_knowledge_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -339,6 +341,11 @@ async function loadView() {
       ]);
       state.memory = mem;
       state.memoryInnerState = inner;
+    } else if (state.view === "plugin_knowledge") {
+      const data = await api("/plugin-knowledge/list");
+      state.pluginKnowledgeList = data.plugins || [];
+      state.pluginKnowledgeAvailable = data.available;
+      state.pluginKnowledgeTotal = data.total || 0;
     }
   } finally { state.loading = false; }
 }
@@ -366,6 +373,7 @@ function renderLayout() {
         ${navItem('memory','Agent 记忆')}
         ${navItem('stickers','表情包')}
         ${navItem('skills','Skill 管理')}
+        ${navItem('plugin_knowledge','插件知识库')}
         ${navItem('test','模型测试')}
         ${navItem('proactive','主动诊断')}
         ${navItem('audit','审计日志')}
@@ -400,6 +408,7 @@ function renderView() {
   if (state.view === "personas") return renderPersonas();
   if (state.view === "groups") return renderGroups();
   if (state.view === "skills") return renderSkills();
+  if (state.view === "plugin_knowledge") return renderPluginKnowledge();
   if (state.view === "test") return renderTest();
   if (state.view === "memory") return renderMemory();
   if (state.view === "stickers") return renderStickers();
@@ -744,7 +753,7 @@ async function toggleMemoryIncludeSelf(checked) {
 }
 
 function viewTitle() {
-  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",memory:"Agent 记忆",stickers:"表情包",skills:"Skill 管理",test:"模型测试",audit:"审计日志",proactive:"主动诊断",devices:"设备管理"})[state.view] || state.view;
+  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",memory:"Agent 记忆",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",test:"模型测试",audit:"审计日志",proactive:"主动诊断",devices:"设备管理"})[state.view] || state.view;
 }
 
 function renderDashboard() {
@@ -994,6 +1003,80 @@ async function toggleSkill(name, disabled) {
     alertFlash("ok", `${name} 已${disabled?'禁用':'启用'}`);
     await loadView(); render();
   } catch (e) { alertFlash("err", "切换失败：" + e.message); }
+}
+
+function renderPluginKnowledge() {
+  if (state.pluginKnowledgeAvailable === false) return `<div class="card muted">knowledge_store 未就绪</div>`;
+  if (state.selectedPluginKnowledge) return renderPluginKnowledgeDetail();
+  const list = state.pluginKnowledgeList || [];
+  const searchResults = state.pluginKnowledgeSearchResults;
+  const matchedSet = searchResults ? new Set(searchResults.results || []) : null;
+  const displayList = matchedSet ? list.filter(p => matchedSet.has(p.plugin_name)) : list;
+  const rows = displayList.map(p => `<tr>
+    <td><strong>${escapeHtml(p.display_name || p.plugin_name)}</strong>${p.category ? ` <span class="tag">${escapeHtml(p.category)}</span>` : ''}</td>
+    <td><code>${escapeHtml(p.plugin_name)}</code></td>
+    <td>${escapeHtml(p.summary || '')}</td>
+    <td class="muted" style="font-size:12px">
+      ${p.has_runtime_data ? '<span class="tag">runtime</span>' : ''}
+      ${p.has_source_data ? `<span class="tag">source(${p.source_file_count}f/${p.source_chunk_count}c)</span>` : ''}
+    </td>
+    <td><button class="btn small" onclick="openPluginKnowledge('${escapeAttr(p.plugin_name)}')">详情</button></td>
+  </tr>`).join("");
+  const searchInfo = matchedSet ? `<div class="muted" style="margin-bottom:8px">搜索 "${escapeHtml(state.pluginKnowledgeSearchQ || '')}" 命中 ${matchedSet.size} 条 <button class="btn small" onclick="clearPluginKnowledgeSearch()">清除</button></div>` : '';
+  return `<div class="card">
+    <div class="row" style="margin-bottom:12px;gap:8px;align-items:center">
+      <input id="pk-search-input" placeholder="按插件名/关键词/摘要搜索" value="${escapeAttr(state.pluginKnowledgeSearchQ || '')}" onkeydown="if(event.key==='Enter')triggerPluginKnowledgeSearch()" style="flex:1">
+      <button class="btn" onclick="triggerPluginKnowledgeSearch()">搜索</button>
+    </div>
+    ${searchInfo}
+    <h2>插件知识库（${displayList.length} / ${list.length}）</h2>
+    <table><thead><tr><th>名称</th><th>plugin_name</th><th>摘要</th><th>数据</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">暂无插件知识，等待自动构建或手动触发。</td></tr>'}</tbody></table>
+  </div>`;
+}
+
+async function triggerPluginKnowledgeSearch() {
+  const input = document.getElementById("pk-search-input");
+  const q = (input ? input.value : "").trim();
+  state.pluginKnowledgeSearchQ = q;
+  if (!q) { state.pluginKnowledgeSearchResults = null; render(); return; }
+  try {
+    state.pluginKnowledgeSearchResults = await api("/plugin-knowledge/search?" + new URLSearchParams({q, top_k: "30"}).toString());
+    render();
+  } catch (e) { alertFlash("err", e.message); }
+}
+
+function clearPluginKnowledgeSearch() {
+  state.pluginKnowledgeSearchQ = "";
+  state.pluginKnowledgeSearchResults = null;
+  render();
+}
+
+async function openPluginKnowledge(name) {
+  try {
+    state.selectedPluginKnowledge = await api("/plugin-knowledge/detail/" + encodeURIComponent(name));
+    render();
+  } catch (e) { alertFlash("err", e.message); }
+}
+
+function renderPluginKnowledgeDetail() {
+  const d = state.selectedPluginKnowledge;
+  const e = d.entry || {};
+  const features = Array.isArray(e.features) ? e.features : [];
+  const featureRows = features.map(f => {
+    if (typeof f === "string") return `<li>${escapeHtml(f)}</li>`;
+    const name = f.name || f.feature || "";
+    const desc = f.description || f.desc || "";
+    return `<li><strong>${escapeHtml(name)}</strong>${desc ? `：${escapeHtml(desc)}` : ''}</li>`;
+  }).join("");
+  return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedPluginKnowledge=null;render()">返回列表</button><span class="muted">插件 ${escapeHtml(d.plugin_name)}</span></div>
+    <div class="card">
+      <h2>${escapeHtml(e.display_name || d.plugin_name)} <code style="font-size:13px;color:var(--muted)">${escapeHtml(d.plugin_name)}</code></h2>
+      ${e.summary ? `<p>${escapeHtml(e.summary)}</p>` : ''}
+      ${(e.keywords && e.keywords.length) ? `<div style="margin:6px 0">${e.keywords.map(k => `<span class="tag">${escapeHtml(k)}</span>`).join("")}</div>` : ''}
+      ${e.architecture_summary ? `<h3>架构摘要</h3><pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(e.architecture_summary)}</pre>` : ''}
+      ${features.length ? `<h3>功能列表</h3><ul>${featureRows}</ul>` : ''}
+      <details style="margin-top:12px"><summary class="muted">完整 JSON</summary><pre style="white-space:pre-wrap;font-size:12px;background:#0b0d12;padding:10px;border-radius:6px;overflow-x:auto">${escapeHtml(JSON.stringify(e, null, 2))}</pre></details>
+    </div>`;
 }
 
 function renderTest() {
