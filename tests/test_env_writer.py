@@ -60,6 +60,30 @@ def test_write_dotenv_appends_when_key_missing(tmp_path: Path) -> None:
     assert parsed["personification_global_enabled"] == "true"
 
 
+def test_write_dotenv_skips_when_value_unchanged(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env.prod"
+    env_file.write_text(
+        "# 顶部注释\n"
+        "personification_probability=0.5\n"
+        "personification_global_enabled=true\n",
+        encoding="utf-8",
+    )
+    original_mtime = env_file.stat().st_mtime_ns
+    # 写入完全一致的值：不应产生备份，也不应改写文件
+    result = env_writer.write_dotenv("personification_probability", 0.5, target=env_file)
+    assert result == env_file
+    backups = list(tmp_path.glob(".env.prod.bak.*"))
+    assert backups == [], "未变化时不应产生备份文件"
+    assert env_file.stat().st_mtime_ns == original_mtime, "未变化时不应改写源文件"
+    # 值实际变化后才会备份
+    result = env_writer.write_dotenv("personification_probability", 0.7, target=env_file)
+    assert result == env_file
+    backups = list(tmp_path.glob(".env.prod.bak.*"))
+    assert len(backups) == 1, "值变化后应产生 1 份备份"
+    parsed = dotenv_values(str(env_file))
+    assert parsed["personification_probability"] == "0.7"
+
+
 def test_write_env_json_creates_and_merges(tmp_path: Path) -> None:
     cfg = _make_plugin_config(tmp_path)
     path = env_writer.write_env_json("personification_probability", 0.5, cfg)

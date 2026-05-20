@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from dotenv import set_key
+from dotenv import dotenv_values, set_key
 
 from .config_manager import _write_payload_atomic, get_env_config_path
 from .runtime_config import (
@@ -36,11 +36,20 @@ def _serialize_value(value: Any) -> str:
 
 def write_dotenv(field_name: str, value: Any, *, backup: bool = True, target: Path | None = None) -> Path | None:
     """写入 .env.prod / .env，保留注释顺序；写前备份。
-    返回实际写入的文件路径，无可写文件时返回 None。
+    若新值与文件中现有值完全一致，则跳过备份与写入，避免产生无意义的 .bak 副本。
+    返回实际写入（或确认未变）的文件路径，无可写文件时返回 None。
     """
     path = target or _resolve_dotenv_target()
     if path is None:
         return None
+    new_value_str = _serialize_value(value)
+    if path.exists():
+        try:
+            existing = dotenv_values(str(path))
+        except Exception:
+            existing = None
+        if isinstance(existing, dict) and existing.get(field_name) == new_value_str:
+            return path
     if backup and path.exists():
         ts = time.strftime("%Y%m%d-%H%M%S")
         backup_path = path.with_suffix(path.suffix + f".bak.{ts}")
@@ -48,7 +57,7 @@ def write_dotenv(field_name: str, value: Any, *, backup: bool = True, target: Pa
             shutil.copy2(path, backup_path)
         except Exception:
             pass
-    set_key(str(path), field_name, _serialize_value(value), quote_mode="auto")
+    set_key(str(path), field_name, new_value_str, quote_mode="auto")
     return path
 
 
