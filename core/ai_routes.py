@@ -44,8 +44,8 @@ def _normalize_api_type(api_type: str) -> str:
         return "anthropic"
     if value in {"openai_codex", "codex"}:
         return "openai_codex"
-    if value in {"gemini_cli", "geminicli"}:
-        return "gemini_cli"
+    if value in {"gemini_cli", "geminicli", "antigravity_cli", "antigravity", "agy", "agy_cli"}:
+        return "antigravity_cli"
     if value in {"claude_code", "claudecode", "claude_cli"}:
         return "claude_code"
     return "openai"
@@ -69,7 +69,7 @@ def _provider_model_is_compatible(api_type: str, model: str) -> bool:
         return False
     if normalized_type == "openai_codex":
         return not normalized_model.startswith(("gemini", "claude"))
-    if normalized_type in {"gemini_official", "gemini_cli"}:
+    if normalized_type in {"gemini_official", "gemini_cli", "antigravity_cli"}:
         return not normalized_model.startswith(("gpt-", "claude"))
     if normalized_type in {"anthropic", "claude_code"}:
         return not normalized_model.startswith(("gpt-", "gemini"))
@@ -84,7 +84,7 @@ def _provider_is_usable(provider: dict[str, Any] | None) -> bool:
         return False
     if not _provider_model_is_compatible(api_type, model):
         return False
-    if api_type in {"openai_codex", "gemini_cli", "claude_code"}:
+    if api_type in {"openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}:
         return True
     return bool(str(payload.get("api_key", "") or "").strip())
 
@@ -486,6 +486,10 @@ class _ProviderConfigProxy:
         if name == "personification_gemini_cli_auth_path":
             return self._provider.get("auth_path", "")
         if name == "personification_gemini_cli_project":
+            return self._provider.get("project", "")
+        if name == "personification_antigravity_cli_auth_path":
+            return self._provider.get("auth_path", "")
+        if name == "personification_antigravity_cli_project":
             return self._provider.get("project", "")
         if name == "personification_claude_code_auth_path":
             return self._provider.get("auth_path", "")

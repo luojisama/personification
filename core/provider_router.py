@@ -31,11 +31,11 @@ def normalize_api_type(api_type: Optional[str]) -> str:
         return "gemini"
     if value in {"openai_codex", "codex"}:
         return "openai_codex"
-    if value in {"gemini_cli", "geminicli"}:
-        return "gemini_cli"
+    if value in {"gemini_cli", "geminicli", "antigravity_cli", "antigravity", "agy", "agy_cli"}:
+        return "antigravity_cli"
     if value in {"claude_code", "claudecode", "claude_cli"}:
         return "claude_code"
-    if value not in {"openai", "gemini", "anthropic", "openai_codex", "gemini_cli", "claude_code"}:
+    if value not in {"openai", "gemini", "anthropic", "openai_codex", "antigravity_cli", "claude_code"}:
         return "openai"
     return value
 
@@ -67,7 +67,7 @@ def _to_int(value: Any, default: int) -> int:
 
 
 def _provider_timeout(provider: Dict[str, Any]) -> float:
-    default_timeout = 120 if provider["api_type"] in {"gemini", "gemini_cli", "anthropic", "claude_code"} else 60
+    default_timeout = 120 if provider["api_type"] in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code"} else 60
     try:
         return float(provider.get("timeout", default_timeout))
     except (TypeError, ValueError):
@@ -111,6 +111,8 @@ def _default_model_for_api_type(api_type: str, model: str = "") -> str:
     if api_type == "openai_codex":
         return "gpt-5.3-codex"
     if api_type == "gemini_cli":
+        return "auto-gemini-3"
+    if api_type == "antigravity_cli":
         return "auto-gemini-3"
     if api_type == "claude_code":
         return "claude-opus-4-7"
@@ -187,10 +189,25 @@ def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str,
         api_key = str(item.get("api_key", "")).strip()
         api_url = str(item.get("api_url", "")).strip()
         model = _default_model_for_api_type(api_type, str(item.get("model", "")).strip())
-        auth_path = str(item.get("auth_path", item.get("codex_auth_path", "")) or "").strip()
-        project = str(item.get("project", item.get("gemini_cli_project", "")) or "").strip()
+        auth_path = str(
+            item.get(
+                "auth_path",
+                item.get(
+                    "antigravity_cli_auth_path",
+                    item.get("gemini_cli_auth_path", item.get("codex_auth_path", "")),
+                ),
+            )
+            or ""
+        ).strip()
+        project = str(
+            item.get(
+                "project",
+                item.get("antigravity_cli_project", item.get("gemini_cli_project", "")),
+            )
+            or ""
+        ).strip()
 
-        if api_type in {"openai_codex", "gemini_cli", "claude_code"}:
+        if api_type in {"openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}:
             if not model:
                 continue
         elif not api_key or not api_url or not model:
@@ -206,14 +223,14 @@ def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str,
             "project": project,
             "enabled": _to_bool(item.get("enabled", True), True),
             "priority": _to_int(item.get("priority", index), index),
-            "timeout": _provider_timeout({"api_type": api_type, **item}),
+            "timeout": _provider_timeout({**item, "api_type": api_type}),
             "max_retries": max(1, _to_int(item.get("max_retries", 2), 2)),
             "supports_native_search": _to_bool(
                 item.get(
                     "supports_native_search",
-                    api_type in {"gemini", "gemini_cli", "anthropic", "claude_code", "openai", "openai_codex"},
+                    api_type in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code", "openai", "openai_codex"},
                 ),
-                api_type in {"gemini", "gemini_cli", "anthropic", "claude_code", "openai", "openai_codex"},
+                api_type in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code", "openai", "openai_codex"},
             ),
             "supports_reasoning": item.get("supports_reasoning"),
         }
@@ -259,13 +276,24 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
         return providers
 
     legacy_type = normalize_api_type(getattr(plugin_config, "personification_api_type", "openai"))
-    if legacy_type in {"openai_codex", "gemini_cli", "claude_code"}:
+    if legacy_type in {"openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}:
         if legacy_type == "openai_codex":
             auth_path = str(getattr(plugin_config, "personification_codex_auth_path", "") or "").strip()
         elif legacy_type == "gemini_cli":
             auth_path = str(getattr(plugin_config, "personification_gemini_cli_auth_path", "") or "").strip()
+        elif legacy_type == "antigravity_cli":
+            auth_path = str(getattr(plugin_config, "personification_antigravity_cli_auth_path", "") or "").strip()
+            if not auth_path:
+                auth_path = str(getattr(plugin_config, "personification_gemini_cli_auth_path", "") or "").strip()
         else:
             auth_path = str(getattr(plugin_config, "personification_claude_code_auth_path", "") or "").strip()
+        project = ""
+        if legacy_type == "gemini_cli":
+            project = str(getattr(plugin_config, "personification_gemini_cli_project", "") or "").strip()
+        elif legacy_type == "antigravity_cli":
+            project = str(getattr(plugin_config, "personification_antigravity_cli_project", "") or "").strip()
+            if not project:
+                project = str(getattr(plugin_config, "personification_gemini_cli_project", "") or "").strip()
         providers = [
             {
                 "name": "legacy_primary",
@@ -277,12 +305,10 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
                     str(getattr(plugin_config, "personification_model", "") or "").strip(),
                 ),
                 "auth_path": auth_path,
-                "project": str(getattr(plugin_config, "personification_gemini_cli_project", "") or "").strip()
-                if legacy_type == "gemini_cli"
-                else "",
+                "project": project,
                 "enabled": True,
                 "priority": 0,
-                "timeout": 120 if legacy_type in {"gemini_cli", "claude_code"} else 60,
+                "timeout": 120 if legacy_type in {"gemini_cli", "antigravity_cli", "claude_code"} else 60,
                 "max_retries": 2,
                 "supports_native_search": True,
             }
@@ -459,6 +485,14 @@ def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
             thinking_mode=_get_thinking_mode(plugin_config),
             timeout=_provider_timeout(provider),
         )
+    if provider["api_type"] == "antigravity_cli":
+        return tool_impl.AntigravityCliToolCaller(
+            model=provider["model"] or "auto-gemini-3",
+            auth_path=str(provider.get("auth_path", "") or "").strip(),
+            project=str(provider.get("project", "") or "").strip(),
+            thinking_mode=_get_thinking_mode(plugin_config),
+            timeout=_provider_timeout(provider),
+        )
     if provider["api_type"] == "claude_code":
         return tool_impl.ClaudeCodeToolCaller(
             model=provider["model"] or "claude-opus-4-7",
@@ -498,6 +532,7 @@ def _should_use_builtin_search(provider: Dict[str, Any], use_builtin_search: boo
     if provider["api_type"] not in {
         "gemini",
         "gemini_cli",
+        "antigravity_cli",
         "anthropic",
         "claude_code",
         "openai",
@@ -811,13 +846,13 @@ async def call_ai_api(
             fallback_provider.setdefault("priority", 999)
             fallback_provider.setdefault(
                 "timeout",
-                120 if fallback_provider["api_type"] in {"gemini", "gemini_cli", "anthropic", "claude_code"} else 60,
+                120 if fallback_provider["api_type"] in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code"} else 60,
             )
             fallback_provider.setdefault("max_retries", 2)
             fallback_provider.setdefault(
                 "supports_native_search",
                 fallback_provider["api_type"]
-                in {"gemini", "gemini_cli", "anthropic", "claude_code", "openai", "openai_codex"},
+                in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code", "openai", "openai_codex"},
             )
             response, fallback_errors, fallback_saw_vision_unavailable = await _try_provider_chain(
                 [fallback_provider],

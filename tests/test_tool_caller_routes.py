@@ -1,4 +1,4 @@
-"""Tests for new gemini-cli / claude-code tool caller routing."""
+"""Tests for Gemini/Antigravity/Claude Code tool caller routing."""
 from __future__ import annotations
 
 import asyncio
@@ -30,6 +30,8 @@ class _DummyConfig:
     personification_codex_auth_path: str = ""
     personification_gemini_cli_auth_path: str = ""
     personification_gemini_cli_project: str = ""
+    personification_antigravity_cli_auth_path: str = ""
+    personification_antigravity_cli_project: str = ""
     personification_claude_code_auth_path: str = ""
     personification_api_pools: object = None
 
@@ -54,9 +56,16 @@ def _make_workspace_temp_dir(prefix: str) -> Path:
 
 
 def test_normalize_api_type_gemini_cli_aliases() -> None:
-    assert caller_impl._normalize_api_type("gemini_cli") == "gemini_cli"
-    assert caller_impl._normalize_api_type("gemini-cli") == "gemini_cli"
-    assert caller_impl._normalize_api_type("GEMINICLI") == "gemini_cli"
+    assert caller_impl._normalize_api_type("gemini_cli") == "antigravity_cli"
+    assert caller_impl._normalize_api_type("gemini-cli") == "antigravity_cli"
+    assert caller_impl._normalize_api_type("GEMINICLI") == "antigravity_cli"
+
+
+def test_normalize_api_type_antigravity_cli_aliases() -> None:
+    assert caller_impl._normalize_api_type("antigravity_cli") == "antigravity_cli"
+    assert caller_impl._normalize_api_type("antigravity-cli") == "antigravity_cli"
+    assert caller_impl._normalize_api_type("agy") == "antigravity_cli"
+    assert provider_router.normalize_api_type("agy_cli") == "antigravity_cli"
 
 
 def test_normalize_api_type_claude_code_aliases() -> None:
@@ -84,6 +93,20 @@ def test_build_tool_caller_returns_gemini_cli_instance() -> None:
     assert caller.model == "gemini-3.1-pro-preview"
 
 
+def test_build_tool_caller_returns_antigravity_cli_instance() -> None:
+    cfg = _DummyConfig(
+        personification_api_type="antigravity_cli",
+        personification_model="gemini-3.1-pro-preview",
+        personification_antigravity_cli_auth_path="C:/tmp/agy.json",
+        personification_antigravity_cli_project="agy-project",
+    )
+    caller = caller_impl.build_tool_caller(cfg)
+    assert isinstance(caller, caller_impl.AntigravityCliToolCaller)
+    assert caller.model == "gemini-3.1-pro-preview"
+    assert caller.auth_path_override == "C:/tmp/agy.json"
+    assert caller.project_override == "agy-project"
+
+
 def test_build_tool_caller_returns_claude_code_instance() -> None:
     cfg = _DummyConfig(
         personification_api_type="claude_code",
@@ -103,9 +126,20 @@ def test_provider_router_accepts_cli_legacy_routes_without_api_key(monkeypatch) 
         personification_gemini_cli_project="cloud-project",
     )
     gemini_providers = provider_router.get_configured_api_providers(gemini_cfg, _Logger())
-    assert gemini_providers[0]["api_type"] == "gemini_cli"
+    assert gemini_providers[0]["api_type"] == "antigravity_cli"
     assert gemini_providers[0]["auth_path"] == "C:/tmp/gemini.json"
     assert gemini_providers[0]["project"] == "cloud-project"
+
+    antigravity_cfg = _DummyConfig(
+        personification_api_type="antigravity_cli",
+        personification_model="gemini-3.1-pro-preview",
+        personification_antigravity_cli_auth_path="C:/tmp/agy.json",
+        personification_antigravity_cli_project="agy-project",
+    )
+    antigravity_providers = provider_router.get_configured_api_providers(antigravity_cfg, _Logger())
+    assert antigravity_providers[0]["api_type"] == "antigravity_cli"
+    assert antigravity_providers[0]["auth_path"] == "C:/tmp/agy.json"
+    assert antigravity_providers[0]["project"] == "agy-project"
 
     claude_cfg = _DummyConfig(
         personification_api_type="claude_code",
@@ -127,7 +161,7 @@ def test_provider_router_accepts_cli_pool_routes_without_api_key() -> None:
         )
     )
     providers = provider_router.get_configured_api_providers(cfg, _Logger())
-    assert [item["api_type"] for item in providers] == ["gemini_cli", "claude_code"]
+    assert [item["api_type"] for item in providers] == ["antigravity_cli", "claude_code"]
     assert providers[0]["project"] == "cloud-project"
 
 
@@ -306,6 +340,20 @@ def test_routed_config_proxy_passes_cli_auth_fields_to_tool_caller() -> None:
     assert gemini_caller.auth_path_override == "C:/tmp/gemini.json"
     assert gemini_caller.project_override == "cloud-project"
 
+    antigravity_proxy = ai_routes._ProviderConfigProxy(
+        base,
+        {
+            "api_type": "antigravity_cli",
+            "model": "gemini-3.1-pro-preview",
+            "auth_path": "C:/tmp/agy.json",
+            "project": "agy-project",
+        },
+    )
+    antigravity_caller = caller_impl.build_tool_caller(antigravity_proxy)
+    assert isinstance(antigravity_caller, caller_impl.AntigravityCliToolCaller)
+    assert antigravity_caller.auth_path_override == "C:/tmp/agy.json"
+    assert antigravity_caller.project_override == "agy-project"
+
     claude_proxy = ai_routes._ProviderConfigProxy(
         base,
         {
@@ -378,6 +426,13 @@ def test_gemini_cli_model_candidates_expand_auto_to_backend_models() -> None:
     ]
 
 
+def test_antigravity_cli_project_prefers_antigravity_env(monkeypatch) -> None:
+    monkeypatch.setenv("ANTIGRAVITY_CLI_PROJECT", "agy-project-123")
+    monkeypatch.setenv("GEMINI_CLI_PROJECT", "gemini-project-123")
+
+    assert caller_impl._resolve_local_antigravity_cli_project() == "agy-project-123"
+
+
 @dataclass
 class _DummyRuntime:
     plugin_config: object
@@ -401,6 +456,14 @@ def test_nanobanan_tool_only_on_gemini_cli_route() -> None:
     assert nano_tool is not None and nano_tool.name == "generate_image_nanobanan"
     # Codex 路由的 generate_image 不应该在 gemini-cli caller 上激活
     assert codex_tool is None
+
+
+def test_nanobanan_tool_available_on_antigravity_cli_route() -> None:
+    cfg = _RuntimeConfig()
+    agy_caller = caller_impl.AntigravityCliToolCaller(model="gemini-3.1-pro-preview")
+    runtime = _DummyRuntime(plugin_config=cfg, tool_caller=agy_caller)
+    nano_tool = build_image_gen_nanobanan_tool(runtime)
+    assert nano_tool is not None and nano_tool.name == "generate_image_nanobanan"
 
 
 def test_nanobanan_tool_disabled_on_openai_route() -> None:

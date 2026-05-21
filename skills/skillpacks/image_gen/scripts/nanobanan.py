@@ -18,7 +18,7 @@ def _first_gemini_cli_caller(tool_caller: Any) -> Any:
     for caller in candidates:
         if caller is None:
             continue
-        if caller.__class__.__name__ != "GeminiCliToolCaller":
+        if caller.__class__.__name__ not in {"GeminiCliToolCaller", "AntigravityCliToolCaller"}:
             continue
         return caller
     return None
@@ -67,13 +67,13 @@ async def generate_image_nanobanan(
     images: list[str] | None = None,
     image_urls: list[str] | None = None,
 ) -> dict[str, str]:
-    """Call Nano Banana (Gemini 3 image) via gemini-cli OAuth credentials."""
+    """Call Nano Banana (Gemini 3 image) via Gemini/Antigravity CLI OAuth credentials."""
     prompt_text = str(prompt or "").strip()
     if not prompt_text:
         return {"error": "empty prompt"}
     caller = _first_gemini_cli_caller(tool_caller)
     if caller is None:
-        return {"error": "nanobanan only available on gemini_cli model route"}
+        return {"error": "nanobanan only available on gemini_cli or antigravity_cli model route"}
 
     access_token, _auth_file = await caller._get_access_token()
     project = await caller._resolve_project(access_token)

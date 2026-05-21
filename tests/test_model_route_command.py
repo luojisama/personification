@@ -54,6 +54,8 @@ class _Bundle:
             personification_codex_auth_path="~/.codex/auth.json",
             personification_gemini_cli_auth_path="~/.gemini/oauth_creds.json",
             personification_gemini_cli_project="",
+            personification_antigravity_cli_auth_path="~/.gemini/antigravity-cli/oauth_creds.json",
+            personification_antigravity_cli_project="agy-project",
             personification_claude_code_auth_path="~/.claude/.credentials.json",
         )
         self.save_count = 0
@@ -101,6 +103,23 @@ def test_model_route_command_can_create_gemini_cli_pool() -> None:
     assert bundle.save_count == 1
     assert bundle.reload_count == 1
     assert "gemini_cli_primary" in result
+
+
+def test_model_route_command_can_create_antigravity_cli_pool() -> None:
+    bundle = _Bundle()
+    bundle.plugin_config.personification_api_pools = None
+
+    result = admin_commands.handle_model_command(
+        bundle,
+        tokens=["路由", "antigravity_cli", "gemini-3-flash-preview"],
+    )
+
+    pools = bundle.plugin_config.personification_api_pools
+    assert pools[0]["api_type"] == "antigravity_cli"
+    assert pools[0]["model"] == "gemini-3-flash-preview"
+    assert pools[0]["auth_path"] == "~/.gemini/antigravity-cli/oauth_creds.json"
+    assert pools[0]["project"] == "agy-project"
+    assert "antigravity_cli_primary" in result
 
 
 def test_model_status_shows_rate_limit_cooldown() -> None:

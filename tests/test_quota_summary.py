@@ -91,7 +91,7 @@ def test_qq_command_renders_full_format(_ledger) -> None:
     assert "Anthropic" in text
     assert "1.50M" in text  # 1.2M prompt + 0.3M completion = 1.5M total
     assert "5.00M" in text  # 上限
-    assert "Gemini CLI" in text
+    assert "Gemini/Antigravity CLI" in text
     assert "∞" in text  # 未设上限
     assert "本地记账" in text
 

@@ -265,7 +265,7 @@ async def handle_stats_command(
 _QUOTA_FIELD_MAP = {
     "anthropic": ("Anthropic", "personification_quota_anthropic_monthly_tokens"),
     "openai": ("OpenAI", "personification_quota_openai_monthly_tokens"),
-    "gemini": ("Gemini CLI", "personification_quota_gemini_cli_monthly_tokens"),
+    "gemini": ("Gemini/Antigravity CLI", "personification_quota_gemini_cli_monthly_tokens"),
     "codex": ("Codex/ChatGPT", "personification_quota_codex_monthly_tokens"),
 }
 

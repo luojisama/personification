@@ -212,9 +212,9 @@ _COMMANDS: list[CommandHelpEntry] = [
     CommandHelpEntry(
         path=("model", "route"),
         category="model",
-        summary="热切主回复 provider，可在 gemini-cli、claude-code、codex 等 provider 间切换。",
+        summary="热切主回复 provider，可在 antigravity-cli、gemini-cli、claude-code、codex 等 provider 间切换。",
         usage="拟人 模型 路由 <provider_name|api_type> [model]",
-        examples=("拟人 模型 路由 gemini_cli_primary", "拟人 模型 路由 gemini_cli gemini-3-flash-preview"),
+        examples=("拟人 模型 路由 antigravity_cli", "拟人 模型 路由 gemini_cli gemini-3-flash-preview"),
         permission="管理员",
         scope="global",
     ),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-GEMINI_API_TYPES = {"gemini", "gemini_official", "gemini_cli"}
+GEMINI_API_TYPES = {"gemini", "gemini_official", "gemini_cli", "antigravity_cli"}
 DEFAULT_CONTEXT_TOKEN_BUDGET = 2000
 GEMINI_CONTEXT_TOKEN_BUDGET = 6000
 DEFAULT_CONTEXT_KEEP_RECENT = 6

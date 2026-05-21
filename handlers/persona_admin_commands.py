@@ -979,6 +979,8 @@ def _default_route_model(api_type: str, config: Any) -> str:
         return str(getattr(config, "personification_model", "") or "").strip() or "gpt-5.3-codex"
     if normalized == "gemini_cli":
         return "auto-gemini-3"
+    if normalized == "antigravity_cli":
+        return "auto-gemini-3"
     if normalized == "claude_code":
         return "claude-opus-4-7"
     return str(getattr(config, "personification_model", "") or "").strip()
@@ -990,6 +992,11 @@ def _default_route_auth_path(api_type: str, config: Any) -> str:
         return str(getattr(config, "personification_codex_auth_path", "") or "").strip() or "~/.codex/auth.json"
     if normalized == "gemini_cli":
         return str(getattr(config, "personification_gemini_cli_auth_path", "") or "").strip() or "~/.gemini/oauth_creds.json"
+    if normalized == "antigravity_cli":
+        return (
+            str(getattr(config, "personification_antigravity_cli_auth_path", "") or "").strip()
+            or "~/.gemini/antigravity-cli/oauth_creds.json"
+        )
     if normalized == "claude_code":
         return str(getattr(config, "personification_claude_code_auth_path", "") or "").strip() or "~/.claude/.credentials.json"
     return ""
@@ -1017,6 +1024,8 @@ def _new_route_provider(api_type: str, model: str, config: Any) -> dict[str, Any
     }
     if normalized == "gemini_cli":
         provider["project"] = str(getattr(config, "personification_gemini_cli_project", "") or "").strip()
+    elif normalized == "antigravity_cli":
+        provider["project"] = str(getattr(config, "personification_antigravity_cli_project", "") or "").strip()
     return provider
 
 
@@ -1066,7 +1075,7 @@ def _switch_primary_provider_route(bundle: Any, *, target: str, model: str = "")
         if not normalized_target:
             names = [str(item.get("name", "") or "").strip() for item in existing if item.get("name")]
             hint = "、".join(names[:8]) if names else "无"
-            return f"没找到这个 provider：{raw_target}\n可用 provider：{hint}\n也可以直接写 api_type：gemini_cli、claude_code、openai_codex。"
+            return f"没找到这个 provider：{raw_target}\n可用 provider：{hint}\n也可以直接写 api_type：antigravity_cli、gemini_cli、claude_code、openai_codex。"
         selected = _new_route_provider(normalized_target, model, bundle.plugin_config)
         existing.insert(0, selected)
         selected_index = 0
@@ -1083,6 +1092,8 @@ def _switch_primary_provider_route(bundle: Any, *, target: str, model: str = "")
                 selected["auth_path"] = auth_path
         if selected["api_type"] == "gemini_cli" and "project" not in selected:
             selected["project"] = str(getattr(bundle.plugin_config, "personification_gemini_cli_project", "") or "").strip()
+        if selected["api_type"] == "antigravity_cli" and "project" not in selected:
+            selected["project"] = str(getattr(bundle.plugin_config, "personification_antigravity_cli_project", "") or "").strip()
         selected["enabled"] = True
         existing[selected_index] = selected
 

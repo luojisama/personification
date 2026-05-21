@@ -35,6 +35,7 @@ def test_gemini_policy_is_empty_for_non_gemini_route() -> None:
 
 def test_gemini_route_gets_larger_context_budget() -> None:
     assert gemini_profile.context_token_budget_for_route("gemini", "gemini-2.5-pro") > 2000
+    assert gemini_profile.context_token_budget_for_route("antigravity_cli", "gemini-3-flash-preview") > 2000
     assert gemini_profile.context_keep_recent_for_route("gemini", "gemini-2.5-pro") > 6
     assert gemini_profile.context_token_budget_for_route("openai", "gpt-5.4-mini") == 2000
 

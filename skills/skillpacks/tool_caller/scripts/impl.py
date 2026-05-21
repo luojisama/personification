@@ -104,8 +104,8 @@ def _normalize_api_type(api_type: Optional[str]) -> str:
     value = (api_type or "openai").strip().lower()
     if value in {"gemini", "gemini_official"}:
         return "gemini_official"
-    if value in {"gemini_cli", "gemini-cli", "geminicli"}:
-        return "gemini_cli"
+    if value in {"gemini_cli", "gemini-cli", "geminicli", "antigravity_cli", "antigravity-cli", "antigravity", "agy", "agy_cli", "agy-cli"}:
+        return "antigravity_cli"
     if value == "anthropic":
         return "anthropic"
     if value in {"claude_code", "claude-code", "claudecode", "claude_cli", "claude-cli"}:
@@ -2026,10 +2026,10 @@ class OpenAICodexToolCaller(ToolCaller):
 
 
 # ============================================================================
-# Gemini CLI / Claude Code 本地凭证调用
+# Gemini CLI / Antigravity CLI / Claude Code 本地凭证调用
 # ============================================================================
 #
-# 复用 gemini-cli / claude-code 在本机保存的 OAuth token，直接 HTTP 调用云端，
+# 复用 gemini-cli / antigravity-cli / claude-code 在本机保存的 OAuth token，直接 HTTP 调用云端，
 # 不再要求用户单独配 API key。token 过期由对应 cli 自身的下次启动负责刷新；
 # 这里失败时会抛出明确的错误提示让用户重新登录 cli。
 
@@ -2037,6 +2037,7 @@ _GEMINI_CLI_BASE = "https://cloudcode-pa.googleapis.com"
 _GEMINI_CLI_LOAD_CODE_ASSIST = f"{_GEMINI_CLI_BASE}/v1internal:loadCodeAssist"
 _GEMINI_CLI_GENERATE_ENDPOINT = f"{_GEMINI_CLI_BASE}/v1internal:generateContent"
 _GEMINI_CLI_DEFAULT_MODEL = "auto-gemini-3"
+_ANTIGRAVITY_CLI_DEFAULT_MODEL = _GEMINI_CLI_DEFAULT_MODEL
 _GEMINI_CLI_AUTO_GEMINI3_MODELS = (
     "gemini-2.5-flash",
     "gemini-3-flash-preview",
@@ -2081,6 +2082,60 @@ def _find_gemini_cli_auth_file_with_log(override_path: str = "") -> tuple[_Path 
         searched.append(str(p))
         if p.exists():
             return p, searched
+    return None, searched
+
+
+def _find_antigravity_cli_auth_file(override_path: str = "") -> _Path | None:
+    return _find_antigravity_cli_auth_file_with_log(override_path)[0]
+
+
+def _find_antigravity_cli_auth_file_with_log(override_path: str = "") -> tuple[_Path | None, list[str]]:
+    """查找 Antigravity CLI OAuth 文件；没有专用文件时兼容 gemini-cli 凭证。"""
+    searched: list[str] = []
+    if override_path:
+        p = _Path(override_path).expanduser()
+        searched.append(f"override={p}")
+        if p.exists():
+            return p, searched
+    for env_name in ("ANTIGRAVITY_CLI_AUTH_PATH", "AGY_AUTH_PATH"):
+        raw_path = _os.environ.get(env_name, "")
+        if raw_path:
+            p = _Path(raw_path).expanduser()
+            searched.append(f"${env_name}={p}")
+            if p.exists():
+                return p, searched
+        else:
+            searched.append(f"${env_name}=<unset>")
+    for env_name in ("ANTIGRAVITY_CLI_HOME", "ANTIGRAVITY_HOME", "AGY_HOME"):
+        base = _os.environ.get(env_name, "")
+        if base:
+            for filename in ("oauth_creds.json", "auth.json", "credentials.json"):
+                p = _Path(base) / filename
+                searched.append(f"${env_name}/{filename}={p}")
+                if p.exists():
+                    return p, searched
+        else:
+            searched.append(f"${env_name}=<unset>")
+    for fallback in [
+        "~/.gemini/antigravity-cli/oauth_creds.json",
+        "~/.gemini/antigravity-cli/auth.json",
+        "~/.gemini/antigravity-cli/credentials.json",
+        "~/AppData/Roaming/antigravity-cli/oauth_creds.json",
+        "~/AppData/Roaming/antigravity-cli/auth.json",
+        "~/AppData/Roaming/antigravity-cli/credentials.json",
+        "~/.config/antigravity-cli/oauth_creds.json",
+        "~/.config/antigravity-cli/auth.json",
+        "~/.config/antigravity-cli/credentials.json",
+    ]:
+        p = _Path(fallback).expanduser()
+        searched.append(str(p))
+        if p.exists():
+            return p, searched
+
+    gemini_auth, gemini_searched = _find_gemini_cli_auth_file_with_log("")
+    searched.extend([f"gemini_compat:{item}" for item in gemini_searched])
+    if gemini_auth is not None:
+        return gemini_auth, searched
     return None, searched
 
 
@@ -2322,6 +2377,48 @@ def _gemini_project_config_candidates(auth_file: _Path | None = None) -> list[_P
     return candidates
 
 
+def _antigravity_project_config_candidates(auth_file: _Path | None = None) -> list[_Path]:
+    candidates: list[_Path] = []
+
+    def _add(path: _Path) -> None:
+        try:
+            resolved = path.expanduser()
+        except Exception:
+            resolved = path
+        if resolved not in candidates:
+            candidates.append(resolved)
+
+    if auth_file is not None:
+        _add(auth_file)
+        base = auth_file.parent
+        for name in ("settings.json", "config.json", "auth.json", "credentials.json"):
+            _add(base / name)
+    for env_name in ("ANTIGRAVITY_CLI_HOME", "ANTIGRAVITY_HOME", "AGY_HOME"):
+        base = _os.environ.get(env_name, "")
+        if base:
+            for name in ("settings.json", "config.json", "oauth_creds.json", "auth.json", "credentials.json"):
+                _add(_Path(base) / name)
+    for raw in (
+        "~/.gemini/antigravity-cli/settings.json",
+        "~/.gemini/antigravity-cli/config.json",
+        "~/.gemini/antigravity-cli/oauth_creds.json",
+        "~/.gemini/antigravity-cli/auth.json",
+        "~/.gemini/antigravity-cli/credentials.json",
+        "~/AppData/Roaming/antigravity-cli/settings.json",
+        "~/AppData/Roaming/antigravity-cli/config.json",
+        "~/AppData/Roaming/antigravity-cli/oauth_creds.json",
+        "~/AppData/Roaming/antigravity-cli/auth.json",
+        "~/AppData/Roaming/antigravity-cli/credentials.json",
+        "~/.config/antigravity-cli/settings.json",
+        "~/.config/antigravity-cli/config.json",
+        "~/.config/antigravity-cli/oauth_creds.json",
+        "~/.config/antigravity-cli/auth.json",
+        "~/.config/antigravity-cli/credentials.json",
+    ):
+        _add(_Path(raw))
+    return candidates
+
+
 def _read_gcloud_project() -> str:
     try:
         import configparser
@@ -2373,11 +2470,29 @@ def _resolve_local_gemini_cli_project(auth_file: _Path | None = None) -> str:
     return _read_gcloud_project()
 
 
-def _gemini_cli_headers(access_token: str) -> dict[str, str]:
+def _resolve_local_antigravity_cli_project(auth_file: _Path | None = None) -> str:
+    for env_name in (
+        "ANTIGRAVITY_CLI_PROJECT",
+        "ANTIGRAVITY_PROJECT",
+        "AGY_PROJECT",
+    ):
+        value = str(_os.environ.get(env_name, "") or "").strip()
+        if _looks_like_project_id(value):
+            return value
+    for path in _antigravity_project_config_candidates(auth_file):
+        if not path.exists():
+            continue
+        project = _read_gemini_project_from_json(path)
+        if project:
+            return project
+    return _resolve_local_gemini_cli_project(auth_file)
+
+
+def _gemini_cli_headers(access_token: str, *, user_agent: str = "GeminiCLI/v0.41.2 (personification; python) google-api-python-client") -> dict[str, str]:
     return {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
-        "User-Agent": "GeminiCLI/v0.41.2 (personification; python) google-api-python-client",
+        "User-Agent": user_agent,
         "x-goog-api-client": "gl-python/3 personification",
     }
 
@@ -2436,6 +2551,13 @@ class GeminiCliToolCaller(ToolCaller):
     """
 
     _project_cache: dict[str, str] = {}
+    _default_model = _GEMINI_CLI_DEFAULT_MODEL
+    _auth_label = "gemini-cli"
+    _login_command = "`gemini auth login`"
+    _onboarding_command = "`gemini`"
+    _auth_config_field = "personification_gemini_cli_auth_path"
+    _project_config_field = "personification_gemini_cli_project"
+    _user_agent = "GeminiCLI/v0.41.2 (personification; python) google-api-python-client"
 
     def __init__(
         self,
@@ -2446,21 +2568,30 @@ class GeminiCliToolCaller(ToolCaller):
         thinking_mode: str = "none",
         timeout: float = 120.0,
     ) -> None:
-        self.model = (model or _GEMINI_CLI_DEFAULT_MODEL).strip() or _GEMINI_CLI_DEFAULT_MODEL
+        self.model = (model or self._default_model).strip() or self._default_model
         self.auth_path_override = auth_path
         self.project_override = (project or "").strip()
         self.thinking_mode = _normalize_thinking_mode(thinking_mode)
         self.timeout = timeout
 
+    def _find_auth_file_with_log(self) -> tuple[_Path | None, list[str]]:
+        return _find_gemini_cli_auth_file_with_log(self.auth_path_override)
+
+    def _resolve_local_project(self, auth_file: _Path | None = None) -> str:
+        return _resolve_local_gemini_cli_project(auth_file)
+
+    def _headers(self, access_token: str) -> dict[str, str]:
+        return _gemini_cli_headers(access_token, user_agent=self._user_agent)
+
     async def _get_access_token(self, *, force_refresh: bool = False) -> tuple[str, _Path]:
         import time as _t
 
-        auth_file, searched = _find_gemini_cli_auth_file_with_log(self.auth_path_override)
+        auth_file, searched = self._find_auth_file_with_log()
         if auth_file is None:
             raise RuntimeError(
-                "未找到 gemini-cli oauth_creds.json。"
-                "请先运行 `gemini auth login` 完成 Google OAuth 登录，"
-                "或在配置中设置 personification_gemini_cli_auth_path。"
+                f"未找到 {self._auth_label} OAuth 凭证。"
+                f"请先运行 {self._login_command} 完成 Google OAuth 登录，"
+                f"或在配置中设置 {self._auth_config_field}。"
                 f" 已搜索路径: {searched}"
             )
         auth = _load_gemini_cli_auth(auth_file)
@@ -2476,8 +2607,8 @@ class GeminiCliToolCaller(ToolCaller):
         if needs_refresh and not refresh_token:
             if force_refresh or not token:
                 raise RuntimeError(
-                    "gemini-cli oauth_creds.json 中 refresh_token 缺失，"
-                    "无法自动续期 access_token；请在本机执行 `gemini auth login` 重新登录。"
+                    f"{self._auth_label} OAuth 凭证中 refresh_token 缺失，"
+                    f"无法自动续期 access_token；请在本机执行 {self._login_command} 重新登录。"
                     f" auth_file={auth_file}"
                 )
             # 有旧 token 但无 refresh_token：尝试用旧 token（可能仍在过期临界点）
@@ -2489,14 +2620,14 @@ class GeminiCliToolCaller(ToolCaller):
                     # 旧 token 仍在尝试中，刷新失败时先用旧的（可能仍未过期）
                     return token, auth_file
                 raise RuntimeError(
-                    f"gemini-cli 自动刷新 access_token 失败：{exc}；"
-                    "请尝试在本机执行 `gemini auth login` 重新登录。"
+                    f"{self._auth_label} 自动刷新 access_token 失败：{exc}；"
+                    f"请尝试在本机执行 {self._login_command} 重新登录。"
                     f" auth_file={auth_file}"
                 ) from exc
             new_token = str(payload.get("access_token", "") or "").strip()
             if not new_token:
                 raise RuntimeError(
-                    "gemini-cli OAuth 刷新响应中 access_token 为空，请重新执行 `gemini auth login`。"
+                    f"{self._auth_label} OAuth 刷新响应中 access_token 为空，请重新执行 {self._login_command}。"
                 )
             id_token = str(payload.get("id_token", "") or "")
             expires_in = int(payload.get("expires_in", 3600) or 3600)
@@ -2508,19 +2639,19 @@ class GeminiCliToolCaller(ToolCaller):
                 id_token=id_token,
             )
             # 旧 access_token 在 project_cache 里已失效，清理
-            GeminiCliToolCaller._project_cache.pop(token, None)
+            type(self)._project_cache.pop(token, None)
             token = new_token
         if not token:
             raise RuntimeError(
-                "gemini-cli oauth_creds.json 中 access_token 为空，且未找到 refresh_token；"
-                "请重新执行 `gemini auth login`。"
+                f"{self._auth_label} OAuth 凭证中 access_token 为空，且未找到 refresh_token；"
+                f"请重新执行 {self._login_command}。"
             )
         return token, auth_file
 
     async def _resolve_project(self, access_token: str, auth_file: _Path | None = None) -> str:
         if self.project_override:
             return self.project_override
-        cached = GeminiCliToolCaller._project_cache.get(access_token)
+        cached = type(self)._project_cache.get(access_token)
         if cached:
             return cached
         load_error: Exception | None = None
@@ -2533,7 +2664,7 @@ class GeminiCliToolCaller(ToolCaller):
                     resp = await client.post(
                         _GEMINI_CLI_LOAD_CODE_ASSIST,
                         json={"metadata": dict(_GEMINI_CLI_CLIENT_METADATA)},
-                        headers=_gemini_cli_headers(access_token),
+                        headers=self._headers(access_token),
                     )
                     resp.raise_for_status()
                     data = resp.json()
@@ -2555,26 +2686,26 @@ class GeminiCliToolCaller(ToolCaller):
                     break
         project = str(data.get("cloudaicompanionProject", "") or "").strip()
         if project:
-            GeminiCliToolCaller._project_cache[access_token] = project
+            type(self)._project_cache[access_token] = project
             return project
 
-        local_project = _resolve_local_gemini_cli_project(auth_file)
+        local_project = self._resolve_local_project(auth_file)
         if local_project:
-            GeminiCliToolCaller._project_cache[access_token] = local_project
+            type(self)._project_cache[access_token] = local_project
             return local_project
         if load_error is not None:
             raise RuntimeError(
-                "loadCodeAssist 获取 Gemini CLI companion project 失败。"
-                "如果本机 gemini 交互式 CLI 可用，请确认 bot 进程读取的是同一个 ~/.gemini/oauth_creds.json，"
-                "或在配置 personification_gemini_cli_project 中手动指定 project。"
+                f"loadCodeAssist 获取 {self._auth_label} companion project 失败。"
+                f"如果本机 {self._auth_label} 可用，请确认 bot 进程读取的是同一份 OAuth 凭证，"
+                f"或在配置 {self._project_config_field} 中手动指定 project。"
                 f" 原始错误: {load_error}"
             ) from load_error
         if not project:
             raise RuntimeError(
                 "loadCodeAssist 未返回 cloudaicompanionProject。"
-                "已尝试从 gemini-cli/gcloud 本地配置自动发现 project 但未找到。"
-                "请在配置 personification_gemini_cli_project 中手动指定 GCP 项目 ID，"
-                "或先运行一次 `gemini` 完成 onboarding。"
+                f"已尝试从 {self._auth_label}/gcloud 本地配置自动发现 project 但未找到。"
+                f"请在配置 {self._project_config_field} 中手动指定 GCP 项目 ID，"
+                f"或先运行一次 {self._onboarding_command} 完成 onboarding。"
             )
 
     async def chat_with_tools(
@@ -2629,7 +2760,7 @@ class GeminiCliToolCaller(ToolCaller):
                     resp = await client.post(
                         _GEMINI_CLI_GENERATE_ENDPOINT,
                         json=envelope_inner,
-                        headers=_gemini_cli_headers(_access_token),
+                        headers=self._headers(_access_token),
                     )
                     resp.raise_for_status()
                     return resp.json()
@@ -2697,7 +2828,7 @@ class GeminiCliToolCaller(ToolCaller):
                 raw=data,
                 used_builtin_search=bool(grounding),
                 usage=usage,
-                model_used=str(self.model or _GEMINI_CLI_DEFAULT_MODEL),
+                model_used=str(self.model or self._default_model),
             )
         except Exception as exc:
             if contains_image_input and _error_indicates_vision_unavailable(exc):
@@ -2721,6 +2852,176 @@ class GeminiCliToolCaller(ToolCaller):
                 }
             ],
         }
+
+
+_ANTIGRAVITY_CLI_BASE = "https://antigravity-pa.googleapis.com"
+_ANTIGRAVITY_CLI_LOAD_CODE_ASSIST = f"{_ANTIGRAVITY_CLI_BASE}/v1internal:loadCodeAssist"
+_ANTIGRAVITY_CLI_GENERATE_ENDPOINT = f"{_ANTIGRAVITY_CLI_BASE}/v1internal:generateContent"
+
+
+class AntigravityCliToolCaller(GeminiCliToolCaller):
+    """复用 Antigravity CLI OAuth/兼容 Gemini OAuth 凭证调用 Gemini 系列模型。"""
+
+    _project_cache: dict[str, str] = {}
+    _default_model = _ANTIGRAVITY_CLI_DEFAULT_MODEL
+    _auth_label = "Antigravity CLI"
+    _login_command = "`agy`"
+    _onboarding_command = "`agy`"
+    _auth_config_field = "personification_antigravity_cli_auth_path"
+    _project_config_field = "personification_antigravity_cli_project"
+    _user_agent = "AntigravityCLI/1.0 (personification; python) google-api-python-client"
+
+    def _find_auth_file_with_log(self) -> tuple[_Path | None, list[str]]:
+        return _find_antigravity_cli_auth_file_with_log(self.auth_path_override)
+
+    def _resolve_local_project(self, auth_file: _Path | None = None) -> str:
+        return _resolve_local_antigravity_cli_project(auth_file)
+
+    async def _resolve_project(self, access_token: str, auth_file: _Path | None = None) -> str:
+        if self.project_override:
+            return self.project_override
+        cached = type(self)._project_cache.get(access_token)
+        if cached:
+            return cached
+        
+        # Try local project resolution first
+        local = self._resolve_local_project(auth_file)
+        if local:
+            type(self)._project_cache[access_token] = local
+            return local
+            
+        raise RuntimeError(
+            "Antigravity CLI 无法本地解析 GCP Project ID。\n"
+            "请执行以下操作之一：\n"
+            "1. 在 .env 中配置 `personification_antigravity_cli_project=\"你的项目ID\"`\n"
+            "2. 设置环境变量 `ANTIGRAVITY_CLI_PROJECT` 或 `AGY_PROJECT`\n"
+            "3. 确保本地 `~/.gemini/antigravity-cli/` 目录下存在包含 project 配置的 json 文件。"
+        )
+
+    async def chat_with_tools(
+        self,
+        messages: List[dict],
+        tools: List[dict],
+        use_builtin_search: bool,
+    ) -> ToolCallerResponse:
+        messages = inject_current_time_context(messages)
+        contains_image_input = _messages_contain_images(messages)
+        try:
+            access_token, auth_file = await self._get_access_token()
+            project = await self._resolve_project(access_token, auth_file)
+            system_instruction, contents = _convert_messages_to_gemini(messages)
+
+            tool_payload: List[dict] = []
+            if tools:
+                tool_payload.append(
+                    {
+                        "function_declarations": [
+                            _convert_openai_tool_to_gemini(tool) for tool in tools
+                        ]
+                    }
+                )
+            if use_builtin_search:
+                tool_payload.append(_gemini_builtin_search_tool(self.model))
+
+            request_obj: Dict[str, Any] = {
+                "contents": contents,
+                "generationConfig": {
+                    "thinkingConfig": {
+                        "thinkingBudget": GEMINI_THINKING_BUDGET_MAP[self.thinking_mode]
+                    }
+                },
+            }
+            if system_instruction:
+                request_obj["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+            if tool_payload:
+                request_obj["tools"] = tool_payload
+
+            model_candidates = _gemini_cli_model_candidates(self.model)
+            last_exc: Exception | None = None
+            auth_refreshed_for_401 = False
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=15.0)) as client:
+
+                async def _post_once(_model_name: str, _access_token: str, _project: str):
+                    envelope_inner = {
+                        "model": _model_name,
+                        "project": _project,
+                        "request": request_obj,
+                    }
+                    resp = await client.post(
+                        _ANTIGRAVITY_CLI_GENERATE_ENDPOINT,
+                        json=envelope_inner,
+                        headers=self._headers(_access_token),
+                    )
+                    resp.raise_for_status()
+                    return resp.json()
+
+                data = {}
+                for model_index, model_name in enumerate(model_candidates):
+                    try:
+                        data = await _post_once(model_name, access_token, project)
+                        last_exc = None
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        last_exc = exc
+                        if (
+                            exc.response is not None
+                            and exc.response.status_code == 401
+                            and not auth_refreshed_for_401
+                        ):
+                            auth_refreshed_for_401 = True
+                            try:
+                                access_token, _ = await self._get_access_token(force_refresh=True)
+                                project = await self._resolve_project(access_token, auth_file)
+                                data = await _post_once(model_name, access_token, project)
+                                last_exc = None
+                                break
+                            except Exception as exc2:
+                                last_exc = exc2
+                                has_next = model_index + 1 < len(model_candidates)
+                                if has_next and _gemini_cli_retry_with_fallback_model(exc2):
+                                    continue
+                                raise
+                        has_next = model_index + 1 < len(model_candidates)
+                        if has_next and _gemini_cli_retry_with_fallback_model(exc):
+                            continue
+                        raise
+                    except Exception as exc:
+                        last_exc = exc
+                        has_next = model_index + 1 < len(model_candidates)
+                        if has_next and _gemini_cli_retry_with_fallback_model(exc):
+                            continue
+                        raise
+                if last_exc is not None and not data:
+                    raise last_exc
+
+            inner_response = data.get("response") if isinstance(data, dict) else None
+            if isinstance(inner_response, dict):
+                payload = inner_response
+            else:
+                payload = data
+            candidates = list(payload.get("candidates", []) or [])
+            if not candidates:
+                return ToolCallerResponse("stop", "", [], data)
+            content = candidates[0].get("content") or {}
+            parts = list(content.get("parts", []) or [])
+            tool_calls = _extract_gemini_tool_calls(parts)
+            text = _extract_gemini_text(parts)
+            finish_reason = "tool_calls" if tool_calls else "stop"
+            grounding = candidates[0].get("groundingMetadata") or candidates[0].get("grounding_metadata")
+            usage = _extract_usage(payload) or _extract_usage(data)
+            return ToolCallerResponse(
+                finish_reason=finish_reason,
+                content=text,
+                tool_calls=tool_calls,
+                raw=data,
+                used_builtin_search=bool(grounding),
+                usage=usage,
+                model_used=str(self.model or self._default_model),
+            )
+        except Exception as exc:
+            if contains_image_input and _error_indicates_vision_unavailable(exc):
+                return _vision_unavailable_response(exc)
+            raise
 
 
 def _find_claude_code_auth_file(override_path: str = "") -> _Path | None:
@@ -2904,6 +3205,19 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
         project = str(getattr(config, "personification_gemini_cli_project", "") or "").strip()
         return GeminiCliToolCaller(
             model=model or _GEMINI_CLI_DEFAULT_MODEL,
+            auth_path=auth_path,
+            project=project,
+            thinking_mode=thinking_mode,
+        )
+    if api_type == "antigravity_cli":
+        auth_path = str(getattr(config, "personification_antigravity_cli_auth_path", "") or "").strip()
+        if not auth_path:
+            auth_path = str(getattr(config, "personification_gemini_cli_auth_path", "") or "").strip()
+        project = str(getattr(config, "personification_antigravity_cli_project", "") or "").strip()
+        if not project:
+            project = str(getattr(config, "personification_gemini_cli_project", "") or "").strip()
+        return AntigravityCliToolCaller(
+            model=model or _ANTIGRAVITY_CLI_DEFAULT_MODEL,
             auth_path=auth_path,
             project=project,
             thinking_mode=thinking_mode,

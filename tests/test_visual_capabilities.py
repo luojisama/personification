@@ -29,6 +29,7 @@ def test_heuristic_supports_vision_native_apis_keep_returning_true() -> None:
     assert visual_capabilities.heuristic_supports_vision("anthropic", "claude-3-haiku") is True
     assert visual_capabilities.heuristic_supports_vision("gemini", "gemini-2.0-flash") is True
     assert visual_capabilities.heuristic_supports_vision("gemini_cli", "gemini-3-flash-preview") is True
+    assert visual_capabilities.heuristic_supports_vision("antigravity_cli", "gemini-3-flash-preview") is True
     assert visual_capabilities.heuristic_supports_vision("claude_code", "claude-opus-4-7") is True
 
 

@@ -131,7 +131,7 @@ def heuristic_supports_vision(api_type: str, model: str | None = None) -> bool:
     if api == "openai_codex":
         return "codex" in model_text
     # 官方 Anthropic / Gemini API：所有当前模型都支持视觉
-    if api in {"anthropic", "gemini", "gemini_official", "gemini_cli", "claude_code"}:
+    if api in {"anthropic", "gemini", "gemini_official", "gemini_cli", "antigravity_cli", "claude_code"}:
         return True
     # 显式视觉模型关键字
     if "vision" in model_text:
@@ -152,7 +152,7 @@ def _probe_response_matches_expected(content: str) -> bool:
 def heuristic_supports_video(api_type: str, model: str | None = None) -> bool:
     api = str(api_type or "").strip().lower().replace("-", "_")
     model_text = str(model or "").strip().lower()
-    if api in {"gemini", "gemini_official"}:
+    if api in {"gemini", "gemini_official", "gemini_cli", "antigravity_cli"}:
         return True
     return "gemini" in model_text
 
@@ -203,6 +203,10 @@ def _clone_provider_config(original: Any, provider: Dict[str, Any]) -> Any:
             if name == "personification_gemini_cli_auth_path":
                 return self._selected.get("auth_path", "")
             if name == "personification_gemini_cli_project":
+                return self._selected.get("project", "")
+            if name == "personification_antigravity_cli_auth_path":
+                return self._selected.get("auth_path", "")
+            if name == "personification_antigravity_cli_project":
                 return self._selected.get("project", "")
             if name == "personification_claude_code_auth_path":
                 return self._selected.get("auth_path", "")

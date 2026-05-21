@@ -339,6 +339,14 @@ class Config(BaseModel):
     # cloudaicompanionProject；留空时通过 v1internal:loadCodeAssist 自动解析并缓存
     personification_gemini_cli_project: str = ""
 
+    # Antigravity CLI OAuth 配置
+    # personification_api_type = "antigravity_cli" 时生效
+    # 留空则按 ~/.gemini/antigravity-cli、$ANTIGRAVITY_CLI_HOME 等顺序查找；
+    # 若仍未找到，会兼容回退到 gemini-cli OAuth 凭证。
+    personification_antigravity_cli_auth_path: str = ""
+    # Antigravity/Gemini companion project；留空时先自动解析，再兼容 gemini-cli/gcloud 配置。
+    personification_antigravity_cli_project: str = ""
+
     # claude-code OAuth 配置
     # personification_api_type = "claude_code" 时生效
     # 留空则按 ~/.claude/.credentials.json、$CLAUDE_CONFIG_DIR 等顺序查找

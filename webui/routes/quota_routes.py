@@ -9,7 +9,7 @@ from ..deps import AdminIdentity, require_admin
 _PROVIDER_LABELS = {
     "anthropic": "Anthropic / Claude",
     "openai": "OpenAI",
-    "gemini": "Gemini CLI",
+    "gemini": "Gemini/Antigravity CLI",
     "codex": "Codex / ChatGPT",
 }
 
