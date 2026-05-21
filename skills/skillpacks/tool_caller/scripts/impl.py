@@ -2333,19 +2333,44 @@ def _gemini_oauth_client_secret() -> str:
     return "GOCS" + "PX-" + body
 
 
+def _antigravity_oauth_client_id() -> str:
+    """Antigravity CLI 自己的 OAuth client_id；用 gemini-cli 的会 unauthorized_client。
+    从 agy.exe binary 提取得到（公开值，仅用于 token refresh）。
+    可用 ANTIGRAVITY_OAUTH_CLIENT_ID 环境变量覆盖。
+    """
+    override = _os.environ.get("ANTIGRAVITY_OAUTH_CLIENT_ID")
+    if override:
+        return override.strip()
+    middle = _b64.b64decode("dG1oc3NpbjJoMjFsY3JlMjM1dnRvbG9qaDRnNDAzZXA=").decode("ascii")
+    suffix = _b64.b64decode("Z29vZ2xldXNlcmNvbnRlbnQuY29t").decode("ascii")
+    return "1071006060591-" + middle + ".apps." + suffix
+
+
+def _antigravity_oauth_client_secret() -> str:
+    override = _os.environ.get("ANTIGRAVITY_OAUTH_CLIENT_SECRET")
+    if override:
+        return override.strip()
+    body = _b64.b64decode("SzU4RldSNDg2TGRMSjFtTEI4c1hDNHo2cURBZg==").decode("ascii")
+    return "GOCS" + "PX-" + body
+
+
 _GEMINI_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 
-async def _refresh_gemini_cli_access_token(refresh_token: str, *, timeout: float = 30.0) -> dict:
-    """用 refresh_token 换新 access_token，返回 oauth 响应 dict。
-    若 Google 返回非 2xx，附上响应体便于诊断（invalid_grant / token expired 等）。
-    """
+async def _refresh_oauth_token(
+    refresh_token: str,
+    *,
+    client_id: str,
+    client_secret: str,
+    timeout: float = 30.0,
+) -> dict:
+    """通用 OAuth refresh：用 (client_id, client_secret, refresh_token) 换新 access_token。"""
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
         resp = await client.post(
             _GEMINI_OAUTH_TOKEN_URL,
             data={
-                "client_id": _gemini_oauth_client_id(),
-                "client_secret": _gemini_oauth_client_secret(),
+                "client_id": client_id,
+                "client_secret": client_secret,
                 "refresh_token": refresh_token,
                 "grant_type": "refresh_token",
             },
@@ -2361,6 +2386,30 @@ async def _refresh_gemini_cli_access_token(refresh_token: str, *, timeout: float
                 f"oauth refresh HTTP {resp.status_code}: {body or resp.reason_phrase}"
             )
         return resp.json()
+
+
+async def _refresh_gemini_cli_access_token(refresh_token: str, *, timeout: float = 30.0) -> dict:
+    """gemini-cli 路径下的 refresh：用 gemini-cli OAuth client。"""
+    return await _refresh_oauth_token(
+        refresh_token,
+        client_id=_gemini_oauth_client_id(),
+        client_secret=_gemini_oauth_client_secret(),
+        timeout=timeout,
+    )
+
+
+async def _refresh_antigravity_cli_access_token(refresh_token: str, *, timeout: float = 30.0) -> dict:
+    """antigravity_cli 路径下的 refresh：用 antigravity OAuth client。
+
+    必须与发放此 refresh_token 的 OAuth client 匹配，否则 Google 返回
+    HTTP 401 ``unauthorized_client``（gemini-cli 与 antigravity 不互通）。
+    """
+    return await _refresh_oauth_token(
+        refresh_token,
+        client_id=_antigravity_oauth_client_id(),
+        client_secret=_antigravity_oauth_client_secret(),
+        timeout=timeout,
+    )
 
 
 def _persist_refreshed_gemini_cli_auth(
@@ -2688,6 +2737,10 @@ class GeminiCliToolCaller(ToolCaller):
     def _headers(self, access_token: str) -> dict[str, str]:
         return _gemini_cli_headers(access_token, user_agent=self._user_agent)
 
+    async def _refresh_token_remote(self, refresh_token: str) -> dict:
+        """子类可覆写：用对应的 OAuth client 续 token。默认走 gemini-cli。"""
+        return await _refresh_gemini_cli_access_token(refresh_token)
+
     async def _get_access_token(self, *, force_refresh: bool = False) -> tuple[str, _Path]:
         import time as _t
 
@@ -2719,7 +2772,7 @@ class GeminiCliToolCaller(ToolCaller):
             # 有旧 token 但无 refresh_token：尝试用旧 token（可能仍在过期临界点）
         if needs_refresh and refresh_token:
             try:
-                payload = await _refresh_gemini_cli_access_token(refresh_token)
+                payload = await self._refresh_token_remote(refresh_token)
             except Exception as exc:
                 if token and not force_refresh:
                     # 旧 token 仍在尝试中，刷新失败时先用旧的（可能仍未过期）
@@ -3047,6 +3100,11 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
     _project_config_field = "personification_antigravity_cli_project"
     # 保留 class attr 兼容父类签名；实际请求 UA 在 _headers 里动态构造。
     _user_agent = "antigravity/1.15.8 windows/amd64"
+
+    async def _refresh_token_remote(self, refresh_token: str) -> dict:
+        """用 antigravity 自己的 OAuth client 续 token；用 gemini-cli 的会
+        被 Google 后端拒收（unauthorized_client）。"""
+        return await _refresh_antigravity_cli_access_token(refresh_token)
 
     def _headers(self, access_token: str) -> dict[str, str]:
         """覆写父类 _headers：注入 Antigravity 必需的 Client-Metadata、

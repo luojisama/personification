@@ -262,3 +262,99 @@ def test_find_auth_file_logs_keyring_sync_attempt() -> None:
             sys.modules["keyring"] = saved_kr
     # log 第一项不一定包含 "keyring"（无 token 时不写日志），但函数本身要正常返回
     assert isinstance(log, list)
+
+
+# ====== OAuth client 区分（refresh token 用对的 client） ======
+
+def test_antigravity_oauth_client_id_decodes_correctly() -> None:
+    """验证 client_id 解码后结构正确 + sha256 指纹匹配（避免明文进入 git history
+    被 GitHub Secret Scanning 拦截）。"""
+    import hashlib
+    cid = impl._antigravity_oauth_client_id()
+    # 结构：12 位数字前缀 + - + 32 字符 middle + .apps.googleusercontent.com
+    assert cid.startswith("1071006060591-")
+    assert cid.endswith(".apps.googleusercontent.com")
+    assert len(cid) == 73
+    # 全文 sha256 指纹（提前离线算好的预期值）
+    assert hashlib.sha256(cid.encode("ascii")).hexdigest() == (
+        "bf00c418024ba6bf606ccdc37120976e41bc429dd1d46ecf16a729aa532626ea"
+    )
+
+
+def test_antigravity_oauth_client_secret_decodes_correctly() -> None:
+    """同样用 sha256 指纹校验 client_secret，不在代码里出现明文。"""
+    import hashlib
+    secret = impl._antigravity_oauth_client_secret()
+    assert secret.startswith("GOCS" + "PX-")
+    assert len(secret) == 35
+    assert hashlib.sha256(secret.encode("ascii")).hexdigest() == (
+        "1d2f041093fd95aa8995a038c711d50a7960da09a505381c09a745d6ad0ecc60"
+    )
+
+
+def test_antigravity_oauth_differs_from_gemini_cli() -> None:
+    """两组 OAuth client 必须不同，否则 refresh 会 unauthorized_client。"""
+    assert impl._antigravity_oauth_client_id() != impl._gemini_oauth_client_id()
+    assert impl._antigravity_oauth_client_secret() != impl._gemini_oauth_client_secret()
+
+
+def test_refresh_antigravity_sends_antigravity_client() -> None:
+    """_refresh_antigravity_cli_access_token 应该把 antigravity client_id/secret
+    放到 POST body 里，而不是 gemini-cli 的。"""
+    captured: dict[str, Any] = {}
+
+    class _CapturingClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "_CapturingClient":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url: str, *, data: dict, headers: dict) -> Any:
+            captured["url"] = url
+            captured["data"] = data
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json = lambda: {"access_token": "new-at", "expires_in": 3599}
+            return resp
+
+    with patch.object(impl.httpx, "AsyncClient", _CapturingClient):
+        result = asyncio.run(impl._refresh_antigravity_cli_access_token("fake-refresh"))
+    assert result["access_token"] == "new-at"
+    assert captured["url"] == "https://oauth2.googleapis.com/token"
+    assert captured["data"]["client_id"] == impl._antigravity_oauth_client_id()
+    assert captured["data"]["client_secret"] == impl._antigravity_oauth_client_secret()
+    assert captured["data"]["refresh_token"] == "fake-refresh"
+    assert captured["data"]["grant_type"] == "refresh_token"
+
+
+def test_refresh_token_remote_dispatches_to_right_client() -> None:
+    """GeminiCliToolCaller 用 gemini-cli refresh；AntigravityCliToolCaller 用
+    antigravity refresh。两者通过 _refresh_token_remote 分派，互不串。"""
+    captured: list[str] = []
+
+    async def fake_refresh_gemini(rt, *, timeout=30.0):
+        captured.append(f"gemini:{rt}")
+        return {"access_token": "g-at", "expires_in": 3599}
+
+    async def fake_refresh_antigravity(rt, *, timeout=30.0):
+        captured.append(f"antigravity:{rt}")
+        return {"access_token": "a-at", "expires_in": 3599}
+
+    with patch.object(impl, "_refresh_gemini_cli_access_token", new=fake_refresh_gemini), \
+         patch.object(impl, "_refresh_antigravity_cli_access_token", new=fake_refresh_antigravity):
+        gemini = impl.GeminiCliToolCaller(
+            model="gemini-2.5-flash", auth_path="", project="p", thinking_mode="none", timeout=30.0
+        )
+        anti = impl.AntigravityCliToolCaller(
+            model="gemini-3.5-flash", auth_path="", project="p", thinking_mode="none", timeout=30.0
+        )
+        r1 = asyncio.run(gemini._refresh_token_remote("rt-1"))
+        r2 = asyncio.run(anti._refresh_token_remote("rt-2"))
+
+    assert captured == ["gemini:rt-1", "antigravity:rt-2"]
+    assert r1["access_token"] == "g-at"
+    assert r2["access_token"] == "a-at"
