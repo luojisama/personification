@@ -2854,9 +2854,80 @@ class GeminiCliToolCaller(ToolCaller):
         }
 
 
-_ANTIGRAVITY_CLI_BASE = "https://antigravity-pa.googleapis.com"
+import uuid as _uuid
+
+# 真实 Antigravity v1internal 走的是 cloudcode-pa（与 gemini-cli 同 host），
+# 由请求 body 的 userAgent="antigravity" + Client-Metadata.ideType="ANTIGRAVITY"
+# 区分调用方。之前用 antigravity-pa.googleapis.com 是错误猜测，会 404。
+_ANTIGRAVITY_CLI_BASE = "https://cloudcode-pa.googleapis.com"
 _ANTIGRAVITY_CLI_LOAD_CODE_ASSIST = f"{_ANTIGRAVITY_CLI_BASE}/v1internal:loadCodeAssist"
 _ANTIGRAVITY_CLI_GENERATE_ENDPOINT = f"{_ANTIGRAVITY_CLI_BASE}/v1internal:generateContent"
+_ANTIGRAVITY_CLIENT_UA_VERSION = "1.15.8"
+_ANTIGRAVITY_X_GOOG_API_CLIENT = "google-cloud-sdk vscode_cloudshelleditor/0.1"
+
+
+def _antigravity_client_platform() -> str:
+    """返回 Antigravity Client-Metadata 中 platform 字段值。"""
+    import platform as _platform_mod
+
+    sys_name = (_platform_mod.system() or "").lower()
+    if sys_name == "darwin":
+        return "MACOS"
+    if sys_name == "linux":
+        return "LINUX"
+    return "WINDOWS"
+
+
+def _antigravity_user_agent() -> str:
+    """按当前 OS/arch 构造 Antigravity 真实使用的 User-Agent 字符串。
+
+    格式 `antigravity/<ver> <os>/<arch>`，例如 ``antigravity/1.15.8 windows/amd64``。
+    """
+    import platform as _platform_mod
+
+    os_token = (_platform_mod.system() or "windows").lower()
+    if os_token == "darwin":
+        os_token = "macos"
+    arch_token = (_platform_mod.machine() or "amd64").lower()
+    if arch_token in {"x86_64", "x64"}:
+        arch_token = "amd64"
+    elif arch_token in {"aarch64", "arm64"}:
+        arch_token = "arm64"
+    return f"antigravity/{_ANTIGRAVITY_CLIENT_UA_VERSION} {os_token}/{arch_token}"
+
+
+# Antigravity v1internal 实际接受的模型列表。把用户配置的 model 放第一位，
+# 后面追加 fallback 候选避免单个模型暂时受限时整体失败。
+# 注意：gemini-3.5-flash 是 Antigravity 2026-05 默认模型，必须在候选首位。
+_ANTIGRAVITY_CLI_AUTO_MODELS = (
+    "gemini-3.5-flash",
+    "gemini-3-pro-high",
+    "gemini-3-pro-low",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+)
+
+
+def _antigravity_cli_model_candidates(model: str) -> list[str]:
+    """Antigravity v1internal 的 model 候选链；与 gemini-cli 路径解耦。"""
+    primary = (model or "auto-gemini-3").strip() or "auto-gemini-3"
+    lowered = primary.lower()
+    if lowered in {"auto", "auto-gemini-3", "auto-antigravity"}:
+        candidates = list(_ANTIGRAVITY_CLI_AUTO_MODELS)
+    else:
+        candidates = [primary]
+        for fallback in _ANTIGRAVITY_CLI_AUTO_MODELS:
+            if fallback.lower() != lowered:
+                candidates.append(fallback)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 class AntigravityCliToolCaller(GeminiCliToolCaller):
@@ -2869,7 +2940,30 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
     _onboarding_command = "`agy`"
     _auth_config_field = "personification_antigravity_cli_auth_path"
     _project_config_field = "personification_antigravity_cli_project"
-    _user_agent = "AntigravityCLI/1.0 (personification; python) google-api-python-client"
+    # 保留 class attr 兼容父类签名；实际请求 UA 在 _headers 里动态构造。
+    _user_agent = "antigravity/1.15.8 windows/amd64"
+
+    def _headers(self, access_token: str) -> dict[str, str]:
+        """覆写父类 _headers：注入 Antigravity 必需的 Client-Metadata、
+        X-Goog-Api-Client 与按 OS/arch 动态生成的 User-Agent。
+        """
+        import json as _json_local
+
+        client_metadata = _json_local.dumps(
+            {
+                "ideType": "ANTIGRAVITY",
+                "platform": _antigravity_client_platform(),
+                "pluginType": "GEMINI",
+            },
+            separators=(",", ":"),
+        )
+        return {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "User-Agent": _antigravity_user_agent(),
+            "X-Goog-Api-Client": _ANTIGRAVITY_X_GOOG_API_CLIENT,
+            "Client-Metadata": client_metadata,
+        }
 
     def _find_auth_file_with_log(self) -> tuple[_Path | None, list[str]]:
         return _find_antigravity_cli_auth_file_with_log(self.auth_path_override)
@@ -2936,16 +3030,20 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
             if tool_payload:
                 request_obj["tools"] = tool_payload
 
-            model_candidates = _gemini_cli_model_candidates(self.model)
+            model_candidates = _antigravity_cli_model_candidates(self.model)
             last_exc: Exception | None = None
             auth_refreshed_for_401 = False
             async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=15.0)) as client:
 
                 async def _post_once(_model_name: str, _access_token: str, _project: str):
+                    # Antigravity v1internal envelope 比 gemini-cli 多两个顶层字段：
+                    # userAgent 固定字面值 "antigravity"；requestId 每次请求独立的标识。
                     envelope_inner = {
                         "model": _model_name,
                         "project": _project,
                         "request": request_obj,
+                        "userAgent": "antigravity",
+                        "requestId": _uuid.uuid4().hex,
                     }
                     resp = await client.post(
                         _ANTIGRAVITY_CLI_GENERATE_ENDPOINT,
