@@ -2085,13 +2085,118 @@ def _find_gemini_cli_auth_file_with_log(override_path: str = "") -> tuple[_Path 
     return None, searched
 
 
+_ANTIGRAVITY_KEYRING_SERVICE = "gemini:antigravity"
+_ANTIGRAVITY_KEYRING_USER = "antigravity"
+_ANTIGRAVITY_FULL_SCOPE = (
+    "https://www.googleapis.com/auth/cloud-platform openid "
+    "https://www.googleapis.com/auth/userinfo.profile "
+    "https://www.googleapis.com/auth/userinfo.email "
+    "https://www.googleapis.com/auth/cclog "
+    "https://www.googleapis.com/auth/experimentsandconfigs"
+)
+
+
+def _read_antigravity_keyring_token() -> dict | None:
+    """从系统 keyring 读 agy 存储的 OAuth token blob。
+
+    agy CLI 把凭证写在 Windows Credential Manager / macOS Keychain /
+    Linux Secret Service，blob 是 JSON 形式但内层 token 字段嵌套在 'token' 下。
+    Windows 上 Credential Manager 把 UTF-8 bytes 当 UTF-16LE 字符串存，
+    Python keyring 读出来呈现为乱码 unicode str；需要回 encode 再 decode。
+    """
+    try:
+        import keyring as _keyring_mod
+    except ImportError:
+        return None
+    try:
+        blob = _keyring_mod.get_password(
+            _ANTIGRAVITY_KEYRING_SERVICE, _ANTIGRAVITY_KEYRING_USER
+        )
+    except Exception:
+        return None
+    if not blob:
+        return None
+    text = blob
+    try:
+        text = blob.encode("utf-16-le").decode("utf-8")
+    except UnicodeError:
+        # 非 Windows 平台一般已经是正常的 utf-8 字符串，保留原值
+        text = blob
+    # 去除 UTF-16LE 解码可能引入的 trailing NUL 与首尾空白
+    text = text.rstrip("\x00").strip()
+    try:
+        payload = json.loads(text)
+    except Exception:
+        try:
+            payload = json.loads(blob)
+        except Exception:
+            return None
+    if not isinstance(payload, dict):
+        return None
+    token = payload.get("token")
+    return token if isinstance(token, dict) else None
+
+
+def _sync_antigravity_keyring_to_file() -> _Path | None:
+    """从系统 keyring 同步 agy 最新凭证到 ~/.gemini/antigravity-cli/oauth_creds.json。
+
+    agy 后台会自己刷新 keyring 中的 access_token；bot 每次读 keyring 取到
+    最新值再写入磁盘，便于现有 _find_antigravity_cli_auth_file_with_log
+    流程定位。失败返回 None，由文件搜索逻辑兜底。
+    """
+    token = _read_antigravity_keyring_token()
+    if not token:
+        return None
+    access_token = str(token.get("access_token", "") or "").strip()
+    if not access_token:
+        return None
+    refresh_token = str(token.get("refresh_token", "") or "").strip()
+    token_type = str(token.get("token_type", "Bearer") or "Bearer")
+    expiry_ms = 0
+    expiry_str = str(token.get("expiry", "") or "").strip()
+    if expiry_str:
+        try:
+            from datetime import datetime as _dt_mod
+
+            iso = expiry_str.replace("Z", "+00:00")
+            expiry_ms = int(_dt_mod.fromisoformat(iso).timestamp() * 1000)
+        except Exception:
+            pass
+    payload_for_disk = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": token_type,
+        "scope": _ANTIGRAVITY_FULL_SCOPE,
+        "expiry_date": expiry_ms,
+    }
+    target_dir = _Path.home() / ".gemini" / "antigravity-cli"
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+    target = target_dir / "oauth_creds.json"
+    try:
+        target.write_text(json.dumps(payload_for_disk, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        return None
+    return target
+
+
 def _find_antigravity_cli_auth_file(override_path: str = "") -> _Path | None:
     return _find_antigravity_cli_auth_file_with_log(override_path)[0]
 
 
 def _find_antigravity_cli_auth_file_with_log(override_path: str = "") -> tuple[_Path | None, list[str]]:
-    """查找 Antigravity CLI OAuth 文件；没有专用文件时兼容 gemini-cli 凭证。"""
+    """查找 Antigravity CLI OAuth 文件；没有专用文件时兼容 gemini-cli 凭证。
+
+    入口先尝试从系统 keyring 把 agy 最新凭证同步写到 ~/.gemini/antigravity-cli/
+    oauth_creds.json，再走原有文件搜索路径。这样首次启动或 token 被 agy
+    后台刷新后，bot 都能拿到最新的 access_token。
+    """
     searched: list[str] = []
+    synced = _sync_antigravity_keyring_to_file()
+    if synced is not None:
+        searched.append(f"synced from system keyring → {synced}")
     if override_path:
         p = _Path(override_path).expanduser()
         searched.append(f"override={p}")
@@ -2968,6 +3073,32 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
     def _find_auth_file_with_log(self) -> tuple[_Path | None, list[str]]:
         return _find_antigravity_cli_auth_file_with_log(self.auth_path_override)
 
+    async def _get_access_token(self, *, force_refresh: bool = False) -> tuple[str, _Path]:
+        """覆写：始终从系统 keyring 取 agy 最新 token，不走 gemini-cli OAuth refresh。
+
+        agy CLI 后台会自己刷新 Credential Manager / Keychain 中的 access_token；
+        bot 每次重读 keyring，避免用 gemini-cli 的 OAuth client_id 去 refresh
+        agy 的 refresh_token（必然 invalid_grant）。
+        """
+        synced = _sync_antigravity_keyring_to_file()
+        if synced is None:
+            # keyring 不可用（库未安装 / agy 未登录），回退父类逻辑作兜底
+            return await super()._get_access_token(force_refresh=force_refresh)
+        try:
+            auth = _load_gemini_cli_auth(synced)
+            token = _get_gemini_cli_access_token(auth)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Antigravity 凭证读取失败：{exc}。"
+                "请确认 agy CLI 已正常登录（运行 `agy --print hi` 完成 Google OAuth）。"
+            ) from exc
+        if not token:
+            raise RuntimeError(
+                "Antigravity 凭证 access_token 为空。"
+                "请重新运行 agy 完成 Google OAuth 登录。"
+            )
+        return token, synced
+
     def _resolve_local_project(self, auth_file: _Path | None = None) -> str:
         return _resolve_local_antigravity_cli_project(auth_file)
 
@@ -2977,20 +3108,30 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
         cached = type(self)._project_cache.get(access_token)
         if cached:
             return cached
-        
-        # Try local project resolution first
+
+        # 1) 优先本地解析（agy settings.json / 环境变量）
         local = self._resolve_local_project(auth_file)
         if local:
             type(self)._project_cache[access_token] = local
             return local
-            
-        raise RuntimeError(
-            "Antigravity CLI 无法本地解析 GCP Project ID。\n"
-            "请执行以下操作之一：\n"
-            "1. 在 .env 中配置 `personification_antigravity_cli_project=\"你的项目ID\"`\n"
-            "2. 设置环境变量 `ANTIGRAVITY_CLI_PROJECT` 或 `AGY_PROJECT`\n"
-            "3. 确保本地 `~/.gemini/antigravity-cli/` 目录下存在包含 project 配置的 json 文件。"
-        )
+
+        # 2) 本地拿不到 → 复用父类 loadCodeAssist 远程查询；agy 的 token
+        #    scope 已含 cclog/experimentsandconfigs，正常情况能拿到
+        #    cloudaicompanionProject 字段
+        try:
+            project = await super()._resolve_project(access_token, auth_file)
+        except Exception as exc:
+            raise RuntimeError(
+                "Antigravity CLI 无法解析 GCP Project ID。\n"
+                "请执行以下操作之一：\n"
+                "1. 在 .env 中配置 `personification_antigravity_cli_project=\"你的项目ID\"`\n"
+                "2. 设置环境变量 `ANTIGRAVITY_CLI_PROJECT` 或 `AGY_PROJECT`\n"
+                "3. 在 `~/.gemini/antigravity-cli/settings.json` 里加 `project` 字段\n"
+                f"4. 或确认 agy 凭证已含 cclog scope（当前 loadCodeAssist 出错：{exc}）"
+            ) from exc
+        if project:
+            type(self)._project_cache[access_token] = project
+        return project
 
     async def chat_with_tools(
         self,

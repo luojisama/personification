@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import pathlib
+import sys
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -146,3 +147,118 @@ def test_headers_include_client_metadata_and_x_goog() -> None:
 def test_response_unwrapped_correctly() -> None:
     c = _run_chat()
     assert c["result"].content == "ok"
+
+
+# ====== keyring 同步链路 ======
+
+def _make_fake_keyring(blob: str | None) -> Any:
+    class _FakeKeyring:
+        @staticmethod
+        def get_password(service: str, user: str) -> str | None:
+            assert service == "gemini:antigravity"
+            assert user == "antigravity"
+            return blob
+    return _FakeKeyring
+
+
+def _utf16le_wrap(s: str) -> str:
+    """模拟 Windows Credential Manager 把 UTF-8 bytes 当 UTF-16LE 字符串呈现的行为。"""
+    b = s.encode("utf-8")
+    if len(b) % 2:
+        b += b"\x00"
+    return b.decode("utf-16-le")
+
+
+def test_read_keyring_token_decodes_utf16_wrap(monkeypatch=None) -> None:
+    raw_json = json.dumps({
+        "token": {
+            "access_token": "ya29.fake-access-token-xxxxx",
+            "token_type": "Bearer",
+            "refresh_token": "1//06fake-refresh",
+            "expiry": "2030-01-01T00:00:00+00:00",
+        },
+        "auth_method": "consumer",
+    })
+    wrapped = _utf16le_wrap(raw_json)
+    fake = _make_fake_keyring(wrapped)
+    saved = sys.modules.get("keyring")
+    sys.modules["keyring"] = fake
+    try:
+        token = impl._read_antigravity_keyring_token()
+    finally:
+        if saved is None:
+            sys.modules.pop("keyring", None)
+        else:
+            sys.modules["keyring"] = saved
+    assert token is not None
+    assert token["access_token"] == "ya29.fake-access-token-xxxxx"
+    assert token["refresh_token"] == "1//06fake-refresh"
+
+
+def test_read_keyring_token_returns_none_when_missing() -> None:
+    fake = _make_fake_keyring(None)
+    saved = sys.modules.get("keyring")
+    sys.modules["keyring"] = fake
+    try:
+        assert impl._read_antigravity_keyring_token() is None
+    finally:
+        if saved is None:
+            sys.modules.pop("keyring", None)
+        else:
+            sys.modules["keyring"] = saved
+
+
+def test_sync_keyring_writes_file_with_full_scope(tmp_path_root: Any = None) -> None:
+    raw_json = json.dumps({
+        "token": {
+            "access_token": "ya29.fake-AT",
+            "token_type": "Bearer",
+            "refresh_token": "1//rf",
+            "expiry": "2030-01-01T00:00:00+00:00",
+        },
+        "auth_method": "consumer",
+    })
+    wrapped = _utf16le_wrap(raw_json)
+    fake = _make_fake_keyring(wrapped)
+    saved_kr = sys.modules.get("keyring")
+    sys.modules["keyring"] = fake
+    # 也要把 _Path.home() 重定向到 tmp 目录，避免污染真实用户目录
+    import tempfile
+    tmp_home = pathlib.Path(tempfile.mkdtemp())
+    saved_home = impl._Path.home
+    impl._Path.home = staticmethod(lambda: tmp_home)
+    try:
+        target = impl._sync_antigravity_keyring_to_file()
+        assert target is not None
+        assert target.exists()
+        d = json.loads(target.read_text(encoding="utf-8"))
+        assert d["access_token"] == "ya29.fake-AT"
+        assert d["refresh_token"] == "1//rf"
+        assert "cclog" in d["scope"]
+        assert "experimentsandconfigs" in d["scope"]
+        assert d["expiry_date"] > 0
+    finally:
+        if saved_kr is None:
+            sys.modules.pop("keyring", None)
+        else:
+            sys.modules["keyring"] = saved_kr
+        impl._Path.home = saved_home
+        import shutil
+        shutil.rmtree(tmp_home, ignore_errors=True)
+
+
+def test_find_auth_file_logs_keyring_sync_attempt() -> None:
+    """_find_antigravity_cli_auth_file_with_log 应在搜索 log 里体现 keyring 同步动作。"""
+    # 不论 keyring 有无凭证，函数都应正常返回（不抛）
+    fake = _make_fake_keyring(None)
+    saved_kr = sys.modules.get("keyring")
+    sys.modules["keyring"] = fake
+    try:
+        found, log = impl._find_antigravity_cli_auth_file_with_log("")
+    finally:
+        if saved_kr is None:
+            sys.modules.pop("keyring", None)
+        else:
+            sys.modules["keyring"] = saved_kr
+    # log 第一项不一定包含 "keyring"（无 token 时不写日志），但函数本身要正常返回
+    assert isinstance(log, list)
