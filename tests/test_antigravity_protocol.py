@@ -336,12 +336,12 @@ def test_refresh_token_remote_dispatches_to_right_client() -> None:
     antigravity refresh。两者通过 _refresh_token_remote 分派，互不串。"""
     captured: list[str] = []
 
-    async def fake_refresh_gemini(rt, *, timeout=30.0):
-        captured.append(f"gemini:{rt}")
+    async def fake_refresh_gemini(rt, *, timeout=30.0, proxy=""):
+        captured.append(f"gemini:{rt}:proxy={proxy}")
         return {"access_token": "g-at", "expires_in": 3599}
 
-    async def fake_refresh_antigravity(rt, *, timeout=30.0):
-        captured.append(f"antigravity:{rt}")
+    async def fake_refresh_antigravity(rt, *, timeout=30.0, proxy=""):
+        captured.append(f"antigravity:{rt}:proxy={proxy}")
         return {"access_token": "a-at", "expires_in": 3599}
 
     with patch.object(impl, "_refresh_gemini_cli_access_token", new=fake_refresh_gemini), \
@@ -355,6 +355,137 @@ def test_refresh_token_remote_dispatches_to_right_client() -> None:
         r1 = asyncio.run(gemini._refresh_token_remote("rt-1"))
         r2 = asyncio.run(anti._refresh_token_remote("rt-2"))
 
-    assert captured == ["gemini:rt-1", "antigravity:rt-2"]
+    assert captured == ["gemini:rt-1:proxy=", "antigravity:rt-2:proxy="]
     assert r1["access_token"] == "g-at"
     assert r2["access_token"] == "a-at"
+
+
+# ====== 显式 proxy 配置 ======
+
+def test_default_proxy_is_empty_and_not_passed_to_httpx() -> None:
+    """不传 proxy 时构造的 caller.proxy 是空串，且不应往 httpx.AsyncClient 传 proxy=。"""
+    caller = impl.AntigravityCliToolCaller(
+        model="gemini-3.5-flash", auth_path="", project="p", thinking_mode="none", timeout=30.0
+    )
+    assert caller.proxy == ""
+
+    captured: dict[str, Any] = {}
+
+    class _Inspect:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["kwargs"] = kwargs
+
+        async def __aenter__(self) -> "_Inspect":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url, *, json, headers):
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json = lambda: {"response": {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}}
+            resp.status_code = 200
+            return resp
+
+    async def fake_get_access_token(*, force_refresh=False):
+        return ("fake-tok", pathlib.Path("/tmp/x.json"))
+
+    with patch.object(caller, "_get_access_token", new=fake_get_access_token), \
+         patch.object(impl.httpx, "AsyncClient", _Inspect):
+        asyncio.run(caller.chat_with_tools(
+            messages=[{"role": "user", "content": "hi"}], tools=[], use_builtin_search=False
+        ))
+    assert "proxy" not in captured["kwargs"]
+
+
+def test_explicit_proxy_passed_through_to_httpx() -> None:
+    """传 proxy 时 chat_with_tools 应显式把它给 httpx.AsyncClient(proxy=...)。"""
+    caller = impl.AntigravityCliToolCaller(
+        model="gemini-3.5-flash",
+        auth_path="",
+        project="p",
+        thinking_mode="none",
+        timeout=30.0,
+        proxy="http://127.0.0.1:17890",
+    )
+    assert caller.proxy == "http://127.0.0.1:17890"
+
+    captured: dict[str, Any] = {}
+
+    class _Inspect:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["kwargs"] = kwargs
+
+        async def __aenter__(self) -> "_Inspect":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url, *, json, headers):
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json = lambda: {"response": {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}}
+            resp.status_code = 200
+            return resp
+
+    async def fake_get_access_token(*, force_refresh=False):
+        return ("fake-tok", pathlib.Path("/tmp/x.json"))
+
+    with patch.object(caller, "_get_access_token", new=fake_get_access_token), \
+         patch.object(impl.httpx, "AsyncClient", _Inspect):
+        asyncio.run(caller.chat_with_tools(
+            messages=[{"role": "user", "content": "hi"}], tools=[], use_builtin_search=False
+        ))
+    assert captured["kwargs"].get("proxy") == "http://127.0.0.1:17890"
+
+
+def test_refresh_helper_forwards_proxy_to_httpx() -> None:
+    """_refresh_oauth_token 应该把 proxy 显式传给 httpx.AsyncClient(proxy=...)。"""
+    captured: dict[str, Any] = {}
+
+    class _Inspect:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["kwargs"] = kwargs
+
+        async def __aenter__(self) -> "_Inspect":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url, *, data, headers):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json = lambda: {"access_token": "x", "expires_in": 3599}
+            return resp
+
+    with patch.object(impl.httpx, "AsyncClient", _Inspect):
+        asyncio.run(impl._refresh_antigravity_cli_access_token("rt", proxy="http://127.0.0.1:17890"))
+    assert captured["kwargs"].get("proxy") == "http://127.0.0.1:17890"
+
+
+def test_refresh_helper_without_proxy_does_not_pass_kwarg() -> None:
+    """proxy 空时不应该把 proxy= 传给 httpx.AsyncClient（让 trust_env 兜底）。"""
+    captured: dict[str, Any] = {}
+
+    class _Inspect:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["kwargs"] = kwargs
+
+        async def __aenter__(self) -> "_Inspect":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url, *, data, headers):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json = lambda: {"access_token": "x", "expires_in": 3599}
+            return resp
+
+    with patch.object(impl.httpx, "AsyncClient", _Inspect):
+        asyncio.run(impl._refresh_antigravity_cli_access_token("rt"))
+    assert "proxy" not in captured["kwargs"]

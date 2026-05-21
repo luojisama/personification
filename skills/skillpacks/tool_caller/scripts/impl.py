@@ -2363,9 +2363,16 @@ async def _refresh_oauth_token(
     client_id: str,
     client_secret: str,
     timeout: float = 30.0,
+    proxy: str = "",
 ) -> dict:
-    """通用 OAuth refresh：用 (client_id, client_secret, refresh_token) 换新 access_token。"""
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
+    """通用 OAuth refresh：用 (client_id, client_secret, refresh_token) 换新 access_token。
+
+    proxy 非空时显式走该代理，不依赖 HTTPS_PROXY 环境变量（bot 进程未必继承）。
+    """
+    client_kwargs: dict[str, Any] = {"timeout": httpx.Timeout(timeout, connect=10.0)}
+    if proxy:
+        client_kwargs["proxy"] = proxy
+    async with httpx.AsyncClient(**client_kwargs) as client:
         resp = await client.post(
             _GEMINI_OAUTH_TOKEN_URL,
             data={
@@ -2388,17 +2395,22 @@ async def _refresh_oauth_token(
         return resp.json()
 
 
-async def _refresh_gemini_cli_access_token(refresh_token: str, *, timeout: float = 30.0) -> dict:
+async def _refresh_gemini_cli_access_token(
+    refresh_token: str, *, timeout: float = 30.0, proxy: str = ""
+) -> dict:
     """gemini-cli 路径下的 refresh：用 gemini-cli OAuth client。"""
     return await _refresh_oauth_token(
         refresh_token,
         client_id=_gemini_oauth_client_id(),
         client_secret=_gemini_oauth_client_secret(),
         timeout=timeout,
+        proxy=proxy,
     )
 
 
-async def _refresh_antigravity_cli_access_token(refresh_token: str, *, timeout: float = 30.0) -> dict:
+async def _refresh_antigravity_cli_access_token(
+    refresh_token: str, *, timeout: float = 30.0, proxy: str = ""
+) -> dict:
     """antigravity_cli 路径下的 refresh：用 antigravity OAuth client。
 
     必须与发放此 refresh_token 的 OAuth client 匹配，否则 Google 返回
@@ -2409,6 +2421,7 @@ async def _refresh_antigravity_cli_access_token(refresh_token: str, *, timeout: 
         client_id=_antigravity_oauth_client_id(),
         client_secret=_antigravity_oauth_client_secret(),
         timeout=timeout,
+        proxy=proxy,
     )
 
 
@@ -2721,12 +2734,16 @@ class GeminiCliToolCaller(ToolCaller):
         project: str = "",
         thinking_mode: str = "none",
         timeout: float = 120.0,
+        proxy: str = "",
     ) -> None:
         self.model = (model or self._default_model).strip() or self._default_model
         self.auth_path_override = auth_path
         self.project_override = (project or "").strip()
         self.thinking_mode = _normalize_thinking_mode(thinking_mode)
         self.timeout = timeout
+        # 显式 HTTP 代理；非空则所有 httpx 调用都强制走它，不依赖 HTTPS_PROXY
+        # 环境变量（bot 子进程未必继承终端 env）。
+        self.proxy = (proxy or "").strip()
 
     def _find_auth_file_with_log(self) -> tuple[_Path | None, list[str]]:
         return _find_gemini_cli_auth_file_with_log(self.auth_path_override)
@@ -2739,7 +2756,7 @@ class GeminiCliToolCaller(ToolCaller):
 
     async def _refresh_token_remote(self, refresh_token: str) -> dict:
         """子类可覆写：用对应的 OAuth client 续 token。默认走 gemini-cli。"""
-        return await _refresh_gemini_cli_access_token(refresh_token)
+        return await _refresh_gemini_cli_access_token(refresh_token, proxy=self.proxy)
 
     async def _get_access_token(self, *, force_refresh: bool = False) -> tuple[str, _Path]:
         import time as _t
@@ -3103,8 +3120,10 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
 
     async def _refresh_token_remote(self, refresh_token: str) -> dict:
         """用 antigravity 自己的 OAuth client 续 token；用 gemini-cli 的会
-        被 Google 后端拒收（unauthorized_client）。"""
-        return await _refresh_antigravity_cli_access_token(refresh_token)
+        被 Google 后端拒收（unauthorized_client）。
+        自动透传 self.proxy（来自构造参数），不依赖 HTTPS_PROXY 环境变量。
+        """
+        return await _refresh_antigravity_cli_access_token(refresh_token, proxy=self.proxy)
 
     def _headers(self, access_token: str) -> dict[str, str]:
         """覆写父类 _headers：注入 Antigravity 必需的 Client-Metadata、
@@ -3232,7 +3251,12 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
             model_candidates = _antigravity_cli_model_candidates(self.model)
             last_exc: Exception | None = None
             auth_refreshed_for_401 = False
-            async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=15.0)) as client:
+            client_kwargs: dict[str, Any] = {
+                "timeout": httpx.Timeout(self.timeout, connect=15.0),
+            }
+            if self.proxy:
+                client_kwargs["proxy"] = self.proxy
+            async with httpx.AsyncClient(**client_kwargs) as client:
 
                 async def _post_once(_model_name: str, _access_token: str, _project: str):
                     # Antigravity v1internal envelope 比 gemini-cli 多两个顶层字段：

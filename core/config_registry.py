@@ -654,6 +654,21 @@ def _build_entries() -> list[ConfigEntry]:
             help_aliases=("web_fetch_timeout", "抓取超时"),
         ),
         ConfigEntry(
+            key="antigravity_cli_proxy",
+            field_name="personification_antigravity_cli_proxy",
+            display_name="Antigravity CLI 代理",
+            value_type="str",
+            default="",
+            scope=GLOBAL_SCOPE,
+            description=(
+                "Antigravity v1internal 与 OAuth refresh 走的 HTTP 代理（如 "
+                "http://127.0.0.1:17890）。非空则覆盖 HTTPS_PROXY 环境变量，"
+                "确保 bot 子进程一定经过该代理。留空则沿用 httpx 的环境变量解析。"
+            ),
+            category="config",
+            help_aliases=("antigravity_proxy", "agy_proxy", "antigravity 代理"),
+        ),
+        ConfigEntry(
             key="agent_max_steps",
             field_name="personification_agent_max_steps",
             display_name="Agent 最大步数",

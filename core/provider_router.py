@@ -221,6 +221,7 @@ def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str,
             "model": model,
             "auth_path": auth_path,
             "project": project,
+            "proxy": str(item.get("proxy", "") or "").strip(),
             "enabled": _to_bool(item.get("enabled", True), True),
             "priority": _to_int(item.get("priority", index), index),
             "timeout": _provider_timeout({**item, "api_type": api_type}),
@@ -486,12 +487,20 @@ def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
             timeout=_provider_timeout(provider),
         )
     if provider["api_type"] == "antigravity_cli":
+        # 先看 provider 自带 proxy 字段；为空再 fallback 到全局
+        # personification_antigravity_cli_proxy 配置（便于 .env 集中配代理）。
+        explicit_proxy = str(provider.get("proxy", "") or "").strip()
+        if not explicit_proxy:
+            explicit_proxy = str(
+                getattr(plugin_config, "personification_antigravity_cli_proxy", "") or ""
+            ).strip()
         return tool_impl.AntigravityCliToolCaller(
             model=provider["model"] or "auto-gemini-3",
             auth_path=str(provider.get("auth_path", "") or "").strip(),
             project=str(provider.get("project", "") or "").strip(),
             thinking_mode=_get_thinking_mode(plugin_config),
             timeout=_provider_timeout(provider),
+            proxy=explicit_proxy,
         )
     if provider["api_type"] == "claude_code":
         return tool_impl.ClaudeCodeToolCaller(
