@@ -2186,7 +2186,36 @@ def _find_antigravity_cli_auth_file(override_path: str = "") -> _Path | None:
     return _find_antigravity_cli_auth_file_with_log(override_path)[0]
 
 
-def _find_antigravity_cli_auth_file_with_log(override_path: str = "") -> tuple[_Path | None, list[str]]:
+def _is_gemini_cli_compat_auth_path(path: _Path) -> bool:
+    """Best-effort path classifier for explicitly configured Gemini CLI creds."""
+    try:
+        target = _Path(path).expanduser().resolve(strict=False)
+    except Exception:
+        target = _Path(path).expanduser()
+    candidates: list[_Path] = []
+    for env_name in ("GEMINI_CLI_HOME", "GEMINI_HOME"):
+        base = _os.environ.get(env_name, "")
+        if base:
+            candidates.append(_Path(base).expanduser() / "oauth_creds.json")
+    for fallback in [
+        "~/.gemini/oauth_creds.json",
+        "~/AppData/Roaming/gemini-cli/oauth_creds.json",
+        "~/.config/gemini/oauth_creds.json",
+    ]:
+        candidates.append(_Path(fallback).expanduser())
+    for candidate in candidates:
+        try:
+            normalized = candidate.resolve(strict=False)
+        except Exception:
+            normalized = candidate
+        if normalized == target:
+            return True
+    return False
+
+
+def _find_antigravity_cli_auth_file_with_source(
+    override_path: str = "",
+) -> tuple[_Path | None, list[str], str]:
     """查找 Antigravity CLI OAuth 文件；没有专用文件时兼容 gemini-cli 凭证。
 
     入口先尝试从系统 keyring 把 agy 最新凭证同步写到 ~/.gemini/antigravity-cli/
@@ -2201,33 +2230,38 @@ def _find_antigravity_cli_auth_file_with_log(override_path: str = "") -> tuple[_
         p = _Path(override_path).expanduser()
         searched.append(f"override={p}")
         if p.exists():
-            return p, searched
+            source = "gemini_compat" if _is_gemini_cli_compat_auth_path(p) else "antigravity"
+            return p, searched, source
     for env_name in ("ANTIGRAVITY_CLI_AUTH_PATH", "AGY_AUTH_PATH"):
         raw_path = _os.environ.get(env_name, "")
         if raw_path:
             p = _Path(raw_path).expanduser()
             searched.append(f"${env_name}={p}")
             if p.exists():
-                return p, searched
+                source = "gemini_compat" if _is_gemini_cli_compat_auth_path(p) else "antigravity"
+                return p, searched, source
         else:
             searched.append(f"${env_name}=<unset>")
     for env_name in ("ANTIGRAVITY_CLI_HOME", "ANTIGRAVITY_HOME", "AGY_HOME"):
         base = _os.environ.get(env_name, "")
         if base:
-            for filename in ("oauth_creds.json", "auth.json", "credentials.json"):
+            for filename in ("antigravity-oauth-token", "oauth_creds.json", "auth.json", "credentials.json"):
                 p = _Path(base) / filename
                 searched.append(f"${env_name}/{filename}={p}")
                 if p.exists():
-                    return p, searched
+                    return p, searched, "antigravity"
         else:
             searched.append(f"${env_name}=<unset>")
     for fallback in [
+        "~/.gemini/antigravity-cli/antigravity-oauth-token",
         "~/.gemini/antigravity-cli/oauth_creds.json",
         "~/.gemini/antigravity-cli/auth.json",
         "~/.gemini/antigravity-cli/credentials.json",
+        "~/AppData/Roaming/antigravity-cli/antigravity-oauth-token",
         "~/AppData/Roaming/antigravity-cli/oauth_creds.json",
         "~/AppData/Roaming/antigravity-cli/auth.json",
         "~/AppData/Roaming/antigravity-cli/credentials.json",
+        "~/.config/antigravity-cli/antigravity-oauth-token",
         "~/.config/antigravity-cli/oauth_creds.json",
         "~/.config/antigravity-cli/auth.json",
         "~/.config/antigravity-cli/credentials.json",
@@ -2235,13 +2269,18 @@ def _find_antigravity_cli_auth_file_with_log(override_path: str = "") -> tuple[_
         p = _Path(fallback).expanduser()
         searched.append(str(p))
         if p.exists():
-            return p, searched
+            return p, searched, "antigravity"
 
     gemini_auth, gemini_searched = _find_gemini_cli_auth_file_with_log("")
     searched.extend([f"gemini_compat:{item}" for item in gemini_searched])
     if gemini_auth is not None:
-        return gemini_auth, searched
-    return None, searched
+        return gemini_auth, searched, "gemini_compat"
+    return None, searched, ""
+
+
+def _find_antigravity_cli_auth_file_with_log(override_path: str = "") -> tuple[_Path | None, list[str]]:
+    auth_file, searched, _source = _find_antigravity_cli_auth_file_with_source(override_path)
+    return auth_file, searched
 
 
 def _load_gemini_cli_auth(auth_path: _Path) -> dict:
@@ -2256,7 +2295,7 @@ def _get_gemini_cli_access_token(auth: dict) -> str:
         token = str(auth.get(key, "") or "").strip()
         if token:
             return token
-    for nested_key in ("credentials", "tokens"):
+    for nested_key in ("credentials", "tokens", "token"):
         nested = auth.get(nested_key)
         if isinstance(nested, dict):
             for key in ("access_token", "accessToken"):
@@ -2271,7 +2310,7 @@ def _get_gemini_cli_refresh_token(auth: dict) -> str:
         token = str(auth.get(key, "") or "").strip()
         if token:
             return token
-    for nested_key in ("credentials", "tokens"):
+    for nested_key in ("credentials", "tokens", "token"):
         nested = auth.get(nested_key)
         if isinstance(nested, dict):
             for key in ("refresh_token", "refreshToken"):
@@ -2286,7 +2325,7 @@ def _get_gemini_cli_token_expiry_ms(auth: dict) -> int:
     candidates: list[Any] = []
     for key in ("expiry_date", "expires_at", "expiresAt", "expiry"):
         candidates.append(auth.get(key))
-    for nested_key in ("credentials", "tokens"):
+    for nested_key in ("credentials", "tokens", "token"):
         nested = auth.get(nested_key)
         if isinstance(nested, dict):
             for key in ("expiry_date", "expires_at", "expiresAt", "expiry"):
@@ -2364,6 +2403,7 @@ async def _refresh_oauth_token(
     client_secret: str,
     timeout: float = 30.0,
     proxy: str = "",
+    trust_env: bool | None = None,
 ) -> dict:
     """通用 OAuth refresh：用 (client_id, client_secret, refresh_token) 换新 access_token。
 
@@ -2372,6 +2412,8 @@ async def _refresh_oauth_token(
     client_kwargs: dict[str, Any] = {"timeout": httpx.Timeout(timeout, connect=10.0)}
     if proxy:
         client_kwargs["proxy"] = proxy
+    if trust_env is not None:
+        client_kwargs["trust_env"] = trust_env
     async with httpx.AsyncClient(**client_kwargs) as client:
         resp = await client.post(
             _GEMINI_OAUTH_TOKEN_URL,
@@ -2396,7 +2438,11 @@ async def _refresh_oauth_token(
 
 
 async def _refresh_gemini_cli_access_token(
-    refresh_token: str, *, timeout: float = 30.0, proxy: str = ""
+    refresh_token: str,
+    *,
+    timeout: float = 30.0,
+    proxy: str = "",
+    trust_env: bool | None = None,
 ) -> dict:
     """gemini-cli 路径下的 refresh：用 gemini-cli OAuth client。"""
     return await _refresh_oauth_token(
@@ -2405,11 +2451,16 @@ async def _refresh_gemini_cli_access_token(
         client_secret=_gemini_oauth_client_secret(),
         timeout=timeout,
         proxy=proxy,
+        trust_env=trust_env,
     )
 
 
 async def _refresh_antigravity_cli_access_token(
-    refresh_token: str, *, timeout: float = 30.0, proxy: str = ""
+    refresh_token: str,
+    *,
+    timeout: float = 30.0,
+    proxy: str = "",
+    trust_env: bool | None = None,
 ) -> dict:
     """antigravity_cli 路径下的 refresh：用 antigravity OAuth client。
 
@@ -2422,6 +2473,7 @@ async def _refresh_antigravity_cli_access_token(
         client_secret=_antigravity_oauth_client_secret(),
         timeout=timeout,
         proxy=proxy,
+        trust_env=trust_env,
     )
 
 
@@ -2438,12 +2490,19 @@ def _persist_refreshed_gemini_cli_auth(
     new_expiry_ms = int(_t.time() * 1000) + max(0, int(expires_in or 3600) - 30) * 1000
     new_auth = dict(auth)
     target_nested = None
-    for nested_key in ("credentials", "tokens"):
+    for nested_key in ("credentials", "tokens", "token"):
         nested = new_auth.get(nested_key)
         if isinstance(nested, dict) and (nested.get("access_token") or nested.get("refresh_token")):
             target_nested = dict(nested)
             target_nested["access_token"] = access_token
             target_nested["expiry_date"] = new_expiry_ms
+            if "expiry" in target_nested:
+                from datetime import datetime as _dt_mod, timezone as _tz_mod
+
+                target_nested["expiry"] = _dt_mod.fromtimestamp(
+                    new_expiry_ms / 1000,
+                    tz=_tz_mod.utc,
+                ).isoformat().replace("+00:00", "Z")
             if id_token:
                 target_nested["id_token"] = id_token
             new_auth[nested_key] = target_nested
@@ -2754,6 +2813,20 @@ class GeminiCliToolCaller(ToolCaller):
     def _headers(self, access_token: str) -> dict[str, str]:
         return _gemini_cli_headers(access_token, user_agent=self._user_agent)
 
+    def _load_code_assist_endpoint(self) -> str:
+        return _GEMINI_CLI_LOAD_CODE_ASSIST
+
+    def _load_code_assist_metadata(self) -> dict[str, Any]:
+        return dict(_GEMINI_CLI_CLIENT_METADATA)
+
+    def _http_client_kwargs(self, *, connect_timeout: float = 15.0) -> dict[str, Any]:
+        client_kwargs: dict[str, Any] = {
+            "timeout": httpx.Timeout(self.timeout, connect=connect_timeout),
+        }
+        if self.proxy:
+            client_kwargs["proxy"] = self.proxy
+        return client_kwargs
+
     async def _refresh_token_remote(self, refresh_token: str) -> dict:
         """子类可覆写：用对应的 OAuth client 续 token。默认走 gemini-cli。"""
         return await _refresh_gemini_cli_access_token(refresh_token, proxy=self.proxy)
@@ -2823,6 +2896,18 @@ class GeminiCliToolCaller(ToolCaller):
             )
         return token, auth_file
 
+    async def _load_code_assist_project(self, access_token: str) -> str:
+        client_kwargs = self._http_client_kwargs(connect_timeout=15.0)
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            resp = await client.post(
+                self._load_code_assist_endpoint(),
+                json={"metadata": self._load_code_assist_metadata()},
+                headers=self._headers(access_token),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        return str(data.get("cloudaicompanionProject", "") or "").strip()
+
     async def _resolve_project(self, access_token: str, auth_file: _Path | None = None) -> str:
         if self.project_override:
             return self.project_override
@@ -2834,31 +2919,25 @@ class GeminiCliToolCaller(ToolCaller):
         # 第一次尝试用当前 token；如果 401 说明 token 已过期但本地未察觉（expiry 缺失或被绕过），
         # 强制刷新一次再重试。
         for attempt in range(2):
-            async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=15.0)) as client:
-                try:
-                    resp = await client.post(
-                        _GEMINI_CLI_LOAD_CODE_ASSIST,
-                        json={"metadata": dict(_GEMINI_CLI_CLIENT_METADATA)},
-                        headers=self._headers(access_token),
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    load_error = None
-                    break
-                except httpx.HTTPStatusError as exc:
-                    load_error = exc
-                    if exc.response is not None and exc.response.status_code == 401 and attempt == 0:
-                        try:
-                            new_token, _ = await self._get_access_token(force_refresh=True)
-                        except Exception:
-                            new_token = ""
-                        if new_token and new_token != access_token:
-                            access_token = new_token
-                            continue
-                    break
-                except Exception as exc:
-                    load_error = exc
-                    break
+            try:
+                project = await self._load_code_assist_project(access_token)
+                data = {"cloudaicompanionProject": project}
+                load_error = None
+                break
+            except httpx.HTTPStatusError as exc:
+                load_error = exc
+                if exc.response is not None and exc.response.status_code == 401 and attempt == 0:
+                    try:
+                        new_token, _ = await self._get_access_token(force_refresh=True)
+                    except Exception:
+                        new_token = ""
+                    if new_token and new_token != access_token:
+                        access_token = new_token
+                        continue
+                break
+            except Exception as exc:
+                load_error = exc
+                break
         project = str(data.get("cloudaicompanionProject", "") or "").strip()
         if project:
             type(self)._project_cache[access_token] = project
@@ -3031,10 +3110,9 @@ class GeminiCliToolCaller(ToolCaller):
 
 import uuid as _uuid
 
-# 真实 Antigravity v1internal 走的是 cloudcode-pa（与 gemini-cli 同 host），
-# 由请求 body 的 userAgent="antigravity" + Client-Metadata.ideType="ANTIGRAVITY"
-# 区分调用方。之前用 antigravity-pa.googleapis.com 是错误猜测，会 404。
-_ANTIGRAVITY_CLI_BASE = "https://cloudcode-pa.googleapis.com"
+# 真实 Antigravity v1internal 走 daily-cloudcode-pa。Gemini CLI 仍走
+# cloudcode-pa，两者不能混用；否则即使 OAuth token 有效也可能 403。
+_ANTIGRAVITY_CLI_BASE = "https://daily-cloudcode-pa.googleapis.com"
 _ANTIGRAVITY_CLI_LOAD_CODE_ASSIST = f"{_ANTIGRAVITY_CLI_BASE}/v1internal:loadCodeAssist"
 _ANTIGRAVITY_CLI_GENERATE_ENDPOINT = f"{_ANTIGRAVITY_CLI_BASE}/v1internal:generateContent"
 _ANTIGRAVITY_CLIENT_UA_VERSION = "1.15.8"
@@ -3119,11 +3197,23 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
     _user_agent = "antigravity/1.15.8 windows/amd64"
 
     async def _refresh_token_remote(self, refresh_token: str) -> dict:
-        """用 antigravity 自己的 OAuth client 续 token；用 gemini-cli 的会
-        被 Google 后端拒收（unauthorized_client）。
-        自动透传 self.proxy（来自构造参数），不依赖 HTTPS_PROXY 环境变量。
+        """按凭证来源选择 OAuth client 续 token。
+
+        Antigravity 专用凭证必须用 antigravity client；兼容回退到
+        gemini-cli 凭证时必须用 gemini-cli client，否则 Google 会返回
+        unauthorized_client。
         """
-        return await _refresh_antigravity_cli_access_token(refresh_token, proxy=self.proxy)
+        if getattr(self, "_last_auth_source", "") == "gemini_compat":
+            return await _refresh_gemini_cli_access_token(
+                refresh_token,
+                proxy=self.proxy,
+                trust_env=False,
+            )
+        return await _refresh_antigravity_cli_access_token(
+            refresh_token,
+            proxy=self.proxy,
+            trust_env=False,
+        )
 
     def _headers(self, access_token: str) -> dict[str, str]:
         """覆写父类 _headers：注入 Antigravity 必需的 Client-Metadata、
@@ -3147,8 +3237,30 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
             "Client-Metadata": client_metadata,
         }
 
+    def _load_code_assist_endpoint(self) -> str:
+        return _ANTIGRAVITY_CLI_LOAD_CODE_ASSIST
+
+    def _load_code_assist_metadata(self) -> dict[str, Any]:
+        return {
+            "ideType": "ANTIGRAVITY",
+            "platform": _antigravity_client_platform(),
+            "pluginType": "GEMINI",
+        }
+
+    def _http_client_kwargs(self, *, connect_timeout: float = 15.0) -> dict[str, Any]:
+        client_kwargs = super()._http_client_kwargs(connect_timeout=connect_timeout)
+        if not self.proxy:
+            # agy CLI 在 Linux/TUN 场景下依赖透明代理直连。httpx 默认读取
+            # HTTPS_PROXY/ALL_PROXY 会绕到本地 HTTP 代理，常见表现是 TLS EOF。
+            client_kwargs["trust_env"] = False
+        return client_kwargs
+
     def _find_auth_file_with_log(self) -> tuple[_Path | None, list[str]]:
-        return _find_antigravity_cli_auth_file_with_log(self.auth_path_override)
+        auth_file, searched, source = _find_antigravity_cli_auth_file_with_source(
+            self.auth_path_override
+        )
+        self._last_auth_source = source
+        return auth_file, searched
 
     async def _get_access_token(self, *, force_refresh: bool = False) -> tuple[str, _Path]:
         """覆写：始终从系统 keyring 取 agy 最新 token，不走 gemini-cli OAuth refresh。
@@ -3251,11 +3363,8 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
             model_candidates = _antigravity_cli_model_candidates(self.model)
             last_exc: Exception | None = None
             auth_refreshed_for_401 = False
-            client_kwargs: dict[str, Any] = {
-                "timeout": httpx.Timeout(self.timeout, connect=15.0),
-            }
-            if self.proxy:
-                client_kwargs["proxy"] = self.proxy
+            project_refreshed_for_403 = False
+            client_kwargs = self._http_client_kwargs(connect_timeout=15.0)
             async with httpx.AsyncClient(**client_kwargs) as client:
 
                 async def _post_once(_model_name: str, _access_token: str, _project: str):
@@ -3296,6 +3405,26 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                                 data = await _post_once(model_name, access_token, project)
                                 last_exc = None
                                 break
+                            except Exception as exc2:
+                                last_exc = exc2
+                                has_next = model_index + 1 < len(model_candidates)
+                                if has_next and _gemini_cli_retry_with_fallback_model(exc2):
+                                    continue
+                                raise
+                        if (
+                            exc.response is not None
+                            and exc.response.status_code == 403
+                            and not project_refreshed_for_403
+                        ):
+                            project_refreshed_for_403 = True
+                            try:
+                                remote_project = await self._load_code_assist_project(access_token)
+                                if remote_project and remote_project != project:
+                                    project = remote_project
+                                    type(self)._project_cache[access_token] = project
+                                    data = await _post_once(model_name, access_token, project)
+                                    last_exc = None
+                                    break
                             except Exception as exc2:
                                 last_exc = exc2
                                 has_next = model_index + 1 < len(model_candidates)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import pathlib
 import sys
 from typing import Any
@@ -17,9 +18,9 @@ impl = load_personification_module(
 # ====== 纯函数测试 ======
 
 def test_endpoint_uses_cloudcode_pa() -> None:
-    """endpoint 必须是 cloudcode-pa（非不存在的 antigravity-pa）。"""
+    """endpoint 必须是 Antigravity CLI 实际使用的 daily-cloudcode-pa。"""
     endpoint = impl._ANTIGRAVITY_CLI_GENERATE_ENDPOINT
-    assert endpoint == "https://cloudcode-pa.googleapis.com/v1internal:generateContent"
+    assert endpoint == "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
     assert "antigravity-pa" not in endpoint
 
 
@@ -127,7 +128,7 @@ def test_envelope_includes_user_agent_and_request_id() -> None:
 
 def test_post_url_is_cloudcode_not_antigravity_pa() -> None:
     c = _run_chat()
-    assert c["url"] == "https://cloudcode-pa.googleapis.com/v1internal:generateContent"
+    assert c["url"] == "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
     assert "antigravity-pa" not in c["url"]
 
 
@@ -142,6 +143,23 @@ def test_headers_include_client_metadata_and_x_goog() -> None:
     assert cm["ideType"] == "ANTIGRAVITY"
     assert cm["pluginType"] == "GEMINI"
     assert cm["platform"] in {"WINDOWS", "MACOS", "LINUX"}
+
+
+def test_load_code_assist_uses_antigravity_endpoint_and_metadata() -> None:
+    caller = impl.AntigravityCliToolCaller(
+        model="gemini-3.5-flash",
+        auth_path="",
+        project="",
+        thinking_mode="none",
+        timeout=30.0,
+    )
+    assert caller._load_code_assist_endpoint() == (
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+    )
+    metadata = caller._load_code_assist_metadata()
+    assert metadata["ideType"] == "ANTIGRAVITY"
+    assert metadata["pluginType"] == "GEMINI"
+    assert metadata["platform"] in {"WINDOWS", "MACOS", "LINUX"}
 
 
 def test_response_unwrapped_correctly() -> None:
@@ -264,6 +282,80 @@ def test_find_auth_file_logs_keyring_sync_attempt() -> None:
     assert isinstance(log, list)
 
 
+def test_find_auth_file_prefers_antigravity_oauth_token_file() -> None:
+    import shutil
+    import tempfile
+
+    tmp_home = pathlib.Path(tempfile.mkdtemp())
+    token_file = tmp_home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text(
+        json.dumps(
+            {
+                "auth_method": "consumer",
+                "token": {
+                    "access_token": "agy-at",
+                    "refresh_token": "agy-rt",
+                    "token_type": "Bearer",
+                    "expiry": "2030-01-01T00:00:00Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake = _make_fake_keyring(None)
+    saved_kr = sys.modules.get("keyring")
+    saved_home_env = os.environ.get("HOME")
+    sys.modules["keyring"] = fake
+    try:
+        os.environ["HOME"] = str(tmp_home)
+        found, _searched, source = impl._find_antigravity_cli_auth_file_with_source("")
+    finally:
+        if saved_kr is None:
+            sys.modules.pop("keyring", None)
+        else:
+            sys.modules["keyring"] = saved_kr
+        if saved_home_env is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = saved_home_env
+        shutil.rmtree(tmp_home, ignore_errors=True)
+
+    assert found == token_file
+    assert source == "antigravity"
+
+
+def test_antigravity_oauth_token_nested_shape_is_read_and_persisted(tmp_path) -> None:
+    auth_file = tmp_path / "antigravity-oauth-token"
+    auth = {
+        "auth_method": "consumer",
+        "token": {
+            "access_token": "old-at",
+            "refresh_token": "agy-rt",
+            "token_type": "Bearer",
+            "expiry": "2020-01-01T00:00:00Z",
+        },
+    }
+    auth_file.write_text(json.dumps(auth), encoding="utf-8")
+    loaded = impl._load_gemini_cli_auth(auth_file)
+
+    assert impl._get_gemini_cli_access_token(loaded) == "old-at"
+    assert impl._get_gemini_cli_refresh_token(loaded) == "agy-rt"
+    assert impl._get_gemini_cli_token_expiry_ms(loaded) > 0
+
+    persisted = impl._persist_refreshed_gemini_cli_auth(
+        auth_file,
+        loaded,
+        access_token="new-at",
+        expires_in=3600,
+    )
+
+    assert persisted["token"]["access_token"] == "new-at"
+    assert persisted["token"]["expiry"].endswith("Z")
+    on_disk = json.loads(auth_file.read_text(encoding="utf-8"))
+    assert on_disk["token"]["access_token"] == "new-at"
+
+
 # ====== OAuth client 区分（refresh token 用对的 client） ======
 
 def test_antigravity_oauth_client_id_decodes_correctly() -> None:
@@ -336,12 +428,12 @@ def test_refresh_token_remote_dispatches_to_right_client() -> None:
     antigravity refresh。两者通过 _refresh_token_remote 分派，互不串。"""
     captured: list[str] = []
 
-    async def fake_refresh_gemini(rt, *, timeout=30.0, proxy=""):
-        captured.append(f"gemini:{rt}:proxy={proxy}")
+    async def fake_refresh_gemini(rt, *, timeout=30.0, proxy="", trust_env=None):
+        captured.append(f"gemini:{rt}:proxy={proxy}:trust_env={trust_env}")
         return {"access_token": "g-at", "expires_in": 3599}
 
-    async def fake_refresh_antigravity(rt, *, timeout=30.0, proxy=""):
-        captured.append(f"antigravity:{rt}:proxy={proxy}")
+    async def fake_refresh_antigravity(rt, *, timeout=30.0, proxy="", trust_env=None):
+        captured.append(f"antigravity:{rt}:proxy={proxy}:trust_env={trust_env}")
         return {"access_token": "a-at", "expires_in": 3599}
 
     with patch.object(impl, "_refresh_gemini_cli_access_token", new=fake_refresh_gemini), \
@@ -355,15 +447,95 @@ def test_refresh_token_remote_dispatches_to_right_client() -> None:
         r1 = asyncio.run(gemini._refresh_token_remote("rt-1"))
         r2 = asyncio.run(anti._refresh_token_remote("rt-2"))
 
-    assert captured == ["gemini:rt-1:proxy=", "antigravity:rt-2:proxy="]
+    assert captured == ["gemini:rt-1:proxy=:trust_env=None", "antigravity:rt-2:proxy=:trust_env=False"]
     assert r1["access_token"] == "g-at"
     assert r2["access_token"] == "a-at"
+
+
+def test_antigravity_gemini_compat_auth_refreshes_with_gemini_client() -> None:
+    """Linux 无 keyring 且配置 ~/.gemini/oauth_creds.json 时；这类凭证要用
+    gemini-cli OAuth client 刷新，不能用 antigravity client。"""
+    import tempfile
+    import shutil
+
+    tmp_home = pathlib.Path(tempfile.mkdtemp())
+    auth_dir = tmp_home / ".gemini"
+    auth_dir.mkdir(parents=True)
+    auth_file = auth_dir / "oauth_creds.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "access_token": "old-at",
+                "refresh_token": "rt-gemini",
+                "expiry_date": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_keyring = _make_fake_keyring(None)
+    saved_kr = sys.modules.get("keyring")
+    saved_env = {
+        key: os.environ.get(key)
+        for key in (
+            "HOME",
+            "GEMINI_CLI_HOME",
+            "GEMINI_HOME",
+            "ANTIGRAVITY_CLI_AUTH_PATH",
+            "AGY_AUTH_PATH",
+            "ANTIGRAVITY_CLI_HOME",
+            "ANTIGRAVITY_HOME",
+            "AGY_HOME",
+        )
+    }
+    calls: list[str] = []
+
+    async def fake_refresh_gemini(rt, *, timeout=30.0, proxy="", trust_env=None):
+        calls.append(f"gemini:{rt}:proxy={proxy}:trust_env={trust_env}")
+        return {"access_token": "new-gemini-at", "expires_in": 3599}
+
+    async def fake_refresh_antigravity(rt, *, timeout=30.0, proxy="", trust_env=None):
+        calls.append(f"antigravity:{rt}:proxy={proxy}:trust_env={trust_env}")
+        return {"access_token": "new-antigravity-at", "expires_in": 3599}
+
+    sys.modules["keyring"] = fake_keyring
+    try:
+        os.environ["HOME"] = str(tmp_home)
+        for key in saved_env:
+            if key != "HOME":
+                os.environ.pop(key, None)
+        caller = impl.AntigravityCliToolCaller(
+            model="gemini-3.5-flash",
+            auth_path="~/.gemini/oauth_creds.json",
+            project="p",
+            thinking_mode="none",
+            timeout=30.0,
+            proxy="http://127.0.0.1:17890",
+        )
+        with patch.object(impl, "_refresh_gemini_cli_access_token", new=fake_refresh_gemini), \
+             patch.object(impl, "_refresh_antigravity_cli_access_token", new=fake_refresh_antigravity):
+            token, found = asyncio.run(caller._get_access_token())
+    finally:
+        if saved_kr is None:
+            sys.modules.pop("keyring", None)
+        else:
+            sys.modules["keyring"] = saved_kr
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        shutil.rmtree(tmp_home, ignore_errors=True)
+
+    assert token == "new-gemini-at"
+    assert found == auth_file
+    assert calls == ["gemini:rt-gemini:proxy=http://127.0.0.1:17890:trust_env=False"]
 
 
 # ====== 显式 proxy 配置 ======
 
 def test_default_proxy_is_empty_and_not_passed_to_httpx() -> None:
-    """不传 proxy 时构造的 caller.proxy 是空串，且不应往 httpx.AsyncClient 传 proxy=。"""
+    """不传 proxy 时不传 proxy=，并忽略环境代理以兼容 TUN 模式。"""
     caller = impl.AntigravityCliToolCaller(
         model="gemini-3.5-flash", auth_path="", project="p", thinking_mode="none", timeout=30.0
     )
@@ -397,6 +569,7 @@ def test_default_proxy_is_empty_and_not_passed_to_httpx() -> None:
             messages=[{"role": "user", "content": "hi"}], tools=[], use_builtin_search=False
         ))
     assert "proxy" not in captured["kwargs"]
+    assert captured["kwargs"].get("trust_env") is False
 
 
 def test_explicit_proxy_passed_through_to_httpx() -> None:
@@ -439,6 +612,7 @@ def test_explicit_proxy_passed_through_to_httpx() -> None:
             messages=[{"role": "user", "content": "hi"}], tools=[], use_builtin_search=False
         ))
     assert captured["kwargs"].get("proxy") == "http://127.0.0.1:17890"
+    assert "trust_env" not in captured["kwargs"]
 
 
 def test_refresh_helper_forwards_proxy_to_httpx() -> None:
@@ -466,8 +640,8 @@ def test_refresh_helper_forwards_proxy_to_httpx() -> None:
     assert captured["kwargs"].get("proxy") == "http://127.0.0.1:17890"
 
 
-def test_refresh_helper_without_proxy_does_not_pass_kwarg() -> None:
-    """proxy 空时不应该把 proxy= 传给 httpx.AsyncClient（让 trust_env 兜底）。"""
+def test_refresh_helper_without_proxy_disables_trust_env_for_tun() -> None:
+    """antigravity refresh 不传 proxy 时应忽略环境代理，交给 TUN 透明代理。"""
     captured: dict[str, Any] = {}
 
     class _Inspect:
@@ -487,5 +661,6 @@ def test_refresh_helper_without_proxy_does_not_pass_kwarg() -> None:
             return resp
 
     with patch.object(impl.httpx, "AsyncClient", _Inspect):
-        asyncio.run(impl._refresh_antigravity_cli_access_token("rt"))
+        asyncio.run(impl._refresh_antigravity_cli_access_token("rt", trust_env=False))
     assert "proxy" not in captured["kwargs"]
+    assert captured["kwargs"].get("trust_env") is False
