@@ -53,6 +53,23 @@ class Config(BaseModel):
     # 不依赖 HTTPS_PROXY / HTTP_PROXY 环境变量（bot 进程未必继承终端 env）。
     # 留空 = 沿用 httpx 的环境变量解析（trust_env 默认 True）。
     personification_antigravity_cli_proxy: str = ""
+    # ──────────── Social Intelligence（主动社交框架）────────────
+    # 总开关：默认关闭，配置好场景后再打开避免上线就乱发
+    personification_social_intelligence_enabled: bool = False
+    # LLM 闸门：开启则每次发送前用 lite_model 二次决策"现在合不合适"
+    personification_social_gate_enabled: bool = True
+    # 每用户每日最多收到的主动社交消息数（跨场景共享）
+    personification_social_daily_quota_per_user: int = 2
+    # 早安问候 cron 时点
+    personification_social_morning_hour: int = 8
+    personification_social_morning_greeting_enabled: bool = True
+    # 晚安问候 cron 时点
+    personification_social_evening_hour: int = 22
+    personification_social_evening_greeting_enabled: bool = True
+    # 单场景冷却（默认 18 小时，避免一天给同一人发两次早安）
+    personification_social_greeting_cooldown_seconds: int = 64800
+    # 早晚问候每次最多发给多少人（按 persona updated_at 取最近活跃的）
+    personification_social_greeting_max_recipients: int = 8
     personification_thinking_mode: str = "none"
     personification_state_thinking_mode: str = "adaptive"
     personification_model_overrides: Dict[str, str] = {}

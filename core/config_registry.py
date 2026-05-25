@@ -669,6 +669,65 @@ def _build_entries() -> list[ConfigEntry]:
             help_aliases=("antigravity_proxy", "agy_proxy", "antigravity 代理"),
         ),
         ConfigEntry(
+            key="social_intelligence_enabled",
+            field_name="personification_social_intelligence_enabled",
+            display_name="主动社交总开关",
+            value_type="bool",
+            default=False,
+            scope=GLOBAL_SCOPE,
+            description=(
+                "总开关：开启后 bot 会按场景配置主动给用户发问候、新闻、节日"
+                "祝福等。默认关闭，确认场景配好后再打开。"
+            ),
+            category="config",
+            help_aliases=("social_intelligence", "主动社交", "社交"),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="social_gate_enabled",
+            field_name="personification_social_gate_enabled",
+            display_name="主动社交 LLM 闸门",
+            value_type="bool",
+            default=True,
+            scope=GLOBAL_SCOPE,
+            description=(
+                "开启则每次主动发送前用 lite 模型二次决策'现在发合不合适'，"
+                "避免显得机器人在群发；关闭则只走 quota 与 cooldown。"
+            ),
+            category="config",
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="social_daily_quota_per_user",
+            field_name="personification_social_daily_quota_per_user",
+            display_name="每用户每日主动消息上限",
+            value_type="int",
+            default=2,
+            scope=GLOBAL_SCOPE,
+            description="所有主动社交场景共享的每用户日额度，避免骚扰。",
+            category="config",
+        ),
+        ConfigEntry(
+            key="social_morning_hour",
+            field_name="personification_social_morning_hour",
+            display_name="主动早安时点（小时）",
+            value_type="int",
+            default=8,
+            scope=GLOBAL_SCOPE,
+            description="0-23，早安问候触发的小时。",
+            category="config",
+        ),
+        ConfigEntry(
+            key="social_evening_hour",
+            field_name="personification_social_evening_hour",
+            display_name="主动晚安时点（小时）",
+            value_type="int",
+            default=22,
+            scope=GLOBAL_SCOPE,
+            description="0-23，晚安问候触发的小时。",
+            category="config",
+        ),
+        ConfigEntry(
             key="agent_max_steps",
             field_name="personification_agent_max_steps",
             display_name="Agent 最大步数",

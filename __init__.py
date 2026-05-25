@@ -668,6 +668,35 @@ async def _init_plugin_knowledge() -> None:
         )
 
 
+@get_driver().on_startup
+async def _setup_social_intelligence() -> None:
+    """注册主动社交场景到 APScheduler。默认总开关关闭，开了才真触发。"""
+    bundle = _require_runtime_bundle()
+    try:
+        from .flows.social_intelligence import (
+            SocialContext,
+            setup_social_intelligence_jobs,
+        )
+
+        ctx = SocialContext(
+            plugin_config=plugin_config,
+            logger=logger,
+            get_bots=get_bots,
+            get_whitelisted_groups=bundle._get_whitelisted_groups,
+            tool_caller=bundle.reply_processor_deps.runtime.agent_tool_caller,
+            persona_store=bundle.persona_store,
+            data_dir=get_personification_data_dir(plugin_config),
+            get_now=get_current_local_time,
+        )
+        registered = setup_social_intelligence_jobs(scheduler=scheduler, ctx=ctx)
+        if registered > 0:
+            logger.info(f"[social] 已注册 {registered} 个主动社交触发器")
+        else:
+            logger.info("[social] 未注册任何主动社交触发器（开关关闭或场景被禁用）")
+    except Exception as exc:
+        logger.error(f"[social] setup_social_intelligence_jobs 失败：{exc}")
+
+
 @get_driver().on_shutdown
 async def _close_personification_runtime() -> None:
     global _sticker_labeler_observer, _knowledge_build_task, _visual_probe_task, _qzone_cookie_refresh_task, runtime_bundle
