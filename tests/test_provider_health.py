@@ -78,8 +78,9 @@ def test_effective_priority_failure_penalty_grows() -> None:
 def test_effective_priority_high_latency_low_success_combine() -> None:
     provider = {"priority": 1}
     stats = {"sample_count": 10, "success_count": 0, "avg_latency_ms": 5500}
-    # base=1, latency_penalty=(5500-1000)/500=9, failure_penalty=(1-0)*10=10
-    assert ph.compute_effective_priority(provider, stats, min_samples=3) == 1 + 9 + 10
+    # base=1, latency_penalty=(5500-1000)/500=9,
+    # failure_penalty=(1-0)*10 + never-success penalty 100
+    assert ph.compute_effective_priority(provider, stats, min_samples=3) == 1 + 9 + 10 + 100
 
 
 def test_effective_priority_ordering_swaps_when_top_dies() -> None:
@@ -90,8 +91,21 @@ def test_effective_priority_ordering_swaps_when_top_dies() -> None:
     backup_stats = {"sample_count": 20, "success_count": 20, "avg_latency_ms": 600}
     top_eff = ph.compute_effective_priority(top, top_stats, min_samples=3)
     backup_eff = ph.compute_effective_priority(backup, backup_stats, min_samples=3)
-    # top: 0 + 14 + 10 = 24；backup: 5 + 0 + 0 = 5；backup 排前面
+    # top: 0 + 14 + 10 + 100 = 124；backup: 5 + 0 + 0 = 5；backup 排前面
     assert top_eff > backup_eff
+
+
+def test_effective_priority_never_success_fast_failure_after_slow_healthy() -> None:
+    """失败很快的 provider 不应排在稳定成功但较慢的 provider 前面。"""
+    failing = {"priority": 2, "name": "antigravity_cli_primary"}
+    healthy = {"priority": 1, "name": "mimo"}
+    failing_stats = {"sample_count": 22, "success_count": 0, "avg_latency_ms": 1584}
+    healthy_stats = {"sample_count": 12, "success_count": 12, "avg_latency_ms": 10706}
+
+    failing_eff = ph.compute_effective_priority(failing, failing_stats, min_samples=3)
+    healthy_eff = ph.compute_effective_priority(healthy, healthy_stats, min_samples=3)
+
+    assert healthy_eff < failing_eff
 
 
 # ========== compute_cooldown_seconds ==========

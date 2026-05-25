@@ -259,8 +259,12 @@ def compute_effective_priority(
     success_rate = success_count / sample_count if sample_count > 0 else 1.0
     # latency 惩罚：每超过 1 秒 +0.001*ms 大约相当于 2 秒 → +2，5 秒 → +8
     latency_penalty = max(0.0, (avg_latency - 1000.0) / 500.0)
-    # 失败率惩罚：100% 失败 +10，50% 失败 +5
+    # 失败率惩罚：100% 失败 +10，50% 失败 +5。
+    # 额外规则：样本足够但从未成功过的 provider 不能因为"失败得快"
+    # 排在稳定成功但较慢的 provider 前面。
     failure_penalty = (1.0 - success_rate) * 10.0
+    if success_count <= 0:
+        failure_penalty += 100.0
     return base + latency_penalty + failure_penalty
 
 
