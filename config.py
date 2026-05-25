@@ -83,6 +83,11 @@ class Config(BaseModel):
     personification_social_topic_scan_interval_minutes: int = 60
     personification_social_topic_followup_window_hours: int = 24
     personification_social_topic_followup_cooldown_seconds: int = 43200
+    # 节日祝福：公历节日 + 生日（从 persona 抽取）
+    personification_social_festival_enabled: bool = True
+    personification_social_festival_hour: int = 9
+    personification_social_festival_max_recipients: int = 20
+    personification_social_festival_cooldown_seconds: int = 82800
     personification_thinking_mode: str = "none"
     personification_state_thinking_mode: str = "adaptive"
     personification_model_overrides: Dict[str, str] = {}

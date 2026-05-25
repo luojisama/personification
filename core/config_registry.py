@@ -787,6 +787,30 @@ def _build_entries() -> list[ConfigEntry]:
             category="config",
         ),
         ConfigEntry(
+            key="social_festival_enabled",
+            field_name="personification_social_festival_enabled",
+            display_name="主动节日 / 生日祝福",
+            value_type="bool",
+            default=True,
+            scope=GLOBAL_SCOPE,
+            description=(
+                "公历节日（元旦 / 国庆 / 圣诞等内置）+ 用户生日（从 persona "
+                "文本里抽 '生日：MM-DD' 模式）；命中当天自动发祝福。"
+            ),
+            category="config",
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="social_festival_hour",
+            field_name="personification_social_festival_hour",
+            display_name="节日祝福触发时点（小时）",
+            value_type="int",
+            default=9,
+            scope=GLOBAL_SCOPE,
+            description="0-23，每天检查节日 / 生日的时点。",
+            category="config",
+        ),
+        ConfigEntry(
             key="agent_max_steps",
             field_name="personification_agent_max_steps",
             display_name="Agent 最大步数",

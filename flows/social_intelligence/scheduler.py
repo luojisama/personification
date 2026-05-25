@@ -18,6 +18,7 @@ from .scenarios.greetings import (
     morning_greetings_handler,
 )
 from .scenarios.news_push import news_push_handler
+from .scenarios.festival_greetings import festival_greetings_handler
 from .scenarios.topic_followup import topic_followup_handler
 
 
@@ -81,6 +82,21 @@ def _register_builtin_scenarios(plugin_config: Any) -> None:
                 getattr(cfg, "personification_social_intelligence_enabled", False)
             ) and bool(
                 getattr(cfg, "personification_social_topic_followup_enabled", True)
+            ),
+        )
+    )
+
+    festival_hour = int(getattr(plugin_config, "personification_social_festival_hour", 9) or 9)
+    register_social_trigger(
+        SocialTrigger(
+            name="festival_greeting",
+            handler=festival_greetings_handler,
+            schedule_kind="cron",
+            schedule_args={"hour": festival_hour, "minute": 0},
+            enabled=lambda cfg: bool(
+                getattr(cfg, "personification_social_intelligence_enabled", False)
+            ) and bool(
+                getattr(cfg, "personification_social_festival_enabled", True)
             ),
         )
     )

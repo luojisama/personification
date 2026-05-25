@@ -329,3 +329,48 @@ def test_mark_skipped_excludes_from_due() -> None:
     )
     pending_topics_mod.mark_skipped(tid)
     assert pending_topics_mod.find_due_topics(now=5000.0, window_seconds=86400.0) == []
+
+
+# ========== festival_greetings ==========
+
+festival_mod = _load_si_submodule("scenarios.festival_greetings")
+
+
+def test_today_festival_table_hits_known_dates() -> None:
+    from datetime import datetime
+    assert festival_mod._today_festival(datetime(2026, 10, 1, 9)) == "国庆节"
+    assert festival_mod._today_festival(datetime(2026, 12, 25, 9)) == "圣诞节"
+    assert festival_mod._today_festival(datetime(2026, 2, 14, 9)) == "情人节"
+
+
+def test_today_festival_returns_none_on_blank_day() -> None:
+    from datetime import datetime
+    assert festival_mod._today_festival(datetime(2026, 7, 7, 9)) is None
+
+
+def test_extract_birthday_various_formats() -> None:
+    assert festival_mod._extract_birthday("生日：3月8日") == (3, 8)
+    assert festival_mod._extract_birthday("生日是 03-08") == (3, 8)
+    assert festival_mod._extract_birthday("出生于 1995-03-08") == (3, 8)
+    assert festival_mod._extract_birthday("birthday: 12/25") == (12, 25)
+    assert festival_mod._extract_birthday("Birthday 1/1") == (1, 1)
+
+
+def test_extract_birthday_rejects_invalid_or_missing() -> None:
+    assert festival_mod._extract_birthday("") is None
+    assert festival_mod._extract_birthday("没提生日") is None
+    # 月份非法不接受
+    assert festival_mod._extract_birthday("生日：13月45日") is None
+
+
+def test_select_birthday_users_matches_today() -> None:
+    from datetime import datetime
+    candidates = [
+        ("u1", "喜欢游戏，生日：3月8日"),
+        ("u2", "在北京"),
+        ("u3", "birthday 10/01"),
+    ]
+    result = festival_mod._select_birthday_users(candidates, datetime(2026, 10, 1, 9))
+    assert [r[0] for r in result] == ["u3"]
+    result2 = festival_mod._select_birthday_users(candidates, datetime(2026, 3, 8, 9))
+    assert [r[0] for r in result2] == ["u1"]
