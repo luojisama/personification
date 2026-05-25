@@ -535,7 +535,7 @@ def test_antigravity_gemini_compat_auth_refreshes_with_gemini_client() -> None:
 # ====== 显式 proxy 配置 ======
 
 def test_default_proxy_is_empty_and_not_passed_to_httpx() -> None:
-    """不传 proxy 时不传 proxy=，并忽略环境代理以兼容 TUN 模式。"""
+    """不传 proxy 且无 env proxy 时：不传 proxy=，并忽略环境代理以兼容 TUN 模式。"""
     caller = impl.AntigravityCliToolCaller(
         model="gemini-3.5-flash", auth_path="", project="p", thinking_mode="none", timeout=30.0
     )
@@ -563,13 +563,67 @@ def test_default_proxy_is_empty_and_not_passed_to_httpx() -> None:
     async def fake_get_access_token(*, force_refresh=False):
         return ("fake-tok", pathlib.Path("/tmp/x.json"))
 
-    with patch.object(caller, "_get_access_token", new=fake_get_access_token), \
-         patch.object(impl.httpx, "AsyncClient", _Inspect):
-        asyncio.run(caller.chat_with_tools(
-            messages=[{"role": "user", "content": "hi"}], tools=[], use_builtin_search=False
-        ))
+    _proxy_vars = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
+    _saved_env = {k: os.environ.pop(k, None) for k in _proxy_vars}
+    try:
+        with patch.object(caller, "_get_access_token", new=fake_get_access_token), \
+             patch.object(impl.httpx, "AsyncClient", _Inspect):
+            asyncio.run(caller.chat_with_tools(
+                messages=[{"role": "user", "content": "hi"}], tools=[], use_builtin_search=False
+            ))
+    finally:
+        for k, v in _saved_env.items():
+            if v is not None:
+                os.environ[k] = v
     assert "proxy" not in captured["kwargs"]
     assert captured["kwargs"].get("trust_env") is False
+
+
+def test_env_proxy_is_respected_when_no_explicit_proxy() -> None:
+    """有 HTTPS_PROXY 环境变量且未配置显式 proxy 时，不应强制 trust_env=False。"""
+    caller = impl.AntigravityCliToolCaller(
+        model="gemini-3.5-flash", auth_path="", project="p", thinking_mode="none", timeout=30.0
+    )
+    assert caller.proxy == ""
+
+    captured: dict[str, Any] = {}
+
+    class _Inspect:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["kwargs"] = kwargs
+
+        async def __aenter__(self) -> "_Inspect":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url, *, json, headers):
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json = lambda: {"response": {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}}
+            resp.status_code = 200
+            return resp
+
+    async def fake_get_access_token(*, force_refresh=False):
+        return ("fake-tok", pathlib.Path("/tmp/x.json"))
+
+    _saved = os.environ.get("HTTPS_PROXY")
+    os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7890"
+    try:
+        with patch.object(caller, "_get_access_token", new=fake_get_access_token), \
+             patch.object(impl.httpx, "AsyncClient", _Inspect):
+            asyncio.run(caller.chat_with_tools(
+                messages=[{"role": "user", "content": "hi"}], tools=[], use_builtin_search=False
+            ))
+    finally:
+        if _saved is None:
+            os.environ.pop("HTTPS_PROXY", None)
+        else:
+            os.environ["HTTPS_PROXY"] = _saved
+    assert "proxy" not in captured["kwargs"]
+    # 有 HTTPS_PROXY 时不应强制 trust_env=False，让 httpx 自己读取环境代理
+    assert captured["kwargs"].get("trust_env") is not False
 
 
 def test_explicit_proxy_passed_through_to_httpx() -> None:

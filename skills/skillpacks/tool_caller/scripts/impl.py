@@ -2355,6 +2355,16 @@ import base64 as _b64
 import os as _os
 
 
+def _has_env_proxy() -> bool:
+    """判断环境中是否配置了 HTTPS/通用代理变量（大小写均检查）。"""
+    return bool(
+        _os.environ.get("HTTPS_PROXY")
+        or _os.environ.get("https_proxy")
+        or _os.environ.get("ALL_PROXY")
+        or _os.environ.get("all_proxy")
+    )
+
+
 def _gemini_oauth_client_id() -> str:
     override = _os.environ.get("GEMINI_OAUTH_CLIENT_ID")
     if override:
@@ -3203,16 +3213,19 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
         gemini-cli 凭证时必须用 gemini-cli client，否则 Google 会返回
         unauthorized_client。
         """
+        # 无显式代理且环境中未配置 HTTPS_PROXY 时，禁止 httpx 读取系统代理（TUN 兼容）；
+        # 有环境代理或显式 proxy 时，传 None 让 httpx 按默认逻辑决定（trust_env=True）。
+        trust_env: bool | None = False if not self.proxy and not _has_env_proxy() else None
         if getattr(self, "_last_auth_source", "") == "gemini_compat":
             return await _refresh_gemini_cli_access_token(
                 refresh_token,
                 proxy=self.proxy,
-                trust_env=False,
+                trust_env=trust_env,
             )
         return await _refresh_antigravity_cli_access_token(
             refresh_token,
             proxy=self.proxy,
-            trust_env=False,
+            trust_env=trust_env,
         )
 
     def _headers(self, access_token: str) -> dict[str, str]:
@@ -3249,9 +3262,10 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
 
     def _http_client_kwargs(self, *, connect_timeout: float = 15.0) -> dict[str, Any]:
         client_kwargs = super()._http_client_kwargs(connect_timeout=connect_timeout)
-        if not self.proxy:
-            # agy CLI 在 Linux/TUN 场景下依赖透明代理直连。httpx 默认读取
-            # HTTPS_PROXY/ALL_PROXY 会绕到本地 HTTP 代理，常见表现是 TLS EOF。
+        if not self.proxy and not _has_env_proxy():
+            # 无显式代理且环境中未配置 HTTPS_PROXY/ALL_PROXY 时，禁止 httpx 读取
+            # 系统代理，使 TUN 透明代理能在 OS 层正常接管（HTTP CONNECT 会绕开 TUN）。
+            # 若使用 TUN 的同时需要 HTTPS_PROXY，请改用 proxy 字段显式配置代理地址。
             client_kwargs["trust_env"] = False
         return client_kwargs
 
