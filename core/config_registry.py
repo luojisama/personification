@@ -728,6 +728,41 @@ def _build_entries() -> list[ConfigEntry]:
             category="config",
         ),
         ConfigEntry(
+            key="social_news_enabled",
+            field_name="personification_social_news_enabled",
+            display_name="主动新闻推送",
+            value_type="bool",
+            default=False,
+            scope=GLOBAL_SCOPE,
+            description=(
+                "开启后每天指定时点向 personification_social_news_users / "
+                "_news_groups 列出的目标推送一条自然语气的新闻摘要。"
+            ),
+            category="config",
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="social_news_hour",
+            field_name="personification_social_news_hour",
+            display_name="主动新闻推送时点（小时）",
+            value_type="int",
+            default=9,
+            scope=GLOBAL_SCOPE,
+            description="0-23，每天哪个时点触发新闻推送。",
+            category="config",
+        ),
+        ConfigEntry(
+            key="social_news_source",
+            field_name="personification_social_news_source",
+            display_name="新闻来源类型",
+            value_type="str",
+            default="daily",
+            scope=GLOBAL_SCOPE,
+            description="daily=早报、ai=AI 资讯、history=历史上的今天。",
+            category="config",
+            choices=("daily", "ai", "history"),
+        ),
+        ConfigEntry(
             key="agent_max_steps",
             field_name="personification_agent_max_steps",
             display_name="Agent 最大步数",

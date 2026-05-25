@@ -70,6 +70,14 @@ class Config(BaseModel):
     personification_social_greeting_cooldown_seconds: int = 64800
     # 早晚问候每次最多发给多少人（按 persona updated_at 取最近活跃的）
     personification_social_greeting_max_recipients: int = 8
+    # 定时新闻推送
+    personification_social_news_enabled: bool = False
+    personification_social_news_hour: int = 9
+    personification_social_news_users: List[str] = []
+    personification_social_news_groups: List[str] = []
+    # 新闻来源：daily / ai / history
+    personification_social_news_source: str = "daily"
+    personification_social_news_cooldown_seconds: int = 72000
     personification_thinking_mode: str = "none"
     personification_state_thinking_mode: str = "adaptive"
     personification_model_overrides: Dict[str, str] = {}

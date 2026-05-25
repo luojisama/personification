@@ -17,6 +17,7 @@ from .scenarios.greetings import (
     evening_greetings_handler,
     morning_greetings_handler,
 )
+from .scenarios.news_push import news_push_handler
 
 
 def _register_builtin_scenarios(plugin_config: Any) -> None:
@@ -46,6 +47,21 @@ def _register_builtin_scenarios(plugin_config: Any) -> None:
                 getattr(cfg, "personification_social_intelligence_enabled", False)
             ) and bool(
                 getattr(cfg, "personification_social_evening_greeting_enabled", True)
+            ),
+        )
+    )
+
+    news_hour = int(getattr(plugin_config, "personification_social_news_hour", 9) or 9)
+    register_social_trigger(
+        SocialTrigger(
+            name="news_push",
+            handler=news_push_handler,
+            schedule_kind="cron",
+            schedule_args={"hour": news_hour, "minute": 0},
+            enabled=lambda cfg: bool(
+                getattr(cfg, "personification_social_intelligence_enabled", False)
+            ) and bool(
+                getattr(cfg, "personification_social_news_enabled", False)
             ),
         )
     )

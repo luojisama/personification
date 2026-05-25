@@ -219,3 +219,33 @@ def test_gate_parses_json_inside_prose() -> None:
     )
     assert allow is True
     assert rewritten is None
+
+
+# ========== news_push ==========
+
+news_push = _load_si_submodule("scenarios.news_push")
+
+
+def test_string_list_parses_list_and_csv_and_empty() -> None:
+    assert news_push._string_list(["123", "456"]) == ["123", "456"]
+    assert news_push._string_list("11,22, 33") == ["11", "22", "33"]
+    assert news_push._string_list("") == []
+    assert news_push._string_list(None) == []
+    assert news_push._string_list(["", " ", "x"]) == ["x"]
+
+
+def test_news_push_early_returns_when_master_switch_off() -> None:
+    ctx = MagicMock()
+    ctx.plugin_config.personification_social_intelligence_enabled = False
+    asyncio.run(news_push.news_push_handler(ctx))
+    # 总开关关闭：不应触发 bot 调用或 LLM 调用
+    ctx.get_bots.assert_not_called()
+    ctx.tool_caller.chat_with_tools.assert_not_called()
+
+
+def test_news_push_early_returns_when_scenario_disabled() -> None:
+    ctx = MagicMock()
+    ctx.plugin_config.personification_social_intelligence_enabled = True
+    ctx.plugin_config.personification_social_news_enabled = False
+    asyncio.run(news_push.news_push_handler(ctx))
+    ctx.get_bots.assert_not_called()
