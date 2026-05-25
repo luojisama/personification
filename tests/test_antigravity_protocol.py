@@ -428,12 +428,12 @@ def test_refresh_token_remote_dispatches_to_right_client() -> None:
     antigravity refresh。两者通过 _refresh_token_remote 分派，互不串。"""
     captured: list[str] = []
 
-    async def fake_refresh_gemini(rt, *, timeout=30.0, proxy=""):
-        captured.append(f"gemini:{rt}:proxy={proxy}")
+    async def fake_refresh_gemini(rt, *, timeout=30.0, proxy="", trust_env=None):
+        captured.append(f"gemini:{rt}:proxy={proxy}:trust_env={trust_env}")
         return {"access_token": "g-at", "expires_in": 3599}
 
-    async def fake_refresh_antigravity(rt, *, timeout=30.0, proxy=""):
-        captured.append(f"antigravity:{rt}:proxy={proxy}")
+    async def fake_refresh_antigravity(rt, *, timeout=30.0, proxy="", trust_env=None):
+        captured.append(f"antigravity:{rt}:proxy={proxy}:trust_env={trust_env}")
         return {"access_token": "a-at", "expires_in": 3599}
 
     with patch.object(impl, "_refresh_gemini_cli_access_token", new=fake_refresh_gemini), \
@@ -447,7 +447,7 @@ def test_refresh_token_remote_dispatches_to_right_client() -> None:
         r1 = asyncio.run(gemini._refresh_token_remote("rt-1"))
         r2 = asyncio.run(anti._refresh_token_remote("rt-2"))
 
-    assert captured == ["gemini:rt-1:proxy=", "antigravity:rt-2:proxy="]
+    assert captured == ["gemini:rt-1:proxy=:trust_env=None", "antigravity:rt-2:proxy=:trust_env=False"]
     assert r1["access_token"] == "g-at"
     assert r2["access_token"] == "a-at"
 
@@ -490,12 +490,12 @@ def test_antigravity_gemini_compat_auth_refreshes_with_gemini_client() -> None:
     }
     calls: list[str] = []
 
-    async def fake_refresh_gemini(rt, *, timeout=30.0, proxy=""):
-        calls.append(f"gemini:{rt}:proxy={proxy}")
+    async def fake_refresh_gemini(rt, *, timeout=30.0, proxy="", trust_env=None):
+        calls.append(f"gemini:{rt}:proxy={proxy}:trust_env={trust_env}")
         return {"access_token": "new-gemini-at", "expires_in": 3599}
 
-    async def fake_refresh_antigravity(rt, *, timeout=30.0, proxy=""):
-        calls.append(f"antigravity:{rt}:proxy={proxy}")
+    async def fake_refresh_antigravity(rt, *, timeout=30.0, proxy="", trust_env=None):
+        calls.append(f"antigravity:{rt}:proxy={proxy}:trust_env={trust_env}")
         return {"access_token": "new-antigravity-at", "expires_in": 3599}
 
     sys.modules["keyring"] = fake_keyring
@@ -529,13 +529,13 @@ def test_antigravity_gemini_compat_auth_refreshes_with_gemini_client() -> None:
 
     assert token == "new-gemini-at"
     assert found == auth_file
-    assert calls == ["gemini:rt-gemini:proxy=http://127.0.0.1:17890"]
+    assert calls == ["gemini:rt-gemini:proxy=http://127.0.0.1:17890:trust_env=False"]
 
 
 # ====== 显式 proxy 配置 ======
 
 def test_default_proxy_is_empty_and_not_passed_to_httpx() -> None:
-    """不传 proxy 时构造的 caller.proxy 是空串，且不应往 httpx.AsyncClient 传 proxy=。"""
+    """不传 proxy 时不传 proxy=，并忽略环境代理以兼容 TUN 模式。"""
     caller = impl.AntigravityCliToolCaller(
         model="gemini-3.5-flash", auth_path="", project="p", thinking_mode="none", timeout=30.0
     )
@@ -569,6 +569,7 @@ def test_default_proxy_is_empty_and_not_passed_to_httpx() -> None:
             messages=[{"role": "user", "content": "hi"}], tools=[], use_builtin_search=False
         ))
     assert "proxy" not in captured["kwargs"]
+    assert captured["kwargs"].get("trust_env") is False
 
 
 def test_explicit_proxy_passed_through_to_httpx() -> None:
@@ -611,6 +612,7 @@ def test_explicit_proxy_passed_through_to_httpx() -> None:
             messages=[{"role": "user", "content": "hi"}], tools=[], use_builtin_search=False
         ))
     assert captured["kwargs"].get("proxy") == "http://127.0.0.1:17890"
+    assert "trust_env" not in captured["kwargs"]
 
 
 def test_refresh_helper_forwards_proxy_to_httpx() -> None:
@@ -638,8 +640,8 @@ def test_refresh_helper_forwards_proxy_to_httpx() -> None:
     assert captured["kwargs"].get("proxy") == "http://127.0.0.1:17890"
 
 
-def test_refresh_helper_without_proxy_does_not_pass_kwarg() -> None:
-    """proxy 空时不应该把 proxy= 传给 httpx.AsyncClient（让 trust_env 兜底）。"""
+def test_refresh_helper_without_proxy_disables_trust_env_for_tun() -> None:
+    """antigravity refresh 不传 proxy 时应忽略环境代理，交给 TUN 透明代理。"""
     captured: dict[str, Any] = {}
 
     class _Inspect:
@@ -659,5 +661,6 @@ def test_refresh_helper_without_proxy_does_not_pass_kwarg() -> None:
             return resp
 
     with patch.object(impl.httpx, "AsyncClient", _Inspect):
-        asyncio.run(impl._refresh_antigravity_cli_access_token("rt"))
+        asyncio.run(impl._refresh_antigravity_cli_access_token("rt", trust_env=False))
     assert "proxy" not in captured["kwargs"]
+    assert captured["kwargs"].get("trust_env") is False
