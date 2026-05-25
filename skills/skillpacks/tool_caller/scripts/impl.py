@@ -1099,6 +1099,8 @@ class AnthropicToolCaller(ToolCaller):
 #  Codex OAuth auth.json 路径解析
 import os as _os
 from pathlib import Path as _Path
+from urllib.parse import unquote as _url_unquote
+from urllib.parse import urlparse as _url_parse
 
 
 def _find_codex_auth_file(override_path: str = "") -> _Path | None:
@@ -2536,7 +2538,13 @@ def _looks_like_project_id(value: str) -> bool:
     text = str(value or "").strip()
     if not text or len(text) > 128:
         return False
-    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{2,127}", text))
+    return bool(
+        re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{2,127}", text)
+        or re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            text,
+        )
+    )
 
 
 def _extract_project_from_json_payload(payload: Any) -> str:
@@ -2565,6 +2573,80 @@ def _read_gemini_project_from_json(path: _Path) -> str:
     except Exception:
         return ""
     return _extract_project_from_json_payload(payload)
+
+
+def _normalise_local_path(value: str) -> _Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("file://"):
+        parsed = _url_parse(raw)
+        raw = _url_unquote(parsed.path or "")
+    if not raw:
+        return None
+    try:
+        return _Path(raw).expanduser().resolve(strict=False)
+    except Exception:
+        return _Path(raw).expanduser()
+
+
+def _antigravity_project_workspace_paths(payload: Any) -> list[_Path]:
+    paths: list[_Path] = []
+
+    def _add(value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        path = _normalise_local_path(value)
+        if path is not None and path not in paths:
+            paths.append(path)
+
+    if not isinstance(payload, dict):
+        return paths
+    _add(payload.get("name"))
+    resources = (
+        (payload.get("projectResources") or {}).get("resources")
+        if isinstance(payload.get("projectResources"), dict)
+        else None
+    )
+    if isinstance(resources, list):
+        for resource in resources:
+            if not isinstance(resource, dict):
+                continue
+            git_folder = resource.get("gitFolder")
+            if isinstance(git_folder, dict):
+                _add(git_folder.get("folderUri"))
+    return paths
+
+
+def _resolve_antigravity_project_from_workspace_configs() -> str:
+    """按当前工作目录匹配 agy 本地 workspace project 配置。"""
+    project_dir = _Path("~/.gemini/config/projects").expanduser()
+    if not project_dir.exists():
+        return ""
+    try:
+        cwd = _Path.cwd().resolve(strict=False)
+    except Exception:
+        cwd = _Path.cwd()
+    best: tuple[int, str] | None = None
+    for path in sorted(project_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        project_id = str(payload.get("id") or "").strip()
+        if not _looks_like_project_id(project_id):
+            continue
+        for workspace_path in _antigravity_project_workspace_paths(payload):
+            try:
+                cwd.relative_to(workspace_path)
+            except Exception:
+                continue
+            score = len(str(workspace_path))
+            if best is None or score > best[0]:
+                best = (score, project_id)
+    return best[1] if best else ""
 
 
 def _gemini_project_config_candidates(auth_file: _Path | None = None) -> list[_Path]:
@@ -2711,6 +2793,9 @@ def _resolve_local_antigravity_cli_project(auth_file: _Path | None = None) -> st
         project = _read_gemini_project_from_json(path)
         if project:
             return project
+    workspace_project = _resolve_antigravity_project_from_workspace_configs()
+    if workspace_project:
+        return workspace_project
     return _resolve_local_gemini_cli_project(auth_file)
 
 
@@ -3115,8 +3200,41 @@ import uuid as _uuid
 _ANTIGRAVITY_CLI_BASE = "https://daily-cloudcode-pa.googleapis.com"
 _ANTIGRAVITY_CLI_LOAD_CODE_ASSIST = f"{_ANTIGRAVITY_CLI_BASE}/v1internal:loadCodeAssist"
 _ANTIGRAVITY_CLI_GENERATE_ENDPOINT = f"{_ANTIGRAVITY_CLI_BASE}/v1internal:generateContent"
-_ANTIGRAVITY_CLIENT_UA_VERSION = "1.15.8"
+_ANTIGRAVITY_CLI_STREAM_ENDPOINT = (
+    f"{_ANTIGRAVITY_CLI_BASE}/v1internal:streamGenerateContent?alt=sse"
+)
+_ANTIGRAVITY_CLIENT_UA_VERSION_FALLBACK = "1.0.0"
 _ANTIGRAVITY_X_GOOG_API_CLIENT = "google-cloud-sdk vscode_cloudshelleditor/0.1"
+_ANTIGRAVITY_CLIENT_UA_VERSION_CACHE = ""
+
+
+def _antigravity_client_version() -> str:
+    """返回本机 agy 版本；可用 ANTIGRAVITY_CLI_VERSION 覆盖。"""
+    global _ANTIGRAVITY_CLIENT_UA_VERSION_CACHE
+    override = str(_os.environ.get("ANTIGRAVITY_CLI_VERSION", "") or "").strip()
+    if override:
+        return override
+    if _ANTIGRAVITY_CLIENT_UA_VERSION_CACHE:
+        return _ANTIGRAVITY_CLIENT_UA_VERSION_CACHE
+    try:
+        import shutil as _shutil
+        import subprocess as _subprocess
+
+        exe = _shutil.which("agy")
+        if exe:
+            version = _subprocess.check_output(
+                [exe, "--version"],
+                text=True,
+                timeout=2.0,
+                stderr=_subprocess.DEVNULL,
+            ).strip()
+            if version:
+                _ANTIGRAVITY_CLIENT_UA_VERSION_CACHE = version.splitlines()[0].strip()
+                return _ANTIGRAVITY_CLIENT_UA_VERSION_CACHE
+    except Exception:
+        pass
+    _ANTIGRAVITY_CLIENT_UA_VERSION_CACHE = _ANTIGRAVITY_CLIENT_UA_VERSION_FALLBACK
+    return _ANTIGRAVITY_CLIENT_UA_VERSION_CACHE
 
 
 def _antigravity_client_platform() -> str:
@@ -3146,19 +3264,29 @@ def _antigravity_user_agent() -> str:
         arch_token = "amd64"
     elif arch_token in {"aarch64", "arm64"}:
         arch_token = "arm64"
-    return f"antigravity/{_ANTIGRAVITY_CLIENT_UA_VERSION} {os_token}/{arch_token}"
+    return f"antigravity/{_antigravity_client_version()} {os_token}/{arch_token}"
 
 
 # Antigravity v1internal 实际接受的模型列表。把用户配置的 model 放第一位，
 # 后面追加 fallback 候选避免单个模型暂时受限时整体失败。
 # 注意：gemini-3.5-flash 是 Antigravity 2026-05 默认模型，必须在候选首位。
 _ANTIGRAVITY_CLI_AUTO_MODELS = (
-    "gemini-3.5-flash",
-    "gemini-3-pro-high",
-    "gemini-3-pro-low",
+    "gemini-3.5-flash-low",
+    "gemini-3-flash-agent",
+    "gemini-3.5-flash-extra-low",
+    "gemini-3.1-pro-high",
+    "gemini-3.1-pro-low",
     "gemini-2.5-flash",
     "gemini-2.5-pro",
 )
+_ANTIGRAVITY_CLI_MODEL_ALIASES = {
+    "gemini-3.5-flash": "gemini-3.5-flash-low",
+    "gemini-3.5-flash-medium": "gemini-3.5-flash-low",
+    "gemini-3.5-flash-high": "gemini-3-flash-agent",
+    "gemini-3-pro-high": "gemini-3.1-pro-high",
+    "gemini-3-pro-low": "gemini-3.1-pro-low",
+    "gemini-3-pro": "gemini-3.1-pro-high",
+}
 
 
 def _antigravity_cli_model_candidates(model: str) -> list[str]:
@@ -3168,9 +3296,9 @@ def _antigravity_cli_model_candidates(model: str) -> list[str]:
     if lowered in {"auto", "auto-gemini-3", "auto-antigravity"}:
         candidates = list(_ANTIGRAVITY_CLI_AUTO_MODELS)
     else:
-        candidates = [primary]
+        candidates = [_ANTIGRAVITY_CLI_MODEL_ALIASES.get(lowered, primary)]
         for fallback in _ANTIGRAVITY_CLI_AUTO_MODELS:
-            if fallback.lower() != lowered:
+            if fallback.lower() != candidates[0].lower():
                 candidates.append(fallback)
     deduped: list[str] = []
     seen: set[str] = set()
@@ -3181,6 +3309,123 @@ def _antigravity_cli_model_candidates(model: str) -> list[str]:
         seen.add(key)
         deduped.append(item)
     return deduped
+
+
+def _parse_antigravity_sse_response(text: str) -> dict[str, Any]:
+    """把 Antigravity streamGenerateContent SSE 合并成 generateContent 形状。
+
+    agy CLI 实际使用 `streamGenerateContent?alt=sse`，返回多行 `data: {...}`。
+    上层只关心最终 candidates / usageMetadata；这里将文本片段、tool parts 与
+    metadata 合并到一个 `{"response": ...}` envelope，兼容既有解析逻辑。
+    """
+    events: list[dict[str, Any]] = []
+    data_lines: list[str] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            if data_lines:
+                joined = "\n".join(data_lines).strip()
+                data_lines = []
+                if joined and joined != "[DONE]":
+                    try:
+                        parsed = json.loads(joined)
+                    except Exception:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        events.append(parsed)
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].strip())
+    if data_lines:
+        joined = "\n".join(data_lines).strip()
+        if joined and joined != "[DONE]":
+            try:
+                parsed = json.loads(joined)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                events.append(parsed)
+
+    if not events:
+        try:
+            fallback = json.loads(text)
+        except Exception:
+            fallback = {}
+        return fallback if isinstance(fallback, dict) else {}
+
+    parts: list[dict[str, Any]] = []
+    finish_reason = ""
+    grounding: Any = None
+    usage: Any = None
+    last_candidate_extra: dict[str, Any] = {}
+    for event in events:
+        payload = event.get("response") if isinstance(event.get("response"), dict) else event
+        candidates = payload.get("candidates") if isinstance(payload, dict) else None
+        if not isinstance(candidates, list) or not candidates:
+            if isinstance(payload, dict):
+                usage = payload.get("usageMetadata") or payload.get("usage_metadata") or usage
+            continue
+        candidate = candidates[0] if isinstance(candidates[0], dict) else {}
+        content = candidate.get("content") if isinstance(candidate.get("content"), dict) else {}
+        chunk_parts = content.get("parts") if isinstance(content, dict) else None
+        if isinstance(chunk_parts, list):
+            for part in chunk_parts:
+                if isinstance(part, dict):
+                    parts.append(part)
+        finish_reason = (
+            candidate.get("finishReason")
+            or candidate.get("finish_reason")
+            or finish_reason
+        )
+        grounding = (
+            candidate.get("groundingMetadata")
+            or candidate.get("grounding_metadata")
+            or grounding
+        )
+        if isinstance(candidate, dict):
+            last_candidate_extra = {
+                key: value
+                for key, value in candidate.items()
+                if key not in {"content", "finishReason", "finish_reason"}
+            }
+        if isinstance(payload, dict):
+            usage = payload.get("usageMetadata") or payload.get("usage_metadata") or usage
+
+    candidate: dict[str, Any] = dict(last_candidate_extra)
+    candidate["content"] = {"parts": parts}
+    if finish_reason:
+        candidate["finishReason"] = finish_reason
+    if grounding:
+        candidate["groundingMetadata"] = grounding
+    merged: dict[str, Any] = {"candidates": [candidate]}
+    if usage:
+        merged["usageMetadata"] = usage
+    return {"response": merged, "stream": events}
+
+
+def _antigravity_is_transient_network_error(exc: Exception) -> bool:
+    if isinstance(
+        exc,
+        (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadError,
+            httpx.ReadTimeout,
+            httpx.RemoteProtocolError,
+        ),
+    ):
+        return True
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "tls/ssl connection has been closed",
+            "connection reset",
+            "connection aborted",
+            "eof",
+            "timed out",
+        )
+    )
 
 
 class AntigravityCliToolCaller(GeminiCliToolCaller):
@@ -3232,6 +3477,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
         return {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
+            "Accept": "text/event-stream",
             "User-Agent": _antigravity_user_agent(),
             "X-Goog-Api-Client": _ANTIGRAVITY_X_GOOG_API_CLIENT,
             "Client-Metadata": client_metadata,
@@ -3364,6 +3610,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
             last_exc: Exception | None = None
             auth_refreshed_for_401 = False
             project_refreshed_for_403 = False
+            selected_model_name = ""
             client_kwargs = self._http_client_kwargs(connect_timeout=15.0)
             async with httpx.AsyncClient(**client_kwargs) as client:
 
@@ -3377,18 +3624,34 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                         "userAgent": "antigravity",
                         "requestId": _uuid.uuid4().hex,
                     }
-                    resp = await client.post(
-                        _ANTIGRAVITY_CLI_GENERATE_ENDPOINT,
-                        json=envelope_inner,
-                        headers=self._headers(_access_token),
-                    )
-                    resp.raise_for_status()
-                    return resp.json()
+                    last_network_exc: Exception | None = None
+                    for attempt in range(4):
+                        try:
+                            resp = await client.post(
+                                _ANTIGRAVITY_CLI_STREAM_ENDPOINT,
+                                json=envelope_inner,
+                                headers=self._headers(_access_token),
+                            )
+                            resp.raise_for_status()
+                            body_attr = getattr(resp, "text", "")
+                            body_text = body_attr if isinstance(body_attr, str) else ""
+                            if body_text.strip().startswith(("data:", "{")):
+                                return _parse_antigravity_sse_response(body_text)
+                            return resp.json()
+                        except Exception as exc:
+                            if not _antigravity_is_transient_network_error(exc) or attempt >= 3:
+                                raise
+                            last_network_exc = exc
+                            await asyncio.sleep(0.8 * (attempt + 1))
+                    if last_network_exc is not None:
+                        raise last_network_exc
+                    raise RuntimeError("Antigravity CLI streamGenerateContent 未返回响应")
 
                 data = {}
                 for model_index, model_name in enumerate(model_candidates):
                     try:
                         data = await _post_once(model_name, access_token, project)
+                        selected_model_name = model_name
                         last_exc = None
                         break
                     except httpx.HTTPStatusError as exc:
@@ -3403,6 +3666,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                                 access_token, _ = await self._get_access_token(force_refresh=True)
                                 project = await self._resolve_project(access_token, auth_file)
                                 data = await _post_once(model_name, access_token, project)
+                                selected_model_name = model_name
                                 last_exc = None
                                 break
                             except Exception as exc2:
@@ -3423,6 +3687,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                                     project = remote_project
                                     type(self)._project_cache[access_token] = project
                                     data = await _post_once(model_name, access_token, project)
+                                    selected_model_name = model_name
                                     last_exc = None
                                     break
                             except Exception as exc2:
@@ -3466,7 +3731,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                 raw=data,
                 used_builtin_search=bool(grounding),
                 usage=usage,
-                model_used=str(self.model or self._default_model),
+                model_used=str(selected_model_name or self.model or self._default_model),
             )
         except Exception as exc:
             if contains_image_input and _error_indicates_vision_unavailable(exc):

@@ -21,17 +21,25 @@ def test_endpoint_uses_cloudcode_pa() -> None:
     """endpoint 必须是 Antigravity CLI 实际使用的 daily-cloudcode-pa。"""
     endpoint = impl._ANTIGRAVITY_CLI_GENERATE_ENDPOINT
     assert endpoint == "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
+    assert impl._ANTIGRAVITY_CLI_STREAM_ENDPOINT == (
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+    )
     assert "antigravity-pa" not in endpoint
 
 
 def test_user_agent_format() -> None:
     ua = impl._antigravity_user_agent()
-    assert ua.startswith("antigravity/1.15.8 ")
+    assert ua.startswith("antigravity/")
     rest = ua.split(" ", 1)[1]
     assert "/" in rest
     os_part, arch_part = rest.split("/", 1)
     assert os_part in {"windows", "linux", "macos"}
     assert arch_part in {"amd64", "arm64"}, f"unexpected arch token: {arch_part!r}"
+
+
+def test_user_agent_version_can_be_overridden(monkeypatch) -> None:
+    monkeypatch.setenv("ANTIGRAVITY_CLI_VERSION", "9.8.7-test")
+    assert impl._antigravity_user_agent().startswith("antigravity/9.8.7-test ")
 
 
 def test_client_platform_returns_canonical() -> None:
@@ -41,22 +49,22 @@ def test_client_platform_returns_canonical() -> None:
 
 def test_model_candidates_user_model_first() -> None:
     cs = impl._antigravity_cli_model_candidates("gemini-3.5-flash")
-    assert cs[0] == "gemini-3.5-flash"
+    assert cs[0] == "gemini-3.5-flash-low"
     assert "gemini-2.5-flash" in cs
-    assert "gemini-3-pro-high" in cs
-    assert cs.count("gemini-3.5-flash") == 1
+    assert "gemini-3.1-pro-high" in cs
+    assert cs.count("gemini-3.5-flash-low") == 1
 
 
 def test_model_candidates_auto_expands() -> None:
     cs = impl._antigravity_cli_model_candidates("auto-gemini-3")
-    assert cs[0] == "gemini-3.5-flash"
-    assert "gemini-3-pro-low" in cs
+    assert cs[0] == "gemini-3.5-flash-low"
+    assert "gemini-3.1-pro-low" in cs
 
 
 def test_model_candidates_unknown_user_model_keeps_first_with_fallback() -> None:
     cs = impl._antigravity_cli_model_candidates("some-future-model-x")
     assert cs[0] == "some-future-model-x"
-    assert "gemini-3.5-flash" in cs
+    assert "gemini-3.5-flash-low" in cs
 
 
 # ====== 协议端到端测试（mock httpx） ======
@@ -88,13 +96,8 @@ def _run_chat(model: str = "gemini-3.5-flash") -> dict[str, Any]:
             captured["headers"] = headers
             resp = MagicMock()
             resp.raise_for_status = MagicMock()
-            resp.json = lambda: {
-                "response": {
-                    "candidates": [
-                        {"content": {"parts": [{"text": "ok"}]}}
-                    ]
-                }
-            }
+            resp.text = 'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}}\n\n'
+            resp.json = lambda: {}
             resp.status_code = 200
             return resp
 
@@ -118,7 +121,7 @@ def _run_chat(model: str = "gemini-3.5-flash") -> dict[str, Any]:
 def test_envelope_includes_user_agent_and_request_id() -> None:
     c = _run_chat()
     body = c["json"]
-    assert body["model"] == "gemini-3.5-flash"
+    assert body["model"] == "gemini-3.5-flash-low"
     assert body["project"] == "fake-project-id"
     assert body["userAgent"] == "antigravity"
     assert "requestId" in body
@@ -128,7 +131,7 @@ def test_envelope_includes_user_agent_and_request_id() -> None:
 
 def test_post_url_is_cloudcode_not_antigravity_pa() -> None:
     c = _run_chat()
-    assert c["url"] == "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
+    assert c["url"] == "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
     assert "antigravity-pa" not in c["url"]
 
 
@@ -137,6 +140,7 @@ def test_headers_include_client_metadata_and_x_goog() -> None:
     h = c["headers"]
     assert h["Authorization"] == "Bearer fake-token"
     assert h["Content-Type"] == "application/json"
+    assert h["Accept"] == "text/event-stream"
     assert h["X-Goog-Api-Client"] == "google-cloud-sdk vscode_cloudshelleditor/0.1"
     assert h["User-Agent"].startswith("antigravity/")
     cm = json.loads(h["Client-Metadata"])
@@ -165,6 +169,75 @@ def test_load_code_assist_uses_antigravity_endpoint_and_metadata() -> None:
 def test_response_unwrapped_correctly() -> None:
     c = _run_chat()
     assert c["result"].content == "ok"
+
+
+def test_antigravity_sse_chunks_are_merged() -> None:
+    body = "\n".join(
+        [
+            'data: {"response":{"candidates":[{"content":{"parts":[{"text":"o"}]}}]}}',
+            "",
+            'data: {"response":{"candidates":[{"content":{"parts":[{"text":"k"}]},"finishReason":"STOP"}],"usageMetadata":{"totalTokenCount":3}}}',
+            "",
+        ]
+    )
+    data = impl._parse_antigravity_sse_response(body)
+    payload = data["response"]
+    parts = payload["candidates"][0]["content"]["parts"]
+    assert parts == [{"text": "o"}, {"text": "k"}]
+    assert payload["candidates"][0]["finishReason"] == "STOP"
+    assert payload["usageMetadata"]["totalTokenCount"] == 3
+
+
+def test_antigravity_retries_transient_tls_eof() -> None:
+    caller = impl.AntigravityCliToolCaller(
+        model="gemini-3.5-flash",
+        auth_path="",
+        project="fake-project-id",
+        thinking_mode="none",
+        timeout=30.0,
+    )
+    attempts = {"count": 0}
+
+    class _RetryingClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "_RetryingClient":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url: str, *, json: dict, headers: dict) -> Any:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise impl.httpx.ConnectError("TLS/SSL connection has been closed (EOF)")
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.text = 'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}}\n\n'
+            resp.json = lambda: {}
+            resp.status_code = 200
+            return resp
+
+    async def fake_get_access_token(*, force_refresh: bool = False):
+        return ("fake-token", pathlib.Path("/tmp/fake_auth.json"))
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
+    with patch.object(caller, "_get_access_token", new=fake_get_access_token), \
+         patch.object(impl.httpx, "AsyncClient", _RetryingClient), \
+         patch.object(impl.asyncio, "sleep", new=no_sleep):
+        result = asyncio.run(
+            caller.chat_with_tools(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[],
+                use_builtin_search=False,
+            )
+        )
+
+    assert attempts["count"] == 2
+    assert result.content == "ok"
 
 
 # ====== keyring 同步链路 ======
@@ -323,6 +396,42 @@ def test_find_auth_file_prefers_antigravity_oauth_token_file() -> None:
 
     assert found == token_file
     assert source == "antigravity"
+
+
+def test_resolve_antigravity_project_from_workspace_config(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "bot" / "shizuku" / "plugin"
+    workspace.mkdir(parents=True)
+    project_dir = tmp_path / ".gemini" / "config" / "projects"
+    project_dir.mkdir(parents=True)
+    project_dir.joinpath("agy-project.json").write_text(
+        json.dumps(
+            {
+                "id": "732daa86-2ed5-4c86-a4b4-4a4e1734a996",
+                "name": str(tmp_path / "bot" / "shizuku"),
+                "projectResources": {
+                    "resources": [
+                        {
+                            "gitFolder": {
+                                "folderUri": f"file://{tmp_path / 'bot' / 'shizuku'}",
+                                "allowWrite": True,
+                            }
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    old_cwd = pathlib.Path.cwd()
+    try:
+        os.chdir(workspace)
+        assert impl._resolve_antigravity_project_from_workspace_configs() == (
+            "732daa86-2ed5-4c86-a4b4-4a4e1734a996"
+        )
+    finally:
+        os.chdir(old_cwd)
 
 
 def test_antigravity_oauth_token_nested_shape_is_read_and_persisted(tmp_path) -> None:
