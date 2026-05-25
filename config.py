@@ -53,6 +53,10 @@ class Config(BaseModel):
     # 不依赖 HTTPS_PROXY / HTTP_PROXY 环境变量（bot 进程未必继承终端 env）。
     # 留空 = 沿用 httpx 的环境变量解析（trust_env 默认 True）。
     personification_antigravity_cli_proxy: str = ""
+    # Provider 动态优先级（基于真实请求 latency / success_rate 自动调整排序）
+    personification_provider_dynamic_priority_enabled: bool = True
+    # 样本数 < min_samples 时仍用配置的 base priority，避免冷启动 fluke
+    personification_provider_health_min_samples: int = 3
     # ──────────── Social Intelligence（主动社交框架）────────────
     # 总开关：默认关闭，配置好场景后再打开避免上线就乱发
     personification_social_intelligence_enabled: bool = False

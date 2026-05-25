@@ -369,26 +369,56 @@ def get_provider_candidates(plugin_config: Any, logger: Any) -> List[Dict[str, A
             else:
                 available.append(provider)
 
-    if not available:
-        available = cooling
+    # cooldown 期间不再直接过滤，而是降级到最后（所有其它 provider 全挂时还能兜底）
+    # 通过给 effective_priority 加大 offset 实现
+    cooling_set = {p["name"] for p in cooling}
+    merged = available + cooling
 
-    if len(available) <= 1:
-        return available
+    # 计算 effective_priority：base + latency_penalty + failure_penalty + (cooling ? +100)
+    dynamic_enabled = bool(
+        getattr(plugin_config, "personification_provider_dynamic_priority_enabled", True)
+    )
+    min_samples = max(
+        1,
+        int(getattr(plugin_config, "personification_provider_health_min_samples", 3) or 3),
+    )
+    all_stats: Dict[str, Dict[str, Any]] = {}
+    if dynamic_enabled:
+        try:
+            from . import provider_health
 
-    top_priority = min(_to_int(provider.get("priority", 0), 0) for provider in available)
-    top_tier = [
-        provider
-        for provider in available
-        if _to_int(provider.get("priority", 0), 0) == top_priority
-    ]
-    lower_tiers = [
-        provider
-        for provider in available
-        if _to_int(provider.get("priority", 0), 0) != top_priority
-    ]
+            all_stats = provider_health.get_all_stats()
+        except Exception:
+            all_stats = {}
+
+    def _eff(provider: Dict[str, Any]) -> float:
+        try:
+            from . import provider_health
+
+            base_eff = provider_health.compute_effective_priority(
+                provider,
+                all_stats.get(provider["name"]),
+                min_samples=min_samples,
+                enabled=dynamic_enabled,
+            )
+        except Exception:
+            base_eff = float(provider.get("priority", 0) or 0)
+        if provider["name"] in cooling_set:
+            base_eff += 100.0  # 降级到最末位但不剔除
+        return round(base_eff, 1)
+
+    decorated = [(provider, _eff(provider)) for provider in merged]
+    decorated.sort(key=lambda item: (item[1], item[0]["name"]))
+
+    if len(decorated) <= 1:
+        return [item[0] for item in decorated]
+
+    # 同 effective_priority 的若干 provider 走轮询
+    top_eff = decorated[0][1]
+    top_tier = [item[0] for item in decorated if item[1] == top_eff]
+    lower_tiers = [item[0] for item in decorated if item[1] != top_eff]
     if len(top_tier) <= 1:
         return top_tier + lower_tiers
-
     with _PROVIDER_STATE_LOCK:
         cursor = PROVIDER_ROTATION_CURSOR % len(top_tier)
         PROVIDER_ROTATION_CURSOR = (PROVIDER_ROTATION_CURSOR + 1) % len(top_tier)
@@ -444,23 +474,38 @@ def _is_rate_limit_error(error: Exception) -> bool:
 
 
 def _mark_provider_failure(provider_name: str, error: Exception) -> float:
+    """记一次失败：失败计数 + 指数退避（带 ±20% jitter）。
+
+    非-429：60s, 120s, 240s, 480s, 960s（封顶 1800s = 30 分钟）
+    429：基础 600s（或 retry-after，取较大者），封顶 1800s
+    全部加 ±20% jitter 避免多 provider 同时复活时挤上游。
+    """
     now_ts = time.time()
+    is_rate_limit = _is_rate_limit_error(error)
+    retry_after = _retry_after_seconds(error) if is_rate_limit else 0.0
     with _PROVIDER_STATE_LOCK:
         state = PROVIDER_FAILURE_STATE.get(provider_name, {})
         failures = int(state.get("failures", 0)) + 1
-        if _is_rate_limit_error(error):
-            retry_after = _retry_after_seconds(error)
-            cooldown = max(_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS, retry_after)
-            cooldown = min(_RATE_LIMIT_MAX_COOLDOWN_SECONDS, cooldown)
-        else:
-            cooldown = min(300, 30 * failures)
+        try:
+            from . import provider_health
+
+            cooldown = provider_health.compute_cooldown_seconds(
+                failures, is_rate_limit=is_rate_limit, retry_after=retry_after
+            )
+        except Exception:
+            # 守底逻辑（与旧实现一致），防 provider_health 模块加载失败
+            if is_rate_limit:
+                cooldown = max(_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS, retry_after)
+                cooldown = min(_RATE_LIMIT_MAX_COOLDOWN_SECONDS, cooldown)
+            else:
+                cooldown = min(300, 30 * failures)
         PROVIDER_FAILURE_STATE[provider_name] = {
             "failures": failures,
             "cooldown_until": now_ts + cooldown,
             "last_error": str(error),
             "last_failed_at": now_ts,
             "last_status": _error_http_status(error) or None,
-            "rate_limited": _is_rate_limit_error(error),
+            "rate_limited": is_rate_limit,
         }
     return cooldown
 
@@ -560,11 +605,41 @@ async def _call_provider_once(
     use_builtin_search: bool = False,
 ) -> ToolCallerResponse:
     caller = _build_provider_caller(provider, plugin_config)
-    response = await caller.chat_with_tools(
-        messages=messages,
-        tools=list(tools or []),
-        use_builtin_search=_should_use_builtin_search(provider, use_builtin_search),
-    )
+    start_ts = time.monotonic()
+    success = False
+    error_kind = ""
+    try:
+        response = await caller.chat_with_tools(
+            messages=messages,
+            tools=list(tools or []),
+            use_builtin_search=_should_use_builtin_search(provider, use_builtin_search),
+        )
+        # vision_unavailable 算业务失败（影响 success_rate），让后续真正能识图的
+        # provider 自然排前面；error_kind 标 vision_unavailable 便于诊断
+        success = not bool(getattr(response, "vision_unavailable", False))
+        if not success:
+            error_kind = "vision_unavailable"
+    except Exception as exc:
+        try:
+            from . import provider_health
+
+            error_kind = provider_health.classify_error(exc)
+        except Exception:
+            error_kind = "other"
+        raise
+    finally:
+        try:
+            from . import provider_health
+
+            latency_ms = (time.monotonic() - start_ts) * 1000.0
+            provider_health.record_request_result(
+                provider_name=str(provider.get("name", "") or ""),
+                latency_ms=latency_ms,
+                success=success,
+                error_kind=error_kind,
+            )
+        except Exception:
+            pass
     # 中央 token 拦截：所有走 call_ai_api → _call_provider_once 的调用统一在这里
     # 记账，覆盖 user_persona / group_style / group_knowledge / proactive / qzone /
     # inner_state / review / intent / planner / vision 等所有非-runner 路径。

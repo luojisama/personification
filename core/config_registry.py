@@ -654,6 +654,31 @@ def _build_entries() -> list[ConfigEntry]:
             help_aliases=("web_fetch_timeout", "抓取超时"),
         ),
         ConfigEntry(
+            key="provider_dynamic_priority_enabled",
+            field_name="personification_provider_dynamic_priority_enabled",
+            display_name="Provider 动态优先级",
+            value_type="bool",
+            default=True,
+            scope=GLOBAL_SCOPE,
+            description=(
+                "开启后按真实请求的 latency 与 success_rate 自动调整 provider "
+                "排序：高 latency / 高失败率的会自动排到后面；关闭则只用配置的 "
+                "priority。冷启动样本不足时仍用 base priority。"
+            ),
+            category="config",
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="provider_health_min_samples",
+            field_name="personification_provider_health_min_samples",
+            display_name="动态优先级最小样本数",
+            value_type="int",
+            default=3,
+            scope=GLOBAL_SCOPE,
+            description="provider 累积达到 N 次真实请求后才参与动态排序，否则用 base priority。",
+            category="config",
+        ),
+        ConfigEntry(
             key="antigravity_cli_proxy",
             field_name="personification_antigravity_cli_proxy",
             display_name="Antigravity CLI 代理",

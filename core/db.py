@@ -193,6 +193,23 @@ DDL_STATEMENTS = (
     """
     CREATE INDEX IF NOT EXISTS idx_proactive_diag_scope ON proactive_diagnostics(scope, ts DESC)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS provider_health_stats (
+        provider_name    TEXT PRIMARY KEY,
+        sample_count     INTEGER NOT NULL DEFAULT 0,
+        success_count    INTEGER NOT NULL DEFAULT 0,
+        failure_count    INTEGER NOT NULL DEFAULT 0,
+        avg_latency_ms   REAL NOT NULL DEFAULT 0,
+        last_request_at  REAL DEFAULT NULL,
+        last_success_at  REAL DEFAULT NULL,
+        last_failure_at  REAL DEFAULT NULL,
+        last_error_kind  TEXT NOT NULL DEFAULT '',
+        last_seen_at     REAL NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_provider_health_seen ON provider_health_stats(last_seen_at)
+    """,
 )
 
 
