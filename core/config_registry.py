@@ -763,6 +763,30 @@ def _build_entries() -> list[ConfigEntry]:
             choices=("daily", "ai", "history"),
         ),
         ConfigEntry(
+            key="social_topic_followup_enabled",
+            field_name="personification_social_topic_followup_enabled",
+            display_name="话题延续主动跟进",
+            value_type="bool",
+            default=True,
+            scope=GLOBAL_SCOPE,
+            description=(
+                "开启后 bot 会在用户提到'明天去上海''下周考试'等未来事件时，"
+                "记录到 pending_topics 表，到承诺时间附近自动发关心话术。"
+            ),
+            category="config",
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="social_topic_scan_interval_minutes",
+            field_name="personification_social_topic_scan_interval_minutes",
+            display_name="话题延续扫描间隔（分钟）",
+            value_type="int",
+            default=60,
+            scope=GLOBAL_SCOPE,
+            description="多久扫一次 pending_topics 表，最小 15 分钟。",
+            category="config",
+        ),
+        ConfigEntry(
             key="agent_max_steps",
             field_name="personification_agent_max_steps",
             display_name="Agent 最大步数",

@@ -468,6 +468,60 @@ async def _friend_request_hook(ctx: HookContext) -> Optional[str]:
     return None
 
 
+async def _pending_topic_extract_hook(ctx: HookContext) -> Optional[str]:
+    """私聊场景下尝试从用户消息抽取 pending topic，fire-and-forget；
+    不阻塞回复主流程，返回 None 即不注入 prompt。
+    """
+    if not ctx.is_private:
+        return None
+    if not bool(getattr(ctx.plugin_config, "personification_social_intelligence_enabled", False)):
+        return None
+    if not bool(getattr(ctx.plugin_config, "personification_social_topic_followup_enabled", True)):
+        return None
+    text = (ctx.message_text or ctx.message_content or "").strip()
+    if not text:
+        return None
+    try:
+        from ..flows.social_intelligence.topic_extractor import pre_filter
+    except Exception:
+        return None
+    if not pre_filter(text):
+        return None
+
+    tool_caller = getattr(ctx.runtime, "agent_tool_caller", None)
+    logger = getattr(ctx.runtime, "logger", None)
+    if not tool_caller or not logger:
+        return None
+    user_id = ctx.user_id
+
+    import asyncio as _asyncio
+
+    async def _bg() -> None:
+        try:
+            from ..flows.social_intelligence.pending_topics import add_pending_topic
+            from ..flows.social_intelligence.topic_extractor import extract_pending_topic
+
+            result = await extract_pending_topic(text, tool_caller=tool_caller, logger=logger)
+            if not result:
+                return
+            tid = add_pending_topic(
+                user_id=user_id,
+                topic=result["topic"],
+                raw_quote=result["raw_quote"],
+                time_hint_ts=result["time_hint_ts"],
+            )
+            if tid:
+                logger.info(
+                    f"[topic_extract] saved pending topic uid={user_id} "
+                    f"tid={tid} topic={result['topic'][:40]}"
+                )
+        except Exception as exc:
+            logger.debug(f"[topic_extract] bg failed: {exc}")
+
+    _asyncio.create_task(_bg())
+    return None
+
+
 def register_all_builtin_hooks() -> None:
     global _REGISTERED
     if _REGISTERED:
@@ -487,4 +541,5 @@ def register_all_builtin_hooks() -> None:
     register_prompt_hook("web_search", _web_search_hook, priority=30, phase="system_context")
     register_prompt_hook("grounding", _grounding_hook, priority=35, phase="system_postlude")
     register_prompt_hook("friend_request", _friend_request_hook, priority=50, phase="message")
+    register_prompt_hook("pending_topic_extract", _pending_topic_extract_hook, priority=55, phase="message")
     _REGISTERED = True

@@ -18,6 +18,7 @@ from .scenarios.greetings import (
     morning_greetings_handler,
 )
 from .scenarios.news_push import news_push_handler
+from .scenarios.topic_followup import topic_followup_handler
 
 
 def _register_builtin_scenarios(plugin_config: Any) -> None:
@@ -62,6 +63,24 @@ def _register_builtin_scenarios(plugin_config: Any) -> None:
                 getattr(cfg, "personification_social_intelligence_enabled", False)
             ) and bool(
                 getattr(cfg, "personification_social_news_enabled", False)
+            ),
+        )
+    )
+
+    topic_scan_minutes = max(
+        15,
+        int(getattr(plugin_config, "personification_social_topic_scan_interval_minutes", 60) or 60),
+    )
+    register_social_trigger(
+        SocialTrigger(
+            name="topic_followup",
+            handler=topic_followup_handler,
+            schedule_kind="interval",
+            schedule_args={"minutes": topic_scan_minutes},
+            enabled=lambda cfg: bool(
+                getattr(cfg, "personification_social_intelligence_enabled", False)
+            ) and bool(
+                getattr(cfg, "personification_social_topic_followup_enabled", True)
             ),
         )
     )

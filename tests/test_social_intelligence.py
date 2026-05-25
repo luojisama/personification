@@ -249,3 +249,83 @@ def test_news_push_early_returns_when_scenario_disabled() -> None:
     ctx.plugin_config.personification_social_news_enabled = False
     asyncio.run(news_push.news_push_handler(ctx))
     ctx.get_bots.assert_not_called()
+
+
+# ========== pending_topics & topic_extractor ==========
+
+pending_topics_mod = _load_si_submodule("pending_topics")
+topic_extractor = _load_si_submodule("topic_extractor")
+
+
+def test_prefilter_rejects_short_or_irrelevant_text() -> None:
+    assert topic_extractor.pre_filter("") is False
+    assert topic_extractor.pre_filter("好") is False
+    assert topic_extractor.pre_filter("今天天气真好") is False
+    # 太长（>400）也跳过
+    assert topic_extractor.pre_filter("x" * 401) is False
+
+
+def test_prefilter_accepts_future_promise_keywords() -> None:
+    assert topic_extractor.pre_filter("我下周三要去上海出差") is True
+    assert topic_extractor.pre_filter("明天有个面试，紧张") is True
+    assert topic_extractor.pre_filter("打算周末搬家") is True
+    assert topic_extractor.pre_filter("过几天就出差了") is True
+
+
+def test_pending_topic_add_and_list() -> None:
+    tid = pending_topics_mod.add_pending_topic(
+        user_id="user1",
+        topic="下周去上海",
+        raw_quote="我下周三去上海出差",
+        time_hint_ts=2_000_000_000.0,
+    )
+    assert isinstance(tid, str) and len(tid) == 12
+    items = pending_topics_mod.list_pending_topics()
+    assert len(items) == 1
+    assert items[0]["user_id"] == "user1"
+    assert items[0]["topic"] == "下周去上海"
+
+
+def test_pending_topic_add_is_idempotent_per_quote() -> None:
+    tid1 = pending_topics_mod.add_pending_topic(
+        user_id="u", topic="t", raw_quote="同样的话", time_hint_ts=1.0
+    )
+    tid2 = pending_topics_mod.add_pending_topic(
+        user_id="u", topic="t-改名了", raw_quote="同样的话", time_hint_ts=999.0
+    )
+    assert tid1 == tid2
+    items = pending_topics_mod.list_pending_topics()
+    assert len(items) == 1
+    # 第二次不覆盖
+    assert items[0]["topic"] == "t"
+
+
+def test_find_due_topics_filters_by_window_and_status() -> None:
+    pending_topics_mod.add_pending_topic(
+        user_id="a", topic="过期已 followup", raw_quote="x1", time_hint_ts=1000.0
+    )
+    pending_topics_mod.mark_followed_up(
+        pending_topics_mod.add_pending_topic(
+            user_id="a", topic="已 followup", raw_quote="x2", time_hint_ts=2000.0
+        ),
+        now=2100.0,
+    )
+    pending_topics_mod.add_pending_topic(
+        user_id="b", topic="未来事件但远", raw_quote="远", time_hint_ts=99_999_999.0
+    )
+    pending_topics_mod.add_pending_topic(
+        user_id="c", topic="正好到时间", raw_quote="正", time_hint_ts=1234500.0
+    )
+    due = pending_topics_mod.find_due_topics(now=1234500.0, window_seconds=86400.0)
+    user_ids = sorted(item["user_id"] for item in due)
+    # 'a' 第一条：time_hint 1000，离 now 1234500 远 → 不在窗口；
+    # 'a' 第二条：已 followed_up 排除；'b' 远 → 不在窗口；'c' 在窗口
+    assert user_ids == ["c"]
+
+
+def test_mark_skipped_excludes_from_due() -> None:
+    tid = pending_topics_mod.add_pending_topic(
+        user_id="z", topic="x", raw_quote="zzz", time_hint_ts=5000.0
+    )
+    pending_topics_mod.mark_skipped(tid)
+    assert pending_topics_mod.find_due_topics(now=5000.0, window_seconds=86400.0) == []

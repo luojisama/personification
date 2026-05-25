@@ -78,6 +78,11 @@ class Config(BaseModel):
     # 新闻来源：daily / ai / history
     personification_social_news_source: str = "daily"
     personification_social_news_cooldown_seconds: int = 72000
+    # 话题延续：扫描间隔（分钟）+ 跟进窗口（承诺时间 ± N 小时内才跟进）
+    personification_social_topic_followup_enabled: bool = True
+    personification_social_topic_scan_interval_minutes: int = 60
+    personification_social_topic_followup_window_hours: int = 24
+    personification_social_topic_followup_cooldown_seconds: int = 43200
     personification_thinking_mode: str = "none"
     personification_state_thinking_mode: str = "adaptive"
     personification_model_overrides: Dict[str, str] = {}
