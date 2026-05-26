@@ -290,6 +290,8 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
 
 def _ensure_group_message_schema(conn: sqlite3.Connection) -> None:
     columns = _table_columns(conn, "group_messages")
+    if not columns:
+        return  # table not created yet; DDL loop will create it with all columns
     if "image_count" not in columns:
         conn.execute("ALTER TABLE group_messages ADD COLUMN image_count INTEGER NOT NULL DEFAULT 0")
     if "visual_summary" not in columns:
@@ -332,10 +334,10 @@ def init_db_sync(data_dir: str | Path) -> Path:
         # 先迁移老表 schema，避免 DDL 循环里 CREATE INDEX 引用新列时
         # 老表（缺该列）抛 OperationalError。
         _ensure_group_style_schema(conn)
-        conn.commit()  # 让 DROP/CREATE 立即可见，下面的 DDL 才看到正确表
+        _ensure_group_message_schema(conn)
+        conn.commit()  # 让迁移立即可见，下面的 DDL CREATE INDEX 才能引用新列
         for ddl in DDL_STATEMENTS:
             conn.execute(ddl)
-        _ensure_group_message_schema(conn)
         conn.commit()
     return _db_path
 
