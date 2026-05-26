@@ -924,10 +924,44 @@ def build_confidence_style_instruction(confidence: float, *, is_group: bool = Fa
     return "\n[系统提示] 当前语义置信度很低。先用一句话确认对方意思，不要硬猜。"
 
 
+_SCENARIO_INSTRUCTIONS: dict[str, str] = {
+    "casual_banter": (
+        "\n[场景提示] 当前群友在互相调侃闲聊。"
+        "不要认真科普或长篇大论；适合沉默、轻接一句、或短句吐槽。"
+    ),
+    "sarcasm_irony": (
+        "\n[场景提示] 当前对话含有反讽/阴阳怪气语气。"
+        "先识别语气再回应，不要把反讽当真回复；可以顺着接或沉默。"
+    ),
+    "argument": (
+        "\n[场景提示] 当前群友在争吵或对立。"
+        "不要站队任何一方；可以尝试降温，或者直接 [NO_REPLY] 不掺和。"
+    ),
+    "inside_joke": (
+        "\n[场景提示] 当前对话涉及群内部梗或暗号。"
+        "如果你不确定含义，不要硬解释；可以问一句或者沉默。"
+    ),
+    "multi_thread": (
+        "\n[场景提示] 群内多个话题同时进行。"
+        "只回应与你被 @ 或直接相关的线程，不要把不同线程的内容混在一起总结。"
+    ),
+    "private_topic": (
+        "\n[场景提示] 当前对话涉及个人隐私或敏感话题。"
+        "不要主动记忆具体内容到长期存储；回复要克制，不追问细节。"
+    ),
+}
+
+
+def build_scenario_instruction(scenario: str) -> str:
+    normalized = str(scenario or "").strip().lower()
+    return _SCENARIO_INSTRUCTIONS.get(normalized, "")
+
+
 __all__ = [
     "batch_has_newer_messages",
     "build_base_system_prompt",
     "build_confidence_style_instruction",
+    "build_scenario_instruction",
     "build_final_visible_reply_text",
     "build_group_session_relation_metadata",
     "build_tts_user_hint",

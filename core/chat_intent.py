@@ -16,6 +16,19 @@ ChatIntent = Literal["banter", "explanation", "lookup", "plugin_question", "imag
 PluginQuestionIntent = Literal["capability", "implementation", "latest"]
 AmbiguityLevel = Literal["low", "medium", "high"]
 EmotionIntensity = Literal["low", "medium", "high"]
+ConversationScenario = Literal[
+    "normal",
+    "casual_banter",
+    "sarcasm_irony",
+    "argument",
+    "inside_joke",
+    "multi_thread",
+    "private_topic",
+]
+_VALID_SCENARIOS: set[str] = {
+    "normal", "casual_banter", "sarcasm_irony", "argument",
+    "inside_joke", "multi_thread", "private_topic",
+}
 
 
 @dataclass
@@ -44,6 +57,7 @@ class TurnSemanticFrame:
     expression_style: str = "自然简短"
     tts_style_hint: str = "自然"
     sticker_mood_hint: str = DEFAULT_STICKER_SEMANTIC_HINT
+    conversation_scenario: ConversationScenario = "normal"
     confidence: float = 0.0
     reason: str = ""
 
@@ -182,9 +196,15 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
         expression_style=str(payload.get("expression_style", "") or "").strip() or "自然简短",
         tts_style_hint=str(payload.get("tts_style_hint", "") or "").strip() or "自然",
         sticker_mood_hint=normalize_sticker_semantic_hint(payload.get("sticker_mood_hint")),
+        conversation_scenario=_parse_scenario(payload.get("conversation_scenario")),
         confidence=max(0.0, min(1.0, confidence)),
         reason=str(payload.get("reason", "") or "").strip(),
     )
+
+
+def _parse_scenario(value: Any) -> ConversationScenario:
+    normalized = str(value or "normal").strip().lower()
+    return normalized if normalized in _VALID_SCENARIOS else "normal"  # type: ignore[return-value]
 
 
 def _extract_json_payload(raw: str) -> dict[str, Any] | None:
@@ -258,6 +278,7 @@ async def infer_turn_semantic_frame_with_llm(
         '"expression_style":"一句短中文，描述本轮该如何表达",'
         '"tts_style_hint":"给 TTS 的简短风格词",'
         '"sticker_mood_hint":"给表情包选择的结构化标签，格式固定为 情绪标签|场景标签",'
+        '"conversation_scenario":"normal|casual_banter|sarcasm_irony|argument|inside_joke|multi_thread|private_topic",'
         '"confidence":0.0,'
         '"reason":"一句极短中文原因"}\n'
         "判别要求：\n"
@@ -279,6 +300,14 @@ async def infer_turn_semantic_frame_with_llm(
         "场景标签=[回应笑点,接梗,表达赞同,化解尴尬,自嘲,反驳,表达惊讶,安慰对方,撒娇,表示无奈,冷场时,表达期待,庆祝,拒绝请求,结束对话,打招呼,表达关心,吐槽,卖萌,表达疑惑]；"
         "严格输出为“情绪标签|场景标签”。\n"
         "## 中文互联网/游戏黑话歧义说明\n以下词语在中文群聊中有常见的非字面含义，判别时需结合上下文：\n- 粥/三角洲：腾讯游戏《三角洲行动》的别称（不是食物的粥）\n- 鸡：《绝地求生》PUBG；吃鸡=赢了PUBG\n- 原神/崩铁/ZZZ：米哈游系列游戏简称\n- dd/DD=关注/粉丝（虚拟主播圈）；典=嘘讽某行为；蚁埠住了=绷不住了；破防=情绪崩了\n12. 当最新消息包含上述歧义词且上下文不足以确认含义时，将 ambiguity_level 设为 high；若是随机插话场景还应将 recommend_silence 设为 true，等待更多上下文再参与。\n"
+        "13. conversation_scenario 判断当前对话场景：\n"
+        "- casual_banter：群友互相调侃、插科打诨\n"
+        "- sarcasm_irony：反讽/阴阳怪气\n"
+        "- argument：争吵/对立\n"
+        "- inside_joke：群内部梗/暗号\n"
+        "- multi_thread：多个话题同时进行\n"
+        "- private_topic：涉及个人隐私/敏感话题\n"
+        "- normal：以上都不是\n"
     )
     user_content = (
         f"场景：{'群聊' if is_group else '私聊'}\n"
@@ -340,6 +369,7 @@ async def infer_intent_decision_with_llm(
 __all__ = [
     "AmbiguityLevel",
     "ChatIntent",
+    "ConversationScenario",
     "EmotionIntensity",
     "IntentDecision",
     "PluginQuestionIntent",

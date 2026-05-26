@@ -445,6 +445,18 @@ async def _register_personification_group_knowledge() -> None:
             tool_caller=tool_caller,
             logger=logger,
         )
+    try:
+        from .core.memory_summarizer import register_memory_summarizer_jobs
+
+        register_memory_summarizer_jobs(
+            scheduler=scheduler,
+            plugin_config=plugin_config,
+            memory_store=memory_store,
+            tool_caller=tool_caller,
+            logger=logger,
+        )
+    except Exception as exc:
+        logger.warning(f"[memory_summarizer] 注册失败：{exc}")
 
 
 @get_driver().on_startup
