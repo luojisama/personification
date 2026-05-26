@@ -11,6 +11,9 @@ from .group_roles import render_group_role_label
 @dataclass(frozen=True)
 class GroupConversationContext:
     recent_messages: list[dict[str, Any]] = field(default_factory=list)
+    current_thread_id: str = ""
+    current_thread_messages: list[dict[str, Any]] = field(default_factory=list)
+    other_thread_summaries: list[str] = field(default_factory=list)
     speaker_relations: dict[str, str] = field(default_factory=dict)
     active_topics: list[str] = field(default_factory=list)
     repeat_clusters: list[dict[str, Any]] = field(default_factory=list)
@@ -57,6 +60,11 @@ def build_group_conversation_context(
             seen_topics.add(topic)
             active_topics.append(topic)
     rendered_context = render_group_context_structured(messages, trigger_msg_id=trigger_msg_id)
+    current_thread_id = _resolve_current_thread_id(messages, trigger_msg_id=trigger_msg_id)
+    current_thread_messages = [
+        msg for msg in messages if current_thread_id and str(msg.get("thread_id", "") or "") == current_thread_id
+    ][-12:]
+    other_thread_summaries = _summarize_other_threads(messages, current_thread_id=current_thread_id)
     relationship_hint = summarize_group_relationships(
         messages,
         trigger_msg_id=trigger_msg_id,
@@ -65,6 +73,9 @@ def build_group_conversation_context(
     )
     return GroupConversationContext(
         recent_messages=messages[-30:],
+        current_thread_id=current_thread_id,
+        current_thread_messages=current_thread_messages,
+        other_thread_summaries=other_thread_summaries,
         speaker_relations=speaker_relations,
         active_topics=active_topics[-6:],
         repeat_clusters=list(repeat_clusters or [])[:5],
@@ -82,6 +93,19 @@ def build_group_conversation_context(
 
 def render_group_conversation_context(context: GroupConversationContext) -> str:
     parts: list[str] = []
+    if context.current_thread_messages:
+        parts.append(
+            "当前对话线程（优先理解和回复这一组，除非被 @ 或明确要求，不要混到其他线程）：\n"
+            + render_group_context_structured(
+                context.current_thread_messages,
+                trigger_msg_id=str(context.current_thread_messages[-1].get("message_id", "") or ""),
+            )
+        )
+    if context.other_thread_summaries:
+        parts.append(
+            "其他同时进行的群聊线程（只作背景，不要主动串线总结）：\n"
+            + "\n".join(f"- {item}" for item in context.other_thread_summaries[:4])
+        )
     if context.rendered_context:
         parts.append(context.rendered_context)
     if context.active_topics:
@@ -126,6 +150,33 @@ def _build_quote_chain(messages: list[dict[str, Any]], *, trigger_msg_id: str = 
         chain.append(current)
         current_id = str(current.get("reply_to_msg_id", "") or "").strip()
     return list(reversed(chain))
+
+
+def _resolve_current_thread_id(messages: list[dict[str, Any]], *, trigger_msg_id: str = "") -> str:
+    if not messages:
+        return ""
+    if trigger_msg_id:
+        for msg in reversed(messages):
+            if str(msg.get("message_id", "") or "").strip() == trigger_msg_id:
+                return str(msg.get("thread_id", "") or "").strip()
+    return str(messages[-1].get("thread_id", "") or "").strip()
+
+
+def _summarize_other_threads(messages: list[dict[str, Any]], *, current_thread_id: str = "") -> list[str]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for msg in messages:
+        thread_id = str(msg.get("thread_id", "") or "").strip()
+        if not thread_id or thread_id == current_thread_id:
+            continue
+        grouped.setdefault(thread_id, []).append(msg)
+    summaries: list[str] = []
+    for thread_id, items in grouped.items():
+        last = items[-1]
+        speaker = str(last.get("nickname") or last.get("speaker") or last.get("user_id") or "未知").strip()
+        content = stringify_history_content(last.get("content", "")).strip()
+        if content:
+            summaries.append(f"{thread_id}: 最近 {speaker}: {content[:80]}")
+    return summaries[-4:]
 
 
 def render_group_context_structured(messages: list[dict[str, Any]], trigger_msg_id: str = "") -> str:
@@ -222,6 +273,9 @@ def render_group_context_structured(messages: list[dict[str, Any]], trigger_msg_
         }
         if source_kind in source_map:
             relation_parts.append(f"来源={source_map[source_kind]}")
+        thread_id = str(msg.get("thread_id", "") or "").strip()
+        if thread_id:
+            relation_parts.append(f"线程={thread_id}")
 
         relation = "|".join(relation_parts) if relation_parts else "普通发言"
         lines.append(f"[{label}][{nickname}|uid={user_id}|{relation}] {content}")

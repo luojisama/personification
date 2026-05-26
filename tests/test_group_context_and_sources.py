@@ -7,6 +7,9 @@ from ._loader import load_personification_module
 event_rules = load_personification_module("plugin.personification.handlers.event_rules")
 group_context = load_personification_module("plugin.personification.core.group_context")
 target_inference = load_personification_module("plugin.personification.core.target_inference")
+db = load_personification_module("plugin.personification.core.db")
+data_store = load_personification_module("plugin.personification.core.data_store")
+utils = load_personification_module("plugin.personification.utils")
 
 
 def test_target_inference_treats_reply_to_non_bot_as_others() -> None:
@@ -127,3 +130,53 @@ def test_group_conversation_context_tracks_quote_chain_and_bot_replies() -> None
     assert "引用链" in rendered
     assert "bot 最近回复：我接了一句" in rendered
     assert "近段发言线索" in rendered
+
+
+def test_record_group_msg_assigns_reply_to_same_thread(tmp_path) -> None:
+    cfg = SimpleNamespace(personification_data_dir=str(tmp_path))
+    data_store.init_data_store(cfg)
+    db.init_db_sync(tmp_path)
+
+    utils.record_group_msg(
+        "g1",
+        "甲",
+        "今天先聊一下构建速度",
+        user_id="u1",
+        message_id="m1",
+        time=1000,
+    )
+    utils.record_group_msg(
+        "g1",
+        "乙",
+        "我回复这个线程",
+        user_id="u2",
+        message_id="m2",
+        reply_to_msg_id="m1",
+        reply_to_user_id="u1",
+        time=1010,
+    )
+
+    first = utils.get_group_msg_by_message_id("g1", "m1")
+    second = utils.get_group_msg_by_message_id("g1", "m2")
+
+    assert first["thread_id"]
+    assert second["thread_id"] == first["thread_id"]
+
+
+def test_group_context_prioritizes_current_thread() -> None:
+    context = group_context.build_group_conversation_context(
+        recent_messages=[
+            {"message_id": "a1", "thread_id": "ta", "nickname": "甲", "user_id": "u1", "content": "A 线程第一句"},
+            {"message_id": "b1", "thread_id": "tb", "nickname": "乙", "user_id": "u2", "content": "B 线程第一句"},
+            {"message_id": "a2", "thread_id": "ta", "nickname": "甲", "user_id": "u1", "content": "A 线程继续"},
+        ],
+        trigger_msg_id="a2",
+        trigger_user_id="u1",
+    )
+
+    rendered = group_context.render_group_conversation_context(context)
+
+    assert context.current_thread_id == "ta"
+    assert [item["message_id"] for item in context.current_thread_messages] == ["a1", "a2"]
+    assert "当前对话线程" in rendered
+    assert "其他同时进行的群聊线程" in rendered

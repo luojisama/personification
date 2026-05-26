@@ -60,6 +60,7 @@ DDL_STATEMENTS = (
         mentioned_ids    TEXT NOT NULL DEFAULT '[]',
         is_at_bot        INTEGER NOT NULL DEFAULT 0,
         message_id       TEXT DEFAULT NULL,
+        thread_id        TEXT NOT NULL DEFAULT '',
         source_kind      TEXT NOT NULL DEFAULT 'user',
         sender_role      TEXT NOT NULL DEFAULT '',
         timestamp   REAL    NOT NULL
@@ -68,6 +69,24 @@ DDL_STATEMENTS = (
     """
     CREATE INDEX IF NOT EXISTS idx_group_messages_group
         ON group_messages(group_id, timestamp)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_group_messages_thread
+        ON group_messages(group_id, thread_id, timestamp)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS conversation_threads (
+        thread_id      TEXT PRIMARY KEY,
+        group_id       TEXT NOT NULL,
+        topic_summary  TEXT NOT NULL DEFAULT '',
+        participants   TEXT NOT NULL DEFAULT '[]',
+        created_at     REAL NOT NULL,
+        last_active_at REAL NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_conversation_threads_group
+        ON conversation_threads(group_id, last_active_at DESC)
     """,
     """
     CREATE TABLE IF NOT EXISTS group_relation_edges (
@@ -256,6 +275,8 @@ def _ensure_group_message_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE group_messages ADD COLUMN visual_summary TEXT NOT NULL DEFAULT ''")
     if "sender_role" not in columns:
         conn.execute("ALTER TABLE group_messages ADD COLUMN sender_role TEXT NOT NULL DEFAULT ''")
+    if "thread_id" not in columns:
+        conn.execute("ALTER TABLE group_messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''")
 
 
 def _ensure_group_style_schema(conn: sqlite3.Connection) -> None:
