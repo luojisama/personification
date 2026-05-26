@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from ...core import webui_audit_log
 from ...core.db import connect_sync
+from ...core.meme_dictionary import delete_meme_entry, list_meme_entries, upsert_meme_entry
 from ...core.onebot_cache import get_group_name, get_user_nickname
 from ..deps import AdminIdentity, get_client_ip, require_admin
 
@@ -218,5 +219,63 @@ def build_group_router(*, runtime) -> APIRouter:
                 }
             )
         return {"group_id": group_id, "knowledge": knowledge}
+
+    @router.get("/{group_id}/memes")
+    async def group_memes(
+        group_id: str,
+        limit: int = 100,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        try:
+            items = list_meme_entries(group_id=group_id, limit=max(1, min(int(limit), 300)))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        return {"group_id": group_id, "memes": items}
+
+    @router.post("/{group_id}/memes")
+    async def save_group_meme(
+        group_id: str,
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        payload = dict(body or {})
+        scope = str(payload.get("scope", "group") or "group").strip().lower()
+        if scope not in {"group", "concept"}:
+            scope = "group"
+        payload["scope"] = scope
+        payload["group_id"] = str(group_id)
+        ok = upsert_meme_entry(payload)
+        if not ok:
+            raise HTTPException(status_code=400, detail="term 和 meaning/definition 不能为空")
+        webui_audit_log.record(
+            action="meme_upsert",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=group_id,
+            ip_hash=get_client_ip(request),
+            detail={"term": payload.get("term"), "scope": scope},
+        )
+        return {"success": True, "entry": payload}
+
+    @router.delete("/{group_id}/memes/{term}")
+    async def delete_group_meme(
+        group_id: str,
+        term: str,
+        request: Request,
+        scope: str = "group",
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        normalized_scope = scope if scope in {"group", "concept"} else "group"
+        changed = delete_meme_entry(term=term, scope=normalized_scope, group_id=group_id)
+        webui_audit_log.record(
+            action="meme_delete",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=group_id,
+            ip_hash=get_client_ip(request),
+            detail={"term": term, "scope": normalized_scope, "changed": changed},
+        )
+        return {"success": True, "deleted": changed}
 
     return router

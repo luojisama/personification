@@ -229,6 +229,27 @@ DDL_STATEMENTS = (
     """
     CREATE INDEX IF NOT EXISTS idx_provider_health_seen ON provider_health_stats(last_seen_at)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS meme_dictionary (
+        term TEXT NOT NULL,
+        aliases TEXT NOT NULL DEFAULT '[]',
+        meaning TEXT NOT NULL DEFAULT '',
+        tone TEXT NOT NULL DEFAULT '[]',
+        risk_level TEXT NOT NULL DEFAULT 'low',
+        examples TEXT NOT NULL DEFAULT '[]',
+        scope TEXT NOT NULL DEFAULT 'public',
+        group_id TEXT NOT NULL DEFAULT '',
+        confidence REAL NOT NULL DEFAULT 0,
+        evidence_message_ids TEXT NOT NULL DEFAULT '[]',
+        safe_usage TEXT NOT NULL DEFAULT '',
+        updated_at REAL NOT NULL,
+        PRIMARY KEY(scope, group_id, term)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_meme_dictionary_scope
+        ON meme_dictionary(scope, group_id, updated_at DESC)
+    """,
 )
 
 

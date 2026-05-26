@@ -930,14 +930,16 @@ async function openGroup(gid) {
   try {
     state.selectedGroup = gid;
     state.groupRawChat = null;
-    const [personas, style, knowledge] = await Promise.all([
+    const [personas, style, knowledge, memes] = await Promise.all([
       api("/groups/" + encodeURIComponent(gid) + "/personas"),
       api("/groups/" + encodeURIComponent(gid) + "/style"),
       api("/groups/" + encodeURIComponent(gid) + "/knowledge").catch(() => ({knowledge: []})),
+      api("/groups/" + encodeURIComponent(gid) + "/memes").catch(() => ({memes: []})),
     ]);
     state.groupPersonas = personas.profiles;
     state.groupStyle = style;
     state.groupKnowledge = knowledge.knowledge || [];
+    state.groupMemes = memes.memes || [];
     render();
   } catch (e) { alertFlash("err", e.message); }
 }
@@ -968,10 +970,18 @@ function renderGroupDetail() {
     <td class="muted" style="font-size:12px">${escapeHtml(k.source_kind || '')}</td>
     <td class="muted" style="font-size:12px">${k.updated_at ? new Date(k.updated_at*1000).toLocaleDateString() : '-'}</td>
   </tr>`).join("");
+  const memeRows = (state.groupMemes || []).map(m => `<tr>
+    <td><strong>${escapeHtml(m.term)}</strong></td>
+    <td>${escapeHtml(m.meaning)}</td>
+    <td>${escapeHtml((m.aliases||[]).join("、"))}</td>
+    <td class="muted" style="font-size:12px">${escapeHtml(m.scope || '')}/${escapeHtml(m.risk_level || '')}/${Number(m.confidence||0).toFixed(2)}</td>
+  </tr>`).join("");
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;state.groupRawChat=null;state.groupStyleSnapIdx=0;render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
     ${renderGroupStyle(style)}
     <div class="card"><h2>群知识库（${(state.groupKnowledge||[]).length}）</h2>
       ${knowledgeRows ? `<table><thead><tr><th>术语</th><th>解释</th><th>来源</th><th>更新</th></tr></thead><tbody>${knowledgeRows}</tbody></table>` : '<p class="muted">暂无群知识。开启「群知识库自动构建」后会定时扫描并写入。</p>'}</div>
+    <div class="card"><h2>梗词典 / 概念锚点（${(state.groupMemes||[]).length}）</h2>
+      ${memeRows ? `<table><thead><tr><th>词条</th><th>含义</th><th>别名</th><th>范围/风险/置信度</th></tr></thead><tbody>${memeRows}</tbody></table>` : '<p class="muted">暂无匹配词条，公共热梗种子会在首次查询后自动初始化。</p>'}</div>
     <div class="card"><h2>群内成员画像（${state.groupPersonas.length}）</h2>
       <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>昵称</th><th>摘要</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">无</td></tr>'}</tbody></table></div>
     ${renderGroupRawChat()}`;

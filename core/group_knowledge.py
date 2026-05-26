@@ -7,9 +7,12 @@ from typing import Any
 
 _GROUP_KNOWLEDGE_PROMPT = (
     "你是群聊知识抽取器。下面是一段群聊对话摘要。"
-    "请从中抽取 3-10 个高频话题、专有名词、群内绰号或内部梗。"
+    "请从中抽取 3-10 个高频话题、专有名词、群内绰号、内部梗或概念锚点。"
     "每个条目一句话说明含义（20字内）。只输出 JSON 数组，不要 markdown。"
-    "\n格式：[{\"term\":\"专有名词\",\"definition\":\"一句话说明\"}]"
+    "is_meme=true 表示这是梗/戏称/口头禅；scope=concept 表示这是群内抽象说法对应的具体含义。"
+    "\n格式：[{\"term\":\"专有名词\",\"definition\":\"一句话说明\",\"aliases\":[\"别名\"],"
+    "\"is_meme\":false,\"scope\":\"group|concept\",\"tone\":[\"吐槽\"],\"risk_level\":\"low|medium|high\","
+    "\"safe_usage\":\"使用边界\"}]"
 )
 
 
@@ -74,18 +77,48 @@ async def build_group_knowledge(
         definition = str(item.get("definition", "") or "").strip()
         if not term or len(term) < 2:
             continue
+        aliases = item.get("aliases", [])
+        tone = item.get("tone", [])
+        risk_level = str(item.get("risk_level", "low") or "low").strip().lower()
+        safe_usage = str(item.get("safe_usage", "") or "").strip()
+        scope = str(item.get("scope", "group") or "group").strip().lower()
+        is_meme = bool(item.get("is_meme")) or scope == "concept"
         memory_id = f"gk_{_safe_id(group_id)}_{_safe_id(term)}"
         memory_store.write_memory_item({
             "memory_id": memory_id,
-            "memory_type": "group_knowledge",
+            "memory_type": "concept_anchor" if scope == "concept" else ("group_meme" if is_meme else "group_knowledge"),
             "summary": f"{term}: {definition}",
             "term": term,
             "definition": definition,
+            "aliases": aliases if isinstance(aliases, list) else [],
+            "tone": tone if isinstance(tone, list) else [],
+            "risk_level": risk_level,
+            "safe_usage": safe_usage,
+            "is_meme": is_meme,
             "group_id": str(group_id),
-            "confidence": 0.7,
+            "confidence": 0.75 if is_meme else 0.7,
             "salience": 0.5,
             "source_kind": "auto_extract",
         })
+        if is_meme:
+            try:
+                from .meme_dictionary import upsert_meme_entry
+
+                upsert_meme_entry(
+                    {
+                        "term": term,
+                        "aliases": aliases,
+                        "meaning": definition,
+                        "tone": tone,
+                        "risk_level": risk_level,
+                        "scope": "concept" if scope == "concept" else "group",
+                        "group_id": str(group_id),
+                        "confidence": 0.75,
+                        "safe_usage": safe_usage,
+                    }
+                )
+            except Exception:
+                pass
         saved += 1
     return saved
 
@@ -99,31 +132,89 @@ def query_group_knowledge(
 ) -> list[dict[str, Any]]:
     if not memory_store:
         return []
-    entries = memory_store.list_recent_memories(
-        group_id=str(group_id),
-        memory_type="group_knowledge",
-        limit=200,
-    )
+    entries = []
+    for memory_type in ("group_knowledge", "group_meme", "concept_anchor"):
+        entries.extend(
+            memory_store.list_recent_memories(
+                group_id=str(group_id),
+                memory_type=memory_type,
+                limit=200,
+            )
+        )
     matched: list[tuple[int, dict[str, Any]]] = []
     text_lower = str(message_text or "").strip().lower()
     for entry in entries:
         term = str(entry.get("term", "") or "").strip()
-        if term and term.lower() in text_lower:
+        aliases = entry.get("aliases", [])
+        alias_list = aliases if isinstance(aliases, list) else []
+        candidates = [term, *[str(item or "") for item in alias_list]]
+        hit_len = max((len(candidate) for candidate in candidates if candidate and candidate.lower() in text_lower), default=0)
+        if hit_len > 0:
             summary = str(entry.get("summary", "") or "").strip()
-            matched.append((len(term), {"term": term, "summary": summary}))
+            matched.append((hit_len, {"term": term, "summary": summary, "memory_type": entry.get("memory_type", "")}))
     matched.sort(key=lambda item: item[0], reverse=True)
-    return [item[1] for item in matched[:top_k]]
+    results = [item[1] for item in matched[:top_k]]
+    try:
+        from .meme_dictionary import query_meme_dictionary
+
+        for meme in query_meme_dictionary(str(group_id), message_text, top_k=top_k):
+            results.append(
+                {
+                    "term": meme.get("term", ""),
+                    "summary": f"{meme.get('term', '')}: {meme.get('meaning', '')}",
+                    "memory_type": "meme_dictionary",
+                    "meme": meme,
+                }
+            )
+    except Exception:
+        pass
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in results:
+        term = str(item.get("term", "") or "")
+        if term in seen:
+            continue
+        seen.add(term)
+        deduped.append(item)
+    return deduped[:top_k]
 
 
 def format_group_knowledge_hint(entries: list[dict[str, Any]]) -> str:
     if not entries:
         return ""
     lines = ["群组已知专有名词/话题："]
+    meme_entries: list[dict[str, Any]] = []
     for entry in entries:
+        if isinstance(entry.get("meme"), dict):
+            meme_entries.append(entry["meme"])
+            continue
+        if str(entry.get("memory_type", "") or "") in {"group_meme", "concept_anchor"}:
+            summary = str(entry.get("summary", "") or "")
+            term = str(entry.get("term", "") or "")
+            meaning = summary.split(":", 1)[1].strip() if ":" in summary else summary
+            meme_entries.append(
+                {
+                    "term": term,
+                    "meaning": meaning,
+                    "scope": "concept" if entry.get("memory_type") == "concept_anchor" else "group",
+                    "confidence": 0.75,
+                    "risk_level": "low",
+                }
+            )
+            continue
         term = entry.get("term", "")
         summary = entry.get("summary", "")
         if term and summary:
             lines.append(f"- {term}: {summary}")
+    if meme_entries:
+        try:
+            from .meme_dictionary import format_meme_hint
+
+            meme_hint = format_meme_hint(meme_entries)
+            if meme_hint:
+                lines.append(meme_hint)
+        except Exception:
+            pass
     if len(lines) <= 1:
         return ""
     lines.append("上面这些是群友常聊的，你已知晓。遇到这些词不要再触发 web_search/lookup_web。")
