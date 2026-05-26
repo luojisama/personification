@@ -39,3 +39,16 @@ def test_should_use_agent_for_reply_keeps_direct_mention_lookup_enabled() -> Non
     )
 
     assert decision is True
+
+
+def test_confidence_style_instruction_medium() -> None:
+    text = pipeline_context.build_confidence_style_instruction(0.7, is_group=True)
+
+    assert "我理解是" in text
+    assert "不要把不确定的推断说死" in text
+
+
+def test_confidence_style_instruction_low_group() -> None:
+    text = pipeline_context.build_confidence_style_instruction(0.35, is_group=True)
+
+    assert "[NO_REPLY]" in text

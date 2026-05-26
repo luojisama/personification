@@ -285,7 +285,10 @@ def compute_cooldown_seconds(failures: int, *, is_rate_limit: bool = False, retr
         base = min(1800.0, 60.0 * (2 ** (n - 1)))
     jitter = base * 0.2  # ±20%
     delta = random.uniform(-jitter, jitter)
-    return max(15.0, base + delta)
+    cooldown = max(15.0, base + delta)
+    if is_rate_limit and retry_after:
+        cooldown = max(cooldown, min(1800.0, float(retry_after or 0)))
+    return cooldown
 
 
 __all__ = [

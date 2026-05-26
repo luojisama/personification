@@ -169,6 +169,7 @@ async def _private_memory_recall_hook(ctx: HookContext) -> Optional[str]:
             user_id=ctx.user_id,
             limit=6,
             mode="auto",
+            context_type="private",
         )
     except Exception:
         return None

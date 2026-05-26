@@ -68,6 +68,7 @@ from ..event_rules import _extract_recordable_group_message, split_segment_if_lo
 from .pipeline_context import (
     batch_has_newer_messages as _batch_has_newer_messages,
     build_base_system_prompt as _build_base_system_prompt,
+    build_confidence_style_instruction as _build_confidence_style_instruction,
     build_final_visible_reply_text as _build_final_visible_reply_text,
     build_group_session_relation_metadata as _build_group_session_relation_metadata,
     build_tts_user_hint as _build_tts_user_hint,
@@ -985,6 +986,10 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             "\n[系统提示] 当前最新名词/对象存在较高歧义。"
             "如果上下文和现有证据不足，请优先承认不确定；群聊里若没人明确在 cue 你，且这轮明显会打断别人时，也可以输出 [NO_REPLY]。"
         )
+    system_prompt += _build_confidence_style_instruction(
+        float(getattr(semantic_frame, "confidence", 0.0) or 0.0),
+        is_group=not is_private_session,
+    )
     if arbitration == "clarify":
         system_prompt += (
             "\n[系统提示] 这轮高歧义但对方像是在直接问你。"

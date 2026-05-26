@@ -50,3 +50,25 @@ def test_capture_turn_writes_episodic_turn_memory() -> None:
         "ambiguity_level": "low",
         "output_mode": "source_summary",
     }
+    assert item["permission_type"] == "public_preference"
+
+
+def test_capture_turn_emotional_care_is_private_fact() -> None:
+    store = _FakeMemoryStore()
+    curator = memory_curator_mod.MemoryCurator(store)
+
+    asyncio.run(
+        curator.capture_turn(
+            user_utterance="今天有点难受",
+            bot_response="先缓一下。",
+            user_id="u1",
+            group_id="g1",
+            semantic_frame=SimpleNamespace(
+                chat_intent="banter",
+                domain_focus="emotion",
+                requires_emotional_care=True,
+            ),
+        )
+    )
+
+    assert store.items[0]["permission_type"] == "private_fact"

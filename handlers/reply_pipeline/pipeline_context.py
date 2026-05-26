@@ -159,6 +159,7 @@ async def _recall_agent_candidate_memories(
             group_id=group_id,
             limit=12,
             mode=mode,
+            context_type="group" if group_id else "private",
         )
     except Exception as exc:
         runtime.logger.debug(f"[agent] evidence memory recall failed: {exc}")
@@ -899,9 +900,34 @@ def build_base_system_prompt(
     return "\n\n".join(part for part in parts if part)
 
 
+def build_confidence_style_instruction(confidence: float, *, is_group: bool = False) -> str:
+    try:
+        value = float(confidence)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value >= 0.8:
+        return ""
+    if value >= 0.6:
+        return (
+            "\n[系统提示] 当前语义置信度中等。回复时用“我理解是…”“应该是…”这类留余地的口吻，"
+            "不要把不确定的推断说死。"
+        )
+    if value >= 0.4:
+        return (
+            "\n[系统提示] 当前语义置信度偏低。优先先确认理解是否正确，例如用一句短问句确认对象或上下文；"
+            "群聊里如果没人明确 cue 你，也可以 [NO_REPLY]。"
+        )
+    if is_group:
+        return (
+            "\n[系统提示] 当前语义置信度很低。群聊里默认不要硬插话，除非被直接 @ 或明确追问，否则输出 [NO_REPLY]。"
+        )
+    return "\n[系统提示] 当前语义置信度很低。先用一句话确认对方意思，不要硬猜。"
+
+
 __all__ = [
     "batch_has_newer_messages",
     "build_base_system_prompt",
+    "build_confidence_style_instruction",
     "build_final_visible_reply_text",
     "build_group_session_relation_metadata",
     "build_tts_user_hint",

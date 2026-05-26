@@ -105,6 +105,14 @@ class MemoryCurator:
         is_time_sensitive = any(token in lowered for token in ("今天", "刚刚", "最近", "版本", "活动", "联动", "更新"))
         stability = 0.28 if is_time_sensitive else 0.42
         confidence = 0.48 if irony_risk > 0.3 else 0.6
+        permission_type = _classify_permission_type(
+            memory_type="episodic",
+            group_id=group_id,
+            semantic_frame=None,
+            tone_risk=tone_risk,
+            irony_risk=irony_risk,
+            summary=text,
+        )
         salience = 0.5 + min(len(merged_entities), 4) * 0.05
         expires_at = 0.0
         if is_time_sensitive:
@@ -131,6 +139,7 @@ class MemoryCurator:
                 "stability": stability,
                 "emotional_weight": 0.0,
                 "privacy_level": "default",
+                "permission_type": permission_type,
                 "expires_at": expires_at,
                 "supports_recall": True,
                 "supports_autofill": False,
@@ -198,6 +207,14 @@ class MemoryCurator:
         memory_scope = str(scope or "").strip()
         if not memory_scope:
             memory_scope = f"group:{group_id}" if group_id else (f"user:{user_id}" if user_id else "both")
+        permission_type = _classify_permission_type(
+            memory_type="episodic_turn",
+            group_id=group_id,
+            semantic_frame=semantic_frame,
+            tone_risk=0.08,
+            irony_risk=0.1,
+            summary=summary,
+        )
         memory_id = await asyncio.to_thread(
             self.memory_store.write_memory_item,
             {
@@ -226,6 +243,7 @@ class MemoryCurator:
                 "stability": 0.4,
                 "emotional_weight": 0.0,
                 "privacy_level": "default",
+                "permission_type": permission_type,
                 "expires_at": 0.0,
                 "supports_recall": True,
                 "supports_autofill": False,
@@ -245,3 +263,28 @@ class MemoryCurator:
                 memory_id=str(memory_id or ""),
                 group_id=str(group_id or ""),
             )
+
+
+def _classify_permission_type(
+    *,
+    memory_type: str,
+    group_id: str = "",
+    semantic_frame: Any = None,
+    tone_risk: float = 0.0,
+    irony_risk: float = 0.0,
+    summary: str = "",
+) -> str:
+    normalized_type = str(memory_type or "").lower()
+    if normalized_type in {"group_meme", "concept_anchor"}:
+        return "group_meme"
+    if normalized_type == "conflict_memory":
+        return "conflict_memory"
+    domain_focus = str(getattr(semantic_frame, "domain_focus", "") or "").lower()
+    requires_care = bool(getattr(semantic_frame, "requires_emotional_care", False))
+    if requires_care or domain_focus == "emotion":
+        return "private_fact"
+    if tone_risk >= 0.6 or irony_risk >= 0.6:
+        return "conflict_memory"
+    if not str(group_id or "").strip():
+        return "private_fact"
+    return "public_preference"

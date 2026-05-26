@@ -333,6 +333,7 @@ def _build_recall_user_memory_tool(memory_store: Any, plugin_config: Any, logger
                 user_id=user_id,
                 limit=max(1, min(int(limit or 8), 20)),
                 mode="auto",
+                context_type="private",
             )
         except Exception as exc:
             logger.debug(f"[recall_user_memory] recall failed: {exc}")

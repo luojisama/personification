@@ -305,7 +305,12 @@ async def infer_turn_semantic_frame_with_llm(
         )
         payload = _extract_json_payload(str(getattr(response, "content", "") or ""))
         frame = _parse_turn_semantic_frame_payload(payload) if payload is not None else None
-        return frame or fallback
+        if frame is None:
+            return fallback
+        if is_group and frame.confidence < 0.4:
+            frame.recommend_silence = True
+            frame.ambiguity_level = "high"
+        return frame
     except Exception:
         return fallback
 

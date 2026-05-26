@@ -431,8 +431,9 @@ class MemoryStore:
                                          user_id, group_id, thread_id, payload, created_at, updated_at, salience,
                                          stability, confidence, supports_recall, supports_autofill, expires_at,
                                          revision, tone_risk, irony_risk, group_scope, cross_group_allowed,
-                                         time_sensitivity, superseded_by, reinforcement_count, last_accessed_at, access_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         time_sensitivity, superseded_by, reinforcement_count, last_accessed_at, access_count,
+                                         permission_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(memory_id) DO UPDATE SET
                     memory_type=excluded.memory_type,
                     palace_zone=excluded.palace_zone,
@@ -461,7 +462,8 @@ class MemoryStore:
                     superseded_by=excluded.superseded_by,
                     reinforcement_count=excluded.reinforcement_count,
                     last_accessed_at=excluded.last_accessed_at,
-                    access_count=excluded.access_count
+                    access_count=excluded.access_count,
+                    permission_type=excluded.permission_type
                 WHERE excluded.revision >= memory_items.revision
                 """,
                 (
@@ -495,6 +497,7 @@ class MemoryStore:
                     int(payload.get("reinforcement_count", 0) or 0),
                     float(payload.get("last_accessed_at", 0) or 0),
                     int(payload.get("access_count", 0) or 0),
+                    str(payload.get("permission_type", "public_preference") or "public_preference"),
                 ),
             )
             if conn.total_changes == before_changes:
@@ -569,6 +572,7 @@ class MemoryStore:
         group_id: str = "",
         limit: int = 0,
         mode: str = "auto",
+        context_type: str = "auto",
     ) -> list[dict[str, Any]]:
         configured_limit = int(
             getattr(self.plugin_config, "personification_memory_recall_top_k", MAX_RECALL_LIMIT) or MAX_RECALL_LIMIT
@@ -577,6 +581,7 @@ class MemoryStore:
         normalized_query = normalize_text(query)
         if self.palace_enabled() and group_id and self.needs_bootstrap(group_id):
             self.bootstrap_group_memories(group_id)
+        normalized_context_type = self._normalize_context_type(context_type, group_id=group_id)
 
         candidate_map: dict[str, MemorySearchCandidate] = {}
         for candidate in self._search_fast(
@@ -614,7 +619,22 @@ class MemoryStore:
             )
 
         if not ranked:
-            fallback = self._recall_grouped_fallback(group_id=group_id, query=normalized_query, limit=limit)
+            fallback = self._recall_item_fallback(
+                group_id=group_id,
+                user_id=user_id,
+                scope=scope,
+                query=normalized_query,
+                limit=limit,
+            )
+            if len(fallback) < limit:
+                fallback.extend(
+                    self._recall_grouped_fallback(
+                        group_id=group_id,
+                        query=normalized_query,
+                        limit=limit - len(fallback),
+                    )
+                )
+            fallback = self._filter_recalled_by_permission(fallback, context_type=normalized_context_type)
             self._record_search_stats(
                 query=normalized_query,
                 scope=scope,
@@ -629,11 +649,15 @@ class MemoryStore:
 
         results: list[dict[str, Any]] = []
         used_ids: list[str] = []
-        for candidate in ranked[:limit]:
+        for candidate in ranked:
             payload = dict(candidate.payload)
+            filtered_payload = self._permission_filtered_payload(payload, context_type=normalized_context_type)
+            if filtered_payload is None:
+                continue
             payload.pop("_query", None)
             payload.pop("_embedding", None)
             payload.pop("_entities", None)
+            payload = {**payload, **filtered_payload}
             payload["why_relevant"] = "；".join(candidate.match_reasons[:4])
             payload["score"] = round(candidate.base_score, 4)
             payload["time_hint"] = build_time_hint(safe_float(payload.get("time_created", 0), 0))
@@ -641,6 +665,8 @@ class MemoryStore:
             results.append(payload)
             used_ids.append(candidate.memory_id)
             self._mark_memory_accessed(candidate.memory_id)
+            if len(results) >= limit:
+                break
 
         self._record_search_stats(
             query=normalized_query,
@@ -653,6 +679,76 @@ class MemoryStore:
             status="ok",
         )
         return results
+
+    def _recall_item_fallback(
+        self,
+        *,
+        group_id: str,
+        user_id: str,
+        scope: str,
+        query: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        query_tokens = [token for token in tokenize(query) if token]
+        if not query_tokens:
+            return []
+        normalized_query = normalize_text(query).lower()
+        with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
+            rows = conn.execute(
+                """
+                SELECT payload
+                FROM memory_items
+                WHERE supports_recall=1
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (max(limit * 8, 48),),
+            ).fetchall()
+
+        scored: list[tuple[float, dict[str, Any]]] = []
+        requested_group_id = str(group_id or "")
+        requested_user_id = str(user_id or "")
+        for row in rows:
+            payload = _json_loads(row["payload"], {})
+            if not isinstance(payload, dict) or not self._scope_matches(payload, scope):
+                continue
+            payload_group_id = str(payload.get("group_id") or "")
+            payload_user_id = str(payload.get("user_id") or "")
+            cross_group_allowed = bool(payload.get("cross_group_allowed", False))
+            if requested_group_id and payload_group_id and payload_group_id != requested_group_id and not cross_group_allowed:
+                continue
+            if requested_user_id and payload_user_id and payload_user_id != requested_user_id:
+                continue
+
+            searchable = normalize_text(self._build_searchable_text(payload)).lower()
+            if not searchable:
+                continue
+            searchable_tokens = set(tokenize(searchable))
+            token_overlap = len(set(query_tokens) & searchable_tokens)
+            substring_hits = sum(1 for token in query_tokens if token and token in searchable)
+            if token_overlap <= 0 and substring_hits <= 0 and normalized_query not in searchable:
+                continue
+            base_score = 0.24 + min(token_overlap, 5) * 0.08 + min(substring_hits, 5) * 0.05
+            payload = dict(payload)
+            payload["why_relevant"] = "记忆文本兜底命中"
+            payload["score"] = round(
+                rank_memory_payload(
+                    payload,
+                    query=query,
+                    base_score=base_score,
+                    requested_group_id=requested_group_id,
+                    requested_user_id=requested_user_id,
+                ),
+                4,
+            )
+            payload["time_hint"] = build_time_hint(safe_float(payload.get("time_created", 0), 0))
+            payload["search_source"] = "item_fallback"
+            payload.pop("_embedding", None)
+            payload.pop("_entities", None)
+            scored.append((float(payload["score"]), payload))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [item[1] for item in scored[:limit]]
 
     def needs_bootstrap(self, group_id: str) -> bool:
         with _connect(self.memory_palace_dir / "bootstrap_state.db") as conn:
@@ -1082,6 +1178,7 @@ class MemoryStore:
         payload["stability"] = min(1.0, max(0.0, safe_float(payload.get("stability", 0.35), 0.35)))
         payload["emotional_weight"] = safe_float(payload.get("emotional_weight", 0), 0)
         payload["privacy_level"] = str(payload.get("privacy_level") or "default")
+        payload["permission_type"] = self._normalize_permission_type(payload.get("permission_type"), payload=payload)
         payload["expires_at"] = safe_float(payload.get("expires_at", 0), 0)
         payload["supports_recall"] = bool(payload.get("supports_recall", True))
         payload["supports_autofill"] = bool(payload.get("supports_autofill", False))
@@ -1106,6 +1203,79 @@ class MemoryStore:
         payload["_embedding"] = embed_text(searchable)
         payload["_entities"] = extract_entities(payload["summary"], payload["topic_tags"], payload["entity_tags"])
         return payload
+
+    def _normalize_permission_type(self, value: Any, *, payload: dict[str, Any]) -> str:
+        normalized = str(value or "").strip().lower()
+        allowed = {
+            "public_preference",
+            "private_fact",
+            "group_meme",
+            "conflict_memory",
+            "sensitive_memory",
+        }
+        if normalized in allowed:
+            return normalized
+        memory_type = str(payload.get("memory_type", "") or "").strip().lower()
+        source_kind = str(payload.get("source_kind", "") or "").strip().lower()
+        privacy_level = str(payload.get("privacy_level", "") or "").strip().lower()
+        if privacy_level in {"private", "sensitive"}:
+            return "private_fact" if privacy_level == "private" else "sensitive_memory"
+        if memory_type in {"group_meme", "concept_anchor"}:
+            return "group_meme"
+        if memory_type in {"conflict_memory"} or source_kind in {"conflict", "avoidance"}:
+            return "conflict_memory"
+        if not payload.get("group_id") and payload.get("user_id"):
+            return "private_fact"
+        return "public_preference"
+
+    def _normalize_context_type(self, context_type: str, *, group_id: str = "") -> str:
+        normalized = str(context_type or "").strip().lower()
+        if normalized in {"group", "private"}:
+            return normalized
+        return "group" if str(group_id or "").strip() else "private"
+
+    def _permission_filtered_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        context_type: str,
+    ) -> dict[str, Any] | None:
+        permission = self._normalize_permission_type(payload.get("permission_type"), payload=payload)
+        if context_type != "group":
+            payload["permission_type"] = permission
+            return payload
+        if permission in {"private_fact", "sensitive_memory"}:
+            return None
+        if permission == "conflict_memory":
+            summary = str(payload.get("summary", "") or "").strip()
+            return {
+                **payload,
+                "summary": "此话题可能敏感，回复要中性克制，不要复述具体细节。",
+                "raw_summary_redacted": True,
+                "permission_type": permission,
+                "permission_note": "conflict_memory redacted for group context",
+                "snippets": [],
+                "aliases": [],
+                "entity_tags": [],
+                "topic_tags": [],
+            }
+        payload["permission_type"] = permission
+        return payload
+
+    def _filter_recalled_by_permission(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        context_type: str,
+    ) -> list[dict[str, Any]]:
+        filtered: list[dict[str, Any]] = []
+        for item in list(items or []):
+            if not isinstance(item, dict):
+                continue
+            payload = self._permission_filtered_payload(dict(item), context_type=context_type)
+            if payload is not None:
+                filtered.append(payload)
+        return filtered
 
     def _get_memory_payload(
         self,
@@ -1769,6 +1939,7 @@ class MemoryStore:
                     reinforcement_count INTEGER NOT NULL DEFAULT 0,
                     last_accessed_at REAL NOT NULL DEFAULT 0,
                     access_count INTEGER NOT NULL DEFAULT 0,
+                    permission_type TEXT NOT NULL DEFAULT 'public_preference',
                     embedding BLOB,
                     embedding_model TEXT NOT NULL DEFAULT ''
                 )
@@ -1791,6 +1962,7 @@ class MemoryStore:
                     "reinforcement_count": "INTEGER NOT NULL DEFAULT 0",
                     "last_accessed_at": "REAL NOT NULL DEFAULT 0",
                     "access_count": "INTEGER NOT NULL DEFAULT 0",
+                    "permission_type": "TEXT NOT NULL DEFAULT 'public_preference'",
                     "embedding": "BLOB",
                     "embedding_model": "TEXT NOT NULL DEFAULT ''",
                 },

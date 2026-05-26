@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 
 from ._loader import load_personification_module
 
@@ -52,3 +53,29 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
     assert valid.requires_emotional_care is True
     assert valid.sticker_appropriate is False
     assert invalid is None
+
+
+def test_low_confidence_group_frame_recommends_silence() -> None:
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"chat_intent":"banter","plugin_question_intent":"capability","ambiguity_level":"low",'
+                        '"recommend_silence":false,"domain_focus":"social","confidence":0.2}'
+                    )
+                },
+            )()
+
+    frame = asyncio.run(
+        chat_intent.infer_turn_semantic_frame_with_llm(
+            "这句很不确定",
+            is_group=True,
+            tool_caller=_Caller(),
+        )
+    )
+
+    assert frame.recommend_silence is True
+    assert frame.ambiguity_level == "high"
