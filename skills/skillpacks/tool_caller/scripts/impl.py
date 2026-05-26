@@ -4,7 +4,9 @@ import asyncio
 import base64
 import json
 import re
+import time
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -41,6 +43,63 @@ ANTHROPIC_BUILTIN_SEARCH_TOOL = {
     "name": "web_search",
     "max_uses": 5,
 }
+
+_HTTP_CLIENT_POOL_MAX_SIZE = 8
+_HTTP_CLIENT_POOL_IDLE_SECONDS = 300.0
+_HTTP_CLIENT_POOL: "OrderedDict[tuple[Any, ...], tuple[httpx.AsyncClient, float]]" = OrderedDict()
+_HTTP_CLIENT_POOL_LOCK = asyncio.Lock()
+
+
+async def _get_pooled_http_client(
+    key: tuple[Any, ...],
+    **client_kwargs: Any,
+) -> httpx.AsyncClient:
+    now = time.monotonic()
+    stale_clients: list[httpx.AsyncClient] = []
+    result_client: httpx.AsyncClient | None = None
+    async with _HTTP_CLIENT_POOL_LOCK:
+        for existing_key, (existing, last_used) in list(_HTTP_CLIENT_POOL.items()):
+            if getattr(existing, "is_closed", False) or (now - last_used) > _HTTP_CLIENT_POOL_IDLE_SECONDS:
+                _HTTP_CLIENT_POOL.pop(existing_key, None)
+                stale_clients.append(existing)
+
+        cached = _HTTP_CLIENT_POOL.get(key)
+        if cached is not None:
+            hit, _ = cached
+            if not getattr(hit, "is_closed", False):
+                _HTTP_CLIENT_POOL.move_to_end(key)
+                _HTTP_CLIENT_POOL[key] = (hit, now)
+                result_client = hit
+            else:
+                _HTTP_CLIENT_POOL.pop(key, None)
+                stale_clients.append(hit)
+
+        if result_client is None:
+            result_client = httpx.AsyncClient(**client_kwargs)
+            _HTTP_CLIENT_POOL[key] = (result_client, now)
+            while len(_HTTP_CLIENT_POOL) > _HTTP_CLIENT_POOL_MAX_SIZE:
+                _, (evicted, _) = _HTTP_CLIENT_POOL.popitem(last=False)
+                stale_clients.append(evicted)
+
+    for stale_item in stale_clients:
+        if not getattr(stale_item, "is_closed", False):
+            try:
+                await stale_item.aclose()
+            except Exception:
+                pass
+    return result_client
+
+
+def _http_client_pool_key(*parts: Any, timeout: Any = "", connect_timeout: Any = "", proxy: str = "") -> tuple[Any, ...]:
+    return tuple(str(part or "") for part in parts) + (
+        f"timeout={timeout}",
+        f"connect={connect_timeout}",
+        f"proxy={proxy or ''}",
+    )
+
+
+def _clear_http_client_pool() -> None:
+    _HTTP_CLIENT_POOL.clear()
 
 
 @dataclass
@@ -104,7 +163,9 @@ def _normalize_api_type(api_type: Optional[str]) -> str:
     value = (api_type or "openai").strip().lower()
     if value in {"gemini", "gemini_official"}:
         return "gemini_official"
-    if value in {"gemini_cli", "gemini-cli", "geminicli", "antigravity_cli", "antigravity-cli", "antigravity", "agy", "agy_cli", "agy-cli"}:
+    if value in {"gemini_cli", "gemini-cli", "geminicli"}:
+        return "gemini_cli"
+    if value in {"antigravity_cli", "antigravity-cli", "antigravity", "agy", "agy_cli", "agy-cli"}:
         return "antigravity_cli"
     if value == "anthropic":
         return "anthropic"
@@ -713,6 +774,7 @@ class OpenAIToolCaller(ToolCaller):
         thinking_mode: str = "none",
         timeout: float = 60.0,
         supports_reasoning: Optional[bool] = None,
+        proxy: str = "",
     ) -> None:
         self.api_key = api_key
         self.base_url = _normalize_openai_base_url(base_url)
@@ -720,6 +782,7 @@ class OpenAIToolCaller(ToolCaller):
         self.thinking_mode = _normalize_thinking_mode(thinking_mode)
         self.timeout = timeout
         self._supports_reasoning = supports_reasoning
+        self.proxy = (proxy or "").strip()
 
     async def chat_with_tools(
         self,
@@ -732,12 +795,29 @@ class OpenAIToolCaller(ToolCaller):
 
         contains_image_input = _messages_contain_images(messages)
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=10.0)) as http_client:
-                client = AsyncOpenAI(
-                    api_key=self.api_key,
-                    base_url=self.base_url,
-                    http_client=http_client,
-                )
+            connect_timeout = 10.0
+            http_kwargs: dict[str, Any] = {
+                "timeout": httpx.Timeout(self.timeout, connect=connect_timeout),
+            }
+            if self.proxy:
+                http_kwargs["proxy"] = self.proxy
+            http_client = await _get_pooled_http_client(
+                _http_client_pool_key(
+                    "openai",
+                    self.base_url,
+                    self.api_key[:12],
+                    timeout=self.timeout,
+                    connect_timeout=connect_timeout,
+                    proxy=self.proxy,
+                ),
+                **http_kwargs,
+            )
+            client = AsyncOpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                http_client=http_client,
+            )
+            if True:
                 all_tools = list(tools)
                 filtered_tools = [
                     tool
@@ -1273,10 +1353,12 @@ class OpenAICodexToolCaller(ToolCaller):
         model: str = "gpt-5.3-codex",
         auth_path: str = "",
         timeout: float = 120.0,
+        proxy: str = "",
     ) -> None:
         self.model = _normalize_codex_model_name(model)
         self.auth_path_override = auth_path
         self.timeout = timeout
+        self.proxy = (proxy or "").strip()
 
     async def _get_access_token(self) -> tuple[str, _Path]:
         """加载并在需要时刷新 access token，返回 (token, auth_file_path)。"""
@@ -1555,69 +1637,82 @@ class OpenAICodexToolCaller(ToolCaller):
         last_error: Optional[Exception] = None
         for attempt in range(2):
             try:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(self.timeout, connect=15.0)
-                ) as client:
-                    async with client.stream(
-                        "POST",
+                connect_timeout = 15.0
+                client_kwargs: dict[str, Any] = {
+                    "timeout": httpx.Timeout(self.timeout, connect=connect_timeout),
+                }
+                if self.proxy:
+                    client_kwargs["proxy"] = self.proxy
+                client = await _get_pooled_http_client(
+                    _http_client_pool_key(
+                        "codex",
                         _CODEX_API_ENDPOINT,
-                        json=payload,
-                        headers={
-                            "Authorization": f"Bearer {access_token}",
-                            "Content-Type": "application/json",
-                            "Accept": "text/event-stream, application/json",
-                            "Connection": "close",
-                        },
-                    ) as resp:
-                        content_type = (resp.headers.get("content-type", "") or "").lower()
-                        if resp.is_error:
-                            detail = (await resp.aread()).decode("utf-8", errors="ignore").strip()
-                            lowered_detail = detail.lower()
-                            if contains_image_input and resp.status_code in {400, 403, 404, 415, 422} and any(
-                                token in lowered_detail
-                                for token in ("image", "vision", "multimodal", "input_image", "unsupported")
-                            ):
-                                return ToolCallerResponse(
-                                    finish_reason="stop",
-                                    content="",
-                                    tool_calls=[],
-                                    raw={"status_code": resp.status_code, "detail": detail[:600]},
-                                    used_builtin_search=False,
-                                    vision_unavailable=True,
-                                )
-                            if resp.status_code == 400:
-                                raise RuntimeError(
-                                    "Codex 请求返回 400。请确认 model 使用 Codex 可用模型（如 gpt-5.3-codex），"
-                                    f"当前 model={self.model}。服务端返回: {detail[:600]}"
-                                )
-                            raise RuntimeError(
-                                f"Codex 请求失败 HTTP {resp.status_code}: {detail[:600]}"
+                        access_token[:16],
+                        timeout=self.timeout,
+                        connect_timeout=connect_timeout,
+                        proxy=self.proxy,
+                    ),
+                    **client_kwargs,
+                )
+                async with client.stream(
+                    "POST",
+                    _CODEX_API_ENDPOINT,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream, application/json",
+                    },
+                ) as resp:
+                    content_type = (resp.headers.get("content-type", "") or "").lower()
+                    if resp.is_error:
+                        detail = (await resp.aread()).decode("utf-8", errors="ignore").strip()
+                        lowered_detail = detail.lower()
+                        if contains_image_input and resp.status_code in {400, 403, 404, 415, 422} and any(
+                            token in lowered_detail
+                            for token in ("image", "vision", "multimodal", "input_image", "unsupported")
+                        ):
+                            return ToolCallerResponse(
+                                finish_reason="stop",
+                                content="",
+                                tool_calls=[],
+                                raw={"status_code": resp.status_code, "detail": detail[:600]},
+                                used_builtin_search=False,
+                                vision_unavailable=True,
                             )
+                        if resp.status_code == 400:
+                            raise RuntimeError(
+                                "Codex 请求返回 400。请确认 model 使用 Codex 可用模型（如 gpt-5.3-codex），"
+                                f"当前 model={self.model}。服务端返回: {detail[:600]}"
+                            )
+                        raise RuntimeError(
+                            f"Codex 请求失败 HTTP {resp.status_code}: {detail[:600]}"
+                        )
 
-                        if "text/event-stream" in content_type:
-                            lines: List[str] = []
-                            async for line in resp.aiter_lines():
-                                lines.append(line)
-                            raw_text = "\n".join(lines).strip()
-                            if not raw_text:
-                                raise RuntimeError("Codex 返回空的流式响应体")
-                            data = self._parse_sse_response(raw_text)
-                        else:
-                            raw_text = (await resp.aread()).decode("utf-8", errors="ignore").strip()
-                            if not raw_text:
-                                raise RuntimeError("Codex 返回空响应体")
-                            try:
-                                data = json.loads(raw_text)
-                            except json.JSONDecodeError:
-                                lowered = raw_text.lower()
-                                if "data:" in lowered or "event:" in lowered:
-                                    data = self._parse_sse_response(raw_text)
-                                else:
-                                    raise RuntimeError(
-                                        "Codex 返回了非 JSON 响应，"
-                                        f"content-type={content_type or 'unknown'}，"
-                                        f"body={raw_text[:600]}"
-                                    )
+                    if "text/event-stream" in content_type:
+                        lines: List[str] = []
+                        async for line in resp.aiter_lines():
+                            lines.append(line)
+                        raw_text = "\n".join(lines).strip()
+                        if not raw_text:
+                            raise RuntimeError("Codex 返回空的流式响应体")
+                        data = self._parse_sse_response(raw_text)
+                    else:
+                        raw_text = (await resp.aread()).decode("utf-8", errors="ignore").strip()
+                        if not raw_text:
+                            raise RuntimeError("Codex 返回空响应体")
+                        try:
+                            data = json.loads(raw_text)
+                        except json.JSONDecodeError:
+                            lowered = raw_text.lower()
+                            if "data:" in lowered or "event:" in lowered:
+                                data = self._parse_sse_response(raw_text)
+                            else:
+                                raise RuntimeError(
+                                    "Codex 返回了非 JSON 响应，"
+                                    f"content-type={content_type or 'unknown'}，"
+                                    f"body={raw_text[:600]}"
+                                )
                 break
             except (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError, httpx.ConnectError) as e:
                 last_error = e
@@ -2993,14 +3088,25 @@ class GeminiCliToolCaller(ToolCaller):
 
     async def _load_code_assist_project(self, access_token: str) -> str:
         client_kwargs = self._http_client_kwargs(connect_timeout=15.0)
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            resp = await client.post(
+        client = await _get_pooled_http_client(
+            _http_client_pool_key(
+                self._auth_label,
+                "loadCodeAssist",
                 self._load_code_assist_endpoint(),
-                json={"metadata": self._load_code_assist_metadata()},
-                headers=self._headers(access_token),
-            )
-            resp.raise_for_status()
-            data = resp.json()
+                access_token[:16],
+                timeout=self.timeout,
+                connect_timeout=15.0,
+                proxy=self.proxy,
+            ),
+            **client_kwargs,
+        )
+        resp = await client.post(
+            self._load_code_assist_endpoint(),
+            json={"metadata": self._load_code_assist_metadata()},
+            headers=self._headers(access_token),
+        )
+        resp.raise_for_status()
+        data = resp.json()
         return str(data.get("cloudaicompanionProject", "") or "").strip()
 
     async def _resolve_project(self, access_token: str, auth_file: _Path | None = None) -> str:
@@ -3098,7 +3204,20 @@ class GeminiCliToolCaller(ToolCaller):
             model_candidates = _gemini_cli_model_candidates(self.model)
             last_exc: Exception | None = None
             auth_refreshed_for_401 = False
-            async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=15.0)) as client:
+            client_kwargs = self._http_client_kwargs(connect_timeout=15.0)
+            client = await _get_pooled_http_client(
+                _http_client_pool_key(
+                    self._auth_label,
+                    "generateContent",
+                    _GEMINI_CLI_GENERATE_ENDPOINT,
+                    access_token[:16],
+                    timeout=self.timeout,
+                    connect_timeout=15.0,
+                    proxy=self.proxy,
+                ),
+                **client_kwargs,
+            )
+            if True:
 
                 async def _post_once(_model_name: str, _access_token: str, _project: str):
                     envelope_inner = {
@@ -3626,7 +3745,19 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
             project_refreshed_for_403 = False
             selected_model_name = ""
             client_kwargs = self._http_client_kwargs(connect_timeout=15.0)
-            async with httpx.AsyncClient(**client_kwargs) as client:
+            client = await _get_pooled_http_client(
+                _http_client_pool_key(
+                    self._auth_label,
+                    "streamGenerateContent",
+                    _ANTIGRAVITY_CLI_STREAM_ENDPOINT,
+                    access_token[:16],
+                    timeout=self.timeout,
+                    connect_timeout=15.0,
+                    proxy=self.proxy,
+                ),
+                **client_kwargs,
+            )
+            if True:
 
                 async def _post_once(_model_name: str, _access_token: str, _project: str):
                     # Antigravity v1internal envelope 比 gemini-cli 多两个顶层字段：
@@ -3918,6 +4049,7 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
     api_key = str(getattr(config, "personification_api_key", "") or "").strip()
     api_url = str(getattr(config, "personification_api_url", "") or "").strip()
     model = str(getattr(config, "personification_model", "") or "").strip()
+    proxy = str(getattr(config, "personification_proxy", "") or "").strip()
     thinking_mode = _normalize_thinking_mode(
         getattr(config, "personification_thinking_mode", "none")
     )
@@ -3937,6 +4069,7 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
             auth_path=auth_path,
             project=project,
             thinking_mode=thinking_mode,
+            proxy=proxy,
         )
     if api_type == "antigravity_cli":
         auth_path = str(getattr(config, "personification_antigravity_cli_auth_path", "") or "").strip()
@@ -3950,6 +4083,7 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
             auth_path=auth_path,
             project=project,
             thinking_mode=thinking_mode,
+            proxy=proxy or str(getattr(config, "personification_antigravity_cli_proxy", "") or "").strip(),
         )
     if api_type == "anthropic":
         return AnthropicToolCaller(
@@ -3970,6 +4104,7 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
         return OpenAICodexToolCaller(
             model=model or "gpt-5.3-codex",
             auth_path=auth_path,
+            proxy=proxy,
         )
     return OpenAIToolCaller(
         api_key=api_key,
@@ -3977,4 +4112,5 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
         model=model,
         thinking_mode=thinking_mode,
         supports_reasoning=supports_reasoning,
+        proxy=proxy,
     )

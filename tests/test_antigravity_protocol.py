@@ -10,9 +10,18 @@ from unittest.mock import MagicMock, patch
 
 from ._loader import load_personification_module
 
+import pytest
+
 impl = load_personification_module(
     "plugin.personification.skills.skillpacks.tool_caller.scripts.impl"
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_pool():
+    impl._clear_http_client_pool()
+    yield
+    impl._clear_http_client_pool()
 
 
 # ====== 纯函数测试 ======

@@ -146,6 +146,16 @@ main { padding:20px 26px; max-width:1400px; }
 .field-input { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 .field-input input[type=text], .field-input input[type=number], .field-input textarea { min-width:260px; flex:1; max-width:560px; }
 .field-input textarea { min-height:60px; font-family:ui-monospace,Consolas,monospace; }
+.api-pool-editor { width:100%; max-width:980px; display:flex; flex-direction:column; gap:10px; }
+.api-provider-card { border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--bg); }
+.api-provider-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px; }
+.api-provider-title { font-weight:600; }
+.api-provider-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; }
+.api-provider-field { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.api-provider-field label { color:var(--muted); font-size:12px; }
+.api-provider-field input, .api-provider-field select { width:100%; min-width:0; }
+.api-provider-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.api-pool-empty { border:1px dashed var(--line); border-radius:8px; padding:14px; color:var(--muted); }
 .btn { padding:7px 14px; border-radius:6px; border:1px solid var(--line); background:var(--panel); color:var(--text); transition:border-color .15s, background .15s, transform .05s; }
 .btn:hover { border-color:var(--accent); background:var(--hover-bg); }
 .btn:active { transform:translateY(1px); }
@@ -208,6 +218,7 @@ tbody tr:hover td { background:var(--hover-bg); }
   table { font-size:12.5px; }
   th, td { padding:6px 8px; }
   .field-input input[type=text], .field-input input[type=number], .field-input textarea { min-width:0; max-width:100%; width:100%; }
+  .api-provider-grid { grid-template-columns:1fr; }
   .sticker-grid { grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); }
   .scrim { position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:40; }
 }
@@ -1257,6 +1268,9 @@ function renderField(e) {
 
 function renderInput(e) {
   const cur = e.current;
+  if (e.field_name === "personification_api_pools") {
+    return renderApiPoolEditor(e);
+  }
   if (e.kind === "toggle") {
     const on = cur === true || cur === "true" || cur === 1;
     return `<div class="toggle">
@@ -1287,6 +1301,175 @@ function renderInput(e) {
   }
   return `<input type="text" value="${escapeAttr(cur==null?'':cur)}" oninput="markDirty(this)">
     <button class="btn small primary" onclick="commitTextField('${escapeAttr(e.field_name)}', this, 'text')">保存</button>`;
+}
+
+function normalizeApiPoolValue(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value.trim());
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  }
+  return [];
+}
+
+function defaultApiProvider(index) {
+  return {
+    name: `provider_${index + 1}`,
+    api_type: "openai",
+    api_url: "",
+    api_key: "",
+    model: "",
+    auth_path: "",
+    project: "",
+    proxy: "",
+    timeout: 60,
+    priority: index,
+    enabled: true,
+  };
+}
+
+function apiProviderFieldVisible(apiType, field) {
+  const type = (apiType || "openai").replaceAll("-", "_");
+  if (["openai_codex", "codex", "claude_code", "claude_cli"].includes(type)) {
+    return !["api_url", "api_key", "project"].includes(field);
+  }
+  if (["gemini_cli", "antigravity_cli", "agy", "agy_cli"].includes(type)) {
+    return !["api_url", "api_key"].includes(field);
+  }
+  return !["auth_path", "project"].includes(field);
+}
+
+function renderApiPoolEditor(e) {
+  const providers = normalizeApiPoolValue(e.current);
+  const cards = providers.map((provider, index) => renderApiProviderCard(e.field_name, provider || {}, index)).join("");
+  return `<div class="api-pool-editor" data-api-pool-field="${escapeAttr(e.field_name)}">
+    <div class="api-provider-actions">
+      <button class="btn small" onclick="addApiProvider('${escapeAttr(e.field_name)}')">+ 添加 Provider</button>
+      <button class="btn small primary" onclick="saveApiPool('${escapeAttr(e.field_name)}')">保存全部</button>
+      <button class="btn small" onclick="toggleApiPoolRaw(this)">查看 JSON</button>
+    </div>
+    <div class="api-provider-list">${cards || '<div class="api-pool-empty">暂无 provider，点击“添加 Provider”创建。</div>'}</div>
+    <textarea data-api-pool-raw style="display:none;min-height:120px" oninput="markDirty(this)">${escapeHtml(JSON.stringify(providers, null, 2))}</textarea>
+  </div>`;
+}
+
+function renderApiProviderCard(field, provider, index) {
+  const apiType = provider.api_type || "openai";
+  const choices = ["openai", "openai_codex", "gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code"];
+  const typeOptions = choices.map(c => `<option value="${escapeAttr(c)}" ${apiType===c?'selected':''}>${escapeHtml(c)}</option>`).join("");
+  const fieldHtml = (name, label, type = "text", extra = "") => {
+    if (!apiProviderFieldVisible(apiType, name)) return "";
+    const value = provider[name] == null ? "" : provider[name];
+    return `<div class="api-provider-field" data-provider-field="${escapeAttr(name)}">
+      <label>${escapeHtml(label)}</label>
+      <input type="${escapeAttr(type)}" value="${escapeAttr(value)}" ${extra}>
+    </div>`;
+  };
+  return `<div class="api-provider-card" data-provider-index="${index}">
+    <div class="api-provider-head">
+      <div class="api-provider-title">Provider ${index + 1}</div>
+      <button class="btn small danger" onclick="removeApiProvider('${escapeAttr(field)}', ${index})">删除</button>
+    </div>
+    <div class="api-provider-grid">
+      ${fieldHtml("name", "名称")}
+      <div class="api-provider-field" data-provider-field="priority">
+        <label>优先级</label>
+        <input type="number" step="1" value="${escapeAttr(provider.priority ?? index)}">
+      </div>
+      <div class="api-provider-field" data-provider-field="api_type">
+        <label>类型</label>
+        <select onchange="refreshApiPoolEditor('${escapeAttr(field)}')">${typeOptions}</select>
+      </div>
+      ${fieldHtml("api_url", "API URL")}
+      ${fieldHtml("api_key", "API Key", "password")}
+      ${fieldHtml("model", "模型")}
+      ${fieldHtml("auth_path", "Auth Path")}
+      ${fieldHtml("project", "Project")}
+      ${fieldHtml("proxy", "代理")}
+      ${fieldHtml("timeout", "超时（秒）", "number", 'step="1"')}
+      <div class="api-provider-field" data-provider-field="enabled">
+        <label>启用</label>
+        <select>
+          <option value="true" ${provider.enabled !== false ? 'selected' : ''}>是</option>
+          <option value="false" ${provider.enabled === false ? 'selected' : ''}>否</option>
+        </select>
+      </div>
+    </div>
+  </div>`;
+}
+
+function readApiPoolEditor(field) {
+  const root = document.querySelector(`[data-api-pool-field="${CSS.escape(field)}"]`);
+  if (!root) return [];
+  const raw = root.querySelector("[data-api-pool-raw]");
+  if (raw && raw.style.display !== "none" && raw.value.trim()) {
+    try {
+      const parsed = JSON.parse(raw.value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      throw new Error("API Pool JSON 格式错误");
+    }
+  }
+  return Array.from(root.querySelectorAll(".api-provider-card")).map((card, index) => {
+    const provider = defaultApiProvider(index);
+    card.querySelectorAll("[data-provider-field]").forEach(wrap => {
+      const name = wrap.dataset.providerField;
+      const input = wrap.querySelector("input, select");
+      if (!input) return;
+      let value = input.value;
+      if (name === "enabled") value = value === "true";
+      if (name === "priority" || name === "timeout") value = value === "" ? undefined : parseInt(value, 10);
+      if (value !== "" && value !== undefined) provider[name] = value;
+      else delete provider[name];
+    });
+    return provider;
+  });
+}
+
+function writeApiPoolEditor(field, providers) {
+  const root = document.querySelector(`[data-api-pool-field="${CSS.escape(field)}"]`);
+  if (!root) return;
+  const list = root.querySelector(".api-provider-list");
+  list.innerHTML = providers.map((provider, index) => renderApiProviderCard(field, provider, index)).join("") || '<div class="api-pool-empty">暂无 provider，点击“添加 Provider”创建。</div>';
+  const raw = root.querySelector("[data-api-pool-raw]");
+  if (raw) raw.value = JSON.stringify(providers, null, 2);
+}
+
+function refreshApiPoolEditor(field) {
+  try { writeApiPoolEditor(field, readApiPoolEditor(field)); } catch (e) { alertFlash("err", e.message); }
+}
+
+function addApiProvider(field) {
+  try {
+    const providers = readApiPoolEditor(field);
+    providers.push(defaultApiProvider(providers.length));
+    writeApiPoolEditor(field, providers);
+  } catch (e) { alertFlash("err", e.message); }
+}
+
+function removeApiProvider(field, index) {
+  try {
+    const providers = readApiPoolEditor(field);
+    providers.splice(index, 1);
+    writeApiPoolEditor(field, providers);
+  } catch (e) { alertFlash("err", e.message); }
+}
+
+function toggleApiPoolRaw(btn) {
+  const root = btn.closest(".api-pool-editor");
+  const raw = root.querySelector("[data-api-pool-raw]");
+  const showing = raw.style.display !== "none";
+  if (!showing) raw.value = JSON.stringify(readApiPoolEditor(root.dataset.apiPoolField), null, 2);
+  raw.style.display = showing ? "none" : "block";
+  btn.textContent = showing ? "查看 JSON" : "隐藏 JSON";
+}
+
+async function saveApiPool(field) {
+  try {
+    await saveField(field, readApiPoolEditor(field));
+  } catch (e) { alertFlash("err", e.message); }
 }
 
 function activeSourceLabel(src) {

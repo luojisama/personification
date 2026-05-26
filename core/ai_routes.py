@@ -44,7 +44,9 @@ def _normalize_api_type(api_type: str) -> str:
         return "anthropic"
     if value in {"openai_codex", "codex"}:
         return "openai_codex"
-    if value in {"gemini_cli", "geminicli", "antigravity_cli", "antigravity", "agy", "agy_cli"}:
+    if value in {"gemini_cli", "geminicli"}:
+        return "gemini_cli"
+    if value in {"antigravity_cli", "antigravity", "agy", "agy_cli"}:
         return "antigravity_cli"
     if value in {"claude_code", "claudecode", "claude_cli"}:
         return "claude_code"
@@ -477,6 +479,8 @@ class _ProviderConfigProxy:
             return self._provider.get("api_url", "")
         if name == "personification_api_key":
             return self._provider.get("api_key", "")
+        if name == "personification_proxy":
+            return self._provider.get("proxy", "")
         if name == "personification_model":
             if self._model_override:
                 return self._model_override

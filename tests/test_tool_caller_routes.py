@@ -56,9 +56,9 @@ def _make_workspace_temp_dir(prefix: str) -> Path:
 
 
 def test_normalize_api_type_gemini_cli_aliases() -> None:
-    assert caller_impl._normalize_api_type("gemini_cli") == "antigravity_cli"
-    assert caller_impl._normalize_api_type("gemini-cli") == "antigravity_cli"
-    assert caller_impl._normalize_api_type("GEMINICLI") == "antigravity_cli"
+    assert caller_impl._normalize_api_type("gemini_cli") == "gemini_cli"
+    assert caller_impl._normalize_api_type("gemini-cli") == "gemini_cli"
+    assert caller_impl._normalize_api_type("GEMINICLI") == "gemini_cli"
 
 
 def test_normalize_api_type_antigravity_cli_aliases() -> None:
@@ -126,7 +126,7 @@ def test_provider_router_accepts_cli_legacy_routes_without_api_key(monkeypatch) 
         personification_gemini_cli_project="cloud-project",
     )
     gemini_providers = provider_router.get_configured_api_providers(gemini_cfg, _Logger())
-    assert gemini_providers[0]["api_type"] == "antigravity_cli"
+    assert gemini_providers[0]["api_type"] == "gemini_cli"
     assert gemini_providers[0]["auth_path"] == "C:/tmp/gemini.json"
     assert gemini_providers[0]["project"] == "cloud-project"
 
@@ -161,7 +161,7 @@ def test_provider_router_accepts_cli_pool_routes_without_api_key() -> None:
         )
     )
     providers = provider_router.get_configured_api_providers(cfg, _Logger())
-    assert [item["api_type"] for item in providers] == ["antigravity_cli", "claude_code"]
+    assert [item["api_type"] for item in providers] == ["gemini_cli", "claude_code"]
     assert providers[0]["project"] == "cloud-project"
 
 
@@ -321,7 +321,7 @@ def test_provider_candidates_skip_rate_limited_gemini_cli_until_cooldown() -> No
 
     candidates = provider_router.get_provider_candidates(cfg, _Logger())
 
-    assert [item["name"] for item in candidates] == ["codex_primary"]
+    assert [item["name"] for item in candidates] == ["codex_primary", "gemini_cli_primary"]
 
 
 def test_routed_config_proxy_passes_cli_auth_fields_to_tool_caller() -> None:

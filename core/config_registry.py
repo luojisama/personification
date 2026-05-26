@@ -258,12 +258,19 @@ _GROUP_RULES: tuple[tuple[Callable[[str], bool], str], ...] = (
         "上下文压缩",
     ),
     (lambda k: k.startswith("background_"), "后台任务"),
+    (lambda k: k.startswith("social_intelligence_") or k.startswith("social_"), "后台任务"),
     (lambda k: k.startswith("wiki"), "百科工具"),
+    (lambda k: k.startswith("tool_"), "工具"),
     (lambda k: k == "plugin_knowledge_build_enabled" or k.startswith("group_knowledge") or k.startswith("group_style"), "知识库"),
     (lambda k: k.startswith("proactive_"), "主动私聊"),
     (lambda k: k in {"schedule_global", "group_schedule_enabled"}, "作息"),
     (lambda k: k.startswith("group_"), "群作用域"),
-    (lambda k: k in {"api_pools", "model_overrides", "lite_model"} or k.startswith("quota_"), "模型路由"),
+    (
+        lambda k: k in {"api_pools", "model_overrides", "lite_model", "antigravity_cli_proxy"}
+        or k.startswith("quota_")
+        or k.startswith("provider_"),
+        "模型路由",
+    ),
     (lambda k: k in {"agent_max_steps", "response_timeout"}, "Agent"),
 )
 

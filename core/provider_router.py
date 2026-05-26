@@ -31,11 +31,13 @@ def normalize_api_type(api_type: Optional[str]) -> str:
         return "gemini"
     if value in {"openai_codex", "codex"}:
         return "openai_codex"
-    if value in {"gemini_cli", "geminicli", "antigravity_cli", "antigravity", "agy", "agy_cli"}:
+    if value in {"gemini_cli", "geminicli"}:
+        return "gemini_cli"
+    if value in {"antigravity_cli", "antigravity", "agy", "agy_cli"}:
         return "antigravity_cli"
     if value in {"claude_code", "claudecode", "claude_cli"}:
         return "claude_code"
-    if value not in {"openai", "gemini", "anthropic", "openai_codex", "antigravity_cli", "claude_code"}:
+    if value not in {"openai", "gemini", "anthropic", "openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}:
         return "openai"
     return value
 
@@ -522,6 +524,7 @@ def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
             model=provider["model"],
             auth_path=str(provider.get("auth_path", "") or "").strip(),
             timeout=_provider_timeout(provider),
+            proxy=str(provider.get("proxy", "") or "").strip(),
         )
     if provider["api_type"] == "gemini_cli":
         return tool_impl.GeminiCliToolCaller(
@@ -530,6 +533,7 @@ def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
             project=str(provider.get("project", "") or "").strip(),
             thinking_mode=_get_thinking_mode(plugin_config),
             timeout=_provider_timeout(provider),
+            proxy=str(provider.get("proxy", "") or "").strip(),
         )
     if provider["api_type"] == "antigravity_cli":
         # 先看 provider 自带 proxy 字段；为空再 fallback 到全局
@@ -577,6 +581,7 @@ def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
         **common_kwargs,
         timeout=_provider_timeout(provider),
         supports_reasoning=supports_reasoning,
+        proxy=str(provider.get("proxy", "") or "").strip(),
     )
 
 
