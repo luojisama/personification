@@ -974,20 +974,25 @@ async function renderMemoryGraphCanvas() {
     }
   }));
   if (_cytoscapeInstance) { try { _cytoscapeInstance.destroy(); } catch {} _cytoscapeInstance = null; }
+  const theme = document.documentElement.getAttribute('data-theme') || 'dark';
+  const labelColor = theme === 'light' ? '#1f2937' : '#e6e8ef';
+  const labelOutline = theme === 'light' ? '#ffffff' : '#0f1115';
+  const edgeColor = theme === 'light' ? '#9ca3af' : '#3b4252';
+  const selectedBorder = theme === 'light' ? '#1f2937' : '#ffffff';
   _cytoscapeInstance = window.cytoscape({
     container: el,
     elements: { nodes, edges },
     style: [
       { selector: 'node', style: {
         'background-color': 'data(color)', 'label': 'data(label)',
-        'color': '#e6e8ef', 'font-size': '10px', 'width': 'data(size)', 'height': 'data(size)',
-        'text-valign': 'bottom', 'text-margin-y': 4, 'text-outline-width': 1, 'text-outline-color': '#0f1115',
+        'color': labelColor, 'font-size': '10px', 'width': 'data(size)', 'height': 'data(size)',
+        'text-valign': 'bottom', 'text-margin-y': 4, 'text-outline-width': 1, 'text-outline-color': labelOutline,
       }},
       { selector: 'edge', style: {
-        'width': 'data(thickness)', 'line-color': '#3b4252', 'curve-style': 'bezier',
+        'width': 'data(thickness)', 'line-color': edgeColor, 'curve-style': 'bezier',
         'opacity': 0.65, 'target-arrow-shape': 'none',
       }},
-      { selector: 'node:selected', style: { 'border-width': 2, 'border-color': '#fff' }},
+      { selector: 'node:selected', style: { 'border-width': 2, 'border-color': selectedBorder }},
     ],
     layout: { name: 'cose', animate: false, idealEdgeLength: 90, nodeRepulsion: 6000, padding: 30 },
     wheelSensitivity: 0.2,
@@ -1015,7 +1020,9 @@ function resetMemoryGraphZoom() {
 function exportMemoryGraphPNG() {
   if (!_cytoscapeInstance) return;
   try {
-    const blob = _cytoscapeInstance.png({ output: 'blob', bg: '#0f1115', full: true, scale: 2 });
+    const theme = document.documentElement.getAttribute('data-theme') || 'dark';
+    const bg = theme === 'light' ? '#f6f8fb' : '#0f1115';
+    const blob = _cytoscapeInstance.png({ output: 'blob', bg, full: true, scale: 2 });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = 'memory-palace.png';
