@@ -1254,15 +1254,63 @@ async def handle_view_plugin_knowledge_error_command(
 _PLUGIN_GIT_DIR = str(Path(__file__).resolve().parent.parent)
 
 
-def _git_mirror_prefix() -> str:
-    """读取插件配置里的镜像前缀，去掉尾部 / 由调用方按需拼接。"""
+def _git_mirror_prefixes() -> list[str]:
+    """读取配置里的镜像列表（plural 优先，singular 兼容并去重保序）。"""
     try:
         from nonebot import get_driver
         cfg = get_driver().config
-        prefix = str(getattr(cfg, "personification_git_mirror_prefix", "") or "").strip()
+        plural = getattr(cfg, "personification_git_mirror_prefixes", None) or []
+        singular = str(getattr(cfg, "personification_git_mirror_prefix", "") or "").strip()
     except Exception:
-        prefix = ""
-    return prefix.rstrip("/")
+        plural, singular = [], ""
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in list(plural) + [singular]:
+        s = str(item or "").strip().rstrip("/")
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+async def _get_origin_https_url(cwd: str) -> str | None:
+    """读取 origin remote URL，SSH 形式归一化成 https。"""
+    rc, out, _ = await _run_git_command(["remote", "get-url", "origin"], cwd=cwd)
+    if rc != 0:
+        return None
+    url = (out or "").strip()
+    if not url:
+        return None
+    m = re.match(r"^git@([^:]+):(.+?)(\.git)?$", url)
+    if m:
+        host, path = m.group(1), m.group(2)
+        return f"https://{host}/{path}.git"
+    return url
+
+
+async def _probe_mirror(mirror: str, repo_url: str, *, timeout: float = 4.0) -> bool:
+    """HEAD 探测镜像是否能响应。mirror='' 表示直连。<500 视为联通。"""
+    target = f"{mirror}/{repo_url}" if mirror else repo_url
+
+    def _do() -> bool:
+        import urllib.request
+        import urllib.error
+        req = urllib.request.Request(
+            target, method="HEAD", headers={"User-Agent": "personification-git-probe"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                code = getattr(resp, "status", 200) or 200
+                return 0 < code < 500
+        except urllib.error.HTTPError as e:
+            return 0 < int(e.code or 0) < 500
+        except Exception:
+            return False
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_do), timeout=timeout + 1.0)
+    except Exception:
+        return False
 
 
 def _looks_like_network_failure(stderr: str) -> bool:
@@ -1328,27 +1376,55 @@ async def _run_git_with_mirror_fallback(
     args: list[str],
     *,
     cwd: str,
-) -> tuple[int, str, str, bool]:
-    """先直连，失败且像网络错误时用镜像前缀重试一次。
+) -> tuple[int, str, str, str, list[tuple[str, bool]]]:
+    """先直连；失败且像网络错误时并行探测所有镜像，选第一个能通的重试。
 
-    返回 (rc, stdout, stderr, used_mirror)。
+    返回 (rc, stdout, stderr, used_mirror_url_or_empty, probe_log)。
+    probe_log 仅在触发镜像逻辑时非空，便于在通知里展示。
     """
     rc, out, err = await _run_git_command(args, cwd=cwd)
     if rc == 0:
-        return rc, out, err, False
-    mirror = _git_mirror_prefix()
-    if not mirror or not _looks_like_network_failure(err):
-        return rc, out, err, False
-    # 用 -c url.<mirror>/https://github.com/.insteadOf=https://github.com/ 临时改写
-    rewrite = f"url.{mirror}/https://github.com/.insteadOf=https://github.com/"
+        return rc, out, err, "", []
+    mirrors = _git_mirror_prefixes()
+    if not mirrors or not _looks_like_network_failure(err):
+        return rc, out, err, "", []
+
+    repo_url = await _get_origin_https_url(cwd)
+    if not repo_url:
+        return rc, out, err, "", []
+
+    probes = await asyncio.gather(
+        *(_probe_mirror(m, repo_url) for m in mirrors), return_exceptions=True
+    )
+    probe_log: list[tuple[str, bool]] = []
+    chosen = ""
+    for mirror, ok in zip(mirrors, probes):
+        is_alive = ok is True
+        probe_log.append((mirror, is_alive))
+        if is_alive and not chosen:
+            chosen = mirror
+    if not chosen:
+        return rc, out, err, "", probe_log
+
+    rewrite = f"url.{chosen}/https://github.com/.insteadOf=https://github.com/"
     rc2, out2, err2 = await _run_git_command(args, cwd=cwd, extra_config=[rewrite])
-    return rc2, out2, err2, True
+    return rc2, out2, err2, chosen, probe_log
+
+
+def _format_probe_log(probe_log: list[tuple[str, bool]]) -> str:
+    if not probe_log:
+        return ""
+    return "\n".join(
+        f"  {'✓' if ok else '✗'} {m}" for m, ok in probe_log
+    )
 
 
 async def check_git_update_available(*, plugin_dir: str | None = None) -> tuple[bool, str, str]:
     """Fetch remote and compare; returns (has_update, local_hash, remote_hash_or_error)."""
     cwd = str(plugin_dir or _PLUGIN_GIT_DIR)
-    rc, _, err, _ = await _run_git_with_mirror_fallback(["fetch", "--prune"], cwd=cwd)
+    rc, _, err, _used, _probes = await _run_git_with_mirror_fallback(
+        ["fetch", "--prune"], cwd=cwd
+    )
     if rc != 0:
         return False, "", f"fetch 失败: {err}"
     _, local_hash, _ = await _run_git_command(["rev-parse", "HEAD"], cwd=cwd)
@@ -1361,12 +1437,14 @@ async def check_git_update_available(*, plugin_dir: str | None = None) -> tuple[
 async def perform_git_pull(*, plugin_dir: str | None = None) -> tuple[bool, str]:
     """Pull latest commits; returns (ok, message)."""
     cwd = str(plugin_dir or _PLUGIN_GIT_DIR)
-    rc, out, err, used_mirror = await _run_git_with_mirror_fallback(["pull", "--ff-only"], cwd=cwd)
+    rc, out, err, used_mirror, _probes = await _run_git_with_mirror_fallback(
+        ["pull", "--ff-only"], cwd=cwd
+    )
     if rc != 0:
         return False, err or out or "pull 失败"
     msg = out or "已更新"
     if used_mirror:
-        msg = f"（已通过镜像 {_git_mirror_prefix()} 完成）\n{msg}"
+        msg = f"（已通过镜像 {used_mirror} 完成）\n{msg}"
     return True, msg
 
 
@@ -1394,7 +1472,7 @@ async def _git_pull_background(
 ) -> None:
     """Background task: pull then notify result."""
     try:
-        rc_pull, pull_out, pull_err, used_mirror = await _run_git_with_mirror_fallback(
+        rc_pull, pull_out, pull_err, used_mirror, _probes = await _run_git_with_mirror_fallback(
             ["pull", "--ff-only"], cwd=cwd
         )
         if rc_pull != 0:
@@ -1404,9 +1482,7 @@ async def _git_pull_background(
             )
         else:
             _, new_log, _ = await _run_git_command(["log", "--oneline", "-1", "HEAD"], cwd=cwd)
-            mirror_note = (
-                f"（已通过镜像 {_git_mirror_prefix()} 完成）\n" if used_mirror else ""
-            )
+            mirror_note = f"（已通过镜像 {used_mirror} 完成）\n" if used_mirror else ""
             msg = (
                 f"✅ 拟人插件已更新！\n"
                 f"{mirror_note}"
@@ -1465,21 +1541,26 @@ async def _handle_git_update_impl(
             "请手动执行 git pull 更新插件。"
         )
 
-    rc_fetch, _, fetch_err, fetch_used_mirror = await _run_git_with_mirror_fallback(
+    rc_fetch, _, fetch_err, fetch_used_mirror, fetch_probes = await _run_git_with_mirror_fallback(
         ["fetch", "--prune"], cwd=cwd
     )
     if rc_fetch != 0:
-        mirror = _git_mirror_prefix()
-        hint = (
-            f"\n（已尝试镜像 {mirror} 仍失败）" if mirror else
-            "\n（可在配置里设置 personification_git_mirror_prefix 启用镜像回退）"
-        )
+        if fetch_probes:
+            hint = "\n镜像联通性探测结果：\n" + _format_probe_log(fetch_probes)
+        elif _git_mirror_prefixes():
+            hint = "\n（已配置镜像，但错误类型未触发回退）"
+        else:
+            hint = "\n（可在配置里设置 personification_git_mirror_prefixes 启用镜像回退）"
         await matcher.finish(
             f"拉取远程信息失败：{fetch_err or '未知错误（网络问题或无远程仓库）'}\n"
             "请检查网络连接和 git remote 配置。" + hint
         )
     if fetch_used_mirror:
-        await matcher.send(f"（直连失败，已通过镜像 {_git_mirror_prefix()} 拉取远程信息）")
+        probe_summary = _format_probe_log(fetch_probes)
+        await matcher.send(
+            f"（直连失败，已选用镜像 {fetch_used_mirror} 拉取）\n"
+            f"探测结果：\n{probe_summary}"
+        )
 
     _, local_hash, _ = await _run_git_command(["rev-parse", "HEAD"], cwd=cwd)
     local_short = (local_hash or "")[:7] or "unknown"
@@ -1518,7 +1599,7 @@ async def _handle_git_update_impl(
             "已在后台开始拉取，完成后将发送通知。"
         )
     else:
-        rc_pull, pull_out, pull_err, pull_used_mirror = await _run_git_with_mirror_fallback(
+        rc_pull, pull_out, pull_err, pull_used_mirror, _pull_probes = await _run_git_with_mirror_fallback(
             ["pull", "--ff-only"], cwd=cwd
         )
         if rc_pull != 0:
@@ -1526,9 +1607,7 @@ async def _handle_git_update_impl(
                 f"更新失败：\n{pull_err or pull_out or '未知错误'}\n当前版本仍为 {local_short}"
             )
         _, new_log, _ = await _run_git_command(["log", "--oneline", "-1", "HEAD"], cwd=cwd)
-        mirror_note = (
-            f"（通过镜像 {_git_mirror_prefix()} 完成）\n" if pull_used_mirror else ""
-        )
+        mirror_note = f"（通过镜像 {pull_used_mirror} 完成）\n" if pull_used_mirror else ""
         await matcher.finish(
             f"✅ 已更新至 {remote_short}！\n{mirror_note}{new_log}\n"
             f"更新内容：\n{commits_text}\n请重启 Bot。"
