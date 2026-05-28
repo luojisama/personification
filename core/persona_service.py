@@ -235,6 +235,11 @@ class PersonaStore:
         user_id: str = "",
     ) -> str | None:
         prompt = build_persona_prompt(messages, previous.data if previous else None)
+        retry_prompt = (
+            prompt
+            + "\n\n（提醒：请只基于上述聊天记录客观提炼字段，不要给出'抱歉'、"
+            "'作为AI'、'无法回答'等套话；信息不足的字段直接写'信息不足'。）"
+        )
         token = None
         try:
             from .llm_context import reset_llm_context, set_llm_context
@@ -243,11 +248,31 @@ class PersonaStore:
         except Exception:
             token = None
         try:
-            response = await self._tool_caller.chat_with_tools(
-                messages=[{"role": "user", "content": prompt}],
-                tools=[],
-                use_builtin_search=False,
-            )
+            from .safety_filter import SafetyRefusalError, sanitize_or_retry
+
+            async def _first() -> Any:
+                return await self._tool_caller.chat_with_tools(
+                    messages=[{"role": "user", "content": prompt}],
+                    tools=[],
+                    use_builtin_search=False,
+                )
+
+            async def _retry() -> Any:
+                return await self._tool_caller.chat_with_tools(
+                    messages=[{"role": "user", "content": retry_prompt}],
+                    tools=[],
+                    use_builtin_search=False,
+                )
+
+            try:
+                response = await sanitize_or_retry(
+                    call=_first,
+                    retry_call=_retry,
+                    logger=self._logger,
+                    purpose="user_persona",
+                )
+            except SafetyRefusalError:
+                return None
             try:
                 from .token_ledger import record_response_usage
                 record_response_usage(response)

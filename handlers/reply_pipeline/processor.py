@@ -509,6 +509,24 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
         if isinstance(event, types.private_message_event_cls) and session.looks_like_private_command(message_content):
             runtime.logger.debug(f"拟人插件：私聊命令消息已跳过，用户 {user_id}")
             return
+        # P7：识别其他机器人 / Q 群管家，避免 bot 互相对话
+        try:
+            from ...core.peer_awareness import detect_other_bot
+
+            extra_bot_ids = list(getattr(runtime.plugin_config, "personification_peer_bot_ids", []) or [])
+            peer_decision = detect_other_bot(
+                user_id=user_id,
+                text=message_content,
+                extra_bot_ids=extra_bot_ids,
+            )
+            if peer_decision.is_other_bot and peer_decision.suggest_silence:
+                runtime.logger.info(
+                    f"拟人插件：检测到来自其他机器人/管家的消息，跳过本轮 "
+                    f"user={user_id} reason={peer_decision.reason}"
+                )
+                return
+        except Exception:
+            pass
         sticker_feedback_scene = build_sticker_feedback_scene_key(
             group_id=str(group_id),
             user_id=user_id,

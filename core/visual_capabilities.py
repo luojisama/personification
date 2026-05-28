@@ -125,13 +125,17 @@ def heuristic_supports_vision(api_type: str, model: str | None = None) -> bool:
     api_type 仅描述协议格式（openai/anthropic/gemini 等），不代表上游模型一定支持视觉。
     例如 api_type=openai + model=deepseek-v4-flash（第三方网关）协议是 OpenAI 但模型不
     支持视觉。**必须 api_type + model 双重判定。**
+
+    注意：antigravity_cli 不在硬编码白名单中，因为其底层走的是 OAuth 转发，
+    不同账号 / 路由配置下视觉能力差异较大。它的视觉能力**只信任探测结果**，
+    探测未通过时这里返回 False，让 provider_router 提前剥离 image parts。
     """
     api = str(api_type or "").strip().lower().replace("-", "_")
     model_text = str(model or "").strip().lower()
     if api == "openai_codex":
         return "codex" in model_text
     # 官方 Anthropic / Gemini API：所有当前模型都支持视觉
-    if api in {"anthropic", "gemini", "gemini_official", "gemini_cli", "antigravity_cli", "claude_code"}:
+    if api in {"anthropic", "gemini", "gemini_official", "gemini_cli", "claude_code"}:
         return True
     # 显式视觉模型关键字
     if "vision" in model_text:
@@ -139,7 +143,7 @@ def heuristic_supports_vision(api_type: str, model: str | None = None) -> bool:
     # 已知支持视觉的官方模型家族（按 model 名匹配，不看 api_type）
     if any(token in model_text for token in ("gpt-4o", "gpt-4-turbo", "gpt-5", "gpt-image", "gemini", "claude")):
         return True
-    # api_type=openai 但 model 名不在已知视觉列表（如 deepseek、qwen、kimi、yi、glm
+    # api_type=openai/antigravity_cli 但 model 名不在已知视觉列表（如 deepseek、qwen、kimi、yi、glm
     # 等第三方网关）→ 默认不支持视觉，避免把 image_url 直接发过去 400
     return False
 

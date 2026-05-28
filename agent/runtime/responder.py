@@ -105,6 +105,16 @@ def with_persona_responder_instruction(
     return copied
 
 
+def _peer_plugins_section() -> str:
+    """枚举其他 NoneBot 插件清单，用于让 bot 不要把别人的功能说成自己。"""
+    try:
+        from ...core.peer_awareness import render_other_plugins_hint
+
+        return render_other_plugins_hint(max_plugins=10)
+    except Exception:
+        return ""
+
+
 def _build_persona_responder_instruction(
     *,
     semantic_frame: Any = None,
@@ -160,10 +170,19 @@ def _build_persona_responder_instruction(
         + "\n"
         f"reply_text 按 output_mode={output_mode} 控制在 {min_chars}-{max_chars} 字附近。"
         "如果只是在复述用户语义，把 info_added 标为 tone_only；如果复用了用户原话连续片段，把 echoed_user_phrase 标为 true。"
-        f"{no_reply_rule}"
+        f"{no_reply_rule}\n"
+        "## 不确定性硬约束（拟人优先于装懂）\n"
+        "- 涉及具体事实、数字、时间、人名、新闻、产品参数等的问题，如果你没有调用工具（如 web_search）且对答案不完全确定，"
+        "  reply_text 应当用口语自然地承认不知道（例如：『这个我不太清楚诶』『不太确定，我去查查再告诉你』），"
+        "  把 info_added 设为 'refuse'。**禁止凭印象编造具体数字、链接、日期、官方说法。**\n"
+        "- 如果工具结果明显为空或与问题无关，也要承认信息不足，而不是绕开。\n"
+        "- 但闲聊、共情、表达情绪、复述用户观点这些**不需要外部事实**的话题，依然要正常回答，不要滥用『不知道』。"
     )
     if lorebook_section:
         instruction = f"{lorebook_section}\n\n{instruction}"
+    peer_section = _peer_plugins_section()
+    if peer_section:
+        instruction = f"{instruction}\n\n{peer_section}"
     return instruction
 
 

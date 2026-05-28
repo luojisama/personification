@@ -33,14 +33,40 @@ async def build_group_knowledge(
     except Exception:
         token = None
     try:
-        response = await tool_caller.chat_with_tools(
-            messages=[
-                {"role": "system", "content": _GROUP_KNOWLEDGE_PROMPT},
-                {"role": "user", "content": str(chat_summary)[:3000]},
-            ],
-            tools=[],
-            use_builtin_search=False,
-        )
+        from .safety_filter import SafetyRefusalError, sanitize_or_retry
+
+        async def _first() -> Any:
+            return await tool_caller.chat_with_tools(
+                messages=[
+                    {"role": "system", "content": _GROUP_KNOWLEDGE_PROMPT},
+                    {"role": "user", "content": str(chat_summary)[:3000]},
+                ],
+                tools=[],
+                use_builtin_search=False,
+            )
+
+        async def _retry() -> Any:
+            return await tool_caller.chat_with_tools(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": _GROUP_KNOWLEDGE_PROMPT
+                        + "\n注意：请只输出 JSON 数组，不要任何拒绝模板。",
+                    },
+                    {"role": "user", "content": str(chat_summary)[:3000]},
+                ],
+                tools=[],
+                use_builtin_search=False,
+            )
+
+        try:
+            response = await sanitize_or_retry(
+                call=_first,
+                retry_call=_retry,
+                purpose="group_knowledge",
+            )
+        except SafetyRefusalError:
+            return 0
         try:
             from .token_ledger import record_response_usage
             record_response_usage(response)

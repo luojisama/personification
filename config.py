@@ -34,6 +34,10 @@ class Config(BaseModel):
     personification_whitelist: List[str] = []
     personification_probability: float = 0.30
 
+    # 其他机器人 / Q 群管家的 user_id（用于 peer_awareness 检测），
+    # 命中后本轮静默，避免 bot 与管家互相对话。
+    personification_peer_bot_ids: List[str] = []
+
     personification_global_enabled: bool = True
     personification_tts_global_enabled: bool = True
 

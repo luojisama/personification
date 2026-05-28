@@ -115,6 +115,7 @@ async def summarize_session_segment(
         "请用 2-4 句话概括这段对话的核心内容、参与者的主要观点和情绪倾向。"
         "不要逐条复述，抓重点。只输出纯文本摘要，不要 JSON 或 markdown。"
     )
+    retry_prompt = prompt + "\n注意：不要输出'抱歉''作为AI''无法回答'这类拒绝模板，只输出对话摘要。"
     token = None
     try:
         from .llm_context import reset_llm_context, set_llm_context
@@ -123,14 +124,36 @@ async def summarize_session_segment(
     except Exception:
         token = None
     try:
-        response = await tool_caller.chat_with_tools(
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": chat_text},
-            ],
-            tools=[],
-            use_builtin_search=False,
-        )
+        from .safety_filter import SafetyRefusalError, sanitize_or_retry
+
+        async def _first() -> Any:
+            return await tool_caller.chat_with_tools(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": chat_text},
+                ],
+                tools=[],
+                use_builtin_search=False,
+            )
+
+        async def _retry() -> Any:
+            return await tool_caller.chat_with_tools(
+                messages=[
+                    {"role": "system", "content": retry_prompt},
+                    {"role": "user", "content": chat_text},
+                ],
+                tools=[],
+                use_builtin_search=False,
+            )
+
+        try:
+            response = await sanitize_or_retry(
+                call=_first,
+                retry_call=_retry,
+                purpose="memory_summarizer_session",
+            )
+        except SafetyRefusalError:
+            return None
         try:
             from .token_ledger import record_response_usage
 
@@ -249,6 +272,7 @@ async def scan_groups_for_daily_summaries(
                 "请用 3-6 句话概括今天群里聊了什么、参与者的整体氛围和关键话题。"
                 "不要逐条复述，抓重点。只输出纯文本摘要。"
             )
+            retry_prompt = prompt + "\n注意：不要输出'抱歉''作为AI'之类的拒绝模板，只输出群聊摘要。"
             token = None
             try:
                 from .llm_context import reset_llm_context, set_llm_context
@@ -257,14 +281,37 @@ async def scan_groups_for_daily_summaries(
             except Exception:
                 token = None
             try:
-                response = await tool_caller.chat_with_tools(
-                    messages=[
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": chat_text},
-                    ],
-                    tools=[],
-                    use_builtin_search=False,
-                )
+                from .safety_filter import SafetyRefusalError, sanitize_or_retry
+
+                async def _first() -> Any:
+                    return await tool_caller.chat_with_tools(
+                        messages=[
+                            {"role": "system", "content": prompt},
+                            {"role": "user", "content": chat_text},
+                        ],
+                        tools=[],
+                        use_builtin_search=False,
+                    )
+
+                async def _retry() -> Any:
+                    return await tool_caller.chat_with_tools(
+                        messages=[
+                            {"role": "system", "content": retry_prompt},
+                            {"role": "user", "content": chat_text},
+                        ],
+                        tools=[],
+                        use_builtin_search=False,
+                    )
+
+                try:
+                    response = await sanitize_or_retry(
+                        call=_first,
+                        retry_call=_retry,
+                        purpose="memory_summarizer_daily",
+                    )
+                except SafetyRefusalError:
+                    result["groups"].append({"group_id": gid, "status": "safety_refusal"})
+                    continue
                 try:
                     from .token_ledger import record_response_usage
 

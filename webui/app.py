@@ -993,13 +993,24 @@ async function enableGroupNew() {
 function renderGroups() {
   if (state.groupsAvailable === false) return `<div class="card muted">profile_service 未就绪</div>`;
   if (state.selectedGroup) return renderGroupDetail();
-  const rows = state.groupList.map(g => `<tr>
-    <td><img class="avatar" src="https://p.qlogo.cn/gh/${encodeURIComponent(g.group_id)}/${encodeURIComponent(g.group_id)}/100/" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
-    <td><code>${escapeHtml(g.group_id)}</code></td>
-    <td>${escapeHtml(g.group_name || '')}</td>
-    <td><button class="btn small" onclick="openGroup('${escapeAttr(g.group_id)}')">查看</button></td>
-  </tr>`).join("");
+  const sourceLabel = {memory:"已积累", group_config:"群配置", config_file:"配置白名单", dynamic:"动态白名单", unknown:""};
+  const rows = state.groupList.map(g => {
+    const srcKey = g.source || (g.has_memory ? 'memory' : '');
+    const srcTag = sourceLabel[srcKey]
+      ? `<span class="tag" style="font-size:11px">${escapeHtml(sourceLabel[srcKey])}</span>`
+      : '';
+    const memTag = g.has_memory === false
+      ? `<span class="tag" style="background:rgba(245,158,11,0.12);color:var(--warn);font-size:11px">无数据</span>`
+      : '';
+    return `<tr>
+      <td><img class="avatar" src="https://p.qlogo.cn/gh/${encodeURIComponent(g.group_id)}/${encodeURIComponent(g.group_id)}/100/" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
+      <td><code>${escapeHtml(g.group_id)}</code></td>
+      <td>${escapeHtml(g.group_name || '')} ${srcTag} ${memTag}</td>
+      <td><button class="btn small" onclick="openGroup('${escapeAttr(g.group_id)}')">查看</button></td>
+    </tr>`;
+  }).join("");
   return `<div class="card"><h2>群列表（${state.groupList.length}）</h2>
+    <p class="muted" style="font-size:12px;margin-top:0">同时显示已建立记忆的群和白名单中的群（包括关闭搜索可找到的群）。</p>
     <table><thead><tr><th style="width:40px"></th><th>群号</th><th>群名</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="muted">暂无群数据</td></tr>'}</tbody></table></div>`;
 }
 
@@ -1007,18 +1018,36 @@ async function openGroup(gid) {
   try {
     state.selectedGroup = gid;
     state.groupRawChat = null;
-    const [personas, style, knowledge, memes] = await Promise.all([
+    const [personas, style, knowledge, memes, agentState] = await Promise.all([
       api("/groups/" + encodeURIComponent(gid) + "/personas"),
       api("/groups/" + encodeURIComponent(gid) + "/style"),
-      api("/groups/" + encodeURIComponent(gid) + "/knowledge").catch(() => ({knowledge: []})),
+      api("/groups/" + encodeURIComponent(gid) + "/knowledge").catch(() => ({knowledge: [], autobuild_status: null})),
       api("/groups/" + encodeURIComponent(gid) + "/memes").catch(() => ({memes: []})),
+      api("/groups/" + encodeURIComponent(gid) + "/agent-state").catch(() => null),
     ]);
     state.groupPersonas = personas.profiles;
     state.groupStyle = style;
     state.groupKnowledge = knowledge.knowledge || [];
+    state.groupKnowledgeAutobuild = knowledge.autobuild_status || null;
     state.groupMemes = memes.memes || [];
+    state.groupAgentState = agentState;
     render();
   } catch (e) { alertFlash("err", e.message); }
+}
+
+async function rebuildGroupKnowledge() {
+  const gid = state.selectedGroup;
+  if (!gid) return;
+  if (state.groupKnowledgeRebuilding) return;
+  state.groupKnowledgeRebuilding = true; render();
+  try {
+    const out = await api("/groups/" + encodeURIComponent(gid) + "/knowledge/rebuild", { method:"POST", headers:{"content-type":"application/json"}, body: "{}" });
+    alertFlash("ok", "已重建群知识库，新增 " + (out.saved || 0) + " 条");
+    const knowledge = await api("/groups/" + encodeURIComponent(gid) + "/knowledge");
+    state.groupKnowledge = knowledge.knowledge || [];
+    state.groupKnowledgeAutobuild = knowledge.autobuild_status || null;
+  } catch (e) { alertFlash("err", "重建失败：" + e.message); }
+  state.groupKnowledgeRebuilding = false; render();
 }
 
 async function loadGroupRawChat() {
@@ -1031,22 +1060,96 @@ async function loadGroupRawChat() {
   } catch (e) { alertFlash("err", "加载对话原文失败：" + e.message); }
 }
 
-function renderGroupDetail() {
-  const gid = state.selectedGroup;
-  const rows = state.groupPersonas.map(p => `<tr>
-    <td><img class="avatar" src="https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
-    <td><code>${escapeHtml(p.user_id)}</code></td>
-    <td>${escapeHtml(p.nickname || '')}</td>
-    <td>${escapeHtml(p.snippet)}</td>
-    <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
-  </tr>`).join("");
-  const style = state.groupStyle || {};
-  const knowledgeRows = (state.groupKnowledge || []).map(k => `<tr>
+function renderGroupAgentState() {
+  const s = state.groupAgentState;
+  if (!s) return '';
+  const emo = s.emotion || {};
+  const stats = s.stats || {};
+  const memories = s.recent_memories || [];
+  const edges = s.top_edges || [];
+  const lastAct = stats.last_activity_at ? new Date(stats.last_activity_at*1000).toLocaleString() : '-';
+  const emoSummary = emo.summary || '（暂无群情绪记忆）';
+  const inner = emo.global_inner_state || '';
+  const memBlock = memories.length
+    ? `<table style="font-size:12.5px"><thead><tr><th>类型</th><th>摘要</th><th>显著度</th><th>更新</th></tr></thead><tbody>${
+        memories.map(m => `<tr>
+          <td><span class="tag">${escapeHtml(m.memory_type || '')}</span></td>
+          <td>${escapeHtml(m.summary || '')}</td>
+          <td class="muted">${Number(m.salience||0).toFixed(2)}</td>
+          <td class="muted">${m.updated_at ? new Date(m.updated_at*1000).toLocaleDateString() : '-'}</td>
+        </tr>`).join('')
+      }</tbody></table>`
+    : '<p class="muted" style="margin:6px 0 0">暂无显著记忆条目</p>';
+  const edgeBlock = edges.length
+    ? `<table style="font-size:12.5px"><thead><tr><th>关系</th><th>类型</th><th>权重</th><th>最近</th></tr></thead><tbody>${
+        edges.map(e => `<tr>
+          <td><code>${escapeHtml(e.src)}</code> → <code>${escapeHtml(e.dst)}</code></td>
+          <td><span class="tag">${escapeHtml(e.kind)}</span></td>
+          <td>${Number(e.weight||0).toFixed(2)}</td>
+          <td class="muted">${e.last_seen_at ? new Date(e.last_seen_at*1000).toLocaleDateString() : '-'}</td>
+        </tr>`).join('')
+      }</tbody></table>`
+    : '<p class="muted" style="margin:6px 0 0">暂无显著关系边</p>';
+  return `<div class="card"><h2>Agent 状态</h2>
+    <div class="row" style="gap:14px;flex-wrap:wrap;margin-bottom:12px">
+      <div style="flex:1;min-width:260px"><div class="muted" style="font-size:12px">群情绪</div><div>${escapeHtml(emoSummary)}</div></div>
+      <div style="flex:1;min-width:260px"><div class="muted" style="font-size:12px">Bot 内心基线</div><div>${escapeHtml(inner || '—')}</div></div>
+      <div style="min-width:160px"><div class="muted" style="font-size:12px">消息总数</div><div>${stats.message_count || 0}</div></div>
+      <div style="min-width:200px"><div class="muted" style="font-size:12px">最近活跃</div><div>${escapeHtml(lastAct)}</div></div>
+    </div>
+    <details><summary class="muted" style="cursor:pointer">显著记忆 Top-${memories.length}</summary>${memBlock}</details>
+    <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">群内关系 Top-${edges.length}</summary>${edgeBlock}</details>
+  </div>`;
+}
+
+function renderGroupKnowledgeCard() {
+  const knowledge = state.groupKnowledge || [];
+  const auto = state.groupKnowledgeAutobuild || null;
+  const rebuilding = state.groupKnowledgeRebuilding;
+  const knowledgeRows = knowledge.map(k => `<tr>
     <td><strong>${escapeHtml(k.term)}</strong></td>
     <td>${escapeHtml(k.definition)}</td>
-    <td class="muted" style="font-size:12px">${escapeHtml(k.source_kind || '')}</td>
+    <td><span class="tag">${escapeHtml(k.memory_type || k.source_kind || '')}</span></td>
     <td class="muted" style="font-size:12px">${k.updated_at ? new Date(k.updated_at*1000).toLocaleDateString() : '-'}</td>
   </tr>`).join("");
+  let autoLine = '';
+  if (auto) {
+    const lastRun = auto.last_run_at ? new Date(auto.last_run_at*1000).toLocaleString() : '从未运行';
+    const flag = auto.enabled ? '已启用' : '已禁用';
+    autoLine = `<p class="muted" style="font-size:12px;margin:4px 0 10px">
+      自动构建：${flag} · 上次运行 ${escapeHtml(lastRun)} · 今日 ${auto.daily_count||0}/${auto.daily_limit||0} 次 · 每 ${auto.interval_hours||0}h · 阈值 ${auto.min_messages_threshold||0} 条
+      ${auto.daily_limit_hit ? '<span class="tag" style="background:rgba(245,158,11,0.18);color:var(--warn)">今日已满</span>' : ''}
+    </p>`;
+  }
+  return `<div class="card">
+    <div class="between"><h2 style="margin:0">群知识库（${knowledge.length}）</h2>
+      <button class="btn small ${rebuilding?'':'primary'}" onclick="rebuildGroupKnowledge()" ${rebuilding?'disabled':''}>${rebuilding?'重建中…':'立即重建'}</button>
+    </div>
+    ${autoLine}
+    ${knowledgeRows ? `<table><thead><tr><th>术语</th><th>解释</th><th>类型</th><th>更新</th></tr></thead><tbody>${knowledgeRows}</tbody></table>` : '<p class="muted">暂无群知识。可点击「立即重建」手动触发分析，或开启「群知识库自动构建」后等待定时扫描。</p>'}
+  </div>`;
+}
+
+function renderGroupDetail() {
+  const gid = state.selectedGroup;
+  const rows = state.groupPersonas.map(p => {
+    const em = p.latest_emotion || {};
+    const emoCol = em.user_attitude || em.bot_emotion
+      ? `<div style="font-size:11.5px;line-height:1.5">
+          ${em.user_attitude ? `<div class="muted">态度: ${escapeHtml(em.user_attitude)}</div>` : ''}
+          ${em.bot_emotion ? `<div class="muted">回应: ${escapeHtml(em.bot_emotion)}</div>` : ''}
+        </div>`
+      : '<span class="muted">—</span>';
+    return `<tr>
+      <td><img class="avatar" src="https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
+      <td><code>${escapeHtml(p.user_id)}</code></td>
+      <td>${escapeHtml(p.nickname || '')}</td>
+      <td>${escapeHtml(p.snippet)}</td>
+      <td>${emoCol}</td>
+      <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
+    </tr>`;
+  }).join("");
+  const style = state.groupStyle || {};
   const memeRows = (state.groupMemes || []).map(m => `<tr>
     <td><strong>${escapeHtml(m.term)}</strong></td>
     <td>${escapeHtml(m.meaning)}</td>
@@ -1054,13 +1157,13 @@ function renderGroupDetail() {
     <td class="muted" style="font-size:12px">${escapeHtml(m.scope || '')}/${escapeHtml(m.risk_level || '')}/${Number(m.confidence||0).toFixed(2)}</td>
   </tr>`).join("");
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;state.groupRawChat=null;state.groupStyleSnapIdx=0;render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
+    ${renderGroupAgentState()}
     ${renderGroupStyle(style)}
-    <div class="card"><h2>群知识库（${(state.groupKnowledge||[]).length}）</h2>
-      ${knowledgeRows ? `<table><thead><tr><th>术语</th><th>解释</th><th>来源</th><th>更新</th></tr></thead><tbody>${knowledgeRows}</tbody></table>` : '<p class="muted">暂无群知识。开启「群知识库自动构建」后会定时扫描并写入。</p>'}</div>
+    ${renderGroupKnowledgeCard()}
     <div class="card"><h2>梗词典 / 概念锚点（${(state.groupMemes||[]).length}）</h2>
       ${memeRows ? `<table><thead><tr><th>词条</th><th>含义</th><th>别名</th><th>范围/风险/置信度</th></tr></thead><tbody>${memeRows}</tbody></table>` : '<p class="muted">暂无匹配词条，公共热梗种子会在首次查询后自动初始化。</p>'}</div>
     <div class="card"><h2>群内成员画像（${state.groupPersonas.length}）</h2>
-      <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>昵称</th><th>摘要</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">无</td></tr>'}</tbody></table></div>
+      <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>昵称</th><th>摘要</th><th>近期情绪</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="muted">无</td></tr>'}</tbody></table></div>
     ${renderGroupRawChat()}`;
 }
 
