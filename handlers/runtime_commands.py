@@ -1355,10 +1355,15 @@ async def handle_git_update_command(
     try:
         await _handle_git_update_impl(matcher, bot=bot, event=event, logger=logger, cwd=cwd)
     except Exception as exc:
-        # Catch anything not already handled to guarantee a response
+        # FinishedException 是 nonebot 用来中断 handler 的正常控制流，不是错误，必须放行。
+        from nonebot.exception import FinishedException
+        if isinstance(exc, FinishedException):
+            raise
         logger.error(f"[git_update] 未预期异常: {exc}", exc_info=True)
         try:
             await matcher.finish(f"拟人插件更新命令发生内部错误：{exc}")
+        except FinishedException:
+            raise
         except Exception:
             pass
 
