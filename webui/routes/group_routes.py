@@ -68,6 +68,78 @@ def build_group_router(*, runtime) -> APIRouter:
             )
         return {"groups": items, "available": True}
 
+    @router.get("/whitelist")
+    async def get_group_switches(_: AdminIdentity = Depends(require_admin)) -> dict:
+        from ...utils import load_whitelist, load_group_configs, is_group_whitelisted
+
+        svc = _profile_service(runtime)
+        bot = _get_first_bot(runtime)
+        config_whitelist = list(getattr(runtime.plugin_config, "personification_whitelist", []) or [])
+        dynamic_whitelist = load_whitelist()
+        group_configs = load_group_configs()
+        known_from_svc = [str(g) for g in (svc.list_groups() if svc else [])]
+        all_ids = sorted({str(g) for g in known_from_svc} | set(dynamic_whitelist) | set(config_whitelist))
+        items: list[dict[str, Any]] = []
+        for gid in all_ids:
+            enabled = is_group_whitelisted(gid, config_whitelist)
+            cfg = group_configs.get(gid, {}) if isinstance(group_configs, dict) else {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+            if "enabled" in cfg:
+                source = "group_config"
+            elif gid in config_whitelist:
+                source = "config_file"
+            elif gid in dynamic_whitelist:
+                source = "dynamic"
+            else:
+                source = "none"
+            items.append(
+                {
+                    "group_id": gid,
+                    "group_name": await get_group_name(bot, gid),
+                    "enabled": enabled,
+                    "source": source,
+                    "readonly": gid in config_whitelist and "enabled" not in cfg,
+                }
+            )
+        return {"groups": items}
+
+    @router.post("/{group_id}/whitelist")
+    async def enable_group(
+        group_id: str,
+        request: Request,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...utils import add_group_to_whitelist
+
+        added = add_group_to_whitelist(group_id)
+        webui_audit_log.record(
+            action="group_whitelist_add",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=group_id,
+            ip_hash=get_client_ip(request),
+        )
+        return {"success": True, "added": added, "group_id": group_id}
+
+    @router.delete("/{group_id}/whitelist")
+    async def disable_group(
+        group_id: str,
+        request: Request,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...utils import remove_group_from_whitelist
+
+        removed = remove_group_from_whitelist(group_id)
+        webui_audit_log.record(
+            action="group_whitelist_remove",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=group_id,
+            ip_hash=get_client_ip(request),
+        )
+        return {"success": True, "removed": removed, "group_id": group_id}
+
     @router.get("/{group_id}/personas")
     async def personas(group_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
         svc = _profile_service(runtime)

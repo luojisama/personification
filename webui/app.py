@@ -238,6 +238,7 @@ let state = {
   dashboard: null, dashboardWindow: "month",
   personas: [], selectedPersona: null, personaSearch: "",
   groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [],
+  groupSwitches: [], newGroupId: "",
   skills: [], skillFilter: "",
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null,
   memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false,
@@ -322,6 +323,9 @@ async function loadView() {
     } else if (state.view === "groups") {
       const data = await api("/groups");
       state.groupList = data.groups; state.groupsAvailable = data.available;
+    } else if (state.view === "group_switch") {
+      const data = await api("/groups/whitelist");
+      state.groupSwitches = data.groups;
     } else if (state.view === "skills") {
       const data = await api("/skills");
       state.skills = data.skills; state.skillsAvailable = data.available;
@@ -386,6 +390,7 @@ function renderLayout() {
         ${navItem('config','配置中心')}
         ${navItem('personas','用户画像')}
         ${navItem('groups','群信息')}
+        ${navItem('group_switch','群开关')}
         ${navItem('memory','Agent 记忆')}
         ${navItem('stickers','表情包')}
         ${navItem('skills','Skill 管理')}
@@ -423,6 +428,7 @@ function renderView() {
   if (state.view === "dashboard") return renderDashboard();
   if (state.view === "personas") return renderPersonas();
   if (state.view === "groups") return renderGroups();
+  if (state.view === "group_switch") return renderGroupSwitch();
   if (state.view === "skills") return renderSkills();
   if (state.view === "plugin_knowledge") return renderPluginKnowledge();
   if (state.view === "test") return renderTest();
@@ -841,7 +847,7 @@ function renderMemoryDetail() {
 }
 
 function viewTitle() {
-  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",memory:"Agent 记忆",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",test:"模型测试",audit:"审计日志",proactive:"主动诊断",devices:"设备管理"})[state.view] || state.view;
+  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",test:"模型测试",audit:"审计日志",proactive:"主动诊断",devices:"设备管理"})[state.view] || state.view;
 }
 
 function renderDashboard() {
@@ -911,6 +917,77 @@ function renderPersonaDetail() {
     <div class="card"><h2>全局印象</h2>${core ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(core.profile_text || '')}</pre>` : '<p class="muted">无全局画像</p>'}</div>
     <h3 style="margin-bottom:10px">各群印象（${(p.local_profiles||[]).length}）</h3>
     ${locals || '<p class="muted">无各群画像</p>'}`;
+}
+
+function renderGroupSwitch() {
+  const list = state.groupSwitches || [];
+  const sourceLabel = {config_file:"配置文件", dynamic:"动态", group_config:"群配置", none:""};
+  const rows = list.map(g => {
+    const statusBadge = g.enabled
+      ? `<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">启用</span>`
+      : `<span class="tag" style="background:rgba(248,113,113,0.12);color:var(--danger)">禁用</span>`;
+    const srcTag = sourceLabel[g.source]
+      ? `<span class="tag">${escapeHtml(sourceLabel[g.source])}</span>`
+      : '';
+    let actionBtn;
+    if (g.readonly) {
+      actionBtn = `<button class="btn small" disabled title="由配置文件固定，无法在此修改">固定启用</button>`;
+    } else if (g.enabled) {
+      actionBtn = `<button class="btn small danger" onclick="disableGroup('${escapeAttr(g.group_id)}')">禁用</button>`;
+    } else {
+      actionBtn = `<button class="btn small primary" onclick="enableGroup('${escapeAttr(g.group_id)}')">启用</button>`;
+    }
+    return `<tr>
+      <td><img class="avatar" src="https://p.qlogo.cn/gh/${encodeURIComponent(g.group_id)}/${encodeURIComponent(g.group_id)}/100/" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
+      <td><code>${escapeHtml(g.group_id)}</code></td>
+      <td>${escapeHtml(g.group_name || '')}</td>
+      <td>${statusBadge}${srcTag}</td>
+      <td>${actionBtn}</td>
+    </tr>`;
+  }).join("");
+  const enabledCount = list.filter(g => g.enabled).length;
+  return `<div class="card">
+    <div class="between" style="margin-bottom:14px">
+      <h2 style="margin:0">群开关（${enabledCount} / ${list.length} 启用）</h2>
+    </div>
+    <table><thead><tr><th style="width:40px"></th><th>群号</th><th>群名</th><th>状态</th><th></th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="5" class="muted">暂无群数据</td></tr>'}</tbody></table>
+  </div>
+  <div class="card">
+    <h2>手动添加群到白名单</h2>
+    <p class="muted" style="margin-bottom:10px">输入群号直接启用，适用于机器人还未在该群发言的情况。</p>
+    <div class="row">
+      <input type="text" id="newGroupIdInput" placeholder="群号" value="${escapeHtml(state.newGroupId)}" oninput="state.newGroupId=this.value" style="width:180px">
+      <button class="btn primary" onclick="enableGroupNew()">添加并启用</button>
+    </div>
+  </div>`;
+}
+
+async function enableGroup(gid) {
+  try {
+    await api("/groups/" + encodeURIComponent(gid) + "/whitelist", { method: "POST" });
+    alertFlash("ok", "已启用群 " + gid);
+    const data = await api("/groups/whitelist");
+    state.groupSwitches = data.groups;
+    render();
+  } catch (e) { alertFlash("err", e.message); }
+}
+
+async function disableGroup(gid) {
+  try {
+    await api("/groups/" + encodeURIComponent(gid) + "/whitelist", { method: "DELETE" });
+    alertFlash("ok", "已禁用群 " + gid);
+    const data = await api("/groups/whitelist");
+    state.groupSwitches = data.groups;
+    render();
+  } catch (e) { alertFlash("err", e.message); }
+}
+
+async function enableGroupNew() {
+  const gid = (state.newGroupId || "").trim();
+  if (!gid) { alertFlash("err", "请输入群号"); return; }
+  await enableGroup(gid);
+  state.newGroupId = "";
 }
 
 function renderGroups() {
