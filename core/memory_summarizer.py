@@ -219,8 +219,22 @@ async def scan_groups_for_session_summaries(
                     "permission_type": "public_preference",
                     "supports_recall": True,
                     "supports_autofill": False,
+                    "tier": "semantic",
                 }
             )
+            # P4：反向加固窗口内的原始 episodic 条目，让它们落到 background 受保护
+            try:
+                from .memory_tier import reinforce_originals
+
+                reinforce_originals(
+                    memory_store,
+                    group_id=str(gid),
+                    since_ts=float(earliest),
+                    until_ts=float(now),
+                    triggered_by=memory_id,
+                )
+            except Exception:
+                pass
             _set_last_run(_NS_SESSION_LAST_RUN, gid, now)
             result["groups"].append({"group_id": gid, "status": "summarized", "messages": len(rows)})
         except Exception as exc:
@@ -342,8 +356,22 @@ async def scan_groups_for_daily_summaries(
                     "permission_type": "public_preference",
                     "supports_recall": True,
                     "supports_autofill": False,
+                    "tier": "semantic",
                 }
             )
+            # P4：反向加固这 24h 窗口内的原始事件
+            try:
+                from .memory_tier import reinforce_originals
+
+                reinforce_originals(
+                    memory_store,
+                    group_id=str(gid),
+                    since_ts=float(now - 24 * 3600),
+                    until_ts=float(now),
+                    triggered_by=memory_id,
+                )
+            except Exception:
+                pass
             _set_last_run(_NS_DAILY_LAST_RUN, gid, now)
             result["groups"].append({"group_id": gid, "status": "summarized", "messages": len(rows)})
         except Exception as exc:

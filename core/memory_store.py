@@ -1191,6 +1191,13 @@ class MemoryStore:
         payload["conflict_refs"] = list(payload.get("conflict_refs") or [])
         payload["superseded_by"] = str(payload.get("superseded_by") or "")
         payload["reinforcement_count"] = int(payload.get("reinforcement_count", 0) or 0)
+        # P4：初次写入或迁移时分配 tier；调用方显式设置的优先保留。
+        try:
+            from .memory_tier import assign_tier_on_write
+
+            assign_tier_on_write(payload)
+        except Exception:
+            payload.setdefault("tier", "episodic")
         searchable = " ".join(
             [
                 payload["summary"],

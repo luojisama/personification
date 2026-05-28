@@ -66,6 +66,7 @@ class MemoryDecayScheduler:
                 # - palace_zone 标记为 semantic 或 background
                 memory_type = str(payload.get("memory_type", "") or "").strip().lower()
                 palace_zone = str(payload.get("palace_zone", "") or "").strip().lower()
+                tier = str(payload.get("tier", "") or "").strip().lower()
                 semi_permanent_types = {
                     "session_summary",
                     "daily_summary",
@@ -84,6 +85,7 @@ class MemoryDecayScheduler:
                     or reinforcement > 0
                     or access_count > 2
                     or palace_zone in {"semantic", "background"}
+                    or tier in {"semantic", "background"}
                 )
                 if is_semi_permanent:
                     # 给底线值兜底：salience/stability 不会被衰减到 0；保留少量召回价值
@@ -100,6 +102,28 @@ class MemoryDecayScheduler:
                         pass
                     purged += 1
                     continue
+                # P4：根据 reinforcement / 时长 重新判定 tier。
+                # 不会降级 semantic/background（这两个由摘要逻辑显式置位）。
+                try:
+                    from .memory_tier import (
+                        TIER_BACKGROUND,
+                        TIER_EPISODIC,
+                        TIER_SEMANTIC,
+                        TIER_WORKING,
+                        should_promote,
+                    )
+
+                    current_tier = str(payload.get("tier", "") or "").strip().lower()
+                    if current_tier not in {TIER_SEMANTIC, TIER_BACKGROUND}:
+                        promoted = should_promote(payload)
+                        if promoted:
+                            payload["tier"] = promoted
+                        elif current_tier == TIER_WORKING and age_days >= 1.0:
+                            payload["tier"] = TIER_EPISODIC
+                        elif not current_tier:
+                            payload["tier"] = TIER_EPISODIC if age_days >= 1.0 else TIER_WORKING
+                except Exception:
+                    pass
                 conn.execute(
                     """
                     UPDATE memory_items
