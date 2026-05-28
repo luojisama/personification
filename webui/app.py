@@ -242,6 +242,7 @@ let state = {
   skills: [], skillFilter: "",
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null,
   memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false,
+  memoryGraph: null, memoryGraphGroupId: "", memoryGraphLimit: 100, memoryGraphMinSalience: 0,
   groupRawChat: null, groupStyleSnapIdx: 0, groupStyleRebuilding: false,
   showAdvancedConfig: false,
   stickers: null, stickerSearch: "", selectedSticker: null,
@@ -380,6 +381,19 @@ async function loadView() {
       state.pluginKnowledgeList = data.plugins || [];
       state.pluginKnowledgeAvailable = data.available;
       state.pluginKnowledgeTotal = data.total || 0;
+    } else if (state.view === "memory_graph") {
+      const qs = new URLSearchParams({ limit: String(state.memoryGraphLimit || 100) });
+      if (state.memoryGraphGroupId) qs.set("group_id", state.memoryGraphGroupId);
+      if (state.memoryGraphMinSalience) qs.set("min_salience", String(state.memoryGraphMinSalience));
+      // 群下拉依赖 groupList；如果还没加载过，顺手加载一次
+      const tasks = [api("/memory/graph?" + qs.toString()).catch(e => ({available:false, error:e.message}))];
+      if (!state.groupList.length) tasks.push(api("/groups").catch(() => ({groups:[]})));
+      const [graph, groupsResp] = await Promise.all(tasks);
+      state.memoryGraph = graph;
+      if (groupsResp && groupsResp.groups) {
+        state.groupList = groupsResp.groups;
+        state.groupsAvailable = groupsResp.available;
+      }
     }
   } finally { state.loading = false; }
 }
@@ -406,6 +420,7 @@ function renderLayout() {
         ${navItem('groups','群信息')}
         ${navItem('group_switch','群开关')}
         ${navItem('memory','Agent 记忆')}
+        ${navItem('memory_graph','记忆宫殿')}
         ${navItem('stickers','表情包')}
         ${navItem('skills','Skill 管理')}
         ${navItem('plugin_knowledge','插件知识库')}
@@ -447,6 +462,7 @@ function renderView() {
   if (state.view === "plugin_knowledge") return renderPluginKnowledge();
   if (state.view === "test") return renderTest();
   if (state.view === "memory") return renderMemory();
+  if (state.view === "memory_graph") return renderMemoryGraph();
   if (state.view === "stickers") return renderStickers();
   if (state.view === "audit") return renderAudit();
   if (state.view === "proactive") return renderProactive();
@@ -861,7 +877,151 @@ function renderMemoryDetail() {
 }
 
 function viewTitle() {
-  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",test:"模型测试",audit:"审计日志",proactive:"主动诊断",devices:"设备管理"})[state.view] || state.view;
+  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",test:"模型测试",audit:"审计日志",proactive:"主动诊断",devices:"设备管理"})[state.view] || state.view;
+}
+
+// ---------------------------------------------------------------------------
+// 记忆宫殿（Cytoscape 力导向关系图）
+// ---------------------------------------------------------------------------
+let _cytoscapeLoaded = false;
+let _cytoscapeInstance = null;
+
+function ensureCytoscapeLoaded() {
+  if (_cytoscapeLoaded) return Promise.resolve();
+  if (window.cytoscape) { _cytoscapeLoaded = true; return Promise.resolve(); }
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js';
+    s.onload = () => { _cytoscapeLoaded = true; resolve(); };
+    s.onerror = () => reject(new Error('cytoscape 加载失败（检查网络）'));
+    document.head.appendChild(s);
+  });
+}
+
+function _memoryGraphColor(kind) {
+  if (kind === 'memory') return '#6aa8ff';
+  if (kind === 'entity') return '#f59e0b';
+  if (kind === 'user') return '#34d399';
+  return '#9ca3af';
+}
+
+function renderMemoryGraph() {
+  const data = state.memoryGraph;
+  const nodeCount = data ? (data.nodes||[]).length : 0;
+  const edgeCount = data ? (data.edges||[]).length : 0;
+  const groups = state.groupList || [];
+  const opts = groups.map(g => `<option value="${escapeAttr(g.group_id)}" ${state.memoryGraphGroupId===g.group_id?'selected':''}>${escapeHtml(g.group_name||g.group_id)}</option>`).join('');
+  const unavailable = data && data.available === false;
+  const errorBox = unavailable
+    ? `<div class="alert err" style="margin-bottom:10px">记忆宫殿不可用（${escapeHtml(data.reason||data.error||'未知原因')}）。检查 personification_memory_palace_enabled。</div>`
+    : '';
+  setTimeout(() => { try { renderMemoryGraphCanvas(); } catch(e) { console.warn('cytoscape', e); } }, 60);
+  return `<div class="card">
+    <div class="between" style="margin-bottom:10px">
+      <h2 style="margin:0">记忆宫殿 力导向图</h2>
+      <div class="row">
+        <button class="btn small" onclick="resetMemoryGraphZoom()">复位视图</button>
+        <button class="btn small" onclick="exportMemoryGraphPNG()">导出PNG</button>
+      </div>
+    </div>
+    ${errorBox}
+    <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
+      <label class="muted" style="font-size:12px">群：</label>
+      <select onchange="state.memoryGraphGroupId=this.value; loadView().then(render)" style="min-width:180px">
+        <option value="">（全局）</option>
+        ${opts}
+      </select>
+      <label class="muted" style="font-size:12px">条目上限：</label>
+      <input type="number" value="${state.memoryGraphLimit||100}" min="10" max="300" step="10" onchange="state.memoryGraphLimit=Number(this.value); loadView().then(render)" style="width:80px">
+      <label class="muted" style="font-size:12px">最小 salience：</label>
+      <input type="number" value="${state.memoryGraphMinSalience||0}" min="0" max="1" step="0.05" onchange="state.memoryGraphMinSalience=Number(this.value); loadView().then(render)" style="width:80px">
+      <span class="muted" style="font-size:12px;margin-left:auto">节点 ${nodeCount} · 边 ${edgeCount}</span>
+    </div>
+    <div class="row" style="gap:14px;font-size:12px;margin-bottom:8px">
+      <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#6aa8ff;margin-right:4px"></span>记忆条目</span>
+      <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#f59e0b;margin-right:4px"></span>实体/标签</span>
+      <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#34d399;margin-right:4px"></span>群成员</span>
+    </div>
+    <div id="memory-graph-canvas" style="width:100%;height:540px;background:var(--input-bg);border:1px solid var(--line);border-radius:6px"></div>
+    <div id="memory-graph-detail" class="muted" style="font-size:12px;margin-top:8px">点击节点查看详情。</div>
+  </div>`;
+}
+
+async function renderMemoryGraphCanvas() {
+  const data = state.memoryGraph;
+  if (!data || !data.available) return;
+  const el = document.getElementById('memory-graph-canvas');
+  if (!el) return;
+  try { await ensureCytoscapeLoaded(); } catch (e) {
+    el.innerHTML = '<p class="muted" style="padding:20px">' + escapeHtml(e.message) + '</p>';
+    return;
+  }
+  const nodes = (data.nodes || []).map(n => {
+    const w = Number(n.salience || n.weight || 0.3) || 0.3;
+    return {
+      data: {
+        id: n.id, label: n.label || n.id, kind: n.kind, color: _memoryGraphColor(n.kind),
+        size: 16 + Math.min(30, w * 40),
+        raw: n,
+      }
+    };
+  });
+  const edges = (data.edges || []).map((e, i) => ({
+    data: {
+      id: 'e' + i, source: e.src, target: e.dst,
+      kind: e.kind, weight: e.weight,
+      thickness: Math.max(1, Math.min(6, Number(e.weight || 1))),
+    }
+  }));
+  if (_cytoscapeInstance) { try { _cytoscapeInstance.destroy(); } catch {} _cytoscapeInstance = null; }
+  _cytoscapeInstance = window.cytoscape({
+    container: el,
+    elements: { nodes, edges },
+    style: [
+      { selector: 'node', style: {
+        'background-color': 'data(color)', 'label': 'data(label)',
+        'color': '#e6e8ef', 'font-size': '10px', 'width': 'data(size)', 'height': 'data(size)',
+        'text-valign': 'bottom', 'text-margin-y': 4, 'text-outline-width': 1, 'text-outline-color': '#0f1115',
+      }},
+      { selector: 'edge', style: {
+        'width': 'data(thickness)', 'line-color': '#3b4252', 'curve-style': 'bezier',
+        'opacity': 0.65, 'target-arrow-shape': 'none',
+      }},
+      { selector: 'node:selected', style: { 'border-width': 2, 'border-color': '#fff' }},
+    ],
+    layout: { name: 'cose', animate: false, idealEdgeLength: 90, nodeRepulsion: 6000, padding: 30 },
+    wheelSensitivity: 0.2,
+  });
+  _cytoscapeInstance.on('tap', 'node', evt => {
+    const raw = evt.target.data('raw') || {};
+    const detail = document.getElementById('memory-graph-detail');
+    if (!detail) return;
+    const lines = [
+      `<strong>${escapeHtml(raw.label || raw.id)}</strong>`,
+      raw.kind ? `<span class="tag">${escapeHtml(raw.kind)}</span>` : '',
+      raw.memory_type ? `<span class="muted">type=${escapeHtml(raw.memory_type)}</span>` : '',
+      raw.palace_zone ? `<span class="muted">zone=${escapeHtml(raw.palace_zone)}</span>` : '',
+      typeof raw.salience === 'number' ? `<span class="muted">salience=${raw.salience.toFixed(2)}</span>` : '',
+      raw.group_id ? `<span class="muted">group=${escapeHtml(raw.group_id)}</span>` : '',
+    ].filter(Boolean);
+    detail.innerHTML = lines.join(' · ');
+  });
+}
+
+function resetMemoryGraphZoom() {
+  if (_cytoscapeInstance) { _cytoscapeInstance.fit(); _cytoscapeInstance.center(); }
+}
+
+function exportMemoryGraphPNG() {
+  if (!_cytoscapeInstance) return;
+  try {
+    const blob = _cytoscapeInstance.png({ output: 'blob', bg: '#0f1115', full: true, scale: 2 });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'memory-palace.png';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  } catch (e) { alertFlash('err', '导出失败：' + e.message); }
 }
 
 function renderDashboard() {

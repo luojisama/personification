@@ -198,6 +198,201 @@ def build_memory_router(*, runtime) -> APIRouter:
             related = []
         return {"memory_id": memory_id, "item": item, "related": related}
 
+    @router.get("/graph")
+    async def memory_graph(
+        group_id: str = Query(default=""),
+        limit: int = Query(default=80, ge=10, le=300),
+        min_salience: float = Query(default=0.0, ge=0.0, le=1.0),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        """记忆宫殿力导向图数据：合并 memory_items / memory_entities /
+        group_relation_edges，返回 {nodes, edges} 给前端 Cytoscape 渲染。"""
+        store = _memory_store(runtime)
+        if store is None:
+            return {"nodes": [], "edges": [], "available": False}
+        try:
+            palace_on = bool(store.palace_enabled())
+        except Exception:
+            palace_on = False
+        if not palace_on:
+            return {"nodes": [], "edges": [], "available": False, "reason": "palace_disabled"}
+
+        from ...core.memory_store import _connect
+
+        nodes: dict[str, dict[str, Any]] = {}
+        edges: list[dict[str, Any]] = []
+
+        # ---- 1) 记忆条目 → memory 节点
+        palace_path = store.memory_palace_dir / "memory_palace.db"
+        try:
+            with _connect(palace_path) as conn:
+                params: list[Any] = []
+                where = ["1=1"]
+                if group_id.strip():
+                    where.append("group_id=?")
+                    params.append(str(group_id).strip())
+                if min_salience > 0:
+                    where.append("salience >= ?")
+                    params.append(float(min_salience))
+                params.append(int(limit))
+                rows = conn.execute(
+                    f"""
+                    SELECT memory_id, memory_type, group_id, user_id, summary,
+                           salience, confidence, updated_at, palace_zone
+                    FROM memory_items
+                    WHERE {' AND '.join(where)}
+                    ORDER BY salience DESC, updated_at DESC
+                    LIMIT ?
+                    """,
+                    tuple(params),
+                ).fetchall()
+                memory_ids: list[str] = []
+                for row in rows:
+                    mid = str(row["memory_id"] or "")
+                    if not mid:
+                        continue
+                    memory_ids.append(mid)
+                    nodes[f"m:{mid}"] = {
+                        "id": f"m:{mid}",
+                        "kind": "memory",
+                        "memory_type": str(row["memory_type"] or ""),
+                        "label": (str(row["summary"] or "")[:40] or mid)[:40],
+                        "salience": float(row["salience"] or 0),
+                        "confidence": float(row["confidence"] or 0),
+                        "updated_at": float(row["updated_at"] or 0),
+                        "palace_zone": str(row["palace_zone"] or ""),
+                        "group_id": str(row["group_id"] or ""),
+                        "user_id": str(row["user_id"] or ""),
+                    }
+                # ---- 2) 实体 → entity 节点（限定到上面拉到的 memory_ids，避免跨 group 噪音）
+                if memory_ids:
+                    placeholder = ",".join("?" * len(memory_ids))
+                    ent_rows = conn.execute(
+                        f"""
+                        SELECT entity, memory_id, entity_type, weight
+                        FROM memory_entities
+                        WHERE memory_id IN ({placeholder})
+                        """,
+                        tuple(memory_ids),
+                    ).fetchall()
+                    for row in ent_rows:
+                        ent = str(row["entity"] or "").strip()
+                        mid = str(row["memory_id"] or "")
+                        if not ent or not mid:
+                            continue
+                        ent_id = f"e:{ent}"
+                        if ent_id not in nodes:
+                            nodes[ent_id] = {
+                                "id": ent_id,
+                                "kind": "entity",
+                                "entity_type": str(row["entity_type"] or "tag"),
+                                "label": ent[:24],
+                                "weight": float(row["weight"] or 0),
+                            }
+                        edges.append(
+                            {
+                                "src": ent_id,
+                                "dst": f"m:{mid}",
+                                "kind": "tag",
+                                "weight": float(row["weight"] or 1),
+                            }
+                        )
+                    # ---- 3) 记忆之间的 relation 边
+                    rel_rows = conn.execute(
+                        f"""
+                        SELECT source_memory_id, target_ref, relation_type, weight
+                        FROM memory_relations
+                        WHERE source_memory_id IN ({placeholder})
+                        """,
+                        tuple(memory_ids),
+                    ).fetchall()
+                    for row in rel_rows:
+                        src_mid = f"m:{row['source_memory_id']}"
+                        tgt_ref = str(row["target_ref"] or "").strip()
+                        if not tgt_ref:
+                            continue
+                        # target_ref 可能是另一个 memory_id 也可能是实体名
+                        if tgt_ref in memory_ids:
+                            tgt_id = f"m:{tgt_ref}"
+                        else:
+                            tgt_id = f"e:{tgt_ref}"
+                            nodes.setdefault(
+                                tgt_id,
+                                {
+                                    "id": tgt_id,
+                                    "kind": "entity",
+                                    "entity_type": "external",
+                                    "label": tgt_ref[:24],
+                                    "weight": 0.0,
+                                },
+                            )
+                        edges.append(
+                            {
+                                "src": src_mid,
+                                "dst": tgt_id,
+                                "kind": str(row["relation_type"] or "related"),
+                                "weight": float(row["weight"] or 0),
+                            }
+                        )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+        # ---- 4) 群关系图：user-user 边（只在 group_id 明确时才加）
+        if group_id.strip():
+            try:
+                from ...core.db import connect_sync
+                from ...core.group_relation_edges import _decayed_weight
+                import time as _time
+
+                now_ts = _time.time()
+                with connect_sync() as conn:
+                    rel_rows = conn.execute(
+                        """
+                        SELECT src_user_id, dst_user_id, edge_kind, weight, last_seen_at
+                        FROM group_relation_edges
+                        WHERE group_id=?
+                        ORDER BY last_seen_at DESC
+                        LIMIT 200
+                        """,
+                        (str(group_id).strip(),),
+                    ).fetchall()
+                for row in rel_rows:
+                    w = _decayed_weight(float(row["weight"] or 0), float(row["last_seen_at"] or 0), now_ts=now_ts)
+                    if w <= 0.15:
+                        continue
+                    src = str(row["src_user_id"] or "")
+                    dst = str(row["dst_user_id"] or "")
+                    if not src or not dst:
+                        continue
+                    src_id = f"u:{src}"
+                    dst_id = f"u:{dst}"
+                    nodes.setdefault(
+                        src_id,
+                        {"id": src_id, "kind": "user", "label": src, "weight": 0.0},
+                    )
+                    nodes.setdefault(
+                        dst_id,
+                        {"id": dst_id, "kind": "user", "label": dst, "weight": 0.0},
+                    )
+                    edges.append(
+                        {
+                            "src": src_id,
+                            "dst": dst_id,
+                            "kind": str(row["edge_kind"] or "related"),
+                            "weight": round(w, 2),
+                        }
+                    )
+            except Exception:
+                pass
+
+        return {
+            "nodes": list(nodes.values()),
+            "edges": edges,
+            "available": True,
+            "group_id": group_id,
+            "limit": limit,
+        }
+
     @router.get("/palace-zones")
     async def palace_zones(_: AdminIdentity = Depends(require_admin)) -> dict:
         store = _memory_store(runtime)
