@@ -297,8 +297,9 @@ def _extract_recordable_group_message(event: Any) -> tuple[str, int, str]:
                 if text:
                     text_parts.append(text)
             elif seg_type == "face":
-                face_id = str(data.get("id", "") or "").strip()
-                token = f"[表情id:{face_id}]" if face_id else "[表情]"
+                from ..core.qq_face_names import render_face_token
+
+                token = render_face_token(data.get("id", ""))
                 text_parts.append(token)
                 visual_parts.append(token)
             elif seg_type == "mface":

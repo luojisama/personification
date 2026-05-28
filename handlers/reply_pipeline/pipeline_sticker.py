@@ -474,6 +474,7 @@ async def extract_mface_from_segment(
     sticker_candidates_ref: List[IncomingStickerCandidate],
     logger: Any,
     stop_reply_ref: List[bool],
+    sticker_image_urls: List[str] | None = None,
 ) -> None:
     if getattr(seg, "type", None) != "mface":
         return
@@ -499,7 +500,9 @@ async def extract_mface_from_segment(
         return
     message_text_ref.append("[图片·表情包]")
     data_url = image_bytes_to_data_url(payload, mime_type)
-    image_urls.append(data_url)
+    # 非 gif 表情包 → 走 sticker_image_urls，由上层决定是否直传视觉模型理解（不打标）。
+    if sticker_image_urls is not None:
+        sticker_image_urls.append(data_url)
     sticker_candidates_ref.append(
         IncomingStickerCandidate(
             data_url=data_url,
@@ -521,6 +524,7 @@ async def extract_images_from_segment(
     sticker_candidates_ref: List[IncomingStickerCandidate],
     logger: Any,
     stop_reply_ref: List[bool],
+    sticker_image_urls: List[str] | None = None,
 ) -> None:
     if getattr(seg, "type", None) != "image":
         return
@@ -550,8 +554,8 @@ async def extract_images_from_segment(
             kind="sticker",
             source="onebot_subtype",
         )
-        # 仍尝试下载用于 sticker_candidates_ref（让插件能学习用户常用的表情包）；
-        # 但不把 data_url 注入 image_urls，避免 LLM vision 处理。
+        # 下载用于 sticker_candidates_ref（让插件能学习用户常用的表情包）；
+        # 非 gif 的同时放进 sticker_image_urls，由上层决定是否直传视觉模型理解（不打标）。
         try:
             mime_type, payload, _is_gif = await download_safe_image_bytes(
                 url=url,
@@ -560,9 +564,11 @@ async def extract_images_from_segment(
                 logger=logger,
             )
         except Exception:
-            mime_type, payload = None, None
+            mime_type, payload, _is_gif = None, None, False
         if payload is not None and mime_type is not None:
             data_url = image_bytes_to_data_url(payload, mime_type)
+            if not _is_gif and sticker_image_urls is not None:
+                sticker_image_urls.append(data_url)
             sticker_candidates_ref.append(
                 IncomingStickerCandidate(
                     data_url=data_url,
@@ -599,9 +605,12 @@ async def extract_images_from_segment(
     )
     is_sticker_like = classification.is_sticker_like
     message_text_ref.append(classification.text_label)
-    # 若启发式分类判定为表情包，同样不放 image_urls（避免 vision 二次解释）
+    # 真实照片 → image_urls（走原视觉/摘要路径）；
+    # 表情包 → sticker_image_urls，由上层决定是否直传视觉模型理解（不打标）。
     if not is_sticker_like:
         image_urls.append(data_url)
+    elif sticker_image_urls is not None:
+        sticker_image_urls.append(data_url)
     record_counter(
         "incoming_image.classified_total",
         kind=classification.kind,

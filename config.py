@@ -46,6 +46,7 @@ class Config(BaseModel):
     personification_response_timeout: int = 180
     personification_image_input_mode: str = "auto"
     personification_image_detail: str = "auto"
+    personification_sticker_vision_max: int = 3
     personification_builtin_search: bool = True
     personification_model_builtin_search_enabled: bool = False
     personification_tool_web_search_enabled: bool = True

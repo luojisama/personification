@@ -77,7 +77,6 @@ from .pipeline_context import (
     extract_reply_sender_meta as _extract_reply_sender_meta,
     get_primary_provider_signature as _get_primary_provider_signature,
     looks_like_photo_message as _looks_like_photo_message,
-    looks_like_sticker_message as _looks_like_sticker_message,
     primary_route_supports_vision as _primary_route_supports_vision,
     private_history_window_limit as _private_history_window_limit,
     restore_current_user_message_content as _restore_current_user_message_content,
@@ -313,6 +312,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
     sender_name = ""
     trigger_reason = ""
     image_urls: List[str] = []
+    sticker_image_urls: List[str] = []
     sticker_candidates: List[IncomingStickerCandidate] = []
     stop_reply_due_to_gif = [False]
     is_direct_mention = False
@@ -407,8 +407,9 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             if seg.type == "text":
                 message_text_parts.append(seg.data.get("text", ""))
             elif seg.type == "face":
-                face_id = seg.data.get("id", "")
-                message_text_parts.append(f"[表情id:{face_id}]")
+                from ...core.qq_face_names import render_face_token
+
+                message_text_parts.append(render_face_token(seg.data.get("id", "")))
             elif seg.type == "mface":
                 await _extract_mface_from_segment(
                     seg,
@@ -418,6 +419,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                     sticker_candidates_ref=sticker_candidates,
                     logger=runtime.logger,
                     stop_reply_ref=stop_reply_due_to_gif,
+                    sticker_image_urls=sticker_image_urls,
                 )
             elif seg.type == "image":
                 await _extract_images_from_segment(
@@ -429,6 +431,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                     sticker_candidates_ref=sticker_candidates,
                     logger=runtime.logger,
                     stop_reply_ref=stop_reply_due_to_gif,
+                    sticker_image_urls=sticker_image_urls,
                 )
             elif seg.type == "gif":
                 # OneBot 独立 gif 消息段，直接忽略，不下载，不传给视觉模型
@@ -448,6 +451,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                             sticker_candidates_ref=sticker_candidates,
                             logger=runtime.logger,
                             stop_reply_ref=stop_reply_due_to_gif,
+                            sticker_image_urls=sticker_image_urls,
                         )
             except Exception as e:
                 runtime.logger.warning(f"回退解析原始消息图片失败: {e}")
@@ -710,22 +714,23 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             incoming_relation_metadata["sender_role"] = sender_role
 
     tool_image_urls = list(image_urls)
+    # 真实照片（不含表情包），仅这部分允许走文本摘要降级；表情包不打标。
+    photo_image_urls = list(image_urls)
     image_input_mode = normalize_image_input_mode(
         getattr(runtime.plugin_config, "personification_image_input_mode", "auto")
     )
     image_detail = normalize_image_detail(
         getattr(runtime.plugin_config, "personification_image_detail", "auto")
     )
-    is_sticker_like = _looks_like_sticker_message(raw_message_text or message_content)
     has_photo_input = _looks_like_photo_message(raw_message_text or message_content)
-    direct_image_input = bool(image_urls) and image_input_mode in {"auto", "direct"} and (
-        image_input_mode == "direct"
-        or _primary_route_supports_vision(runtime, VISUAL_ROUTE_REPLY_PLAIN)
+    plain_route_vision = image_input_mode == "direct" or _primary_route_supports_vision(
+        runtime, VISUAL_ROUTE_REPLY_PLAIN
     )
-    agent_direct_image_input = bool(image_urls) and image_input_mode in {"auto", "direct"} and (
-        image_input_mode == "direct"
-        or _primary_route_supports_vision(runtime, VISUAL_ROUTE_AGENT)
+    agent_route_vision = image_input_mode == "direct" or _primary_route_supports_vision(
+        runtime, VISUAL_ROUTE_AGENT
     )
+    direct_image_input = bool(image_urls) and image_input_mode in {"auto", "direct"} and plain_route_vision
+    agent_direct_image_input = bool(image_urls) and image_input_mode in {"auto", "direct"} and agent_route_vision
     image_summary_suffix = ""
     image_urls_for_text_model = list(image_urls)
     _needs_image_summary = False
@@ -737,6 +742,32 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                 _needs_image_summary = True
             if not direct_image_input:
                 image_urls_for_text_model = []
+
+    # 非 gif 表情包：去重 + 限量后，仅在视觉可用时直传模型理解（多模态直传 / 非多模态降级为文本占位符，不打标）。
+    # summary / disabled 模式不直传：前者明确要走文本，后者关图；两种情况下表情都只留文本占位符。
+    if sticker_image_urls and image_input_mode in {"auto", "direct"}:
+        sticker_vision_max = int(
+            getattr(runtime.plugin_config, "personification_sticker_vision_max", 3) or 0
+        )
+        _seen_sticker: set[str] = set()
+        capped_stickers: List[str] = []
+        for _su in sticker_image_urls:
+            if _su and _su not in _seen_sticker:
+                _seen_sticker.add(_su)
+                capped_stickers.append(_su)
+            if sticker_vision_max > 0 and len(capped_stickers) >= sticker_vision_max:
+                break
+        if capped_stickers and (plain_route_vision or agent_route_vision):
+            for _su in capped_stickers:
+                if _su not in tool_image_urls:
+                    tool_image_urls.append(_su)
+            if plain_route_vision:
+                for _su in capped_stickers:
+                    if _su not in image_urls_for_text_model:
+                        image_urls_for_text_model.append(_su)
+                direct_image_input = True
+            if agent_route_vision:
+                agent_direct_image_input = True
 
     hook_ctx = HookContext(
         user_id=user_id,
@@ -801,12 +832,13 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             task_exc_logger=_task_exc_logger,
         )
     async def _image_summary_task() -> str:
-        if not _needs_image_summary:
+        # 仅对真实照片做文本摘要降级；表情包不在回复路径打标（打标只服务于收集入库）。
+        if not _needs_image_summary or not photo_image_urls:
             return ""
         return await _build_image_summary_suffix(
             runtime=runtime,
-            image_urls=tool_image_urls,
-            sticker_like=is_sticker_like,
+            image_urls=photo_image_urls,
+            sticker_like=False,
         )
 
     image_summary_suffix, prepared_semantics = await asyncio.gather(
@@ -1068,8 +1100,8 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             runtime.logger.warning("拟人插件：模型不支持图片输入，改用视觉摘要重试...")
             retry_suffix = image_summary_suffix or await _build_image_summary_suffix(
                 runtime=runtime,
-                image_urls=tool_image_urls,
-                sticker_like=is_sticker_like,
+                image_urls=photo_image_urls,
+                sticker_like=False,
             )
             retry_messages = clone_messages_with_text_suffix(messages_to_use, retry_suffix)
             result = await runtime.call_ai_api(retry_messages)
@@ -1077,8 +1109,8 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             runtime.logger.warning("拟人插件：图片输入可能不被支持，改用视觉摘要重试...")
             retry_suffix = image_summary_suffix or await _build_image_summary_suffix(
                 runtime=runtime,
-                image_urls=tool_image_urls,
-                sticker_like=is_sticker_like,
+                image_urls=photo_image_urls,
+                sticker_like=False,
             )
             retry_messages = clone_messages_with_text_suffix(messages_to_use, retry_suffix)
             result = await runtime.call_ai_api(retry_messages)

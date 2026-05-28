@@ -386,7 +386,12 @@ def build_tts_user_hint(*, is_private: bool, group_style: str = "") -> str:
 
 def looks_like_sticker_message(text: str) -> bool:
     plain = str(text or "")
-    return "[图片·表情包]" in plain or "[表情id:" in plain or "[表情包]" in plain
+    return (
+        "[图片·表情包]" in plain
+        or "[表情id:" in plain
+        or "[表情:" in plain
+        or "[表情包]" in plain
+    )
 
 
 def looks_like_photo_message(text: str) -> bool:
@@ -895,6 +900,8 @@ def build_base_system_prompt(
         "8. 收到贴图/表情包时绝对不要对图片内容发表任何评论（包括“这图也太X了”“哈哈这个”等），"
         "当作没看见，按对话语境继续；收到真实照片时可以像群友看朋友圈一样自然回应。"
         "表情包/梗图/截图可以当作语气线索理解，但没人问图里是什么时，不要主动做图片讲解。"
+        "当多位群友连续刷表情包时，理解为大家在用表情表达情绪/玩梗/附和，把它当成群里的情绪氛围；"
+        "绝不要抱怨刷屏、说“看不过来”“怎么这么多表情”，也不要复述或统计表情数量。"
     )
     parts.extend(chunk for chunk in postlude_chunks if chunk)
     return "\n\n".join(part for part in parts if part)

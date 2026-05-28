@@ -866,7 +866,12 @@ async def process_yaml_response_logic(
     image_detail = normalize_image_detail(
         getattr(plugin_config, "personification_image_detail", "auto")
     )
-    sticker_like = "[图片·表情包]" in input_text or "[表情id:" in input_text or "[表情包]" in input_text
+    sticker_like = (
+        "[图片·表情包]" in input_text
+        or "[表情id:" in input_text
+        or "[表情:" in input_text
+        or "[表情包]" in input_text
+    )
     photo_like = photo_like or "[图片·照片]" in input_text
     direct_image_input = bool(last_images) and image_input_mode in {"auto", "direct"} and (
         image_input_mode == "direct"
