@@ -14,7 +14,7 @@ _RELATION_EVOLUTION_PROMPT = (
 )
 
 
-_RELATION_EVOLUTION_DAILY_QUOTA = 10
+_RELATION_EVOLUTION_DAILY_QUOTA = 30
 
 
 def _read_quota(memory_store: Any, key: str) -> int:

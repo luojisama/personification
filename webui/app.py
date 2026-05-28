@@ -260,6 +260,8 @@ function readCookie(name) {
   return "";
 }
 
+const _apiInflight = new Map();
+
 async function api(path, opts = {}) {
   const method = (opts.method || "GET").toUpperCase();
   const headers = { ...(opts.headers || {}) };
@@ -268,14 +270,26 @@ async function api(path, opts = {}) {
     const csrf = readCookie("personification_webui_csrf");
     if (csrf) headers["X-Personification-CSRF"] = csrf;
   }
-  const res = await fetch(API + path, { credentials: "include", ...opts, headers });
-  if (res.status === 401) { state.logged = false; render(); throw new Error("未登录"); }
-  if (!res.ok) {
-    let detail = res.statusText;
-    try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch {}
-    throw new Error(detail);
+  // 仅对 GET 做 in-flight 去重；同一 path 在响应回来之前的重复请求复用同一 Promise
+  const dedupKey = method === "GET" ? path : null;
+  if (dedupKey && _apiInflight.has(dedupKey)) {
+    return _apiInflight.get(dedupKey);
   }
-  return res.status === 204 ? null : await res.json();
+  const promise = (async () => {
+    const res = await fetch(API + path, { credentials: "include", ...opts, headers });
+    if (res.status === 401) { state.logged = false; render(); throw new Error("未登录"); }
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch {}
+      throw new Error(detail);
+    }
+    return res.status === 204 ? null : await res.json();
+  })();
+  if (dedupKey) {
+    _apiInflight.set(dedupKey, promise);
+    promise.finally(() => { _apiInflight.delete(dedupKey); });
+  }
+  return promise;
 }
 
 function alertFlash(kind, text) { state.alert = { kind, text }; render(); setTimeout(() => { state.alert = null; render(); }, 4000); }

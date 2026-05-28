@@ -241,6 +241,10 @@ class Config(BaseModel):
     # 留空时 fallback 到主模型，无需额外配置。
     # 建议值：与主模型同 provider 的 mini 版本（如 gpt-4.1-mini / gpt-5.4-mini）。
     personification_lite_model: str = ""
+    # 严格主模型模式：开启后忽略 lite_model 配置，所有 intent / review / 闸门 /
+    # 表情决策都走主模型，避免 cooldown / 网关失败时降级到弱模型导致 bot 突然变傻。
+    # 代价是 token 消耗更高。要回到旧行为把这个关掉。
+    personification_strict_main_model: bool = True
     personification_persona_api_type: str = ""
     personification_persona_api_url: str = ""
     personification_persona_api_key: str = ""

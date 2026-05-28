@@ -2050,6 +2050,14 @@ class MemoryStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_palace_zone ON memory_items(palace_zone)"
             )
+            # WU5：webui 群详情 list_recent_memories 按 (group_id, memory_type, updated_at) 过滤；
+            # 加复合索引避免在 memory_items 全表扫描
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_items_group_type ON memory_items(group_id, memory_type, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_items_salience ON memory_items(group_id, salience)"
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_entities_lookup ON memory_entities(entity, updated_at)"
             )

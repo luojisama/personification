@@ -445,6 +445,15 @@ def _build_agent_tool_caller(plugin_config: Any, logger: Any) -> Any:
 
 
 def _build_lite_tool_caller(plugin_config: Any, logger: Any, default_caller: Any = None) -> Any:
+    # P10：严格主模型模式下，所有 lite 路径都共用主模型，避免偶尔降级到弱模型
+    # 导致 bot "突然变傻"。默认开启；要恢复旧行为把此开关关掉即可。
+    if bool(getattr(plugin_config, "personification_strict_main_model", True)):
+        if logger is not None:
+            try:
+                logger.info("[strict_main_model] 启用：lite_tool_caller 复用主模型 caller")
+            except Exception:
+                pass
+        return default_caller
     lite_model = (
         get_model_override_for_role(plugin_config, MODEL_ROLE_INTENT)
         or str(getattr(plugin_config, "personification_lite_model", "") or "").strip()

@@ -58,7 +58,38 @@ class MemoryDecayScheduler:
                 payload["stability"] = max(0.0, safe_float(payload.get("stability", 0.4), 0.4) - min(age_days * decay_factor * 0.7, 0.08))
                 payload["confidence"] = max(0.0, safe_float(payload.get("confidence", 0.5), 0.5) - (0.05 if str(payload.get("superseded_by", "")) else 0.0))
                 payload["revision"] = int(payload.get("revision", 1) or 1) + 1
-                if payload["salience"] < 0.08 and payload["stability"] < 0.08 and reinforcement <= 0:
+                # P1：长期记忆保护——以下类型 / 标记的记忆不再硬删，避免"长期记忆丢失"。
+                # 满足任一条件即视为"半永久"：
+                # - memory_type 属于摘要 / 知识 / 画像类（session/daily summary、group_knowledge 等）
+                # - reinforcement_count > 0（被多次提及/确认）
+                # - access_count > 2（多次被检索）
+                # - palace_zone 标记为 semantic 或 background
+                memory_type = str(payload.get("memory_type", "") or "").strip().lower()
+                palace_zone = str(payload.get("palace_zone", "") or "").strip().lower()
+                semi_permanent_types = {
+                    "session_summary",
+                    "daily_summary",
+                    "group_knowledge",
+                    "group_meme",
+                    "concept_anchor",
+                    "user_persona",
+                    "persona_knowledge",
+                    "group_relation",
+                    "core_profile",
+                    "fact",
+                    "semantic",
+                }
+                is_semi_permanent = (
+                    memory_type in semi_permanent_types
+                    or reinforcement > 0
+                    or access_count > 2
+                    or palace_zone in {"semantic", "background"}
+                )
+                if is_semi_permanent:
+                    # 给底线值兜底：salience/stability 不会被衰减到 0；保留少量召回价值
+                    payload["salience"] = max(0.1, payload["salience"])
+                    payload["stability"] = max(0.1, payload["stability"])
+                if payload["salience"] < 0.08 and payload["stability"] < 0.08 and reinforcement <= 0 and not is_semi_permanent:
                     conn.execute("DELETE FROM memory_items WHERE memory_id=?", (str(row["memory_id"] or ""),))
                     conn.execute("DELETE FROM memory_embeddings WHERE memory_id=?", (str(row["memory_id"] or ""),))
                     conn.execute("DELETE FROM memory_entities WHERE memory_id=?", (str(row["memory_id"] or ""),))

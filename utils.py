@@ -187,6 +187,7 @@ def record_group_msg(
             message_id=str(safe_metadata.get("message_id", "") or ""),
             content=str(content or ""),
             timestamp=now_ts,
+            thread_id=str(thread_assignment.thread_id or ""),
         )
         row = conn.execute(
             "SELECT COUNT(1) AS cnt FROM group_messages WHERE group_id=?",

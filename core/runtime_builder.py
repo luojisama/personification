@@ -577,6 +577,9 @@ def build_plugin_runtime(
     )
 
     def _build_dynamic_lite_tool_caller(default_caller: Any) -> Any:
+        # P10：strict 模式下 lite 路径直接复用主模型 caller
+        if bool(getattr(plugin_config, "personification_strict_main_model", True)):
+            return default_caller
         lite_model = (
             get_model_override_for_role(plugin_config, MODEL_ROLE_INTENT)
             or str(getattr(plugin_config, "personification_lite_model", "") or "").strip()
