@@ -249,6 +249,7 @@ class PersonaStore:
             token = None
         try:
             from .safety_filter import SafetyRefusalError, sanitize_or_retry
+            from .token_ledger import record_response_usage
 
             async def _first() -> Any:
                 return await self._tool_caller.chat_with_tools(
@@ -268,16 +269,12 @@ class PersonaStore:
                 response = await sanitize_or_retry(
                     call=_first,
                     retry_call=_retry,
+                    on_response=record_response_usage,
                     logger=self._logger,
                     purpose="user_persona",
                 )
             except SafetyRefusalError:
                 return None
-            try:
-                from .token_ledger import record_response_usage
-                record_response_usage(response)
-            except Exception:
-                pass
         except Exception as e:
             self._logger.warning(f"[user_persona] LLM 调用失败: {e}")
             return None

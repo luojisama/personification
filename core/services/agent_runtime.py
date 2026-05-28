@@ -450,7 +450,15 @@ def _build_lite_tool_caller(plugin_config: Any, logger: Any, default_caller: Any
     if bool(getattr(plugin_config, "personification_strict_main_model", True)):
         if logger is not None:
             try:
-                logger.info("[strict_main_model] 启用：lite_tool_caller 复用主模型 caller")
+                configured_lite = str(getattr(plugin_config, "personification_lite_model", "") or "").strip()
+                if configured_lite:
+                    logger.warning(
+                        f"[strict_main_model] 已启用，配置的 personification_lite_model="
+                        f"{configured_lite!r} 将被忽略；要恢复 lite 路径请把 "
+                        f"personification_strict_main_model 关闭。"
+                    )
+                else:
+                    logger.info("[strict_main_model] 启用：lite_tool_caller 复用主模型 caller")
             except Exception:
                 pass
         return default_caller

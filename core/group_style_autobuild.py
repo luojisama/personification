@@ -190,6 +190,7 @@ async def build_group_style(
         token = None
     try:
         from .safety_filter import SafetyRefusalError, sanitize_or_retry
+        from .token_ledger import record_response_usage
 
         async def _first() -> Any:
             return await tool_caller.chat_with_tools(
@@ -219,15 +220,11 @@ async def build_group_style(
             response = await sanitize_or_retry(
                 call=_first,
                 retry_call=_retry,
+                on_response=record_response_usage,
                 purpose="group_style",
             )
         except SafetyRefusalError:
             return {}
-        try:
-            from .token_ledger import record_response_usage
-            record_response_usage(response)
-        except Exception:
-            pass
     except Exception:
         return {}
     finally:

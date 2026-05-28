@@ -66,6 +66,7 @@ async def sanitize_or_retry(
     call: Callable[[], Awaitable[Any]],
     retry_call: Callable[[], Awaitable[Any]] | None = None,
     extract: Callable[[Any], str] = lambda r: str(getattr(r, "content", "") or ""),
+    on_response: Callable[[Any], None] | None = None,
     logger: Any = None,
     purpose: str = "",
 ) -> Any:
@@ -74,9 +75,20 @@ async def sanitize_or_retry(
     - call: 第一次调用工厂
     - retry_call: 第二次调用工厂（可选，应使用更明确的 prompt）
     - extract: 从响应对象提取文本以判断
+    - on_response: 每次拿到 LLM 响应都会调用（包括被丢弃的第一次和重试的两次），
+      用于 token_ledger 记账 —— 否则 retry 路径下首次调用的 token 会丢失。
     - 仍命中 → 抛 SafetyRefusalError，调用方应跳过持久化。
     """
+    def _notify(resp: Any) -> None:
+        if on_response is None:
+            return
+        try:
+            on_response(resp)
+        except Exception:
+            pass
+
     response = await call()
+    _notify(response)
     text = extract(response)
     if not detect_refusal(text):
         return response
@@ -91,6 +103,7 @@ async def sanitize_or_retry(
     if retry_call is None:
         raise SafetyRefusalError(sample=_sanitize_sample(text))
     response2 = await retry_call()
+    _notify(response2)
     text2 = extract(response2)
     if detect_refusal(text2):
         if logger is not None:

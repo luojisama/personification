@@ -125,6 +125,7 @@ async def summarize_session_segment(
         token = None
     try:
         from .safety_filter import SafetyRefusalError, sanitize_or_retry
+        from .token_ledger import record_response_usage
 
         async def _first() -> Any:
             return await tool_caller.chat_with_tools(
@@ -150,16 +151,11 @@ async def summarize_session_segment(
             response = await sanitize_or_retry(
                 call=_first,
                 retry_call=_retry,
+                on_response=record_response_usage,
                 purpose="memory_summarizer_session",
             )
         except SafetyRefusalError:
             return None
-        try:
-            from .token_ledger import record_response_usage
-
-            record_response_usage(response)
-        except Exception:
-            pass
         return str(getattr(response, "content", "") or "").strip() or None
     except Exception:
         return None
@@ -282,6 +278,7 @@ async def scan_groups_for_daily_summaries(
                 token = None
             try:
                 from .safety_filter import SafetyRefusalError, sanitize_or_retry
+                from .token_ledger import record_response_usage
 
                 async def _first() -> Any:
                     return await tool_caller.chat_with_tools(
@@ -307,17 +304,12 @@ async def scan_groups_for_daily_summaries(
                     response = await sanitize_or_retry(
                         call=_first,
                         retry_call=_retry,
+                        on_response=record_response_usage,
                         purpose="memory_summarizer_daily",
                     )
                 except SafetyRefusalError:
                     result["groups"].append({"group_id": gid, "status": "safety_refusal"})
                     continue
-                try:
-                    from .token_ledger import record_response_usage
-
-                    record_response_usage(response)
-                except Exception:
-                    pass
             except Exception:
                 result["groups"].append({"group_id": gid, "status": "llm_error"})
                 continue
