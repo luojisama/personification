@@ -661,6 +661,22 @@ def _build_entries() -> list[ConfigEntry]:
             help_aliases=("web_fetch_timeout", "抓取超时"),
         ),
         ConfigEntry(
+            key="web_proxy",
+            field_name="personification_web_proxy",
+            display_name="联网抓取代理",
+            value_type="str",
+            default="",
+            scope=GLOBAL_SCOPE,
+            description=(
+                "web_fetch / web_search 走的 HTTP 代理（如 http://127.0.0.1:7890）。"
+                "国内服务器抓被 DNS 污染/墙的站点（Cloudflare 前置站、海外 API）时填写，"
+                "请求会经代理解析 DNS 并连接，绕开本地污染；非空时还会跳过"
+                "“本地解析到内网就拒绝”的判断（仍拦截字面内网 IP）。留空 = 直连。"
+            ),
+            category="config",
+            help_aliases=("web_proxy", "抓取代理", "联网代理", "搜索代理"),
+        ),
+        ConfigEntry(
             key="provider_dynamic_priority_enabled",
             field_name="personification_provider_dynamic_priority_enabled",
             display_name="Provider 动态优先级",
