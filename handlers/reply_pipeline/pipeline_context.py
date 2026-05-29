@@ -391,6 +391,7 @@ def looks_like_sticker_message(text: str) -> bool:
         or "[表情id:" in plain
         or "[表情:" in plain
         or "[表情包]" in plain
+        or "[多张表情]" in plain
     )
 
 

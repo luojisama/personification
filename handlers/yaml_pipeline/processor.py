@@ -871,6 +871,7 @@ async def process_yaml_response_logic(
         or "[表情id:" in input_text
         or "[表情:" in input_text
         or "[表情包]" in input_text
+        or "[多张表情]" in input_text
     )
     photo_like = photo_like or "[图片·照片]" in input_text
     direct_image_input = bool(last_images) and image_input_mode in {"auto", "direct"} and (

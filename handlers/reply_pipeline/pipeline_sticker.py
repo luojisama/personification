@@ -698,7 +698,11 @@ async def maybe_choose_reply_sticker(
         record_counter("reply_sticker.skipped_total", reason="group_disabled")
     if is_sticker_enabled:
         if force_mode == "mixed":
-            should_get_sticker = True
+            # mixed 仅来自随机水群表情路径：仍尊重群级冷却，避免短时间内连甩表情刷屏，
+            # 并记录 last_sent，让随后的普通回复也守同一条冷却线。
+            should_get_sticker = not sticker_in_cooldown
+            if should_get_sticker and not is_private_session:
+                sticker_state["last_sent"] = sticker_now
         elif force_mode == "text_only":
             should_get_sticker = False
         elif not sticker_in_cooldown and random.random() < runtime.plugin_config.personification_sticker_probability:
