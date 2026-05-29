@@ -398,6 +398,33 @@ def looks_like_photo_message(text: str) -> bool:
     return "[图片·照片]" in str(text or "")
 
 
+# 单个表情占位符的形态（incoming sticker placeholder）。
+_STICKER_PLACEHOLDER_ALT = (
+    r"\[图片·表情包\]"
+    r"|\[对方发送了一个表情包(?:：[^\]]*)?\]"
+    r"|\[表情包\]"
+    r"|\[表情:[^\]]*\]"
+    r"|\[表情id:[^\]]*\]"
+)
+# 连续 2+ 个表情占位符（中间可夹空白/分隔符）——批量刷表情时出现。
+_STICKER_RUN_RE = re.compile(
+    rf"(?:{_STICKER_PLACEHOLDER_ALT})(?:\s*(?:{_STICKER_PLACEHOLDER_ALT}))+"
+)
+
+
+def fold_consecutive_sticker_placeholders(text: str) -> str:
+    """把"一连串表情占位符"折叠成单个中性标记。
+
+    多人/连续刷表情时，喂给模型的消息文本会出现 N 个相邻的 `[图片·表情包]` 等占位符，
+    模型看到"一张接一张"的信号容易被勾出"怎么发个没完"之类的吐槽。这里在源头把连续
+    占位符折叠成一个中性的 `[多张表情]`，消除数量/连续性线索（单个表情保持原样）。
+    """
+    plain = str(text or "")
+    if not plain:
+        return plain
+    return _STICKER_RUN_RE.sub("[多张表情]", plain)
+
+
 def get_primary_provider_signature(runtime: Any) -> tuple[str, str]:
     provider_getter = getattr(runtime, "get_configured_api_providers", None)
     providers = provider_getter() if callable(provider_getter) else []
@@ -978,6 +1005,7 @@ __all__ = [
     "compute_agent_time_budget",
     "count_user_interactions",
     "extract_reply_sender_meta",
+    "fold_consecutive_sticker_placeholders",
     "get_cached_friend_ids",
     "get_primary_provider_signature",
     "IncomingImageClassification",

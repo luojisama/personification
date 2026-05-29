@@ -75,6 +75,7 @@ from .pipeline_context import (
     build_tts_user_hint as _build_tts_user_hint,
     count_user_interactions as _count_user_interactions,
     extract_reply_sender_meta as _extract_reply_sender_meta,
+    fold_consecutive_sticker_placeholders as _fold_consecutive_sticker_placeholders,
     get_primary_provider_signature as _get_primary_provider_signature,
     looks_like_photo_message as _looks_like_photo_message,
     primary_route_supports_vision as _primary_route_supports_vision,
@@ -507,6 +508,9 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             message_text_parts.append(clipped_forward)
 
         message_text = "".join(message_text_parts)
+        # 多人/连续刷表情时，把一连串表情占位符折叠成单个中性标记，
+        # 避免模型看到"一张接一张"的信号后吐槽刷屏（配合 base prompt 的告诫）。
+        message_text = _fold_consecutive_sticker_placeholders(message_text)
         raw_message_text = message_text
         message_content = message_text.strip()
         is_private_context = str(group_id).startswith(session.private_session_prefix)
