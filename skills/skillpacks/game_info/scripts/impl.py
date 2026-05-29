@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Optional
 
@@ -272,37 +273,23 @@ async def _format_story(
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
-async def _maybe_synthesize(
-    *,
-    tool_caller: Any,
-    logger: Any,
+async def _steam_update_block(
     game: str,
-    aspect_label: str,
-    raw_text: str,
+    *,
+    http_client: httpx.AsyncClient,
+    logger: Any,
+    timeout: float,
 ) -> str:
-    """可选：用 LLM 把多源结果压缩成一段可读摘要；不可用或失败时返回空（由上层兜底原文）。"""
-    if tool_caller is None or not raw_text.strip():
-        return ""
-    system_prompt = (
-        "你是游戏资讯整理助手。请把下面来自官方与社区的多源信息整理成一段简洁、可读的中文摘要，"
-        "保留关键事实与最有用的链接，去掉重复与噪音，不要编造信息。"
+    """Steam 官方公告块：解析 appid → 取公告 → 格式化；解析不到返回 ""（由社区搜索兜底）。"""
+    appid, matched = await _resolve_steam_appid(
+        game, http_client=http_client, logger=logger, timeout=timeout
     )
-    user_prompt = f"游戏：{game}\n查询方面：{aspect_label}\n\n原始多源信息：\n{raw_text[:3500]}"
-    try:
-        response = await tool_caller.chat_with_tools(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            [],
-            False,
-        )
-    except Exception as exc:
-        logger.debug(f"[game_info] synthesize failed: {exc}")
+    if appid is None:
         return ""
-    if getattr(response, "tool_calls", None):
-        return ""
-    return str(getattr(response, "content", "") or "").strip()
+    news = await _fetch_steam_news(
+        appid, http_client=http_client, logger=logger, timeout=timeout
+    )
+    return _format_steam_updates(game, matched, news)
 
 
 async def game_info(
@@ -313,12 +300,12 @@ async def game_info(
     http_client: httpx.AsyncClient,
     logger: Any = None,
     plugin_config: Any = None,
-    tool_caller: Any = None,
 ) -> str:
     """游戏信息聚合查询主入口。
 
     aspect: update=更新公告 / guide=攻略 / story=剧情设定 / tips=技巧。
     数据源：Steam 官方公告（update）+ 社区定向搜索 + Wiki（story）。
+    返回结构化可读文本，交由调用方 agent 综合成最终回复。
     """
     logger = _resolve_logger(logger)
     game = str(game or "").strip()
@@ -330,62 +317,36 @@ async def game_info(
     timeout = _timeout(plugin_config)
     community_sites = _community_sites(plugin_config)
 
-    sections: list[str] = []
-
-    if aspect == "story":
-        story = await _format_story(game, query, http_client=http_client, logger=logger)
-        if story:
-            sections.append(story)
-        # 剧情也补一条社区搜索，覆盖 wiki 收录不全的小众游戏。
-        kw = _ASPECT_SEARCH_KEYWORDS["story"]
-        community = await _community_search(
-            f"{game} {kw} {query}".strip(),
-            http_client=http_client,
-            logger=logger,
-            community_sites=community_sites,
-        )
-        block = _format_community(aspect_label, game, community)
-        if block:
-            sections.append(block)
-    else:
-        if aspect == "update":
-            # 先试 Steam 官方公告。
-            appid, matched = await _resolve_steam_appid(
-                game, http_client=http_client, logger=logger, timeout=timeout
-            )
-            if appid is not None:
-                news = await _fetch_steam_news(
-                    appid, http_client=http_client, logger=logger, timeout=timeout
-                )
-                steam_block = _format_steam_updates(game, matched, news)
-                if steam_block:
-                    sections.append(steam_block)
-        # 社区定向搜索（攻略/技巧主力；更新作为 Steam 的补充或国服网游的主力）。
+    async def _community_block() -> str:
         kw = _ASPECT_SEARCH_KEYWORDS[aspect]
-        community = await _community_search(
+        results = await _community_search(
             f"{game} {kw} {query}".strip(),
             http_client=http_client,
             logger=logger,
             community_sites=community_sites,
         )
-        block = _format_community(aspect_label, game, community)
-        if block:
-            sections.append(block)
+        return _format_community(aspect_label, game, results)
 
+    # 主数据源与社区搜索互不依赖，并行拉取（本工具 latency_class=slow）。
+    if aspect == "story":
+        # 剧情优先 Wiki，并补社区搜索覆盖 wiki 收录不全的小众游戏。
+        blocks = await asyncio.gather(
+            _format_story(game, query, http_client=http_client, logger=logger),
+            _community_block(),
+        )
+    elif aspect == "update":
+        # Steam 官方公告 + 社区（国服网游 / Steam 无收录时的兜底）。
+        blocks = await asyncio.gather(
+            _steam_update_block(game, http_client=http_client, logger=logger, timeout=timeout),
+            _community_block(),
+        )
+    else:
+        blocks = [await _community_block()]
+
+    sections = [b for b in blocks if b]
     if not sections:
         return (
             f"没有查到「{game}」关于{aspect_label}的可靠信息，可能是名称不准确、"
             "暂无相关公告，或当前网络不可达。可以换个更准确的游戏名或具体一点的关键词再试。"
         )
-
-    raw_text = "\n\n".join(sections)
-    summary = await _maybe_synthesize(
-        tool_caller=tool_caller,
-        logger=logger,
-        game=game,
-        aspect_label=aspect_label,
-        raw_text=raw_text,
-    )
-    if summary:
-        return f"{summary}\n\n——\n参考来源：\n{raw_text}"
-    return raw_text
+    return "\n\n".join(sections)

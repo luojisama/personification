@@ -15,7 +15,6 @@ def build_tools(runtime):
     logger = getattr(runtime, "logger", None) or _SilentLogger()
     plugin_config = getattr(runtime, "plugin_config", None)
     shared_client = getattr(runtime, "http_client", None)
-    tool_caller = getattr(runtime, "tool_caller", None)
 
     enabled = bool(getattr(plugin_config, "personification_game_info_enabled", True))
 
@@ -34,7 +33,6 @@ def build_tools(runtime):
                 http_client=http_client,
                 logger=logger,
                 plugin_config=plugin_config,
-                tool_caller=tool_caller,
             )
 
         return await _with_client(_call)
