@@ -401,8 +401,31 @@ async function loadView() {
 function render() {
   const root = document.getElementById("app");
   if (!state.logged) { root.innerHTML = renderLogin(); attachLogin(); return; }
+  // 全量 innerHTML 重绘会让正在输入的搜索框失焦；记下焦点 + 光标位置，重绘后还原。
+  const active = document.activeElement;
+  let focusSnap = null;
+  if (active && active.id && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+    focusSnap = {
+      id: active.id,
+      start: active.selectionStart,
+      end: active.selectionEnd,
+      scrollTop: active.scrollTop,
+    };
+  }
   root.innerHTML = renderLayout();
   attachLayout();
+  if (focusSnap) {
+    const next = document.getElementById(focusSnap.id);
+    if (next && (next.tagName === "INPUT" || next.tagName === "TEXTAREA")) {
+      next.focus();
+      try {
+        if (focusSnap.start !== null && focusSnap.end !== null) {
+          next.setSelectionRange(focusSnap.start, focusSnap.end);
+        }
+        next.scrollTop = focusSnap.scrollTop || 0;
+      } catch (_) { /* number/email inputs 不支持 setSelectionRange，忽略 */ }
+    }
+  }
 }
 
 function renderLayout() {
@@ -625,7 +648,7 @@ function renderStickers() {
     </div>`;
   }).join("");
   return `<div class="toolbar">
-      <input type="search" placeholder="按文件名/描述/标签搜索…" value="${escapeAttr(state.stickerSearch)}" oninput="state.stickerSearch=this.value;render()" style="flex:1;max-width:340px">
+      <input id="sticker-search-input" type="search" placeholder="按文件名/描述/标签搜索…" value="${escapeAttr(state.stickerSearch)}" oninput="state.stickerSearch=this.value;render()" style="flex:1;max-width:340px">
       <span class="muted">共 ${data.total} 张，已标 ${data.labeled_count}</span>
       <button class="btn" onclick="document.getElementById('sticker-upload-input').click()">上传</button>
       <input id="sticker-upload-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" onchange="uploadStickerFromInput(this)">
@@ -1447,7 +1470,7 @@ function renderSkills() {
     </tr>`;
   }).join("");
   return `<div class="toolbar">
-      <input type="search" placeholder="搜索 skill 名称…" value="${escapeAttr(state.skillFilter)}" oninput="state.skillFilter=this.value;render()" style="flex:1;max-width:340px">
+      <input id="skill-filter-input" type="search" placeholder="搜索 skill 名称…" value="${escapeAttr(state.skillFilter)}" oninput="state.skillFilter=this.value;render()" style="flex:1;max-width:340px">
       <span class="muted">共 ${state.skills.length} 个 skill</span>
     </div>
     <div class="card"><h2>Skill 启停</h2>
@@ -1594,7 +1617,7 @@ function renderConfig() {
   }).join("") : "";
   const heading = search ? `搜索结果（${items.length}）` : (activeGroup || '配置');
   return `<div class="toolbar">
-      <input type="search" placeholder="搜索字段名 / 标签 / 描述…" value="${escapeAttr(state.configSearch)}" oninput="state.configSearch=this.value;render()" style="flex:1;max-width:340px">
+      <input id="config-search-input" type="search" placeholder="搜索字段名 / 标签 / 描述…" value="${escapeAttr(state.configSearch)}" oninput="state.configSearch=this.value;render()" style="flex:1;max-width:340px">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
         <input type="checkbox" ${state.showAdvancedConfig?'checked':''} onchange="state.showAdvancedConfig=this.checked;render()" style="width:auto">
         显示高级配置
