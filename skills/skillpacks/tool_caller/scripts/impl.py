@@ -458,6 +458,9 @@ def _gemini_builtin_search_tool(model: str) -> dict:
 
 def _anthropic_content_blocks(content: Any) -> List[dict]:
     blocks: List[dict] = []
+    # 空文本不要发：Anthropic 拒收空 text block；同时避免把 None 拼成字面 "None"。
+    if content is None or content == "" or content == []:
+        return blocks
     if isinstance(content, list):
         for item in content:
             if isinstance(item, dict):
@@ -883,10 +886,22 @@ class OpenAIToolCaller(ToolCaller):
 
                 chat_supports_native_search = use_builtin_search and _openai_chat_search_model(self.model)
 
+                # 部分严格 provider（Rust serde 反序列化）会把 content=None 当作
+                # "missing field 'content'" 直接 400 拒绝。统一规范化为 ""。
+                normalized_messages: List[dict] = []
+                for _m in messages:
+                    if not isinstance(_m, dict):
+                        normalized_messages.append(_m)
+                        continue
+                    _role = _m.get("role")
+                    if _role in {"assistant", "system", "user"} and _m.get("content") is None:
+                        _m = {**_m, "content": ""}
+                    normalized_messages.append(_m)
+
                 def _build_chat_payload(*, use_native_search: bool, use_original_tools: bool) -> Dict[str, Any]:
                     payload = {
                         "model": self.model,
-                        "messages": messages,
+                        "messages": normalized_messages,
                     }
                     payload_tools = all_tools if use_original_tools else filtered_tools
                     if payload_tools:

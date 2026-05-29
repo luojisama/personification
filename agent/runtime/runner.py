@@ -816,7 +816,7 @@ async def run_agent(
                         messages.append(
                             {
                                 "role": "assistant",
-                                "content": None,
+                                "content": "",
                                 "tool_calls": [
                                     {
                                         "id": fallback_id,
@@ -907,7 +907,9 @@ async def run_agent(
             messages.append(
                 {
                     "role": "assistant",
-                    "content": response.content if response.content else None,
+                    # 必须用空字符串而非 None：部分严格 provider（Rust 反序列化）
+                    # 会把 null 当作"缺失字段"直接 400 拒绝。
+                    "content": response.content if response.content else "",
                     "tool_calls": [
                         {
                             "id": tool_call.id,
