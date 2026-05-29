@@ -260,6 +260,11 @@ class Config(BaseModel):
     personification_wiki_enabled: bool = True
     personification_wiki_fandom_enabled: bool = True
     personification_fandom_wikis: Optional[Union[str, Dict[str, str]]] = None
+    # 游戏信息工具（game_info）：聚合更新公告/攻略/剧情/技巧，数据源含 Steam 官方与社区。
+    personification_game_info_enabled: bool = True
+    personification_game_info_timeout: float = 15.0
+    # 攻略/技巧定向搜索时附加的社区站点白名单（覆盖默认）；留空用内置默认列表。
+    personification_game_info_community_sites: Optional[Union[str, List[str]]] = None
 
     personification_api_pools: Optional[Union[str, List[Dict[str, Any]]]] = None
     personification_api_type: str = "openai"
