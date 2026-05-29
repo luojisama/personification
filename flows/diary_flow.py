@@ -81,8 +81,11 @@ def _spread_sample(lines: list[str], k: int) -> list[str]:
         return []
     if len(lines) <= k:
         return list(lines)
-    step = len(lines) / float(k)
-    picked_indices = sorted({min(len(lines) - 1, int(i * step)) for i in range(k)})
+    if k == 1:
+        return [lines[-1]]
+    # 含首尾的均匀取样：保证最新一条（也包含最早一条）一定入选。
+    last = len(lines) - 1
+    picked_indices = sorted({round(i * last / (k - 1)) for i in range(k)})
     return [lines[i] for i in picked_indices]
 
 
