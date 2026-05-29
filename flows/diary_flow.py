@@ -44,6 +44,48 @@ def filter_sensitive_content(text: str) -> str:
     return filtered_text
 
 
+# 发说说的切入角度池：每次随机挑 1-2 个做软性引导，促使话题/题材在多次发布间轮换，
+# 避免老是围绕群里正在热议的同一件事写命题作文。
+_DIARY_ANGLE_POOL = [
+    "眼前的一个生活小观察",
+    "突然冒出来的一个念头或联想",
+    "此刻的心情或身体感觉",
+    "窗外/天气/光线/声音之类的环境细节",
+    "刚吃的、想吃的或随手摸到的东西",
+    "一个无聊的小吐槽",
+    "今天的游戏/动漫里一个很小的细节",
+    "一条轻新闻勾起的即时反应",
+    "对某件小事的一句反问或牢骚",
+    "一个没说完、半截就停下的画面",
+]
+
+
+def _pick_diversity_hint() -> str:
+    """随机挑选 1-2 个切入角度，生成软性题材轮换提示。"""
+    k = random.choice((1, 2))
+    angles = random.sample(_DIARY_ANGLE_POOL, min(k, len(_DIARY_ANGLE_POOL)))
+    joined = "或".join(f"「{a}」" for a in angles)
+    return (
+        f"这次优先从 {joined} 这类角度切入，不必围绕群里正在热议的那个主话题；"
+        "在不同题材间轮换（生活/心情/游戏/动漫/新闻/环境各换着来），别连续几条都黏在同一件事上。"
+    )
+
+
+def _spread_sample(lines: list[str], k: int) -> list[str]:
+    """跨整个时间窗均匀稀疏取样，保留原有先后顺序。
+
+    直接取最近连续 N 条往往集中在同一段热议话题上；均匀抽样能让窗口内不同时段、
+    不同话题的发言都露头，给选题更多样的素材。
+    """
+    if k <= 0 or not lines:
+        return []
+    if len(lines) <= k:
+        return list(lines)
+    step = len(lines) / float(k)
+    picked_indices = sorted({min(len(lines) - 1, int(i * step)) for i in range(k)})
+    return [lines[i] for i in picked_indices]
+
+
 def clean_generated_text(text: str) -> str:
     """Strip model-side thinking/status wrappers."""
     cleaned = re.sub(r"<status.*?>.*?</\s*status\s*>", "", text, flags=re.DOTALL | re.IGNORECASE)
@@ -242,14 +284,15 @@ async def get_recent_chat_context(bot: Any, logger: Any) -> str:
         if not group_list:
             return ""
 
-        selected_groups = random.sample(group_list, min(2, len(group_list)))
+        # 多采几个群、每群跨时间窗稀疏取样，避免说说素材被单一群的单一热议话题主导。
+        selected_groups = random.sample(group_list, min(3, len(group_list)))
         context_parts = []
         for group in selected_groups:
             group_id = group["group_id"]
             group_name = group.get("group_name", str(group_id))
 
             try:
-                messages = await bot.get_group_msg_history(group_id=group_id, count=50)
+                messages = await bot.get_group_msg_history(group_id=group_id, count=40)
             except Exception as e:
                 logger.warning(f"[diary] get group history failed: {group_id}: {e}")
                 continue
@@ -276,6 +319,8 @@ async def get_recent_chat_context(bot: Any, logger: Any) -> str:
                 if safe_content.strip():
                     lines.append(f"{sender_name}: {safe_content.strip()}")
 
+            # 跨整个窗口均匀稀疏取样，让不同时段/话题都露头，而非只盯最近一段热聊。
+            lines = _spread_sample(lines, 12)
             if lines:
                 context_parts.append(f"群聊 {group_name} 的最近聊天：\n" + "\n".join(lines))
 
@@ -394,16 +439,20 @@ async def generate_ai_diary(
         "4. 标点可以省略，可用空格、句号、问号代替逗号；可以是反问、牢骚、发现、未说完的半句；不必有结论。\n"
         "5. 语气贴合角色，但不要互联网黑话、热梗、夸张营业感、AI 客服腔、对仗工整的总结句。\n"
         "6. 不要列条目、不要标题、不要 hashtag、不要说自己是 AI。\n"
-        "7. 必须避开最近说说已经反复出现的具体意象、食物、动作和句式；如果最近写过，就换一个完全不同的触发点。\n"
-        "8. 可以从最近群聊、今天的游戏/动漫/轻新闻里抓一个很小的细节当触发点，但写成自己的即时反应，不要新闻播报。\n"
+        "7. 必须避开最近说说已经反复出现的话题、题材、具体意象、食物、动作和句式；如果最近写过类似的，就彻底换一个不同的话题和角度。\n"
+        "8. 触发点要小而具体，写成自己的即时反应，不要新闻播报、不要复述大家正在热议的主话题。\n"
         "9. image_prompt 只有在适合配一张日常氛围图时填写英文画面描述；不适合就留空。"
     )
     recent_block = "最近已经发过的说说，禁止复读这些内容或近似句式：\n" + _format_recent_qzone_posts(recent_posts)
+    diversity_hint = _pick_diversity_hint()
 
     if chat_context:
         rich_prompt = (
-            "请结合下面这些最近聊天内容，写一条带一点生活感的 QQ 空间说说。\n"
-            "不要逐条复述聊天记录，而是把它们消化成自己的感受、吐槽或碎碎念。\n\n"
+            "下面是最近的一些聊天片段，仅作为氛围参考。\n"
+            "不要复述、也不要总结大家正在热议的那个主话题；可以从里面挑一个不显眼的小细节、"
+            "边角料或一闪而过的念头当触发点，写成自己此刻的碎碎念。如果聊天内容没有特别想接的，"
+            "完全可以抛开它，写自己当下的心情或一个生活小观察。\n\n"
+            f"{diversity_hint}\n\n"
             f"{chat_context}\n\n"
             f"{emotion_hint}\n\n"
             f"{recent_block}\n\n"
@@ -443,7 +492,9 @@ async def generate_ai_diary(
 
     basic_prompt = (
         "请直接写一条自然的短说说，像是角色自己随手发的碎碎念。\n"
-        "如果没有群聊素材，可以借助模型内置搜索/常识，从今天的游戏、动漫、轻新闻里挑一个小触发点。\n\n"
+        "触发点可以是自己当下的心情、一个生活小观察，或借助常识从今天的游戏/动漫/轻新闻里挑一个细节；"
+        "重点是每次换着题材来，别老写同一类东西。\n\n"
+        f"{diversity_hint}\n\n"
         f"{recent_block}\n\n"
         f"{base_requirements}"
     )
@@ -542,9 +593,10 @@ async def maybe_generate_proactive_qzone_post(
         "2. 如果想发，action=post，并给出 content。\n"
         "3. 正文 12-50 个中文字符，像真人随手发的一句话，别写长篇大段。\n"
         "4. 只写一个小瞬间、小吐槽或突然想到的念头，不要列表、标题、hashtag 或总结腔。\n"
-        "5. 不要为了发而发，不要重复最近已经说过很多遍的话题，不要互联网黑话和热梗。\n"
-        "6. 可以从今天的游戏、动漫、轻新闻里抓一个细节，但必须写成自己的日常反应，不要像新闻标题。\n"
-        "7. 如果适合配图，image_prompt 写英文画面描述，要求贴合人设和正文氛围；不适合就留空。"
+        "5. 不要为了发而发，不要重复最近已经说过很多遍的话题或题材，每次换着不同的话题和角度来，不要互联网黑话和热梗。\n"
+        "6. 触发点可以是当下心情、一个生活小观察，或今天游戏/动漫/轻新闻里的一个细节，但写成自己的日常反应、不要复述群里正在热议的主话题、不要像新闻标题。\n"
+        f"7. {_pick_diversity_hint()}\n"
+        "8. 如果适合配图，image_prompt 写英文画面描述，要求贴合人设和正文氛围；不适合就留空。"
     )
     result = await _generate_once(
         system_prompt,
