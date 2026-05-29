@@ -68,35 +68,57 @@ _DEFAULT_COMMUNITY_SITES = [
     "psnine.com",
 ]
 
-# 头部游戏官方公告源精选映射：覆盖不在 Steam 的腾讯/网易/米哈游/暴雪/拳头/EA 等。
-# names 为别名（匹配时大小写/空格/标点不敏感）；urls 为官方新闻/公告页。
+# 头部游戏官方公告源精选映射：预设 10 主流网游 + 10 主流单机（近期、不限平台，
+# 含 Switch/PS 独占等 Steam 覆盖不到的）。names 为别名（匹配时大小写/空格/标点不敏感，
+# 支持子串包含）；urls 为官方新闻/公告页。
 # 注意：部分官网是 JS 渲染的 SPA，正文可能抽取不全——此时仍会把官方链接作为权威来源给出。
 # URL 可能随官网改版失效，需要时更新此表即可。
 _OFFICIAL_GAME_SOURCES: list[dict[str, Any]] = [
+    # ===== 10 主流网游 / 服务型游戏 =====
     {"names": ["原神", "genshin", "genshin impact"], "label": "原神官网",
      "urls": ["https://ys.mihoyo.com/main/news/index/2"]},
     {"names": ["崩坏：星穹铁道", "崩坏星穹铁道", "星穹铁道", "星铁", "honkai star rail", "hsr", "star rail"],
      "label": "星穹铁道官网", "urls": ["https://sr.mihoyo.com/news"]},
     {"names": ["绝区零", "zenless zone zero", "zzz"], "label": "绝区零官网",
      "urls": ["https://zzz.mihoyo.com/main/news"]},
-    {"names": ["崩坏3", "崩坏三", "honkai impact 3", "崩崩崩"], "label": "崩坏3官网",
-     "urls": ["https://www.bh3.com/news"]},
+    {"names": ["鸣潮", "wuthering waves"], "label": "鸣潮官网",
+     "urls": ["https://mc.kurogames.com/"]},
     {"names": ["王者荣耀", "王者", "honor of kings"], "label": "王者荣耀官网",
      "urls": ["https://pvp.qq.com/"]},
-    {"names": ["和平精英"], "label": "和平精英官网", "urls": ["https://gp.qq.com/"]},
+    {"names": ["三角洲行动", "三角洲", "delta force"], "label": "三角洲行动官网",
+     "urls": ["https://df.qq.com/"]},
     {"names": ["英雄联盟", "lol", "league of legends", "撸啊撸"], "label": "英雄联盟官方",
      "urls": ["https://www.leagueoflegends.com/zh-cn/news/tags/patch-notes/"]},
     {"names": ["无畏契约", "valorant", "瓦罗兰特"], "label": "无畏契约官方",
      "urls": ["https://playvalorant.com/zh-cn/news/"]},
-    {"names": ["阴阳师", "onmyoji"], "label": "阴阳师官网", "urls": ["https://yys.163.com/"]},
-    {"names": ["第五人格", "identity v", "identityv"], "label": "第五人格官网",
-     "urls": ["https://id5.163.com/"]},
-    {"names": ["蛋仔派对", "蛋仔"], "label": "蛋仔派对官网", "urls": ["https://egg.163.com/"]},
-    {"names": ["逆水寒"], "label": "逆水寒官网", "urls": ["https://n.163.com/"]},
-    {"names": ["apex", "apex legends", "apex英雄", "apex 英雄"], "label": "Apex 官方",
-     "urls": ["https://www.ea.com/games/apex-legends/apex-legends/news"]},
-    {"names": ["暗黑破坏神4", "暗黑破坏神 4", "暗黑4", "diablo iv", "diablo 4"], "label": "暴雪官方",
-     "urls": ["https://news.blizzard.com/zh-cn"]},
+    {"names": ["永劫无间", "naraka", "naraka bladepoint"], "label": "永劫无间官网",
+     "urls": ["https://www.yjwujian.com/"]},
+    {"names": ["守望先锋", "守望先锋2", "overwatch", "overwatch 2", "ow2"], "label": "守望先锋官方",
+     "urls": ["https://overwatch.blizzard.com/zh-cn/news/"]},
+    # ===== 10 主流单机 / 买断制（近期） =====
+    {"names": ["黑神话：悟空", "黑神话悟空", "黑神话", "black myth wukong", "black myth: wukong", "wukong"],
+     "label": "黑神话悟空官网", "urls": ["https://www.heishenhua.com/"]},
+    {"names": ["怪物猎人荒野", "怪物猎人：荒野", "怪猎荒野", "monster hunter wilds", "mh wilds"],
+     "label": "怪物猎人荒野官网", "urls": ["https://www.monsterhunter.com/wilds/"]},
+    {"names": ["艾尔登法环", "老头环", "elden ring", "黄金树幽影", "shadow of the erdtree"],
+     "label": "艾尔登法环官网", "urls": ["https://www.eldenring.jp/"]},
+    {"names": ["塞尔达传说：王国之泪", "王国之泪", "塞尔达王国之泪", "tears of the kingdom", "totk"],
+     "label": "塞尔达·王国之泪官网", "urls": ["https://www.zelda.com/tears-of-the-kingdom/"]},
+    {"names": ["最终幻想7重生", "最终幻想7：重生", "最终幻想7 重生", "ff7重生", "ff7 rebirth",
+               "final fantasy vii rebirth"], "label": "FF7 重生官网",
+     "urls": ["https://ffvii.square-enix-games.com/"]},
+    {"names": ["赛博朋克2077", "赛博朋克 2077", "2077", "cyberpunk 2077", "cyberpunk2077"],
+     "label": "赛博朋克2077官网", "urls": ["https://www.cyberpunk.net/"]},
+    {"names": ["博德之门3", "博德之门 3", "bg3", "baldur's gate 3", "baldurs gate 3"],
+     "label": "博德之门3官网", "urls": ["https://baldursgate3.game/"]},
+    {"names": ["刺客信条：影", "刺客信条影", "刺客信条 影", "assassin's creed shadows", "ac shadows"],
+     "label": "刺客信条·影官网",
+     "urls": ["https://www.ubisoft.com/zh-cn/game/assassins-creed/shadows"]},
+    {"names": ["战神：诸神黄昏", "战神诸神黄昏", "战神5", "god of war ragnarok", "god of war ragnarök",
+               "gow ragnarok"], "label": "战神·诸神黄昏官网",
+     "urls": ["https://godofwar.playstation.com/"]},
+    {"names": ["双影奇境", "split fiction"], "label": "双影奇境官网",
+     "urls": ["https://www.ea.com/games/split-fiction"]},
 ]
 
 
@@ -348,7 +370,10 @@ def _match_official_source(game: str) -> Optional[dict[str, Any]]:
     for entry in _OFFICIAL_GAME_SOURCES:
         for name in entry.get("names", []):
             n = _norm_name(name)
-            if n and (n == g or n in g or g in n):
+            if not n:
+                continue
+            # 完全相等，或较短一方长度≥2 时允许子串包含（避免单字误匹配）。
+            if n == g or (len(n) >= 2 and n in g) or (len(g) >= 2 and g in n):
                 return entry
     return None
 
