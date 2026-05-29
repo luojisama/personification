@@ -163,7 +163,15 @@ _BANTER_BLOCKED_TOOL_NAMES = frozenset(
     | set(_PLUGIN_KNOWLEDGE_TOOL_NAMES)
     | {"vision_analyze", "analyze_image", "resolve_acg_entity"}
 )
-_BUILTIN_SEARCH_CALLER_NAMES = frozenset({"GeminiToolCaller", "AnthropicToolCaller", "OpenAICodexToolCaller"})
+_BUILTIN_SEARCH_CALLER_NAMES = frozenset({
+    "GeminiToolCaller",
+    "AnthropicToolCaller",
+    "OpenAICodexToolCaller",
+    # 三个 CLI 协议 caller 内部也已注入对应原生 search 工具（impl.py:3203/3741/4005）
+    "GeminiCliToolCaller",
+    "AntigravityCliToolCaller",
+    "ClaudeCodeToolCaller",
+})
 
 
 @dataclass
