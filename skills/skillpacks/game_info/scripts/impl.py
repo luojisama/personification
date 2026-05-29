@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any, Optional
 
 import httpx
@@ -9,10 +10,12 @@ import httpx
 # 复用现有基础设施，避免重复造轮子：
 # - resource_collector：免 key 多搜索引擎抓取 + 工具函数（_strip_tags / search_web）
 # - wiki_search：维基百科 / 萌娘百科 / Fandom 条目查询
+# - core.web_fetch：带 SSRF 防护/代理/正文抽取的网页抓取（抓官方公告页）
 # 采用绝对导入（与 parallel_research 一致的可靠写法）；builtin skillpack 经合成包名加载，
 # 3 级相对导入不可靠，故用 plugin.personification.* 绝对路径。
 from plugin.personification.skills.skillpacks.resource_collector.scripts import impl as rc_impl
 from plugin.personification.skills.skillpacks.wiki_search.scripts import impl as wiki_impl
+from plugin.personification.core.web_fetch import fetch_web_page
 
 
 _STEAM_STORE_SEARCH = "https://store.steampowered.com/api/storesearch/"
@@ -43,16 +46,57 @@ _ASPECT_LABEL = {
 
 # 攻略/技巧定向搜索时优先关注的社区站点（用于排序加权，不做硬过滤）。
 _DEFAULT_COMMUNITY_SITES = [
+    # 综合站
     "gamersky.com",
     "3dmgame.com",
-    "bbs.mihoyo.com",
-    "miyoushe.com",
-    "bilibili.com",
-    "tieba.baidu.com",
-    "reddit.com",
-    "gamefaqs.gamespot.com",
+    "17173.com",
     "ign.com",
     "fextralife.com",
+    "gamefaqs.gamespot.com",
+    "reddit.com",
+    "bilibili.com",
+    "tieba.baidu.com",
+    # 手游 / 厂商社区（腾讯/网易/米哈游等非 Steam 平台覆盖）
+    "taptap.cn",
+    "taptap.com",
+    "bbs.mihoyo.com",
+    "miyoushe.com",
+    "nga.cn",
+    "ngabbs.com",
+    # 主机社区（PlayStation / Switch / Xbox）
+    "a9vg.com",
+    "psnine.com",
+]
+
+# 头部游戏官方公告源精选映射：覆盖不在 Steam 的腾讯/网易/米哈游/暴雪/拳头/EA 等。
+# names 为别名（匹配时大小写/空格/标点不敏感）；urls 为官方新闻/公告页。
+# 注意：部分官网是 JS 渲染的 SPA，正文可能抽取不全——此时仍会把官方链接作为权威来源给出。
+# URL 可能随官网改版失效，需要时更新此表即可。
+_OFFICIAL_GAME_SOURCES: list[dict[str, Any]] = [
+    {"names": ["原神", "genshin", "genshin impact"], "label": "原神官网",
+     "urls": ["https://ys.mihoyo.com/main/news/index/2"]},
+    {"names": ["崩坏：星穹铁道", "崩坏星穹铁道", "星穹铁道", "星铁", "honkai star rail", "hsr", "star rail"],
+     "label": "星穹铁道官网", "urls": ["https://sr.mihoyo.com/news"]},
+    {"names": ["绝区零", "zenless zone zero", "zzz"], "label": "绝区零官网",
+     "urls": ["https://zzz.mihoyo.com/main/news"]},
+    {"names": ["崩坏3", "崩坏三", "honkai impact 3", "崩崩崩"], "label": "崩坏3官网",
+     "urls": ["https://www.bh3.com/news"]},
+    {"names": ["王者荣耀", "王者", "honor of kings"], "label": "王者荣耀官网",
+     "urls": ["https://pvp.qq.com/"]},
+    {"names": ["和平精英"], "label": "和平精英官网", "urls": ["https://gp.qq.com/"]},
+    {"names": ["英雄联盟", "lol", "league of legends", "撸啊撸"], "label": "英雄联盟官方",
+     "urls": ["https://www.leagueoflegends.com/zh-cn/news/tags/patch-notes/"]},
+    {"names": ["无畏契约", "valorant", "瓦罗兰特"], "label": "无畏契约官方",
+     "urls": ["https://playvalorant.com/zh-cn/news/"]},
+    {"names": ["阴阳师", "onmyoji"], "label": "阴阳师官网", "urls": ["https://yys.163.com/"]},
+    {"names": ["第五人格", "identity v", "identityv"], "label": "第五人格官网",
+     "urls": ["https://id5.163.com/"]},
+    {"names": ["蛋仔派对", "蛋仔"], "label": "蛋仔派对官网", "urls": ["https://egg.163.com/"]},
+    {"names": ["逆水寒"], "label": "逆水寒官网", "urls": ["https://n.163.com/"]},
+    {"names": ["apex", "apex legends", "apex英雄", "apex 英雄"], "label": "Apex 官方",
+     "urls": ["https://www.ea.com/games/apex-legends/apex-legends/news"]},
+    {"names": ["暗黑破坏神4", "暗黑破坏神 4", "暗黑4", "diablo iv", "diablo 4"], "label": "暴雪官方",
+     "urls": ["https://news.blizzard.com/zh-cn"]},
 ]
 
 
@@ -292,6 +336,57 @@ async def _steam_update_block(
     return _format_steam_updates(game, matched, news)
 
 
+def _norm_name(value: str) -> str:
+    return re.sub(r"[\s:：·\-_、,，.]+", "", str(value or "").strip().lower())
+
+
+def _match_official_source(game: str) -> Optional[dict[str, Any]]:
+    """把游戏名匹配到精选官方源；大小写/空格/标点不敏感，支持别名与子串包含。"""
+    g = _norm_name(game)
+    if not g:
+        return None
+    for entry in _OFFICIAL_GAME_SOURCES:
+        for name in entry.get("names", []):
+            n = _norm_name(name)
+            if n and (n == g or n in g or g in n):
+                return entry
+    return None
+
+
+async def _official_update_block(
+    game: str,
+    *,
+    logger: Any,
+    timeout: float,
+    proxy: Optional[str],
+) -> str:
+    """头部游戏的官方公告块：抓取精选官方页正文；即使正文抽取不全，也保留官方链接作为权威来源。"""
+    entry = _match_official_source(game)
+    if not entry:
+        return ""
+    urls = list(entry.get("urls", []))[:2]
+    if not urls:
+        return ""
+
+    async def _one(url: str) -> tuple[str, str, str]:
+        try:
+            res = await fetch_web_page(url, timeout=timeout, max_chars=600, proxy=proxy)
+        except Exception as exc:
+            logger.debug(f"[game_info] official fetch failed {url}: {exc}")
+            return url, "", ""
+        return url, str(res.get("title", "") or "").strip(), str(res.get("text", "") or "").strip()
+
+    fetched = await asyncio.gather(*[_one(u) for u in urls])
+    lines = [f"【{game} 的更新/公告 · {entry.get('label', '官方')}（官方源）】"]
+    for url, title, text in fetched:
+        if title:
+            lines.append(title)
+        if text:
+            lines.append(text[:300])
+        lines.append(f"官方链接：{url}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
 async def game_info(
     game: str,
     aspect: str,
@@ -316,6 +411,7 @@ async def game_info(
     query = str(query or "").strip()
     timeout = _timeout(plugin_config)
     community_sites = _community_sites(plugin_config)
+    proxy = str(getattr(plugin_config, "personification_web_proxy", "") or "").strip() or None
 
     async def _community_block() -> str:
         kw = _ASPECT_SEARCH_KEYWORDS[aspect]
@@ -335,9 +431,10 @@ async def game_info(
             _community_block(),
         )
     elif aspect == "update":
-        # Steam 官方公告 + 社区（国服网游 / Steam 无收录时的兜底）。
+        # Steam 官方公告 + 头部游戏精选官方源 + 社区（三路并行，覆盖 Steam/非 Steam 平台）。
         blocks = await asyncio.gather(
             _steam_update_block(game, http_client=http_client, logger=logger, timeout=timeout),
+            _official_update_block(game, logger=logger, timeout=timeout, proxy=proxy),
             _community_block(),
         )
     else:

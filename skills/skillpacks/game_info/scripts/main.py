@@ -42,7 +42,8 @@ def build_tools(runtime):
             name="game_info",
             description=(
                 "查询指定游戏的更新公告 / 攻略 / 剧情设定 / 技巧，覆盖热门网游、3A 大作与小众独立游戏，"
-                "数据源含 Steam 官方公告与多个社区站点。"
+                "数据源含 Steam 官方公告、头部国产/网游官方源（原神·星铁·王者·英雄联盟·阴阳师等"
+                "腾讯/网易/米哈游/拳头/暴雪/EA）与多个社区站点（含 TapTap/NGA/A9VG 等）。"
                 "适用：用户问某款游戏怎么玩、最近更新了什么、剧情讲了啥、有什么技巧。"
                 "参数 aspect 取 update/guide/story/tips。"
                 "边界：纯角色/世界观/设定的百科式查询也可走 wiki_lookup；"
