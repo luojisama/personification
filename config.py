@@ -48,11 +48,21 @@ class Config(BaseModel):
     personification_image_detail: str = "auto"
     personification_sticker_vision_max: int = 3
     personification_builtin_search: bool = True
-    personification_model_builtin_search_enabled: bool = False
+    # 默认启用：Gemini/Anthropic/OpenAICodex 等支持的 caller 会直接用 provider 原生
+    # 联网搜索（google_search / web_search_20250305 / web_search_options），无需任何 key。
+    # 不支持的 provider 自动回落到外部 web_search 工具。可在 WebUI 关回 False。
+    personification_model_builtin_search_enabled: bool = True
     personification_tool_web_search_enabled: bool = True
     personification_tool_web_search_mode: str = "enabled"
     personification_tool_web_fetch_enabled: bool = True
     personification_tool_web_fetch_timeout: int = 60
+    # 免配置联网搜索引擎链（按顺序并行调用，合并去重）。可选项：wikipedia / searxng / duckduckgo。
+    personification_free_search_engines: List[str] = ["wikipedia", "searxng", "duckduckgo"]
+    # SearXNG 公共实例池，留空则用 core/free_search.py:DEFAULT_SEARXNG_INSTANCES。
+    personification_searxng_instances: List[str] = []
+    # web_search 返回给 LLM 的结果上限（top-N 渲染）与单条 snippet 字符上限。
+    personification_web_search_max_results: int = 6
+    personification_web_search_snippet_chars: int = 400
     # web_fetch / web_search 走哪个 HTTP 代理（http://host:port）。
     # 国内服务器抓取被 DNS 污染/墙的站点（如 Cloudflare 前置站点、海外 API）时，
     # 设置后请求走代理、由代理侧解析 DNS 并连接，绕开本地污染。

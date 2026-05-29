@@ -605,9 +605,13 @@ def _build_entries() -> list[ConfigEntry]:
             field_name="personification_model_builtin_search_enabled",
             display_name="模型内置搜索",
             value_type="bool",
-            default=False,
+            default=True,
             scope=GLOBAL_SCOPE,
-            description="允许主模型直接使用 provider 原生 builtin search；Gemini 主路由在全局搜索开启时会自动利用原生联网。",
+            description=(
+                "允许主模型直接使用 provider 原生 builtin search（Gemini google_search、"
+                "Anthropic web_search_20250305、OpenAI web_search_options），无需任何 API key。"
+                "仅当 caller 支持时生效；不支持的 provider 自动回落到外部 web_search 工具。"
+            ),
             category="config",
             help_aliases=("builtin_search", "内置搜索", "模型搜索"),
             parser=_bool_parser,
@@ -636,6 +640,58 @@ def _build_entries() -> list[ConfigEntry]:
             choices=("enabled", "live", "cached", "disabled"),
             help_aliases=("web_search_mode", "搜索模式", "联网方式"),
             parser=_web_search_mode_parser,
+        ),
+        ConfigEntry(
+            key="free_search_engines",
+            field_name="personification_free_search_engines",
+            display_name="免配置搜索引擎链",
+            value_type="list",
+            default=["wikipedia", "searxng", "duckduckgo"],
+            scope=GLOBAL_SCOPE,
+            description=(
+                "外部 web_search 兜底用的免 key 搜索引擎，按顺序并行调用并合并去重。"
+                "可选：wikipedia / searxng / duckduckgo。"
+            ),
+            category="config",
+            help_aliases=("免key搜索", "免配置搜索", "search_engines"),
+            parser=_json_array_parser,
+        ),
+        ConfigEntry(
+            key="searxng_instances",
+            field_name="personification_searxng_instances",
+            display_name="SearXNG 实例池",
+            value_type="list",
+            default=[],
+            scope=GLOBAL_SCOPE,
+            description=(
+                "SearXNG 公共实例 URL 列表（留空 = 用插件内置默认池）。"
+                "运行时会并行 HEAD 探测，选第一个能通的实例发请求。"
+            ),
+            category="config",
+            help_aliases=("searxng", "searx", "实例池"),
+            parser=_json_array_parser,
+        ),
+        ConfigEntry(
+            key="web_search_max_results",
+            field_name="personification_web_search_max_results",
+            display_name="搜索结果上限",
+            value_type="int",
+            default=6,
+            scope=GLOBAL_SCOPE,
+            description="web_search 返回给 LLM 的最大结果条数（合并去重后）。",
+            category="config",
+            help_aliases=("max_results", "搜索条数"),
+        ),
+        ConfigEntry(
+            key="web_search_snippet_chars",
+            field_name="personification_web_search_snippet_chars",
+            display_name="搜索摘要长度",
+            value_type="int",
+            default=400,
+            scope=GLOBAL_SCOPE,
+            description="每条搜索结果的 snippet 字符上限。",
+            category="config",
+            help_aliases=("snippet_chars", "摘要长度"),
         ),
         ConfigEntry(
             key="tool_web_fetch_enabled",
