@@ -53,6 +53,12 @@ class Config(BaseModel):
     personification_tool_web_search_mode: str = "enabled"
     personification_tool_web_fetch_enabled: bool = True
     personification_tool_web_fetch_timeout: int = 60
+    # web_fetch / web_search 走哪个 HTTP 代理（http://host:port）。
+    # 国内服务器抓取被 DNS 污染/墙的站点（如 Cloudflare 前置站点、海外 API）时，
+    # 设置后请求走代理、由代理侧解析 DNS 并连接，绕开本地污染。
+    # 非空时 web_fetch 会跳过"本地 DNS 解析到内网就拒绝"的判断（仍拦截字面内网 IP）。
+    # 留空 = 直连 + 本地 DNS SSRF 校验。
+    personification_web_proxy: str = ""
     # Antigravity CLI 调用走哪个 HTTP 代理（http://host:port）。
     # 非空时所有 antigravity v1internal / OAuth refresh 请求都强制走它，
     # 不依赖 HTTPS_PROXY / HTTP_PROXY 环境变量（bot 进程未必继承终端 env）。

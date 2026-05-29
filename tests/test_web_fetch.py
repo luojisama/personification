@@ -46,6 +46,37 @@ def test_rejects_domain_resolving_to_loopback(monkeypatch) -> None:
         asyncio.run(wf.fetch_web_page("http://example.com/"))
 
 
+def test_proxy_bypasses_dns_ssrf_for_polluted_domain(monkeypatch) -> None:
+    # 模拟 DNS 污染：域名被本地解析到 127.0.0.1。配置代理后应跳过本地 DNS 校验，
+    # 不再因"解析到内网"而拒绝（实际连接会失败，但不应是 SSRF 守卫的错误）。
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [(2, 1, 6, "", ("127.0.0.1", 0))]
+    monkeypatch.setattr(wf.socket, "getaddrinfo", fake_getaddrinfo)
+    try:
+        asyncio.run(
+            wf.fetch_web_page("http://blog.shiro.team/", proxy="http://127.0.0.1:1", timeout=2)
+        )
+    except wf.WebFetchError as exc:
+        assert "解析到内网" not in str(exc)
+    except Exception:
+        pass
+
+
+def test_literal_private_ip_blocked_even_with_proxy() -> None:
+    # 代理模式下仍要拦截字面内网 IP，防止 SSRF。
+    with pytest.raises(wf.WebFetchError, match="内网|本地"):
+        asyncio.run(wf.fetch_web_page("http://192.168.1.1/", proxy="http://127.0.0.1:1", timeout=2))
+
+
+def test_polluted_domain_error_hints_proxy(monkeypatch) -> None:
+    # 无代理时被内网解析拦截，错误提示应引导用户配置 personification_web_proxy。
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [(2, 1, 6, "", ("127.0.0.1", 0))]
+    monkeypatch.setattr(wf.socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(wf.WebFetchError, match="personification_web_proxy"):
+        asyncio.run(wf.fetch_web_page("http://blog.shiro.team/"))
+
+
 def test_rejects_blocked_domain(monkeypatch) -> None:
     # 黑名单优先于 DNS 检查，无需 mock 网络
     with pytest.raises(wf.WebFetchError, match="黑名单"):

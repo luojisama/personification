@@ -384,12 +384,14 @@ def _build_web_fetch_tool(plugin_config: Any, logger: Any) -> AgentTool:
         timeout = float(
             getattr(plugin_config, "personification_tool_web_fetch_timeout", 60.0) or 60.0
         )
+        proxy = str(getattr(plugin_config, "personification_web_proxy", "") or "").strip()
         try:
             result = await fetch_web_page(
                 url,
                 timeout=timeout,
                 max_chars=int(max_chars or 3000),
                 blocked_domains=blocked or None,
+                proxy=proxy or None,
             )
         except WebFetchError as exc:
             logger.debug(f"[web_fetch] {exc}")

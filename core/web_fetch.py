@@ -66,6 +66,27 @@ def _is_unsafe_host(host: str) -> bool:
     return False
 
 
+def _is_literal_private_ip(host: str) -> bool:
+    """host 本身就是字面 IP 且落在内网/本地段时返回 True；非 IP 字面量返回 False。
+
+    走代理时只用这个做防护：DNS 由代理侧解析，本地解析结果不可信，
+    但若用户直接给了内网 IP 字面量仍要拦截。
+    """
+    h = (host or "").strip().strip("[]")
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
 def _validate_url(url: str) -> tuple[str, str]:
     """返回 (scheme, host) 或抛 WebFetchError。"""
     parsed = urlparse(str(url or "").strip())
@@ -116,6 +137,7 @@ async def fetch_web_page(
     timeout: float = _DEFAULT_TIMEOUT,
     max_chars: int = _DEFAULT_MAX_CHARS,
     blocked_domains: list[str] | None = None,
+    proxy: str | None = None,
 ) -> dict[str, Any]:
     """抓取指定 URL 并返回结构化结果。失败时抛 WebFetchError。
 
@@ -130,9 +152,20 @@ async def fetch_web_page(
     scheme, host = _validate_url(url)
     if _is_blocked_domain(host, blocked_domains):
         raise WebFetchError(f"目标域名被黑名单拦截：{host}")
-    is_unsafe = await asyncio.to_thread(_is_unsafe_host, host)
-    if is_unsafe:
-        raise WebFetchError(f"目标主机解析到内网/本地地址，拒绝访问：{host}")
+    proxy_url = str(proxy or "").strip() or None
+    if proxy_url:
+        # 走代理：DNS 由代理侧解析，本地解析结果不可信（可能被污染），
+        # 只拦截字面内网 IP，避免误把公网站点（被本地 DNS 污染）当成内网拒绝。
+        if _is_literal_private_ip(host):
+            raise WebFetchError(f"目标主机是内网/本地 IP，拒绝访问：{host}")
+    else:
+        is_unsafe = await asyncio.to_thread(_is_unsafe_host, host)
+        if is_unsafe:
+            raise WebFetchError(
+                f"目标主机解析到内网/本地地址，拒绝访问：{host}"
+                "（若该域名确为公网站点，可能是本地 DNS 被污染/劫持；"
+                "可在配置 personification_web_proxy 设置代理后重试）"
+            )
 
     headers = {
         "User-Agent": _USER_AGENT,
@@ -141,12 +174,15 @@ async def fetch_web_page(
     }
     safe_max_chars = max(200, int(max_chars or _DEFAULT_MAX_CHARS))
     try:
-        async with httpx.AsyncClient(
-            timeout=float(timeout or _DEFAULT_TIMEOUT),
-            follow_redirects=True,
-            max_redirects=5,
-            headers=headers,
-        ) as client:
+        client_kwargs: dict[str, Any] = {
+            "timeout": float(timeout or _DEFAULT_TIMEOUT),
+            "follow_redirects": True,
+            "max_redirects": 5,
+            "headers": headers,
+        }
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
+        async with httpx.AsyncClient(**client_kwargs) as client:
             resp = await client.get(url)
             content_type = (resp.headers.get("content-type", "") or "").lower()
             raw = resp.content

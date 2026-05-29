@@ -10,6 +10,24 @@ from urllib.parse import quote
 import httpx
 
 
+def _web_proxy() -> Optional[str]:
+    """读取 personification_web_proxy 配置，供联网检索的 httpx 客户端使用。"""
+    try:
+        from nonebot import get_driver
+        proxy = str(getattr(get_driver().config, "personification_web_proxy", "") or "").strip()
+    except Exception:
+        proxy = ""
+    return proxy or None
+
+
+def _client_kwargs(**base: Any) -> Dict[str, Any]:
+    """在 base kwargs 上按需注入 proxy。"""
+    proxy = _web_proxy()
+    if proxy:
+        base["proxy"] = proxy
+    return base
+
+
 async def extract_forward_message_content(
     bot: Any,
     event: Any,
@@ -333,7 +351,7 @@ async def fetch_tavily_context(
         "max_results": 3,
     }
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(**_client_kwargs(timeout=10.0)) as client:
             resp = await client.post("https://api.tavily.com/search", json=payload)
             if resp.status_code != 200:
                 return ""
@@ -365,7 +383,7 @@ async def fetch_baike_summary(keyword: str, *, logger: Any) -> str:
         )
     }
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=headers) as client:
+        async with httpx.AsyncClient(**_client_kwargs(timeout=10.0, follow_redirects=True, headers=headers)) as client:
             url = f"https://baike.baidu.com/search/word?word={quote(keyword)}"
             resp = await client.get(url)
             if resp.status_code != 200:
@@ -601,7 +619,7 @@ async def do_web_search(
                     return f"Tavily 新闻查证结果: {tavily_text}"
                 return f"Tavily 新闻结果: {tavily_text}"
 
-        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(**_client_kwargs(timeout=12.0, follow_redirects=True)) as client:
             search_query = topic or query
             resp = await client.get(
                 "https://api.duckduckgo.com/",
