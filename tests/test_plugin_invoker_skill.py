@@ -65,6 +65,16 @@ def test_render_segments_text_and_placeholders() -> None:
     assert impl._render_segments_to_text(None) == ""
 
 
+def test_render_forward_messages() -> None:
+    nodes = [
+        {"data": {"content": [_seg("text", text="第一条")]}},
+        {"data": {"content": [_seg("text", text="第二条"), _seg("image")]}},
+    ]
+    assert impl._render_forward_messages(nodes) == "第一条\n第二条[图片]"
+    assert impl._render_forward_messages(None) == ""
+    assert impl._render_forward_messages([]) == ""
+
+
 # ---------- _make_capturing_bot ----------
 
 def test_capturing_bot_buffers_send_and_passes_through_reads() -> None:
@@ -79,6 +89,18 @@ def test_capturing_bot_buffers_send_and_passes_through_reads() -> None:
     # 只读 API 透传到真 bot
     asyncio.run(proxy.get_group_info(group_id=1))
     assert any(api == "get_group_info" for api, _ in real.calls)
+
+
+def test_capturing_bot_captures_forward_messages() -> None:
+    class _ForwardBot(_FakeBot):
+        async def send_group_forward_msg(self, **data):  # noqa: ANN003
+            return await self.call_api("send_group_forward_msg", **data)
+
+    real = _ForwardBot()
+    proxy, captured = impl._make_capturing_bot(real)
+    nodes = [{"data": {"content": [_seg("text", text="榜单第一")]}}]
+    asyncio.run(proxy.send_group_forward_msg(group_id=1, messages=nodes))
+    assert captured == ["榜单第一"]
 
 
 # ---------- _command_matches_triggers ----------
@@ -108,9 +130,17 @@ def test_is_dangerous_keyword_and_lists() -> None:
     blocked, _ = impl._is_dangerous("/点歌 abc", "music", {}, allow_cfg)
     assert blocked is True  # 不在白名单
 
+    # allowlist 大小写不敏感
+    case_cfg = SimpleNamespace(personification_plugin_invoker_allowlist=["Weather"])
+    assert impl._is_dangerous("/天气 北京", "weather", {}, case_cfg)[0] is False
+    assert impl._is_dangerous("/点歌", "music", {}, case_cfg)[0] is True
+
     block_cfg = SimpleNamespace(personification_plugin_invoker_blocklist=["weather:vip"])
     blocked, _ = impl._is_dangerous("/vip", "weather", {}, block_cfg)
     assert blocked is True
+    # blocklist 按命令名匹配，不再因子串误伤合法命令
+    partial_cfg = SimpleNamespace(personification_plugin_invoker_blocklist=["weather:vi"])
+    assert impl._is_dangerous("/vip 北京", "weather", {}, partial_cfg)[0] is False
 
 
 def test_is_dangerous_admin_hint_in_trigger_desc() -> None:
@@ -210,3 +240,27 @@ def test_personification_rule_short_circuits_synthetic_event() -> None:
 def test_record_msg_rule_short_circuits_synthetic_event() -> None:
     event = SimpleNamespace(_personification_synthetic=True)
     assert asyncio.run(event_rules.record_msg_rule(event)) is False
+
+
+def test_evaluate_rule_short_circuits_synthetic_before_cache() -> None:
+    # 合成事件必须在查规则结果缓存之前就被短路，否则会命中原事件的缓存
+    # 结果（matched=True）而绕过 personification_rule 顶部的合成事件守卫，造成递归。
+    reply_matchers = load_personification_module(
+        "plugin.personification.handlers.reply_matchers"
+    )
+    called = {"n": 0}
+
+    async def _rule(_event, _state):  # noqa: ANN001
+        called["n"] += 1
+        _state["is_random_chat"] = False
+        return True  # 若被调用会返回匹配
+
+    event = SimpleNamespace(_personification_synthetic=True, message_id="m1")
+    state: dict = {}
+    result = asyncio.run(
+        reply_matchers._evaluate_personification_rule(
+            personification_rule=_rule, event=event, state=state
+        )
+    )
+    assert result == {"matched": False, "is_random_chat": False}
+    assert called["n"] == 0  # 真正的规则没有被调用

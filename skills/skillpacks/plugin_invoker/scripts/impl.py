@@ -82,6 +82,27 @@ def _render_segments_to_text(message: Any) -> str:
     return "".join(parts).strip()
 
 
+def _render_forward_messages(nodes: Any) -> str:
+    """渲染合并转发（send_*_forward_msg 的 messages 节点列表）为纯文本。"""
+    if not nodes:
+        return ""
+    try:
+        node_list = list(nodes)
+    except TypeError:
+        return ""
+    parts: list[str] = []
+    for node in node_list:
+        data = getattr(node, "data", None)
+        if data is None and isinstance(node, dict):
+            data = node.get("data", {})
+        data = data or {}
+        content = data.get("content")
+        text = _render_segments_to_text(content) if content is not None else ""
+        if text:
+            parts.append(text)
+    return "\n".join(parts).strip()
+
+
 def _make_capturing_bot(real_bot: Any) -> tuple[Any, list[str]]:
     """构造一个代理 Bot：发送类 call_api 被缓冲捕获，其它 API 透传给真 bot。
 
@@ -95,7 +116,10 @@ def _make_capturing_bot(real_bot: Any) -> tuple[Any, list[str]]:
     class _CapturingBot(bot_cls):  # type: ignore[valid-type, misc]
         async def call_api(self, api: str, **data: Any) -> Any:
             if api in _SEND_APIS:
-                captured.append(_render_segments_to_text(data.get("message", "")))
+                if "message" in data:
+                    captured.append(_render_segments_to_text(data.get("message", "")))
+                elif "messages" in data:  # 合并转发
+                    captured.append(_render_forward_messages(data.get("messages")))
                 return {"message_id": 0}
             return await bot_cls.call_api(self, api, **data)
 
@@ -218,8 +242,8 @@ def _is_dangerous(
     cmd = str(command_text or "").strip()
     head = _normalize_command_head(cmd)
 
-    allowlist = [str(x).strip() for x in (_cfg(plugin_config, "personification_plugin_invoker_allowlist", []) or []) if str(x).strip()]
-    if allowlist and name not in allowlist:
+    allowlist = [str(x).strip().lower() for x in (_cfg(plugin_config, "personification_plugin_invoker_allowlist", []) or []) if str(x).strip()]
+    if allowlist and name.lower() not in allowlist:
         return True, f"插件 {name} 不在允许名单内"
 
     blocklist = [str(x).strip().lower() for x in (_cfg(plugin_config, "personification_plugin_invoker_blocklist", []) or []) if str(x).strip()]
@@ -227,7 +251,10 @@ def _is_dangerous(
         # 支持 "插件名" 或 "插件名:命令"
         if ":" in item:
             blk_plugin, blk_cmd = item.split(":", 1)
-            if blk_plugin.strip() == name.lower() and blk_cmd.strip() and blk_cmd.strip() in cmd.lower():
+            blk_plugin = blk_plugin.strip()
+            blk_cmd = blk_cmd.strip()
+            # 命令部分按命令名（head）匹配，避免子串误伤合法命令的参数
+            if blk_plugin == name.lower() and blk_cmd and _normalize_command_head(blk_cmd) == head:
                 return True, "命中黑名单"
         elif item == name.lower():
             return True, "插件在黑名单内"
@@ -274,16 +301,19 @@ async def _execute_synthetic(
     proxy_bot, captured = _make_capturing_bot(bot)
     synthetic = _build_synthetic_event(event, command_text)
 
+    incomplete_note = ""
     try:
         await asyncio.wait_for(handle_event(proxy_bot, synthetic), timeout=timeout)
     except asyncio.TimeoutError:
         logger.warning(f"[plugin_invoker] 执行命令超时: {command_text}")
         if not captured:
             return f"（插件执行 `{command_text}` 超时，没有及时返回结果。）"
+        incomplete_note = "（注意：插件执行超时，以下可能是不完整的输出）\n"
     except Exception as e:
         logger.warning(f"[plugin_invoker] 执行命令失败: {command_text}: {e}")
         if not captured:
             return f"（尝试执行 `{command_text}` 时出错，没有拿到插件结果。）"
+        incomplete_note = "（注意：插件执行中途出错，以下可能是不完整的输出）\n"
 
     outputs = [text for text in captured if str(text or "").strip()]
     if not outputs:
@@ -292,7 +322,7 @@ async def _execute_synthetic(
     combined = "\n".join(outputs).strip()
     if len(combined) > max_chars:
         combined = combined[:max_chars].rstrip() + "…（内容过长已截断）"
-    return "以下是插件的原始输出，请用你自己的人设语气自然地转述给用户：\n" + combined
+    return incomplete_note + "以下是插件的原始输出，请用你自己的人设语气自然地转述给用户：\n" + combined
 
 
 def build_invoke_plugin_tool(

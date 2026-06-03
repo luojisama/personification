@@ -291,6 +291,11 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
     types = deps.types
     started_at = time.monotonic()
 
+    # plugin_invoker 代为执行其它插件命令时会用 handle_event 重新分发合成事件，
+    # 这里直接短路，确保合成事件永远不会再次进入拟人回复/Agent 流程（防递归）。
+    if getattr(event, "_personification_synthetic", False):
+        return
+
     try:
         from ...core.llm_context import set_llm_context
         set_llm_context(
