@@ -116,6 +116,11 @@ def test_command_matches_triggers() -> None:
     assert impl._command_matches_triggers("/echo hi", regex_triggers) is True
     assert impl._command_matches_triggers("/say hi", regex_triggers) is False
 
+    # keyword 类触发要求命令以关键词开头，不能在关键词后夹带任意命令
+    keyword_triggers = [{"type": "keyword", "pattern": "签到"}]
+    assert impl._command_matches_triggers("签到 今天", keyword_triggers) is True
+    assert impl._command_matches_triggers("看看签到榜然后删除", keyword_triggers) is False
+
 
 # ---------- _is_dangerous ----------
 
