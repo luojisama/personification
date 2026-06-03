@@ -26,6 +26,7 @@ from ...core.visual_capabilities import VISUAL_ROUTE_REPLY_PLAIN
 from ...skill_runtime.runtime_api import SkillRuntime
 from ...skills.skillpacks.friend_request_tool.scripts.main import build_friend_request_tool_for_runtime
 from ...skills.skillpacks.group_info_tool.scripts.main import build_group_info_tool_for_runtime
+from ...skills.skillpacks.plugin_invoker.scripts.main import build_invoke_plugin_tool_for_runtime
 
 
 _FRIEND_IDS_CACHE: Dict[str, tuple[float, set[str]]] = {}
@@ -712,6 +713,17 @@ async def run_agent_if_enabled(
             is_group_scene=hasattr(event, "group_id") and not str(getattr(event, "group_id", "")).startswith("private_"),
         )
     )
+    if (
+        bool(getattr(runtime.plugin_config, "personification_plugin_invoker_enabled", False))
+        and runtime.knowledge_store is not None
+    ):
+        runtime_registry.register(
+            build_invoke_plugin_tool_for_runtime(
+                bot=bot,
+                event=event,
+                runtime=skill_runtime,
+            )
+        )
     ack_phrase = ""
     if is_direct_mention:
         group_id = str(getattr(event, "group_id", "") or "").strip() or None

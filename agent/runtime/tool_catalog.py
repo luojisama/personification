@@ -33,6 +33,7 @@ _PLUGIN_LOCAL_TOOL_NAMES = frozenset(
         "list_plugins",
         "list_plugin_features",
         "get_feature_detail",
+        "invoke_plugin",
     }
 )
 _PLUGIN_WEB_TOOL_NAMES = frozenset(

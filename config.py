@@ -215,6 +215,14 @@ class Config(BaseModel):
     personification_video_fallback_model: str = ""
     personification_video_fallback_auth_path: str = ""
     personification_plugin_knowledge_build_enabled: bool = False
+    # plugin_invoker：让 bot 代为执行其它已安装插件的命令并转述结果（默认关闭，安全起见）
+    personification_plugin_invoker_enabled: bool = False
+    personification_plugin_invoker_allowlist: list[str] = []  # 非空则仅允许这些插件
+    personification_plugin_invoker_blocklist: list[str] = []  # 插件名 或 插件名:命令
+    personification_plugin_invoker_max_calls_per_turn: int = 2
+    personification_plugin_invoker_capture_timeout: float = 15.0
+    personification_plugin_invoker_max_output_chars: int = 1500
+    personification_plugin_invoker_extra_danger_keywords: list[str] = []
     personification_image_gen_enabled: bool = True
     personification_image_gen_model: str = "gpt-image-2"
     personification_image_gen_nanobanan_model: str = "gemini-3-pro-image-preview"

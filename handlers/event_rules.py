@@ -106,6 +106,10 @@ async def personification_rule(
     looks_like_private_command: Callable[[str], bool],
     get_recent_group_msgs: Optional[Callable[[str, int], list[dict]]] = None,
 ) -> bool:
+    # plugin_invoker 代为执行其它插件命令时会用 handle_event 重新分发合成事件，
+    # 这里短路，避免合成事件再次进入拟人回复流程造成递归。
+    if getattr(event, "_personification_synthetic", False):
+        return False
     user_id = str(event.user_id)
 
     if sign_in_available:
@@ -276,6 +280,8 @@ async def personification_rule(
 
 
 async def record_msg_rule(_event: Event) -> bool:
+    if getattr(_event, "_personification_synthetic", False):
+        return False
     return True
 
 
@@ -330,6 +336,8 @@ def resolve_record_message(
     should_trigger_auto_analyze: Optional[Callable[[str, int], bool]] = None,
 ) -> Tuple[Optional[str], bool]:
     """记录群消息，返回 (group_id, should_auto_analyze)。"""
+    if bool(getattr(event, "_personification_synthetic", False)):
+        return None, False
     if bool(getattr(event, "_personification_muted_recorded", False)):
         return None, False
 
@@ -380,6 +388,8 @@ async def sticker_chat_rule(
     plugin_whitelist: list[str],
     probability: float,
 ) -> bool:
+    if getattr(event, "_personification_synthetic", False):
+        return False
     if event.to_me:
         return False
     group_id = str(event.group_id)
@@ -395,6 +405,8 @@ async def poke_rule(
     plugin_whitelist: list[str],
     probability: float,
 ) -> bool:
+    if getattr(event, "_personification_synthetic", False):
+        return False
     target_id = getattr(event, "target_id", None)
     self_id = getattr(event, "self_id", None)
     group_id = getattr(event, "group_id", None)
