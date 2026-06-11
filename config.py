@@ -410,6 +410,33 @@ class Config(BaseModel):
     # KY 保护：热聊时 bot 随机发言的最低通过概率（0.0 完全拦截，0.3 保留30%机会）
     personification_hot_chat_min_pass_rate: float = 0.40
 
+    # ──────────── 拟人化发送层（humanize）────────────
+    # 协议扩展档位：auto=按 get_version_info 自动识别；none=禁用全部扩展 API；
+    # 也可强制指定 napcat / lagrange / llonebot / gocq
+    personification_protocol_extensions: str = "auto"
+    # 打字延迟：首条回复按 阅读时间+len/cps-LLM已耗时 模拟，消除"秒回长文"
+    personification_humanize_typing_enabled: bool = True
+    personification_humanize_typing_cps: float = 7.0
+    personification_humanize_typing_max_delay: float = 5.0
+    # 碎片化输出：off=不干预；prompt=提示词引导拆成 1-3 条群聊短消息
+    personification_humanize_fragment_style: str = "prompt"
+    # 跨楼回复时带引用（OneBot v11 标准 reply 段，全端可用）
+    personification_humanize_quote_reply_enabled: bool = True
+    personification_humanize_quote_reply_min_gap: int = 4
+    # NO_REPLY 时按概率贴表情代替沉默（NapCat/LLOneBot/Lagrange 扩展 API）
+    personification_humanize_reaction_enabled: bool = True
+    personification_humanize_reaction_probability: float = 0.25
+    personification_humanize_reaction_daily_limit: int = 20
+    # 闲聊短句低概率错别字+跟发修正；0=关闭，建议 0.03
+    personification_humanize_typo_probability: float = 0.0
+    # 被拍后拍回去的概率；主动拍一拍默认关闭
+    personification_humanize_poke_back_probability: float = 0.3
+    personification_humanize_proactive_poke_enabled: bool = False
+    # 多人混战时 @ 回复对象（与引用互斥）
+    personification_humanize_at_enabled: bool = True
+    # 私聊回复前显示"正在输入"（仅 NapCat 系支持）
+    personification_humanize_input_status_enabled: bool = True
+
     personification_blacklist_duration: int = 300
 
     # 60s API 配置

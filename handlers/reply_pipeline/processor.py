@@ -30,7 +30,10 @@ from ...core.gemini_profile import (
     context_token_budget_for_route,
     should_enable_default_builtin_search,
 )
+from ...core import protocol_capabilities as _protocol_caps
 from ...flows.yaml_parser import parse_yaml_response
+from . import humanize as _humanize
+from .reaction import maybe_poke_back, maybe_react_on_silence
 from ...agent.runtime.responder import (
     apply_persona_response_to_semantic_frame,
     parse_persona_response,
@@ -368,6 +371,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         message_content = "[你被对方戳了戳，你感到有点疑惑和好奇，想知道对方要做什么]"
         sender_name = "戳戳怪"
         runtime.logger.info(f"拟人插件：检测到来自 {user_id} 的戳一戳")
+        poke_back_task = asyncio.create_task(
+            maybe_poke_back(bot, runtime, group_id=group_id, user_id=user_id)
+        )
+        poke_back_task.add_done_callback(_task_exc_logger("humanize_poke_back", runtime.logger))
     elif isinstance(event, types.message_event_cls):
         user_id = str(event.user_id)
 
@@ -665,6 +672,28 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         )
 
     is_private_session = str(group_id).startswith(session.private_session_prefix)
+
+    async def _maybe_silence_reaction() -> None:
+        """NO_REPLY 沉默前的轻量回应（贴表情/拍一拍），never-raise。"""
+        try:
+            favorability = 0.0
+            try:
+                favorability = float(persona.get_user_data(user_id).get("favorability", 0.0) or 0.0)
+            except Exception:
+                favorability = 0.0
+            await maybe_react_on_silence(
+                bot,
+                runtime,
+                event=event,
+                message_text=raw_message_text or message_text or message_content,
+                group_id=str(group_id),
+                user_id=user_id,
+                is_private=is_private_session,
+                favorability=favorability,
+            )
+        except Exception as exc:
+            runtime.logger.debug(f"[humanize] silence reaction failed: {exc}")
+
     record_counter(
         "reply_processor.requests_total",
         scene="private" if is_private_session else "group",
@@ -1080,6 +1109,15 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             f"\n[系统提示] 当前是同一时间窗内合并的 {batch_event_count} 条群消息。"
             "先理解这一小批消息之间的承接关系，再决定接哪一句。"
         )
+    if (
+        str(getattr(runtime.plugin_config, "personification_humanize_fragment_style", "prompt") or "off").strip().lower()
+        == "prompt"
+    ):
+        system_prompt += (
+            "\n[输出风格] 像 QQ 群友聊天那样说话：需要多句时拆成 1-3 条短消息，"
+            "条与条之间用空行分隔；单条尽量不超过 40 字，口语化，可以只接半句，"
+            "不要写成完整段落或书面文。"
+        )
 
     available_stickers: List[str] = []
     group_config = persona.get_group_config(str(group_id))
@@ -1223,6 +1261,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         if used_agent and reply_content in ("[NO_REPLY]", "<NO_REPLY>"):
             if is_random_chat:
                 runtime.logger.info("拟人插件：Agent 在随机插话场景选择 NO_REPLY，保持沉默。")
+                await _maybe_silence_reaction()
                 return
             else:
                 runtime.logger.info("拟人插件：Agent 返回 NO_REPLY，回退基础模型生成文本回复。")
@@ -1310,6 +1349,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
         if used_agent and ("[NO_REPLY]" in reply_content or "<NO_REPLY>" in reply_content):
             if is_random_chat:
+                await _maybe_silence_reaction()
                 return
             else:
                 runtime.logger.info("拟人插件：Agent 文本含 NO_REPLY 标记，回退基础模型重试。")
@@ -1357,6 +1397,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             runtime.logger.info(
                 f"AI 选择不回复群 {group_id} 中 {user_name}({user_id}) 的消息 (NO_REPLY)"
             )
+            await _maybe_silence_reaction()
             return
 
         has_good_atmosphere = "[氛围好]" in reply_content or "<氛围好>" in reply_content
@@ -1619,6 +1660,74 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     segments = expanded
                 if not segments:
                     segments = [final_reply]
+
+                typo_correction: str | None = None
+                if message_intent == "banter" and not looks_like_explanatory_output(final_reply):
+                    typo_prob = float(
+                        getattr(runtime.plugin_config, "personification_humanize_typo_probability", 0.0) or 0.0
+                    )
+                    if typo_prob > 0 and segments:
+                        typo_idx = random.randrange(len(segments))
+                        mutated, typo_correction = _humanize.maybe_inject_typo(
+                            segments[typo_idx], probability=typo_prob
+                        )
+                        segments[typo_idx] = mutated
+
+                quote_message_id = _humanize.should_quote_reply(
+                    plugin_config=runtime.plugin_config,
+                    state=state,
+                    event=event,
+                    group_id=str(group_id),
+                    user_id=user_id,
+                    is_private=is_private_session,
+                    has_newer_batch=_batch_has_newer_messages(state),
+                )
+                at_target = _humanize.should_at_target(
+                    plugin_config=runtime.plugin_config,
+                    state=state,
+                    event=event,
+                    user_id=user_id,
+                    is_private=is_private_session,
+                    quote_message_id=quote_message_id,
+                )
+
+                humanize_typing = _humanize.typing_enabled(runtime.plugin_config)
+                typing_cps = float(
+                    getattr(runtime.plugin_config, "personification_humanize_typing_cps", 7.0) or 7.0
+                )
+                typing_max_delay = float(
+                    getattr(runtime.plugin_config, "personification_humanize_typing_max_delay", 5.0) or 0.0
+                )
+                if humanize_typing and segments:
+                    try:
+                        current_hour = runtime.get_current_time().hour
+                        is_night = current_hour >= 23 or current_hour < 7
+                    except Exception:
+                        is_night = False
+                    first_delay = _humanize.compute_typing_delay(
+                        segments[0],
+                        cps=typing_cps,
+                        max_delay=typing_max_delay,
+                        already_elapsed=time.monotonic() - started_at,
+                        night=is_night,
+                    )
+                    if first_delay > 0.05:
+                        if (
+                            is_private_session
+                            and first_delay > 1.5
+                            and bool(
+                                getattr(
+                                    runtime.plugin_config,
+                                    "personification_humanize_input_status_enabled",
+                                    True,
+                                )
+                            )
+                        ):
+                            await _protocol_caps.set_typing(
+                                bot, runtime.plugin_config, user_id=user_id, logger=runtime.logger
+                            )
+                        await asyncio.sleep(first_delay)
+
                 for i, seg in enumerate(segments):
                     if not seg.strip():
                         continue
@@ -1626,11 +1735,34 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     if stale_reason:
                         runtime.logger.info(f"拟人插件：{stale_reason}")
                         return
-                    send_result = await bot.send(event, seg)
+                    outgoing: Any = seg
+                    if i == 0:
+                        try:
+                            if quote_message_id is not None:
+                                outgoing = runtime.message_segment_cls.reply(int(quote_message_id)) + seg
+                            elif at_target:
+                                outgoing = runtime.message_segment_cls.at(int(at_target)) + f" {seg}"
+                        except Exception:
+                            outgoing = seg
+                    send_result = await bot.send(event, outgoing)
                     if not sent_message_id:
                         sent_message_id = extract_send_message_id(send_result)
                     if i < len(segments) - 1 or sticker_segment:
-                        await asyncio.sleep(random.uniform(0.8, 1.6))
+                        if humanize_typing and i < len(segments) - 1:
+                            await asyncio.sleep(
+                                _humanize.compute_gap_delay(
+                                    segments[i + 1], cps=typing_cps, max_delay=typing_max_delay
+                                )
+                            )
+                        else:
+                            await asyncio.sleep(random.uniform(0.8, 1.6))
+
+                if typo_correction and not _stale_reply_abort_reason(state):
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
+                    try:
+                        await bot.send(event, typo_correction)
+                    except Exception as exc:
+                        runtime.logger.debug(f"[humanize] 修正消息发送失败: {exc}")
 
         for image_b64 in image_b64_payloads:
             stale_reason = _stale_reply_abort_reason(state)
