@@ -4,7 +4,7 @@ import json
 import time
 from typing import Any
 
-from .memory_store import MemoryStore
+from .memory_store import MemoryStore, _connect
 from .search_ranker import now_ts, safe_float
 
 
@@ -18,10 +18,7 @@ class MemoryDecayScheduler:
             return 0
         db_path = self.memory_store.memory_palace_dir / "memory_palace.db"
         now = time.time()
-        import sqlite3
-
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
+        conn = _connect(db_path)
         try:
             rows = conn.execute(
                 """

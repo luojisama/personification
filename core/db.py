@@ -269,6 +269,9 @@ def _configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # 共享连接可能被事件循环与线程池并发使用，写锁竞争时等待而不是立刻抛
+    # "database is locked"。
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 

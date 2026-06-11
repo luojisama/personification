@@ -285,26 +285,36 @@ def _should_regenerate_for_banter(
 
 
 async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], deps: ReplyProcessorDeps) -> None:
-    session = deps.session
-    persona = deps.persona
-    runtime = deps.runtime
-    types = deps.types
-    started_at = time.monotonic()
-
     # plugin_invoker 代为执行其它插件命令时会用 handle_event 重新分发合成事件，
     # 这里直接短路，确保合成事件永远不会再次进入拟人回复/Agent 流程（防递归）。
     if getattr(event, "_personification_synthetic", False):
         return
 
+    token = None
+    reset_llm_context = None
     try:
-        from ...core.llm_context import set_llm_context
-        set_llm_context(
+        from ...core.llm_context import reset_llm_context, set_llm_context
+
+        token = set_llm_context(
             group_id=str(getattr(event, "group_id", "") or ""),
             user_id=str(getattr(event, "user_id", "") or ""),
             purpose="reply",
         )
     except Exception:
-        pass
+        token = None
+    try:
+        await _process_response_logic_impl(bot, event, state, deps)
+    finally:
+        if token is not None and reset_llm_context is not None:
+            reset_llm_context(token)
+
+
+async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, Any], deps: ReplyProcessorDeps) -> None:
+    session = deps.session
+    persona = deps.persona
+    runtime = deps.runtime
+    types = deps.types
+    started_at = time.monotonic()
 
     if hasattr(event, "message_id") and runtime.is_msg_processed(event.message_id):
         return

@@ -225,7 +225,16 @@ _GROUP_RULES: tuple[tuple[Callable[[str], bool], str], ...] = (
     (lambda k: k.startswith("turn_planner_") or k == "evidence_synthesizer_enabled", "意图规划"),
     (
         lambda k: k.startswith("parallel_research_")
-        or k in {"deep_research_v2_enabled", "tool_web_search_enabled", "tool_web_search_mode", "model_builtin_search_enabled"},
+        or k.startswith("web_search_")
+        or k in {
+            "deep_research_v2_enabled",
+            "tool_web_search_enabled",
+            "tool_web_search_mode",
+            "model_builtin_search_enabled",
+            "free_search_engines",
+            "searxng_instances",
+            "web_proxy",
+        },
         "联网搜索",
     ),
     (lambda k: k.startswith("fallback_"), "模型回退"),
@@ -2456,7 +2465,51 @@ def _build_entries() -> list[ConfigEntry]:
             parser=_bool_parser,
         ),
     ]
+    entries.extend(_build_extra_entries())
     return [_enrich_entry(entry) for entry in entries]
+
+
+_EXTRA_SPEC_PARSERS: dict[str, Callable[[str], Any]] = {
+    "bool": _bool_parser,
+    "int": _int_parser,
+    "float": _float_parser,
+    "str": _str_parser,
+    "list": _json_array_parser,
+    "dict": _json_object_parser,
+}
+
+
+def _build_extra_entries() -> list[ConfigEntry]:
+    from .config_registry_extra import EXTRA_CONFIG_SPECS
+
+    entries: list[ConfigEntry] = []
+    for spec in EXTRA_CONFIG_SPECS:
+        field_name = str(spec["field"])
+        value_type = str(spec["t"])
+        entries.append(
+            ConfigEntry(
+                key=field_name.removeprefix("personification_"),
+                field_name=field_name,
+                display_name=str(spec["name"]),
+                value_type=value_type,
+                default=spec["default"],
+                scope=GLOBAL_SCOPE,
+                description=str(spec["desc"]),
+                category="config",
+                choices=tuple(spec.get("choices", ())),
+                min_value=spec.get("min"),
+                max_value=spec.get("max"),
+                help_aliases=tuple(spec.get("aliases", ())),
+                risk_note=str(spec.get("risk", "")),
+                parser=_EXTRA_SPEC_PARSERS[value_type],
+                kind=str(spec.get("kind", "")),
+                group=str(spec.get("group", "其他")),
+                advanced=bool(spec.get("advanced", False)),
+                hot_reloadable=bool(spec.get("hot", True)),
+                example=str(spec.get("example", "")),
+            )
+        )
+    return entries
 
 
 _ENTRIES = _build_entries()
