@@ -154,7 +154,7 @@ def test_apply_recommended_writes_subset(_runtime_context, tmp_path, monkeypatch
     env_writer = load_personification_module("plugin.personification.core.env_writer")
     env_file = tmp_path / ".env.prod"
     env_file.write_text("personification_agent_max_steps=10\n", encoding="utf-8")
-    monkeypatch.setattr(env_writer, "_resolve_dotenv_target", lambda: env_file)
+    monkeypatch.setattr(env_writer, "_resolve_dotenv_target", lambda field_name="": env_file)
     monkeypatch.setattr(env_writer, "read_env_file_value", lambda _k: "")
 
     client = _build_client(_runtime_context)

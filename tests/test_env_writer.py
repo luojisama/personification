@@ -103,7 +103,7 @@ def test_write_both_emits_paths_and_errors(tmp_path: Path) -> None:
     cfg = _make_plugin_config(tmp_path)
     # monkey-patch target resolver to point at tmp file
     original = env_writer._resolve_dotenv_target
-    env_writer._resolve_dotenv_target = lambda: env_file
+    env_writer._resolve_dotenv_target = lambda field_name="": env_file
     try:
         result = env_writer.write_both("personification_probability", 0.6, cfg)
     finally:

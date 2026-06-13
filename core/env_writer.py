@@ -16,8 +16,35 @@ from .runtime_config import (
 )
 
 
-def _resolve_dotenv_target() -> Path | None:
-    for path in _iter_env_file_candidates():
+def _file_has_key(path: Path, field_name: str) -> bool:
+    target = str(field_name or "").strip().lower()
+    if not target:
+        return False
+    try:
+        for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key = stripped.split("=", 1)[0].strip().lower()
+            if key == target:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _resolve_dotenv_target(field_name: str = "") -> Path | None:
+    """选择写入目标 .env 文件。
+
+    优先选已包含该字段的文件（就地更新，避免在另一个文件里产生重复副本，
+    导致 read_env_file_value 读到旧值），否则退回第一个存在的候选文件。
+    """
+    candidates = list(_iter_env_file_candidates())
+    if field_name:
+        for path in candidates:
+            if _file_has_key(path, field_name):
+                return path
+    for path in candidates:
         return path
     return None
 
@@ -39,7 +66,7 @@ def write_dotenv(field_name: str, value: Any, *, backup: bool = True, target: Pa
     若新值与文件中现有值完全一致，则跳过备份与写入，避免产生无意义的 .bak 副本。
     返回实际写入（或确认未变）的文件路径，无可写文件时返回 None。
     """
-    path = target or _resolve_dotenv_target()
+    path = target or _resolve_dotenv_target(field_name)
     if path is None:
         return None
     new_value_str = _serialize_value(value)

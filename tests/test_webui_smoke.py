@@ -147,7 +147,7 @@ def test_config_value_update_double_writes(_runtime_context, monkeypatch, tmp_pa
     env_writer = load_personification_module("plugin.personification.core.env_writer")
     env_file = tmp_path / ".env.prod"
     env_file.write_text("personification_agent_max_steps=5\n", encoding="utf-8")
-    monkeypatch.setattr(env_writer, "_resolve_dotenv_target", lambda: env_file)
+    monkeypatch.setattr(env_writer, "_resolve_dotenv_target", lambda field_name="": env_file)
     monkeypatch.setattr(env_writer, "read_env_file_value", lambda key: "")
 
     _runtime_context.plugin_config.personification_agent_max_steps = 5
