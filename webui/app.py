@@ -247,7 +247,8 @@ let state = {
   groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [],
   groupSwitches: [], newGroupId: "",
   skills: [], skillFilter: "",
-  testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null,
+  testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
+  personaPrompt: null, personaPromptPath: "",
   memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false,
   memoryGraph: null, memoryGraphGroupId: "", memoryGraphLimit: 100, memoryGraphMinSalience: 0,
   groupRawChat: null, groupStyleSnapIdx: 0, groupStyleRebuilding: false,
@@ -358,6 +359,9 @@ async function loadView() {
       state.skills = data.skills; state.skillsAvailable = data.available;
     } else if (state.view === "test") {
       /* nothing to preload */
+    } else if (state.view === "persona_prompt") {
+      const qs = state.personaPromptPath ? ("?path=" + encodeURIComponent(state.personaPromptPath)) : "";
+      state.personaPrompt = await api("/test/persona-prompt" + qs);
     } else if (state.view === "proactive") {
       const qs = new URLSearchParams({ since_hours: "72" });
       if (state.proactiveScope) qs.set("scope", state.proactiveScope);
@@ -461,6 +465,7 @@ function renderLayout() {
         ${navItem('skills','Skill 管理')}
         ${navItem('plugin_knowledge','插件知识库')}
         ${navItem('test','模型测试')}
+        ${navItem('persona_prompt','人设预览')}
         ${navItem('proactive','主动诊断')}
         ${navItem('audit','审计日志')}
         ${navItem('devices','设备管理')}
@@ -497,6 +502,7 @@ function renderView() {
   if (state.view === "skills") return renderSkills();
   if (state.view === "plugin_knowledge") return renderPluginKnowledge();
   if (state.view === "test") return renderTest();
+  if (state.view === "persona_prompt") return renderPersonaPrompt();
   if (state.view === "memory") return renderMemory();
   if (state.view === "memory_graph") return renderMemoryGraph();
   if (state.view === "stickers") return renderStickers();
@@ -1582,9 +1588,14 @@ function renderTest() {
     <textarea oninput="state.testSystem=this.value" style="width:100%;min-height:60px;margin:6px 0">${escapeHtml(state.testSystem)}</textarea>
     <label class="muted">用户消息</label>
     <textarea oninput="state.testPrompt=this.value" style="width:100%;min-height:80px;margin:6px 0">${escapeHtml(state.testPrompt)}</textarea>
-    <div class="row" style="margin-top:10px"><button class="btn primary" onclick="runTest()">发送</button>${state.testLoading?'<span class="muted">调用中…</span>':''}</div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary" onclick="runTest()">发送（路由模型）</button>
+      <button class="btn" onclick="runTestAll()">测试全部 provider</button>
+      ${state.testLoading?'<span class="muted">调用中…</span>':''}
+    </div>
+    <p class="muted" style="margin-top:8px;font-size:12px">“测试全部 provider”会向 api_pools 里每个 provider 各发一次，分别返回延迟与内容，用于排查哪个供应商不通或被拦截。</p>
   </div>
-  ${r ? `<div class="card"><h2>响应</h2>
+  ${r ? `<div class="card"><h2>响应（路由模型）</h2>
     <div class="row muted" style="font-size:12px;margin-bottom:8px">
       <span>模型 <code>${escapeHtml(r.model_used||'未知')}</code></span>
       <span>finish=${escapeHtml(r.finish_reason||'')}</span>
@@ -1592,7 +1603,32 @@ function renderTest() {
       <span>tokens prompt=${r.usage?.prompt_tokens||0} completion=${r.usage?.completion_tokens||0}</span>
     </div>
     <pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(r.content||'(无内容)')}</pre>
-  </div>` : ''}`;
+  </div>` : ''}
+  ${renderTestAll()}`;
+}
+
+function renderTestAll() {
+  const ra = state.testAllResult;
+  if (!ra) return '';
+  const rows = (ra.results || []).slice().sort((a,b)=>(a.priority-b.priority)||(a.index-b.index)).map(x => {
+    const ok = x.ok && !x.error;
+    const status = ok
+      ? '<span class="device-status approved">通过</span>'
+      : (x.blocked_reason ? '<span class="device-status pending">被拦截</span>'
+                          : '<span class="device-status pending" style="background:rgba(248,113,113,0.18);color:var(--danger)">失败</span>');
+    const detail = ok ? (escapeHtml((x.content||'').slice(0,200)) || '(空)') : escapeHtml(x.error || x.blocked_reason || '未知错误');
+    return `<tr>
+      <td>${escapeHtml(x.name||'')}</td>
+      <td class="muted">${escapeHtml(x.api_type||'')} / ${escapeHtml(x.model||'')}</td>
+      <td>${status}</td>
+      <td>${x.duration_ms!=null?x.duration_ms+'ms':'-'}</td>
+      <td style="max-width:380px;white-space:pre-wrap;word-break:break-word">${detail}</td>
+    </tr>`;
+  }).join("");
+  return `<div class="card"><h2>全部 provider 测试（${ra.count||0}）</h2>
+    <table><thead><tr><th>名称</th><th>类型 / 模型</th><th>状态</th><th>延迟</th><th>内容 / 错误</th></tr></thead>
+    <tbody>${rows||'<tr><td colspan="5" class="muted">无</td></tr>'}</tbody></table>
+  </div>`;
 }
 
 async function runTest() {
@@ -1601,6 +1637,47 @@ async function runTest() {
     state.testResult = await api("/test/chat", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({prompt: state.testPrompt, system: state.testSystem}) });
   } catch (e) { alertFlash("err", "调用失败：" + e.message); }
   state.testLoading = false; render();
+}
+
+async function runTestAll() {
+  state.testLoading = true; render();
+  try {
+    state.testAllResult = await api("/test/chat-all", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({prompt: state.testPrompt, system: state.testSystem}) });
+  } catch (e) { alertFlash("err", "测试失败：" + e.message); }
+  state.testLoading = false; render();
+}
+
+function renderPersonaPrompt() {
+  const p = state.personaPrompt;
+  const meta = p ? `<div class="row muted" style="font-size:12px;margin-bottom:8px;gap:14px">
+      <span>来源：${escapeHtml(p.source||'-')}</span>
+      ${p.resolved_path ? `<span>路径：<code>${escapeHtml(p.resolved_path)}</code></span>` : ''}
+      <span>${p.exists ? (p.is_file ? (p.size+' 字节') : '内联文本') : '<span style="color:var(--danger)">文件不存在</span>'}</span>
+    </div>` : '';
+  const body = p && (p.content || p.content === '')
+    ? `<pre style="white-space:pre-wrap;margin:0;font-family:ui-monospace,Consolas,monospace;max-height:60vh;overflow:auto">${escapeHtml(p.content || '(空)')}</pre>`
+    : '<p class="muted">加载中…</p>';
+  return `<div class="card">
+    <h2>人设预览</h2>
+    <p class="muted" style="font-size:12.5px">默认显示当前生效的人设文件（prompt_path / system_path / system_prompt）。也可输入任意路径查看其内容。</p>
+    <div class="row" style="margin:10px 0">
+      <input id="persona-path" type="text" placeholder="留空=当前配置；或输入文件路径" value="${escapeAttr(state.personaPromptPath||'')}" style="flex:1;min-width:240px" onkeydown="if(event.key==='Enter')loadPersonaPrompt()">
+      <button class="btn primary" onclick="loadPersonaPrompt()">查看</button>
+      ${state.personaPromptPath ? '<button class="btn" onclick="resetPersonaPrompt()">重置为当前配置</button>' : ''}
+    </div>
+  </div>
+  <div class="card">${meta}${body}</div>`;
+}
+
+async function loadPersonaPrompt() {
+  const el = document.getElementById("persona-path");
+  if (el) state.personaPromptPath = el.value.trim();
+  try { await loadView(); render(); } catch (e) { alertFlash("err", "读取失败：" + e.message); }
+}
+
+async function resetPersonaPrompt() {
+  state.personaPromptPath = "";
+  try { await loadView(); render(); } catch (e) { alertFlash("err", "读取失败：" + e.message); }
 }
 
 function renderConfig() {
