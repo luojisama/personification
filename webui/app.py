@@ -241,7 +241,7 @@ const API = "/personification/api";
 let state = {
   logged: false, qq: "", view: "dashboard",
   entries: [], groups: [], activeGroup: null, configSearch: "",
-  devices: [], alert: null, loading: false,
+  devices: [], pendingDevices: [], devicePending: false, alert: null, loading: false,
   dashboard: null, dashboardWindow: "month",
   personas: [], selectedPersona: null, personaSearch: "",
   groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [],
@@ -307,8 +307,9 @@ async function bootstrap() {
   const savedTheme = localStorage.getItem("personification_theme") || "dark";
   state.theme = savedTheme;
   document.documentElement.setAttribute("data-theme", savedTheme);
-  try { const me = await api("/auth/me"); state.logged = true; state.qq = me.qq; await loadView(); }
-  catch { state.logged = false; }
+  try { const me = await api("/auth/me"); state.logged = true; state.devicePending = false; state.qq = me.qq; await loadView(); }
+  catch (e) { state.logged = false; state.devicePending = /DEVICE_PENDING/.test(String(e && e.message || "")); }
+  if (state.devicePending) { render(); return; }
   if (!state.logged) {
     try { const ea = await fetch(API + "/auth/eligible-admins").then(r=>r.json()); state.eligibleAdmins = ea.admins||[]; } catch {}
   }
@@ -335,8 +336,12 @@ async function loadView() {
       state.entries = data.entries; state.groups = data.groups;
       if (!state.activeGroup || !state.groups.includes(state.activeGroup)) state.activeGroup = state.groups[0] || null;
     } else if (state.view === "devices") {
-      const data = await api("/auth/devices");
+      const [data, pend] = await Promise.all([
+        api("/auth/devices"),
+        api("/auth/pending-devices").catch(() => ({ devices: [] })),
+      ]);
       state.devices = data.devices; state.currentDeviceId = data.current_device_id;
+      state.pendingDevices = pend.devices || [];
     } else if (state.view === "dashboard") {
       state.dashboard = await api("/metrics/summary?window=" + encodeURIComponent(state.dashboardWindow));
     } else if (state.view === "personas") {
@@ -407,6 +412,7 @@ async function loadView() {
 
 function render() {
   const root = document.getElementById("app");
+  if (state.devicePending) { root.innerHTML = renderDevicePending(); return; }
   if (!state.logged) { root.innerHTML = renderLogin(); attachLogin(); return; }
   // 全量 innerHTML 重绘会让正在输入的搜索框失焦；记下焦点 + 光标位置，重绘后还原。
   const active = document.activeElement;
@@ -1903,17 +1909,42 @@ function pickGroup(g) { state.activeGroup = g; render(); }
 function renderDevices() {
   const rows = state.devices.map(d => {
     const isCurrent = d.id === state.currentDeviceId;
+    const badge = d.status === "pending" ? '<span class="device-status pending">待审批</span>' : '<span class="device-status approved">已批准</span>';
     return `<tr>
       <td>${escapeHtml(d.label)} ${isCurrent ? '<span class="tag">当前</span>' : ''}</td>
+      <td>${badge}</td>
       <td class="muted">${escapeHtml(d.ua.slice(0, 60))}</td>
       <td>${new Date(d.last_seen * 1000).toLocaleString()}</td>
       <td>${isCurrent ? '' : `<button class="btn small danger" onclick="revokeDevice('${escapeAttr(d.id)}')">撤销</button>`}</td>
     </tr>`;
   }).join("");
-  return `<div class="card">
+  const pending = state.pendingDevices || [];
+  const pendingRows = pending.map(d => `<tr>
+      <td>${escapeHtml(d.label)} <span class="muted">QQ ${escapeHtml(d.qq)}</span></td>
+      <td class="muted">${escapeHtml(d.ua.slice(0, 60))}</td>
+      <td>${new Date(d.created_at * 1000).toLocaleString()}</td>
+      <td>
+        <button class="btn small primary" onclick="approveDevice('${escapeAttr(d.id)}')">批准</button>
+        <button class="btn small danger" onclick="revokeDevice('${escapeAttr(d.id)}')">拒绝</button>
+      </td>
+    </tr>`).join("");
+  const pendingCard = pending.length ? `<div class="card">
+    <h2>待审批设备 <span class="device-status pending">${pending.length}</span></h2>
+    <p class="muted">以下新设备等待确认。请核对 QQ / 来源后再批准，拒绝将立即吊销其令牌。</p>
+    <table><thead><tr><th>设备</th><th>UA</th><th>登记时间</th><th></th></tr></thead><tbody>${pendingRows}</tbody></table>
+  </div>` : '';
+  return `${pendingCard}<div class="card">
     <h2>已登录设备</h2>
-    <table><thead><tr><th>设备</th><th>UA</th><th>最后活跃</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    <table><thead><tr><th>设备</th><th>状态</th><th>UA</th><th>最后活跃</th><th></th></tr></thead><tbody>${rows}</tbody></table>
   </div>`;
+}
+
+async function approveDevice(id) {
+  try {
+    await api("/auth/devices/" + encodeURIComponent(id) + "/approve", { method:"POST" });
+    alertFlash("ok", "已批准");
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "批准失败：" + e.message); }
 }
 
 async function revokeDevice(id) {
@@ -1971,6 +2002,31 @@ function renderLogin() {
 
 function attachLogin() { /* 节点内 onclick 已绑定 */ }
 
+function renderDevicePending() {
+  return `<div class="login-wrap"><div class="card">
+    <h2>设备等待审批</h2>
+    <p class="muted">该设备已登记，但需由一台<strong>已批准的设备</strong>在「设备」页确认后才能使用。</p>
+    <p class="muted">已通知管理员。批准后点击下方按钮刷新。</p>
+    <div style="margin-top:14px;display:flex;gap:8px">
+      <button class="btn primary" onclick="recheckDevice()">我已被批准，刷新</button>
+      <button class="btn" onclick="logoutPending()">退出</button>
+    </div>
+  </div></div>`;
+}
+
+async function recheckDevice() {
+  try { const me = await api("/auth/me"); state.logged = true; state.devicePending = false; state.qq = me.qq; await loadView(); render(); }
+  catch (e) {
+    if (/DEVICE_PENDING/.test(String(e && e.message || ""))) { alertFlash("info", "仍在等待管理员批准"); }
+    else { state.devicePending = false; render(); }
+  }
+}
+
+async function logoutPending() {
+  try { await api("/auth/logout", { method:"POST" }); } catch {}
+  state.devicePending = false; state.logged = false; render();
+}
+
 async function sendCode() {
   const qq = document.getElementById("login-qq").value.trim();
   const msg = document.getElementById("login-msg");
@@ -1990,8 +2046,9 @@ async function doVerify() {
   const msg = document.getElementById("login-msg");
   msg.textContent = "正在验证…";
   try {
-    await api("/auth/verify", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq: state.pendingQq, code, device_label: label }) });
-    state.logged = true; state.qq = state.pendingQq; await loadView(); render();
+    const r = await api("/auth/verify", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq: state.pendingQq, code, device_label: label }) });
+    if (r && r.pending) { state.logged = false; state.devicePending = true; state.qq = state.pendingQq; render(); return; }
+    state.logged = true; state.devicePending = false; state.qq = state.pendingQq; await loadView(); render();
   } catch (e) { msg.textContent = "验证失败：" + e.message; }
 }
 

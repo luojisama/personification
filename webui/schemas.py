@@ -24,6 +24,7 @@ class VerifyRequest(BaseModel):
 class VerifyResponse(BaseModel):
     success: bool
     message: str = ""
+    pending: bool = False
 
 
 class DeviceInfo(BaseModel):
@@ -33,11 +34,16 @@ class DeviceInfo(BaseModel):
     ua: str
     created_at: float
     last_seen: float
+    status: str = "approved"
 
 
 class DeviceListResponse(BaseModel):
     devices: list[DeviceInfo]
     current_device_id: str = ""
+
+
+class PendingDeviceListResponse(BaseModel):
+    devices: list[DeviceInfo]
 
 
 class ConfigEntryView(BaseModel):

@@ -437,6 +437,9 @@ class Config(BaseModel):
     # 私聊回复前显示"正在输入"（仅 NapCat 系支持）
     personification_humanize_input_status_enabled: bool = True
 
+    # WebUI 新设备登录需已批准设备确认（首个设备自动批准，防锁死）
+    personification_webui_require_device_approval: bool = True
+
     personification_blacklist_duration: int = 300
 
     # 60s API 配置

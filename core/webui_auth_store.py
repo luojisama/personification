@@ -100,8 +100,11 @@ def _prune_expired_codes(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def issue_device_token(qq: str, ua: str, ip: str, label: str = "") -> str:
-    """生成 device token + CSRF token，写 KV，返回明文 token（设到 cookie）。"""
+def issue_device_token(qq: str, ua: str, ip: str, label: str = "", status: str = "approved") -> str:
+    """生成 device token + CSRF token，写 KV，返回明文 token（设到 cookie）。
+
+    status: "approved" 直接可用；"pending" 需已批准管理员确认后才放行。
+    """
     qq_key = str(qq or "").strip()
     if not qq_key:
         raise ValueError("qq required")
@@ -117,6 +120,7 @@ def issue_device_token(qq: str, ua: str, ip: str, label: str = "") -> str:
         "last_seen": now_ts,
         "expires_at": now_ts + _DEVICE_TOKEN_TTL_SECONDS,
         "csrf_token": secrets.token_urlsafe(24),
+        "status": "pending" if str(status) == "pending" else "approved",
     }
 
     def _mutate(current: object) -> dict[str, Any]:
@@ -126,6 +130,73 @@ def issue_device_token(qq: str, ua: str, ip: str, label: str = "") -> str:
 
     get_data_store().mutate_sync(_NS_DEVICES, _mutate)
     return token
+
+
+def _device_status(entry: dict[str, Any]) -> str:
+    """兼容旧记录：缺 status 字段的设备视为已批准（避免升级后把现有设备锁死）。"""
+    status = str(entry.get("status", "") or "").strip()
+    return "pending" if status == "pending" else "approved"
+
+
+def has_any_approved_device() -> bool:
+    """是否存在任一未过期且已批准的设备。用于决定首个设备是否需审批（防锁死）。"""
+    data = get_data_store().load_sync(_NS_DEVICES)
+    if not isinstance(data, dict):
+        return False
+    now_ts = _now()
+    for entry in data.values():
+        if not isinstance(entry, dict):
+            continue
+        expires_at = float(entry.get("expires_at", 0) or 0)
+        if expires_at > 0 and expires_at <= now_ts:
+            continue
+        if _device_status(entry) == "approved":
+            return True
+    return False
+
+
+def approve_device(device_id: str) -> bool:
+    """把待审批设备标记为已批准。"""
+    target = str(device_id or "").strip()
+    if not target:
+        return False
+    approved = False
+
+    def _mutate(current: object) -> dict[str, Any]:
+        nonlocal approved
+        data = current if isinstance(current, dict) else {}
+        entry = data.get(target)
+        if isinstance(entry, dict):
+            entry["status"] = "approved"
+            data[target] = entry
+            approved = True
+        return _prune_expired_devices(data)
+
+    get_data_store().mutate_sync(_NS_DEVICES, _mutate)
+    return approved
+
+
+def list_pending_devices() -> list[dict[str, Any]]:
+    """所有未过期的待审批设备（不限 QQ），供已批准管理员确认。"""
+    data = get_data_store().load_sync(_NS_DEVICES)
+    if not isinstance(data, dict):
+        return []
+    now_ts = _now()
+    out: list[dict[str, Any]] = []
+    for token_hash, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        expires_at = float(entry.get("expires_at", 0) or 0)
+        if expires_at > 0 and expires_at <= now_ts:
+            continue
+        if _device_status(entry) != "pending":
+            continue
+        item = dict(entry)
+        item["id"] = token_hash
+        item.pop("csrf_token", None)
+        out.append(item)
+    out.sort(key=lambda x: float(x.get("created_at", 0) or 0), reverse=True)
+    return out
 
 
 def lookup_device(token: str, *, ua: str = "") -> dict[str, Any] | None:
@@ -177,6 +248,7 @@ def list_devices(qq: str | None = None) -> list[dict[str, Any]]:
             continue
         item = dict(entry)
         item["id"] = token_hash
+        item["status"] = _device_status(entry)
         # 不向 API 暴露 csrf_token；调用方需要时单独走 lookup_device
         item.pop("csrf_token", None)
         out.append(item)
@@ -288,6 +360,9 @@ __all__ = [
     "issue_device_token",
     "lookup_device",
     "list_devices",
+    "has_any_approved_device",
+    "approve_device",
+    "list_pending_devices",
     "revoke_device",
     "prune_expired_devices",
     "record_login_attempt",

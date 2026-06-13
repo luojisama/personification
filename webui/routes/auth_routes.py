@@ -17,6 +17,7 @@ from ..schemas import (
     DeviceListResponse,
     LoginRequest,
     LoginResponse,
+    PendingDeviceListResponse,
     VerifyRequest,
     VerifyResponse,
 )
@@ -78,7 +79,15 @@ def build_auth_router(*, runtime) -> APIRouter:
             )
             raise HTTPException(status_code=403, detail="验证码错误或已过期")
         ua = get_user_agent(request)
-        token = webui_auth_store.issue_device_token(qq, ua, ip, label=payload.device_label)
+        # 设备审批：开启且系统已存在至少一个已批准设备时，新设备进入待审批；
+        # 全新部署（无任何已批准设备）的首个设备自动批准，避免无人可审导致锁死。
+        require_approval = bool(
+            getattr(runtime.plugin_config, "personification_webui_require_device_approval", False)
+        ) and webui_auth_store.has_any_approved_device()
+        device_status = "pending" if require_approval else "approved"
+        token = webui_auth_store.issue_device_token(
+            qq, ua, ip, label=payload.device_label, status=device_status
+        )
         webui_auth_store.reset_login_attempts(ip)
         # 找回刚生成的设备记录拿 csrf_token
         record = webui_auth_store.lookup_device(token, ua=ua) or {}
@@ -110,22 +119,38 @@ def build_auth_router(*, runtime) -> APIRouter:
             target=str(payload.device_label or ""),
             outcome="ok",
         )
-        # 告知 SUPERUSER：新设备登录
+        # 告知 SUPERUSER：新设备登录 / 待审批
         try:
             superusers = list(runtime.superusers or [])
-            await notify.startup_notify_admins(
-                get_bots=runtime.get_bots,
-                superusers=superusers,
-                plugin_admins=[],
-                message=(
+            if require_approval:
+                notice = (
+                    f"【拟人 WebUI】新设备待审批\n"
+                    f"QQ：{qq}\n"
+                    f"设备：{payload.device_label or '未命名'}\n"
+                    f"IP：{ip or '未知'}\n"
+                    "请用已登录的设备在「设备」页确认或拒绝该设备。"
+                )
+            else:
+                notice = (
                     f"【拟人 WebUI】新设备登录\n"
                     f"QQ：{qq}\n"
                     f"设备：{payload.device_label or '未命名'}\n"
                     f"IP：{ip or '未知'}"
-                ),
+                )
+            await notify.startup_notify_admins(
+                get_bots=runtime.get_bots,
+                superusers=superusers,
+                plugin_admins=[],
+                message=notice,
             )
         except Exception:
             pass
+        if require_approval:
+            return VerifyResponse(
+                success=True,
+                pending=True,
+                message="设备已登记，等待管理员在已登录设备上确认后方可使用",
+            )
         return VerifyResponse(success=True, message="登录成功")
 
     @router.get("/me")
@@ -174,19 +199,56 @@ def build_auth_router(*, runtime) -> APIRouter:
                 ua=str(item.get("ua", "")),
                 created_at=float(item.get("created_at", 0) or 0),
                 last_seen=float(item.get("last_seen", 0) or 0),
+                status=str(item.get("status", "approved") or "approved"),
             )
             for item in raw
         ]
         return DeviceListResponse(devices=items, current_device_id=admin.device_id)
+
+    @router.get("/pending-devices", response_model=PendingDeviceListResponse)
+    async def pending_devices(_: AdminIdentity = Depends(require_admin)) -> PendingDeviceListResponse:
+        raw = webui_auth_store.list_pending_devices()
+        items = [
+            DeviceInfo(
+                id=str(item.get("id", "")),
+                qq=str(item.get("qq", "")),
+                label=str(item.get("label", "")),
+                ua=str(item.get("ua", "")),
+                created_at=float(item.get("created_at", 0) or 0),
+                last_seen=float(item.get("last_seen", 0) or 0),
+                status="pending",
+            )
+            for item in raw
+        ]
+        return PendingDeviceListResponse(devices=items)
+
+    @router.post("/devices/{device_id}/approve")
+    async def approve_device(
+        device_id: str,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        pending_ids = {item["id"] for item in webui_auth_store.list_pending_devices()}
+        if device_id not in pending_ids:
+            raise HTTPException(status_code=404, detail="待审批设备不存在")
+        ok = webui_auth_store.approve_device(device_id)
+        webui_audit_log.record(
+            action="device_approve",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=device_id,
+            outcome="ok" if ok else "no_op",
+        )
+        return {"success": ok}
 
     @router.delete("/devices/{device_id}")
     async def revoke_device(
         device_id: str,
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
-        # 仅允许撤销同 QQ 的设备
+        # 允许撤销同 QQ 的设备，或任一待审批设备（拒绝新设备）
         owned = {item["id"] for item in webui_auth_store.list_devices(admin.qq)}
-        if device_id not in owned:
+        pending = {item["id"] for item in webui_auth_store.list_pending_devices()}
+        if device_id not in owned and device_id not in pending:
             raise HTTPException(status_code=404, detail="设备不存在或非本账号")
         ok = webui_auth_store.revoke_device(device_id)
         webui_audit_log.record(
