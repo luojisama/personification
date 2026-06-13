@@ -193,6 +193,13 @@ class ConfigEntry:
     def normalize_value(self, raw: Any) -> Any:
         if isinstance(raw, bool) and self.value_type == "bool":
             value = raw
+        elif isinstance(raw, (list, dict)):
+            # 前端可能直接传来已解析的 JSON 数组/对象（如 API Provider 池编辑器
+            # 提交的 provider 列表）。此时 str(raw) 会得到 Python repr（单引号、
+            # True/False），交给 json.loads 必然失败，导致保存被拒、配置"回退"。
+            # 用 json.dumps 转回合法 JSON 再交给 parser 校验归一。
+            parser = self.parser or _str_parser
+            value = parser(json.dumps(raw, ensure_ascii=False))
         else:
             parser = self.parser or _str_parser
             value = parser(str(raw or ""))

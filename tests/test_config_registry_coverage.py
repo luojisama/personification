@@ -59,6 +59,26 @@ def test_extra_entries_normalize_roundtrip() -> None:
     assert entries["favorability_attitudes"].normalize_value('{"初见":"礼貌"}') == {"初见": "礼貌"}
 
 
+def test_normalize_value_accepts_parsed_list_and_dict() -> None:
+    # WebUI 的 API Provider 池编辑器直接提交已解析的数组（FastAPI 解析 JSON body
+    # 后是 Python list），normalize_value 必须接受，不能因 str(list) 的 Python repr
+    # 解析失败而拒绝保存（历史上导致"保存后回退"）。
+    entries = {entry.field_name: entry for entry in config_registry.get_config_entries()}
+    pools_entry = entries["personification_api_pools"]
+    pools = [
+        {"name": "main", "api_type": "openai", "api_key": "sk-x", "model": "m", "priority": 1, "enabled": True},
+        {"name": "backup", "api_type": "anthropic", "api_key": "sk-y", "model": "c", "priority": 2, "enabled": False},
+    ]
+    out = pools_entry.normalize_value(pools)
+    assert isinstance(out, list) and len(out) == 2
+    assert out[0]["api_key"] == "sk-x" and out[1]["enabled"] is False
+    # 空列表与 JSON 字符串两种输入也要继续工作
+    assert pools_entry.normalize_value([]) == []
+    assert len(pools_entry.normalize_value('[{"name":"x","api_type":"openai"}]')) == 1
+    overrides_entry = entries["personification_model_overrides"]
+    assert overrides_entry.normalize_value({"intent": "gpt-4o-mini"}) == {"intent": "gpt-4o-mini"}
+
+
 def test_extra_entries_secret_and_advanced_inference() -> None:
     entries = {entry.key: entry for entry in config_registry.get_config_entries()}
     assert entries["tts_api_key"].secret is True
