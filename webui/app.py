@@ -1970,24 +1970,34 @@ function attachLayout() {
 
 function renderLogin() {
   const themeIcon = state.theme === "dark" ? "🌙" : "☀";
-  const eligible = (state.eligibleAdmins || []).slice(0, 8);
-  const eligibleBlock = eligible.length
-    ? `<div class="muted" style="font-size:12px;margin-top:12px;padding:10px;background:var(--zebra);border-radius:6px;border:1px solid var(--line)">
-        <div style="margin-bottom:4px">可登录的 QQ：</div>
-        ${eligible.map(e => `<div style="font-family:ui-monospace,Consolas,monospace">· ${escapeHtml(e.qq)} <span class="muted" style="font-size:11px">${escapeHtml(e.source)}</span></div>`).join("")}
-        ${state.eligibleAdmins.length > 8 ? `<div style="margin-top:4px">… 还有 ${state.eligibleAdmins.length - 8} 个</div>` : ''}
-      </div>`
-    : `<div class="muted" style="font-size:12px;margin-top:12px">未检测到管理员 QQ。请在 .env.prod 配置 <code>SUPERUSERS=["你的QQ"]</code>。</div>`;
+  const eligible = state.eligibleAdmins || [];
+  let picker, hint;
+  if (!eligible.length) {
+    picker = `<div class="muted" style="font-size:12px;margin-top:6px">未检测到管理员 QQ。请在 .env.prod 配置 <code>SUPERUSERS=["你的QQ"]</code> 后重启。</div>`;
+    hint = `<p class="muted" style="margin-top:14px;font-size:12.5px">配置管理员 QQ 后即可登录。</p>`;
+  } else if (eligible.length === 1) {
+    const e = eligible[0];
+    picker = `<input id="login-qq" type="hidden" value="${escapeAttr(e.qq)}">
+      <div style="margin-top:6px;padding:10px;background:var(--zebra);border-radius:6px;border:1px solid var(--line)">
+        <span style="font-family:ui-monospace,Consolas,monospace">${escapeHtml(e.qq)}</span>
+        <span class="muted" style="font-size:11px;margin-left:6px">${escapeHtml(e.source)}</span>
+      </div>`;
+    hint = `<p class="muted" style="margin-top:14px;font-size:12.5px">将向上述 QQ 私聊推送 6 位数验证码，5 分钟内有效。</p>`;
+  } else {
+    picker = `<select id="login-qq" style="width:100%;margin-top:6px">
+        ${eligible.map(e => `<option value="${escapeAttr(e.qq)}">${escapeHtml(e.qq)}（${escapeHtml(e.source)}）</option>`).join("")}
+      </select>`;
+    hint = `<p class="muted" style="margin-top:14px;font-size:12.5px">选择一个管理员 QQ，Bot 会向其私聊推送 6 位数验证码，5 分钟内有效。</p>`;
+  }
   return `<div class="login-wrap"><div class="card"><div class="between">
       <h2 style="margin:0">拟人插件 WebUI 登录</h2>
       <button class="btn small" onclick="toggleTheme()" title="切换主题">${themeIcon}</button>
     </div>
     <div id="login-step1">
-      <label>管理员 QQ</label>
-      <input id="login-qq" type="text" placeholder="例如 10001">
-      <div style="margin-top:14px"><button class="btn primary" onclick="sendCode()">发送验证码</button></div>
-      <p class="muted" style="margin-top:14px;font-size:12.5px">点击发送后，Bot 会向该 QQ 私聊推送 6 位数验证码，5 分钟内有效。</p>
-      ${eligibleBlock}
+      <label>管理员 QQ（自动读取自 .env.prod）</label>
+      ${picker}
+      <div style="margin-top:14px"><button class="btn primary" onclick="sendCode()" ${eligible.length ? '' : 'disabled'}>发送验证码</button></div>
+      ${hint}
     </div>
     <div id="login-step2" style="display:none">
       <label>验证码（来自 Bot 私聊）</label>
@@ -2028,8 +2038,10 @@ async function logoutPending() {
 }
 
 async function sendCode() {
-  const qq = document.getElementById("login-qq").value.trim();
+  const el = document.getElementById("login-qq");
+  const qq = (el && el.value || "").trim();
   const msg = document.getElementById("login-msg");
+  if (!qq) { msg.textContent = "未检测到可登录的管理员 QQ，请先在 .env.prod 配置 SUPERUSERS。"; return; }
   msg.textContent = "正在发送…";
   try {
     await api("/auth/login", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq }) });

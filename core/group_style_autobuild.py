@@ -10,6 +10,11 @@ from .data_store import get_data_store
 from .db import connect_sync
 from .group_knowledge_autobuild import _load_messages_since, _format_chat_summary
 
+try:  # 诊断日志用；测试/无 nonebot 环境下降级为 None
+    from nonebot import logger as _logger
+except Exception:  # pragma: no cover
+    _logger = None
+
 
 _NS_LAST_RUN = "group_style_last_run"
 _NS_DAILY_COUNT = "group_style_daily_count"
@@ -221,9 +226,18 @@ async def build_group_style(
                 call=_first,
                 retry_call=_retry,
                 on_response=record_response_usage,
+                logger=_logger,
                 purpose="group_style",
             )
-        except SafetyRefusalError:
+        except SafetyRefusalError as e:
+            if _logger is not None:
+                if getattr(e, "source", "") == "api_block":
+                    _logger.warning(
+                        f"[group_style] 群 {group_id} 风格分析被供应商安全策略拦截"
+                        f"（{getattr(e, 'reason', '') or '未知原因'}）：本轮跳过。"
+                    )
+                else:
+                    _logger.info(f"[group_style] 群 {group_id} 风格分析返回拒绝模板，本轮跳过。")
             return {}
     except Exception:
         return {}
