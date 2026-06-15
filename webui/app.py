@@ -260,7 +260,7 @@ const API = "/personification/api";
 let state = {
   logged: false, qq: "", view: "dashboard",
   entries: [], groups: [], activeGroup: null, configSearch: "",
-  devices: [], pendingDevices: [], devicePending: false, alert: null, loading: false,
+  devices: [], pendingDevices: [], trustedDevices: [], devicePending: false, loginRequestId: "", loginPolling: false, alert: null, loading: false,
   dashboard: null, dashboardWindow: "month",
   personas: [], selectedPersona: null, personaSearch: "",
   groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [],
@@ -356,12 +356,14 @@ async function loadView() {
       state.entries = data.entries; state.groups = data.groups;
       if (!state.activeGroup || !state.groups.includes(state.activeGroup)) state.activeGroup = state.groups[0] || null;
     } else if (state.view === "devices") {
-      const [data, pend] = await Promise.all([
+      const [data, pend, trust] = await Promise.all([
         api("/auth/devices"),
         api("/auth/pending-devices").catch(() => ({ devices: [] })),
+        api("/auth/trusted-devices").catch(() => ({ devices: [] })),
       ]);
       state.devices = data.devices; state.currentDeviceId = data.current_device_id;
       state.pendingDevices = pend.devices || [];
+      state.trustedDevices = trust.devices || [];
     } else if (state.view === "dashboard") {
       state.dashboard = await api("/metrics/summary?window=" + encodeURIComponent(state.dashboardWindow));
     } else if (state.view === "personas") {
@@ -2060,9 +2062,24 @@ function renderDevices() {
       <td>${badge}</td>
       <td class="muted">${escapeHtml(d.ua.slice(0, 60))}</td>
       <td>${new Date(d.last_seen * 1000).toLocaleString()}</td>
-      <td>${isCurrent ? '' : `<button class="btn small danger" onclick="revokeDevice('${escapeAttr(d.id)}')">撤销</button>`}</td>
+      <td>
+        <button class="btn small" onclick="trustDevice('${escapeAttr(d.id)}')" title="之后从该设备登录免验证">设为免验证</button>
+        ${isCurrent ? '' : `<button class="btn small danger" onclick="revokeDevice('${escapeAttr(d.id)}')">撤销</button>`}
+      </td>
     </tr>`;
   }).join("");
+  const trusted = state.trustedDevices || [];
+  const trustedRows = trusted.map(d => `<tr>
+      <td>${escapeHtml(d.label)}</td>
+      <td class="muted">${escapeHtml((d.ua||'').slice(0,60))}</td>
+      <td>${new Date(d.created_at * 1000).toLocaleString()}</td>
+      <td><button class="btn small danger" onclick="untrustDevice('${escapeAttr(d.id)}')">移除</button></td>
+    </tr>`).join("");
+  const trustedCard = `<div class="card">
+    <h2>免验证设备 ${trusted.length?`<span class="device-status approved">${trusted.length}</span>`:''}</h2>
+    <p class="muted">登记后，从相同浏览器（UA 指纹）+ 相同 QQ 登录将跳过验证码与审批，直接登录。请仅对你本人长期使用的设备启用。</p>
+    ${trusted.length ? `<table><thead><tr><th>设备</th><th>UA</th><th>登记时间</th><th></th></tr></thead><tbody>${trustedRows}</tbody></table>` : '<p class="muted">暂无免验证设备。在上方「已登录设备」点“设为免验证”添加。</p>'}
+  </div>`;
   const pending = state.pendingDevices || [];
   const pendingRows = pending.map(d => `<tr>
       <td>${escapeHtml(d.label)} <span class="muted">QQ ${escapeHtml(d.qq)}</span></td>
@@ -2081,7 +2098,24 @@ function renderDevices() {
   return `${pendingCard}<div class="card">
     <h2>已登录设备</h2>
     <table><thead><tr><th>设备</th><th>状态</th><th>UA</th><th>最后活跃</th><th></th></tr></thead><tbody>${rows}</tbody></table>
-  </div>`;
+  </div>${trustedCard}`;
+}
+
+async function trustDevice(id) {
+  if (!confirm("将该设备设为免验证？之后从相同浏览器+QQ 登录会跳过验证码与审批。")) return;
+  try {
+    await api("/auth/devices/" + encodeURIComponent(id) + "/trust", { method:"POST" });
+    alertFlash("ok", "已设为免验证设备");
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "操作失败：" + e.message); }
+}
+
+async function untrustDevice(id) {
+  try {
+    await api("/auth/trusted-devices/" + encodeURIComponent(id), { method:"DELETE" });
+    alertFlash("ok", "已移除免验证");
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "操作失败：" + e.message); }
 }
 
 async function approveDevice(id) {
@@ -2145,6 +2179,7 @@ function renderLogin() {
       ${hint}
     </div>
     <div id="login-step2" style="display:none">
+      <div class="alert info" style="font-size:12.5px">已向 QQ 发送登录请求。<b>在 QQ 私聊回复『同意登录』即可直接进入</b>（本页会自动刷新）；也可手动输入验证码。</div>
       <label>验证码（来自 Bot 私聊）</label>
       <input id="login-code" type="text" inputmode="numeric" maxlength="6" placeholder="6 位数字">
       <label style="margin-top:10px">设备名称（便于识别）</label>
@@ -2189,12 +2224,45 @@ async function sendCode() {
   if (!qq) { msg.textContent = "未检测到可登录的管理员 QQ，请先在 .env.prod 配置 SUPERUSERS。"; return; }
   msg.textContent = "正在发送…";
   try {
-    await api("/auth/login", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq }) });
+    const r = await api("/auth/login", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq }) });
     state.pendingQq = qq;
+    // 免验证设备：后端直接发证
+    if (r && r.passwordless) {
+      if (r.pending) { state.logged = false; state.devicePending = true; state.qq = qq; render(); return; }
+      state.logged = true; state.devicePending = false; state.qq = qq; await loadView(); render(); return;
+    }
     document.getElementById("login-step1").style.display = "none";
     document.getElementById("login-step2").style.display = "block";
-    msg.textContent = "已发送，请到 QQ 私聊查看 6 位数验证码。";
+    msg.textContent = "已发送。可在 QQ 私聊回复『同意登录』直接进入，或输入验证码。";
+    state.loginRequestId = (r && r.request_id) || "";
+    if (state.loginRequestId) startLoginPolling();
   } catch (e) { msg.textContent = "发送失败：" + e.message; }
+}
+
+async function startLoginPolling() {
+  if (state.loginPolling) return;
+  state.loginPolling = true;
+  const myReq = state.loginRequestId;
+  while (state.loginPolling && !state.logged && state.loginRequestId === myReq) {
+    await new Promise(r => setTimeout(r, 2500));
+    if (!state.loginRequestId || state.loginRequestId !== myReq) break;
+    let s;
+    try { s = await fetch(API + "/auth/login-status?request_id=" + encodeURIComponent(myReq), { credentials:"include" }).then(r=>r.json()); }
+    catch { continue; }
+    if (s.status === "approved" && s.success) {
+      state.loginPolling = false;
+      if (s.pending) { state.devicePending = true; state.logged = false; state.qq = state.pendingQq; render(); return; }
+      state.logged = true; state.devicePending = false; state.qq = state.pendingQq; await loadView(); render(); return;
+    }
+    if (s.status === "denied") {
+      state.loginPolling = false;
+      const msg = document.getElementById("login-msg");
+      if (msg) msg.textContent = "管理员已拒绝本次登录请求。";
+      return;
+    }
+    if (s.status === "expired") { state.loginPolling = false; return; }
+  }
+  state.loginPolling = false;
 }
 
 async function doVerify() {

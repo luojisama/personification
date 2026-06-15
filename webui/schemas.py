@@ -13,6 +13,9 @@ class LoginResponse(BaseModel):
     sent: bool
     cooldown_seconds: int = 0
     message: str = ""
+    request_id: str = ""
+    passwordless: bool = False
+    pending: bool = False
 
 
 class VerifyRequest(BaseModel):
