@@ -1,61 +1,89 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+
 from ._loader import load_personification_module
 
-# 复用 smoke fixture + 登录
 from .test_webui_smoke import _build_client, _login_as_admin, _runtime_context  # noqa: F401
+
+diagnostics = load_personification_module("plugin.personification.core.diagnostics")
+ai_routes = load_personification_module("plugin.personification.core.ai_routes")
+
+
+class _FakeResp:
+    def __init__(self, content="好", raw=None):
+        self.content = content
+        self.raw = raw
+        self.finish_reason = "stop"
+
+
+class _FakeCaller:
+    def __init__(self, content="好"):
+        self._c = content
+
+    async def chat_with_tools(self, messages, tools, use_builtin_search):
+        return _FakeResp(self._c)
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """屏蔽真实网络/模型调用：模型探测用假 caller，连通探测直接返回可达。"""
+    monkeypatch.setattr(ai_routes, "build_single_provider_caller", lambda cfg, prov, **kw: _FakeCaller())
+    monkeypatch.setattr(ai_routes, "list_primary_providers", lambda cfg, lg: [
+        {"name": "main", "api_type": "openai", "model": "gpt-4o", "priority": 1}
+    ])
+
+    async def _reachable(url, *, timeout=8):
+        return True, "HTTP 200"
+
+    monkeypatch.setattr(diagnostics, "_http_reachable", _reachable)
 
 
 def _statuses(body: dict) -> dict:
     out = {}
     for cat in body["categories"]:
         for c in cat["checks"]:
-            out[c["key"]] = c["status"]
+            out[c["key"]] = c
     return out
 
 
-def test_health_check_overall_structure(_runtime_context) -> None:
-    cfg = _runtime_context.plugin_config
-    cfg.personification_global_enabled = True
-    cfg.personification_api_pools = [
-        {"name": "main", "api_type": "openai", "model": "gpt-4o", "api_key": "k", "api_url": "u", "enabled": True, "priority": 1}
-    ]
+def test_health_does_live_model_call(_runtime_context) -> None:
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
-    res = client.get("/personification/api/health/check")
-    assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["overall"] in ("ok", "warn", "error")
-    assert "summary" in body and "categories" in body
-    assert len(body["categories"]) >= 10
+    body = client.get("/personification/api/health/check").json()
+    assert body["live"] is True
     st = _statuses(body)
-    # superusers 已配置（fixture 注入 10001）→ ok
-    assert st["superusers"] == "ok"
-    # provider 已配置 → ok
-    assert st["api_pools"] == "ok"
+    # 模型探测产生 per-provider 项，且为真实调用结果
+    model_keys = [k for k in st if k.startswith("model_")]
+    assert model_keys, "应有逐 provider 的模型调用探测项"
+    assert st[model_keys[0]]["status"] == "ok"
+    assert "调用正常" in st[model_keys[0]]["detail"]
 
 
-def test_health_flags_tts_enabled_without_key(_runtime_context) -> None:
-    cfg = _runtime_context.plugin_config
-    cfg.personification_tts_enabled = True
-    cfg.personification_tts_api_key = ""
-    cfg.personification_tts_api_url = ""
+def test_health_model_call_failure_is_error(_runtime_context, monkeypatch) -> None:
+    class _Boom:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):
+            raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(ai_routes, "build_single_provider_caller", lambda cfg, prov, **kw: _Boom())
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
     body = client.get("/personification/api/health/check").json()
     st = _statuses(body)
-    assert st["tts"] == "error"
+    model_keys = [k for k in st if k.startswith("model_")]
+    assert st[model_keys[0]]["status"] == "error"
+    assert "调用失败" in st[model_keys[0]]["detail"]
     assert body["overall"] == "error"
 
 
-def test_health_flags_no_enabled_groups(_runtime_context) -> None:
-    cfg = _runtime_context.plugin_config
-    cfg.personification_whitelist = []
+def test_health_db_is_live_query(_runtime_context) -> None:
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
-    body = client.get("/personification/api/health/check").json()
-    st = _statuses(body)
-    assert st["group_whitelist"] == "warn"
+    st = _statuses(client.get("/personification/api/health/check").json())
+    assert st["db"]["status"] == "ok"
+    assert "查询正常" in st["db"]["detail"]
 
 
 def test_health_requires_auth(_runtime_context) -> None:

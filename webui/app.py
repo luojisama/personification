@@ -1163,7 +1163,7 @@ function renderHealth() {
       <h2 style="margin:0">功能体检 <span class="health-badge ${overall.cls}" title="${overall.label}"></span> <span class="muted" style="font-size:13px">${overall.label}</span></h2>
       <button class="btn small" onclick="refreshHealth()">${state.loading?'检测中…':'重新检测'}</button>
     </div>
-    <p class="muted" style="font-size:12px;margin:8px 0 0">检测各模块的配置与就绪状态。红=异常需处理，黄=会影响行为，灰=未启用。</p>
+    <p class="muted" style="font-size:12px;margin:8px 0 0">对各模块做<b>真实调用探测</b>（模型逐个真发一次、数据库/记忆/画像真实读、TTS/空间/搜索真实连通），耗时数秒并消耗少量 token。红=异常需处理，黄=会影响行为，灰=未启用。</p>
     <div class="health-summary" style="margin-top:14px">
       ${pill('error')}${pill('warn')}${pill('ok')}${pill('disabled')}
     </div>

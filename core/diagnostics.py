@@ -1,18 +1,18 @@
-"""WebUI 功能体检：聚合各模块的配置/就绪状态，供图形化诊断页使用。
+"""WebUI 功能体检：对各模块做**实际调用探测**，而非仅检查配置。
 
-每个检查返回统一结构：key/label/status/detail/hint。
-status 取值：
-- ok       绿：配置正常、功能就绪
-- warn     黄：能用但有影响行为的配置（如没有任何已启用的群 → 群里不说话）
-- error    红：配置错误会导致功能不可用（如启用了 TTS 但缺 API Key）
-- disabled 灰：功能被主动关闭
-- info     中性信息
+与单纯"配置是否填了"不同，这里尽量真实地跑一次：
+- 模型：对每个 provider 真发一次最小调用，看是否返回/被拦截/超时；
+- 存储/记忆/画像：执行一次真实读操作；
+- TTS/QQ 空间/联网搜索：对目标地址做真实连通探测；
+- 协议端：真实调用 get_version_info。
 
-所有检查均 never-raise；单个检查异常会被收敛为 error 项，不影响整体。
+status：ok 绿 / warn 黄 / error 红 / disabled 灰 / info 中性。
+所有探测 never-raise、带超时、可并发；单项异常收敛为 error。
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -22,7 +22,12 @@ _ERROR = "error"
 _DISABLED = "disabled"
 _INFO = "info"
 
-_SEVERITY = {_ERROR: 3, _WARN: 2, _OK: 1, _INFO: 0, _DISABLED: 0}
+_PROVIDER_PROBE_TIMEOUT = 20
+_HTTP_PROBE_TIMEOUT = 8
+_PROBE_MESSAGES = [
+    {"role": "system", "content": "回复一个字：好"},
+    {"role": "user", "content": "在吗"},
+]
 
 
 def _check(key: str, label: str, status: str, detail: str = "", hint: str = "") -> dict[str, Any]:
@@ -37,118 +42,124 @@ def _truthy_str(cfg: Any, name: str) -> bool:
     return bool(str(_get(cfg, name, "") or "").strip())
 
 
-def _safe(fn) -> dict[str, Any]:
-    """执行单个检查闭包，异常收敛为 error 项。"""
+def _safe_list(fn) -> list[dict[str, Any]]:
     try:
-        return fn()
-    except Exception as exc:  # pragma: no cover - 防御
-        return _check("internal_error", "检查异常", _ERROR, detail=str(exc)[:200])
+        return list(fn())
+    except Exception as exc:  # pragma: no cover
+        return [_check("internal_error", "检查异常", _ERROR, detail=str(exc)[:200])]
 
 
-# ──────────────────────── 各类检查 ────────────────────────
+async def _http_reachable(url: str, *, timeout: int = _HTTP_PROBE_TIMEOUT) -> tuple[bool, str]:
+    """对 url 做一次真实 HTTP 探测；任何 HTTP 响应都算连通，连接异常算不通。"""
+    url = str(url or "").strip()
+    if not url:
+        return False, "地址为空"
+    if not url.startswith("http"):
+        url = "https://" + url
+    try:
+        from .runtime_state import get_shared_http_client
+
+        client = get_shared_http_client()
+        resp = await asyncio.wait_for(client.get(url), timeout=timeout)
+        return True, f"HTTP {resp.status_code}"
+    except asyncio.TimeoutError:
+        return False, f"超时（>{timeout}s）"
+    except Exception as exc:
+        return False, str(exc)[:120]
+
+
+# ──────────────────────── 实时探测各模块 ────────────────────────
 
 def _core_checks(cfg: Any, superusers: set[str]) -> list[dict[str, Any]]:
     checks = []
     enabled = bool(_get(cfg, "personification_global_enabled", True))
-    checks.append(_check(
-        "global_enabled", "插件总开关", _OK if enabled else _WARN,
-        detail="已开启" if enabled else "已关闭：插件不会响应任何消息",
-        hint="" if enabled else "在「配置中心 → 核心开关」开启 personification_global_enabled",
-    ))
+    checks.append(_check("global_enabled", "插件总开关", _OK if enabled else _WARN,
+                         detail="已开启" if enabled else "已关闭：插件不响应任何消息"))
     n = len([s for s in (superusers or set()) if str(s).strip()])
-    checks.append(_check(
-        "superusers", "管理员 (SUPERUSERS)", _OK if n else _ERROR,
-        detail=f"已配置 {n} 个管理员" if n else "未配置：无人能登录 WebUI / 收验证码",
-        hint="" if n else "在 .env.prod 配置 SUPERUSERS=[\"你的QQ\"]",
-    ))
+    checks.append(_check("superusers", "管理员 (SUPERUSERS)", _OK if n else _ERROR,
+                         detail=f"已配置 {n} 个" if n else "未配置：无人能登录 WebUI",
+                         hint="" if n else "在 .env.prod 配置 SUPERUSERS"))
     return checks
 
 
-def _model_checks(cfg: Any, bundle: Any, logger: Any) -> list[dict[str, Any]]:
-    checks = []
-    from .ai_routes import list_primary_providers
+async def _model_checks(cfg: Any, bundle: Any, logger: Any) -> list[dict[str, Any]]:
+    from .ai_routes import build_single_provider_caller, list_primary_providers
+    from .safety_filter import detect_api_block
 
     providers = list_primary_providers(cfg, logger) or []
-    if providers:
-        names = ", ".join(
-            str(p.get("name") or f"{p.get('api_type')}:{p.get('model')}") for p in providers[:6]
-        )
-        checks.append(_check(
-            "api_pools", "模型 Provider 池", _OK,
-            detail=f"已配置 {len(providers)} 个 provider：{names}",
-            hint="可在「模型测试 → 测试全部 provider」验证各家连通性",
-        ))
-    else:
-        checks.append(_check(
-            "api_pools", "模型 Provider 池", _ERROR,
-            detail="未配置任何 provider，主回复模型不可用",
-            hint="在「配置中心 → 模型路由」的 API Provider 池添加至少一个 provider",
-        ))
-    # 主回复 tool_caller 是否就绪
-    caller = None
-    if bundle is not None:
-        deps = getattr(bundle, "reply_processor_deps", None)
-        inner = getattr(deps, "runtime", None) if deps is not None else None
-        caller = getattr(inner, "agent_tool_caller", None) if inner is not None else None
-    checks.append(_check(
-        "tool_caller", "Agent 调用链路", _OK if caller is not None else _WARN,
-        detail="就绪" if caller is not None else "未就绪（Agent 流水线可能未启用）",
-    ))
-    # 全局兜底
-    if bool(_get(cfg, "personification_fallback_enabled", True)) and _truthy_str(cfg, "personification_fallback_model"):
-        checks.append(_check("fallback", "全局兜底模型", _OK, detail=str(_get(cfg, "personification_fallback_model", ""))))
-    else:
-        checks.append(_check("fallback", "全局兜底模型", _INFO, detail="未配置（provider 池全挂时无救援）"))
-    return checks
+    if not providers:
+        return [_check("api_pools", "模型 Provider 池", _ERROR,
+                       detail="未配置任何 provider，主回复模型不可用",
+                       hint="在「模型路由」添加至少一个 provider")]
+
+    async def _probe(provider: dict) -> dict:
+        name = str(provider.get("name") or f"{provider.get('api_type')}:{provider.get('model')}")
+        label = f"模型调用 · {name}"
+        started = time.monotonic()
+        try:
+            caller = build_single_provider_caller(cfg, provider)
+            resp = await asyncio.wait_for(
+                caller.chat_with_tools(messages=_PROBE_MESSAGES, tools=[], use_builtin_search=False),
+                timeout=_PROVIDER_PROBE_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            return _check(f"model_{name}", label, _ERROR, detail=f"调用超时（>{_PROVIDER_PROBE_TIMEOUT}s）")
+        except Exception as exc:
+            return _check(f"model_{name}", label, _ERROR, detail=f"调用失败：{str(exc)[:140]}")
+        ms = int((time.monotonic() - started) * 1000)
+        blocked = detect_api_block(resp)
+        content = str(getattr(resp, "content", "") or "").strip()
+        if blocked:
+            return _check(f"model_{name}", label, _ERROR, detail=f"被安全策略拦截：{blocked}（{ms}ms）",
+                          hint="换 provider 或软化提示词")
+        if content:
+            return _check(f"model_{name}", label, _OK, detail=f"调用正常，{ms}ms，返回 {len(content)} 字")
+        return _check(f"model_{name}", label, _WARN, detail=f"返回空内容（{ms}ms）")
+
+    results = await asyncio.gather(*[_probe(p) for p in providers])
+    return list(results)
 
 
 def _db_checks(cfg: Any) -> list[dict[str, Any]]:
-    checks = []
+    started = time.monotonic()
     try:
         from .db import connect_sync
 
         with connect_sync() as conn:
             conn.execute("SELECT 1").fetchone()
-        checks.append(_check("db", "主数据库", _OK, detail="连接正常"))
+        ms = int((time.monotonic() - started) * 1000)
+        return [_check("db", "主数据库读写", _OK, detail=f"查询正常（{ms}ms）")]
     except Exception as exc:
-        checks.append(_check("db", "主数据库", _ERROR, detail=f"连接失败：{exc}"[:200]))
-    return checks
+        return [_check("db", "主数据库读写", _ERROR, detail=f"查询失败：{str(exc)[:160]}")]
 
 
 def _memory_checks(cfg: Any, bundle: Any) -> list[dict[str, Any]]:
-    checks = []
-    enabled = bool(_get(cfg, "personification_memory_enabled", True))
-    if not enabled:
-        checks.append(_check("memory", "记忆系统", _DISABLED, detail="已关闭"))
-        return checks
+    if not bool(_get(cfg, "personification_memory_enabled", True)):
+        return [_check("memory", "记忆系统", _DISABLED, detail="已关闭")]
     store = getattr(bundle, "memory_store", None) if bundle is not None else None
-    checks.append(_check(
-        "memory", "记忆系统", _OK if store is not None else _WARN,
-        detail="已启用且就绪" if store is not None else "已启用但 memory_store 未就绪",
-    ))
-    if bool(_get(cfg, "personification_real_embedding_enabled", False)):
-        provider = str(_get(cfg, "personification_embedding_provider", "") or "")
-        checks.append(_check("embedding", "向量检索", _OK, detail=f"已启用，provider={provider or '默认'}"))
-    else:
-        checks.append(_check("embedding", "向量检索", _INFO, detail="使用本地 hash_bow（未启用真实 embedding）"))
-    return checks
+    if store is None:
+        return [_check("memory", "记忆系统", _WARN, detail="已启用但 memory_store 未就绪")]
+    try:
+        groups = store.list_groups()  # 真实读
+        return [_check("memory", "记忆系统", _OK, detail=f"读操作正常，已知 {len(groups)} 个群空间")]
+    except Exception as exc:
+        return [_check("memory", "记忆系统", _ERROR, detail=f"读操作失败：{str(exc)[:140]}")]
 
 
 def _persona_checks(cfg: Any, bundle: Any) -> list[dict[str, Any]]:
-    checks = []
     if not bool(_get(cfg, "personification_persona_enabled", True)):
-        checks.append(_check("persona", "用户画像", _DISABLED, detail="已关闭"))
-        return checks
+        return [_check("persona", "用户画像", _DISABLED, detail="已关闭")]
     store = getattr(bundle, "persona_store", None) if bundle is not None else None
-    checks.append(_check(
-        "persona", "用户画像", _OK if store is not None else _WARN,
-        detail="已启用且就绪" if store is not None else "已启用但 persona_store 未就绪",
-    ))
-    return checks
+    if store is None:
+        return [_check("persona", "用户画像", _WARN, detail="已启用但 persona_store 未就绪")]
+    try:
+        store.get_persona("__healthcheck__")  # 真实读（不存在返回 None，不报错即通路正常）
+        return [_check("persona", "用户画像", _OK, detail="画像存储读操作正常")]
+    except Exception as exc:
+        return [_check("persona", "用户画像", _ERROR, detail=f"读操作失败：{str(exc)[:140]}")]
 
 
 def _group_checks(cfg: Any) -> list[dict[str, Any]]:
-    checks = []
     from ..utils import is_group_whitelisted, load_group_configs, load_whitelist
 
     config_wl = [str(g) for g in (_get(cfg, "personification_whitelist", []) or [])]
@@ -158,103 +169,84 @@ def _group_checks(cfg: Any) -> list[dict[str, Any]]:
         gconfigs = {}
     all_ids = set(config_wl) | set(dynamic_wl) | {str(k) for k in gconfigs}
     enabled = [g for g in all_ids if is_group_whitelisted(g, config_wl)]
-    if enabled:
-        checks.append(_check(
-            "group_whitelist", "群聊白名单", _OK,
-            detail=f"{len(enabled)} 个群已启用拟人回复",
-        ))
-    else:
-        checks.append(_check(
-            "group_whitelist", "群聊白名单", _WARN,
-            detail="没有任何已启用的群：bot 在所有群里都不会主动说话",
-            hint="在「群开关」页打开目标群，或配置 personification_whitelist",
-        ))
+    checks = [_check(
+        "group_whitelist", "群聊白名单",
+        _OK if enabled else _WARN,
+        detail=f"{len(enabled)} 个群已启用拟人回复" if enabled else "没有任何已启用的群：bot 在群里不会说话",
+        hint="" if enabled else "在「群开关」打开目标群",
+    )]
     prob = float(_get(cfg, "personification_probability", 0.0) or 0.0)
-    checks.append(_check(
-        "probability", "随机插话概率", _OK if prob > 0 else _WARN,
-        detail=f"probability={prob}",
-        hint="" if prob > 0 else "概率为 0：除被 @/点名外，群里几乎不会主动接话",
-    ))
+    checks.append(_check("probability", "随机插话概率", _OK if prob > 0 else _WARN, detail=f"probability={prob}"))
     return checks
 
 
 def _sticker_checks(cfg: Any) -> list[dict[str, Any]]:
-    checks = []
     try:
         from .sticker_cache import get_sticker_files
 
         files = get_sticker_files(_get(cfg, "personification_sticker_path", None)) or []
         n = len(files)
-        checks.append(_check(
-            "stickers", "表情包库", _OK if n else _WARN,
-            detail=f"{n} 张表情可用" if n else "目录为空或不存在",
-            hint="" if n else "在「表情包」页上传，或检查 personification_sticker_path",
-        ))
+        return [_check("stickers", "表情包库", _OK if n else _WARN,
+                       detail=f"扫描到 {n} 张表情" if n else "目录为空或不存在",
+                       hint="" if n else "在「表情包」上传或检查 sticker_path")]
     except Exception as exc:
-        checks.append(_check("stickers", "表情包库", _ERROR, detail=str(exc)[:160]))
-    if bool(_get(cfg, "personification_labeler_enabled", True)):
-        has_key = _truthy_str(cfg, "personification_labeler_api_key")
-        checks.append(_check(
-            "labeler", "表情视觉打标", _OK if has_key else _INFO,
-            detail="独立打标模型已配置" if has_key else "未配独立打标模型，回退主模型",
-        ))
-    return checks
+        return [_check("stickers", "表情包库", _ERROR, detail=str(exc)[:140])]
 
 
-def _tts_checks(cfg: Any) -> list[dict[str, Any]]:
+async def _tts_checks(cfg: Any) -> list[dict[str, Any]]:
     if not bool(_get(cfg, "personification_tts_enabled", False)):
         return [_check("tts", "TTS 语音", _DISABLED, detail="已关闭")]
-    has_key = _truthy_str(cfg, "personification_tts_api_key")
-    has_url = _truthy_str(cfg, "personification_tts_api_url")
-    if has_key and has_url:
-        return [_check("tts", "TTS 语音", _OK, detail="已启用，API 已配置")]
-    missing = "、".join(x for x, ok in (("api_key", has_key), ("api_url", has_url)) if not ok)
-    return [_check("tts", "TTS 语音", _ERROR, detail=f"已启用但缺少 {missing}", hint="在「配置中心 → TTS 语音」补全")]
+    url = str(_get(cfg, "personification_tts_api_url", "") or "")
+    if not url or not _truthy_str(cfg, "personification_tts_api_key"):
+        return [_check("tts", "TTS 语音", _ERROR, detail="已启用但缺少 api_url / api_key")]
+    ok, info = await _http_reachable(url)
+    return [_check("tts", "TTS 语音", _OK if ok else _ERROR,
+                   detail=f"接口连通（{info}）" if ok else f"接口不通：{info}",
+                   hint="" if ok else "检查 tts_api_url 与网络/代理")]
 
 
-def _qzone_checks(cfg: Any) -> list[dict[str, Any]]:
+async def _qzone_checks(cfg: Any) -> list[dict[str, Any]]:
     if not bool(_get(cfg, "personification_qzone_enabled", False)):
         return [_check("qzone", "QQ 空间", _DISABLED, detail="已关闭")]
-    has_cookie = _truthy_str(cfg, "personification_qzone_cookie")
-    if has_cookie:
-        return [_check("qzone", "QQ 空间", _OK, detail="已启用，Cookie 已配置")]
-    return [_check("qzone", "QQ 空间", _ERROR, detail="已启用但缺少 Cookie（说说/点赞会静默失败）",
-                   hint="在「配置中心 → QQ 空间」填入 personification_qzone_cookie")]
+    if not _truthy_str(cfg, "personification_qzone_cookie"):
+        return [_check("qzone", "QQ 空间", _ERROR, detail="已启用但缺少 Cookie")]
+    ok, info = await _http_reachable("https://user.qzone.qq.com")
+    return [_check("qzone", "QQ 空间", _OK if ok else _WARN,
+                   detail=f"已配置 Cookie，空间服务可达（{info}）" if ok else f"空间服务探测失败：{info}",
+                   hint="" if ok else "Cookie 失效需重新抓取；或网络受限")]
 
 
-def _search_checks(cfg: Any) -> list[dict[str, Any]]:
+async def _search_checks(cfg: Any) -> list[dict[str, Any]]:
     tool = bool(_get(cfg, "personification_tool_web_search_enabled", True))
     builtin = bool(_get(cfg, "personification_model_builtin_search_enabled", True))
-    status = _OK if (tool or builtin) else _DISABLED
-    detail = "、".join(x for x, ok in (("外部搜索", tool), ("模型内置搜索", builtin)) if ok) or "均关闭"
-    return [_check("web_search", "联网搜索", status, detail=detail)]
+    if not (tool or builtin):
+        return [_check("web_search", "联网搜索", _DISABLED, detail="外部与内置搜索均关闭")]
+    if builtin and not tool:
+        return [_check("web_search", "联网搜索", _OK, detail="使用模型内置搜索（随模型调用验证）")]
+    ok, info = await _http_reachable("https://duckduckgo.com")
+    return [_check("web_search", "联网搜索", _OK if ok else _WARN,
+                   detail=f"外部搜索网络可达（{info}）" if ok else f"外部搜索网络探测失败：{info}",
+                   hint="" if ok else "可能需配置 web_proxy")]
 
 
 def _skill_checks(cfg: Any, bundle: Any) -> list[dict[str, Any]]:
-    checks = []
     registry = getattr(bundle, "tool_registry", None) if bundle is not None else None
-    if registry is not None:
-        try:
-            n = len(list(registry.all()))
-        except Exception:
-            n = 0
-        checks.append(_check("tools", "已加载工具", _OK if n else _WARN, detail=f"{n} 个工具就绪"))
-    else:
-        checks.append(_check("tools", "已加载工具", _WARN, detail="工具注册表未就绪"))
-    if bool(_get(cfg, "personification_use_skillpacks", False)):
-        checks.append(_check("skillpacks", "Skillpacks", _OK, detail="已启用标准 skillpack 加载"))
-    return checks
+    if registry is None:
+        return [_check("tools", "已加载工具", _WARN, detail="工具注册表未就绪")]
+    try:
+        n = len(list(registry.all()))
+    except Exception:
+        n = 0
+    return [_check("tools", "已加载工具", _OK if n else _WARN, detail=f"{n} 个工具已注册就绪")]
 
 
 def _social_checks(cfg: Any) -> list[dict[str, Any]]:
-    checks = []
     si = bool(_get(cfg, "personification_social_intelligence_enabled", False))
-    checks.append(_check("social", "主动社交框架", _OK if si else _DISABLED,
-                         detail="已启用" if si else "已关闭"))
     pa = bool(_get(cfg, "personification_proactive_enabled", True))
-    checks.append(_check("proactive", "主动私聊", _OK if pa else _DISABLED,
-                         detail="已启用" if pa else "已关闭"))
-    return checks
+    return [
+        _check("social", "主动社交框架", _OK if si else _DISABLED, detail="已启用" if si else "已关闭"),
+        _check("proactive", "主动私聊", _OK if pa else _DISABLED, detail="已启用" if pa else "已关闭"),
+    ]
 
 
 def _persona_prompt_checks(cfg: Any) -> list[dict[str, Any]]:
@@ -264,47 +256,43 @@ def _persona_prompt_checks(cfg: Any) -> list[dict[str, Any]]:
         path = str(_get(cfg, "personification_prompt_path", "") or _get(cfg, "personification_system_path", "") or "").strip().strip('"').strip("'")
         if path:
             try:
-                p = _resolve_candidate_path(path)
-                ok = p.is_file()
+                ok = _resolve_candidate_path(path).is_file()
             except OSError:
                 ok = False
             if ok:
-                return [_check("persona_prompt", "人设文件", _OK, detail=f"已加载：{path}")]
-            return [_check("persona_prompt", "人设文件", _ERROR, detail=f"配置的路径不存在：{path}",
-                           hint="检查 prompt_path / system_path，或改用内联 system_prompt")]
+                return [_check("persona_prompt", "人设文件", _OK, detail=f"文件可读：{path}")]
+            return [_check("persona_prompt", "人设文件", _ERROR, detail=f"路径不存在：{path}")]
         sp = str(_get(cfg, "personification_system_prompt", "") or "").strip()
         if sp:
             return [_check("persona_prompt", "人设设定", _OK, detail=f"使用内联 system_prompt（{len(sp)} 字）")]
-        return [_check("persona_prompt", "人设设定", _WARN, detail="未配置人设，使用内置默认提示词")]
+        return [_check("persona_prompt", "人设设定", _WARN, detail="未配置人设，用内置默认")]
     except Exception as exc:
-        return [_check("persona_prompt", "人设设定", _ERROR, detail=str(exc)[:160])]
+        return [_check("persona_prompt", "人设设定", _ERROR, detail=str(exc)[:140])]
 
 
 async def _protocol_checks(get_bots: Any, cfg: Any, logger: Any) -> list[dict[str, Any]]:
     mode = str(_get(cfg, "personification_protocol_extensions", "auto") or "auto").strip().lower()
     if mode == "none":
-        return [_check("protocol", "协议端扩展", _DISABLED, detail="已禁用全部扩展 API（贴表情/拍一拍/输入状态）")]
+        return [_check("protocol", "协议端扩展", _DISABLED, detail="已禁用扩展 API")]
     try:
         bots = get_bots() if callable(get_bots) else {}
         bot = next(iter(bots.values())) if bots else None
         if bot is None:
-            return [_check("protocol", "协议端", _WARN, detail="Bot 未连接，无法识别协议端")]
+            return [_check("protocol", "协议端", _WARN, detail="Bot 未连接")]
         from .protocol_capabilities import detect_flavor
 
-        flavor = await detect_flavor(bot, logger)
+        flavor = await detect_flavor(bot, logger)  # 真实 get_version_info 调用
         if flavor == "gocq":
-            return [_check("protocol", "协议端", _WARN, detail="go-cqhttp：不支持贴表情/拍一拍等扩展能力")]
-        return [_check("protocol", "协议端", _OK, detail=f"已识别：{flavor}")]
+            return [_check("protocol", "协议端", _WARN, detail="go-cqhttp：不支持贴表情/拍一拍")]
+        return [_check("protocol", "协议端", _OK, detail=f"调用正常，识别为 {flavor}")]
     except Exception as exc:
-        return [_check("protocol", "协议端", _WARN, detail=str(exc)[:160])]
+        return [_check("protocol", "协议端", _WARN, detail=str(exc)[:140])]
 
 
 def _webui_checks(cfg: Any) -> list[dict[str, Any]]:
     approval = bool(_get(cfg, "personification_webui_require_device_approval", True))
-    return [_check(
-        "device_approval", "新设备审批", _OK if approval else _WARN,
-        detail="已开启：新设备需管理员确认" if approval else "已关闭：任意拿到验证码的设备直接放行",
-    )]
+    return [_check("device_approval", "新设备审批", _OK if approval else _WARN,
+                   detail="已开启" if approval else "已关闭：新设备直接放行")]
 
 
 async def run_diagnostics(
@@ -317,21 +305,31 @@ async def run_diagnostics(
 ) -> dict[str, Any]:
     cfg = plugin_config
     su = superusers or set()
+
+    # 并发执行各类异步探测
+    model_c, tts_c, qzone_c, search_c, protocol_c = await asyncio.gather(
+        _model_checks(cfg, bundle, logger),
+        _tts_checks(cfg),
+        _qzone_checks(cfg),
+        _search_checks(cfg),
+        _protocol_checks(get_bots, cfg, logger),
+    )
+
     categories: list[dict[str, Any]] = [
-        {"name": "核心", "checks": [_safe(lambda: c) for c in _core_checks(cfg, su)]},
-        {"name": "模型路由", "checks": _safe_list(lambda: _model_checks(cfg, bundle, logger))},
+        {"name": "核心", "checks": _safe_list(lambda: _core_checks(cfg, su))},
+        {"name": "模型调用", "checks": model_c},
         {"name": "存储", "checks": _safe_list(lambda: _db_checks(cfg))},
         {"name": "记忆", "checks": _safe_list(lambda: _memory_checks(cfg, bundle))},
         {"name": "用户画像", "checks": _safe_list(lambda: _persona_checks(cfg, bundle))},
         {"name": "群聊", "checks": _safe_list(lambda: _group_checks(cfg))},
         {"name": "表情包", "checks": _safe_list(lambda: _sticker_checks(cfg))},
-        {"name": "TTS 语音", "checks": _safe_list(lambda: _tts_checks(cfg))},
-        {"name": "QQ 空间", "checks": _safe_list(lambda: _qzone_checks(cfg))},
-        {"name": "联网搜索", "checks": _safe_list(lambda: _search_checks(cfg))},
+        {"name": "TTS 语音", "checks": tts_c},
+        {"name": "QQ 空间", "checks": qzone_c},
+        {"name": "联网搜索", "checks": search_c},
         {"name": "Skill 扩展", "checks": _safe_list(lambda: _skill_checks(cfg, bundle))},
         {"name": "主动社交", "checks": _safe_list(lambda: _social_checks(cfg))},
         {"name": "人设", "checks": _safe_list(lambda: _persona_prompt_checks(cfg))},
-        {"name": "协议端", "checks": await _protocol_checks(get_bots, cfg, logger)},
+        {"name": "协议端", "checks": protocol_c},
         {"name": "WebUI 安全", "checks": _safe_list(lambda: _webui_checks(cfg))},
     ]
 
@@ -345,14 +343,8 @@ async def run_diagnostics(
         "overall": overall,
         "summary": summary,
         "categories": categories,
+        "live": True,
     }
-
-
-def _safe_list(fn) -> list[dict[str, Any]]:
-    try:
-        return list(fn())
-    except Exception as exc:  # pragma: no cover
-        return [_check("internal_error", "检查异常", _ERROR, detail=str(exc)[:200])]
 
 
 __all__ = ["run_diagnostics"]
