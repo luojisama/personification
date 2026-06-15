@@ -14,6 +14,7 @@ from .routes.group_routes import build_group_router
 from .routes.memory_routes import build_memory_router
 from .routes.metrics_routes import build_metrics_router
 from .routes.persona_routes import build_persona_router
+from .routes.health_routes import build_health_router
 from .routes.plugin_knowledge_routes import build_plugin_knowledge_router
 from .routes.quota_routes import build_quota_router
 from .routes.skill_routes import build_skill_router
@@ -73,6 +74,7 @@ def build_router() -> APIRouter:
     router.include_router(build_proactive_router(runtime=runtime))
     router.include_router(build_quota_router(runtime=runtime))
     router.include_router(build_plugin_knowledge_router(runtime=runtime))
+    router.include_router(build_health_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -211,6 +213,23 @@ td code, .field-head code { word-break:break-all; }
 .device-status { display:inline-block; padding:1px 8px; border-radius:99px; font-size:12px; }
 .device-status.pending { background:rgba(245,158,11,0.18); color:var(--warn); }
 .device-status.approved { background:rgba(52,211,153,0.18); color:var(--ok); }
+/* 功能体检 */
+.health-summary { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
+.health-pill { display:flex; align-items:center; gap:8px; padding:8px 14px; border-radius:10px; border:1px solid var(--line); background:var(--panel); }
+.health-pill .num { font-size:22px; font-weight:700; }
+.health-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:12px; }
+.health-cat { border:1px solid var(--line); border-radius:10px; padding:12px 14px; background:var(--panel); }
+.health-cat h3 { margin:0 0 10px; font-size:14px; display:flex; align-items:center; gap:8px; }
+.health-item { display:flex; gap:9px; padding:7px 0; border-top:1px solid var(--line); }
+.health-item:first-of-type { border-top:none; }
+.health-item .dot { flex:none; width:9px; height:9px; border-radius:50%; margin-top:6px; }
+.health-item .body { min-width:0; flex:1; }
+.health-item .lbl { font-size:13px; }
+.health-item .det { font-size:12px; color:var(--muted); word-break:break-word; }
+.health-item .hint { font-size:12px; color:var(--accent); margin-top:2px; word-break:break-word; }
+.hs-ok { background:var(--ok); } .hs-warn { background:var(--warn); }
+.hs-error { background:var(--danger); } .hs-disabled { background:var(--muted); } .hs-info { background:var(--accent); }
+.health-badge { width:10px; height:10px; border-radius:50%; display:inline-block; }
 
 /* Mobile 响应式 */
 @media (max-width: 768px) {
@@ -248,7 +267,7 @@ let state = {
   groupSwitches: [], newGroupId: "",
   skills: [], skillFilter: "",
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
-  personaPrompt: null, personaPromptPath: "",
+  personaPrompt: null, personaPromptPath: "", health: null,
   memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false,
   memoryGraph: null, memoryGraphGroupId: "", memoryGraphLimit: 100, memoryGraphMinSalience: 0,
   groupRawChat: null, groupStyleSnapIdx: 0, groupStyleRebuilding: false,
@@ -359,6 +378,8 @@ async function loadView() {
       state.skills = data.skills; state.skillsAvailable = data.available;
     } else if (state.view === "test") {
       /* nothing to preload */
+    } else if (state.view === "health") {
+      state.health = await api("/health/check");
     } else if (state.view === "persona_prompt") {
       const qs = state.personaPromptPath ? ("?path=" + encodeURIComponent(state.personaPromptPath)) : "";
       state.personaPrompt = await api("/test/persona-prompt" + qs);
@@ -455,6 +476,7 @@ function renderLayout() {
       <h1>拟人插件控制台</h1>
       <nav>
         ${navItem('dashboard','仪表盘')}
+        ${navItem('health','功能体检')}
         ${navItem('config','配置中心')}
         ${navItem('personas','用户画像')}
         ${navItem('groups','群信息')}
@@ -501,6 +523,7 @@ function renderView() {
   if (state.view === "group_switch") return renderGroupSwitch();
   if (state.view === "skills") return renderSkills();
   if (state.view === "plugin_knowledge") return renderPluginKnowledge();
+  if (state.view === "health") return renderHealth();
   if (state.view === "test") return renderTest();
   if (state.view === "persona_prompt") return renderPersonaPrompt();
   if (state.view === "memory") return renderMemory();
@@ -1105,6 +1128,51 @@ function renderDashboard() {
 async function switchDashboard(window) {
   state.dashboardWindow = window;
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+const HEALTH_STATUS = {
+  ok: {label:"正常", cls:"hs-ok"}, warn: {label:"注意", cls:"hs-warn"},
+  error: {label:"异常", cls:"hs-error"}, disabled: {label:"未启用", cls:"hs-disabled"},
+  info: {label:"信息", cls:"hs-info"},
+};
+
+function renderHealth() {
+  const h = state.health;
+  if (!h) return `<div class="card muted">体检中…</div>`;
+  const s = h.summary || {};
+  const overall = HEALTH_STATUS[h.overall] || HEALTH_STATUS.info;
+  const pill = (k) => `<div class="health-pill"><span class="health-badge ${HEALTH_STATUS[k].cls}"></span><span class="num">${s[k]||0}</span><span class="muted">${HEALTH_STATUS[k].label}</span></div>`;
+  const cats = (h.categories || []).map(cat => {
+    const items = (cat.checks || []).map(it => {
+      const st = HEALTH_STATUS[it.status] || HEALTH_STATUS.info;
+      return `<div class="health-item">
+        <span class="dot ${st.cls}" title="${st.label}"></span>
+        <div class="body">
+          <div class="lbl">${escapeHtml(it.label)} <span class="muted" style="font-size:11px">${st.label}</span></div>
+          ${it.detail ? `<div class="det">${escapeHtml(it.detail)}</div>` : ''}
+          ${it.hint ? `<div class="hint">→ ${escapeHtml(it.hint)}</div>` : ''}
+        </div>
+      </div>`;
+    }).join("");
+    return `<div class="health-cat"><h3>${escapeHtml(cat.name)}</h3>${items||'<div class="muted">无</div>'}</div>`;
+  }).join("");
+  return `<div class="card">
+    <div class="between">
+      <h2 style="margin:0">功能体检 <span class="health-badge ${overall.cls}" title="${overall.label}"></span> <span class="muted" style="font-size:13px">${overall.label}</span></h2>
+      <button class="btn small" onclick="refreshHealth()">${state.loading?'检测中…':'重新检测'}</button>
+    </div>
+    <p class="muted" style="font-size:12px;margin:8px 0 0">检测各模块的配置与就绪状态。红=异常需处理，黄=会影响行为，灰=未启用。</p>
+    <div class="health-summary" style="margin-top:14px">
+      ${pill('error')}${pill('warn')}${pill('ok')}${pill('disabled')}
+    </div>
+  </div>
+  <div class="health-grid">${cats}</div>`;
+}
+
+async function refreshHealth() {
+  state.loading = true; render();
+  try { state.health = await api("/health/check"); } catch (e) { alertFlash("err", "检测失败：" + e.message); }
+  state.loading = false; render();
 }
 
 function renderPersonas() {
