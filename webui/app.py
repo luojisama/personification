@@ -267,7 +267,7 @@ let state = {
   groupSwitches: [], newGroupId: "",
   skills: [], skillFilter: "",
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
-  personaPrompt: null, personaPromptPath: "", health: null,
+  personaPrompt: null, personaPromptPath: "", health: null, healthBusyCat: "", interactionResult: null, interactionBusy: false,
   memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false,
   memoryGraph: null, memoryGraphGroupId: "", memoryGraphLimit: 100, memoryGraphMinSalience: 0,
   groupRawChat: null, groupStyleSnapIdx: 0, groupStyleRebuilding: false,
@@ -1156,18 +1156,34 @@ function renderHealth() {
         </div>
       </div>`;
     }).join("");
-    return `<div class="health-cat"><h3>${escapeHtml(cat.name)}</h3>${items||'<div class="muted">无</div>'}</div>`;
+    const busy = state.healthBusyCat === cat.name;
+    return `<div class="health-cat">
+      <h3>${escapeHtml(cat.name)}
+        <button class="btn small" style="margin-left:auto" onclick="recheckCategory('${escapeAttr(cat.name)}')">${busy?'检测中…':'重测'}</button>
+      </h3>${items||'<div class="muted">无</div>'}</div>`;
   }).join("");
+  const ir = state.interactionResult;
+  const interactionCard = `<div class="card">
+    <h2>实际交互测试</h2>
+    <p class="muted" style="font-size:12px">向「配置中心 → 运维」里设置的<b>测试群 / 测试私聊用户</b>真实注入一条消息，走完整回复链路（规则→缓冲→模型→发送），并回显 bot 实际回复。会真的在 QQ 里发消息。</p>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary" onclick="runInteraction('group')">测试群交互</button>
+      <button class="btn primary" onclick="runInteraction('private')">测试私聊交互</button>
+      ${state.interactionBusy?'<span class="muted">交互中（最长 45s）…</span>':''}
+    </div>
+    ${ir ? `<div class="alert ${ir.replied?'ok':'err'}" style="margin-top:10px;white-space:pre-wrap">${escapeHtml(ir.detail||'')}${ir.reply?('\\n\\n回复内容：\\n'+escapeHtml(ir.reply)):''}${ir.duration_ms!=null?('\\n\\n耗时 '+ir.duration_ms+'ms'):''}</div>` : ''}
+  </div>`;
   return `<div class="card">
     <div class="between">
       <h2 style="margin:0">功能体检 <span class="health-badge ${overall.cls}" title="${overall.label}"></span> <span class="muted" style="font-size:13px">${overall.label}</span></h2>
-      <button class="btn small" onclick="refreshHealth()">${state.loading?'检测中…':'重新检测'}</button>
+      <button class="btn small" onclick="refreshHealth()">${state.loading?'检测中…':'全部重新检测'}</button>
     </div>
-    <p class="muted" style="font-size:12px;margin:8px 0 0">对各模块做<b>真实调用探测</b>（模型逐个真发一次、数据库/记忆/画像真实读、TTS/空间/搜索真实连通），耗时数秒并消耗少量 token。红=异常需处理，黄=会影响行为，灰=未启用。</p>
+    <p class="muted" style="font-size:12px;margin:8px 0 0">对各模块做<b>真实调用探测</b>（模型逐个真发一次、数据库/记忆/画像真实读、TTS/空间/搜索真实连通），耗时数秒并消耗少量 token。可点单项「重测」逐个自检。红=异常，黄=会影响行为，灰=未启用。</p>
     <div class="health-summary" style="margin-top:14px">
       ${pill('error')}${pill('warn')}${pill('ok')}${pill('disabled')}
     </div>
   </div>
+  ${interactionCard}
   <div class="health-grid">${cats}</div>`;
 }
 
@@ -1175,6 +1191,31 @@ async function refreshHealth() {
   state.loading = true; render();
   try { state.health = await api("/health/check"); } catch (e) { alertFlash("err", "检测失败：" + e.message); }
   state.loading = false; render();
+}
+
+async function recheckCategory(name) {
+  state.healthBusyCat = name; render();
+  try {
+    const r = await api("/health/check?only=" + encodeURIComponent(name));
+    const fresh = (r.categories || [])[0];
+    if (fresh && state.health) {
+      state.health.categories = state.health.categories.map(c => c.name === name ? fresh : c);
+      // 重算汇总
+      const sum = {ok:0,warn:0,error:0,disabled:0,info:0};
+      state.health.categories.forEach(c => (c.checks||[]).forEach(it => { sum[it.status] = (sum[it.status]||0)+1; }));
+      state.health.summary = sum;
+      state.health.overall = sum.error ? 'error' : (sum.warn ? 'warn' : 'ok');
+    }
+  } catch (e) { alertFlash("err", "重测失败：" + e.message); }
+  state.healthBusyCat = ""; render();
+}
+
+async function runInteraction(target) {
+  state.interactionBusy = true; state.interactionResult = null; render();
+  try {
+    state.interactionResult = await api("/health/interaction-test", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ target }) });
+  } catch (e) { alertFlash("err", "交互测试失败：" + e.message); }
+  state.interactionBusy = false; render();
 }
 
 function renderPersonas() {

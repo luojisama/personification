@@ -426,6 +426,10 @@ EXTRA_CONFIG_SPECS: tuple[dict[str, Any], ...] = (
     _s("personification_webui_require_device_approval", "bool", True, "新设备需审批",
        "WebUI 新设备登录后需由已批准的设备在「设备」页确认才能使用；全新部署的首个设备自动批准，避免锁死。",
        group="运维"),
+    _s("personification_webui_test_group_id", "str", "", "体检测试群",
+       "功能体检「实际交互测试」会向该群真实发一条消息，触发完整回复链路。", group="运维"),
+    _s("personification_webui_test_user_id", "str", "", "体检测试私聊用户",
+       "功能体检「实际交互测试」会向该 QQ 私聊真实发一条消息，触发完整回复链路。", group="运维"),
 
     # ──────────── 运维 ────────────
     _s("personification_git_auto_update", "bool", False, "Git 自动更新",

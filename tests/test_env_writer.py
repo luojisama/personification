@@ -97,11 +97,11 @@ def test_write_env_json_creates_and_merges(tmp_path: Path) -> None:
     assert data2["personification_agent_max_steps"] == 7
 
 
-def test_write_both_emits_paths_and_errors(tmp_path: Path) -> None:
+def test_write_both_updates_env_in_place_when_key_exists(tmp_path: Path) -> None:
+    # 字段已在 .env 中 → 就地更新 .env，同时写 env.json
     env_file = tmp_path / ".env.prod"
-    env_file.write_text("# header\n", encoding="utf-8")
+    env_file.write_text("# header\npersonification_probability=0.3\n", encoding="utf-8")
     cfg = _make_plugin_config(tmp_path)
-    # monkey-patch target resolver to point at tmp file
     original = env_writer._resolve_dotenv_target
     env_writer._resolve_dotenv_target = lambda field_name="": env_file
     try:
@@ -110,9 +110,25 @@ def test_write_both_emits_paths_and_errors(tmp_path: Path) -> None:
         env_writer._resolve_dotenv_target = original
     assert result["errors"] == []
     assert result["dotenv_path"] == str(env_file)
-    assert Path(result["env_json_path"]).exists()
-    parsed = dotenv_values(str(env_file))
-    assert parsed["personification_probability"] == "0.6"
+    assert dotenv_values(str(env_file))["personification_probability"] == "0.6"
+    json_data = json.loads(Path(result["env_json_path"]).read_text(encoding="utf-8"))
+    assert json_data["personification_probability"] == 0.6
+
+
+def test_write_both_new_field_goes_env_json_only(tmp_path: Path) -> None:
+    # 字段不在 .env 中 → 不新增到 .env（避免重启回退），只写 env.json
+    env_file = tmp_path / ".env.prod"
+    env_file.write_text("# header\n", encoding="utf-8")
+    cfg = _make_plugin_config(tmp_path)
+    original = env_writer._resolve_dotenv_target
+    env_writer._resolve_dotenv_target = lambda field_name="": env_file
+    try:
+        result = env_writer.write_both("personification_probability", 0.6, cfg)
+    finally:
+        env_writer._resolve_dotenv_target = original
+    assert result["errors"] == []
+    assert result["dotenv_path"] is None
+    assert "personification_probability" not in dotenv_values(str(env_file))
     json_data = json.loads(Path(result["env_json_path"]).read_text(encoding="utf-8"))
     assert json_data["personification_probability"] == 0.6
 

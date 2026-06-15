@@ -41,6 +41,12 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(diagnostics, "_http_reachable", _reachable)
 
 
+def _set_csrf(client) -> None:
+    csrf = client.cookies.get("personification_webui_csrf", "")
+    if csrf:
+        client.headers["X-Personification-CSRF"] = csrf
+
+
 def _statuses(body: dict) -> dict:
     out = {}
     for cat in body["categories"]:
@@ -84,6 +90,25 @@ def test_health_db_is_live_query(_runtime_context) -> None:
     st = _statuses(client.get("/personification/api/health/check").json())
     assert st["db"]["status"] == "ok"
     assert "查询正常" in st["db"]["detail"]
+
+
+def test_health_only_runs_single_category(_runtime_context) -> None:
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    body = client.get("/personification/api/health/check", params={"only": "存储"}).json()
+    assert body["partial"] is True
+    assert [c["name"] for c in body["categories"]] == ["存储"]
+
+
+def test_interaction_test_requires_configured_target(_runtime_context) -> None:
+    cfg = _runtime_context.plugin_config
+    cfg.personification_webui_test_group_id = ""
+    cfg.personification_webui_test_user_id = ""
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+    res = client.post("/personification/api/health/interaction-test", json={"target": "group"})
+    assert res.status_code == 400
 
 
 def test_health_requires_auth(_runtime_context) -> None:

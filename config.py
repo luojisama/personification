@@ -439,6 +439,9 @@ class Config(BaseModel):
 
     # WebUI 新设备登录需已批准设备确认（首个设备自动批准，防锁死）
     personification_webui_require_device_approval: bool = True
+    # 功能体检"实际交互测试"的目标：测试群号 / 测试私聊用户 QQ（任填其一即可）
+    personification_webui_test_group_id: str = ""
+    personification_webui_test_user_id: str = ""
 
     personification_blacklist_duration: int = 300
 

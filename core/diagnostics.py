@@ -223,10 +223,30 @@ async def _search_checks(cfg: Any) -> list[dict[str, Any]]:
         return [_check("web_search", "联网搜索", _DISABLED, detail="外部与内置搜索均关闭")]
     if builtin and not tool:
         return [_check("web_search", "联网搜索", _OK, detail="使用模型内置搜索（随模型调用验证）")]
-    ok, info = await _http_reachable("https://duckduckgo.com")
-    return [_check("web_search", "联网搜索", _OK if ok else _WARN,
-                   detail=f"外部搜索网络可达（{info}）" if ok else f"外部搜索网络探测失败：{info}",
-                   hint="" if ok else "可能需配置 web_proxy")]
+
+    # 优先探测国内可达的源（Bing 国内站），再带上已配置的免配置搜索引擎代表站点；
+    # 任意一个可达即视为联网搜索可用，避免被墙的 duckduckgo/wikipedia 误报失败。
+    engines = [str(e).strip().lower() for e in (_get(cfg, "personification_free_search_engines", []) or [])]
+    engine_hosts = {
+        "wikipedia": "https://zh.wikipedia.org",
+        "duckduckgo": "https://duckduckgo.com",
+        "searxng": (list(_get(cfg, "personification_searxng_instances", []) or []) or ["https://searx.be"])[0],
+    }
+    targets = [("Bing 国内", "https://cn.bing.com")]
+    for e in engines:
+        if e in engine_hosts:
+            targets.append((e, engine_hosts[e]))
+    if _truthy_str(cfg, "personification_web_proxy"):
+        return [_check("web_search", "联网搜索", _INFO,
+                       detail=f"已配置 web_proxy，外部搜索经代理访问；候选源：{', '.join(t[0] for t in targets)}")]
+
+    results = await asyncio.gather(*[_http_reachable(url) for _, url in targets])
+    reachable = [targets[i][0] for i, (ok, _info) in enumerate(results) if ok]
+    if reachable:
+        return [_check("web_search", "联网搜索", _OK, detail=f"可用源：{', '.join(reachable)}")]
+    return [_check("web_search", "联网搜索", _WARN,
+                   detail="所有候选搜索源均不可达（可能被墙或断网）",
+                   hint="配置 web_proxy，或在 free_search_engines 改用国内可达源（如自建 searxng）")]
 
 
 def _skill_checks(cfg: Any, bundle: Any) -> list[dict[str, Any]]:
@@ -295,6 +315,47 @@ def _webui_checks(cfg: Any) -> list[dict[str, Any]]:
                    detail="已开启" if approval else "已关闭：新设备直接放行")]
 
 
+async def _run_category(name: str, *, cfg, bundle, su, get_bots, logger) -> list[dict[str, Any]]:
+    if name == "核心":
+        return _safe_list(lambda: _core_checks(cfg, su))
+    if name == "模型调用":
+        return await _model_checks(cfg, bundle, logger)
+    if name == "存储":
+        return _safe_list(lambda: _db_checks(cfg))
+    if name == "记忆":
+        return _safe_list(lambda: _memory_checks(cfg, bundle))
+    if name == "用户画像":
+        return _safe_list(lambda: _persona_checks(cfg, bundle))
+    if name == "群聊":
+        return _safe_list(lambda: _group_checks(cfg))
+    if name == "表情包":
+        return _safe_list(lambda: _sticker_checks(cfg))
+    if name == "TTS 语音":
+        return await _tts_checks(cfg)
+    if name == "QQ 空间":
+        return await _qzone_checks(cfg)
+    if name == "联网搜索":
+        return await _search_checks(cfg)
+    if name == "Skill 扩展":
+        return _safe_list(lambda: _skill_checks(cfg, bundle))
+    if name == "主动社交":
+        return _safe_list(lambda: _social_checks(cfg))
+    if name == "人设":
+        return _safe_list(lambda: _persona_prompt_checks(cfg))
+    if name == "协议端":
+        return await _protocol_checks(get_bots, cfg, logger)
+    if name == "WebUI 安全":
+        return _safe_list(lambda: _webui_checks(cfg))
+    return []
+
+
+CATEGORY_NAMES: tuple[str, ...] = (
+    "核心", "模型调用", "存储", "记忆", "用户画像", "群聊", "表情包",
+    "TTS 语音", "QQ 空间", "联网搜索", "Skill 扩展", "主动社交", "人设",
+    "协议端", "WebUI 安全",
+)
+
+
 async def run_diagnostics(
     *,
     plugin_config: Any,
@@ -302,36 +363,16 @@ async def run_diagnostics(
     superusers: set[str] | None = None,
     get_bots: Any = None,
     logger: Any = None,
+    only: str = "",
 ) -> dict[str, Any]:
+    """运行全部体检；only 指定单个分类名时只跑该项（逐项自检用）。"""
     cfg = plugin_config
     su = superusers or set()
+    names = [only] if (only and only in CATEGORY_NAMES) else list(CATEGORY_NAMES)
 
-    # 并发执行各类异步探测
-    model_c, tts_c, qzone_c, search_c, protocol_c = await asyncio.gather(
-        _model_checks(cfg, bundle, logger),
-        _tts_checks(cfg),
-        _qzone_checks(cfg),
-        _search_checks(cfg),
-        _protocol_checks(get_bots, cfg, logger),
-    )
-
-    categories: list[dict[str, Any]] = [
-        {"name": "核心", "checks": _safe_list(lambda: _core_checks(cfg, su))},
-        {"name": "模型调用", "checks": model_c},
-        {"name": "存储", "checks": _safe_list(lambda: _db_checks(cfg))},
-        {"name": "记忆", "checks": _safe_list(lambda: _memory_checks(cfg, bundle))},
-        {"name": "用户画像", "checks": _safe_list(lambda: _persona_checks(cfg, bundle))},
-        {"name": "群聊", "checks": _safe_list(lambda: _group_checks(cfg))},
-        {"name": "表情包", "checks": _safe_list(lambda: _sticker_checks(cfg))},
-        {"name": "TTS 语音", "checks": tts_c},
-        {"name": "QQ 空间", "checks": qzone_c},
-        {"name": "联网搜索", "checks": search_c},
-        {"name": "Skill 扩展", "checks": _safe_list(lambda: _skill_checks(cfg, bundle))},
-        {"name": "主动社交", "checks": _safe_list(lambda: _social_checks(cfg))},
-        {"name": "人设", "checks": _safe_list(lambda: _persona_prompt_checks(cfg))},
-        {"name": "协议端", "checks": protocol_c},
-        {"name": "WebUI 安全", "checks": _safe_list(lambda: _webui_checks(cfg))},
-    ]
+    kwargs = dict(cfg=cfg, bundle=bundle, su=su, get_bots=get_bots, logger=logger)
+    results = await asyncio.gather(*[_run_category(n, **kwargs) for n in names])
+    categories = [{"name": n, "checks": r} for n, r in zip(names, results)]
 
     summary = {_OK: 0, _WARN: 0, _ERROR: 0, _DISABLED: 0, _INFO: 0}
     for cat in categories:
@@ -344,7 +385,8 @@ async def run_diagnostics(
         "summary": summary,
         "categories": categories,
         "live": True,
+        "partial": bool(only),
     }
 
 
-__all__ = ["run_diagnostics"]
+__all__ = ["run_diagnostics", "CATEGORY_NAMES"]

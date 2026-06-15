@@ -109,7 +109,14 @@ def write_env_json(field_name: str, value: Any, plugin_config: Any) -> Path:
 
 
 def write_both(field_name: str, value: Any, plugin_config: Any) -> dict[str, Any]:
-    """双写 .env.prod + env.json，返回结构化结果（含错误信息，不抛异常）。"""
+    """持久化配置：env.json 作为运行时权威层，.env 仅在该字段已存在时就地更新。
+
+    历史问题：write_both 会把新字段也写进 .env.prod，使其变成"显式 env 字段"；
+    重启时 ConfigManager 认为 env.json 里的同名值是脏数据而跳过并删除，一旦
+    pydantic 未能从 .env 正确加载（复杂类型/引号等），就回退到默认值。
+    现在新字段只写 env.json（启动时会被正常应用），仅当字段本就在 .env 文件里
+    时才就地更新 .env，避免该回退链。
+    """
     result: dict[str, Any] = {
         "field_name": field_name,
         "value": value,
@@ -117,21 +124,23 @@ def write_both(field_name: str, value: Any, plugin_config: Any) -> dict[str, Any
         "env_json_path": None,
         "errors": [],
     }
-    try:
-        dotenv_path = write_dotenv(field_name, value)
-        if dotenv_path is not None:
-            result["dotenv_path"] = str(dotenv_path)
-        else:
-            result["errors"].append("no writable .env / .env.prod found")
-    except PermissionError as exc:
-        result["errors"].append(f".env write blocked: {exc}")
-    except Exception as exc:
-        result["errors"].append(f".env write failed: {exc}")
+    # env.json：权威运行时层，始终写
     try:
         json_path = write_env_json(field_name, value, plugin_config)
         result["env_json_path"] = str(json_path)
     except Exception as exc:
         result["errors"].append(f"env.json write failed: {exc}")
+    # .env：仅当该字段已存在于某个 .env 文件时就地更新，保持与手工配置一致
+    target = _resolve_dotenv_target(field_name)
+    if target is not None and _file_has_key(target, field_name):
+        try:
+            dotenv_path = write_dotenv(field_name, value, target=target)
+            if dotenv_path is not None:
+                result["dotenv_path"] = str(dotenv_path)
+        except PermissionError as exc:
+            result["errors"].append(f".env write blocked: {exc}")
+        except Exception as exc:
+            result["errors"].append(f".env write failed: {exc}")
     return result
 
 
