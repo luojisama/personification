@@ -15,6 +15,7 @@ from .routes.memory_routes import build_memory_router
 from .routes.metrics_routes import build_metrics_router
 from .routes.persona_routes import build_persona_router
 from .routes.health_routes import build_health_router
+from .routes.qq_routes import build_qq_router
 from .routes.plugin_knowledge_routes import build_plugin_knowledge_router
 from .routes.quota_routes import build_quota_router
 from .routes.skill_routes import build_skill_router
@@ -75,6 +76,7 @@ def build_router() -> APIRouter:
     router.include_router(build_quota_router(runtime=runtime))
     router.include_router(build_plugin_knowledge_router(runtime=runtime))
     router.include_router(build_health_router(runtime=runtime))
+    router.include_router(build_qq_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -273,6 +275,7 @@ let state = {
   skills: [], skillFilter: "",
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
   personaPrompt: null, personaPromptPath: "", health: null, healthBusyCat: "", interactionResult: null, interactionBusy: false,
+  qqInfo: null, qqGroups: [], qqFriends: [],
   memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false,
   memoryGraph: null, memoryGraphGroupId: "", memoryGraphLimit: 100, memoryGraphMinSalience: 0,
   groupRawChat: null, groupStyleSnapIdx: 0, groupStyleRebuilding: false,
@@ -385,6 +388,13 @@ async function loadView() {
       state.skills = data.skills; state.skillsAvailable = data.available;
     } else if (state.view === "test") {
       /* nothing to preload */
+    } else if (state.view === "qq") {
+      const [info, groups, friends] = await Promise.all([
+        api("/qq/info").catch(e => ({ error: e.message })),
+        api("/qq/groups").catch(() => ({ groups: [] })),
+        api("/qq/friends").catch(() => ({ friends: [] })),
+      ]);
+      state.qqInfo = info; state.qqGroups = groups.groups || []; state.qqFriends = friends.friends || [];
     } else if (state.view === "health") {
       state.health = await api("/health/check");  // 默认读缓存，秒开
     } else if (state.view === "persona_prompt") {
@@ -497,6 +507,7 @@ function renderLayout() {
         ${navItem('persona_prompt','人设预览')}
         ${navItem('proactive','主动诊断')}
         ${navItem('audit','审计日志')}
+        ${navItem('qq','QQ 管理')}
         ${navItem('devices','设备管理')}
       </nav>
     </aside>
@@ -530,6 +541,7 @@ function renderView() {
   if (state.view === "group_switch") return renderGroupSwitch();
   if (state.view === "skills") return renderSkills();
   if (state.view === "plugin_knowledge") return renderPluginKnowledge();
+  if (state.view === "qq") return renderQQ();
   if (state.view === "health") return renderHealth();
   if (state.view === "test") return renderTest();
   if (state.view === "persona_prompt") return renderPersonaPrompt();
@@ -949,7 +961,7 @@ function renderMemoryDetail() {
 }
 
 function viewTitle() {
-  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",test:"模型测试",audit:"审计日志",proactive:"主动诊断",devices:"设备管理"})[state.view] || state.view;
+  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",test:"模型测试",audit:"审计日志",proactive:"主动诊断",qq:"QQ 管理",devices:"设备管理"})[state.view] || state.view;
 }
 
 // ---------------------------------------------------------------------------
@@ -1197,6 +1209,77 @@ async function refreshHealth() {
   state.loading = true; render();
   try { state.health = await api("/health/check?refresh=true"); } catch (e) { alertFlash("err", "检测失败：" + e.message); }
   state.loading = false; render();
+}
+
+function renderQQ() {
+  const info = state.qqInfo || {};
+  const groups = state.qqGroups || [];
+  const friends = state.qqFriends || [];
+  const infoCard = info.error
+    ? `<div class="card"><div class="alert err">获取账号信息失败：${escapeHtml(info.error)}</div></div>`
+    : `<div class="card">
+        <h2>当前账号</h2>
+        <div class="row"><span class="muted">QQ</span> <code>${escapeHtml(info.user_id||'')}</code>
+          <span class="muted">昵称</span> <b>${escapeHtml(info.nickname||'')}</b></div>
+        <div class="field-input" style="margin-top:12px">
+          <input id="qq-nick" type="text" placeholder="新昵称" value="${escapeAttr(info.nickname||'')}">
+          <button class="btn small primary" onclick="qqSetNickname()">改昵称</button>
+        </div>
+        <div class="field-input" style="margin-top:8px">
+          <input id="qq-sign" type="text" placeholder="新签名">
+          <button class="btn small" onclick="qqSetSignature()">改签名</button>
+        </div>
+        <div class="field-input" style="margin-top:8px">
+          <input id="qq-avatar" type="text" placeholder="头像图片 URL 或 base64://...">
+          <button class="btn small" onclick="qqSetAvatar()">改头像</button>
+        </div>
+        <p class="muted" style="font-size:11px;margin-top:8px">部分操作依赖协议端扩展（NapCat 支持较全）；不支持时会提示失败。</p>
+      </div>`;
+  const groupRows = groups.map(g => `<tr>
+      <td>${escapeHtml(g.group_name||'')} <code>${escapeHtml(g.group_id)}</code></td>
+      <td>${g.member_count}/${g.max_member_count||'-'}</td>
+      <td><button class="btn small danger" onclick="qqLeaveGroup('${escapeAttr(g.group_id)}','${escapeAttr(g.group_name||'')}')">退群</button></td>
+    </tr>`).join("");
+  const friendRows = friends.map(f => `<tr>
+      <td>${escapeHtml(f.remark||f.nickname||'')} <code>${escapeHtml(f.user_id)}</code></td>
+      <td><button class="btn small danger" onclick="qqDeleteFriend('${escapeAttr(f.user_id)}','${escapeAttr(f.remark||f.nickname||'')}')">删好友</button></td>
+    </tr>`).join("");
+  return `${infoCard}
+    <div class="card"><h2>群列表（${groups.length}）</h2>
+      <table><thead><tr><th>群</th><th>人数</th><th></th></tr></thead><tbody>${groupRows||'<tr><td colspan="3" class="muted">无</td></tr>'}</tbody></table>
+    </div>
+    <div class="card"><h2>好友列表（${friends.length}）</h2>
+      <table><thead><tr><th>好友</th><th></th></tr></thead><tbody>${friendRows||'<tr><td colspan="2" class="muted">无</td></tr>'}</tbody></table>
+    </div>`;
+}
+
+async function qqSetNickname() {
+  const v = (document.getElementById("qq-nick")?.value||"").trim();
+  if (!v || !confirm("确认修改 bot 昵称为：" + v + " ？")) return;
+  try { await api("/qq/nickname", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({nickname:v})}); alertFlash("ok","已修改"); await loadView(); render(); }
+  catch (e) { alertFlash("err", e.message); }
+}
+async function qqSetSignature() {
+  const v = (document.getElementById("qq-sign")?.value||"").trim();
+  if (!confirm("确认修改签名？")) return;
+  try { await api("/qq/signature", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({signature:v})}); alertFlash("ok","已修改"); }
+  catch (e) { alertFlash("err", e.message); }
+}
+async function qqSetAvatar() {
+  const v = (document.getElementById("qq-avatar")?.value||"").trim();
+  if (!v || !confirm("确认修改 bot 头像？")) return;
+  try { await api("/qq/avatar", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({file:v})}); alertFlash("ok","已修改"); }
+  catch (e) { alertFlash("err", e.message); }
+}
+async function qqLeaveGroup(gid, name) {
+  if (!confirm("确认让 bot 退出群「" + (name||gid) + "」？此操作不可撤销。")) return;
+  try { await api("/qq/groups/"+encodeURIComponent(gid)+"/leave", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({})}); alertFlash("ok","已退群"); await loadView(); render(); }
+  catch (e) { alertFlash("err", e.message); }
+}
+async function qqDeleteFriend(uid, name) {
+  if (!confirm("确认删除好友「" + (name||uid) + "」？")) return;
+  try { await api("/qq/friends/"+encodeURIComponent(uid), {method:"DELETE"}); alertFlash("ok","已删除"); await loadView(); render(); }
+  catch (e) { alertFlash("err", e.message); }
 }
 
 async function recheckCategory(name) {
