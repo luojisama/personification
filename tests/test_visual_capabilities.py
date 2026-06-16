@@ -37,3 +37,31 @@ def test_probe_response_matches_expected_color_order() -> None:
     assert visual_capabilities._probe_response_matches_expected("红绿蓝黄") is True
     assert visual_capabilities._probe_response_matches_expected("左上红，右上绿，左下蓝，右下黄") is True
     assert visual_capabilities._probe_response_matches_expected("ok") is False
+
+
+def test_mimo_v25_models_are_treated_as_multimodal_except_audio_embedding_variants() -> None:
+    assert visual_capabilities.heuristic_supports_vision("openai", "mimo-v2.5") is True
+    assert visual_capabilities.heuristic_supports_vision("openai", "mimo2.5") is True
+    assert visual_capabilities.heuristic_supports_vision("openai", "mimo-v2.5-tts") is False
+    assert visual_capabilities.heuristic_supports_vision("openai", "mimo-v2.5-embedding") is False
+
+
+def test_visual_route_probe_cache_overrides_model_heuristic() -> None:
+    visual_capabilities.set_visual_capability(
+        "test_route",
+        "openai",
+        "mimo-v2.5",
+        False,
+        source="test",
+        detail="forced by test",
+    )
+    assert visual_capabilities.provider_supports_vision(
+        "openai",
+        "mimo-v2.5",
+        route_name="test_route",
+    ) is False
+    assert visual_capabilities.provider_supports_vision(
+        "openai",
+        "mimo-v2.5",
+        route_name="other_route",
+    ) is True

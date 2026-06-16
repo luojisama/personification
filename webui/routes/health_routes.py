@@ -23,17 +23,46 @@ def _first_bot(runtime) -> Any | None:
 class _CapturingBot:
     """透传真实 bot（消息真的发到 QQ），同时捕获 send 的内容用于回显。"""
 
-    def __init__(self, real: Any) -> None:
+    def __init__(self, real: Any, *, trace_id: str = "") -> None:
         self._real = real
         self.captured: list[str] = []
         self.self_id = getattr(real, "self_id", "")
+        self.trace_id = trace_id
 
     async def send(self, event: Any, message: Any, **kwargs: Any) -> Any:
+        from ...core import reply_turn_trace
+
+        reply_turn_trace.record_stage(
+            trace_id=self.trace_id,
+            key="send_attempt",
+            label="发送回复",
+            status="info",
+            detail=str(message)[:500],
+        )
+        try:
+            result = await self._real.send(event, message, **kwargs)
+        except Exception as exc:
+            reply_turn_trace.record_stage(
+                trace_id=self.trace_id,
+                key="send_failed",
+                label="发送失败",
+                status="error",
+                detail=str(exc)[:500],
+                hint="检查协议端发送权限、好友/群关系、账号风控或消息格式",
+            )
+            raise
         try:
             self.captured.append(str(message))
         except Exception:
             pass
-        return await self._real.send(event, message, **kwargs)
+        reply_turn_trace.record_stage(
+            trace_id=self.trace_id,
+            key="send_success",
+            label="发送成功",
+            status="ok",
+            detail=str(result)[:500],
+        )
+        return result
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
@@ -62,6 +91,61 @@ def _build_probe_event(bot: Any, *, group_id: str, user_id: str, text: str) -> A
             message_type="group", sub_type="normal", group_id=int(group_id), anonymous=None, **common
         )
     return PrivateMessageEvent(message_type="private", sub_type="friend", **common)
+
+
+def _stage(stages: list[dict[str, Any]], trace_id: str, key: str, label: str, status: str, detail: str = "", hint: str = "") -> None:
+    from ...core import reply_turn_trace
+
+    item = {"key": key, "label": label, "status": status, "detail": detail, "hint": hint}
+    stages.append(item)
+    reply_turn_trace.record_stage(
+        trace_id=trace_id,
+        key=key,
+        label=label,
+        status=status,
+        detail=detail,
+        hint=hint,
+    )
+
+
+def _finish_payload(
+    *,
+    trace_id: str,
+    stages: list[dict[str, Any]],
+    replied: bool,
+    target: str,
+    reply: str = "",
+    detail: str,
+    diagnosis_code: str,
+    duration_ms: int = 0,
+    target_detail: dict[str, str] | None = None,
+) -> dict:
+    from ...core import reply_turn_trace
+
+    if replied:
+        outcome = "ok"
+    elif diagnosis_code in {"no_reply", "model_empty", "stale_reply", "capture_timeout"}:
+        outcome = "no_reply"
+    else:
+        outcome = "failed"
+    reply_turn_trace.finish_trace(
+        trace_id=trace_id,
+        outcome=outcome,
+        diagnosis_code=diagnosis_code,
+        detail={"detail": detail, "target": target, **(target_detail or {})},
+    )
+    return {
+        "replied": replied,
+        "duration_ms": duration_ms,
+        "target": target,
+        "reply": reply[:2000],
+        "detail": detail,
+        "trace_id": trace_id,
+        "diagnosis_code": diagnosis_code,
+        "stages": stages,
+        "target_detail": target_detail or {},
+        "last_trace": reply_turn_trace.get_trace(trace_id),
+    }
 
 
 def build_health_router(*, runtime) -> APIRouter:
@@ -96,11 +180,15 @@ def build_health_router(*, runtime) -> APIRouter:
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
         """向配置的测试群/私聊真实注入一条消息，走完整回复链路并回显 bot 实际回复。"""
+        from ...core import reply_turn_trace
+
         cfg = getattr(runtime, "plugin_config", None)
         target = str(body.get("target", "") or "").strip()  # "group" | "private"
         group_id = str(getattr(cfg, "personification_webui_test_group_id", "") or "").strip()
         user_id = str(getattr(cfg, "personification_webui_test_user_id", "") or "").strip()
         text = str(body.get("text", "") or "").strip() or "（功能自检）你好呀，简单回复一句就行"
+        target_label = "group" if target == "group" else "private"
+        stages: list[dict[str, Any]] = []
 
         if target == "group":
             if not group_id:
@@ -112,25 +200,150 @@ def build_health_router(*, runtime) -> APIRouter:
                 raise HTTPException(status_code=400, detail="未配置测试私聊用户（personification_webui_test_user_id）")
             target_group, target_user = "", user_id
 
+        trace_id = reply_turn_trace.start_trace(
+            session_type=target_label,
+            group_id=target_group,
+            user_id=target_user,
+            detail={"source": "webui_interaction_test", "text": text[:200]},
+        )
+        target_detail = {"group_id": target_group, "user_id": target_user}
+        _stage(stages, trace_id, "runtime_ready", "运行时", "ok" if cfg is not None else "error",
+               "运行时配置已就绪" if cfg is not None else "运行时配置缺失")
+        if cfg is None:
+            return _finish_payload(
+                trace_id=trace_id,
+                stages=stages,
+                replied=False,
+                target=target_label,
+                detail="运行时未就绪，无法构造交互测试。",
+                diagnosis_code="runtime_unavailable",
+                target_detail=target_detail,
+            )
+
         bot = _first_bot(runtime)
         if bot is None:
-            raise HTTPException(status_code=503, detail="Bot 未连接")
+            _stage(stages, trace_id, "bot_connected", "Bot 连接", "error", "Bot 未连接", "检查 OneBot 连接、反向 WebSocket、协议端状态")
+            return _finish_payload(
+                trace_id=trace_id,
+                stages=stages,
+                replied=False,
+                target=target_label,
+                detail="Bot 未连接。",
+                diagnosis_code="bot_not_connected",
+                target_detail=target_detail,
+            )
+        _stage(stages, trace_id, "bot_connected", "Bot 连接", "ok",
+               f"self_id={getattr(bot, 'self_id', '') or 'unknown'}")
+
+        if target_group:
+            try:
+                from ...utils import is_group_whitelisted
+
+                enabled = is_group_whitelisted(str(target_group), list(getattr(cfg, "personification_whitelist", []) or []))
+            except Exception as exc:
+                enabled = False
+                _stage(stages, trace_id, "group_whitelist", "群白名单", "warn", f"检查失败：{exc}",
+                       "检查 data_store / 群配置是否可读")
+            else:
+                _stage(stages, trace_id, "group_whitelist", "群白名单", "ok" if enabled else "error",
+                       "目标群已启用拟人回复" if enabled else "目标群未启用拟人回复",
+                       "" if enabled else "在 WebUI「群开关」启用测试群，或配置 personification_whitelist")
+                if not enabled:
+                    return _finish_payload(
+                        trace_id=trace_id,
+                        stages=stages,
+                        replied=False,
+                        target=target_label,
+                        detail="目标群未启用拟人回复，群聊测试不会进入回复链路。",
+                        diagnosis_code="not_whitelisted",
+                        target_detail=target_detail,
+                    )
+            try:
+                from ...core.group_mute import refresh_bot_group_mute_state
+
+                muted = await refresh_bot_group_mute_state(bot, str(target_group), logger=getattr(runtime, "logger", None))
+            except Exception as exc:
+                muted = False
+                _stage(stages, trace_id, "group_mute", "Bot 禁言", "warn", f"禁言状态查询失败：{exc}",
+                       "协议端不支持 get_group_member_info 时会回退缓存")
+            else:
+                _stage(stages, trace_id, "group_mute", "Bot 禁言", "error" if muted else "ok",
+                       "Bot 当前在目标群被禁言" if muted else "未检测到 Bot 被禁言")
+                if muted:
+                    return _finish_payload(
+                        trace_id=trace_id,
+                        stages=stages,
+                        replied=False,
+                        target=target_label,
+                        detail="Bot 在测试群被禁言，无法发送回复。",
+                        diagnosis_code="bot_muted",
+                        target_detail=target_detail,
+                    )
+        else:
+            call_api = getattr(bot, "call_api", None)
+            if callable(call_api):
+                try:
+                    friends = await call_api("get_friend_list")
+                    friend_ids = {str(item.get("user_id", "")) for item in list(friends or []) if isinstance(item, dict)}
+                    if friend_ids:
+                        ok = str(target_user) in friend_ids
+                        _stage(stages, trace_id, "friend_relation", "好友关系", "ok" if ok else "warn",
+                               "目标用户在好友列表中" if ok else "目标用户不在 get_friend_list 返回中",
+                               "" if ok else "若协议端好友列表不完整可忽略；否则检查是否已添加好友")
+                    else:
+                        _stage(stages, trace_id, "friend_relation", "好友关系", "info", "协议端返回空好友列表")
+                except Exception as exc:
+                    _stage(stages, trace_id, "friend_relation", "好友关系", "warn", f"好友列表查询失败：{exc}",
+                           "协议端不支持 get_friend_list 时可忽略；若私聊失败则检查好友关系")
 
         try:
             from nonebot.message import handle_event
 
             event = _build_probe_event(bot, group_id=target_group, user_id=target_user, text=text)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"构造测试事件失败：{exc}") from exc
+            _stage(stages, trace_id, "event_build", "构造事件", "error", str(exc),
+                   "检查测试群号/QQ 是否为纯数字，以及 OneBot v11 依赖是否正常")
+            return _finish_payload(
+                trace_id=trace_id,
+                stages=stages,
+                replied=False,
+                target=target_label,
+                detail=f"构造测试事件失败：{exc}",
+                diagnosis_code="event_build_failed",
+                target_detail=target_detail,
+            )
+        _stage(stages, trace_id, "event_build", "构造事件", "ok",
+               f"message_type={getattr(event, 'message_type', '')}, to_me={getattr(event, 'to_me', None)}")
 
-        proxy = _CapturingBot(bot)
+        proxy = _CapturingBot(bot, trace_id=trace_id)
         started = time.monotonic()
+        token = reply_turn_trace.set_current_trace_id(trace_id)
         try:
+            _stage(stages, trace_id, "dispatch_start", "分发事件", "info", "开始调用 nonebot.message.handle_event")
             await asyncio.wait_for(handle_event(proxy, event), timeout=_INTERACTION_WAIT_SECONDS)
         except asyncio.TimeoutError:
-            pass
+            _stage(stages, trace_id, "dispatch_timeout", "分发事件", "warn",
+                   f"handle_event 超过 {_INTERACTION_WAIT_SECONDS}s 未返回",
+                   "通常是模型调用或回复链路较慢，继续等待 send 捕获")
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"分发事件失败：{exc}") from exc
+            _stage(stages, trace_id, "dispatch_failed", "分发事件", "error", str(exc)[:500],
+                   "查看插件日志中同 trace_id 的异常")
+            reply_turn_trace.reset_current_trace_id(token)
+            return _finish_payload(
+                trace_id=trace_id,
+                stages=stages,
+                replied=False,
+                target=target_label,
+                detail=f"分发事件失败：{exc}",
+                diagnosis_code="internal_exception",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                target_detail=target_detail,
+            )
+        finally:
+            try:
+                reply_turn_trace.reset_current_trace_id(token)
+            except Exception:
+                pass
 
         # 回复经缓冲/模型，可能在 handle_event 返回后才产生，轮询等待
         deadline = started + _INTERACTION_WAIT_SECONDS
@@ -138,16 +351,35 @@ def build_health_router(*, runtime) -> APIRouter:
             await asyncio.sleep(0.5)
         ms = int((time.monotonic() - started) * 1000)
         replied = bool(proxy.captured)
-        return {
-            "replied": replied,
-            "duration_ms": ms,
-            "target": "group" if target_group else "private",
-            "reply": "\n".join(proxy.captured)[:2000],
-            "detail": (
-                f"已在{'测试群 ' + target_group if target_group else '私聊 ' + target_user}收到 bot 回复"
-                if replied else
-                "未捕获到回复：可能被 NO_REPLY/白名单/概率拦截，或模型超时。详见日志。"
-            ),
-        }
+        if replied:
+            _stage(stages, trace_id, "capture_reply", "捕获回复", "ok", f"捕获 {len(proxy.captured)} 条 send")
+            return _finish_payload(
+                trace_id=trace_id,
+                stages=stages,
+                replied=True,
+                target=target_label,
+                reply="\n".join(proxy.captured),
+                detail=f"已在{'测试群 ' + target_group if target_group else '私聊 ' + target_user}收到 bot 回复",
+                diagnosis_code="ok",
+                duration_ms=ms,
+                target_detail=target_detail,
+            )
+        last_trace = reply_turn_trace.get_trace(trace_id) or {}
+        diagnosis = str(last_trace.get("diagnosis_code") or "") or "capture_timeout"
+        if diagnosis == "ok":
+            diagnosis = "capture_timeout"
+        _stage(stages, trace_id, "capture_reply", "捕获回复", "error",
+               "未捕获到 bot.send",
+               "查看上方阶段和插件日志；常见原因是 NO_REPLY、规则未进入、模型超时或发送失败")
+        return _finish_payload(
+            trace_id=trace_id,
+            stages=stages,
+            replied=False,
+            target=target_label,
+            detail="未捕获到回复：已完成分层诊断，请查看 stages / last_trace / 插件日志。",
+            diagnosis_code=diagnosis,
+            duration_ms=ms,
+            target_detail=target_detail,
+        )
 
     return router

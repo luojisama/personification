@@ -113,6 +113,74 @@ async def _probe_provider(cfg: Any, provider: dict, *, key: str, label: str) -> 
                   hint="模型可能拒答或上下文为空，建议人工用「模型测试」复核")
 
 
+async def _probe_provider_vision(cfg: Any, provider: dict, *, key: str, label: str, route_name: str = "") -> dict:
+    """对单个 provider 真发一次图片理解探测。"""
+    from .ai_routes import build_single_provider_caller
+    from .message_parts import build_user_message_content
+    from .visual_capabilities import (
+        _PROBE_IMAGE_DATA_URL,
+        error_indicates_vision_unavailable,
+        heuristic_supports_vision,
+        _probe_response_matches_expected,
+        set_visual_capability,
+    )
+
+    api_type = str(provider.get("api_type", "") or "")
+    model = str(provider.get("model", "") or "")
+    if not heuristic_supports_vision(api_type, model):
+        return _check(
+            key,
+            label,
+            _WARN,
+            detail=f"当前路由未判定为可直传图片（{api_type}:{model or 'unset'}）",
+            hint="若该模型实际支持视觉，请确认模型名、路由配置，或运行启动/体检视觉探测刷新缓存",
+        )
+    messages = [
+        {
+            "role": "user",
+            "content": build_user_message_content(
+                text="请只按左上、右上、左下、右下顺序回答这张四宫格图片的颜色，只输出四个汉字。",
+                image_urls=[_PROBE_IMAGE_DATA_URL],
+                image_detail="low",
+            ),
+        }
+    ]
+    started = time.monotonic()
+    try:
+        caller = build_single_provider_caller(cfg, provider)
+        resp = await asyncio.wait_for(
+            caller.chat_with_tools(messages=messages, tools=[], use_builtin_search=False),
+            timeout=_PROVIDER_PROBE_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        return _check(key, label, _ERROR, detail=f"视觉调用超时（>{_PROVIDER_PROBE_TIMEOUT}s）",
+                      hint="检查该 provider 的视觉模型、网络、代理或额度")
+    except Exception as exc:
+        if route_name and error_indicates_vision_unavailable(exc):
+            set_visual_capability(route_name, api_type, model, False, source="diagnostics", detail=str(exc))
+        return _check(key, label, _ERROR, detail=f"视觉调用失败：{str(exc)[:200]}",
+                      hint="多为模型不支持图片、api_type/model 不匹配、凭证或网络问题")
+    ms = int((time.monotonic() - started) * 1000)
+    content = str(getattr(resp, "content", "") or "").strip()
+    supported = not bool(getattr(resp, "vision_unavailable", False)) and _probe_response_matches_expected(content)
+    if route_name:
+        set_visual_capability(
+            route_name,
+            api_type,
+            model,
+            supported,
+            source="diagnostics",
+            detail=content[:80] or str(getattr(resp, "finish_reason", "") or ""),
+        )
+    if supported:
+        return _check(key, label, _OK, detail=f"图片理解正常（{model}，{ms}ms）")
+    if bool(getattr(resp, "vision_unavailable", False)):
+        return _check(key, label, _ERROR, detail=f"模型拒绝图片输入（{model}，{ms}ms）",
+                      hint="改用支持视觉的模型，或启用视觉摘要 fallback")
+    return _check(key, label, _ERROR, detail=f"图片理解结果不符合预期：{content[:80] or '空'}（{model}，{ms}ms）",
+                  hint="该模型可能只支持文本，或上游没有正确接收 image_url")
+
+
 async def _model_checks(cfg: Any, bundle: Any, logger: Any) -> list[dict[str, Any]]:
     from .ai_routes import list_primary_providers
 
@@ -151,9 +219,73 @@ async def _llm_subconfig_checks(cfg: Any) -> list[dict[str, Any]]:
             "name": key, "api_type": api_type or "openai", "api_url": api_url,
             "api_key": api_key, "model": model, "enabled": True, "priority": 1,
         }
+        if key == "labeler":
+            return await _probe_provider_vision(cfg, provider, key=f"sub_{key}", label=f"{name}视觉调用", route_name="sub_labeler")
         return await _probe_provider(cfg, provider, key=f"sub_{key}", label=f"{name}调用")
 
     return list(await asyncio.gather(*[_one(*r) for r in _LLM_SUBROLES]))
+
+
+async def _vision_checks(cfg: Any, bundle: Any, logger: Any) -> list[dict[str, Any]]:
+    from .ai_routes import list_primary_providers
+    from .visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_PLAIN, VISUAL_ROUTE_REPLY_YAML, VISUAL_ROUTE_VISION
+
+    checks: list[dict[str, Any]] = []
+    providers = list_primary_providers(cfg, logger) or []
+    if not providers:
+        return [_check("vision_primary", "主路由视觉", _ERROR, detail="未配置主 provider，无法探测视觉路径")]
+    primary = dict(providers[0])
+    for route_name, label in (
+        (VISUAL_ROUTE_REPLY_PLAIN, "普通回复直传图片"),
+        (VISUAL_ROUTE_REPLY_YAML, "YAML 回复直传图片"),
+        (VISUAL_ROUTE_AGENT, "Agent 工具循环直传图片"),
+    ):
+        checks.append(
+            await _probe_provider_vision(
+                cfg,
+                primary,
+                key=f"vision_{route_name}",
+                label=label,
+                route_name=route_name,
+            )
+        )
+    runtime_inner = None
+    deps = getattr(bundle, "reply_processor_deps", None) if bundle is not None else None
+    if deps is not None:
+        runtime_inner = getattr(deps, "runtime", None)
+    fallback = getattr(runtime_inner, "vision_caller", None) if runtime_inner is not None else None
+    if fallback is None:
+        checks.append(_check("vision_fallback", "视觉摘要 fallback", _WARN,
+                             detail="vision_caller 未就绪；不支持直传图片的路由只能看到 [图片] 占位",
+                             hint="配置全局 fallback 或视觉 fallback provider/model"))
+    else:
+        from .visual_capabilities import _PROBE_IMAGE_DATA_URL, _probe_response_matches_expected
+
+        started = time.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                fallback.describe("请只回答四宫格颜色顺序，输出四个汉字。", _PROBE_IMAGE_DATA_URL),
+                timeout=_PROVIDER_PROBE_TIMEOUT,
+            )
+            ms = int((time.monotonic() - started) * 1000)
+            ok = _probe_response_matches_expected(str(result or ""))
+            checks.append(_check(
+                "vision_fallback",
+                "视觉摘要 fallback",
+                _OK if ok else _WARN,
+                detail=(f"fallback 图片理解正常（{ms}ms）" if ok else f"fallback 返回异常：{str(result or '')[:80]}（{ms}ms）"),
+                hint="" if ok else "若主路由不支持图片，视觉摘要质量可能受影响",
+            ))
+        except Exception as exc:
+            checks.append(_check("vision_fallback", "视觉摘要 fallback", _ERROR,
+                                 detail=f"fallback 调用失败：{str(exc)[:160]}",
+                                 hint="检查 fallback/vision provider、模型和网络"))
+    if checks:
+        error_count = sum(1 for c in checks if c.get("status") == _ERROR)
+        if error_count and any(c.get("status") == _OK for c in checks):
+            checks.append(_check("vision_mode", "视觉降级模式", _WARN,
+                                 detail="部分直传路径不可用，但仍有可用视觉路径；运行时会尝试摘要 fallback"))
+    return checks
 
 
 def _db_checks(cfg: Any) -> list[dict[str, Any]]:
@@ -378,6 +510,8 @@ async def _run_category(name: str, *, cfg, bundle, su, get_bots, logger) -> list
         return await _model_checks(cfg, bundle, logger)
     if name == "LLM 子模型":
         return await _llm_subconfig_checks(cfg)
+    if name == "视觉能力":
+        return await _vision_checks(cfg, bundle, logger)
     if name == "存储":
         return _safe_list(lambda: _db_checks(cfg))
     if name == "记忆":
@@ -408,7 +542,7 @@ async def _run_category(name: str, *, cfg, bundle, su, get_bots, logger) -> list
 
 
 CATEGORY_NAMES: tuple[str, ...] = (
-    "核心", "模型调用", "LLM 子模型", "存储", "记忆", "用户画像", "群聊", "表情包",
+    "核心", "模型调用", "LLM 子模型", "视觉能力", "存储", "记忆", "用户画像", "群聊", "表情包",
     "TTS 语音", "QQ 空间", "联网搜索", "Skill 扩展", "主动社交", "人设",
     "协议端", "WebUI 安全",
 )

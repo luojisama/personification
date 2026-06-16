@@ -795,10 +795,6 @@ async def run_agent_if_enabled(
         ),
         ack_sender=ack_sender,
     )
-    if runtime.inner_state_updater and task_exc_logger is not None:
-        user_id = str(getattr(event, "user_id", "") or "")
-        task = asyncio.create_task(runtime.inner_state_updater(result.text, user_id))
-        task.add_done_callback(task_exc_logger("inner_state_updater", runtime.logger))
     for action in result.pending_actions:
         await executor.execute(action["type"], action["params"])
     return result.text, True, bool(getattr(result, "bypass_length_limits", False))

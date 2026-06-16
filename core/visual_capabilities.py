@@ -132,6 +132,11 @@ def heuristic_supports_vision(api_type: str, model: str | None = None) -> bool:
     """
     api = str(api_type or "").strip().lower().replace("-", "_")
     model_text = str(model or "").strip().lower()
+    if any(token in model_text for token in ("tts", "asr", "embedding", "embed")):
+        return False
+    normalized_model = model_text.replace("_", "-")
+    if "mimo-v2.5" in normalized_model or "mimo2.5" in normalized_model:
+        return True
     if api == "openai_codex":
         return "codex" in model_text
     # 官方 Anthropic / Gemini API：所有当前模型都支持视觉

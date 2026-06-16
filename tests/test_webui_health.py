@@ -10,17 +10,18 @@ from .test_webui_smoke import _build_client, _login_as_admin, _runtime_context  
 
 diagnostics = load_personification_module("plugin.personification.core.diagnostics")
 ai_routes = load_personification_module("plugin.personification.core.ai_routes")
+visual_capabilities = load_personification_module("plugin.personification.core.visual_capabilities")
 
 
 class _FakeResp:
-    def __init__(self, content="好", raw=None):
+    def __init__(self, content="红绿蓝黄", raw=None):
         self.content = content
         self.raw = raw
         self.finish_reason = "stop"
 
 
 class _FakeCaller:
-    def __init__(self, content="好"):
+    def __init__(self, content="红绿蓝黄"):
         self._c = content
 
     async def chat_with_tools(self, messages, tools, use_builtin_search):
@@ -120,6 +121,27 @@ def test_health_includes_llm_subconfig_category(_runtime_context) -> None:
     _login_as_admin(client, _runtime_context)
     body = client.get("/personification/api/health/check", params={"refresh": "true"}).json()
     assert "LLM 子模型" in [c["name"] for c in body["categories"]]
+    assert "视觉能力" in [c["name"] for c in body["categories"]]
+
+
+def test_health_visual_probe_refreshes_stale_negative_cache(_runtime_context) -> None:
+    visual_capabilities.set_visual_capability(
+        visual_capabilities.VISUAL_ROUTE_REPLY_PLAIN,
+        "openai",
+        "gpt-4o",
+        False,
+        source="unit",
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    body = client.get("/personification/api/health/check", params={"only": "视觉能力"}).json()
+    st = _statuses(body)
+    assert st["vision_reply_plain"]["status"] == "ok"
+    assert visual_capabilities.provider_supports_vision(
+        "openai",
+        "gpt-4o",
+        route_name=visual_capabilities.VISUAL_ROUTE_REPLY_PLAIN,
+    ) is True
 
 
 def test_interaction_test_requires_configured_target(_runtime_context) -> None:

@@ -15,6 +15,7 @@ from .routes.memory_routes import build_memory_router
 from .routes.metrics_routes import build_metrics_router
 from .routes.persona_routes import build_persona_router
 from .routes.health_routes import build_health_router
+from .routes.log_routes import build_log_router
 from .routes.qq_routes import build_qq_router
 from .routes.plugin_knowledge_routes import build_plugin_knowledge_router
 from .routes.quota_routes import build_quota_router
@@ -76,6 +77,7 @@ def build_router() -> APIRouter:
     router.include_router(build_quota_router(runtime=runtime))
     router.include_router(build_plugin_knowledge_router(runtime=runtime))
     router.include_router(build_health_router(runtime=runtime))
+    router.include_router(build_log_router(runtime=runtime))
     router.include_router(build_qq_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
@@ -283,6 +285,7 @@ let state = {
   stickers: null, stickerSearch: "", selectedSticker: null,
   theme: "dark", mobileNavOpen: false, eligibleAdmins: [],
   audit: null, auditFilter: "",
+  logs: null, logLevel: "", logQuery: "",
   proactiveStats: null, proactiveRecent: null, proactiveScope: "",
 };
 
@@ -413,6 +416,11 @@ async function loadView() {
       const qs = new URLSearchParams({ limit: "150" });
       if (state.auditFilter) qs.set("action", state.auditFilter);
       state.audit = await api("/audit/recent?" + qs.toString());
+    } else if (state.view === "logs") {
+      const qs = new URLSearchParams({ limit: "220" });
+      if (state.logLevel) qs.set("level", state.logLevel);
+      if (state.logQuery) qs.set("q", state.logQuery);
+      state.logs = await api("/logs/recent?" + qs.toString());
     } else if (state.view === "stickers") {
       state.stickers = await api("/stickers");
     } else if (state.view === "memory") {
@@ -507,6 +515,7 @@ function renderLayout() {
         ${navItem('persona_prompt','人设预览')}
         ${navItem('proactive','主动诊断')}
         ${navItem('audit','审计日志')}
+        ${navItem('logs','插件日志')}
         ${navItem('qq','QQ 管理')}
         ${navItem('devices','设备管理')}
       </nav>
@@ -549,6 +558,7 @@ function renderView() {
   if (state.view === "memory_graph") return renderMemoryGraph();
   if (state.view === "stickers") return renderStickers();
   if (state.view === "audit") return renderAudit();
+  if (state.view === "logs") return renderLogs();
   if (state.view === "proactive") return renderProactive();
   return `<div class="card"><h2>${escapeHtml(viewTitle())}</h2><p class="muted">该视图暂未实现。</p></div>`;
 }
@@ -680,6 +690,79 @@ function renderAudit() {
 async function pickAuditFilter(action) {
   state.auditFilter = action;
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+function renderLogs() {
+  const data = state.logs;
+  if (!data) return `<div class="card muted">加载中…</div>`;
+  const levels = [
+    {key:"", label:"全部"},
+    {key:"DEBUG", label:"DEBUG+"},
+    {key:"INFO", label:"INFO+"},
+    {key:"WARNING", label:"WARNING+"},
+    {key:"ERROR", label:"ERROR+"},
+  ];
+  const levelBar = levels.map(f => `<button class="${state.logLevel===f.key?'active':''}" onclick="pickLogLevel('${f.key}')">${escapeHtml(f.label)}</button>`).join("");
+  const rows = (data.entries || []).map(e => {
+    const time = new Date(e.ts * 1000).toLocaleString();
+    const level = String(e.level || "INFO");
+    const cls = level === "ERROR" || level === "CRITICAL" ? "hs-error" : (level === "WARNING" ? "hs-warn" : (level === "DEBUG" ? "hs-info" : "hs-ok"));
+    const trace = e.trace_id ? `<button class="btn small" onclick="filterLogsByTrace('${escapeAttr(e.trace_id)}')">${escapeHtml(e.trace_id)}</button>` : '<span class="muted">-</span>';
+    return `<tr>
+      <td class="muted" style="font-size:12px;white-space:nowrap">${escapeHtml(time)}</td>
+      <td><span class="dot ${cls}" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px"></span><code style="font-size:11px">${escapeHtml(level)}</code></td>
+      <td>${escapeHtml(e.source||'-')}</td>
+      <td style="white-space:pre-wrap;word-break:break-word">${escapeHtml(e.message||'')}</td>
+      <td>${trace}</td>
+    </tr>`;
+  }).join("");
+  return `<div class="group-bar">${levelBar}</div>
+    <div class="card">
+      <div class="between">
+        <h2 style="margin:0">插件日志（最近 ${(data.entries||[]).length} 条）</h2>
+        <button class="btn small danger" onclick="clearPluginLogs()">清空</button>
+      </div>
+      <p class="muted" style="font-size:12px;margin:8px 0">只显示拟人插件 runtime logger 捕获到的日志；默认保留 ${Number(data.retention_days||7)} 天，每日自动清理。敏感 token、Cookie、API Key 会在写入前脱敏。</p>
+      <div class="field-input" style="margin-bottom:10px">
+        <input id="log-query" type="text" placeholder="搜索消息 / source / trace_id" value="${escapeAttr(state.logQuery||'')}" onkeydown="if(event.key==='Enter') applyLogQuery()">
+        <button class="btn small" onclick="applyLogQuery()">搜索</button>
+        <button class="btn small" onclick="state.logQuery=''; loadView().then(render)">重置</button>
+      </div>
+      <table><thead><tr><th>时间</th><th>级别</th><th>来源</th><th>消息</th><th>Trace</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="5" class="muted">暂无</td></tr>'}</tbody></table>
+    </div>`;
+}
+
+async function pickLogLevel(level) {
+  state.logLevel = level;
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+async function applyLogQuery() {
+  state.logQuery = (document.getElementById("log-query")?.value || "").trim();
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+async function filterLogsByTrace(traceId) {
+  state.logQuery = traceId || "";
+  state.logLevel = "";
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+async function openLogsForTrace(traceId) {
+  state.view = "logs";
+  state.logQuery = traceId || "";
+  state.logLevel = "";
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+async function clearPluginLogs() {
+  if (!confirm("确认清空拟人插件持久日志？")) return;
+  try {
+    const res = await api("/logs/clear", {method:"DELETE"});
+    alertFlash("ok", "已清空 " + (res.deleted || 0) + " 条日志");
+    await loadView(); render();
+  } catch (e) { alertFlash("err", e.message); }
 }
 
 function renderStickers() {
@@ -961,7 +1044,7 @@ function renderMemoryDetail() {
 }
 
 function viewTitle() {
-  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",test:"模型测试",audit:"审计日志",proactive:"主动诊断",qq:"QQ 管理",devices:"设备管理"})[state.view] || state.view;
+  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",test:"模型测试",audit:"审计日志",logs:"插件日志",proactive:"主动诊断",qq:"QQ 管理",devices:"设备管理"})[state.view] || state.view;
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,6 +1238,48 @@ const HEALTH_STATUS = {
   info: {label:"信息", cls:"hs-info"},
 };
 
+function renderInteractionResult(ir) {
+  if (!ir) return "";
+  const alertCls = ir.replied ? "ok" : "err";
+  const meta = [];
+  if (ir.diagnosis_code) meta.push(`诊断码：${ir.diagnosis_code}`);
+  if (ir.trace_id) meta.push(`trace：${ir.trace_id}`);
+  if (ir.target_detail) {
+    const targetParts = [];
+    if (ir.target_detail.group_id) targetParts.push(`group=${ir.target_detail.group_id}`);
+    if (ir.target_detail.user_id) targetParts.push(`user=${ir.target_detail.user_id}`);
+    if (targetParts.length) meta.push(`目标：${targetParts.join(" ")}`);
+  }
+  if (ir.duration_ms != null) meta.push(`耗时：${ir.duration_ms}ms`);
+  const reply = ir.reply ? `\n\n回复内容：\n${String(ir.reply)}` : "";
+  const traceBtn = ir.trace_id
+    ? `<button class="btn small" onclick="openLogsForTrace('${escapeAttr(ir.trace_id)}')">查看同 trace 日志</button>`
+    : "";
+  const stages = (ir.stages || []).map(st => {
+    const status = HEALTH_STATUS[st.status] || HEALTH_STATUS.info;
+    return `<tr>
+      <td><span class="dot ${status.cls}" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px"></span>${escapeHtml(st.label || st.key || "-")}</td>
+      <td><code style="font-size:11px">${escapeHtml(st.status || "info")}</code></td>
+      <td style="white-space:pre-wrap">${escapeHtml(st.detail || "")}</td>
+      <td style="white-space:pre-wrap">${escapeHtml(st.hint || "")}</td>
+    </tr>`;
+  }).join("");
+  const last = ir.last_trace || {};
+  const traceSummary = last && (last.outcome || last.diagnosis_code)
+    ? `<p class="muted" style="font-size:12px;margin:8px 0 0">链路收口：${escapeHtml(last.outcome || "-")} / ${escapeHtml(last.diagnosis_code || "-")}</p>`
+    : "";
+  return `<div style="margin-top:10px">
+    <div class="alert ${alertCls}" style="white-space:pre-wrap">${escapeHtml(ir.detail || "")}${escapeHtml(reply)}</div>
+    <div class="row" style="margin:6px 0 10px">
+      ${meta.map(x => `<span class="tag">${escapeHtml(x)}</span>`).join("")}
+      ${traceBtn}
+    </div>
+    ${traceSummary}
+    <table style="margin-top:10px"><thead><tr><th>阶段</th><th>状态</th><th>详情</th><th>建议</th></tr></thead>
+      <tbody>${stages || '<tr><td colspan="4" class="muted">无分层诊断信息</td></tr>'}</tbody></table>
+  </div>`;
+}
+
 function renderHealth() {
   const h = state.health;
   if (!h) return `<div class="card muted">体检中…</div>`;
@@ -1188,7 +1313,7 @@ function renderHealth() {
       <button class="btn primary" onclick="runInteraction('private')">测试私聊交互</button>
       ${state.interactionBusy?'<span class="muted">交互中（最长 45s）…</span>':''}
     </div>
-    ${ir ? `<div class="alert ${ir.replied?'ok':'err'}" style="margin-top:10px;white-space:pre-wrap">${escapeHtml(ir.detail||'')}${ir.reply?('\\n\\n回复内容：\\n'+escapeHtml(ir.reply)):''}${ir.duration_ms!=null?('\\n\\n耗时 '+ir.duration_ms+'ms'):''}</div>` : ''}
+    ${renderInteractionResult(ir)}
   </div>`;
   return `<div class="card">
     <div class="between">

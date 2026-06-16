@@ -94,6 +94,7 @@ from .pipeline_context import (
 from .pipeline_emotion import (
     persist_reply_emotion_state,
     prepare_reply_semantics,
+    schedule_inner_state_update_after_reply,
     should_speak_in_random_chat,
 )
 from .pipeline_sticker import (
@@ -295,6 +296,9 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
 
     token = None
     reset_llm_context = None
+    trace_id = ""
+    trace_token = None
+    trace_mod = None
     try:
         from ...core.llm_context import reset_llm_context, set_llm_context
 
@@ -306,8 +310,68 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
     except Exception:
         token = None
     try:
+        from ...core import reply_turn_trace as trace_mod  # type: ignore[assignment]
+
+        runtime = deps.runtime
+        if bool(getattr(runtime.plugin_config, "personification_turn_trace_enabled", True)):
+            trace_id = trace_mod.current_trace_id()
+            session_type = "group" if hasattr(event, "group_id") else "private"
+            group_id = str(getattr(event, "group_id", "") or "")
+            user_id = str(getattr(event, "user_id", "") or "")
+            trace_id = trace_mod.start_trace(
+                trace_id=trace_id,
+                session_type=session_type,
+                group_id=group_id,
+                user_id=user_id,
+                detail={"source": "reply_pipeline", "message_id": str(getattr(event, "message_id", "") or "")},
+            )
+            trace_token = trace_mod.set_current_trace_id(trace_id)
+            trace_mod.record_stage(
+                trace_id=trace_id,
+                key="ingress",
+                label="进入回复链路",
+                status="info",
+                detail=f"session={session_type} user={user_id} group={group_id or '-'}",
+            )
+    except Exception:
+        trace_id = ""
+        trace_token = None
+        trace_mod = None
+    try:
         await _process_response_logic_impl(bot, event, state, deps)
+    except FinishedException:
+        if trace_mod is not None and trace_id:
+            trace_mod.finish_trace(trace_id=trace_id, outcome="finished", diagnosis_code="finished_exception")
+        raise
+    except Exception as exc:
+        if trace_mod is not None and trace_id:
+            trace_mod.record_stage(
+                trace_id=trace_id,
+                key="unhandled_exception",
+                label="链路异常",
+                status="error",
+                detail=str(exc)[:500],
+            )
+            trace_mod.finish_trace(trace_id=trace_id, outcome="failed", diagnosis_code="internal_exception")
+        raise
     finally:
+        if trace_mod is not None and trace_id:
+            try:
+                last_trace = trace_mod.get_trace(trace_id) or {}
+                if not str(last_trace.get("outcome", "") or ""):
+                    trace_mod.finish_trace(
+                        trace_id=trace_id,
+                        outcome="no_reply",
+                        diagnosis_code="no_reply",
+                        detail={"reason": "reply_pipeline_returned_without_send"},
+                    )
+            except Exception:
+                pass
+        if trace_token is not None and trace_mod is not None:
+            try:
+                trace_mod.reset_current_trace_id(trace_token)
+            except Exception:
+                pass
         if token is not None and reset_llm_context is not None:
             reset_llm_context(token)
 
@@ -707,6 +771,20 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             bot_self_id=str(getattr(bot, "self_id", "") or ""),
             recent_group_msgs=recent_group_msgs,
         )
+    try:
+        from ...core import reply_turn_trace
+
+        reply_turn_trace.record_stage(
+            key="target_inferred",
+            label="目标推断",
+            status="info",
+            detail=(
+                f"private={is_private_session} random={bool(is_random_chat)} "
+                f"direct={bool(is_direct_mention)} target={state.get('message_target') or '-'}"
+            ),
+        )
+    except Exception:
+        pass
     session_id = session.build_private_session_id(user_id) if is_private_session else session.build_group_session_id(str(group_id))
     legacy_session_id = None if is_private_session else str(group_id)
     session.ensure_session_history(session_id, legacy_session_id=legacy_session_id)
@@ -779,6 +857,22 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     )
     direct_image_input = bool(image_urls) and image_input_mode in {"auto", "direct"} and plain_route_vision
     agent_direct_image_input = bool(image_urls) and image_input_mode in {"auto", "direct"} and agent_route_vision
+    if image_urls or sticker_image_urls:
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.record_stage(
+                key="vision_mode",
+                label="视觉路径",
+                status="ok" if (direct_image_input or agent_direct_image_input) else "warn",
+                detail=(
+                    f"mode={image_input_mode} plain_direct={direct_image_input} "
+                    f"agent_direct={agent_direct_image_input} images={len(image_urls)} stickers={len(sticker_image_urls)}"
+                ),
+                hint="" if (direct_image_input or agent_direct_image_input) else "将尝试视觉摘要 fallback 或文本占位",
+            )
+        except Exception:
+            pass
     image_summary_suffix = ""
     image_urls_for_text_model = list(image_urls)
     _needs_image_summary = False
@@ -930,10 +1024,39 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     intent_decision = prepared_semantics.intent_decision
     message_intent = prepared_semantics.message_intent
     arbitration = prepared_semantics.arbitration
+    try:
+        from ...core import reply_turn_trace
+
+        reply_turn_trace.record_stage(
+            key="semantic_frame",
+            label="语义帧",
+            status="ok",
+            detail=(
+                f"intent={message_intent} ambiguity={getattr(intent_decision, 'ambiguity_level', '')} "
+                f"silence={getattr(intent_decision, 'recommend_silence', False)} "
+                f"emotion={getattr(semantic_frame, 'bot_emotion', '')} "
+                f"output={getattr(semantic_frame, 'output_mode', '') or '-'}"
+            ),
+        )
+    except Exception:
+        pass
     if arbitration == "no_reply":
         runtime.logger.info(
             f"拟人插件：LLM 意图判别认为本轮高歧义且不宜插话，group={group_id} user={user_id}"
         )
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.record_stage(
+                key="no_reply",
+                label="静默",
+                status="warn",
+                detail="arbitration=no_reply",
+                hint="LLM 判定高歧义或不宜插话",
+            )
+            reply_turn_trace.finish_trace(outcome="no_reply", diagnosis_code="no_reply", detail={"reason": "arbitration_no_reply"})
+        except Exception:
+            pass
         return
     if is_random_chat:
         should_speak = should_speak_in_random_chat(
@@ -943,6 +1066,19 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         )
         if not should_speak:
             runtime.logger.info(f"拟人插件：随机插话场景被 LLM 否决，group={group_id} user={user_id}")
+            try:
+                from ...core import reply_turn_trace
+
+                reply_turn_trace.record_stage(
+                    key="no_reply",
+                    label="静默",
+                    status="warn",
+                    detail="random_chat denied by semantic frame",
+                    hint="随机插话场景被判定不适合接话",
+                )
+                reply_turn_trace.finish_trace(outcome="no_reply", diagnosis_code="no_reply", detail={"reason": "random_chat_denied"})
+            except Exception:
+                pass
             return
 
     current_user_content = build_user_message_content(
@@ -976,6 +1112,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
     base_prompt = persona.load_prompt(str(group_id))
     if isinstance(base_prompt, dict):
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.record_stage(
+                key="yaml_route",
+                label="YAML 回复路径",
+                status="info",
+                detail="当前人设 prompt 使用 YAML 模式",
+            )
+        except Exception:
+            pass
         if not trigger_reason and is_poke:
             trigger_reason = "对方戳了戳你。"
         await runtime.process_yaml_response_logic(
@@ -1222,6 +1369,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             image_ctx_token = set_current_image_context(tool_image_urls, message_content)
             try:
                 try:
+                    try:
+                        from ...core import reply_turn_trace
+
+                        reply_turn_trace.record_stage(
+                            key="agent_start",
+                            label="Agent 主循环",
+                            status="info",
+                            detail=f"intent={message_intent} images={len(tool_image_urls)} direct_image={agent_direct_image_input}",
+                        )
+                    except Exception:
+                        pass
                     reply_content, used_agent, bypass_length_limits = await _run_agent_if_enabled(
                         bot=bot,
                         event=event,
@@ -1244,6 +1402,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         ),
                         task_exc_logger=_task_exc_logger,
                     )
+                    try:
+                        from ...core import reply_turn_trace
+
+                        reply_turn_trace.record_stage(
+                            key="agent_result",
+                            label="Agent 结果",
+                            status="ok" if reply_content else "warn",
+                            detail=f"used={used_agent} chars={len(str(reply_content or ''))}",
+                        )
+                    except Exception:
+                        pass
                 except Exception as exc:
                     if not (
                         tool_image_urls
@@ -1261,6 +1430,18 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         if used_agent and reply_content in ("[NO_REPLY]", "<NO_REPLY>"):
             if is_random_chat:
                 runtime.logger.info("拟人插件：Agent 在随机插话场景选择 NO_REPLY，保持沉默。")
+                try:
+                    from ...core import reply_turn_trace
+
+                    reply_turn_trace.record_stage(
+                        key="no_reply",
+                        label="静默",
+                        status="warn",
+                        detail="agent returned NO_REPLY in random chat",
+                    )
+                    reply_turn_trace.finish_trace(outcome="no_reply", diagnosis_code="no_reply", detail={"reason": "agent_no_reply_random"})
+                except Exception:
+                    pass
                 await _maybe_silence_reaction()
                 return
             else:
@@ -1276,6 +1457,19 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 if is_direct_mention:
                     reply_content = random.choice(_FALLBACK_REPLIES)
                 else:
+                    try:
+                        from ...core import reply_turn_trace
+
+                        reply_turn_trace.record_stage(
+                            key="no_reply",
+                            label="静默",
+                            status="error",
+                            detail="empty model reply",
+                            hint="模型返回空内容或 provider 链路失败",
+                        )
+                        reply_turn_trace.finish_trace(outcome="no_reply", diagnosis_code="model_empty", detail={"reason": "empty_reply"})
+                    except Exception:
+                        pass
                     return
         elif is_agent_reply_ooc(reply_content):
             rewritten_ooc = await rewrite_agent_reply_ooc(
@@ -1292,6 +1486,18 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         stale_reason = _stale_reply_abort_reason(state)
         if stale_reason:
             runtime.logger.info(f"拟人插件：{stale_reason}")
+            try:
+                from ...core import reply_turn_trace
+
+                reply_turn_trace.record_stage(
+                    key="stale_abort",
+                    label="旧批次丢弃",
+                    status="warn",
+                    detail=stale_reason,
+                )
+                reply_turn_trace.finish_trace(outcome="no_reply", diagnosis_code="stale_reply", detail={"reason": stale_reason})
+            except Exception:
+                pass
             return
 
         reply_content = re.sub(r"\[表情:[^\]]*\]", "", reply_content)
@@ -1810,6 +2016,16 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             assistant_text=final_visible_reply_text,
             is_private=is_private_session,
         )
+        schedule_inner_state_update_after_reply(
+            runtime=runtime,
+            user_text=raw_message_text or message_text or message_content,
+            assistant_text=final_visible_reply_text,
+            user_id=user_id,
+            group_id=str(group_id),
+            is_private=is_private_session,
+            semantic_frame=semantic_frame,
+            task_exc_logger=_task_exc_logger,
+        )
 
         if not is_private_session and bool(getattr(runtime.plugin_config, "personification_relation_evolution_enabled", False)):
             async def _spawn_relation_evolution() -> None:
@@ -1907,11 +2123,43 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             (time.monotonic() - started_at) * 1000.0,
             scene="private" if is_private_session else "group",
         )
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.record_stage(
+                key="reply_success",
+                label="回复完成",
+                status="ok",
+                detail=f"chars={len(final_visible_reply_text)} tts={bool(sent_as_tts)} sticker={bool(sticker_name)}",
+            )
+            reply_turn_trace.finish_trace(
+                outcome="ok",
+                diagnosis_code="ok",
+                detail={
+                    "reply_chars": len(final_visible_reply_text),
+                    "tts": bool(sent_as_tts),
+                    "sticker": bool(sticker_name),
+                },
+            )
+        except Exception:
+            pass
     except FinishedException:
         raise
     except Exception as e:
         record_counter("reply_processor.error_total")
         runtime.logger.error(f"拟人插件 API 调用失败: {e}")
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.record_stage(
+                key="reply_failed",
+                label="回复异常",
+                status="error",
+                detail=str(e)[:500],
+            )
+            reply_turn_trace.finish_trace(outcome="failed", diagnosis_code="internal_exception", detail={"error": str(e)[:500]})
+        except Exception:
+            pass
         if is_direct_mention:
             try:
                 await bot.send(event, random.choice(_FALLBACK_REPLIES))

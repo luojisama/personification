@@ -281,10 +281,63 @@ async def persist_reply_emotion_state(
         runtime.logger.debug(f"[emotion] update after reply failed: {e}")
 
 
+def schedule_inner_state_update_after_reply(
+    *,
+    runtime: Any = None,
+    inner_state_updater: Any = None,
+    logger: Any = None,
+    user_text: str,
+    assistant_text: str,
+    user_id: str,
+    group_id: str = "",
+    is_private: bool = False,
+    semantic_frame: Any = None,
+    task_exc_logger: Any = None,
+) -> None:
+    updater = inner_state_updater or getattr(runtime, "inner_state_updater", None)
+    if updater is None:
+        return
+    runtime_logger = logger or getattr(runtime, "logger", None)
+    visible_reply = str(assistant_text or "").strip()
+    if not visible_reply:
+        return
+    frame_parts = []
+    if semantic_frame is not None:
+        for name in ("chat_intent", "user_attitude", "bot_emotion", "emotion_intensity", "expression_style", "session_goal"):
+            value = str(getattr(semantic_frame, name, "") or "").strip()
+            if value:
+                frame_parts.append(f"{name}={value}")
+        turn_plan = getattr(semantic_frame, "turn_plan", None)
+        if turn_plan is not None:
+            action = str(getattr(turn_plan, "reply_action", "") or "").strip()
+            output = str(getattr(turn_plan, "output_mode", "") or "").strip()
+            if action or output:
+                frame_parts.append(f"turn_plan={action or '-'}:{output or '-'}")
+    recent_summary = (
+        f"场景：{'私聊' if is_private else '群聊'}"
+        + (f" group={group_id}" if group_id and not is_private else "")
+        + f" user={user_id}\n"
+        f"用户：{str(user_text or '').strip()[:300]}\n"
+        f"你：{visible_reply[:300]}\n"
+        + (f"语义帧：{'; '.join(frame_parts)}" if frame_parts else "")
+    ).strip()
+    try:
+        task = asyncio.create_task(updater(recent_summary, str(user_id or "")))
+        if task_exc_logger is not None and runtime_logger is not None:
+            task.add_done_callback(task_exc_logger("inner_state_updater", runtime_logger))
+    except Exception as exc:
+        try:
+            if runtime_logger is not None:
+                runtime_logger.debug(f"[emotion] schedule inner_state update failed: {exc}")
+        except Exception:
+            pass
+
+
 __all__ = [
     "PreparedReplySemantics",
     "compose_reply_emotion_block",
     "persist_reply_emotion_state",
     "prepare_reply_semantics",
+    "schedule_inner_state_update_after_reply",
     "should_speak_in_random_chat",
 ]
