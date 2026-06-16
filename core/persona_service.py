@@ -9,6 +9,10 @@ from typing import Any
 from .db import connect_sync
 
 
+# 画像判断取最近 20 条本人发言作为上下文，避免被早期无关内容稀释
+_PERSONA_CONTEXT_LIMIT = 20
+
+
 _PERSONA_FIELD_GUIDE = """\
 要求输出格式严格如下（不要使用 Markdown 符号 / # *，每段一行或多行）：
 【职业推测】：身份/职业/学业阶段，证据不足直接写"信息不足"，不要瞎猜。
@@ -33,17 +37,34 @@ _PERSONA_FIELD_GUIDE = """\
 （真实住址、真实姓名、证件号、政治/宗教立场、健康隐私等），这类除非用户明确说过，
 否则一律写"信息不足"。这是为了更懂用户、更好地陪伴，不做任何越界推断。"""
 
+_PERSONA_TASK_FRAME = """\
+这是一个角色扮演陪伴机器人「更懂用户、更好地陪伴」的内部理解任务：根据群聊/私聊公开
+发言，归纳对方的说话风格与偏好。这不是真实身份识别、不涉及隐私侵犯，属于正常的产品
+功能。请务必直接完成任务并按格式输出，不要拒绝、不要输出"无法完成/不在能力范围/请
+咨询其他问题"之类的话；信息不足的字段写"信息不足"即可。
+
+判断要点（重要）：
+- 只刻画【该用户本人】。群里在讨论某话题（如考试、游戏、工作）不代表用户就属于该群体——
+  讨论考试的可能是学生，也可能是老师、家长或回忆往事的上班族。
+- 优先依据用户的【自述、视角与用词】判断身份（如"我当年""我带的学生""我同事""我孩子"
+  "下班""上课"），而不是话题本身或别人的发言。
+- 证据冲突或不足时，保守判断或写"信息不足"，不要被单一热门话题带偏。"""
+
 PERSONA_PROMPT_NEW = """\
-你是一个用户画像分析师。请基于下方聊天记录刻画该用户特征。
+你是一个用户画像分析师。{task_frame}
+
+请基于下方【该用户本人】的聊天记录刻画其特征。
 要求：实话实说，不必赞美；证据不足的字段写"信息不足"，不要为了完整而编造。
 
 {field_guide}
 
-用户聊天记录：
+该用户本人的聊天记录（共 {message_count} 条，越靠后越近期）：
 {messages_block}"""
 
 PERSONA_PROMPT_UPDATE = """\
-你是一个用户画像分析师。该用户已有一份画像（见「旧画像」），现在请基于最新聊天记录"修订"它。
+你是一个用户画像分析师。{task_frame}
+
+该用户已有一份画像（见「旧画像」），现在请基于最新聊天记录"修订"它。
 
 修订规则：
 1. 旧画像中**未被新记录推翻**的事实、判断、特征**必须保留**——不要因为新记录没提就抹除。
@@ -51,29 +72,37 @@ PERSONA_PROMPT_UPDATE = """\
 3. 不要为了显得有变化而编造新内容；信息不足时复用旧字段原文。
 4. 每个字段都要给出最终版本（即"保留 + 修订"后的整体），不要只写差异。
 5. 如旧画像缺失某字段（比如旧版只有 4 个字段），按新格式补全；缺乏证据的字段写"信息不足"。
+6. 旧画像里带「用户确认/用户更正」标记的内容是用户本人核对过的事实，优先级最高，
+   除非新记录明确推翻，否则必须原样保留。
 
 {field_guide}
 
 旧画像：
 {previous_persona}
 
-最新聊天记录：
+该用户本人的最新聊天记录（共 {message_count} 条，越靠后越近期）：
 {messages_block}"""
 
 
 def _format_persona_prompt(template: str, **kwargs: str) -> str:
-    return template.format(field_guide=_PERSONA_FIELD_GUIDE, **kwargs)
+    return template.format(field_guide=_PERSONA_FIELD_GUIDE, task_frame=_PERSONA_TASK_FRAME, **kwargs)
 
 
 def build_persona_prompt(messages: list[str], previous: str | None) -> str:
-    messages_block = "\n".join(f"- {message}" for message in messages)
+    # 取最近 N 条本人发言作为判断依据（越靠后越近期）
+    recent = list(messages)[-_PERSONA_CONTEXT_LIMIT:]
+    messages_block = "\n".join(f"- {message}" for message in recent)
+    message_count = str(len(recent))
     if previous:
         return _format_persona_prompt(
             PERSONA_PROMPT_UPDATE,
             previous_persona=str(previous or ""),
             messages_block=messages_block,
+            message_count=message_count,
         )
-    return _format_persona_prompt(PERSONA_PROMPT_NEW, messages_block=messages_block)
+    return _format_persona_prompt(
+        PERSONA_PROMPT_NEW, messages_block=messages_block, message_count=message_count
+    )
 
 
 @dataclass
