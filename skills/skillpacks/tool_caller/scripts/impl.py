@@ -1198,6 +1198,28 @@ from urllib.parse import unquote as _url_unquote
 from urllib.parse import urlparse as _url_parse
 
 
+def _expand_user_path(value: Any) -> _Path:
+    """Expand ``~`` while respecting HOME in tests and service wrappers.
+
+    On Windows, pathlib expands ``~`` from USERPROFILE and ignores a temporary
+    HOME set by tests. The CLI auth paths here are Unix-style on every platform,
+    so prefer HOME when it is explicitly present, then fall back to pathlib.
+    """
+    raw = str(value or "")
+    if raw == "~" or raw.startswith("~/") or raw.startswith("~\\"):
+        home = str(_os.environ.get("HOME", "") or "").strip()
+        if home:
+            suffix = raw[1:].lstrip("/\\")
+            base = _Path(home)
+            return base / suffix if suffix else base
+    return _Path(raw).expanduser()
+
+
+def _user_home_path() -> _Path:
+    home = str(_os.environ.get("HOME", "") or "").strip()
+    return _Path(home) if home else _Path.home()
+
+
 def _find_codex_auth_file(override_path: str = "") -> _Path | None:
     """
     按优先级查找 Codex auth.json：
@@ -1218,12 +1240,12 @@ def _find_codex_auth_file(override_path: str = "") -> _Path | None:
     ]
     for base in candidates:
         if base:
-            p = _Path(base) / "auth.json"
+            p = _expand_user_path(base) / "auth.json"
             if p.exists():
                 return p
 
     for fallback in ["~/.chatgpt-local/auth.json", "~/.codex/auth.json"]:
-        p = _Path(fallback).expanduser()
+        p = _expand_user_path(fallback)
         if p.exists():
             return p
 
@@ -2172,14 +2194,14 @@ def _find_gemini_cli_auth_file_with_log(override_path: str = "") -> tuple[_Path 
     """同时返回搜索过的所有路径，便于诊断"why gemini was skipped"。"""
     searched: list[str] = []
     if override_path:
-        p = _Path(override_path).expanduser()
+        p = _expand_user_path(override_path)
         searched.append(f"override={p}")
         if p.exists():
             return p, searched
     for env_name in ("GEMINI_CLI_HOME", "GEMINI_HOME"):
         base = _os.environ.get(env_name, "")
         if base:
-            p = _Path(base) / "oauth_creds.json"
+            p = _expand_user_path(base) / "oauth_creds.json"
             searched.append(f"${env_name}={p}")
             if p.exists():
                 return p, searched
@@ -2190,7 +2212,7 @@ def _find_gemini_cli_auth_file_with_log(override_path: str = "") -> tuple[_Path 
         "~/AppData/Roaming/gemini-cli/oauth_creds.json",
         "~/.config/gemini/oauth_creds.json",
     ]:
-        p = _Path(fallback).expanduser()
+        p = _expand_user_path(fallback)
         searched.append(str(p))
         if p.exists():
             return p, searched
@@ -2281,7 +2303,7 @@ def _sync_antigravity_keyring_to_file() -> _Path | None:
         "scope": _ANTIGRAVITY_FULL_SCOPE,
         "expiry_date": expiry_ms,
     }
-    target_dir = _Path.home() / ".gemini" / "antigravity-cli"
+    target_dir = _user_home_path() / ".gemini" / "antigravity-cli"
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -2301,20 +2323,20 @@ def _find_antigravity_cli_auth_file(override_path: str = "") -> _Path | None:
 def _is_gemini_cli_compat_auth_path(path: _Path) -> bool:
     """Best-effort path classifier for explicitly configured Gemini CLI creds."""
     try:
-        target = _Path(path).expanduser().resolve(strict=False)
+        target = _expand_user_path(path).resolve(strict=False)
     except Exception:
-        target = _Path(path).expanduser()
+        target = _expand_user_path(path)
     candidates: list[_Path] = []
     for env_name in ("GEMINI_CLI_HOME", "GEMINI_HOME"):
         base = _os.environ.get(env_name, "")
         if base:
-            candidates.append(_Path(base).expanduser() / "oauth_creds.json")
+            candidates.append(_expand_user_path(base) / "oauth_creds.json")
     for fallback in [
         "~/.gemini/oauth_creds.json",
         "~/AppData/Roaming/gemini-cli/oauth_creds.json",
         "~/.config/gemini/oauth_creds.json",
     ]:
-        candidates.append(_Path(fallback).expanduser())
+        candidates.append(_expand_user_path(fallback))
     for candidate in candidates:
         try:
             normalized = candidate.resolve(strict=False)
@@ -2339,7 +2361,7 @@ def _find_antigravity_cli_auth_file_with_source(
     if synced is not None:
         searched.append(f"synced from system keyring → {synced}")
     if override_path:
-        p = _Path(override_path).expanduser()
+        p = _expand_user_path(override_path)
         searched.append(f"override={p}")
         if p.exists():
             source = "gemini_compat" if _is_gemini_cli_compat_auth_path(p) else "antigravity"
@@ -2347,7 +2369,7 @@ def _find_antigravity_cli_auth_file_with_source(
     for env_name in ("ANTIGRAVITY_CLI_AUTH_PATH", "AGY_AUTH_PATH"):
         raw_path = _os.environ.get(env_name, "")
         if raw_path:
-            p = _Path(raw_path).expanduser()
+            p = _expand_user_path(raw_path)
             searched.append(f"${env_name}={p}")
             if p.exists():
                 source = "gemini_compat" if _is_gemini_cli_compat_auth_path(p) else "antigravity"
@@ -2358,7 +2380,7 @@ def _find_antigravity_cli_auth_file_with_source(
         base = _os.environ.get(env_name, "")
         if base:
             for filename in ("antigravity-oauth-token", "oauth_creds.json", "auth.json", "credentials.json"):
-                p = _Path(base) / filename
+                p = _expand_user_path(base) / filename
                 searched.append(f"${env_name}/{filename}={p}")
                 if p.exists():
                     return p, searched, "antigravity"
@@ -2378,7 +2400,7 @@ def _find_antigravity_cli_auth_file_with_source(
         "~/.config/antigravity-cli/auth.json",
         "~/.config/antigravity-cli/credentials.json",
     ]:
-        p = _Path(fallback).expanduser()
+        p = _expand_user_path(fallback)
         searched.append(str(p))
         if p.exists():
             return p, searched, "antigravity"
@@ -2599,6 +2621,28 @@ async def _refresh_antigravity_cli_access_token(
     )
 
 
+async def _call_refresh_token_remote(
+    refresh_func: Any,
+    refresh_token: str,
+    *,
+    proxy: str = "",
+    trust_env: bool | None = None,
+) -> dict:
+    import inspect
+
+    kwargs: dict[str, Any] = {}
+    try:
+        params = inspect.signature(refresh_func).parameters
+    except Exception:
+        params = {}
+    accepts_kwargs = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values())
+    if accepts_kwargs or "proxy" in params:
+        kwargs["proxy"] = proxy
+    if accepts_kwargs or "trust_env" in params:
+        kwargs["trust_env"] = trust_env
+    return await refresh_func(refresh_token, **kwargs)
+
+
 def _persist_refreshed_gemini_cli_auth(
     auth_path: _Path,
     auth: dict,
@@ -2705,9 +2749,9 @@ def _normalise_local_path(value: str) -> _Path | None:
     if not raw:
         return None
     try:
-        return _Path(raw).expanduser().resolve(strict=False)
+        return _expand_user_path(raw).resolve(strict=False)
     except Exception:
-        return _Path(raw).expanduser()
+        return _expand_user_path(raw)
 
 
 def _antigravity_project_workspace_paths(payload: Any) -> list[_Path]:
@@ -2740,7 +2784,7 @@ def _antigravity_project_workspace_paths(payload: Any) -> list[_Path]:
 
 def _resolve_antigravity_project_from_workspace_configs() -> str:
     """按当前工作目录匹配 agy 本地 workspace project 配置。"""
-    project_dir = _Path("~/.gemini/config/projects").expanduser()
+    project_dir = _expand_user_path("~/.gemini/config/projects")
     if not project_dir.exists():
         return ""
     try:
@@ -2774,7 +2818,7 @@ def _gemini_project_config_candidates(auth_file: _Path | None = None) -> list[_P
 
     def _add(path: _Path) -> None:
         try:
-            resolved = path.expanduser()
+            resolved = _expand_user_path(path)
         except Exception:
             resolved = path
         if resolved not in candidates:
@@ -2789,7 +2833,7 @@ def _gemini_project_config_candidates(auth_file: _Path | None = None) -> list[_P
         base = _os.environ.get(env_name, "")
         if base:
             for name in ("settings.json", "config.json", "oauth_creds.json"):
-                _add(_Path(base) / name)
+                _add(_expand_user_path(base) / name)
     for raw in (
         "~/.gemini/settings.json",
         "~/.gemini/config.json",
@@ -2810,7 +2854,7 @@ def _antigravity_project_config_candidates(auth_file: _Path | None = None) -> li
 
     def _add(path: _Path) -> None:
         try:
-            resolved = path.expanduser()
+            resolved = _expand_user_path(path)
         except Exception:
             resolved = path
         if resolved not in candidates:
@@ -2825,7 +2869,7 @@ def _antigravity_project_config_candidates(auth_file: _Path | None = None) -> li
         base = _os.environ.get(env_name, "")
         if base:
             for name in ("settings.json", "config.json", "oauth_creds.json", "auth.json", "credentials.json"):
-                _add(_Path(base) / name)
+                _add(_expand_user_path(base) / name)
     for raw in (
         "~/.gemini/antigravity-cli/settings.json",
         "~/.gemini/antigravity-cli/config.json",
@@ -2861,7 +2905,7 @@ def _read_gcloud_project() -> str:
     for raw in raw_candidates:
         if not raw:
             continue
-        base = _Path(raw).expanduser()
+        base = _expand_user_path(raw)
         files.append(base / "configurations" / "config_default")
         files.append(base / "active_config")
     for path in files:
@@ -3034,7 +3078,11 @@ class GeminiCliToolCaller(ToolCaller):
 
     async def _refresh_token_remote(self, refresh_token: str) -> dict:
         """子类可覆写：用对应的 OAuth client 续 token。默认走 gemini-cli。"""
-        return await _refresh_gemini_cli_access_token(refresh_token, proxy=self.proxy)
+        return await _call_refresh_token_remote(
+            _refresh_gemini_cli_access_token,
+            refresh_token,
+            proxy=self.proxy,
+        )
 
     async def _get_access_token(self, *, force_refresh: bool = False) -> tuple[str, _Path]:
         import time as _t
@@ -3592,16 +3640,18 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
         gemini-cli 凭证时必须用 gemini-cli client，否则 Google 会返回
         unauthorized_client。
         """
-        # 无显式代理且环境中未配置 HTTPS_PROXY 时，禁止 httpx 读取系统代理（TUN 兼容）；
-        # 有环境代理或显式 proxy 时，传 None 让 httpx 按默认逻辑决定（trust_env=True）。
-        trust_env: bool | None = False if not self.proxy and not _has_env_proxy() else None
+        # 显式 proxy 已足够表达路由意图；无显式 proxy 且环境中未配置代理时也禁用
+        # httpx 环境代理读取，避免服务进程被宿主机代理状态污染。
+        trust_env: bool | None = None if (not self.proxy and _has_env_proxy()) else False
         if getattr(self, "_last_auth_source", "") == "gemini_compat":
-            return await _refresh_gemini_cli_access_token(
+            return await _call_refresh_token_remote(
+                _refresh_gemini_cli_access_token,
                 refresh_token,
                 proxy=self.proxy,
                 trust_env=trust_env,
             )
-        return await _refresh_antigravity_cli_access_token(
+        return await _call_refresh_token_remote(
+            _refresh_antigravity_cli_access_token,
             refresh_token,
             proxy=self.proxy,
             trust_env=trust_env,
@@ -3901,7 +3951,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
 
 def _find_claude_code_auth_file(override_path: str = "") -> _Path | None:
     if override_path:
-        p = _Path(override_path).expanduser()
+        p = _expand_user_path(override_path)
         if p.exists():
             return p
     candidates = [
@@ -3910,7 +3960,7 @@ def _find_claude_code_auth_file(override_path: str = "") -> _Path | None:
     ]
     for base in candidates:
         if base:
-            p = _Path(base) / ".credentials.json"
+            p = _expand_user_path(base) / ".credentials.json"
             if p.exists():
                 return p
     for fallback in [
@@ -3918,7 +3968,7 @@ def _find_claude_code_auth_file(override_path: str = "") -> _Path | None:
         "~/AppData/Roaming/claude/.credentials.json",
         "~/.config/claude/.credentials.json",
     ]:
-        p = _Path(fallback).expanduser()
+        p = _expand_user_path(fallback)
         if p.exists():
             return p
     return None

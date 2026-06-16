@@ -264,7 +264,7 @@ def load_api_pool_config(plugin_config: Any, logger: Any) -> List[Dict[str, Any]
     providers = parse_api_pool_config(raw_config, logger)
 
     env_raw = _read_env_api_pool_raw()
-    env_providers = parse_api_pool_config(env_raw, logger) if env_raw else []
+    env_providers = _load_env_api_pool_config(logger)
 
     # 运行时为空（未配置或被异常清空）：直接用 .env 兜底救援。
     if not providers:

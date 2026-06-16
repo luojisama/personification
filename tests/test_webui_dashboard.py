@@ -123,7 +123,7 @@ def test_groups_list_and_detail(_runtime_with_data) -> None:
     res = client.get("/personification/api/groups")
     assert res.status_code == 200
     body = res.json()
-    assert "g1" in body["groups"]
+    assert any(group["group_id"] == "g1" for group in body["groups"])
 
     res2 = client.get("/personification/api/groups/g1/personas")
     assert res2.status_code == 200

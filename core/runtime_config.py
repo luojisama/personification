@@ -136,6 +136,27 @@ def _collect_explicit_env_fields(plugin_config: Any) -> set[str]:
     return explicit
 
 
+def _collect_env_json_fields(plugin_config: Any) -> set[str]:
+    """Collect fields explicitly persisted by ConfigManager/env_writer in env.json.
+
+    Startup loads env.json before runtime_config.json. Treat fields present in
+    env.json as higher-priority runtime overrides so stale managed_globals in
+    runtime_config.json cannot revert WebUI changes after a restart.
+    """
+    path = Path(get_data_dir(plugin_config)) / "env.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    return {
+        str(key or "").strip()
+        for key in payload.keys()
+        if str(key or "").strip().startswith("personification_")
+    }
+
+
 def _set_runtime_load_info(plugin_config: Any, info: dict[str, Any]) -> None:
     try:
         plugin_config.__dict__[_RUNTIME_INFO_ATTR] = info
@@ -217,9 +238,12 @@ def save_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
 def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUNTIME_CONFIG_PATH) -> None:
     """加载运行时配置并回填到插件配置对象。"""
     explicit_env_fields = _collect_explicit_env_fields(plugin_config)
+    env_json_fields = _collect_env_json_fields(plugin_config)
+    protected_runtime_fields = explicit_env_fields | env_json_fields
     info = {
         "path": str(path),
         "explicit_env_fields": sorted(explicit_env_fields),
+        "env_json_fields": sorted(env_json_fields),
         "applied_runtime_keys": [],
         "skipped_runtime_keys": [],
         "errors": [],
@@ -243,7 +267,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
         field_name="personification_web_search",
         value=data.get("web_search", True),
         runtime_key="web_search",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -254,7 +278,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
             getattr(plugin_config, "personification_web_search_always", False),
         ),
         runtime_key="web_search_always",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -265,7 +289,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
             getattr(plugin_config, "personification_builtin_search", True),
         ),
         runtime_key="builtin_search",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -280,7 +304,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
             ),
         ),
         runtime_key="model_builtin_search_enabled",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -295,7 +319,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
             ),
         ),
         runtime_key="tool_web_search_enabled",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -306,7 +330,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
             getattr(plugin_config, "personification_tool_web_search_mode", "enabled"),
         ),
         runtime_key="tool_web_search_mode",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -317,7 +341,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
             plugin_config.personification_schedule_global,
         ),
         runtime_key="schedule_global",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -328,7 +352,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
             plugin_config.personification_proactive_enabled,
         ),
         runtime_key="proactive_enabled",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -339,7 +363,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
             getattr(plugin_config, "personification_group_idle_enabled", False),
         ),
         runtime_key="group_idle_enabled",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -347,7 +371,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
         field_name="personification_global_enabled",
         value=data.get("global_enabled", True),
         runtime_key="global_enabled",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -355,7 +379,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
         field_name="personification_tts_global_enabled",
         value=data.get("tts_global_enabled", True),
         runtime_key="tts_global_enabled",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -366,7 +390,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
             getattr(plugin_config, "personification_skill_sources", None),
         ),
         runtime_key="skill_sources",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -377,7 +401,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
             getattr(plugin_config, "personification_skill_remote_enabled", False),
         ),
         runtime_key="skill_remote_enabled",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -388,7 +412,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
             getattr(plugin_config, "personification_skill_allow_unsafe_external", False),
         ),
         runtime_key="skill_allow_unsafe_external",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     _apply_runtime_value(
@@ -399,7 +423,7 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
             getattr(plugin_config, "personification_skill_require_admin_review", True),
         ),
         runtime_key="skill_require_admin_review",
-        explicit_env_fields=explicit_env_fields,
+        explicit_env_fields=protected_runtime_fields,
         info=info,
     )
     managed_globals = data.get("managed_globals", {})
@@ -412,14 +436,14 @@ def load_plugin_runtime_config(plugin_config: Any, logger: Any, path: Path = RUN
                 field_name=entry.field_name,
                 value=managed_globals[entry.key],
                 runtime_key=entry.key,
-                explicit_env_fields=explicit_env_fields,
+                explicit_env_fields=protected_runtime_fields,
                 info=info,
             )
     info["loaded"] = True
     _set_runtime_load_info(plugin_config, info)
     if info["skipped_runtime_keys"]:
         logger.info(
-            "personification: runtime_config respected explicit env overrides; skipped keys="
+            "personification: runtime_config respected env/env.json overrides; skipped keys="
             + ", ".join(sorted(info["skipped_runtime_keys"]))
         )
     if info["errors"]:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 
@@ -19,6 +21,12 @@ class _Logger:
 
     def error(self, *_args, **_kwargs) -> None:
         return None
+
+
+@pytest.fixture(autouse=True)
+def _isolate_env_api_pools(monkeypatch) -> None:
+    monkeypatch.setattr(provider_router, "_load_env_api_pool_config", lambda _logger: [])
+    monkeypatch.setattr(provider_router, "_read_env_api_pool_raw", lambda: "")
 
 
 class _Bundle:

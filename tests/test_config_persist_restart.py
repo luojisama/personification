@@ -12,6 +12,17 @@ runtime_config = load_personification_module("plugin.personification.core.runtim
 data_store = load_personification_module("plugin.personification.core.data_store")
 
 
+class _Logger:
+    def info(self, *_args, **_kwargs) -> None:
+        return None
+
+    def warning(self, *_args, **_kwargs) -> None:
+        return None
+
+    def error(self, *_args, **_kwargs) -> None:
+        return None
+
+
 def _setup(tmp_path, monkeypatch):
     # 无 .env 文件，env.json 落在 tmp_path
     monkeypatch.setattr(runtime_config, "_iter_env_file_candidates", lambda: [])
@@ -41,3 +52,56 @@ def test_env_json_retains_webui_field_after_load(tmp_path, monkeypatch) -> None:
 
     env_json = json.loads((tmp_path / "env.json").read_text(encoding="utf-8"))
     assert env_json.get("personification_probability") == 0.42
+
+
+def test_env_json_api_pools_wins_over_stale_runtime_managed_globals(tmp_path, monkeypatch) -> None:
+    cfg = _setup(tmp_path, monkeypatch)
+    old_pools = [
+        {
+            "name": "old_codex",
+            "api_type": "openai_codex",
+            "model": "gpt-5-codex",
+            "priority": 1,
+            "enabled": True,
+        }
+    ]
+    new_pools = [
+        {
+            "name": "new_gemini",
+            "api_type": "gemini_cli",
+            "model": "auto-gemini-3",
+            "priority": 1,
+            "enabled": True,
+        }
+    ]
+    env_writer.write_both("personification_api_pools", new_pools, cfg)
+    runtime_path = tmp_path / "runtime_config.json"
+    runtime_path.write_text(
+        json.dumps({"managed_globals": {"api_pools": old_pools}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    fresh = config_module.Config(personification_data_dir=str(tmp_path))
+    config_manager.ConfigManager(plugin_config=fresh, logger=None).load()
+    runtime_config.load_plugin_runtime_config(fresh, _Logger(), path=runtime_path)
+
+    assert fresh.personification_api_pools == new_pools
+    info = runtime_config.get_runtime_load_info(fresh)
+    assert "personification_api_pools" in info["env_json_fields"]
+    assert "api_pools" in info["skipped_runtime_keys"]
+
+
+def test_env_json_top_level_runtime_key_wins_over_runtime_config(tmp_path, monkeypatch) -> None:
+    cfg = _setup(tmp_path, monkeypatch)
+    env_writer.write_both("personification_web_search", False, cfg)
+    runtime_path = tmp_path / "runtime_config.json"
+    runtime_path.write_text(json.dumps({"web_search": True}, ensure_ascii=False), encoding="utf-8")
+
+    fresh = config_module.Config(personification_data_dir=str(tmp_path))
+    config_manager.ConfigManager(plugin_config=fresh, logger=None).load()
+    runtime_config.load_plugin_runtime_config(fresh, _Logger(), path=runtime_path)
+
+    assert fresh.personification_web_search is False
+    info = runtime_config.get_runtime_load_info(fresh)
+    assert "personification_web_search" in info["env_json_fields"]
+    assert "web_search" in info["skipped_runtime_keys"]
