@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,6 +83,33 @@ PERSONA_PROMPT_UPDATE = """\
 
 该用户本人的最新聊天记录（共 {message_count} 条，越靠后越近期）：
 {messages_block}"""
+
+
+# 画像文本【字段】→ 结构化 key（用于持久化与查询；性别/职业等半永久字段）
+_STRUCTURED_FIELD_MAP: dict[str, str] = {
+    "职业推测": "occupation", "年龄推测": "age_group", "性别推测": "gender",
+    "作息特征": "routine", "兴趣领域": "interests", "沟通风格": "communication_style",
+    "情绪基线": "emotion_baseline", "社交模式": "social_mode", "知识结构": "knowledge",
+    "称呼与昵称": "nickname_pref", "关系与亲密度": "relationship", "雷区与禁忌": "taboos",
+    "记忆锚点": "memory_anchors", "近期关注": "recent_focus", "内容偏好": "content_pref",
+}
+
+_STRUCTURED_LINE = re.compile(r"[【\[]\s*([^】\]]+?)\s*[】\]]\s*[:：]?\s*(.+)")
+
+
+def parse_persona_structured(text: str) -> dict[str, str]:
+    """把画像文本里的【字段】：内容 解析成结构化字典（确定性解析，不调用 LLM）。"""
+    out: dict[str, str] = {}
+    for raw_line in str(text or "").splitlines():
+        m = _STRUCTURED_LINE.match(raw_line.strip())
+        if not m:
+            continue
+        label = m.group(1).strip()
+        value = m.group(2).strip()
+        key = _STRUCTURED_FIELD_MAP.get(label)
+        if key and value and value not in {"信息不足", "未知", "不明"}:
+            out[key] = value[:200]
+    return out
 
 
 def _format_persona_prompt(template: str, **kwargs: str) -> str:
@@ -230,6 +258,28 @@ class PersonaStore:
         finally:
             self._generating.discard(uid)
 
+    async def apply_user_correction(self, user_id: str, corrections: dict[str, str]) -> PersonaEntry | None:
+        """用户/管理员对画像的更正：以最高优先级写入，并保留到后续再生成。
+
+        corrections: {中文字段名或key: 修正后的值}。会在画像文本顶部加「用户更正」块
+        （带标记），并持久化到 core profile 的 user_corrections，后续 UPDATE 提示词
+        会优先保留这些内容。
+        """
+        uid = str(user_id)
+        clean = {str(k).strip(): str(v).strip() for k, v in (corrections or {}).items() if str(v).strip()}
+        if not clean:
+            return self.get_persona(uid)
+        previous = self.get_persona(uid)
+        base_text = previous.data if previous else ""
+        # 去掉旧的用户更正块，避免重复堆叠
+        base_text = re.sub(r"【用户更正[^】]*】[\s\S]*?(?=\n\n|\Z)", "", base_text).strip()
+        block_lines = "\n".join(f"- {k}：{v}（用户本人确认）" for k, v in clean.items())
+        new_text = f"【用户更正（最高优先级，请始终保留）】\n{block_lines}\n\n{base_text}".strip()
+        entry = PersonaEntry(data=new_text, time=int(time.time()))
+        await asyncio.to_thread(self._save_persona_sync, uid, entry, False, corrections=clean)
+        self._logger.info(f"[user_persona] 用户 {uid} 画像已按用户更正修订：{list(clean.keys())}")
+        return entry
+
     async def _generate_and_save(self, user_id: str, history: list[str]) -> None:
         try:
             previous = self.get_persona(user_id)
@@ -245,12 +295,30 @@ class PersonaStore:
         finally:
             self._generating.discard(user_id)
 
-    def _save_persona_sync(self, user_id: str, entry: PersonaEntry, clear_history: bool) -> None:
+    def _save_persona_sync(
+        self, user_id: str, entry: PersonaEntry, clear_history: bool, *, corrections: dict | None = None
+    ) -> None:
         if self._profile_service is not None:
+            structured = parse_persona_structured(entry.data)
+            existing = None
+            try:
+                existing = self._profile_service.get_core_profile(str(user_id))
+            except Exception:
+                existing = None
+            # 保留历史用户更正（除非本次显式覆盖）
+            prior_corrections: dict = {}
+            if existing is not None and isinstance(getattr(existing, "profile_json", None), dict):
+                prior_corrections = dict(existing.profile_json.get("user_corrections", {}) or {})
+            if corrections:
+                prior_corrections.update(corrections)
             self._profile_service.upsert_core_profile(
                 user_id=str(user_id),
                 profile_text=entry.data,
-                profile_json={"updated_by": "persona_service"},
+                profile_json={
+                    "updated_by": "persona_service",
+                    "structured": structured,
+                    "user_corrections": prior_corrections,
+                },
                 source="persona_service",
             )
         with connect_sync() as conn:

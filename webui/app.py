@@ -1336,10 +1336,39 @@ function renderPersonaDetail() {
     <div class="between"><strong>群 ${escapeHtml(lp.group_id)}</strong><span class="muted" style="font-size:12px">${new Date(lp.updated_at*1000).toLocaleString()}</span></div>
     <pre style="white-space:pre-wrap;margin:6px 0 0;font-family:inherit">${escapeHtml(lp.profile_text)}</pre>
   </div>`).join("");
+  const structured = (core && core.structured) || {};
+  const corr = (core && core.user_corrections) || {};
+  const SKEY = {gender:"性别",age_group:"年龄段",occupation:"职业",interests:"兴趣",routine:"作息",communication_style:"沟通风格",emotion_baseline:"情绪基线",social_mode:"社交模式",knowledge:"知识结构",relationship:"关系",taboos:"雷区",memory_anchors:"记忆锚点",recent_focus:"近期关注",content_pref:"内容偏好",nickname_pref:"称呼偏好"};
+  const structRows = Object.keys(structured).map(k => `<tr>
+      <td style="white-space:nowrap">${escapeHtml(SKEY[k]||k)}${corr[SKEY[k]]||corr[k]?' <span class="device-status approved">已更正</span>':''}</td>
+      <td>${escapeHtml(String(structured[k]))}</td>
+    </tr>`).join("");
+  const structCard = `<div class="card"><h2>结构化字段（持久保存）</h2>
+    ${structRows?`<table><tbody>${structRows}</tbody></table>`:'<p class="muted">暂无结构化字段</p>'}
+    <div class="field-input" style="margin-top:12px">
+      <input id="corr-field" type="text" placeholder="字段（如 性别/职业）" style="max-width:160px">
+      <input id="corr-value" type="text" placeholder="更正为…" style="max-width:220px">
+      <button class="btn small primary" onclick="submitCorrection('${escapeAttr(p.user_id)}')">提交更正</button>
+    </div>
+    <p class="muted" style="font-size:11px;margin-top:6px">用户更正以最高优先级保留，后续画像重生成不会被覆盖。</p>
+  </div>`;
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedPersona=null;render()">返回列表</button><span class="muted">用户 ${escapeHtml(p.user_id)}</span></div>
     <div class="card"><h2>全局印象</h2>${core ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(core.profile_text || '')}</pre>` : '<p class="muted">无全局画像</p>'}</div>
+    ${structCard}
     <h3 style="margin-bottom:10px">各群印象（${(p.local_profiles||[]).length}）</h3>
     ${locals || '<p class="muted">无各群画像</p>'}`;
+}
+
+async function submitCorrection(uid) {
+  const field = (document.getElementById("corr-field")?.value||"").trim();
+  const value = (document.getElementById("corr-value")?.value||"").trim();
+  if (!field || !value) { alertFlash("err", "请填写字段与更正值"); return; }
+  try {
+    await api("/personas/"+encodeURIComponent(uid)+"/correction", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({corrections:{[field]:value}})});
+    alertFlash("ok", "已提交更正");
+    state.selectedPersona = await api("/personas/"+encodeURIComponent(uid));
+    render();
+  } catch (e) { alertFlash("err", e.message); }
 }
 
 function renderGroupSwitch() {
