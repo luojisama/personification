@@ -286,14 +286,34 @@ async def _search_checks(cfg: Any) -> list[dict[str, Any]]:
 
 
 def _skill_checks(cfg: Any, bundle: Any) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
     registry = getattr(bundle, "tool_registry", None) if bundle is not None else None
     if registry is None:
-        return [_check("tools", "已加载工具", _WARN, detail="工具注册表未就绪")]
+        checks.append(_check("tools", "已加载工具", _WARN, detail="工具注册表未就绪"))
+    else:
+        try:
+            n = len(list(registry.all()))
+        except Exception:
+            n = 0
+        checks.append(_check("tools", "已加载工具", _OK if n else _WARN, detail=f"{n} 个工具已注册就绪"))
+    # MCP（仅 stdio）
     try:
-        n = len(list(registry.all()))
-    except Exception:
-        n = 0
-    return [_check("tools", "已加载工具", _OK if n else _WARN, detail=f"{n} 个工具已注册就绪")]
+        from ..skill_runtime.mcp_compat import _REGISTERED_MCP_TOOLS
+
+        mcp_n = len(_REGISTERED_MCP_TOOLS)
+        checks.append(_check("mcp", "MCP 工具", _OK if mcp_n else _INFO,
+                             detail=(f"已接入 {mcp_n} 个 MCP 工具（stdio）" if mcp_n
+                                     else "未接入 MCP 工具；当前仅支持 stdio transport")))
+    except Exception as exc:
+        checks.append(_check("mcp", "MCP 工具", _INFO, detail=f"MCP 模块不可用：{str(exc)[:80]}"))
+    # 远程 skill
+    remote_on = bool(_get(cfg, "personification_skill_remote_enabled", False))
+    sources = _get(cfg, "personification_skill_sources", None)
+    src_n = len(sources) if isinstance(sources, (list, tuple)) else (1 if sources else 0)
+    checks.append(_check("remote_skill", "远程 Skill", _OK if remote_on else _DISABLED,
+                         detail=(f"已启用，配置 {src_n} 个来源（支持目录/zip/GitHub，不可信来源默认隔离）"
+                                 if remote_on else "已关闭")))
+    return checks
 
 
 def _social_checks(cfg: Any) -> list[dict[str, Any]]:
