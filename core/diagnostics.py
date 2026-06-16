@@ -82,9 +82,39 @@ def _core_checks(cfg: Any, superusers: set[str]) -> list[dict[str, Any]]:
     return checks
 
 
-async def _model_checks(cfg: Any, bundle: Any, logger: Any) -> list[dict[str, Any]]:
-    from .ai_routes import build_single_provider_caller, list_primary_providers
+async def _probe_provider(cfg: Any, provider: dict, *, key: str, label: str) -> dict:
+    """对单个 provider 真发一次最小调用，返回带详细原因的检查项。"""
+    from .ai_routes import build_single_provider_caller
     from .safety_filter import detect_api_block
+
+    started = time.monotonic()
+    try:
+        caller = build_single_provider_caller(cfg, provider)
+        resp = await asyncio.wait_for(
+            caller.chat_with_tools(messages=_PROBE_MESSAGES, tools=[], use_builtin_search=False),
+            timeout=_PROVIDER_PROBE_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        return _check(key, label, _ERROR, detail=f"调用超时（>{_PROVIDER_PROBE_TIMEOUT}s）",
+                      hint="检查该 provider 的网络/代理或换源")
+    except Exception as exc:
+        return _check(key, label, _ERROR, detail=f"调用失败：{str(exc)[:200]}",
+                      hint="多为 api_key 错误、地址不对、额度耗尽或网络不通")
+    ms = int((time.monotonic() - started) * 1000)
+    blocked = detect_api_block(resp)
+    content = str(getattr(resp, "content", "") or "").strip()
+    model = str(provider.get("model", "") or "")
+    if blocked:
+        return _check(key, label, _ERROR, detail=f"被安全策略拦截：{blocked}（{model}，{ms}ms）",
+                      hint="该 provider 对内容审查严格，建议换 provider 或软化提示词")
+    if content:
+        return _check(key, label, _OK, detail=f"调用正常（{model}，{ms}ms，返回 {len(content)} 字）")
+    return _check(key, label, _WARN, detail=f"返回空内容（{model}，{ms}ms）",
+                  hint="模型可能拒答或上下文为空，建议人工用「模型测试」复核")
+
+
+async def _model_checks(cfg: Any, bundle: Any, logger: Any) -> list[dict[str, Any]]:
+    from .ai_routes import list_primary_providers
 
     providers = list_primary_providers(cfg, logger) or []
     if not providers:
@@ -92,32 +122,38 @@ async def _model_checks(cfg: Any, bundle: Any, logger: Any) -> list[dict[str, An
                        detail="未配置任何 provider，主回复模型不可用",
                        hint="在「模型路由」添加至少一个 provider")]
 
-    async def _probe(provider: dict) -> dict:
+    async def _one(provider: dict) -> dict:
         name = str(provider.get("name") or f"{provider.get('api_type')}:{provider.get('model')}")
-        label = f"模型调用 · {name}"
-        started = time.monotonic()
-        try:
-            caller = build_single_provider_caller(cfg, provider)
-            resp = await asyncio.wait_for(
-                caller.chat_with_tools(messages=_PROBE_MESSAGES, tools=[], use_builtin_search=False),
-                timeout=_PROVIDER_PROBE_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            return _check(f"model_{name}", label, _ERROR, detail=f"调用超时（>{_PROVIDER_PROBE_TIMEOUT}s）")
-        except Exception as exc:
-            return _check(f"model_{name}", label, _ERROR, detail=f"调用失败：{str(exc)[:140]}")
-        ms = int((time.monotonic() - started) * 1000)
-        blocked = detect_api_block(resp)
-        content = str(getattr(resp, "content", "") or "").strip()
-        if blocked:
-            return _check(f"model_{name}", label, _ERROR, detail=f"被安全策略拦截：{blocked}（{ms}ms）",
-                          hint="换 provider 或软化提示词")
-        if content:
-            return _check(f"model_{name}", label, _OK, detail=f"调用正常，{ms}ms，返回 {len(content)} 字")
-        return _check(f"model_{name}", label, _WARN, detail=f"返回空内容（{ms}ms）")
+        return await _probe_provider(cfg, provider, key=f"model_{name}", label=f"模型调用 · {name}")
 
-    results = await asyncio.gather(*[_probe(p) for p in providers])
-    return list(results)
+    return list(await asyncio.gather(*[_one(p) for p in providers]))
+
+
+# 各 LLM 子角色（独立 api_* 字段）：(展示名, key, 字段前缀, model 字段名)
+_LLM_SUBROLES: tuple[tuple[str, str, str, str], ...] = (
+    ("画像模型", "persona", "personification_persona_api", "personification_persona_model"),
+    ("群风格模型", "style", "personification_style_api", "personification_style_api_model"),
+    ("视觉打标模型", "labeler", "personification_labeler_api", "personification_labeler_model"),
+    ("上下文压缩模型", "compress", "personification_compress_api", "personification_compress_model"),
+)
+
+
+async def _llm_subconfig_checks(cfg: Any) -> list[dict[str, Any]]:
+    """对画像/风格/视觉打标/压缩等独立子模型做真实调用探测；未单独配置则标注复用主模型。"""
+    async def _one(name: str, key: str, prefix: str, model_field: str) -> dict:
+        api_type = str(_get(cfg, f"{prefix}_type", "") or "").strip()
+        api_url = str(_get(cfg, f"{prefix}_url", "") or "").strip()
+        api_key = str(_get(cfg, f"{prefix}_key", "") or "").strip()
+        model = str(_get(cfg, model_field, "") or "").strip()
+        if not (api_key or api_url or api_type):
+            return _check(f"sub_{key}", name, _INFO, detail="未单独配置，复用主模型（随主模型一并验证）")
+        provider = {
+            "name": key, "api_type": api_type or "openai", "api_url": api_url,
+            "api_key": api_key, "model": model, "enabled": True, "priority": 1,
+        }
+        return await _probe_provider(cfg, provider, key=f"sub_{key}", label=f"{name}调用")
+
+    return list(await asyncio.gather(*[_one(*r) for r in _LLM_SUBROLES]))
 
 
 def _db_checks(cfg: Any) -> list[dict[str, Any]]:
@@ -320,6 +356,8 @@ async def _run_category(name: str, *, cfg, bundle, su, get_bots, logger) -> list
         return _safe_list(lambda: _core_checks(cfg, su))
     if name == "模型调用":
         return await _model_checks(cfg, bundle, logger)
+    if name == "LLM 子模型":
+        return await _llm_subconfig_checks(cfg)
     if name == "存储":
         return _safe_list(lambda: _db_checks(cfg))
     if name == "记忆":
@@ -350,10 +388,17 @@ async def _run_category(name: str, *, cfg, bundle, su, get_bots, logger) -> list
 
 
 CATEGORY_NAMES: tuple[str, ...] = (
-    "核心", "模型调用", "存储", "记忆", "用户画像", "群聊", "表情包",
+    "核心", "模型调用", "LLM 子模型", "存储", "记忆", "用户画像", "群聊", "表情包",
     "TTS 语音", "QQ 空间", "联网搜索", "Skill 扩展", "主动社交", "人设",
     "协议端", "WebUI 安全",
 )
+
+# 全量体检结果缓存：WebUI 默认读缓存（秒开），仅启动 / 配置变更 / 手动刷新时重算
+_CACHE: dict[str, Any] = {"result": None}
+
+
+def get_cached_diagnostics() -> dict[str, Any] | None:
+    return _CACHE.get("result")
 
 
 async def run_diagnostics(
@@ -379,7 +424,7 @@ async def run_diagnostics(
         for chk in cat["checks"]:
             summary[chk.get("status", _INFO)] = summary.get(chk.get("status", _INFO), 0) + 1
     overall = _ERROR if summary[_ERROR] else (_WARN if summary[_WARN] else _OK)
-    return {
+    result = {
         "generated_at": time.time(),
         "overall": overall,
         "summary": summary,
@@ -387,6 +432,27 @@ async def run_diagnostics(
         "live": True,
         "partial": bool(only),
     }
+    if not only:
+        _CACHE["result"] = result  # 仅缓存全量结果
+    return result
 
 
-__all__ = ["run_diagnostics", "CATEGORY_NAMES"]
+async def warm_diagnostics(
+    *, plugin_config: Any, bundle: Any = None, superusers: set[str] | None = None,
+    get_bots: Any = None, logger: Any = None,
+) -> None:
+    """后台运行一次全量体检并写入缓存（启动 / 配置变更时调用），异常不外抛。"""
+    try:
+        await run_diagnostics(
+            plugin_config=plugin_config, bundle=bundle, superusers=superusers,
+            get_bots=get_bots, logger=logger,
+        )
+    except Exception as exc:  # pragma: no cover
+        if logger is not None:
+            try:
+                logger.warning(f"[diagnostics] warm 失败: {exc}")
+            except Exception:
+                pass
+
+
+__all__ = ["run_diagnostics", "warm_diagnostics", "get_cached_diagnostics", "CATEGORY_NAMES"]

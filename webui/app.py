@@ -381,7 +381,7 @@ async function loadView() {
     } else if (state.view === "test") {
       /* nothing to preload */
     } else if (state.view === "health") {
-      state.health = await api("/health/check");
+      state.health = await api("/health/check");  // 默认读缓存，秒开
     } else if (state.view === "persona_prompt") {
       const qs = state.personaPromptPath ? ("?path=" + encodeURIComponent(state.personaPromptPath)) : "";
       state.personaPrompt = await api("/test/persona-prompt" + qs);
@@ -1178,7 +1178,8 @@ function renderHealth() {
       <h2 style="margin:0">功能体检 <span class="health-badge ${overall.cls}" title="${overall.label}"></span> <span class="muted" style="font-size:13px">${overall.label}</span></h2>
       <button class="btn small" onclick="refreshHealth()">${state.loading?'检测中…':'全部重新检测'}</button>
     </div>
-    <p class="muted" style="font-size:12px;margin:8px 0 0">对各模块做<b>真实调用探测</b>（模型逐个真发一次、数据库/记忆/画像真实读、TTS/空间/搜索真实连通），耗时数秒并消耗少量 token。可点单项「重测」逐个自检。红=异常，黄=会影响行为，灰=未启用。</p>
+    <p class="muted" style="font-size:12px;margin:8px 0 0">对各模块做<b>真实调用探测</b>（含画像/风格/视觉打标等子模型）。结果缓存展示、秒开；启动与配置变更后自动重跑，也可点「全部重新检测」或单项「重测」。红=异常，黄=会影响行为，灰=未启用。</p>
+    <p class="muted" style="font-size:11px;margin:4px 0 0">${h.generated_at?('上次检测：'+new Date(h.generated_at*1000).toLocaleString()+(h.cached?'（缓存）':'')):''}</p>
     <div class="health-summary" style="margin-top:14px">
       ${pill('error')}${pill('warn')}${pill('ok')}${pill('disabled')}
     </div>
@@ -1189,7 +1190,7 @@ function renderHealth() {
 
 async function refreshHealth() {
   state.loading = true; render();
-  try { state.health = await api("/health/check"); } catch (e) { alertFlash("err", "检测失败：" + e.message); }
+  try { state.health = await api("/health/check?refresh=true"); } catch (e) { alertFlash("err", "检测失败：" + e.message); }
   state.loading = false; render();
 }
 

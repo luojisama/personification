@@ -6,6 +6,27 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ...core import config_registry, env_writer, webui_audit_log
 from ..deps import AdminIdentity, require_admin
+
+
+def _schedule_diagnostics_warm(runtime: Any) -> None:
+    """配置变更后后台刷新功能体检缓存；never-raise。"""
+    import asyncio
+
+    from ...core.diagnostics import warm_diagnostics
+
+    async def _run() -> None:
+        await warm_diagnostics(
+            plugin_config=getattr(runtime, "plugin_config", None),
+            bundle=getattr(runtime, "runtime_bundle", None),
+            superusers=getattr(runtime, "superusers", set()),
+            get_bots=getattr(runtime, "get_bots", None),
+            logger=getattr(runtime, "logger", None),
+        )
+
+    try:
+        asyncio.create_task(_run())
+    except Exception:
+        pass
 from ..schemas import (
     ConfigEntriesResponse,
     ConfigEntryView,
@@ -185,6 +206,9 @@ def build_config_router(*, runtime) -> APIRouter:
             detail={"errors": result.get("errors", []), "secret": bool(entry.secret)},
             outcome="ok" if not result["errors"] else "partial",
         )
+        # 配置变更后后台重跑一次功能体检，刷新缓存（不阻塞本次响应）
+        if not result["errors"]:
+            _schedule_diagnostics_warm(runtime)
         return ConfigUpdateResponse(
             success=not result["errors"],
             errors=list(result["errors"]),

@@ -68,10 +68,19 @@ def build_health_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/health", tags=["health"])
 
     @router.get("/check")
-    async def check(only: str = Query(default=""), _: AdminIdentity = Depends(require_admin)) -> dict:
-        from ...core.diagnostics import run_diagnostics
+    async def check(
+        only: str = Query(default=""),
+        refresh: bool = Query(default=False),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...core.diagnostics import get_cached_diagnostics, run_diagnostics
 
-        return await run_diagnostics(
+        # 默认返回缓存（秒开）；only=单项 或 refresh=true 时才真实重跑
+        if not only and not refresh:
+            cached = get_cached_diagnostics()
+            if cached is not None:
+                return {**cached, "cached": True}
+        result = await run_diagnostics(
             plugin_config=getattr(runtime, "plugin_config", None),
             bundle=getattr(runtime, "runtime_bundle", None),
             superusers=getattr(runtime, "superusers", set()),
@@ -79,6 +88,7 @@ def build_health_router(*, runtime) -> APIRouter:
             logger=getattr(runtime, "logger", None),
             only=only.strip(),
         )
+        return {**result, "cached": False}
 
     @router.post("/interaction-test")
     async def interaction_test(

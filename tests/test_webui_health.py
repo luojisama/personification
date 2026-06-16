@@ -39,6 +39,7 @@ def _no_network(monkeypatch):
         return True, "HTTP 200"
 
     monkeypatch.setattr(diagnostics, "_http_reachable", _reachable)
+    monkeypatch.setattr(diagnostics, "_CACHE", {"result": None})  # 每个测试清空体检缓存
 
 
 def _set_csrf(client) -> None:
@@ -76,7 +77,7 @@ def test_health_model_call_failure_is_error(_runtime_context, monkeypatch) -> No
     monkeypatch.setattr(ai_routes, "build_single_provider_caller", lambda cfg, prov, **kw: _Boom())
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
-    body = client.get("/personification/api/health/check").json()
+    body = client.get("/personification/api/health/check", params={"refresh": "true"}).json()
     st = _statuses(body)
     model_keys = [k for k in st if k.startswith("model_")]
     assert st[model_keys[0]]["status"] == "error"
@@ -98,6 +99,27 @@ def test_health_only_runs_single_category(_runtime_context) -> None:
     body = client.get("/personification/api/health/check", params={"only": "存储"}).json()
     assert body["partial"] is True
     assert [c["name"] for c in body["categories"]] == ["存储"]
+
+
+def test_health_caches_full_run_and_serves_fast(_runtime_context, monkeypatch) -> None:
+    diag = load_personification_module("plugin.personification.core.diagnostics")
+    monkeypatch.setattr(diag, "_CACHE", {"result": None})
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    # refresh 真跑并写缓存
+    first = client.get("/personification/api/health/check", params={"refresh": "true"}).json()
+    assert first["cached"] is False
+    # 默认读缓存
+    second = client.get("/personification/api/health/check").json()
+    assert second["cached"] is True
+    assert second["generated_at"] == first["generated_at"]
+
+
+def test_health_includes_llm_subconfig_category(_runtime_context) -> None:
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    body = client.get("/personification/api/health/check", params={"refresh": "true"}).json()
+    assert "LLM 子模型" in [c["name"] for c in body["categories"]]
 
 
 def test_interaction_test_requires_configured_target(_runtime_context) -> None:
