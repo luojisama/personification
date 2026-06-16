@@ -294,6 +294,11 @@ _REQUIRED_KEYS: frozenset[str] = frozenset({"global_enabled", "api_pools"})
 
 _SECRET_FIELD_HINTS: tuple[str, ...] = ("_api_key", "_token", "_secret", "auth_path", "cookie")
 
+# value_type=="list" 但元素是对象 / 结构化项的字段，保留 JSON 编辑器
+_OBJECT_LIST_KEYS: frozenset[str] = frozenset({
+    "api_pools", "skill_sources",
+})
+
 
 def _infer_group(key: str) -> str:
     for predicate, name in _GROUP_RULES:
@@ -317,7 +322,13 @@ def _infer_kind(entry: ConfigEntry, *, secret: bool) -> str:
         return "path"
     if entry.choices:
         return "select"
-    if entry.value_type in {"dict", "list"}:
+    if entry.value_type == "list":
+        # 对象数组（provider 池 / 远程 skill 源 / 社交场景配置）保留 JSON 编辑；
+        # 简单字符串数组用更友好的「逐项增删」编辑器。
+        if entry.key in _OBJECT_LIST_KEYS:
+            return "json"
+        return "strlist"
+    if entry.value_type == "dict":
         return "json"
     if entry.value_type == "int":
         return "int"

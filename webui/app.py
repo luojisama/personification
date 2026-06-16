@@ -232,6 +232,9 @@ td code, .field-head code { word-break:break-all; }
 .hs-ok { background:var(--ok); } .hs-warn { background:var(--warn); }
 .hs-error { background:var(--danger); } .hs-disabled { background:var(--muted); } .hs-info { background:var(--accent); }
 .health-badge { width:10px; height:10px; border-radius:50%; display:inline-block; }
+.strlist-editor { width:100%; max-width:560px; }
+.strlist-row { display:flex; gap:6px; margin-bottom:6px; }
+.strlist-row input { flex:1; min-width:0; }
 
 /* Mobile 响应式 */
 @media (max-width: 768px) {
@@ -1880,6 +1883,9 @@ function renderInput(e) {
     const opts = e.choices.map(c => `<option value="${escapeAttr(c)}" ${cur===c?'selected':''}>${escapeHtml(c)}</option>`).join("");
     return `<select onchange="saveField('${escapeAttr(e.field_name)}', this.value)">${opts}</select>`;
   }
+  if (e.kind === "strlist") {
+    return renderStrListEditor(e);
+  }
   if (e.kind === "json") {
     const text = cur == null ? "" : (typeof cur === "string" ? cur : JSON.stringify(cur, null, 2));
     return `<textarea data-raw="json" oninput="markDirty(this)">${escapeHtml(text)}</textarea>
@@ -1899,6 +1905,48 @@ function renderInput(e) {
   }
   return `<input type="text" value="${escapeAttr(cur==null?'':cur)}" oninput="markDirty(this)">
     <button class="btn small primary" onclick="commitTextField('${escapeAttr(e.field_name)}', this, 'text')">保存</button>`;
+}
+
+function strListValue(cur) {
+  if (Array.isArray(cur)) return cur.map(x => String(x));
+  if (typeof cur === "string" && cur.trim()) {
+    try { const p = JSON.parse(cur); if (Array.isArray(p)) return p.map(x => String(x)); } catch {}
+    return cur.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function renderStrListEditor(e) {
+  const items = strListValue(e.current);
+  const field = escapeAttr(e.field_name);
+  const rows = items.map((v, i) => `<div class="strlist-row" data-strlist-row>
+      <input type="text" value="${escapeAttr(v)}" oninput="markDirty(this)">
+      <button class="btn small danger" onclick="this.closest('[data-strlist-row]').remove();markDirty(this)">删</button>
+    </div>`).join("");
+  return `<div class="strlist-editor" data-strlist-field="${field}">
+    <div class="strlist-rows">${rows || '<div class="muted" style="font-size:12px">（空）</div>'}</div>
+    <div class="row" style="margin-top:6px">
+      <button class="btn small" onclick="addStrListRow('${field}')">+ 添加一项</button>
+      <button class="btn small primary" onclick="saveStrList('${field}')">保存</button>
+    </div>
+  </div>`;
+}
+
+function addStrListRow(field) {
+  const root = document.querySelector(`[data-strlist-field="${CSS.escape(field)}"] .strlist-rows`);
+  if (!root) return;
+  const empty = root.querySelector(".muted"); if (empty) empty.remove();
+  const div = document.createElement("div");
+  div.className = "strlist-row"; div.setAttribute("data-strlist-row", "");
+  div.innerHTML = `<input type="text" value="" oninput="markDirty(this)"><button class="btn small danger" onclick="this.closest('[data-strlist-row]').remove()">删</button>`;
+  root.appendChild(div); div.querySelector("input").focus();
+}
+
+function saveStrList(field) {
+  const root = document.querySelector(`[data-strlist-field="${CSS.escape(field)}"]`);
+  if (!root) return;
+  const vals = Array.from(root.querySelectorAll('[data-strlist-row] input')).map(i => i.value.trim()).filter(Boolean);
+  saveField(field, vals);
 }
 
 function normalizeApiPoolValue(value) {
