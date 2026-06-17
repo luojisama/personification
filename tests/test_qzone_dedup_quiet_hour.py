@@ -105,7 +105,7 @@ def test_proactive_qzone_post_skipped_in_quiet_hour() -> None:
         qzone_publish_available=True,
         qzone_proactive_enabled=True,
         qzone_probability=1.0,
-        qzone_daily_limit=10,
+        qzone_monthly_limit=10,
         qzone_min_interval_hours=0,
         get_bots=lambda: {"1": SimpleNamespace(self_id="1")},
         get_now=lambda: fake_now,
@@ -147,7 +147,7 @@ def test_proactive_qzone_post_runs_outside_quiet_hour(tmp_path, monkeypatch) -> 
         qzone_publish_available=True,
         qzone_proactive_enabled=True,
         qzone_probability=1.0,
-        qzone_daily_limit=10,
+        qzone_monthly_limit=10,
         qzone_min_interval_hours=0,
         get_bots=lambda: {"1": SimpleNamespace(self_id="1")},
         get_now=lambda: fake_now,
@@ -164,3 +164,86 @@ def test_proactive_qzone_post_runs_outside_quiet_hour(tmp_path, monkeypatch) -> 
     # 但因为 generate 返空，最终未真正发布
     assert publish_called == []
     assert result is False
+
+
+# ---- 月度限额 ----
+
+
+def _make_runner(now, *, monthly_limit, publish_called, generate=lambda: "今天写点什么"):
+    async def _upd(_bot):
+        return True, "ok"
+
+    async def _gen(_bot):
+        return generate()
+
+    async def _pub(content, self_id):
+        publish_called.append(content)
+        return True, "ok"
+
+    return periodic_jobs.run_proactive_qzone_post(
+        qzone_publish_available=True,
+        qzone_proactive_enabled=True,
+        qzone_probability=1.0,
+        qzone_monthly_limit=monthly_limit,
+        qzone_min_interval_hours=0,
+        get_bots=lambda: {"1": SimpleNamespace(self_id="1")},
+        get_now=lambda: now,
+        update_qzone_cookie=_upd,
+        maybe_generate_qzone_post=_gen,
+        publish_qzone_shuo=_pub,
+        logger=SimpleNamespace(debug=lambda *_a, **_k: None, warning=lambda *_a, **_k: None,
+                               info=lambda *_a, **_k: None, error=lambda *_a, **_k: None),
+        quiet_hour_start=0,
+        quiet_hour_end=7,
+    )
+
+
+def _seed_state(tmp_path, monkeypatch, state) -> None:
+    data_store_mod = load_personification_module("plugin.personification.core.data_store")
+    paths_mod = load_personification_module("plugin.personification.core.paths")
+    monkeypatch.setattr(paths_mod, "get_data_dir", lambda _cfg=None: tmp_path)
+    data_store_mod.init_data_store(SimpleNamespace(personification_data_dir=str(tmp_path)))
+    data_store_mod.get_data_store().save_sync("qzone_post_state", state)
+
+
+def test_monthly_limit_blocks_after_quota(tmp_path, monkeypatch) -> None:
+    """本月已发满 30 条 → 直接 skip，不发布。"""
+    _seed_state(tmp_path, monkeypatch,
+                {"period": "2026-06", "count": 30, "last_post_at": 0, "recent_contents": []})
+    published: list = []
+    result = asyncio.run(_make_runner(datetime(2026, 6, 17, 14, 0),
+                                      monthly_limit=30, publish_called=published))
+    assert result is False
+    assert published == []
+
+
+def test_monthly_limit_resets_on_new_month(tmp_path, monkeypatch) -> None:
+    """跨月后计数归零，可继续发布，并写回新 period。"""
+    _seed_state(tmp_path, monkeypatch,
+                {"period": "2026-06", "count": 30, "last_post_at": 0, "recent_contents": []})
+    published: list = []
+    result = asyncio.run(_make_runner(datetime(2026, 7, 1, 14, 0),
+                                      monthly_limit=30, publish_called=published))
+    assert result is True
+    assert len(published) == 1
+    state = load_personification_module(
+        "plugin.personification.core.data_store"
+    ).get_data_store().load_sync("qzone_post_state")
+    assert state["period"] == "2026-07"
+    assert state["count"] == 1
+
+
+def test_old_daily_state_migrates_to_monthly(tmp_path, monkeypatch) -> None:
+    """旧的按天 state（只有 date 字段）被视为重置，按月重新计数。"""
+    _seed_state(tmp_path, monkeypatch,
+                {"date": "2026-08-01", "count": 3, "last_post_at": 0, "recent_contents": []})
+    published: list = []
+    result = asyncio.run(_make_runner(datetime(2026, 8, 15, 14, 0),
+                                      monthly_limit=30, publish_called=published))
+    assert result is True
+    assert len(published) == 1
+    state = load_personification_module(
+        "plugin.personification.core.data_store"
+    ).get_data_store().load_sync("qzone_post_state")
+    assert state["period"] == "2026-08"
+    assert state["count"] == 1

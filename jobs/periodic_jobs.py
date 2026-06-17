@@ -180,7 +180,7 @@ async def run_proactive_qzone_post(
     qzone_publish_available: bool,
     qzone_proactive_enabled: bool,
     qzone_probability: float,
-    qzone_daily_limit: int,
+    qzone_monthly_limit: int,
     qzone_min_interval_hours: float,
     get_bots: Callable[[], Dict[str, Any]],
     get_now: Callable[[], Any],
@@ -208,16 +208,18 @@ async def run_proactive_qzone_post(
             f"[qzone] skip proactive post in quiet hour {quiet_hour_start}-{quiet_hour_end}"
         )
         return False
-    today = now.strftime("%Y-%m-%d")
+    period = now.strftime("%Y-%m")
     now_ts = time.time()
 
     store = get_data_store()
     state = store.load_sync("qzone_post_state")
     if not isinstance(state, dict):
         state = {}
-    if state.get("date") != today:
+    # 按月计数：跨月（或旧的按天 state，缺少 period 字段）时 count 归零，
+    # last_post_at / recent_contents 照旧 carry over 喂去重。
+    if state.get("period") != period:
         state = {
-            "date": today,
+            "period": period,
             "count": 0,
             "last_post_at": float(state.get("last_post_at", 0) or 0),
             "last_content": str(state.get("last_content", "") or ""),
@@ -226,7 +228,7 @@ async def run_proactive_qzone_post(
             else [],
         }
 
-    if int(state.get("count", 0) or 0) >= max(1, int(qzone_daily_limit)):
+    if int(state.get("count", 0) or 0) >= max(1, int(qzone_monthly_limit)):
         return False
     min_interval_seconds = max(0.0, float(qzone_min_interval_hours)) * 3600
     last_post_at = float(state.get("last_post_at", 0) or 0)
@@ -250,7 +252,7 @@ async def run_proactive_qzone_post(
         logger.error(f"拟人插件：主动说说发布失败：{msg}")
         return False
 
-    state["date"] = today
+    state["period"] = period
     state["count"] = int(state.get("count", 0) or 0) + 1
     state["last_post_at"] = now_ts
     _remember_qzone_post(state, content)

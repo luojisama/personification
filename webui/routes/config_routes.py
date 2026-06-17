@@ -46,7 +46,7 @@ _RECOMMENDED_DEFAULTS: dict[str, Any] = {
     "personification_qzone_enabled": True,
     "personification_qzone_proactive_enabled": True,
     "personification_qzone_check_interval": 90,
-    "personification_qzone_daily_limit": 3,
+    "personification_qzone_monthly_limit": 30,
     "personification_qzone_min_interval_hours": 6,
     "personification_labeler_enabled": True,
     "personification_labeler_concurrency": 3,

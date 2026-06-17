@@ -7,6 +7,22 @@ from ._loader import load_personification_module
 
 
 diary_flow = load_personification_module("plugin.personification.flows.diary_flow")
+simple_loop = load_personification_module(
+    "plugin.personification.agent.runtime.simple_loop"
+)
+
+
+class _Resp:
+    def __init__(self, content: str, tool_calls=None) -> None:
+        self.content = content
+        self.tool_calls = tool_calls or []
+
+
+class _ToolCall:
+    def __init__(self, call_id: str, name: str, arguments: dict) -> None:
+        self.id = call_id
+        self.name = name
+        self.arguments = arguments
 
 
 class _Logger:
@@ -106,3 +122,111 @@ def test_generate_ai_diary_skips_too_similar_recent_post(monkeypatch) -> None:  
 
     assert result == ""
     assert any("repeats recent content" in item for item in logger.infos)
+
+
+def test_run_tool_loop_text_executes_tool_then_returns_content(monkeypatch) -> None:  # noqa: ANN001
+    """工具循环：首轮返回 tool_calls 执行工具，次轮返回最终文本。"""
+
+    class _Caller:
+        def __init__(self) -> None:
+            self.rounds = 0
+            self.builtin_search_seen: list = []
+
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            self.builtin_search_seen.append(use_builtin_search)
+            self.rounds += 1
+            if self.rounds == 1:
+                return _Resp("", [_ToolCall("c1", "web_search", {"query": "天气"})])
+            return _Resp(json.dumps({"content": "今天有点冷", "image_prompt": ""}, ensure_ascii=False))
+
+        def build_tool_result_message(self, call_id, name, result):  # noqa: ANN001
+            return {"role": "tool", "tool_call_id": call_id, "name": name, "content": result}
+
+    class _Registry:
+        def get(self, _name):  # noqa: ANN001
+            return object()
+
+        def openai_schemas(self):  # noqa: ANN201
+            return [{"type": "function", "function": {"name": "web_search", "parameters": {}}}]
+
+    executed: list = []
+
+    async def _fake_exec(*, registry, tool_name, tool_args, rewritten_query, user_images, logger):  # noqa: ANN001
+        executed.append(tool_name)
+        return tool_args, "tianqi 5 度"
+
+    monkeypatch.setattr(simple_loop, "_execute_tool_with_retries", _fake_exec)
+    monkeypatch.setattr(
+        simple_loop,
+        "select_tool_schemas",
+        lambda registry, *, has_images, chat_intent="": registry.openai_schemas(),
+    )
+
+    caller = _Caller()
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "写说说"}]
+    out = asyncio.run(
+        simple_loop.run_tool_loop_text(
+            messages,
+            registry=_Registry(),
+            tool_caller=caller,
+            logger=_Logger(),
+            max_steps=4,
+            use_builtin_search=True,
+        )
+    )
+
+    assert json.loads(out)["content"] == "今天有点冷"
+    assert caller.rounds == 2
+    assert executed == ["web_search"]
+    assert caller.builtin_search_seen[0] is True
+    # 工具结果被回填进消息历史
+    assert any(m.get("role") == "tool" for m in messages)
+
+
+def test_build_qzone_post_rewrites_ooc_search_talk() -> None:
+    """生成内容若漏出"根据搜索结果"等搜索腔，应被去 AI 腔重写。"""
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            assert tools == []  # rewrite 走空工具
+            return _Resp("外面风有点大")
+
+        def build_tool_result_message(self, *_a):  # noqa: ANN001
+            return {}
+
+    result = asyncio.run(
+        diary_flow._build_qzone_post_with_optional_image(
+            content="根据搜索结果，今天天气不错",
+            image_prompt="",
+            tool_caller=_Caller(),
+            logger=_Logger(),
+            recent_posts=[],
+            persona_system="你是某角色",
+        )
+    )
+
+    assert result == "外面风有点大"
+
+
+def test_build_qzone_post_drops_when_ooc_rewrite_fails() -> None:
+    """去 AI 腔重写失败（仍是搜索腔）则丢弃该条，宁缺勿发。"""
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            return _Resp("我查了一下资料发现")  # 仍是 OOC
+
+        def build_tool_result_message(self, *_a):  # noqa: ANN001
+            return {}
+
+    result = asyncio.run(
+        diary_flow._build_qzone_post_with_optional_image(
+            content="根据搜索结果，今天天气不错",
+            image_prompt="",
+            tool_caller=_Caller(),
+            logger=_Logger(),
+            recent_posts=[],
+            persona_system="x",
+        )
+    )
+
+    assert result == ""

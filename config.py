@@ -252,7 +252,8 @@ class Config(BaseModel):
     qzone_cookie: str = ""
     personification_qzone_proactive_enabled: bool = True
     personification_qzone_check_interval: int = 30
-    personification_qzone_daily_limit: int = 3
+    personification_qzone_monthly_limit: int = 30
+    personification_qzone_agent_max_steps: int = 4
     personification_qzone_probability: float = 0.35
     personification_qzone_min_interval_hours: float = 6.0
     personification_qzone_social_enabled: bool = True

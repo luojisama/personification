@@ -1695,7 +1695,7 @@ def _build_entries() -> list[ConfigEntry]:
             value_type="bool",
             default=False,
             scope=GLOBAL_SCOPE,
-            description="开启后 bot 会按 inner_state / 主动发表节奏自主发空间说说，受 daily_limit 与 min_interval_hours 约束。",
+            description="开启后 bot 会按 inner_state / 主动发表节奏自主发空间说说，受 monthly_limit 与 min_interval_hours 约束。",
             category="config",
             help_aliases=("qzone主动发表", "空间主动"),
             parser=_bool_parser,
