@@ -276,3 +276,52 @@ def test_review_qzone_post_keeps_clean_text_untouched() -> None:
     )
 
     assert result == "下午三点的阳光有点刺眼"
+
+
+def test_generate_once_reinforces_persona_in_system_prompt() -> None:
+    """发空间生成必须保留角色人设：旧的"不扮演角色"措辞已去除，并注入人设快照。"""
+    captured: dict = {}
+
+    async def _call(messages, **_kwargs):  # noqa: ANN001
+        captured["messages"] = messages
+        return json.dumps({"content": "楼下的猫又来蹭饭了", "image_prompt": ""}, ensure_ascii=False)
+
+    asyncio.run(
+        diary_flow._generate_once(
+            "你是白咲真寻，一个有点中二又傲娇的少女。",
+            "写一条说说",
+            call_ai_api=_call,
+            use_builtin_search=False,
+        )
+    )
+    system = captured["messages"][0]["content"]
+    assert "你是白咲真寻" in system  # 原始人设被保留
+    assert "你不在群聊中扮演角色" not in system  # 误导性旧措辞已移除
+    assert "继续严格保持你的人设" in system  # 改为强化人设
+    assert "## 人设快照" in system  # 注入身份/风格快照
+
+
+def test_generate_once_recovers_persona_profile_from_dict() -> None:
+    """dict 形态人设（YAML 模式）的 persona_profile 身份/风格会被抽进人设快照。"""
+    captured: dict = {}
+
+    async def _call(messages, **_kwargs):  # noqa: ANN001
+        captured["messages"] = messages
+        return json.dumps({"content": "今天也想早点下班", "image_prompt": ""}, ensure_ascii=False)
+
+    persona = {
+        "system": "你是高冷知性的小姐姐。",
+        "persona_profile": {
+            "identity_rules": ["高冷知性，话不多"],
+            "style_rules": ["短句、克制、偶尔毒舌"],
+            "boundary_rules": ["群聊接话规则X"],
+        },
+    }
+    asyncio.run(
+        diary_flow._generate_once(persona, "写说说", call_ai_api=_call)
+    )
+    system = captured["messages"][0]["content"]
+    assert isinstance(system, dict)
+    snapshot = system["system"].split("## 人设快照", 1)[1]
+    assert "高冷知性，话不多" in snapshot and "短句、克制、偶尔毒舌" in snapshot
+    assert "群聊接话规则X" not in snapshot  # group-chat 边界规则不带入发空间

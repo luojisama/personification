@@ -13,12 +13,19 @@ from ..agent.runtime.simple_loop import run_tool_loop_text
 from ..core.context_policy import strip_response_control_markers
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_group_emotion_memory, load_emotion_state
+from ..core.persona_profile import load_persona_profile
 from ..core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
 from ..skills.skillpacks.image_gen.scripts.impl import generate_image as generate_codex_image
 
 
+# 发空间不是群聊对话，而是角色本人写一条要发到自己 QQ 空间的动态。
+# 这里必须强调"继续保持人设"，否则旧措辞"你不在群聊中扮演角色"会被模型理解成
+# "本轮不用维持人设"，导致空间说说脱离角色设定。本 guard 只负责约束输出格式。
 _FLOW_OUTPUT_GUARD = (
-    "\n\n本轮你不在群聊中扮演角色，按这条用户消息里要求的纯文本/JSON 输出，"
+    "\n\n本轮不是群聊对话，而是你（角色本人）在写一条要发到自己 QQ 空间的个人动态/说说。"
+    "请继续严格保持你的人设、性格和一贯的说话风格，用第一人称、像自己随手发的口吻写，"
+    "不要因为这是发动态就变成中立的旁白腔或通用助手腔。"
+    "只是把输出格式换成这条用户消息里要求的纯文本/JSON，"
     "不要使用 <status>/<think>/<action>/<output>/<message> 等思维链 XML 包装。"
 )
 
@@ -430,6 +437,29 @@ async def get_recent_chat_context(bot: Any, logger: Any) -> str:
         return ""
 
 
+def _render_qzone_persona_snapshot(system_prompt: Any) -> str:
+    """从人设里抽取身份/风格规则，拼成发空间用的人设快照。
+
+    复用群聊同款 `load_persona_profile`（支持 str / YAML 头 / dict 三种人设形态，
+    会兜底 DEFAULT_PERSONA_PROFILE）。只取 identity_rules + style_rules——
+    group-chat 的 boundary_rules（接话/[SILENCE] 之类）对"写一条个人动态"不适用，
+    带进来反而会干扰。这样即便发空间没有群上下文、人设是 dict 只用了 system 字段，
+    身份与说话风格约束也能被显式注入，避免说说脱离人设。
+    """
+    profile = load_persona_profile(system_prompt)
+    identity = profile.get("identity_rules", []) if isinstance(profile, dict) else []
+    style = profile.get("style_rules", []) if isinstance(profile, dict) else []
+    identity_lines = "\n".join(f"- {str(item)}" for item in list(identity)[:4])
+    style_lines = "\n".join(f"- {str(item)}" for item in list(style)[:4])
+    if not identity_lines and not style_lines:
+        return ""
+    return (
+        "\n\n## 人设快照（发空间也要严格保持）\n"
+        f"[身份一致性]\n{identity_lines or '- 保持角色一致，不提及自己是 AI/模型/程序'}\n"
+        f"[语气风格]\n{style_lines or '- 用角色一贯的口语化风格，避免客服腔和通用助手腔'}"
+    )
+
+
 async def _generate_once(
     system_prompt: Any,
     user_prompt: str,
@@ -441,12 +471,14 @@ async def _generate_once(
     logger: Any = None,
     agent_max_steps: int = 4,
 ) -> str:
+    # 在格式 guard 之外再注入人设快照，强化发空间时的角色一致性。
+    suffix = _render_qzone_persona_snapshot(system_prompt) + _FLOW_OUTPUT_GUARD
     if isinstance(system_prompt, str):
-        system_text = system_prompt + _FLOW_OUTPUT_GUARD
+        system_text = system_prompt + suffix
     elif isinstance(system_prompt, dict):
         copied = dict(system_prompt)
         sys_text = str(copied.get("system", "") or "")
-        copied["system"] = sys_text + _FLOW_OUTPUT_GUARD
+        copied["system"] = sys_text + suffix
         system_text = copied
     else:
         system_text = system_prompt
