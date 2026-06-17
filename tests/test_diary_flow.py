@@ -230,3 +230,49 @@ def test_build_qzone_post_drops_when_ooc_rewrite_fails() -> None:
     )
 
     assert result == ""
+
+
+def test_review_qzone_post_rewrites_net_slang_tic() -> None:
+    """『也太……了吧』等营业感叹腔会被改写成平铺直叙。"""
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            assert tools == []
+            return _Resp("上班还能摸鱼打两局游戏")
+
+        def build_tool_result_message(self, *_a):  # noqa: ANN001
+            return {}
+
+    result = asyncio.run(
+        diary_flow._review_qzone_post(
+            "上班能打游戏也太爽了吧",
+            tool_caller=_Caller(),
+            persona_system="你是某角色",
+            logger=_Logger(),
+        )
+    )
+
+    assert result == "上班还能摸鱼打两局游戏"
+    assert not diary_flow._NET_SLANG_TIC_RE.search(result)
+
+
+def test_review_qzone_post_keeps_clean_text_untouched() -> None:
+    """不含营业感叹腔/搜索腔的正文不调用改写，原样返回。"""
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            raise AssertionError("clean text should not be rewritten")
+
+        def build_tool_result_message(self, *_a):  # noqa: ANN001
+            return {}
+
+    result = asyncio.run(
+        diary_flow._review_qzone_post(
+            "下午三点的阳光有点刺眼",
+            tool_caller=_Caller(),
+            persona_system="x",
+            logger=_Logger(),
+        )
+    )
+
+    assert result == "下午三点的阳光有点刺眼"
