@@ -59,7 +59,7 @@ def test_qzone_social_and_frequency_defaults() -> None:
 
     assert cfg.personification_qzone_check_interval == 30
     assert cfg.personification_qzone_proactive_enabled is True
-    assert cfg.personification_qzone_daily_limit == 3
+    assert cfg.personification_qzone_monthly_limit == 30
     assert cfg.personification_qzone_min_interval_hours == 6.0
     assert cfg.personification_qzone_social_enabled is True
     assert cfg.personification_qzone_social_check_interval == 30

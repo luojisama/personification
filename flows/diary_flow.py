@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from ..agent.inner_state import load_inner_state, update_state_from_diary
+from ..agent.runtime.simple_loop import run_tool_loop_text
 from ..core.context_policy import strip_response_control_markers
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_group_emotion_memory, load_emotion_state
+from ..core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
 from ..skills.skillpacks.image_gen.scripts.impl import generate_image as generate_codex_image
 
 
@@ -258,6 +260,36 @@ async def _maybe_generate_qzone_image_marker(
     return f"\n[IMAGE_B64]{b64}[/IMAGE_B64]"
 
 
+async def _review_qzone_post(
+    text: str,
+    *,
+    tool_caller: Any,
+    persona_system: Any = "",
+    logger: Any,
+) -> str:
+    """对生成的说说做去 AI 腔审阅。
+
+    引入工具调用循环后，正文最容易漏出"根据搜索结果/查了一下/参考链接"这类搜索腔，
+    用群聊同款的 `is_agent_reply_ooc` 正则 + `rewrite_agent_reply_ooc` 重写兜住；
+    重写失败则丢弃该条（宁缺勿发）。
+    """
+    if not text or tool_caller is None:
+        return text
+    if not is_agent_reply_ooc(text):
+        return text
+    rewritten = await rewrite_agent_reply_ooc(
+        tool_caller=tool_caller,
+        original_text=text,
+        persona_system=str(persona_system or "")[:1200],
+        output_mode="chat_short",
+    )
+    if not rewritten:
+        if logger is not None:
+            logger.info(f"[qzone] OOC rewrite failed, drop post: {text}")
+        return ""
+    return _trim_qzone_content(rewritten)
+
+
 async def _build_qzone_post_with_optional_image(
     *,
     content: str,
@@ -265,8 +297,17 @@ async def _build_qzone_post_with_optional_image(
     tool_caller: Any,
     logger: Any,
     recent_posts: Optional[list[str]] = None,
+    persona_system: Any = "",
 ) -> str:
     text = _trim_qzone_content(content)
+    if not text:
+        return ""
+    text = await _review_qzone_post(
+        text,
+        tool_caller=tool_caller,
+        persona_system=persona_system,
+        logger=logger,
+    )
     if not text:
         return ""
     if _is_too_similar_to_recent_qzone_post(text, recent_posts or []):
@@ -339,6 +380,10 @@ async def _generate_once(
     *,
     call_ai_api: Callable[..., Awaitable[Optional[str]]],
     use_builtin_search: bool = False,
+    tool_caller: Any = None,
+    registry: Any = None,
+    logger: Any = None,
+    agent_max_steps: int = 4,
 ) -> str:
     if isinstance(system_prompt, str):
         system_text = system_prompt + _FLOW_OUTPUT_GUARD
@@ -370,7 +415,18 @@ async def _generate_once(
     except Exception:
         _qz_token = None
     try:
-        if supports_builtin_search:
+        if tool_caller is not None and registry is not None:
+            # 与群聊同等：让生成过程也能按需调用 web_search 等真实工具查证内容。
+            result = await run_tool_loop_text(
+                messages,
+                registry=registry,
+                tool_caller=tool_caller,
+                logger=logger,
+                max_steps=agent_max_steps,
+                use_builtin_search=use_builtin_search,
+                chat_intent="",
+            )
+        elif supports_builtin_search:
             result = await call_ai_api(messages, use_builtin_search=use_builtin_search)
         else:
             result = await call_ai_api(messages)
@@ -414,6 +470,8 @@ async def generate_ai_diary(
     logger: Any,
     tool_caller: Any = None,
     data_dir: Optional[Path] = None,
+    registry: Any = None,
+    agent_max_steps: int = 4,
 ) -> str:
     """Generate a short Qzone post from recent chat context."""
     system_prompt = load_prompt()
@@ -466,6 +524,10 @@ async def generate_ai_diary(
             rich_prompt,
             call_ai_api=call_ai_api,
             use_builtin_search=True,
+            tool_caller=tool_caller,
+            registry=registry,
+            logger=logger,
+            agent_max_steps=agent_max_steps,
         )
         payload = _extract_json_object(raw_rich_result)
         rich_result = ""
@@ -476,6 +538,7 @@ async def generate_ai_diary(
                 tool_caller=tool_caller,
                 logger=logger,
                 recent_posts=recent_posts,
+                persona_system=system_prompt,
             )
         elif raw_rich_result:
             rich_result = _trim_qzone_content(raw_rich_result)
@@ -506,6 +569,10 @@ async def generate_ai_diary(
         basic_prompt,
         call_ai_api=call_ai_api,
         use_builtin_search=True,
+        tool_caller=tool_caller,
+        registry=registry,
+        logger=logger,
+        agent_max_steps=agent_max_steps,
     )
     payload = _extract_json_object(raw_result)
     if payload:
@@ -515,6 +582,7 @@ async def generate_ai_diary(
             tool_caller=tool_caller,
             logger=logger,
             recent_posts=recent_posts,
+            persona_system=system_prompt,
         )
     else:
         result = _trim_qzone_content(raw_result)
@@ -539,6 +607,8 @@ async def maybe_generate_proactive_qzone_post(
     logger: Any,
     data_dir: Optional[Path] = None,
     tool_caller: Any = None,
+    registry: Any = None,
+    agent_max_steps: int = 4,
 ) -> str:
     """根据近期聊天与内心状态决定是否主动发一条更日常的空间动态。"""
     system_prompt = load_prompt()
@@ -606,6 +676,10 @@ async def maybe_generate_proactive_qzone_post(
         decision_prompt,
         call_ai_api=call_ai_api,
         use_builtin_search=True,
+        tool_caller=tool_caller,
+        registry=registry,
+        logger=logger,
+        agent_max_steps=agent_max_steps,
     )
     if not result:
         return ""
@@ -619,9 +693,18 @@ async def maybe_generate_proactive_qzone_post(
             tool_caller=tool_caller,
             logger=logger,
             recent_posts=recent_posts,
+            persona_system=system_prompt,
         )
     if result.startswith("POST|"):
         text = _trim_qzone_content(result.split("|", 1)[1])
+        text = await _review_qzone_post(
+            text,
+            tool_caller=tool_caller,
+            persona_system=system_prompt,
+            logger=logger,
+        )
+        if not text:
+            return ""
         if _is_too_similar_to_recent_qzone_post(text, recent_posts):
             logger.info(f"[qzone] skip POST raw post because it repeats recent content: {text}")
             return ""
