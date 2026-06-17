@@ -11,6 +11,12 @@ from ._loader import load_personification_module
 provider_router = load_personification_module("plugin.personification.core.provider_router")
 
 
+def test_provider_router_treats_mimo_v25_pro_as_text_only() -> None:
+    assert provider_router.provider_supports_vision("openai", "mimo-v2.5-pro") is False
+    assert provider_router.provider_supports_vision("anthropic", "mimo-v2.5-pro") is False
+    assert provider_router.provider_supports_vision("openai", "mimo-v2.5") is True
+
+
 def test_strip_image_parts_keeps_text_and_replaces_image() -> None:
     fn = provider_router._strip_image_parts_for_text_only_provider
     messages = [

@@ -230,6 +230,126 @@ def _messages_contain_images(messages: List[dict]) -> bool:
     return False
 
 
+def _is_mimo_endpoint(base_url: str) -> bool:
+    raw = str(base_url or "").strip().lower()
+    if not raw:
+        return False
+    host = raw.split("://", 1)[-1].split("/", 1)[0].split("@", 1)[-1].split(":", 1)[0]
+    return host in {"api.xiaomimimo.com", "token-plan-cn.xiaomimimo.com"}
+
+
+def _is_mimo_model(model: str) -> bool:
+    normalized = str(model or "").strip().lower().replace("_", "-")
+    return normalized == "mimo" or normalized.startswith(("mimo-", "mimo2", "mimov"))
+
+
+def _text_from_text_parts(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                part_type = str(item.get("type", "") or "").strip().lower()
+                if part_type in {"text", "input_text"}:
+                    texts.append(str(item.get("text", "") or ""))
+                elif "text" in item:
+                    texts.append(str(item.get("text", "") or ""))
+            elif item is not None:
+                texts.append(str(item))
+        return "\n".join(part for part in texts if part)
+    if isinstance(content, dict):
+        if "text" in content:
+            return str(content.get("text", "") or "")
+        return extract_text_from_parts(content)
+    return str(content)
+
+
+def _sanitize_mimo_openai_content(content: Any) -> Any:
+    if content is None:
+        return ""
+    if not isinstance(content, list):
+        if isinstance(content, dict):
+            parts = _sanitize_mimo_openai_content([content])
+            if parts:
+                return parts
+            return _text_from_text_parts(content)
+        return content
+
+    sanitized_parts: list[dict[str, Any]] = []
+    for item in content:
+        if not isinstance(item, dict):
+            text = str(item or "")
+            if text:
+                sanitized_parts.append({"type": "text", "text": text})
+            continue
+
+        part_type = str(item.get("type", "") or "").strip().lower()
+        if part_type in {"text", "input_text"} or "text" in item:
+            text = str(item.get("text", "") or "")
+            if text:
+                sanitized_parts.append({"type": "text", "text": text})
+            continue
+
+        if part_type == "image_url":
+            image_obj = item.get("image_url", {})
+            raw_url = image_obj if isinstance(image_obj, str) else _obj_get(image_obj, "url", "")
+            normalized_url, _ = normalize_image_ref(str(raw_url or ""))
+            if normalized_url:
+                sanitized_parts.append({"type": "image_url", "image_url": {"url": normalized_url}})
+            continue
+
+        if part_type == "image_file":
+            image_obj = item.get("image_file", {})
+            raw_path = image_obj if isinstance(image_obj, str) else _obj_get(image_obj, "path", "")
+            normalized_url, _ = normalize_image_ref(str(raw_path or ""))
+            if normalized_url:
+                sanitized_parts.append({"type": "image_url", "image_url": {"url": normalized_url}})
+
+    if sanitized_parts:
+        return sanitized_parts
+    return _text_from_text_parts(content)
+
+
+def _sanitize_mimo_openai_messages(messages: List[dict]) -> List[dict]:
+    system_parts: list[str] = []
+    sanitized_messages: list[dict] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            sanitized_messages.append(message)
+            continue
+        role = str(message.get("role", "") or "").strip()
+        if role == "system":
+            text = _text_from_text_parts(message.get("content", ""))
+            if text:
+                system_parts.append(text)
+            continue
+        cloned = dict(message)
+        if role in {"user", "assistant"}:
+            cloned["content"] = _sanitize_mimo_openai_content(cloned.get("content", ""))
+        elif cloned.get("content") is None:
+            cloned["content"] = ""
+        sanitized_messages.append(cloned)
+
+    if not system_parts:
+        return sanitized_messages
+    return [{"role": "system", "content": "\n\n".join(system_parts)}] + sanitized_messages
+
+
+def _error_indicates_mimo_message_shape_or_vision_unavailable(error: Exception) -> bool:
+    text = str(error or "").strip().lower()
+    if not text or "param incorrect" not in text:
+        return False
+    return (
+        "system only supports" in text
+        or "image_url" in text
+        or "text parts" in text
+        or ("messages[" in text and "system" in text)
+    )
+
+
 def _error_indicates_vision_unavailable(error: Exception) -> bool:
     text = str(error or "").strip().lower()
     if not text:
@@ -794,6 +914,9 @@ class OpenAIToolCaller(ToolCaller):
         use_builtin_search: bool,
     ) -> ToolCallerResponse:
         messages = inject_current_time_context(messages)
+        is_mimo_openai = _is_mimo_endpoint(self.base_url) and _is_mimo_model(self.model)
+        if is_mimo_openai:
+            messages = _sanitize_mimo_openai_messages(messages)
         from openai import AsyncOpenAI
 
         contains_image_input = _messages_contain_images(messages)
@@ -962,7 +1085,10 @@ class OpenAIToolCaller(ToolCaller):
                 model_used=str(self.model or ""),
             )
         except Exception as exc:
-            if contains_image_input and _error_indicates_vision_unavailable(exc):
+            if contains_image_input and (
+                _error_indicates_vision_unavailable(exc)
+                or (is_mimo_openai and _error_indicates_mimo_message_shape_or_vision_unavailable(exc))
+            ):
                 return _vision_unavailable_response(exc)
             raise
 

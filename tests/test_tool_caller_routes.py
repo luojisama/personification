@@ -83,6 +83,87 @@ def test_normalize_api_type_keeps_existing_routes() -> None:
     assert caller_impl._normalize_api_type("codex") == "openai_codex"
 
 
+def test_mimo_endpoint_detection_accepts_api_and_token_plan_urls() -> None:
+    assert caller_impl._is_mimo_endpoint("https://api.xiaomimimo.com/v1") is True
+    assert caller_impl._is_mimo_endpoint("https://token-plan-cn.xiaomimimo.com/v1") is True
+    assert caller_impl._is_mimo_endpoint("https://api.xiaomimimo.com/anthropic") is True
+    assert caller_impl._is_mimo_endpoint("https://token-plan-cn.xiaomimimo.com/anthropic") is True
+    assert caller_impl._is_mimo_endpoint("https://api.openai.com/v1") is False
+
+
+def test_mimo_openai_message_sanitizer_merges_system_and_cleans_images() -> None:
+    messages = [
+        {"role": "system", "content": "当前时间块"},
+        {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": "人格设定"},
+                {"type": "input_text", "text": "附加约束"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,SYSTEM"}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "看这张图"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,USER",
+                        "detail": "high",
+                        "mime_type": "image/png",
+                    },
+                    "alt_text": "user image",
+                    "mime_type": "image/png",
+                },
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+    ]
+
+    sanitized = caller_impl._sanitize_mimo_openai_messages(messages)
+
+    assert sanitized[0]["role"] == "system"
+    assert isinstance(sanitized[0]["content"], str)
+    assert "当前时间块" in sanitized[0]["content"]
+    assert "人格设定" in sanitized[0]["content"]
+    assert "附加约束" in sanitized[0]["content"]
+    assert "SYSTEM" not in sanitized[0]["content"]
+    assert [item.get("role") for item in sanitized].count("system") == 1
+
+    user_parts = sanitized[1]["content"]
+    assert user_parts == [
+        {"type": "text", "text": "看这张图"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,USER"}},
+    ]
+    assert "detail" not in user_parts[1]["image_url"]
+    assert "mime_type" not in user_parts[1]
+    assert "alt_text" not in user_parts[1]
+    assert sanitized[2]["content"] == ""
+    assert sanitized[2]["tool_calls"][0]["id"] == "call_1"
+
+
+def test_mimo_message_shape_error_is_detected_only_for_param_incorrect() -> None:
+    error = RuntimeError(
+        "Error code: 400 - {'error': {'code': '400', 'message': "
+        "'Param Incorrect', 'param': 'messages[1] system only supports a string or an array of text parts'}}"
+    )
+    assert caller_impl._error_indicates_mimo_message_shape_or_vision_unavailable(error) is True
+    assert caller_impl._error_indicates_mimo_message_shape_or_vision_unavailable(
+        RuntimeError("system only supports text")
+    ) is False
+
+
 def test_build_tool_caller_returns_gemini_cli_instance() -> None:
     cfg = _DummyConfig(
         personification_api_type="gemini_cli",
