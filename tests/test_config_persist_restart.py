@@ -7,6 +7,7 @@ from ._loader import load_personification_module
 
 config_module = load_personification_module("plugin.personification.config")
 config_manager = load_personification_module("plugin.personification.core.config_manager")
+config_registry = load_personification_module("plugin.personification.core.config_registry")
 env_writer = load_personification_module("plugin.personification.core.env_writer")
 runtime_config = load_personification_module("plugin.personification.core.runtime_config")
 data_store = load_personification_module("plugin.personification.core.data_store")
@@ -123,3 +124,33 @@ def test_env_json_top_level_runtime_key_wins_over_runtime_config(tmp_path, monke
     info = runtime_config.get_runtime_load_info(fresh)
     assert "personification_web_search" in info["env_json_fields"]
     assert "web_search" in info["skipped_runtime_keys"]
+
+
+def test_config_registry_extra_field_wins_over_stale_runtime_after_restart(tmp_path, monkeypatch) -> None:
+    """config_registry_extra.py 注册的字段（如 qzone 月度上限）经 WebUI 改后，
+    重启时也应胜过 runtime_config.json 里的旧 managed_globals，不回退到默认。
+
+    守住 config_manager（按 _managed_field_names 应用 env.json）与
+    runtime_config（按 _collect_env_json_fields 保护 env.json 字段）两套注册一致。
+    """
+    cfg = _setup(tmp_path, monkeypatch)
+    field = "personification_qzone_monthly_limit"
+    entry = next(e for e in config_registry.get_config_entries("global") if e.field_name == field)
+    default_val = config_module.Config().personification_qzone_monthly_limit
+
+    env_writer.write_both(field, 17, cfg)
+    runtime_path = tmp_path / "runtime_config.json"
+    runtime_path.write_text(
+        json.dumps({"managed_globals": {entry.key: default_val}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    fresh = config_module.Config(personification_data_dir=str(tmp_path))
+    assert fresh.personification_qzone_monthly_limit == default_val  # 重启初值=默认
+    config_manager.ConfigManager(plugin_config=fresh, logger=None).load()
+    runtime_config.load_plugin_runtime_config(fresh, _Logger(), path=runtime_path)
+
+    assert fresh.personification_qzone_monthly_limit == 17  # env.json 值保留，未回退
+    info = runtime_config.get_runtime_load_info(fresh)
+    assert field in info["env_json_fields"]
+    assert entry.key in info["skipped_runtime_keys"]
