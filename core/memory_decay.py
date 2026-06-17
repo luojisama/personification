@@ -35,6 +35,7 @@ class MemoryDecayScheduler:
                 if expires_at and expires_at <= now:
                     conn.execute("DELETE FROM memory_items WHERE memory_id=?", (str(row["memory_id"] or ""),))
                     conn.execute("DELETE FROM memory_embeddings WHERE memory_id=?", (str(row["memory_id"] or ""),))
+                    conn.execute("DELETE FROM memory_vector_chunks WHERE memory_id=?", (str(row["memory_id"] or ""),))
                     conn.execute("DELETE FROM memory_entities WHERE memory_id=?", (str(row["memory_id"] or ""),))
                     conn.execute("DELETE FROM memory_relations WHERE source_memory_id=?", (str(row["memory_id"] or ""),))
                     try:
@@ -91,6 +92,7 @@ class MemoryDecayScheduler:
                 if payload["salience"] < 0.08 and payload["stability"] < 0.08 and reinforcement <= 0 and not is_semi_permanent:
                     conn.execute("DELETE FROM memory_items WHERE memory_id=?", (str(row["memory_id"] or ""),))
                     conn.execute("DELETE FROM memory_embeddings WHERE memory_id=?", (str(row["memory_id"] or ""),))
+                    conn.execute("DELETE FROM memory_vector_chunks WHERE memory_id=?", (str(row["memory_id"] or ""),))
                     conn.execute("DELETE FROM memory_entities WHERE memory_id=?", (str(row["memory_id"] or ""),))
                     conn.execute("DELETE FROM memory_relations WHERE source_memory_id=?", (str(row["memory_id"] or ""),))
                     try:

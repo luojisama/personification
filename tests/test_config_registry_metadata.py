@@ -99,6 +99,9 @@ def test_memory_and_labeler_defaults_match_long_term_memory_design() -> None:
     assert entries["memory_search_scan_limit"].default == 800
     assert entries["memory_capture_policy"].choices == ("balanced", "conservative", "all")
     assert entries["agent_memory_write_enabled"].default is True
+    assert entries["memory_vector_backend"].choices == ("sqlite_exact", "disabled")
+    assert entries["memory_rag_enabled"].default is True
+    assert entries["memory_rag_candidate_limit"].default == 80
 
 
 def test_secret_inference_for_key_and_auth_path_fields() -> None:

@@ -43,6 +43,10 @@ def test_llm_review_features_default_disabled() -> None:
     assert cfg.personification_persona_responder_json_enabled is False
     assert cfg.personification_real_embedding_enabled is False
     assert cfg.personification_embedding_provider == "hash_bow"
+    assert cfg.personification_embedding_model == ""
+    assert cfg.personification_memory_vector_backend == "sqlite_exact"
+    assert cfg.personification_memory_rag_enabled is True
+    assert cfg.personification_memory_rag_candidate_limit == 80
     assert cfg.personification_deep_research_v2_enabled is False
     assert cfg.personification_parallel_research_pages_per_worker == 20
     assert cfg.personification_tts_llm_decision_enabled is False

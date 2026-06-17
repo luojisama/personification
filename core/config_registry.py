@@ -165,6 +165,20 @@ def _embedding_provider_parser(raw: str) -> str:
     return mapping.get(text, text)
 
 
+def _memory_vector_backend_parser(raw: str) -> str:
+    text = str(raw or "").strip().lower().replace("-", "_")
+    mapping = {
+        "sqlite": "sqlite_exact",
+        "local": "sqlite_exact",
+        "sqlite_exact": "sqlite_exact",
+        "hash": "sqlite_exact",
+        "off": "disabled",
+        "none": "disabled",
+        "disabled": "disabled",
+    }
+    return mapping.get(text, text)
+
+
 @dataclass(frozen=True)
 class ConfigEntry:
     key: str
@@ -251,6 +265,7 @@ _GROUP_RULES: tuple[tuple[Callable[[str], bool], str], ...] = (
     (lambda k: k.startswith("qzone_"), "QQ 空间"),
     (
         lambda k: k.startswith("memory_")
+        or k.startswith("embedding_")
         or k in {"real_embedding_enabled", "embedding_provider", "agent_memory_write_enabled"},
         "记忆",
     ),
@@ -983,6 +998,95 @@ def _build_entries() -> list[ConfigEntry]:
             choices=("hash_bow", "gemini", "openai"),
             help_aliases=("embedding_provider", "向量模型", "embedding"),
             parser=_embedding_provider_parser,
+        ),
+        ConfigEntry(
+            key="embedding_model",
+            field_name="personification_embedding_model",
+            display_name="Embedding 模型",
+            value_type="str",
+            default="",
+            scope=GLOBAL_SCOPE,
+            description="真实向量记忆使用的 embedding 模型；留空时按 provider 使用默认模型。",
+            category="config",
+            help_aliases=("embedding_model", "向量模型名", "嵌入模型"),
+            parser=_str_parser,
+        ),
+        ConfigEntry(
+            key="embedding_api_url",
+            field_name="personification_embedding_api_url",
+            display_name="Embedding API URL",
+            value_type="str",
+            default="",
+            scope=GLOBAL_SCOPE,
+            description="OpenAI 兼容 embedding 接口 Base URL；留空时使用 SDK 默认地址。",
+            category="config",
+            help_aliases=("embedding_api_url", "向量接口", "embedding_base_url"),
+            parser=_str_parser,
+        ),
+        ConfigEntry(
+            key="embedding_api_key",
+            field_name="personification_embedding_api_key",
+            display_name="Embedding API Key",
+            value_type="str",
+            default="",
+            scope=GLOBAL_SCOPE,
+            description="真实 embedding provider 的 API Key。留空时尝试复用对应 SDK 的环境变量。",
+            category="config",
+            help_aliases=("embedding_api_key", "向量key", "embedding_key"),
+            parser=_str_parser,
+        ),
+        ConfigEntry(
+            key="embedding_batch_size",
+            field_name="personification_embedding_batch_size",
+            display_name="Embedding 批量大小",
+            value_type="int",
+            default=16,
+            scope=GLOBAL_SCOPE,
+            description="后台重建向量索引时单批提交的文本数量；过大可能触发 provider 限流。",
+            category="config",
+            min_value=1,
+            max_value=128,
+            help_aliases=("embedding_batch", "向量批量", "embedding批量"),
+            parser=_int_parser,
+        ),
+        ConfigEntry(
+            key="memory_vector_backend",
+            field_name="personification_memory_vector_backend",
+            display_name="记忆向量后端",
+            value_type="str",
+            default="sqlite_exact",
+            scope=GLOBAL_SCOPE,
+            description="长期记忆 RAG 的本地向量后端；sqlite_exact 不需要额外服务，disabled 关闭向量索引。",
+            category="config",
+            choices=("sqlite_exact", "disabled"),
+            help_aliases=("向量后端", "vector_backend", "rag_backend"),
+            parser=_memory_vector_backend_parser,
+        ),
+        ConfigEntry(
+            key="memory_rag_enabled",
+            field_name="personification_memory_rag_enabled",
+            display_name="记忆 RAG 召回",
+            value_type="bool",
+            default=True,
+            scope=GLOBAL_SCOPE,
+            description="启用长期记忆的 chunk 向量索引与 RAG 召回；关闭后仍保留 FTS/实体/时间召回。",
+            category="config",
+            help_aliases=("rag", "记忆rag", "向量召回"),
+            parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="memory_rag_candidate_limit",
+            field_name="personification_memory_rag_candidate_limit",
+            display_name="RAG 候选上限",
+            value_type="int",
+            default=80,
+            scope=GLOBAL_SCOPE,
+            description="单次 RAG 向量召回最多扫描的 chunk 候选数；数值越大越容易找回旧记忆但会增加 CPU 开销。",
+            category="config",
+            min_value=20,
+            max_value=1000,
+            help_aliases=("rag候选", "向量候选", "memory_rag_candidate_limit"),
+            parser=_int_parser,
         ),
         ConfigEntry(
             key="response_timeout",

@@ -167,6 +167,13 @@ class Config(BaseModel):
     personification_memory_palace_enabled: bool = True
     personification_real_embedding_enabled: bool = False
     personification_embedding_provider: str = "hash_bow"
+    personification_embedding_model: str = ""
+    personification_embedding_api_url: str = ""
+    personification_embedding_api_key: str = ""
+    personification_embedding_batch_size: int = 16
+    personification_memory_vector_backend: str = "sqlite_exact"
+    personification_memory_rag_enabled: bool = True
+    personification_memory_rag_candidate_limit: int = 80
     personification_memory_decay_enabled: bool = True
     personification_memory_consolidation_enabled: bool = True
     personification_memory_recall_top_k: int = DEFAULT_MEMORY_RECALL_TOP_K
