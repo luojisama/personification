@@ -9,6 +9,7 @@ from dotenv import dotenv_values
 from ._loader import load_personification_module
 
 env_writer = load_personification_module("plugin.personification.core.env_writer")
+runtime_config = load_personification_module("plugin.personification.core.runtime_config")
 
 
 def _make_plugin_config(tmp_path: Path, **extra) -> SimpleNamespace:
@@ -131,6 +132,93 @@ def test_write_both_new_field_goes_env_json_only(tmp_path: Path) -> None:
     assert "personification_probability" not in dotenv_values(str(env_file))
     json_data = json.loads(Path(result["env_json_path"]).read_text(encoding="utf-8"))
     assert json_data["personification_probability"] == 0.6
+
+
+def test_env_candidates_prefer_project_root_over_plugin_local_env(tmp_path: Path, monkeypatch) -> None:
+    project_root = tmp_path / "bot"
+    plugin_root = project_root / "plugin" / "personification"
+    plugin_root.mkdir(parents=True)
+    project_env = project_root / ".env.prod"
+    plugin_env = plugin_root / ".env.prod"
+    project_env.write_text("personification_probability=0.3\n", encoding="utf-8")
+    plugin_env.write_text("personification_probability=0.8\n", encoding="utf-8")
+
+    monkeypatch.setattr(runtime_config, "_get_plugin_root", lambda: plugin_root)
+    monkeypatch.chdir(plugin_root)
+
+    candidates = runtime_config._iter_env_file_candidates()
+
+    assert candidates[0] == project_env
+    assert plugin_env not in candidates
+    assert runtime_config.read_env_file_value("personification_probability") == "0.3"
+
+
+def test_write_both_updates_project_env_instead_of_plugin_local_env(tmp_path: Path, monkeypatch) -> None:
+    project_root = tmp_path / "bot"
+    plugin_root = project_root / "plugin" / "personification"
+    data_dir = tmp_path / "data"
+    plugin_root.mkdir(parents=True)
+    project_env = project_root / ".env.prod"
+    plugin_env = plugin_root / ".env.prod"
+    old_value = [{"name": "old_root", "api_type": "openai", "model": "old"}]
+    stale_value = [{"name": "stale_plugin", "api_type": "openai", "model": "stale"}]
+    new_value = [{"name": "new_root", "api_type": "openai", "model": "new"}]
+    project_env.write_text(
+        "personification_api_pools=" + json.dumps(old_value, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    plugin_env.write_text(
+        "personification_api_pools=" + json.dumps(stale_value, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(runtime_config, "_get_plugin_root", lambda: plugin_root)
+    monkeypatch.chdir(plugin_root)
+    cfg = _make_plugin_config(data_dir)
+
+    result = env_writer.write_both("personification_api_pools", new_value, cfg)
+
+    assert result["errors"] == []
+    assert result["dotenv_path"] == str(project_env)
+    assert dotenv_values(str(project_env))["personification_api_pools"] == json.dumps(
+        new_value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert dotenv_values(str(plugin_env))["personification_api_pools"] == json.dumps(
+        stale_value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert json.loads(Path(result["env_json_path"]).read_text(encoding="utf-8"))[
+        "personification_api_pools"
+    ] == new_value
+    assert json.loads(runtime_config.read_env_file_value("personification_api_pools")) == new_value
+
+
+def test_write_both_ignores_plugin_local_env_when_project_env_exists(tmp_path: Path, monkeypatch) -> None:
+    project_root = tmp_path / "bot"
+    plugin_root = project_root / "plugin" / "personification"
+    data_dir = tmp_path / "data"
+    plugin_root.mkdir(parents=True)
+    project_env = project_root / ".env.prod"
+    plugin_env = plugin_root / ".env.prod"
+    project_env.write_text("OTHER=1\n", encoding="utf-8")
+    plugin_env.write_text("personification_probability=0.8\n", encoding="utf-8")
+
+    monkeypatch.setattr(runtime_config, "_get_plugin_root", lambda: plugin_root)
+    monkeypatch.chdir(plugin_root)
+    cfg = _make_plugin_config(data_dir)
+
+    result = env_writer.write_both("personification_probability", 0.6, cfg)
+
+    assert result["errors"] == []
+    assert result["dotenv_path"] is None
+    assert "personification_probability" not in dotenv_values(str(project_env))
+    assert dotenv_values(str(plugin_env))["personification_probability"] == "0.8"
+    assert json.loads(Path(result["env_json_path"]).read_text(encoding="utf-8"))[
+        "personification_probability"
+    ] == 0.6
 
 
 def test_resolve_value_sources_reports_env_json_when_no_env_file(tmp_path: Path, monkeypatch) -> None:

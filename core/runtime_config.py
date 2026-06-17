@@ -11,28 +11,76 @@ RUNTIME_CONFIG_PATH = Path("data/personification/runtime_config.json")
 _RUNTIME_INFO_ATTR = "_personification_runtime_load_info"
 
 
+def _get_plugin_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _dedupe_dirs(dirs: Iterable[Path]) -> list[Path]:
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for directory in dirs:
+        key = str(directory.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(directory)
+    return unique
+
+
+def _env_files_from_dirs(dirs: Iterable[Path]) -> list[Path]:
+    paths: list[Path] = []
+    seen_paths: set[str] = set()
+    for directory in _dedupe_dirs(dirs):
+        for name in (".env.prod", ".env"):
+            path = directory / name
+            key = str(path.resolve())
+            if path.exists() and key not in seen_paths:
+                paths.append(path)
+                seen_paths.add(key)
+    return paths
+
+
 def get_runtime_config_path(plugin_config: Any) -> Path:
     return Path(get_data_dir(plugin_config)) / "runtime_config.json"
 
 
 def _iter_env_file_candidates() -> list[Path]:
-    candidates: list[Path] = []
     cwd = Path.cwd()
-    candidates.extend([cwd] + list(cwd.parents)[:5])
-    plugin_root = Path(__file__).resolve().parent.parent
-    candidates.extend([plugin_root] + list(plugin_root.parents)[:5])
-    paths: list[Path] = []
-    seen_dirs: set[str] = set()
-    for d in candidates:
-        key = str(d)
-        if key in seen_dirs:
-            continue
-        seen_dirs.add(key)
-        for name in (".env.prod", ".env"):
-            p = d / name
-            if p.exists() and p not in paths:
-                paths.append(p)
-    return paths
+    cwd_chain = [cwd] + list(cwd.parents)[:5]
+    plugin_root = _get_plugin_root()
+    plugin_chain = [plugin_root] + list(plugin_root.parents)[:5]
+    plugin_container = plugin_root.parent if plugin_root.parent.name.lower() in {"plugin", "plugins"} else None
+
+    def is_plugin_local_dir(directory: Path) -> bool:
+        if _path_is_relative_to(directory, plugin_root):
+            return True
+        return plugin_container is not None and directory.resolve() == plugin_container.resolve()
+
+    cwd_resolved = cwd.resolve()
+    cwd_is_plugin_entry = cwd_resolved == plugin_root.resolve() or (
+        plugin_container is not None and cwd_resolved == plugin_container.resolve()
+    )
+    project_dirs = [directory for directory in plugin_chain if not is_plugin_local_dir(directory)]
+    cwd_dirs = []
+    if not cwd_is_plugin_entry:
+        cwd_dirs.append(cwd)
+    cwd_dirs.extend(directory for directory in cwd_chain[1:] if not is_plugin_local_dir(directory))
+    preferred_dirs = project_dirs + cwd_dirs if cwd_is_plugin_entry else cwd_dirs + project_dirs
+    preferred = _env_files_from_dirs(preferred_dirs)
+    if preferred:
+        return preferred
+
+    # 兼容旧版本误写在插件目录里的 .env 文件；只在找不到工程级 env 时读取。
+    fallback_dirs = [directory for directory in cwd_chain + plugin_chain if is_plugin_local_dir(directory)]
+    return _env_files_from_dirs(fallback_dirs)
 
 
 def _parse_env_assignment(lines: list[str], start: int) -> tuple[str, str, int] | None:
