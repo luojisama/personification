@@ -260,6 +260,50 @@ async def _maybe_generate_qzone_image_marker(
     return f"\n[IMAGE_B64]{b64}[/IMAGE_B64]"
 
 
+# 营业感叹腔/网络流行语 tic：『(也)太……了吧 / X爆了 / 绝了 / 谁懂 / 笑死 / yyds』等，
+# 这类口号式收尾会让说说显得网感营业、千篇一律，需要改写成平铺直叙。
+_NET_SLANG_TIC_RE = re.compile(
+    r"也?太[一-鿿]{0,8}了吧|[一-鿿]爆了|绝了|谁懂|笑死|绷不住|好家伙|yyds",
+    re.IGNORECASE,
+)
+
+
+async def _rewrite_qzone_net_slang(
+    text: str,
+    *,
+    tool_caller: Any,
+    persona_system: Any = "",
+    timeout: float = 8.0,
+) -> str:
+    """把带营业感叹腔/网络流行语的说说改写成平铺直叙的一句。"""
+    if tool_caller is None:
+        return ""
+    messages: list[dict[str, Any]] = []
+    persona = str(persona_system or "").strip()
+    if persona:
+        messages.append({"role": "system", "content": persona[:1200]})
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "下面这条 QQ 空间说说带有营业感叹腔/网络流行语"
+                "（如『也太……了吧 / ……爆了 / 绝了 / 谁懂 / 笑死 / yyds』）。"
+                "用你自己的口吻改写成平铺直叙的一句日常碎碎念，去掉所有感叹营业腔和网络流行语，"
+                "只描述那个画面或念头本身，不喊口号、不强行制造情绪，12-50 字。只输出改写后的句子。"
+            ),
+        }
+    )
+    messages.append({"role": "user", "content": str(text or "").strip()[:300]})
+    try:
+        response = await asyncio.wait_for(
+            tool_caller.chat_with_tools(messages, [], False),
+            timeout=timeout,
+        )
+    except Exception:
+        return ""
+    return str(getattr(response, "content", "") or "").strip()
+
+
 async def _review_qzone_post(
     text: str,
     *,
@@ -267,27 +311,39 @@ async def _review_qzone_post(
     persona_system: Any = "",
     logger: Any,
 ) -> str:
-    """对生成的说说做去 AI 腔审阅。
+    """对生成的说说做去 AI 腔 + 去营业感叹腔审阅。
 
-    引入工具调用循环后，正文最容易漏出"根据搜索结果/查了一下/参考链接"这类搜索腔，
-    用群聊同款的 `is_agent_reply_ooc` 正则 + `rewrite_agent_reply_ooc` 重写兜住；
-    重写失败则丢弃该条（宁缺勿发）。
+    1) 引入工具调用循环后，正文最容易漏出"根据搜索结果/查了一下/参考链接"这类搜索腔，
+       用群聊同款的 `is_agent_reply_ooc` 正则 + `rewrite_agent_reply_ooc` 重写兜住；
+       重写失败则丢弃该条（宁缺勿发）。
+    2) 再兜一层『(也)太……了吧 / X爆了 / 绝了 / yyds』等营业感叹腔，改写成平铺直叙。
     """
     if not text or tool_caller is None:
         return text
-    if not is_agent_reply_ooc(text):
-        return text
-    rewritten = await rewrite_agent_reply_ooc(
-        tool_caller=tool_caller,
-        original_text=text,
-        persona_system=str(persona_system or "")[:1200],
-        output_mode="chat_short",
-    )
-    if not rewritten:
-        if logger is not None:
-            logger.info(f"[qzone] OOC rewrite failed, drop post: {text}")
-        return ""
-    return _trim_qzone_content(rewritten)
+    if is_agent_reply_ooc(text):
+        rewritten = await rewrite_agent_reply_ooc(
+            tool_caller=tool_caller,
+            original_text=text,
+            persona_system=str(persona_system or "")[:1200],
+            output_mode="chat_short",
+        )
+        if not rewritten:
+            if logger is not None:
+                logger.info(f"[qzone] OOC rewrite failed, drop post: {text}")
+            return ""
+        text = _trim_qzone_content(rewritten)
+    if text and _NET_SLANG_TIC_RE.search(text):
+        toned = await _rewrite_qzone_net_slang(
+            text,
+            tool_caller=tool_caller,
+            persona_system=persona_system,
+        )
+        toned = _trim_qzone_content(toned)
+        if toned and not _NET_SLANG_TIC_RE.search(toned):
+            text = toned
+        elif logger is not None:
+            logger.info(f"[qzone] net-slang rewrite ineffective, keeping: {text}")
+    return text
 
 
 async def _build_qzone_post_with_optional_image(
@@ -499,6 +555,8 @@ async def generate_ai_diary(
         "3. 允许跳跃：可以半句话突然转到另一个画面，或在一个观察后接一句不相关的吐槽；不必上下文连贯。\n"
         "4. 标点可以省略，可用空格、句号、问号代替逗号；可以是反问、牢骚、发现、未说完的半句；不必有结论。\n"
         "5. 语气贴合角色，但不要互联网黑话、热梗、夸张营业感、AI 客服腔、对仗工整的总结句。\n"
+        "5b. 严禁用『(也)太……了吧 / ……爆了 / ……绝了 / 谁懂啊 / 笑死 / 绷不住了 / yyds / 好耶』这类营业感叹腔收尾或起势；"
+        "把这种感叹换成平铺直叙的一句话，或干脆只描述那个画面/动作本身，不喊口号、不强行制造情绪。\n"
         "6. 不要列条目、不要标题、不要 hashtag、不要说自己是 AI。\n"
         "7. 必须避开最近说说已经反复出现的话题、题材、具体意象、食物、动作和句式；如果最近写过类似的，就彻底换一个不同的话题和角度。\n"
         "8. 触发点要小而具体，写成自己的即时反应，不要新闻播报、不要复述大家正在热议的主话题。\n"
@@ -667,6 +725,7 @@ async def maybe_generate_proactive_qzone_post(
         "3. 正文 12-50 个中文字符，像真人随手发的一句话，别写长篇大段。\n"
         "4. 只写一个小瞬间、小吐槽或突然想到的念头，不要列表、标题、hashtag 或总结腔。\n"
         "5. 不要为了发而发，不要重复最近已经说过很多遍的话题或题材，每次换着不同的话题和角度来，不要互联网黑话和热梗。\n"
+        "5b. 严禁用『(也)太……了吧 / ……爆了 / ……绝了 / 谁懂啊 / 笑死 / yyds』这类营业感叹腔；改成平铺直叙或只描述画面本身，不喊口号。\n"
         "6. 触发点可以是当下心情、一个生活小观察，或今天游戏、动漫、轻新闻里的一个细节，但写成自己的日常反应、不要复述群里正在热议的主话题、不要像新闻标题。\n"
         f"7. {_pick_diversity_hint()}\n"
         "8. 如果适合配图，image_prompt 写英文画面描述，要求贴合人设和正文氛围；不适合就留空。"
