@@ -95,7 +95,7 @@ _INDEX_HTML = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>拟人插件 控制台</title>
 <style>
 :root {
@@ -243,18 +243,28 @@ td code, .field-head code { word-break:break-all; }
 /* Mobile 响应式 */
 @media (max-width: 768px) {
   .layout { grid-template-columns:1fr; }
-  aside { position:fixed; top:0; left:-100%; bottom:0; width:240px; z-index:50; transition:left .2s; padding-top:60px; }
+  aside { position:fixed; top:0; left:-100%; bottom:0; width:min(82vw,260px); z-index:50; transition:left .2s; overflow-y:auto;
+          padding-top:calc(60px + env(safe-area-inset-top)); padding-left:env(safe-area-inset-left); padding-bottom:env(safe-area-inset-bottom); }
   aside.open { left:0; box-shadow:2px 0 12px rgba(0,0,0,.3); }
-  main { padding:14px 14px 60px; }
-  .mobile-nav-toggle { display:inline-flex; align-items:center; justify-content:center; width:36px; height:36px; border-radius:6px; border:1px solid var(--line); background:var(--panel); color:var(--text); margin-right:10px; }
-  .topbar { padding:8px 0 10px; }
+  aside nav a { padding:13px 18px; }
+  main { padding:14px 14px calc(40px + env(safe-area-inset-bottom)); padding-left:max(14px,env(safe-area-inset-left)); padding-right:max(14px,env(safe-area-inset-right)); }
+  .mobile-nav-toggle { display:inline-flex; align-items:center; justify-content:center; width:40px; height:40px; border-radius:6px; border:1px solid var(--line); background:var(--panel); color:var(--text); margin-right:10px; font-size:20px; flex:none; }
+  .topbar { padding:8px 0 10px; gap:8px; }
   .topbar > div:first-child { flex:1; min-width:0; }
   .topbar strong { font-size:15px !important; }
+  .topbar .muted { display:none; }
   table { font-size:12.5px; }
   th, td { padding:6px 8px; }
+  /* iOS Safari 在聚焦字号 <16px 的输入框时会自动放大页面，统一设为 16px 规避 */
+  input, select, textarea { font-size:16px; }
   .field-input input[type=text], .field-input input[type=number], .field-input textarea { min-width:0; max-width:100%; width:100%; }
   .api-provider-grid { grid-template-columns:1fr; }
   .sticker-grid { grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); }
+  /* 触摸目标加大，避免误触 */
+  .btn { min-height:40px; }
+  .btn.small { min-height:34px; padding:6px 12px; font-size:13px; }
+  .toggle button { padding:8px 16px; }
+  .group-bar button, .strlist-row .btn { min-height:34px; }
   .scrim { position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:40; }
 }
 @media (min-width: 769px) {
@@ -396,6 +406,11 @@ function toggleMobileNav() {
   render();
 }
 
+function closeMobileNav() {
+  // 点击导航项后关闭抽屉；即便点的是当前视图（hashchange 不触发）也立即收起。
+  if (state.mobileNavOpen) { state.mobileNavOpen = false; render(); }
+}
+
 async function loadView() {
   state.loading = true;
   try {
@@ -531,7 +546,7 @@ function render() {
 }
 
 function renderLayout() {
-  const navItem = (v, label) => `<a href="#${v}" class="${state.view===v?'active':''}" onclick="state.mobileNavOpen=false">${label}</a>`;
+  const navItem = (v, label) => `<a href="#${v}" class="${state.view===v?'active':''}" onclick="closeMobileNav()">${label}</a>`;
   const themeIcon = state.theme === "dark" ? "🌙" : "☀";
   return `${state.loading ? '<div class="progress-bar"></div>' : ''}
     <div class="layout">
