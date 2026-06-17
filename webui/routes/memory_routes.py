@@ -45,7 +45,7 @@ def build_memory_router(*, runtime) -> APIRouter:
 
     @router.get("/recent")
     async def recent(
-        limit: int = Query(default=40, ge=1, le=200),
+        limit: int = Query(default=100, ge=1, le=500),
         memory_type: str = Query(default=""),
         group_id: str = Query(default=""),
         user_id: str = Query(default=""),
@@ -64,7 +64,7 @@ def build_memory_router(*, runtime) -> APIRouter:
         if not palace_on:
             return {"items": [], "palace_enabled": False}
         # 默认拉略多一些，过滤 bot 自言后剩下的可能少于 limit
-        raw_limit = int(limit) if include_self else min(int(limit) * 3, 200)
+        raw_limit = int(limit) if include_self else min(int(limit) * 3, 1000)
         try:
             items = list(store.list_recent_memories(
                 group_id=str(group_id or "").strip(),
@@ -89,6 +89,8 @@ def build_memory_router(*, runtime) -> APIRouter:
                 "user_id": str(item.get("user_id", "") or ""),
                 "summary": str(item.get("summary", "") or "")[:300],
                 "source_kind": str(item.get("source_kind", "") or ""),
+                "tier": str(item.get("tier", "") or ""),
+                "palace_zone": str(item.get("palace_zone", "") or ""),
                 "confidence": float(item.get("confidence", 0) or 0),
                 "salience": float(item.get("salience", 0) or 0),
                 "updated_at": float(item.get("updated_at", 0) or 0),

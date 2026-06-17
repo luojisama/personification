@@ -3,6 +3,7 @@ from __future__ import annotations
 from ._loader import load_personification_module
 
 config_registry = load_personification_module("plugin.personification.core.config_registry")
+config_mod = load_personification_module("plugin.personification.config")
 
 
 def test_all_entries_have_non_empty_group_and_kind() -> None:
@@ -79,6 +80,25 @@ def test_detailed_descriptions_applied_to_core_entries() -> None:
     assert entries["api_pools"].example  # 应有示例
     assert entries["probability"].example
     assert entries["agent_max_steps"].example
+
+
+def test_memory_and_labeler_defaults_match_long_term_memory_design() -> None:
+    cfg = config_mod.Config()
+    entries = {entry.key: entry for entry in config_registry.get_config_entries()}
+
+    assert cfg.personification_labeler_model == ""
+    assert entries["labeler_model"].default == ""
+    assert "留空复用主模型" in entries["labeler_model"].description
+
+    assert cfg.personification_memory_palace_enabled is True
+    assert entries["memory_palace_enabled"].default is True
+    assert entries["memory_recall_top_k"].default == 12
+    assert entries["memory_recall_top_k"].max_value == 32
+    assert entries["private_history_turns"].default == 60
+    assert entries["private_history_turns"].max_value == 240
+    assert entries["memory_search_scan_limit"].default == 800
+    assert entries["memory_capture_policy"].choices == ("balanced", "conservative", "all")
+    assert entries["agent_memory_write_enabled"].default is True
 
 
 def test_secret_inference_for_key_and_auth_path_fields() -> None:

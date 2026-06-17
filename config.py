@@ -164,12 +164,15 @@ class Config(BaseModel):
     personification_persona_snippet_max_chars: int = 150
     personification_persona_prompt_max_chars: int = 120
     personification_memory_enabled: bool = True
-    personification_memory_palace_enabled: bool = False
+    personification_memory_palace_enabled: bool = True
     personification_real_embedding_enabled: bool = False
     personification_embedding_provider: str = "hash_bow"
     personification_memory_decay_enabled: bool = True
     personification_memory_consolidation_enabled: bool = True
     personification_memory_recall_top_k: int = DEFAULT_MEMORY_RECALL_TOP_K
+    personification_memory_search_scan_limit: int = 800
+    personification_memory_capture_policy: str = "balanced"
+    personification_agent_memory_write_enabled: bool = True
     personification_background_intelligence_enabled: bool = True
     personification_background_evolves_enabled: bool = True
     personification_background_crystals_enabled: bool = True
@@ -196,7 +199,7 @@ class Config(BaseModel):
     personification_labeler_api_type: str = "openai"
     personification_labeler_api_url: str = ""
     personification_labeler_api_key: str = ""
-    personification_labeler_model: str = "gemini-2.0-flash"
+    personification_labeler_model: str = ""
     personification_labeler_concurrency: int = 3
     personification_fallback_enabled: bool = True
     personification_fallback_api_type: str = ""

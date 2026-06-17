@@ -61,6 +61,7 @@ class ConfigEntryView(BaseModel):
     secret: bool
     advanced: bool = False
     example: str = ""
+    aliases: list[str] = []
     default: Any = None
     current: Any = None
     active_source: str = "default"

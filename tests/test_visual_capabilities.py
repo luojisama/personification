@@ -43,8 +43,8 @@ def test_mimo_v25_models_are_treated_as_multimodal_except_audio_embedding_varian
     assert visual_capabilities.heuristic_supports_vision("openai", "mimo-v2.5") is True
     assert visual_capabilities.heuristic_supports_vision("openai", "mimo2.5") is True
     assert visual_capabilities.heuristic_supports_vision("openai", "mimo-v2-omni") is True
-    assert visual_capabilities.heuristic_supports_vision("openai", "mimo-v2.5-pro") is False
-    assert visual_capabilities.heuristic_supports_vision("anthropic", "mimo-v2.5-pro") is False
+    assert visual_capabilities.heuristic_supports_vision("openai", "mimo-v2.5-pro") is True
+    assert visual_capabilities.heuristic_supports_vision("anthropic", "mimo-v2.5-pro") is True
     assert visual_capabilities.heuristic_supports_vision("openai", "mimo-v2.5-tts") is False
     assert visual_capabilities.heuristic_supports_vision("openai", "mimo-v2.5-embedding") is False
 

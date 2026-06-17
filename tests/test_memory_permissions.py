@@ -18,6 +18,7 @@ def _store(tmp_path: Path, monkeypatch):
         personification_memory_enabled=True,
         personification_memory_palace_enabled=True,
         personification_memory_recall_top_k=8,
+        personification_memory_search_scan_limit=300,
     )
     data_store.init_data_store(cfg)
     memory_store_mod = load_personification_module("plugin.personification.core.memory_store")
@@ -101,3 +102,60 @@ def test_private_recall_can_return_private_fact(_store) -> None:
     results = _store.recall_memories(query="深夜 整理代码", user_id="u1", context_type="private")
 
     assert any("深夜整理代码" in item["summary"] for item in results)
+
+
+def test_recall_can_find_old_semantic_memory_beyond_recent_window(_store) -> None:
+    import time
+
+    _store.write_memory_item(
+        {
+            "memory_id": "old-semantic",
+            "memory_type": "semantic",
+            "summary": "长期事实：用户喜欢蓝色列车模型",
+            "user_id": "u1",
+            "permission_type": "private_fact",
+            "confidence": 0.95,
+            "salience": 0.95,
+            "time_created": time.time() - 86400 * 60,
+        }
+    )
+    for idx in range(150):
+        _store.write_memory_item(
+            {
+                "memory_id": f"recent-{idx}",
+                "memory_type": "episodic_turn",
+                "summary": f"普通最近对话片段 {idx}",
+                "user_id": "u1",
+                "permission_type": "private_fact",
+                "confidence": 0.55,
+                "salience": 0.35,
+            }
+        )
+
+    results = _store.recall_memories(
+        query="蓝色列车模型",
+        user_id="u1",
+        context_type="private",
+        limit=12,
+    )
+
+    assert any(item.get("memory_id") == "old-semantic" for item in results)
+
+
+def test_group_recall_does_not_cross_isolated_group_scope(_store) -> None:
+    _store.write_memory_item(
+        {
+            "memory_id": "g2-only",
+            "memory_type": "group_knowledge",
+            "summary": "群二专属暗号：蓝色列车",
+            "group_id": "g2",
+            "permission_type": "group_meme",
+            "confidence": 0.95,
+            "salience": 0.95,
+            "cross_group_allowed": False,
+        }
+    )
+
+    results = _store.recall_memories(query="蓝色列车", group_id="g1", context_type="group")
+
+    assert all(item.get("memory_id") != "g2-only" for item in results)

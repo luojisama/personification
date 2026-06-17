@@ -268,7 +268,7 @@ td code, .field-head code { word-break:break-all; }
 const API = "/personification/api";
 let state = {
   logged: false, qq: "", view: "dashboard",
-  entries: [], groups: [], activeGroup: null, configSearch: "",
+  entries: [], groups: [], activeGroup: null, configSearch: "", configSearchComposing: false, configSearchDraft: "",
   devices: [], pendingDevices: [], trustedDevices: [], devicePending: false, loginRequestId: "", loginPolling: false, alert: null, loading: false,
   dashboard: null, dashboardWindow: "month",
   personas: [], selectedPersona: null, personaSearch: "",
@@ -278,7 +278,7 @@ let state = {
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
   personaPrompt: null, personaPromptPath: "", health: null, healthBusyCat: "", interactionResult: null, interactionBusy: false,
   qqInfo: null, qqGroups: [], qqFriends: [],
-  memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false,
+  memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false, memoryLimit: 200,
   memoryGraph: null, memoryGraphGroupId: "", memoryGraphLimit: 100, memoryGraphMinSalience: 0,
   groupRawChat: null, groupStyleSnapIdx: 0, groupStyleRebuilding: false,
   showAdvancedConfig: false,
@@ -332,6 +332,42 @@ async function api(path, opts = {}) {
 }
 
 function alertFlash(kind, text) { state.alert = { kind, text }; render(); setTimeout(() => { state.alert = null; render(); }, 4000); }
+
+function restoreConfigSearchFocus(caret) {
+  setTimeout(() => {
+    const el = document.getElementById("config-search-input");
+    if (!el) return;
+    el.focus();
+    const pos = Number.isFinite(caret) ? Math.max(0, Math.min(caret, el.value.length)) : el.value.length;
+    try { el.setSelectionRange(pos, pos); } catch {}
+  }, 0);
+}
+
+function onConfigSearchCompositionStart(input) {
+  state.configSearchComposing = true;
+  state.configSearchDraft = input ? input.value : state.configSearch;
+}
+
+function onConfigSearchCompositionEnd(input) {
+  state.configSearchComposing = false;
+  state.configSearch = input ? input.value : state.configSearchDraft;
+  state.configSearchDraft = "";
+  const caret = input ? input.selectionStart : undefined;
+  render();
+  restoreConfigSearchFocus(caret);
+}
+
+function onConfigSearchInput(input, event) {
+  if (!input) return;
+  if ((event && event.isComposing) || state.configSearchComposing) {
+    state.configSearchDraft = input.value;
+    return;
+  }
+  state.configSearch = input.value;
+  const caret = input.selectionStart;
+  render();
+  restoreConfigSearchFocus(caret);
+}
 
 async function bootstrap() {
   // 主题
@@ -424,7 +460,7 @@ async function loadView() {
     } else if (state.view === "stickers") {
       state.stickers = await api("/stickers");
     } else if (state.view === "memory") {
-      const qs = new URLSearchParams({ limit: "80" });
+      const qs = new URLSearchParams({ limit: String(state.memoryLimit || 200) });
       if (state.memoryFilter) qs.set("memory_type", state.memoryFilter);
       if (state.memoryIncludeSelf) qs.set("include_self", "true");
       if (state.memoryUserId) qs.set("user_id", state.memoryUserId);
@@ -923,7 +959,7 @@ function renderMemory() {
     (state.memoryPalaceZones || []).map(z => `<option value="${escapeAttr(z)}" ${state.memoryPalaceZone===z?'selected':''}>${escapeHtml(z)}</option>`)
   ).join("");
   const rows = (mem.items || []).map(it => `<tr>
-    <td><span class="tag">${escapeHtml(it.memory_type||'-')}</span></td>
+    <td><span class="tag">${escapeHtml(it.memory_type||'-')}</span>${it.tier ? `<br><span class="muted" style="font-size:11px">${escapeHtml(it.tier)}</span>` : ''}</td>
     <td><code style="font-size:11px">${escapeHtml(it.group_id||'')}${it.user_id ? '/'+escapeHtml(it.user_id) : ''}</code></td>
     <td>${escapeHtml(it.summary)}</td>
     <td class="muted" style="font-size:12px">conf=${it.confidence.toFixed(2)}<br>sal=${it.salience.toFixed(2)}</td>
@@ -960,6 +996,9 @@ function renderMemory() {
         <input id="mem-user-input" placeholder="按 user_id 过滤" value="${escapeAttr(state.memoryUserId || '')}" onkeydown="if(event.key==='Enter')applyMemoryFilters()" style="width:160px">
         <input id="mem-group-input" placeholder="按 group_id 过滤" value="${escapeAttr(state.memoryGroupId || '')}" onkeydown="if(event.key==='Enter')applyMemoryFilters()" style="width:160px">
         <select id="mem-zone-select" onchange="pickPalaceZone(this.value)">${zoneOptions}</select>
+        <select id="mem-limit-select" onchange="pickMemoryLimit(this.value)">
+          ${[100,200,500].map(n => `<option value="${n}" ${Number(state.memoryLimit||200)===n?'selected':''}>显示 ${n} 条</option>`).join('')}
+        </select>
         <button class="btn" onclick="applyMemoryFilters()">应用</button>
         ${(state.memoryUserId || state.memoryGroupId || state.memoryPalaceZone) ? '<button class="btn small" onclick="clearMemoryFilters()">清除过滤</button>' : ''}
       </div>
@@ -992,6 +1031,12 @@ async function applyMemoryFilters() {
 
 async function pickPalaceZone(zone) {
   state.memoryPalaceZone = zone || "";
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+async function pickMemoryLimit(value) {
+  const n = Number(value || 200);
+  state.memoryLimit = [100, 200, 500].includes(n) ? n : 200;
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
 
@@ -2034,16 +2079,33 @@ async function resetPersonaPrompt() {
   try { await loadView(); render(); } catch (e) { alertFlash("err", "读取失败：" + e.message); }
 }
 
+function normalizeConfigSearchText(value) {
+  return String(value || "").normalize("NFKC").trim().toLowerCase();
+}
+
+function configSearchHaystack(entry) {
+  if (!entry) return "";
+  if (!entry._searchText) {
+    const aliases = Array.isArray(entry.aliases) ? entry.aliases.join(" ") : "";
+    entry._searchText = normalizeConfigSearchText([
+      entry.key,
+      entry.field_name,
+      entry.label,
+      entry.description,
+      entry.group,
+      aliases,
+    ].join(" "));
+  }
+  return entry._searchText;
+}
+
 function renderConfig() {
-  const search = (state.configSearch || "").trim().toLowerCase();
+  const search = normalizeConfigSearchText(state.configSearch || "");
+  const searchTokens = search ? search.split(/\s+/).filter(Boolean) : [];
   let items = state.entries;
   let activeGroup = state.activeGroup;
-  if (search) {
-    items = items.filter(e =>
-      e.field_name.toLowerCase().includes(search)
-      || (e.label || "").toLowerCase().includes(search)
-      || (e.description || "").toLowerCase().includes(search)
-    );
+  if (searchTokens.length) {
+    items = items.filter(e => searchTokens.every(token => configSearchHaystack(e).includes(token)));
     activeGroup = null;
   } else if (activeGroup) {
     items = items.filter(e => e.group === activeGroup);
@@ -2061,7 +2123,7 @@ function renderConfig() {
   }).join("") : "";
   const heading = search ? `搜索结果（${items.length}）` : (activeGroup || '配置');
   return `<div class="toolbar">
-      <input id="config-search-input" type="search" placeholder="搜索字段名 / 标签 / 描述…" value="${escapeAttr(state.configSearch)}" oninput="state.configSearch=this.value;render()" style="flex:1;max-width:340px">
+      <input id="config-search-input" type="search" placeholder="搜索字段名 / 标签 / 描述…" value="${escapeAttr(state.configSearch)}" oncompositionstart="onConfigSearchCompositionStart(this)" oncompositionend="onConfigSearchCompositionEnd(this)" oninput="onConfigSearchInput(this,event)" style="flex:1;max-width:340px">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
         <input type="checkbox" ${state.showAdvancedConfig?'checked':''} onchange="state.showAdvancedConfig=this.checked;render()" style="width:auto">
         显示高级配置

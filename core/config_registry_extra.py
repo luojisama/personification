@@ -174,8 +174,8 @@ EXTRA_CONFIG_SPECS: tuple[dict[str, Any], ...] = (
        "表情包视觉打标模型的 API 地址；留空复用主模型。", group="表情包", advanced=True),
     _s("personification_labeler_api_key", "str", "", "打标模型 API 密钥",
        "表情包视觉打标模型的 API 密钥；留空复用主模型。", group="表情包", advanced=True),
-    _s("personification_labeler_model", "str", "gemini-2.0-flash", "打标模型名称",
-       "表情包视觉打标使用的模型名。", group="表情包", advanced=True),
+    _s("personification_labeler_model", "str", "", "打标模型名称",
+       "表情包视觉打标使用的模型名；留空复用主模型，填写后仅覆盖表情包/视觉打标角色。", group="表情包", advanced=True),
     _s("personification_labeler_concurrency", "int", 3, "打标并发数",
        "批量打标时的并发请求数。", group="表情包", min=1, advanced=True),
 

@@ -126,7 +126,7 @@ def _mimo_heuristic_supports_vision(model_text: str) -> bool | None:
         return None
     if any(token in normalized_model for token in ("tts", "asr", "embedding", "embed")):
         return False
-    if compact_model in {"mimo25", "mimov25", "mimov2omni"}:
+    if compact_model.startswith(("mimo25", "mimov25", "mimov2omni")):
         return True
     if "vision" in normalized_model or "-vl" in normalized_model:
         return True

@@ -208,12 +208,21 @@ _LLM_SUBROLES: tuple[tuple[str, str, str, str], ...] = (
 
 async def _llm_subconfig_checks(cfg: Any) -> list[dict[str, Any]]:
     """对画像/风格/视觉打标/压缩等独立子模型做真实调用探测；未单独配置则标注复用主模型。"""
+    def _subrole_is_explicitly_configured(key: str, api_type: str, api_url: str, api_key: str, model: str) -> bool:
+        if api_url or api_key or model:
+            return True
+        if not api_type:
+            return False
+        if key == "labeler" and api_type == "openai":
+            return False
+        return True
+
     async def _one(name: str, key: str, prefix: str, model_field: str) -> dict:
         api_type = str(_get(cfg, f"{prefix}_type", "") or "").strip()
         api_url = str(_get(cfg, f"{prefix}_url", "") or "").strip()
         api_key = str(_get(cfg, f"{prefix}_key", "") or "").strip()
         model = str(_get(cfg, model_field, "") or "").strip()
-        if not (api_key or api_url or api_type):
+        if not _subrole_is_explicitly_configured(key, api_type, api_url, api_key, model):
             return _check(f"sub_{key}", name, _INFO, detail="未单独配置，复用主模型（随主模型一并验证）")
         provider = {
             "name": key, "api_type": api_type or "openai", "api_url": api_url,

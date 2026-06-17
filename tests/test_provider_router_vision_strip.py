@@ -11,9 +11,9 @@ from ._loader import load_personification_module
 provider_router = load_personification_module("plugin.personification.core.provider_router")
 
 
-def test_provider_router_treats_mimo_v25_pro_as_text_only() -> None:
-    assert provider_router.provider_supports_vision("openai", "mimo-v2.5-pro") is False
-    assert provider_router.provider_supports_vision("anthropic", "mimo-v2.5-pro") is False
+def test_provider_router_treats_mimo_v25_pro_as_multimodal() -> None:
+    assert provider_router.provider_supports_vision("openai", "mimo-v2.5-pro") is True
+    assert provider_router.provider_supports_vision("anthropic", "mimo-v2.5-pro") is True
     assert provider_router.provider_supports_vision("openai", "mimo-v2.5") is True
 
 
