@@ -279,6 +279,7 @@ let state = {
   personaPrompt: null, personaPromptPath: "", health: null, healthBusyCat: "", interactionResult: null, interactionBusy: false,
   qqInfo: null, qqGroups: [], qqFriends: [],
   memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false, memoryLimit: 200,
+  memoryVectorIndex: null, memorySearchQuery: "", memorySearchResult: null, memoryVectorBusy: false,
   memoryGraph: null, memoryGraphGroupId: "", memoryGraphLimit: 100, memoryGraphMinSalience: 0,
   groupRawChat: null, groupStyleSnapIdx: 0, groupStyleRebuilding: false,
   showAdvancedConfig: false,
@@ -466,14 +467,16 @@ async function loadView() {
       if (state.memoryUserId) qs.set("user_id", state.memoryUserId);
       if (state.memoryGroupId) qs.set("group_id", state.memoryGroupId);
       if (state.memoryPalaceZone) qs.set("palace_zone", state.memoryPalaceZone);
-      const [mem, inner, zones] = await Promise.all([
+      const [mem, inner, zones, vectorIndex] = await Promise.all([
         api("/memory/recent?" + qs.toString()),
         api("/memory/inner-state").catch(() => ({available: false})),
         api("/memory/palace-zones").catch(() => ({zones: []})),
+        api("/memory/vector-index").catch(e => ({available:false, error:e.message})),
       ]);
       state.memory = mem;
       state.memoryInnerState = inner;
       state.memoryPalaceZones = zones.zones || [];
+      state.memoryVectorIndex = vectorIndex;
     } else if (state.view === "plugin_knowledge") {
       const data = await api("/plugin-knowledge/list");
       state.pluginKnowledgeList = data.plugins || [];
@@ -982,7 +985,9 @@ function renderMemory() {
       </div>
       ${warmRows ? `<h3 style="margin-top:14px;margin-bottom:6px;font-size:13px">用户好感度</h3><table style="max-width:420px"><thead><tr><th>用户</th><th>好感</th></tr></thead><tbody>${warmRows}</tbody></table>`:''}</div>`;
   }
+  const vectorPanel = renderMemoryVectorPanel();
   return `${innerBlock}
+    ${vectorPanel}
     <div class="toolbar">
       <div class="group-bar" style="margin-bottom:0">${filters}</div>
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
@@ -1013,9 +1018,75 @@ function renderMemory() {
     </div>`;
 }
 
+function renderMemoryVectorPanel() {
+  const idx = state.memoryVectorIndex || {};
+  const ok = idx.available !== false;
+  const statusTag = ok
+    ? `<span class="tag ${idx.enabled ? 'source-env_json' : ''}">${idx.enabled ? '已启用' : '未启用'}</span>`
+    : `<span class="tag required">不可用</span>`;
+  const searchRows = ((state.memorySearchResult || {}).items || []).map(it => `<tr>
+    <td><code style="font-size:11px">${escapeHtml(it.memory_id || '')}</code><br><span class="tag">${escapeHtml(it.search_source || '-')}</span></td>
+    <td>${escapeHtml(it.summary || '')}</td>
+    <td class="muted" style="font-size:12px">${escapeHtml(it.why_relevant || '')}</td>
+    <td>${Number(it.score || 0).toFixed(3)}</td>
+  </tr>`).join("");
+  return `<div class="card">
+    <div class="row" style="justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <h2 style="margin:0">RAG 索引</h2>
+      <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+        ${statusTag}
+        <span class="muted" style="font-size:12px">backend=${escapeHtml(idx.backend || '-')} model=${escapeHtml(idx.model_version || '-')}</span>
+        <button class="btn small" onclick="rebuildMemoryVectorIndex()" ${state.memoryVectorBusy?'disabled':''}>重建索引</button>
+      </div>
+    </div>
+    <div class="row" style="gap:24px;flex-wrap:wrap;margin-top:10px">
+      <div><div class="muted">记忆数</div><div style="font-size:18px">${Number(idx.memory_count || 0)}</div></div>
+      <div><div class="muted">chunk 数</div><div style="font-size:18px">${Number(idx.chunk_count || 0)}</div></div>
+      <div><div class="muted">待补建</div><div style="font-size:18px">${Number(idx.stale_count || 0)}</div></div>
+    </div>
+    <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
+      <input id="memory-search-query" placeholder="测试长期记忆召回" value="${escapeAttr(state.memorySearchQuery || '')}" onkeydown="if(event.key==='Enter')testMemoryRecall()" style="min-width:260px;flex:1">
+      <button class="btn small primary" onclick="testMemoryRecall()">测试召回</button>
+    </div>
+    ${state.memorySearchResult ? `<table style="margin-top:10px"><thead><tr><th>记忆</th><th>摘要</th><th>相关性</th><th>分数</th></tr></thead><tbody>${searchRows || '<tr><td colspan="4" class="muted">无召回结果</td></tr>'}</tbody></table>` : ''}
+  </div>`;
+}
+
 async function pickMemoryFilter(t) {
   state.memoryFilter = t;
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+async function rebuildMemoryVectorIndex() {
+  state.memoryVectorBusy = true;
+  render();
+  try {
+    const result = await api("/memory/vector-index/rebuild", { method:"POST" });
+    state.memoryVectorIndex = result.index || state.memoryVectorIndex;
+    alertFlash("ok", `已重建 ${result.rebuilt || 0} 条记忆索引`);
+    await loadView(); render();
+  } catch (e) {
+    alertFlash("err", "重建失败：" + e.message);
+  } finally {
+    state.memoryVectorBusy = false;
+    render();
+  }
+}
+
+async function testMemoryRecall() {
+  const input = document.getElementById("memory-search-query");
+  const query = (input ? input.value : state.memorySearchQuery || "").trim();
+  state.memorySearchQuery = query;
+  if (!query) { alertFlash("err", "请输入召回测试 query"); return; }
+  const qs = new URLSearchParams({ query, limit: "8" });
+  if (state.memoryUserId) qs.set("user_id", state.memoryUserId);
+  if (state.memoryGroupId) qs.set("group_id", state.memoryGroupId);
+  try {
+    state.memorySearchResult = await api("/memory/search-test?" + qs.toString());
+    render();
+  } catch (e) {
+    alertFlash("err", "召回测试失败：" + e.message);
+  }
 }
 
 async function toggleMemoryIncludeSelf(checked) {

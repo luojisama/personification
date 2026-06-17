@@ -190,6 +190,63 @@ def test_config_value_validation_rejects_bad_value(_runtime_context) -> None:
     assert res.status_code == 400
 
 
+def test_memory_vector_index_routes(_runtime_context, tmp_path) -> None:
+    memory_store_mod = load_personification_module("plugin.personification.core.memory_store")
+    cfg = _runtime_context.plugin_config
+    cfg.personification_memory_enabled = True
+    cfg.personification_memory_palace_enabled = True
+    cfg.personification_memory_rag_enabled = True
+    cfg.personification_memory_vector_backend = "sqlite_exact"
+    cfg.personification_memory_rag_candidate_limit = 80
+    cfg.personification_memory_recall_top_k = 8
+    cfg.personification_memory_search_scan_limit = 300
+    store = memory_store_mod.MemoryStore(plugin_config=cfg, logger=None)
+    store.initialize()
+    store.write_memory_item(
+        {
+            "memory_id": "webui-rag",
+            "memory_type": "semantic",
+            "summary": "长期事实：用户喜欢月面基地模型",
+            "snippets": ["月面基地模型"],
+            "user_id": "u1",
+            "permission_type": "private_fact",
+            "confidence": 0.95,
+            "salience": 0.9,
+        }
+    )
+
+    sent_messages: list[dict] = []
+
+    class _FakeBot:
+        async def call_api(self, _name: str, **kwargs):
+            sent_messages.append(kwargs)
+            return {"message_id": 1}
+
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=cfg,
+        superusers={"10001"},
+        get_bots=lambda: {"100": _FakeBot()},
+        logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+        runtime_bundle=SimpleNamespace(memory_store=store),
+    )
+    _runtime_context.sent = sent_messages
+
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    status = client.get("/personification/api/memory/vector-index")
+    assert status.status_code == 200, status.text
+    assert status.json()["chunk_count"] >= 1
+
+    search = client.get("/personification/api/memory/search-test?query=月面基地模型&user_id=u1")
+    assert search.status_code == 200, search.text
+    assert any(item["memory_id"] == "webui-rag" for item in search.json()["items"])
+
+    rebuild = client.post("/personification/api/memory/vector-index/rebuild")
+    assert rebuild.status_code == 200, rebuild.text
+    assert rebuild.json()["status"] == "ok"
+
+
 def test_devices_listing_and_revoke(_runtime_context) -> None:
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
