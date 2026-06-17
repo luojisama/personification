@@ -147,6 +147,7 @@ class PluginRuntimeBundle:
     background_intelligence: Any = None
     qzone_social_scan: Any = None
     qzone_inbound_poll: Any = None
+    qzone_generate_post: Any = None
     get_knowledge_build_task: Any = None
     set_knowledge_build_task: Any = None
 

@@ -325,3 +325,45 @@ def test_generate_once_recovers_persona_profile_from_dict() -> None:
     snapshot = system["system"].split("## 人设快照", 1)[1]
     assert "高冷知性，话不多" in snapshot and "短句、克制、偶尔毒舌" in snapshot
     assert "群聊接话规则X" not in snapshot  # group-chat 边界规则不带入发空间
+
+
+def test_format_qzone_quota_block_tight_budget() -> None:
+    block = diary_flow._format_qzone_quota_block(
+        {"used": 28, "limit": 30, "remaining": 2, "days_in_month": 30, "days_left": 12}
+    )
+    assert "上限 30 条" in block and "已发 28 条" in block and "剩余 2 条" in block
+    assert "节奏建议" in block and "克制" in block
+
+
+def test_maybe_generate_proactive_injects_quota(monkeypatch) -> None:  # noqa: ANN001
+    """额度快照会被注入主动发空间的决策 prompt，agent 据此自行决定 skip/post。"""
+
+    class _Store:
+        def load_sync(self, _name):  # noqa: ANN001
+            return {}
+
+    monkeypatch.setattr(diary_flow, "get_data_store", lambda: _Store())
+
+    class _Bot:
+        async def get_group_list(self):  # noqa: ANN201
+            return []
+
+    captured: dict = {}
+
+    async def _call(messages, **_kwargs):  # noqa: ANN001
+        captured["messages"] = messages
+        return json.dumps({"action": "skip", "content": "", "reason": "额度紧"}, ensure_ascii=False)
+
+    quota = {"used": 27, "limit": 30, "remaining": 3, "days_in_month": 30, "days_left": 10}
+    result = asyncio.run(
+        diary_flow.maybe_generate_proactive_qzone_post(
+            _Bot(),
+            load_prompt=lambda: "你是某角色",
+            call_ai_api=_call,
+            logger=_Logger(),
+            quota=quota,
+        )
+    )
+    user_prompt = captured["messages"][1]["content"]
+    assert "本月发空间额度" in user_prompt and "已发 27 条" in user_prompt
+    assert result == ""  # action=skip
