@@ -9,7 +9,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from ..deps import AdminIdentity, require_admin
 
-_INTERACTION_WAIT_SECONDS = 45
+_INTERACTION_WAIT_SECONDS = 75
 
 
 def _first_bot(runtime) -> Any | None:
@@ -20,8 +20,27 @@ def _first_bot(runtime) -> Any | None:
     return next(iter(bots.values()), None) if bots else None
 
 
+# 这些 OneBot 动作都是"对外发消息"，交互测试需要全部捕获，
+# 否则拟人化发送层若走 send_group_msg / 转发消息 / call_api 等非 bot.send 路径，
+# 测试会误判为"未回复"，而真实聊天里 bot 其实已经发言。
+_SEND_API_ACTIONS = frozenset(
+    {
+        "send_msg",
+        "send_group_msg",
+        "send_private_msg",
+        "send_group_forward_msg",
+        "send_private_forward_msg",
+        "send_forward_msg",
+    }
+)
+
+
 class _CapturingBot:
-    """透传真实 bot（消息真的发到 QQ），同时捕获 send 的内容用于回显。"""
+    """透传真实 bot（消息真的发到 QQ），同时捕获各种发送路径的内容用于回显。
+
+    覆盖 send / send_*_msg / 转发 / call_api，确保无论回复链路用哪种发送方式
+    （含拟人化发送层、多段、图片、表情、转发）都能被捕获并回显。
+    """
 
     def __init__(self, real: Any, *, trace_id: str = "") -> None:
         self._real = real
@@ -29,7 +48,7 @@ class _CapturingBot:
         self.self_id = getattr(real, "self_id", "")
         self.trace_id = trace_id
 
-    async def send(self, event: Any, message: Any, **kwargs: Any) -> Any:
+    def _record_attempt(self, detail: str) -> None:
         from ...core import reply_turn_trace
 
         reply_turn_trace.record_stage(
@@ -37,51 +56,109 @@ class _CapturingBot:
             key="send_attempt",
             label="发送回复",
             status="info",
-            detail=str(message)[:500],
+            detail=str(detail)[:500],
         )
+
+    def _record_outcome(self, *, ok: bool, detail: str) -> None:
+        from ...core import reply_turn_trace
+
+        if ok:
+            reply_turn_trace.record_stage(
+                trace_id=self.trace_id, key="send_success", label="发送成功",
+                status="ok", detail=str(detail)[:500],
+            )
+        else:
+            reply_turn_trace.record_stage(
+                trace_id=self.trace_id, key="send_failed", label="发送失败",
+                status="error", detail=str(detail)[:500],
+                hint="检查协议端发送权限、好友/群关系、账号风控或消息格式",
+            )
+
+    def _capture(self, message: Any) -> None:
+        try:
+            text = str(message)
+        except Exception:
+            return
+        if text:
+            self.captured.append(text)
+
+    async def send(self, event: Any, message: Any, **kwargs: Any) -> Any:
+        self._record_attempt(message)
         try:
             result = await self._real.send(event, message, **kwargs)
         except Exception as exc:
-            reply_turn_trace.record_stage(
-                trace_id=self.trace_id,
-                key="send_failed",
-                label="发送失败",
-                status="error",
-                detail=str(exc)[:500],
-                hint="检查协议端发送权限、好友/群关系、账号风控或消息格式",
-            )
+            self._record_outcome(ok=False, detail=str(exc))
             raise
-        try:
-            self.captured.append(str(message))
-        except Exception:
-            pass
-        reply_turn_trace.record_stage(
-            trace_id=self.trace_id,
-            key="send_success",
-            label="发送成功",
-            status="ok",
-            detail=str(result)[:500],
-        )
+        self._capture(message)
+        self._record_outcome(ok=True, detail=result)
         return result
+
+    async def call_api(self, api: str, **data: Any) -> Any:
+        action = str(api or "").strip()
+        if action in _SEND_API_ACTIONS:
+            self._record_attempt(data.get("message", data))
+        try:
+            result = await self._real.call_api(api, **data)
+        except Exception as exc:
+            if action in _SEND_API_ACTIONS:
+                self._record_outcome(ok=False, detail=str(exc))
+            raise
+        if action in _SEND_API_ACTIONS:
+            self._capture(data.get("message", ""))
+            self._record_outcome(ok=True, detail=result)
+        return result
+
+    async def _send_via_action(self, action: str, message: Any, **data: Any) -> Any:
+        self._record_attempt(message)
+        try:
+            result = await getattr(self._real, action)(message=message, **data)
+        except Exception as exc:
+            self._record_outcome(ok=False, detail=str(exc))
+            raise
+        self._capture(message)
+        self._record_outcome(ok=True, detail=result)
+        return result
+
+    async def send_msg(self, *, message: Any = "", **data: Any) -> Any:
+        return await self._send_via_action("send_msg", message, **data)
+
+    async def send_group_msg(self, *, message: Any = "", **data: Any) -> Any:
+        return await self._send_via_action("send_group_msg", message, **data)
+
+    async def send_private_msg(self, *, message: Any = "", **data: Any) -> Any:
+        return await self._send_via_action("send_private_msg", message, **data)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
 
 
 def _build_probe_event(bot: Any, *, group_id: str, user_id: str, text: str) -> Any:
-    from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, PrivateMessageEvent
+    from nonebot.adapters.onebot.v11 import (
+        GroupMessageEvent,
+        Message,
+        MessageSegment,
+        PrivateMessageEvent,
+    )
     from nonebot.adapters.onebot.v11.event import Sender
 
-    msg = Message(text)
+    self_id = int(getattr(bot, "self_id", 0) or 0)
+    if group_id:
+        # 群聊探测显式 @bot：与真实"直呼 bot"一致，确保被判为定向消息、
+        # 立即处理（不进随机插话/批延迟），避免被语义帧判为"非对我说"而沉默。
+        msg = MessageSegment.at(self_id) + MessageSegment.text(" " + text)
+        raw_message = f"[CQ:at,qq={self_id}] {text}"
+    else:
+        msg = Message(text)
+        raw_message = text
     common = dict(
         time=int(time.time()),
-        self_id=int(getattr(bot, "self_id", 0) or 0),
+        self_id=self_id,
         post_type="message",
         message_id=random.randint(1, 2_000_000_000),
         user_id=int(user_id),
         message=msg,
         original_message=msg,
-        raw_message=text,
+        raw_message=raw_message,
         font=0,
         sender=Sender(user_id=int(user_id), nickname="功能自检"),
         to_me=True,
