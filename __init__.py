@@ -314,6 +314,7 @@ async def _init_personification_runtime() -> None:
     )
     runtime_bundle.qzone_social_scan = job_handles.get("qzone_social_scan")
     runtime_bundle.qzone_inbound_poll = job_handles.get("qzone_inbound_poll")
+    runtime_bundle.qzone_generate_post = job_handles.get("generate_ai_diary")
     _start_qzone_cookie_refresh_background()
 
     if bool(getattr(plugin_config, "personification_git_auto_update", False)):

@@ -94,7 +94,7 @@ def test_proactive_qzone_post_skipped_in_quiet_hour() -> None:
     async def _fake_update_cookie(_bot):
         return True, "ok"
 
-    async def _fake_maybe_generate(_bot):
+    async def _fake_maybe_generate(_bot, quota=None):
         return "本来应该生成的内容"
 
     async def _fake_publish(content, self_id):
@@ -135,7 +135,7 @@ def test_proactive_qzone_post_runs_outside_quiet_hour(tmp_path, monkeypatch) -> 
     async def _fake_update_cookie(_bot):
         return True, "ok"
 
-    async def _fake_maybe_generate(_bot):
+    async def _fake_maybe_generate(_bot, quota=None):
         generated.append(True)
         return ""  # 返空避免真发布
 
@@ -173,7 +173,7 @@ def _make_runner(now, *, monthly_limit, publish_called, generate=lambda: "今天
     async def _upd(_bot):
         return True, "ok"
 
-    async def _gen(_bot):
+    async def _gen(_bot, quota=None):
         return generate()
 
     async def _pub(content, self_id):
@@ -247,3 +247,39 @@ def test_old_daily_state_migrates_to_monthly(tmp_path, monkeypatch) -> None:
     ).get_data_store().load_sync("qzone_post_state")
     assert state["period"] == "2026-08"
     assert state["count"] == 1
+
+
+# ---- 月度额度快照 ----
+
+
+def test_build_qzone_quota_current_month() -> None:
+    q = periodic_jobs.build_qzone_quota(
+        state={"period": "2026-06", "count": 25, "last_post_at": 0},
+        now=datetime(2026, 6, 17, 14, 0),
+        monthly_limit=30,
+        min_interval_hours=6,
+    )
+    assert q["used"] == 25 and q["limit"] == 30 and q["remaining"] == 5
+    assert q["days_in_month"] == 30 and q["days_left"] == 14
+
+
+def test_build_qzone_quota_resets_for_new_month() -> None:
+    """state 还停留在上个月时，本月已发计 0、额度全满。"""
+    q = periodic_jobs.build_qzone_quota(
+        state={"period": "2026-05", "count": 30, "last_post_at": 0},
+        now=datetime(2026, 6, 1, 9, 0),
+        monthly_limit=30,
+        min_interval_hours=6,
+    )
+    assert q["used"] == 0 and q["remaining"] == 30
+
+
+def test_build_qzone_quota_next_eligible_from_min_interval() -> None:
+    last = datetime(2026, 6, 17, 12, 0).timestamp()
+    q = periodic_jobs.build_qzone_quota(
+        state={"period": "2026-06", "count": 1, "last_post_at": last},
+        now=datetime(2026, 6, 17, 14, 0),
+        monthly_limit=30,
+        min_interval_hours=6,
+    )
+    assert q["next_eligible_at"] == last + 6 * 3600

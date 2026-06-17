@@ -146,8 +146,8 @@ def build_maybe_generate_qzone_post_task(
     agent_tool_registry: Any = None,
     agent_max_steps: int = 4,
     agent_data_dir: Any = None,
-) -> Callable[[Any], Awaitable[str]]:
-    async def _maybe_generate_qzone_post(bot: Any) -> str:
+) -> Callable[..., Awaitable[str]]:
+    async def _maybe_generate_qzone_post(bot: Any, quota: Any = None) -> str:
         return await maybe_generate_proactive_qzone_post_flow(
             bot,
             load_prompt=load_prompt,
@@ -157,6 +157,7 @@ def build_maybe_generate_qzone_post_task(
             tool_caller=agent_tool_caller,
             registry=agent_tool_registry,
             agent_max_steps=agent_max_steps,
+            quota=quota,
         )
 
     return _maybe_generate_qzone_post

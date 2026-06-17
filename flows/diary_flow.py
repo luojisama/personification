@@ -177,6 +177,36 @@ def _format_recent_qzone_posts(posts: list[str]) -> str:
     return "\n".join(f"- {item}" for item in posts[-8:])
 
 
+def _format_qzone_quota_block(quota: Optional[dict]) -> str:
+    """把月度额度快照渲染成给 agent 自我节奏控制的提示块。"""
+    if not isinstance(quota, dict) or not quota:
+        return ""
+    used = int(quota.get("used", 0) or 0)
+    limit = int(quota.get("limit", 0) or 0)
+    remaining = int(quota.get("remaining", max(0, limit - used)) or 0)
+    days_left = int(quota.get("days_left", 0) or 0)
+    days_in_month = int(quota.get("days_in_month", 0) or 0)
+    lines = [
+        f"- 本月发空间额度：上限 {limit} 条，已发 {used} 条，剩余 {remaining} 条。",
+    ]
+    if days_in_month:
+        lines.append(f"- 本月共 {days_in_month} 天，还剩 {days_left} 天。")
+    if limit > 0 and days_in_month > 0:
+        ideal_rate = limit / days_in_month
+        elapsed_days = max(1, days_in_month - days_left + 1)
+        expected_used = ideal_rate * elapsed_days
+        if remaining <= 0:
+            pace = "额度已用完，本轮必须 skip。"
+        elif remaining <= max(1, round(ideal_rate * max(1, days_left) * 0.5)):
+            pace = "额度偏紧，请明显更克制：只在真的很想发、且内容有意思时才 post，否则 skip。"
+        elif used > expected_used + 1:
+            pace = "发得比平均节奏快了些，适当收一收，没有强烈冲动就 skip。"
+        else:
+            pace = "额度还算宽裕，但也别为了发而发；有真想发的就发，没有就 skip。"
+        lines.append(f"- 节奏建议：{pace}")
+    return "你的发空间额度与节奏（请像真人一样自己把控，不要把额度发满当任务）：\n" + "\n".join(lines)
+
+
 def _normalize_similarity_text(text: str) -> str:
     cleaned = _compact_qzone_history_content(text)
     cleaned = re.sub(r"[\s，。！？!?、,.；;：:~…·'\"“”‘’（）()【】\[\]#]+", "", cleaned)
@@ -699,8 +729,9 @@ async def maybe_generate_proactive_qzone_post(
     tool_caller: Any = None,
     registry: Any = None,
     agent_max_steps: int = 4,
+    quota: Optional[dict] = None,
 ) -> str:
-    """根据近期聊天与内心状态决定是否主动发一条更日常的空间动态。"""
+    """根据近期聊天、内心状态与本月额度，决定是否主动发一条更日常的空间动态。"""
     system_prompt = load_prompt()
     chat_context = await get_recent_chat_context(bot, logger)
     if not chat_context:
@@ -740,9 +771,11 @@ async def maybe_generate_proactive_qzone_post(
                 pending_lines.append(f"- {thought}")
     pending_block = "\n".join(pending_lines) if pending_lines else "- 无明显挂念"
 
+    quota_block = _format_qzone_quota_block(quota)
     decision_prompt = (
         "你现在在考虑要不要发一条 QQ 空间说说。\n"
-        "请基于最近聊天内容、当前心情和挂念，判断你此刻是不是真的有想发动态的冲动。\n"
+        "请基于最近聊天内容、当前心情和挂念，以及你本月还剩多少发空间额度，"
+        "判断你此刻是不是真的有想发动态的冲动、以及现在发是否合适。\n"
         "输出严格 JSON：{\"action\":\"skip|post\",\"content\":\"正文\",\"image_prompt\":\"可选英文配图提示词\",\"reason\":\"极短原因\"}。\n\n"
         f"当前心情：{mood}\n"
         f"当前精力：{energy}\n"
@@ -751,8 +784,9 @@ async def maybe_generate_proactive_qzone_post(
         f"最近聊天片段：\n{chat_context}\n\n"
         "最近已经发过的说说，禁止复读这些内容或近似句式：\n"
         f"{_format_recent_qzone_posts(recent_posts)}\n\n"
-        "要求：\n"
-        "1. 如果没有明确想说的话，action=skip。\n"
+        + (f"{quota_block}\n\n" if quota_block else "")
+        + "要求：\n"
+        "1. 如果没有明确想说的话，或按上面的额度节奏建议此刻不该发，action=skip。\n"
         "2. 如果想发，action=post，并给出 content。\n"
         "3. 正文 12-50 个中文字符，像真人随手发的一句话，别写长篇大段。\n"
         "4. 只写一个小瞬间、小吐槽或突然想到的念头，不要列表、标题、hashtag 或总结腔。\n"

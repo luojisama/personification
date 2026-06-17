@@ -19,6 +19,7 @@ from .routes.log_routes import build_log_router
 from .routes.qq_routes import build_qq_router
 from .routes.plugin_knowledge_routes import build_plugin_knowledge_router
 from .routes.quota_routes import build_quota_router
+from .routes.qzone_routes import build_qzone_router
 from .routes.skill_routes import build_skill_router
 from .routes.sticker_routes import build_sticker_router
 from .routes.test_routes import build_test_router
@@ -75,6 +76,7 @@ def build_router() -> APIRouter:
     router.include_router(build_audit_router(runtime=runtime))
     router.include_router(build_proactive_router(runtime=runtime))
     router.include_router(build_quota_router(runtime=runtime))
+    router.include_router(build_qzone_router(runtime=runtime))
     router.include_router(build_plugin_knowledge_router(runtime=runtime))
     router.include_router(build_health_router(runtime=runtime))
     router.include_router(build_log_router(runtime=runtime))
@@ -452,6 +454,8 @@ async function loadView() {
       state.qqInfo = info; state.qqGroups = groups.groups || []; state.qqFriends = friends.friends || [];
     } else if (state.view === "health") {
       state.health = await api("/health/check");  // 默认读缓存，秒开
+    } else if (state.view === "qzone") {
+      state.qzone = await api("/qzone/status");
     } else if (state.view === "persona_prompt") {
       const qs = state.personaPromptPath ? ("?path=" + encodeURIComponent(state.personaPromptPath)) : "";
       state.personaPrompt = await api("/test/persona-prompt" + qs);
@@ -556,6 +560,7 @@ function renderLayout() {
       <nav>
         ${navItem('dashboard','仪表盘')}
         ${navItem('health','功能体检')}
+        ${navItem('qzone','QQ 空间')}
         ${navItem('config','配置中心')}
         ${navItem('personas','用户画像')}
         ${navItem('groups','群信息')}
@@ -606,6 +611,7 @@ function renderView() {
   if (state.view === "plugin_knowledge") return renderPluginKnowledge();
   if (state.view === "qq") return renderQQ();
   if (state.view === "health") return renderHealth();
+  if (state.view === "qzone") return renderQzone();
   if (state.view === "test") return renderTest();
   if (state.view === "persona_prompt") return renderPersonaPrompt();
   if (state.view === "memory") return renderMemory();
@@ -1175,7 +1181,7 @@ function renderMemoryDetail() {
 }
 
 function viewTitle() {
-  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",test:"模型测试",audit:"审计日志",logs:"插件日志",proactive:"主动诊断",qq:"QQ 管理",devices:"设备管理"})[state.view] || state.view;
+  return ({dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",test:"模型测试",audit:"审计日志",logs:"插件日志",proactive:"主动诊断",health:"功能体检",qzone:"QQ 空间",qq:"QQ 管理",devices:"设备管理"})[state.view] || state.view;
 }
 
 // ---------------------------------------------------------------------------
@@ -1561,6 +1567,84 @@ async function runInteraction(target) {
     state.interactionResult = await api("/health/interaction-test", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ target }) });
   } catch (e) { alertFlash("err", "交互测试失败：" + e.message); }
   state.interactionBusy = false; render();
+}
+
+function _fmtTs(ts) {
+  ts = Number(ts) || 0;
+  return ts > 0 ? new Date(ts * 1000).toLocaleString() : "—";
+}
+function _fmtDuration(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  if (sec === 0) return "现在可发";
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  if (h > 0) return `约 ${h} 小时 ${m} 分后`;
+  if (m > 0) return `约 ${m} 分后`;
+  return `约 ${sec} 秒后`;
+}
+
+function renderQzone() {
+  const q = state.qzone;
+  if (!q) return `<div class="card muted">加载中…</div>`;
+  const quota = q.quota || {};
+  const used = Number(quota.used || 0), limit = Number(quota.limit || 0);
+  const remaining = Number(quota.remaining != null ? quota.remaining : Math.max(0, limit - used));
+  const pct = limit > 0 ? Math.min(100, Math.round(used / limit * 100)) : 0;
+  const barColor = pct >= 90 ? "var(--danger)" : (pct >= 70 ? "var(--warn)" : "var(--ok)");
+  const enabledPill = (on, label) => `<span class="device-status ${on?'approved':'pending'}">${label}：${on?'开':'关'}</span>`;
+  const recent = (q.recent_contents || []).slice().reverse();
+  const recentRows = recent.length
+    ? recent.map(c => `<li style="padding:5px 0;border-top:1px solid var(--line)">${escapeHtml(c)}</li>`).join("")
+    : '<li class="muted" style="padding:6px 0">暂无记录</li>';
+  return `<div class="card">
+    <div class="between" style="margin-bottom:4px">
+      <h2 style="margin:0">本月发空间额度</h2>
+      <div class="row">${enabledPill(q.enabled,'空间总开关')}${enabledPill(q.proactive_enabled,'主动发说说')}</div>
+    </div>
+    <p class="muted" style="margin:2px 0 14px">agent 会参考这份额度自己把控发不发、发的节奏；下面是当前快照。</p>
+    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">
+      <span style="font-size:30px;font-weight:700">${used}</span>
+      <span class="muted">/ ${limit} 条（本月 ${escapeHtml(quota.month||'')}）</span>
+      <span style="margin-left:auto" class="muted">剩余 <strong style="color:${barColor}">${remaining}</strong> 条 · 还剩 ${Number(quota.days_left||0)} 天</span>
+    </div>
+    <div style="height:10px;border-radius:99px;background:var(--input-bg);border:1px solid var(--line);overflow:hidden">
+      <div style="height:100%;width:${pct}%;background:${barColor};transition:width .3s"></div>
+    </div>
+    <div class="health-summary" style="margin-top:16px">
+      <div class="health-pill"><div><div class="muted" style="font-size:12px">检查间隔</div><div>每 ${Number(q.check_interval_minutes||0)} 分钟</div></div></div>
+      <div class="health-pill"><div><div class="muted" style="font-size:12px">最小间隔</div><div>${Number((quota.min_interval_hours)||0)} 小时</div></div></div>
+      <div class="health-pill"><div><div class="muted" style="font-size:12px">静默时段</div><div>${Number(q.quiet_hour_start||0)}:00 - ${Number(q.quiet_hour_end||0)}:00</div></div></div>
+      <div class="health-pill"><div><div class="muted" style="font-size:12px">下次最早可发</div><div>${q.next_eligible_in_seconds>0?_fmtDuration(q.next_eligible_in_seconds):'现在可发'}</div></div></div>
+    </div>
+    <div class="field" style="margin-top:8px">
+      <div class="muted" style="font-size:12px">上次发布</div>
+      <div>${_fmtTs(q.last_post_at)}${q.last_content?'：'+escapeHtml(q.last_content):''}</div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button class="btn primary" onclick="triggerQzonePost()" ${state.qzoneBusy?'disabled':''}>${state.qzoneBusy?'<span class="spinner"></span> 发布中…':'立即发一条'}</button>
+      <button class="btn small" onclick="loadView().then(render)">刷新</button>
+      <span class="muted" style="font-size:12px">「立即发一条」会强制生成并发布（绕过额度/间隔判断），但仍计入本月额度。</span>
+    </div>
+    ${state.qzonePostResult ? `<div class="alert ${state.qzonePostResult.ok?'ok':'err'}" style="margin-top:12px">${escapeHtml(state.qzonePostResult.ok ? ('已发布：'+(state.qzonePostResult.content||'')) : (state.qzonePostResult.error||'发布失败'))}</div>` : ''}
+  </div>
+  <div class="card">
+    <h2>最近发过的说说（去重记忆）</h2>
+    <ul style="list-style:none;margin:0;padding:0">${recentRows}</ul>
+  </div>`;
+}
+
+async function triggerQzonePost() {
+  if (state.qzoneBusy) return;
+  if (!confirm("确定现在强制发一条空间说说？会真实发布到 QQ 空间，并计入本月额度。")) return;
+  state.qzoneBusy = true; state.qzonePostResult = null; render();
+  try {
+    const r = await api("/qzone/post-now", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({}) });
+    state.qzonePostResult = r;
+    if (r && r.quota && state.qzone) state.qzone.quota = r.quota;
+    if (r && r.ok) { try { await loadView(); } catch {} }
+  } catch (e) {
+    state.qzonePostResult = { ok:false, error: e.message };
+  }
+  state.qzoneBusy = false; render();
 }
 
 function renderPersonas() {
