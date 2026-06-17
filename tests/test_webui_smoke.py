@@ -142,7 +142,7 @@ def test_config_entries_authenticated_returns_groups(_runtime_context) -> None:
     assert sample["group"] == "核心开关"
 
 
-def test_config_value_update_double_writes(_runtime_context, monkeypatch, tmp_path) -> None:
+def test_config_value_update_writes_env_json_only(_runtime_context, monkeypatch, tmp_path) -> None:
     # 重定向 .env.prod 探测到 tmp_path
     env_writer = load_personification_module("plugin.personification.core.env_writer")
     env_file = tmp_path / ".env.prod"
@@ -163,10 +163,13 @@ def test_config_value_update_double_writes(_runtime_context, monkeypatch, tmp_pa
     body = res.json()
     assert body["success"] is True
     assert body["errors"] == []
-    # .env.prod 已写入
+    assert body["dotenv_path"] is None
+    assert body["env_json_path"]
+    # .env.prod 不再由 WebUI 改写
     from dotenv import dotenv_values
 
-    assert dotenv_values(str(env_file))["personification_agent_max_steps"] == "8"
+    assert dotenv_values(str(env_file))["personification_agent_max_steps"] == "5"
+    assert list(tmp_path.glob(".env.prod.bak.*")) == []
     # env.json 也已写入
     import json as _json
 

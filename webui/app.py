@@ -2130,6 +2130,9 @@ function renderConfig() {
       </label>
       <button class="btn" onclick="applyRecommended()">应用推荐默认值</button>
     </div>
+    <div class="alert" style="margin-bottom:10px">
+      插件配置由数据目录下的 <code>env.json</code> 持久化；<code>.env.prod</code> 仅在首次启用时导入插件字段，后续 WebUI 保存不会改写它。<code>SUPERUSERS</code> 等 NoneBot 基础配置仍放在 <code>.env.prod</code>。
+    </div>
     ${groupBar ? `<div class="group-bar">${groupBar}</div>` : ''}
     <div class="card">
       <h2>${escapeHtml(heading)} ${hiddenAdvanced ? `<span class="muted" style="font-size:12px;font-weight:normal">（已折叠 ${hiddenAdvanced} 项高级配置）</span>` : ''}</h2>
@@ -2138,7 +2141,7 @@ function renderConfig() {
 }
 
 async function applyRecommended() {
-  if (!confirm("将一组推荐配置写入 .env.prod 与 env.json，覆盖现有值。继续？")) return;
+  if (!confirm("将一组推荐配置写入插件 env.json，覆盖现有插件配置；不会改写 .env.prod。继续？")) return;
   try {
     const result = await api("/config/apply-recommended", { method:"POST", headers:{"content-type":"application/json"}, body: "{}" });
     const lines = [`已应用 ${result.applied.length} 项`];
@@ -2418,7 +2421,7 @@ async function saveApiPool(field) {
 }
 
 function activeSourceLabel(src) {
-  return ({env_file:".env.prod",env_json:"env.json",runtime_config:"runtime_config.json",default:"默认"})[src] || src;
+  return ({env_file:".env.prod 首次导入",env_json:"env.json",runtime_config:"runtime_config.json",default:"默认"})[src] || src;
 }
 
 function markDirty(el) { el.dataset.dirty = "1"; }
@@ -2437,7 +2440,7 @@ async function commitTextField(field, btn, kind) {
 async function saveField(field, value) {
   try {
     const result = await api("/config/value", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ field_name: field, value }) });
-    if (result.success) { alertFlash("ok", `已保存 ${field}（已同步 .env 与 env.json）`); await loadView(); render(); }
+    if (result.success) { alertFlash("ok", `已保存 ${field} 到插件 env.json，重启后仍生效`); await loadView(); render(); }
     else { alertFlash("err", `保存部分失败：${(result.errors||[]).join("；")}`); await loadView(); render(); }
   } catch (e) { alertFlash("err", "保存失败：" + e.message); }
 }

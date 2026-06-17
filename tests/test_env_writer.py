@@ -98,8 +98,8 @@ def test_write_env_json_creates_and_merges(tmp_path: Path) -> None:
     assert data2["personification_agent_max_steps"] == 7
 
 
-def test_write_both_updates_env_in_place_when_key_exists(tmp_path: Path) -> None:
-    # 字段已在 .env 中 → 就地更新 .env，同时写 env.json
+def test_write_both_keeps_env_file_read_only_when_key_exists(tmp_path: Path) -> None:
+    # WebUI 保存只写 env.json；.env.prod 中已有同名字段也不再被改写。
     env_file = tmp_path / ".env.prod"
     env_file.write_text("# header\npersonification_probability=0.3\n", encoding="utf-8")
     cfg = _make_plugin_config(tmp_path)
@@ -110,8 +110,9 @@ def test_write_both_updates_env_in_place_when_key_exists(tmp_path: Path) -> None
     finally:
         env_writer._resolve_dotenv_target = original
     assert result["errors"] == []
-    assert result["dotenv_path"] == str(env_file)
-    assert dotenv_values(str(env_file))["personification_probability"] == "0.6"
+    assert result["dotenv_path"] is None
+    assert dotenv_values(str(env_file))["personification_probability"] == "0.3"
+    assert list(tmp_path.glob(".env.prod.bak.*")) == []
     json_data = json.loads(Path(result["env_json_path"]).read_text(encoding="utf-8"))
     assert json_data["personification_probability"] == 0.6
 
@@ -153,7 +154,7 @@ def test_env_candidates_prefer_project_root_over_plugin_local_env(tmp_path: Path
     assert runtime_config.read_env_file_value("personification_probability") == "0.3"
 
 
-def test_write_both_updates_project_env_instead_of_plugin_local_env(tmp_path: Path, monkeypatch) -> None:
+def test_write_both_writes_env_json_without_touching_project_or_plugin_env(tmp_path: Path, monkeypatch) -> None:
     project_root = tmp_path / "bot"
     plugin_root = project_root / "plugin" / "personification"
     data_dir = tmp_path / "data"
@@ -179,9 +180,9 @@ def test_write_both_updates_project_env_instead_of_plugin_local_env(tmp_path: Pa
     result = env_writer.write_both("personification_api_pools", new_value, cfg)
 
     assert result["errors"] == []
-    assert result["dotenv_path"] == str(project_env)
+    assert result["dotenv_path"] is None
     assert dotenv_values(str(project_env))["personification_api_pools"] == json.dumps(
-        new_value,
+        old_value,
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -193,7 +194,8 @@ def test_write_both_updates_project_env_instead_of_plugin_local_env(tmp_path: Pa
     assert json.loads(Path(result["env_json_path"]).read_text(encoding="utf-8"))[
         "personification_api_pools"
     ] == new_value
-    assert json.loads(runtime_config.read_env_file_value("personification_api_pools")) == new_value
+    assert json.loads(runtime_config.read_env_file_value("personification_api_pools")) == old_value
+    assert list(project_root.glob(".env.prod.bak.*")) == []
 
 
 def test_write_both_ignores_plugin_local_env_when_project_env_exists(tmp_path: Path, monkeypatch) -> None:
@@ -233,11 +235,11 @@ def test_resolve_value_sources_reports_env_json_when_no_env_file(tmp_path: Path,
     assert sources["current"] == 0.5
 
 
-def test_resolve_value_sources_env_file_wins(tmp_path: Path, monkeypatch) -> None:
+def test_resolve_value_sources_env_json_wins_over_env_file(tmp_path: Path, monkeypatch) -> None:
     cfg = _make_plugin_config(tmp_path, personification_probability=0.7)
     monkeypatch.setattr(env_writer, "read_env_file_value", lambda key: "0.7" if key == "personification_probability" else "")
     env_writer.write_env_json("personification_probability", 0.3, cfg)
     sources = env_writer.resolve_value_sources("personification_probability", cfg)
     assert sources["env_file"] == "0.7"
     assert sources["env_json"] == 0.3
-    assert sources["active_source"] == "env_file"
+    assert sources["active_source"] == "env_json"

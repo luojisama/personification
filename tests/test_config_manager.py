@@ -50,7 +50,7 @@ def test_config_manager_save_and_load_round_trip() -> None:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def test_config_manager_skips_explicit_env_fields() -> None:
+def test_config_manager_env_json_overrides_explicit_env_fields() -> None:
     temp_dir = _make_workspace_temp_dir("config-manager-")
     try:
         cfg = _build_config(temp_dir, fields_set={"personification_global_enabled"})
@@ -69,9 +69,10 @@ def test_config_manager_skips_explicit_env_fields() -> None:
         manager.load()
         info = config_manager.get_env_config_load_info(cfg)
 
-        assert cfg.personification_global_enabled is True
+        assert cfg.personification_global_enabled is False
         assert cfg.personification_lite_model == "lite-from-file"
-        assert "personification_global_enabled" in info["skipped_fields"]
+        assert "personification_global_enabled" in info["applied_fields"]
+        assert info["skipped_fields"] == []
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -99,41 +100,39 @@ def test_config_manager_save_uses_atomic_replace(monkeypatch) -> None:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def test_config_manager_load_respects_env_explicit_fields(monkeypatch) -> None:
-    """回归测试：env.json 中残留的字段被 .env / pydantic_fields_set 显式声明时不应覆盖。
+def test_config_manager_load_env_json_wins_over_legacy_env_explicit_fields(monkeypatch) -> None:
+    """回归测试：env.json 是 WebUI 权威层，重启时不应再被旧 .env 覆盖。
 
-    场景：历史上 admin 命令 `/拟人 模型 路由 codex_primary` 把 codex 持久化到 env.json，
-    随后 .env.prod 改为 gemini_cli_primary。pydantic 加载 .env.prod 时把字段加入
-    fields_set，ConfigManager.load() 必须跳过 env.json 的旧值。
+    场景：WebUI 把 codex_primary 写入 env.json，服务器 .env.prod 仍残留
+    gemini_cli_primary。ConfigManager.load() 必须使用 env.json，避免重启回退。
     """
     temp_dir = _make_workspace_temp_dir("config-manager-bug-")
     try:
-        # 1. 模拟 env.json 中有旧 api_pools（codex_primary）
+        # 1. 模拟 env.json 中有 WebUI 新 api_pools（codex_primary）
         env_json_path = temp_dir / "env.json"
         env_json_path.write_text(
             json.dumps({"personification_api_pools": [{"name": "codex_primary", "api_type": "openai_codex"}]}),
             encoding="utf-8",
         )
 
-        # 2. plugin_config 已经被 pydantic 用 .env.prod 加载好 gemini_cli_primary，
-        #    并且 fields_set 含 personification_api_pools
+        # 2. plugin_config 启动时先从 .env.prod 得到旧值 gemini_cli_primary
         cfg = _build_config(temp_dir, fields_set={"personification_api_pools"})
         cfg.personification_api_pools = [{"name": "gemini_cli_primary", "api_type": "gemini_cli"}]
 
         manager = config_manager.ConfigManager(plugin_config=cfg, logger=None)
         manager.load()
 
-        # 3. 必须仍是 gemini_cli_primary（env.json 的 codex_primary 不能复活）
-        assert cfg.personification_api_pools[0]["name"] == "gemini_cli_primary"
-        # 4. env.json 应该被自动清理，不再持久化 .env 接管的字段
+        # 3. 必须使用 env.json 中的 codex_primary，旧 .env 不再抢优先级
+        assert cfg.personification_api_pools[0]["name"] == "codex_primary"
+        # 4. env.json 不应再被清理掉同名字段
         cleaned = json.loads(env_json_path.read_text(encoding="utf-8"))
-        assert "personification_api_pools" not in cleaned
+        assert cleaned["personification_api_pools"][0]["name"] == "codex_primary"
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def test_config_manager_save_skips_env_explicit_fields(monkeypatch) -> None:
-    """回归测试：admin 命令热切时 ConfigManager.save() 不能把 .env 接管的字段写进 env.json。"""
+def test_config_manager_save_persists_env_explicit_fields_to_env_json(monkeypatch) -> None:
+    """回归测试：热切修改后的插件字段要写进 env.json，重启后不被 .env 拉回。"""
     temp_dir = _make_workspace_temp_dir("config-manager-bug-")
     try:
         cfg = _build_config(temp_dir, fields_set={"personification_api_pools"})
@@ -143,8 +142,7 @@ def test_config_manager_save_skips_env_explicit_fields(monkeypatch) -> None:
         manager.save()
 
         payload = json.loads((temp_dir / "env.json").read_text(encoding="utf-8"))
-        # api_pools 来自 .env，热切结果不能持久化进 env.json
-        assert "personification_api_pools" not in payload
+        assert payload["personification_api_pools"][0]["name"] == "user_hot_switch"
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 

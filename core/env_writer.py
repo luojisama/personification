@@ -89,10 +89,7 @@ def write_dotenv(field_name: str, value: Any, *, backup: bool = True, target: Pa
 
 
 def write_env_json(field_name: str, value: Any, plugin_config: Any) -> Path:
-    """写入 env.json 覆盖层。
-    与 ConfigManager._save_unlocked 不同，这里不剔除 .env 中已存在的字段，
-    因为本函数与 write_dotenv 配对，用于让 env.json 与 .env 同步该 key。
-    """
+    """写入插件 env.json 覆盖层。"""
     path = get_env_config_path(plugin_config)
     payload: dict[str, Any] = {}
     if path.exists():
@@ -109,13 +106,11 @@ def write_env_json(field_name: str, value: Any, plugin_config: Any) -> Path:
 
 
 def write_both(field_name: str, value: Any, plugin_config: Any) -> dict[str, Any]:
-    """持久化配置：env.json 作为运行时权威层，.env 仅在该字段已存在时就地更新。
+    """持久化 WebUI 配置。
 
-    历史问题：write_both 会把新字段也写进 .env.prod，使其变成"显式 env 字段"；
-    重启时 ConfigManager 认为 env.json 里的同名值是脏数据而跳过并删除，一旦
-    pydantic 未能从 .env 正确加载（复杂类型/引号等），就回退到默认值。
-    现在新字段只写 env.json（启动时会被正常应用），仅当字段本就在 .env 文件里
-    时才就地更新 .env，避免该回退链。
+    保留历史函数名供调用方兼容，但实际只写插件自己的 env.json。
+    .env.prod / .env 只作为首次启用时的导入来源，不再由 WebUI 改写，
+    避免产生 .bak 文件并避免重启后旧 env 值把配置拉回去。
     """
     result: dict[str, Any] = {
         "field_name": field_name,
@@ -130,25 +125,14 @@ def write_both(field_name: str, value: Any, plugin_config: Any) -> dict[str, Any
         result["env_json_path"] = str(json_path)
     except Exception as exc:
         result["errors"].append(f"env.json write failed: {exc}")
-    # .env：仅当该字段已存在于某个 .env 文件时就地更新，保持与手工配置一致
-    target = _resolve_dotenv_target(field_name)
-    if target is not None and _file_has_key(target, field_name):
-        try:
-            dotenv_path = write_dotenv(field_name, value, target=target)
-            if dotenv_path is not None:
-                result["dotenv_path"] = str(dotenv_path)
-        except PermissionError as exc:
-            result["errors"].append(f".env write blocked: {exc}")
-        except Exception as exc:
-            result["errors"].append(f".env write failed: {exc}")
     return result
 
 
 def resolve_value_sources(field_name: str, plugin_config: Any) -> dict[str, Any]:
     """返回字段在 .env / env.json / runtime_config / 默认值 各层的快照。
 
-    供 WebUI 显示 "当前生效来源" 并辅助管理员决策。优先级与 ConfigManager 一致：
-    .env > env.json > runtime_config > 默认值。
+    供 WebUI 显示来源快照并辅助管理员决策。插件字段优先级：
+    env.json > 首次导入用 .env > runtime_config > 默认值。
     """
     sources: dict[str, Any] = {
         "field_name": field_name,
@@ -159,20 +143,20 @@ def resolve_value_sources(field_name: str, plugin_config: Any) -> dict[str, Any]
         "current": getattr(plugin_config, field_name, None),
         "active_source": "default",
     }
-    env_val = read_env_file_value(field_name)
-    if env_val:
-        sources["env_file"] = env_val
-        sources["active_source"] = "env_file"
     env_json_path = get_env_config_path(plugin_config)
     if env_json_path.exists():
         try:
             data = json.loads(env_json_path.read_text(encoding="utf-8"))
             if isinstance(data, dict) and field_name in data:
                 sources["env_json"] = data[field_name]
-                if sources["active_source"] == "default":
-                    sources["active_source"] = "env_json"
+                sources["active_source"] = "env_json"
         except Exception:
             pass
+    env_val = read_env_file_value(field_name)
+    if env_val:
+        sources["env_file"] = env_val
+        if sources["active_source"] == "default":
+            sources["active_source"] = "env_file"
     rt_path = get_runtime_config_path(plugin_config)
     if rt_path.exists():
         try:
