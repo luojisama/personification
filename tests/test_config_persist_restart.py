@@ -54,6 +54,24 @@ def test_env_json_retains_webui_field_after_load(tmp_path, monkeypatch) -> None:
     assert env_json.get("personification_probability") == 0.42
 
 
+def test_env_json_wins_over_stale_env_file_after_restart(tmp_path, monkeypatch) -> None:
+    cfg = _setup(tmp_path, monkeypatch)
+    env_writer.write_both("personification_probability", 0.66, cfg)
+    env_file = tmp_path / ".env.prod"
+    env_file.write_text("personification_probability=0.11\n", encoding="utf-8")
+    monkeypatch.setattr(runtime_config, "_iter_env_file_candidates", lambda: [env_file])
+    monkeypatch.setattr(env_writer, "_iter_env_file_candidates", lambda: [env_file])
+
+    fresh = config_module.Config(personification_data_dir=str(tmp_path), personification_probability=0.11)
+    config_manager.ConfigManager(plugin_config=fresh, logger=None).load()
+
+    assert fresh.personification_probability == 0.66
+    env_json = json.loads((tmp_path / "env.json").read_text(encoding="utf-8"))
+    assert env_json.get("personification_probability") == 0.66
+    assert env_file.read_text(encoding="utf-8") == "personification_probability=0.11\n"
+    assert list(tmp_path.glob(".env.prod.bak.*")) == []
+
+
 def test_env_json_api_pools_wins_over_stale_runtime_managed_globals(tmp_path, monkeypatch) -> None:
     cfg = _setup(tmp_path, monkeypatch)
     old_pools = [

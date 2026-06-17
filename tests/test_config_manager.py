@@ -77,6 +77,24 @@ def test_config_manager_env_json_overrides_explicit_env_fields() -> None:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def test_config_manager_imports_explicit_env_fields_when_env_json_missing() -> None:
+    temp_dir = _make_workspace_temp_dir("config-manager-bootstrap-")
+    try:
+        cfg = _build_config(temp_dir, fields_set={"personification_global_enabled"})
+        manager = config_manager.ConfigManager(plugin_config=cfg, logger=None)
+
+        manager.load()
+        info = config_manager.get_env_config_load_info(cfg)
+
+        payload = json.loads((temp_dir / "env.json").read_text(encoding="utf-8"))
+        assert payload["personification_global_enabled"] is True
+        assert "personification_global_enabled" in info["imported_fields"]
+        assert "personification_global_enabled" in info["applied_fields"]
+        assert cfg.personification_global_enabled is True
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def test_config_manager_save_uses_atomic_replace(monkeypatch) -> None:
     temp_dir = _make_workspace_temp_dir("config-manager-")
     try:
