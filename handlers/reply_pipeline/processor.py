@@ -43,7 +43,7 @@ from ...core.prompt_hooks import HookContext, get_hook_registry
 from ...core.group_context import build_group_conversation_context, render_group_conversation_context
 from ...core.group_mute import refresh_bot_group_mute_state
 from ...core.group_roles import extract_sender_role
-from ...core.target_inference import TARGET_OTHERS, infer_message_target
+from ...core.target_inference import TARGET_OTHERS, TARGET_UNCLEAR, infer_message_target
 from ...core.tts_service import extract_persona_tts_config
 from ...core.repeat_follow import maybe_follow_repeat_cluster
 from ...core.reply_style_policy import build_direct_visual_identity_guard
@@ -1212,11 +1212,19 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             get_configured_api_providers=runtime.get_configured_api_providers,
         ),
     )
-    if state.get("message_target") == TARGET_OTHERS:
+    _msg_target = state.get("message_target")
+    if _msg_target in (TARGET_OTHERS, TARGET_UNCLEAR):
         system_prompt += (
-            "\n[系统提示] 当前消息疑似群友之间的对话，不一定是对你说话。"
-            "请判断是否需要回复；只有明显无关、会打断别人或高歧义时再保持沉默（输出 [NO_REPLY]）。"
+            "\n[系统提示] 这是多人群聊，当前这句不一定是对你说的。"
+            "群友简短的感叹/评价（如『你牛大了/绝了/真的假的/笑死/好家伙』）若是紧跟在别人刚发的"
+            "图片/视频/链接/内容之后，通常是在评价那条内容或那个发的人，不是在说你——"
+            "不要自作多情当成在夸你或说你，更不要回『谢谢夸奖/突然这么夸我』之类。"
+            "只有当对方明确 @你、引用回复你发的消息、或叫你名字/昵称时，才默认是对你说。"
         )
+        if _msg_target == TARGET_OTHERS:
+            system_prompt += (
+                "请判断是否需要回复；只有明显无关、会打断别人或高歧义时再保持沉默（输出 [NO_REPLY]）。"
+            )
     if message_intent == "banter" and not is_private_session:
         system_prompt += (
             "\n[系统提示] 当前更像群聊接梗/顺嘴吐槽场景。"
@@ -1879,23 +1887,44 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         )
                         segments[typo_idx] = mutated
 
-                quote_message_id = _humanize.should_quote_reply(
-                    plugin_config=runtime.plugin_config,
-                    state=state,
-                    event=event,
-                    group_id=str(group_id),
-                    user_id=user_id,
-                    is_private=is_private_session,
-                    has_newer_batch=_batch_has_newer_messages(state),
-                )
-                at_target = _humanize.should_at_target(
-                    plugin_config=runtime.plugin_config,
-                    state=state,
-                    event=event,
-                    user_id=user_id,
-                    is_private=is_private_session,
-                    quote_message_id=quote_message_id,
-                )
+                # @ / 引用 由 LLM 决定（semantic_frame.address_mode）更拟人；
+                # auto 或私聊时回退到原有启发式规则，行为平滑兜底。
+                _addr_mode = str(getattr(semantic_frame, "address_mode", "auto") or "auto").lower()
+                if not is_private_session and _addr_mode in ("none", "at", "quote", "at_quote"):
+                    _quote_enabled = bool(
+                        getattr(runtime.plugin_config, "personification_humanize_quote_reply_enabled", True)
+                    )
+                    _at_enabled = bool(
+                        getattr(runtime.plugin_config, "personification_humanize_at_enabled", True)
+                    )
+                    quote_message_id = (
+                        getattr(event, "message_id", None)
+                        if (_addr_mode in ("quote", "at_quote") and _quote_enabled)
+                        else None
+                    )
+                    at_target = (
+                        user_id
+                        if (_addr_mode in ("at", "at_quote") and _at_enabled and user_id)
+                        else None
+                    )
+                else:
+                    quote_message_id = _humanize.should_quote_reply(
+                        plugin_config=runtime.plugin_config,
+                        state=state,
+                        event=event,
+                        group_id=str(group_id),
+                        user_id=user_id,
+                        is_private=is_private_session,
+                        has_newer_batch=_batch_has_newer_messages(state),
+                    )
+                    at_target = _humanize.should_at_target(
+                        plugin_config=runtime.plugin_config,
+                        state=state,
+                        event=event,
+                        user_id=user_id,
+                        is_private=is_private_session,
+                        quote_message_id=quote_message_id,
+                    )
 
                 humanize_typing = _humanize.typing_enabled(runtime.plugin_config)
                 typing_cps = float(
@@ -1944,10 +1973,16 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     outgoing: Any = seg
                     if i == 0:
                         try:
+                            seg_cls = runtime.message_segment_cls
+                            prefix = None
                             if quote_message_id is not None:
-                                outgoing = runtime.message_segment_cls.reply(int(quote_message_id)) + seg
-                            elif at_target:
-                                outgoing = runtime.message_segment_cls.at(int(at_target)) + f" {seg}"
+                                prefix = seg_cls.reply(int(quote_message_id))
+                            if at_target:
+                                at_seg = seg_cls.at(int(at_target))
+                                prefix = at_seg if prefix is None else (prefix + at_seg)
+                                outgoing = prefix + f" {seg}"
+                            elif prefix is not None:
+                                outgoing = prefix + seg
                         except Exception:
                             outgoing = seg
                     send_result = await bot.send(event, outgoing)

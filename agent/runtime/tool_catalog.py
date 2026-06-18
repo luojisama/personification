@@ -15,6 +15,16 @@ _IMAGE_REQUIRED_TOOL_NAMES = frozenset(
     }
 )
 _IMAGE_GENERATION_TOOL_NAMES = frozenset({"generate_image"})
+# 闲聊/接梗场景也放行的一组"轻量查证"工具：遇到看不懂的梗/专有名词/外号/分享内容时，
+# 模型可以先查清楚再用自己的口吻接话（不强制；配合 runner 的 banter 提示与生成后审阅）。
+_LIGHTWEIGHT_LOOKUP_TOOL_NAMES = frozenset(
+    {
+        "web_search",
+        "search_web",
+        "wiki_lookup",
+        "resolve_acg_entity",
+    }
+)
 _IMAGE_GENERATION_CONTEXT_TOOL_NAMES = frozenset(
     {
         "parallel_research",
@@ -251,12 +261,15 @@ def select_tool_schemas(
     result_schemas: list[dict]
     effective_chat_intent = str(chat_intent or "").strip()
     if effective_chat_intent == "banter":
-        if not has_images:
-            return []
+        # 闲聊也可能遇到看不懂的梗/专有名词/外号/分享内容，放行轻量查证工具，
+        # 让模型"想查就能查"（不再无图就 return []）；有图时再叠加视觉类工具。
         result_schemas = [
             schema
             for schema in schemas
-            if _tool_requires_image(registry, schema_tool_name(schema))
+            if (
+                schema_tool_name(schema) in _LIGHTWEIGHT_LOOKUP_TOOL_NAMES
+                or (has_images and _tool_requires_image(registry, schema_tool_name(schema)))
+            )
         ]
     elif effective_chat_intent == "image_generation":
         result_schemas = [

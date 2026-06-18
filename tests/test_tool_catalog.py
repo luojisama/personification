@@ -120,3 +120,26 @@ def test_registry_planner_metadata_applies_name_defaults() -> None:
     assert "lookup" in by_name["parallel_research"]["intent_tags"]
     assert by_name["vision_analyze"]["requires_image"] is True
     assert "vision" in by_name["vision_analyze"]["intent_tags"]
+
+
+def test_select_tool_schemas_banter_exposes_lightweight_lookup_tools() -> None:
+    """闲聊场景也放行 web_search/resolve_acg_entity 等轻量查证工具（不再 return []）。"""
+    registry = tool_registry.ToolRegistry()
+    for name in ("web_search", "resolve_acg_entity", "wiki_lookup", "vision_analyze", "sticker_labeler"):
+        _register(registry, name)
+
+    # 无图：放行查证工具，但不含 image-required 与 admin
+    names_noimg = {
+        tool_catalog.schema_tool_name(s)
+        for s in tool_catalog.select_tool_schemas(registry, has_images=False, chat_intent="banter")
+    }
+    assert {"web_search", "resolve_acg_entity", "wiki_lookup"} <= names_noimg
+    assert "vision_analyze" not in names_noimg
+    assert "sticker_labeler" not in names_noimg
+
+    # 有图：在查证工具之上再叠加视觉工具
+    names_img = {
+        tool_catalog.schema_tool_name(s)
+        for s in tool_catalog.select_tool_schemas(registry, has_images=True, chat_intent="banter")
+    }
+    assert "web_search" in names_img and "vision_analyze" in names_img

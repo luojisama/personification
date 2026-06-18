@@ -79,3 +79,20 @@ def test_low_confidence_group_frame_recommends_silence() -> None:
 
     assert frame.recommend_silence is True
     assert frame.ambiguity_level == "high"
+
+
+def test_parse_address_mode_field() -> None:
+    """LLM 输出的 address_mode 被解析进语义帧；非法/缺失回退 auto。"""
+    assert chat_intent._parse_turn_semantic_frame_payload(
+        {"chat_intent": "banter", "address_mode": "at"}
+    ).address_mode == "at"
+    assert chat_intent._parse_turn_semantic_frame_payload(
+        {"chat_intent": "banter", "address_mode": "at_quote"}
+    ).address_mode == "at_quote"
+    assert chat_intent._parse_turn_semantic_frame_payload(
+        {"chat_intent": "banter", "address_mode": "不存在"}
+    ).address_mode == "auto"
+    assert chat_intent._parse_turn_semantic_frame_payload(
+        {"chat_intent": "banter"}
+    ).address_mode == "auto"
+    assert chat_intent.TurnSemanticFrame().address_mode == "auto"
