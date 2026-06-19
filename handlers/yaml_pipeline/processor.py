@@ -59,6 +59,7 @@ from ...core.response_review import (
     rewrite_agent_reply_ooc,
     review_response_text,
 )
+from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.prompt_loader import pick_ack_phrase
 from ...core.sticker_feedback import (
     build_sticker_feedback_scene_key,
@@ -295,6 +296,19 @@ def _strip_control_markers(text: str) -> str:
     cleaned = re.sub(r'\[[^\]]*\]', '', cleaned)
     cleaned = re.sub(r'<[^>]*>', '', cleaned)
     return cleaned.strip()
+
+
+def _normalize_parsed_message_texts(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    copied = dict(parsed or {})
+    messages: list[dict[str, Any]] = []
+    for item in list(copied.get("messages") or []):
+        if not isinstance(item, dict):
+            continue
+        normalized = dict(item)
+        normalized["text"] = normalize_visible_reply_text(strip_response_control_markers(normalized.get("text", "")))
+        messages.append(normalized)
+    copied["messages"] = messages
+    return copied
 
 
 def _build_tts_user_hint(*, is_private: bool) -> str:
@@ -1194,6 +1208,7 @@ async def process_yaml_response_logic(
                             return
                     except Exception as e:
                         logger.warning(f"拟人插件: 翻译结果转发发送失败，回退到普通消息: {e}")
+                raw_direct_output = normalize_visible_reply_text(raw_direct_output)
                 direct_segments_sent = 0
                 for seg in re.split(r"(?:\r?\n){2,}", raw_direct_output):
                     text = seg.strip()
@@ -1431,10 +1446,15 @@ async def process_yaml_response_logic(
         return
 
     cleaned_assistant_text = strip_response_control_markers(assistant_text)
+    cleaned_assistant_text = normalize_visible_reply_text(cleaned_assistant_text)
     if not cleaned_assistant_text:
         _trace_no_reply("empty_visible_reply", diagnosis_code="model_empty", detail="清理控制标记后没有可见文本")
         return
-    if cleaned_assistant_text != assistant_text:
+    if parsed.get("messages"):
+        parsed = _normalize_parsed_message_texts(parsed)
+        if not any(str(item.get("text", "") or "").strip() for item in parsed.get("messages", [])):
+            parsed = {"messages": [{"text": cleaned_assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
+    elif cleaned_assistant_text != assistant_text:
         parsed = {"messages": [{"text": cleaned_assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
     assistant_text = cleaned_assistant_text
 

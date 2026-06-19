@@ -21,6 +21,7 @@ from ...core.message_relations import build_event_relation_metadata
 from ...core.persona_profile import load_persona_profile, render_persona_snapshot
 from ...core.prompt_loader import pick_ack_phrase
 from ...core.gemini_profile import build_gemini_route_policy_prompt
+from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_style_policy import build_reply_style_policy_prompt
 from ...core.visual_capabilities import VISUAL_ROUTE_REPLY_PLAIN
 from ...skill_runtime.runtime_api import SkillRuntime
@@ -844,7 +845,7 @@ def build_final_visible_reply_text(
     这里显式复用发送前的裁剪结果，确保「用户实际看到/听到的文本」
     与下一轮模型读到的 assistant 历史保持一致。
     """
-    final_reply = str(reply_content or "").strip()
+    final_reply = normalize_visible_reply_text(reply_content)
     if max_chars and max_chars > 0 and len(final_reply) > max_chars:
         final_reply = truncate_at_punctuation(final_reply, max_chars)
     return sanitize_history_text(final_reply)

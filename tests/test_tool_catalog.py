@@ -125,7 +125,18 @@ def test_registry_planner_metadata_applies_name_defaults() -> None:
 def test_select_tool_schemas_banter_exposes_lightweight_lookup_tools() -> None:
     """闲聊场景也放行 web_search/resolve_acg_entity 等轻量查证工具（不再 return []）。"""
     registry = tool_registry.ToolRegistry()
-    for name in ("web_search", "resolve_acg_entity", "wiki_lookup", "vision_analyze", "sticker_labeler"):
+    for name in (
+        "web_search",
+        "resolve_acg_entity",
+        "wiki_lookup",
+        "weather",
+        "recall_user_memory",
+        "recall_group_memory",
+        "memory_recall",
+        "get_user_persona",
+        "vision_analyze",
+        "sticker_labeler",
+    ):
         _register(registry, name)
 
     # 无图：放行查证工具，但不含 image-required 与 admin
@@ -133,7 +144,16 @@ def test_select_tool_schemas_banter_exposes_lightweight_lookup_tools() -> None:
         tool_catalog.schema_tool_name(s)
         for s in tool_catalog.select_tool_schemas(registry, has_images=False, chat_intent="banter")
     }
-    assert {"web_search", "resolve_acg_entity", "wiki_lookup"} <= names_noimg
+    assert {
+        "web_search",
+        "resolve_acg_entity",
+        "wiki_lookup",
+        "weather",
+        "recall_user_memory",
+        "recall_group_memory",
+        "memory_recall",
+        "get_user_persona",
+    } <= names_noimg
     assert "vision_analyze" not in names_noimg
     assert "sticker_labeler" not in names_noimg
 

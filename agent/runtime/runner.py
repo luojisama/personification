@@ -235,6 +235,54 @@ def _tool_timeout_result(tool_name: str) -> str:
     return "工具调用失败：超时"
 
 
+async def _classify_deferred_lookup_reply(
+    *,
+    tool_caller: Any,
+    user_query_text: str,
+    assistant_reply_text: str,
+    previous_tool_name: str = "",
+    previous_tool_result_text: str = "",
+    timeout: float = 8.0,
+) -> bool:
+    """Ask the model whether a draft should trigger one more lookup.
+
+    This is a compatibility helper for older tests and callers. It keeps the
+    decision model-led: code only parses the model's explicit enum answer.
+    """
+
+    if tool_caller is None:
+        return False
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "判断候选回复是否只是承诺去查、但还没有真正回答用户。"
+                "如果应该继续检索，严格输出 RETRY_SEARCH。"
+                "如果已经可以作为最终回复，严格输出 FINAL_ANSWER。"
+                "只输出这两个枚举之一。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"用户问题：{str(user_query_text or '').strip()[:300]}\n"
+                f"候选回复：{str(assistant_reply_text or '').strip()[:300]}\n"
+                f"上一个工具：{str(previous_tool_name or '').strip()[:80] or '[无]'}\n"
+                f"上一个工具结果：{str(previous_tool_result_text or '').strip()[:500] or '[无]'}"
+            ),
+        },
+    ]
+    try:
+        response = await asyncio.wait_for(
+            tool_caller.chat_with_tools(messages, [], False),
+            timeout=timeout,
+        )
+    except Exception:
+        return False
+    verdict = str(getattr(response, "content", "") or "").strip().upper()
+    return verdict == "RETRY_SEARCH"
+
+
 
 
 def _direct_tool_result_agent_result(
@@ -447,6 +495,8 @@ async def run_agent(
                 "最终对用户的回复必须自然、像群聊里的活人接话。"
                 "不要暴露工具、检索、看图、回忆这些中间步骤。"
                 "遇到不确定或有歧义时，优先查证或承认不确定，不要硬猜。"
+                "涉及本地天气、出行、城市或附近状态时，如果用户没明说地点，先看已注入的用户档案；仍不确定可调用记忆工具确认，不能猜城市。"
+                "最终只输出纯文本，不要 markdown、标题、项目符号列表、编号列表、URL 列表，也不要说“我需要确认一下”“根据搜索结果”。"
             ),
         }
     )

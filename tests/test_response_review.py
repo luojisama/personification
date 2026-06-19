@@ -48,6 +48,8 @@ def test_arbitrate_reply_mode_handles_key_combinations() -> None:
 def test_is_agent_reply_ooc_detects_search_style_phrasing_and_urls() -> None:
     assert response_review.is_agent_reply_ooc("根据搜索结果，先给你两条相关链接：https://example.com/very/long/path")
     assert response_review.is_agent_reply_ooc("我查了一下，这个设定后来改过")
+    assert response_review.is_agent_reply_ooc("我需要确认一下广州的天气。")
+    assert response_review.is_agent_reply_ooc("**广州** 接下来雨不少")
     assert not response_review.is_agent_reply_ooc("这事儿大概就是后来改设定了")
 
 

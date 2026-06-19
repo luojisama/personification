@@ -23,6 +23,11 @@ _LIGHTWEIGHT_LOOKUP_TOOL_NAMES = frozenset(
         "search_web",
         "wiki_lookup",
         "resolve_acg_entity",
+        "weather",
+        "memory_recall",
+        "recall_user_memory",
+        "recall_group_memory",
+        "get_user_persona",
     }
 )
 _IMAGE_GENERATION_CONTEXT_TOOL_NAMES = frozenset(
@@ -88,7 +93,7 @@ _ADMIN_TOOL_NAMES = frozenset(
         "confirm_resource_request",
     }
 )
-_MEMORY_TOOL_NAMES = frozenset({"memory_recall", "get_user_persona"})
+_MEMORY_TOOL_NAMES = frozenset({"memory_recall", "recall_user_memory", "recall_group_memory", "get_user_persona"})
 
 
 def _coerce_tags(value: Any) -> set[str]:
@@ -322,6 +327,8 @@ def semantic_tool_guidance() -> str:
         "工具使用总原则：能直接回答就别起工具；不确定、高风险、时效性强、明显需要查证时再调用工具。"
         "插件技术问题优先本地插件知识和源码工具。"
         "用户明确要求生成图片时，必须调用 generate_image，不要只给提示词。"
+        "涉及本地天气、出行、城市或附近状态时，如果用户没明说地点，先看已注入的用户档案；仍不确定可调用记忆工具确认，不能猜城市。"
+        "最终回复只输出纯文本，不要 markdown、项目符号列表、编号列表，也不要说正在查询、根据搜索结果或我需要确认一下。"
         "群聊接梗场景优先像群友接话，不要为了显得聪明而滥用工具。"
     )
 

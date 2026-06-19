@@ -53,6 +53,7 @@ from ...core.response_review import (
     rewrite_agent_reply_ooc,
     review_response_text,
 )
+from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_PLAIN
 from ...skills.skillpacks.sticker_tool.scripts.impl import (
     reset_current_image_context,
@@ -1768,6 +1769,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if joined:
                 reply_content = joined
         reply_content = strip_response_control_markers(reply_content)
+        reply_content = normalize_visible_reply_text(reply_content)
         if not reply_content and not _IMAGE_B64_RE.search(str(reply_content or "")):
             return
 
@@ -1804,7 +1806,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 bot_nickname = bot_member_info.get("card") or bot_member_info.get("nickname") or bot_nickname
             except Exception as exc:
                 log_exception(runtime.logger, "[reply_processor] get_group_member_info failed", exc, level="debug")
-        final_reply = reply_content.strip()
+        final_reply = normalize_visible_reply_text(reply_content)
         max_chars = 0 if bypass_length_limits else getattr(runtime.plugin_config, "personification_max_output_chars", 0)
         final_reply, image_b64_payloads = _extract_image_b64_markers(final_reply)
         if max_chars and max_chars > 0 and len(final_reply) > max_chars:
