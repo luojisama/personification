@@ -32,6 +32,9 @@ class _Cfg:
         self.personification_api_pools = pools
         self.personification_data_dir = data_dir
         self.personification_api_type = "openai"
+        self.personification_api_url = ""
+        self.personification_api_key = ""
+        self.personification_model = ""
 
 
 def test_runtime_value_not_reverted_when_env_has_more(tmp_path, monkeypatch) -> None:
@@ -57,6 +60,23 @@ def test_env_fallback_when_runtime_empty(tmp_path, monkeypatch) -> None:
     cfg = _Cfg(None, str(tmp_path))
     providers = provider_router.load_api_pool_config(cfg, _LOG)
     assert len(providers) == 3
+
+
+def test_env_fallback_ignored_when_legacy_primary_is_complete(tmp_path, monkeypatch) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "personification_api_pools=" + json.dumps(_pools(3), separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_config, "_iter_env_file_candidates", lambda: [env_file])
+    cfg = _Cfg(None, str(tmp_path))
+    cfg.personification_api_url = "https://legacy.example/v1"
+    cfg.personification_api_key = "legacy-key"
+    cfg.personification_model = "gpt-4o-mini"
+
+    providers = provider_router.load_api_pool_config(cfg, _LOG)
+
+    assert providers == []
 
 
 def test_write_targets_file_already_holding_key(tmp_path, monkeypatch) -> None:

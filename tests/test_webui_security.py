@@ -170,14 +170,26 @@ def test_prune_expired_devices_cleans_up(_runtime) -> None:
     assert set(remaining.keys()) == {"fresh_hash"}
 
 
-# ---- eligible-admins 接口（不需要鉴权） ----
+# ---- eligible-admins 接口（不需要鉴权，但默认不暴露 QQ） ----
 
 
-def test_eligible_admins_lists_superusers(_runtime) -> None:
+def test_eligible_admins_hidden_by_default(_runtime) -> None:
     client = _client(_runtime)
     res = client.get("/personification/api/auth/eligible-admins")
     assert res.status_code == 200
     body = res.json()
+    assert body["admins"] == []
+    assert body["manual_entry"] is True
+    assert body["source_hidden"] is True
+
+
+def test_eligible_admins_lists_superusers_when_explicitly_enabled(_runtime) -> None:
+    _runtime.plugin_config.personification_webui_expose_admin_list = True
+    client = _client(_runtime)
+    res = client.get("/personification/api/auth/eligible-admins")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["manual_entry"] is False
     qqs = {item["qq"] for item in body["admins"]}
     assert {"10001", "20002"} <= qqs
     # 来源标记

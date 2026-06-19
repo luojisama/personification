@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -168,4 +169,8 @@ def test_apply_recommended_writes_subset(_runtime_context, tmp_path, monkeypatch
     assert "personification_agent_max_steps" in body["applied"]
     from dotenv import dotenv_values
     parsed = dotenv_values(str(env_file))
-    assert parsed["personification_agent_max_steps"] == "5"
+    assert parsed["personification_agent_max_steps"] == "10"
+    env_json = json.loads((tmp_path / "env.json").read_text(encoding="utf-8"))
+    assert env_json["personification_agent_max_steps"] == 5
+    assert env_json["personification_probability"] == 0.35
+    assert _runtime_context.plugin_config.personification_agent_max_steps == 5

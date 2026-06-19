@@ -259,6 +259,19 @@ def _load_env_api_pool_config(logger: Any) -> List[Dict[str, Any]]:
     return parse_api_pool_config(raw_env, logger)
 
 
+def _has_usable_legacy_primary_config(plugin_config: Any) -> bool:
+    legacy_type = normalize_api_type(getattr(plugin_config, "personification_api_type", "openai"))
+    model = _default_model_for_api_type(
+        legacy_type,
+        str(getattr(plugin_config, "personification_model", "") or "").strip(),
+    )
+    if legacy_type in {"openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}:
+        return bool(model)
+    api_url = str(getattr(plugin_config, "personification_api_url", "") or "").strip()
+    api_key = str(getattr(plugin_config, "personification_api_key", "") or "").strip()
+    return bool(api_url and api_key and model)
+
+
 def load_api_pool_config(plugin_config: Any, logger: Any) -> List[Dict[str, Any]]:
     raw_config = getattr(plugin_config, "personification_api_pools", None)
     providers = parse_api_pool_config(raw_config, logger)
@@ -269,6 +282,12 @@ def load_api_pool_config(plugin_config: Any, logger: Any) -> List[Dict[str, Any]
     # 运行时为空（未配置或被异常清空）：直接用 .env 兜底救援。
     if not providers:
         if env_providers:
+            if _has_usable_legacy_primary_config(plugin_config):
+                logger.info(
+                    "personification: runtime api_pools is empty but legacy primary provider "
+                    "is explicitly configured; ignoring .env api_pools fallback."
+                )
+                return providers
             logger.warning(
                 "personification: 运行时 api_pools 为空，回退到 .env 文件中的配置 "
                 f"({len(env_providers)} 个 provider)。"

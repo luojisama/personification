@@ -37,6 +37,8 @@ def test_qq_leave_group_passes_group_id(_runtime_context) -> None:
     _login_as_admin(client, _runtime_context)
     _set_csrf(client)
     res = client.post("/personification/api/qq/groups/123456/leave", json={})
+    assert res.status_code == 400
+    res = client.post("/personification/api/qq/groups/123456/leave", json={"confirm": "123456"})
     assert res.status_code == 200
     assert any(m.get("group_id") == 123456 for m in _runtime_context.sent)
 
@@ -45,6 +47,8 @@ def test_qq_delete_friend(_runtime_context) -> None:
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
     _set_csrf(client)
-    res = client.delete("/personification/api/qq/friends/10001")
+    res = client.request("DELETE", "/personification/api/qq/friends/10001", json={})
+    assert res.status_code == 400
+    res = client.request("DELETE", "/personification/api/qq/friends/10001", json={"confirm": "10001"})
     assert res.status_code == 200
     assert any(m.get("user_id") == 10001 for m in _runtime_context.sent)

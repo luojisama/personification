@@ -32,6 +32,12 @@ async def _call(bot: Any, api: str, **kwargs: Any) -> Any:
         raise HTTPException(status_code=502, detail=f"协议端不支持或调用失败（{api}）：{str(exc)[:160]}") from exc
 
 
+def _require_confirm(body: dict, *, expected: str, label: str) -> None:
+    confirmed = str(body.get("confirm", "") or "").strip()
+    if confirmed != str(expected):
+        raise HTTPException(status_code=400, detail=f"危险操作需要 confirm={label}")
+
+
 def build_qq_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/qq", tags=["qq"])
 
@@ -90,6 +96,7 @@ def build_qq_router(*, runtime) -> APIRouter:
 
     @router.post("/groups/{group_id}/leave")
     async def leave_group(group_id: str, body: dict = Body(default_factory=dict), admin: AdminIdentity = Depends(require_admin)) -> dict:
+        _require_confirm(body, expected=str(group_id), label=str(group_id))
         is_dismiss = bool(body.get("is_dismiss", False))
         bot = _bot(runtime)
         await _call(bot, "set_group_leave", group_id=int(group_id), is_dismiss=is_dismiss)
@@ -126,7 +133,8 @@ def build_qq_router(*, runtime) -> APIRouter:
         return {"friends": items, "count": len(items)}
 
     @router.delete("/friends/{user_id}")
-    async def delete_friend(user_id: str, admin: AdminIdentity = Depends(require_admin)) -> dict:
+    async def delete_friend(user_id: str, body: dict = Body(default_factory=dict), admin: AdminIdentity = Depends(require_admin)) -> dict:
+        _require_confirm(body, expected=str(user_id), label=str(user_id))
         bot = _bot(runtime)
         await _call(bot, "delete_friend", user_id=int(user_id))
         webui_audit_log.record(action="qq_delete_friend", qq=admin.qq, device_id=admin.device_id, target=str(user_id), outcome="ok")

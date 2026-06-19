@@ -54,6 +54,53 @@ def test_health_endpoint(_runtime_context) -> None:
     assert res.json() == {"status": "ok"}
 
 
+def test_index_serves_static_frontend(_runtime_context) -> None:
+    client = _build_client(_runtime_context)
+    res = client.get("/personification/")
+    assert res.status_code == 200
+    assert "text/html" in res.headers["content-type"]
+    assert "拟人插件 控制台" in res.text
+    assert '<link rel="stylesheet" href="/personification/static/style.css">' in res.text
+    assert '<script src="/personification/static/app-core.js" defer></script>' in res.text
+    assert '<script src="/personification/static/app-activity.js" defer></script>' in res.text
+    assert '<script src="/personification/static/app-content.js" defer></script>' in res.text
+    assert '<script src="/personification/static/app-admin.js" defer></script>' in res.text
+    assert '<script src="/personification/static/app-tools.js" defer></script>' in res.text
+    assert '<script src="/personification/static/app-config.js" defer></script>' in res.text
+    assert '<script src="/personification/static/app-auth.js" defer></script>' in res.text
+
+
+def test_static_frontend_assets_are_served(_runtime_context) -> None:
+    client = _build_client(_runtime_context)
+    js = client.get("/personification/static/app-core.js")
+    assert js.status_code == 200
+    assert "text/javascript" in js.headers["content-type"]
+    assert 'const API = "/personification/api";' in js.text
+
+    config_js = client.get("/personification/static/app-config.js")
+    assert config_js.status_code == 200
+    assert "configSearchHaystack" in config_js.text
+
+    auth_js = client.get("/personification/static/app-auth.js")
+    assert auth_js.status_code == 200
+    assert "bootstrap();" in auth_js.text
+
+    admin_js = client.get("/personification/static/app-admin.js")
+    assert admin_js.status_code == 200
+    assert "renderHealth" in admin_js.text
+
+    css = client.get("/personification/static/style.css")
+    assert css.status_code == 200
+    assert "text/css" in css.headers["content-type"]
+    assert ":root" in css.text
+
+
+def test_static_frontend_rejects_unserved_files(_runtime_context) -> None:
+    client = _build_client(_runtime_context)
+    assert client.get("/personification/static/index.html").status_code == 404
+    assert client.get("/personification/static/missing.js").status_code == 404
+
+
 def test_me_unauthenticated_returns_401(_runtime_context) -> None:
     client = _build_client(_runtime_context)
     res = client.get("/personification/api/auth/me")

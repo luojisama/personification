@@ -163,9 +163,14 @@ def build_auth_router(*, runtime) -> APIRouter:
 
     @router.get("/eligible-admins")
     async def eligible_admins() -> dict:
-        """返回可登录的 QQ 列表（SUPERUSERS + plugin_admins 去重）。
-        无鉴权——展示在登录页，不暴露敏感信息。
+        """返回登录页辅助信息。
+
+        默认不向未登录访客公开管理员 QQ；需要旧版下拉体验时显式开启
+        personification_webui_expose_admin_list。
         """
+        if not bool(getattr(runtime.plugin_config, "personification_webui_expose_admin_list", False)):
+            return {"admins": [], "manual_entry": True, "source_hidden": True}
+
         from ...core import admin_acl as _acl
 
         seen: set[str] = set()
@@ -183,7 +188,7 @@ def build_auth_router(*, runtime) -> APIRouter:
                     out.append({"qq": sid, "source": "plugin_admins"})
         except Exception:
             pass
-        return {"admins": out}
+        return {"admins": out, "manual_entry": False, "source_hidden": False}
 
     @router.get("/devices", response_model=DeviceListResponse)
     async def devices(admin: AdminIdentity = Depends(require_admin)) -> DeviceListResponse:
