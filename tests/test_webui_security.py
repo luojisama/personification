@@ -121,6 +121,50 @@ def test_verify_code_invalidated_after_5_bad_attempts(_runtime) -> None:
     assert r.status_code in (403, 429), f"正确验证码不应在 5 次失败后还能使用，得到 {r.status_code}"
 
 
+def test_verify_code_uses_constant_time_compare(_runtime, monkeypatch) -> None:
+    auth_store = load_personification_module("plugin.personification.core.webui_auth_store")
+    calls: list[tuple[str, str]] = []
+    real_compare = auth_store.secrets.compare_digest
+
+    def compare_spy(a: str, b: str) -> bool:
+        calls.append((a, b))
+        return real_compare(a, b)
+
+    monkeypatch.setattr(auth_store.secrets, "compare_digest", compare_spy)
+
+    code = auth_store.create_verify_code("10001")
+    assert auth_store.consume_verify_code("10001", code) is True
+    assert calls == [(code, code)]
+
+
+def test_https_login_cookies_are_marked_secure(_runtime) -> None:
+    client = _client(_runtime)
+    sent: list = []
+
+    class _Bot:
+        async def call_api(self, _n: str, **kwargs):
+            sent.append(kwargs)
+            return {}
+
+    _runtime.app_module.get_runtime_context().get_bots = lambda: {"1": _Bot()}
+    headers = {"X-Forwarded-Proto": "https"}
+    r1 = client.post("/personification/api/auth/login", json={"qq": "10001"}, headers=headers)
+    assert r1.status_code == 200, r1.text
+    code = re.search(r"\b(\d{6})\b", str(sent[-1]["message"])).group(1)
+
+    r2 = client.post(
+        "/personification/api/auth/verify",
+        json={"qq": "10001", "code": code, "device_label": "https"},
+        headers=headers,
+    )
+
+    assert r2.status_code == 200, r2.text
+    set_cookie = r2.headers.get("set-cookie", "")
+    assert "personification_webui_token=" in set_cookie
+    assert "personification_webui_csrf=" in set_cookie
+    assert "Secure" in set_cookie
+
+
 # ---- 设备 token 7 天过期 ----
 
 

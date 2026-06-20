@@ -79,7 +79,7 @@ def consume_verify_code(qq: str, code: str) -> bool:
         if float(entry.get("expires_at", 0)) <= _now():
             data.pop(qq_key, None)
             return _prune_expired_codes(data)
-        if str(entry.get("code", "")) == target:
+        if secrets.compare_digest(str(entry.get("code", "")), target):
             matched = True
             data.pop(qq_key, None)
         else:

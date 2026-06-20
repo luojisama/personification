@@ -118,6 +118,25 @@ def test_config_manager_save_uses_atomic_replace(monkeypatch) -> None:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def test_config_manager_save_restricts_env_json_permissions(monkeypatch) -> None:
+    temp_dir = _make_workspace_temp_dir("config-manager-")
+    try:
+        cfg = _build_config(temp_dir)
+        manager = config_manager.ConfigManager(plugin_config=cfg, logger=None)
+        calls: list[tuple[Path, int]] = []
+
+        def fake_chmod(path, mode):  # noqa: ANN001
+            calls.append((Path(path), mode))
+
+        monkeypatch.setattr(config_manager.os, "chmod", fake_chmod)
+
+        manager.save()
+
+        assert any(path == temp_dir / "env.json" and mode == 0o600 for path, mode in calls)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def test_config_manager_load_env_json_wins_over_legacy_env_explicit_fields(monkeypatch) -> None:
     """回归测试：env.json 是 WebUI 权威层，重启时不应再被旧 .env 覆盖。
 

@@ -101,6 +101,14 @@ def _new_load_info(path: Path) -> dict[str, Any]:
     }
 
 
+def _restrict_sensitive_file_permissions(path: Path) -> None:
+    """Best-effort: keep config files containing tokens/cookies owner-readable only."""
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+
 def _write_payload_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
@@ -113,7 +121,9 @@ def _write_payload_atomic(path: Path, payload: dict[str, Any]) -> None:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
             fh.flush()
             os.fsync(fh.fileno())
+        _restrict_sensitive_file_permissions(Path(tmp_path))
         os.replace(tmp_path, path)
+        _restrict_sensitive_file_permissions(path)
     except Exception:
         try:
             os.unlink(tmp_path)

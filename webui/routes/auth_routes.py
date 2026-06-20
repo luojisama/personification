@@ -26,11 +26,24 @@ from ..schemas import (
 _CSRF_COOKIE_NAME = "personification_webui_csrf"
 
 
+def _request_uses_https(request: Request) -> bool:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "") or ""
+    first_proto = forwarded_proto.split(",", 1)[0].strip().lower()
+    return first_proto == "https" or request.url.scheme == "https"
+
+
 def build_auth_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/auth", tags=["auth"])
 
     def _issue_session(
-        *, qq: str, ua: str, ip: str, device_label: str, response: Response, trusted: bool = False
+        *,
+        qq: str,
+        ua: str,
+        ip: str,
+        device_label: str,
+        request: Request,
+        response: Response,
+        trusted: bool = False,
     ) -> bool:
         """签发设备 token + 写 cookie + 审计 + 通知。返回 pending（是否待审批）。
 
@@ -48,14 +61,15 @@ def build_auth_router(*, runtime) -> APIRouter:
         record = webui_auth_store.lookup_device(token, ua=ua) or {}
         csrf_token = str(record.get("csrf_token", "") or "")
         cookie_max_age = 60 * 60 * 24 * 7
+        cookie_secure = _request_uses_https(request)
         response.set_cookie(
             key=get_cookie_name(), value=token, max_age=cookie_max_age,
-            httponly=True, samesite="lax", path="/personification",
+            httponly=True, secure=cookie_secure, samesite="lax", path="/personification",
         )
         if csrf_token:
             response.set_cookie(
                 key=_CSRF_COOKIE_NAME, value=csrf_token, max_age=cookie_max_age,
-                httponly=False, samesite="lax", path="/personification",
+                httponly=False, secure=cookie_secure, samesite="lax", path="/personification",
             )
         webui_audit_log.record(
             action="login_verify", qq=qq, ip_hash=ip_hash,
@@ -80,7 +94,10 @@ def build_auth_router(*, runtime) -> APIRouter:
 
         # 免验证设备：当前浏览器指纹被登记为信任 → 直接登录，跳过验证码/批准
         if webui_auth_store.match_trusted_device(qq, ua):
-            pending = _issue_session(qq=qq, ua=ua, ip=ip, device_label="免验证设备", response=response, trusted=True)
+            pending = _issue_session(
+                qq=qq, ua=ua, ip=ip, device_label="免验证设备",
+                request=request, response=response, trusted=True,
+            )
             webui_audit_log.record(action="login_passwordless", qq=qq, ip_hash=ip_hash, outcome="ok")
             return LoginResponse(sent=True, passwordless=True, pending=pending,
                                  message="免验证设备，已直接登录")
@@ -118,7 +135,7 @@ def build_auth_router(*, runtime) -> APIRouter:
         ua = get_user_agent(request)
         pending = _issue_session(
             qq=str(req.get("qq", "")), ua=ua, ip=ip,
-            device_label=str(req.get("label", "")), response=response,
+            device_label=str(req.get("label", "")), request=request, response=response,
         )
         return {"status": "approved", "success": True, "pending": pending}
 
@@ -134,7 +151,10 @@ def build_auth_router(*, runtime) -> APIRouter:
             webui_audit_log.record(action="login_verify", qq=qq, ip_hash=ip_hash, outcome="bad_code")
             raise HTTPException(status_code=403, detail="验证码错误或已过期")
         ua = get_user_agent(request)
-        pending = _issue_session(qq=qq, ua=ua, ip=ip, device_label=payload.device_label, response=response)
+        pending = _issue_session(
+            qq=qq, ua=ua, ip=ip, device_label=payload.device_label,
+            request=request, response=response,
+        )
         try:
             await notify.startup_notify_admins(
                 get_bots=runtime.get_bots, superusers=list(runtime.superusers or []), plugin_admins=[],

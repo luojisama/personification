@@ -8,7 +8,11 @@ from typing import Any
 
 from dotenv import dotenv_values, set_key
 
-from .config_manager import _write_payload_atomic, get_env_config_path
+from .config_manager import (
+    _restrict_sensitive_file_permissions,
+    _write_payload_atomic,
+    get_env_config_path,
+)
 from .runtime_config import (
     _iter_env_file_candidates,
     get_runtime_config_path,
@@ -82,9 +86,11 @@ def write_dotenv(field_name: str, value: Any, *, backup: bool = True, target: Pa
         backup_path = path.with_suffix(path.suffix + f".bak.{ts}")
         try:
             shutil.copy2(path, backup_path)
+            _restrict_sensitive_file_permissions(backup_path)
         except Exception:
             pass
     set_key(str(path), field_name, new_value_str, quote_mode="auto")
+    _restrict_sensitive_file_permissions(path)
     return path
 
 

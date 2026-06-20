@@ -91,22 +91,37 @@ def test_blocked_domain_matches_subdomain(monkeypatch) -> None:
 # ============ 正文抽取 ============
 
 class _FakeResp:
-    def __init__(self, *, text: str, status: int = 200, content_type: str = "text/html; charset=utf-8") -> None:
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        status: int = 200,
+        content_type: str = "text/html; charset=utf-8",
+        location: str = "",
+        url: str = "http://example.com/article",
+    ) -> None:
         self.text = text
         self.content = text.encode("utf-8")
         self.status_code = status
         self.headers = {"content-type": content_type}
-        self.url = "http://example.com/article"
+        if location:
+            self.headers["location"] = location
+        self.url = url
 
 
 class _FakeClient:
     def __init__(self, *args, **kwargs) -> None:
         self._resp = kwargs.pop("_resp_override", None)
+        self._responses = list(kwargs.pop("_responses_override", []) or [])
+        self.requests: list[str] = []
     async def __aenter__(self) -> "_FakeClient":
         return self
     async def __aexit__(self, *a) -> None:
         return None
     async def get(self, url: str) -> _FakeResp:
+        self.requests.append(url)
+        if self._responses:
+            return self._responses.pop(0)
         if self._resp:
             return self._resp
         return _FakeResp(text="<html><head><title>T</title></head><body>x</body></html>")
@@ -117,6 +132,54 @@ def _make_safe_dns(monkeypatch) -> None:
         # 返回一个公网 IP（8.8.8.8）让 SSRF 检查通过
         return [(2, 1, 6, "", ("8.8.8.8", 0))]
     monkeypatch.setattr(wf.socket, "getaddrinfo", fake_getaddrinfo)
+
+
+def test_rejects_redirect_to_loopback_ip(monkeypatch) -> None:
+    _make_safe_dns(monkeypatch)
+    fake_client = _FakeClient(_responses_override=[
+        _FakeResp(status=302, location="http://127.0.0.1/admin", url="http://example.com/start"),
+    ])
+
+    def make_client(*args, **kwargs):
+        return fake_client
+
+    monkeypatch.setattr(wf.httpx, "AsyncClient", make_client)
+
+    with pytest.raises(wf.WebFetchError, match="内网|本地|拒绝"):
+        asyncio.run(wf.fetch_web_page("http://example.com/start"))
+    assert fake_client.requests == ["http://example.com/start"]
+
+
+def test_rejects_redirect_to_blocked_domain(monkeypatch) -> None:
+    _make_safe_dns(monkeypatch)
+    fake_client = _FakeClient(_responses_override=[
+        _FakeResp(status=302, location="http://blocked.example/path", url="http://example.com/start"),
+    ])
+
+    def make_client(*args, **kwargs):
+        return fake_client
+
+    monkeypatch.setattr(wf.httpx, "AsyncClient", make_client)
+
+    with pytest.raises(wf.WebFetchError, match="黑名单"):
+        asyncio.run(wf.fetch_web_page("http://example.com/start", blocked_domains=["blocked.example"]))
+    assert fake_client.requests == ["http://example.com/start"]
+
+
+def test_rejects_redirect_to_literal_private_ip_even_with_proxy(monkeypatch) -> None:
+    _make_safe_dns(monkeypatch)
+    fake_client = _FakeClient(_responses_override=[
+        _FakeResp(status=302, location="http://169.254.169.254/latest/meta-data/", url="http://example.com/start"),
+    ])
+
+    def make_client(*args, **kwargs):
+        return fake_client
+
+    monkeypatch.setattr(wf.httpx, "AsyncClient", make_client)
+
+    with pytest.raises(wf.WebFetchError, match="内网|本地|拒绝"):
+        asyncio.run(wf.fetch_web_page("http://example.com/start", proxy="http://127.0.0.1:1"))
+    assert fake_client.requests == ["http://example.com/start"]
 
 
 def test_extracts_title_and_main_text(monkeypatch) -> None:

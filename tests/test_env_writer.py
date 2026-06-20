@@ -10,6 +10,7 @@ from ._loader import load_personification_module
 
 env_writer = load_personification_module("plugin.personification.core.env_writer")
 runtime_config = load_personification_module("plugin.personification.core.runtime_config")
+qzone_service = load_personification_module("plugin.personification.core.qzone_service")
 
 
 def _make_plugin_config(tmp_path: Path, **extra) -> SimpleNamespace:
@@ -50,6 +51,44 @@ def test_write_dotenv_updates_existing_key_and_creates_backup(tmp_path: Path) ->
     assert "# 中间注释" in text
     backups = list(tmp_path.glob(".env.prod.bak.*"))
     assert backups, "backup file should exist after write"
+
+
+def test_write_dotenv_restricts_source_and_backup_permissions(tmp_path: Path, monkeypatch) -> None:
+    env_file = tmp_path / ".env.prod"
+    env_file.write_text("personification_qzone_cookie=old\n", encoding="utf-8")
+    restricted: list[Path] = []
+
+    monkeypatch.setattr(
+        env_writer,
+        "_restrict_sensitive_file_permissions",
+        lambda path: restricted.append(Path(path)),
+    )
+
+    env_writer.write_dotenv("personification_qzone_cookie", "new-cookie", target=env_file)
+
+    backups = list(tmp_path.glob(".env.prod.bak.*"))
+    assert env_file in restricted
+    assert backups and backups[0] in restricted
+
+
+def test_qzone_cookie_persist_restricts_env_permissions(tmp_path: Path, monkeypatch) -> None:
+    env_file = tmp_path / ".env.prod"
+    env_file.write_text("personification_qzone_cookie=old\n", encoding="utf-8")
+    restricted: list[Path] = []
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        qzone_service,
+        "_restrict_sensitive_file_permissions",
+        lambda path: restricted.append(Path(path).resolve()),
+    )
+
+    qzone_service._persist_cookie_to_env(
+        "uin=o10001; p_skey=secret;",
+        SimpleNamespace(error=lambda *_a, **_k: None),
+    )
+
+    assert env_file.resolve() in restricted
 
 
 def test_write_dotenv_appends_when_key_missing(tmp_path: Path) -> None:
