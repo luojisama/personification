@@ -25,6 +25,20 @@ class _FakeLogger:
         self.warning_messages.append(message)
 
 
+def _config(**overrides) -> SimpleNamespace:  # noqa: ANN003
+    values = {
+        "personification_agent_enabled": False,
+        "personification_agent_max_steps": 10,
+        "personification_prompt_path": "",
+        "personification_system_path": "",
+        "personification_system_prompt": "你是群友",
+        "personification_core_values_enabled": True,
+        "personification_core_values_prompt": "尊重生命、公共安全和法律责任，别把危险或违法行为说成值得同情。",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def test_load_prompt_reuses_yaml_cache_and_pick_ack_phrase(monkeypatch) -> None:  # noqa: ANN001
     temp_dir = Path(__file__).resolve().parent / ".tmp"
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -53,3 +67,52 @@ def test_load_prompt_reuses_yaml_cache_and_pick_ack_phrase(monkeypatch) -> None:
     assert ack_phrase == "查下~"
     assert len(logger.info_messages) == 1
     yaml_path.unlink(missing_ok=True)
+
+
+def test_core_values_are_appended_to_string_prompt_when_agent_disabled() -> None:
+    logger = _FakeLogger()
+    plugin_config = _config(personification_agent_enabled=False)
+
+    loaded = prompt_loader.load_prompt(plugin_config, lambda _gid: {}, logger)
+
+    assert isinstance(loaded, str)
+    assert "你是群友" in loaded
+    assert prompt_loader.CORE_VALUES_MARKER in loaded
+    assert "公共安全" in loaded
+    assert prompt_loader.AGENT_GUIDANCE_MARKER not in loaded
+
+
+def test_core_values_are_appended_to_yaml_system_without_duplicate() -> None:
+    temp_dir = Path(__file__).resolve().parent / ".tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    yaml_path = temp_dir / f"persona_core_values_{time.time_ns()}.yaml"
+    yaml_path.write_text(
+        "system: 你是群友\ninput: '{message}'\n",
+        encoding="utf-8",
+    )
+    logger = _FakeLogger()
+    plugin_config = _config(
+        personification_agent_enabled=True,
+        personification_prompt_path=str(yaml_path),
+    )
+    prompt_loader.clear_yaml_prompt_cache()
+
+    first = prompt_loader.load_prompt(plugin_config, lambda _gid: {}, logger)
+    second = prompt_loader.load_prompt(plugin_config, lambda _gid: {}, logger)
+
+    assert first == second
+    assert isinstance(first, dict)
+    system_prompt = first["system"]
+    assert system_prompt.count(prompt_loader.CORE_VALUES_MARKER) == 1
+    assert system_prompt.count(prompt_loader.AGENT_GUIDANCE_MARKER) == 1
+    assert "你是群友" in system_prompt
+    yaml_path.unlink(missing_ok=True)
+
+
+def test_core_values_can_be_disabled() -> None:
+    logger = _FakeLogger()
+    plugin_config = _config(personification_core_values_enabled=False)
+
+    loaded = prompt_loader.load_prompt(plugin_config, lambda _gid: {}, logger)
+
+    assert loaded == "你是群友"

@@ -36,6 +36,9 @@ def test_qzone_cookie_deprecated_alias_copies_to_prefixed_field() -> None:
 def test_llm_review_features_default_disabled() -> None:
     cfg = config_mod.Config()
 
+    assert cfg.personification_core_values_enabled is True
+    assert "公共安全" in cfg.personification_core_values_prompt
+    assert "不要长篇说教" in cfg.personification_core_values_prompt
     assert cfg.personification_response_review_enabled is False
     assert cfg.personification_turn_planner_enabled is False
     assert cfg.personification_turn_planner_shadow_enabled is False
