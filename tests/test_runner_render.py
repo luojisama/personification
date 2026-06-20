@@ -261,6 +261,77 @@ def test_run_agent_returns_immediately_for_banter_stop_without_tools(monkeypatch
     assert len(caller.calls) == 1
 
 
+def test_run_agent_retries_lookup_when_banter_draft_asks_group_about_unknown_term(monkeypatch) -> None:  # noqa: ANN001
+    handled: list[dict[str, object]] = []
+
+    async def _handler(**kwargs):  # noqa: ANN001
+        handled.append(dict(kwargs))
+        assert kwargs["query"] == "猎鹰阿努比斯藏东西了"
+        return "检索摘要：疑似游戏/梗相关实体，语境里是在说藏东西。"
+
+    async def _fallback_lookup(**kwargs):  # noqa: ANN001
+        assert kwargs["chat_intent"] == "banter"
+        assert kwargs["user_query_text"] == "猎鹰阿努比斯藏东西了"
+        assert kwargs["draft_answer_text"] == "猎鹰阿努比斯？这是哪个游戏的梗啊"
+        return "search_web", {"query": "猎鹰阿努比斯藏东西了"}
+
+    monkeypatch.setattr(runner, "_select_semantic_fallback_tool", _fallback_lookup)
+
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="猎鹰阿努比斯？这是哪个游戏的梗啊",
+                tool_calls=[],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="RETRY_SEARCH",
+                tool_calls=[],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="它还真会藏东西啊。",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[
+                {"role": "system", "content": "你是群里的正常成员。" * 80},
+                {"role": "user", "content": "猎鹰阿努比斯藏东西了"},
+            ],
+            registry=_register_query_tool(_handler),
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=3,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="capability",
+                ambiguity_level="high",
+            ),
+        )
+    )
+
+    assert result.text == "它还真会藏东西啊。"
+    assert handled == [{"query": "猎鹰阿努比斯藏东西了"}]
+    assert len(caller.calls) == 3
+    assert caller.calls[1]["tools"] == []
+    assert "候选回复" in caller.calls[1]["messages"][1]["content"]
+
+
 def test_run_agent_uses_precomputed_intent_without_reinferring(monkeypatch) -> None:  # noqa: ANN001
     async def _should_not_run(*_args, **_kwargs):  # noqa: ANN001
         raise AssertionError("intent inference should be skipped")

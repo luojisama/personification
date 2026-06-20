@@ -16,7 +16,7 @@ _IMAGE_REQUIRED_TOOL_NAMES = frozenset(
 )
 _IMAGE_GENERATION_TOOL_NAMES = frozenset({"generate_image"})
 # 闲聊/接梗场景也放行的一组"轻量查证"工具：遇到看不懂的梗/专有名词/外号/分享内容时，
-# 模型可以先查清楚再用自己的口吻接话（不强制；配合 runner 的 banter 提示与生成后审阅）。
+# 模型应先查清楚再用自己的口吻接话；runner 会用模型侧草稿审查兜底。
 _LIGHTWEIGHT_LOOKUP_TOOL_NAMES = frozenset(
     {
         "web_search",
@@ -325,6 +325,10 @@ def select_tool_schemas(
 def semantic_tool_guidance() -> str:
     return (
         "工具使用总原则：能直接回答就别起工具；不确定、高风险、时效性强、明显需要查证时再调用工具。"
+        "当当前消息包含你不认识、无法确定指代或可能有圈内含义的专有名词、角色名、作品名、游戏/动漫/卡牌术语、"
+        "怪物/装备/地图名、外号、别称、缩写、谐音、空耳、梗或活动名时，如果可用工具里有 web_search、search_web、"
+        "wiki_lookup、resolve_acg_entity 或 parallel_research，必须先调用合适工具查证；不要凭记忆猜，也不要直接在群里问"
+        "“这是什么梗/哪个游戏/什么意思”。"
         "插件技术问题优先本地插件知识和源码工具。"
         "用户明确要求生成图片时，必须调用 generate_image，不要只给提示词。"
         "涉及本地天气、出行、城市或附近状态时，如果用户没明说地点，先看已注入的用户档案；仍不确定可调用记忆工具确认，不能猜城市。"

@@ -256,10 +256,13 @@ async def _classify_deferred_lookup_reply(
         {
             "role": "system",
             "content": (
-                "判断候选回复是否只是承诺去查、但还没有真正回答用户。"
-                "如果应该继续检索，严格输出 RETRY_SEARCH。"
-                "如果已经可以作为最终回复，严格输出 FINAL_ANSWER。"
+                "判断候选回复是否应该立刻补一次查证。"
+                "如果候选回复只是在承诺稍后去查、承认自己没懂但没有查、"
+                "反问用户/群友某个专有名词/梗/外号/游戏动漫卡牌术语是什么，"
+                "或明显在没有证据时凭印象猜，应严格输出 RETRY_SEARCH。"
+                "如果上一轮工具已经查过且结果为空，或候选回复已经能自然作为最终回复，严格输出 FINAL_ANSWER。"
                 "只输出这两个枚举之一。"
+                "按语义判断，不要按固定关键词机械判断。"
             ),
         },
         {
@@ -283,6 +286,16 @@ async def _classify_deferred_lookup_reply(
     return verdict == "RETRY_SEARCH"
 
 
+def _has_lookup_schema(schemas: list[dict]) -> bool:
+    return any(_schema_tool_name(schema) in _RETRYABLE_LOOKUP_TOOLS for schema in list(schemas or []))
+
+
+def _should_review_banter_lookup_draft(*, ambiguity_level: str, draft_answer_text: str) -> bool:
+    # 只用结构性信号控制是否追加一次模型审查，避免把具体话题词写进代码语义。
+    if str(ambiguity_level or "").strip() == "high":
+        return True
+    draft = str(draft_answer_text or "").strip()
+    return "?" in draft or "？" in draft
 
 
 def _direct_tool_result_agent_result(
@@ -494,7 +507,8 @@ async def run_agent(
             "content": (
                 "最终对用户的回复必须自然、像群聊里的活人接话。"
                 "不要暴露工具、检索、看图、回忆这些中间步骤。"
-                "遇到不确定或有歧义时，优先查证或承认不确定，不要硬猜。"
+                "遇到不确定或有歧义时，如果有可用查证工具必须先查；工具不可用、查不到或时间预算不足时再承认不确定，不要硬猜。"
+                "遇到不认识的专有名词、外号、梗、游戏/动漫/卡牌术语或圈内说法，不要直接问群友那是什么，先用可用工具查证。"
                 "涉及本地天气、出行、城市或附近状态时，如果用户没明说地点，先看已注入的用户档案；仍不确定可调用记忆工具确认，不能猜城市。"
                 "最终只输出纯文本，不要 markdown、标题、项目符号列表、编号列表、URL 列表，也不要说“我需要确认一下”“根据搜索结果”。"
             ),
@@ -523,7 +537,8 @@ async def run_agent(
                 "content": (
                     "当前更像接梗、吐槽、复读或顺嘴接话场景，优先短句自然接话。"
                     "但如果群友分享了你看不懂的内容、梗、专有名词、节目名或外号（比如配图配文、视频/链接分享），"
-                    "可以先用 web_search 或 resolve_acg_entity 快速查清楚那是什么，再用自己的口吻接住——"
+                    "且可用工具里有 web_search、search_web、wiki_lookup 或 resolve_acg_entity，必须先快速查清楚那是什么，再用自己的口吻接住——"
+                    "不要直接在群里问『这是什么梗/哪个游戏/什么意思』，也不要凭记忆猜。"
                     "查证只为听懂梗，别变成解释、定义、考据或百科腔，查完一句话接住即可。"
                 ),
             }
@@ -566,7 +581,8 @@ async def run_agent(
                 "role": "system",
                 "content": (
                     "当前这句里有高歧义名词/对象，容易误解。"
-                    "如果上下文和工具证据仍不足，请优先承认不确定；群聊里若没人明确在 cue 你，也可以输出 [NO_REPLY]。"
+                    "如果有可用查证工具，先查证再说；上下文和工具证据仍不足时再承认不确定。"
+                    "群聊里若没人明确在 cue 你，也可以输出 [NO_REPLY]。"
                 ),
             }
         )
@@ -776,12 +792,33 @@ async def run_agent(
             if _evidence_synthesizer_enabled(plugin_config) and has_tool_call:
                 await _append_evidence_guidance_if_needed(draft_answer_text=str(response.content or ""))
         if response.finish_reason == "stop":
+            banter_requires_lookup_retry = False
             if runtime_chat_intent == "banter" and not response.tool_calls and content_len > 0:
-                return AgentResult(
-                    text=str(response.content or "").strip(),
-                    pending_actions=pending_actions,
-                    bypass_length_limits=False,
-                )
+                if (
+                    not has_tool_call
+                    and not semantic_fallback_attempted
+                    and bool(user_query_text)
+                    and _has_lookup_schema(active_schemas)
+                    and _should_review_banter_lookup_draft(
+                        ambiguity_level=str(getattr(intent_decision, "ambiguity_level", "") or ""),
+                        draft_answer_text=str(response.content or ""),
+                    )
+                ):
+                    banter_requires_lookup_retry = await _classify_deferred_lookup_reply(
+                        tool_caller=tool_caller,
+                        user_query_text=user_query_text,
+                        assistant_reply_text=str(response.content or ""),
+                        previous_tool_name=last_tool_name,
+                        previous_tool_result_text=last_tool_result_text,
+                    )
+                    if banter_requires_lookup_retry:
+                        logger.info("[agent] banter draft requested lookup retry")
+                if not banter_requires_lookup_retry:
+                    return AgentResult(
+                        text=str(response.content or "").strip(),
+                        pending_actions=pending_actions,
+                        bypass_length_limits=False,
+                    )
             if (
                 response.vision_unavailable
                 and bool(
@@ -819,16 +856,19 @@ async def run_agent(
                     continue
             fallback_lookup = None
             previous_tool_empty = _tool_result_indicates_empty(last_tool_result_text)
-            should_run_fallback_lookup = (
+            non_banter_fallback_needed = (
                 runtime_chat_intent != "banter"
-                and not semantic_fallback_attempted
-                and bool(user_query_text)
                 and (
                     not has_tool_call
                     or bool(pending_evidence_followup_query)
                     or content_len == 0
                     or response.vision_unavailable
                 )
+            )
+            should_run_fallback_lookup = (
+                not semantic_fallback_attempted
+                and bool(user_query_text)
+                and (non_banter_fallback_needed or banter_requires_lookup_retry)
             )
             if should_run_fallback_lookup:
                 semantic_fallback_attempted = True
@@ -919,6 +959,12 @@ async def run_agent(
                         await _append_evidence_guidance_if_needed()
                         continue
                     logger.info(f"[agent] semantic fallback selected unavailable tool: {fallback_name}")
+            if banter_requires_lookup_retry:
+                return AgentResult(
+                    text="[NO_REPLY]",
+                    pending_actions=pending_actions,
+                    bypass_length_limits=False,
+                )
             if (
                 content_len == 0
                 and bool(

@@ -163,3 +163,13 @@ def test_select_tool_schemas_banter_exposes_lightweight_lookup_tools() -> None:
         for s in tool_catalog.select_tool_schemas(registry, has_images=True, chat_intent="banter")
     }
     assert "web_search" in names_img and "vision_analyze" in names_img
+
+
+def test_semantic_tool_guidance_requires_lookup_for_unknown_entities() -> None:
+    guidance = tool_catalog.semantic_tool_guidance()
+
+    assert "必须先调用合适工具查证" in guidance
+    assert "不要凭记忆猜" in guidance
+    assert "不要直接在群里问" in guidance
+    assert "专有名词" in guidance
+    assert "resolve_acg_entity" in guidance
