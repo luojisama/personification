@@ -9,7 +9,15 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from ..deps import AdminIdentity, require_admin
 
-_INTERACTION_WAIT_SECONDS = 75
+_INTERACTION_WAIT_SECONDS = 45
+_INTERACTION_POLL_SECONDS = 0.25
+_STAGE_LOG_LEVEL = {
+    "error": "ERROR",
+    "warn": "WARNING",
+    "warning": "WARNING",
+    "ok": "INFO",
+    "info": "INFO",
+}
 
 
 def _first_bot(runtime) -> Any | None:
@@ -170,9 +178,22 @@ def _build_probe_event(bot: Any, *, group_id: str, user_id: str, text: str) -> A
     return PrivateMessageEvent(message_type="private", sub_type="friend", **common)
 
 
-def _stage(stages: list[dict[str, Any]], trace_id: str, key: str, label: str, status: str, detail: str = "", hint: str = "") -> None:
+def _stage(
+    stages: list[dict[str, Any]],
+    trace_id: str,
+    key: str,
+    label: str,
+    status: str,
+    detail: str = "",
+    hint: str = "",
+    *,
+    started_at: float | None = None,
+) -> None:
     from ...core import reply_turn_trace
 
+    if started_at is not None:
+        elapsed_ms = int(max(0.0, time.monotonic() - started_at) * 1000)
+        detail = f"{detail}（耗时 {elapsed_ms}ms）" if detail else f"耗时 {elapsed_ms}ms"
     item = {"key": key, "label": label, "status": status, "detail": detail, "hint": hint}
     stages.append(item)
     reply_turn_trace.record_stage(
@@ -182,6 +203,297 @@ def _stage(stages: list[dict[str, Any]], trace_id: str, key: str, label: str, st
         status=status,
         detail=detail,
         hint=hint,
+    )
+    try:
+        from ...core import plugin_runtime_logs
+
+        plugin_runtime_logs.record(
+            level=_STAGE_LOG_LEVEL.get(str(status or "info").lower(), "INFO"),
+            source="webui.health",
+            message=f"{label or key}: {detail}",
+            context={"stage": key, "hint": hint} if hint else {"stage": key},
+            trace_id=trace_id,
+            min_level="DEBUG",
+        )
+    except Exception:
+        pass
+
+
+def _bundle_missing_fields(bundle: Any) -> list[str]:
+    required = [
+        "personification_rule",
+        "reply_processor_deps",
+        "msg_buffer",
+        "poke_event_cls",
+        "message_event_cls",
+        "group_message_event_cls",
+        "message_cls",
+        "message_segment_cls",
+    ]
+    return [name for name in required if getattr(bundle, name, None) is None]
+
+
+async def _dispatch_via_plugin_path(
+    *,
+    runtime: Any,
+    bot: Any,
+    proxy: _CapturingBot,
+    event: Any,
+    trace_id: str,
+    stages: list[dict[str, Any]],
+    target_label: str,
+    target_detail: dict[str, str],
+    started: float,
+) -> dict | None:
+    """Run the plugin-owned rule/buffer/reply path directly for WebUI diagnostics.
+
+    NoneBot's global ``handle_event`` is useful for integration testing, but it
+    hides whether this plugin's rule matched and can drop trace context when the
+    reply leaves through the buffer task. The health page needs plugin-local
+    evidence, so this path explicitly runs the same rule and buffer helpers that
+    the matcher uses in production.
+    """
+
+    bundle = getattr(runtime, "runtime_bundle", None)
+    if bundle is None:
+        _stage(
+            stages,
+            trace_id,
+            "plugin_path_unavailable",
+            "插件直连链路",
+            "warn",
+            "runtime_bundle 不可用，回退 nonebot.message.handle_event",
+        )
+        return None
+    missing = _bundle_missing_fields(bundle)
+    if missing:
+        _stage(
+            stages,
+            trace_id,
+            "plugin_path_unavailable",
+            "插件直连链路",
+            "warn",
+            f"runtime_bundle 缺少字段：{', '.join(missing)}；回退 nonebot.message.handle_event",
+        )
+        return None
+
+    try:
+        from ...handlers.reply_buffer import handle_reply_event, run_buffer_timer
+        from ...handlers.reply_pipeline.processor import process_response_logic as process_response_logic_core
+    except Exception as exc:
+        _stage(
+            stages,
+            trace_id,
+            "plugin_path_unavailable",
+            "插件直连链路",
+            "warn",
+            f"导入插件回复链路失败：{exc}；回退 nonebot.message.handle_event",
+        )
+        return None
+
+    state: dict[str, Any] = {}
+    try:
+        matched = bool(await bundle.personification_rule(event, state))
+    except Exception as exc:
+        _stage(
+            stages,
+            trace_id,
+            "rule_match",
+            "规则匹配",
+            "error",
+            f"personification_rule 异常：{exc}",
+            "查看插件日志中同 trace_id 的异常",
+            started_at=started,
+        )
+        return _finish_payload(
+            trace_id=trace_id,
+            stages=stages,
+            replied=False,
+            target=target_label,
+            detail=f"规则匹配阶段异常：{exc}",
+            diagnosis_code="rule_exception",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            target_detail=target_detail,
+        )
+
+    state_summary = {
+        key: state.get(key)
+        for key in ("is_random_chat", "message_target", "active_followup", "group_idle_active")
+        if key in state
+    }
+    _stage(
+        stages,
+        trace_id,
+        "rule_match",
+        "规则匹配",
+        "ok" if matched else "error",
+        f"matched={matched}; state={state_summary or '{}'}",
+        "" if matched else "规则未匹配：检查私聊命令过滤、群白名单、禁言缓存、黑名单或全局开关",
+        started_at=started,
+    )
+    if not matched:
+        return _finish_payload(
+            trace_id=trace_id,
+            stages=stages,
+            replied=False,
+            target=target_label,
+            detail="personification_rule 未匹配，消息没有进入拟人回复链路。",
+            diagnosis_code="rule_not_matched",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            target_detail=target_detail,
+        )
+
+    scheduled_tasks: list[asyncio.Task[Any]] = []
+    reply_logger = getattr(runtime, "logger", None) or getattr(
+        getattr(bundle.reply_processor_deps, "runtime", None), "logger", None
+    )
+
+    async def _process_response_logic(_bot: Any, _event: Any, _state: dict[str, Any]) -> None:
+        await process_response_logic_core(_bot, _event, _state, bundle.reply_processor_deps)
+
+    def _start_buffer_timer(key: str, _bot: Any, wait_seconds: float) -> asyncio.Task[Any]:
+        task = asyncio.create_task(
+            run_buffer_timer(
+                key,
+                _bot,
+                msg_buffer=bundle.msg_buffer,
+                process_response_logic=_process_response_logic,
+                message_event_cls=bundle.message_event_cls,
+                message_cls=bundle.message_cls,
+                message_segment_cls=bundle.message_segment_cls,
+                logger=reply_logger,
+                finished_exception_cls=getattr(bundle, "finished_exception_cls", None),
+                delay=wait_seconds,
+                response_timeout_seconds=float(_INTERACTION_WAIT_SECONDS),
+            )
+        )
+        scheduled_tasks.append(task)
+        return task
+
+    try:
+        await handle_reply_event(
+            proxy,
+            event,
+            state,
+            poke_event_cls=bundle.poke_event_cls,
+            message_event_cls=bundle.message_event_cls,
+            group_message_event_cls=bundle.group_message_event_cls,
+            process_response_logic=_process_response_logic,
+            msg_buffer=bundle.msg_buffer,
+            start_buffer_timer=_start_buffer_timer,
+            logger=reply_logger,
+        )
+    except Exception as exc:
+        _stage(
+            stages,
+            trace_id,
+            "buffer_dispatch",
+            "缓冲分发",
+            "error",
+            f"handle_reply_event 异常：{exc}",
+            "查看插件日志中同 trace_id 的异常",
+            started_at=started,
+        )
+        return _finish_payload(
+            trace_id=trace_id,
+            stages=stages,
+            replied=False,
+            target=target_label,
+            detail=f"缓冲分发失败：{exc}",
+            diagnosis_code="buffer_exception",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            target_detail=target_detail,
+        )
+
+    _stage(
+        stages,
+        trace_id,
+        "buffer_dispatch",
+        "缓冲分发",
+        "info",
+        f"已进入插件 reply_buffer，scheduled_tasks={len(scheduled_tasks)}",
+        started_at=started,
+    )
+    deadline = started + float(_INTERACTION_WAIT_SECONDS)
+    while time.monotonic() < deadline:
+        if proxy.captured:
+            break
+        if scheduled_tasks and all(task.done() for task in scheduled_tasks):
+            break
+        await asyncio.sleep(_INTERACTION_POLL_SECONDS)
+
+    for task in list(scheduled_tasks):
+        if task.done() and not task.cancelled():
+            try:
+                exc = task.exception()
+            except asyncio.CancelledError:
+                exc = None
+            if exc is not None:
+                _stage(
+                    stages,
+                    trace_id,
+                    "buffer_task_failed",
+                    "缓冲任务",
+                    "error",
+                    str(exc)[:500],
+                    "查看插件日志中同 trace_id 的异常",
+                    started_at=started,
+                )
+
+    ms = int((time.monotonic() - started) * 1000)
+    if proxy.captured:
+        _stage(stages, trace_id, "capture_reply", "捕获回复", "ok", f"捕获 {len(proxy.captured)} 条发送", started_at=started)
+        return _finish_payload(
+            trace_id=trace_id,
+            stages=stages,
+            replied=True,
+            target=target_label,
+            reply="\n".join(proxy.captured),
+            detail=f"已在{'测试群 ' + target_detail.get('group_id', '') if target_detail.get('group_id') else '私聊 ' + target_detail.get('user_id', '')}收到 bot 回复",
+            diagnosis_code="ok",
+            duration_ms=ms,
+            target_detail=target_detail,
+        )
+
+    from ...core import reply_turn_trace
+
+    last_trace = reply_turn_trace.get_trace(trace_id) or {}
+    diagnosis = str(last_trace.get("diagnosis_code") or "") or "capture_timeout"
+    if diagnosis == "ok":
+        diagnosis = "capture_timeout"
+    active = [task for task in scheduled_tasks if not task.done()]
+    if active:
+        _stage(
+            stages,
+            trace_id,
+            "reply_timeout",
+            "回复超时",
+            "warn",
+            f"插件回复链路超过 {_INTERACTION_WAIT_SECONDS}s 仍未发送，已取消本次测试任务",
+            "通常是模型/provider 超时、工具调用耗时或 provider 重试过多；查看同 trace_id 阶段耗时",
+            started_at=started,
+        )
+        for task in active:
+            task.cancel()
+    _stage(
+        stages,
+        trace_id,
+        "capture_reply",
+        "捕获回复",
+        "error",
+        "未捕获到发送",
+        "查看上方阶段和插件日志；若已出现 no_reply 阶段则是模型/规则选择沉默，否则多为模型超时或发送失败",
+        started_at=started,
+    )
+    return _finish_payload(
+        trace_id=trace_id,
+        stages=stages,
+        replied=False,
+        target=target_label,
+        detail="未捕获到回复：已完成插件规则、缓冲、回复链路诊断，请查看 stages / last_trace / 插件日志。",
+        diagnosis_code=diagnosis if not active else "reply_timeout",
+        duration_ms=ms,
+        target_detail=target_detail,
     )
 
 
@@ -396,15 +708,40 @@ def build_health_router(*, runtime) -> APIRouter:
         started = time.monotonic()
         token = reply_turn_trace.set_current_trace_id(trace_id)
         try:
-            _stage(stages, trace_id, "dispatch_start", "分发事件", "info", "开始调用 nonebot.message.handle_event")
+            _stage(stages, trace_id, "dispatch_start", "分发事件", "info", "开始调用插件 personification_rule / reply_buffer")
+            direct_result = await _dispatch_via_plugin_path(
+                runtime=runtime,
+                bot=bot,
+                proxy=proxy,
+                event=event,
+                trace_id=trace_id,
+                stages=stages,
+                target_label=target_label,
+                target_detail=target_detail,
+                started=started,
+            )
+            if direct_result is not None:
+                return direct_result
+
+            _stage(
+                stages,
+                trace_id,
+                "dispatch_fallback",
+                "分发回退",
+                "warn",
+                "插件直连链路不可用，回退调用 nonebot.message.handle_event",
+                started_at=started,
+            )
             await asyncio.wait_for(handle_event(proxy, event), timeout=_INTERACTION_WAIT_SECONDS)
         except asyncio.TimeoutError:
             _stage(stages, trace_id, "dispatch_timeout", "分发事件", "warn",
                    f"handle_event 超过 {_INTERACTION_WAIT_SECONDS}s 未返回",
-                   "通常是模型调用或回复链路较慢，继续等待 send 捕获")
+                   "通常是模型调用或回复链路较慢，继续等待 send 捕获",
+                   started_at=started)
         except Exception as exc:
             _stage(stages, trace_id, "dispatch_failed", "分发事件", "error", str(exc)[:500],
-                   "查看插件日志中同 trace_id 的异常")
+                   "查看插件日志中同 trace_id 的异常",
+                   started_at=started)
             reply_turn_trace.reset_current_trace_id(token)
             return _finish_payload(
                 trace_id=trace_id,
@@ -425,11 +762,19 @@ def build_health_router(*, runtime) -> APIRouter:
         # 回复经缓冲/模型，可能在 handle_event 返回后才产生，轮询等待
         deadline = started + _INTERACTION_WAIT_SECONDS
         while not proxy.captured and time.monotonic() < deadline:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(_INTERACTION_POLL_SECONDS)
         ms = int((time.monotonic() - started) * 1000)
         replied = bool(proxy.captured)
         if replied:
-            _stage(stages, trace_id, "capture_reply", "捕获回复", "ok", f"捕获 {len(proxy.captured)} 条 send")
+            _stage(
+                stages,
+                trace_id,
+                "capture_reply",
+                "捕获回复",
+                "ok",
+                f"捕获 {len(proxy.captured)} 条 send",
+                started_at=started,
+            )
             return _finish_payload(
                 trace_id=trace_id,
                 stages=stages,
@@ -447,7 +792,8 @@ def build_health_router(*, runtime) -> APIRouter:
             diagnosis = "capture_timeout"
         _stage(stages, trace_id, "capture_reply", "捕获回复", "error",
                "未捕获到 bot.send",
-               "查看上方阶段和插件日志；常见原因是 NO_REPLY、规则未进入、模型超时或发送失败")
+               "查看上方阶段和插件日志；常见原因是 NO_REPLY、规则未进入、模型超时或发送失败",
+               started_at=started)
         return _finish_payload(
             trace_id=trace_id,
             stages=stages,

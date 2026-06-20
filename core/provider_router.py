@@ -911,6 +911,19 @@ async def _try_provider_chain(
                     f"personification: provider {provider['name']} failed "
                     f"({attempt + 1}/{retries}): {error_text}"
                 )
+                try:
+                    from . import provider_health
+
+                    error_kind = provider_health.classify_error(e)
+                except Exception:
+                    error_kind = ""
+                if error_kind in {"timeout", "connect"}:
+                    cooldown = _mark_provider_failure(provider["name"], e)
+                    logger.warning(
+                        f"personification: provider {provider['name']} {error_kind}，"
+                        f"跳过剩余重试并 cooldown {int(cooldown)}s"
+                    )
+                    break
                 if attempt + 1 >= retries:
                     _mark_provider_failure(provider["name"], e)
                 else:

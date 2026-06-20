@@ -155,6 +155,123 @@ def test_interaction_test_requires_configured_target(_runtime_context) -> None:
     assert res.status_code == 400
 
 
+def _install_fake_interaction_runtime(_runtime_context, monkeypatch, *, group_id: str = "123456", user_id: str = "20001"):
+    from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageEvent, MessageSegment
+
+    processor = load_personification_module("plugin.personification.handlers.reply_pipeline.processor")
+    logger = SimpleNamespace(
+        debug=lambda *_a, **_k: None,
+        info=lambda *_a, **_k: None,
+        warning=lambda *_a, **_k: None,
+        error=lambda *_a, **_k: None,
+        exception=lambda *_a, **_k: None,
+    )
+    sent: list[dict] = []
+
+    class _FakeBot:
+        self_id = "100"
+
+        async def call_api(self, name: str, **kwargs):  # noqa: ANN001
+            if name == "get_friend_list":
+                return [{"user_id": int(user_id)}]
+            sent.append({"api": name, **kwargs})
+            return {"message_id": len(sent)}
+
+        async def send(self, event, message, **kwargs):  # noqa: ANN001
+            sent.append(
+                {
+                    "api": "send",
+                    "message_type": getattr(event, "message_type", ""),
+                    "message": str(message),
+                    **kwargs,
+                }
+            )
+            return {"message_id": len(sent)}
+
+        async def get_group_member_info(self, **_kwargs):  # noqa: ANN001
+            return {"shut_up_timestamp": 0}
+
+    async def _rule(event, state):  # noqa: ANN001
+        state["is_random_chat"] = False
+        state["message_target"] = "bot"
+        return True
+
+    async def _fake_process_response_logic(bot, event, state, deps):  # noqa: ANN001
+        assert state["message_target"] == "bot"
+        await bot.send(event, "自检回复")
+
+    class _NeverPoke:
+        pass
+
+    monkeypatch.setattr(processor, "process_response_logic", _fake_process_response_logic)
+    cfg = _runtime_context.plugin_config
+    cfg.personification_webui_test_group_id = group_id
+    cfg.personification_webui_test_user_id = user_id
+    cfg.personification_whitelist = [group_id]
+    cfg.personification_turn_trace_enabled = True
+    cfg.personification_webui_log_capture_level = "INFO"
+    bundle = SimpleNamespace(
+        personification_rule=_rule,
+        reply_processor_deps=SimpleNamespace(runtime=SimpleNamespace(logger=logger)),
+        msg_buffer={},
+        poke_event_cls=_NeverPoke,
+        message_event_cls=MessageEvent,
+        group_message_event_cls=GroupMessageEvent,
+        message_cls=Message,
+        message_segment_cls=MessageSegment,
+        finished_exception_cls=None,
+    )
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=cfg,
+        superusers={"10001"},
+        get_bots=lambda: {"100": _FakeBot()},
+        logger=logger,
+        runtime_bundle=bundle,
+    )
+    _runtime_context.sent = sent
+    return sent
+
+
+def test_interaction_test_private_uses_plugin_path_and_captures_reply(_runtime_context, monkeypatch) -> None:
+    sent = _install_fake_interaction_runtime(_runtime_context, monkeypatch)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+
+    res = client.post("/personification/api/health/interaction-test", json={"target": "private", "text": "在吗"})
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["replied"] is True
+    assert body["diagnosis_code"] == "ok"
+    assert "自检回复" in body["reply"]
+    stage_keys = [item["key"] for item in body["stages"]]
+    assert "rule_match" in stage_keys
+    assert "buffer_dispatch" in stage_keys
+    assert "capture_reply" in stage_keys
+    assert any(item.get("api") == "send" for item in sent)
+    logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")
+    rows = logs.query_recent(trace_id=body["trace_id"], limit=20)
+    assert any(row["source"] == "webui.health" for row in rows)
+
+
+def test_interaction_test_group_uses_plugin_path_and_captures_reply(_runtime_context, monkeypatch) -> None:
+    _install_fake_interaction_runtime(_runtime_context, monkeypatch)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+
+    res = client.post("/personification/api/health/interaction-test", json={"target": "group", "text": "群测试"})
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["replied"] is True
+    assert body["target"] == "group"
+    assert body["diagnosis_code"] == "ok"
+    assert "自检回复" in body["reply"]
+    assert body["target_detail"]["group_id"] == _runtime_context.plugin_config.personification_webui_test_group_id
+
+
 def test_health_requires_auth(_runtime_context) -> None:
     client = _build_client(_runtime_context)
     assert client.get("/personification/api/health/check").status_code == 401

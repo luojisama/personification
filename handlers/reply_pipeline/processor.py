@@ -1036,7 +1036,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 f"intent={message_intent} ambiguity={getattr(intent_decision, 'ambiguity_level', '')} "
                 f"silence={getattr(intent_decision, 'recommend_silence', False)} "
                 f"emotion={getattr(semantic_frame, 'bot_emotion', '')} "
-                f"output={getattr(semantic_frame, 'output_mode', '') or '-'}"
+                f"output={getattr(semantic_frame, 'output_mode', '') or '-'} "
+                f"elapsed_ms={int((time.monotonic() - started_at) * 1000)}"
             ),
         )
     except Exception:
@@ -1300,8 +1301,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     )
 
     async def _call_text_model_with_retry(messages_to_use: List[Dict[str, Any]]) -> str:
+        call_text_model = runtime.call_ai_api
+        route_label = "main"
+        if (
+            str(message_intent or "").strip() == "banter"
+            and not tool_image_urls
+            and runtime.lite_call_ai_api is not None
+        ):
+            call_text_model = runtime.lite_call_ai_api
+            route_label = "lite"
         try:
-            result = await runtime.call_ai_api(messages_to_use)
+            result = await call_text_model(messages_to_use)
         except Exception as exc:
             if not (
                 tool_image_urls
@@ -1327,6 +1337,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             )
             retry_messages = clone_messages_with_text_suffix(messages_to_use, retry_suffix)
             result = await runtime.call_ai_api(retry_messages)
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.record_stage(
+                key="text_model_route",
+                label="文本模型路由",
+                status="ok",
+                detail=f"route={route_label} intent={message_intent}",
+            )
+        except Exception:
+            pass
         return result
 
     async def _call_persona_responder_model(messages_to_use: List[Dict[str, Any]]) -> str:
@@ -1385,10 +1406,15 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             key="agent_start",
                             label="Agent 主循环",
                             status="info",
-                            detail=f"intent={message_intent} images={len(tool_image_urls)} direct_image={agent_direct_image_input}",
+                            detail=(
+                                f"intent={message_intent} images={len(tool_image_urls)} "
+                                f"direct_image={agent_direct_image_input} "
+                                f"elapsed_ms={int((time.monotonic() - started_at) * 1000)}"
+                            ),
                         )
                     except Exception:
                         pass
+                    agent_started_at = time.monotonic()
                     reply_content, used_agent, bypass_length_limits = await _run_agent_if_enabled(
                         bot=bot,
                         event=event,
@@ -1418,7 +1444,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             key="agent_result",
                             label="Agent 结果",
                             status="ok" if reply_content else "warn",
-                            detail=f"used={used_agent} chars={len(str(reply_content or ''))}",
+                            detail=(
+                                f"used={used_agent} chars={len(str(reply_content or ''))} "
+                                f"agent_elapsed_ms={int((time.monotonic() - agent_started_at) * 1000)} "
+                                f"elapsed_ms={int((time.monotonic() - started_at) * 1000)}"
+                            ),
                         )
                     except Exception:
                         pass
@@ -1459,7 +1489,34 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 reply_content = ""
                 bypass_length_limits = False
         if not used_agent:
+            fallback_started_at = time.monotonic()
+            try:
+                from ...core import reply_turn_trace
+
+                reply_turn_trace.record_stage(
+                    key="fallback_model_start",
+                    label="基础模型",
+                    status="info",
+                    detail=f"intent={message_intent} elapsed_ms={int((fallback_started_at - started_at) * 1000)}",
+                )
+            except Exception:
+                pass
             reply_content = await _call_persona_responder_model(fallback_model_messages)
+            try:
+                from ...core import reply_turn_trace
+
+                reply_turn_trace.record_stage(
+                    key="fallback_model_result",
+                    label="基础模型结果",
+                    status="ok" if reply_content else "warn",
+                    detail=(
+                        f"chars={len(str(reply_content or ''))} "
+                        f"model_elapsed_ms={int((time.monotonic() - fallback_started_at) * 1000)} "
+                        f"elapsed_ms={int((time.monotonic() - started_at) * 1000)}"
+                    ),
+                )
+            except Exception:
+                pass
             bypass_length_limits = False
             if not reply_content:
                 runtime.logger.warning("拟人插件：未能获取到 AI 回复内容")
@@ -1949,6 +2006,20 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         night=is_night,
                     )
                     if first_delay > 0.05:
+                        try:
+                            from ...core import reply_turn_trace
+
+                            reply_turn_trace.record_stage(
+                                key="humanize_delay",
+                                label="拟人化延迟",
+                                status="info",
+                                detail=(
+                                    f"typing_delay_ms={int(first_delay * 1000)} "
+                                    f"elapsed_ms={int((time.monotonic() - started_at) * 1000)}"
+                                ),
+                            )
+                        except Exception:
+                            pass
                         if (
                             is_private_session
                             and first_delay > 1.5
