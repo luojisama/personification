@@ -101,6 +101,7 @@ from .pipeline_emotion import (
 from .pipeline_sticker import (
     IncomingStickerCandidate,
     build_image_summary_suffix as _build_image_summary_suffix,
+    extract_gif_from_segment as _extract_gif_from_segment,
     extract_images_from_segment as _extract_images_from_segment,
     extract_mface_from_segment as _extract_mface_from_segment,
     extract_reply_images as _extract_reply_images,
@@ -399,6 +400,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     sticker_image_urls: List[str] = []
     sticker_candidates: List[IncomingStickerCandidate] = []
     stop_reply_due_to_gif = [False]
+    gif_understanding_counter = [0]
     is_direct_mention = False
     http_client = runtime.get_http_client()
     disable_network_hooks = bool(state.get("disable_network_hooks", False))
@@ -501,6 +503,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             elif seg.type == "mface":
                 await _extract_mface_from_segment(
                     seg,
+                    runtime=runtime,
                     http_client=http_client,
                     message_text_ref=message_text_parts,
                     image_urls=image_urls,
@@ -508,6 +511,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     logger=runtime.logger,
                     stop_reply_ref=stop_reply_due_to_gif,
                     sticker_image_urls=sticker_image_urls,
+                    gif_understanding_counter_ref=gif_understanding_counter,
                 )
             elif seg.type == "image":
                 await _extract_images_from_segment(
@@ -520,11 +524,18 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     logger=runtime.logger,
                     stop_reply_ref=stop_reply_due_to_gif,
                     sticker_image_urls=sticker_image_urls,
+                    gif_understanding_counter_ref=gif_understanding_counter,
                 )
             elif seg.type == "gif":
-                # OneBot 独立 gif 消息段，直接忽略，不下载，不传给视觉模型
-                runtime.logger.info("拟人插件：检测到 gif 消息段，忽略并不予回复")
-                stop_reply_due_to_gif[0] = True
+                await _extract_gif_from_segment(
+                    seg,
+                    runtime=runtime,
+                    http_client=http_client,
+                    message_text_ref=message_text_parts,
+                    logger=runtime.logger,
+                    stop_reply_ref=stop_reply_due_to_gif,
+                    gif_understanding_counter_ref=gif_understanding_counter,
+                )
 
         if not image_urls and source_message is not event.message:
             try:
@@ -540,6 +551,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             logger=runtime.logger,
                             stop_reply_ref=stop_reply_due_to_gif,
                             sticker_image_urls=sticker_image_urls,
+                            gif_understanding_counter_ref=gif_understanding_counter,
+                        )
+                    elif getattr(seg, "type", None) == "gif":
+                        await _extract_gif_from_segment(
+                            seg,
+                            runtime=runtime,
+                            http_client=http_client,
+                            message_text_ref=message_text_parts,
+                            logger=runtime.logger,
+                            stop_reply_ref=stop_reply_due_to_gif,
+                            gif_understanding_counter_ref=gif_understanding_counter,
                         )
             except Exception as e:
                 runtime.logger.warning(f"回退解析原始消息图片失败: {e}")
@@ -572,6 +594,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                                     image_urls=image_urls,
                                     logger=runtime.logger,
                                     stop_reply_ref=stop_reply_due_to_gif,
+                                    runtime=runtime,
+                                    gif_understanding_counter_ref=gif_understanding_counter,
                                 )
                 except Exception as e:
                     runtime.logger.warning(f"处理引用消息失败: {e}")

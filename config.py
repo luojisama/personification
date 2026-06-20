@@ -47,6 +47,14 @@ class Config(BaseModel):
     personification_image_input_mode: str = "auto"
     personification_image_detail: str = "auto"
     personification_sticker_vision_max: int = 3
+    personification_gif_understanding_enabled: bool = False
+    personification_gif_understanding_timeout: float = 12.0
+    personification_gif_max_bytes: int = 8 * 1024 * 1024
+    personification_gif_max_decode_frames: int = 180
+    personification_gif_sample_frames: int = 8
+    personification_gif_contact_sheet_long_edge: int = 1600
+    personification_gif_max_per_turn: int = 1
+    personification_gif_summary_cache_enabled: bool = True
     personification_builtin_search: bool = True
     # 默认启用：Gemini/Anthropic/OpenAICodex 等支持的 caller 会直接用 provider 原生
     # 联网搜索（google_search / web_search_20250305 / web_search_options），无需任何 key。
