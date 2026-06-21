@@ -722,7 +722,7 @@ def _build_agent_tool_caller(plugin_config: Any, logger: Any) -> Any:
 
 def _build_lite_tool_caller(plugin_config: Any, logger: Any, default_caller: Any = None) -> Any:
     # P10：严格主模型模式下，所有 lite 路径都共用主模型，避免偶尔降级到弱模型
-    # 导致 bot "突然变傻"。默认开启；要恢复旧行为把此开关关掉即可。
+    # 导致 bot "突然变傻"。默认关闭以优先降低普通回复延迟；要强制质量一致可手动开启。
     if bool(getattr(plugin_config, "personification_strict_main_model", True)):
         if logger is not None:
             try:

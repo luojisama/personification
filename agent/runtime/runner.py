@@ -345,6 +345,28 @@ async def _safe_ack(
         logger.debug(f"[agent] ack send failed: {exc}")
 
 
+def _record_reply_trace_stage(
+    *,
+    key: str,
+    label: str,
+    status: str = "info",
+    detail: Any = "",
+    hint: str = "",
+) -> None:
+    try:
+        from ...core import reply_turn_trace
+
+        reply_turn_trace.record_stage(
+            key=key,
+            label=label,
+            status=status,
+            detail=detail,
+            hint=hint,
+        )
+    except Exception:
+        pass
+
+
 async def run_agent(
     messages: List[dict],
     registry: ToolRegistry,
@@ -404,6 +426,7 @@ async def run_agent(
         intent_decision = precomputed_intent
         logger.debug("[agent] using precomputed intent_decision, skipping LLM inference")
     else:
+        intent_started_at = time.monotonic()
         intent_decision = await _infer_intent_decision_with_context(
             preliminary_query_text or user_text,
             messages,
@@ -411,6 +434,18 @@ async def run_agent(
             repeat_clusters=repeat_clusters,
             relationship_hint=relationship_hint,
             recent_bot_replies=recent_bot_replies,
+        )
+        intent_elapsed_ms = int((time.monotonic() - intent_started_at) * 1000)
+        record_timing("agent.intent_ms", intent_elapsed_ms)
+        _record_reply_trace_stage(
+            key="agent_intent",
+            label="Agent 意图判别",
+            status="ok",
+            detail=(
+                f"intent={getattr(intent_decision, 'chat_intent', '')} "
+                f"ambiguity={getattr(intent_decision, 'ambiguity_level', '')} "
+                f"elapsed_ms={intent_elapsed_ms}"
+            ),
         )
     chat_intent = intent_decision.chat_intent
     plugin_query_intent = intent_decision.plugin_question_intent if chat_intent == "plugin_question" else ""
@@ -434,6 +469,7 @@ async def run_agent(
             search_plan=[],
         )
     else:
+        rewrite_started_at = time.monotonic()
         rewritten_query = await contextual_query_rewriter(
             tool_caller=tool_caller,
             history_new=rewrite_context.history_new,
@@ -442,6 +478,14 @@ async def run_agent(
             images=rewrite_context.images,
             quoted_message=rewrite_context.quoted_message,
             topic_hint=context_hint,
+        )
+        rewrite_elapsed_ms = int((time.monotonic() - rewrite_started_at) * 1000)
+        record_timing("agent.query_rewrite_ms", rewrite_elapsed_ms, intent=runtime_chat_intent or "unknown")
+        _record_reply_trace_stage(
+            key="agent_query_rewrite",
+            label="Agent 查询改写",
+            status="ok",
+            detail=f"intent={runtime_chat_intent or '-'} elapsed_ms={rewrite_elapsed_ms}",
         )
     effective_query_text = (
         rewritten_query.primary_query
@@ -783,6 +827,23 @@ async def run_agent(
             f"tool_calls={len(response.tool_calls)} content_len={content_len} "
             f"model_elapsed_ms={model_elapsed_ms}"
         )
+        record_timing(
+            "agent.model_step_ms",
+            model_elapsed_ms,
+            intent=runtime_chat_intent or "unknown",
+            finish_reason=str(response.finish_reason or ""),
+        )
+        _record_reply_trace_stage(
+            key="agent_model_step",
+            label=f"Agent 模型步 {_step + 1}",
+            status="ok" if content_len > 0 or response.tool_calls else "warn",
+            detail=(
+                f"intent={runtime_chat_intent or '-'} step={_step + 1} "
+                f"tools={','.join(selected_names[:8]) if selected_names else '-'} "
+                f"finish={response.finish_reason} tool_calls={len(response.tool_calls)} "
+                f"content_len={content_len} elapsed_ms={model_elapsed_ms}"
+            ),
+        )
         if response.finish_reason == "stop" and not response.tool_calls and content_len == 0:
             logger.warning(
                 "[agent] provider returned empty stop response "
@@ -804,12 +865,29 @@ async def run_agent(
                         draft_answer_text=str(response.content or ""),
                     )
                 ):
+                    lookup_review_started_at = time.monotonic()
                     banter_requires_lookup_retry = await _classify_deferred_lookup_reply(
                         tool_caller=tool_caller,
                         user_query_text=user_query_text,
                         assistant_reply_text=str(response.content or ""),
                         previous_tool_name=last_tool_name,
                         previous_tool_result_text=last_tool_result_text,
+                    )
+                    lookup_review_elapsed_ms = int((time.monotonic() - lookup_review_started_at) * 1000)
+                    record_timing(
+                        "agent.banter_lookup_review_ms",
+                        lookup_review_elapsed_ms,
+                        retry=bool(banter_requires_lookup_retry),
+                    )
+                    _record_reply_trace_stage(
+                        key="agent_banter_lookup_review",
+                        label="Banter 查证裁判",
+                        status="warn" if banter_requires_lookup_retry else "ok",
+                        detail=(
+                            f"retry={bool(banter_requires_lookup_retry)} "
+                            f"elapsed_ms={lookup_review_elapsed_ms}"
+                        ),
+                        hint="若此阶段经常较慢，配置 lite_model 并关闭严格主模型模式",
                     )
                     if banter_requires_lookup_retry:
                         logger.info("[agent] banter draft requested lookup retry")
@@ -873,6 +951,7 @@ async def run_agent(
             if should_run_fallback_lookup:
                 semantic_fallback_attempted = True
                 fallback_query_text = pending_evidence_followup_query or user_query_text
+                fallback_planner_started_at = time.monotonic()
                 fallback_lookup = await _select_semantic_fallback_tool(
                     tool_caller=tool_caller,
                     registry=registry,
@@ -886,6 +965,22 @@ async def run_agent(
                     user_images=user_images,
                     previous_tool_name=last_tool_name,
                     previous_tool_result_text=last_tool_result_text,
+                )
+                fallback_planner_elapsed_ms = int((time.monotonic() - fallback_planner_started_at) * 1000)
+                record_timing(
+                    "agent.semantic_fallback_planner_ms",
+                    fallback_planner_elapsed_ms,
+                    selected=bool(fallback_lookup),
+                    intent=runtime_chat_intent or "unknown",
+                )
+                _record_reply_trace_stage(
+                    key="agent_semantic_fallback",
+                    label="语义 fallback 选工具",
+                    status="ok" if fallback_lookup else "warn",
+                    detail=(
+                        f"selected={fallback_lookup[0] if fallback_lookup else '-'} "
+                        f"intent={runtime_chat_intent or '-'} elapsed_ms={fallback_planner_elapsed_ms}"
+                    ),
                 )
                 if fallback_lookup is None and pending_evidence_followup_query:
                     pending_evidence_followup_query = ""
@@ -907,6 +1002,7 @@ async def run_agent(
                     last_fallback_signature = fallback_signature
                     fallback_tool = registry.get(fallback_name)
                     if fallback_tool is not None:
+                        fallback_tool_started_at = time.monotonic()
                         fallback_args, fallback_result = await _execute_tool_with_retries(
                             registry=registry,
                             tool_name=fallback_name,
@@ -917,6 +1013,15 @@ async def run_agent(
                             previous_tool_result_text=last_tool_result_text,
                             logger=logger,
                             budget_deadline=budget_deadline,
+                        )
+                        _record_reply_trace_stage(
+                            key="agent_fallback_tool",
+                            label="fallback 工具执行",
+                            status="ok" if str(fallback_result or "").strip() else "warn",
+                            detail=(
+                                f"tool={fallback_name} "
+                                f"elapsed_ms={int((time.monotonic() - fallback_tool_started_at) * 1000)}"
+                            ),
                         )
                         fallback_id = f"fallback-{fallback_name}-{_step + 1}"
                         messages.append(

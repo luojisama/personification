@@ -66,8 +66,8 @@ EXTRA_CONFIG_SPECS: tuple[dict[str, Any], ...] = (
        example='{"初见":"保持基本礼貌","挚友":"无话不谈"}'),
 
     # ──────────── 模型路由（补充） ────────────
-    _s("personification_strict_main_model", "bool", True, "严格主模型模式",
-       "开启后 intent / review / 闸门 / 表情决策全部走主模型，避免降级到弱模型；代价是 token 消耗更高。",
+    _s("personification_strict_main_model", "bool", False, "严格主模型模式",
+       "开启后 intent / review / 闸门 / 表情决策全部走主模型，避免降级到弱模型；默认关闭以优先使用 lite_model 降低回复延迟。",
        group="模型路由", aliases=("严格主模型",)),
     _s("personification_state_model", "str", "", "状态流模型",
        "内在状态 / 日记流使用的模型名；留空复用主模型。", group="模型路由", advanced=True),

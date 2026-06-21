@@ -31,6 +31,28 @@ from .pipeline_context import batch_has_newer_messages
 _EMOTIONAL_SUPPORT_HINT = load_prompt("emotional_support_hint")
 
 
+def _record_reply_trace_stage(
+    *,
+    key: str,
+    label: str,
+    status: str = "info",
+    detail: Any = "",
+    hint: str = "",
+) -> None:
+    try:
+        from ...core import reply_turn_trace
+
+        reply_turn_trace.record_stage(
+            key=key,
+            label=label,
+            status=status,
+            detail=detail,
+            hint=hint,
+        )
+    except Exception:
+        pass
+
+
 @dataclass
 class PreparedReplySemantics:
     data_dir: Any
@@ -158,9 +180,21 @@ async def prepare_reply_semantics(
             action=turn_plan.reply_action,
             output_mode=turn_plan.output_mode,
         )
-        record_timing("turn_planner.plan_ms", (time.monotonic() - started_at) * 1000.0, mode="enabled")
+        plan_elapsed_ms = (time.monotonic() - started_at) * 1000.0
+        record_timing("turn_planner.plan_ms", plan_elapsed_ms, mode="enabled")
         semantic_frame = turn_plan_to_semantic_frame(turn_plan)
+        _record_reply_trace_stage(
+            key="turn_plan_llm",
+            label="回合规划 LLM",
+            status="ok",
+            detail=(
+                f"action={getattr(turn_plan, 'reply_action', '')} "
+                f"output={getattr(turn_plan, 'output_mode', '')} "
+                f"elapsed_ms={int(plan_elapsed_ms)}"
+            ),
+        )
     else:
+        semantic_started_at = time.monotonic()
         semantic_frame = await infer_turn_semantic_frame_with_llm(
             raw_message_text or current_agent_message_content,
             is_group=not is_private_session,
@@ -171,6 +205,12 @@ async def prepare_reply_semantics(
             repeat_clusters=repeat_clusters,
             current_inner_state=render_inner_state_hint(inner_state),
             current_emotion_state=emotion_memory_hint,
+        )
+        semantic_elapsed_ms = (time.monotonic() - semantic_started_at) * 1000.0
+        record_timing(
+            "reply.semantic_frame_ms",
+            semantic_elapsed_ms,
+            scene="private" if is_private_session else "group",
         )
         turn_plan = turn_plan_from_semantic_frame(
             semantic_frame,
@@ -183,6 +223,18 @@ async def prepare_reply_semantics(
             semantic_frame.session_goal = turn_plan.session_goal
         except Exception:
             pass
+        _record_reply_trace_stage(
+            key="semantic_frame_llm",
+            label="语义帧 LLM",
+            status="ok",
+            detail=(
+                f"intent={getattr(semantic_frame, 'chat_intent', '')} "
+                f"ambiguity={getattr(semantic_frame, 'ambiguity_level', '')} "
+                f"emotion={getattr(semantic_frame, 'bot_emotion', '')} "
+                f"elapsed_ms={int(semantic_elapsed_ms)}"
+            ),
+            hint="若此阶段经常较慢，配置 lite_model 并保持 strict_main_model 关闭",
+        )
         if planner_shadow_enabled:
             started_at = time.monotonic()
             shadow_plan = await plan_turn_with_llm(

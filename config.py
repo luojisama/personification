@@ -304,8 +304,8 @@ class Config(BaseModel):
     personification_lite_model: str = ""
     # 严格主模型模式：开启后忽略 lite_model 配置，所有 intent / review / 闸门 /
     # 表情决策都走主模型，避免 cooldown / 网关失败时降级到弱模型导致 bot 突然变傻。
-    # 代价是 token 消耗更高。要回到旧行为把这个关掉。
-    personification_strict_main_model: bool = True
+    # 默认关闭，让已配置的 lite_model 真正承担轻量任务，降低普通闲聊回复延迟。
+    personification_strict_main_model: bool = False
     personification_persona_api_type: str = ""
     personification_persona_api_url: str = ""
     personification_persona_api_key: str = ""
