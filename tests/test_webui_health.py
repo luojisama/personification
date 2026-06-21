@@ -11,6 +11,7 @@ from .test_webui_smoke import _build_client, _login_as_admin, _runtime_context  
 diagnostics = load_personification_module("plugin.personification.core.diagnostics")
 ai_routes = load_personification_module("plugin.personification.core.ai_routes")
 visual_capabilities = load_personification_module("plugin.personification.core.visual_capabilities")
+health_routes = load_personification_module("plugin.personification.webui.routes.health_routes")
 
 
 class _FakeResp:
@@ -155,6 +156,12 @@ def test_interaction_test_requires_configured_target(_runtime_context) -> None:
     assert res.status_code == 400
 
 
+def test_interaction_wait_follows_reply_timeout() -> None:
+    cfg = SimpleNamespace(personification_response_timeout=180)
+
+    assert health_routes._interaction_wait_seconds(cfg) >= 185
+
+
 def _install_fake_interaction_runtime(_runtime_context, monkeypatch, *, group_id: str = "123456", user_id: str = "20001"):
     from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageEvent, MessageSegment
 
@@ -197,7 +204,10 @@ def _install_fake_interaction_runtime(_runtime_context, monkeypatch, *, group_id
         return True
 
     async def _fake_process_response_logic(bot, event, state, deps):  # noqa: ANN001
+        trace_mod = load_personification_module("plugin.personification.core.reply_turn_trace")
+
         assert state["message_target"] == "bot"
+        trace_mod.record_stage(key="fake_inner", label="内部链路", status="info", detail="已进入回复处理")
         await bot.send(event, "自检回复")
 
     class _NeverPoke:
@@ -248,6 +258,7 @@ def test_interaction_test_private_uses_plugin_path_and_captures_reply(_runtime_c
     stage_keys = [item["key"] for item in body["stages"]]
     assert "rule_match" in stage_keys
     assert "buffer_dispatch" in stage_keys
+    assert "fake_inner" in stage_keys
     assert "capture_reply" in stage_keys
     assert any(item.get("api") == "send" for item in sent)
     logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")

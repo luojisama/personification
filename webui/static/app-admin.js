@@ -107,11 +107,11 @@ function renderHealth() {
   const ir = state.interactionResult;
   const interactionCard = `<div class="card">
     <h2>实际交互测试</h2>
-    <p class="muted" style="font-size:12px">向「配置中心 → 运维」里设置的<b>测试群 / 测试私聊用户</b>真实注入一条消息，走完整回复链路（规则→缓冲→模型→发送），并回显 bot 实际回复。会真的在 QQ 里发消息。</p>
+    <p class="muted" style="font-size:12px">向「配置中心 → 运维」里设置的<b>测试群 / 测试私聊用户</b>真实注入一条消息，走完整回复链路（规则→缓冲→模型→发送），并回显 bot 实际回复。等待时间按回复超时配置加少量余量；会真的在 QQ 里发消息。</p>
     <div class="row" style="margin-top:10px">
       <button class="btn primary" onclick="runInteraction('group')">测试群交互</button>
       <button class="btn primary" onclick="runInteraction('private')">测试私聊交互</button>
-      ${state.interactionBusy?'<span class="muted">交互中（最长 45s）…</span>':''}
+      ${state.interactionBusy?'<span class="muted">交互中（按回复超时配置）…</span>':''}
     </div>
     ${renderInteractionResult(ir)}
   </div>`;

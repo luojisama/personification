@@ -10,6 +10,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from ..deps import AdminIdentity, require_admin
 
 _INTERACTION_WAIT_SECONDS = 45
+_INTERACTION_TIMEOUT_GRACE_SECONDS = 5
 _INTERACTION_POLL_SECONDS = 0.25
 _STAGE_LOG_LEVEL = {
     "error": "ERROR",
@@ -18,6 +19,22 @@ _STAGE_LOG_LEVEL = {
     "ok": "INFO",
     "info": "INFO",
 }
+
+
+def _response_timeout_seconds(cfg: Any) -> float:
+    try:
+        value = float(getattr(cfg, "personification_response_timeout", 180) or 180)
+    except Exception:
+        value = 180.0
+    return max(30.0, value)
+
+
+def _interaction_wait_seconds(cfg: Any) -> float:
+    # 体检必须覆盖生产回复超时；否则真实链路还在等模型时 WebUI 会先误报失败。
+    return max(
+        float(_INTERACTION_WAIT_SECONDS),
+        _response_timeout_seconds(cfg) + float(_INTERACTION_TIMEOUT_GRACE_SECONDS),
+    )
 
 
 def _first_bot(runtime) -> Any | None:
@@ -168,7 +185,7 @@ def _build_probe_event(bot: Any, *, group_id: str, user_id: str, text: str) -> A
         original_message=msg,
         raw_message=raw_message,
         font=0,
-        sender=Sender(user_id=int(user_id), nickname="功能自检"),
+        sender=Sender(user_id=int(user_id), nickname="测试用户"),
         to_me=True,
     )
     if group_id:
@@ -244,6 +261,8 @@ async def _dispatch_via_plugin_path(
     target_label: str,
     target_detail: dict[str, str],
     started: float,
+    interaction_wait_seconds: float,
+    response_timeout_seconds: float,
 ) -> dict | None:
     """Run the plugin-owned rule/buffer/reply path directly for WebUI diagnostics.
 
@@ -364,7 +383,7 @@ async def _dispatch_via_plugin_path(
                 logger=reply_logger,
                 finished_exception_cls=getattr(bundle, "finished_exception_cls", None),
                 delay=wait_seconds,
-                response_timeout_seconds=float(_INTERACTION_WAIT_SECONDS),
+                response_timeout_seconds=response_timeout_seconds,
             )
         )
         scheduled_tasks.append(task)
@@ -414,7 +433,7 @@ async def _dispatch_via_plugin_path(
         f"已进入插件 reply_buffer，scheduled_tasks={len(scheduled_tasks)}",
         started_at=started,
     )
-    deadline = started + float(_INTERACTION_WAIT_SECONDS)
+    deadline = started + float(interaction_wait_seconds)
     while time.monotonic() < deadline:
         if proxy.captured:
             break
@@ -469,7 +488,7 @@ async def _dispatch_via_plugin_path(
             "reply_timeout",
             "回复超时",
             "warn",
-            f"插件回复链路超过 {_INTERACTION_WAIT_SECONDS}s 仍未发送，已取消本次测试任务",
+            f"插件回复链路超过 {int(interaction_wait_seconds)}s 仍未发送，已取消本次测试任务",
             "通常是模型/provider 超时、工具调用耗时或 provider 重试过多；查看同 trace_id 阶段耗时",
             started_at=started,
         )
@@ -523,6 +542,12 @@ def _finish_payload(
         diagnosis_code=diagnosis_code,
         detail={"detail": detail, "target": target, **(target_detail or {})},
     )
+    last_trace = reply_turn_trace.get_trace(trace_id)
+    trace_stages = []
+    if isinstance(last_trace, dict):
+        raw_stages = last_trace.get("stages")
+        if isinstance(raw_stages, list):
+            trace_stages = raw_stages
     return {
         "replied": replied,
         "duration_ms": duration_ms,
@@ -531,9 +556,9 @@ def _finish_payload(
         "detail": detail,
         "trace_id": trace_id,
         "diagnosis_code": diagnosis_code,
-        "stages": stages,
+        "stages": trace_stages or stages,
         "target_detail": target_detail or {},
-        "last_trace": reply_turn_trace.get_trace(trace_id),
+        "last_trace": last_trace,
     }
 
 
@@ -575,9 +600,11 @@ def build_health_router(*, runtime) -> APIRouter:
         target = str(body.get("target", "") or "").strip()  # "group" | "private"
         group_id = str(getattr(cfg, "personification_webui_test_group_id", "") or "").strip()
         user_id = str(getattr(cfg, "personification_webui_test_user_id", "") or "").strip()
-        text = str(body.get("text", "") or "").strip() or "（功能自检）你好呀，简单回复一句就行"
+        text = str(body.get("text", "") or "").strip() or "你好呀，回我一句就好"
         target_label = "group" if target == "group" else "private"
         stages: list[dict[str, Any]] = []
+        interaction_wait_seconds = _interaction_wait_seconds(cfg)
+        response_timeout_seconds = _response_timeout_seconds(cfg)
 
         if target == "group":
             if not group_id:
@@ -719,6 +746,8 @@ def build_health_router(*, runtime) -> APIRouter:
                 target_label=target_label,
                 target_detail=target_detail,
                 started=started,
+                interaction_wait_seconds=interaction_wait_seconds,
+                response_timeout_seconds=response_timeout_seconds,
             )
             if direct_result is not None:
                 return direct_result
@@ -732,10 +761,10 @@ def build_health_router(*, runtime) -> APIRouter:
                 "插件直连链路不可用，回退调用 nonebot.message.handle_event",
                 started_at=started,
             )
-            await asyncio.wait_for(handle_event(proxy, event), timeout=_INTERACTION_WAIT_SECONDS)
+            await asyncio.wait_for(handle_event(proxy, event), timeout=interaction_wait_seconds)
         except asyncio.TimeoutError:
             _stage(stages, trace_id, "dispatch_timeout", "分发事件", "warn",
-                   f"handle_event 超过 {_INTERACTION_WAIT_SECONDS}s 未返回",
+                   f"handle_event 超过 {int(interaction_wait_seconds)}s 未返回",
                    "通常是模型调用或回复链路较慢，继续等待 send 捕获",
                    started_at=started)
         except Exception as exc:
@@ -760,7 +789,7 @@ def build_health_router(*, runtime) -> APIRouter:
                 pass
 
         # 回复经缓冲/模型，可能在 handle_event 返回后才产生，轮询等待
-        deadline = started + _INTERACTION_WAIT_SECONDS
+        deadline = started + interaction_wait_seconds
         while not proxy.captured and time.monotonic() < deadline:
             await asyncio.sleep(_INTERACTION_POLL_SECONDS)
         ms = int((time.monotonic() - started) * 1000)
