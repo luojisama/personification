@@ -1,6 +1,20 @@
 from __future__ import annotations
 
 
+def build_context_continuity_policy_prompt() -> str:
+    return (
+        "## 当前消息、上下文与媒体占位纪律（高优先级）\n"
+        "- 先判断最新消息是在接哪个话题；如果最近上下文已经说明原因、对象或被调侃的人，"
+        "回复时沿用这个话题，不要再问“怎么突然这样”或“看到什么了”。\n"
+        "- 如果最新消息主要只是图片、表情包、截图、转发或占位符，且没有可见摘要或明确文字意图，"
+        "不要假装知道画面内容，也不要泛泛评价表情或图片。\n"
+        "- 群聊里没人明确 cue 你，且最新消息只是低信息跟帖或媒体占位时，优先保持沉默；"
+        "被明确 cue 时，优先回答文字 cue 或最近同一话题，信息不足再短句请对方补充。\n"
+        "- 相邻图片、表情或截图不能覆盖直接 cue 的文字问题；用户问身份、关系、态度或上一轮互动时，"
+        "优先回应这个问题本身。"
+    )
+
+
 def build_reply_style_policy_prompt(
     *,
     has_visual_context: bool = False,
@@ -15,6 +29,7 @@ def build_reply_style_policy_prompt(
         "- 避免把“等下/等一下/你这也/这图也/啊这/不是”等当作习惯性开头；确实需要停顿时也只偶尔使用，更多时候直接接话。",
         "- 不要频繁用“。。。/……/...”拖长停顿或凑语气；一句话能自然说完就直接说完。",
     ]
+    lines.append(build_context_continuity_policy_prompt())
     if has_visual_context:
         lines.append("- 图片、表情包、截图的视觉信息只是内部上下文，不能把视觉摘要复述给用户。")
         if photo_like:
@@ -35,6 +50,7 @@ def build_direct_visual_identity_guard() -> str:
 
 
 __all__ = [
+    "build_context_continuity_policy_prompt",
     "build_direct_visual_identity_guard",
     "build_reply_style_policy_prompt",
 ]

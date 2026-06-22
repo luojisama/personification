@@ -34,15 +34,15 @@
 ## 跑回放
 
 ```powershell
-python -m tools.personification_replay --input plugin/personification/tests/replay_corpus/*.jsonl --output replay_report.md
+python plugin/personification/scripts/replay_corpus.py --input plugin/personification/tests/replay_corpus/*.jsonl --output replay_report.md
 ```
 
 输出 markdown 报表，包含每段的 plan diff。
 
 ## 当前样本
 
-- `sample_group_banter.jsonl` 群聊接梗场景示例（10 段）
+- `sample_group_banter.jsonl` 群聊接梗场景示例（12 段）
 - `sample_private.jsonl` 私聊场景示例（4 段）
 - `sample_qzone.jsonl` QZone 评论链场景示例（3 段）
 
-目标：补到 ≥100 段（群聊 70 + 私聊 20 + QZone 10）。当前 17 段为冷启动样本。
+目标：补到 ≥100 段（群聊 70 + 私聊 20 + QZone 10）。当前 19 段为冷启动样本。

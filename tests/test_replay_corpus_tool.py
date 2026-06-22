@@ -6,23 +6,16 @@
 """
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 
+from ._loader import load_personification_module
 
 _CORPUS_DIR = Path(__file__).parent / "replay_corpus"
 
 
 def _load_planner():
-    planner_path = Path(__file__).parent.parent / "agent" / "runtime" / "planner.py"
-    spec = importlib.util.spec_from_file_location("test_planner_replay", planner_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["test_planner_replay"] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_personification_module("plugin.personification.agent.runtime.planner")
 
 
 def test_replay_corpus_has_min_samples() -> None:

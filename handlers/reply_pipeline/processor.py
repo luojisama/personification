@@ -378,6 +378,44 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             reset_llm_context(token)
 
 
+def _build_image_only_context_message(
+    *,
+    sender_name: str,
+    is_private_context: bool,
+    is_active_followup: bool,
+    followup_topic: str,
+    is_solo_speaker_follow: bool,
+    solo_follow_topic: str,
+    is_random_chat: bool,
+) -> str:
+    if is_private_context:
+        return (
+            "[对方发送了一张图片。若没有直接看到图片或可见摘要，不要假装看懂；"
+            "先结合最近对话短句回应，必要时请对方补一句]"
+        )
+    if is_active_followup:
+        return (
+            f"[对方正在顺着你刚才的话题继续聊，并发来了一条图片/表情消息。"
+            f"刚才的话题：{followup_topic or '上一轮对话'}。"
+            "若没有清楚的视觉摘要，不要评价图片内容；只有能从前文确定是在接话时才短句回应，否则保持安静]"
+        )
+    if is_solo_speaker_follow:
+        return (
+            f"[群里 {sender_name} 已经连续说了一阵，并发来了一条图片/表情消息。"
+            f"当前延续的话题：{solo_follow_topic or '刚才这串内容'}。"
+            "若没有清楚的视觉摘要，不要假装看懂图片；只有能从前文确定是在接话时才短句回应，否则保持安静]"
+        )
+    if is_random_chat:
+        return (
+            f"[群里 {sender_name} 发了一条图片/表情消息，你只是路过看到。"
+            "没人 cue 你且没有明确文字意图时保持安静，不要评论图片或表情内容]"
+        )
+    return (
+        "[对方发送了一张图片，是在对你说话。"
+        "如果看不清内容，先接文字或最近上下文；信息不足时请对方补一句，不要硬猜图里是什么]"
+    )
+
+
 async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, Any], deps: ReplyProcessorDeps) -> None:
     session = deps.session
     persona = deps.persona
@@ -689,29 +727,38 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 trigger_reason = f"对方（{sender_name}）正在【主动】与你搭话，请认真回复。"
 
             if image_urls and not message_content:
-                message_content = "[发送了一张图片]"
+                message_content = _build_image_only_context_message(
+                    sender_name=sender_name,
+                    is_private_context=is_private_context,
+                    is_active_followup=is_active_followup,
+                    followup_topic=followup_topic,
+                    is_solo_speaker_follow=is_solo_speaker_follow,
+                    solo_follow_topic=solo_follow_topic,
+                    is_random_chat=is_random_chat,
+                )
         else:
             if is_private_context:
                 if image_urls and not message_content:
-                    message_content = "[发送了一张图片]"
+                    message_content = _build_image_only_context_message(
+                        sender_name=sender_name,
+                        is_private_context=True,
+                        is_active_followup=False,
+                        followup_topic="",
+                        is_solo_speaker_follow=False,
+                        solo_follow_topic="",
+                        is_random_chat=False,
+                    )
             else:
                 if image_urls and not message_content:
-                    if is_active_followup:
-                        message_content = (
-                            f"[对方正在顺着你刚才的话题继续聊，并发来了一张图片。"
-                            f"刚才的话题：{followup_topic or '上一轮对话'}。"
-                            "如果图片明显是在接前文，就自然评价一句；否则保持安静]"
-                        )
-                    elif is_solo_speaker_follow:
-                        message_content = (
-                            f"[群里 {sender_name} 已经连续说了一阵，并发来了一张图片。"
-                            f"当前延续的话题：{solo_follow_topic or '刚才这串内容'}。"
-                            "如果图片和前文接得上，就像群友顺手接一句；明显不合适再安静]"
-                        )
-                    elif is_random_chat:
-                        message_content = f"[群里 {sender_name} 发了一张图片，你只是路过看到。要是自然能接一句就接，不然保持安静]"
-                    else:
-                        message_content = "[对方发送了一张图片，是在对你说话]"
+                    message_content = _build_image_only_context_message(
+                        sender_name=sender_name,
+                        is_private_context=False,
+                        is_active_followup=is_active_followup,
+                        followup_topic=followup_topic,
+                        is_solo_speaker_follow=is_solo_speaker_follow,
+                        solo_follow_topic=solo_follow_topic,
+                        is_random_chat=is_random_chat,
+                    )
                 elif is_active_followup:
                     message_content = (
                         f"[对方正在顺着你刚才的话继续聊，刚才的话题：{followup_topic or '上一轮对话'}。"

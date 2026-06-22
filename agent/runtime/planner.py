@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from ...core.reply_style_policy import build_context_continuity_policy_prompt
+
 
 ReplyAction = Literal["reply", "silence", "ask_clarify"]
 MemoryNeed = Literal["none", "light", "deep"]
@@ -298,6 +300,7 @@ async def plan_turn_with_llm(
         "5. research_need=high 只给明显需要多源查证、时效或争议的问题。\n"
         "6. output_mode 控制最终回复长度和形态：chat_short 接梗，chat_answer 普通答，structured_help 教程，source_summary 检索摘要，qzone_reply 空间评论。\n"
         "7. fallback 只能当模型不确定时参考，不要机械照抄。\n"
+        f"{build_context_continuity_policy_prompt()}\n"
     )
     user_content = (
         f"场景：{'群聊' if is_group else '私聊'}\n"

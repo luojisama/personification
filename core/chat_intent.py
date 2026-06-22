@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from .reply_style_policy import build_context_continuity_policy_prompt
 from .sticker_semantics import (
     DEFAULT_STICKER_SEMANTIC_HINT,
     default_sticker_semantic_hint,
@@ -331,6 +332,7 @@ async def infer_turn_semantic_frame_with_llm(
         "- quote：需要精确指向对方那条具体消息（尤其是隔了好几条、容易认错）时，引用回复\n"
         "- at_quote：两者都用（少用，仅在既要指人又要指那条消息时）\n"
         "- auto：拿不准就给 auto，交给默认规则。私聊一律 none/auto。\n"
+        f"{build_context_continuity_policy_prompt()}\n"
     )
     user_content = (
         f"场景：{'群聊' if is_group else '私聊'}\n"

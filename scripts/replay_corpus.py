@@ -2,7 +2,7 @@
 """拟人插件回放集执行工具。
 
 用法：
-    python -m plugin.personification.scripts.replay_corpus \\
+    python plugin/personification/scripts/replay_corpus.py \\
         --input plugin/personification/tests/replay_corpus/*.jsonl \\
         --output replay_report.md
 
@@ -20,6 +20,7 @@ import argparse
 import glob
 import json
 import sys
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -84,19 +85,39 @@ def load_records(paths: list[str]) -> list[ReplayRecord]:
 _PLANNER_MODULE = None
 
 
+def _ensure_namespace_package(name: str, path: Path) -> None:
+    module = sys.modules.get(name)
+    if module is None:
+        module = types.ModuleType(name)
+        module.__path__ = [str(path)]  # type: ignore[attr-defined]
+        sys.modules[name] = module
+        return
+    if not hasattr(module, "__path__"):
+        module.__path__ = [str(path)]  # type: ignore[attr-defined]
+
+
 def _load_planner() -> Any:
-    """直接按文件加载 planner.py，避免触发 personification __init__.py 的 nonebot 依赖。"""
+    """按 namespace 包加载 planner.py，避免触发 personification __init__.py。"""
     global _PLANNER_MODULE
     if _PLANNER_MODULE is not None:
         return _PLANNER_MODULE
     import importlib.util
 
-    planner_path = Path(__file__).resolve().parent.parent / "agent" / "runtime" / "planner.py"
-    spec = importlib.util.spec_from_file_location("personification_planner", planner_path)
+    personification_dir = Path(__file__).resolve().parent.parent
+    plugin_dir = personification_dir.parent
+    _ensure_namespace_package("plugin", plugin_dir)
+    _ensure_namespace_package("plugin.personification", personification_dir)
+    _ensure_namespace_package("plugin.personification.agent", personification_dir / "agent")
+    _ensure_namespace_package("plugin.personification.agent.runtime", personification_dir / "agent" / "runtime")
+    _ensure_namespace_package("plugin.personification.core", personification_dir / "core")
+
+    module_name = "plugin.personification.agent.runtime.planner"
+    planner_path = personification_dir / "agent" / "runtime" / "planner.py"
+    spec = importlib.util.spec_from_file_location(module_name, planner_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"无法加载 planner 模块: {planner_path}")
     module = importlib.util.module_from_spec(spec)
-    sys.modules["personification_planner"] = module
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     _PLANNER_MODULE = module
     return module

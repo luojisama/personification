@@ -408,8 +408,9 @@ async def _group_idle_hook(ctx: HookContext) -> Optional[str]:
         ctx.message_content = (
             "[提示：你刚刚在群里主动起了个头，当前处于短暂活跃期。"
             f"刚才的话题：{topic_hint}。"
-            f"现在你观察到群里 {ctx.user_name} 发送了一张图片，若是在接前面的话茬，可以更自然地评价一下；"
-            "若明显无关，回复 [SILENCE]]"
+            f"现在你观察到群里 {ctx.user_name} 发送了一条图片/表情消息。"
+            "若没有清楚的视觉摘要，不要假装看懂或评价图片内容；"
+            "只有能从前文确定是在接话时才短句回应，若明显无关就回复 [SILENCE]]"
         )
         return None
 
