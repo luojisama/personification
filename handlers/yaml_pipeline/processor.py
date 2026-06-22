@@ -647,7 +647,7 @@ async def process_yaml_response_logic(
                 planner_available_tools = []
         plan_source_text = raw_message_text or history_last_text or trigger_reason
         if planner_enabled:
-            turn_plan, plan_elapsed_ms, plan_timed_out, plan_timeout_s = await plan_turn_with_timeout(
+            turn_plan, plan_elapsed_ms, plan_fallback_reason, plan_timeout_s, plan_source = await plan_turn_with_timeout(
                 plan_source_text,
                 plugin_config=plugin_config,
                 is_group=not is_private_session,
@@ -656,6 +656,7 @@ async def process_yaml_response_logic(
                 has_images=bool(last_images),
                 message_target=str(message_target or ""),
                 tool_caller=lite_tool_caller,
+                fallback_tool_caller=agent_tool_caller,
                 recent_context=recent_context_hint,
                 relationship_hint=relationship_hint,
                 repeat_clusters=repeat_clusters,
@@ -673,28 +674,32 @@ async def process_yaml_response_logic(
             )
             record_timing("turn_planner.plan_ms", plan_elapsed_ms, mode="yaml_enabled")
             semantic_frame = turn_plan_to_semantic_frame(turn_plan)
-            if plan_timed_out:
+            if plan_fallback_reason:
+                is_timeout = plan_fallback_reason.endswith("_timeout")
                 _trace_stage(
-                    key="yaml_turn_plan_timeout",
-                    label="YAML 回合规划超时",
+                    key="yaml_turn_plan_timeout" if is_timeout else "yaml_turn_plan_fallback",
+                    label="YAML 回合规划超时" if is_timeout else "YAML 回合规划降级",
                     status="warn",
                     detail=(
                         f"timeout_s={plan_timeout_s:g} "
                         f"elapsed_ms={int(plan_elapsed_ms)} "
+                        f"reason={plan_fallback_reason} "
                         f"fallback=metadata "
+                        f"source={plan_source} "
                         f"action={getattr(turn_plan, 'reply_action', '')} "
                         f"output={getattr(turn_plan, 'output_mode', '')}"
                     ),
                     hint=semantic_frame_timeout_hint(plan_timeout_s),
                 )
         else:
-            semantic_frame, semantic_elapsed_ms, semantic_timed_out, semantic_timeout_s = (
+            semantic_frame, semantic_elapsed_ms, semantic_fallback_reason, semantic_timeout_s, semantic_source = (
                 await infer_turn_semantic_frame_with_timeout(
                     plan_source_text,
                     plugin_config=plugin_config,
                     is_group=not is_private_session,
                     is_random_chat=is_random_chat,
                     tool_caller=lite_tool_caller,
+                    fallback_tool_caller=agent_tool_caller,
                     recent_context=recent_context_hint,
                     relationship_hint=relationship_hint,
                     repeat_clusters=repeat_clusters,
@@ -715,22 +720,25 @@ async def process_yaml_response_logic(
                 message_target=str(message_target or ""),
             )
             attach_turn_plan_to_semantic_frame(semantic_frame, turn_plan)
-            if semantic_timed_out:
+            if semantic_fallback_reason:
+                is_timeout = semantic_fallback_reason.endswith("_timeout")
                 _trace_stage(
-                    key="yaml_semantic_frame_timeout",
-                    label="YAML 语义帧超时",
+                    key="yaml_semantic_frame_timeout" if is_timeout else "yaml_semantic_frame_fallback",
+                    label="YAML 语义帧超时" if is_timeout else "YAML 语义帧降级",
                     status="warn",
                     detail=(
                         f"timeout_s={semantic_timeout_s:g} "
                         f"elapsed_ms={int(semantic_elapsed_ms)} "
+                        f"reason={semantic_fallback_reason} "
                         f"fallback=metadata "
+                        f"source={semantic_source} "
                         f"intent={getattr(semantic_frame, 'chat_intent', '')} "
                         f"ambiguity={getattr(semantic_frame, 'ambiguity_level', '')}"
                     ),
                     hint=semantic_frame_timeout_hint(semantic_timeout_s),
                 )
             if planner_shadow_enabled:
-                shadow_plan, shadow_elapsed_ms, shadow_timed_out, shadow_timeout_s = await plan_turn_with_timeout(
+                shadow_plan, shadow_elapsed_ms, shadow_fallback_reason, shadow_timeout_s, shadow_source = await plan_turn_with_timeout(
                     plan_source_text,
                     plugin_config=plugin_config,
                     is_group=not is_private_session,
@@ -739,6 +747,7 @@ async def process_yaml_response_logic(
                     has_images=bool(last_images),
                     message_target=str(message_target or ""),
                     tool_caller=lite_tool_caller,
+                    fallback_tool_caller=agent_tool_caller,
                     recent_context=recent_context_hint,
                     relationship_hint=relationship_hint,
                     repeat_clusters=repeat_clusters,
@@ -749,15 +758,17 @@ async def process_yaml_response_logic(
                     metric_mode="yaml_shadow",
                 )
                 record_timing("turn_planner.plan_ms", shadow_elapsed_ms, mode="yaml_shadow")
-                if shadow_timed_out:
+                if shadow_fallback_reason:
+                    is_timeout = shadow_fallback_reason.endswith("_timeout")
                     _trace_stage(
-                        key="yaml_turn_plan_shadow_timeout",
-                        label="YAML TurnPlan 影子超时",
+                        key="yaml_turn_plan_shadow_timeout" if is_timeout else "yaml_turn_plan_shadow_fallback",
+                        label="YAML TurnPlan 影子超时" if is_timeout else "YAML TurnPlan 影子降级",
                         status="warn",
                         detail=(
                             f"timeout_s={shadow_timeout_s:g} "
                             f"elapsed_ms={int(shadow_elapsed_ms)} "
-                            "fallback=metadata"
+                            f"reason={shadow_fallback_reason} "
+                            f"fallback=metadata source={shadow_source}"
                         ),
                         hint=semantic_frame_timeout_hint(shadow_timeout_s),
                     )

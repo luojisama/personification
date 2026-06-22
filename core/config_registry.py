@@ -641,7 +641,7 @@ def _build_entries() -> list[ConfigEntry]:
             value_type="float",
             default=8.0,
             scope=GLOBAL_SCOPE,
-            description="前置语义帧 / TurnPlan LLM 调用的硬超时；超时后使用 metadata fallback 继续回复，避免短句回复被轻量阶段拖慢。",
+            description="前置语义帧 / TurnPlan 判断阶段的总耗时预算；lite/intent 路径慢或无效时会在预算内尝试主 Agent caller 重判，最后才 metadata fallback。",
             category="config",
             min_value=1,
             max_value=60,
