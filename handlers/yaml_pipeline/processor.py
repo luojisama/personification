@@ -7,13 +7,11 @@ from typing import Any, Awaitable, Callable, Dict, List
 
 from ...agent.inner_state import DEFAULT_STATE as DEFAULT_INNER_STATE, get_personification_data_dir, load_inner_state
 from ...agent.runtime.planner import (
-    plan_turn_with_llm,
     turn_plan_from_semantic_frame,
     turn_plan_to_semantic_frame,
 )
 from ...agent.runtime.tool_catalog import registry_planner_metadata
 from ...core.chat_intent import (
-    infer_turn_semantic_frame_with_llm,
     looks_like_explanatory_output,
 )
 from ...core.emotion_state import (
@@ -75,8 +73,12 @@ from ...agent.action_executor import ActionExecutor
 from ...agent.loop import run_agent
 from ...agent.query_rewriter import QueryRewriteContext
 from ..reply_pipeline.pipeline_emotion import (
+    attach_turn_plan_to_semantic_frame,
     compose_reply_emotion_block,
+    infer_turn_semantic_frame_with_timeout,
+    plan_turn_with_timeout,
     schedule_inner_state_update_after_reply,
+    semantic_frame_timeout_hint,
 )
 from ..reply_pipeline.pipeline_context import (
     batch_has_newer_messages as _shared_batch_has_newer_messages,
@@ -645,9 +647,9 @@ async def process_yaml_response_logic(
                 planner_available_tools = []
         plan_source_text = raw_message_text or history_last_text or trigger_reason
         if planner_enabled:
-            started_at = time.monotonic()
-            turn_plan = await plan_turn_with_llm(
+            turn_plan, plan_elapsed_ms, plan_timed_out, plan_timeout_s = await plan_turn_with_timeout(
                 plan_source_text,
+                plugin_config=plugin_config,
                 is_group=not is_private_session,
                 is_random_chat=is_random_chat,
                 is_direct_mention=is_direct_mention,
@@ -660,6 +662,8 @@ async def process_yaml_response_logic(
                 current_inner_state=render_inner_state_hint(inner_state),
                 current_emotion_state=emotion_memory_hint,
                 available_tools=planner_available_tools,
+                logger=logger,
+                metric_mode="yaml_enabled",
             )
             record_counter(
                 "turn_planner.plan_total",
@@ -667,35 +671,68 @@ async def process_yaml_response_logic(
                 action=turn_plan.reply_action,
                 output_mode=turn_plan.output_mode,
             )
-            record_timing("turn_planner.plan_ms", (time.monotonic() - started_at) * 1000.0, mode="yaml_enabled")
+            record_timing("turn_planner.plan_ms", plan_elapsed_ms, mode="yaml_enabled")
             semantic_frame = turn_plan_to_semantic_frame(turn_plan)
+            if plan_timed_out:
+                _trace_stage(
+                    key="yaml_turn_plan_timeout",
+                    label="YAML 回合规划超时",
+                    status="warn",
+                    detail=(
+                        f"timeout_s={plan_timeout_s:g} "
+                        f"elapsed_ms={int(plan_elapsed_ms)} "
+                        f"fallback=metadata "
+                        f"action={getattr(turn_plan, 'reply_action', '')} "
+                        f"output={getattr(turn_plan, 'output_mode', '')}"
+                    ),
+                    hint=semantic_frame_timeout_hint(plan_timeout_s),
+                )
         else:
-            semantic_frame = await infer_turn_semantic_frame_with_llm(
-                plan_source_text,
-                is_group=not is_private_session,
-                is_random_chat=is_random_chat,
-                tool_caller=lite_tool_caller,
-                recent_context=recent_context_hint,
-                relationship_hint=relationship_hint,
-                repeat_clusters=repeat_clusters,
-                current_inner_state=render_inner_state_hint(inner_state),
-                current_emotion_state=emotion_memory_hint,
+            semantic_frame, semantic_elapsed_ms, semantic_timed_out, semantic_timeout_s = (
+                await infer_turn_semantic_frame_with_timeout(
+                    plan_source_text,
+                    plugin_config=plugin_config,
+                    is_group=not is_private_session,
+                    is_random_chat=is_random_chat,
+                    tool_caller=lite_tool_caller,
+                    recent_context=recent_context_hint,
+                    relationship_hint=relationship_hint,
+                    repeat_clusters=repeat_clusters,
+                    current_inner_state=render_inner_state_hint(inner_state),
+                    current_emotion_state=emotion_memory_hint,
+                    logger=logger,
+                    metric_scene="yaml_private" if is_private_session else "yaml_group",
+                )
+            )
+            record_timing(
+                "reply.semantic_frame_ms",
+                semantic_elapsed_ms,
+                scene="yaml_private" if is_private_session else "yaml_group",
             )
             turn_plan = turn_plan_from_semantic_frame(
                 semantic_frame,
                 has_images=bool(last_images),
                 message_target=str(message_target or ""),
             )
-            try:
-                semantic_frame.turn_plan = turn_plan
-                semantic_frame.output_mode = turn_plan.output_mode
-                semantic_frame.session_goal = turn_plan.session_goal
-            except Exception:
-                pass
+            attach_turn_plan_to_semantic_frame(semantic_frame, turn_plan)
+            if semantic_timed_out:
+                _trace_stage(
+                    key="yaml_semantic_frame_timeout",
+                    label="YAML 语义帧超时",
+                    status="warn",
+                    detail=(
+                        f"timeout_s={semantic_timeout_s:g} "
+                        f"elapsed_ms={int(semantic_elapsed_ms)} "
+                        f"fallback=metadata "
+                        f"intent={getattr(semantic_frame, 'chat_intent', '')} "
+                        f"ambiguity={getattr(semantic_frame, 'ambiguity_level', '')}"
+                    ),
+                    hint=semantic_frame_timeout_hint(semantic_timeout_s),
+                )
             if planner_shadow_enabled:
-                started_at = time.monotonic()
-                shadow_plan = await plan_turn_with_llm(
+                shadow_plan, shadow_elapsed_ms, shadow_timed_out, shadow_timeout_s = await plan_turn_with_timeout(
                     plan_source_text,
+                    plugin_config=plugin_config,
                     is_group=not is_private_session,
                     is_random_chat=is_random_chat,
                     is_direct_mention=is_direct_mention,
@@ -708,18 +745,33 @@ async def process_yaml_response_logic(
                     current_inner_state=render_inner_state_hint(inner_state),
                     current_emotion_state=emotion_memory_hint,
                     available_tools=planner_available_tools,
+                    logger=logger,
+                    metric_mode="yaml_shadow",
                 )
-                record_counter(
-                    "turn_planner.plan_total",
-                    mode="yaml_shadow",
-                    action=shadow_plan.reply_action,
-                    output_mode=shadow_plan.output_mode,
-                )
-                if shadow_plan.reply_action != turn_plan.reply_action:
-                    record_counter("turn_planner.diff_total", field="yaml_reply_action")
-                if shadow_plan.output_mode != turn_plan.output_mode:
-                    record_counter("turn_planner.diff_total", field="yaml_output_mode")
-                record_timing("turn_planner.plan_ms", (time.monotonic() - started_at) * 1000.0, mode="yaml_shadow")
+                record_timing("turn_planner.plan_ms", shadow_elapsed_ms, mode="yaml_shadow")
+                if shadow_timed_out:
+                    _trace_stage(
+                        key="yaml_turn_plan_shadow_timeout",
+                        label="YAML TurnPlan 影子超时",
+                        status="warn",
+                        detail=(
+                            f"timeout_s={shadow_timeout_s:g} "
+                            f"elapsed_ms={int(shadow_elapsed_ms)} "
+                            "fallback=metadata"
+                        ),
+                        hint=semantic_frame_timeout_hint(shadow_timeout_s),
+                    )
+                else:
+                    record_counter(
+                        "turn_planner.plan_total",
+                        mode="yaml_shadow",
+                        action=shadow_plan.reply_action,
+                        output_mode=shadow_plan.output_mode,
+                    )
+                    if shadow_plan.reply_action != turn_plan.reply_action:
+                        record_counter("turn_planner.diff_total", field="yaml_reply_action")
+                    if shadow_plan.output_mode != turn_plan.output_mode:
+                        record_counter("turn_planner.diff_total", field="yaml_output_mode")
     intent_decision = semantic_frame.to_intent_decision()
     if not message_intent:
         message_intent = intent_decision.chat_intent

@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass
 from typing import Any
 
 from ...agent.inner_state import DEFAULT_STATE as DEFAULT_INNER_STATE, get_personification_data_dir, load_inner_state
 from ...agent.runtime.planner import (
+    metadata_fallback_turn_plan,
     plan_turn_with_llm,
     turn_plan_from_semantic_frame,
     turn_plan_to_semantic_frame,
 )
 from ...agent.runtime.tool_catalog import registry_planner_metadata
-from ...core.chat_intent import infer_turn_semantic_frame_with_llm
+from ...core.chat_intent import (
+    infer_turn_semantic_frame_with_llm,
+    metadata_fallback_turn_semantic_frame_for_session,
+)
 from ...core.emotion_state import (
     build_turn_emotion_prompt_block,
     load_emotion_state,
@@ -29,6 +34,9 @@ from ...core.response_review import (
 from .pipeline_context import batch_has_newer_messages
 
 _EMOTIONAL_SUPPORT_HINT = load_prompt("emotional_support_hint")
+_DEFAULT_SEMANTIC_FRAME_TIMEOUT_SECONDS = 8.0
+_MIN_SEMANTIC_FRAME_TIMEOUT_SECONDS = 1.0
+_MAX_SEMANTIC_FRAME_TIMEOUT_SECONDS = 60.0
 
 
 def _record_reply_trace_stage(
@@ -51,6 +59,156 @@ def _record_reply_trace_stage(
         )
     except Exception:
         pass
+
+
+def semantic_frame_timeout_seconds(plugin_config: Any) -> float:
+    raw = getattr(plugin_config, "personification_semantic_frame_timeout", _DEFAULT_SEMANTIC_FRAME_TIMEOUT_SECONDS)
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        seconds = _DEFAULT_SEMANTIC_FRAME_TIMEOUT_SECONDS
+    if not math.isfinite(seconds):
+        seconds = _DEFAULT_SEMANTIC_FRAME_TIMEOUT_SECONDS
+    return max(_MIN_SEMANTIC_FRAME_TIMEOUT_SECONDS, min(_MAX_SEMANTIC_FRAME_TIMEOUT_SECONDS, seconds))
+
+
+def semantic_frame_timeout_hint(timeout_s: float) -> str:
+    return (
+        f"前置语义阶段超过 {timeout_s:g}s 已降级为 metadata fallback；"
+        "若频繁出现，优先配置 personification_lite_model 或 personification_model_overrides.intent，"
+        "并保持 personification_strict_main_model 关闭；也可调整 personification_semantic_frame_timeout。"
+    )
+
+
+def attach_turn_plan_to_semantic_frame(semantic_frame: Any, turn_plan: Any) -> None:
+    try:
+        semantic_frame.turn_plan = turn_plan
+        semantic_frame.output_mode = turn_plan.output_mode
+        semantic_frame.session_goal = turn_plan.session_goal
+    except Exception:
+        pass
+
+
+def _mark_fallback_reason(value: Any, reason: str) -> None:
+    try:
+        value.fallback_reason = reason
+    except Exception:
+        pass
+
+
+def _warn_semantic_timeout(logger: Any, label: str, timeout_s: float) -> None:
+    if logger is None:
+        return
+    try:
+        logger.warning(f"[emotion] {label} exceeded {timeout_s:g}s; using metadata fallback.")
+    except Exception:
+        pass
+
+
+async def infer_turn_semantic_frame_with_timeout(
+    text: str,
+    *,
+    plugin_config: Any,
+    is_group: bool = False,
+    is_random_chat: bool = False,
+    tool_caller: Any = None,
+    recent_context: str = "",
+    relationship_hint: str = "",
+    repeat_clusters: list[dict[str, Any]] | None = None,
+    current_inner_state: str = "",
+    current_emotion_state: str = "",
+    logger: Any = None,
+    metric_scene: str = "group",
+) -> tuple[Any, float, bool, float]:
+    timeout_s = semantic_frame_timeout_seconds(plugin_config)
+    started_at = time.monotonic()
+    try:
+        semantic_frame = await asyncio.wait_for(
+            infer_turn_semantic_frame_with_llm(
+                text,
+                is_group=is_group,
+                is_random_chat=is_random_chat,
+                tool_caller=tool_caller,
+                recent_context=recent_context,
+                relationship_hint=relationship_hint,
+                repeat_clusters=repeat_clusters,
+                current_inner_state=current_inner_state,
+                current_emotion_state=current_emotion_state,
+            ),
+            timeout=timeout_s,
+        )
+        return semantic_frame, (time.monotonic() - started_at) * 1000.0, False, timeout_s
+    except asyncio.TimeoutError:
+        elapsed_ms = (time.monotonic() - started_at) * 1000.0
+        semantic_frame = metadata_fallback_turn_semantic_frame_for_session(
+            is_group=is_group,
+            is_random_chat=is_random_chat,
+        )
+        _mark_fallback_reason(semantic_frame, "semantic_frame_timeout")
+        record_counter("reply.semantic_frame_timeout_total", scene=metric_scene)
+        _warn_semantic_timeout(logger, "semantic frame LLM", timeout_s)
+        return semantic_frame, elapsed_ms, True, timeout_s
+
+
+async def plan_turn_with_timeout(
+    text: str,
+    *,
+    plugin_config: Any,
+    is_group: bool = False,
+    is_random_chat: bool = False,
+    is_direct_mention: bool = False,
+    has_images: bool = False,
+    message_target: str = "",
+    qzone_event_type: str = "",
+    tool_caller: Any = None,
+    recent_context: str = "",
+    relationship_hint: str = "",
+    repeat_clusters: list[dict[str, Any]] | None = None,
+    current_inner_state: str = "",
+    current_emotion_state: str = "",
+    available_tools: list[dict[str, Any]] | None = None,
+    group_knowledge_hint: str = "",
+    logger: Any = None,
+    metric_mode: str = "enabled",
+) -> tuple[Any, float, bool, float]:
+    timeout_s = semantic_frame_timeout_seconds(plugin_config)
+    started_at = time.monotonic()
+    try:
+        turn_plan = await asyncio.wait_for(
+            plan_turn_with_llm(
+                text,
+                is_group=is_group,
+                is_random_chat=is_random_chat,
+                is_direct_mention=is_direct_mention,
+                has_images=has_images,
+                message_target=message_target,
+                qzone_event_type=qzone_event_type,
+                tool_caller=tool_caller,
+                recent_context=recent_context,
+                relationship_hint=relationship_hint,
+                repeat_clusters=repeat_clusters,
+                current_inner_state=current_inner_state,
+                current_emotion_state=current_emotion_state,
+                available_tools=available_tools,
+                group_knowledge_hint=group_knowledge_hint,
+            ),
+            timeout=timeout_s,
+        )
+        return turn_plan, (time.monotonic() - started_at) * 1000.0, False, timeout_s
+    except asyncio.TimeoutError:
+        elapsed_ms = (time.monotonic() - started_at) * 1000.0
+        turn_plan = metadata_fallback_turn_plan(
+            is_group=is_group,
+            is_random_chat=is_random_chat,
+            is_direct_mention=is_direct_mention,
+            has_images=has_images,
+            message_target=message_target,
+            qzone_event_type=qzone_event_type,
+        )
+        _mark_fallback_reason(turn_plan, "turn_plan_timeout")
+        record_counter("turn_planner.timeout_total", mode=metric_mode)
+        _warn_semantic_timeout(logger, "TurnPlan LLM", timeout_s)
+        return turn_plan, elapsed_ms, True, timeout_s
 
 
 @dataclass
@@ -157,9 +315,9 @@ async def prepare_reply_semantics(
 
     turn_plan = None
     if planner_enabled:
-        started_at = time.monotonic()
-        turn_plan = await plan_turn_with_llm(
+        turn_plan, plan_elapsed_ms, plan_timed_out, plan_timeout_s = await plan_turn_with_timeout(
             raw_message_text or current_agent_message_content,
+            plugin_config=runtime.plugin_config,
             is_group=not is_private_session,
             is_random_chat=is_random_chat,
             is_direct_mention=is_direct_mention,
@@ -173,6 +331,8 @@ async def prepare_reply_semantics(
             current_emotion_state=emotion_memory_hint,
             available_tools=planner_available_tools,
             group_knowledge_hint=group_knowledge_hint,
+            logger=runtime.logger,
+            metric_mode="enabled",
         )
         record_counter(
             "turn_planner.plan_total",
@@ -180,33 +340,50 @@ async def prepare_reply_semantics(
             action=turn_plan.reply_action,
             output_mode=turn_plan.output_mode,
         )
-        plan_elapsed_ms = (time.monotonic() - started_at) * 1000.0
         record_timing("turn_planner.plan_ms", plan_elapsed_ms, mode="enabled")
         semantic_frame = turn_plan_to_semantic_frame(turn_plan)
-        _record_reply_trace_stage(
-            key="turn_plan_llm",
-            label="回合规划 LLM",
-            status="ok",
-            detail=(
-                f"action={getattr(turn_plan, 'reply_action', '')} "
-                f"output={getattr(turn_plan, 'output_mode', '')} "
-                f"elapsed_ms={int(plan_elapsed_ms)}"
-            ),
-        )
+        if plan_timed_out:
+            _record_reply_trace_stage(
+                key="turn_plan_timeout",
+                label="回合规划超时",
+                status="warn",
+                detail=(
+                    f"timeout_s={plan_timeout_s:g} "
+                    f"elapsed_ms={int(plan_elapsed_ms)} "
+                    f"fallback=metadata "
+                    f"action={getattr(turn_plan, 'reply_action', '')} "
+                    f"output={getattr(turn_plan, 'output_mode', '')}"
+                ),
+                hint=semantic_frame_timeout_hint(plan_timeout_s),
+            )
+        else:
+            _record_reply_trace_stage(
+                key="turn_plan_llm",
+                label="回合规划 LLM",
+                status="ok",
+                detail=(
+                    f"action={getattr(turn_plan, 'reply_action', '')} "
+                    f"output={getattr(turn_plan, 'output_mode', '')} "
+                    f"elapsed_ms={int(plan_elapsed_ms)}"
+                ),
+            )
     else:
-        semantic_started_at = time.monotonic()
-        semantic_frame = await infer_turn_semantic_frame_with_llm(
-            raw_message_text or current_agent_message_content,
-            is_group=not is_private_session,
-            is_random_chat=is_random_chat,
-            tool_caller=runtime.lite_tool_caller or runtime.agent_tool_caller,
-            recent_context=recent_context_hint,
-            relationship_hint=relationship_hint,
-            repeat_clusters=repeat_clusters,
-            current_inner_state=render_inner_state_hint(inner_state),
-            current_emotion_state=emotion_memory_hint,
+        semantic_frame, semantic_elapsed_ms, semantic_timed_out, semantic_timeout_s = (
+            await infer_turn_semantic_frame_with_timeout(
+                raw_message_text or current_agent_message_content,
+                plugin_config=runtime.plugin_config,
+                is_group=not is_private_session,
+                is_random_chat=is_random_chat,
+                tool_caller=runtime.lite_tool_caller or runtime.agent_tool_caller,
+                recent_context=recent_context_hint,
+                relationship_hint=relationship_hint,
+                repeat_clusters=repeat_clusters,
+                current_inner_state=render_inner_state_hint(inner_state),
+                current_emotion_state=emotion_memory_hint,
+                logger=runtime.logger,
+                metric_scene="private" if is_private_session else "group",
+            )
         )
-        semantic_elapsed_ms = (time.monotonic() - semantic_started_at) * 1000.0
         record_timing(
             "reply.semantic_frame_ms",
             semantic_elapsed_ms,
@@ -217,28 +394,38 @@ async def prepare_reply_semantics(
             has_images=has_images,
             message_target=message_target,
         )
-        try:
-            semantic_frame.turn_plan = turn_plan
-            semantic_frame.output_mode = turn_plan.output_mode
-            semantic_frame.session_goal = turn_plan.session_goal
-        except Exception:
-            pass
-        _record_reply_trace_stage(
-            key="semantic_frame_llm",
-            label="语义帧 LLM",
-            status="ok",
-            detail=(
-                f"intent={getattr(semantic_frame, 'chat_intent', '')} "
-                f"ambiguity={getattr(semantic_frame, 'ambiguity_level', '')} "
-                f"emotion={getattr(semantic_frame, 'bot_emotion', '')} "
-                f"elapsed_ms={int(semantic_elapsed_ms)}"
-            ),
-            hint="若此阶段经常较慢，配置 lite_model 并保持 strict_main_model 关闭",
-        )
+        attach_turn_plan_to_semantic_frame(semantic_frame, turn_plan)
+        if semantic_timed_out:
+            _record_reply_trace_stage(
+                key="semantic_frame_timeout",
+                label="语义帧超时",
+                status="warn",
+                detail=(
+                    f"timeout_s={semantic_timeout_s:g} "
+                    f"elapsed_ms={int(semantic_elapsed_ms)} "
+                    f"fallback=metadata "
+                    f"intent={getattr(semantic_frame, 'chat_intent', '')} "
+                    f"ambiguity={getattr(semantic_frame, 'ambiguity_level', '')}"
+                ),
+                hint=semantic_frame_timeout_hint(semantic_timeout_s),
+            )
+        else:
+            _record_reply_trace_stage(
+                key="semantic_frame_llm",
+                label="语义帧 LLM",
+                status="ok",
+                detail=(
+                    f"intent={getattr(semantic_frame, 'chat_intent', '')} "
+                    f"ambiguity={getattr(semantic_frame, 'ambiguity_level', '')} "
+                    f"emotion={getattr(semantic_frame, 'bot_emotion', '')} "
+                    f"elapsed_ms={int(semantic_elapsed_ms)}"
+                ),
+                hint="若此阶段经常较慢，配置 lite_model 并保持 strict_main_model 关闭",
+            )
         if planner_shadow_enabled:
-            started_at = time.monotonic()
-            shadow_plan = await plan_turn_with_llm(
+            shadow_plan, shadow_elapsed_ms, shadow_timed_out, shadow_timeout_s = await plan_turn_with_timeout(
                 raw_message_text or current_agent_message_content,
+                plugin_config=runtime.plugin_config,
                 is_group=not is_private_session,
                 is_random_chat=is_random_chat,
                 is_direct_mention=is_direct_mention,
@@ -252,18 +439,33 @@ async def prepare_reply_semantics(
                 current_emotion_state=emotion_memory_hint,
                 available_tools=planner_available_tools,
                 group_knowledge_hint=group_knowledge_hint,
+                logger=runtime.logger,
+                metric_mode="shadow",
             )
-            record_counter(
-                "turn_planner.plan_total",
-                mode="shadow",
-                action=shadow_plan.reply_action,
-                output_mode=shadow_plan.output_mode,
-            )
-            if shadow_plan.reply_action != turn_plan.reply_action:
-                record_counter("turn_planner.diff_total", field="reply_action")
-            if shadow_plan.output_mode != turn_plan.output_mode:
-                record_counter("turn_planner.diff_total", field="output_mode")
-            record_timing("turn_planner.plan_ms", (time.monotonic() - started_at) * 1000.0, mode="shadow")
+            record_timing("turn_planner.plan_ms", shadow_elapsed_ms, mode="shadow")
+            if shadow_timed_out:
+                _record_reply_trace_stage(
+                    key="turn_plan_shadow_timeout",
+                    label="TurnPlan 影子超时",
+                    status="warn",
+                    detail=(
+                        f"timeout_s={shadow_timeout_s:g} "
+                        f"elapsed_ms={int(shadow_elapsed_ms)} "
+                        "fallback=metadata"
+                    ),
+                    hint=semantic_frame_timeout_hint(shadow_timeout_s),
+                )
+            else:
+                record_counter(
+                    "turn_planner.plan_total",
+                    mode="shadow",
+                    action=shadow_plan.reply_action,
+                    output_mode=shadow_plan.output_mode,
+                )
+                if shadow_plan.reply_action != turn_plan.reply_action:
+                    record_counter("turn_planner.diff_total", field="reply_action")
+                if shadow_plan.output_mode != turn_plan.output_mode:
+                    record_counter("turn_planner.diff_total", field="output_mode")
     intent_decision = semantic_frame.to_intent_decision()
     message_intent = intent_decision.chat_intent
     arbitration = arbitrate_reply_mode(
@@ -387,9 +589,14 @@ def schedule_inner_state_update_after_reply(
 
 __all__ = [
     "PreparedReplySemantics",
+    "attach_turn_plan_to_semantic_frame",
     "compose_reply_emotion_block",
+    "infer_turn_semantic_frame_with_timeout",
+    "plan_turn_with_timeout",
     "persist_reply_emotion_state",
     "prepare_reply_semantics",
     "schedule_inner_state_update_after_reply",
+    "semantic_frame_timeout_hint",
+    "semantic_frame_timeout_seconds",
     "should_speak_in_random_chat",
 ]

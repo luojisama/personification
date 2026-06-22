@@ -140,6 +140,7 @@ class Config(BaseModel):
     personification_response_review_model_role: str = "review"
     personification_turn_planner_enabled: bool = False
     personification_turn_planner_shadow_enabled: bool = False
+    personification_semantic_frame_timeout: float = 8.0
     personification_evidence_synthesizer_enabled: bool = False
     personification_cross_verify_enabled: bool = False
     personification_lorebook_enabled: bool = False
