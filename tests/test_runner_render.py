@@ -332,6 +332,73 @@ def test_run_agent_retries_lookup_when_banter_draft_asks_group_about_unknown_ter
     assert "候选回复" in caller.calls[1]["messages"][1]["content"]
 
 
+def test_run_agent_reviews_high_ambiguity_banter_even_without_question_mark(monkeypatch) -> None:  # noqa: ANN001
+    handled: list[dict[str, object]] = []
+
+    async def _handler(**kwargs):  # noqa: ANN001
+        handled.append(dict(kwargs))
+        return "检索摘要：这是某个新梗的上下文。"
+
+    async def _fallback_lookup(**kwargs):  # noqa: ANN001
+        assert kwargs["chat_intent"] == "banter"
+        assert kwargs["draft_answer_text"] == "这肯定是在说老版本活动"
+        return "search_web", {"query": "高歧义新梗"}
+
+    monkeypatch.setattr(runner, "_select_semantic_fallback_tool", _fallback_lookup)
+
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="这肯定是在说老版本活动",
+                tool_calls=[],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="RETRY_SEARCH",
+                tool_calls=[],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="原来是这个梗啊。",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[
+                {"role": "system", "content": "你是群里的正常成员。" * 80},
+                {"role": "user", "content": "高歧义新梗"},
+            ],
+            registry=_register_query_tool(_handler),
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=3,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="capability",
+                ambiguity_level="high",
+            ),
+        )
+    )
+
+    assert result.text == "原来是这个梗啊。"
+    assert handled == [{"query": "高歧义新梗"}]
+    assert caller.calls[1]["tools"] == []
+
+
 def test_run_agent_uses_precomputed_intent_without_reinferring(monkeypatch) -> None:  # noqa: ANN001
     async def _should_not_run(*_args, **_kwargs):  # noqa: ANN001
         raise AssertionError("intent inference should be skipped")

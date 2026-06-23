@@ -449,7 +449,7 @@ def test_qzone_profile_evidence_records_once_with_source_label() -> None:
     assert len(store.records) == 1
     assert store.records[0][0] == "20001"
     assert "[QQ空间动态]" in store.records[0][1]
-    assert "图片摘要：一张饮料和便当的照片" in store.records[0][1]
+    assert "图片内部摘要（仅供理解）：一张饮料和便当的照片" in store.records[0][1]
     assert result["profile_records"] == 1
 
 

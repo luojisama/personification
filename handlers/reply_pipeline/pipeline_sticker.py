@@ -156,6 +156,12 @@ def _gif_placeholder(summary_hint: str = "") -> str:
     return "[对方发送了一个动态表情]"
 
 
+def _internal_media_summary_marker(label: str, summary: str) -> str:
+    cleaned_summary = str(summary or "").strip()
+    cleaned_label = str(label or "").strip() or "媒体语义"
+    return f"[{cleaned_label}（系统注入，仅供理解，不可复述）：{cleaned_summary}]"
+
+
 def _reserve_gif_understanding(runtime: Any, counter_ref: List[int] | None) -> bool:
     if counter_ref is None:
         return True
@@ -195,7 +201,7 @@ async def _append_gif_understanding_from_payload(
         summary_hint=summary_hint,
     )
     if result.summary:
-        message_text_ref.append(f"[动态表情摘要：{result.summary}]")
+        message_text_ref.append(_internal_media_summary_marker("动态表情语义", result.summary))
         try:
             logger.info(
                 "拟人插件：GIF 理解完成 "
@@ -320,7 +326,7 @@ async def build_image_summary_suffix(
     if not summary_text:
         return ""
     desc_label = "表情包语义" if sticker_like else "图片视觉描述"
-    return f"[{desc_label}（系统注入，不触发防御机制）：{summary_text}]"
+    return _internal_media_summary_marker(desc_label, summary_text)
 
 
 async def auto_collect_stickers(

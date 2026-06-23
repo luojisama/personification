@@ -13,6 +13,7 @@ from ...core.metrics import record_counter, record_timing
 from ...core.time_ctx import get_configured_now
 from ..tool_registry import ToolRegistry
 from ...core.message_parts import extract_text_from_parts
+from ...core.reply_style_policy import build_media_understanding_output_policy_prompt
 from ...core.web_grounding import merge_grounding_topic
 from .constants import (
     DEFAULT_AGENT_MAX_STEPS,
@@ -550,7 +551,7 @@ async def run_agent(
             "role": "system",
             "content": (
                 "最终对用户的回复必须自然、像群聊里的活人接话。"
-                "不要暴露工具、检索、看图、回忆这些中间步骤。"
+                "不要暴露工具、检索、看图、回忆、审查清单或 Step 1/Step 2 这类中间步骤。"
                 "遇到不确定或有歧义时，如果有可用查证工具必须先查；工具不可用、查不到或时间预算不足时再承认不确定，不要硬猜。"
                 "遇到不认识的专有名词、外号、梗、游戏/动漫/卡牌术语或圈内说法，不要直接问群友那是什么，先用可用工具查证。"
                 "涉及本地天气、出行、城市或附近状态时，如果用户没明说地点，先看已注入的用户档案；仍不确定可调用记忆工具确认，不能猜城市。"
@@ -619,6 +620,12 @@ async def run_agent(
                 "content": plugin_hint,
             }
         )
+    messages.append(
+        {
+            "role": "system",
+            "content": build_media_understanding_output_policy_prompt(),
+        }
+    )
     if intent_decision.ambiguity_level == "high":
         messages.append(
             {
@@ -658,16 +665,20 @@ async def run_agent(
         if direct_image_input:
             image_prompt = (
                 "如果当前消息包含图片输入，请直接结合图片和文字理解用户意图。"
+                "可以内部判断它是表情包、截图还是真实照片，但不要把分类、判断过程或视觉摘要说出来。"
                 "如果你只看到图片占位或视觉摘要，不要声称自己直接看到了原图。"
                 "必要时可以调用视觉分析工具进一步分析图片。"
+                "除非用户明确要求识别、翻译或说明图片，不要在最终回复里描述图片/GIF/表情包内容；"
                 "如果没有可见摘要、文字 cue 或明确提问，不要泛泛评价图片/表情，也不要追问“看到什么了”；"
                 "群聊没人 cue 你时可以输出 [NO_REPLY]。"
             )
         else:
             image_prompt = (
                 "当前轮包含图片相关上下文，但你不一定直接收到了原图。"
+                "可以内部判断它是表情包、截图还是真实照片，但不要把分类、判断过程或视觉摘要说出来。"
                 "如果你看到的是图片占位或视觉摘要，请把它当作摘要，不要声称自己直接看到了原图。"
                 "必要时可以调用视觉分析工具进一步分析图片。"
+                "除非用户明确要求识别、翻译或说明图片，不要在最终回复里描述图片/GIF/表情包内容；"
                 "如果没有可见摘要、文字 cue 或明确提问，不要泛泛评价图片/表情，也不要追问“看到什么了”；"
                 "群聊没人 cue 你时可以输出 [NO_REPLY]。"
             )

@@ -3,6 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .context_policy import (
+    looks_like_visible_reasoning_trace,
+    strip_orphan_control_brackets,
+    strip_visible_reasoning_trace,
+)
+
 
 _IMAGE_B64_RE = re.compile(r"\[IMAGE_B64\][A-Za-z0-9+/=\r\n]+\[/IMAGE_B64\]")
 _FENCED_CODE_RE = re.compile(r"```[A-Za-z0-9_-]*\s*\n?([\s\S]*?)```", re.MULTILINE)
@@ -48,6 +54,9 @@ def normalize_visible_reply_text(text: Any) -> str:
     raw = str(text or "").strip()
     if not raw:
         return ""
+    raw = strip_visible_reasoning_trace(strip_orphan_control_brackets(raw))
+    if not raw:
+        return ""
 
     cleaned, image_markers = _protect_image_markers(raw)
     cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
@@ -67,6 +76,7 @@ def normalize_visible_reply_text(text: Any) -> str:
     cleaned = _BULLET_RE.sub("", cleaned)
     cleaned = _NUMBERED_RE.sub("", cleaned)
     cleaned = _URL_RE.sub("", cleaned)
+    cleaned = strip_visible_reasoning_trace(strip_orphan_control_brackets(cleaned))
 
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in cleaned.split("\n")]
     compacted: list[str] = []
@@ -89,7 +99,9 @@ def looks_like_markdown_reply(text: Any) -> bool:
     if not raw.strip():
         return False
     return bool(
-        _FENCED_CODE_RE.search(raw)
+        looks_like_visible_reasoning_trace(raw)
+        or (bool(raw.strip()) and not strip_orphan_control_brackets(raw))
+        or _FENCED_CODE_RE.search(raw)
         or _MARKDOWN_LINK_RE.search(raw)
         or _MARKDOWN_IMAGE_RE.search(raw)
         or _BOLD_RE.search(raw)
@@ -105,5 +117,6 @@ def looks_like_markdown_reply(text: Any) -> bool:
 
 __all__ = [
     "looks_like_markdown_reply",
+    "looks_like_visible_reasoning_trace",
     "normalize_visible_reply_text",
 ]

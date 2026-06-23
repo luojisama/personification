@@ -15,6 +15,18 @@ def build_context_continuity_policy_prompt() -> str:
     )
 
 
+def build_media_understanding_output_policy_prompt() -> str:
+    return (
+        "## 媒体理解与可见输出纪律（高优先级）\n"
+        "- 图片、GIF、动态表情、表情包、截图和视觉摘要都只作为内部上下文和内部语境证据，仅供理解；"
+        "可以自己判断它更像表情包、梗图、截图还是真实照片，但不要把判断过程说给用户。\n"
+        "- 除非对方明确要求识别、翻译、说明或解读图片/动图/表情包，最终回复不要讲解、复述、总结或分析画面内容，也不要主动讲图里是什么。\n"
+        "- 真实照片可以帮助你理解关系、情绪和对方意图；可见回复只接对方这句话和当下关系，不列画面细节，不写成图片说明。\n"
+        "- GIF、动态表情和表情包只当作语气/情绪/附和信号；不要主动说“这个表情包/这张图/这个动图是在……”。\n"
+        "- 看不懂且有视觉或查证工具时先内部使用工具；没有证据时宁可短句承认不确定或保持沉默，不要硬猜。"
+    )
+
+
 def build_reply_style_policy_prompt(
     *,
     has_visual_context: bool = False,
@@ -30,12 +42,9 @@ def build_reply_style_policy_prompt(
         "- 不要频繁用“。。。/……/...”拖长停顿或凑语气；一句话能自然说完就直接说完。",
     ]
     lines.append(build_context_continuity_policy_prompt())
-    if has_visual_context:
-        lines.append("- 图片、表情包、截图的视觉信息只是内部上下文，不能把视觉摘要复述给用户。")
-        if photo_like:
-            lines.append("- 真实照片可以自然回应氛围或情绪，但不要写成列清单式画面描述。")
-        else:
-            lines.append("- 表情包、梗图和截图只当作语气线索；除非对方明确让你识别、翻译或解读，不要主动讲图里是什么。")
+    lines.append(build_media_understanding_output_policy_prompt())
+    if has_visual_context and photo_like:
+        lines.append("- 本轮有真实照片线索时，也只把它当作内部语境，最终不要主动输出画面说明。")
     return "\n".join(lines)
 
 
@@ -45,12 +54,14 @@ def build_direct_visual_identity_guard() -> str:
         "1. 你正在接收图片输入，但仍然保持自己的人设和当前聊天关系。\n"
         "2. 禁止代入、扮演图片中的人物或角色。\n"
         "3. 图片内容只用于理解当前语境；没有被明确要求时，不要主动讲解、复述或分析画面。\n"
-        "4. 如果需要回应，像聊天对象看见这条消息后的自然反应，不要写成图像识别报告。\n"
+        "4. 可以在内部判断它是表情包、截图还是真实照片，但不要把分类或判断过程说出来。\n"
+        "5. 如果需要回应，像聊天对象看见这条消息后的自然反应，不要写成图像识别报告。\n"
     )
 
 
 __all__ = [
     "build_context_continuity_policy_prompt",
     "build_direct_visual_identity_guard",
+    "build_media_understanding_output_policy_prompt",
     "build_reply_style_policy_prompt",
 ]

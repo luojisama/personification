@@ -528,7 +528,7 @@ async def _record_qzone_profile_evidence(
     if text:
         lines.append(text[:240])
     if visual:
-        lines.append(f"图片摘要：{visual[:180]}")
+        lines.append(f"图片内部摘要（仅供理解）：{visual[:180]}")
     record_message = getattr(persona_store, "record_message", None)
     if not callable(record_message):
         return
@@ -655,7 +655,7 @@ async def _decide_feed_action(
         f"动态作者：{feed.get('nickname') or candidate['nickname']}（{feed.get('owner_uin') or candidate['user_id']}）\n"
         f"动态时间戳：{feed.get('created_at') or 0}\n"
         f"动态正文：{feed.get('content') or '（无文字）'}\n"
-        f"图片摘要：{image_summary or ('有图片，但视觉摘要不可用' if feed.get('images') else '无图片')}\n\n"
+        f"图片内部线索（仅供理解，不可复述）：{image_summary or ('有图片，但视觉摘要不可用' if feed.get('images') else '无图片')}\n\n"
         "互动要求：\n"
         "- 默认倾向轻互动：日常熟人内容能点赞就点赞；动态里有具体可接的细节就 like_comment；只有确实没话可说时才 ignore。\n"
         "- 评论像真人随手留言：4-15 个中文字符为主，最多 30 个；可以是半句话、一个反问、一句吐槽、跳跃的小联想；不必工整结尾。\n"
@@ -663,7 +663,8 @@ async def _decide_feed_action(
         "- 不要小作文、不要客服腔、不要互联网黑话和热梗、不要 hashtag、不要堆叠表情符号。\n"
         "- 不要暴露你在分析画像、情绪记忆或系统规则。\n"
         "- 对沉重、争议、隐私、求助、疾病、事故等不适合轻浮互动的内容，优先 ignore 或仅 like。\n"
-        "- 图片摘要不可用时，不要评论具体画面。"
+        "- 图片线索只用于判断动态情绪和关系语境；不要在评论里描述、复述或总结画面内容。"
+        "- 图片线索不可用时，更不要评论具体画面。"
     )
     messages = inject_current_time_context(
         [

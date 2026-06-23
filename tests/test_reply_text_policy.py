@@ -42,7 +42,14 @@ def test_normalize_visible_reply_text_preserves_image_b64_marker() -> None:
     assert marker in cleaned
 
 
+def test_normalize_visible_reply_text_drops_reasoning_trace_and_orphan_bracket() -> None:
+    raw = "轻松\n\nStep 1: 检查\nStep 2: 输出\n\n轻松"
+    assert reply_text_policy.normalize_visible_reply_text(raw) == "轻松"
+    assert reply_text_policy.normalize_visible_reply_text("[") == ""
+
+
 def test_looks_like_markdown_reply_detects_visible_formatting() -> None:
     assert reply_text_policy.looks_like_markdown_reply("**广州** 这两天雨多")
     assert reply_text_policy.looks_like_markdown_reply("- 22日雨\n- 23日雨")
+    assert reply_text_policy.looks_like_markdown_reply("Step 1: 检查\nStep 2: 输出")
     assert not reply_text_policy.looks_like_markdown_reply("广州这两天雨多，伞别离手")

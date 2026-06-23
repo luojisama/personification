@@ -860,8 +860,8 @@ async def process_yaml_response_logic(
     system_prompt += (
         "\n\n## 基础输出规则\n"
         "- 输出纯文本，禁止使用 markdown 格式（不要用 **加粗**、*斜体*、# 标题、- 列表符号、`代码块`等）。\n"
-        "- 收到贴图/表情包时绝对不要对图片内容发表任何评论，当作语气线索或群聊气氛继续；收到真实照片且确实有可见信息时，才可以像群友看朋友圈一样自然回应。\n"
-        "- 表情包/梗图/截图可以当作语气线索理解，但没人问图里是什么时，不要主动做图片讲解；如果只看到图片占位或没有视觉摘要，不要假装看懂，也不要泛泛问对方看到什么。\n"
+        "- 收到贴图、表情包、GIF、截图或真实照片时，先把视觉信息当作内部语境理解；没人明确要求识别、翻译或说明时，不要主动评论、讲解、复述或总结图片/动图内容。\n"
+        "- 表情包/梗图/GIF 只当作语气线索；真实照片也只用于判断情绪、关系和意图，最终回复接人和话题，不写成图片说明。如果只看到图片占位或没有视觉摘要，不要假装看懂，也不要泛泛问对方看到什么。\n"
         "- 有人让你“写一段/来一段/AI 一段/帮我写”对白、剧本、小作文、段子、歌词或角色扮演内容时，不要切换成写作工具去交付任务：不写前言铺垫、不写“角色：台词”式多角色剧本、不写结尾点评总结、不堆营业腔和网络黑话。可以用人设口吻即兴接两三句、玩梗式带过，但绝不展开成长篇命题作文，也不要为此出戏或扮演成别的角色。"
     )
     system_prompt += "\n\n" + build_reply_style_policy_prompt(
@@ -1075,8 +1075,8 @@ async def process_yaml_response_logic(
             agent_input_text = f"{agent_input_text} {image_summary_suffix}".strip()
     if photo_like:
         system_prompt += (
-            "\n[系统提示] 当前消息包含真实照片，可以像群友看到朋友圈一样自然回应图片内容，"
-            "不需要等对方先提问。"
+            "\n[系统提示] 当前消息包含真实照片。照片只作为内部语境帮助你理解对方的情绪、关系和意图；"
+            "除非对方明确要求说明/识别/翻译图片，最终回复不要讲解、复述或总结画面细节。"
         )
 
     image_guard_prompt = build_direct_visual_identity_guard()
@@ -1271,7 +1271,7 @@ async def process_yaml_response_logic(
                             return
                     except Exception as e:
                         logger.warning(f"拟人插件: 翻译结果转发发送失败，回退到普通消息: {e}")
-                raw_direct_output = normalize_visible_reply_text(raw_direct_output)
+                raw_direct_output = normalize_visible_reply_text(strip_response_control_markers(raw_direct_output))
                 direct_segments_sent = 0
                 for seg in re.split(r"(?:\r?\n){2,}", raw_direct_output):
                     text = seg.strip()

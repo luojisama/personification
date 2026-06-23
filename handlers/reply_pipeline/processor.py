@@ -1327,8 +1327,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         )
     if has_photo_input:
         system_prompt += (
-            "\n[系统提示] 当前消息包含真实照片，可以像群友看到朋友圈一样自然回应图片内容，"
-            "不需要等对方先提问。"
+            "\n[系统提示] 当前消息包含真实照片。照片只作为内部语境帮助你理解对方的情绪、关系和意图；"
+            "除非对方明确要求说明/识别/翻译图片，最终回复不要讲解、复述或总结画面细节。"
         )
     if tool_image_urls:
         system_prompt += build_direct_visual_identity_guard()
