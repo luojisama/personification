@@ -97,6 +97,9 @@ function renderAudit() {
     {key:"sticker_delete", label:"表情删除"},
     {key:"sticker_upload", label:"表情上传"},
     {key:"skill_toggle", label:"Skill 启停"},
+    {key:"remote_skill_source_add", label:"远程添加"},
+    {key:"remote_skill_review", label:"远程审核"},
+    {key:"skill_runtime_reload", label:"Skill 重载"},
     {key:"style_rebuild", label:"风格重建"},
   ];
   const filterBar = actionFilters.map(f => `<button class="${state.auditFilter===f.key?'active':''}" onclick="pickAuditFilter('${f.key}')">${escapeHtml(f.label)}</button>`).join("");

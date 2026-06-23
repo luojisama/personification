@@ -85,6 +85,13 @@ main { padding:20px 26px; max-width:1400px; }
 .group-bar button:hover { color:var(--text); border-color:var(--accent); }
 .group-bar button.active { background:var(--accent); color:var(--on-accent); border-color:transparent; }
 .toolbar { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
+.skill-summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:14px; }
+.skill-stat { border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--panel); min-height:72px; display:flex; flex-direction:column; justify-content:space-between; gap:4px; }
+.skill-stat strong { font-size:22px; line-height:1.1; }
+.skill-stat small { color:var(--muted); font-size:12px; }
+.remote-source-form { display:grid; grid-template-columns:minmax(220px,2fr) minmax(120px,1fr) minmax(100px,0.7fr) minmax(120px,1fr) auto auto auto; gap:8px; align-items:center; margin:14px 0; }
+.remote-source-form input[type=text], .remote-source-form input:not([type]) { width:100%; min-width:0; }
+.remote-source-form label { color:var(--muted); white-space:nowrap; font-size:12px; }
 .sticker-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:14px; }
 .sticker-card { position:relative; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px; cursor:pointer; transition:border-color .15s; }
 .sticker-card:hover { border-color:var(--accent); }
@@ -159,6 +166,9 @@ td code, .field-head code { word-break:break-all; }
   input, select, textarea { font-size:16px; }
   .field-input input[type=text], .field-input input[type=number], .field-input textarea { min-width:0; max-width:100%; width:100%; }
   .api-provider-grid { grid-template-columns:1fr; }
+  .skill-summary { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .remote-source-form { grid-template-columns:1fr; }
+  .remote-source-form label { min-height:34px; display:flex; align-items:center; }
   .sticker-grid { grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); }
   /* 触摸目标加大，避免误触 */
   .btn { min-height:40px; }

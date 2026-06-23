@@ -42,6 +42,9 @@ def build_audit_router(*, runtime) -> APIRouter:
                 {"key": "sticker_upload", "label": "上传表情包"},
                 {"key": "sticker_rescan", "label": "重扫表情包"},
                 {"key": "skill_toggle", "label": "Skill 启停"},
+                {"key": "remote_skill_source_add", "label": "添加远程 Skill"},
+                {"key": "remote_skill_review", "label": "远程 Skill 审核"},
+                {"key": "skill_runtime_reload", "label": "Skill 重载"},
                 {"key": "style_rebuild", "label": "群风格手动重建"},
             ],
         }

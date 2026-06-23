@@ -7,7 +7,8 @@ let state = {
   personas: [], selectedPersona: null, personaSearch: "",
   groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [],
   groupSwitches: [], newGroupId: "",
-  skills: [], skillFilter: "",
+  skills: [], skillFilter: "", skillSummary: null, skillRemoteSources: [], skillMcpTools: [],
+  skillSourceForm: { source: "", name: "", ref: "", subdir: "", kind: "auto", preferFirst: false, autoApprove: false },
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
   personaPrompt: null, personaPromptPath: "", health: null, healthBusyCat: "", interactionResult: null, interactionBusy: false,
   qqInfo: null, qqGroups: [], qqFriends: [],
@@ -164,6 +165,9 @@ async function loadView() {
     } else if (state.view === "skills") {
       const data = await api("/skills");
       state.skills = data.skills; state.skillsAvailable = data.available;
+      state.skillSummary = data.summary || null;
+      state.skillRemoteSources = data.remote_sources || [];
+      state.skillMcpTools = data.mcp_tools || [];
     } else if (state.view === "test") {
       /* nothing to preload */
     } else if (state.view === "qq") {

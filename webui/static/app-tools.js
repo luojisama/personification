@@ -1,11 +1,20 @@
 function renderSkills() {
-  if (state.skillsAvailable === false) return `<div class="card muted">tool_registry 未就绪</div>`;
+  if (state.skillsAvailable === false) return `<div class="card muted">tool_registry 未就绪</div>${renderRemoteSkillSources()}${renderMcpTools()}`;
   const search = (state.skillFilter || "").trim().toLowerCase();
-  const items = search ? state.skills.filter(s => s.name.toLowerCase().includes(search) || (s.description||"").toLowerCase().includes(search)) : state.skills;
+  const items = search ? state.skills.filter(s => {
+    const hay = [s.name, s.description, s.category, s.source_kind, s.mcp ? "mcp" : ""].join(" ").toLowerCase();
+    return hay.includes(search);
+  }) : state.skills;
   const rows = items.map(s => {
     const active = s.enabled_by_config && !s.user_disabled;
+    const tags = [
+      s.category ? `<span class="tag">${escapeHtml(s.category)}</span>` : "",
+      s.source_kind ? `<span class="tag">${escapeHtml(s.source_kind)}</span>` : "",
+      s.mcp ? '<span class="tag source-runtime_config">MCP</span>' : "",
+      s.local === false && !s.mcp ? '<span class="tag">remote</span>' : "",
+    ].filter(Boolean).join("");
     return `<tr>
-      <td><strong>${escapeHtml(s.name)}</strong>${s.category ? ` <span class="tag">${escapeHtml(s.category)}</span>` : ''}</td>
+      <td><strong>${escapeHtml(s.name)}</strong><div style="margin-top:4px">${tags}</div></td>
       <td class="muted" style="font-size:12.5px">${escapeHtml((s.description||"").slice(0,140))}</td>
       <td>${active ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">启用</span>' : '<span class="tag" style="background:rgba(248,113,113,0.18);color:var(--danger)">禁用</span>'}</td>
       <td>
@@ -16,14 +25,103 @@ function renderSkills() {
       </td>
     </tr>`;
   }).join("");
-  return `<div class="toolbar">
+  return `${renderSkillSummary()}
+    <div class="toolbar">
       <input id="skill-filter-input" type="search" placeholder="搜索 skill 名称…" value="${escapeAttr(state.skillFilter)}" oninput="state.skillFilter=this.value;render()" style="flex:1;max-width:340px">
       <span class="muted">共 ${state.skills.length} 个 skill</span>
+      <button class="btn" onclick="reloadSkillRuntime()" ${state.skillSummary && state.skillSummary.reload_available ? "" : "disabled"}>重载 Skill</button>
     </div>
+    ${renderRemoteSkillSources()}
+    ${renderMcpTools()}
     <div class="card"><h2>Skill 启停</h2>
-      <table><thead><tr><th>名称</th><th>说明</th><th>状态</th><th>开关</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">无 skill</td></tr>'}</tbody></table>
-      <p class="muted" style="margin-top:10px;font-size:12px">仅启停内置 skillpack；新增 skillpack 仍需在文件系统放入 plugin/personification/skills/skillpacks/ 后重启。</p>
+      <div class="table-wrap"><table><thead><tr><th>名称</th><th>说明</th><th>状态</th><th>开关</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">无 skill</td></tr>'}</tbody></table></div>
     </div>`;
+}
+
+function renderSkillSummary() {
+  const s = state.skillSummary || {};
+  const remoteStatus = s.remote_enabled
+    ? '<span class="device-status approved">已开</span>'
+    : '<span class="device-status pending">关闭</span>';
+  const unsafe = s.allow_unsafe_external
+    ? '<span class="tag required">允许非隔离</span>'
+    : '<span class="tag">隔离优先</span>';
+  const review = s.require_admin_review
+    ? '<span class="tag source-runtime_config">需审核</span>'
+    : '<span class="tag required">免审核</span>';
+  return `<div class="skill-summary">
+    <div class="skill-stat"><span class="muted">可用工具</span><strong>${Number(s.active || 0)}</strong><small>/ ${Number(s.total || 0)}</small></div>
+    <div class="skill-stat"><span class="muted">用户禁用</span><strong>${Number(s.user_disabled || 0)}</strong></div>
+    <div class="skill-stat"><span class="muted">远程源</span><strong>${Number(s.remote_sources_enabled || 0)}</strong><small>${remoteStatus}</small></div>
+    <div class="skill-stat"><span class="muted">待审核</span><strong>${Number(s.remote_pending || 0)}</strong><small>${review}</small></div>
+    <div class="skill-stat"><span class="muted">MCP</span><strong>${Number(s.mcp_tools || 0)}</strong><small>stdio</small></div>
+    <div class="skill-stat"><span class="muted">外部执行</span><strong style="font-size:13px">${unsafe}</strong></div>
+  </div>`;
+}
+
+function _remoteStatusTag(status) {
+  const st = String(status || "pending").toLowerCase();
+  if (st === "approved") return '<span class="device-status approved">通过</span>';
+  if (st === "rejected") return '<span class="device-status pending" style="background:rgba(248,113,113,0.18);color:var(--danger)">拒绝</span>';
+  if (st === "disabled") return '<span class="tag">未启用</span>';
+  return '<span class="device-status pending">待审</span>';
+}
+
+function renderRemoteSkillSources() {
+  const sources = state.skillRemoteSources || [];
+  const s = state.skillSummary || {};
+  const rows = sources.map(item => {
+    const selector = item.key || item.name || item.source;
+    return `<tr>
+      <td><strong>${escapeHtml(item.name || ("source_" + (item.index + 1)))}</strong><br><code style="font-size:11px">${escapeHtml(item.key || "")}</code></td>
+      <td style="word-break:break-all">${escapeHtml(item.source || "")}${item.ref ? `<br><span class="muted">ref=${escapeHtml(item.ref)}</span>` : ""}${item.subdir ? `<br><span class="muted">subdir=${escapeHtml(item.subdir)}</span>` : ""}</td>
+      <td>${_remoteStatusTag(item.status)}</td>
+      <td>
+        <div class="row" style="gap:6px">
+          <button class="btn small primary" onclick="reviewRemoteSkill('${escapeAttr(selector)}','approved')" ${item.status==="approved"?"disabled":""}>批准</button>
+          <button class="btn small" onclick="reviewRemoteSkill('${escapeAttr(selector)}','pending')">待审</button>
+          <button class="btn small danger" onclick="reviewRemoteSkill('${escapeAttr(selector)}','rejected')">拒绝</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+  return `<div class="card">
+    <div class="between" style="gap:12px;align-items:flex-start">
+      <div><h2>远程 Skill 源</h2>
+        <div class="row" style="gap:6px">
+          ${s.remote_enabled ? '<span class="device-status approved">远程加载已开</span>' : '<span class="device-status pending">远程加载关闭</span>'}
+          ${s.require_admin_review ? '<span class="tag source-runtime_config">管理员审核</span>' : '<span class="tag required">免审核</span>'}
+          ${s.allow_unsafe_external ? '<span class="tag required">允许非隔离外部代码</span>' : '<span class="tag">非隔离外部代码关闭</span>'}
+        </div>
+      </div>
+      <button class="btn small" onclick="setSkillRemoteEnabled(${s.remote_enabled ? "false" : "true"})">${s.remote_enabled ? "关闭远程" : "开启远程"}</button>
+    </div>
+    <div class="remote-source-form">
+      <input id="skill-source-url" placeholder="GitHub / zip / 本地目录" value="${escapeAttr(state.skillSourceForm.source || "")}" oninput="state.skillSourceForm.source=this.value">
+      <input id="skill-source-name" placeholder="名称" value="${escapeAttr(state.skillSourceForm.name || "")}" oninput="state.skillSourceForm.name=this.value">
+      <input id="skill-source-ref" placeholder="ref" value="${escapeAttr(state.skillSourceForm.ref || "")}" oninput="state.skillSourceForm.ref=this.value">
+      <input id="skill-source-subdir" placeholder="subdir" value="${escapeAttr(state.skillSourceForm.subdir || "")}" oninput="state.skillSourceForm.subdir=this.value">
+      <label><input type="checkbox" ${state.skillSourceForm.preferFirst ? "checked" : ""} onchange="state.skillSourceForm.preferFirst=this.checked"> 优先</label>
+      <label><input type="checkbox" ${state.skillSourceForm.autoApprove ? "checked" : ""} onchange="state.skillSourceForm.autoApprove=this.checked"> 添加后批准</label>
+      <button class="btn primary" onclick="addRemoteSkillSource()">添加源</button>
+    </div>
+    <div class="table-wrap"><table><thead><tr><th>名称</th><th>来源</th><th>审核</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">暂无远程源</td></tr>'}</tbody></table></div>
+  </div>`;
+}
+
+function renderMcpTools() {
+  const tools = state.skillMcpTools || [];
+  const rows = tools.map(t => `<tr>
+    <td><strong>${escapeHtml(t.name)}</strong><br><span class="muted">remote=${escapeHtml(t.remote_name || "-")}</span></td>
+    <td><code>${escapeHtml(t.command || "-")}</code></td>
+    <td class="muted">${escapeHtml(t.cwd || "-")}</td>
+    <td>${Number(t.timeout || 0)}s</td>
+    <td>${Number(t.args_count || 0)} / ${Number(t.env_count || 0)}</td>
+  </tr>`).join("");
+  return `<div class="card">
+    <h2>MCP 工具</h2>
+    <div class="table-wrap"><table><thead><tr><th>工具</th><th>命令</th><th>cwd</th><th>超时</th><th>args/env</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">当前未注册 MCP stdio 工具</td></tr>'}</tbody></table></div>
+  </div>`;
 }
 
 async function toggleSkill(name, disabled) {
@@ -32,6 +130,45 @@ async function toggleSkill(name, disabled) {
     alertFlash("ok", `${name} 已${disabled?'禁用':'启用'}`);
     await loadView(); render();
   } catch (e) { alertFlash("err", "切换失败：" + e.message); }
+}
+
+async function setSkillRemoteEnabled(enabled) {
+  try {
+    await api("/config/value", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({field_name:"personification_skill_remote_enabled", value: !!enabled}) });
+    alertFlash("ok", enabled ? "远程 Skill 已开启" : "远程 Skill 已关闭");
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "保存失败：" + e.message); }
+}
+
+async function addRemoteSkillSource() {
+  const f = state.skillSourceForm || {};
+  if (!String(f.source || "").trim()) { alertFlash("err", "source 不能为空"); return; }
+  try {
+    const payload = {
+      source: f.source, name: f.name, ref: f.ref, subdir: f.subdir, kind: f.kind || "auto",
+      prefer_first: !!f.preferFirst, auto_approve: !!f.autoApprove, enable_remote: true,
+    };
+    const result = await api("/skills/remote/source", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify(payload) });
+    state.skillSourceForm = { source: "", name: "", ref: "", subdir: "", kind: "auto", preferFirst: false, autoApprove: false };
+    alertFlash("ok", result.auto_approved ? "远程源已添加并批准，重载后生效" : "远程源已添加，审核后重载生效");
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "添加失败：" + e.message); }
+}
+
+async function reviewRemoteSkill(selector, status) {
+  try {
+    const result = await api("/skills/remote/review", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({selector, status}) });
+    alertFlash("ok", `已更新 ${result.matched_count || 0} 个远程源`);
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "审核失败：" + e.message); }
+}
+
+async function reloadSkillRuntime() {
+  try {
+    await api("/skills/reload", { method:"POST" });
+    alertFlash("ok", "Skill 运行时已重载");
+    await loadView(); render();
+  } catch (e) { alertFlash("err", "重载失败：" + e.message); }
 }
 
 function renderPluginKnowledge() {
