@@ -13,7 +13,7 @@ MemoryNeed = Literal["none", "light", "deep"]
 ResearchNeed = Literal["none", "low", "medium", "high"]
 VisionNeed = Literal["none", "summary", "native"]
 OutputMode = Literal["chat_short", "chat_answer", "structured_help", "source_summary", "qzone_reply"]
-ToolIntent = Literal["lookup_web", "lookup_plugin", "vision", "image_gen", "memory", "none"]
+ToolIntent = Literal["lookup_web", "lookup_plugin", "vision", "image_gen", "memory", "expression", "none"]
 AmbiguityLevel = Literal["low", "medium", "high"]
 MessageTarget = Literal["bot", "someone_else", "broadcast", "uncertain"]
 
@@ -23,7 +23,7 @@ ALLOWED_MEMORY_NEEDS = {"none", "light", "deep"}
 ALLOWED_RESEARCH_NEEDS = {"none", "low", "medium", "high"}
 ALLOWED_VISION_NEEDS = {"none", "summary", "native"}
 ALLOWED_OUTPUT_MODES = {"chat_short", "chat_answer", "structured_help", "source_summary", "qzone_reply"}
-ALLOWED_TOOL_INTENTS = {"lookup_web", "lookup_plugin", "vision", "image_gen", "memory", "none"}
+ALLOWED_TOOL_INTENTS = {"lookup_web", "lookup_plugin", "vision", "image_gen", "memory", "expression", "none"}
 ALLOWED_AMBIGUITY_LEVELS = {"low", "medium", "high"}
 ALLOWED_MESSAGE_TARGETS = {"bot", "someone_else", "broadcast", "uncertain"}
 
@@ -286,7 +286,7 @@ async def plan_turn_with_llm(
         '"vision_need":"none|summary|native",'
         '"qzone_continue":false,'
         '"output_mode":"chat_short|chat_answer|structured_help|source_summary|qzone_reply",'
-        '"tool_intent":["lookup_web|lookup_plugin|vision|image_gen|memory|none"],'
+        '"tool_intent":["lookup_web|lookup_plugin|vision|image_gen|memory|expression|none"],'
         '"ambiguity_level":"low|medium|high",'
         '"message_target":"bot|someone_else|broadcast|uncertain",'
         '"session_goal":"一句短中文目标",'
@@ -297,6 +297,7 @@ async def plan_turn_with_llm(
         "2. message_target 由 @、引用、称呼、上下文共同判断；uncertain 时通常 silence。\n"
         "3. 风格、用户态度、bot 情绪、TTS 和表情不要在这里决定。\n"
         "4. 工具意图只给候选方向，不要因为工具存在就强行使用。\n"
+        "4b. 用户明确要求发送 QQ 表情、小黄脸、收藏表情、推荐表情，或这轮只适合发 QQ 表情时，tool_intent 包含 expression。\n"
         "5. research_need=high 只给明显需要多源查证、时效或争议的问题。\n"
         "6. output_mode 控制最终回复长度和形态：chat_short 接梗，chat_answer 普通答，structured_help 教程，source_summary 检索摘要，qzone_reply 空间评论。\n"
         "7. fallback 只能当模型不确定时参考，不要机械照抄。\n"
@@ -356,6 +357,9 @@ def turn_plan_from_semantic_frame(frame: Any, *, has_images: bool = False, messa
     elif chat_intent == "image_generation":
         output_mode = "chat_answer"
         tool_intent = ["image_gen"]
+    elif chat_intent == "expression":
+        output_mode = "chat_short"
+        tool_intent = ["expression"]
     elif chat_intent == "explanation":
         output_mode = "chat_answer"
     if has_images and "vision" not in tool_intent:
@@ -389,6 +393,8 @@ def turn_plan_to_semantic_frame(plan: TurnPlan) -> Any:
     plugin_intent = "capability"
     if "image_gen" in tool_intents:
         chat_intent = "image_generation"
+    elif "expression" in tool_intents:
+        chat_intent = "expression"
     elif "lookup_plugin" in tool_intents:
         chat_intent = "plugin_question"
         plugin_intent = "latest" if "lookup_web" in tool_intents or plan.research_need != "none" else "capability"

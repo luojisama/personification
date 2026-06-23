@@ -59,6 +59,7 @@ from ...core.response_review import (
 )
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.prompt_loader import pick_ack_phrase
+from ...core.qq_expression_tools import register_send_qq_expression_tools
 from ...core.sticker_feedback import (
     build_sticker_feedback_scene_key,
     load_sticker_feedback,
@@ -82,6 +83,7 @@ from ..reply_pipeline.pipeline_emotion import (
 )
 from ..reply_pipeline.pipeline_context import (
     batch_has_newer_messages as _shared_batch_has_newer_messages,
+    clone_tool_registry as _clone_tool_registry,
     compute_agent_time_budget as _compute_agent_time_budget,
     primary_route_supports_vision as _runtime_primary_route_supports_vision,
     should_use_agent_for_reply as _should_use_agent_for_reply,
@@ -1159,6 +1161,13 @@ async def process_yaml_response_logic(
         has_image_input=bool(tool_image_urls),
     ):
         executor = ActionExecutor(bot, event, plugin_config, logger)
+        agent_tool_registry = _clone_tool_registry(tool_registry)
+        register_send_qq_expression_tools(
+            agent_tool_registry,
+            executor=executor,
+            bot=bot,
+            plugin_config=plugin_config,
+        )
         image_ctx_token = set_current_image_context(tool_image_urls, input_text)
         ack_phrase = ""
         if is_direct_mention:
@@ -1183,7 +1192,7 @@ async def process_yaml_response_logic(
             try:
                 agent_result = await run_agent(
                     messages=agent_messages,
-                    registry=tool_registry,
+                    registry=agent_tool_registry,
                     tool_caller=agent_tool_caller,
                     executor=executor,
                     plugin_config=plugin_config,

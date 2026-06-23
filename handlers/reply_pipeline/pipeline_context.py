@@ -20,6 +20,7 @@ from ...core.message_parts import build_user_message_content
 from ...core.message_relations import build_event_relation_metadata
 from ...core.persona_profile import load_persona_profile, render_persona_snapshot
 from ...core.prompt_loader import pick_ack_phrase
+from ...core.qq_expression_tools import register_send_qq_expression_tools
 from ...core.gemini_profile import build_gemini_route_policy_prompt
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_style_policy import build_reply_style_policy_prompt
@@ -611,7 +612,7 @@ def should_use_agent_for_reply(
         and not is_direct_mention
     ):
         return False
-    return str(message_intent or "").strip() in {"lookup", "plugin_question", "explanation", "image_generation"}
+    return str(message_intent or "").strip() in {"lookup", "plugin_question", "explanation", "image_generation", "expression"}
 
 
 def compute_agent_time_budget(
@@ -689,6 +690,12 @@ async def run_agent_if_enabled(
 
     executor = ActionExecutor(bot, event, runtime.plugin_config, runtime.logger)
     runtime_registry = clone_tool_registry(runtime.tool_registry)
+    register_send_qq_expression_tools(
+        runtime_registry,
+        executor=executor,
+        bot=bot,
+        plugin_config=runtime.plugin_config,
+    )
     friend_ids = await get_cached_friend_ids(bot, runtime.logger)
     skill_runtime = SkillRuntime(
         plugin_config=runtime.plugin_config,

@@ -13,6 +13,7 @@ from ...core.metrics import record_counter, record_timing
 from ...core.time_ctx import get_configured_now
 from ..tool_registry import ToolRegistry
 from ...core.message_parts import extract_text_from_parts
+from ...core.qq_expression_tools import QQ_EXPRESSION_TOOL_NAMES, expression_tool_result_queued
 from ...core.reply_style_policy import build_media_understanding_output_policy_prompt
 from ...core.web_grounding import merge_grounding_topic
 from .constants import (
@@ -307,6 +308,13 @@ def _direct_tool_result_agent_result(
 ) -> "AgentResult | None":
     text = str(result_text or "").strip()
     normalized_tool_name = str(tool_name or "").strip()
+    if normalized_tool_name in QQ_EXPRESSION_TOOL_NAMES and expression_tool_result_queued(text):
+        return AgentResult(
+            text="[SILENCE]",
+            pending_actions=pending_actions,
+            direct_output=False,
+            bypass_length_limits=False,
+        )
     if _is_direct_media_tool_result(normalized_tool_name, text):
         return AgentResult(
             text=text,
@@ -401,6 +409,9 @@ async def run_agent(
         and _caller_supports_builtin_search(tool_caller)
     )
     pending_actions: List[dict] = []
+    bind_actions = getattr(executor, "bind_pending_actions", None)
+    if callable(bind_actions):
+        bind_actions(pending_actions)
     last_tool_name = ""
     last_tool_result_text = ""
     last_fallback_signature = ""
@@ -460,13 +471,17 @@ async def run_agent(
         current_images=user_images,
         provided=query_rewrite_context,
     )
-    if runtime_chat_intent in {"banter", "image_generation"}:
+    if runtime_chat_intent in {"banter", "image_generation", "expression"}:
         rewritten_query = ContextualQueryRewrite(
             primary_query=preliminary_query_text,
             query_candidates=[preliminary_query_text] if preliminary_query_text else [],
             context_clues=[],
             need_image_understanding=bool(user_images),
-            recommended_tools=["generate_image"] if runtime_chat_intent == "image_generation" else [],
+            recommended_tools=(
+                ["generate_image"]
+                if runtime_chat_intent == "image_generation"
+                else list(QQ_EXPRESSION_TOOL_NAMES) if runtime_chat_intent == "expression" else []
+            ),
             search_plan=[],
         )
     else:
@@ -595,6 +610,20 @@ async def run_agent(
                 "content": (
                     "当前用户是在要求生成图片。必须调用 generate_image 工具，"
                     "不要只回复提示词、描述或制作步骤。"
+                ),
+            }
+        )
+    elif runtime_chat_intent == "expression":
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "当前用户是在要求你发送 QQ 表情，或这轮最适合只用 QQ 表情回应。"
+                    "必须从可用的 send_qq_face、send_qq_favorite_expression、send_qq_recommended_expression 中选择合适工具；"
+                    "工具成功后最终只输出 [SILENCE]，不要再说“已发送”、不要解释工具。"
+                    "如果用户明确说小黄脸/系统表情，优先 send_qq_face；"
+                    "明确说收藏表情时用 send_qq_favorite_expression；"
+                    "需要按情绪或场景匹配图片表情时用 send_qq_recommended_expression。"
                 ),
             }
         )

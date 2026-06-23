@@ -15,6 +15,13 @@ _IMAGE_REQUIRED_TOOL_NAMES = frozenset(
     }
 )
 _IMAGE_GENERATION_TOOL_NAMES = frozenset({"generate_image"})
+_QQ_EXPRESSION_TOOL_NAMES = frozenset(
+    {
+        "send_qq_face",
+        "send_qq_favorite_expression",
+        "send_qq_recommended_expression",
+    }
+)
 # 闲聊/接梗场景也放行的一组"轻量查证"工具：遇到看不懂的梗/专有名词/外号/分享内容时，
 # 模型应先查清楚再用自己的口吻接话；runner 会用模型侧草稿审查兜底。
 _LIGHTWEIGHT_LOOKUP_TOOL_NAMES = frozenset(
@@ -131,6 +138,15 @@ def _default_tool_metadata(tool_name: str) -> dict[str, Any]:
                 "intent_tags": ["image_generation"],
                 "evidence_kind": "direct_media",
                 "latency_class": "slow",
+            }
+        )
+    if name in _QQ_EXPRESSION_TOOL_NAMES:
+        metadata.update(
+            {
+                "intent_tags": ["expression"],
+                "evidence_kind": "action",
+                "latency_class": "fast",
+                "risk_level": "low",
             }
         )
     if name in _IMAGE_GENERATION_CONTEXT_TOOL_NAMES:
@@ -273,7 +289,18 @@ def select_tool_schemas(
             for schema in schemas
             if (
                 schema_tool_name(schema) in _LIGHTWEIGHT_LOOKUP_TOOL_NAMES
+                or schema_tool_name(schema) in _QQ_EXPRESSION_TOOL_NAMES
+                or "expression" in _tool_tags(registry, schema_tool_name(schema))
                 or (has_images and _tool_requires_image(registry, schema_tool_name(schema)))
+            )
+        ]
+    elif effective_chat_intent == "expression":
+        result_schemas = [
+            schema
+            for schema in schemas
+            if (
+                schema_tool_name(schema) in _QQ_EXPRESSION_TOOL_NAMES
+                or "expression" in _tool_tags(registry, schema_tool_name(schema))
             )
         ]
     elif effective_chat_intent == "image_generation":
