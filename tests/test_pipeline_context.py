@@ -41,6 +41,23 @@ def test_should_use_agent_for_reply_keeps_direct_mention_lookup_enabled() -> Non
     assert decision is True
 
 
+def test_should_use_agent_for_reply_skips_expression_fast_path() -> None:
+    decision = pipeline_context.should_use_agent_for_reply(
+        plugin_config=SimpleNamespace(
+            personification_agent_enabled=True,
+            personification_web_search_always=False,
+        ),
+        tool_registry=object(),
+        agent_tool_caller=object(),
+        message_intent="expression",
+        ambiguity_level="low",
+        is_direct_mention=True,
+        has_image_input=False,
+    )
+
+    assert decision is False
+
+
 def test_confidence_style_instruction_medium() -> None:
     text = pipeline_context.build_confidence_style_instruction(0.7, is_group=True)
 

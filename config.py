@@ -392,6 +392,13 @@ class Config(BaseModel):
     personification_sticker_second_judge_enabled: bool = False
     personification_sticker_curator_enabled: bool = False
     personification_sticker_curator_interval_days: int = 3
+    personification_qq_expression_enabled: bool = True
+    personification_qq_expression_probability: float = 0.08
+    personification_qq_expression_cooldown_seconds: int = 180
+    personification_qq_expression_daily_limit: int = 30
+    personification_qq_expression_super_probability: float = 0.02
+    personification_qq_expression_triple_probability: float = 0.02
+    personification_qq_favorite_expression_probability: float = 0.02
 
     personification_poke_probability: float = 0.35
     # DEPRECATED: replaced by the agent web_search skill configuration.

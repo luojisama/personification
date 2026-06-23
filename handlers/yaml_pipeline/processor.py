@@ -59,6 +59,14 @@ from ...core.response_review import (
 )
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.prompt_loader import pick_ack_phrase
+from ...core.qq_expression_library import (
+    build_qq_expression_prompt,
+    contains_qq_expression_marker,
+    history_text_for_qq_expression,
+    maybe_choose_auto_qq_expression_marker,
+    qq_expression_enabled,
+    render_qq_expression_message,
+)
 from ...core.qq_expression_tools import register_send_qq_expression_tools
 from ...core.sticker_feedback import (
     build_sticker_feedback_scene_key,
@@ -866,6 +874,8 @@ async def process_yaml_response_logic(
         "- 表情包/梗图/GIF 只当作语气线索；真实照片也只用于判断情绪、关系和意图，最终回复接人和话题，不写成图片说明。如果只看到图片占位或没有视觉摘要，不要假装看懂，也不要泛泛问对方看到什么。\n"
         "- 有人让你“写一段/来一段/AI 一段/帮我写”对白、剧本、小作文、段子、歌词或角色扮演内容时，不要切换成写作工具去交付任务：不写前言铺垫、不写“角色：台词”式多角色剧本、不写结尾点评总结、不堆营业腔和网络黑话。可以用人设口吻即兴接两三句、玩梗式带过，但绝不展开成长篇命题作文，也不要为此出戏或扮演成别的角色。"
     )
+    if qq_expression_enabled(plugin_config):
+        system_prompt += "\n\n" + build_qq_expression_prompt()
     system_prompt += "\n\n" + build_reply_style_policy_prompt(
         has_visual_context=bool(last_images),
         photo_like=photo_like,
@@ -1529,17 +1539,41 @@ async def process_yaml_response_logic(
     elif cleaned_assistant_text != assistant_text:
         parsed = {"messages": [{"text": cleaned_assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
     assistant_text = cleaned_assistant_text
+    qq_auto_marker = maybe_choose_auto_qq_expression_marker(
+        plugin_config=plugin_config,
+        semantic_frame=semantic_frame,
+        reply_text=assistant_text,
+        raw_message_text=raw_message_text or history_last_text or trigger_reason,
+        message_intent=message_intent,
+        group_id=group_id,
+        user_id=user_id,
+        is_private=is_private_session,
+        is_random_chat=is_random_chat,
+        has_rich_sticker=bool(stickers_sent),
+    )
+    if qq_auto_marker:
+        if message_intent == "expression" and not contains_qq_expression_marker(assistant_text):
+            assistant_text = qq_auto_marker
+            parsed = {"messages": [{"text": qq_auto_marker, "sticker": ""}], "think": "", "status": "", "action": ""}
+        elif parsed.get("messages"):
+            parsed["messages"][-1]["text"] = f"{str(parsed['messages'][-1].get('text', '') or '').strip()}{qq_auto_marker}"
+            assistant_text = f"{assistant_text}{qq_auto_marker}".strip()
+        else:
+            assistant_text = f"{assistant_text}{qq_auto_marker}".strip()
+            parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
 
     assistant_text, history_image_payloads = _extract_image_b64_markers(assistant_text)
     has_generated_image = bool(history_image_payloads)
-    if history_image_payloads and not assistant_text:
-        assistant_text = "[发送了一张图片]"
+    assistant_history_text = history_text_for_qq_expression(assistant_text)
+    if history_image_payloads and not assistant_history_text:
+        assistant_history_text = "[发送了一张图片]"
 
     sticker_dir = resolve_sticker_dir(getattr(plugin_config, "personification_sticker_path", None))
     chosen_sticker_paths: list[Path | None] = []
     if (
         parsed["messages"]
         and bool(getattr(semantic_frame, "sticker_appropriate", True))
+        and not contains_qq_expression_marker(assistant_text)
         and group_config.get("sticker_enabled", True)
         and sticker_dir.exists()
         and sticker_dir.is_dir()
@@ -1582,6 +1616,7 @@ async def process_yaml_response_logic(
         assistant_text
         and not has_generated_image
         and not stickers_sent
+        and not contains_qq_expression_marker(assistant_text)
         and tts_service is not None
     ):
         try:
@@ -1647,7 +1682,16 @@ async def process_yaml_response_logic(
                                 logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                                 _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="分段文本发送前出现更新批次")
                                 return
-                            send_result = await bot.send(event, seg)
+                            rendered_seg = await render_qq_expression_message(
+                                seg,
+                                message_segment_cls=message_segment_cls,
+                                bot=bot,
+                                plugin_config=plugin_config,
+                                logger=logger,
+                            )
+                            if not rendered_seg.message:
+                                continue
+                            send_result = await bot.send(event, rendered_seg.message)
                             if not sent_message_id:
                                 sent_message_id = extract_send_message_id(send_result)
                             await asyncio.sleep(random.uniform(0.4, 1.0))
@@ -1695,8 +1739,18 @@ async def process_yaml_response_logic(
                     logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                     _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="普通文本发送前出现更新批次")
                     return
-                send_result = await bot.send(event, clean_reply)
-                if not sent_message_id:
+                rendered_reply = await render_qq_expression_message(
+                    clean_reply,
+                    message_segment_cls=message_segment_cls,
+                    bot=bot,
+                    plugin_config=plugin_config,
+                    logger=logger,
+                )
+                if rendered_reply.message:
+                    send_result = await bot.send(event, rendered_reply.message)
+                else:
+                    send_result = None
+                if send_result is not None and not sent_message_id:
                     sent_message_id = extract_send_message_id(send_result)
             for image_b64 in image_b64_payloads:
                 if _has_newer_batch_now():
@@ -1713,7 +1767,7 @@ async def process_yaml_response_logic(
     append_session_message(
         session_id,
         "assistant",
-        assistant_text,
+        assistant_history_text,
         legacy_session_id=legacy_session_id,
         scene="reply",
         sticker_sent=", ".join(stickers_sent) if stickers_sent else None,
@@ -1733,7 +1787,7 @@ async def process_yaml_response_logic(
             user_id=user_id,
             group_id="" if is_private_session else group_id,
             semantic_frame=semantic_frame,
-            assistant_text=assistant_text,
+            assistant_text=assistant_history_text,
             is_private=is_private_session,
         )
     except Exception as e:
@@ -1742,7 +1796,7 @@ async def process_yaml_response_logic(
         inner_state_updater=inner_state_updater,
         logger=logger,
         user_text=raw_message_text or history_last_text or trigger_reason,
-        assistant_text=assistant_text,
+        assistant_text=assistant_history_text,
         user_id=user_id,
         group_id=group_id,
         is_private=is_private_session,
@@ -1753,7 +1807,7 @@ async def process_yaml_response_logic(
         if hasattr(memory_curator, "schedule_turn_capture"):
             memory_curator.schedule_turn_capture(
                 user_utterance=raw_message_text or history_last_text or trigger_reason,
-                bot_response=assistant_text,
+                bot_response=assistant_history_text,
                 user_id=user_id,
                 group_id=memory_group_id,
                 vision_summary=image_summary_suffix,
@@ -1762,7 +1816,7 @@ async def process_yaml_response_logic(
             )
         else:
             memory_curator.schedule_capture(
-                summary=assistant_text,
+                summary=assistant_history_text,
                 user_id=user_id,
                 group_id=memory_group_id,
                 topic_tags=[group_id] if not is_private_session else [],
@@ -1771,7 +1825,7 @@ async def process_yaml_response_logic(
         record_group_msg(
             group_id,
             str(getattr(bot, "self_id", "") or "bot"),
-            assistant_text,
+            assistant_history_text,
             is_bot=True,
             user_id=str(getattr(bot, "self_id", "") or ""),
             message_id=sent_message_id or None,
@@ -1794,13 +1848,13 @@ async def process_yaml_response_logic(
         key="yaml_reply_success",
         label="YAML 回复完成",
         status="ok",
-        detail=f"chars={len(assistant_text)} tts={bool(sent_as_tts)} sticker={bool(stickers_sent)}",
+        detail=f"chars={len(assistant_history_text)} tts={bool(sent_as_tts)} sticker={bool(stickers_sent)}",
     )
     _trace_finish(
         outcome="ok",
         diagnosis_code="ok",
         detail={
-            "reply_chars": len(assistant_text),
+            "reply_chars": len(assistant_history_text),
             "tts": bool(sent_as_tts),
             "sticker": bool(stickers_sent),
         },

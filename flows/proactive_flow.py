@@ -20,6 +20,10 @@ from ..core.session_store import (
     get_session_messages,
 )
 from ..core.context_policy import stringify_history_content
+from ..core.qq_expression_library import (
+    choose_qq_expression_marker_for_context,
+    render_qq_expression_cq_text,
+)
 from ..skills.skillpacks.datetime_tool.scripts.impl import get_current_datetime_info
 from ..utils import get_group_topic_summary
 
@@ -84,12 +88,16 @@ SKIP|{{原因（给自己的备注，如"现在没什么想说的"）}}
 GROUP_IDLE_MODE_DECISION_PROMPT = """你正在决定怎样回应群里的冷场，已经准备好一段话题：「{topic}」。
 群风格：{group_style}
 
-你的任务：从下面三种模式选一种，输出严格 JSON（不带 ```、不带额外解释）：
+你的任务：从下面七种模式选一种，输出严格 JSON（不带 ```、不带额外解释）：
 1) text  —— 只发文字话题（适合需要明确表达的场景）
 2) sticker —— 只发一张表情包替代文字（适合纯气氛带动、群已经在玩梗时）
 3) combo —— 文字 + 一张配图表情包（适合情绪强烈、想强化效果时）
+4) qq_face —— 只发一个 QQ 小黄脸（适合冷场时轻轻带一下）
+5) qq_face_combo —— 连续三个普通 QQ 小黄脸（只适合强水群/群里正在玩梗）
+6) qq_super —— 只发一个 QQ 超级表情（只适合水群、庆祝、强接梗）
+7) text_qq_face —— 文字 + 一个 QQ 小黄脸（适合短句后补语气）
 
-输出格式：{{"mode":"text|sticker|combo","mood":"<2-6 字情绪/场景标签，如 调侃 / 困倦 / 兴奋 / 无奈>"}}"""
+输出格式：{{"mode":"text|sticker|combo|qq_face|qq_face_combo|qq_super|text_qq_face","mood":"<2-6 字情绪/场景标签，如 调侃 / 困倦 / 兴奋 / 无奈>"}}"""
 
 
 GROUP_IDLE_TOPIC_PROMPT = """[角色设定]
@@ -664,10 +672,51 @@ async def _decide_idle_output_mode(
     if not isinstance(data, dict):
         return ("text", "")
     mode = str(data.get("mode", "text") or "text").strip().lower()
-    if mode not in {"text", "sticker", "combo"}:
+    if mode not in {"text", "sticker", "combo", "qq_face", "qq_face_combo", "qq_super", "text_qq_face"}:
         mode = "text"
     mood = str(data.get("mood", "") or "").strip()[:24]
     return (mode, mood)
+
+
+async def _send_group_idle_qq_expression(
+    *,
+    bot: Any,
+    group_id: str,
+    plugin_config: Any,
+    topic: str,
+    mood_hint: str,
+    mode: str,
+    logger: Any,
+) -> str:
+    try:
+        marker_mode = {
+            "qq_face": "face",
+            "qq_face_combo": "triple",
+            "qq_super": "super",
+            "text_qq_face": "face",
+        }.get(str(mode or "").strip().lower(), "face")
+        marker = choose_qq_expression_marker_for_context(
+            mood_hint=mood_hint or topic,
+            context=topic,
+            mode=marker_mode,
+        )
+        if not marker:
+            return ""
+        content = marker if mode in {"qq_face", "qq_face_combo", "qq_super"} else f"{topic}{marker}"
+        rendered = await render_qq_expression_cq_text(
+            content,
+            bot=bot,
+            plugin_config=plugin_config,
+            logger=logger,
+        )
+        if not rendered.message:
+            return ""
+        await bot.send_group_msg(group_id=int(group_id), message=rendered.message)
+        logger.info(f"[group_idle] 群 {group_id} 发送 QQ 表情模式 {mode}: {rendered.history_text[:40]}")
+        return rendered.history_text or content
+    except Exception as e:
+        logger.warning(f"[group_idle] qq expression send failed for group {group_id}: {e}")
+        return ""
 
 
 async def _try_send_idle_sticker(
@@ -1232,6 +1281,7 @@ async def run_group_idle_topic(
 
             try:
                 # 根据 chosen_mode 决定发送方式
+                sent_record_text = topic
                 if chosen_mode == "sticker":
                     sticker_sent = await _try_send_idle_sticker(
                         bot=bot,
@@ -1248,6 +1298,8 @@ async def run_group_idle_topic(
                     elif chosen_mode == "combo":
                         # combo 已在 _try_send_idle_sticker 内发了表情，这里不再补
                         pass
+                    else:
+                        sent_record_text = "[发送了一张表情包]"
                 elif chosen_mode == "combo":
                     await bot.send_group_msg(group_id=int(group_id), message=topic)
                     # 异步追加 sticker（不阻塞回 sent_count 计数）
@@ -1260,6 +1312,20 @@ async def run_group_idle_topic(
                         topic_text_fallback="",
                         logger=logger,
                     )
+                elif chosen_mode in {"qq_face", "qq_face_combo", "qq_super", "text_qq_face"}:
+                    qq_sent = await _send_group_idle_qq_expression(
+                        bot=bot,
+                        group_id=group_id,
+                        plugin_config=plugin_config,
+                        topic=topic,
+                        mood_hint=sticker_mood_hint or topic,
+                        mode=chosen_mode,
+                        logger=logger,
+                    )
+                    if qq_sent:
+                        sent_record_text = qq_sent
+                    else:
+                        await bot.send_group_msg(group_id=int(group_id), message=topic)
                 else:
                     await bot.send_group_msg(group_id=int(group_id), message=topic)
                 sent_now = get_now()
@@ -1284,7 +1350,7 @@ async def run_group_idle_topic(
                     ).strip() or bot_nickname
                 except Exception:
                     pass
-                record_group_msg(group_id, real_bot_nickname, topic, is_bot=True)
+                record_group_msg(group_id, real_bot_nickname, sent_record_text, is_bot=True)
                 sent_count += 1
                 logger.info(
                     f"[group_idle] 已向群 {group_name}({group_id}) 发送话题：{topic[:30]}"

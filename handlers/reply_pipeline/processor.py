@@ -60,6 +60,14 @@ from ...skills.skillpacks.sticker_tool.scripts.impl import (
     set_current_image_context,
 )
 from ...core.proactive_store import update_group_chat_active
+from ...core.qq_expression_library import (
+    build_qq_expression_prompt,
+    contains_qq_expression_marker,
+    history_text_for_qq_expression,
+    maybe_choose_auto_qq_expression_marker,
+    qq_expression_enabled,
+    render_qq_expression_message,
+)
 from ...core.sticker_feedback import (
     build_sticker_feedback_scene_key,
     mark_pending_sticker_reaction,
@@ -1320,6 +1328,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     system_prompt += _build_scenario_instruction(
         str(getattr(semantic_frame, "conversation_scenario", "") or ""),
     )
+    if qq_expression_enabled(runtime.plugin_config):
+        system_prompt += "\n\n" + build_qq_expression_prompt()
     if arbitration == "clarify":
         system_prompt += (
             "\n[系统提示] 这轮高歧义但对方像是在直接问你。"
@@ -1935,13 +1945,31 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             except Exception as exc:
                 log_exception(runtime.logger, "[reply_processor] get_group_member_info failed", exc, level="debug")
         final_reply = normalize_visible_reply_text(reply_content)
+        qq_auto_marker = maybe_choose_auto_qq_expression_marker(
+            plugin_config=runtime.plugin_config,
+            semantic_frame=semantic_frame,
+            reply_text=final_reply,
+            raw_message_text=raw_message_text or message_text or message_content,
+            message_intent=message_intent,
+            group_id=str(group_id),
+            user_id=user_id,
+            is_private=is_private_session,
+            is_random_chat=is_random_chat,
+            force_mode=force_mode,
+            has_rich_sticker=bool(sticker_segment),
+        )
+        if qq_auto_marker:
+            if message_intent == "expression" and not contains_qq_expression_marker(final_reply):
+                final_reply = qq_auto_marker
+            else:
+                final_reply = f"{final_reply}{qq_auto_marker}".strip()
         max_chars = 0 if bypass_length_limits else getattr(runtime.plugin_config, "personification_max_output_chars", 0)
         final_reply, image_b64_payloads = _extract_image_b64_markers(final_reply)
         if max_chars and max_chars > 0 and len(final_reply) > max_chars:
             final_reply = _truncate_at_punctuation(final_reply, max_chars)
         # session/history 只记录最终对用户生效的文本，避免原始长回复与实际可见内容漂移。
         final_visible_reply_text = _build_final_visible_reply_text(
-            final_reply or ("[发送了一张图片]" if image_b64_payloads else ""),
+            history_text_for_qq_expression(final_reply) or ("[发送了一张图片]" if image_b64_payloads else ""),
             max_chars=max_chars,
             sanitize_history_text=session.sanitize_history_text,
         )
@@ -1955,6 +1983,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         if (
             final_reply
             and not sticker_segment
+            and not contains_qq_expression_marker(final_reply)
             and tts_service is not None
         ):
             try:
@@ -2114,7 +2143,16 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     if stale_reason:
                         runtime.logger.info(f"拟人插件：{stale_reason}")
                         return
-                    outgoing: Any = seg
+                    rendered_seg = await render_qq_expression_message(
+                        seg,
+                        message_segment_cls=runtime.message_segment_cls,
+                        bot=bot,
+                        plugin_config=runtime.plugin_config,
+                        logger=runtime.logger,
+                    )
+                    outgoing: Any = rendered_seg.message
+                    if not outgoing:
+                        continue
                     if i == 0:
                         try:
                             seg_cls = runtime.message_segment_cls
@@ -2124,11 +2162,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             if at_target:
                                 at_seg = seg_cls.at(int(at_target))
                                 prefix = at_seg if prefix is None else (prefix + at_seg)
-                                outgoing = prefix + f" {seg}"
+                                outgoing = prefix + seg_cls.text(" ") + outgoing
                             elif prefix is not None:
-                                outgoing = prefix + seg
+                                outgoing = prefix + outgoing
                         except Exception:
-                            outgoing = seg
+                            outgoing = rendered_seg.message
                     send_result = await bot.send(event, outgoing)
                     if not sent_message_id:
                         sent_message_id = extract_send_message_id(send_result)

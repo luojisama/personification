@@ -194,6 +194,13 @@ async def _call_optional_onebot_api(bot: Any, api: str, **kwargs: Any) -> Any:
     return await call_api(api, **kwargs)
 
 
+async def _call_recommend_face_api(bot: Any, query: str) -> Any:
+    try:
+        return await _call_optional_onebot_api(bot, "get_recommend_face", word=query)
+    except Exception:
+        return await _call_optional_onebot_api(bot, "get_recommend_face", message=query)
+
+
 def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_config: Any = None) -> list[AgentTool]:
     effective_bot = bot or getattr(executor, "bot", None)
     effective_config = plugin_config or getattr(executor, "config", None)
@@ -255,7 +262,7 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
         if not q:
             return _action_result(ok=False, reason="需要提供推荐表情搜索词")
         try:
-            raw = await _call_optional_onebot_api(effective_bot, "get_recommend_face", message=q)
+            raw = await _call_recommend_face_api(effective_bot, q)
         except Exception as exc:
             return _action_result(ok=False, reason=f"get_recommend_face 调用失败：{str(exc)[:120]}")
         urls = _extract_url_list(raw)

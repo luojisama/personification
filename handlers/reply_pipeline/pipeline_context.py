@@ -612,7 +612,7 @@ def should_use_agent_for_reply(
         and not is_direct_mention
     ):
         return False
-    return str(message_intent or "").strip() in {"lookup", "plugin_question", "explanation", "image_generation", "expression"}
+    return str(message_intent or "").strip() in {"lookup", "plugin_question", "explanation", "image_generation"}
 
 
 def compute_agent_time_budget(

@@ -10,6 +10,7 @@ from ._loader import load_personification_module
 action_executor_mod = load_personification_module("plugin.personification.agent.action_executor")
 chat_intent_mod = load_personification_module("plugin.personification.core.chat_intent")
 planner_mod = load_personification_module("plugin.personification.agent.runtime.planner")
+qq_library = load_personification_module("plugin.personification.core.qq_expression_library")
 qq_tools = load_personification_module("plugin.personification.core.qq_expression_tools")
 tool_catalog = load_personification_module("plugin.personification.agent.runtime.tool_catalog")
 tool_registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
@@ -36,8 +37,11 @@ class _Logger:
         return None
 
 
-def _config(mode: str = "auto"):
-    return SimpleNamespace(personification_protocol_extensions=mode)
+def _config(mode: str = "auto", *, qq_expression_enabled: bool = True):
+    return SimpleNamespace(
+        personification_protocol_extensions=mode,
+        personification_qq_expression_enabled=qq_expression_enabled,
+    )
 
 
 def _tool_map(executor, bot):  # noqa: ANN001
@@ -123,7 +127,7 @@ def test_send_favorite_expression_string_false_keeps_index_pick() -> None:
     assert queued[0]["params"]["url"] == "https://example.test/b.png"
 
 
-def test_send_recommended_expression_uses_message_parameter() -> None:
+def test_send_recommended_expression_uses_word_parameter() -> None:
     async def _run() -> tuple[list[dict], list[tuple[str, dict]], dict]:
         bot = FakeBot()
         bot.api_results["get_recommend_face"] = {"url": ["https://example.test/happy.png"]}
@@ -135,9 +139,121 @@ def test_send_recommended_expression_uses_message_parameter() -> None:
 
     queued, calls, payload = asyncio.run(_run())
 
-    assert calls == [("get_recommend_face", {"message": "开心"})]
+    assert calls == [("get_recommend_face", {"word": "开心"})]
     assert payload["queued"] is True
     assert queued[0]["params"]["url"] == "https://example.test/happy.png"
+
+
+def test_send_recommended_expression_falls_back_to_message_parameter() -> None:
+    class _FallbackBot(FakeBot):
+        async def call_api(self, api: str, **kwargs):  # noqa: ANN001
+            self.calls.append((api, kwargs))
+            if api == "get_recommend_face" and "word" in kwargs:
+                raise RuntimeError("unsupported parameter")
+            if api in self.api_results:
+                return self.api_results[api]
+            return {}
+
+    async def _run() -> tuple[list[dict], list[tuple[str, dict]], dict]:
+        bot = _FallbackBot()
+        bot.api_results["get_recommend_face"] = {"url": ["https://example.test/happy.png"]}
+        executor = action_executor_mod.ActionExecutor(bot, object(), _config(), _Logger())
+        queued: list[dict] = []
+        executor.bind_pending_actions(queued)
+        result = await _tool_map(executor, bot)["send_qq_recommended_expression"].handler(query="开心")
+        return queued, bot.calls, json.loads(result)
+
+    queued, calls, payload = asyncio.run(_run())
+
+    assert calls == [
+        ("get_recommend_face", {"word": "开心"}),
+        ("get_recommend_face", {"message": "开心"}),
+    ]
+    assert payload["queued"] is True
+    assert queued[0]["params"]["url"] == "https://example.test/happy.png"
+
+
+def test_render_recommended_expression_uses_word_parameter() -> None:
+    async def _run() -> tuple[str, list[tuple[str, dict]]]:
+        bot = FakeBot()
+        bot.api_results["get_recommend_face"] = {"url": ["https://example.test/happy.png"]}
+        rendered = await qq_library.render_qq_expression_message(
+            "[QQ推荐表情:开心]",
+            message_segment_cls=action_executor_mod.MessageSegment,
+            bot=bot,
+            plugin_config=_config(),
+        )
+        return str(rendered.message), bot.calls
+
+    message, calls = asyncio.run(_run())
+
+    assert calls == [("get_recommend_face", {"word": "开心"})]
+    assert message.startswith("[CQ:image,file=https://example.test/happy.png")
+
+
+def test_render_qq_expression_marker_as_inline_face_segment() -> None:
+    rendered = asyncio.run(
+        qq_library.render_qq_expression_message(
+            "好好好[QQ表情:笑哭]",
+            message_segment_cls=action_executor_mod.MessageSegment,
+            plugin_config=_config(),
+        )
+    )
+
+    assert str(rendered.message) == "好好好[CQ:face,id=182]"
+    assert rendered.history_text == "好好好[QQ表情:笑哭]"
+    assert rendered.expression_names == ("笑哭",)
+
+
+def test_render_qq_expression_marker_disabled_strips_marker() -> None:
+    rendered = asyncio.run(
+        qq_library.render_qq_expression_message(
+            "好好好[QQ表情:笑哭]",
+            message_segment_cls=action_executor_mod.MessageSegment,
+            plugin_config=_config(qq_expression_enabled=False),
+        )
+    )
+
+    assert str(rendered.message) == "好好好"
+    assert rendered.history_text == "好好好"
+    assert rendered.expression_names == ()
+
+
+def test_render_qq_expression_marker_supports_three_faces() -> None:
+    rendered = asyncio.run(
+        qq_library.render_qq_expression_message(
+            "[QQ表情:捂脸*3]",
+            message_segment_cls=action_executor_mod.MessageSegment,
+            plugin_config=_config(),
+        )
+    )
+
+    assert str(rendered.message) == "[CQ:face,id=264][CQ:face,id=264][CQ:face,id=264]"
+    assert rendered.history_text == "[QQ表情:捂脸x3]"
+
+
+def test_render_qq_super_expression_uses_face_extension_fields() -> None:
+    rendered = asyncio.run(
+        qq_library.render_qq_expression_message(
+            "[QQ超级表情:笑哭]",
+            message_segment_cls=action_executor_mod.MessageSegment,
+            plugin_config=_config(),
+        )
+    )
+
+    text = str(rendered.message)
+    assert "[CQ:face" in text
+    assert "id=182" in text
+    assert "large=True" in text or "large=1" in text
+    assert rendered.history_text == "[QQ超级表情:笑哭]"
+
+
+def test_qq_expression_prompt_warns_about_ambiguous_smile() -> None:
+    prompt = qq_library.build_qq_expression_prompt()
+
+    assert "[QQ表情:笑哭]" in prompt
+    assert "微笑" in prompt
+    assert "冷淡" in prompt
 
 
 def test_expression_tool_result_queued() -> None:
