@@ -5,6 +5,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tmp/
+tests/.tmp/
+tests/tests/
 .coverage
 htmlcov/
 
@@ -26,5 +29,25 @@ env/
 data/
 skill_cache/
 
-.claude/settings.local.json
-.claude/worktrees/
+# Coding-agent local workspaces and caches
+.agents/
+.claude/
+.codex/
+.cursor/
+.continue/
+.aider/
+.aider.chat.history.md
+.aider.input.history
+.antigravity/
+.amazonq/
+.amp/
+.cline/
+.gemini/
+.kiro/
+.kilocode/
+.openhands/
+.opencode/
+.qwen/
+.goose/
+.roo/
+.windsurf/
