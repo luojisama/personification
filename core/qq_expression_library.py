@@ -20,6 +20,7 @@ _STATE_TTL_SECONDS = 12 * 60 * 60
 _MAX_FACE_REPEAT = 3
 
 _QQ_EXPRESSION_STATE: dict[str, dict[str, Any]] = {}
+_QQ_MFACE_CACHE: dict[str, dict[str, Any]] = {}
 
 
 @dataclass(frozen=True)
@@ -37,11 +38,150 @@ class QQExpressionRender:
     expression_names: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class QQExpressionCandidate:
+    url: str
+    summary: str = ""
+    mface_data: dict[str, Any] | None = None
+
+
 def _normalize_text(value: Any) -> str:
     text = str(value or "").strip().lower()
     text = re.sub(r"\s+", "", text)
     text = text.strip("[]()（）【】「」'\"")
     return text.replace("qq", "").replace("表情", "")
+
+
+def _clean_expression_label(value: Any, default: str = "表情包") -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^\s*\[(?:CQ:)?", "", text)
+    text = text.strip("[]【】「」()（）'\"")
+    text = re.sub(r"^(?:QQ)?(?:超级|收藏|推荐|普通|小黄脸)?表情\s*[:：]?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return (text or default).strip()[:40]
+
+
+def qq_face_semantic_text(face_id: Any, *, super_face: bool = False) -> str:
+    raw = str(face_id or "").strip()
+    if not raw:
+        return "[QQ表情]"
+    try:
+        from .qq_face_names import QQ_FACE_NAMES
+
+        name = QQ_FACE_NAMES.get(int(raw))
+    except Exception:
+        name = None
+    if name:
+        return f"[QQ{'超级' if super_face else ''}表情:{name}]"
+    return f"[QQ{'超级' if super_face else ''}表情id:{raw}]"
+
+
+def _coerce_segment_data(data: Any) -> dict[str, Any]:
+    return dict(data or {}) if isinstance(data, dict) else {}
+
+
+def _looks_like_super_face_data(data: dict[str, Any]) -> bool:
+    if not isinstance(data, dict):
+        return False
+    for key in ("large", "is_super", "super", "super_face"):
+        value = data.get(key)
+        if value is True:
+            return True
+        if isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+    sub_type = str(data.get("sub_type", data.get("subType", "")) or "").strip().lower()
+    return sub_type in {"1", "super", "large"}
+
+
+def _mface_send_data(raw: Any, *, fallback_summary: str = "") -> dict[str, Any] | None:
+    data = _coerce_segment_data(raw)
+    if not data:
+        return None
+    emoji_id = str(data.get("emoji_id", data.get("emojiId", "")) or "").strip()
+    package_id = str(data.get("emoji_package_id", data.get("emojiPackageId", data.get("package_id", ""))) or "").strip()
+    key = str(data.get("key", data.get("mface_key", "")) or "").strip()
+    if not emoji_id or not package_id or not key:
+        return None
+    summary = _clean_expression_label(data.get("summary") or fallback_summary, default=f"emoji:{emoji_id}")
+    normalized: dict[str, Any] = {
+        "emoji_id": emoji_id,
+        "emoji_package_id": package_id,
+        "key": key,
+        "summary": summary,
+    }
+    for optional_key in ("url", "file"):
+        value = str(data.get(optional_key, "") or "").strip()
+        if value:
+            normalized[optional_key] = value
+    return normalized
+
+
+def remember_qq_mface_segment(data: Any, *, kind: str = "super", summary: str = "") -> dict[str, Any] | None:
+    send_data = _mface_send_data(data, fallback_summary=summary)
+    if send_data is None:
+        return None
+    label = _clean_expression_label(send_data.get("summary") or summary, default="表情包")
+    keys = {
+        _normalize_text(label),
+        _normalize_text(send_data.get("emoji_id", "")),
+        _normalize_text(send_data.get("summary", "")),
+    }
+    for key in list(keys):
+        if key:
+            _QQ_MFACE_CACHE[key] = {**send_data, "_kind": str(kind or "super").strip().lower()}
+    return send_data
+
+
+def _mface_label(data: dict[str, Any], *, fallback: str = "表情包") -> str:
+    for key in ("summary", "name", "text", "emoji_name", "emojiName"):
+        value = str(data.get(key, "") or "").strip()
+        if value:
+            return _clean_expression_label(value, default=fallback)
+    emoji_id = str(data.get("emoji_id", data.get("emojiId", "")) or "").strip()
+    return f"emoji:{emoji_id}" if emoji_id else fallback
+
+
+def semantic_text_for_qq_expression_segment(
+    segment_type: Any,
+    data: Any,
+    *,
+    default_mface_kind: str = "favorite",
+) -> str:
+    seg_type = str(segment_type or "").strip().lower()
+    payload = _coerce_segment_data(data)
+    if seg_type == "face":
+        return qq_face_semantic_text(payload.get("id", ""), super_face=_looks_like_super_face_data(payload))
+    if seg_type == "mface":
+        kind = str(default_mface_kind or "super").strip().lower()
+        label = _mface_label(payload)
+        remember_qq_mface_segment(payload, kind=kind, summary=label)
+        if kind == "super":
+            return f"[QQ超级表情:{label}]"
+        if kind == "recommended":
+            return f"[QQ推荐表情:{label}]"
+        return f"[QQ收藏表情:{label}]"
+    if seg_type == "image" and any(key in payload for key in ("emoji_id", "emojiId", "emoji_package_id", "emojiPackageId", "key")):
+        label = _mface_label(payload)
+        remember_qq_mface_segment(payload, kind=default_mface_kind or "favorite", summary=label)
+        return f"[QQ收藏表情:{label}]"
+    return ""
+
+
+def _super_mface_data_for_query(query: Any, asset: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    if asset:
+        label = str(asset.get("official_name") or query or "").strip()
+        for key in ("super_mface", "mface", "mface_data"):
+            data = _mface_send_data(asset.get(key), fallback_summary=label)
+            if data is not None:
+                return data
+    normalized_keys = [
+        _normalize_text(query),
+        _normalize_text(asset.get("official_name", "") if isinstance(asset, dict) else ""),
+    ]
+    for key in normalized_keys:
+        if key and key in _QQ_MFACE_CACHE:
+            return dict(_QQ_MFACE_CACHE[key])
+    return None
 
 
 def _bounded_float(value: Any, default: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
@@ -197,7 +337,7 @@ def build_qq_expression_prompt(*, max_items: int = 16) -> str:
         "你可以在普通回复里插入 QQ 表情标记，发送层会把标记转成真实 QQ 表情，用户不会看到标记文本。\n"
         "- 普通小黄脸/系统表情：用 [QQ表情:笑哭]，也可嵌在短句中，例如 好好好[QQ表情:捂脸]。\n"
         "- 强烈接梗或水群时可以三连普通表情：用 [QQ表情:笑哭*3]，只在气氛适合时偶尔用。\n"
-        "- 超级表情：用 [QQ超级表情:笑哭]，只在水群、庆祝、强接梗时偶尔用；不确定协议端支持时会降级。\n"
+        "- 超级表情：用 [QQ超级表情:笑哭]，只在水群、庆祝、强接梗时偶尔用；只有协议端已有完整 mface 元数据时才会发成真正超级表情，否则会降级为普通 QQ 表情。\n"
         "- QQ 收藏表情：用 [QQ收藏表情:随机]，只在像发图表情包比文字更自然时用。\n"
         "- QQ 推荐表情：用 [QQ推荐表情:开心]，按 2-6 字短词获取协议端推荐图片表情。\n"
         f"- 默认安全可用：{safe_names or '笑哭、捂脸、赞、OK、吃瓜'}。\n"
@@ -256,26 +396,37 @@ def history_text_for_qq_expression(text: Any) -> str:
         if isinstance(part, str):
             rendered.append(part)
             continue
-        label = part.query or "随机"
         if part.kind == "super_face":
-            rendered.append(f"[QQ超级表情:{label}]")
+            item = _choose_explicit_or_safe_face(part.query, super_only=True)
+            label = str((item or {}).get("official_name") or part.query or "随机")
+            if _super_mface_data_for_query(part.query or label, item):
+                rendered.append(f"[QQ超级表情:{label}]")
+            else:
+                rendered.append(f"[QQ表情:{label}]")
         elif part.kind == "favorite":
-            rendered.append("[QQ收藏表情]")
+            if _normalize_text(part.query) in {"", "随机", "随便"}:
+                rendered.append("[QQ收藏表情]")
+            else:
+                rendered.append(f"[QQ收藏表情:{_clean_expression_label(part.query)}]")
         elif part.kind == "recommended":
-            rendered.append(f"[QQ推荐表情:{label}]")
+            rendered.append(f"[QQ推荐表情:{part.query or '开心'}]")
         elif part.count > 1:
+            item = _choose_explicit_or_safe_face(part.query, super_only=False)
+            label = str((item or {}).get("official_name") or part.query or "随机")
             rendered.append(f"[QQ表情:{label}x{part.count}]")
         else:
+            item = _choose_explicit_or_safe_face(part.query, super_only=False)
+            label = str((item or {}).get("official_name") or part.query or "随机")
             rendered.append(f"[QQ表情:{label}]")
     return re.sub(r"\s+", " ", "".join(rendered)).strip()
 
 
-def _extract_url_list(raw: Any) -> list[str]:
+def _extract_url_candidates(raw: Any) -> list[QQExpressionCandidate]:
     if raw is None:
         return []
     if isinstance(raw, str):
         value = raw.strip()
-        return [value] if value.startswith(("http://", "https://")) else []
+        return [QQExpressionCandidate(value)] if value.startswith(("http://", "https://")) else []
     if isinstance(raw, list):
         values = raw
     elif isinstance(raw, dict):
@@ -286,22 +437,32 @@ def _extract_url_list(raw: Any) -> list[str]:
                 values = candidate
                 break
         if isinstance(values, dict):
-            return _extract_url_list(values)
+            return _extract_url_candidates(values)
         if isinstance(values, str):
             values = [values]
         if not isinstance(values, list):
             return []
     else:
         return []
-    urls: list[str] = []
+    candidates: list[QQExpressionCandidate] = []
+    seen: set[str] = set()
     for item in values:
+        summary = ""
+        mface_data: dict[str, Any] | None = None
         if isinstance(item, dict):
             url = str(item.get("url") or item.get("file") or "").strip()
+            summary = _clean_expression_label(item.get("summary") or item.get("name") or "", default="")
+            mface_data = _mface_send_data(item, fallback_summary=summary)
         else:
             url = str(item or "").strip()
-        if url.startswith(("http://", "https://")) and url not in urls:
-            urls.append(url)
-    return urls
+        if url.startswith(("http://", "https://")) and url not in seen:
+            seen.add(url)
+            candidates.append(QQExpressionCandidate(url=url, summary=summary, mface_data=mface_data))
+    return candidates
+
+
+def _extract_url_list(raw: Any) -> list[str]:
+    return [item.url for item in _extract_url_candidates(raw)]
 
 
 async def _call_optional_onebot_api(bot: Any, api: str, **kwargs: Any) -> Any:
@@ -328,19 +489,8 @@ def _choose_explicit_or_safe_face(query: str, *, super_only: bool = False) -> di
     return choose_qq_face_asset(mood_hint=query, context=query, super_only=super_only)
 
 
-def _face_segment(message_segment_cls: Any, face_id: int, *, super_face: bool = False) -> Any:
-    if not super_face:
-        return message_segment_cls.face(int(face_id))
-    # NapCat/LLOneBot commonly keep super-expression metadata on the face segment.
-    # If a protocol端 ignores the extra fields, it should degrade to a normal face.
-    data = {
-        "id": str(int(face_id)),
-        "large": True,
-        "resultId": "0",
-        "chainCount": "1",
-        "sub_type": "1",
-    }
-    return message_segment_cls("face", data)
+def _face_segment(message_segment_cls: Any, face_id: int) -> Any:
+    return message_segment_cls.face(int(face_id))
 
 
 def _cq_escape(value: Any) -> str:
@@ -354,9 +504,16 @@ def _cq_escape(value: Any) -> str:
 
 
 def _face_cq(face_id: int, *, super_face: bool = False) -> str:
-    if not super_face:
-        return f"[CQ:face,id={int(face_id)}]"
-    return f"[CQ:face,id={int(face_id)},large=1,resultId=0,chainCount=1,sub_type=1]"
+    return f"[CQ:face,id={int(face_id)}]"
+
+
+def _mface_cq(data: dict[str, Any]) -> str:
+    params = []
+    for key in ("emoji_id", "emoji_package_id", "key", "summary", "url", "file"):
+        value = str(data.get(key, "") or "").strip()
+        if value:
+            params.append(f"{key}={_cq_escape(value)}")
+    return f"[CQ:mface,{','.join(params)}]" if params else ""
 
 
 async def _resolve_request_to_segment(
@@ -366,40 +523,50 @@ async def _resolve_request_to_segment(
     bot: Any = None,
     plugin_config: Any = None,
     logger: Any = None,
-) -> tuple[list[Any], str]:
+) -> tuple[list[Any], str, str]:
     try:
         if request.kind in {"face", "super_face"}:
             super_face = request.kind == "super_face"
             item = _choose_explicit_or_safe_face(request.query, super_only=super_face)
             if item is None:
-                return [], ""
+                return [], "", ""
+            label = str(item.get("official_name") or item.get("id"))
+            if super_face:
+                mface_data = _super_mface_data_for_query(request.query or label, item)
+                if mface_data is not None:
+                    return [message_segment_cls("mface", mface_data)], _clean_expression_label(mface_data.get("summary") or label), "super_face"
             repeat = 1 if super_face else max(1, min(_MAX_FACE_REPEAT, request.count))
             return (
-                [_face_segment(message_segment_cls, int(item["id"]), super_face=super_face) for _ in range(repeat)],
-                str(item.get("official_name") or item.get("id")),
+                [_face_segment(message_segment_cls, int(item["id"])) for _ in range(repeat)],
+                label,
+                "face",
             )
         if _extensions_disabled(plugin_config) or bot is None:
-            return [], ""
+            return [], "", ""
         if request.kind == "favorite":
             raw = await _call_optional_onebot_api(bot, "fetch_custom_face", count=20)
-            urls = _extract_url_list(raw)
-            if not urls:
-                return [], ""
-            return [message_segment_cls.image(random.choice(urls))], "收藏表情"
+            candidates = _extract_url_candidates(raw)
+            if not candidates:
+                return [], "", ""
+            candidate = random.choice(candidates)
+            if candidate.mface_data is not None:
+                remember_qq_mface_segment(candidate.mface_data, kind="favorite", summary=candidate.summary)
+            return [message_segment_cls.image(candidate.url)], candidate.summary or "收藏表情", "favorite"
         if request.kind == "recommended":
             query = str(request.query or "开心").strip()[:40] or "开心"
             raw = await _call_recommend_face_api(bot, query)
-            urls = _extract_url_list(raw)
-            if not urls:
-                return [], ""
-            return [message_segment_cls.image(random.choice(urls))], f"推荐表情:{query}"
+            candidates = _extract_url_candidates(raw)
+            if not candidates:
+                return [], "", ""
+            candidate = random.choice(candidates)
+            return [message_segment_cls.image(candidate.url)], candidate.summary or query, "recommended"
     except Exception as exc:
         if logger is not None:
             try:
                 logger.debug(f"[qq_expression] render marker failed: {exc}")
             except Exception:
                 pass
-    return [], ""
+    return [], "", ""
 
 
 async def render_qq_expression_message(
@@ -427,7 +594,7 @@ async def render_qq_expression_message(
                 message = text_seg if message is None else message + text_seg
                 history_parts.append(part)
             continue
-        segments, label = await _resolve_request_to_segment(
+        segments, label, resolved_kind = await _resolve_request_to_segment(
             part,
             message_segment_cls=message_segment_cls,
             bot=bot,
@@ -439,11 +606,11 @@ async def render_qq_expression_message(
         for segment in segments:
             message = segment if message is None else message + segment
         names.append(label)
-        if part.kind == "super_face":
+        if resolved_kind == "super_face":
             history_parts.append(f"[QQ超级表情:{label}]")
-        elif part.kind == "favorite":
-            history_parts.append("[QQ收藏表情]")
-        elif part.kind == "recommended":
+        elif resolved_kind == "favorite":
+            history_parts.append(f"[QQ收藏表情:{label}]" if label and label != "收藏表情" else "[QQ收藏表情]")
+        elif resolved_kind == "recommended":
             history_parts.append(f"[QQ推荐表情:{part.query or label}]")
         elif part.count > 1:
             history_parts.append(f"[QQ表情:{label}x{part.count}]")
@@ -482,25 +649,38 @@ async def render_qq_expression_cq_text(
                 if item is None:
                     continue
                 repeat = 1 if super_face else max(1, min(_MAX_FACE_REPEAT, part.count))
-                rendered.extend(_face_cq(int(item["id"]), super_face=super_face) for _ in range(repeat))
                 label = str(item.get("official_name") or item.get("id"))
+                if super_face:
+                    mface_data = _super_mface_data_for_query(part.query or label, item)
+                    if mface_data is not None:
+                        mface_text = _mface_cq(mface_data)
+                        if mface_text:
+                            rendered.append(mface_text)
+                            label = _clean_expression_label(mface_data.get("summary") or label)
+                            names.append(label)
+                            history_parts.append(f"[QQ超级表情:{label}]")
+                            continue
+                rendered.extend(_face_cq(int(item["id"])) for _ in range(repeat))
                 names.append(label)
-                history_parts.append(f"[QQ{'超级' if super_face else ''}表情:{label}{'x' + str(repeat) if repeat > 1 else ''}]")
+                history_parts.append(f"[QQ表情:{label}{'x' + str(repeat) if repeat > 1 else ''}]")
             elif not _extensions_disabled(plugin_config) and bot is not None:
                 if part.kind == "favorite":
                     raw = await _call_optional_onebot_api(bot, "fetch_custom_face", count=20)
-                    urls = _extract_url_list(raw)
-                    if urls:
-                        rendered.append(f"[CQ:image,file={_cq_escape(random.choice(urls))}]")
-                        names.append("收藏表情")
-                        history_parts.append("[QQ收藏表情]")
+                    candidates = _extract_url_candidates(raw)
+                    if candidates:
+                        candidate = random.choice(candidates)
+                        rendered.append(f"[CQ:image,file={_cq_escape(candidate.url)}]")
+                        label = candidate.summary or "收藏表情"
+                        names.append(label)
+                        history_parts.append(f"[QQ收藏表情:{label}]" if candidate.summary else "[QQ收藏表情]")
                 elif part.kind == "recommended":
                     query = str(part.query or "开心").strip()[:40] or "开心"
                     raw = await _call_recommend_face_api(bot, query)
-                    urls = _extract_url_list(raw)
-                    if urls:
-                        rendered.append(f"[CQ:image,file={_cq_escape(random.choice(urls))}]")
-                        names.append(f"推荐表情:{query}")
+                    candidates = _extract_url_candidates(raw)
+                    if candidates:
+                        candidate = random.choice(candidates)
+                        rendered.append(f"[CQ:image,file={_cq_escape(candidate.url)}]")
+                        names.append(candidate.summary or f"推荐表情:{query}")
                         history_parts.append(f"[QQ推荐表情:{query}]")
         except Exception as exc:
             if logger is not None:
@@ -596,6 +776,8 @@ def choose_qq_expression_marker_for_context(
         return ""
     name = str(item.get("official_name") or item.get("id"))
     if super_face:
+        if _super_mface_data_for_query(name, item) is None:
+            return f"[QQ表情:{name}]"
         return f"[QQ超级表情:{name}]"
     if triple:
         return f"[QQ表情:{name}*3]"
@@ -673,6 +855,7 @@ def maybe_choose_auto_qq_expression_marker(
 
 def reset_qq_expression_state() -> None:
     _QQ_EXPRESSION_STATE.clear()
+    _QQ_MFACE_CACHE.clear()
 
 
 __all__ = [
@@ -686,9 +869,12 @@ __all__ = [
     "load_qq_expression_assets",
     "maybe_choose_auto_qq_expression_marker",
     "qq_expression_enabled",
+    "qq_face_semantic_text",
+    "remember_qq_mface_segment",
     "render_qq_expression_cq_text",
     "render_qq_expression_message",
     "reset_qq_expression_state",
+    "semantic_text_for_qq_expression_segment",
     "split_qq_expression_markers",
     "strip_qq_expression_markers",
 ]

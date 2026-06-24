@@ -13,6 +13,8 @@ planner_mod = load_personification_module("plugin.personification.agent.runtime.
 qq_library = load_personification_module("plugin.personification.core.qq_expression_library")
 qq_diagnostics = load_personification_module("plugin.personification.core.qq_expression_diagnostics")
 qq_tools = load_personification_module("plugin.personification.core.qq_expression_tools")
+event_rules = load_personification_module("plugin.personification.handlers.event_rules")
+reply_buffer = load_personification_module("plugin.personification.handlers.reply_buffer")
 tool_catalog = load_personification_module("plugin.personification.agent.runtime.tool_catalog")
 tool_registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
 
@@ -36,6 +38,12 @@ class FakeBot:
 class _Logger:
     def warning(self, *_args, **_kwargs):  # noqa: ANN001
         return None
+
+
+class _Seg:
+    def __init__(self, type_: str, data: dict) -> None:
+        self.type = type_
+        self.data = data
 
 
 def _config(mode: str = "auto", *, qq_expression_enabled: bool = True):
@@ -78,7 +86,12 @@ def test_send_qq_face_tool_queues_and_executor_sends() -> None:
 
     assert payload["ok"] is True
     assert payload["queued"] is True
-    assert queued == [{"type": "send_qq_face", "params": {"face_id": 264, "text": ""}}]
+    assert queued == [
+        {
+            "type": "send_qq_face",
+            "params": {"face_id": 264, "text": "", "history_text": "[QQ表情:捂脸]"},
+        }
+    ]
     assert sent == ["[CQ:face,id=264]"]
 
 
@@ -101,7 +114,12 @@ def test_send_favorite_expression_fetches_url_and_queues_image() -> None:
     assert queued == [
         {
             "type": "send_qq_image_expression",
-            "params": {"url": "https://example.test/a.png", "text": ""},
+            "params": {
+                "url": "https://example.test/a.png",
+                "text": "",
+                "summary": "",
+                "history_text": "[QQ收藏表情]",
+            },
         }
     ]
     assert sent and sent[0].startswith("[CQ:image,file=https://example.test/a.png")
@@ -143,6 +161,7 @@ def test_send_recommended_expression_uses_word_parameter() -> None:
     assert calls == [("get_recommend_face", {"word": "开心"})]
     assert payload["queued"] is True
     assert queued[0]["params"]["url"] == "https://example.test/happy.png"
+    assert queued[0]["params"]["history_text"] == "[QQ推荐表情:开心]"
 
 
 def test_send_recommended_expression_falls_back_to_message_parameter() -> None:
@@ -233,7 +252,8 @@ def test_render_qq_expression_marker_supports_three_faces() -> None:
     assert rendered.history_text == "[QQ表情:捂脸x3]"
 
 
-def test_render_qq_super_expression_uses_face_extension_fields() -> None:
+def test_render_qq_super_expression_falls_back_to_plain_face_without_mface_metadata() -> None:
+    qq_library.reset_qq_expression_state()
     rendered = asyncio.run(
         qq_library.render_qq_expression_message(
             "[QQ超级表情:笑哭]",
@@ -243,10 +263,117 @@ def test_render_qq_super_expression_uses_face_extension_fields() -> None:
     )
 
     text = str(rendered.message)
-    assert "[CQ:face" in text
-    assert "id=182" in text
-    assert "large=True" in text or "large=1" in text
-    assert rendered.history_text == "[QQ超级表情:笑哭]"
+    assert text == "[CQ:face,id=182]"
+    assert "large=" not in text
+    assert rendered.history_text == "[QQ表情:笑哭]"
+
+
+def test_render_qq_super_expression_uses_cached_mface_metadata() -> None:
+    qq_library.reset_qq_expression_state()
+    qq_library.remember_qq_mface_segment(
+        {
+            "emoji_id": "e-vomit",
+            "emoji_package_id": "p-super",
+            "key": "k-super",
+            "summary": "呕吐",
+        },
+        kind="super",
+    )
+
+    rendered = asyncio.run(
+        qq_library.render_qq_expression_message(
+            "[QQ超级表情:呕吐]",
+            message_segment_cls=action_executor_mod.MessageSegment,
+            plugin_config=_config(),
+        )
+    )
+
+    text = str(rendered.message)
+    assert "[CQ:mface" in text
+    assert "emoji_id=e-vomit" in text
+    assert "emoji_package_id=p-super" in text
+    assert "key=k-super" in text
+    assert rendered.history_text == "[QQ超级表情:呕吐]"
+
+
+def test_incoming_expression_segments_render_semantic_text() -> None:
+    assert qq_library.semantic_text_for_qq_expression_segment("face", {"id": "182"}) == "[QQ表情:笑哭]"
+    token = qq_library.semantic_text_for_qq_expression_segment(
+        "mface",
+        {
+            "emoji_id": "e-vomit",
+            "emoji_package_id": "p-super",
+            "key": "k-super",
+            "summary": "呕吐",
+        },
+        default_mface_kind="super",
+    )
+    assert token == "[QQ超级表情:呕吐]"
+    assert (
+        qq_library.semantic_text_for_qq_expression_segment(
+            "image",
+            {"emoji_id": "fav-1", "emoji_package_id": "fav-pack", "key": "fav-key", "summary": "拍桌"},
+            default_mface_kind="favorite",
+        )
+        == "[QQ收藏表情:拍桌]"
+    )
+
+
+def test_expression_action_history_text_describes_sent_expression() -> None:
+    assert (
+        qq_tools.qq_action_history_text({"type": "send_qq_face", "params": {"face_id": 182}})
+        == "[QQ表情:笑哭]"
+    )
+    assert (
+        qq_tools.qq_action_history_text(
+            {"type": "send_qq_image_expression", "params": {"summary": "拍桌"}}
+        )
+        == "[QQ收藏表情:拍桌]"
+    )
+
+
+def test_recordable_group_message_extracts_incoming_expression_semantics() -> None:
+    event = SimpleNamespace(
+        message=[
+            _Seg("face", {"id": "182"}),
+            _Seg(
+                "mface",
+                {
+                    "emoji_id": "e-vomit",
+                    "emoji_package_id": "p-super",
+                    "key": "k-super",
+                    "summary": "呕吐",
+                },
+            ),
+        ],
+        get_plaintext=lambda: "",
+    )
+
+    content, image_count, visual_summary = event_rules._extract_recordable_group_message(event)
+
+    assert content == "[QQ表情:笑哭][QQ超级表情:呕吐]"
+    assert image_count == 0
+    assert "[QQ超级表情:呕吐]" in visual_summary
+
+
+def test_reply_buffer_plain_text_extracts_incoming_expression_semantics() -> None:
+    event = SimpleNamespace(
+        message=[
+            _Seg("text", {"text": "看这个"}),
+            _Seg("face", {"id": "264"}),
+            _Seg(
+                "mface",
+                {
+                    "emoji_id": "e-vomit",
+                    "emoji_package_id": "p-super",
+                    "key": "k-super",
+                    "summary": "呕吐",
+                },
+            ),
+        ],
+    )
+
+    assert reply_buffer._extract_plain_text(event) == "看这个[QQ表情:捂脸][QQ超级表情:呕吐]"
 
 
 def test_build_qq_expression_test_messages_cover_three_command_kinds() -> None:
@@ -280,7 +407,8 @@ def test_build_qq_expression_test_messages_cover_three_command_kinds() -> None:
     assert str(face.render.message) == "[CQ:face,id=182]"
     assert super_face.ok is True
     assert super_face.marker == "[QQ超级表情:笑哭]"
-    assert "[CQ:face" in str(super_face.render.message)
+    assert str(super_face.render.message) == "[CQ:face,id=182]"
+    assert super_face.render.history_text == "[QQ表情:笑哭]"
     assert favorite.ok is True
     assert favorite.marker == "[QQ收藏表情:随机]"
     assert str(favorite.render.message).startswith("[CQ:image,file=https://example.test/fav.png")

@@ -67,7 +67,7 @@ from ...core.qq_expression_library import (
     qq_expression_enabled,
     render_qq_expression_message,
 )
-from ...core.qq_expression_tools import register_send_qq_expression_tools
+from ...core.qq_expression_tools import qq_action_history_text, register_send_qq_expression_tools
 from ...core.sticker_feedback import (
     build_sticker_feedback_scene_key,
     load_sticker_feedback,
@@ -310,6 +310,16 @@ def _strip_control_markers(text: str) -> str:
     return cleaned.strip()
 
 
+def _consume_pending_action_history_text(event: Any) -> str:
+    text = str(getattr(event, "_personification_pending_action_history_text", "") or "").strip()
+    if text:
+        try:
+            setattr(event, "_personification_pending_action_history_text", "")
+        except Exception:
+            pass
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _normalize_parsed_message_texts(parsed: Dict[str, Any]) -> Dict[str, Any]:
     copied = dict(parsed or {})
     messages: list[dict[str, Any]] = []
@@ -547,6 +557,46 @@ async def process_yaml_response_logic(
         detail=f"scene={'private' if is_private_session else 'group'} user={user_id} group={group_id or '-'}",
     )
     is_direct_mention = _event_mentions_bot(event, bot)
+
+    def _record_pending_action_history_if_any() -> bool:
+        action_history_text = _consume_pending_action_history_text(event)
+        if not action_history_text:
+            return False
+        assistant_history = sanitize_history_text(action_history_text)
+        if not assistant_history:
+            return False
+        session_id = build_private_session_id(user_id) if is_private_session else build_group_session_id(group_id)
+        legacy_session_id = None if is_private_session else group_id
+        bot_self_id = str(getattr(bot, "self_id", "") or "")
+        append_session_message(
+            session_id,
+            "assistant",
+            assistant_history,
+            legacy_session_id=legacy_session_id,
+            scene="reply",
+            sticker_sent=None,
+            speaker=bot_self_id or "bot",
+            user_id=bot_self_id or None,
+            source_kind="bot_reply",
+            group_id=None if is_private_session else group_id,
+            message_id=None,
+            reply_to_msg_id=str(getattr(event, "message_id", "") or "") or None,
+            reply_to_user_id=None if is_private_session else user_id,
+            mentioned_ids=[],
+            is_at_bot=False,
+        )
+        if not is_private_session and record_group_msg is not None:
+            record_group_msg(
+                group_id,
+                bot_self_id or "bot",
+                assistant_history,
+                is_bot=True,
+                user_id=bot_self_id,
+                reply_to_msg_id=str(getattr(event, "message_id", "") or "") or None,
+                reply_to_user_id=user_id,
+                source_kind="bot_reply",
+            )
+        return True
 
     forward_content = ""
     if extract_forward_content is not None:
@@ -1030,6 +1080,10 @@ async def process_yaml_response_logic(
         "[图片·表情包]" in input_text
         or "[表情id:" in input_text
         or "[表情:" in input_text
+        or "[QQ表情" in input_text
+        or "[QQ超级表情" in input_text
+        or "[QQ收藏表情" in input_text
+        or "[QQ推荐表情" in input_text
         or "[表情包]" in input_text
         or "[多张表情]" in input_text
     )
@@ -1269,8 +1323,14 @@ async def process_yaml_response_logic(
                 logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                 _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="Agent 结果生成后出现更新批次")
                 return
+            action_history_parts: list[str] = []
             for action in agent_result.pending_actions:
                 await executor.execute(action["type"], action["params"])
+                history_text = qq_action_history_text(action)
+                if history_text:
+                    action_history_parts.append(history_text)
+            if action_history_parts:
+                setattr(event, "_personification_pending_action_history_text", " ".join(action_history_parts))
             if agent_result.direct_output:
                 raw_direct_output = str(reply_content or "").strip()
                 if _looks_like_translation_result(raw_direct_output):
@@ -1372,6 +1432,8 @@ async def process_yaml_response_logic(
         _trace_no_reply("block_marker", diagnosis_code="blocked", detail="模型返回 BLOCK 控制标记")
         return
     if "[SILENCE]" in reply_content or "<SILENCE>" in reply_content:
+        if _record_pending_action_history_if_any():
+            logger.info("拟人插件 (YAML)：Agent 静默动作已写入会话历史。")
         logger.info("AI (YAML) 决定保持沉默 (SILENCE)")
         _trace_no_reply("silence_marker", detail="模型返回 SILENCE 控制标记")
         return

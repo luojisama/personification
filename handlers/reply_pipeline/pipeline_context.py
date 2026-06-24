@@ -20,7 +20,7 @@ from ...core.message_parts import build_user_message_content
 from ...core.message_relations import build_event_relation_metadata
 from ...core.persona_profile import load_persona_profile, render_persona_snapshot
 from ...core.prompt_loader import pick_ack_phrase
-from ...core.qq_expression_tools import register_send_qq_expression_tools
+from ...core.qq_expression_tools import qq_action_history_text, register_send_qq_expression_tools
 from ...core.gemini_profile import build_gemini_route_policy_prompt
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_style_policy import build_reply_style_policy_prompt
@@ -393,6 +393,10 @@ def looks_like_sticker_message(text: str) -> bool:
         "[图片·表情包]" in plain
         or "[表情id:" in plain
         or "[表情:" in plain
+        or "[QQ表情" in plain
+        or "[QQ超级表情" in plain
+        or "[QQ收藏表情" in plain
+        or "[QQ推荐表情" in plain
         or "[表情包]" in plain
         or "[多张表情]" in plain
     )
@@ -406,6 +410,11 @@ def looks_like_photo_message(text: str) -> bool:
 _STICKER_PLACEHOLDER_ALT = (
     r"\[图片·表情包\]"
     r"|\[对方发送了一个表情包(?:：[^\]]*)?\]"
+    r"|\[QQ表情[^\]]*\]"
+    r"|\[QQ超级表情[^\]]*\]"
+    r"|\[QQ收藏表情[^\]]*\]"
+    r"|\[QQ推荐表情[^\]]*\]"
+    r"|\[QQ表情id:[^\]]*\]"
     r"|\[表情包\]"
     r"|\[表情:[^\]]*\]"
     r"|\[表情id:[^\]]*\]"
@@ -803,8 +812,14 @@ async def run_agent_if_enabled(
         ),
         ack_sender=ack_sender,
     )
+    action_history_parts: list[str] = []
     for action in result.pending_actions:
         await executor.execute(action["type"], action["params"])
+        history_text = qq_action_history_text(action)
+        if history_text:
+            action_history_parts.append(history_text)
+    if action_history_parts:
+        setattr(event, "_personification_pending_action_history_text", " ".join(action_history_parts))
     return result.text, True, bool(getattr(result, "bypass_length_limits", False))
 
 

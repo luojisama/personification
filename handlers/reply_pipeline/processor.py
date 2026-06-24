@@ -67,6 +67,7 @@ from ...core.qq_expression_library import (
     maybe_choose_auto_qq_expression_marker,
     qq_expression_enabled,
     render_qq_expression_message,
+    semantic_text_for_qq_expression_segment,
 )
 from ...core.sticker_feedback import (
     build_sticker_feedback_scene_key,
@@ -194,6 +195,16 @@ def _record_muted_group_message(
         setattr(event, "_personification_muted_recorded", True)
     except Exception:
         pass
+
+
+def _consume_pending_action_history_text(event: Any) -> str:
+    text = str(getattr(event, "_personification_pending_action_history_text", "") or "").strip()
+    if text:
+        try:
+            setattr(event, "_personification_pending_action_history_text", "")
+        except Exception:
+            pass
+    return re.sub(r"\s+", " ", text).strip()
 
 
 @dataclass
@@ -543,9 +554,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if seg.type == "text":
                 message_text_parts.append(seg.data.get("text", ""))
             elif seg.type == "face":
-                from ...core.qq_face_names import render_face_token
-
-                message_text_parts.append(render_face_token(seg.data.get("id", "")))
+                message_text_parts.append(semantic_text_for_qq_expression_segment("face", seg.data))
             elif seg.type == "mface":
                 await _extract_mface_from_segment(
                     seg,
@@ -631,6 +640,16 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             data = getattr(seg, "data", None) or (seg.get("data") if isinstance(seg, dict) else {})
                             if seg_type == "text":
                                 message_text_parts.append(data.get("text", ""))
+                            elif seg_type == "face":
+                                message_text_parts.append(semantic_text_for_qq_expression_segment("face", data))
+                            elif seg_type == "mface":
+                                message_text_parts.append(
+                                    semantic_text_for_qq_expression_segment(
+                                        "mface",
+                                        data,
+                                        default_mface_kind="super",
+                                    )
+                                )
                             elif seg_type == "image":
                                 await _extract_reply_images(
                                     seg_type,
@@ -1191,6 +1210,57 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         current_user_content,
     )
 
+    def _record_pending_action_history_if_any() -> bool:
+        action_history_text = _consume_pending_action_history_text(event)
+        if not action_history_text:
+            return False
+        max_chars = getattr(runtime.plugin_config, "personification_max_output_chars", 0)
+        final_history_text = _build_final_visible_reply_text(
+            action_history_text,
+            max_chars=max_chars,
+            sanitize_history_text=session.sanitize_history_text,
+        )
+        if not final_history_text:
+            return False
+        bot_nickname = persona.default_bot_nickname or str(getattr(bot, "self_id", "") or "bot")
+        assistant_metadata = {
+            "scene": "reply",
+            "sticker_sent": None,
+            "speaker": bot_nickname,
+            "user_id": bot_self_id or None,
+            "source_kind": "bot_reply",
+        }
+        if isinstance(event, types.group_message_event_cls):
+            assistant_metadata.update(
+                {
+                    "group_id": str(event.group_id),
+                    "message_id": None,
+                    "reply_to_msg_id": incoming_relation_metadata.get("message_id"),
+                    "reply_to_user_id": user_id,
+                    "mentioned_ids": [],
+                    "is_at_bot": False,
+                }
+            )
+        session.append_session_message(
+            session_id,
+            "assistant",
+            final_history_text,
+            legacy_session_id=legacy_session_id,
+            **assistant_metadata,
+        )
+        if isinstance(event, types.group_message_event_cls):
+            runtime.record_group_msg(
+                str(event.group_id),
+                bot_nickname,
+                final_history_text,
+                is_bot=True,
+                user_id=bot_self_id,
+                reply_to_msg_id=incoming_relation_metadata.get("message_id"),
+                reply_to_user_id=user_id,
+                source_kind="bot_reply",
+            )
+        return True
+
     base_prompt = persona.load_prompt(str(group_id))
     if isinstance(base_prompt, dict):
         try:
@@ -1697,6 +1767,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
         has_silence_marker = "[SILENCE]" in reply_content or "<SILENCE>" in reply_content
         if has_silence_marker:
+            if _record_pending_action_history_if_any():
+                runtime.logger.info("拟人插件：Agent 静默动作已写入会话历史。")
             runtime.logger.info(f"AI 决定结束与群 {group_id} 中 {user_name}({user_id}) 的对话 (SILENCE)")
             return
 
@@ -1888,6 +1960,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             reply_content = review_decision.text.strip()
 
         if has_silence_control_marker(reply_content):
+            if _record_pending_action_history_if_any():
+                runtime.logger.info("拟人插件：静默动作已写入会话历史。")
             runtime.logger.info(
                 f"拟人插件：最终回复含沉默控制标记，group={group_id} user={user_id}"
             )

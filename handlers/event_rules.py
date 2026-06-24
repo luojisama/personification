@@ -339,14 +339,15 @@ def _extract_recordable_group_message(event: Any) -> tuple[str, int, str]:
                 if text:
                     text_parts.append(text)
             elif seg_type == "face":
-                from ..core.qq_face_names import render_face_token
+                from ..core.qq_expression_library import semantic_text_for_qq_expression_segment
 
-                token = render_face_token(data.get("id", ""))
+                token = semantic_text_for_qq_expression_segment("face", data)
                 text_parts.append(token)
                 visual_parts.append(token)
             elif seg_type == "mface":
-                summary = str(data.get("summary", "") or "表情包").strip() or "表情包"
-                token = f"[{summary}]"
+                from ..core.qq_expression_library import semantic_text_for_qq_expression_segment
+
+                token = semantic_text_for_qq_expression_segment("mface", data, default_mface_kind="super")
                 text_parts.append(token)
                 visual_parts.append(token)
             elif seg_type == "image":

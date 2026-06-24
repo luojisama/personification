@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from ..agent.tool_registry import AgentTool, ToolRegistry
+from .qq_expression_library import semantic_text_for_qq_expression_segment
 from .qq_face_names import QQ_FACE_NAMES
 
 
@@ -155,6 +156,44 @@ def _extract_url_list(raw: Any) -> list[str]:
     return urls
 
 
+def _extract_url_candidates(raw: Any) -> list[dict[str, str]]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        value = raw.strip()
+        return [{"url": value, "summary": ""}] if value.startswith(("http://", "https://")) else []
+    if isinstance(raw, list):
+        values = raw
+    elif isinstance(raw, dict):
+        values = None
+        for key in ("url", "urls", "data", "result"):
+            candidate = raw.get(key)
+            if candidate:
+                values = candidate
+                break
+        if isinstance(values, dict):
+            return _extract_url_candidates(values)
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            return []
+    else:
+        return []
+    candidates: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in values:
+        summary = ""
+        if isinstance(item, dict):
+            url = str(item.get("url") or item.get("file") or "").strip()
+            summary = re.sub(r"\s+", " ", str(item.get("summary") or item.get("name") or "").strip()).strip("[]")[:40]
+        else:
+            url = str(item or "").strip()
+        if url.startswith(("http://", "https://")) and url not in seen:
+            seen.add(url)
+            candidates.append({"url": url, "summary": summary})
+    return candidates
+
+
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)
@@ -187,6 +226,35 @@ def _pick_url(urls: list[str], *, index: Any = 1, random_pick: bool = False) -> 
     return urls[one_based - 1], one_based
 
 
+def _pick_candidate(candidates: list[dict[str, str]], *, index: Any = 1, random_pick: bool = False) -> tuple[dict[str, str], int]:
+    if not candidates:
+        return {}, 0
+    if random_pick:
+        picked_index = random.randrange(0, len(candidates))
+        return candidates[picked_index], picked_index + 1
+    one_based = _bounded_int(index, default=1, minimum=1, maximum=len(candidates))
+    return candidates[one_based - 1], one_based
+
+
+def qq_action_history_text(action: Any) -> str:
+    if not isinstance(action, dict):
+        return ""
+    action_type = str(action.get("type", "") or "").strip()
+    params = action.get("params") if isinstance(action.get("params"), dict) else {}
+    explicit = str(params.get("history_text", "") or "").strip()
+    if explicit:
+        return explicit
+    if action_type == "send_qq_face":
+        return semantic_text_for_qq_expression_segment("face", {"id": params.get("face_id", "")})
+    if action_type == "send_qq_image_expression":
+        summary = str(params.get("summary", "") or "").strip()
+        return f"[QQ收藏表情:{summary}]" if summary else "[QQ收藏表情]"
+    if action_type == "send_qq_mface":
+        data = params.get("data") if isinstance(params, dict) else {}
+        return semantic_text_for_qq_expression_segment("mface", data, default_mface_kind=str(params.get("kind", "super") or "super"))
+    return ""
+
+
 async def _call_optional_onebot_api(bot: Any, api: str, **kwargs: Any) -> Any:
     call_api = getattr(bot, "call_api", None)
     if not callable(call_api):
@@ -212,7 +280,11 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
         if not _queue_action(
             executor,
             "send_qq_face",
-            {"face_id": resolved_id, "text": _compact_text(text)},
+            {
+                "face_id": resolved_id,
+                "text": _compact_text(text),
+                "history_text": f"[QQ表情:{label}]",
+            },
         ):
             return _action_result(ok=False, reason="当前发送上下文不可用")
         return _action_result(
@@ -233,16 +305,23 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
             raw = await _call_optional_onebot_api(effective_bot, "fetch_custom_face", count=resolved_count)
         except Exception as exc:
             return _action_result(ok=False, reason=f"fetch_custom_face 调用失败：{str(exc)[:120]}")
-        urls = _extract_url_list(raw)
-        if not urls:
+        candidates = _extract_url_candidates(raw)
+        if not candidates:
             return _action_result(ok=False, reason="没有拿到可发送的收藏表情 URL")
-        picked_url, picked_index = _pick_url(urls, index=index, random_pick=_coerce_bool(random_pick))
+        picked, picked_index = _pick_candidate(candidates, index=index, random_pick=_coerce_bool(random_pick))
+        picked_url = picked.get("url", "")
+        summary = picked.get("summary", "")
         if not picked_url:
             return _action_result(ok=False, reason="没有选中收藏表情")
         if not _queue_action(
             executor,
             "send_qq_image_expression",
-            {"url": picked_url, "text": _compact_text(text)},
+            {
+                "url": picked_url,
+                "text": _compact_text(text),
+                "summary": summary,
+                "history_text": f"[QQ收藏表情:{summary}]" if summary else "[QQ收藏表情]",
+            },
         ):
             return _action_result(ok=False, reason="当前发送上下文不可用")
         return _action_result(
@@ -250,7 +329,8 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
             queued=True,
             kind="qq_favorite_expression",
             picked_index=picked_index,
-            fetched=len(urls),
+            fetched=len(candidates),
+            summary=summary,
         )
 
     async def _send_recommended(query: str, index: int = 1, random_pick: bool = False, text: str = "") -> str:
@@ -265,16 +345,23 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
             raw = await _call_recommend_face_api(effective_bot, q)
         except Exception as exc:
             return _action_result(ok=False, reason=f"get_recommend_face 调用失败：{str(exc)[:120]}")
-        urls = _extract_url_list(raw)
-        if not urls:
+        candidates = _extract_url_candidates(raw)
+        if not candidates:
             return _action_result(ok=False, reason="没有拿到可发送的推荐表情 URL", query=q)
-        picked_url, picked_index = _pick_url(urls, index=index, random_pick=_coerce_bool(random_pick))
+        picked, picked_index = _pick_candidate(candidates, index=index, random_pick=_coerce_bool(random_pick))
+        picked_url = picked.get("url", "")
+        summary = picked.get("summary", "")
         if not picked_url:
             return _action_result(ok=False, reason="没有选中推荐表情", query=q)
         if not _queue_action(
             executor,
             "send_qq_image_expression",
-            {"url": picked_url, "text": _compact_text(text)},
+            {
+                "url": picked_url,
+                "text": _compact_text(text),
+                "summary": summary or q,
+                "history_text": f"[QQ推荐表情:{q}]",
+            },
         ):
             return _action_result(ok=False, reason="当前发送上下文不可用")
         return _action_result(
@@ -283,7 +370,8 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
             kind="qq_recommended_expression",
             query=q,
             picked_index=picked_index,
-            fetched=len(urls),
+            fetched=len(candidates),
+            summary=summary,
         )
 
     metadata = {
@@ -373,6 +461,7 @@ __all__ = [
     "QQ_EXPRESSION_TOOL_NAMES",
     "build_send_qq_expression_tools",
     "expression_tool_result_queued",
+    "qq_action_history_text",
     "register_send_qq_expression_tools",
     "resolve_qq_face_id",
 ]

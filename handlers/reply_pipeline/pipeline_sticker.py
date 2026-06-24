@@ -21,6 +21,7 @@ from ...core.gif_understanding import (
 )
 from ...core.media_understanding import analyze_images_with_route_or_fallback
 from ...core.metrics import record_counter
+from ...core.qq_expression_library import semantic_text_for_qq_expression_segment
 from ...core.sticker_library import (
     analyze_sticker_image,
     image_bytes_to_data_url,
@@ -624,10 +625,11 @@ async def extract_mface_from_segment(
         return
     data = getattr(seg, "data", {}) or {}
     summary = str(data.get("summary", "") or "表情包").strip() or "表情包"
+    semantic_token = semantic_text_for_qq_expression_segment("mface", data, default_mface_kind="super")
     url = str(data.get("url", "") or "").strip()
     file_name = str(data.get("file", "") or "").lower()
     if not url:
-        message_text_ref.append(f"[{summary}]")
+        message_text_ref.append(semantic_token or f"[{summary}]")
         return
     gif_enabled = bool(runtime is not None and is_gif_understanding_enabled(runtime))
     if gif_enabled and file_name.endswith(".gif"):
@@ -665,13 +667,13 @@ async def extract_mface_from_segment(
                 counter_ref=gif_understanding_counter_ref,
             )
             return
-        logger.info("拟人插件：检测到 GIF 表情包，忽略并不予回复")
-        stop_reply_ref[0] = True
+        logger.info("拟人插件：检测到 GIF mface，使用协议语义占位处理")
+        message_text_ref.append(semantic_token or _gif_placeholder(summary))
         return
     if payload is None or mime_type is None:
-        message_text_ref.append(f"[{summary}]")
+        message_text_ref.append(semantic_token or f"[{summary}]")
         return
-    message_text_ref.append("[图片·表情包]")
+    message_text_ref.append(semantic_token or "[图片·表情包]")
     data_url = image_bytes_to_data_url(payload, mime_type)
     # 非 gif 表情包 → 走 sticker_image_urls，由上层决定是否直传视觉模型理解（不打标）。
     if sticker_image_urls is not None:
@@ -722,7 +724,8 @@ async def extract_images_from_segment(
 
     if is_protocol_sticker:
         summary = str(data.get("summary") or data.get("emoji_id") or "").strip()
-        placeholder = f"[对方发送了一个表情包：{summary}]" if summary else "[对方发送了一个表情包]"
+        semantic_token = semantic_text_for_qq_expression_segment("image", data, default_mface_kind="favorite")
+        placeholder = semantic_token or (f"[对方发送了一个表情包：{summary}]" if summary else "[对方发送了一个表情包]")
         message_text_ref.append(placeholder)
         record_counter(
             "incoming_image.classified_total",
