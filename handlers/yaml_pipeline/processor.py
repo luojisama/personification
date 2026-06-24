@@ -99,6 +99,7 @@ from ..reply_pipeline.pipeline_context import (
 )
 from ..reply_pipeline.pipeline_sticker import build_image_summary_suffix as _shared_build_image_summary_suffix
 from ...skills.skillpacks.sticker_tool.scripts.impl import (
+    build_send_sticker_tool,
     choose_sticker_for_context,
     reset_current_image_context,
     set_current_image_context,
@@ -1232,6 +1233,18 @@ async def process_yaml_response_logic(
             bot=bot,
             plugin_config=plugin_config,
         )
+        try:
+            sticker_dir = resolve_sticker_dir(getattr(plugin_config, "personification_sticker_path", None))
+            if sticker_dir.exists() and sticker_dir.is_dir():
+                agent_tool_registry.register(
+                    build_send_sticker_tool(
+                        sticker_dir,
+                        plugin_config,
+                        executor,
+                    )
+                )
+        except Exception as exc:
+            logger.debug(f"拟人插件 (YAML)：注册本地表情包发送工具失败: {exc}")
         image_ctx_token = set_current_image_context(tool_image_urls, input_text)
         ack_phrase = ""
         if is_direct_mention:

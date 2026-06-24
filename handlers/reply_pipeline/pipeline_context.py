@@ -29,6 +29,7 @@ from ...skill_runtime.runtime_api import SkillRuntime
 from ...skills.skillpacks.friend_request_tool.scripts.main import build_friend_request_tool_for_runtime
 from ...skills.skillpacks.group_info_tool.scripts.main import build_group_info_tool_for_runtime
 from ...skills.skillpacks.plugin_invoker.scripts.main import build_invoke_plugin_tool_for_runtime
+from ...skills.skillpacks.sticker_tool.scripts.impl import build_send_sticker_tool
 
 
 _FRIEND_IDS_CACHE: Dict[str, tuple[float, set[str]]] = {}
@@ -705,6 +706,20 @@ async def run_agent_if_enabled(
         bot=bot,
         plugin_config=runtime.plugin_config,
     )
+    try:
+        from ...core.sticker_library import resolve_sticker_dir
+
+        sticker_dir = resolve_sticker_dir(getattr(runtime.plugin_config, "personification_sticker_path", None))
+        if sticker_dir.exists() and sticker_dir.is_dir():
+            runtime_registry.register(
+                build_send_sticker_tool(
+                    sticker_dir,
+                    runtime.plugin_config,
+                    executor,
+                )
+            )
+    except Exception as exc:
+        runtime.logger.debug(f"拟人插件：注册本地表情包发送工具失败: {exc}")
     friend_ids = await get_cached_friend_ids(bot, runtime.logger)
     skill_runtime = SkillRuntime(
         plugin_config=runtime.plugin_config,

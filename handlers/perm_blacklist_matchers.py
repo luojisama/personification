@@ -60,7 +60,7 @@ def register_perm_blacklist_matchers(
     @perm_blacklist_list.handle()
     async def _handle_perm_blacklist_list(_bot: Bot, _event: MessageEvent):
         if not sign_in_available:
-            await perm_blacklist_list.finish("签到插件未就绪，无法操作。")
+            await perm_blacklist_list.finish("插件内好感度体系未启用，无法操作。")
 
         data = load_data()
         blacklisted_items = collect_perm_blacklist_items(data)

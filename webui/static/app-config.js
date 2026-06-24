@@ -2,10 +2,15 @@ function normalizeConfigSearchText(value) {
   return String(value || "").normalize("NFKC").trim().toLowerCase();
 }
 
+function compactConfigSearchText(value) {
+  return normalizeConfigSearchText(value).replace(/[^\w\u4e00-\u9fff]+/g, "");
+}
+
 function configSearchHaystack(entry) {
   if (!entry) return "";
   if (!entry._searchText) {
     const aliases = Array.isArray(entry.aliases) ? entry.aliases.join(" ") : "";
+    const searchIndex = Array.isArray(entry.search_index) ? entry.search_index.join(" ") : "";
     entry._searchText = normalizeConfigSearchText([
       entry.key,
       entry.field_name,
@@ -13,9 +18,86 @@ function configSearchHaystack(entry) {
       entry.description,
       entry.group,
       aliases,
+      searchIndex,
     ].join(" "));
+    entry._searchCompact = compactConfigSearchText(entry._searchText);
+    entry._searchParts = entry._searchText.split(/[\s,，;；/|]+/).map(compactConfigSearchText).filter(Boolean);
   }
   return entry._searchText;
+}
+
+function configSearchCompactHaystack(entry) {
+  configSearchHaystack(entry);
+  return entry && entry._searchCompact || "";
+}
+
+function configSearchNeedleVariants(token) {
+  const raw = normalizeConfigSearchText(token);
+  const compact = compactConfigSearchText(raw);
+  return Array.from(new Set([raw, compact].filter(Boolean)));
+}
+
+function isConfigSubsequence(needle, haystack) {
+  if (!needle || !haystack || needle.length < 2) return false;
+  let idx = 0;
+  for (const ch of haystack) {
+    if (ch === needle[idx]) idx += 1;
+    if (idx >= needle.length) return true;
+  }
+  return false;
+}
+
+function configEditDistanceWithin(a, b, maxDistance) {
+  if (!a || !b) return false;
+  if (Math.abs(a.length - b.length) > maxDistance) return false;
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  const curr = new Array(b.length + 1);
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    let rowMin = curr[0];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+      rowMin = Math.min(rowMin, curr[j]);
+    }
+    if (rowMin > maxDistance) return false;
+    for (let j = 0; j <= b.length; j++) prev[j] = curr[j];
+  }
+  return prev[b.length] <= maxDistance;
+}
+
+function configSearchTokenScore(entry, token) {
+  const haystack = configSearchHaystack(entry);
+  const compactHaystack = configSearchCompactHaystack(entry);
+  const variants = configSearchNeedleVariants(token);
+  if (!variants.length) return 0;
+  for (const variant of variants) {
+    if (haystack.includes(variant)) return 120 - Math.min(40, variant.length);
+    if (compactHaystack.includes(variant)) return 110 - Math.min(40, variant.length);
+  }
+  const compactNeedle = variants[variants.length - 1];
+  if (isConfigSubsequence(compactNeedle, compactHaystack)) return 56;
+  if (compactNeedle.length >= 3) {
+    const maxDistance = compactNeedle.length <= 5 ? 1 : 2;
+    const parts = entry._searchParts || [];
+    for (const part of parts) {
+      if (part.length < 2) continue;
+      if (configEditDistanceWithin(compactNeedle, part, maxDistance)) return 48;
+      if (part.length > compactNeedle.length && configEditDistanceWithin(compactNeedle, part.slice(0, compactNeedle.length), maxDistance)) return 44;
+    }
+  }
+  return -1;
+}
+
+function configSearchEntryScore(entry, tokens) {
+  let score = 0;
+  for (const token of tokens) {
+    const tokenScore = configSearchTokenScore(entry, token);
+    if (tokenScore < 0) return -1;
+    score += tokenScore;
+  }
+  if (entry && entry.advanced) score -= 1;
+  return score;
 }
 
 function renderConfig() {
@@ -24,7 +106,11 @@ function renderConfig() {
   let items = state.entries;
   let activeGroup = state.activeGroup;
   if (searchTokens.length) {
-    items = items.filter(e => searchTokens.every(token => configSearchHaystack(e).includes(token)));
+    items = items
+      .map(e => ({ entry: e, score: configSearchEntryScore(e, searchTokens) }))
+      .filter(item => item.score >= 0)
+      .sort((a, b) => b.score - a.score || String(a.entry.group).localeCompare(String(b.entry.group), "zh-CN") || String(a.entry.label).localeCompare(String(b.entry.label), "zh-CN"))
+      .map(item => item.entry);
     activeGroup = null;
   } else if (activeGroup) {
     items = items.filter(e => e.group === activeGroup);

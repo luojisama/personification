@@ -26,7 +26,7 @@ async def handle_perm_blacklist_set_command(
 ) -> None:
     """处理永久拉黑/取消永久拉黑命令。"""
     if not sign_in_available:
-        await matcher.finish("签到插件未就绪，无法操作。")
+        await matcher.finish("插件内好感度体系未启用，无法操作。")
 
     target_id = extract_target_user_id(args_text, message)
     if not target_id:

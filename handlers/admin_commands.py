@@ -16,7 +16,7 @@ async def handle_group_fav_query_command(
     logger: Any,
 ) -> None:
     if not sign_in_available:
-        await matcher.finish("签到插件未就绪，无法查询好感度。")
+        await matcher.finish("插件内好感度体系未启用，无法查询好感度。")
 
     group_key = f"group_{group_id}"
     data = get_user_data(group_key)
@@ -51,7 +51,7 @@ async def handle_set_group_fav_command(
     logger: Any,
 ) -> None:
     if not sign_in_available:
-        await matcher.finish("签到插件未就绪，无法设置好感度。")
+        await matcher.finish("插件内好感度体系未启用，无法设置好感度。")
 
     target_group, new_fav, error_msg = parse_group_fav_update_args(arg_str, event_group_id)
     if error_msg:

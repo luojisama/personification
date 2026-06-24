@@ -237,7 +237,7 @@ def normalize_sticker_metadata(data: Any, *, files: Iterable[Path] | None = None
 
 def load_sticker_metadata(sticker_dir: str | Path | None) -> dict[str, Any]:
     base_dir = resolve_sticker_dir(sticker_dir)
-    files = list_local_sticker_files(base_dir)
+    files = list_local_sticker_files(base_dir, include_gif=True)
     path = sticker_metadata_path(base_dir)
     if not path.exists():
         return normalize_sticker_metadata({}, files=files)
@@ -250,7 +250,7 @@ def load_sticker_metadata(sticker_dir: str | Path | None) -> dict[str, Any]:
 
 def save_sticker_metadata_sync(sticker_dir: str | Path | None, metadata: dict[str, Any]) -> None:
     base_dir = resolve_sticker_dir(sticker_dir, create=True)
-    files = list_local_sticker_files(base_dir)
+    files = list_local_sticker_files(base_dir, include_gif=True)
     normalized = normalize_sticker_metadata(metadata, files=files)
     normalized["_meta"]["folder_hash"] = compute_folder_hash(files)
     path = sticker_metadata_path(base_dir)
@@ -297,7 +297,7 @@ def save_collected_sticker_sync(
 
     suffix = mimetypes.guess_extension(str(mime_type or "").split(";")[0].strip()) or ".png"
     suffix = suffix.lower()
-    if suffix not in SUPPORTED_STICKER_SUFFIXES:
+    if suffix not in RESOLVABLE_STICKER_SUFFIXES:
         suffix = ".png"
     file_name = f"{_safe_stem(file_name_hint)}_{file_hash[:12]}{suffix}"
     target = base_dir / file_name

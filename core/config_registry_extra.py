@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .favorability import DEFAULT_FAVORABILITY_LEVELS
+
 
 def _s(field: str, t: str, default: Any, name: str, desc: str, **extra: Any) -> dict[str, Any]:
     spec: dict[str, Any] = {"field": field, "t": t, "default": default, "name": name, "desc": desc}
@@ -60,6 +62,20 @@ EXTRA_CONFIG_SPECS: tuple[dict[str, Any], ...] = (
        "外部人设提示词文件路径；非空时覆盖 system_prompt 文本配置。", group="人设提示词"),
     _s("personification_system_path", "str", "", "系统提示词文件路径",
        "外部系统提示词文件路径，与 prompt_path 二选一使用。", group="人设提示词"),
+    _s("personification_favorability_enabled", "bool", True, "插件内好感度",
+       "启用拟人插件自带好感度体系；关闭后好感度提示、群好感命令、主动加好友等联动不生效。",
+       group="人设提示词", aliases=("好感度", "好感系统", "亲密度")),
+    _s("personification_favorability_default_score", "float", 0.0, "用户默认好感",
+       "新用户首次进入插件内好感度档案时的默认分值（0-100）。",
+       group="人设提示词", min=0, max=100, aliases=("默认好感", "用户好感初始值")),
+    _s("personification_favorability_group_default_score", "float", 100.0, "群默认好感",
+       "新群聊首次进入插件内好感度档案时的默认分值（0-100）。",
+       group="人设提示词", min=0, max=100, aliases=("群好感初始值", "群默认亲密度")),
+    _s("personification_favorability_levels", "dict", DEFAULT_FAVORABILITY_LEVELS.copy(), "好感度等级阈值",
+       "好感度等级到最低分值的映射（JSON 对象）；例如 {\"初见\":0,\"普通\":35,\"挚友\":92}。",
+       group="人设提示词", advanced=True,
+       aliases=("好感等级", "好感阈值", "亲密度等级"),
+       example='{"初见":0,"普通":35,"挚友":92,"亲密":98}'),
     _s("personification_favorability_attitudes", "dict", {}, "好感度态度表",
        "好感度等级到说话态度的映射（JSON 对象）；留空使用内置 10 级默认表。",
        group="人设提示词", advanced=True,

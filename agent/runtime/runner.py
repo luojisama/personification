@@ -76,6 +76,8 @@ from .fallbacks import (
     _tool_result_indicates_empty,
 )
 
+_QUEUED_ACTION_TOOL_NAMES = QQ_EXPRESSION_TOOL_NAMES | {"send_local_sticker"}
+
 
 _QUERY_REWRITE_TOOL_NAMES = frozenset(
     {
@@ -308,7 +310,7 @@ def _direct_tool_result_agent_result(
 ) -> "AgentResult | None":
     text = str(result_text or "").strip()
     normalized_tool_name = str(tool_name or "").strip()
-    if normalized_tool_name in QQ_EXPRESSION_TOOL_NAMES and expression_tool_result_queued(text):
+    if normalized_tool_name in _QUEUED_ACTION_TOOL_NAMES and expression_tool_result_queued(text):
         return AgentResult(
             text="[SILENCE]",
             pending_actions=pending_actions,

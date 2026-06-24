@@ -352,7 +352,7 @@ async def auto_collect_stickers(
     second_judge_enabled = bool(getattr(runtime.plugin_config, "personification_sticker_second_judge_enabled", False))
     for candidate in candidates:
         try:
-            current_files = list_local_sticker_files(sticker_dir)
+            current_files = list_local_sticker_files(sticker_dir, include_gif=True)
             file_count = len(current_files)
             if file_count >= hard_limit:
                 record_counter("sticker.collect_library_full", reason="hard_limit")

@@ -56,6 +56,10 @@ def test_extra_entries_normalize_roundtrip() -> None:
     assert entries["qzone_probability"].normalize_value("0.5") == 0.5
     assert entries["image_detail"].normalize_value("LOW") == "low"
     assert entries["whitelist"].normalize_value('["123"]') == ["123"]
+    assert entries["favorability_enabled"].normalize_value("开") is True
+    assert entries["favorability_default_score"].normalize_value("12.5") == 12.5
+    assert entries["favorability_group_default_score"].normalize_value("87") == 87.0
+    assert entries["favorability_levels"].normalize_value('{"初见":0,"普通":35}') == {"初见": 0, "普通": 35}
     assert entries["favorability_attitudes"].normalize_value('{"初见":"礼貌"}') == {"初见": "礼貌"}
 
 

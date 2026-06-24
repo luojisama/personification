@@ -17,4 +17,7 @@ def test_config_search_is_ime_aware_and_searches_aliases() -> None:
     assert "event.isComposing" in app_core_js
     assert "state.configSearchComposing" in app_core_js
     assert "entry.aliases" in app_config_js
+    assert "entry.search_index" in app_config_js
     assert "configSearchHaystack" in app_config_js
+    assert "configSearchEntryScore" in app_config_js
+    assert "configEditDistanceWithin" in app_config_js

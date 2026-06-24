@@ -201,7 +201,14 @@ def build_plugin_runtime(
     init_time_context(str(getattr(plugin_config, "personification_timezone", "Asia/Shanghai") or "Asia/Shanghai"))
     register_all_builtin_hooks()
 
-    sign_in_available, get_user_data, update_user_data, load_data, get_level_name = build_sign_in_fallbacks()
+    (
+        sign_in_available,
+        get_user_data,
+        update_user_data,
+        load_data,
+        get_level_name,
+        external_sign_in_available,
+    ) = build_sign_in_fallbacks(plugin_config, logger=logger)
     qzone_publish_available, publish_qzone_shuo, update_qzone_cookie = build_qzone_services(
         plugin_config=plugin_config,
         logger=logger,
@@ -211,9 +218,12 @@ def build_plugin_runtime(
     knowledge_store = PluginKnowledgeStore(data_dir)
 
     if sign_in_available:
-        logger.info("拟人插件：已加载签到插件，启用好感度与黑名单联动。")
+        if external_sign_in_available:
+            logger.info("拟人插件：已启用插件内好感度体系，并将外部签到数据作为兼容迁移源。")
+        else:
+            logger.info("拟人插件：已启用插件内好感度体系。")
     else:
-        logger.warning("拟人插件：未加载签到插件，部分联动功能不可用。")
+        logger.warning("拟人插件：插件内好感度体系已关闭，相关联动功能不可用。")
 
     module_instance_id = random.randint(1000, 9999)
     logger.info(f"拟人插件：模块加载中 (Instance ID: {module_instance_id})")
@@ -485,7 +495,10 @@ def build_plugin_runtime(
         inner_state_updater=inner_state_updater,
     )
 
-    get_custom_title = build_custom_title_getter(logger=logger)
+    get_custom_title = build_custom_title_getter(
+        logger=logger,
+        get_user_data=get_user_data,
+    )
     get_sticker_files = build_sticker_cache(
         sticker_path=plugin_config.personification_sticker_path,
         ttl_seconds=300,

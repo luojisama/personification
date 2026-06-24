@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from ...core import config_registry, env_writer, webui_audit_log
+from ...core.config_search import build_config_search_index
 from ..deps import AdminIdentity, require_admin
 
 
@@ -97,6 +98,15 @@ def _entry_to_view(entry: Any, *, plugin_config: Any) -> ConfigEntryView:
         advanced=bool(getattr(entry, "advanced", False)),
         example=str(getattr(entry, "example", "") or ""),
         aliases=list(getattr(entry, "help_aliases", ()) or ()),
+        search_index=build_config_search_index(
+            entry.key,
+            entry.field_name,
+            entry.display_name,
+            entry.description,
+            entry.group,
+            getattr(entry, "help_aliases", ()) or (),
+            getattr(entry, "example", "") or "",
+        ),
         default=getattr(type(plugin_config), entry.field_name, entry.default),
         current=sources.get("current"),
         active_source=sources.get("active_source", "default"),

@@ -14,6 +14,7 @@ from .core.memory_defaults import (
     DEFAULT_PERSONA_HISTORY_MAX,
     DEFAULT_PRIVATE_HISTORY_TURNS,
 )
+from .core.favorability import DEFAULT_FAVORABILITY_LEVELS
 
 
 DEFAULT_FAVORABILITY_ATTITUDES: Dict[str, str] = {
@@ -357,6 +358,10 @@ class Config(BaseModel):
     personification_prompt_path: Optional[str] = None
     personification_system_path: Optional[str] = None
 
+    personification_favorability_enabled: bool = True
+    personification_favorability_default_score: float = 0.0
+    personification_favorability_group_default_score: float = 100.0
+    personification_favorability_levels: Dict[str, float] = DEFAULT_FAVORABILITY_LEVELS.copy()
     personification_favorability_attitudes: Dict[str, str] = DEFAULT_FAVORABILITY_ATTITUDES.copy()
 
     personification_history_len: int = DEFAULT_HISTORY_LEN
