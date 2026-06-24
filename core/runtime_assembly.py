@@ -170,6 +170,8 @@ class PluginRuntimeBundle:
             parse_yaml_response=self.parse_yaml_response,
             logger=self.logger,
             agent_tool_caller=self.reply_processor_deps.runtime.agent_tool_caller,
+            agent_tool_registry=self.reply_processor_deps.runtime.tool_registry,
+            agent_max_steps=int(getattr(self.plugin_config, "personification_agent_max_steps", 10)),
             agent_data_dir=get_personification_data_dir(self.plugin_config),
             persona_store=self.persona_store,
             superusers=self.superusers,

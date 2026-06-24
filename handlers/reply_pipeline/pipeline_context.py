@@ -606,23 +606,12 @@ def should_use_agent_for_reply(
     is_direct_mention: bool = False,
     has_image_input: bool,
 ) -> bool:
-    if not (
+    _ = message_intent, ambiguity_level, is_direct_mention, has_image_input
+    return bool(
         getattr(plugin_config, "personification_agent_enabled", True)
         and tool_registry
         and agent_tool_caller
-    ):
-        return False
-    if has_image_input:
-        return True
-    if bool(getattr(plugin_config, "personification_web_search_always", False)):
-        return True
-    if (
-        str(message_intent or "").strip() == "lookup"
-        and str(ambiguity_level or "").strip().lower() == "high"
-        and not is_direct_mention
-    ):
-        return False
-    return str(message_intent or "").strip() in {"lookup", "plugin_question", "explanation", "image_generation"}
+    )
 
 
 def compute_agent_time_budget(

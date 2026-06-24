@@ -114,6 +114,7 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
     # 但"定时发送"（每周五 19:00 到点必发的 run_auto_post_diary + register_weekly_diary_job）
     # 已弃用——自动发空间改由下方 proactive 路径，让 agent 按 inner_state 自主判断 skip|post。
     generate_ai_diary = build_generate_ai_diary_task(
+        plugin_config=deps.plugin_config,
         generate_ai_diary_flow=deps.generate_ai_diary_flow,
         load_prompt=deps.load_prompt,
         call_ai_api=deps.call_ai_api,
@@ -134,6 +135,7 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
     if deps.qzone_publish_available:
         if deps.qzone_proactive_enabled and deps.maybe_generate_proactive_qzone_post_flow is not None:
             maybe_generate_qzone_post = build_maybe_generate_qzone_post_task(
+                plugin_config=deps.plugin_config,
                 maybe_generate_proactive_qzone_post_flow=deps.maybe_generate_proactive_qzone_post_flow,
                 load_prompt=deps.load_prompt,
                 call_ai_api=deps.call_ai_api,
@@ -183,6 +185,9 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                     persona_store=deps.persona_store,
                     vision_caller=deps.vision_caller,
                     agent_data_dir=deps.agent_data_dir,
+                    agent_tool_caller=deps.agent_tool_caller,
+                    agent_tool_registry=deps.agent_tool_registry,
+                    agent_max_steps=deps.agent_max_steps,
                     target_user_id=target_user_id,
                     allow_open_user=allow_open_user,
                 )
@@ -216,6 +221,9 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                     logger=deps.logger,
                     persona_store=deps.persona_store,
                     agent_data_dir=deps.agent_data_dir,
+                    agent_tool_caller=deps.agent_tool_caller,
+                    agent_tool_registry=deps.agent_tool_registry,
+                    agent_max_steps=deps.agent_max_steps,
                 )
 
             qzone_inbound_poll = build_qzone_inbound_poll_task(

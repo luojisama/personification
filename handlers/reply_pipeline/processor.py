@@ -1619,27 +1619,21 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             finally:
                 reset_current_image_context(image_ctx_token)
         if used_agent and reply_content in ("[NO_REPLY]", "<NO_REPLY>"):
-            if is_random_chat:
-                runtime.logger.info("拟人插件：Agent 在随机插话场景选择 NO_REPLY，保持沉默。")
-                try:
-                    from ...core import reply_turn_trace
+            runtime.logger.info("拟人插件：Agent 返回 NO_REPLY，保持沉默。")
+            try:
+                from ...core import reply_turn_trace
 
-                    reply_turn_trace.record_stage(
-                        key="no_reply",
-                        label="静默",
-                        status="warn",
-                        detail="agent returned NO_REPLY in random chat",
-                    )
-                    reply_turn_trace.finish_trace(outcome="no_reply", diagnosis_code="no_reply", detail={"reason": "agent_no_reply_random"})
-                except Exception:
-                    pass
-                await _maybe_silence_reaction()
-                return
-            else:
-                runtime.logger.info("拟人插件：Agent 返回 NO_REPLY，回退基础模型生成文本回复。")
-                used_agent = False
-                reply_content = ""
-                bypass_length_limits = False
+                reply_turn_trace.record_stage(
+                    key="no_reply",
+                    label="静默",
+                    status="warn",
+                    detail="agent returned NO_REPLY",
+                )
+                reply_turn_trace.finish_trace(outcome="no_reply", diagnosis_code="no_reply", detail={"reason": "agent_no_reply"})
+            except Exception:
+                pass
+            await _maybe_silence_reaction()
+            return
         if not used_agent:
             fallback_started_at = time.monotonic()
             try:
@@ -1744,7 +1738,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             is_random_chat=is_random_chat,
             raw_message_text=raw_message_text or message_text,
             message_intent=message_intent,
-        ):
+        ) and not used_agent:
             try:
                 rewrite_messages = list(messages) + [
                     {
@@ -1774,19 +1768,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             return
 
         if used_agent and ("[NO_REPLY]" in reply_content or "<NO_REPLY>" in reply_content):
-            if is_random_chat:
-                await _maybe_silence_reaction()
-                return
-            else:
-                runtime.logger.info("拟人插件：Agent 文本含 NO_REPLY 标记，回退基础模型重试。")
-                reply_content = await _call_text_model_with_retry(fallback_model_messages)
-                bypass_length_limits = False
-                if not reply_content:
-                    runtime.logger.warning("拟人插件：Agent 回退基础模型后仍无回复内容")
-                    if is_direct_mention:
-                        reply_content = random.choice(_FALLBACK_REPLIES)
-                    else:
-                        return
+            runtime.logger.info("拟人插件：Agent 文本含 NO_REPLY 标记，保持沉默。")
+            await _maybe_silence_reaction()
+            return
 
         if has_block_marker:
             runtime.logger.warning(

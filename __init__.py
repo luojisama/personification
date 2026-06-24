@@ -48,7 +48,7 @@ except Exception as e:
 
 try:
     from nonebot_plugin_htmlrender import md_to_pic
-except ImportError:
+except Exception:
     md_to_pic = None
 
 from .config import Config
@@ -716,6 +716,8 @@ async def _setup_social_intelligence() -> None:
             persona_store=bundle.persona_store,
             data_dir=get_personification_data_dir(plugin_config),
             get_now=get_current_local_time,
+            tool_registry=bundle.reply_processor_deps.runtime.tool_registry,
+            agent_max_steps=int(getattr(plugin_config, "personification_agent_max_steps", 10)),
         )
         registered = setup_social_intelligence_jobs(scheduler=scheduler, ctx=ctx)
         if registered > 0:

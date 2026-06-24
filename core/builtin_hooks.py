@@ -492,6 +492,7 @@ async def _pending_topic_extract_hook(ctx: HookContext) -> Optional[str]:
         return None
 
     tool_caller = getattr(ctx.runtime, "agent_tool_caller", None)
+    tool_registry = getattr(ctx.runtime, "tool_registry", None)
     logger = getattr(ctx.runtime, "logger", None)
     if not tool_caller or not logger:
         return None
@@ -504,7 +505,14 @@ async def _pending_topic_extract_hook(ctx: HookContext) -> Optional[str]:
             from ..flows.social_intelligence.pending_topics import add_pending_topic
             from ..flows.social_intelligence.topic_extractor import extract_pending_topic
 
-            result = await extract_pending_topic(text, tool_caller=tool_caller, logger=logger)
+            result = await extract_pending_topic(
+                text,
+                plugin_config=ctx.plugin_config,
+                tool_caller=tool_caller,
+                tool_registry=tool_registry,
+                agent_max_steps=int(getattr(ctx.plugin_config, "personification_agent_max_steps", 10)),
+                logger=logger,
+            )
             if not result:
                 return
             tid = add_pending_topic(

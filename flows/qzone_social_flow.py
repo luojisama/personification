@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
 from ..agent.inner_state import DEFAULT_STATE, load_inner_state
+from ..core.agent_bridge import run_text_agent
 from ..core.context_policy import strip_response_control_markers
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_user_emotion_memory, load_emotion_state
@@ -641,6 +642,11 @@ async def _decide_feed_action(
     image_summary: str,
     inner_state: dict[str, Any],
     emotion_memory: str,
+    plugin_config: Any = None,
+    agent_tool_caller: Any = None,
+    agent_tool_registry: Any = None,
+    agent_max_steps: int = 4,
+    logger: Any = None,
 ) -> dict[str, Any]:
     prompt = (
         "你正在阅读一位好友刚发的 QQ 空间动态。把它当成熟人朋友圈，决定是否互动。\n"
@@ -672,7 +678,26 @@ async def _decide_feed_action(
             {"role": "user", "content": prompt},
         ]
     )
-    result = await call_ai_api(messages)
+    result = ""
+    if agent_tool_caller is not None and agent_tool_registry is not None:
+        try:
+            result = await run_text_agent(
+                messages=messages,
+                plugin_config=plugin_config,
+                logger=logger,
+                tool_caller=agent_tool_caller,
+                registry=agent_tool_registry,
+                max_steps=agent_max_steps,
+                use_builtin_search_hint=True,
+                trigger_reason="qzone_social_feed_action",
+                chat_intent_hint="qzone_social_feed_action",
+            )
+        except Exception as exc:
+            if logger is not None:
+                logger.warning(f"[qzone_social] feed Agent decision failed, skip direct-model fallback: {exc}")
+            result = ""
+    else:
+        result = await call_ai_api(messages)
     payload = _extract_json_object(result)
     if payload is None:
         return {"action": "ignore", "comment": "", "reason": "llm_parse_failed"}
@@ -800,6 +825,11 @@ async def _decide_bot_comment_reply(
     call_ai_api: Callable[..., Awaitable[Optional[str]]],
     inner_state: dict[str, Any],
     emotion_memory: str,
+    plugin_config: Any = None,
+    agent_tool_caller: Any = None,
+    agent_tool_registry: Any = None,
+    agent_max_steps: int = 4,
+    logger: Any = None,
     allow_third_party_chime_in: bool = True,
     bot_id: str = "",
     is_reply_to_bot: bool = False,
@@ -852,7 +882,26 @@ async def _decide_bot_comment_reply(
             {"role": "user", "content": prompt},
         ]
     )
-    result = await call_ai_api(messages)
+    result = ""
+    if agent_tool_caller is not None and agent_tool_registry is not None:
+        try:
+            result = await run_text_agent(
+                messages=messages,
+                plugin_config=plugin_config,
+                logger=logger,
+                tool_caller=agent_tool_caller,
+                registry=agent_tool_registry,
+                max_steps=agent_max_steps,
+                use_builtin_search_hint=True,
+                trigger_reason="qzone_comment_reply",
+                chat_intent_hint="qzone_comment_reply",
+            )
+        except Exception as exc:
+            if logger is not None:
+                logger.warning(f"[qzone_social] comment Agent decision failed, skip direct-model fallback: {exc}")
+            result = ""
+    else:
+        result = await call_ai_api(messages)
     payload = _extract_json_object(result)
     if payload is None:
         return {"action": "ignore", "reply": "", "reason": "llm_parse_failed"}
@@ -912,13 +961,17 @@ async def _scan_bot_space_comments(
     inner_state: dict[str, Any],
     emotion_state: dict[str, Any],
     max_feeds: int,
+    state: dict[str, Any],
+    result: dict[str, Any],
+    logger: Any,
+    plugin_config: Any = None,
     max_comments_per_feed: int = 20,
     count_checked_feeds: bool = False,
     allow_third_party_chime_in: bool = True,
     process_existing_comments: bool = True,
-    state: dict[str, Any],
-    result: dict[str, Any],
-    logger: Any,
+    agent_tool_caller: Any = None,
+    agent_tool_registry: Any = None,
+    agent_max_steps: int = 4,
 ) -> None:
     bot_id = str(getattr(bot, "self_id", "") or "")
     if not bot_id:
@@ -998,8 +1051,13 @@ async def _scan_bot_space_comments(
                 commenter_profile=commenter_profile,
                 system_prompt=system_prompt,
                 call_ai_api=call_ai_api,
+                plugin_config=plugin_config,
+                agent_tool_caller=agent_tool_caller,
+                agent_tool_registry=agent_tool_registry,
+                agent_max_steps=agent_max_steps,
                 inner_state=inner_state,
                 emotion_memory=emotion_memory,
+                logger=logger,
                 allow_third_party_chime_in=allow_third_party_chime_in,
                 bot_id=bot_id,
                 is_reply_to_bot=is_reply_to_bot,
@@ -1060,6 +1118,9 @@ async def _scan_bot_outbound_comment_replies(
     result: dict[str, Any],
     logger: Any,
     allow_third_party_chime_in: bool = True,
+    agent_tool_caller: Any = None,
+    agent_tool_registry: Any = None,
+    agent_max_steps: int = 4,
 ) -> None:
     """对 Bot 之前在好友空间评论过的动态进行 3 分钟近实时反查，看是否有人回复 Bot。"""
     bot_id = str(getattr(bot, "self_id", "") or "")
@@ -1181,8 +1242,13 @@ async def _scan_bot_outbound_comment_replies(
                     commenter_profile=commenter_profile,
                     system_prompt=system_prompt,
                     call_ai_api=call_ai_api,
+                    plugin_config=plugin_config,
+                    agent_tool_caller=agent_tool_caller,
+                    agent_tool_registry=agent_tool_registry,
+                    agent_max_steps=agent_max_steps,
                     inner_state=inner_state,
                     emotion_memory=emotion_memory,
+                    logger=logger,
                     allow_third_party_chime_in=allow_third_party_chime_in,
                     bot_id=bot_id,
                     is_reply_to_bot=is_reply_to_bot,
@@ -1254,6 +1320,9 @@ async def scan_qzone_social_feeds(
     persona_store: Any = None,
     vision_caller: Any = None,
     agent_data_dir: Any = None,
+    agent_tool_caller: Any = None,
+    agent_tool_registry: Any = None,
+    agent_max_steps: int = 4,
     target_user_id: str = "",
     allow_open_user: bool = False,
 ) -> dict[str, Any]:
@@ -1384,6 +1453,11 @@ async def scan_qzone_social_feeds(
                         image_summary=image_summary,
                         inner_state=inner_state,
                         emotion_memory=emotion_memory,
+                        plugin_config=plugin_config,
+                        agent_tool_caller=agent_tool_caller,
+                        agent_tool_registry=agent_tool_registry,
+                        agent_max_steps=agent_max_steps,
+                        logger=logger,
                     )
                     friend_state = _daily_friend_state(state, str(candidate["user_id"]), today)
                     decision = _apply_action_limits(
@@ -1475,6 +1549,7 @@ async def scan_qzone_social_feeds(
                     persona_snippet_max_chars=persona_snippet_max_chars,
                     system_prompt=system_prompt,
                     call_ai_api=call_ai_api,
+                    plugin_config=plugin_config,
                     inner_state=inner_state,
                     emotion_state=emotion_state,
                     max_feeds=max_feeds,
@@ -1483,6 +1558,9 @@ async def scan_qzone_social_feeds(
                     state=state,
                     result=result,
                     logger=logger,
+                    agent_tool_caller=agent_tool_caller,
+                    agent_tool_registry=agent_tool_registry,
+                    agent_max_steps=agent_max_steps,
                 )
             _save_state(state, result)
             return result
@@ -1506,6 +1584,9 @@ async def scan_qzone_inbound_messages(
     logger: Any,
     persona_store: Any = None,
     agent_data_dir: Any = None,
+    agent_tool_caller: Any = None,
+    agent_tool_registry: Any = None,
+    agent_max_steps: int = 4,
 ) -> dict[str, Any]:
     """Poll comments under the bot's own Qzone feeds and let the LLM decide replies."""
     if _SCAN_LOCK.locked():
@@ -1566,6 +1647,7 @@ async def scan_qzone_inbound_messages(
                 persona_snippet_max_chars=persona_snippet_max_chars,
                 system_prompt=system_prompt,
                 call_ai_api=call_ai_api,
+                plugin_config=plugin_config,
                 inner_state=inner_state,
                 emotion_state=emotion_state,
                 max_feeds=max_feeds,
@@ -1576,6 +1658,9 @@ async def scan_qzone_inbound_messages(
                 state=state,
                 result=result,
                 logger=logger,
+                agent_tool_caller=agent_tool_caller,
+                agent_tool_registry=agent_tool_registry,
+                agent_max_steps=agent_max_steps,
             )
             if bool(getattr(plugin_config, "personification_qzone_outbound_reply_enabled", True)):
                 now_ts = time.time()
@@ -1598,6 +1683,9 @@ async def scan_qzone_inbound_messages(
                             result=result,
                             logger=logger,
                             allow_third_party_chime_in=allow_third_party_chime_in,
+                            agent_tool_caller=agent_tool_caller,
+                            agent_tool_registry=agent_tool_registry,
+                            agent_max_steps=agent_max_steps,
                         )
                     except Exception as exc:
                         result["failed"] = int(result.get("failed", 0) or 0) + 1

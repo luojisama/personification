@@ -3,6 +3,7 @@ from typing import Any, Awaitable, Callable
 
 def build_generate_ai_diary_task(
     *,
+    plugin_config: Any,
     generate_ai_diary_flow: Callable[..., Awaitable[str]],
     load_prompt: Callable[[], Any],
     call_ai_api: Callable[..., Awaitable[str]],
@@ -18,6 +19,7 @@ def build_generate_ai_diary_task(
             load_prompt=load_prompt,
             call_ai_api=call_ai_api,
             logger=logger,
+            plugin_config=plugin_config,
             tool_caller=agent_tool_caller,
             registry=agent_tool_registry,
             agent_max_steps=agent_max_steps,
@@ -138,6 +140,7 @@ def build_qzone_inbound_poll_task(
 
 def build_maybe_generate_qzone_post_task(
     *,
+    plugin_config: Any,
     maybe_generate_proactive_qzone_post_flow: Callable[..., Awaitable[str]],
     load_prompt: Callable[[], Any],
     call_ai_api: Callable[..., Awaitable[str]],
@@ -153,6 +156,7 @@ def build_maybe_generate_qzone_post_task(
             load_prompt=load_prompt,
             call_ai_api=call_ai_api,
             logger=logger,
+            plugin_config=plugin_config,
             data_dir=agent_data_dir,
             tool_caller=agent_tool_caller,
             registry=agent_tool_registry,

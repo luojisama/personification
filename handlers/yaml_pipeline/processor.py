@@ -1494,7 +1494,8 @@ async def process_yaml_response_logic(
     assistant_text = re.sub(r"^(如果你需要|如果需要的话)[，,:：\s]*", "", assistant_text).strip()
     assistant_text = re.sub(r"(?:如果你需要|需要的话).*?$", "", assistant_text).strip()
     if (
-        message_intent == "banter"
+        not used_agent
+        and message_intent == "banter"
         and looks_like_explanatory_output(assistant_text)
     ):
         try:
@@ -1521,7 +1522,7 @@ async def process_yaml_response_logic(
         except Exception as e:
             logger.debug(f"[yaml_response_handler] banter regenerate skipped: {e}")
 
-    if not is_private_session and message_intent == "banter":
+    if not used_agent and not is_private_session and message_intent == "banter":
         async def _rewrite_for_repeat(cluster_text: str, original_reply: str) -> str:
             return str(
                 await call_ai_api(

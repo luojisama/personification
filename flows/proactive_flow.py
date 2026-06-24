@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 
 from ..agent.inner_state import DEFAULT_STATE, load_inner_state
 from ..core.context_policy import strip_response_control_markers
+from ..core.agent_bridge import run_text_agent
 from ..core.emotion_state import (
     describe_group_emotion_memory,
     describe_user_emotion_memory,
@@ -633,6 +634,10 @@ def _increment_group_idle_count(
 async def _decide_idle_output_mode(
     *,
     call_ai_api: Callable[..., Awaitable[Optional[str]]],
+    plugin_config: Any = None,
+    agent_tool_caller: Any = None,
+    agent_tool_registry: Any = None,
+    agent_max_steps: int = 4,
     topic: str,
     group_style: str,
     logger: Any,
@@ -656,7 +661,25 @@ async def _decide_idle_output_mode(
     except Exception:
         token = None
     try:
-        raw = await call_ai_api([{"role": "user", "content": prompt}])
+        messages = [{"role": "user", "content": prompt}]
+        raw = ""
+        if agent_tool_caller is not None and agent_tool_registry is not None:
+            try:
+                raw = await run_text_agent(
+                    messages=messages,
+                    plugin_config=plugin_config,
+                    logger=logger,
+                    tool_caller=agent_tool_caller,
+                    registry=agent_tool_registry,
+                    max_steps=agent_max_steps,
+                    trigger_reason="proactive_group_idle_mode",
+                    chat_intent_hint="proactive_group_idle_mode",
+                )
+            except Exception as exc:
+                logger.debug(f"[group_idle] mode Agent decision failed: {exc}")
+                raw = ""
+        else:
+            raw = await call_ai_api(messages)
     except Exception as e:
         logger.debug(f"[group_idle] mode decision LLM call failed: {e}")
         return ("text", "")
@@ -832,10 +855,12 @@ async def run_proactive_messaging(
     parse_yaml_response: Callable[..., Any],
     logger: Any,
     agent_tool_caller: Any = None,
+    agent_tool_registry: Any = None,
+    agent_max_steps: int = 4,
     agent_data_dir: Optional[Path] = None,
     persona_store: Any = None,
 ) -> bool:
-    _ = get_user_data, get_level_name, get_activity_status, parse_yaml_response, agent_tool_caller
+    _ = get_user_data, get_level_name, get_activity_status, parse_yaml_response
 
     from ..core import proactive_diagnostics as _diag
 
@@ -999,13 +1024,29 @@ async def run_proactive_messaging(
     except Exception:
         _purpose_token = None
     try:
-        decision = await call_ai_api(
-            _build_time_anchored_messages(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                now=now,
-            )
+        messages = _build_time_anchored_messages(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            now=now,
         )
+        decision = ""
+        if agent_tool_caller is not None and agent_tool_registry is not None:
+            try:
+                decision = await run_text_agent(
+                    messages=messages,
+                    plugin_config=plugin_config,
+                    logger=logger,
+                    tool_caller=agent_tool_caller,
+                    registry=agent_tool_registry,
+                    max_steps=agent_max_steps,
+                    trigger_reason="proactive_private",
+                    chat_intent_hint="proactive_private",
+                )
+            except Exception as exc:
+                logger.warning(f"[proactive] full Agent decision failed, skip direct-model fallback: {exc}")
+                decision = ""
+        else:
+            decision = await call_ai_api(messages)
     finally:
         if _purpose_token is not None:
             try:
@@ -1089,6 +1130,9 @@ async def run_group_idle_topic(
     get_now: Callable[[], datetime],
     record_group_msg: Callable[[str, str, str, bool], int],
     logger: Any,
+    agent_tool_caller: Any = None,
+    agent_tool_registry: Any = None,
+    agent_max_steps: int = 4,
     agent_data_dir: Optional[Path] = None,
     superusers: Optional[set[str]] = None,
     get_user_data: Optional[Callable[[str], Any]] = None,
@@ -1250,13 +1294,33 @@ async def run_group_idle_topic(
             except Exception:
                 _gi_token = None
             try:
-                topic = await call_ai_api(
-                    _build_time_anchored_messages(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        now=now,
-                    )
+                messages = _build_time_anchored_messages(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    now=now,
                 )
+                topic = ""
+                if agent_tool_caller is not None and agent_tool_registry is not None:
+                    try:
+                        topic = await run_text_agent(
+                            messages=messages,
+                            plugin_config=plugin_config,
+                            logger=logger,
+                            tool_caller=agent_tool_caller,
+                            registry=agent_tool_registry,
+                            max_steps=agent_max_steps,
+                            use_builtin_search_hint=True,
+                            trigger_reason="proactive_group_idle",
+                            chat_intent_hint="proactive_group_idle",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"[group_idle] full Agent topic failed for group {group_id}, "
+                            f"skip direct-model fallback: {exc}"
+                        )
+                        topic = ""
+                else:
+                    topic = await call_ai_api(messages)
             except Exception as e:
                 logger.warning(f"[group_idle] call_ai_api failed for group {group_id}: {e}")
                 continue
@@ -1291,6 +1355,10 @@ async def run_group_idle_topic(
             if random.random() < mode_decision_prob:
                 chosen_mode, sticker_mood_hint = await _decide_idle_output_mode(
                     call_ai_api=call_ai_api,
+                    plugin_config=plugin_config,
+                    agent_tool_caller=agent_tool_caller,
+                    agent_tool_registry=agent_tool_registry,
+                    agent_max_steps=agent_max_steps,
                     topic=topic,
                     group_style=group_style,
                     logger=logger,
@@ -1401,6 +1469,8 @@ def build_proactive_checker(
     parse_yaml_response: Callable[..., Any],
     logger: Any,
     agent_tool_caller: Any = None,
+    agent_tool_registry: Any = None,
+    agent_max_steps: int = 4,
     agent_data_dir: Optional[Path] = None,
     persona_store: Any = None,
 ) -> Callable[[], Awaitable[bool]]:
@@ -1422,6 +1492,8 @@ def build_proactive_checker(
             parse_yaml_response=parse_yaml_response,
             logger=logger,
             agent_tool_caller=agent_tool_caller,
+            agent_tool_registry=agent_tool_registry,
+            agent_max_steps=agent_max_steps,
             agent_data_dir=agent_data_dir,
             persona_store=persona_store,
         )
@@ -1443,6 +1515,9 @@ def build_group_idle_checker(
     get_now: Callable[[], datetime],
     record_group_msg: Callable[[str, str, str, bool], int],
     logger: Any,
+    agent_tool_caller: Any = None,
+    agent_tool_registry: Any = None,
+    agent_max_steps: int = 4,
     agent_data_dir: Optional[Path] = None,
     superusers: Optional[set[str]] = None,
     get_user_data: Optional[Callable[[str], Any]] = None,
@@ -1462,6 +1537,9 @@ def build_group_idle_checker(
             get_now=get_now,
             record_group_msg=record_group_msg,
             logger=logger,
+            agent_tool_caller=agent_tool_caller,
+            agent_tool_registry=agent_tool_registry,
+            agent_max_steps=agent_max_steps,
             agent_data_dir=agent_data_dir,
             superusers=superusers,
             get_user_data=get_user_data,

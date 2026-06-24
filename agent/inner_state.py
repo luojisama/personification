@@ -8,12 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-from ..core.data_store import get_data_store
-from ..core.paths import get_data_dir
-from ..core.prompts import load_prompt
-from ..schedule import format_time_context, get_activity_status, get_current_local_time
-
-
 DEFAULT_STATE = {
     "mood": "平静",
     "energy": "正常",
@@ -46,11 +40,21 @@ _MOOD_ALIASES = {
     "好奇": "好奇",
 }
 
-INNER_STATE_UPDATE_PROMPT = load_prompt("inner_state_update")
-DIARY_STATE_UPDATE_PROMPT = load_prompt("diary_state_update")
+def _get_data_store() -> Any:
+    from ..core.data_store import get_data_store
+
+    return get_data_store()
+
+
+def _load_prompt_text(name: str) -> str:
+    from ..core.prompts import load_prompt
+
+    return load_prompt(name)
 
 
 def get_personification_data_dir(plugin_config: Any | None = None) -> Path:
+    from ..core.paths import get_data_dir
+
     return get_data_dir(plugin_config)
 
 _STORE_NAME = "inner_state"
@@ -153,7 +157,7 @@ def normalize_inner_state(state: dict | None) -> dict:
 
 async def load_inner_state(data_dir: Path) -> dict:
     _ = data_dir
-    loaded = await get_data_store().load(_STORE_NAME)
+    loaded = await _get_data_store().load(_STORE_NAME)
     if not isinstance(loaded, dict):
         return copy.deepcopy(DEFAULT_STATE)
     return normalize_inner_state(loaded)
@@ -161,7 +165,7 @@ async def load_inner_state(data_dir: Path) -> dict:
 
 async def save_inner_state(data_dir: Path, state: dict) -> None:
     _ = data_dir
-    await get_data_store().save(_STORE_NAME, normalize_inner_state(state))
+    await _get_data_store().save(_STORE_NAME, normalize_inner_state(state))
 
 
 def _merge_state(current_state: Dict[str, Any], new_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -225,7 +229,7 @@ async def update_inner_state_after_chat(
     _ = data_dir, current_state
     # thinking_mode 参数保留以备将来直接在 tool_caller 层控制推理档位
     # 当前由 build_inner_state_updater 构建 state_tool_caller 时应用
-    store = get_data_store()
+    store = _get_data_store()
     async with store._alock(_STORE_NAME):
         fresh_state = await asyncio.to_thread(store._read, _STORE_NAME)
         if not isinstance(fresh_state, dict):
@@ -239,8 +243,10 @@ async def update_inner_state_after_chat(
                 "\n对话用户画像参考（用于更新 relation_warmth，不必照搬）：\n"
                 f"{persona_snippet}\n"
             )
+        from ..schedule import format_time_context, get_activity_status, get_current_local_time
+
         datetime_now = get_current_local_time()
-        prompt = INNER_STATE_UPDATE_PROMPT.replace(
+        prompt = _load_prompt_text("inner_state_update").replace(
             "{current_time}",
             f"{datetime_now.strftime('%Y-%m-%d %H:%M:%S')} [{format_time_context(datetime_now)}]",
         ).replace(
@@ -296,7 +302,7 @@ async def update_state_from_diary(
     logger: Any,
 ) -> None:
     _ = data_dir
-    store = get_data_store()
+    store = _get_data_store()
     async with store._alock(_STORE_NAME):
         fresh_state = await asyncio.to_thread(store._read, _STORE_NAME)
         if not isinstance(fresh_state, dict):
@@ -304,7 +310,7 @@ async def update_state_from_diary(
         else:
             fresh_state = normalize_inner_state(fresh_state)
 
-        prompt = DIARY_STATE_UPDATE_PROMPT.replace(
+        prompt = _load_prompt_text("diary_state_update").replace(
             "{diary_text}",
             diary_text,
         ).replace(

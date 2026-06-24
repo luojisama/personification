@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from ..agent.inner_state import load_inner_state, update_state_from_diary
-from ..agent.runtime.simple_loop import run_tool_loop_text
+from ..core.agent_bridge import run_text_agent
 from ..core.context_policy import strip_response_control_markers
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_group_emotion_memory, load_emotion_state
@@ -309,8 +309,12 @@ async def _rewrite_qzone_net_slang(
     text: str,
     *,
     tool_caller: Any,
+    registry: Any = None,
+    plugin_config: Any = None,
+    agent_max_steps: int = 4,
     persona_system: Any = "",
     timeout: float = 8.0,
+    logger: Any = None,
 ) -> str:
     """把带营业感叹腔/网络流行语的说说改写成平铺直叙的一句。"""
     if tool_caller is None:
@@ -332,10 +336,18 @@ async def _rewrite_qzone_net_slang(
     )
     messages.append({"role": "user", "content": str(text or "").strip()[:300]})
     try:
-        response = await asyncio.wait_for(
-            tool_caller.chat_with_tools(messages, [], False),
-            timeout=timeout,
-        )
+        if registry is not None:
+            return await run_text_agent(
+                messages=messages,
+                plugin_config=plugin_config,
+                logger=logger,
+                tool_caller=tool_caller,
+                registry=registry,
+                max_steps=agent_max_steps,
+                trigger_reason="qzone_net_slang_rewrite",
+                chat_intent_hint="qzone_net_slang_rewrite",
+            )
+        response = await asyncio.wait_for(tool_caller.chat_with_tools(messages, [], False), timeout=timeout)
     except Exception:
         return ""
     return str(getattr(response, "content", "") or "").strip()
@@ -345,6 +357,9 @@ async def _review_qzone_post(
     text: str,
     *,
     tool_caller: Any,
+    registry: Any = None,
+    plugin_config: Any = None,
+    agent_max_steps: int = 4,
     persona_system: Any = "",
     logger: Any,
 ) -> str:
@@ -373,7 +388,11 @@ async def _review_qzone_post(
         toned = await _rewrite_qzone_net_slang(
             text,
             tool_caller=tool_caller,
+            registry=registry,
+            plugin_config=plugin_config,
+            agent_max_steps=agent_max_steps,
             persona_system=persona_system,
+            logger=logger,
         )
         toned = _trim_qzone_content(toned)
         if toned and not _NET_SLANG_TIC_RE.search(toned):
@@ -388,6 +407,9 @@ async def _build_qzone_post_with_optional_image(
     content: str,
     image_prompt: str,
     tool_caller: Any,
+    registry: Any = None,
+    plugin_config: Any = None,
+    agent_max_steps: int = 4,
     logger: Any,
     recent_posts: Optional[list[str]] = None,
     persona_system: Any = "",
@@ -398,6 +420,9 @@ async def _build_qzone_post_with_optional_image(
     text = await _review_qzone_post(
         text,
         tool_caller=tool_caller,
+        registry=registry,
+        plugin_config=plugin_config,
+        agent_max_steps=agent_max_steps,
         persona_system=persona_system,
         logger=logger,
     )
@@ -494,6 +519,7 @@ async def _generate_once(
     system_prompt: Any,
     user_prompt: str,
     *,
+    plugin_config: Any = None,
     call_ai_api: Callable[..., Awaitable[Optional[str]]],
     use_builtin_search: bool = False,
     tool_caller: Any = None,
@@ -534,16 +560,23 @@ async def _generate_once(
         _qz_token = None
     try:
         if tool_caller is not None and registry is not None:
-            # 与群聊同等：让生成过程也能按需调用 web_search 等真实工具查证内容。
-            result = await run_tool_loop_text(
-                messages,
-                registry=registry,
-                tool_caller=tool_caller,
-                logger=logger,
-                max_steps=agent_max_steps,
-                use_builtin_search=use_builtin_search,
-                chat_intent="",
-            )
+            # 与群聊同等：走完整 Agent 管线，而不是轻量工具循环。
+            try:
+                result = await run_text_agent(
+                    messages=messages,
+                    plugin_config=plugin_config,
+                    logger=logger,
+                    tool_caller=tool_caller,
+                    registry=registry,
+                    max_steps=agent_max_steps,
+                    use_builtin_search_hint=use_builtin_search,
+                    trigger_reason="qzone_diary",
+                    chat_intent_hint="qzone_diary",
+                )
+            except Exception as exc:
+                if logger is not None:
+                    logger.warning(f"[diary] full Agent failed, skip direct-model fallback: {exc}")
+                result = ""
         elif supports_builtin_search:
             result = await call_ai_api(messages, use_builtin_search=use_builtin_search)
         else:
@@ -586,6 +619,7 @@ async def generate_ai_diary(
     load_prompt: Callable[[], Any],
     call_ai_api: Callable[..., Awaitable[Optional[str]]],
     logger: Any,
+    plugin_config: Any = None,
     tool_caller: Any = None,
     data_dir: Optional[Path] = None,
     registry: Any = None,
@@ -642,6 +676,7 @@ async def generate_ai_diary(
         raw_rich_result = await _generate_once(
             system_prompt,
             rich_prompt,
+            plugin_config=plugin_config,
             call_ai_api=call_ai_api,
             use_builtin_search=True,
             tool_caller=tool_caller,
@@ -656,6 +691,9 @@ async def generate_ai_diary(
                 content=str(payload.get("content", "") or ""),
                 image_prompt=str(payload.get("image_prompt", "") or ""),
                 tool_caller=tool_caller,
+                registry=registry,
+                plugin_config=plugin_config,
+                agent_max_steps=agent_max_steps,
                 logger=logger,
                 recent_posts=recent_posts,
                 persona_system=system_prompt,
@@ -687,6 +725,7 @@ async def generate_ai_diary(
     raw_result = await _generate_once(
         system_prompt,
         basic_prompt,
+        plugin_config=plugin_config,
         call_ai_api=call_ai_api,
         use_builtin_search=True,
         tool_caller=tool_caller,
@@ -700,6 +739,9 @@ async def generate_ai_diary(
             content=str(payload.get("content", "") or ""),
             image_prompt=str(payload.get("image_prompt", "") or ""),
             tool_caller=tool_caller,
+            registry=registry,
+            plugin_config=plugin_config,
+            agent_max_steps=agent_max_steps,
             logger=logger,
             recent_posts=recent_posts,
             persona_system=system_prompt,
@@ -725,6 +767,7 @@ async def maybe_generate_proactive_qzone_post(
     load_prompt: Callable[[], Any],
     call_ai_api: Callable[..., Awaitable[Optional[str]]],
     logger: Any,
+    plugin_config: Any = None,
     data_dir: Optional[Path] = None,
     tool_caller: Any = None,
     registry: Any = None,
@@ -799,6 +842,7 @@ async def maybe_generate_proactive_qzone_post(
     result = await _generate_once(
         system_prompt,
         decision_prompt,
+        plugin_config=plugin_config,
         call_ai_api=call_ai_api,
         use_builtin_search=True,
         tool_caller=tool_caller,
@@ -816,6 +860,9 @@ async def maybe_generate_proactive_qzone_post(
             content=str(payload.get("content", "") or ""),
             image_prompt=str(payload.get("image_prompt", "") or ""),
             tool_caller=tool_caller,
+            registry=registry,
+            plugin_config=plugin_config,
+            agent_max_steps=agent_max_steps,
             logger=logger,
             recent_posts=recent_posts,
             persona_system=system_prompt,
@@ -825,6 +872,9 @@ async def maybe_generate_proactive_qzone_post(
         text = await _review_qzone_post(
             text,
             tool_caller=tool_caller,
+            registry=registry,
+            plugin_config=plugin_config,
+            agent_max_steps=agent_max_steps,
             persona_system=system_prompt,
             logger=logger,
         )
