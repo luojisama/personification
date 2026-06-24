@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, Query
 
 from ...core import metrics, token_ledger
+from ...core.onebot_cache import get_group_name
 from ..deps import AdminIdentity, require_admin
 
 _WINDOW_PATTERN = "^(day|week|month|24h|7d|30d)$"
@@ -116,6 +119,87 @@ def _billing_summary(summary: dict, provider_usage: list[dict]) -> dict:
     }
 
 
+def _get_first_bot(runtime) -> Any | None:
+    bundle = getattr(runtime, "runtime_bundle", None)
+    if bundle is None:
+        return None
+    get_bots = getattr(bundle, "get_bots", None)
+    if not callable(get_bots):
+        return None
+    try:
+        bots = get_bots() or {}
+    except Exception:
+        return None
+    return next(iter(bots.values()), None) if bots else None
+
+
+async def _annotate_group_rows(runtime, rows: list[dict]) -> list[dict]:
+    bot = _get_first_bot(runtime)
+    out: list[dict] = []
+    for index, row in enumerate(rows or [], start=1):
+        item = dict(row)
+        group_id = str(item.get("group_id", "") or "")
+        group_name = await get_group_name(bot, group_id) if group_id else ""
+        item["group_name"] = group_name
+        item["group_label"] = group_name or f"未命名群 {index}"
+        out.append(item)
+    return out
+
+
+def _add_distribution_fields(rows: list[dict], *, total_tokens: int) -> list[dict]:
+    max_tokens = max((int(row.get("total_tokens", 0) or 0) for row in rows), default=0)
+    out = []
+    for row in rows:
+        item = dict(row)
+        tokens = int(item.get("total_tokens", 0) or 0)
+        item["token_share"] = round(tokens / total_tokens, 4) if total_tokens > 0 else 0.0
+        item["percent"] = round(tokens / total_tokens * 100, 2) if total_tokens > 0 else 0.0
+        item["relative_width"] = round(tokens / max_tokens, 4) if max_tokens > 0 else 0.0
+        out.append(item)
+    return out
+
+
+def _chart_from_summary(key: str, label: str, summary: dict) -> dict:
+    total = dict(summary.get("total") or {})
+    return {
+        "key": key,
+        "label": label,
+        "value_key": "total_tokens",
+        "total": total,
+        "series": list(summary.get("series") or []),
+    }
+
+
+async def _dashboard_overview(runtime, total_consumption: dict) -> dict:
+    summaries = {
+        "day": token_ledger.query_summary("day"),
+        "week": token_ledger.query_summary("week"),
+        "month": token_ledger.query_summary("month"),
+    }
+    total = dict(total_consumption.get("total") or {})
+    total_tokens = int(total.get("total_tokens", 0) or 0)
+    total_groups = await _annotate_group_rows(runtime, list(total_consumption.get("by_group") or []))
+    return {
+        "charts": [
+            _chart_from_summary("day", "24小时", summaries["day"]),
+            _chart_from_summary("week", "7天", summaries["week"]),
+            _chart_from_summary("month", "30天", summaries["month"]),
+            {
+                "key": "total",
+                "label": "总消耗",
+                "value_key": "cumulative_total_tokens",
+                "total": total,
+                "series": list(total_consumption.get("series") or []),
+            },
+        ],
+        "model_usage": _add_distribution_fields(
+            list(total_consumption.get("by_model") or []),
+            total_tokens=total_tokens,
+        ),
+        "group_usage": _add_distribution_fields(total_groups, total_tokens=total_tokens),
+    }
+
+
 def build_metrics_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
@@ -128,9 +212,16 @@ def build_metrics_router(*, runtime) -> APIRouter:
         data = token_ledger.query_summary(window_key)
         plugin_config = getattr(runtime, "plugin_config", None)
         provider_usage = _provider_usage(plugin_config=plugin_config, window=window_key)
+        data["by_group"] = await _annotate_group_rows(runtime, list(data.get("by_group") or []))
         data["provider_usage"] = provider_usage
         data["billing"] = _billing_summary(data, provider_usage)
-        data["total_consumption"] = token_ledger.query_total_consumption()
+        total_consumption = token_ledger.query_total_consumption()
+        total_consumption["by_group"] = await _annotate_group_rows(
+            runtime,
+            list(total_consumption.get("by_group") or []),
+        )
+        data["total_consumption"] = total_consumption
+        data["dashboard_overview"] = await _dashboard_overview(runtime, total_consumption)
         return data
 
     @router.get("/group/{group_id}")

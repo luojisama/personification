@@ -11,135 +11,154 @@ function dashboardMoney(value) {
   return "$" + Number(value || 0).toFixed(2);
 }
 
-function renderSparkline(values, tone) {
-  const nums = (values || []).map(v => Number(v || 0));
-  const series = nums.length ? nums : [0, 0];
-  const width = 220, height = 58, pad = 6;
-  const min = Math.min(...series);
-  const max = Math.max(...series);
+function dashboardPercent(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return "0%";
+  if (n > 0 && n < 0.1) return "<0.1%";
+  return n.toFixed(n >= 10 ? 1 : 2).replace(/\.0+$/, "") + "%";
+}
+
+function renderDashboardLineChart(points, valueKey, tone) {
+  const rows = Array.isArray(points) ? points : [];
+  const nums = rows.map(row => Number(row && row[valueKey] || 0));
+  const values = nums.length ? nums : [0, 0];
+  const width = 320, height = 118, padX = 12, padY = 12;
+  const min = Math.min(0, ...values);
+  const max = Math.max(...values);
   const span = max - min || 1;
-  const points = series.map((v, i) => {
-    const x = pad + (series.length === 1 ? 0 : i * (width - pad * 2) / (series.length - 1));
-    const y = height - pad - ((v - min) / span) * (height - pad * 2);
+  const chartPoints = values.map((v, i) => {
+    const x = padX + (values.length === 1 ? 0 : i * (width - padX * 2) / (values.length - 1));
+    const y = height - padY - ((v - min) / span) * (height - padY * 2);
     return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
-  return `<svg class="dashboard-sparkline ${tone || ""}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
-    <polyline points="${points}" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
+  });
+  const line = chartPoints.join(" ");
+  const fill = `${padX},${height - padY} ${line} ${width - padX},${height - padY}`;
+  const firstLabel = rows.length ? String(rows[0].label || rows[0].bucket || "") : "";
+  const lastLabel = rows.length ? String(rows[rows.length - 1].label || rows[rows.length - 1].bucket || "") : "";
+  return `<svg class="dashboard-line-chart ${tone || ""}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+    <polygon points="${fill}" fill="currentColor" opacity="0.10"></polygon>
+    <polyline points="${line}" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"></polyline>
+    <line x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}" stroke="currentColor" stroke-opacity="0.18" stroke-width="1"></line>
+    <text x="${padX}" y="${height - 2}" fill="currentColor" opacity="0.55" font-size="10">${escapeHtml(firstLabel)}</text>
+    <text x="${width - padX}" y="${height - 2}" fill="currentColor" opacity="0.55" font-size="10" text-anchor="end">${escapeHtml(lastLabel)}</text>
   </svg>`;
 }
 
-function renderDashboardMetric(title, value, subtitle, values, tone) {
-  return `<div class="dashboard-metric">
-    <div class="dashboard-metric-head">
-      <span class="muted">${escapeHtml(title)}</span>
-      <strong>${escapeHtml(value)}</strong>
+function renderDashboardLineCard(chart, tone) {
+  const total = chart && chart.total || {};
+  const series = chart && chart.series || [];
+  const valueKey = chart && chart.value_key || "total_tokens";
+  const tokenText = dashboardCompactNumber(total.total_tokens || 0);
+  const callText = Number(total.call_count || 0).toLocaleString();
+  const promptText = dashboardCompactNumber(total.prompt_tokens || 0);
+  const completionText = dashboardCompactNumber(total.completion_tokens || 0);
+  return `<div class="dashboard-line-card">
+    <div class="dashboard-line-head">
+      <span class="muted">${escapeHtml(chart && chart.label || "")}</span>
+      <strong>${escapeHtml(tokenText)} T</strong>
     </div>
-    ${subtitle ? `<div class="dashboard-metric-sub">${escapeHtml(subtitle)}</div>` : ""}
-    ${renderSparkline(values, tone)}
+    <div class="dashboard-line-meta">
+      <span>${escapeHtml(callText)} 次请求</span>
+      <span>P/C ${escapeHtml(promptText)} / ${escapeHtml(completionText)}</span>
+    </div>
+    ${renderDashboardLineChart(series, valueKey, tone)}
   </div>`;
 }
 
-function renderTotalConsumption(consumption) {
-  const data = consumption || {};
-  const total = data.total || {};
-  const providerLabels = {openai:"OpenAI", anthropic:"Anthropic", gemini:"Gemini", codex:"Codex", unknown:"未知"};
-  const topProvider = (data.providers || [])[0] || null;
-  const topModel = (data.by_model || [])[0] || null;
-  const dateRange = data.first_day && data.last_day
-    ? (data.first_day === data.last_day ? data.first_day : `${data.first_day} 至 ${data.last_day}`)
-    : "暂无记录";
-  return `<div class="dashboard-consumption">
-    <div class="dashboard-consumption-title">
-      <span class="muted">总消耗统计</span>
-      <strong>${escapeHtml(dashboardCompactNumber(total.total_tokens || 0))} T</strong>
+function renderDashboardModelUsage(rows) {
+  const data = (rows || []).slice(0, 16);
+  const body = data.map(row => {
+    const width = Math.max(1.5, Math.min(100, Number(row.relative_width || 0) * 100));
+    return `<tr>
+      <td class="dashboard-model-cell" title="${escapeAttr(row.model || "unknown")}">${escapeHtml(row.model || "unknown")}</td>
+      <td>${Number(row.call_count || 0).toLocaleString()}</td>
+      <td>
+        <div class="dashboard-token-bar">
+          <div style="width:${width.toFixed(1)}%"></div>
+          <span>${Number(row.total_tokens || 0).toLocaleString()}</span>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+  return `<div class="card dashboard-panel">
+    <h2>模型用量（总计）</h2>
+    <table class="dashboard-model-table">
+      <thead><tr><th>模型名</th><th>请求次数</th><th>Token 消耗</th></tr></thead>
+      <tbody>${body || '<tr><td colspan="3" class="muted">暂无模型用量。</td></tr>'}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderDashboardGroupPie(rows) {
+  const colors = ["#4f8cff", "#20c997", "#ffb020", "#ff6b6b", "#9775fa", "#38bdf8", "#f472b6", "#94d82d", "#ffa94d", "#adb5bd"];
+  const source = (rows || []).filter(row => Number(row.total_tokens || 0) > 0);
+  const top = source.slice(0, 9);
+  const rest = source.slice(9);
+  const restTokens = rest.reduce((sum, row) => sum + Number(row.total_tokens || 0), 0);
+  const data = restTokens > 0
+    ? [...top, { group_label: "其他群", total_tokens: restTokens, call_count: rest.reduce((sum, row) => sum + Number(row.call_count || 0), 0) }]
+    : top;
+  const total = data.reduce((sum, row) => sum + Number(row.total_tokens || 0), 0);
+  let cursor = 0;
+  const gradient = data.length && total > 0
+    ? data.map((row, index) => {
+        const pct = Number(row.total_tokens || 0) / total * 100;
+        const start = cursor;
+        cursor += pct;
+        return `${colors[index % colors.length]} ${start.toFixed(3)}% ${cursor.toFixed(3)}%`;
+      }).join(", ")
+    : "#2b3138 0% 100%";
+  const legend = data.map((row, index) => {
+    const pct = total > 0 ? Number(row.total_tokens || 0) / total * 100 : 0;
+    const label = row.group_label || row.group_name || `未命名群 ${index + 1}`;
+    return `<div class="dashboard-pie-legend-row">
+      <span class="dashboard-pie-dot" style="background:${colors[index % colors.length]}"></span>
+      <span class="dashboard-pie-name">${escapeHtml(label)}</span>
+      <span class="dashboard-pie-percent">${escapeHtml(dashboardPercent(pct))}</span>
+      <span class="dashboard-pie-token">${escapeHtml(dashboardCompactNumber(row.total_tokens || 0))} T</span>
+    </div>`;
+  }).join("");
+  return `<div class="card dashboard-panel">
+    <h2>群消耗占比（总计）</h2>
+    <div class="dashboard-pie-layout">
+      <div class="dashboard-pie" style="background:conic-gradient(${gradient})">
+        <div><strong>${escapeHtml(dashboardCompactNumber(total))} T</strong><span>总 token</span></div>
+      </div>
+      <div class="dashboard-pie-legend">${legend || '<p class="muted">暂无群用量。</p>'}</div>
     </div>
-    <div class="dashboard-consumption-item"><span class="muted">累计请求</span><strong>${Number(total.call_count || 0).toLocaleString()}</strong></div>
-    <div class="dashboard-consumption-item"><span class="muted">Prompt / Completion</span><strong>${escapeHtml(dashboardCompactNumber(total.prompt_tokens || 0))} / ${escapeHtml(dashboardCompactNumber(total.completion_tokens || 0))}</strong></div>
-    <div class="dashboard-consumption-item"><span class="muted">最高 provider</span><strong>${escapeHtml(topProvider ? (providerLabels[topProvider.provider] || topProvider.provider) : "-")}</strong></div>
-    <div class="dashboard-consumption-item"><span class="muted">最高模型</span><strong title="${escapeAttr(topModel ? topModel.model : "")}">${escapeHtml(topModel ? topModel.model : "-")}</strong></div>
-    <div class="dashboard-consumption-item wide"><span class="muted">账本范围</span><strong>${escapeHtml(dateRange)}</strong></div>
   </div>`;
 }
 
 function renderDashboard() {
   const d = state.dashboard;
   if (!d) return `<div class="card muted">加载中…</div>`;
-  const total = d.total || {};
-  const billing = d.billing || {};
-  const quota = billing.quota || {};
-  const series = d.series || [];
-  const billingSeries = billing.series || [];
-  const tabs = [
-    ["day", "24小时"],
-    ["week", "7天"],
-    ["month", "30天"],
-  ].map(([w, label]) => `<button class="${state.dashboardWindow===w?'active':''}" onclick="switchDashboard('${w}')">${label}</button>`).join("");
-  const modelRowsData = (d.model_distribution && d.model_distribution.length ? d.model_distribution : d.by_model || []).slice(0, 8);
-  const maxModelTokens = Math.max(...modelRowsData.map(r => Number(r.total_tokens || 0)), 1);
-  const modelRows = modelRowsData.map(row => {
-    const tokens = Number(row.total_tokens || 0);
-    const width = Math.max(1.5, Math.min(100, Number(row.relative_width || 0) * 100 || tokens / maxModelTokens * 100));
-    return `<div class="model-distribution-row">
-      <div class="model-name" title="${escapeAttr(row.model || "unknown")}">${escapeHtml(row.model || "unknown")}</div>
-      <div class="model-bar-track"><div class="model-bar" style="width:${width.toFixed(1)}%"><span>${escapeHtml(dashboardCompactNumber(row.call_count || 0))}</span></div></div>
-      <div class="model-token">${escapeHtml(dashboardCompactNumber(tokens))} T</div>
-    </div>`;
-  }).join("");
-  const providers = (d.provider_usage || []).filter(p => Number(p.total_tokens || 0) > 0 || Number(p.monthly_limit || 0) > 0);
-  const maxProviderUsed = Math.max(...providers.map(p => Number(p.total_tokens || 0)), 1);
-  const providerRows = providers.map(p => {
-    const used = Number(p.total_tokens || 0);
-    const limit = Number(p.monthly_limit || 0);
-    const pct = limit > 0 ? Math.min(100, used / limit * 100) : Math.min(100, used / maxProviderUsed * 100);
-    const valueText = limit > 0
-      ? `${dashboardCompactNumber(used)} / ${dashboardCompactNumber(limit)} tokens`
-      : `${dashboardCompactNumber(used)} tokens / 不限额`;
-    return `<div class="quota-usage-row">
-      <div class="between"><span>${escapeHtml(p.label || p.provider || "provider")}</span><span class="muted">${escapeHtml(valueText)}</span></div>
-      <div class="quota-track"><div class="quota-fill" style="width:${pct.toFixed(1)}%"></div></div>
-    </div>`;
-  }).join("");
-  const byDay = (d.by_day || []).map(row => `<tr><td>${escapeHtml(row.bucket_day)}</td><td>${Number(row.total_tokens||0).toLocaleString()}</td><td>${Number(row.call_count||0).toLocaleString()}</td></tr>`).join("");
-  const byGroup = (d.by_group || []).map(row => `<tr><td>${escapeHtml(row.group_id)}</td><td>${Number(row.total_tokens||0).toLocaleString()}</td><td>${Number(row.call_count||0).toLocaleString()}</td></tr>`).join("");
-  const empty = (total.total_tokens || 0) === 0;
-  const costSubtitle = billing.cost_configured ? "" : "本地未配置模型单价";
-  const quotaSubtitle = quota.unlimited
-    ? `已记 ${dashboardCompactNumber(quota.used_tokens || total.total_tokens || 0)} tokens · 未设月度上限`
-    : `已用 ${dashboardCompactNumber(quota.limited_used_tokens || 0)} / ${dashboardCompactNumber(quota.limit_tokens || 0)} tokens`;
+  const overview = d.dashboard_overview || {};
+  const charts = overview.charts && overview.charts.length
+    ? overview.charts
+    : [
+        { key: "day", label: "24小时", total: d.total || {}, series: d.series || [], value_key: "total_tokens" },
+        { key: "week", label: "7天", total: d.total || {}, series: d.series || [], value_key: "total_tokens" },
+        { key: "month", label: "30天", total: d.total || {}, series: d.series || [], value_key: "total_tokens" },
+        { key: "total", label: "总消耗", total: (d.total_consumption || {}).total || {}, series: (d.total_consumption || {}).series || [], value_key: "cumulative_total_tokens" },
+      ];
+  const tones = ["blue", "green", "orange", "purple"];
+  const totalTokens = Number(((d.total_consumption || {}).total || {}).total_tokens || 0);
+  const empty = totalTokens === 0;
   return `<div class="dashboard-toolbar">
-      <div class="dashboard-tabs">${tabs}</div>
+      <div>
+        <h2 style="margin:0">Token 消耗统计</h2>
+        <p class="muted" style="margin:4px 0 0;font-size:12px">24h、7天、30天与全量累计；模型与群占比使用总计账本。</p>
+      </div>
       <a href="#logs" onclick="state.view='logs'; loadView().then(render)">查看日志 →</a>
     </div>
-    <div class="dashboard-metric-grid">
-      ${renderDashboardMetric("请求花费", dashboardMoney(billing.request_cost), costSubtitle, billingSeries.map(p => p.request_cost), "green")}
-      ${renderDashboardMetric("额度扣减", dashboardMoney(billing.credit_deduction), quotaSubtitle, billingSeries.map(p => p.credit_deduction || p.tokens), "orange")}
-      ${renderDashboardMetric("请求数", dashboardCompactNumber(total.call_count || 0), "", series.map(p => p.call_count), "purple")}
-      ${renderDashboardMetric("Tokens", dashboardCompactNumber(total.total_tokens || 0), "", series.map(p => p.total_tokens), "blue")}
+    <div class="dashboard-line-grid">
+      ${charts.slice(0, 4).map((chart, index) => renderDashboardLineCard(chart, tones[index % tones.length])).join("")}
     </div>
     ${empty ? `<div class="alert info">暂无 token 数据。LLM 调用记录写入后，这里会展示本地 token 账本统计。</div>` : ""}
-    ${renderTotalConsumption(d.total_consumption)}
-    <div class="dashboard-main-grid">
-      <div class="card dashboard-panel">
-        <h2>模型使用分布</h2>
-        <div class="model-distribution">${modelRows || '<p class="muted">暂无模型用量。</p>'}</div>
-      </div>
-      <div class="card dashboard-panel">
-        <h2>套餐使用情况</h2>
-        <div class="quota-usage">${providerRows || '<p class="muted">暂无 provider 用量；可在配置中心设置各 provider 月度 token 额度。</p>'}</div>
-      </div>
-    </div>
-    <details class="card dashboard-details">
-      <summary class="muted" style="cursor:pointer">明细</summary>
-      <div class="dashboard-detail-grid">
-        <div><h3>按日期</h3><table><thead><tr><th>日期</th><th>总 token</th><th>调用</th></tr></thead><tbody>${byDay || `<tr><td colspan="3" class="muted">无</td></tr>`}</tbody></table></div>
-        <div><h3>按群</h3><table><thead><tr><th>群号</th><th>总 token</th><th>调用</th></tr></thead><tbody>${byGroup || `<tr><td colspan="3" class="muted">无</td></tr>`}</tbody></table></div>
-      </div>
-    </details>`;
-}
-
-async function switchDashboard(window) {
-  state.dashboardWindow = window;
-  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+    <div class="dashboard-usage-grid">
+      ${renderDashboardModelUsage(overview.model_usage || ((d.total_consumption || {}).by_model || d.by_model || []))}
+      ${renderDashboardGroupPie(overview.group_usage || ((d.total_consumption || {}).by_group || d.by_group || []))}
+    </div>`;
 }
 
 const HEALTH_STATUS = {

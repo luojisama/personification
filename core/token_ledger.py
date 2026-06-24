@@ -226,7 +226,33 @@ def query_total_consumption() -> dict[str, Any]:
             WHERE model != ''
             GROUP BY model
             ORDER BY total_tokens DESC
-            LIMIT 10
+            LIMIT 50
+            """
+        ).fetchall()
+        group_rows = conn.execute(
+            """
+            SELECT group_id,
+                   SUM(prompt_tokens) AS prompt_tokens,
+                   SUM(completion_tokens) AS completion_tokens,
+                   SUM(total_tokens) AS total_tokens,
+                   SUM(call_count) AS call_count
+            FROM token_usage_ledger
+            WHERE group_id != ''
+            GROUP BY group_id
+            ORDER BY total_tokens DESC
+            LIMIT 50
+            """
+        ).fetchall()
+        day_rows = conn.execute(
+            """
+            SELECT bucket_day,
+                   SUM(prompt_tokens) AS prompt_tokens,
+                   SUM(completion_tokens) AS completion_tokens,
+                   SUM(total_tokens) AS total_tokens,
+                   SUM(call_count) AS call_count
+            FROM token_usage_ledger
+            GROUP BY bucket_day
+            ORDER BY bucket_day ASC
             """
         ).fetchall()
 
@@ -262,6 +288,20 @@ def query_total_consumption() -> dict[str, Any]:
             _row_to_dict(row, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="model")
             for row in model_rows
         ],
+        "by_group": [
+            _row_to_dict(row, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="group_id")
+            for row in group_rows
+        ],
+        "series": _build_total_series(
+            [
+                _row_to_dict(
+                    row,
+                    ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"),
+                    key="bucket_day",
+                )
+                for row in day_rows
+            ]
+        ),
     }
 
 
@@ -328,6 +368,35 @@ def _build_series(window: str, day_rows: list[dict[str, Any]]) -> list[dict[str,
             }
         )
     return buckets
+
+
+def _build_total_series(day_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按自然日返回全量累计曲线。
+
+    账本当前按天聚合，因此总消耗图展示每日新增与累计 total_tokens。
+    """
+    cumulative = _empty_totals()
+    series: list[dict[str, Any]] = []
+    for row in day_rows:
+        values = {
+            key: int(row.get(key, 0) or 0)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens", "call_count")
+        }
+        for key in cumulative:
+            cumulative[key] += values[key]
+        bucket = str(row.get("bucket_day") or "")
+        series.append(
+            {
+                "bucket": bucket,
+                "label": bucket[5:] if len(bucket) >= 10 else bucket,
+                **values,
+                "cumulative_prompt_tokens": cumulative["prompt_tokens"],
+                "cumulative_completion_tokens": cumulative["completion_tokens"],
+                "cumulative_total_tokens": cumulative["total_tokens"],
+                "cumulative_call_count": cumulative["call_count"],
+            }
+        )
+    return series
 
 
 def query_summary(window: str = "month") -> dict[str, Any]:

@@ -24,9 +24,11 @@ def _runtime_with_data(tmp_path: Path, monkeypatch):
     data_store.init_data_store(cfg)
 
     ledger = load_personification_module("plugin.personification.core.token_ledger")
-    ledger.record_llm_call(model="gpt-x", prompt_tokens=100, completion_tokens=50, group_id="g1")
-    ledger.record_llm_call(model="gpt-x", prompt_tokens=200, completion_tokens=80, group_id="g2")
-    ledger.record_llm_call(model="gpt-y", prompt_tokens=30, completion_tokens=10, group_id="g1")
+    ledger.record_llm_call(model="gpt-x", prompt_tokens=100, completion_tokens=50, group_id="1")
+    ledger.record_llm_call(model="gpt-x", prompt_tokens=200, completion_tokens=80, group_id="2")
+    ledger.record_llm_call(model="gpt-y", prompt_tokens=30, completion_tokens=10, group_id="1")
+    onebot_cache = load_personification_module("plugin.personification.core.onebot_cache")
+    onebot_cache._clear_caches_for_testing()
 
     # 准备一份全局画像和一份群内画像
     memory_store_mod = load_personification_module("plugin.personification.core.memory_store")
@@ -43,10 +45,16 @@ def _runtime_with_data(tmp_path: Path, monkeypatch):
     favorability_service.set_score("u_alpha", 66.0, actor="test")
     favorability_service.set_score("group_g1", 88.0, actor="test")
 
+    class _InfoBot:
+        async def get_group_info(self, group_id: int):
+            names = {1: "测试一群", 2: "测试二群"}
+            return {"group_id": group_id, "group_name": names.get(int(group_id), "")}
+
     runtime_bundle = SimpleNamespace(
         profile_service=profile_service,
         memory_store=store,
         favorability_service=favorability_service,
+        get_bots=lambda: {"1": _InfoBot()},
     )
 
     app_module = load_personification_module("plugin.personification.webui.app")
@@ -108,8 +116,10 @@ def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
     distribution = {row["model"]: row for row in body["model_distribution"]}
     assert distribution["gpt-x"]["relative_width"] == 1.0
     groups = {row["group_id"]: row for row in body["by_group"]}
-    assert groups["g1"]["total_tokens"] == 100 + 50 + 30 + 10
-    assert groups["g2"]["total_tokens"] == 280
+    assert groups["1"]["total_tokens"] == 100 + 50 + 30 + 10
+    assert groups["2"]["total_tokens"] == 280
+    assert groups["1"]["group_name"] == "测试一群"
+    assert groups["1"]["group_label"] == "测试一群"
     providers = {row["provider"]: row for row in body["provider_usage"]}
     assert providers["openai"]["total_tokens"] == body["total"]["total_tokens"]
     assert providers["openai"]["monthly_limit"] == 1000
@@ -119,6 +129,15 @@ def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
     assert body["total_consumption"]["total"]["call_count"] == body["total"]["call_count"]
     assert body["total_consumption"]["first_day"]
     assert body["total_consumption"]["last_day"]
+    assert body["total_consumption"]["series"][-1]["cumulative_total_tokens"] == body["total"]["total_tokens"]
+    assert {chart["key"] for chart in body["dashboard_overview"]["charts"]} == {"day", "week", "month", "total"}
+    assert len(body["dashboard_overview"]["charts"]) == 4
+    overview_models = {row["model"]: row for row in body["dashboard_overview"]["model_usage"]}
+    assert overview_models["gpt-x"]["call_count"] == 2
+    assert overview_models["gpt-x"]["total_tokens"] == 430
+    overview_groups = {row["group_id"]: row for row in body["dashboard_overview"]["group_usage"]}
+    assert overview_groups["1"]["group_label"] == "测试一群"
+    assert overview_groups["1"]["percent"] > 0
 
 
 def test_dashboard_window_validation(_runtime_with_data) -> None:
