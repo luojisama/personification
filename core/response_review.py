@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, Iterable
 
 from ..agent.runtime.planner import OUTPUT_MODE_LENGTHS
 from .reply_text_policy import (
+    looks_like_formulaic_reply_tic,
     looks_like_markdown_reply,
     looks_like_visible_reasoning_trace,
     normalize_visible_reply_text,
@@ -159,6 +160,7 @@ def arbitrate_reply_mode(
 def is_agent_reply_ooc(text: str) -> bool:
     return bool(
         _AGENT_REPLY_OOC_PATTERNS.search(str(text or ""))
+        or looks_like_formulaic_reply_tic(text)
         or looks_like_visible_reasoning_trace(text)
         or looks_like_markdown_reply(text)
     )
@@ -361,9 +363,9 @@ async def review_response_text(
                 f"{'当前是直呼/提及 bot 的消息，禁止输出 no_reply。' if is_direct_mention else ''}"
                 "普通短句 banter、顺着上一句接话、轻量吐槽，优先 accept 或 rewrite，不要轻易 no_reply。"
                 "只输出 JSON，不要解释。"
-                "\n## 必须 rewrite 的 AI 味回复模式（重点检查）\n1. 「回声评论」：把用户说的话原样重复后加“太真实了/太直球了/太 X 了吧/真的假的”等感叹——必须改写为不重复原话的短句接话。\n2. 候选回复中超过 3 个连续字与用户原话重叠，且没有新增信息或立场——必须 rewrite。\n3. 候选只是在用感叹词复述用户语义，没有新事实、延续话题、转向或明确态度——必须 rewrite。\n4. 「安抚式客服腔」：以“别这么说/已经很够用了/不要这样想/你很棒的”开头——改写为自然接话。\n5. 「旁白式观察」：类似“真去做了啊/真的行动了/居然真的 XX 了”的旁白——改写为参与式短句。\n6. 「梗分析腔」：用“像是把 X 玩成 Y 了/意思就是/可以理解成”解释梗结构——改写为直接接梗。\n7. 「营业感叹腔」：用“(也)太……了吧/……爆了/绝了/谁懂啊/笑死/绷不住了/yyds”这类口号式感叹收尾或起势——改写成平铺直叙的接话，去掉感叹营业腔和网络流行语，不喊口号。\n改写原则：去掉对用户发言的复述和分析，按 output_mode 的长度要求输出；改写后不得引入新的回声模式或营业感叹腔。"
-                "\n8. 出现 markdown 格式、标题、项目符号列表、编号列表、代码块、链接列表时，必须改成纯文本短句。"
-                "\n9. 出现 Step 1/Step 2、步骤 1/步骤 2 这类内部推理、审查清单或草稿过程时，必须 rewrite，只保留最终要对用户说的一句。"
+                "\n## 必须 rewrite 的 AI 味回复模式（重点检查）\n1. 「回声评论」：把用户说的话原样重复后加“太真实了/太直球了/太 X 了吧/真的假的”等感叹——必须改写为不重复原话的短句接话。\n2. 候选回复中超过 3 个连续字与用户原话重叠，且没有新增信息或立场——必须 rewrite。\n3. 候选只是在用感叹词复述用户语义，没有新事实、延续话题、转向或明确态度——必须 rewrite。\n4. 「安抚式客服腔」：以“别这么说/已经很够用了/不要这样想/你很棒的”开头——改写为自然接话。\n5. 「旁白式观察」：类似“真去做了啊/真的行动了/居然真的 XX 了”的旁白——改写为参与式短句。\n6. 「梗分析腔」：用“像是把 X 玩成 Y 了/意思就是/可以理解成”解释梗结构——改写为直接接梗。\n7. 「营业感叹腔」：用“(也)太……了吧/……爆了/绝了/谁懂啊/笑死/绷不住了/yyds”这类口号式感叹收尾或起势——改写成平铺直叙的接话，去掉感叹营业腔和网络流行语，不喊口号。\n8. 「固定起手口癖」：用“等下，/等一下，”开头，或反复用“这也/这也太/你这也/这听着也”评价用户、图片、表情、剧情——必须换一种自然说法，不要保留这个开头或句式。\n改写原则：去掉对用户发言的复述和分析，按 output_mode 的长度要求输出；改写后不得引入新的回声模式、营业感叹腔或固定起手口癖。"
+                "\n9. 出现 markdown 格式、标题、项目符号列表、编号列表、代码块、链接列表时，必须改成纯文本短句。"
+                "\n10. 出现 Step 1/Step 2、步骤 1/步骤 2 这类内部推理、审查清单或草稿过程时，必须 rewrite，只保留最终要对用户说的一句。"
                 "\n如果语义情绪帧里 persona_info_added=tone_only 且 persona_echoed_user_phrase=true，也必须 rewrite。"
             ),
         },

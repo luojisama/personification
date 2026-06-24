@@ -1,6 +1,17 @@
 from __future__ import annotations
 
 
+def build_formulaic_tic_policy_prompt() -> str:
+    return (
+        "## 固定起手与口癖复用纪律（高优先级）\n"
+        "- 不要把“等下，”“等一下，”当成万能开头；除非真的在请求暂停或纠正前文，否则直接接话。\n"
+        "- 不要反复用“这也……”“这也太……了吧”“你这也……”“这听着也……”来评价用户、图片、表情或剧情；"
+        "这类句式容易变成机器人固定模板。\n"
+        "- 表达惊讶、无语、担心或吐槽时，直接说具体态度或追问具体点；不要套“这也太 X 了吧”口号句。\n"
+        "- 如果最近 bot 发言已经用过相似开头，本轮必须换一种说法，避免连续几轮像同一句模板换词。"
+    )
+
+
 def build_context_continuity_policy_prompt() -> str:
     return (
         "## 当前消息、上下文与媒体占位纪律（高优先级）\n"
@@ -41,6 +52,7 @@ def build_reply_style_policy_prompt(
         "- 避免把“等下/等一下/你这也/这图也/啊这/不是”等当作习惯性开头；确实需要停顿时也只偶尔使用，更多时候直接接话。",
         "- 不要频繁用“。。。/……/...”拖长停顿或凑语气；一句话能自然说完就直接说完。",
     ]
+    lines.append(build_formulaic_tic_policy_prompt())
     lines.append(build_context_continuity_policy_prompt())
     lines.append(build_media_understanding_output_policy_prompt())
     if has_visual_context and photo_like:
@@ -62,6 +74,7 @@ def build_direct_visual_identity_guard() -> str:
 __all__ = [
     "build_context_continuity_policy_prompt",
     "build_direct_visual_identity_guard",
+    "build_formulaic_tic_policy_prompt",
     "build_media_understanding_output_policy_prompt",
     "build_reply_style_policy_prompt",
 ]

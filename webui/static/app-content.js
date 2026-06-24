@@ -140,6 +140,24 @@ async function deleteStickerByName(name) {
   } catch (e) { alertFlash("err", "删除失败：" + e.message); }
 }
 
+function formatInnerPendingThoughts(value) {
+  if (!value || (Array.isArray(value) && !value.length)) return "-";
+  const items = Array.isArray(value) ? value : [value];
+  const texts = items.map(item => {
+    if (item == null) return "";
+    if (typeof item === "string" || typeof item === "number" || typeof item === "boolean") {
+      return String(item).trim();
+    }
+    if (typeof item === "object") {
+      const primary = item.thought || item.text || item.summary || item.content || item.title;
+      if (primary) return String(primary).trim();
+      try { return JSON.stringify(item); } catch (_e) { return ""; }
+    }
+    return String(item || "").trim();
+  }).filter(Boolean);
+  return texts.slice(-3).join(" / ") || "-";
+}
+
 function renderMemory() {
   const mem = state.memory;
   const inner = state.memoryInnerState;
@@ -175,7 +193,7 @@ function renderMemory() {
       <div class="row" style="gap:30px;flex-wrap:wrap">
         <div><div class="muted">mood</div><div style="font-size:18px;margin-top:4px">${escapeHtml(String(s.mood||'-'))}</div></div>
         <div><div class="muted">energy</div><div style="font-size:18px;margin-top:4px">${escapeHtml(String(s.energy||'-'))}</div></div>
-        <div><div class="muted">pending</div><div style="font-size:13px;margin-top:4px">${escapeHtml(String(s.pending_thoughts||'-')).slice(0,80)||'-'}</div></div>
+        <div><div class="muted">pending</div><div style="font-size:13px;margin-top:4px">${escapeHtml(formatInnerPendingThoughts(s.pending_thoughts)).slice(0,120)||'-'}</div></div>
       </div>
       ${warmRows ? `<h3 style="margin-top:14px;margin-bottom:6px;font-size:13px">用户好感度</h3><table style="max-width:420px"><thead><tr><th>用户</th><th>好感</th></tr></thead><tbody>${warmRows}</tbody></table>`:''}</div>`;
   }

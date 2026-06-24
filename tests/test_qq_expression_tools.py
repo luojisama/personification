@@ -11,6 +11,7 @@ action_executor_mod = load_personification_module("plugin.personification.agent.
 chat_intent_mod = load_personification_module("plugin.personification.core.chat_intent")
 planner_mod = load_personification_module("plugin.personification.agent.runtime.planner")
 qq_library = load_personification_module("plugin.personification.core.qq_expression_library")
+qq_diagnostics = load_personification_module("plugin.personification.core.qq_expression_diagnostics")
 qq_tools = load_personification_module("plugin.personification.core.qq_expression_tools")
 tool_catalog = load_personification_module("plugin.personification.agent.runtime.tool_catalog")
 tool_registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
@@ -246,6 +247,44 @@ def test_render_qq_super_expression_uses_face_extension_fields() -> None:
     assert "id=182" in text
     assert "large=True" in text or "large=1" in text
     assert rendered.history_text == "[QQ超级表情:笑哭]"
+
+
+def test_build_qq_expression_test_messages_cover_three_command_kinds() -> None:
+    async def _run():
+        bot = FakeBot()
+        bot.api_results["fetch_custom_face"] = {"url": ["https://example.test/fav.png"]}
+        face = await qq_diagnostics.build_qq_expression_test_message(
+            "小黄脸",
+            message_segment_cls=action_executor_mod.MessageSegment,
+            bot=bot,
+            plugin_config=_config(),
+        )
+        super_face = await qq_diagnostics.build_qq_expression_test_message(
+            "超级表情",
+            message_segment_cls=action_executor_mod.MessageSegment,
+            bot=bot,
+            plugin_config=_config(),
+        )
+        favorite = await qq_diagnostics.build_qq_expression_test_message(
+            "收藏表情",
+            message_segment_cls=action_executor_mod.MessageSegment,
+            bot=bot,
+            plugin_config=_config(),
+        )
+        return face, super_face, favorite, bot.calls
+
+    face, super_face, favorite, calls = asyncio.run(_run())
+
+    assert face.ok is True
+    assert face.marker == "[QQ表情:笑哭]"
+    assert str(face.render.message) == "[CQ:face,id=182]"
+    assert super_face.ok is True
+    assert super_face.marker == "[QQ超级表情:笑哭]"
+    assert "[CQ:face" in str(super_face.render.message)
+    assert favorite.ok is True
+    assert favorite.marker == "[QQ收藏表情:随机]"
+    assert str(favorite.render.message).startswith("[CQ:image,file=https://example.test/fav.png")
+    assert calls == [("fetch_custom_face", {"count": 20})]
 
 
 def test_qq_expression_prompt_warns_about_ambiguous_smile() -> None:

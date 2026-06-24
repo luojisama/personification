@@ -48,6 +48,20 @@ def test_normalize_visible_reply_text_drops_reasoning_trace_and_orphan_bracket()
     assert reply_text_policy.normalize_visible_reply_text("[") == ""
 
 
+def test_normalize_visible_reply_text_reduces_formulaic_opening_tics() -> None:
+    assert reply_text_policy.normalize_visible_reply_text("等下，这什么表情") == "这什么表情"
+    assert reply_text_policy.normalize_visible_reply_text("这也太危险了吧，你到底在玩什么") == "挺危险的，你到底在玩什么"
+    assert reply_text_policy.normalize_visible_reply_text("这也抽得太狠了吧") == "抽得挺狠"
+    assert reply_text_policy.normalize_visible_reply_text("被雷炸了，这也太刺激了吧") == "被雷炸了，挺刺激的"
+    assert reply_text_policy.normalize_visible_reply_text("这也行") == "这也行"
+
+
+def test_looks_like_formulaic_reply_tic_detects_repeated_reply_templates() -> None:
+    assert reply_text_policy.looks_like_formulaic_reply_tic("等下，这什么表情")
+    assert reply_text_policy.looks_like_formulaic_reply_tic("被雷炸了，这也太刺激了吧")
+    assert not reply_text_policy.looks_like_formulaic_reply_tic("这也行")
+
+
 def test_looks_like_markdown_reply_detects_visible_formatting() -> None:
     assert reply_text_policy.looks_like_markdown_reply("**广州** 这两天雨多")
     assert reply_text_policy.looks_like_markdown_reply("- 22日雨\n- 23日雨")

@@ -5,6 +5,7 @@ from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageEvent
 from nonebot.params import CommandArg
 
+from ..core.qq_expression_diagnostics import build_qq_expression_test_message
 from ..core.remote_skill_review import get_remote_skill_review_stats
 
 
@@ -222,6 +223,53 @@ def register_admin_matchers(
             logger=logger,
         )
 
+    test_qq_face = _register_command(
+        "测试小黄脸",
+        aliases={"拟人测试小黄脸", "测试QQ小黄脸"},
+        permission=superuser_permission,
+        priority=5,
+        block=True,
+    )
+    test_qq_super = _register_command(
+        "测试超级表情",
+        aliases={"拟人测试超级表情", "测试QQ超级表情"},
+        permission=superuser_permission,
+        priority=5,
+        block=True,
+    )
+    test_qq_favorite = _register_command(
+        "测试收藏表情",
+        aliases={"拟人测试收藏表情", "测试QQ收藏表情"},
+        permission=superuser_permission,
+        priority=5,
+        block=True,
+    )
+
+    async def _send_qq_expression_test(matcher: Any, bot: Bot, event: MessageEvent, kind: str) -> None:
+        result = await build_qq_expression_test_message(
+            kind,
+            message_segment_cls=message_segment_cls,
+            bot=bot,
+            plugin_config=plugin_config,
+            logger=logger,
+        )
+        if result.ok and result.render is not None and result.render.message:
+            await bot.send(event, result.render.message)
+            return
+        await matcher.finish(result.error or "QQ 表情测试失败。")
+
+    @test_qq_face.handle()
+    async def _handle_test_qq_face(bot: Bot, event: MessageEvent):
+        await _send_qq_expression_test(test_qq_face, bot, event, "face")
+
+    @test_qq_super.handle()
+    async def _handle_test_qq_super(bot: Bot, event: MessageEvent):
+        await _send_qq_expression_test(test_qq_super, bot, event, "super")
+
+    @test_qq_favorite.handle()
+    async def _handle_test_qq_favorite(bot: Bot, event: MessageEvent):
+        await _send_qq_expression_test(test_qq_favorite, bot, event, "favorite")
+
     return {
         "group_fav_query": group_fav_query,
         "set_group_fav": set_group_fav,
@@ -236,4 +284,7 @@ def register_admin_matchers(
         "disable_tts": disable_tts,
         "enable_schedule": enable_schedule,
         "view_config": view_config,
+        "test_qq_face": test_qq_face,
+        "test_qq_super": test_qq_super,
+        "test_qq_favorite": test_qq_favorite,
     }

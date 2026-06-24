@@ -18,6 +18,9 @@ def test_reply_style_policy_keeps_visual_context_internal() -> None:
     assert "不要主动讲图里是什么" in prompt
     assert "不要堆砌互联网热词" in prompt
     assert "等下/等一下/你这也/这图也" in prompt
+    assert "固定起手与口癖复用纪律" in prompt
+    assert "这也太" in prompt
+    assert "最近 bot 发言已经用过相似开头" in prompt
     assert "。。。/……/..." in prompt
     assert "仅供理解" in prompt
     assert "不要把判断过程说给用户" in prompt

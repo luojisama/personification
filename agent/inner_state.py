@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
@@ -21,6 +22,30 @@ DEFAULT_STATE = {
     "updated_at": "",
 }
 
+_MOOD_LABELS = ("平静", "开心", "疲惫", "困倦", "烦躁", "低落", "期待", "紧张", "放松", "无语", "好奇")
+_ENERGY_LABELS = ("高", "中", "低", "正常")
+_MOOD_ALIASES = {
+    "平淡": "平静",
+    "平稳": "平静",
+    "普通": "平静",
+    "正常": "平静",
+    "高兴": "开心",
+    "愉快": "开心",
+    "累": "疲惫",
+    "疲劳": "疲惫",
+    "想睡": "困倦",
+    "困": "困倦",
+    "生气": "烦躁",
+    "烦": "烦躁",
+    "难过": "低落",
+    "伤心": "低落",
+    "期待": "期待",
+    "紧张": "紧张",
+    "放松": "放松",
+    "无语": "无语",
+    "好奇": "好奇",
+}
+
 INNER_STATE_UPDATE_PROMPT = load_prompt("inner_state_update")
 DIARY_STATE_UPDATE_PROMPT = load_prompt("diary_state_update")
 
@@ -31,29 +56,122 @@ def get_personification_data_dir(plugin_config: Any | None = None) -> Path:
 _STORE_NAME = "inner_state"
 
 
+def _compact_text(value: Any, *, limit: int = 120) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    return text[:limit].strip()
+
+
+def _normalize_mood(value: Any, *, fallback: str = DEFAULT_STATE["mood"]) -> str:
+    text = _compact_text(value, limit=80)
+    if not text:
+        return fallback
+    if text in _MOOD_LABELS:
+        return text
+    for label in _MOOD_LABELS:
+        if label in text:
+            return label
+    compact = re.sub(r"[\s，。！？、,.!?;；:：]+", "", text)
+    for needle, label in _MOOD_ALIASES.items():
+        if needle and needle in compact:
+            return label
+    if fallback == "":
+        return ""
+    return fallback if fallback in _MOOD_LABELS else DEFAULT_STATE["mood"]
+
+
+def _normalize_energy(value: Any, *, fallback: str = DEFAULT_STATE["energy"]) -> str:
+    text = _compact_text(value, limit=20)
+    if not text:
+        return fallback
+    if text in _ENERGY_LABELS:
+        return text
+    if "高" in text:
+        return "高"
+    if "低" in text:
+        return "低"
+    if "中" in text:
+        return "中"
+    if "正常" in text or "普通" in text:
+        return "正常"
+    if fallback == "":
+        return ""
+    return fallback if fallback in _ENERGY_LABELS else DEFAULT_STATE["energy"]
+
+
+def _normalize_pending_thoughts(value: Any, *, limit: int = 8) -> list[dict[str, str]]:
+    if value in (None, "", False):
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = [value]
+    items: list[dict[str, str]] = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            thought = ""
+            for key in ("thought", "text", "summary", "content", "title"):
+                thought = _compact_text(item.get(key), limit=120)
+                if thought:
+                    break
+            if not thought:
+                thought = _compact_text(json.dumps(item, ensure_ascii=False), limit=120)
+            if thought:
+                normalized = {"thought": thought}
+                for key in ("status", "due", "user_id", "group_id"):
+                    val = _compact_text(item.get(key), limit=40)
+                    if val:
+                        normalized[key] = val
+                items.append(normalized)
+            continue
+        thought = _compact_text(item, limit=120)
+        if thought:
+            items.append({"thought": thought})
+    return items[-max(1, int(limit)):]
+
+
+def normalize_inner_state(state: dict | None) -> dict:
+    normalized = copy.deepcopy(DEFAULT_STATE)
+    if isinstance(state, dict):
+        normalized.update(state)
+    normalized["mood"] = _normalize_mood(normalized.get("mood"), fallback=DEFAULT_STATE["mood"])
+    normalized["energy"] = _normalize_energy(normalized.get("energy"), fallback=DEFAULT_STATE["energy"])
+    normalized["pending_thoughts"] = _normalize_pending_thoughts(normalized.get("pending_thoughts"))
+
+    relation = normalized.get("relation_warmth")
+    if not isinstance(relation, dict):
+        relation = {}
+    clipped_relation: Dict[str, Any] = {}
+    for uid, score in relation.items():
+        try:
+            clipped_relation[str(uid)] = max(-1.0, min(1.0, float(score)))
+        except Exception:
+            continue
+    normalized["relation_warmth"] = clipped_relation
+    normalized["updated_at"] = str(normalized.get("updated_at") or "")
+    return normalized
+
+
 async def load_inner_state(data_dir: Path) -> dict:
     _ = data_dir
     loaded = await get_data_store().load(_STORE_NAME)
     if not isinstance(loaded, dict):
         return copy.deepcopy(DEFAULT_STATE)
-    state = copy.deepcopy(DEFAULT_STATE)
-    state.update(loaded)
-    return state
+    return normalize_inner_state(loaded)
 
 
 async def save_inner_state(data_dir: Path, state: dict) -> None:
     _ = data_dir
-    await get_data_store().save(_STORE_NAME, state)
+    await get_data_store().save(_STORE_NAME, normalize_inner_state(state))
 
 
 def _merge_state(current_state: Dict[str, Any], new_state: Dict[str, Any]) -> Dict[str, Any]:
-    merged = copy.deepcopy(DEFAULT_STATE)
-    merged.update(current_state or {})
+    merged = normalize_inner_state(current_state or {})
     now = datetime.now()
-    current_mood = str(merged.get("mood") or DEFAULT_STATE["mood"]).strip()
-    current_energy = str(merged.get("energy") or DEFAULT_STATE["energy"]).strip()
-    incoming_mood = str((new_state or {}).get("mood") or "").strip()
-    incoming_energy = str((new_state or {}).get("energy") or "").strip()
+    incoming_patch = dict(new_state or {})
+    current_mood = _normalize_mood(merged.get("mood"), fallback=DEFAULT_STATE["mood"])
+    current_energy = _normalize_energy(merged.get("energy"), fallback=DEFAULT_STATE["energy"])
+    incoming_mood = _normalize_mood(incoming_patch.get("mood"), fallback="") if incoming_patch.get("mood") else ""
+    incoming_energy = _normalize_energy(incoming_patch.get("energy"), fallback="") if incoming_patch.get("energy") else ""
 
     updated_at_raw = str(merged.get("updated_at") or "").strip()
     hours_since_update = 0.0
@@ -65,37 +183,23 @@ def _merge_state(current_state: Dict[str, Any], new_state: Dict[str, Any]) -> Di
             hours_since_update = 0.0
 
     if incoming_mood and incoming_mood != current_mood and hours_since_update < 0.5:
-        new_state = dict(new_state or {})
-        new_state["mood"] = current_mood
-    elif incoming_mood and incoming_mood != current_mood and hours_since_update < 2:
-        new_state = dict(new_state or {})
-        new_state["mood"] = f"{current_mood}，但有些{incoming_mood}"
+        incoming_patch["mood"] = current_mood
+    elif incoming_mood:
+        incoming_patch["mood"] = incoming_mood
 
     if incoming_energy:
         if current_energy == "高" and incoming_energy == "低" and hours_since_update < 1:
-            new_state = dict(new_state or {})
-            new_state["energy"] = "中"
-        if current_energy == "低" and incoming_energy == "高" and hours_since_update < 1:
-            new_state = dict(new_state or {})
-            new_state["energy"] = "中"
+            incoming_patch["energy"] = "中"
+        elif current_energy == "低" and incoming_energy == "高" and hours_since_update < 1:
+            incoming_patch["energy"] = "中"
+        else:
+            incoming_patch["energy"] = incoming_energy
 
-    for key, value in (new_state or {}).items():
+    if "pending_thoughts" in incoming_patch:
+        incoming_patch["pending_thoughts"] = _normalize_pending_thoughts(incoming_patch.get("pending_thoughts"))
+
+    for key, value in incoming_patch.items():
         merged[key] = value
-
-    relation = merged.get("relation_warmth")
-    if not isinstance(relation, dict):
-        relation = {}
-    clipped_relation: Dict[str, Any] = {}
-    for uid, score in relation.items():
-        try:
-            clipped_relation[str(uid)] = max(-1.0, min(1.0, float(score)))
-        except Exception:
-            continue
-    merged["relation_warmth"] = clipped_relation
-
-    pending = merged.get("pending_thoughts")
-    if isinstance(pending, list) and len(pending) > 8:
-        merged["pending_thoughts"] = pending[-8:]
 
     hour = now.hour
     if hour >= 23 or hour < 6:
@@ -106,7 +210,7 @@ def _merge_state(current_state: Dict[str, Any], new_state: Dict[str, Any]) -> Di
             merged["energy"] = "中"
 
     merged["updated_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
-    return merged
+    return normalize_inner_state(merged)
 
 
 async def update_inner_state_after_chat(
@@ -127,9 +231,7 @@ async def update_inner_state_after_chat(
         if not isinstance(fresh_state, dict):
             fresh_state = copy.deepcopy(DEFAULT_STATE)
         else:
-            merged_state = copy.deepcopy(DEFAULT_STATE)
-            merged_state.update(fresh_state)
-            fresh_state = merged_state
+            fresh_state = normalize_inner_state(fresh_state)
 
         persona_context = ""
         if persona_snippet:
@@ -200,9 +302,7 @@ async def update_state_from_diary(
         if not isinstance(fresh_state, dict):
             fresh_state = copy.deepcopy(DEFAULT_STATE)
         else:
-            base = copy.deepcopy(DEFAULT_STATE)
-            base.update(fresh_state)
-            fresh_state = base
+            fresh_state = normalize_inner_state(fresh_state)
 
         prompt = DIARY_STATE_UPDATE_PROMPT.replace(
             "{diary_text}",
