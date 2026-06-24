@@ -139,8 +139,45 @@ def test_persona_template_builder_uses_main_model(_runtime_context, monkeypatch)
         async def __call__(self, messages, **kwargs):
             self.calls.append({"messages": messages, "kwargs": kwargs})
             user_text = str(messages[-1]["content"])
-            if "请直接输出模板正文" in user_text:
-                return "## 人设模板\n基础身份：测试角色\n资料冲突与缺口：无"
+            if "生成插件内可直接使用的人设 YAML" in user_text:
+                return """
+name: 测试角色
+tts:
+  voice: default_zh
+  style: 平静 自然
+  user_hint: 用自然语气朗读。
+status: |
+  心情: "平静"
+  状态: "测试中"
+  记忆: ""
+  动作: "看群消息"
+nick_name:
+  - 测试角色
+ack_phrases:
+  - 我看看
+initial_message: "我是测试角色"
+mute_keyword:
+  - 闭嘴
+input: |
+  # 当前时间
+  {time}
+  # 触发原因
+  {trigger_reason}
+  {schedule_instruction}
+  # 对话历史
+  {history_new}
+  # 当前消息
+  {history_last}
+  # 当前状态
+  {status}
+  <output>
+  <message>消息正文</message>
+  </output>
+system: |
+  你是测试角色，不是 AI 助手。
+  ## 资料冲突与缺口
+  - 无
+""".strip()
             if "输出 JSON" in user_text:
                 return '{"facts":["事实 S1"],"conflicts":[],"unknowns":[]}'
             return "ok"
@@ -166,6 +203,89 @@ def test_persona_template_builder_uses_main_model(_runtime_context, monkeypatch)
     assert body["model_role"] == "configured_main"
     assert body["sources"][0]["source"] == "萌娘百科"
     assert len(body["subagents"]) == 3
-    assert "人设模板" in body["template"]
+    assert body["template_valid"] is True
+    assert "system:" in body["template"]
+    assert "input" in body["template_keys"]
     assert len(caller.calls) == 4
     assert all(call["kwargs"].get("use_builtin_search") is True for call in caller.calls[:3])
+
+
+def test_persona_template_builder_has_no_sample_specific_branches() -> None:
+    module = load_personification_module(
+        "plugin.personification.webui.routes.persona_template_routes"
+    )
+    source = module.Path(module.__file__).resolve()
+    text = source.read_text(encoding="utf-8")
+    forbidden_literals = [
+        "绪山真寻",
+        "西木野真姬",
+        "早濑优香",
+        "ONIMAI 官方",
+        "LLWiki",
+        "KivoWiki",
+        "onimai.jp/character/mahiro",
+    ]
+    for literal in forbidden_literals:
+        assert literal not in text
+
+
+def test_persona_template_search_queries_use_generic_aliases() -> None:
+    module = load_personification_module(
+        "plugin.personification.webui.routes.persona_template_routes"
+    )
+    aliases = module._normalize_search_aliases(
+        {
+            "work_aliases": ["Example Work"],
+            "character_aliases": ["Example Hero"],
+            "queries": ["Example Work Example Hero character profile"],
+        },
+        work_title="测试作品",
+        character_name="测试太郎",
+    )
+    queries = module._persona_search_queries("测试作品", "测试太郎", aliases)
+    site_queries = module._persona_site_search_queries("测试作品", "测试太郎", aliases)
+
+    assert "测试 太郎" in aliases["character_aliases"]
+    assert any("Example Work" in query and "Example Hero" in query for query in queries)
+    assert any("测试 太郎" in query for query in queries)
+    assert any(query.startswith("site:") and "Example Hero" in query for query in site_queries)
+
+
+def test_persona_template_source_relevance_rejects_weak_character_mentions() -> None:
+    module = load_personification_module(
+        "plugin.personification.webui.routes.persona_template_routes"
+    )
+    aliases = module._normalize_search_aliases(
+        None,
+        work_title="测试作品",
+        character_name="测试太郎",
+    )
+
+    assert module._source_relevant(
+        work_title="测试作品",
+        character_name="测试太郎",
+        title="测试太郎 - 萌娘百科",
+        summary="测试太郎是《测试作品》的登场角色。",
+        search_aliases=aliases,
+    )
+    assert module._source_relevant(
+        work_title="测试作品",
+        character_name="测试太郎",
+        title="测试作品人物列表",
+        summary="这里介绍测试作品角色，包括测试太郎。",
+        search_aliases=aliases,
+    )
+    assert not module._source_relevant(
+        work_title="测试作品",
+        character_name="测试太郎",
+        title="测试声优",
+        summary="曾在测试作品中为测试太郎配音。",
+        search_aliases=aliases,
+    )
+    assert not module._source_relevant(
+        work_title="测试作品",
+        character_name="测试太郎",
+        title="测试太郎的母亲",
+        summary="测试太郎的母亲是《测试作品》的登场角色。",
+        search_aliases=aliases,
+    )

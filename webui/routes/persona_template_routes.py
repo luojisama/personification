@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urljoin
 
 import httpx
+import yaml
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from ...core import webui_audit_log
@@ -18,6 +22,89 @@ _SOURCE_SUMMARY_LIMIT = 1400
 _SOURCE_CORPUS_LIMIT = 18000
 _RESEARCH_TIMEOUT_SECONDS = 90
 _SYNTHESIS_TIMEOUT_SECONDS = 120
+_TEMPLATE_REFERENCE_LIMIT = 24000
+_FETCHED_PAGE_LIMIT = 3
+_SEARCH_ALIAS_LIMIT = 6
+_SEARCH_QUERY_LIMIT = 30
+_CHARACTER_SOURCE_THRESHOLD = 50
+
+_ROLE_PAGE_HINTS = (
+    "人物列表",
+    "角色列表",
+    "角色介绍",
+    "登场人物",
+    "登場人物",
+    "登场角色",
+    "登場角色",
+    "角色",
+    "character",
+    "characters",
+)
+
+_BIOGRAPHY_NOISE_HINTS = (
+    "声优",
+    "聲優",
+    "配音",
+    "演员",
+    "演員",
+    "歌手",
+    "艺人",
+    "藝人",
+    "个人资料",
+    "个人经历",
+)
+
+_RELATED_CHARACTER_TITLE_HINTS = (
+    "的母亲",
+    "的母親",
+    "的父亲",
+    "的父親",
+    "的姐姐",
+    "的姊姊",
+    "的妹妹",
+    "的哥哥",
+    "的弟弟",
+    "的朋友",
+    "的同学",
+    "的同學",
+    "的老师",
+    "的老師",
+)
+
+_MEDIAWIKI_API_HEADERS = {
+    "User-Agent": "PersonificationBot/1.0 (https://github.com/luojisama/personification) httpx/python",
+    "Accept": "application/json",
+}
+
+_BAIKE_API_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Accept-Encoding": "gzip, deflate",
+}
+
+_REQUIRED_TEMPLATE_KEYS = (
+    "name",
+    "tts",
+    "status",
+    "nick_name",
+    "ack_phrases",
+    "initial_message",
+    "mute_keyword",
+    "input",
+    "system",
+)
+
+_REQUIRED_INPUT_PLACEHOLDERS = (
+    "{time}",
+    "{trigger_reason}",
+    "{history_new}",
+    "{history_last}",
+    "{status}",
+    "{schedule_instruction}",
+)
 
 
 def _clip_text(value: Any, limit: int) -> str:
@@ -25,6 +112,13 @@ def _clip_text(value: Any, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "..."
+
+
+def _clip_multiline(value: Any, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 32].rstrip() + "\n...<truncated>"
 
 
 def _runtime_bundle(runtime: Any) -> Any | None:
@@ -84,12 +178,326 @@ def _source_key(source: dict[str, Any]) -> tuple[str, str, str]:
     )
 
 
+def _dedupe_keep_order(values: list[str], limit: int = 8) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text or text.lower() in seen:
+            continue
+        seen.add(text.lower())
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _compact_alias_text(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text or len(text) > 80:
+        return ""
+    if re.search(r"https?://|[\r\n{}<>]", text, flags=re.I):
+        return ""
+    return text
+
+
+def _cjk_spaced_variants(value: Any) -> list[str]:
+    compact = re.sub(r"\s+", "", str(value or "").strip())
+    if not compact or len(compact) < 3:
+        return []
+    if not re.fullmatch(r"[\u3400-\u9fff\u3040-\u30ff\uff00-\uffef]+", compact):
+        return []
+    variants: list[str] = []
+    # Many ACG character pages are indexed as "surname given-name" even when
+    # users input the no-space Chinese spelling. Try generic split points only.
+    for index in (2, 1, 3):
+        if 0 < index < len(compact):
+            variants.append(f"{compact[:index]} {compact[index:]}")
+    if len(compact) <= 6:
+        variants.append(" ".join(compact))
+    return _dedupe_keep_order(variants, limit=4)
+
+
+def _clean_alias_list(values: list[Any], primary: str, *, limit: int = _SEARCH_ALIAS_LIMIT) -> list[str]:
+    cleaned = [_compact_alias_text(primary)]
+    cleaned.extend(_compact_alias_text(value) for value in values)
+    return _dedupe_keep_order([value for value in cleaned if value], limit=limit)
+
+
+def _normalize_search_aliases(
+    raw: dict[str, Any] | None,
+    *,
+    work_title: str,
+    character_name: str,
+) -> dict[str, list[str]]:
+    raw = raw if isinstance(raw, dict) else {}
+    work_aliases_raw = raw.get("work_aliases", [])
+    character_aliases_raw = raw.get("character_aliases", [])
+    extra_queries_raw = raw.get("queries", [])
+    if not isinstance(work_aliases_raw, list):
+        work_aliases_raw = []
+    if not isinstance(character_aliases_raw, list):
+        character_aliases_raw = []
+    if not isinstance(extra_queries_raw, list):
+        extra_queries_raw = []
+    character_values: list[Any] = [*character_aliases_raw, *_cjk_spaced_variants(character_name)]
+    return {
+        "work_aliases": _clean_alias_list(work_aliases_raw, work_title),
+        "character_aliases": _clean_alias_list(character_values, character_name),
+        "queries": _dedupe_keep_order(
+            [_compact_alias_text(value) for value in extra_queries_raw if _compact_alias_text(value)],
+            limit=6,
+        ),
+    }
+
+
+def _alias_values(search_aliases: dict[str, list[str]] | None, key: str, primary: str) -> list[str]:
+    if not search_aliases:
+        return _clean_alias_list([], primary)
+    values = search_aliases.get(key, []) if isinstance(search_aliases, dict) else []
+    return _clean_alias_list(list(values or []), primary)
+
+
+def _normalized_for_match(value: Any) -> str:
+    return re.sub(r"[\s\-_/|:：,，。！？!?（）()【】\[\]<>]+", "", str(value or "").lower())
+
+
+def _source_relevance_score(
+    *,
+    work_title: str,
+    character_name: str,
+    title: str,
+    summary: str,
+    search_aliases: dict[str, list[str]] | None = None,
+) -> int:
+    title_text = str(title or "")
+    summary_text = str(summary or "")
+    title_norm = _normalized_for_match(title_text)
+    summary_norm = _normalized_for_match(summary_text)
+    haystack = f"{title_norm}{summary_norm}"
+    work_keys = [
+        _normalized_for_match(value)
+        for value in _alias_values(search_aliases, "work_aliases", work_title)
+    ]
+    character_keys = [
+        _normalized_for_match(value)
+        for value in _alias_values(search_aliases, "character_aliases", character_name)
+    ]
+    role_hints = [_normalized_for_match(value) for value in _ROLE_PAGE_HINTS]
+    noise_hints = [_normalized_for_match(value) for value in _BIOGRAPHY_NOISE_HINTS]
+
+    title_has_character = any(key and key in title_norm for key in character_keys)
+    title_exact_character = any(key and title_norm == key for key in character_keys)
+    summary_has_character = any(key and key in summary_norm for key in character_keys)
+    title_has_work = any(key and key in title_norm for key in work_keys)
+    has_work = any(key and key in haystack for key in work_keys)
+    title_has_role_hint = any(hint and hint in title_norm for hint in role_hints)
+    has_role_hint = any(hint and hint in haystack for hint in role_hints)
+    title_has_noise = any(hint and hint in title_norm for hint in noise_hints)
+    title_is_related_character = title_has_character and not title_exact_character and any(
+        _normalized_for_match(hint) in title_norm for hint in _RELATED_CHARACTER_TITLE_HINTS
+    )
+
+    if title_has_character and has_work:
+        score = 100
+    elif title_has_character:
+        score = 92
+    elif summary_has_character and has_work and has_role_hint:
+        score = 72
+    elif title_has_work and title_has_role_hint and summary_has_character:
+        score = 66
+    elif title_has_work and title_has_role_hint:
+        score = 54
+    elif summary_has_character and has_work:
+        score = 44
+    elif has_work and has_role_hint:
+        score = 38
+    else:
+        score = 0
+
+    if title_has_noise and not title_has_character:
+        score -= 35
+    if title_is_related_character:
+        score = min(score, 42)
+    return max(0, score)
+
+
+def _source_relevant(
+    *,
+    work_title: str,
+    character_name: str,
+    title: str,
+    summary: str,
+    search_aliases: dict[str, list[str]] | None = None,
+) -> bool:
+    return (
+        _source_relevance_score(
+            work_title=work_title,
+            character_name=character_name,
+            title=title,
+            summary=summary,
+            search_aliases=search_aliases,
+        )
+        >= _CHARACTER_SOURCE_THRESHOLD
+    )
+
+
+def _source_rank(
+    source: dict[str, Any],
+    *,
+    work_title: str,
+    character_name: str,
+    search_aliases: dict[str, list[str]] | None = None,
+) -> tuple[float, float]:
+    relevance = _source_relevance_score(
+        work_title=work_title,
+        character_name=character_name,
+        title=str(source.get("title") or ""),
+        summary=str(source.get("summary") or ""),
+        search_aliases=search_aliases,
+    )
+    kind_weight = {
+        "wiki_api": 0.18,
+        "baike_api": 0.17,
+        "web_page": 0.12,
+        "wiki": 0.10,
+        "web_search": 0.03,
+    }.get(str(source.get("kind") or ""), 0.0)
+    try:
+        confidence = float(source.get("confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return (relevance + confidence * 10 + kind_weight, confidence)
+
+
+def _persona_search_queries(
+    work_title: str,
+    character_name: str,
+    search_aliases: dict[str, list[str]] | None = None,
+) -> list[str]:
+    work_aliases = _alias_values(search_aliases, "work_aliases", work_title)[:3]
+    character_aliases = _alias_values(search_aliases, "character_aliases", character_name)[:4]
+    queries = [
+        f"{work_aliases[0]} {character_aliases[0]}",
+        f"{character_aliases[0]} {work_aliases[0]} 角色",
+        f"{work_aliases[0]} {character_aliases[0]} 人物设定 口癖 关系",
+        f"{work_aliases[0]} {character_aliases[0]} 官方 角色介绍",
+        f"{work_aliases[0]} {character_aliases[0]} wiki",
+        f"{work_aliases[0]} {character_aliases[0]} character profile",
+        f"{work_aliases[0]} {character_aliases[0]} official character",
+    ]
+    for character in character_aliases:
+        queries.extend(
+            [
+                f"{work_aliases[0]} {character}",
+                f"{character} {work_aliases[0]}",
+                f"{character} {work_aliases[0]} wiki",
+            ]
+        )
+    for work in work_aliases[1:]:
+        for character in character_aliases[:3]:
+            queries.extend(
+                [
+                    f"{work} {character}",
+                    f"{character} {work}",
+                    f"{character} {work} character profile",
+                ]
+            )
+    for character in character_aliases:
+        queries.extend(
+            [
+                character,
+                f"{character} wiki",
+                f"{character} 角色",
+            ]
+        )
+    if search_aliases:
+        queries.extend(search_aliases.get("queries") or [])
+    return _dedupe_keep_order(queries, limit=_SEARCH_QUERY_LIMIT)
+
+
+def _persona_site_search_queries(
+    work_title: str,
+    character_name: str,
+    search_aliases: dict[str, list[str]] | None = None,
+) -> list[str]:
+    work_aliases = _alias_values(search_aliases, "work_aliases", work_title)[:2]
+    character_aliases = _alias_values(search_aliases, "character_aliases", character_name)[:4]
+    domains = (
+        "moegirl.org.cn",
+        "mzh.moegirl.org.cn",
+        "moegirl.uk",
+        "baike.baidu.com",
+        "fandom.com",
+    )
+    queries: list[str] = []
+    for character in character_aliases:
+        for domain in domains[:4]:
+            queries.append(f"site:{domain} {character}")
+    for work in work_aliases:
+        for character in character_aliases[:3]:
+            queries.extend(
+                [
+                    f"site:fandom.com {character} {work}",
+                    f'"{character}" "{work}" 角色',
+                ]
+            )
+    return _dedupe_keep_order(queries, limit=10)
+
+
+def _resolve_prompt_path(raw_path: str) -> Path:
+    cleaned = str(raw_path or "").strip().strip('"').strip("'")
+    path = Path(cleaned).expanduser()
+    if path.is_file():
+        return path
+    return Path(cleaned.replace("\\", "/")).expanduser()
+
+
+def _configured_template_reference(runtime: Any) -> dict[str, Any]:
+    plugin_config = getattr(runtime, "plugin_config", None)
+    candidates = [
+        getattr(plugin_config, "personification_prompt_path", "") if plugin_config is not None else "",
+        getattr(plugin_config, "personification_system_path", "") if plugin_config is not None else "",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            path = _resolve_prompt_path(str(candidate))
+            if not path.is_file() or path.suffix.lower() not in {".yml", ".yaml"}:
+                continue
+            content = path.read_text(encoding="utf-8")
+            parsed = yaml.safe_load(content)
+            keys = list(parsed.keys()) if isinstance(parsed, dict) else []
+            return {
+                "path": str(path),
+                "exists": True,
+                "keys": keys,
+                "content": _clip_multiline(content, _TEMPLATE_REFERENCE_LIMIT),
+            }
+        except Exception as exc:
+            return {
+                "path": str(candidate),
+                "exists": False,
+                "keys": [],
+                "content": "",
+                "error": _clip_text(exc, 240),
+            }
+    return {
+        "path": "",
+        "exists": False,
+        "keys": [],
+        "content": "",
+    }
+
+
 async def _gather_wiki_sources(
     *,
     work_title: str,
     character_name: str,
     plugin_config: Any,
     logger: Any,
+    search_aliases: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     try:
         from ...skills.skillpacks.wiki_search.scripts.impl import wiki_lookup_candidates
@@ -100,14 +508,10 @@ async def _gather_wiki_sources(
     wiki_enabled, _fandom_enabled, extra_fandom_wikis = resolve_wiki_runtime_config(plugin_config)
     if not wiki_enabled:
         return []
-    queries = [
-        f"{work_title} {character_name}",
-        f"{character_name} {work_title} 角色",
-        f"{work_title} {character_name} 人物设定 口癖 关系",
-    ]
+    queries = _persona_search_queries(work_title, character_name, search_aliases)[:6]
     sources: list[dict[str, Any]] = []
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        for query in queries:
+        async def _lookup_one(query: str) -> list[dict[str, Any]]:
             try:
                 payload = await asyncio.wait_for(
                     wiki_lookup_candidates(
@@ -116,25 +520,792 @@ async def _gather_wiki_sources(
                         http_client=client,
                         logger=logger,
                     ),
-                    timeout=18,
+                    timeout=10,
                 )
             except Exception:
-                continue
+                return []
+            items: list[dict[str, Any]] = []
             for item in payload.get("top_candidates", []) or []:
                 if not isinstance(item, dict):
                     continue
-                sources.append(
+                title = str(item.get("title", "") or "")
+                summary = _clip_text(item.get("summary", ""), _SOURCE_SUMMARY_LIMIT)
+                if not _source_relevant(
+                    work_title=work_title,
+                    character_name=character_name,
+                    title=title,
+                    summary=summary,
+                    search_aliases=search_aliases,
+                ):
+                    continue
+                items.append(
                     {
                         "kind": "wiki",
                         "query": query,
                         "source": str(item.get("source", "") or "Wiki"),
-                        "title": str(item.get("title", "") or ""),
+                        "title": title,
                         "url": str(item.get("url", "") or ""),
-                        "summary": _clip_text(item.get("summary", ""), _SOURCE_SUMMARY_LIMIT),
+                        "summary": summary,
                         "confidence": item.get("confidence", 0),
                     }
                 )
+            return items
+
+        results = await asyncio.gather(*(_lookup_one(query) for query in queries))
+        for items in results:
+            sources.extend(items)
     return sources
+
+
+def _html_text_excerpt(raw_html: str, limit: int = 520) -> str:
+    text = str(raw_html or "")
+    meta = re.search(
+        r'<meta[^>]+(?:name|property)=["\'](?:description|og:description)["\'][^>]+content=["\']([^"\']+)["\']',
+        text,
+        flags=re.I,
+    )
+    meta_text = _clip_text(html.unescape(meta.group(1)), limit) if meta else ""
+    body = re.sub(r"(?is)<script.*?</script>|<style.*?</style>|<noscript.*?</noscript>", " ", text)
+    body = re.sub(r"(?is)<table.*?</table>|<nav.*?</nav>|<footer.*?</footer>", " ", body)
+    paragraphs = re.findall(r"(?is)<p[^>]*>(.*?)</p>", body)
+    for paragraph in paragraphs[:12]:
+        cleaned = html.unescape(re.sub(r"<[^>]+>", " ", paragraph))
+        cleaned = re.sub(r"\[[^\]]{1,12}\]", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if len(cleaned) >= 40 and cleaned != meta_text:
+            return _clip_text(cleaned, limit)
+    cleaned = html.unescape(re.sub(r"<[^>]+>", " ", body))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) >= 80:
+        return _clip_text(cleaned, limit)
+    return meta_text or _clip_text(cleaned, limit)
+
+
+def _html_title(raw_html: str) -> str:
+    match = re.search(r"(?is)<title[^>]*>(.*?)</title>", str(raw_html or ""))
+    if not match:
+        return ""
+    return _clip_text(html.unescape(re.sub(r"<[^>]+>", " ", match.group(1))), 120)
+
+
+def _direct_profile_urls(work_title: str, character_name: str) -> list[tuple[str, str]]:
+    char = quote(re.sub(r"\s+", "", str(character_name or "").strip()))
+    return [
+        ("萌娘百科镜像", f"https://moegirl.icu/{char}"),
+        ("百度百科", f"https://baike.baidu.com/item/{char}"),
+    ]
+
+
+async def _plan_search_aliases(
+    *,
+    runtime: Any,
+    work_title: str,
+    character_name: str,
+) -> dict[str, list[str]]:
+    aliases = _normalize_search_aliases(
+        None,
+        work_title=work_title,
+        character_name=character_name,
+    )
+    caller = _main_ai_caller(runtime)
+    if caller is None:
+        return aliases
+    logger = getattr(runtime, "logger", None)
+    system = (
+        "你是 Web 检索查询规划器，只负责为 ACG/作品角色资料检索生成别名。"
+        "不要编造角色事实，不要输出资料正文，不要输出 URL。"
+        "如果不确定某个别名就省略。输出必须是 JSON。"
+    )
+    user = f"""
+作品名：{work_title}
+角色名：{character_name}
+
+请输出 JSON：
+{{
+  "work_aliases": ["作品的其他常见中文名、日文名、英文名或罗马字名，最多 5 个"],
+  "character_aliases": ["角色的其他常见中文名、日文名、英文名、罗马字名或带空格写法，最多 5 个"],
+  "queries": ["额外推荐的通用搜索查询，最多 5 个"]
+}}
+
+规则：
+- 必须适用于任意作品和任意角色，不能写固定站点专用脚本。
+- work_aliases 和 character_aliases 不要包含 URL。
+- queries 应是普通搜索词，例如“作品别名 角色别名 wiki/character profile/官方角色介绍”。
+- 不确定就少写，禁止把猜测当事实。
+""".strip()
+    try:
+        text = await _call_main_model(
+            caller,
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            temperature=0.0,
+            use_builtin_search=False,
+            timeout=25,
+        )
+        parsed = _extract_json_object(text)
+        if parsed:
+            aliases = _normalize_search_aliases(
+                parsed,
+                work_title=work_title,
+                character_name=character_name,
+            )
+    except Exception as exc:
+        if logger:
+            try:
+                logger.debug(f"persona builder alias planning skipped: {exc}")
+            except Exception:
+                pass
+    return aliases
+
+
+async def _fetch_mediawiki_extract(
+    *,
+    client: httpx.AsyncClient,
+    api_url: str,
+    title: str,
+    source_name: str,
+    query: str,
+) -> dict[str, Any] | None:
+    params = {
+        "action": "query",
+        "prop": "extracts|info",
+        "titles": title,
+        "inprop": "url",
+        "explaintext": "1",
+        "exintro": "1",
+        "format": "json",
+        "utf8": "1",
+        "redirects": "1",
+    }
+    try:
+        resp = await client.get(api_url, params=params, headers=_MEDIAWIKI_API_HEADERS)
+        if resp.status_code != 200:
+            return None
+        payload = resp.json()
+    except Exception:
+        return None
+    pages = payload.get("query", {}).get("pages", {}) if isinstance(payload, dict) else {}
+    if not isinstance(pages, dict):
+        return None
+    for page in pages.values():
+        if not isinstance(page, dict) or "missing" in page:
+            continue
+        extract = _clip_text(page.get("extract", ""), _SOURCE_SUMMARY_LIMIT)
+        page_title = str(page.get("title") or title)
+        url = str(page.get("fullurl") or "")
+        if extract:
+            return {
+                "kind": "wiki_api",
+                "query": query,
+                "source": source_name,
+                "title": page_title,
+                "url": url,
+                "summary": extract,
+                "confidence": 0.82,
+            }
+    return None
+
+
+async def _fetch_mediawiki_search_sources(
+    *,
+    client: httpx.AsyncClient,
+    api_url: str,
+    source_name: str,
+    queries: list[str],
+    work_title: str,
+    character_name: str,
+    search_aliases: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    titles: list[tuple[str, str]] = []
+    seen_titles: set[str] = set()
+    for query in queries:
+        params = {
+            "action": "query",
+            "format": "json",
+            "list": "search",
+            "srsearch": query,
+            "srlimit": 3,
+            "srprop": "snippet|titlesnippet",
+            "utf8": "1",
+            "formatversion": "2",
+        }
+        try:
+            resp = await client.get(api_url, params=params, headers=_MEDIAWIKI_API_HEADERS)
+            if resp.status_code != 200:
+                continue
+            payload = resp.json()
+        except Exception:
+            continue
+        hits = payload.get("query", {}).get("search", []) if isinstance(payload, dict) else []
+        if not isinstance(hits, list):
+            continue
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+            title = str(hit.get("title") or "").strip()
+            if not title or title.lower() in seen_titles:
+                continue
+            seen_titles.add(title.lower())
+            titles.append((title, query))
+            if len(titles) >= 8:
+                break
+        if len(titles) >= 8:
+            break
+
+    if not titles:
+        return []
+
+    async def _fetch_title(title: str, query: str) -> dict[str, Any] | None:
+        try:
+            return await asyncio.wait_for(
+                _fetch_mediawiki_extract(
+                    client=client,
+                    api_url=api_url,
+                    title=title,
+                    source_name=source_name,
+                    query=query,
+                ),
+                timeout=5,
+            )
+        except Exception:
+            return None
+
+    results = await asyncio.gather(*(_fetch_title(title, query) for title, query in titles))
+    sources: list[dict[str, Any]] = []
+    for item in results:
+        if item is None:
+            continue
+        if not _source_relevant(
+            work_title=work_title,
+            character_name=character_name,
+            title=str(item.get("title") or ""),
+            summary=str(item.get("summary") or ""),
+            search_aliases=search_aliases,
+        ):
+            continue
+        item["confidence"] = max(float(item.get("confidence") or 0), 0.78)
+        sources.append(item)
+    return sources
+
+
+async def _fetch_baike_open_source(
+    *,
+    client: httpx.AsyncClient,
+    keyword: str,
+    work_title: str,
+    character_name: str,
+    search_aliases: dict[str, list[str]] | None = None,
+) -> dict[str, Any] | None:
+    keyword = re.sub(r"\s+", "", str(keyword or "").strip())
+    if not keyword:
+        return None
+    params = {
+        "scope": "103",
+        "format": "json",
+        "appid": "379020",
+        "bk_key": keyword,
+        "bk_length": "800",
+    }
+    try:
+        resp = await client.get(
+            "https://baike.baidu.com/api/openapi/BaikeLemmaCardApi",
+            params=params,
+            headers=_BAIKE_API_HEADERS,
+        )
+        if resp.status_code != 200:
+            return None
+        payload = resp.json()
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or payload.get("errno"):
+        return None
+    title = str(payload.get("key") or payload.get("title") or keyword).strip()
+    desc = _clean_html_fragment(payload.get("desc") or "")
+    abstract = _clean_html_fragment(payload.get("abstract") or "")
+    facts: list[str] = []
+    for card in payload.get("card") or []:
+        if not isinstance(card, dict):
+            continue
+        name = _clean_html_fragment(card.get("name") or "")
+        values = card.get("value") or card.get("format") or []
+        if isinstance(values, str):
+            values = [values]
+        if not name or not isinstance(values, list):
+            continue
+        value_text = "、".join(_clean_html_fragment(value) for value in values[:4] if value)
+        if value_text:
+            facts.append(f"{name}: {value_text}")
+        if len(facts) >= 8:
+            break
+    summary = _clip_text(" ".join([part for part in [desc, abstract, *facts] if part]), _SOURCE_SUMMARY_LIMIT)
+    if not summary:
+        return None
+    if not _source_relevant(
+        work_title=work_title,
+        character_name=character_name,
+        title=title,
+        summary=summary,
+        search_aliases=search_aliases,
+    ):
+        return None
+    return {
+        "kind": "baike_api",
+        "query": keyword,
+        "source": "百度百科开放接口",
+        "title": title,
+        "url": str(payload.get("url") or payload.get("wapUrl") or ""),
+        "summary": summary,
+        "confidence": 0.8,
+    }
+
+
+async def _gather_special_api_sources(
+    *,
+    work_title: str,
+    character_name: str,
+    client: httpx.AsyncClient,
+    search_aliases: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    api_targets = (
+        ("https://zh.wikipedia.org/w/api.php", "维基百科"),
+        ("https://zh.moegirl.icu/api.php", "萌娘百科镜像"),
+    )
+    character_aliases = _alias_values(search_aliases, "character_aliases", character_name)[:3]
+    search_queries = _dedupe_keep_order(
+        [
+            *character_aliases,
+            *(f"{character_alias} {work_title}" for character_alias in character_aliases),
+        ],
+        limit=8,
+    )
+
+    async def _fetch_one(api_url: str, source_name: str, character_alias: str) -> dict[str, Any] | None:
+        try:
+            return await asyncio.wait_for(
+                _fetch_mediawiki_extract(
+                    client=client,
+                    api_url=api_url,
+                    title=character_alias,
+                    source_name=source_name,
+                    query=f"{work_title} {character_alias}",
+                ),
+                timeout=5,
+            )
+        except Exception:
+            return None
+
+    results = await asyncio.gather(
+        *(
+            _fetch_one(api_url, source_name, character_alias)
+            for api_url, source_name in api_targets
+            for character_alias in character_aliases
+        )
+    )
+    for item in results:
+        if item is not None and _source_relevant(
+            work_title=work_title,
+            character_name=character_name,
+            title=str(item.get("title") or ""),
+            summary=str(item.get("summary") or ""),
+            search_aliases=search_aliases,
+        ):
+            sources.append(item)
+    search_results = await asyncio.gather(
+        *(
+            _fetch_mediawiki_search_sources(
+                client=client,
+                api_url=api_url,
+                source_name=source_name,
+                queries=search_queries,
+                work_title=work_title,
+                character_name=character_name,
+                search_aliases=search_aliases,
+            )
+            for api_url, source_name in api_targets
+        )
+    )
+    for items in search_results:
+        sources.extend(items)
+    return sources
+
+
+async def _gather_direct_page_sources(
+    *,
+    work_title: str,
+    character_name: str,
+    logger: Any,
+    search_aliases: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        )
+    }
+    sources: list[dict[str, Any]] = []
+    timeout = httpx.Timeout(10.0, connect=4.0)
+    async with httpx.AsyncClient(follow_redirects=True, headers=headers, timeout=timeout) as client:
+        sources.extend(
+            await _gather_special_api_sources(
+                work_title=work_title,
+                character_name=character_name,
+                client=client,
+                search_aliases=search_aliases,
+            )
+        )
+        baike_keywords: list[str] = []
+        seen_baike_keywords: set[str] = set()
+        for character_alias in _alias_values(search_aliases, "character_aliases", character_name)[:5]:
+            keyword = re.sub(r"\s+", "", str(character_alias or "").strip())
+            if not keyword or keyword.lower() in seen_baike_keywords:
+                continue
+            seen_baike_keywords.add(keyword.lower())
+            baike_keywords.append(keyword)
+            if len(baike_keywords) >= 3:
+                break
+        baike_results = await asyncio.gather(
+            *(
+                _fetch_baike_open_source(
+                    client=client,
+                    keyword=keyword,
+                    work_title=work_title,
+                    character_name=character_name,
+                    search_aliases=search_aliases,
+                )
+                for keyword in baike_keywords
+            )
+        )
+        sources.extend(item for item in baike_results if item is not None)
+        direct_url_pairs: list[tuple[str, str]] = []
+        for character_alias in _alias_values(search_aliases, "character_aliases", character_name)[:3]:
+            if re.search(r"[\u3400-\u9fff]", character_alias):
+                direct_url_pairs.extend(_direct_profile_urls(work_title, character_alias))
+        seen_direct_urls: set[str] = set()
+        for source_name, url in direct_url_pairs:
+            if url in seen_direct_urls:
+                continue
+            seen_direct_urls.add(url)
+            try:
+                resp = await client.get(url)
+                if resp.status_code >= 500 or not resp.text:
+                    continue
+                title = _html_title(resp.text) or character_name
+                summary = _html_text_excerpt(resp.text)
+                normalized_page = re.sub(r"\s+", "", f"{title} {summary}").lower()
+                if "justamoment" in normalized_page or "checkingyourconnection" in normalized_page:
+                    continue
+                title_key = re.sub(r"\s+", "", title)
+                if not _source_relevant(
+                    work_title=work_title,
+                    character_name=character_name,
+                    title=title,
+                    summary=summary,
+                    search_aliases=search_aliases,
+                ):
+                    continue
+                sources.append(
+                    {
+                        "kind": "web_page",
+                        "query": f"{work_title} {character_name}",
+                        "source": source_name,
+                        "title": title,
+                        "url": str(resp.url),
+                        "summary": summary,
+                        "confidence": 0.7,
+                    }
+                )
+            except Exception as exc:
+                if logger:
+                    try:
+                        logger.debug(f"persona builder direct page failed: {url}: {exc}")
+                    except Exception:
+                        pass
+    return sources
+
+
+def _parse_web_search_sources(query: str, rendered: str) -> list[dict[str, Any]]:
+    text = str(rendered or "").strip()
+    if not text:
+        return []
+    header = text.splitlines()[0] if text.splitlines() else ""
+    source_name = "联网搜索"
+    source_match = re.search(r"来源=([^\]\s]+)", header)
+    if source_match:
+        source_name = f"联网搜索/{source_match.group(1)}"
+    if "命中=0" in header:
+        return [
+            {
+                "kind": "web_search_empty",
+                "query": query,
+                "source": source_name,
+                "title": query,
+                "url": "",
+                "summary": _clip_text(text, _SOURCE_SUMMARY_LIMIT),
+                "confidence": 0,
+            }
+        ]
+
+    sources: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    snippet_lines: list[str] = []
+    item_re = re.compile(r"^\s*\d+\.\s+\*\*(.*?)\*\*\s+—\s*(.*?)\s*$")
+    for raw_line in text.splitlines()[1:]:
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = item_re.match(line)
+        if match:
+            if current is not None:
+                current["summary"] = _clip_text(" ".join(snippet_lines), _SOURCE_SUMMARY_LIMIT)
+                sources.append(current)
+            title = re.sub(r"\s+", " ", match.group(1)).strip()
+            domain = re.sub(r"\s+", " ", match.group(2)).strip()
+            current = {
+                "kind": "web_search",
+                "query": query,
+                "source": source_name,
+                "title": title,
+                "url": "",
+                "domain": domain,
+                "summary": "",
+                "confidence": 0.55,
+            }
+            snippet_lines = []
+            continue
+        if current is None:
+            continue
+        if line.startswith("http://") or line.startswith("https://"):
+            current["url"] = line
+            continue
+        snippet_lines.append(re.sub(r"^\s*(摘要\(综合\):\s*)?", "", line).strip())
+    if current is not None:
+        current["summary"] = _clip_text(" ".join(snippet_lines), _SOURCE_SUMMARY_LIMIT)
+        sources.append(current)
+    return sources
+
+
+def _clean_html_fragment(value: Any) -> str:
+    text = html.unescape(re.sub(r"<[^>]+>", " ", str(value or "")))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+async def _bing_search_sources(
+    *,
+    query: str,
+    work_title: str,
+    character_name: str,
+    logger: Any,
+    search_aliases: dict[str, list[str]] | None = None,
+    max_results: int = 5,
+) -> list[dict[str, Any]]:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7",
+    }
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, headers=headers, timeout=10.0) as client:
+            resp = await client.get(
+                "https://www.bing.com/search",
+                params={"q": query, "mkt": "zh-CN", "setlang": "zh-CN"},
+            )
+            if resp.status_code != 200:
+                return []
+            html_text = resp.text
+    except Exception as exc:
+        if logger:
+            try:
+                logger.debug(f"persona builder bing search failed: {query}: {exc}")
+            except Exception:
+                pass
+        return []
+
+    out: list[dict[str, Any]] = []
+    blocks = re.findall(r'<li class="b_algo".*?</li>', html_text, flags=re.S | re.I)
+    for block in blocks:
+        match = re.search(r'<h2.*?<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block, flags=re.S | re.I)
+        if not match:
+            continue
+        url = html.unescape(match.group(1)).strip()
+        title = _clean_html_fragment(match.group(2))
+        snippet_match = re.search(r"<p[^>]*>(.*?)</p>", block, flags=re.S | re.I)
+        snippet = _clean_html_fragment(snippet_match.group(1)) if snippet_match else ""
+        if not url.startswith(("http://", "https://")) or not title:
+            continue
+        if not _source_relevant(
+            work_title=work_title,
+            character_name=character_name,
+            title=title,
+            summary=snippet,
+            search_aliases=search_aliases,
+        ):
+            continue
+        out.append(
+            {
+                "kind": "web_search",
+                "query": query,
+                "source": "Bing",
+                "title": title,
+                "url": url,
+                "summary": _clip_text(snippet, _SOURCE_SUMMARY_LIMIT),
+                "confidence": 0.58,
+            }
+        )
+        if len(out) >= max_results:
+            break
+    return out
+
+
+async def _sogou_search_sources(
+    *,
+    query: str,
+    work_title: str,
+    character_name: str,
+    logger: Any,
+    search_aliases: dict[str, list[str]] | None = None,
+    max_results: int = 5,
+) -> list[dict[str, Any]]:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7",
+        "Accept-Encoding": "gzip, deflate",
+    }
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, headers=headers, timeout=10.0) as client:
+            resp = await client.get("https://www.sogou.com/web", params={"query": query})
+            if resp.status_code != 200:
+                return []
+            html_text = resp.text
+    except Exception as exc:
+        if logger:
+            try:
+                logger.debug(f"persona builder sogou search failed: {query}: {exc}")
+            except Exception:
+                pass
+        return []
+
+    if "安全验证" in _html_title(html_text) or "请输入验证码" in html_text:
+        return []
+
+    out: list[dict[str, Any]] = []
+    title_re = re.compile(
+        r'<h3\b[^>]*class="[^"]*vr-title[^"]*"[^>]*>.*?'
+        r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>.*?</h3>',
+        flags=re.S | re.I,
+    )
+    matches = list(title_re.finditer(html_text))
+    for index, match in enumerate(matches):
+        url = urljoin("https://www.sogou.com/", html.unescape(match.group(1)).strip())
+        title = _clean_html_fragment(match.group(2))
+        if not url.startswith(("http://", "https://")) or not title:
+            continue
+        next_start = matches[index + 1].start() if index + 1 < len(matches) else min(
+            len(html_text),
+            match.end() + 2200,
+        )
+        block = html_text[match.end() : next_start]
+        snippet_match = re.search(
+            r'<div[^>]*class="[^"]*(?:fz-mid|text-layout|str_info)[^"]*"[^>]*>(.*?)</div>',
+            block,
+            flags=re.S | re.I,
+        )
+        snippet_source = snippet_match.group(1) if snippet_match else block[:1800]
+        snippet = _clean_html_fragment(snippet_source)
+        if not _source_relevant(
+            work_title=work_title,
+            character_name=character_name,
+            title=title,
+            summary=snippet,
+            search_aliases=search_aliases,
+        ):
+            continue
+        out.append(
+            {
+                "kind": "web_search",
+                "query": query,
+                "source": "搜狗",
+                "title": title,
+                "url": url,
+                "summary": _clip_text(snippet, _SOURCE_SUMMARY_LIMIT),
+                "confidence": 0.56,
+            }
+        )
+        if len(out) >= max_results:
+            break
+    return out
+
+
+async def _enrich_sources_with_pages(
+    *,
+    sources: list[dict[str, Any]],
+    work_title: str,
+    character_name: str,
+    logger: Any,
+    search_aliases: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    page_sources: list[dict[str, Any]] = []
+    urls: list[tuple[str, str, str]] = []
+    for source in sources:
+        url = str(source.get("url") or "").strip()
+        if not url or not url.startswith(("http://", "https://")):
+            continue
+        title = str(source.get("title") or "")
+        source_name = str(source.get("source") or "网页")
+        if "just a moment" in title.lower() or "checking your connection" in title.lower():
+            continue
+        urls.append((url, title, source_name))
+        if len(urls) >= _FETCHED_PAGE_LIMIT:
+            break
+    if not urls:
+        return []
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        )
+    }
+    async with httpx.AsyncClient(follow_redirects=True, headers=headers, timeout=10.0) as client:
+        for url, fallback_title, source_name in urls:
+            try:
+                resp = await client.get(url)
+                if resp.status_code >= 500 or not resp.text:
+                    continue
+                title = _html_title(resp.text) or fallback_title
+                summary = _html_text_excerpt(resp.text, limit=_SOURCE_SUMMARY_LIMIT)
+                normalized = _normalized_for_match(f"{title} {summary}")
+                if "justamoment" in normalized or "checkingyourconnection" in normalized:
+                    continue
+                if not _source_relevant(
+                    work_title=work_title,
+                    character_name=character_name,
+                    title=title,
+                    summary=summary,
+                    search_aliases=search_aliases,
+                ):
+                    continue
+                page_sources.append(
+                    {
+                        "kind": "web_page",
+                        "query": f"{work_title} {character_name}",
+                        "source": f"{source_name}/正文",
+                        "title": title,
+                        "url": str(resp.url),
+                        "summary": summary,
+                        "confidence": 0.72,
+                    }
+                )
+            except Exception as exc:
+                if logger:
+                    try:
+                        logger.debug(f"persona builder page enrich failed: {url}: {exc}")
+                    except Exception:
+                        pass
+    return page_sources
 
 
 async def _gather_web_sources(
@@ -142,30 +1313,61 @@ async def _gather_web_sources(
     work_title: str,
     character_name: str,
     logger: Any,
+    search_aliases: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     try:
         from ...core.web_grounding import do_web_search
     except Exception:
-        return []
+        do_web_search = None
 
-    queries = [
-        f"{work_title} {character_name} 官方 角色介绍",
-        f"{work_title} {character_name} 设定 立绘 台词 萌点",
-    ]
-    sources: list[dict[str, Any]] = []
-    for query in queries:
+    base_queries = _persona_search_queries(work_title, character_name, search_aliases)
+    queries = _dedupe_keep_order(
+        [
+            f"{base_queries[0]} 官方 角色介绍",
+            f"{base_queries[0]} 设定 立绘 台词 萌点",
+            *base_queries[1:4],
+        ],
+        limit=5,
+    )
+    direct_sources = await _gather_direct_page_sources(
+        work_title=work_title,
+        character_name=character_name,
+        logger=logger,
+        search_aliases=search_aliases,
+    )
+    sources: list[dict[str, Any]] = list(direct_sources)
+    search_queries = queries[:2] if direct_sources else queries[:4]
+    character_queries: list[str] = []
+    work_aliases = _alias_values(search_aliases, "work_aliases", work_title)[:2]
+    character_aliases = _alias_values(search_aliases, "character_aliases", character_name)[:5]
+    for character in character_aliases:
+        character_queries.append(character)
+        for work in work_aliases:
+            character_queries.append(f"{character} {work}")
+    bing_queries = _dedupe_keep_order(
+        [
+            *character_queries,
+            *base_queries,
+            *_persona_site_search_queries(work_title, character_name, search_aliases),
+        ],
+        limit=10,
+    )
+
+    async def _search_one(query: str) -> list[dict[str, Any]]:
+        if do_web_search is None:
+            return []
         try:
             result = await asyncio.wait_for(
                 do_web_search(
                     query,
-                    context_hint="为 WebUI 自动构建角色人设模板，优先官方资料、百科、角色资料页和设定集信息。",
+                    context_hint="",
                     get_now=lambda: datetime.now(),
                     logger=logger,
                 ),
-                timeout=24,
+                timeout=12,
             )
         except Exception as exc:
-            sources.append(
+            return [
                 {
                     "kind": "web_search_error",
                     "query": query,
@@ -175,11 +1377,23 @@ async def _gather_web_sources(
                     "summary": f"联网搜索失败：{_clip_text(exc, 300)}",
                     "confidence": 0,
                 }
-            )
-            continue
+            ]
         text = _clip_text(result, _SOURCE_SUMMARY_LIMIT)
+        parsed_sources = _parse_web_search_sources(query, result)
+        if parsed_sources:
+            return [
+                source
+                for source in parsed_sources
+                if _source_relevant(
+                    work_title=work_title,
+                    character_name=character_name,
+                    title=str(source.get("title") or ""),
+                    summary=str(source.get("summary") or ""),
+                    search_aliases=search_aliases,
+                )
+            ]
         if text:
-            sources.append(
+            return [
                 {
                     "kind": "web_search",
                     "query": query,
@@ -189,8 +1403,41 @@ async def _gather_web_sources(
                     "summary": text,
                     "confidence": 0.5,
                 }
-            )
-    return sources
+            ]
+        return []
+
+    if search_queries:
+        generic_search_queries = bing_queries[:6]
+        results = await asyncio.gather(
+            *(_bing_search_sources(
+                query=query,
+                work_title=work_title,
+                character_name=character_name,
+                logger=logger,
+                search_aliases=search_aliases,
+            ) for query in bing_queries),
+            *(_sogou_search_sources(
+                query=query,
+                work_title=work_title,
+                character_name=character_name,
+                logger=logger,
+                search_aliases=search_aliases,
+            ) for query in generic_search_queries),
+            *(_search_one(query) for query in search_queries),
+        )
+        for items in results:
+            sources.extend(items)
+    sources.extend(
+        await _enrich_sources_with_pages(
+            sources=sources,
+            work_title=work_title,
+            character_name=character_name,
+            logger=logger,
+            search_aliases=search_aliases,
+        )
+    )
+    useful = [s for s in sources if s.get("kind") not in {"web_search_error", "web_search_empty"}]
+    return useful if useful else sources
 
 
 async def _gather_persona_sources(
@@ -201,17 +1448,24 @@ async def _gather_persona_sources(
 ) -> list[dict[str, Any]]:
     plugin_config = getattr(runtime, "plugin_config", None)
     logger = getattr(runtime, "logger", None)
+    search_aliases = await _plan_search_aliases(
+        runtime=runtime,
+        work_title=work_title,
+        character_name=character_name,
+    )
     wiki_sources, web_sources = await asyncio.gather(
         _gather_wiki_sources(
             work_title=work_title,
             character_name=character_name,
             plugin_config=plugin_config,
             logger=logger,
+            search_aliases=search_aliases,
         ),
         _gather_web_sources(
             work_title=work_title,
             character_name=character_name,
             logger=logger,
+            search_aliases=search_aliases,
         ),
     )
     seen: set[tuple[str, str, str]] = set()
@@ -222,7 +1476,17 @@ async def _gather_persona_sources(
             continue
         seen.add(key)
         merged.append(source)
-    return merged[:12]
+    merged.sort(
+        key=lambda source: _source_rank(
+            source,
+            work_title=work_title,
+            character_name=character_name,
+            search_aliases=search_aliases,
+        ),
+        reverse=True,
+    )
+    useful = [s for s in merged if s.get("kind") not in {"web_search_error", "web_search_empty"}]
+    return (useful if useful else merged)[:12]
 
 
 def _source_corpus(sources: list[dict[str, Any]]) -> str:
@@ -261,6 +1525,111 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _strip_yaml_fence(text: str) -> str:
+    raw = str(text or "").strip()
+    fenced = re.search(r"```(?:yaml|yml)?\s*(.*?)\s*```", raw, flags=re.S | re.I)
+    if fenced:
+        raw = fenced.group(1).strip()
+    if raw.startswith("---"):
+        raw = raw[3:].lstrip()
+    return raw
+
+
+def _validate_template_yaml(text: str) -> dict[str, Any]:
+    raw = _strip_yaml_fence(text)
+    errors: list[str] = []
+    warnings: list[str] = []
+    try:
+        parsed = yaml.safe_load(raw)
+    except Exception as exc:
+        return {
+            "valid": False,
+            "errors": [f"YAML 解析失败：{exc}"],
+            "warnings": [],
+            "keys": [],
+            "data": None,
+            "template": raw,
+        }
+    if not isinstance(parsed, dict):
+        errors.append("YAML 顶层必须是对象/dict。")
+        parsed = {}
+    keys = list(parsed.keys()) if isinstance(parsed, dict) else []
+    missing = [key for key in _REQUIRED_TEMPLATE_KEYS if key not in parsed]
+    if missing:
+        errors.append("缺少必需顶层字段：" + "、".join(missing))
+    if not isinstance(parsed.get("system"), str) or not str(parsed.get("system") or "").strip():
+        errors.append("system 必须是非空字符串。")
+    input_text = parsed.get("input")
+    if not isinstance(input_text, str) or not input_text.strip():
+        errors.append("input 必须是非空字符串。")
+    else:
+        missing_placeholders = [p for p in _REQUIRED_INPUT_PLACEHOLDERS if p not in input_text]
+        if missing_placeholders:
+            errors.append("input 缺少插件运行占位符：" + "、".join(missing_placeholders))
+        if "<output>" not in input_text or "<message>" not in input_text:
+            warnings.append("input 未显式包含 <output>/<message> 输出格式，YAML 回复路径可能无法解析多消息。")
+    if not isinstance(parsed.get("tts"), dict):
+        warnings.append("tts 建议使用 voice/style/user_hint 对象。")
+    for list_key in ("nick_name", "ack_phrases", "mute_keyword"):
+        if list_key in parsed and not isinstance(parsed.get(list_key), list):
+            errors.append(f"{list_key} 必须是列表。")
+    if parsed.get("name") and not str(parsed.get("name")).strip():
+        errors.append("name 不能为空。")
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "keys": keys,
+        "data": parsed,
+        "template": raw,
+    }
+
+
+async def _repair_template_yaml(
+    *,
+    caller: Any,
+    work_title: str,
+    character_name: str,
+    template: str,
+    validation: dict[str, Any],
+    reference_template: dict[str, Any],
+) -> str:
+    errors = "\n".join(f"- {item}" for item in validation.get("errors", []) or [])
+    system = (
+        "你是 NoneBot 拟人插件 YAML 模板修复器。"
+        "只修复 YAML 结构、字段、占位符和转义问题，不改写为 Markdown。"
+        "输出必须是完整 YAML，不能有代码围栏、解释或额外文本。"
+    )
+    reference = reference_template.get("content") or "（无当前模板参考）"
+    user = f"""
+作品：《{work_title}》
+角色：{character_name}
+
+当前 YAML 校验错误：
+{errors or "- 未知错误"}
+
+当前插件正在使用的人设 YAML 参考：
+{reference}
+
+待修复文本：
+{template}
+
+修复要求：
+- 输出完整 YAML。
+- 必须包含顶层字段：{", ".join(_REQUIRED_TEMPLATE_KEYS)}。
+- input 必须保留占位符：{", ".join(_REQUIRED_INPUT_PLACEHOLDERS)}。
+- input/system/status 必须适合 YAML 块标量。
+- 不能输出 Markdown、解释、代码围栏。
+""".strip()
+    return await _call_main_model(
+        caller,
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        temperature=0.05,
+        use_builtin_search=False,
+        timeout=60,
+    )
 
 
 async def _run_subagent(
@@ -323,6 +1692,7 @@ async def _synthesize_template(
     character_name: str,
     source_text: str,
     subagents: list[dict[str, Any]],
+    reference_template: dict[str, Any],
 ) -> str:
     reports = json.dumps(
         [
@@ -337,29 +1707,36 @@ async def _synthesize_template(
         indent=2,
     )
     system = (
-        "你是 NoneBot 拟人插件的人设模板构建器，必须使用主模型做最终合成。"
-        "目标是生成可直接放入插件 system prompt/YAML 人设中的中文模板。"
+        "你是 NoneBot 拟人插件的人设 YAML 构建器，必须使用主模型做最终合成。"
+        "目标是生成可直接写入 personification_prompt_path 的完整 YAML 文件。"
         "保留角色核心，不要把 bot 写成客服或助手；口吻应像群友。"
         "不要用关键词规则或触发词设计对话语义。"
+        "输出必须只有 YAML 本体，不能有 Markdown 代码围栏、标题、解释、注释之外的额外文本。"
     )
+    reference = reference_template.get("content") or "（未读取到当前模板；请按字段规范生成）"
     user = f"""
-请基于资料和三个子agent交叉验证报告，为《{work_title}》的「{character_name}」生成插件内可用的人设模板。
+请基于资料和三个子agent交叉验证报告，为《{work_title}》的「{character_name}」生成插件内可直接使用的人设 YAML。
 
 硬性要求：
-- 输出中文。
-- 包含基础身份、性格、说话方式、口癖、视觉/立绘参考、角色关系、萌点、剧情定位、禁忌与不确定项。
+- 输出完整 YAML，顶层字段必须包含：{", ".join(_REQUIRED_TEMPLATE_KEYS)}。
+- 顶层结构、input 输出格式和占位符请参考“当前插件正在使用的人设 YAML”。
+- input 必须保留占位符：{", ".join(_REQUIRED_INPUT_PLACEHOLDERS)}。
+- system 内必须包含基础身份、性格、说话方式、口癖、视觉/立绘参考、角色关系、萌点、剧情定位、安全边界、资料冲突与缺口。
 - 模板要适合作为“白咲真寻机”这类群聊拟人 bot 的角色底座：自然、有边界、有群友感。
 - 不要写“我是 AI/助手/客服”。
 - 对证据不足的设定标注“待确认”，不要编造成事实。
-- 最后附“资料冲突与缺口”小节。
+- 资料冲突与缺口必须写入 system 的“## 资料冲突与缺口”小节，不要在 YAML 外附文字。
+- status、input、system 使用 YAML 块标量；nick_name、ack_phrases、mute_keyword 使用列表。
+- 最终输出只能是 YAML，不要代码围栏，不要额外说明。
+
+当前插件正在使用的人设 YAML 参考：
+{reference}
 
 资料：
 {source_text or "（资料抓取为空）"}
 
 三个子agent报告：
 {reports}
-
-请直接输出模板正文，不要输出 JSON。
 """.strip()
     return await _call_main_model(
         caller,
@@ -420,7 +1797,24 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             character_name=character_name,
             source_text=source_text,
             subagents=list(subagents),
+            reference_template=_configured_template_reference(runtime),
         )
+        validation = _validate_template_yaml(template)
+        if not validation.get("valid"):
+            repaired = await _repair_template_yaml(
+                caller=caller,
+                work_title=work_title,
+                character_name=character_name,
+                template=template,
+                validation=validation,
+                reference_template=_configured_template_reference(runtime),
+            )
+            repaired_validation = _validate_template_yaml(repaired)
+            if repaired_validation.get("valid"):
+                template = repaired_validation["template"]
+                validation = repaired_validation
+            else:
+                template = _strip_yaml_fence(template)
         conflicts: list[str] = []
         for item in subagents:
             report = item.get("report") if isinstance(item, dict) else {}
@@ -445,7 +1839,12 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             "sources": sources,
             "subagents": list(subagents),
             "conflicts": conflicts[:20],
-            "template": template,
+            "template": validation.get("template") or _strip_yaml_fence(template),
+            "template_valid": bool(validation.get("valid")),
+            "template_errors": list(validation.get("errors") or [])[:20],
+            "template_warnings": list(validation.get("warnings") or [])[:20],
+            "template_keys": list(validation.get("keys") or []),
+            "template_reference": _configured_template_reference(runtime),
         }
 
     return router

@@ -1,30 +1,140 @@
+function dashboardCompactNumber(value, digits = 1) {
+  const n = Number(value || 0);
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return (n / 1e9).toFixed(digits).replace(/\.0$/, "") + "B";
+  if (abs >= 1e6) return (n / 1e6).toFixed(digits).replace(/\.0$/, "") + "M";
+  if (abs >= 1e3) return (n / 1e3).toFixed(digits).replace(/\.0$/, "") + "K";
+  return String(Math.round(n));
+}
+
+function dashboardMoney(value) {
+  return "$" + Number(value || 0).toFixed(2);
+}
+
+function renderSparkline(values, tone) {
+  const nums = (values || []).map(v => Number(v || 0));
+  const series = nums.length ? nums : [0, 0];
+  const width = 220, height = 58, pad = 6;
+  const min = Math.min(...series);
+  const max = Math.max(...series);
+  const span = max - min || 1;
+  const points = series.map((v, i) => {
+    const x = pad + (series.length === 1 ? 0 : i * (width - pad * 2) / (series.length - 1));
+    const y = height - pad - ((v - min) / span) * (height - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return `<svg class="dashboard-sparkline ${tone || ""}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+    <polyline points="${points}" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
+  </svg>`;
+}
+
+function renderDashboardMetric(title, value, subtitle, values, tone) {
+  return `<div class="dashboard-metric">
+    <div class="dashboard-metric-head">
+      <span class="muted">${escapeHtml(title)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+    ${subtitle ? `<div class="dashboard-metric-sub">${escapeHtml(subtitle)}</div>` : ""}
+    ${renderSparkline(values, tone)}
+  </div>`;
+}
+
+function renderTotalConsumption(consumption) {
+  const data = consumption || {};
+  const total = data.total || {};
+  const providerLabels = {openai:"OpenAI", anthropic:"Anthropic", gemini:"Gemini", codex:"Codex", unknown:"未知"};
+  const topProvider = (data.providers || [])[0] || null;
+  const topModel = (data.by_model || [])[0] || null;
+  const dateRange = data.first_day && data.last_day
+    ? (data.first_day === data.last_day ? data.first_day : `${data.first_day} 至 ${data.last_day}`)
+    : "暂无记录";
+  return `<div class="dashboard-consumption">
+    <div class="dashboard-consumption-title">
+      <span class="muted">总消耗统计</span>
+      <strong>${escapeHtml(dashboardCompactNumber(total.total_tokens || 0))} T</strong>
+    </div>
+    <div class="dashboard-consumption-item"><span class="muted">累计请求</span><strong>${Number(total.call_count || 0).toLocaleString()}</strong></div>
+    <div class="dashboard-consumption-item"><span class="muted">Prompt / Completion</span><strong>${escapeHtml(dashboardCompactNumber(total.prompt_tokens || 0))} / ${escapeHtml(dashboardCompactNumber(total.completion_tokens || 0))}</strong></div>
+    <div class="dashboard-consumption-item"><span class="muted">最高 provider</span><strong>${escapeHtml(topProvider ? (providerLabels[topProvider.provider] || topProvider.provider) : "-")}</strong></div>
+    <div class="dashboard-consumption-item"><span class="muted">最高模型</span><strong title="${escapeAttr(topModel ? topModel.model : "")}">${escapeHtml(topModel ? topModel.model : "-")}</strong></div>
+    <div class="dashboard-consumption-item wide"><span class="muted">账本范围</span><strong>${escapeHtml(dateRange)}</strong></div>
+  </div>`;
+}
+
 function renderDashboard() {
   const d = state.dashboard;
   if (!d) return `<div class="card muted">加载中…</div>`;
   const total = d.total || {};
-  const tabs = ["day","week","month"].map(w => `<button class="${state.dashboardWindow===w?'active':''}" onclick="switchDashboard('${w}')">${({day:'今日',week:'本周',month:'本月'})[w]}</button>`).join("");
-  const byDay = (d.by_day || []).map(row => {
-    const max = Math.max(...d.by_day.map(r => r.total_tokens || 1), 1);
-    const w = ((row.total_tokens || 0) / max * 100).toFixed(1);
-    return `<tr><td>${escapeHtml(row.bucket_day)}</td><td><div style="background:linear-gradient(90deg,var(--accent) ${w}%,transparent ${w}%);padding:4px 8px;border-radius:4px">${row.total_tokens.toLocaleString()}</div></td><td>${row.call_count}</td></tr>`;
+  const billing = d.billing || {};
+  const quota = billing.quota || {};
+  const series = d.series || [];
+  const billingSeries = billing.series || [];
+  const tabs = [
+    ["day", "24小时"],
+    ["week", "7天"],
+    ["month", "30天"],
+  ].map(([w, label]) => `<button class="${state.dashboardWindow===w?'active':''}" onclick="switchDashboard('${w}')">${label}</button>`).join("");
+  const modelRowsData = (d.model_distribution && d.model_distribution.length ? d.model_distribution : d.by_model || []).slice(0, 8);
+  const maxModelTokens = Math.max(...modelRowsData.map(r => Number(r.total_tokens || 0)), 1);
+  const modelRows = modelRowsData.map(row => {
+    const tokens = Number(row.total_tokens || 0);
+    const width = Math.max(1.5, Math.min(100, Number(row.relative_width || 0) * 100 || tokens / maxModelTokens * 100));
+    return `<div class="model-distribution-row">
+      <div class="model-name" title="${escapeAttr(row.model || "unknown")}">${escapeHtml(row.model || "unknown")}</div>
+      <div class="model-bar-track"><div class="model-bar" style="width:${width.toFixed(1)}%"><span>${escapeHtml(dashboardCompactNumber(row.call_count || 0))}</span></div></div>
+      <div class="model-token">${escapeHtml(dashboardCompactNumber(tokens))} T</div>
+    </div>`;
   }).join("");
-  const byModel = (d.by_model || []).map(row => `<tr><td>${escapeHtml(row.model)}</td><td>${row.total_tokens.toLocaleString()}</td><td>${row.call_count}</td></tr>`).join("");
-  const byGroup = (d.by_group || []).map(row => `<tr><td>${escapeHtml(row.group_id)}</td><td>${row.total_tokens.toLocaleString()}</td><td>${row.call_count}</td></tr>`).join("");
+  const providers = (d.provider_usage || []).filter(p => Number(p.total_tokens || 0) > 0 || Number(p.monthly_limit || 0) > 0);
+  const maxProviderUsed = Math.max(...providers.map(p => Number(p.total_tokens || 0)), 1);
+  const providerRows = providers.map(p => {
+    const used = Number(p.total_tokens || 0);
+    const limit = Number(p.monthly_limit || 0);
+    const pct = limit > 0 ? Math.min(100, used / limit * 100) : Math.min(100, used / maxProviderUsed * 100);
+    const valueText = limit > 0
+      ? `${dashboardCompactNumber(used)} / ${dashboardCompactNumber(limit)} tokens`
+      : `${dashboardCompactNumber(used)} tokens / 不限额`;
+    return `<div class="quota-usage-row">
+      <div class="between"><span>${escapeHtml(p.label || p.provider || "provider")}</span><span class="muted">${escapeHtml(valueText)}</span></div>
+      <div class="quota-track"><div class="quota-fill" style="width:${pct.toFixed(1)}%"></div></div>
+    </div>`;
+  }).join("");
+  const byDay = (d.by_day || []).map(row => `<tr><td>${escapeHtml(row.bucket_day)}</td><td>${Number(row.total_tokens||0).toLocaleString()}</td><td>${Number(row.call_count||0).toLocaleString()}</td></tr>`).join("");
+  const byGroup = (d.by_group || []).map(row => `<tr><td>${escapeHtml(row.group_id)}</td><td>${Number(row.total_tokens||0).toLocaleString()}</td><td>${Number(row.call_count||0).toLocaleString()}</td></tr>`).join("");
   const empty = (total.total_tokens || 0) === 0;
-  return `<div class="group-bar">${tabs}</div>
-    <div class="card">
-      <h2>总览（${escapeHtml(({day:'今日',week:'本周',month:'本月'})[state.dashboardWindow])}）</h2>
-      <div class="row" style="gap:30px">
-        <div><div class="muted">总 token</div><div style="font-size:24px;margin-top:4px">${(total.total_tokens||0).toLocaleString()}</div></div>
-        <div><div class="muted">prompt</div><div style="font-size:18px;margin-top:4px">${(total.prompt_tokens||0).toLocaleString()}</div></div>
-        <div><div class="muted">completion</div><div style="font-size:18px;margin-top:4px">${(total.completion_tokens||0).toLocaleString()}</div></div>
-        <div><div class="muted">调用次数</div><div style="font-size:18px;margin-top:4px">${total.call_count||0}</div></div>
-      </div>
-      ${empty ? `<p class="muted" style="margin-top:14px">暂无数据。token 计量将在 LLM 调用拦截上线后开始记录（M6）。</p>` : ''}
+  const costSubtitle = billing.cost_configured ? "" : "本地未配置模型单价";
+  const quotaSubtitle = quota.unlimited
+    ? `已记 ${dashboardCompactNumber(quota.used_tokens || total.total_tokens || 0)} tokens · 未设月度上限`
+    : `已用 ${dashboardCompactNumber(quota.limited_used_tokens || 0)} / ${dashboardCompactNumber(quota.limit_tokens || 0)} tokens`;
+  return `<div class="dashboard-toolbar">
+      <div class="dashboard-tabs">${tabs}</div>
+      <a href="#logs" onclick="state.view='logs'; loadView().then(render)">查看日志 →</a>
     </div>
-    <div class="card"><h2>按日期</h2><table><thead><tr><th>日期</th><th>总 token</th><th>调用</th></tr></thead><tbody>${byDay || `<tr><td colspan="3" class="muted">无</td></tr>`}</tbody></table></div>
-    <div class="card"><h2>按模型</h2><table><thead><tr><th>模型</th><th>总 token</th><th>调用</th></tr></thead><tbody>${byModel || `<tr><td colspan="3" class="muted">无</td></tr>`}</tbody></table></div>
-    <div class="card"><h2>按群</h2><table><thead><tr><th>群号</th><th>总 token</th><th>调用</th></tr></thead><tbody>${byGroup || `<tr><td colspan="3" class="muted">无</td></tr>`}</tbody></table></div>`;
+    <div class="dashboard-metric-grid">
+      ${renderDashboardMetric("请求花费", dashboardMoney(billing.request_cost), costSubtitle, billingSeries.map(p => p.request_cost), "green")}
+      ${renderDashboardMetric("额度扣减", dashboardMoney(billing.credit_deduction), quotaSubtitle, billingSeries.map(p => p.credit_deduction || p.tokens), "orange")}
+      ${renderDashboardMetric("请求数", dashboardCompactNumber(total.call_count || 0), "", series.map(p => p.call_count), "purple")}
+      ${renderDashboardMetric("Tokens", dashboardCompactNumber(total.total_tokens || 0), "", series.map(p => p.total_tokens), "blue")}
+    </div>
+    ${empty ? `<div class="alert info">暂无 token 数据。LLM 调用记录写入后，这里会展示本地 token 账本统计。</div>` : ""}
+    ${renderTotalConsumption(d.total_consumption)}
+    <div class="dashboard-main-grid">
+      <div class="card dashboard-panel">
+        <h2>模型使用分布</h2>
+        <div class="model-distribution">${modelRows || '<p class="muted">暂无模型用量。</p>'}</div>
+      </div>
+      <div class="card dashboard-panel">
+        <h2>套餐使用情况</h2>
+        <div class="quota-usage">${providerRows || '<p class="muted">暂无 provider 用量；可在配置中心设置各 provider 月度 token 额度。</p>'}</div>
+      </div>
+    </div>
+    <details class="card dashboard-details">
+      <summary class="muted" style="cursor:pointer">明细</summary>
+      <div class="dashboard-detail-grid">
+        <div><h3>按日期</h3><table><thead><tr><th>日期</th><th>总 token</th><th>调用</th></tr></thead><tbody>${byDay || `<tr><td colspan="3" class="muted">无</td></tr>`}</tbody></table></div>
+        <div><h3>按群</h3><table><thead><tr><th>群号</th><th>总 token</th><th>调用</th></tr></thead><tbody>${byGroup || `<tr><td colspan="3" class="muted">无</td></tr>`}</tbody></table></div>
+      </div>
+    </details>`;
 }
 
 async function switchDashboard(window) {
@@ -425,19 +535,42 @@ function renderPersonaBuilder() {
   const r = state.personaTemplateResult;
   const sources = (r && r.sources) || [];
   const subagents = (r && r.subagents) || [];
-  const sourceRows = sources.map((s, i) => `<tr>
-    <td>${i + 1}</td>
-    <td>${escapeHtml(s.source || s.kind || "资料")}</td>
-    <td>${s.url ? `<a href="${escapeAttr(s.url)}" target="_blank" rel="noreferrer">${escapeHtml(s.title || s.query || s.url)}</a>` : escapeHtml(s.title || s.query || "")}</td>
-    <td>${escapeHtml((s.summary || "").slice(0, 180))}</td>
-  </tr>`).join("");
-  const agentBlocks = subagents.map(a => `<details style="margin-top:8px">
-    <summary class="muted" style="cursor:pointer">${escapeHtml(a.name || "子agent")} · ${escapeHtml(a.focus || "")}</summary>
-    <pre style="white-space:pre-wrap;font-size:12.5px;background:var(--input-bg);padding:10px;border-radius:6px;overflow-x:auto">${escapeHtml(JSON.stringify(a.report || a.raw || {}, null, 2))}</pre>
-  </details>`).join("");
+  const sourceCards = sources.map((s, i) => `<div class="persona-source-card">
+    <div class="between" style="gap:8px"><span class="tag">S${i + 1}</span><span class="muted">${escapeHtml(s.source || s.kind || "资料")}</span></div>
+    <strong>${s.url ? `<a href="${escapeAttr(s.url)}" target="_blank" rel="noreferrer">${escapeHtml(s.title || s.query || s.url)}</a>` : escapeHtml(s.title || s.query || "")}</strong>
+    <p>${escapeHtml((s.summary || "").slice(0, 260))}</p>
+    ${s.url ? `<code>${escapeHtml(s.url)}</code>` : ""}
+  </div>`).join("");
+  const listBlock = (items) => (items || []).filter(Boolean).slice(0, 8).map(x => `<li>${escapeHtml(x)}</li>`).join("");
+  const agentBlocks = subagents.map(a => {
+    const report = a.report || {};
+    if (!report || report.raw) {
+      return `<details class="persona-agent-card" open>
+        <summary>${escapeHtml(a.name || "子agent")} <span class="muted">${escapeHtml(a.focus || "")}</span></summary>
+        <pre>${escapeHtml(JSON.stringify(report || a.raw || {}, null, 2))}</pre>
+      </details>`;
+    }
+    const facts = listBlock(report.facts);
+    const personality = listBlock(report.personality);
+    const relations = listBlock(report.relations);
+    const conflicts = listBlock([...(report.conflicts || []), ...(report.unknowns || [])]);
+    return `<details class="persona-agent-card" open>
+      <summary>${escapeHtml(a.name || "子agent")} <span class="muted">${escapeHtml(a.focus || "")}</span></summary>
+      <div class="agent-report-grid">
+        <div><h4>事实</h4><ul>${facts || '<li class="muted">无</li>'}</ul></div>
+        <div><h4>性格/关系</h4><ul>${personality || relations || '<li class="muted">无</li>'}</ul></div>
+        <div><h4>冲突与缺口</h4><ul>${conflicts || '<li class="muted">无</li>'}</ul></div>
+      </div>
+    </details>`;
+  }).join("");
+  const valid = r ? r.template_valid === true : false;
+  const validationTag = r ? `<span class="tag" style="${valid?'background:rgba(52,211,153,0.18);color:var(--ok)':'background:rgba(248,113,113,0.18);color:var(--danger)'}">${valid?'YAML 有效':'YAML 需修复'}</span>` : "";
+  const errors = r ? [...(r.template_errors || []), ...(r.template_warnings || [])] : [];
+  const validationList = errors.map(x => `<li>${escapeHtml(x)}</li>`).join("");
+  const ref = (r && r.template_reference) || {};
   return `<div class="card">
     <h2>自动构建人设模板</h2>
-    <div class="field-input">
+    <div class="persona-builder-form">
       <input id="persona-builder-work" type="text" placeholder="作品名" value="${escapeAttr(state.personaTemplateForm.work_title || "")}" oninput="state.personaTemplateForm.work_title=this.value">
       <input id="persona-builder-character" type="text" placeholder="角色名" value="${escapeAttr(state.personaTemplateForm.character_name || "")}" oninput="state.personaTemplateForm.character_name=this.value">
       <button class="btn primary" onclick="buildPersonaTemplate()" ${state.personaTemplateBusy?'disabled':''}>${state.personaTemplateBusy?'<span class="spinner"></span> 构建中…':'开始构建'}</button>
@@ -446,16 +579,34 @@ function renderPersonaBuilder() {
   ${r ? `<div class="card">
     <div class="between" style="gap:12px;flex-wrap:wrap">
       <h2 style="margin:0">${escapeHtml(r.work_title || "")} / ${escapeHtml(r.character_name || "")}</h2>
-      <span class="tag">主模型</span>
-      <span class="muted">${Number(r.duration_ms || 0)} ms</span>
+      <div>${validationTag}<span class="tag">主模型</span><span class="muted">${Number(r.duration_ms || 0)} ms</span></div>
     </div>
-    <h3 style="margin:14px 0 8px">生成模板</h3>
-    <pre style="white-space:pre-wrap;font-family:inherit;background:var(--input-bg);padding:12px;border-radius:6px;border:1px solid var(--line)">${escapeHtml(r.template || "")}</pre>
-    <h3 style="margin:14px 0 8px">资料来源（${sources.length}）</h3>
-    ${sourceRows ? `<table><thead><tr><th>#</th><th>来源</th><th>标题</th><th>摘要</th></tr></thead><tbody>${sourceRows}</tbody></table>` : '<p class="muted">未抓取到资料来源。</p>'}
-    <h3 style="margin:14px 0 8px">子agent交叉验证（${subagents.length}）</h3>
+    <div class="row" style="margin-top:10px">
+      ${ref.path ? `<span class="muted">参考模板：<code>${escapeHtml(ref.path)}</code></span>` : '<span class="muted">未读取到当前模板参考</span>'}
+      ${(r.template_keys || []).map(k => `<span class="tag">${escapeHtml(k)}</span>`).join("")}
+    </div>
+    ${validationList ? `<div class="alert ${valid?'info':'err'}" style="margin-top:12px"><ul class="validation-list">${validationList}</ul></div>` : ""}
+    <div class="between" style="margin:16px 0 8px">
+      <h3 style="margin:0">插件 YAML 模板</h3>
+      <button class="btn small" onclick="copyPersonaTemplate()">复制</button>
+    </div>
+    <pre class="persona-template-code">${escapeHtml(r.template || "")}</pre>
+    <h3 style="margin:16px 0 8px">资料来源（${sources.length}）</h3>
+    <div class="persona-source-grid">${sourceCards || '<p class="muted">未抓取到资料来源。</p>'}</div>
+    <h3 style="margin:16px 0 8px">子agent交叉验证（${subagents.length}）</h3>
     ${agentBlocks || '<p class="muted">暂无子agent报告。</p>'}
   </div>` : ''}`;
+}
+
+async function copyPersonaTemplate() {
+  const text = state.personaTemplateResult && state.personaTemplateResult.template;
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    alertFlash("ok", "已复制 YAML 模板");
+  } catch (e) {
+    alertFlash("err", "复制失败：" + e.message);
+  }
 }
 
 async function buildPersonaTemplate() {

@@ -14,7 +14,13 @@ def _runtime_with_data(tmp_path: Path, monkeypatch):
     data_store = load_personification_module("plugin.personification.core.data_store")
     paths = load_personification_module("plugin.personification.core.paths")
     monkeypatch.setattr(paths, "get_data_dir", lambda _cfg=None: tmp_path)
-    cfg = SimpleNamespace(personification_data_dir=str(tmp_path))
+    cfg = SimpleNamespace(
+        personification_data_dir=str(tmp_path),
+        personification_quota_anthropic_monthly_tokens=0,
+        personification_quota_openai_monthly_tokens=1000,
+        personification_quota_gemini_cli_monthly_tokens=0,
+        personification_quota_codex_monthly_tokens=0,
+    )
     data_store.init_data_store(cfg)
 
     ledger = load_personification_module("plugin.personification.core.token_ledger")
@@ -89,17 +95,30 @@ def _login(client) -> None:
 def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
     client = _build_client(_runtime_with_data)
     _login(client)
-    res = client.get("/personification/api/metrics/summary?window=month")
+    res = client.get("/personification/api/metrics/summary?window=30d")
     assert res.status_code == 200
     body = res.json()
+    assert body["window"] == "month"
     assert body["total"]["total_tokens"] == 100 + 50 + 200 + 80 + 30 + 10
     assert body["total"]["call_count"] == 3
+    assert len(body["series"]) == 30
     models = {row["model"]: row for row in body["by_model"]}
     assert models["gpt-x"]["total_tokens"] == 430
     assert models["gpt-y"]["total_tokens"] == 40
+    distribution = {row["model"]: row for row in body["model_distribution"]}
+    assert distribution["gpt-x"]["relative_width"] == 1.0
     groups = {row["group_id"]: row for row in body["by_group"]}
     assert groups["g1"]["total_tokens"] == 100 + 50 + 30 + 10
     assert groups["g2"]["total_tokens"] == 280
+    providers = {row["provider"]: row for row in body["provider_usage"]}
+    assert providers["openai"]["total_tokens"] == body["total"]["total_tokens"]
+    assert providers["openai"]["monthly_limit"] == 1000
+    assert body["billing"]["cost_configured"] is False
+    assert body["billing"]["quota"]["limit_tokens"] == 1000
+    assert body["total_consumption"]["total"]["total_tokens"] == body["total"]["total_tokens"]
+    assert body["total_consumption"]["total"]["call_count"] == body["total"]["call_count"]
+    assert body["total_consumption"]["first_day"]
+    assert body["total_consumption"]["last_day"]
 
 
 def test_dashboard_window_validation(_runtime_with_data) -> None:

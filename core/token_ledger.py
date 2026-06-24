@@ -7,6 +7,15 @@ from typing import Any
 from .db import connect_sync
 from .llm_context import current_llm_context
 
+_WINDOW_ALIASES = {
+    "24h": "day",
+    "day": "day",
+    "7d": "week",
+    "week": "week",
+    "30d": "month",
+    "month": "month",
+}
+
 
 def record_response_usage(
     response: Any,
@@ -59,6 +68,10 @@ def _day_str(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
+def normalize_window(window: str) -> str:
+    return _WINDOW_ALIASES.get(str(window or "").strip().lower(), "month")
+
+
 def _infer_provider(model: str, explicit: str = "") -> str:
     """从 explicit 参数或 model 名推导 provider 标签。"""
     if explicit:
@@ -73,6 +86,16 @@ def _infer_provider(model: str, explicit: str = "") -> str:
     if "codex" in name:
         return "codex"
     return ""
+
+
+def _provider_from_model_purpose(model: str, purpose: str) -> str:
+    provider = ""
+    if "provider=" in purpose:
+        for part in purpose.split("|"):
+            if part.startswith("provider="):
+                provider = part[len("provider="):].strip().lower()
+                break
+    return provider or _infer_provider(model) or "unknown"
 
 
 def record_llm_call(
@@ -127,7 +150,8 @@ def query_provider_summary(window: str = "month") -> dict[str, Any]:
     """按 provider 维度聚合最近窗口的 token 用量。返回 {provider: totals}。
     provider 从 purpose 字段中的 `provider=xxx` 子串解析，或从 model 名兜底推导。
     """
-    start_str = _day_str(_range_start(window))
+    window_key = normalize_window(window)
+    start_str = _day_str(_range_start(window_key))
     providers: dict[str, dict[str, int]] = {}
     with connect_sync() as conn:
         rows = conn.execute(
@@ -146,15 +170,7 @@ def query_provider_summary(window: str = "month") -> dict[str, Any]:
     for row in rows:
         model = str(row["model"] or "")
         purpose = str(row["purpose"] or "")
-        # 优先从 purpose 解析 provider=xxx
-        provider = ""
-        if "provider=" in purpose:
-            for part in purpose.split("|"):
-                if part.startswith("provider="):
-                    provider = part[len("provider="):].strip().lower()
-                    break
-        if not provider:
-            provider = _infer_provider(model) or "unknown"
+        provider = _provider_from_model_purpose(model, purpose)
         bucket = providers.setdefault(provider, {
             "prompt_tokens": 0, "completion_tokens": 0,
             "total_tokens": 0, "call_count": 0,
@@ -164,7 +180,7 @@ def query_provider_summary(window: str = "month") -> dict[str, Any]:
         bucket["total_tokens"] += int(row["tt"] or 0)
         bucket["call_count"] += int(row["cc"] or 0)
     return {
-        "window": window,
+        "window": window_key,
         "start_day": start_str,
         "providers": [
             {"provider": p, **vals}
@@ -173,7 +189,84 @@ def query_provider_summary(window: str = "month") -> dict[str, Any]:
     }
 
 
+def query_total_consumption() -> dict[str, Any]:
+    """返回不受窗口限制的累计 token 消耗。"""
+    with connect_sync() as conn:
+        total_row = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                COALESCE(SUM(call_count), 0) AS call_count,
+                MIN(bucket_day) AS first_day,
+                MAX(bucket_day) AS last_day
+            FROM token_usage_ledger
+            """
+        ).fetchone()
+        provider_rows = conn.execute(
+            """
+            SELECT model, purpose,
+                   SUM(prompt_tokens) AS prompt_tokens,
+                   SUM(completion_tokens) AS completion_tokens,
+                   SUM(total_tokens) AS total_tokens,
+                   SUM(call_count) AS call_count
+            FROM token_usage_ledger
+            GROUP BY model, purpose
+            """
+        ).fetchall()
+        model_rows = conn.execute(
+            """
+            SELECT model,
+                   SUM(prompt_tokens) AS prompt_tokens,
+                   SUM(completion_tokens) AS completion_tokens,
+                   SUM(total_tokens) AS total_tokens,
+                   SUM(call_count) AS call_count
+            FROM token_usage_ledger
+            WHERE model != ''
+            GROUP BY model
+            ORDER BY total_tokens DESC
+            LIMIT 10
+            """
+        ).fetchall()
+
+    providers: dict[str, dict[str, int]] = {}
+    for row in provider_rows:
+        model = str(row["model"] or "")
+        purpose = str(row["purpose"] or "")
+        provider = _provider_from_model_purpose(model, purpose)
+        bucket = providers.setdefault(provider, _empty_totals())
+        for key, column in (
+            ("prompt_tokens", "prompt_tokens"),
+            ("completion_tokens", "completion_tokens"),
+            ("total_tokens", "total_tokens"),
+            ("call_count", "call_count"),
+        ):
+            bucket[key] += int(row[column] or 0)
+
+    total = _row_to_dict(
+        total_row,
+        ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"),
+    )
+    return {
+        "total": total,
+        "first_day": str(total_row["first_day"] or "") if total_row is not None else "",
+        "last_day": str(total_row["last_day"] or "") if total_row is not None else "",
+        "providers": [
+            {"provider": provider, **values}
+            for provider, values in sorted(
+                providers.items(), key=lambda item: -item[1]["total_tokens"]
+            )
+        ],
+        "by_model": [
+            _row_to_dict(row, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="model")
+            for row in model_rows
+        ],
+    }
+
+
 def _range_start(window: str) -> datetime:
+    window = normalize_window(window)
     now = datetime.now()
     today = datetime(now.year, now.month, now.day)
     if window == "day":
@@ -185,9 +278,62 @@ def _range_start(window: str) -> datetime:
     return today - timedelta(days=29)
 
 
+def _empty_totals() -> dict[str, int]:
+    return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "call_count": 0}
+
+
+def _build_series(window: str, day_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """为 WebUI sparkline 补齐时间桶。
+
+    当前 ledger schema 只按 day 聚合，不保存逐次调用时间。`day` 窗口因此把
+    今天累计量放在当前小时桶，其它窗口按自然日补齐；这样既不伪造小时分布，
+    也能给前端提供稳定的 24/7/30 个点。
+    """
+    window = normalize_window(window)
+    today = datetime.now()
+    by_day = {str(row.get("bucket_day") or ""): row for row in day_rows}
+    fields = ("prompt_tokens", "completion_tokens", "total_tokens", "call_count")
+    if window == "day":
+        current_hour = today.replace(minute=0, second=0, microsecond=0)
+        buckets: list[dict[str, Any]] = []
+        today_key = _day_str(today)
+        today_totals = by_day.get(today_key) or _empty_totals()
+        for offset in range(23, -1, -1):
+            bucket_dt = current_hour - timedelta(hours=offset)
+            values = _empty_totals()
+            if bucket_dt.date() == today.date() and bucket_dt.hour == current_hour.hour:
+                values = {f: int(today_totals.get(f, 0) or 0) for f in fields}
+            buckets.append(
+                {
+                    "bucket": bucket_dt.strftime("%Y-%m-%d %H:00"),
+                    "label": bucket_dt.strftime("%H:00"),
+                    **values,
+                }
+            )
+        return buckets
+
+    days = 7 if window == "week" else 30
+    start = datetime(today.year, today.month, today.day) - timedelta(days=days - 1)
+    buckets = []
+    for offset in range(days):
+        bucket_dt = start + timedelta(days=offset)
+        key = _day_str(bucket_dt)
+        raw = by_day.get(key) or _empty_totals()
+        values = {f: int(raw.get(f, 0) or 0) for f in fields}
+        buckets.append(
+            {
+                "bucket": key,
+                "label": bucket_dt.strftime("%m-%d"),
+                **values,
+            }
+        )
+    return buckets
+
+
 def query_summary(window: str = "month") -> dict[str, Any]:
     """返回当前窗口的总 token 数 + 按 day/model/group 的分布。"""
-    start = _range_start(window)
+    window_key = normalize_window(window)
+    start = _range_start(window_key)
     start_str = _day_str(start)
     with connect_sync() as conn:
         total_row = conn.execute(
@@ -261,6 +407,37 @@ def query_summary(window: str = "month") -> dict[str, Any]:
             """,
             (start_str,),
         ).fetchall()
+    by_day_list = [
+        _row_to_dict(r, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="bucket_day")
+        for r in by_day
+    ]
+    by_model_list = [
+        _row_to_dict(r, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="model")
+        for r in by_model
+    ]
+    by_group_list = [
+        _row_to_dict(r, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="group_id")
+        for r in by_group
+    ]
+
+    total = _row_to_dict(total_row, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"))
+    total_tokens = max(0, int(total.get("total_tokens", 0) or 0))
+    max_model_tokens = max((int(row.get("total_tokens", 0) or 0) for row in by_model_list), default=0)
+    model_distribution = []
+    for row in by_model_list[:12]:
+        tokens = int(row.get("total_tokens", 0) or 0)
+        calls = int(row.get("call_count", 0) or 0)
+        model_distribution.append(
+            {
+                **row,
+                "token_share": round(tokens / total_tokens, 4) if total_tokens > 0 else 0.0,
+                "relative_width": round(tokens / max_model_tokens, 4) if max_model_tokens > 0 else 0.0,
+                "call_share": round(calls / int(total.get("call_count", 0) or 1), 4)
+                if int(total.get("call_count", 0) or 0) > 0
+                else 0.0,
+            }
+        )
+
     by_purpose_agg: dict[str, dict[str, int]] = {}
     for row in by_purpose_rows:
         raw_purpose = str(row["purpose"] or "")
@@ -277,19 +454,22 @@ def query_summary(window: str = "month") -> dict[str, Any]:
         for k, v in sorted(by_purpose_agg.items(), key=lambda kv: -kv[1]["total_tokens"])
     ]
     return {
-        "window": window,
+        "window": window_key,
         "start_day": start_str,
-        "total": _row_to_dict(total_row, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count")),
-        "by_day": [_row_to_dict(r, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="bucket_day") for r in by_day],
-        "by_model": [_row_to_dict(r, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="model") for r in by_model],
-        "by_group": [_row_to_dict(r, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="group_id") for r in by_group],
+        "total": total,
+        "series": _build_series(window_key, by_day_list),
+        "by_day": by_day_list,
+        "by_model": by_model_list,
+        "model_distribution": model_distribution,
+        "by_group": by_group_list,
         "by_purpose": by_purpose_list,
     }
 
 
 def query_group_detail(group_id: str, window: str = "month") -> dict[str, Any]:
     """单个群在窗口内按 day/model 的明细。"""
-    start_str = _day_str(_range_start(window))
+    window_key = normalize_window(window)
+    start_str = _day_str(_range_start(window_key))
     with connect_sync() as conn:
         rows = conn.execute(
             """
@@ -307,7 +487,7 @@ def query_group_detail(group_id: str, window: str = "month") -> dict[str, Any]:
         ).fetchall()
     return {
         "group_id": str(group_id or ""),
-        "window": window,
+        "window": window_key,
         "rows": [
             {
                 "bucket_day": str(r["bucket_day"]),
@@ -334,4 +514,11 @@ def _row_to_dict(row: Any, fields: tuple[str, ...], *, key: str | None = None) -
     return result
 
 
-__all__ = ["record_llm_call", "query_summary", "query_group_detail", "query_provider_summary"]
+__all__ = [
+    "record_llm_call",
+    "query_summary",
+    "query_group_detail",
+    "query_provider_summary",
+    "query_total_consumption",
+    "normalize_window",
+]
