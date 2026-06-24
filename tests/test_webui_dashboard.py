@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,15 +47,29 @@ def _runtime_with_data(tmp_path: Path, monkeypatch):
     favorability_service.set_score("group_g1", 88.0, actor="test")
 
     class _InfoBot:
+        def __init__(self) -> None:
+            self.group_list_calls = 0
+            self.group_info_calls = 0
+
+        async def get_group_list(self):
+            self.group_list_calls += 1
+            return [
+                {"group_id": 1, "group_name": "测试一群"},
+                {"group_id": 2, "group_name": "测试二群"},
+            ]
+
         async def get_group_info(self, group_id: int):
+            self.group_info_calls += 1
             names = {1: "测试一群", 2: "测试二群"}
             return {"group_id": group_id, "group_name": names.get(int(group_id), "")}
+
+    info_bot = _InfoBot()
 
     runtime_bundle = SimpleNamespace(
         profile_service=profile_service,
         memory_store=store,
         favorability_service=favorability_service,
-        get_bots=lambda: {"1": _InfoBot()},
+        get_bots=lambda: {"1": info_bot},
     )
 
     app_module = load_personification_module("plugin.personification.webui.app")
@@ -65,7 +80,14 @@ def _runtime_with_data(tmp_path: Path, monkeypatch):
         logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
         runtime_bundle=runtime_bundle,
     )
-    return SimpleNamespace(plugin_config=cfg, app_module=app_module, runtime_bundle=runtime_bundle, store=store, ledger=ledger)
+    return SimpleNamespace(
+        plugin_config=cfg,
+        app_module=app_module,
+        runtime_bundle=runtime_bundle,
+        store=store,
+        ledger=ledger,
+        info_bot=info_bot,
+    )
 
 
 def _build_client(runtime_context):
@@ -120,6 +142,9 @@ def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
     assert groups["2"]["total_tokens"] == 280
     assert groups["1"]["group_name"] == "测试一群"
     assert groups["1"]["group_label"] == "测试一群"
+    assert all("未命名群" not in row["group_label"] for row in groups.values())
+    assert _runtime_with_data.info_bot.group_list_calls == 1
+    assert _runtime_with_data.info_bot.group_info_calls == 0
     providers = {row["provider"]: row for row in body["provider_usage"]}
     assert providers["openai"]["total_tokens"] == body["total"]["total_tokens"]
     assert providers["openai"]["monthly_limit"] == 1000
@@ -138,6 +163,18 @@ def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
     overview_groups = {row["group_id"]: row for row in body["dashboard_overview"]["group_usage"]}
     assert overview_groups["1"]["group_label"] == "测试一群"
     assert overview_groups["1"]["percent"] > 0
+
+
+def test_dashboard_group_rows_never_emit_fake_unnamed_label() -> None:
+    metrics_routes = load_personification_module("plugin.personification.webui.routes.metrics_routes")
+    runtime = SimpleNamespace(runtime_bundle=SimpleNamespace(get_bots=lambda: {"1": SimpleNamespace()}))
+    rows = [{"group_id": "999001", "total_tokens": 1, "call_count": 1}]
+    annotated = asyncio.run(metrics_routes._annotate_group_rows(runtime, rows))
+    assert annotated[0]["group_name"] == ""
+    assert annotated[0]["group_label"] == "群 999001"
+    assert annotated[0]["group_name_missing"] is True
+    assert annotated[0]["group_lookup_status"] == "missing"
+    assert "未命名群" not in annotated[0]["group_label"]
 
 
 def test_dashboard_window_validation(_runtime_with_data) -> None:

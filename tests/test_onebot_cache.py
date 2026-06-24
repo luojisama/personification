@@ -17,12 +17,15 @@ class _FakeBot:
         fail: bool = False,
         nickname: str = "测试昵称",
         group_name: str = "测试群",
+        group_list: list[dict] | None = None,
     ) -> None:
         self.fail = fail
         self.nickname = nickname
         self.group_name = group_name
+        self.group_list = group_list or []
         self.stranger_calls = 0
         self.group_calls = 0
+        self.group_list_calls = 0
 
     async def get_stranger_info(self, *, user_id: int) -> dict:
         self.stranger_calls += 1
@@ -35,6 +38,12 @@ class _FakeBot:
         if self.fail:
             raise RuntimeError("bot offline")
         return {"group_id": group_id, "group_name": self.group_name}
+
+    async def get_group_list(self) -> list[dict]:
+        self.group_list_calls += 1
+        if self.fail:
+            raise RuntimeError("bot offline")
+        return self.group_list
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +69,35 @@ def test_get_group_name_caches_repeated_calls() -> None:
     assert name1 == "技术交流群"
     assert name2 == "技术交流群"
     assert bot.group_calls == 1
+
+
+def test_get_group_name_map_prefers_group_list() -> None:
+    bot = _FakeBot(
+        group_name="详情接口群名",
+        group_list=[
+            {"group_id": 1001, "group_name": "群列表一群"},
+            {"group_id": "1002", "group_name": "群列表二群"},
+        ],
+    )
+    names = asyncio.run(onebot_cache.get_group_name_map(bot, ["1001", "1002"]))
+    assert names == {"1001": "群列表一群", "1002": "群列表二群"}
+    assert bot.group_list_calls == 1
+    assert bot.group_calls == 0
+
+
+def test_get_group_name_map_uses_call_api_fallback() -> None:
+    class _CallApiBot:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call_api(self, api: str, **kwargs) -> list[dict]:
+            self.calls.append((api, kwargs))
+            return [{"group_id": 2001, "group_name": "call_api 群"}]
+
+    bot = _CallApiBot()
+    names = asyncio.run(onebot_cache.get_group_name_map(bot, ["2001"]))
+    assert names["2001"] == "call_api 群"
+    assert bot.calls == [("get_group_list", {})]
 
 
 def test_bot_failure_degrades_to_empty_string() -> None:

@@ -89,6 +89,13 @@ function renderDashboardModelUsage(rows) {
   </div>`;
 }
 
+function dashboardGroupLabel(row) {
+  const label = row && (row.group_label || row.group_name);
+  if (label) return String(label);
+  const groupId = row && row.group_id ? String(row.group_id) : "";
+  return groupId ? `群 ${groupId}` : "群名获取失败";
+}
+
 function renderDashboardGroupPie(rows) {
   const colors = ["#4f8cff", "#20c997", "#ffb020", "#ff6b6b", "#9775fa", "#38bdf8", "#f472b6", "#94d82d", "#ffa94d", "#adb5bd"];
   const source = (rows || []).filter(row => Number(row.total_tokens || 0) > 0);
@@ -110,10 +117,14 @@ function renderDashboardGroupPie(rows) {
     : "#2b3138 0% 100%";
   const legend = data.map((row, index) => {
     const pct = total > 0 ? Number(row.total_tokens || 0) / total * 100 : 0;
-    const label = row.group_label || row.group_name || `未命名群 ${index + 1}`;
+    const label = dashboardGroupLabel(row);
+    const groupId = row.group_id ? String(row.group_id) : "";
+    const title = row.group_name
+      ? `${row.group_name}${groupId ? ` · 群号 ${groupId}` : ""}`
+      : `${row.group_name_missing ? "群名获取失败；" : ""}${groupId ? `群号 ${groupId}` : label}`;
     return `<div class="dashboard-pie-legend-row">
       <span class="dashboard-pie-dot" style="background:${colors[index % colors.length]}"></span>
-      <span class="dashboard-pie-name">${escapeHtml(label)}</span>
+      <span class="dashboard-pie-name" title="${escapeAttr(title)}">${escapeHtml(label)}</span>
       <span class="dashboard-pie-percent">${escapeHtml(dashboardPercent(pct))}</span>
       <span class="dashboard-pie-token">${escapeHtml(dashboardCompactNumber(row.total_tokens || 0))} T</span>
     </div>`;

@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 
 from ...core import metrics, token_ledger
-from ...core.onebot_cache import get_group_name
+from ...core.onebot_cache import get_group_name_map
 from ..deps import AdminIdentity, require_admin
 
 _WINDOW_PATTERN = "^(day|week|month|24h|7d|30d)$"
@@ -120,28 +120,40 @@ def _billing_summary(summary: dict, provider_usage: list[dict]) -> dict:
 
 
 def _get_first_bot(runtime) -> Any | None:
-    bundle = getattr(runtime, "runtime_bundle", None)
-    if bundle is None:
-        return None
-    get_bots = getattr(bundle, "get_bots", None)
-    if not callable(get_bots):
-        return None
-    try:
-        bots = get_bots() or {}
-    except Exception:
-        return None
-    return next(iter(bots.values()), None) if bots else None
+    for holder in (getattr(runtime, "runtime_bundle", None), runtime):
+        if holder is None:
+            continue
+        get_bots = getattr(holder, "get_bots", None)
+        if not callable(get_bots):
+            continue
+        try:
+            bots = get_bots() or {}
+        except Exception:
+            continue
+        bot = next(iter(bots.values()), None) if bots else None
+        if bot is not None:
+            return bot
+    return None
+
+
+def _fallback_group_label(group_id: str) -> str:
+    return f"群 {group_id}" if group_id else "群名获取失败"
 
 
 async def _annotate_group_rows(runtime, rows: list[dict]) -> list[dict]:
     bot = _get_first_bot(runtime)
+    group_ids = [str(row.get("group_id", "") or "").strip() for row in rows or []]
+    name_map = await get_group_name_map(bot, group_ids) if group_ids else {}
     out: list[dict] = []
-    for index, row in enumerate(rows or [], start=1):
+    for row in rows or []:
         item = dict(row)
-        group_id = str(item.get("group_id", "") or "")
-        group_name = await get_group_name(bot, group_id) if group_id else ""
+        group_id = str(item.get("group_id", "") or "").strip()
+        existing_name = str(item.get("group_name", "") or "").strip()
+        group_name = (str(name_map.get(group_id, "") or "").strip() if group_id else "") or existing_name
         item["group_name"] = group_name
-        item["group_label"] = group_name or f"未命名群 {index}"
+        item["group_label"] = group_name or _fallback_group_label(group_id)
+        item["group_name_missing"] = bool(group_id and not group_name)
+        item["group_lookup_status"] = "ok" if group_name else ("no_bot" if bot is None else "missing")
         out.append(item)
     return out
 

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from ...core import webui_audit_log
 from ...core.db import connect_sync
 from ...core.meme_dictionary import delete_meme_entry, list_meme_entries, upsert_meme_entry
-from ...core.onebot_cache import get_group_name, get_user_nickname
+from ...core.onebot_cache import get_group_name_map, get_user_nickname
 from ..deps import AdminIdentity, get_client_ip, require_admin
 from .favorability_view import serialize_favorability
 
@@ -82,17 +82,20 @@ def _knowledge_autobuild_status(runtime, group_id: str) -> dict[str, Any]:
 
 
 def _get_first_bot(runtime) -> Any | None:
-    bundle = getattr(runtime, "runtime_bundle", None)
-    if bundle is None:
-        return None
-    get_bots = getattr(bundle, "get_bots", None)
-    if not callable(get_bots):
-        return None
-    try:
-        bots = get_bots() or {}
-    except Exception:
-        return None
-    return next(iter(bots.values()), None) if bots else None
+    for holder in (getattr(runtime, "runtime_bundle", None), runtime):
+        if holder is None:
+            continue
+        get_bots = getattr(holder, "get_bots", None)
+        if not callable(get_bots):
+            continue
+        try:
+            bots = get_bots() or {}
+        except Exception:
+            continue
+        bot = next(iter(bots.values()), None) if bots else None
+        if bot is not None:
+            return bot
+    return None
 
 
 _REBUILD_RATELIMIT_NS = "group_style_rebuild_ratelimit"
@@ -139,12 +142,13 @@ def build_group_router(*, runtime) -> APIRouter:
         svc = _profile_service(runtime)
         all_ids, source_map = _collect_all_known_groups(runtime)
         bot = _get_first_bot(runtime)
+        name_map = await get_group_name_map(bot, all_ids)
         items: list[dict[str, Any]] = []
         for gid in all_ids:
             items.append(
                 {
                     "group_id": gid,
-                    "group_name": await get_group_name(bot, gid),
+                    "group_name": name_map.get(gid, ""),
                     "source": source_map.get(gid, ""),
                     "has_memory": source_map.get(gid) == "memory",
                     "favorability": serialize_favorability(
@@ -168,6 +172,7 @@ def build_group_router(*, runtime) -> APIRouter:
         group_configs = load_group_configs()
         known_from_svc = [str(g) for g in (svc.list_groups() if svc else [])]
         all_ids = sorted({str(g) for g in known_from_svc} | set(dynamic_whitelist) | set(config_whitelist))
+        name_map = await get_group_name_map(bot, all_ids)
         items: list[dict[str, Any]] = []
         for gid in all_ids:
             enabled = is_group_whitelisted(gid, config_whitelist)
@@ -185,7 +190,7 @@ def build_group_router(*, runtime) -> APIRouter:
             items.append(
                 {
                     "group_id": gid,
-                    "group_name": await get_group_name(bot, gid),
+                    "group_name": name_map.get(gid, ""),
                     "enabled": enabled,
                     "source": source,
                     "readonly": gid in config_whitelist and "enabled" not in cfg,
