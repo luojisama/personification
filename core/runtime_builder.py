@@ -208,6 +208,7 @@ def build_plugin_runtime(
         load_data,
         get_level_name,
         external_sign_in_available,
+        favorability_service,
     ) = build_sign_in_fallbacks(plugin_config, logger=logger)
     qzone_publish_available, publish_qzone_shuo, update_qzone_cookie = build_qzone_services(
         plugin_config=plugin_config,
@@ -545,6 +546,7 @@ def build_plugin_runtime(
             favorability_attitudes=plugin_config.personification_favorability_attitudes,
             get_custom_title=get_custom_title,
             default_bot_nickname=default_bot_nickname,
+            favorability_service=favorability_service,
         ),
         runtime=RuntimeDeps(
             is_msg_processed=is_msg_processed,
@@ -701,6 +703,7 @@ def build_plugin_runtime(
         publish_qzone_shuo=publish_qzone_shuo,
         update_qzone_cookie=update_qzone_cookie,
         qzone_social_service=qzone_social_service,
+        favorability_service=favorability_service,
         get_user_data=get_user_data,
         update_user_data=update_user_data,
         load_data=load_data,

@@ -172,6 +172,29 @@ async def run_daily_group_fav_report(
         return 0
 
 
+async def run_favorability_maintenance(
+    *,
+    sign_in_available: bool,
+    favorability_service: Any,
+    logger: Any,
+) -> dict[str, Any]:
+    """Run plugin-owned favorability maintenance such as optional decay."""
+    if not sign_in_available or favorability_service is None:
+        return {"enabled": False, "checked": 0, "decayed": 0, "events": []}
+    try:
+        result = favorability_service.run_decay_once()
+        if result.get("enabled") and int(result.get("decayed", 0) or 0) > 0:
+            logger.info(
+                "拟人插件：好感度维护完成，"
+                f"检查 {int(result.get('checked', 0) or 0)} 个档案，"
+                f"衰减 {int(result.get('decayed', 0) or 0)} 个。"
+            )
+        return result
+    except Exception as exc:
+        logger.error(f"执行好感度维护任务出错: {exc}")
+        return {"enabled": False, "checked": 0, "decayed": 0, "events": [], "error": str(exc)}
+
+
 async def run_auto_post_diary(
     *,
     qzone_publish_available: bool,

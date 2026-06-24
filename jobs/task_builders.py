@@ -186,6 +186,23 @@ def build_daily_group_fav_report_task(
     return _daily_group_fav_report
 
 
+def build_favorability_maintenance_task(
+    *,
+    run_favorability_maintenance: Callable[..., Awaitable[dict[str, Any]]],
+    sign_in_available: bool,
+    favorability_service: Any,
+    logger: Any,
+) -> Callable[[], Awaitable[dict[str, Any]]]:
+    async def _favorability_maintenance() -> dict[str, Any]:
+        return await run_favorability_maintenance(
+            sign_in_available=sign_in_available,
+            favorability_service=favorability_service,
+            logger=logger,
+        )
+
+    return _favorability_maintenance
+
+
 def build_group_idle_topic_task(
     *,
     check_group_idle_topic: Callable[[], Awaitable[int]],

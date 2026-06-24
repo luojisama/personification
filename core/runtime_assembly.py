@@ -119,6 +119,7 @@ class PluginRuntimeBundle:
     publish_qzone_shuo: Any
     update_qzone_cookie: Any
     qzone_social_service: Any
+    favorability_service: Any
     get_user_data: Any
     update_user_data: Any
     load_data: Any
@@ -258,6 +259,7 @@ class PluginRuntimeBundle:
         return JobSetupDeps(
             plugin_config=self.plugin_config,
             sign_in_available=self.sign_in_available,
+            favorability_service=self.favorability_service,
             load_data=self.load_data,
             load_proactive_state=load_proactive_state,
             get_now=get_current_local_time,
@@ -357,6 +359,7 @@ class PluginRuntimeBundle:
             superuser_permission=self.superuser_permission,
             superusers=self.superusers,
             sign_in_available=self.sign_in_available,
+            favorability_service=self.favorability_service,
             md_to_pic=self.md_to_pic,
             finished_exception_cls=self.finished_exception_cls,
             register_private_command_keywords=register_private_command_keywords,

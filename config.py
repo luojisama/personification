@@ -14,7 +14,7 @@ from .core.memory_defaults import (
     DEFAULT_PERSONA_HISTORY_MAX,
     DEFAULT_PRIVATE_HISTORY_TURNS,
 )
-from .core.favorability import DEFAULT_FAVORABILITY_LEVELS
+from .core.favorability import DEFAULT_FAVORABILITY_EVENT_DELTAS, DEFAULT_FAVORABILITY_LEVELS
 
 
 DEFAULT_FAVORABILITY_ATTITUDES: Dict[str, str] = {
@@ -363,6 +363,14 @@ class Config(BaseModel):
     personification_favorability_group_default_score: float = 100.0
     personification_favorability_levels: Dict[str, float] = DEFAULT_FAVORABILITY_LEVELS.copy()
     personification_favorability_attitudes: Dict[str, str] = DEFAULT_FAVORABILITY_ATTITUDES.copy()
+    personification_favorability_event_deltas: Dict[str, float] = DEFAULT_FAVORABILITY_EVENT_DELTAS.copy()
+    personification_favorability_daily_positive_cap: float = 5.0
+    personification_favorability_group_daily_positive_cap: float = 10.0
+    personification_favorability_daily_negative_cap: float = 30.0
+    personification_favorability_event_log_limit: int = 50
+    personification_favorability_decay_enabled: bool = False
+    personification_favorability_decay_idle_days: int = 14
+    personification_favorability_decay_delta: float = -0.20
 
     personification_history_len: int = DEFAULT_HISTORY_LEN
     # 滚动窗口：触发压缩的条数阈值（达到此数量时压缩）

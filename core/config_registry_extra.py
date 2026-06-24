@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .favorability import DEFAULT_FAVORABILITY_LEVELS
+from .favorability import DEFAULT_FAVORABILITY_EVENT_DELTAS, DEFAULT_FAVORABILITY_LEVELS
 
 
 def _s(field: str, t: str, default: Any, name: str, desc: str, **extra: Any) -> dict[str, Any]:
@@ -80,6 +80,32 @@ EXTRA_CONFIG_SPECS: tuple[dict[str, Any], ...] = (
        "好感度等级到说话态度的映射（JSON 对象）；留空使用内置 10 级默认表。",
        group="人设提示词", advanced=True,
        example='{"初见":"保持基本礼貌","挚友":"无话不谈"}'),
+    _s("personification_favorability_event_deltas", "dict", DEFAULT_FAVORABILITY_EVENT_DELTAS.copy(), "好感度事件分值",
+       "统一好感度事件到分值变化的映射；内置事件含群氛围好、聊天有趣、永久拉黑、手动调整和每日衰减。",
+       group="人设提示词", advanced=True,
+       aliases=("好感加分", "好感扣分", "亲密度事件", "事件分值"),
+       example='{"group_good_atmosphere":0.1,"user_interesting_chat":0.05,"user_perm_blacklist":-30}'),
+    _s("personification_favorability_daily_positive_cap", "float", 5.0, "用户好感每日加分上限",
+       "单个用户每天通过正向事件最多累计增加多少好感；模型觉得聊天有趣等事件共享此上限。",
+       group="人设提示词", min=0, aliases=("用户加分上限", "好感日上限", "亲密度加分上限")),
+    _s("personification_favorability_group_daily_positive_cap", "float", 10.0, "群好感每日加分上限",
+       "单个群每天通过氛围良好等正向事件最多累计增加多少群好感。",
+       group="人设提示词", min=0, aliases=("群加分上限", "群好感日上限")),
+    _s("personification_favorability_daily_negative_cap", "float", 30.0, "好感每日扣分上限",
+       "单个用户每天通过负向事件最多累计降低多少好感；永久拉黑等事件受此上限保护。",
+       group="人设提示词", min=0, aliases=("扣分上限", "降好感上限", "负向事件上限")),
+    _s("personification_favorability_event_log_limit", "int", 50, "好感事件日志条数",
+       "每个用户/群好感档案保留最近多少条事件账本；0 表示不保留事件明细。",
+       group="人设提示词", min=0, max=500, aliases=("好感日志", "事件账本", "亲密度日志")),
+    _s("personification_favorability_decay_enabled", "bool", False, "好感度每日衰减",
+       "是否启用每日维护衰减；默认关闭，开启后长期没有好感事件的用户会按配置小幅降低到默认分为止。",
+       group="人设提示词", aliases=("好感衰减", "亲密度衰减", "关系冷却")),
+    _s("personification_favorability_decay_idle_days", "int", 14, "好感衰减空闲天数",
+       "用户连续多少天没有好感事件后才允许每日衰减；只影响用户档案，不自动衰减群默认好感。",
+       group="人设提示词", min=1, aliases=("衰减天数", "冷却天数")),
+    _s("personification_favorability_decay_delta", "float", -0.20, "好感每日衰减幅度",
+       "衰减启用时每日维护应用的分值变化，建议保持为负数且幅度较小；不会降到用户默认好感以下。",
+       group="人设提示词", max=0, aliases=("衰减幅度", "每日扣好感")),
 
     # ──────────── 模型路由（补充） ────────────
     _s("personification_strict_main_model", "bool", False, "严格主模型模式",

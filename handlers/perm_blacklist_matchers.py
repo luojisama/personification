@@ -20,6 +20,7 @@ def register_perm_blacklist_matchers(
     message_segment_cls: Any,
     finished_exception_cls: Any,
     logger: Any,
+    favorability_service: Any = None,
     track_command_keywords: Callable[[str, Iterable[str] | None], None] | None = None,
 ) -> Dict[str, Any]:
     def _register_command(command: str, *, aliases: set[str] | None = None, **kwargs: Any) -> Any:
@@ -40,6 +41,8 @@ def register_perm_blacklist_matchers(
             message=event.get_message(),
             update_user_data=update_user_data,
             set_blacklisted=True,
+            actor_user_id=event.get_user_id(),
+            favorability_service=favorability_service,
         )
 
     perm_blacklist_del = _register_command("取消永久拉黑", permission=superuser_permission, priority=5, block=True)
@@ -53,6 +56,8 @@ def register_perm_blacklist_matchers(
             message=event.get_message(),
             update_user_data=update_user_data,
             set_blacklisted=False,
+            actor_user_id=event.get_user_id(),
+            favorability_service=favorability_service,
         )
 
     perm_blacklist_list = _register_command("永久黑名单列表", permission=superuser_permission, priority=5, block=True)

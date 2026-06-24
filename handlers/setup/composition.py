@@ -123,6 +123,7 @@ class MatcherSetupDeps:
     superuser_permission: Any
     superusers: set[str]
     sign_in_available: bool
+    favorability_service: Any
     md_to_pic: Any
     finished_exception_cls: Any
     register_private_command_keywords: Any
@@ -349,6 +350,7 @@ def setup_all_matchers(*, deps: MatcherSetupDeps) -> Dict[str, Any]:
         handle_set_group_fav_command=deps.handle_set_group_fav_command,
         parse_group_fav_update_args=deps.parse_group_fav_update_args,
         update_user_data=deps.update_user_data,
+        favorability_service=deps.favorability_service,
         group_message_event_cls=deps.group_message_event_cls,
         handle_set_persona_command=deps.handle_set_persona_command,
         parse_persona_update_args=deps.parse_persona_update_args,
@@ -389,6 +391,7 @@ def setup_all_matchers(*, deps: MatcherSetupDeps) -> Dict[str, Any]:
         sign_in_available=deps.sign_in_available,
         handle_perm_blacklist_set_command=deps.handle_perm_blacklist_set_command,
         update_user_data=deps.update_user_data,
+        favorability_service=deps.favorability_service,
         collect_perm_blacklist_items=deps.collect_perm_blacklist_items,
         build_perm_blacklist_card_markdown=deps.build_perm_blacklist_card_markdown,
         build_perm_blacklist_text=deps.build_perm_blacklist_text,

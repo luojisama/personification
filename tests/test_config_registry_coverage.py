@@ -61,6 +61,16 @@ def test_extra_entries_normalize_roundtrip() -> None:
     assert entries["favorability_group_default_score"].normalize_value("87") == 87.0
     assert entries["favorability_levels"].normalize_value('{"初见":0,"普通":35}') == {"初见": 0, "普通": 35}
     assert entries["favorability_attitudes"].normalize_value('{"初见":"礼貌"}') == {"初见": "礼貌"}
+    assert entries["favorability_event_deltas"].normalize_value('{"user_perm_blacklist":-20}') == {
+        "user_perm_blacklist": -20
+    }
+    assert entries["favorability_daily_positive_cap"].normalize_value("3.5") == 3.5
+    assert entries["favorability_group_daily_positive_cap"].normalize_value("9") == 9.0
+    assert entries["favorability_daily_negative_cap"].normalize_value("25") == 25.0
+    assert entries["favorability_event_log_limit"].normalize_value("20") == 20
+    assert entries["favorability_decay_enabled"].normalize_value("关") is False
+    assert entries["favorability_decay_idle_days"].normalize_value("21") == 21
+    assert entries["favorability_decay_delta"].normalize_value("-0.1") == -0.1
 
 
 def test_normalize_value_accepts_parsed_list_and_dict() -> None:

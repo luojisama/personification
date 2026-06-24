@@ -46,6 +46,7 @@ def register_admin_matchers(
     get_configured_api_providers: Any,
     build_view_config_nodes: Any,
     session_history_limit: int,
+    favorability_service: Any = None,
     track_command_keywords: Callable[[str, Iterable[str] | None], None] | None = None,
 ) -> Dict[str, Any]:
     def _register_command(command: str, *, aliases: set[str] | None = None, **kwargs: Any) -> Any:
@@ -86,6 +87,7 @@ def register_admin_matchers(
             parse_group_fav_update_args=parse_group_fav_update_args,
             update_user_data=update_user_data,
             logger=logger,
+            favorability_service=favorability_service,
         )
 
     set_persona = _register_command("设置人设", permission=superuser_permission, priority=5, block=True)

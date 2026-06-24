@@ -233,6 +233,7 @@ class PersonaDeps:
     favorability_attitudes: Dict[str, str]
     get_custom_title: Callable[[str], str]
     default_bot_nickname: str
+    favorability_service: Any = None
 
 
 @dataclass
@@ -1832,29 +1833,44 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 try:
                     is_private_context = str(group_id).startswith("private_")
                     if not is_private_context:
-                        group_key = f"group_{group_id}"
-                        group_data = persona.get_user_data(group_key)
-
-                        today = runtime.get_current_time().strftime("%Y-%m-%d")
-                        last_update = group_data.get("last_update", "")
-                        daily_count = group_data.get("daily_fav_count", 0.0)
-
-                        if last_update != today:
-                            daily_count = 0.0
-
-                        if daily_count < 10.0:
-                            g_current_fav = float(group_data.get("favorability", 100.0))
-                            g_new_fav = round(g_current_fav + 0.1, 2)
-                            daily_count = round(float(daily_count) + 0.1, 2)
-                            persona.update_user_data(
-                                group_key,
-                                favorability=g_new_fav,
-                                daily_fav_count=daily_count,
-                                last_update=today,
+                        service = getattr(persona, "favorability_service", None)
+                        if service is not None and hasattr(service, "apply_group_good_atmosphere"):
+                            result = service.apply_group_good_atmosphere(
+                                str(group_id),
+                                now=runtime.get_current_time(),
                             )
-                            runtime.logger.info(
-                                f"AI 觉得群 {group_id} 氛围良好，好感度 +0.10 (今日已加: {daily_count:.2f}/10.00)"
-                            )
+                            delta = float(result.get("delta", 0.0) or 0.0)
+                            if delta > 0:
+                                runtime.logger.info(
+                                    f"AI 觉得群 {group_id} 氛围良好，好感度 +{delta:.2f} "
+                                    f"(今日已加: {float(result.get('daily_used', 0.0) or 0.0):.2f}/"
+                                    f"{float(result.get('daily_cap', 0.0) or 0.0):.2f})"
+                                )
+                        else:
+                            group_key = f"group_{group_id}"
+                            group_data = persona.get_user_data(group_key)
+
+                            today = runtime.get_current_time().strftime("%Y-%m-%d")
+                            last_update = group_data.get("last_update", "")
+                            daily_count = group_data.get("daily_fav_count", 0.0)
+
+                            if last_update != today:
+                                daily_count = 0.0
+
+                            if daily_count < 10.0:
+                                g_current_fav = float(group_data.get("favorability", 100.0))
+                                g_new_fav = round(g_current_fav + 0.1, 2)
+                                daily_count = round(float(daily_count) + 0.1, 2)
+                                persona.update_user_data(
+                                    group_key,
+                                    favorability=g_new_fav,
+                                    daily_fav_count=daily_count,
+                                    last_update=today,
+                                )
+                                runtime.logger.info(
+                                    f"AI 觉得群 {group_id} 氛围良好，好感度 +0.10 "
+                                    f"(今日已加: {daily_count:.2f}/10.00)"
+                                )
                 except Exception as e:
                     runtime.logger.error(f"增加群聊好感度失败: {e}")
 
@@ -1863,31 +1879,47 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             reply_content = reply_content.replace("[有趣]", "").strip()
             if persona.sign_in_available:
                 try:
-                    user_data = persona.get_user_data(user_id)
-                    today = runtime.get_current_time().strftime("%Y-%m-%d")
-
-                    last_fav_date = user_data.get("last_interesting_date", "")
-                    daily_interesting_count = float(user_data.get("daily_interesting_count", 0.0))
-                    if last_fav_date != today:
-                        daily_interesting_count = 0.0
-
-                    DAILY_LIMIT = 5.0
-                    INCREMENT = 0.05
-
-                    if daily_interesting_count < DAILY_LIMIT:
-                        current_fav = float(user_data.get("favorability", 0.0))
-                        new_fav = round(current_fav + INCREMENT, 2)
-                        daily_interesting_count = round(daily_interesting_count + INCREMENT, 2)
-                        persona.update_user_data(
+                    service = getattr(persona, "favorability_service", None)
+                    if service is not None and hasattr(service, "apply_user_interesting_chat"):
+                        result = service.apply_user_interesting_chat(
                             user_id,
-                            favorability=new_fav,
-                            daily_interesting_count=daily_interesting_count,
-                            last_interesting_date=today,
+                            now=runtime.get_current_time(),
+                            group_id="" if is_private_session else str(group_id),
                         )
-                        runtime.logger.info(
-                            f"AI 觉得与 {user_name}({user_id}) 聊天有趣，"
-                            f"好感度 +{INCREMENT} (今日已加: {daily_interesting_count:.2f}/{DAILY_LIMIT:.1f})"
-                        )
+                        delta = float(result.get("delta", 0.0) or 0.0)
+                        if delta > 0:
+                            runtime.logger.info(
+                                f"AI 觉得与 {user_name}({user_id}) 聊天有趣，"
+                                f"好感度 +{delta:.2f} "
+                                f"(今日已加: {float(result.get('daily_used', 0.0) or 0.0):.2f}/"
+                                f"{float(result.get('daily_cap', 0.0) or 0.0):.1f})"
+                            )
+                    else:
+                        user_data = persona.get_user_data(user_id)
+                        today = runtime.get_current_time().strftime("%Y-%m-%d")
+
+                        last_fav_date = user_data.get("last_interesting_date", "")
+                        daily_interesting_count = float(user_data.get("daily_interesting_count", 0.0))
+                        if last_fav_date != today:
+                            daily_interesting_count = 0.0
+
+                        DAILY_LIMIT = 5.0
+                        INCREMENT = 0.05
+
+                        if daily_interesting_count < DAILY_LIMIT:
+                            current_fav = float(user_data.get("favorability", 0.0))
+                            new_fav = round(current_fav + INCREMENT, 2)
+                            daily_interesting_count = round(daily_interesting_count + INCREMENT, 2)
+                            persona.update_user_data(
+                                user_id,
+                                favorability=new_fav,
+                                daily_interesting_count=daily_interesting_count,
+                                last_interesting_date=today,
+                            )
+                            runtime.logger.info(
+                                f"AI 觉得与 {user_name}({user_id}) 聊天有趣，"
+                                f"好感度 +{INCREMENT} (今日已加: {daily_interesting_count:.2f}/{DAILY_LIMIT:.1f})"
+                            )
                 except Exception as e:
                     runtime.logger.error(f"增加用户好感度失败: {e}")
 
