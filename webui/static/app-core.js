@@ -6,10 +6,12 @@ let state = {
   dashboard: null, dashboardWindow: "month",
   personas: [], selectedPersona: null, personaSearch: "",
   groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [],
+  groupFavorability: null,
   groupSwitches: [], newGroupId: "",
   skills: [], skillFilter: "", skillSummary: null, skillRemoteSources: [], skillMcpTools: [],
   skillSourceForm: { source: "", name: "", ref: "", subdir: "", kind: "auto", preferFirst: false, autoApprove: false },
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
+  personaTemplateForm: { work_title: "", character_name: "" }, personaTemplateResult: null, personaTemplateBusy: false,
   personaPrompt: null, personaPromptPath: "", health: null, healthBusyCat: "", interactionResult: null, interactionBusy: false,
   qqInfo: null, qqGroups: [], qqFriends: [],
   memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false, memoryLimit: 200,
@@ -168,7 +170,7 @@ async function loadView() {
       state.skillSummary = data.summary || null;
       state.skillRemoteSources = data.remote_sources || [];
       state.skillMcpTools = data.mcp_tools || [];
-    } else if (state.view === "test") {
+    } else if (state.view === "test" || state.view === "persona_builder") {
       /* nothing to preload */
     } else if (state.view === "qq") {
       const [info, groups, friends] = await Promise.all([
@@ -297,6 +299,7 @@ function renderLayout() {
         ${navItem('plugin_knowledge','插件知识库')}
         ${navItem('test','模型测试')}
         ${navItem('persona_prompt','人设预览')}
+        ${navItem('persona_builder','人设构建')}
         ${navItem('proactive','主动诊断')}
         ${navItem('audit','审计日志')}
         ${navItem('logs','插件日志')}
@@ -339,6 +342,7 @@ function renderView() {
   if (state.view === "qzone") return renderQzone();
   if (state.view === "test") return renderTest();
   if (state.view === "persona_prompt") return renderPersonaPrompt();
+  if (state.view === "persona_builder") return renderPersonaBuilder();
   if (state.view === "memory") return renderMemory();
   if (state.view === "memory_graph") return renderMemoryGraph();
   if (state.view === "stickers") return renderStickers();

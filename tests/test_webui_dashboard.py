@@ -32,7 +32,16 @@ def _runtime_with_data(tmp_path: Path, monkeypatch):
     profile_service_mod = load_personification_module("plugin.personification.core.profile_service")
     profile_service = profile_service_mod.ProfileService(memory_store=store)
 
-    runtime_bundle = SimpleNamespace(profile_service=profile_service, memory_store=store)
+    favorability_mod = load_personification_module("plugin.personification.core.favorability")
+    favorability_service = favorability_mod.FavorabilityService(plugin_config=cfg)
+    favorability_service.set_score("u_alpha", 66.0, actor="test")
+    favorability_service.set_score("group_g1", 88.0, actor="test")
+
+    runtime_bundle = SimpleNamespace(
+        profile_service=profile_service,
+        memory_store=store,
+        favorability_service=favorability_service,
+    )
 
     app_module = load_personification_module("plugin.personification.webui.app")
     app_module.set_runtime_context(
@@ -107,12 +116,16 @@ def test_personas_list_and_detail(_runtime_with_data) -> None:
     assert res.status_code == 200
     body = res.json()
     assert body["available"] is True
-    assert any(p["user_id"] == "u_alpha" for p in body["profiles"])
+    listed = next(p for p in body["profiles"] if p["user_id"] == "u_alpha")
+    assert listed["favorability"]["available"] is True
+    assert listed["favorability"]["score"] == 66.0
 
     res2 = client.get("/personification/api/personas/u_alpha")
     assert res2.status_code == 200
     detail = res2.json()
     assert detail["core_profile"]["profile_text"] == "全局画像 Alpha"
+    assert detail["favorability"]["score"] == 66.0
+    assert detail["favorability"]["events"][0]["label"] == "管理员手动调整"
     assert len(detail["local_profiles"]) == 1
     assert detail["local_profiles"][0]["group_id"] == "g1"
 
@@ -129,6 +142,9 @@ def test_groups_list_and_detail(_runtime_with_data) -> None:
     assert res2.status_code == 200
     detail = res2.json()
     assert any(p["user_id"] == "u_alpha" for p in detail["profiles"])
+    assert detail["group_favorability"]["score"] == 88.0
+    member = next(p for p in detail["profiles"] if p["user_id"] == "u_alpha")
+    assert member["favorability"]["score"] == 66.0
 
     res3 = client.get("/personification/api/groups/g1/style")
     assert res3.status_code == 200

@@ -12,6 +12,7 @@ from ...core.db import connect_sync
 from ...core.meme_dictionary import delete_meme_entry, list_meme_entries, upsert_meme_entry
 from ...core.onebot_cache import get_group_name, get_user_nickname
 from ..deps import AdminIdentity, get_client_ip, require_admin
+from .favorability_view import serialize_favorability
 
 
 def _profile_service(runtime) -> Any | None:
@@ -146,6 +147,12 @@ def build_group_router(*, runtime) -> APIRouter:
                     "group_name": await get_group_name(bot, gid),
                     "source": source_map.get(gid, ""),
                     "has_memory": source_map.get(gid) == "memory",
+                    "favorability": serialize_favorability(
+                        runtime,
+                        f"group_{gid}",
+                        scope="group",
+                        include_events=False,
+                    ),
                 }
             )
         return {"groups": items, "available": svc is not None}
@@ -287,9 +294,24 @@ def build_group_router(*, runtime) -> APIRouter:
                         "expression_style": str(entry_emotion.get("expression_style", "") or "")[:60],
                         "updated_at": str(entry_emotion.get("updated_at", "") or ""),
                     },
+                    "favorability": serialize_favorability(
+                        runtime,
+                        str(uid),
+                        scope="user",
+                        include_events=False,
+                    ),
                 }
             )
-        return {"group_id": group_id, "profiles": items}
+        return {
+            "group_id": group_id,
+            "profiles": items,
+            "group_favorability": serialize_favorability(
+                runtime,
+                f"group_{group_id}",
+                scope="group",
+                include_events=True,
+            ),
+        }
 
     @router.get("/{group_id}/style")
     async def style(group_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:

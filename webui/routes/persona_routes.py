@@ -6,6 +6,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 
 from ...core.onebot_cache import get_user_nickname
 from ..deps import AdminIdentity, require_admin
+from .favorability_view import serialize_favorability
 
 
 def _profile_service(runtime) -> Any | None:
@@ -56,6 +57,12 @@ def build_persona_router(*, runtime) -> APIRouter:
                     "snippet": (p["profile_text"] or "")[:140],
                     "updated_at": p.get("updated_at", 0),
                     "source": p.get("source", ""),
+                    "favorability": serialize_favorability(
+                        runtime,
+                        str(uid),
+                        scope="user",
+                        include_events=False,
+                    ),
                 }
             )
         return {"profiles": items, "available": True}
@@ -92,6 +99,12 @@ def build_persona_router(*, runtime) -> APIRouter:
                 structured = {}
         return {
             "user_id": user_id,
+            "favorability": serialize_favorability(
+                runtime,
+                str(user_id),
+                scope="user",
+                include_events=True,
+            ),
             "core_profile": {
                 "profile_text": core.profile_text if core else "",
                 "profile_json": core_json,

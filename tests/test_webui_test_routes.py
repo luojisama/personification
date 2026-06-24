@@ -112,3 +112,60 @@ def test_persona_prompt_missing_path_reports_not_exists(_runtime_context, tmp_pa
     res = client.get("/personification/api/test/persona-prompt", params={"path": str(tmp_path / "nope.txt")})
     assert res.status_code == 200
     assert res.json()["exists"] is False
+
+
+def test_persona_template_builder_uses_main_model(_runtime_context, monkeypatch) -> None:
+    persona_template_routes = load_personification_module("plugin.personification.webui.routes.persona_template_routes")
+
+    async def _fake_sources(*, runtime, work_title, character_name):
+        return [
+            {
+                "kind": "wiki",
+                "query": f"{work_title} {character_name}",
+                "source": "萌娘百科",
+                "title": character_name,
+                "url": "https://example.test/character",
+                "summary": "角色资料摘要",
+                "confidence": 0.9,
+            }
+        ]
+
+    monkeypatch.setattr(persona_template_routes, "_gather_persona_sources", _fake_sources)
+
+    class _MainCaller:
+        def __init__(self):
+            self.calls = []
+
+        async def __call__(self, messages, **kwargs):
+            self.calls.append({"messages": messages, "kwargs": kwargs})
+            user_text = str(messages[-1]["content"])
+            if "请直接输出模板正文" in user_text:
+                return "## 人设模板\n基础身份：测试角色\n资料冲突与缺口：无"
+            if "输出 JSON" in user_text:
+                return '{"facts":["事实 S1"],"conflicts":[],"unknowns":[]}'
+            return "ok"
+
+    caller = _MainCaller()
+    old_get_bots = _runtime_context.app_module.get_runtime_context().get_bots
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=_runtime_context.plugin_config,
+        superusers={"10001"},
+        get_bots=old_get_bots,
+        logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+        runtime_bundle=SimpleNamespace(call_ai_api=caller),
+    )
+
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    res = client.post(
+        "/personification/api/persona-template/build",
+        json={"work_title": "测试作品", "character_name": "测试角色"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["model_role"] == "configured_main"
+    assert body["sources"][0]["source"] == "萌娘百科"
+    assert len(body["subagents"]) == 3
+    assert "人设模板" in body["template"]
+    assert len(caller.calls) == 4
+    assert all(call["kwargs"].get("use_builtin_search") is True for call in caller.calls[:3])

@@ -317,12 +317,70 @@ function renderPersonas() {
     <td><img class="avatar" src="https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
     <td><code>${escapeHtml(p.user_id)}</code></td>
     <td>${escapeHtml(p.nickname || '')}</td>
+    <td>${renderFavorabilityBadge(p.favorability)}</td>
     <td>${escapeHtml(p.snippet)}</td>
     <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
     <td><button class="btn small" onclick="openPersona('${escapeAttr(p.user_id)}')">详情</button></td>
   </tr>`).join("");
   return `<div class="card"><h2>用户画像（${state.personas.length}）</h2>
-    <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>昵称</th><th>摘要</th><th>更新</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="muted">暂无画像</td></tr>'}</tbody></table></div>`;
+    <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>昵称</th><th>好感度</th><th>摘要</th><th>更新</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">暂无画像</td></tr>'}</tbody></table></div>`;
+}
+
+function favorabilityScoreText(fav) {
+  if (!fav || fav.available === false) return "不可用";
+  const score = Number(fav.score || 0);
+  return `${score.toFixed(2)}${fav.level ? " · " + fav.level : ""}`;
+}
+
+function renderFavorabilityBadge(fav) {
+  if (!fav || fav.available === false) return '<span class="muted">—</span>';
+  const score = Number(fav.score || 0);
+  let style = 'background:rgba(106,168,255,0.18);color:var(--accent)';
+  if (score >= 85) style = 'background:rgba(52,211,153,0.18);color:var(--ok)';
+  else if (score < 20) style = 'background:rgba(245,158,11,0.16);color:var(--warn)';
+  if (fav.is_perm_blacklisted) style = 'background:rgba(248,113,113,0.16);color:var(--danger)';
+  return `<span class="tag" style="${style}">${escapeHtml(favorabilityScoreText(fav))}</span>`;
+}
+
+function renderFavorabilityCard(fav, title) {
+  if (!fav || fav.available === false) {
+    return `<div class="card"><h2>${escapeHtml(title)}</h2><p class="muted">好感度服务未就绪。</p></div>`;
+  }
+  const events = fav.events || [];
+  const eventRows = events.map(e => {
+    const delta = Number(e.delta || 0);
+    const deltaText = (delta > 0 ? "+" : "") + delta.toFixed(2);
+    const color = delta > 0 ? "var(--ok)" : (delta < 0 ? "var(--danger)" : "var(--muted)");
+    const when = e.timestamp ? new Date(e.timestamp*1000).toLocaleString() : (e.date || "-");
+    return `<tr>
+      <td>${escapeHtml(when)}</td>
+      <td>${escapeHtml(e.label || "其他好感事件")}</td>
+      <td style="color:${color};font-weight:600">${escapeHtml(deltaText)}</td>
+      <td>${escapeHtml(e.status_label || "")}</td>
+      <td>${escapeHtml(e.reason || "")}</td>
+    </tr>`;
+  }).join("");
+  const last = fav.latest_event;
+  const lastLine = last
+    ? `${last.label || "其他好感事件"} ${(Number(last.delta || 0) > 0 ? "+" : "")}${Number(last.delta || 0).toFixed(2)}`
+    : "暂无事件";
+  return `<div class="card">
+    <div class="between" style="gap:12px;flex-wrap:wrap">
+      <h2 style="margin:0">${escapeHtml(title)}</h2>
+      ${renderFavorabilityBadge(fav)}
+    </div>
+    <div class="row" style="gap:24px;margin-top:12px">
+      <div><div class="muted">当前分值</div><div style="font-size:22px;font-weight:700">${Number(fav.score || 0).toFixed(2)}</div></div>
+      <div><div class="muted">等级</div><div style="font-size:18px">${escapeHtml(fav.level || "—")}</div></div>
+      <div><div class="muted">今日加分</div><div>${Number(fav.daily_positive_count || 0).toFixed(2)}</div></div>
+      <div><div class="muted">今日扣分</div><div>${Number(fav.daily_negative_count || 0).toFixed(2)}</div></div>
+      <div><div class="muted">最近事件</div><div>${escapeHtml(lastLine)}</div></div>
+      ${fav.is_perm_blacklisted ? '<div><div class="muted">黑名单</div><div style="color:var(--danger)">永久黑名单</div></div>' : ''}
+    </div>
+    ${events.length ? `<details style="margin-top:12px"><summary class="muted" style="cursor:pointer">最近好感事件</summary>
+      <table style="margin-top:8px"><thead><tr><th>时间</th><th>事件</th><th>变化</th><th>状态</th><th>原因</th></tr></thead><tbody>${eventRows}</tbody></table>
+    </details>` : ''}
+  </div>`;
 }
 
 async function openPersona(uid) {
@@ -356,10 +414,66 @@ function renderPersonaDetail() {
     <p class="muted" style="font-size:11px;margin-top:6px">用户更正以最高优先级保留，后续画像重生成不会被覆盖。</p>
   </div>`;
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedPersona=null;render()">返回列表</button><span class="muted">用户 ${escapeHtml(p.user_id)}</span></div>
+    ${renderFavorabilityCard(p.favorability, "用户好感度")}
     <div class="card"><h2>全局印象</h2>${core ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(core.profile_text || '')}</pre>` : '<p class="muted">无全局画像</p>'}</div>
     ${structCard}
     <h3 style="margin-bottom:10px">各群印象（${(p.local_profiles||[]).length}）</h3>
     ${locals || '<p class="muted">无各群画像</p>'}`;
+}
+
+function renderPersonaBuilder() {
+  const r = state.personaTemplateResult;
+  const sources = (r && r.sources) || [];
+  const subagents = (r && r.subagents) || [];
+  const sourceRows = sources.map((s, i) => `<tr>
+    <td>${i + 1}</td>
+    <td>${escapeHtml(s.source || s.kind || "资料")}</td>
+    <td>${s.url ? `<a href="${escapeAttr(s.url)}" target="_blank" rel="noreferrer">${escapeHtml(s.title || s.query || s.url)}</a>` : escapeHtml(s.title || s.query || "")}</td>
+    <td>${escapeHtml((s.summary || "").slice(0, 180))}</td>
+  </tr>`).join("");
+  const agentBlocks = subagents.map(a => `<details style="margin-top:8px">
+    <summary class="muted" style="cursor:pointer">${escapeHtml(a.name || "子agent")} · ${escapeHtml(a.focus || "")}</summary>
+    <pre style="white-space:pre-wrap;font-size:12.5px;background:var(--input-bg);padding:10px;border-radius:6px;overflow-x:auto">${escapeHtml(JSON.stringify(a.report || a.raw || {}, null, 2))}</pre>
+  </details>`).join("");
+  return `<div class="card">
+    <h2>自动构建人设模板</h2>
+    <div class="field-input">
+      <input id="persona-builder-work" type="text" placeholder="作品名" value="${escapeAttr(state.personaTemplateForm.work_title || "")}" oninput="state.personaTemplateForm.work_title=this.value">
+      <input id="persona-builder-character" type="text" placeholder="角色名" value="${escapeAttr(state.personaTemplateForm.character_name || "")}" oninput="state.personaTemplateForm.character_name=this.value">
+      <button class="btn primary" onclick="buildPersonaTemplate()" ${state.personaTemplateBusy?'disabled':''}>${state.personaTemplateBusy?'<span class="spinner"></span> 构建中…':'开始构建'}</button>
+    </div>
+  </div>
+  ${r ? `<div class="card">
+    <div class="between" style="gap:12px;flex-wrap:wrap">
+      <h2 style="margin:0">${escapeHtml(r.work_title || "")} / ${escapeHtml(r.character_name || "")}</h2>
+      <span class="tag">主模型</span>
+      <span class="muted">${Number(r.duration_ms || 0)} ms</span>
+    </div>
+    <h3 style="margin:14px 0 8px">生成模板</h3>
+    <pre style="white-space:pre-wrap;font-family:inherit;background:var(--input-bg);padding:12px;border-radius:6px;border:1px solid var(--line)">${escapeHtml(r.template || "")}</pre>
+    <h3 style="margin:14px 0 8px">资料来源（${sources.length}）</h3>
+    ${sourceRows ? `<table><thead><tr><th>#</th><th>来源</th><th>标题</th><th>摘要</th></tr></thead><tbody>${sourceRows}</tbody></table>` : '<p class="muted">未抓取到资料来源。</p>'}
+    <h3 style="margin:14px 0 8px">子agent交叉验证（${subagents.length}）</h3>
+    ${agentBlocks || '<p class="muted">暂无子agent报告。</p>'}
+  </div>` : ''}`;
+}
+
+async function buildPersonaTemplate() {
+  const work = (state.personaTemplateForm.work_title || "").trim();
+  const character = (state.personaTemplateForm.character_name || "").trim();
+  if (!work || !character) { alertFlash("err", "请填写作品名和角色名"); return; }
+  state.personaTemplateBusy = true; render();
+  try {
+    state.personaTemplateResult = await api("/persona-template/build", {
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({work_title: work, character_name: character}),
+    });
+    alertFlash("ok", "人设模板已生成");
+  } catch (e) {
+    alertFlash("err", "构建失败：" + e.message);
+  }
+  state.personaTemplateBusy = false; render();
 }
 
 async function submitCorrection(uid) {
@@ -461,12 +575,13 @@ function renderGroups() {
       <td><img class="avatar" src="https://p.qlogo.cn/gh/${encodeURIComponent(g.group_id)}/${encodeURIComponent(g.group_id)}/100/" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
       <td><code>${escapeHtml(g.group_id)}</code></td>
       <td>${escapeHtml(g.group_name || '')} ${srcTag} ${memTag}</td>
+      <td>${renderFavorabilityBadge(g.favorability)}</td>
       <td><button class="btn small" onclick="openGroup('${escapeAttr(g.group_id)}')">查看</button></td>
     </tr>`;
   }).join("");
   return `<div class="card"><h2>群列表（${state.groupList.length}）</h2>
     <p class="muted" style="font-size:12px;margin-top:0">同时显示已建立记忆的群和白名单中的群（包括关闭搜索可找到的群）。</p>
-    <table><thead><tr><th style="width:40px"></th><th>群号</th><th>群名</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="muted">暂无群数据</td></tr>'}</tbody></table></div>`;
+    <table><thead><tr><th style="width:40px"></th><th>群号</th><th>群名</th><th>群好感</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">暂无群数据</td></tr>'}</tbody></table></div>`;
 }
 
 async function openGroup(gid) {
@@ -481,6 +596,7 @@ async function openGroup(gid) {
       api("/groups/" + encodeURIComponent(gid) + "/agent-state").catch(() => null),
     ]);
     state.groupPersonas = personas.profiles;
+    state.groupFavorability = personas.group_favorability || null;
     state.groupStyle = style;
     state.groupKnowledge = knowledge.knowledge || [];
     state.groupKnowledgeAutobuild = knowledge.autobuild_status || null;
@@ -599,6 +715,7 @@ function renderGroupDetail() {
       <td><img class="avatar" src="https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
       <td><code>${escapeHtml(p.user_id)}</code></td>
       <td>${escapeHtml(p.nickname || '')}</td>
+      <td>${renderFavorabilityBadge(p.favorability)}</td>
       <td>${escapeHtml(p.snippet)}</td>
       <td>${emoCol}</td>
       <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
@@ -611,14 +728,15 @@ function renderGroupDetail() {
     <td>${escapeHtml((m.aliases||[]).join("、"))}</td>
     <td class="muted" style="font-size:12px">${escapeHtml(m.scope || '')}/${escapeHtml(m.risk_level || '')}/${Number(m.confidence||0).toFixed(2)}</td>
   </tr>`).join("");
-  return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;state.groupRawChat=null;state.groupStyleSnapIdx=0;render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
+  return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;state.groupRawChat=null;state.groupFavorability=null;state.groupStyleSnapIdx=0;render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
+    ${renderFavorabilityCard(state.groupFavorability, "群好感度")}
     ${renderGroupAgentState()}
     ${renderGroupStyle(style)}
     ${renderGroupKnowledgeCard()}
     <div class="card"><h2>梗词典 / 概念锚点（${(state.groupMemes||[]).length}）</h2>
       ${memeRows ? `<table><thead><tr><th>词条</th><th>含义</th><th>别名</th><th>范围/风险/置信度</th></tr></thead><tbody>${memeRows}</tbody></table>` : '<p class="muted">暂无匹配词条，公共热梗种子会在首次查询后自动初始化。</p>'}</div>
     <div class="card"><h2>群内成员画像（${state.groupPersonas.length}）</h2>
-      <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>昵称</th><th>摘要</th><th>近期情绪</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="muted">无</td></tr>'}</tbody></table></div>
+      <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>昵称</th><th>好感度</th><th>摘要</th><th>近期情绪</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">无</td></tr>'}</tbody></table></div>
     ${renderGroupRawChat()}`;
 }
 
