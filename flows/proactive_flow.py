@@ -24,6 +24,7 @@ from ..core.qq_expression_library import (
     choose_qq_expression_marker_for_context,
     render_qq_expression_cq_text,
 )
+from ..core.time_ctx import inject_current_time_context
 from ..skills.skillpacks.datetime_tool.scripts.impl import get_current_datetime_info
 from ..utils import get_group_topic_summary
 
@@ -162,6 +163,21 @@ def _extract_system_prompt(prompt_data: Any) -> str:
     if isinstance(prompt_data, str):
         return prompt_data.strip()
     return ""
+
+
+def _build_time_anchored_messages(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    now: datetime | None = None,
+) -> list[dict[str, str]]:
+    return inject_current_time_context(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        now=now,
+    )
 
 
 def _normalize_user_state(now: datetime, user_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -984,10 +1000,11 @@ async def run_proactive_messaging(
         _purpose_token = None
     try:
         decision = await call_ai_api(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
+            _build_time_anchored_messages(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                now=now,
+            )
         )
     finally:
         if _purpose_token is not None:
@@ -1234,10 +1251,11 @@ async def run_group_idle_topic(
                 _gi_token = None
             try:
                 topic = await call_ai_api(
-                    [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ]
+                    _build_time_anchored_messages(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        now=now,
+                    )
                 )
             except Exception as e:
                 logger.warning(f"[group_idle] call_ai_api failed for group {group_id}: {e}")
