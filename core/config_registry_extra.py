@@ -551,7 +551,7 @@ EXTRA_CONFIG_SPECS: tuple[dict[str, Any], ...] = (
     _s("personification_git_mirror_prefixes", "list",
        ["https://ghproxy.com", "https://gh-proxy.com", "https://mirror.ghproxy.com", "https://hub.gitmirror.com"],
        "Git 镜像列表",
-       "/拟人更新 直连失败时按顺序探测的镜像反代前缀（JSON 数组）；留空关闭镜像回退。",
+       "/拟人更新 与 WebUI 插件更新优先按顺序探测的镜像反代前缀（JSON 数组）；留空关闭镜像优先，只走直连。",
        group="运维", advanced=True),
     _s("personification_git_mirror_prefix", "str", "", "Git 单镜像（兼容）",
        "单个镜像前缀（向后兼容）；非空时自动并入镜像列表末尾。", group="运维", advanced=True),

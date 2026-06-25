@@ -76,10 +76,14 @@ def _looks_like_network_failure(stderr: str) -> bool:
             "connection reset",
             "connection timed out",
             "operation timed out",
+            "timed out",
+            "timeout",
             "unable to access",
             "failed to connect",
             "early eof",
             "rpc failed",
+            "git 命令超时",
+            "超时",
             "网络",
             "无法访问",
         )
@@ -160,34 +164,33 @@ async def _run_git_with_mirror_fallback(
     plugin_config: Any = None,
     remote_name: str = "origin",
 ) -> tuple[int, str, str, str, list[dict[str, Any]]]:
-    rc, out, err = await _run_git_command(args, cwd=cwd)
-    if rc == 0:
-        return rc, out, err, "", []
     mirrors = _mirror_prefixes(plugin_config)
-    if not mirrors or not _looks_like_network_failure(err):
-        return rc, out, err, "", []
-
-    repo_url = await _origin_https_url(cwd, remote_name=remote_name)
-    if not repo_url:
-        return rc, out, err, "", []
-
-    probes = await asyncio.gather(
-        *(_probe_mirror(mirror, repo_url) for mirror in mirrors),
-        return_exceptions=True,
-    )
     probe_log: list[dict[str, Any]] = []
-    chosen = ""
-    for mirror, result in zip(mirrors, probes):
-        ok = result is True
-        probe_log.append({"mirror": mirror, "ok": ok})
-        if ok and not chosen:
-            chosen = mirror
-    if not chosen:
-        return rc, out, err, "", probe_log
 
-    rewrite = f"url.{chosen}/https://github.com/.insteadOf=https://github.com/"
-    rc2, out2, err2 = await _run_git_command(args, cwd=cwd, extra_config=[rewrite])
-    return rc2, out2, err2, chosen, probe_log
+    if mirrors:
+        repo_url = await _origin_https_url(cwd, remote_name=remote_name)
+        if repo_url:
+            probes = await asyncio.gather(
+                *(_probe_mirror(mirror, repo_url) for mirror in mirrors),
+                return_exceptions=True,
+            )
+            for mirror, result in zip(mirrors, probes):
+                ok = result is True
+                probe_log.append({"mirror": mirror, "ok": ok})
+
+            for probe in probe_log:
+                if not probe.get("ok"):
+                    continue
+                mirror = str(probe.get("mirror") or "")
+                rewrite = f"url.{mirror}/https://github.com/.insteadOf=https://github.com/"
+                rc, out, err = await _run_git_command(args, cwd=cwd, extra_config=[rewrite])
+                if rc == 0:
+                    return rc, out, err, mirror, probe_log
+                if not _looks_like_network_failure(err):
+                    return rc, out, err, mirror, probe_log
+
+    rc, out, err = await _run_git_command(args, cwd=cwd)
+    return rc, out, err, "", probe_log
 
 
 def _parse_commit_log(raw: str) -> list[dict[str, Any]]:

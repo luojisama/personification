@@ -83,10 +83,10 @@ class Config(BaseModel):
     # 不依赖 HTTPS_PROXY / HTTP_PROXY 环境变量（bot 进程未必继承终端 env）。
     # 留空 = 沿用 httpx 的环境变量解析（trust_env 默认 True）。
     personification_antigravity_cli_proxy: str = ""
-    # /拟人更新 走的 git 镜像反代列表（GitHub 在国内不稳时按顺序探测）。
-    # 直连失败时：并行 HEAD 探测每一项的联通性，按列表顺序选第一个能通的，
+    # /拟人更新 与 WebUI 插件更新走的 git 镜像反代列表（GitHub 在国内不稳时按顺序探测）。
+    # 有配置时：并行 HEAD 探测每一项的联通性，按列表顺序选第一个能通的，
     # 用 -c url.X.insteadOf 临时改写重试 fetch/pull，不污染全局 git config。
-    # 留空 = 关闭镜像 fallback，只走直连。
+    # 留空 = 关闭镜像优先，只走直连。
     personification_git_mirror_prefixes: List[str] = [
         "https://ghproxy.com",
         "https://gh-proxy.com",
