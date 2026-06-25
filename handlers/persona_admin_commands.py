@@ -219,6 +219,16 @@ def _format_duration(seconds: float) -> str:
     return f"{sec}秒"
 
 
+def _format_persona_template_error(exc: BaseException) -> str:
+    text = str(exc or "").strip()
+    if text:
+        return text
+    name = type(exc).__name__
+    if name in {"TimeoutError", "asyncio.TimeoutError"}:
+        return "构建过程超时，请稍后重试或缩短作品/角色检索范围。"
+    return f"{name}（无详细错误信息，请查看插件日志）"
+
+
 def _scope_label(scope: str) -> str:
     mapping = {
         GLOBAL_SCOPE: "全局",
@@ -761,7 +771,11 @@ async def handle_persona_template_command(
             progress=_progress,
         )
     except Exception as exc:
-        await matcher.finish(f"人设构建失败：{exc}")
+        try:
+            bundle.logger.warning(f"[persona_template] QQ 命令人设构建失败：{type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+        await matcher.finish(f"人设构建失败：{_format_persona_template_error(exc)}")
 
     forward_ok = await _send_persona_template_forward(bot, event, result, logger=bundle.logger)
     file_status = await _send_persona_template_file(bundle, event, str(result.get("export_path") or ""))

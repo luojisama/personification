@@ -28,6 +28,7 @@ def _runtime_with_data(tmp_path: Path, monkeypatch):
     ledger.record_llm_call(model="gpt-x", prompt_tokens=100, completion_tokens=50, group_id="1")
     ledger.record_llm_call(model="gpt-x", prompt_tokens=200, completion_tokens=80, group_id="2")
     ledger.record_llm_call(model="gpt-y", prompt_tokens=30, completion_tokens=10, group_id="1")
+    ledger.record_llm_call(model="gpt-z", prompt_tokens=70, completion_tokens=30, purpose="persona_template_synthesis")
     onebot_cache = load_personification_module("plugin.personification.core.onebot_cache")
     onebot_cache._clear_caches_for_testing()
 
@@ -129,17 +130,19 @@ def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
     assert res.status_code == 200
     body = res.json()
     assert body["window"] == "month"
-    assert body["total"]["total_tokens"] == 100 + 50 + 200 + 80 + 30 + 10
-    assert body["total"]["call_count"] == 3
+    assert body["total"]["total_tokens"] == 100 + 50 + 200 + 80 + 30 + 10 + 70 + 30
+    assert body["total"]["call_count"] == 4
     assert len(body["series"]) == 30
     models = {row["model"]: row for row in body["by_model"]}
     assert models["gpt-x"]["total_tokens"] == 430
     assert models["gpt-y"]["total_tokens"] == 40
+    assert models["gpt-z"]["total_tokens"] == 100
     distribution = {row["model"]: row for row in body["model_distribution"]}
     assert distribution["gpt-x"]["relative_width"] == 1.0
     groups = {row["group_id"]: row for row in body["by_group"]}
     assert groups["1"]["total_tokens"] == 100 + 50 + 30 + 10
     assert groups["2"]["total_tokens"] == 280
+    assert sum(row["total_tokens"] for row in groups.values()) < body["total"]["total_tokens"]
     assert groups["1"]["group_name"] == "测试一群"
     assert groups["1"]["group_label"] == "测试一群"
     assert all("未命名群" not in row["group_label"] for row in groups.values())
@@ -157,12 +160,18 @@ def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
     assert body["total_consumption"]["series"][-1]["cumulative_total_tokens"] == body["total"]["total_tokens"]
     assert {chart["key"] for chart in body["dashboard_overview"]["charts"]} == {"day", "week", "month", "total"}
     assert len(body["dashboard_overview"]["charts"]) == 4
+    purposes = {row["purpose"]: row for row in body["by_purpose"]}
+    assert purposes["persona_template_synthesis"]["purpose_label"] == "人设构建：模板生成"
+    assert purposes["persona_template_synthesis"]["total_tokens"] == 100
     overview_models = {row["model"]: row for row in body["dashboard_overview"]["model_usage"]}
     assert overview_models["gpt-x"]["call_count"] == 2
     assert overview_models["gpt-x"]["total_tokens"] == 430
     overview_groups = {row["group_id"]: row for row in body["dashboard_overview"]["group_usage"]}
     assert overview_groups["1"]["group_label"] == "测试一群"
     assert overview_groups["1"]["percent"] > 0
+    overview_purposes = {row["purpose"]: row for row in body["dashboard_overview"]["purpose_usage"]}
+    assert overview_purposes["persona_template_synthesis"]["purpose_label"] == "人设构建：模板生成"
+    assert overview_purposes["persona_template_synthesis"]["percent"] > 0
 
 
 def test_dashboard_group_rows_never_emit_fake_unnamed_label() -> None:

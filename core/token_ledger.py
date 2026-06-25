@@ -243,6 +243,20 @@ def query_total_consumption() -> dict[str, Any]:
             LIMIT 50
             """
         ).fetchall()
+        purpose_rows = conn.execute(
+            """
+            SELECT purpose,
+                   SUM(prompt_tokens) AS prompt_tokens,
+                   SUM(completion_tokens) AS completion_tokens,
+                   SUM(total_tokens) AS total_tokens,
+                   SUM(call_count) AS call_count
+            FROM token_usage_ledger
+            WHERE purpose != ''
+            GROUP BY purpose
+            ORDER BY total_tokens DESC
+            LIMIT 80
+            """
+        ).fetchall()
         day_rows = conn.execute(
             """
             SELECT bucket_day,
@@ -292,6 +306,7 @@ def query_total_consumption() -> dict[str, Any]:
             _row_to_dict(row, ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"), key="group_id")
             for row in group_rows
         ],
+        "by_purpose": _aggregate_purpose_rows(purpose_rows),
         "series": _build_total_series(
             [
                 _row_to_dict(
@@ -507,21 +522,7 @@ def query_summary(window: str = "month") -> dict[str, Any]:
             }
         )
 
-    by_purpose_agg: dict[str, dict[str, int]] = {}
-    for row in by_purpose_rows:
-        raw_purpose = str(row["purpose"] or "")
-        # 提取 functional 段（如 `user_persona|provider=openai` → `user_persona`）
-        functional = raw_purpose.split("|", 1)[0].strip() or "unknown"
-        bucket_row = by_purpose_agg.setdefault(
-            functional,
-            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "call_count": 0},
-        )
-        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"):
-            bucket_row[key] = int(bucket_row[key]) + int(row[key] or 0)
-    by_purpose_list = [
-        {"purpose": k, **v}
-        for k, v in sorted(by_purpose_agg.items(), key=lambda kv: -kv[1]["total_tokens"])
-    ]
+    by_purpose_list = _aggregate_purpose_rows(by_purpose_rows)
     return {
         "window": window_key,
         "start_day": start_str,
@@ -581,6 +582,20 @@ def _row_to_dict(row: Any, fields: tuple[str, ...], *, key: str | None = None) -
     if key:
         result[key] = str(row[key] or "")
     return result
+
+
+def _aggregate_purpose_rows(rows: list[Any]) -> list[dict[str, Any]]:
+    by_purpose_agg: dict[str, dict[str, int]] = {}
+    for row in rows:
+        raw_purpose = str(row["purpose"] or "")
+        functional = raw_purpose.split("|", 1)[0].strip() or "unknown"
+        bucket_row = by_purpose_agg.setdefault(functional, _empty_totals())
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "call_count"):
+            bucket_row[key] = int(bucket_row[key]) + int(row[key] or 0)
+    return [
+        {"purpose": purpose, **values}
+        for purpose, values in sorted(by_purpose_agg.items(), key=lambda item: -item[1]["total_tokens"])
+    ]
 
 
 __all__ = [

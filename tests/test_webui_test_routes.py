@@ -136,9 +136,12 @@ def test_persona_template_builder_uses_main_model(_runtime_context, monkeypatch)
     class _MainCaller:
         def __init__(self):
             self.calls = []
+            self.contexts = []
 
         async def __call__(self, messages, **kwargs):
             self.calls.append({"messages": messages, "kwargs": kwargs})
+            llm_context = load_personification_module("plugin.personification.core.llm_context")
+            self.contexts.append(dict(llm_context.current_llm_context()))
             user_text = str(messages[-1]["content"])
             if "生成插件内可直接使用的人设 YAML" in user_text:
                 return """
@@ -219,6 +222,13 @@ system: |
     assert detail.json()["result"]["template"] == body["template"]
     assert len(caller.calls) == 4
     assert all(call["kwargs"].get("use_builtin_search") is True for call in caller.calls[:3])
+    purposes = [ctx.get("purpose") for ctx in caller.contexts]
+    assert purposes == [
+        "persona_template_research",
+        "persona_template_research",
+        "persona_template_research",
+        "persona_template_synthesis",
+    ]
 
 
 def test_persona_template_builder_has_no_sample_specific_branches() -> None:

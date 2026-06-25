@@ -126,3 +126,28 @@ def test_persona_template_command_sends_private_forward_and_file(tmp_path, monke
     call_names = [name for name, _ in bot.calls]
     assert "send_private_forward_msg" in call_names
     assert "upload_private_file" in call_names
+
+
+def test_persona_template_command_formats_empty_timeout_error(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    async def _timeout_build(**_kwargs):  # noqa: ANN003
+        raise TimeoutError()
+
+    monkeypatch.setattr(persona_template_routes, "_run_persona_template_build", _timeout_build)
+    bot = _Bot()
+    matcher = _Matcher()
+    event = SimpleNamespace(group_id=10001, user_id=20001)
+
+    try:
+        asyncio.run(
+            admin_commands.handle_persona_template_command(
+                matcher,
+                bot=bot,
+                bundle=_bundle(tmp_path, bot),
+                event=event,
+                tokens=["测试作品", "测试角色"],
+            )
+        )
+    except _Finish:
+        pass
+
+    assert matcher.finished == "人设构建失败：构建过程超时，请稍后重试或缩短作品/角色检索范围。"

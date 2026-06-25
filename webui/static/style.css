@@ -98,7 +98,7 @@ main { padding:20px 26px; max-width:1400px; }
 .dashboard-line-chart.green { color:#20c997; }
 .dashboard-line-chart.orange { color:#ffb020; }
 .dashboard-line-chart.purple { color:#9775fa; }
-.dashboard-usage-grid { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(320px,0.95fr); gap:18px; align-items:start; }
+.dashboard-usage-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; align-items:start; }
 .dashboard-panel { min-height:300px; overflow:hidden; }
 .dashboard-model-table { table-layout:fixed; }
 .dashboard-model-table th:nth-child(1), .dashboard-model-table td:nth-child(1) { width:42%; }

@@ -17,6 +17,7 @@ import yaml
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from ...core import webui_audit_log
+from ...core.llm_context import reset_llm_context, set_llm_context
 from ...core.persona_template_history import (
     list_persona_template_records,
     record_persona_template_result,
@@ -189,6 +190,8 @@ async def _call_main_model(
     temperature: float = 0.2,
     use_builtin_search: bool = False,
     timeout: int = _RESEARCH_TIMEOUT_SECONDS,
+    purpose: str = "",
+    stage_label: str = "主模型调用",
 ) -> str:
     async def _invoke() -> Any:
         try:
@@ -203,7 +206,14 @@ async def _call_main_model(
             except TypeError:
                 return await caller(messages)
 
-    raw = await asyncio.wait_for(_invoke(), timeout=timeout)
+    token = set_llm_context(purpose=purpose) if purpose else None
+    try:
+        raw = await asyncio.wait_for(_invoke(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(f"{stage_label}超时（>{timeout}秒）") from exc
+    finally:
+        if token is not None:
+            reset_llm_context(token)
     if raw is None:
         return ""
     if isinstance(raw, str):
@@ -822,6 +832,8 @@ async def _plan_search_aliases(
             temperature=0.0,
             use_builtin_search=False,
             timeout=25,
+            purpose="persona_template_alias_planning",
+            stage_label="检索别名规划",
         )
         parsed = _extract_json_object(text)
         if parsed:
@@ -1811,6 +1823,8 @@ async def _repair_template_yaml(
         temperature=0.05,
         use_builtin_search=False,
         timeout=60,
+        purpose="persona_template_repair",
+        stage_label="人设模板修复",
     )
 
 
@@ -1857,6 +1871,8 @@ async def _run_subagent(
         temperature=0.1,
         use_builtin_search=True,
         timeout=_RESEARCH_TIMEOUT_SECONDS,
+        purpose="persona_template_research",
+        stage_label=f"{agent_name}研究",
     )
     parsed = _extract_json_object(text)
     return {
@@ -1926,6 +1942,8 @@ async def _synthesize_template(
         temperature=0.25,
         use_builtin_search=False,
         timeout=_SYNTHESIS_TIMEOUT_SECONDS,
+        purpose="persona_template_synthesis",
+        stage_label="人设模板生成",
     )
 
 

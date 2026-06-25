@@ -89,6 +89,32 @@ function renderDashboardModelUsage(rows) {
   </div>`;
 }
 
+function renderDashboardPurposeUsage(rows) {
+  const data = (rows || []).slice(0, 16);
+  const body = data.map(row => {
+    const width = Math.max(1.5, Math.min(100, Number(row.relative_width || 0) * 100));
+    const label = row.purpose_label || row.purpose || "unknown";
+    const title = row.purpose || label;
+    return `<tr>
+      <td class="dashboard-model-cell" title="${escapeAttr(title)}">${escapeHtml(label)}</td>
+      <td>${Number(row.call_count || 0).toLocaleString()}</td>
+      <td>
+        <div class="dashboard-token-bar">
+          <div style="width:${width.toFixed(1)}%"></div>
+          <span>${Number(row.total_tokens || 0).toLocaleString()}</span>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+  return `<div class="card dashboard-panel">
+    <h2>功能用量（总计）</h2>
+    <table class="dashboard-model-table">
+      <thead><tr><th>功能</th><th>请求次数</th><th>Token 消耗</th></tr></thead>
+      <tbody>${body || '<tr><td colspan="3" class="muted">暂无功能用量。</td></tr>'}</tbody>
+    </table>
+  </div>`;
+}
+
 function dashboardGroupLabel(row) {
   const label = row && (row.group_label || row.group_name);
   if (label) return String(label);
@@ -158,7 +184,7 @@ function renderDashboard() {
   return `<div class="dashboard-toolbar">
       <div>
         <h2 style="margin:0">Token 消耗统计</h2>
-        <p class="muted" style="margin:4px 0 0;font-size:12px">24h、7天、30天与全量累计；模型与群占比使用总计账本。</p>
+        <p class="muted" style="margin:4px 0 0;font-size:12px">24h、7天、30天与全量累计；模型、功能与群占比使用总计账本。</p>
       </div>
       <a href="#logs" onclick="state.view='logs'; loadView().then(render)">查看日志 →</a>
     </div>
@@ -168,6 +194,7 @@ function renderDashboard() {
     ${empty ? `<div class="alert info">暂无 token 数据。LLM 调用记录写入后，这里会展示本地 token 账本统计。</div>` : ""}
     <div class="dashboard-usage-grid">
       ${renderDashboardModelUsage(overview.model_usage || ((d.total_consumption || {}).by_model || d.by_model || []))}
+      ${renderDashboardPurposeUsage(overview.purpose_usage || ((d.total_consumption || {}).by_purpose || d.by_purpose || []))}
       ${renderDashboardGroupPie(overview.group_usage || ((d.total_consumption || {}).by_group || d.by_group || []))}
     </div>`;
 }

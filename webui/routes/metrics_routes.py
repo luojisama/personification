@@ -24,6 +24,26 @@ _QUOTA_FIELDS = {
     "codex": "personification_quota_codex_monthly_tokens",
 }
 
+_PURPOSE_LABELS = {
+    "chat": "群聊回复",
+    "ai_route": "未标注主模型调用",
+    "direct_call": "直接调用",
+    "user_persona": "用户画像",
+    "group_style": "群风格学习",
+    "group_knowledge": "群知识构建",
+    "memory_summarizer": "记忆摘要",
+    "memory_summarizer_daily": "每日记忆摘要",
+    "inner_state_chat": "聊天内心状态",
+    "inner_state_diary": "日记内心状态",
+    "qzone_diary": "QQ 空间日记",
+    "proactive_group_idle": "群主动消息",
+    "proactive_private": "私聊主动消息",
+    "persona_template_alias_planning": "人设构建：别名规划",
+    "persona_template_research": "人设构建：资料研究",
+    "persona_template_synthesis": "人设构建：模板生成",
+    "persona_template_repair": "人设构建：模板修复",
+}
+
 
 def _resolve_limit(plugin_config, provider: str) -> int:
     field = _QUOTA_FIELDS.get(provider, "")
@@ -171,6 +191,17 @@ def _add_distribution_fields(rows: list[dict], *, total_tokens: int) -> list[dic
     return out
 
 
+def _annotate_purpose_rows(rows: list[dict], *, total_tokens: int) -> list[dict]:
+    annotated = []
+    for row in rows:
+        item = dict(row)
+        purpose = str(item.get("purpose", "") or "unknown")
+        item["purpose"] = purpose
+        item["purpose_label"] = _PURPOSE_LABELS.get(purpose, purpose)
+        annotated.append(item)
+    return _add_distribution_fields(annotated, total_tokens=total_tokens)
+
+
 def _chart_from_summary(key: str, label: str, summary: dict) -> dict:
     total = dict(summary.get("total") or {})
     return {
@@ -208,6 +239,10 @@ async def _dashboard_overview(runtime, total_consumption: dict) -> dict:
             list(total_consumption.get("by_model") or []),
             total_tokens=total_tokens,
         ),
+        "purpose_usage": _annotate_purpose_rows(
+            list(total_consumption.get("by_purpose") or []),
+            total_tokens=total_tokens,
+        ),
         "group_usage": _add_distribution_fields(total_groups, total_tokens=total_tokens),
     }
 
@@ -225,12 +260,20 @@ def build_metrics_router(*, runtime) -> APIRouter:
         plugin_config = getattr(runtime, "plugin_config", None)
         provider_usage = _provider_usage(plugin_config=plugin_config, window=window_key)
         data["by_group"] = await _annotate_group_rows(runtime, list(data.get("by_group") or []))
+        data["by_purpose"] = _annotate_purpose_rows(
+            list(data.get("by_purpose") or []),
+            total_tokens=int((data.get("total") or {}).get("total_tokens", 0) or 0),
+        )
         data["provider_usage"] = provider_usage
         data["billing"] = _billing_summary(data, provider_usage)
         total_consumption = token_ledger.query_total_consumption()
         total_consumption["by_group"] = await _annotate_group_rows(
             runtime,
             list(total_consumption.get("by_group") or []),
+        )
+        total_consumption["by_purpose"] = _annotate_purpose_rows(
+            list(total_consumption.get("by_purpose") or []),
+            total_tokens=int((total_consumption.get("total") or {}).get("total_tokens", 0) or 0),
         )
         data["total_consumption"] = total_consumption
         data["dashboard_overview"] = await _dashboard_overview(runtime, total_consumption)
