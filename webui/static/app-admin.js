@@ -621,6 +621,8 @@ function renderPersonaDetail() {
 
 function renderPersonaBuilder() {
   const r = state.personaTemplateResult;
+  const task = state.personaTemplateTask || {};
+  const history = state.personaTemplateHistory || [];
   const sources = (r && r.sources) || [];
   const subagents = (r && r.subagents) || [];
   const sourceCards = sources.map((s, i) => `<div class="persona-source-card">
@@ -656,6 +658,28 @@ function renderPersonaBuilder() {
   const errors = r ? [...(r.template_errors || []), ...(r.template_warnings || [])] : [];
   const validationList = errors.map(x => `<li>${escapeHtml(x)}</li>`).join("");
   const ref = (r && r.template_reference) || {};
+  const taskProgress = Math.max(0, Math.min(100, Number(task.progress || 0)));
+  const progressBlock = state.personaTemplateBusy || task.task_id
+    ? `<div class="persona-progress">
+        <div class="between" style="gap:10px">
+          <strong>${escapeHtml(task.message || "正在准备人设构建...")}</strong>
+          <span class="muted">${taskProgress}%</span>
+        </div>
+        <div class="persona-progress-bar"><div style="width:${taskProgress}%"></div></div>
+        <div class="muted" style="font-size:12px;margin-top:6px">阶段：${escapeHtml(task.stage || "-")}</div>
+      </div>`
+    : "";
+  const historyItems = history.map(item => {
+    const when = item.created_at ? new Date(item.created_at * 1000).toLocaleString() : "-";
+    const valid = item.template_valid ? "YAML 有效" : "需检查";
+    return `<div class="persona-history-item">
+      <div class="title">
+        <strong>${escapeHtml(item.work_title || "")} / ${escapeHtml(item.character_name || "")}</strong>
+        <div class="muted" style="font-size:12px">${escapeHtml(when)} · ${escapeHtml(valid)} · ${Number(item.source_count || 0)} 个来源</div>
+      </div>
+      <button class="btn small" onclick="openPersonaTemplateHistory('${escapeAttr(item.record_id || "")}')">查看</button>
+    </div>`;
+  }).join("");
   return `<div class="card">
     <h2>自动构建人设模板</h2>
     <div class="persona-builder-form">
@@ -663,6 +687,14 @@ function renderPersonaBuilder() {
       <input id="persona-builder-character" type="text" placeholder="角色名" value="${escapeAttr(state.personaTemplateForm.character_name || "")}" oninput="state.personaTemplateForm.character_name=this.value">
       <button class="btn primary" onclick="buildPersonaTemplate()" ${state.personaTemplateBusy?'disabled':''}>${state.personaTemplateBusy?'<span class="spinner"></span> 构建中…':'开始构建'}</button>
     </div>
+    ${progressBlock}
+  </div>
+  <div class="card">
+    <div class="between" style="gap:10px;flex-wrap:wrap">
+      <h2 style="margin:0">构建历史</h2>
+      <button class="btn small" onclick="refreshPersonaTemplateHistory()">刷新</button>
+    </div>
+    <div class="persona-history-list" style="margin-top:12px">${historyItems || '<p class="muted">暂无历史记录。</p>'}</div>
   </div>
   ${r ? `<div class="card">
     <div class="between" style="gap:12px;flex-wrap:wrap">
@@ -697,18 +729,60 @@ async function copyPersonaTemplate() {
   }
 }
 
+async function refreshPersonaTemplateHistory() {
+  try {
+    const r = await api("/persona-template/history?limit=8");
+    state.personaTemplateHistory = r.records || [];
+    render();
+  } catch (e) {
+    alertFlash("err", "读取历史失败：" + e.message);
+  }
+}
+
+async function openPersonaTemplateHistory(recordId) {
+  if (!recordId) return;
+  try {
+    const record = await api("/persona-template/history/" + encodeURIComponent(recordId));
+    state.personaTemplateResult = record.result || null;
+    state.personaTemplateTask = null;
+    render();
+  } catch (e) {
+    alertFlash("err", "读取历史失败：" + e.message);
+  }
+}
+
 async function buildPersonaTemplate() {
   const work = (state.personaTemplateForm.work_title || "").trim();
   const character = (state.personaTemplateForm.character_name || "").trim();
   if (!work || !character) { alertFlash("err", "请填写作品名和角色名"); return; }
-  state.personaTemplateBusy = true; render();
+  state.personaTemplateBusy = true;
+  state.personaTemplateResult = null;
+  state.personaTemplateTask = { status:"queued", stage:"queued", message:"已加入构建队列...", progress:1 };
+  render();
   try {
-    state.personaTemplateResult = await api("/persona-template/build", {
+    const started = await api("/persona-template/build-task", {
       method:"POST",
       headers:{"content-type":"application/json"},
       body: JSON.stringify({work_title: work, character_name: character}),
     });
-    alertFlash("ok", "人设模板已生成");
+    state.personaTemplateTask = started;
+    render();
+    let last = started;
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      last = await api("/persona-template/tasks/" + encodeURIComponent(started.task_id));
+      state.personaTemplateTask = last;
+      if (last.status === "done") {
+        state.personaTemplateResult = last.result || null;
+        alertFlash("ok", "人设模板已生成");
+        await refreshPersonaTemplateHistory();
+        break;
+      }
+      if (last.status === "error") {
+        throw new Error(last.error || last.message || "构建失败");
+      }
+      render();
+    }
   } catch (e) {
     alertFlash("err", "构建失败：" + e.message);
   }

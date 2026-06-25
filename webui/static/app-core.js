@@ -2,7 +2,7 @@ const API = "/personification/api";
 let state = {
   logged: false, qq: "", view: "dashboard",
   entries: [], groups: [], activeGroup: null, configSearch: "", configSearchComposing: false, configSearchDraft: "",
-  devices: [], pendingDevices: [], trustedDevices: [], devicePending: false, loginRequestId: "", loginPolling: false, alert: null, loading: false,
+  devices: [], pendingDevices: [], trustedDevices: [], devicePending: false, loginRequestId: "", loginPolling: false, alert: null, loading: false, loadingMessage: "",
   dashboard: null, dashboardWindow: "month",
   personas: [], selectedPersona: null, personaSearch: "",
   groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [],
@@ -11,7 +11,7 @@ let state = {
   skills: [], skillFilter: "", skillSummary: null, skillRemoteSources: [], skillMcpTools: [],
   skillSourceForm: { source: "", name: "", ref: "", subdir: "", kind: "auto", preferFirst: false, autoApprove: false },
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
-  personaTemplateForm: { work_title: "", character_name: "" }, personaTemplateResult: null, personaTemplateBusy: false,
+  personaTemplateForm: { work_title: "", character_name: "" }, personaTemplateResult: null, personaTemplateBusy: false, personaTemplateTask: null, personaTemplateHistory: [],
   personaPrompt: null, personaPromptPath: "", health: null, healthBusyCat: "", interactionResult: null, interactionBusy: false,
   qzoneForwardForm: { target_user_id: "", forward_text: "" }, qzoneForwardResult: null, qzoneForwardBusy: false,
   pluginUpdateStatus: null, pluginUpdateHistory: null, pluginUpdateBusy: false, pluginUpdateChecking: false, pluginUpdateResult: null,
@@ -139,8 +139,31 @@ function closeMobileNav() {
   if (state.mobileNavOpen) { state.mobileNavOpen = false; render(); }
 }
 
+function loadingMessageForView(view) {
+  return ({
+    dashboard: "正在统计 Token 消耗...",
+    health: "正在跑功能体检...",
+    qzone: "正在读取 QQ 空间状态...",
+    config: "正在加载配置中心...",
+    personas: "正在读取用户画像...",
+    groups: "正在整理群信息...",
+    memory: "正在打开记忆宫殿...",
+    memory_graph: "正在绘制记忆关系...",
+    stickers: "正在加载表情包库...",
+    skills: "正在扫描 Skill 和 MCP 工具...",
+    plugin_knowledge: "正在读取插件知识库...",
+    plugin_manager: "正在检查插件更新...",
+    persona_builder: "正在准备人设构建工具...",
+    logs: "正在拉取插件日志...",
+    audit: "正在读取审计记录...",
+    qq: "正在读取 QQ 账号信息...",
+  })[view] || "正在加载页面...";
+}
+
 async function loadView() {
   state.loading = true;
+  state.loadingMessage = loadingMessageForView(state.view);
+  if (state.logged) render();
   try {
     if (state.view === "config") {
       const data = await api("/config/entries");
@@ -172,8 +195,11 @@ async function loadView() {
       state.skillSummary = data.summary || null;
       state.skillRemoteSources = data.remote_sources || [];
       state.skillMcpTools = data.mcp_tools || [];
-    } else if (state.view === "test" || state.view === "persona_builder") {
+    } else if (state.view === "test") {
       /* nothing to preload */
+    } else if (state.view === "persona_builder") {
+      const history = await api("/persona-template/history?limit=8").catch(() => ({ records: [] }));
+      state.personaTemplateHistory = history.records || [];
     } else if (state.view === "qq") {
       const [info, groups, friends] = await Promise.all([
         api("/qq/info").catch(e => ({ error: e.message })),
@@ -251,7 +277,7 @@ async function loadView() {
         state.groupsAvailable = groupsResp.available;
       }
     }
-  } finally { state.loading = false; }
+  } finally { state.loading = false; state.loadingMessage = ""; }
 }
 
 function render() {
@@ -288,6 +314,9 @@ function render() {
 function renderLayout() {
   const navItem = (v, label) => `<a href="#${v}" class="${state.view===v?'active':''}" onclick="closeMobileNav()">${label}</a>`;
   const themeIcon = state.theme === "dark" ? "🌙" : "☀";
+  const loadingHint = state.loading
+    ? `<div class="loading-hint"><span class="spinner"></span><span>${escapeHtml(state.loadingMessage || "正在加载页面...")}</span></div>`
+    : "";
   return `${state.loading ? '<div class="progress-bar"></div>' : ''}
     <div class="layout">
     ${state.mobileNavOpen ? '<div class="scrim" onclick="toggleMobileNav()"></div>' : ''}
@@ -333,6 +362,7 @@ function renderLayout() {
         </div>
       </div>
       ${state.alert ? `<div class="alert ${state.alert.kind}">${escapeHtml(state.alert.text)}</div>` : ''}
+      ${loadingHint}
       ${renderView()}
     </main>
   </div>`;

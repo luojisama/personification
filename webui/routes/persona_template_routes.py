@@ -5,9 +5,11 @@ import html
 import json
 import re
 import time
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import quote, urljoin
 
 import httpx
@@ -15,6 +17,12 @@ import yaml
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from ...core import webui_audit_log
+from ...core.persona_template_history import (
+    list_persona_template_records,
+    record_persona_template_result,
+    summarize_persona_template_record,
+    write_persona_template_export_file,
+)
 from ..deps import AdminIdentity, get_client_ip, require_admin
 
 
@@ -27,6 +35,8 @@ _FETCHED_PAGE_LIMIT = 3
 _SEARCH_ALIAS_LIMIT = 6
 _SEARCH_QUERY_LIMIT = 30
 _CHARACTER_SOURCE_THRESHOLD = 50
+_TASK_RETENTION_SECONDS = 6 * 60 * 60
+ProgressCallback = Callable[[str, str, int], Awaitable[None]]
 
 _ROLE_PAGE_HINTS = (
     "人物列表",
@@ -105,6 +115,40 @@ _REQUIRED_INPUT_PLACEHOLDERS = (
     "{status}",
     "{schedule_instruction}",
 )
+
+
+@dataclass
+class _PersonaTemplateTask:
+    task_id: str
+    work_title: str
+    character_name: str
+    created_at: float
+    status: str = "queued"
+    stage: str = "queued"
+    message: str = "已加入构建队列..."
+    progress: int = 1
+    updated_at: float = field(default_factory=time.time)
+    result: dict[str, Any] | None = None
+    error: str = ""
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "work_title": self.work_title,
+            "character_name": self.character_name,
+            "status": self.status,
+            "stage": self.stage,
+            "message": self.message,
+            "progress": max(0, min(100, int(self.progress or 0))),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "result": self.result,
+            "error": self.error,
+        }
+
+
+_TASKS: dict[str, _PersonaTemplateTask] = {}
+_TASK_LOCK = asyncio.Lock()
 
 
 def _clip_text(value: Any, limit: int) -> str:
@@ -489,6 +533,144 @@ def _configured_template_reference(runtime: Any) -> dict[str, Any]:
         "keys": [],
         "content": "",
     }
+
+
+async def _set_task_progress(
+    task: _PersonaTemplateTask | None,
+    *,
+    stage: str,
+    message: str,
+    progress: int,
+    status: str | None = None,
+) -> None:
+    if task is None:
+        return
+    task.stage = stage
+    task.message = message
+    task.progress = max(0, min(100, int(progress)))
+    task.updated_at = time.time()
+    if status:
+        task.status = status
+
+
+async def _default_progress(_: str, __: str, ___: int) -> None:
+    return None
+
+
+def _cleanup_finished_tasks() -> None:
+    now = time.time()
+    expired = [
+        task_id
+        for task_id, task in _TASKS.items()
+        if task.status in {"done", "error"} and now - float(task.updated_at or task.created_at) > _TASK_RETENTION_SECONDS
+    ]
+    for task_id in expired:
+        _TASKS.pop(task_id, None)
+
+
+def _get_task(task_id: str) -> _PersonaTemplateTask | None:
+    _cleanup_finished_tasks()
+    return _TASKS.get(str(task_id or ""))
+
+
+async def _run_persona_template_build(
+    *,
+    runtime: Any,
+    work_title: str,
+    character_name: str,
+    actor: str = "",
+    source: str = "webui",
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    caller = _main_ai_caller(runtime)
+    if caller is None:
+        raise RuntimeError("主模型调用器未就绪")
+    progress = progress or _default_progress
+
+    started = time.time()
+    await progress("alias_planning", "正在梳理检索别名...", 5)
+    await progress("query_moegirl", "正在查询萌娘百科...", 12)
+    sources = await _gather_persona_sources(
+        runtime=runtime,
+        work_title=work_title,
+        character_name=character_name,
+    )
+    source_text = _source_corpus(sources)
+    await progress("relation_mapping", "正在梳理关系...", 44)
+    focus_items = [
+        ("基础设定子agent", "官方身份、百科摘要、基础人设、剧情定位、资料可信度"),
+        ("性格台词子agent", "性格模式、口癖、说话节奏、萌点、群聊可迁移表达"),
+        ("关系视觉子agent", "角色关系、立绘/服装/视觉锚点、冲突资料与缺口"),
+    ]
+    subagents = await asyncio.gather(
+        *[
+            _run_subagent(
+                caller=caller,
+                agent_name=name,
+                focus=focus,
+                work_title=work_title,
+                character_name=character_name,
+                source_text=source_text,
+            )
+            for name, focus in focus_items
+        ]
+    )
+    reference_template = _configured_template_reference(runtime)
+    await progress("template_synthesis", "正在生成人设模板...", 78)
+    template = await _synthesize_template(
+        caller=caller,
+        work_title=work_title,
+        character_name=character_name,
+        source_text=source_text,
+        subagents=list(subagents),
+        reference_template=reference_template,
+    )
+    validation = _validate_template_yaml(template)
+    if not validation.get("valid"):
+        await progress("template_repair", "正在修复模板结构...", 88)
+        repaired = await _repair_template_yaml(
+            caller=caller,
+            work_title=work_title,
+            character_name=character_name,
+            template=template,
+            validation=validation,
+            reference_template=reference_template,
+        )
+        repaired_validation = _validate_template_yaml(repaired)
+        if repaired_validation.get("valid"):
+            template = repaired_validation["template"]
+            validation = repaired_validation
+        else:
+            template = _strip_yaml_fence(template)
+    await progress("finalize", "正在整理输出结果...", 95)
+    conflicts: list[str] = []
+    for item in subagents:
+        report = item.get("report") if isinstance(item, dict) else {}
+        raw_conflicts = report.get("conflicts", []) if isinstance(report, dict) else []
+        if isinstance(raw_conflicts, list):
+            conflicts.extend(str(x) for x in raw_conflicts if str(x).strip())
+    result = {
+        "success": True,
+        "work_title": work_title,
+        "character_name": character_name,
+        "model_role": "configured_main",
+        "duration_ms": int((time.time() - started) * 1000),
+        "sources": sources,
+        "subagents": list(subagents),
+        "conflicts": conflicts[:20],
+        "template": validation.get("template") or _strip_yaml_fence(template),
+        "template_valid": bool(validation.get("valid")),
+        "template_errors": list(validation.get("errors") or [])[:20],
+        "template_warnings": list(validation.get("warnings") or [])[:20],
+        "template_keys": list(validation.get("keys") or []),
+        "template_reference": reference_template,
+    }
+    record = record_persona_template_result(result, actor=actor, source=source)
+    result["history_record"] = summarize_persona_template_record(record)
+    export_path = write_persona_template_export_file(record, plugin_config=getattr(runtime, "plugin_config", None))
+    result["export_path"] = str(export_path)
+    await progress("done", "人设模板已完成。", 100)
+    return result
 
 
 async def _gather_wiki_sources(
@@ -1750,101 +1932,170 @@ async def _synthesize_template(
 def build_persona_template_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/persona-template", tags=["persona-template"])
 
-    @router.post("/build")
-    async def build_template(
-        request: Request,
-        body: dict = Body(default_factory=dict),
-        admin: AdminIdentity = Depends(require_admin),
-    ) -> dict:
+    def _parse_build_body(body: dict) -> tuple[str, str]:
         work_title = str(body.get("work_title", "") or "").strip()
         character_name = str(body.get("character_name", "") or "").strip()
         if not work_title or not character_name:
             raise HTTPException(status_code=400, detail="作品名和角色名都不能为空")
         if len(work_title) > 120 or len(character_name) > 80:
             raise HTTPException(status_code=400, detail="作品名或角色名过长")
-        caller = _main_ai_caller(runtime)
-        if caller is None:
+        if _main_ai_caller(runtime) is None:
             raise HTTPException(status_code=503, detail="主模型调用器未就绪")
+        return work_title, character_name
 
-        started = time.time()
-        sources = await _gather_persona_sources(
-            runtime=runtime,
+    @router.get("/history")
+    async def history(
+        limit: int = 20,
+        work_title: str = "",
+        character_name: str = "",
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        records = list_persona_template_records(
+            limit=limit,
             work_title=work_title,
             character_name=character_name,
         )
-        source_text = _source_corpus(sources)
-        focus_items = [
-            ("基础设定子agent", "官方身份、百科摘要、基础人设、剧情定位、资料可信度"),
-            ("性格台词子agent", "性格模式、口癖、说话节奏、萌点、群聊可迁移表达"),
-            ("关系视觉子agent", "角色关系、立绘/服装/视觉锚点、冲突资料与缺口"),
-        ]
-        subagents = await asyncio.gather(
-            *[
-                _run_subagent(
-                    caller=caller,
-                    agent_name=name,
-                    focus=focus,
+        return {
+            "records": [summarize_persona_template_record(record) for record in records],
+            "total": len(records),
+        }
+
+    @router.get("/history/{record_id}")
+    async def history_detail(
+        record_id: str,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        records = list_persona_template_records(limit=100)
+        for record in records:
+            if str(record.get("record_id", "")) == str(record_id):
+                return record
+        raise HTTPException(status_code=404, detail="未找到该人设构建历史记录")
+
+    @router.post("/build-task")
+    async def build_template_task(
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        work_title, character_name = _parse_build_body(body)
+        task = _PersonaTemplateTask(
+            task_id=uuid.uuid4().hex,
+            work_title=work_title,
+            character_name=character_name,
+            created_at=time.time(),
+        )
+        async with _TASK_LOCK:
+            _cleanup_finished_tasks()
+            _TASKS[task.task_id] = task
+
+        async def _progress(stage: str, message: str, percent: int) -> None:
+            await _set_task_progress(
+                task,
+                stage=stage,
+                message=message,
+                progress=percent,
+                status="running",
+            )
+
+        async def _runner() -> None:
+            try:
+                await _set_task_progress(
+                    task,
+                    stage="starting",
+                    message="正在启动人设构建...",
+                    progress=3,
+                    status="running",
+                )
+                task.result = await _run_persona_template_build(
+                    runtime=runtime,
                     work_title=work_title,
                     character_name=character_name,
-                    source_text=source_text,
+                    actor=admin.qq,
+                    source="webui",
+                    progress=_progress,
                 )
-                for name, focus in focus_items
-            ]
-        )
-        template = await _synthesize_template(
-            caller=caller,
-            work_title=work_title,
-            character_name=character_name,
-            source_text=source_text,
-            subagents=list(subagents),
-            reference_template=_configured_template_reference(runtime),
-        )
-        validation = _validate_template_yaml(template)
-        if not validation.get("valid"):
-            repaired = await _repair_template_yaml(
-                caller=caller,
+                await _set_task_progress(
+                    task,
+                    stage="done",
+                    message="人设模板已完成。",
+                    progress=100,
+                    status="done",
+                )
+                webui_audit_log.record(
+                    action="persona_template_build",
+                    qq=admin.qq,
+                    device_id=admin.device_id,
+                    target=f"{work_title}/{character_name}",
+                    ip_hash=get_client_ip(request),
+                    detail={
+                        "source_count": len((task.result or {}).get("sources") or []),
+                        "subagent_count": len((task.result or {}).get("subagents") or []),
+                        "mode": "task",
+                    },
+                    outcome="ok",
+                )
+            except Exception as exc:
+                task.error = _clip_text(exc, 500)
+                await _set_task_progress(
+                    task,
+                    stage="error",
+                    message=f"构建失败：{task.error}",
+                    progress=max(1, task.progress),
+                    status="error",
+                )
+                webui_audit_log.record(
+                    action="persona_template_build",
+                    qq=admin.qq,
+                    device_id=admin.device_id,
+                    target=f"{work_title}/{character_name}",
+                    ip_hash=get_client_ip(request),
+                    detail={"error": task.error, "mode": "task"},
+                    outcome="error",
+                )
+
+        asyncio.create_task(_runner())
+        return task.public()
+
+    @router.get("/tasks/{task_id}")
+    async def build_task_status(
+        task_id: str,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        task = _get_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="人设构建任务不存在或已过期")
+        return task.public()
+
+    @router.post("/build")
+    async def build_template(
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        work_title, character_name = _parse_build_body(body)
+        try:
+            result = await _run_persona_template_build(
+                runtime=runtime,
                 work_title=work_title,
                 character_name=character_name,
-                template=template,
-                validation=validation,
-                reference_template=_configured_template_reference(runtime),
+                actor=admin.qq,
+                source="webui",
             )
-            repaired_validation = _validate_template_yaml(repaired)
-            if repaired_validation.get("valid"):
-                template = repaired_validation["template"]
-                validation = repaired_validation
-            else:
-                template = _strip_yaml_fence(template)
-        conflicts: list[str] = []
-        for item in subagents:
-            report = item.get("report") if isinstance(item, dict) else {}
-            raw_conflicts = report.get("conflicts", []) if isinstance(report, dict) else []
-            if isinstance(raw_conflicts, list):
-                conflicts.extend(str(x) for x in raw_conflicts if str(x).strip())
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         webui_audit_log.record(
             action="persona_template_build",
             qq=admin.qq,
             device_id=admin.device_id,
             target=f"{work_title}/{character_name}",
             ip_hash=get_client_ip(request),
-            detail={"source_count": len(sources), "subagent_count": len(subagents)},
+            detail={
+                "source_count": len(result.get("sources") or []),
+                "subagent_count": len(result.get("subagents") or []),
+                "mode": "sync",
+            },
             outcome="ok",
         )
-        return {
-            "success": True,
-            "work_title": work_title,
-            "character_name": character_name,
-            "model_role": "configured_main",
-            "duration_ms": int((time.time() - started) * 1000),
-            "sources": sources,
-            "subagents": list(subagents),
-            "conflicts": conflicts[:20],
-            "template": validation.get("template") or _strip_yaml_fence(template),
-            "template_valid": bool(validation.get("valid")),
-            "template_errors": list(validation.get("errors") or [])[:20],
-            "template_warnings": list(validation.get("warnings") or [])[:20],
-            "template_keys": list(validation.get("keys") or []),
-            "template_reference": _configured_template_reference(runtime),
-        }
+        return result
 
     return router

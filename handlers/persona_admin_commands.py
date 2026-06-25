@@ -4,6 +4,8 @@ import asyncio
 import json
 import re
 import time
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from ..core.admin_acl import (
@@ -88,6 +90,11 @@ _COMMAND_ALIASES = {
     "lore": "lore",
     "设定": "lore",
     "lorebook": "lore",
+    "template": "template",
+    "模板": "template",
+    "构建": "template",
+    "人设构建": "template",
+    "人格构建": "template",
 }
 _SUBCOMMAND_ALIASES = {
     "list": "list",
@@ -251,6 +258,7 @@ def _root_help_text() -> str:
         "- 拟人 定时 状态：查看定时任务注册状态、下次运行时间和功能开关。",
         "- 拟人 空间 状态|测试 <QQ号/@用户>：查看空间任务状态，或对指定好友空间执行一次测试互动扫描。",
         "- 拟人 表情包 整理|清理|回滚：整理表情包库（去重/去低质量）、清理过期 trash、回滚最近一次整理。",
+        "- 拟人 人设构建 <作品名> <角色名>：从百科/联网资料生成角色人设模板，输出聊天记录并附带文件。",
         "",
         "旧命令兼容（仍可用，下面直接说明用途）：",
         "- 拟人配置：发送聊天记录形式的配置总览。",
@@ -301,6 +309,12 @@ def _format_command_help(path: tuple[str, ...]) -> str:
 
 
 def _format_category_help(category: str) -> str:
+    if category == "template":
+        return (
+            "人设构建：\n"
+            "- 拟人 人设构建 <作品名> <角色名>：生成角色人设 YAML，输出聊天记录并附带文件。\n"
+            "示例：拟人 人设构建 蔚蓝档案 早濑优香"
+        )
     entries = find_entries_by_category(category)
     if not entries:
         return "未找到该帮助分类。"
@@ -562,6 +576,199 @@ async def handle_lore_command(bundle: Any, *, tokens: list[str]) -> str:
     return "未知子命令。"
 
 
+def _chunk_text(text: str, *, limit: int = 3200) -> list[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    chunks: list[str] = []
+    while raw:
+        if len(raw) <= limit:
+            chunks.append(raw)
+            break
+        split_at = raw.rfind("\n", 0, limit)
+        if split_at < max(800, limit // 3):
+            split_at = limit
+        chunks.append(raw[:split_at].rstrip())
+        raw = raw[split_at:].lstrip()
+    return chunks
+
+
+def _format_persona_template_sources(result: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for index, source in enumerate((result.get("sources") or [])[:12], start=1):
+        if not isinstance(source, dict):
+            continue
+        title = source.get("title") or source.get("query") or f"资料 {index}"
+        lines.append(f"[S{index}] {source.get('source') or source.get('kind') or '资料'}：{title}")
+        if source.get("url"):
+            lines.append(str(source.get("url")))
+        if source.get("summary"):
+            lines.append(str(source.get("summary"))[:420])
+    return "\n".join(lines)
+
+
+def _build_persona_template_forward_nodes(bot: Any, result: dict[str, Any]) -> list[dict[str, Any]]:
+    bot_id = str(getattr(bot, "self_id", "") or "0")
+    work_title = str(result.get("work_title", "") or "")
+    character_name = str(result.get("character_name", "") or "")
+    valid_text = "通过" if result.get("template_valid") else "需要检查"
+    header = "\n".join(
+        [
+            f"人设构建结果：{work_title} / {character_name}",
+            f"YAML 校验：{valid_text}",
+            f"资料来源：{len(result.get('sources') or [])} 条",
+            f"子agent报告：{len(result.get('subagents') or [])} 条",
+            f"耗时：{int(result.get('duration_ms') or 0)} ms",
+        ]
+    )
+    nodes = [
+        {
+            "type": "node",
+            "data": {
+                "name": "人设构建",
+                "uin": bot_id,
+                "content": header,
+            },
+        }
+    ]
+
+    validation = [str(x) for x in [*(result.get("template_errors") or []), *(result.get("template_warnings") or [])] if str(x).strip()]
+    if validation:
+        nodes.append(
+            {
+                "type": "node",
+                "data": {
+                    "name": "YAML 校验",
+                    "uin": bot_id,
+                    "content": "\n".join(f"- {item}" for item in validation[:20]),
+                },
+            }
+        )
+
+    for index, chunk in enumerate(_chunk_text(str(result.get("template") or ""), limit=3600), start=1):
+        nodes.append(
+            {
+                "type": "node",
+                "data": {
+                    "name": f"YAML 模板 {index}",
+                    "uin": bot_id,
+                    "content": chunk,
+                },
+            }
+        )
+
+    sources_text = _format_persona_template_sources(result)
+    for index, chunk in enumerate(_chunk_text(sources_text, limit=3200), start=1):
+        nodes.append(
+            {
+                "type": "node",
+                "data": {
+                    "name": f"资料来源 {index}",
+                    "uin": bot_id,
+                    "content": chunk,
+                },
+            }
+        )
+
+    return nodes[:24]
+
+
+async def _send_persona_template_forward(bot: Any, event: Any, result: dict[str, Any], *, logger: Any) -> bool:
+    nodes = _build_persona_template_forward_nodes(bot, result)
+    try:
+        if hasattr(event, "group_id"):
+            await bot.call_api("send_group_forward_msg", group_id=getattr(event, "group_id"), messages=nodes)
+        else:
+            await bot.call_api("send_private_forward_msg", user_id=getattr(event, "user_id"), messages=nodes)
+        return True
+    except Exception as exc:
+        try:
+            logger.warning(f"[persona_template] 转发消息发送失败：{exc}")
+        except Exception:
+            pass
+        return False
+
+
+async def _send_persona_template_file(bundle: Any, event: Any, export_path: str) -> str:
+    if not export_path:
+        return "未生成导出文件。"
+    path = Path(export_path)
+    if not path.is_file():
+        return "导出文件不存在。"
+    from ..core.file_sender import build_file_sender
+
+    sender = build_file_sender(get_bots=bundle.get_bots, logger=bundle.logger)
+    try:
+        if hasattr(event, "group_id"):
+            await sender.upload_group_file(
+                group_id=getattr(event, "group_id"),
+                file=str(path),
+                name=path.name,
+            )
+        else:
+            await sender.upload_private_file(
+                user_id=getattr(event, "user_id"),
+                file=str(path),
+                name=path.name,
+            )
+        return "文件已发送。"
+    except Exception as exc:
+        try:
+            bundle.logger.warning(f"[persona_template] 文件发送失败：{exc}")
+        except Exception:
+            pass
+        return f"文件发送失败：{exc}"
+
+
+async def handle_persona_template_command(
+    matcher: Any,
+    *,
+    bot: Any,
+    bundle: Any,
+    event: Any,
+    tokens: list[str],
+) -> None:
+    if len(tokens) < 2:
+        await matcher.finish("用法：拟人 人设构建 <作品名> <角色名>")
+    work_title = str(tokens[0] or "").strip()
+    character_name = " ".join(str(token or "").strip() for token in tokens[1:] if str(token or "").strip())
+    if not work_title or not character_name:
+        await matcher.finish("作品名和角色名都不能为空。用法：拟人 人设构建 <作品名> <角色名>")
+
+    await matcher.send(f"开始构建《{work_title}》的「{character_name}」人设模板。")
+    announced: set[str] = set()
+    stage_allowlist = {"query_moegirl", "relation_mapping", "template_synthesis"}
+
+    async def _progress(stage: str, message: str, _percent: int) -> None:
+        if stage in stage_allowlist and stage not in announced:
+            announced.add(stage)
+            await matcher.send(message)
+
+    try:
+        from ..webui.routes.persona_template_routes import _run_persona_template_build
+
+        runtime = SimpleNamespace(
+            plugin_config=bundle.plugin_config,
+            logger=bundle.logger,
+            runtime_bundle=bundle,
+        )
+        result = await _run_persona_template_build(
+            runtime=runtime,
+            work_title=work_title,
+            character_name=character_name,
+            actor=str(getattr(event, "user_id", "") or ""),
+            source="qq_command",
+            progress=_progress,
+        )
+    except Exception as exc:
+        await matcher.finish(f"人设构建失败：{exc}")
+
+    forward_ok = await _send_persona_template_forward(bot, event, result, logger=bundle.logger)
+    file_status = await _send_persona_template_file(bundle, event, str(result.get("export_path") or ""))
+    status = "已发送聊天记录。" if forward_ok else "聊天记录发送失败，已生成文件。"
+    await matcher.finish(f"人设模板已生成：{status}\n{file_status}")
+
+
 async def dispatch_persona_admin_command(
     matcher: Any,
     *,
@@ -636,6 +843,16 @@ async def dispatch_persona_admin_command(
         await matcher.finish(await handle_lore_command(bundle, tokens=rest))
         return
 
+    if command == "template":
+        await handle_persona_template_command(
+            matcher,
+            bot=bot,
+            bundle=bundle,
+            event=event,
+            tokens=rest,
+        )
+        return
+
     if command == "update":
         if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):
             await matcher.finish(_admin_error())
@@ -659,7 +876,7 @@ def render_help(bundle: Any, *, event: Any, tokens: list[str]) -> str:
         entry = find_command_help(tuple(normalized[:2]))
         if entry is not None:
             return _format_command_help(entry.path)
-    if normalized[0] in {"config", "admin", "memory", "migrate", "help", "status", "recall", "model", "scheduler", "qzone", "update"}:
+    if normalized[0] in {"config", "admin", "memory", "migrate", "help", "status", "recall", "model", "scheduler", "qzone", "template", "update"}:
         return _format_category_help(normalized[0])
     config_entry = resolve_config_entry(" ".join(tokens))
     if config_entry is None:

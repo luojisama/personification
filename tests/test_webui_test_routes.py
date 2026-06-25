@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
@@ -206,6 +207,16 @@ system: |
     assert body["template_valid"] is True
     assert "system:" in body["template"]
     assert "input" in body["template_keys"]
+    assert body["history_record"]["work_title"] == "测试作品"
+    assert Path(body["export_path"]).is_file()
+    history = client.get("/personification/api/persona-template/history?limit=5")
+    assert history.status_code == 200, history.text
+    assert history.json()["records"][0]["record_id"] == body["history_record"]["record_id"]
+    detail = client.get(
+        "/personification/api/persona-template/history/" + body["history_record"]["record_id"]
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["result"]["template"] == body["template"]
     assert len(caller.calls) == 4
     assert all(call["kwargs"].get("use_builtin_search") is True for call in caller.calls[:3])
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 
 from .routes.audit_routes import build_audit_router
@@ -89,11 +90,14 @@ def build_router() -> APIRouter:
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
-        return HTMLResponse(_INDEX_HTML)
+        return HTMLResponse(
+            _render_index_html(),
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
 
     @router.get("/static/{filename}")
-    async def static_asset(filename: str) -> FileResponse:
-        return _serve_static_asset(filename)
+    async def static_asset(filename: str, request: Request) -> FileResponse:
+        return _serve_static_asset(filename, versioned=bool(request.query_params.get("v")))
 
     @router.get("/health")
     async def health() -> dict:
@@ -114,7 +118,35 @@ def _load_index_html() -> str:
     return _STATIC_INDEX_PATH.read_text(encoding="utf-8")
 
 
-def _serve_static_asset(filename: str) -> FileResponse:
+def _asset_version(filename: str) -> str:
+    target = (_STATIC_ROOT / filename).resolve()
+    try:
+        stat = target.stat()
+    except OSError:
+        return str(int(time.time()))
+    return f"{int(stat.st_mtime)}-{stat.st_size}"
+
+
+def _render_index_html() -> str:
+    html = _load_index_html()
+    for filename in (
+        "style.css",
+        "app-core.js",
+        "app-activity.js",
+        "app-content.js",
+        "app-admin.js",
+        "app-tools.js",
+        "app-config.js",
+        "app-auth.js",
+    ):
+        html = html.replace(
+            f"/personification/static/{filename}",
+            f"/personification/static/{filename}?v={_asset_version(filename)}",
+        )
+    return html
+
+
+def _serve_static_asset(filename: str, *, versioned: bool = False) -> FileResponse:
     if Path(filename).name != filename:
         raise HTTPException(status_code=404, detail="static asset not found")
     target = (_STATIC_ROOT / filename).resolve()
@@ -125,7 +157,9 @@ def _serve_static_asset(filename: str) -> FileResponse:
     media_type = _STATIC_CONTENT_TYPES.get(target.suffix.lower())
     if media_type is None or not target.is_file():
         raise HTTPException(status_code=404, detail="static asset not found")
-    return FileResponse(target, media_type=media_type)
-
-
-_INDEX_HTML = _load_index_html()
+    headers = {
+        "Cache-Control": "public, max-age=31536000, immutable"
+        if versioned
+        else "no-cache, max-age=0, must-revalidate"
+    }
+    return FileResponse(target, media_type=media_type, headers=headers)
