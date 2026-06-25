@@ -245,6 +245,133 @@ function renderPluginKnowledgeDetail() {
     </div>`;
 }
 
+function pluginCommitRows(items, emptyText) {
+  const rows = (items || []).map(item => {
+    const ts = Number(item.timestamp || 0);
+    const time = ts ? new Date(ts * 1000).toLocaleString() : "-";
+    return `<tr>
+      <td><code>${escapeHtml(item.short_hash || "")}</code></td>
+      <td>${escapeHtml(item.subject || "")}</td>
+      <td class="muted">${escapeHtml(item.author || "")}</td>
+      <td class="muted">${escapeHtml(time)}</td>
+    </tr>`;
+  }).join("");
+  return `<table><thead><tr><th>版本</th><th>内容</th><th>作者</th><th>时间</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="4" class="muted">${escapeHtml(emptyText || "暂无记录")}</td></tr>`}</tbody></table>`;
+}
+
+function renderPluginManager() {
+  const st = state.pluginUpdateStatus;
+  if (!st) return `<div class="card muted">加载中…</div>`;
+  const source = st.source || {};
+  const local = st.local || {};
+  const remote = st.remote || {};
+  const history = state.pluginUpdateHistory || {};
+  const pending = st.pending_history || history.pending_history || [];
+  const localHistory = history.history || st.history || [];
+  const fetch = st.fetch || {};
+  const sourceType = st.source_type === "git" ? "Git" : (st.source_type || "unknown");
+  const updateAvailable = !!st.update_available;
+  const canUpdate = !!st.update_supported && updateAvailable && !st.dirty && !state.pluginUpdateBusy;
+  const statusTag = st.update_supported === false
+    ? '<span class="tag required">不支持自动更新</span>'
+    : updateAvailable
+      ? '<span class="tag" style="background:rgba(245,158,11,0.18);color:var(--warn)">有更新</span>'
+      : '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">已是最新</span>';
+  const fetchAlert = fetch && fetch.ok === false
+    ? `<div class="alert err" style="margin-top:10px">远端检查失败：${escapeHtml(fetch.error || "未知错误")}</div>`
+    : "";
+  const dirtyAlert = st.dirty
+    ? `<div class="alert err" style="margin-top:10px">本地有 ${Number(st.dirty_count || 0)} 项未提交改动，自动更新已禁用。<pre style="white-space:pre-wrap;margin:8px 0 0">${escapeHtml((st.dirty_preview || []).join("\n"))}</pre></div>`
+    : "";
+  const result = state.pluginUpdateResult;
+  const resultAlert = result
+    ? `<div class="alert ${result.ok?'ok':'err'}" style="margin-top:10px">${escapeHtml(result.message || result.error || (result.ok ? "操作完成" : "操作失败"))}</div>`
+    : "";
+  return `<div class="card">
+    <div class="between" style="gap:12px;align-items:flex-start">
+      <div>
+        <h2 style="margin:0">拟人插件更新</h2>
+        <p class="muted" style="font-size:12px;margin:6px 0 0">按当前安装源检查更新；当前实现识别 Git 安装，后续商店版可接入新的 source provider。</p>
+      </div>
+      <div class="row">
+        ${statusTag}
+        <button class="btn small" onclick="reloadPluginManager()" ${state.loading?'disabled':''}>刷新</button>
+      </div>
+    </div>
+    <div class="health-summary" style="margin-top:14px">
+      <div class="health-pill"><div><div class="muted" style="font-size:12px">安装源</div><div>${escapeHtml(sourceType)}</div></div></div>
+      <div class="health-pill"><div><div class="muted" style="font-size:12px">本地版本</div><div><code>${escapeHtml(local.short_hash || "-")}</code></div></div></div>
+      <div class="health-pill"><div><div class="muted" style="font-size:12px">远端版本</div><div><code>${escapeHtml(remote.short_hash || "-")}</code></div></div></div>
+      <div class="health-pill"><div><div class="muted" style="font-size:12px">差异</div><div>领先 ${Number(st.ahead || 0)} / 落后 ${Number(st.behind || 0)}</div></div></div>
+    </div>
+    <table style="margin-top:10px"><tbody>
+      <tr><td class="muted" style="width:120px">仓库根目录</td><td><code>${escapeHtml(st.repo_root || st.plugin_root || "-")}</code></td></tr>
+      <tr><td class="muted">插件目录</td><td><code>${escapeHtml(st.plugin_subdir || ".")}</code></td></tr>
+      <tr><td class="muted">分支</td><td>${escapeHtml(source.branch || local.branch || "-")} ${source.upstream ? `<span class="muted">→ ${escapeHtml(source.upstream)}</span>` : ""}</td></tr>
+      <tr><td class="muted">远端</td><td>${source.remote_url ? `<code>${escapeHtml(source.remote_url)}</code>` : '<span class="muted">未配置</span>'}</td></tr>
+      <tr><td class="muted">状态</td><td>${escapeHtml(st.message || "-")}</td></tr>
+    </tbody></table>
+    ${fetchAlert}${dirtyAlert}${resultAlert}
+    <div class="row" style="margin-top:14px">
+      <button class="btn primary" onclick="checkPluginUpdates()" ${state.pluginUpdateChecking?'disabled':''}>${state.pluginUpdateChecking?'<span class="spinner"></span> 检查中…':'检查更新'}</button>
+      <button class="btn danger" onclick="applyPluginUpdate()" ${canUpdate?'':'disabled'}>${state.pluginUpdateBusy?'<span class="spinner"></span> 更新中…':'应用更新'}</button>
+      <span class="muted" style="font-size:12px">应用更新只执行 fast-forward；成功后需要重启 bot 才会加载新代码。</span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>待更新内容</h2>
+    ${pluginCommitRows(pending, updateAvailable ? "暂无可展示的待更新提交" : "当前没有待更新提交")}
+  </div>
+  <div class="card">
+    <h2>历史更新内容</h2>
+    ${pluginCommitRows(localHistory, "暂无历史提交记录")}
+  </div>`;
+}
+
+async function reloadPluginManager() {
+  try { await loadView(); render(); } catch (e) { alertFlash("err", "刷新失败：" + e.message); }
+}
+
+async function checkPluginUpdates() {
+  if (state.pluginUpdateChecking) return;
+  state.pluginUpdateChecking = true;
+  state.pluginUpdateResult = null;
+  render();
+  try {
+    const status = await api("/plugin-manager/check", { method:"POST", headers:{"content-type":"application/json"}, body:"{}" });
+    state.pluginUpdateStatus = status;
+    state.pluginUpdateHistory = await api("/plugin-manager/history?limit=30").catch(() => state.pluginUpdateHistory);
+    alertFlash("ok", status.message || (status.update_available ? "发现更新" : "已是最新版本"));
+  } catch (e) {
+    alertFlash("err", "检查失败：" + e.message);
+  }
+  state.pluginUpdateChecking = false;
+  render();
+}
+
+async function applyPluginUpdate() {
+  const st = state.pluginUpdateStatus || {};
+  if (!st.update_available) { alertFlash("err", "当前没有可应用的更新"); return; }
+  if (st.dirty) { alertFlash("err", "本地有未提交改动，不能自动更新"); return; }
+  if (!confirm("确认更新拟人插件？将执行当前安装源的 fast-forward 更新，成功后需要重启 bot。")) return;
+  state.pluginUpdateBusy = true;
+  state.pluginUpdateResult = null;
+  render();
+  try {
+    const result = await api("/plugin-manager/update", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({confirm:"update"}) });
+    state.pluginUpdateResult = result;
+    if (result && result.status) state.pluginUpdateStatus = result.status;
+    state.pluginUpdateHistory = await api("/plugin-manager/history?limit=30").catch(() => state.pluginUpdateHistory);
+    alertFlash(result.ok ? "ok" : "err", result.message || result.error || (result.ok ? "更新完成" : "更新失败"));
+  } catch (e) {
+    state.pluginUpdateResult = { ok:false, error:e.message };
+    alertFlash("err", "更新失败：" + e.message);
+  }
+  state.pluginUpdateBusy = false;
+  render();
+}
+
 function renderTest() {
   const r = state.testResult;
   return `<div class="card">

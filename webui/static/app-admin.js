@@ -220,6 +220,29 @@ function renderInteractionResult(ir) {
   </div>`;
 }
 
+function renderQzoneForwardResult(result) {
+  if (!result) return "";
+  const ok = !!result.ok;
+  const feed = result.feed || {};
+  const quota = result.quota || {};
+  const quotaLine = quota.month
+    ? `本月额度：${Number(quota.used || 0)} / ${Number(quota.limit || 0)}，剩余 ${Number(quota.remaining || 0)}`
+    : "";
+  const detail = ok
+    ? `已转发 ${result.target_user_id || ""} 的第一条空间动态`
+    : (result.error || "转发测试失败");
+  const feedText = feed.content ? `\n\n动态内容：${feed.content}` : "";
+  return `<div style="margin-top:10px">
+    <div class="alert ${ok?'ok':'err'}" style="white-space:pre-wrap">${escapeHtml(detail + feedText)}</div>
+    <div class="row" style="margin-top:8px">
+      ${result.stage ? `<span class="tag">阶段：${escapeHtml(result.stage)}</span>` : ""}
+      ${feed.owner_uin ? `<span class="tag">owner=${escapeHtml(feed.owner_uin)}</span>` : ""}
+      ${feed.feed_id ? `<span class="tag">feed=${escapeHtml(feed.feed_id)}</span>` : ""}
+      ${quotaLine ? `<span class="tag">${escapeHtml(quotaLine)}</span>` : ""}
+    </div>
+  </div>`;
+}
+
 function renderHealth() {
   const h = state.health;
   if (!h) return `<div class="card muted">体检中…</div>`;
@@ -245,6 +268,7 @@ function renderHealth() {
       </h3>${items||'<div class="muted">无</div>'}</div>`;
   }).join("");
   const ir = state.interactionResult;
+  const qzf = state.qzoneForwardForm || {};
   const interactionCard = `<div class="card">
     <h2>实际交互测试</h2>
     <p class="muted" style="font-size:12px">向「配置中心 → 运维」里设置的<b>测试群 / 测试私聊用户</b>真实注入一条消息，走完整回复链路（规则→缓冲→模型→发送），并回显 bot 实际回复。等待时间按回复超时配置加少量余量；会真的在 QQ 里发消息。</p>
@@ -254,6 +278,16 @@ function renderHealth() {
       ${state.interactionBusy?'<span class="muted">交互中（按回复超时配置）…</span>':''}
     </div>
     ${renderInteractionResult(ir)}
+  </div>`;
+  const qzoneForwardCard = `<div class="card">
+    <h2>QZone 首条转发测试</h2>
+    <p class="muted" style="font-size:12px">指定一个 QQ，读取该用户空间第一条动态并真实转发到 bot 空间；成功后计入本月 QQ 空间额度。只用于管理员显式体检，不走自动转发决策。</p>
+    <div class="row" style="margin-top:10px;gap:8px;align-items:center">
+      <input id="qzone-forward-target" type="text" placeholder="目标 QQ 或 [CQ:at]" value="${escapeAttr(qzf.target_user_id || "")}" oninput="state.qzoneForwardForm.target_user_id=this.value" style="width:220px">
+      <input id="qzone-forward-text" type="text" placeholder="转发附言，可空" value="${escapeAttr(qzf.forward_text || "")}" oninput="state.qzoneForwardForm.forward_text=this.value" style="min-width:220px;flex:1">
+      <button class="btn primary" onclick="runQzoneForwardTest()" ${state.qzoneForwardBusy?'disabled':''}>${state.qzoneForwardBusy?'<span class="spinner"></span> 转发中…':'转发第一条'}</button>
+    </div>
+    ${renderQzoneForwardResult(state.qzoneForwardResult)}
   </div>`;
   return `<div class="card">
     <div class="between">
@@ -267,6 +301,7 @@ function renderHealth() {
     </div>
   </div>
   ${interactionCard}
+  ${qzoneForwardCard}
   <div class="health-grid">${cats}</div>`;
 }
 
@@ -370,6 +405,29 @@ async function runInteraction(target) {
     state.interactionResult = await api("/health/interaction-test", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ target }) });
   } catch (e) { alertFlash("err", "交互测试失败：" + e.message); }
   state.interactionBusy = false; render();
+}
+
+async function runQzoneForwardTest() {
+  if (state.qzoneForwardBusy) return;
+  const form = state.qzoneForwardForm || {};
+  const target = String(form.target_user_id || "").trim();
+  const forwardText = String(form.forward_text || "").trim();
+  if (!target) { alertFlash("err", "请输入目标 QQ"); return; }
+  if (!confirm("确认转发该用户空间第一条动态？这会真实发布到 bot 的 QQ 空间，并消耗本月空间额度。")) return;
+  state.qzoneForwardBusy = true;
+  state.qzoneForwardResult = null;
+  render();
+  try {
+    state.qzoneForwardResult = await api("/health/qzone-forward-test", {
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({ target_user_id: target, forward_text: forwardText }),
+    });
+  } catch (e) {
+    state.qzoneForwardResult = { ok:false, error:e.message };
+  }
+  state.qzoneForwardBusy = false;
+  render();
 }
 
 function _fmtTs(ts) {

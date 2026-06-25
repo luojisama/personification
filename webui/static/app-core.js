@@ -13,6 +13,8 @@ let state = {
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
   personaTemplateForm: { work_title: "", character_name: "" }, personaTemplateResult: null, personaTemplateBusy: false,
   personaPrompt: null, personaPromptPath: "", health: null, healthBusyCat: "", interactionResult: null, interactionBusy: false,
+  qzoneForwardForm: { target_user_id: "", forward_text: "" }, qzoneForwardResult: null, qzoneForwardBusy: false,
+  pluginUpdateStatus: null, pluginUpdateHistory: null, pluginUpdateBusy: false, pluginUpdateChecking: false, pluginUpdateResult: null,
   qqInfo: null, qqGroups: [], qqFriends: [],
   memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false, memoryLimit: 200,
   memoryVectorIndex: null, memorySearchQuery: "", memorySearchResult: null, memoryVectorBusy: false,
@@ -183,6 +185,13 @@ async function loadView() {
       state.health = await api("/health/check");  // 默认读缓存，秒开
     } else if (state.view === "qzone") {
       state.qzone = await api("/qzone/status");
+    } else if (state.view === "plugin_manager") {
+      const [status, history] = await Promise.all([
+        api("/plugin-manager/status"),
+        api("/plugin-manager/history?limit=30"),
+      ]);
+      state.pluginUpdateStatus = status;
+      state.pluginUpdateHistory = history;
     } else if (state.view === "persona_prompt") {
       const qs = state.personaPromptPath ? ("?path=" + encodeURIComponent(state.personaPromptPath)) : "";
       state.personaPrompt = await api("/test/persona-prompt" + qs);
@@ -297,6 +306,7 @@ function renderLayout() {
         ${navItem('stickers','表情包')}
         ${navItem('skills','Skill 管理')}
         ${navItem('plugin_knowledge','插件知识库')}
+        ${navItem('plugin_manager','插件管理')}
         ${navItem('test','模型测试')}
         ${navItem('persona_prompt','人设预览')}
         ${navItem('persona_builder','人设构建')}
@@ -337,6 +347,7 @@ function renderView() {
   if (state.view === "group_switch") return renderGroupSwitch();
   if (state.view === "skills") return renderSkills();
   if (state.view === "plugin_knowledge") return renderPluginKnowledge();
+  if (state.view === "plugin_manager") return renderPluginManager();
   if (state.view === "qq") return renderQQ();
   if (state.view === "health") return renderHealth();
   if (state.view === "qzone") return renderQzone();

@@ -76,6 +76,7 @@ def test_static_frontend_assets_are_served(_runtime_context) -> None:
     assert js.status_code == 200
     assert "text/javascript" in js.headers["content-type"]
     assert 'const API = "/personification/api";' in js.text
+    assert "plugin_manager" in js.text
 
     config_js = client.get("/personification/static/app-config.js")
     assert config_js.status_code == 200
@@ -88,6 +89,11 @@ def test_static_frontend_assets_are_served(_runtime_context) -> None:
     admin_js = client.get("/personification/static/app-admin.js")
     assert admin_js.status_code == 200
     assert "renderHealth" in admin_js.text
+    assert "runQzoneForwardTest" in admin_js.text
+
+    tools_js = client.get("/personification/static/app-tools.js")
+    assert tools_js.status_code == 200
+    assert "renderPluginManager" in tools_js.text
 
     css = client.get("/personification/static/style.css")
     assert css.status_code == 200
