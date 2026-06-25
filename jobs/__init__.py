@@ -61,10 +61,10 @@ class JobSetupDeps:
     group_idle_enabled: bool = True
     group_idle_check_interval_minutes: int = 15
     qzone_proactive_enabled: bool = False
-    qzone_check_interval_minutes: int = 90
+    qzone_check_interval_minutes: int = 60
     qzone_monthly_limit: int = 30
-    qzone_probability: float = 0.35
-    qzone_min_interval_hours: float = 6.0
+    qzone_probability: float = 0.20
+    qzone_min_interval_hours: float = 12.0
     qzone_quiet_hour_start: int = 0
     qzone_quiet_hour_end: int = 7
     qzone_social_enabled: bool = False

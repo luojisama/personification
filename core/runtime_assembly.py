@@ -289,12 +289,12 @@ class PluginRuntimeBundle:
                 getattr(self.plugin_config, "personification_qzone_proactive_enabled", False)
             ),
             qzone_check_interval_minutes=int(
-                getattr(self.plugin_config, "personification_qzone_check_interval", 90)
+                getattr(self.plugin_config, "personification_qzone_check_interval", 60)
             ),
             qzone_monthly_limit=int(getattr(self.plugin_config, "personification_qzone_monthly_limit", 30)),
-            qzone_probability=float(getattr(self.plugin_config, "personification_qzone_probability", 0.35)),
+            qzone_probability=float(getattr(self.plugin_config, "personification_qzone_probability", 0.20)),
             qzone_min_interval_hours=float(
-                getattr(self.plugin_config, "personification_qzone_min_interval_hours", 6.0)
+                getattr(self.plugin_config, "personification_qzone_min_interval_hours", 12.0)
             ),
             qzone_quiet_hour_start=int(
                 getattr(self.plugin_config, "personification_qzone_quiet_hour_start", 0)

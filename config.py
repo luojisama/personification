@@ -261,11 +261,11 @@ class Config(BaseModel):
     # DEPRECATED: use personification_qzone_cookie.
     qzone_cookie: str = ""
     personification_qzone_proactive_enabled: bool = True
-    personification_qzone_check_interval: int = 30
+    personification_qzone_check_interval: int = 60
     personification_qzone_monthly_limit: int = 30
     personification_qzone_agent_max_steps: int = 4
-    personification_qzone_probability: float = 0.35
-    personification_qzone_min_interval_hours: float = 6.0
+    personification_qzone_probability: float = 0.20
+    personification_qzone_min_interval_hours: float = 12.0
     personification_qzone_social_enabled: bool = True
     personification_qzone_social_check_interval: int = 30
     personification_qzone_social_scope: str = "recent_interactions"
@@ -273,6 +273,9 @@ class Config(BaseModel):
     personification_qzone_social_comment_limit: int = 0
     personification_qzone_social_per_friend_limit: int = 0
     personification_qzone_social_max_feeds_per_scan: int = 5
+    personification_qzone_forward_enabled: bool = True
+    personification_qzone_forward_limit: int = 1
+    personification_qzone_forward_max_per_scan: int = 1
     personification_qzone_third_party_chime_in_enabled: bool = True
     personification_qzone_inbound_enabled: bool = True
     personification_qzone_inbound_check_interval: int = 3

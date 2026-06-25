@@ -15,6 +15,7 @@ from ..core.emotion_state import describe_user_emotion_memory, load_emotion_stat
 from ..core.image_input import summarize_images_with_vision
 from ..core.qzone_service import _extract_qzone_comments
 from ..core.time_ctx import inject_current_time_context
+from ..jobs.periodic_jobs import build_qzone_quota, record_qzone_post
 from .diary_flow import clean_generated_text
 
 
@@ -236,6 +237,41 @@ def _limit_reached(limit: Any, count: Any) -> bool:
     return current >= normalized_limit
 
 
+def _build_qzone_forward_quota(plugin_config: Any, now: datetime) -> dict[str, Any]:
+    try:
+        state = get_data_store().load_sync("qzone_post_state")
+    except Exception:
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    monthly_limit = int(getattr(plugin_config, "personification_qzone_monthly_limit", 30) or 30)
+    min_interval_hours = float(getattr(plugin_config, "personification_qzone_min_interval_hours", 12.0) or 0)
+    return build_qzone_quota(
+        state=state,
+        now=now,
+        monthly_limit=monthly_limit,
+        min_interval_hours=min_interval_hours,
+    )
+
+
+def _forward_quota_block_reason(
+    quota: dict[str, Any],
+    *,
+    forwarded_this_scan: int,
+    forward_max_per_scan: int,
+    now_ts: float,
+) -> str:
+    if _limit_reached(forward_max_per_scan, forwarded_this_scan):
+        return "forward_scan_limit_reached"
+    remaining = int((quota or {}).get("remaining", 0) or 0)
+    if remaining <= max(0, int(forwarded_this_scan)):
+        return "qzone_monthly_limit_reached"
+    next_eligible_at = float((quota or {}).get("next_eligible_at", 0) or 0)
+    if next_eligible_at and next_eligible_at > float(now_ts or time.time()):
+        return "qzone_min_interval_not_reached"
+    return ""
+
+
 def _trim_comment(text: Any, *, max_chars: int = 36) -> str:
     cleaned = clean_generated_text(str(text or ""))
     cleaned = re.sub(r"</?[^>]+>", "", cleaned)
@@ -253,6 +289,18 @@ def _format_ts(ts: float) -> str:
         return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
     except Exception:
         return "未知"
+
+
+def _format_qzone_forward_record(feed: dict[str, Any], forward_text: str) -> str:
+    author = str(feed.get("nickname") or feed.get("owner_uin") or "好友").strip()
+    content = str(feed.get("content") or "").strip()
+    prefix = f"[转发QQ空间] {author}"
+    if content:
+        prefix += f": {content[:120]}"
+    text = str(forward_text or "").strip()
+    if text:
+        prefix += f"\n我的附言：{text[:120]}"
+    return prefix
 
 
 def _get_persona_snippet(persona_store: Any, user_id: str, max_chars: int) -> str:
@@ -301,6 +349,7 @@ def _normalize_state(now: datetime) -> dict[str, Any]:
         state["date"] = today
         state["like_count"] = 0
         state["comment_count"] = 0
+        state["forward_count"] = 0
         state["per_friend"] = {}
     state.setdefault("seen", {})
     state.setdefault("reacted", {})
@@ -313,6 +362,7 @@ def _normalize_state(now: datetime) -> dict[str, Any]:
     state.setdefault("per_friend", {})
     state.setdefault("like_count", 0)
     state.setdefault("comment_count", 0)
+    state.setdefault("forward_count", 0)
     return state
 
 
@@ -392,7 +442,7 @@ def _daily_friend_state(state: dict[str, Any], user_id: str, today: str) -> dict
         state["per_friend"] = per_friend
     item = per_friend.get(user_id)
     if not isinstance(item, dict) or item.get("date") != today:
-        item = {"date": today, "like_count": 0, "comment_count": 0, "action_count": 0}
+        item = {"date": today, "like_count": 0, "comment_count": 0, "forward_count": 0, "action_count": 0}
         per_friend[user_id] = item
     return item
 
@@ -650,7 +700,7 @@ async def _decide_feed_action(
 ) -> dict[str, Any]:
     prompt = (
         "你正在阅读一位好友刚发的 QQ 空间动态。把它当成熟人朋友圈，决定是否互动。\n"
-        "输出严格 JSON：{\"action\":\"ignore|like|comment|like_comment\",\"comment\":\"可选评论\",\"reason\":\"极短原因\"}。\n\n"
+        "输出严格 JSON：{\"action\":\"ignore|like|comment|like_comment|forward\",\"comment\":\"可选评论\",\"forward_text\":\"转发附言，可空\",\"reason\":\"极短原因\"}。\n\n"
         f"好友 QQ：{candidate['user_id']}\n"
         f"好友昵称：{candidate['nickname']}\n"
         f"好友画像：{candidate.get('persona_snippet') or '暂无'}\n"
@@ -664,6 +714,9 @@ async def _decide_feed_action(
         f"图片内部线索（仅供理解，不可复述）：{image_summary or ('有图片，但视觉摘要不可用' if feed.get('images') else '无图片')}\n\n"
         "互动要求：\n"
         "- 默认倾向轻互动：日常熟人内容能点赞就点赞；动态里有具体可接的细节就 like_comment；只有确实没话可说时才 ignore。\n"
+        "- 只有当动态文案本身足够抽象、有意思、像你会想拿到自己空间转一下，而且适合公开转发时，才选择 forward；转发不是常规互动，宁缺毋滥。\n"
+        "- 禁止转发这些内容：漫展自由行/摊位招募/求捞人，瓜条/吃瓜爆料，挂人/曝光/网暴，涉及黄赌毒暴/血腥伤害/违法，转发好运/抽奖诱导/扩散链，隐私求助、沉重争议、营销广告。遇到这些最多 like/comment/ignore，不能 forward。\n"
+        "- forward_text 是你转发时自己的短附言，0-24 个中文字符，可以不写；要像真人顺手转，不要解释“我觉得很有趣所以转发”。\n"
         "- 评论像真人随手留言：4-15 个中文字符为主，最多 30 个；可以是半句话、一个反问、一句吐槽、跳跃的小联想；不必工整结尾。\n"
         "- 允许跳跃：评论不必紧扣动态全部内容，抓一个细节回应即可，不用补全前因后果。\n"
         "- 不要小作文、不要客服腔、不要互联网黑话和热梗、不要 hashtag、不要堆叠表情符号。\n"
@@ -702,14 +755,16 @@ async def _decide_feed_action(
     if payload is None:
         return {"action": "ignore", "comment": "", "reason": "llm_parse_failed"}
     action = str(payload.get("action", "") or "").strip().lower()
-    if action not in {"ignore", "like", "comment", "like_comment"}:
+    if action not in {"ignore", "like", "comment", "like_comment", "forward"}:
         action = "ignore"
     comment = _trim_comment(payload.get("comment", ""))
     if action in {"comment", "like_comment"} and not comment:
         action = "like" if action == "like_comment" else "ignore"
+    forward_text = _trim_comment(payload.get("forward_text", payload.get("comment", "")), max_chars=24)
     return {
         "action": action,
         "comment": comment,
+        "forward_text": forward_text,
         "reason": str(payload.get("reason", "") or "").strip()[:80],
     }
 
@@ -920,12 +975,22 @@ def _apply_action_limits(
     like_limit: int,
     comment_limit: int,
     per_friend_limit: int,
+    forward_limit: int = 0,
+    forward_block_reason: str = "",
 ) -> dict[str, Any]:
     action = str(decision.get("action", "") or "ignore")
     if action == "ignore":
         return decision
     if _limit_reached(per_friend_limit, friend_state.get("action_count", 0)):
         return {"action": "ignore", "comment": "", "reason": "per_friend_limit_reached"}
+    if action == "forward":
+        if forward_block_reason:
+            return {"action": "ignore", "comment": "", "forward_text": "", "reason": forward_block_reason}
+        if _limit_reached(forward_limit, state.get("forward_count", 0)):
+            return {"action": "ignore", "comment": "", "forward_text": "", "reason": "forward_limit_reached"}
+        updated = dict(decision)
+        updated["comment"] = ""
+        return updated
     want_like = action in {"like", "like_comment"}
     want_comment = action in {"comment", "like_comment"}
     if want_like and _limit_reached(like_limit, state.get("like_count", 0)):
@@ -944,6 +1009,7 @@ def _apply_action_limits(
     updated["action"] = action
     if action == "ignore":
         updated["comment"] = ""
+        updated["forward_text"] = ""
         updated["reason"] = "limit_reached"
     return updated
 
@@ -1339,6 +1405,7 @@ async def scan_qzone_social_feeds(
             "feeds_seen": 0,
             "liked": 0,
             "commented": 0,
+            "forwarded": 0,
             "ignored": 0,
             "failed": 0,
             "inbound_comments": 0,
@@ -1396,8 +1463,15 @@ async def scan_qzone_social_feeds(
             per_friend_limit = _normalize_limit(
                 getattr(plugin_config, "personification_qzone_social_per_friend_limit", 0)
             )
+            forward_enabled = bool(getattr(plugin_config, "personification_qzone_forward_enabled", True))
+            forward_limit = _normalize_limit(getattr(plugin_config, "personification_qzone_forward_limit", 1))
+            forward_max_per_scan = _normalize_limit(
+                getattr(plugin_config, "personification_qzone_forward_max_per_scan", 1)
+            )
+            forward_quota = _build_qzone_forward_quota(plugin_config, now) if forward_enabled else {}
 
             processed_feeds = 0
+            forwarded_this_scan = 0
             for candidate in candidates:
                 if processed_feeds >= max_feeds:
                     break
@@ -1460,6 +1534,18 @@ async def scan_qzone_social_feeds(
                         logger=logger,
                     )
                     friend_state = _daily_friend_state(state, str(candidate["user_id"]), today)
+                    forward_method = getattr(qzone_social_service, "forward_feed", None)
+                    if not forward_enabled:
+                        forward_block_reason = "forward_disabled"
+                    elif not callable(forward_method):
+                        forward_block_reason = "forward_api_unavailable"
+                    else:
+                        forward_block_reason = _forward_quota_block_reason(
+                            forward_quota,
+                            forwarded_this_scan=forwarded_this_scan,
+                            forward_max_per_scan=forward_max_per_scan,
+                            now_ts=time.time(),
+                        )
                     decision = _apply_action_limits(
                         decision=decision,
                         state=state,
@@ -1467,6 +1553,8 @@ async def scan_qzone_social_feeds(
                         like_limit=like_limit,
                         comment_limit=comment_limit,
                         per_friend_limit=per_friend_limit,
+                        forward_limit=forward_limit,
+                        forward_block_reason=forward_block_reason,
                     )
                     action = str(decision.get("action", "") or "ignore")
                     if action == "ignore":
@@ -1475,6 +1563,50 @@ async def scan_qzone_social_feeds(
 
                     acted = False
                     comment_text = str(decision.get("comment", "") or "")
+                    reaction_text = comment_text
+                    if action == "forward":
+                        forward_text = str(decision.get("forward_text", "") or "")
+                        reaction_text = forward_text
+                        forward_ok, forward_msg = await qzone_social_service.forward_feed(
+                            feed=feed,
+                            bot_id=str(getattr(bot, "self_id", "") or ""),
+                            content=forward_text,
+                        )
+                        if forward_ok:
+                            acted = True
+                            forwarded_this_scan += 1
+                            result["forwarded"] += 1
+                            state["forward_count"] = int(state.get("forward_count", 0) or 0) + 1
+                            friend_state["forward_count"] = int(friend_state.get("forward_count", 0) or 0) + 1
+                            updated_post_state = record_qzone_post(
+                                _format_qzone_forward_record(feed, forward_text),
+                                now=now,
+                                kind="forward",
+                            )
+                            forward_quota = build_qzone_quota(
+                                state=updated_post_state,
+                                now=now,
+                                monthly_limit=int(
+                                    getattr(plugin_config, "personification_qzone_monthly_limit", 30) or 30
+                                ),
+                                min_interval_hours=float(
+                                    getattr(plugin_config, "personification_qzone_min_interval_hours", 12.0) or 0
+                                ),
+                            )
+                            await _record_qzone_profile_evidence(
+                                persona_store=persona_store,
+                                user_id=str(candidate["user_id"]),
+                                evidence_key=f"bot_forward:{feed_key}",
+                                kind="bot转发",
+                                content=forward_text or "（转发了 ta 这条动态）",
+                                state=state,
+                                result=result,
+                                logger=logger,
+                            )
+                        else:
+                            result["failed"] += 1
+                            result["last_error"] = forward_msg
+                            logger.warning(f"[qzone_social] forward failed for {feed_key}: {forward_msg}")
                     if action in {"like", "like_comment"}:
                         like_ok, like_msg = await qzone_social_service.like_feed(
                             feed=feed,
@@ -1536,7 +1668,7 @@ async def scan_qzone_social_feeds(
                             logger.warning(f"[qzone_social] comment failed for {feed_key}: {comment_msg}")
                     if acted:
                         friend_state["action_count"] = int(friend_state.get("action_count", 0) or 0) + 1
-                        _mark_reacted(state, feed_key, action=action, comment=comment_text)
+                        _mark_reacted(state, feed_key, action=action, comment=reaction_text)
                     else:
                         result["ignored"] += 1
             if not target_user_id and friend_profiles:

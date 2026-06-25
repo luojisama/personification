@@ -693,7 +693,8 @@ def _render_qzone_status_summary(bundle: Any) -> str:
     return (
         f"QQ空间：总开关 {qzone_enabled}，主动发说说 {proactive_enabled}"
         f"（今日 {int(post_state.get('count', 0) or 0)} 条），好友互动 {social_enabled}"
-        f"（赞 {int(social_state.get('like_count', 0) or 0)} / 评 {int(social_state.get('comment_count', 0) or 0)}），"
+        f"（赞 {int(social_state.get('like_count', 0) or 0)} / 评 {int(social_state.get('comment_count', 0) or 0)}"
+        f" / 转 {int(social_state.get('forward_count', 0) or 0)}），"
         f"空间消息 {inbound_enabled}"
     )
 
@@ -711,9 +712,9 @@ def render_qzone_status(bundle: Any) -> str:
         "QQ 空间状态",
         f"总开关：{'开' if bool(getattr(bundle.plugin_config, 'personification_qzone_enabled', False)) else '关'}",
         f"主动发说说：{'开' if bool(getattr(bundle.plugin_config, 'personification_qzone_proactive_enabled', False)) else '关'}",
-        f"主动发说说频率：每 {getattr(bundle.plugin_config, 'personification_qzone_check_interval', 90)} 分钟检查，"
+        f"主动发说说频率：每 {getattr(bundle.plugin_config, 'personification_qzone_check_interval', 60)} 分钟检查，"
         f"每月最多 {getattr(bundle.plugin_config, 'personification_qzone_monthly_limit', 30)} 条，"
-        f"最小间隔 {getattr(bundle.plugin_config, 'personification_qzone_min_interval_hours', 6.0)} 小时",
+        f"最小间隔 {getattr(bundle.plugin_config, 'personification_qzone_min_interval_hours', 12.0)} 小时",
         f"本月已发：{int(post_state.get('count', 0) or 0)} 条",
         f"上次发说说：{format_timestamp(float(post_state.get('last_post_at', 0) or 0))}",
         f"上次内容：{post_state.get('last_content') or '无'}",
@@ -724,11 +725,16 @@ def render_qzone_status(bundle: Any) -> str:
         f"单次动态数：{getattr(bundle.plugin_config, 'personification_qzone_social_max_feeds_per_scan', 10)}",
         f"点赞上限：{getattr(bundle.plugin_config, 'personification_qzone_social_like_limit', 0)}（0=无上限）",
         f"评论上限：{getattr(bundle.plugin_config, 'personification_qzone_social_comment_limit', 0)}（0=无上限）",
+        f"转发：{'开' if bool(getattr(bundle.plugin_config, 'personification_qzone_forward_enabled', True)) else '关'}，"
+        f"每日上限 {getattr(bundle.plugin_config, 'personification_qzone_forward_limit', 1)}，"
+        f"单次扫描 {getattr(bundle.plugin_config, 'personification_qzone_forward_max_per_scan', 1)}",
         f"单好友上限：{getattr(bundle.plugin_config, 'personification_qzone_social_per_friend_limit', 0)}（0=无上限）",
-        f"今日点赞/评论：{int(social_state.get('like_count', 0) or 0)} / {int(social_state.get('comment_count', 0) or 0)}",
+        f"今日点赞/评论/转发：{int(social_state.get('like_count', 0) or 0)} / "
+        f"{int(social_state.get('comment_count', 0) or 0)} / {int(social_state.get('forward_count', 0) or 0)}",
         f"上次扫描：{format_timestamp(float(social_state.get('last_scan_at', 0) or 0))}",
         f"上次结果：用户 {last_result.get('scanned_users', 0)}，动态 {last_result.get('feeds_seen', 0)}，"
         f"点赞 {last_result.get('liked', 0)}，评论 {last_result.get('commented', 0)}，"
+        f"转发 {last_result.get('forwarded', 0)}，"
         f"留言 {last_result.get('inbound_comments', 0)}，回复 {last_result.get('replied', 0)}，"
         f"画像补充 {last_result.get('profile_records', 0)}，忽略 {last_result.get('ignored', 0)}，失败 {last_result.get('failed', 0)}",
         f"最近失败：{social_state.get('last_error') or '无'}",

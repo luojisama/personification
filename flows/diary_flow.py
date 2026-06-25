@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import json
 import random
@@ -15,6 +16,12 @@ from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_group_emotion_memory, load_emotion_state
 from ..core.persona_profile import load_persona_profile
 from ..core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
+from ..core.sticker_library import (
+    list_local_sticker_files,
+    load_sticker_metadata,
+    render_sticker_semantic_summary,
+    resolve_sticker_dir,
+)
 from ..skills.skillpacks.image_gen.scripts.impl import generate_image as generate_codex_image
 
 
@@ -267,14 +274,147 @@ def _is_too_similar_to_recent_qzone_post(content: str, recent_posts: list[str]) 
     return False
 
 
+_QZONE_STICKER_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+
+
+def _normalize_qzone_sticker_match_text(text: str) -> str:
+    value = str(text or "").strip().lower()
+    value = re.sub(r"\s+", "", value)
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", value)
+
+
+def _qzone_sticker_overlap_score(context: str, candidate: str) -> int:
+    current = _normalize_qzone_sticker_match_text(context)
+    target = _normalize_qzone_sticker_match_text(candidate)
+    if len(current) < 2 or len(target) < 2:
+        return 0
+    if current in target or target in current:
+        return 4
+    max_span = min(8, len(target))
+    for span in range(max_span, 1, -1):
+        for start in range(0, len(target) - span + 1):
+            if target[start : start + span] in current:
+                return 1
+    return 0
+
+
+def _score_qzone_sticker_candidate(meta: dict[str, Any], context: str) -> float:
+    if not isinstance(meta, dict):
+        meta = {}
+    if meta.get("is_sticker") is False:
+        return -1.0
+    try:
+        weight = max(0.0, float(meta.get("weight", 1.0) or 1.0))
+    except (TypeError, ValueError):
+        weight = 1.0
+    if weight <= 0.0:
+        return -1.0
+    score = weight
+    if meta.get("proactive_send") is True:
+        score += 2.0
+    style = str(meta.get("style", "anime") or "anime").strip().lower()
+    if style == "anime":
+        score += 1.0
+    elif style == "meme":
+        score += 0.3
+    summary = render_sticker_semantic_summary(meta)
+    score += _qzone_sticker_overlap_score(context, summary)
+    score += _qzone_sticker_overlap_score(context, str(meta.get("description", "") or ""))
+    score += _qzone_sticker_overlap_score(context, str(meta.get("use_hint", "") or ""))
+    score -= min(3, _qzone_sticker_overlap_score(context, str(meta.get("avoid_hint", "") or "")))
+    return score
+
+
+def _select_qzone_sticker_image(
+    *,
+    plugin_config: Any,
+    content: str,
+    image_prompt: str,
+) -> Path | None:
+    sticker_root = getattr(plugin_config, "personification_sticker_path", "data/stickers")
+    sticker_dir = resolve_sticker_dir(sticker_root)
+    files = [
+        path
+        for path in list_local_sticker_files(sticker_dir, include_gif=False)
+        if path.suffix.lower() in _QZONE_STICKER_IMAGE_SUFFIXES
+    ]
+    if not files:
+        return None
+    context = "\n".join(part for part in (str(content or ""), str(image_prompt or "")) if part.strip())
+    metadata = load_sticker_metadata(sticker_dir)
+    candidates: list[tuple[float, Path]] = []
+    for file_path in files:
+        meta = metadata.get(file_path.name, {}) if isinstance(metadata, dict) else {}
+        score = _score_qzone_sticker_candidate(meta, context)
+        if score < 0:
+            continue
+        candidates.append((score, file_path))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1].name))
+    top = candidates[: min(6, len(candidates))]
+    if len(top) == 1:
+        return top[0][1]
+    weights = [max(0.1, item[0]) for item in top]
+    return random.choices([item[1] for item in top], weights=weights, k=1)[0]
+
+
+async def _maybe_build_qzone_sticker_image_marker(
+    *,
+    plugin_config: Any,
+    content: str,
+    image_prompt: str,
+    logger: Any,
+) -> str:
+    if plugin_config is None:
+        return ""
+    try:
+        selected = await asyncio.to_thread(
+            _select_qzone_sticker_image,
+            plugin_config=plugin_config,
+            content=content,
+            image_prompt=image_prompt,
+        )
+    except Exception as exc:
+        if logger is not None:
+            logger.debug(f"[qzone] select sticker image failed: {exc}")
+        return ""
+    if selected is None:
+        return ""
+    try:
+        payload = await asyncio.to_thread(selected.read_bytes)
+    except Exception as exc:
+        if logger is not None:
+            logger.debug(f"[qzone] read sticker image failed: {selected}: {exc}")
+        return ""
+    if not payload:
+        return ""
+    b64 = base64.b64encode(payload).decode("ascii")
+    if logger is not None:
+        logger.info(f"[qzone] use local sticker image as post attachment: {selected.name}")
+    return f"\n[IMAGE_B64]{b64}[/IMAGE_B64]"
+
+
 async def _maybe_generate_qzone_image_marker(
     *,
     tool_caller: Any,
     image_prompt: str,
+    content: str = "",
+    plugin_config: Any = None,
     logger: Any,
 ) -> str:
     prompt = str(image_prompt or "").strip()
-    if not prompt or tool_caller is None:
+    if not prompt:
+        return ""
+    sticker_marker = await _maybe_build_qzone_sticker_image_marker(
+        plugin_config=plugin_config,
+        content=content,
+        image_prompt=prompt,
+        logger=logger,
+    )
+    if sticker_marker:
+        return sticker_marker
+    if tool_caller is None:
         return ""
     try:
         result = await generate_codex_image(
@@ -434,17 +574,20 @@ async def _build_qzone_post_with_optional_image(
     image_marker = await _maybe_generate_qzone_image_marker(
         tool_caller=tool_caller,
         image_prompt=image_prompt,
+        content=text,
+        plugin_config=plugin_config,
         logger=logger,
     )
     return f"{text}{image_marker}"
 
 
 async def get_recent_chat_context(bot: Any, logger: Any) -> str:
-    """Sample recent group messages as diary context."""
+    """Sample recent non-bot group messages as diary context."""
     try:
         group_list = await bot.get_group_list()
         if not group_list:
             return ""
+        bot_id = str(getattr(bot, "self_id", "") or "")
 
         # 多采几个群、每群跨时间窗稀疏取样，避免说说素材被单一群的单一热议话题主导。
         selected_groups = random.sample(group_list, min(3, len(group_list)))
@@ -464,7 +607,11 @@ async def get_recent_chat_context(bot: Any, logger: Any) -> str:
 
             lines = []
             for msg in messages["messages"]:
-                sender_name = msg.get("sender", {}).get("nickname", "未知")
+                sender = msg.get("sender", {}) if isinstance(msg.get("sender"), dict) else {}
+                sender_id = str(sender.get("user_id") or msg.get("user_id") or "").strip()
+                if bot_id and sender_id == bot_id:
+                    continue
+                sender_name = sender.get("nickname", "未知")
                 raw_msg = msg.get("message", "")
                 content = ""
 

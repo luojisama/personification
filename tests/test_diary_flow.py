@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+from types import SimpleNamespace
 
 from ._loader import load_personification_module
 
@@ -276,6 +278,77 @@ def test_review_qzone_post_keeps_clean_text_untouched() -> None:
     )
 
     assert result == "下午三点的阳光有点刺眼"
+
+
+def test_build_qzone_post_can_attach_local_sticker_image(tmp_path) -> None:
+    """有 image_prompt 时，QZone 配图可优先使用外置表情包库静态图。"""
+    payload = b"\x89PNG\r\n\x1a\nlocal-qzone-sticker"
+    image_path = tmp_path / "mood.png"
+    image_path.write_bytes(payload)
+    (tmp_path / "stickers.json").write_text(
+        json.dumps(
+            {
+                "mood.png": {
+                    "description": "窗边发呆的日常氛围图",
+                    "use_hint": "适合日常碎碎念配图",
+                    "mood_tags": ["淡定"],
+                    "scene_tags": ["冷场时"],
+                    "proactive_send": True,
+                    "style": "anime",
+                    "weight": 1.5,
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class _Caller:
+        async def chat_with_tools(self, *_args, **_kwargs):  # noqa: ANN001
+            raise AssertionError("clean post with local sticker should not call LLM")
+
+    result = asyncio.run(
+        diary_flow._build_qzone_post_with_optional_image(
+            content="下午三点的阳光有点刺眼",
+            image_prompt="quiet daily anime image by the window",
+            tool_caller=_Caller(),
+            plugin_config=SimpleNamespace(personification_sticker_path=str(tmp_path)),
+            logger=_Logger(),
+            recent_posts=[],
+            persona_system="x",
+        )
+    )
+
+    assert result.startswith("下午三点的阳光有点刺眼")
+    assert f"[IMAGE_B64]{base64.b64encode(payload).decode('ascii')}[/IMAGE_B64]" in result
+
+
+def test_recent_chat_context_filters_bot_self_messages() -> None:
+    """发空间参考聊天时跳过 bot 自己发的消息，避免采样其它插件输出。"""
+
+    class _HistoryBot:
+        self_id = "99999"
+
+        async def get_group_list(self):  # noqa: ANN201
+            return [{"group_id": 1, "group_name": "测试群"}]
+
+        async def get_group_msg_history(self, *, group_id, count):  # noqa: ANN001, ANN201
+            return {
+                "messages": [
+                    {
+                        "sender": {"user_id": "99999", "nickname": "bot"},
+                        "message": [{"type": "text", "data": {"text": "其它插件自动播报"}}],
+                    },
+                    {
+                        "sender": {"user_id": "10001", "nickname": "好友"},
+                        "message": [{"type": "text", "data": {"text": "今晚风好大"}}],
+                    },
+                ]
+            }
+
+    result = asyncio.run(diary_flow.get_recent_chat_context(_HistoryBot(), _Logger()))
+    assert "今晚风好大" in result
+    assert "其它插件自动播报" not in result
 
 
 def test_generate_once_reinforces_persona_in_system_prompt() -> None:
