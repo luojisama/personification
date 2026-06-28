@@ -100,6 +100,8 @@ def test_generate_ai_diary_injects_recent_posts_and_enables_builtin_search(monke
     prompt = calls[0]["messages"][1]["content"]
     assert "明天先靠炸鸡排和摸鱼慢慢回血" in prompt
     assert "游戏、动漫、轻新闻" in prompt
+    assert "不要写成镜头旁白" in prompt
+    assert "状态报告" in prompt
 
 
 def test_generate_ai_diary_skips_too_similar_recent_post(monkeypatch) -> None:  # noqa: ANN001
@@ -439,4 +441,6 @@ def test_maybe_generate_proactive_injects_quota(monkeypatch) -> None:  # noqa: A
     )
     user_prompt = captured["messages"][1]["content"]
     assert "本月发空间额度" in user_prompt and "已发 27 条" in user_prompt
+    assert "不要写成镜头旁白" in user_prompt
+    assert "手机上随手敲的一句" in user_prompt
     assert result == ""  # action=skip

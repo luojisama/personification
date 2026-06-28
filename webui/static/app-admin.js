@@ -18,29 +18,61 @@ function dashboardPercent(value) {
   return n.toFixed(n >= 10 ? 1 : 2).replace(/\.0+$/, "") + "%";
 }
 
+function dashboardChartPath(points) {
+  if (!points.length) return "";
+  if (points.length === 1) {
+    const p = points[0];
+    return `M ${p.x.toFixed(1)} ${p.y.toFixed(1)} L ${(p.x + 0.1).toFixed(1)} ${p.y.toFixed(1)}`;
+  }
+  return points.map((p, index) => `${index === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ");
+}
+
 function renderDashboardLineChart(points, valueKey, tone) {
-  const rows = Array.isArray(points) ? points : [];
-  const nums = rows.map(row => Number(row && row[valueKey] || 0));
-  const values = nums.length ? nums : [0, 0];
-  const width = 320, height = 118, padX = 12, padY = 12;
-  const min = Math.min(0, ...values);
-  const max = Math.max(...values);
-  const span = max - min || 1;
-  const chartPoints = values.map((v, i) => {
-    const x = padX + (values.length === 1 ? 0 : i * (width - padX * 2) / (values.length - 1));
-    const y = height - padY - ((v - min) / span) * (height - padY * 2);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  const rows = Array.isArray(points) ? points.filter(row => row && typeof row === "object") : [];
+  const values = rows.map(row => {
+    const n = Number(row[valueKey] || 0);
+    return Number.isFinite(n) ? Math.max(0, n) : 0;
   });
-  const line = chartPoints.join(" ");
-  const fill = `${padX},${height - padY} ${line} ${width - padX},${height - padY}`;
+  const width = 360, height = 128, padX = 18, padTop = 14, padBottom = 24;
+  const plotBottom = height - padBottom;
+  const plotHeight = plotBottom - padTop;
+  const hasData = values.some(v => v > 0);
+  const maxRaw = hasData ? Math.max(...values) : 0;
+  const minRaw = hasData ? Math.min(...values) : 0;
+  const rawSpan = maxRaw - minRaw;
+  const chartMin = hasData && minRaw > 0 && rawSpan > 0 && rawSpan / maxRaw < 0.5
+    ? Math.max(0, minRaw - rawSpan * 0.35)
+    : 0;
+  const chartMax = hasData
+    ? (rawSpan > 0 ? maxRaw + rawSpan * 0.12 : maxRaw * 1.18)
+    : 1;
+  const span = Math.max(1, chartMax - chartMin);
+  const coords = values.map((v, i) => {
+    const x = values.length === 1
+      ? width / 2
+      : padX + i * (width - padX * 2) / Math.max(1, values.length - 1);
+    const y = plotBottom - ((v - chartMin) / span) * plotHeight;
+    return { x, y, value: v };
+  });
+  const path = dashboardChartPath(coords);
+  const area = coords.length
+    ? `${path} L ${coords[coords.length - 1].x.toFixed(1)} ${plotBottom.toFixed(1)} L ${coords[0].x.toFixed(1)} ${plotBottom.toFixed(1)} Z`
+    : "";
+  const grid = [0, 0.5, 1].map(ratio => {
+    const y = padTop + ratio * plotHeight;
+    return `<line x1="${padX}" y1="${y.toFixed(1)}" x2="${width - padX}" y2="${y.toFixed(1)}" stroke="currentColor" stroke-opacity="${ratio === 1 ? "0.22" : "0.10"}" stroke-width="1" vector-effect="non-scaling-stroke"></line>`;
+  }).join("");
+  const lastPoint = coords[coords.length - 1];
   const firstLabel = rows.length ? String(rows[0].label || rows[0].bucket || "") : "";
   const lastLabel = rows.length ? String(rows[rows.length - 1].label || rows[rows.length - 1].bucket || "") : "";
-  return `<svg class="dashboard-line-chart ${tone || ""}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
-    <polygon points="${fill}" fill="currentColor" opacity="0.10"></polygon>
-    <polyline points="${line}" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"></polyline>
-    <line x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}" stroke="currentColor" stroke-opacity="0.18" stroke-width="1"></line>
-    <text x="${padX}" y="${height - 2}" fill="currentColor" opacity="0.55" font-size="10">${escapeHtml(firstLabel)}</text>
-    <text x="${width - padX}" y="${height - 2}" fill="currentColor" opacity="0.55" font-size="10" text-anchor="end">${escapeHtml(lastLabel)}</text>
+  return `<svg class="dashboard-line-chart ${tone || ""}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Token 消耗折线图">
+    ${grid}
+    ${area ? `<path d="${area}" fill="currentColor" opacity="0.10"></path>` : ""}
+    ${path ? `<path d="${path}" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"></path>` : ""}
+    ${lastPoint && hasData ? `<circle cx="${lastPoint.x.toFixed(1)}" cy="${lastPoint.y.toFixed(1)}" r="3.8" fill="var(--panel)" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke"></circle>` : ""}
+    ${hasData ? `<text x="${padX}" y="11" fill="currentColor" opacity="0.70" font-size="10">${escapeHtml(dashboardCompactNumber(maxRaw))} T</text>` : `<text x="${width / 2}" y="${height / 2}" fill="currentColor" opacity="0.55" font-size="12" text-anchor="middle">暂无数据</text>`}
+    <text x="${padX}" y="${height - 3}" fill="currentColor" opacity="0.55" font-size="10">${escapeHtml(firstLabel)}</text>
+    <text x="${width - padX}" y="${height - 3}" fill="currentColor" opacity="0.55" font-size="10" text-anchor="end">${escapeHtml(lastLabel)}</text>
   </svg>`;
 }
 
@@ -481,18 +513,18 @@ function renderQzone() {
   const enabledPill = (on, label) => `<span class="device-status ${on?'approved':'pending'}">${label}：${on?'开':'关'}</span>`;
   const recent = (q.recent_contents || []).slice().reverse();
   const recentRows = recent.length
-    ? recent.map(c => `<li style="padding:5px 0;border-top:1px solid var(--line)">${escapeHtml(c)}</li>`).join("")
-    : '<li class="muted" style="padding:6px 0">暂无记录</li>';
+    ? recent.map(c => `<li class="qzone-recent-item">${escapeHtml(c)}</li>`).join("")
+    : '<li class="qzone-recent-item muted">暂无记录</li>';
   return `<div class="card">
     <div class="between" style="margin-bottom:4px">
       <h2 style="margin:0">本月发空间额度</h2>
       <div class="row">${enabledPill(q.enabled,'空间总开关')}${enabledPill(q.proactive_enabled,'主动发说说')}</div>
     </div>
     <p class="muted" style="margin:2px 0 14px">agent 会参考这份额度自己把控发不发、发的节奏；下面是当前快照。</p>
-    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">
+    <div class="qzone-quota-line">
       <span style="font-size:30px;font-weight:700">${used}</span>
       <span class="muted">/ ${limit} 条（本月 ${escapeHtml(quota.month||'')}）</span>
-      <span style="margin-left:auto" class="muted">剩余 <strong style="color:${barColor}">${remaining}</strong> 条 · 还剩 ${Number(quota.days_left||0)} 天</span>
+      <span class="muted qzone-quota-remain">剩余 <strong style="color:${barColor}">${remaining}</strong> 条 · 还剩 ${Number(quota.days_left||0)} 天</span>
     </div>
     <div style="height:10px;border-radius:99px;background:var(--input-bg);border:1px solid var(--line);overflow:hidden">
       <div style="height:100%;width:${pct}%;background:${barColor};transition:width .3s"></div>
@@ -516,7 +548,7 @@ function renderQzone() {
   </div>
   <div class="card">
     <h2>最近发过的说说（去重记忆）</h2>
-    <ul style="list-style:none;margin:0;padding:0">${recentRows}</ul>
+    <ul class="qzone-recent-list">${recentRows}</ul>
   </div>`;
 }
 

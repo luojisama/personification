@@ -21,6 +21,8 @@ def test_reply_style_policy_keeps_visual_context_internal() -> None:
     assert "固定起手与口癖复用纪律" in prompt
     assert "这也太" in prompt
     assert "最近 bot 发言已经用过相似开头" in prompt
+    assert "观望与旁白式发言纪律" in prompt
+    assert "不要说明自己接下来要怎么观察" in prompt
     assert "。。。/……/..." in prompt
     assert "仅供理解" in prompt
     assert "不要把判断过程说给用户" in prompt
@@ -34,6 +36,14 @@ def test_context_continuity_policy_covers_media_only_and_direct_cues() -> None:
     assert "优先保持沉默" in prompt
     assert "相邻图片、表情或截图不能覆盖直接 cue 的文字问题" in prompt
     assert "优先回应这个问题本身" in prompt
+
+
+def test_observer_posture_policy_prefers_silence_over_status_announcement() -> None:
+    prompt = reply_style_policy.build_observer_posture_policy_prompt()
+
+    assert "潜水" in prompt
+    assert "[NO_REPLY]" in prompt
+    assert "具体反应" in prompt
 
 
 def test_direct_visual_guard_does_not_ask_to_describe_image() -> None:

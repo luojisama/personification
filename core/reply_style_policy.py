@@ -26,6 +26,16 @@ def build_context_continuity_policy_prompt() -> str:
     )
 
 
+def build_observer_posture_policy_prompt() -> str:
+    return (
+        "## 观望与旁白式发言纪律（高优先级）\n"
+        "- 群里没人明确需要你表态时，不要用“我先潜水/围观/看看情况/蹲一下/路过”"
+        "这类宣告自己观察姿态或下一步计划的句子；这听起来像值班提示，不像群友。\n"
+        "- 如果只是想观望，就输出 [NO_REPLY]；如果确实要接话，只说和当前话题有关的一句具体反应，"
+        "不要说明自己接下来要怎么观察、等待或处理。"
+    )
+
+
 def build_media_understanding_output_policy_prompt() -> str:
     return (
         "## 媒体理解与可见输出纪律（高优先级）\n"
@@ -54,6 +64,7 @@ def build_reply_style_policy_prompt(
     ]
     lines.append(build_formulaic_tic_policy_prompt())
     lines.append(build_context_continuity_policy_prompt())
+    lines.append(build_observer_posture_policy_prompt())
     lines.append(build_media_understanding_output_policy_prompt())
     if has_visual_context and photo_like:
         lines.append("- 本轮有真实照片线索时，也只把它当作内部语境，最终不要主动输出画面说明。")
@@ -76,5 +87,6 @@ __all__ = [
     "build_direct_visual_identity_guard",
     "build_formulaic_tic_policy_prompt",
     "build_media_understanding_output_policy_prompt",
+    "build_observer_posture_policy_prompt",
     "build_reply_style_policy_prompt",
 ]
