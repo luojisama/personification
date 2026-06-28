@@ -202,6 +202,21 @@ td code, .field-head code { word-break:break-all; }
 .hs-ok { background:var(--ok); } .hs-warn { background:var(--warn); }
 .hs-error { background:var(--danger); } .hs-disabled { background:var(--muted); } .hs-info { background:var(--accent); }
 .health-badge { width:10px; height:10px; border-radius:50%; display:inline-block; }
+.trace-panel { overflow:hidden; }
+.trace-stat-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:10px 0 12px; }
+.trace-stat { border:1px solid var(--line); border-radius:8px; padding:9px 11px; background:var(--bg); min-width:0; }
+.trace-stat strong { display:block; font-size:20px; line-height:1.1; font-variant-numeric:tabular-nums; }
+.trace-stat span { color:var(--muted); font-size:12px; }
+.trace-slow { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin:0 0 12px; }
+.trace-timeline { display:grid; gap:9px; }
+.trace-step { display:grid; grid-template-columns:18px minmax(0,1fr); gap:8px; align-items:start; }
+.trace-step-dot { width:10px; height:10px; border-radius:50%; margin:8px 0 0 4px; box-shadow:0 0 0 3px rgba(255,255,255,0.04); }
+.trace-step-body { min-width:0; border:1px solid var(--line); border-radius:8px; background:var(--bg); padding:9px 11px; }
+.trace-step-head { display:flex; align-items:center; gap:6px; flex-wrap:wrap; min-width:0; }
+.trace-step-head strong { font-size:13px; }
+.trace-step-head code { font-size:11px; color:var(--muted); background:var(--input-bg); border-radius:4px; padding:1px 5px; word-break:break-all; }
+.trace-step-detail { margin-top:5px; white-space:pre-wrap; word-break:break-word; font-size:12.5px; }
+.trace-step-hint { margin-top:4px; white-space:pre-wrap; word-break:break-word; color:var(--accent); font-size:12px; }
 .strlist-editor { width:100%; max-width:560px; }
 .strlist-row { display:flex; gap:6px; margin-bottom:6px; }
 .strlist-row input { flex:1; min-width:0; }
@@ -223,6 +238,7 @@ td code, .field-head code { word-break:break-all; }
   th, td { padding:6px 8px; }
   /* iOS Safari 在聚焦字号 <16px 的输入框时会自动放大页面，统一设为 16px 规避 */
   input, select, textarea { font-size:16px; }
+  .row input[type=text], .row input[type=number], .row select { min-width:0; max-width:100%; }
   .field-input input[type=text], .field-input input[type=number], .field-input textarea { min-width:0; max-width:100%; width:100%; }
   .api-provider-grid { grid-template-columns:1fr; }
   .skill-summary { grid-template-columns:repeat(2,minmax(0,1fr)); }
@@ -240,6 +256,10 @@ td code, .field-head code { word-break:break-all; }
   .dashboard-pie-legend-row { grid-template-columns:12px minmax(0,1fr) 48px 58px; font-size:12px; gap:6px; }
   .dashboard-model-table th:nth-child(2), .dashboard-model-table td:nth-child(2) { width:78px; }
   .dashboard-token-bar { min-width:90px; }
+  .trace-stat-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .trace-step { grid-template-columns:14px minmax(0,1fr); gap:6px; }
+  .trace-step-body { padding:8px 9px; }
+  .trace-step-head { gap:5px; }
   .qzone-quota-line { align-items:flex-start; flex-direction:column; gap:2px; }
   .qzone-quota-remain { margin-left:0; }
   .qzone-recent-list { gap:7px; }

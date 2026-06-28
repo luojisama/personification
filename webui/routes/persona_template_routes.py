@@ -116,6 +116,20 @@ _REQUIRED_INPUT_PLACEHOLDERS = (
     "{status}",
     "{schedule_instruction}",
 )
+_RECOMMENDED_SYSTEM_SECTIONS = (
+    ("角色身份", ("身份", "角色")),
+    ("性格与行为模式", ("性格", "行为")),
+    ("群聊说话方式", ("说话", "口吻", "群聊")),
+    ("角色关系", ("关系", "称呼")),
+    ("资料冲突与缺口", ("资料冲突", "缺口", "待确认")),
+)
+_ASSISTANT_ROLE_PATTERNS = (
+    r"我是\s*(?:AI|人工智能)",
+    r"作为\s*(?:AI|人工智能|助手|客服)",
+    r"(?:AI|智能)\s*助手",
+    r"客服",
+    r"有什么可以帮",
+)
 
 
 @dataclass
@@ -599,14 +613,14 @@ async def _run_persona_template_build(
 
     started = time.time()
     await progress("alias_planning", "正在梳理检索别名...", 5)
-    await progress("query_moegirl", "正在查询萌娘百科...", 12)
+    await progress("source_gathering", "正在收集百科与联网资料...", 12)
     sources = await _gather_persona_sources(
         runtime=runtime,
         work_title=work_title,
         character_name=character_name,
     )
     source_text = _source_corpus(sources)
-    await progress("relation_mapping", "正在梳理关系...", 44)
+    await progress("subagent_research", f"已收集 {len(sources)} 个资料源，正在运行 3 个研究子agent...", 44)
     focus_items = [
         ("基础设定子agent", "官方身份、百科摘要、基础人设、剧情定位、资料可信度"),
         ("性格台词子agent", "性格模式、口癖、说话节奏、萌点、群聊可迁移表达"),
@@ -626,7 +640,7 @@ async def _run_persona_template_build(
         ]
     )
     reference_template = _configured_template_reference(runtime)
-    await progress("template_synthesis", "正在生成人设模板...", 78)
+    await progress("template_synthesis", "正在按插件 YAML 结构生成人设模板...", 78)
     template = await _synthesize_template(
         caller=caller,
         work_title=work_title,
@@ -637,7 +651,7 @@ async def _run_persona_template_build(
     )
     validation = _validate_template_yaml(template)
     if not validation.get("valid"):
-        await progress("template_repair", "正在修复模板结构...", 88)
+        await progress("template_repair", "正在修复模板结构与占位符...", 88)
         repaired = await _repair_template_yaml(
             caller=caller,
             work_title=work_title,
@@ -1753,8 +1767,21 @@ def _validate_template_yaml(text: str) -> dict[str, Any]:
     missing = [key for key in _REQUIRED_TEMPLATE_KEYS if key not in parsed]
     if missing:
         errors.append("缺少必需顶层字段：" + "、".join(missing))
-    if not isinstance(parsed.get("system"), str) or not str(parsed.get("system") or "").strip():
+    system_text = str(parsed.get("system") or "")
+    if not isinstance(parsed.get("system"), str) or not system_text.strip():
         errors.append("system 必须是非空字符串。")
+    else:
+        if len(system_text.strip()) < 900:
+            warnings.append("system 偏短：建议补足身份锚点、性格、群聊口吻、关系、边界与资料缺口。")
+        missing_sections = [
+            label
+            for label, hints in _RECOMMENDED_SYSTEM_SECTIONS
+            if not any(hint in system_text for hint in hints)
+        ]
+        if missing_sections:
+            warnings.append("system 建议补充小节：" + "、".join(missing_sections))
+        if any(re.search(pattern, system_text, flags=re.I) for pattern in _ASSISTANT_ROLE_PATTERNS):
+            warnings.append("system 含助手/客服式身份措辞，建议改成角色本人在群里说话的边界。")
     input_text = parsed.get("input")
     if not isinstance(input_text, str) or not input_text.strip():
         errors.append("input 必须是非空字符串。")
@@ -1769,6 +1796,15 @@ def _validate_template_yaml(text: str) -> dict[str, Any]:
     for list_key in ("nick_name", "ack_phrases", "mute_keyword"):
         if list_key in parsed and not isinstance(parsed.get(list_key), list):
             errors.append(f"{list_key} 必须是列表。")
+    ack_phrases = parsed.get("ack_phrases")
+    if isinstance(ack_phrases, list) and len([item for item in ack_phrases if str(item or "").strip()]) < 3:
+        warnings.append("ack_phrases 建议至少 3 条短促自然的接话短句，避免固定口癖反复出现。")
+    nick_names = parsed.get("nick_name")
+    if isinstance(nick_names, list) and not [item for item in nick_names if str(item or "").strip()]:
+        warnings.append("nick_name 列表为空，建议加入角色常用称呼/别名。")
+    status_text = parsed.get("status")
+    if isinstance(status_text, str) and "{time}" in status_text:
+        warnings.append("status 不建议直接放运行占位符；时间事实应由 input 注入。")
     if parsed.get("name") and not str(parsed.get("name")).strip():
         errors.append("name 不能为空。")
     return {
@@ -1791,9 +1827,10 @@ async def _repair_template_yaml(
     reference_template: dict[str, Any],
 ) -> str:
     errors = "\n".join(f"- {item}" for item in validation.get("errors", []) or [])
+    warnings = "\n".join(f"- {item}" for item in validation.get("warnings", []) or [])
     system = (
         "你是 NoneBot 拟人插件 YAML 模板修复器。"
-        "只修复 YAML 结构、字段、占位符和转义问题，不改写为 Markdown。"
+        "优先修复 YAML 结构、字段、占位符和转义问题；如果存在质量提醒，也顺手补齐角色群聊底座。"
         "输出必须是完整 YAML，不能有代码围栏、解释或额外文本。"
     )
     reference = reference_template.get("content") or "（无当前模板参考）"
@@ -1803,6 +1840,9 @@ async def _repair_template_yaml(
 
 当前 YAML 校验错误：
 {errors or "- 未知错误"}
+
+当前 YAML 质量提醒：
+{warnings or "- 无"}
 
 当前插件正在使用的人设 YAML 参考：
 {reference}
@@ -1815,6 +1855,8 @@ async def _repair_template_yaml(
 - 必须包含顶层字段：{", ".join(_REQUIRED_TEMPLATE_KEYS)}。
 - input 必须保留占位符：{", ".join(_REQUIRED_INPUT_PLACEHOLDERS)}。
 - input/system/status 必须适合 YAML 块标量。
+- system 建议包含：角色身份、性格与行为模式、群聊说话方式、角色关系、资料冲突与缺口。
+- ack_phrases 至少给 3 条短促自然的接话短句；不要写成“我来帮你查询”。
 - 不能输出 Markdown、解释、代码围栏。
 """.strip()
     return await _call_main_model(
@@ -1841,6 +1883,7 @@ async def _run_subagent(
         "你是拟人插件 WebUI 的只读资料研究子agent。"
         "只能基于给出的资料和你能通过主模型内置搜索查到的可靠信息做交叉验证。"
         "不要编造设定；不确定就写入 conflicts 或 unknowns。"
+        "重点提取能迁移到群聊拟人 bot 的身份锚点、说话节奏、边界和关系称呼。"
         "输出 JSON，不要输出寒暄。"
     )
     user = f"""
@@ -1859,6 +1902,8 @@ async def _run_subagent(
   "visual_references": ["立绘、服装、外观、表情、代表性物件"],
   "relations": ["角色关系"],
   "catchphrases": ["口癖/常用表达"],
+  "speech_style": ["句长、语气、称呼、吐槽方式、群聊可用的表达习惯"],
+  "conversation_boundaries": ["哪些内容不应扮演、不能自称 AI/助手、证据不足时怎么说"],
   "moe_points": ["萌点/记忆点"],
   "story_setting": ["剧情定位/背景"],
   "conflicts": ["互相冲突或来源不足之处"],
@@ -1908,6 +1953,7 @@ async def _synthesize_template(
         "你是 NoneBot 拟人插件的人设 YAML 构建器，必须使用主模型做最终合成。"
         "目标是生成可直接写入 personification_prompt_path 的完整 YAML 文件。"
         "保留角色核心，不要把 bot 写成客服或助手；口吻应像群友。"
+        "模板要控制角色扮演边界，但不要把正常聊天语义写成关键词触发规则。"
         "不要用关键词规则或触发词设计对话语义。"
         "输出必须只有 YAML 本体，不能有 Markdown 代码围栏、标题、解释、注释之外的额外文本。"
     )
@@ -1919,9 +1965,20 @@ async def _synthesize_template(
 - 输出完整 YAML，顶层字段必须包含：{", ".join(_REQUIRED_TEMPLATE_KEYS)}。
 - 顶层结构、input 输出格式和占位符请参考“当前插件正在使用的人设 YAML”。
 - input 必须保留占位符：{", ".join(_REQUIRED_INPUT_PLACEHOLDERS)}。
-- system 内必须包含基础身份、性格、说话方式、口癖、视觉/立绘参考、角色关系、萌点、剧情定位、安全边界、资料冲突与缺口。
-- 模板要适合作为“白咲真寻机”这类群聊拟人 bot 的角色底座：自然、有边界、有群友感。
+- system 内必须使用清晰小节，至少包含：
+  - ## 角色身份与不可替换锚点
+  - ## 性格与行为模式
+  - ## 群聊说话方式
+  - ## 角色关系与称呼
+  - ## 视觉/立绘参考
+  - ## 剧情定位与可用背景
+  - ## 安全边界与扮演边界
+  - ## 资料冲突与缺口
+- 模板要适合作为群聊拟人 bot 的角色底座：自然、有边界、有群友感，不像在朗读百科。
 - 不要写“我是 AI/助手/客服”。
+- 不要让角色解释自己的运行机制、工具、检索、子agent、审查清单或思考过程。
+- ack_phrases 给 4-8 条短促自然的接话短句，避免每句都像“收到/我来查”。
+- status 写当前心情、动作和状态基线，不要塞长篇设定。
 - 对证据不足的设定标注“待确认”，不要编造成事实。
 - 资料冲突与缺口必须写入 system 的“## 资料冲突与缺口”小节，不要在 YAML 外附文字。
 - status、input、system 使用 YAML 块标量；nick_name、ack_phrases、mute_keyword 使用列表。

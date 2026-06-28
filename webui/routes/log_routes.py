@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ...core import plugin_runtime_logs
+from ...core import plugin_runtime_logs, reply_turn_trace
 from ..deps import AdminIdentity, require_admin
 
 
@@ -32,6 +32,21 @@ def build_log_router(*, runtime) -> APIRouter:
             "next_cursor": rows[-1]["id"] if rows else 0,
             "retention_days": plugin_runtime_logs.retention_days_from_config(cfg),
             "pruned": pruned,
+        }
+
+    @router.get("/trace/{trace_id}")
+    async def trace_detail(
+        trace_id: str,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        trace = reply_turn_trace.get_trace(trace_id)
+        if trace is None:
+            raise HTTPException(status_code=404, detail="未找到该 trace")
+        rows = plugin_runtime_logs.query_recent(limit=120, trace_id=trace_id)
+        return {
+            "trace": trace,
+            "logs": rows,
+            "process": reply_turn_trace.build_process_view(trace, logs=rows),
         }
 
     @router.delete("/clear")

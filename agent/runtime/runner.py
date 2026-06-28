@@ -341,6 +341,17 @@ def _tool_signature(tool_name: str, tool_args: dict[str, Any]) -> str:
     )
 
 
+def _tool_result_trace_status(result: Any) -> str:
+    text = str(result or "").strip()
+    if not text:
+        return "warn"
+    if text.startswith("工具调用失败") or (text.startswith("工具 ") and text.endswith("不存在")):
+        return "error"
+    if _tool_result_indicates_empty(text):
+        return "warn"
+    return "ok"
+
+
 def _caller_supports_builtin_search(tool_caller: Any) -> bool:
     return tool_caller.__class__.__name__ in _BUILTIN_SEARCH_CALLER_NAMES
 
@@ -439,6 +450,15 @@ async def run_agent(
     if precomputed_intent is not None:
         intent_decision = precomputed_intent
         logger.debug("[agent] using precomputed intent_decision, skipping LLM inference")
+        _record_reply_trace_stage(
+            key="agent_intent",
+            label="Agent 意图判别",
+            status="info",
+            detail=(
+                f"precomputed=true intent={getattr(intent_decision, 'chat_intent', '')} "
+                f"ambiguity={getattr(intent_decision, 'ambiguity_level', '')}"
+            ),
+        )
     else:
         intent_started_at = time.monotonic()
         intent_decision = await _infer_intent_decision_with_context(
@@ -468,6 +488,15 @@ async def run_agent(
     effective_max_steps = _normalize_agent_max_steps(
         max_steps if max_steps is not None else getattr(plugin_config, "personification_agent_max_steps", DEFAULT_AGENT_MAX_STEPS)
     )
+    _record_reply_trace_stage(
+        key="agent_start",
+        label="Agent 开始",
+        status="info",
+        detail=(
+            f"max_steps={effective_max_steps} builtin_search={bool(use_builtin_search)} "
+            f"images={len(user_images)} caller={type(tool_caller).__name__}"
+        ),
+    )
     rewrite_context = _derive_query_rewrite_context(
         messages,
         current_images=user_images,
@@ -485,6 +514,12 @@ async def run_agent(
                 else list(QQ_EXPRESSION_TOOL_NAMES) if runtime_chat_intent == "expression" else []
             ),
             search_plan=[],
+        )
+        _record_reply_trace_stage(
+            key="agent_query_rewrite",
+            label="Agent 查询改写",
+            status="info",
+            detail=f"skipped=true intent={runtime_chat_intent or '-'}",
         )
     else:
         rewrite_started_at = time.monotonic()
@@ -938,6 +973,12 @@ async def run_agent(
                     if banter_requires_lookup_retry:
                         logger.info("[agent] banter draft requested lookup retry")
                 if not banter_requires_lookup_retry:
+                    _record_reply_trace_stage(
+                        key="agent_finish",
+                        label="Agent 收尾",
+                        status="ok",
+                        detail=f"reason=banter_stop content_len={content_len}",
+                    )
                     return AgentResult(
                         text=str(response.content or "").strip(),
                         pending_actions=pending_actions,
@@ -1111,6 +1152,12 @@ async def run_agent(
                         continue
                     logger.info(f"[agent] semantic fallback selected unavailable tool: {fallback_name}")
             if banter_requires_lookup_retry:
+                _record_reply_trace_stage(
+                    key="agent_finish",
+                    label="Agent 收尾",
+                    status="warn",
+                    detail="reason=banter_lookup_retry_failed text=[NO_REPLY]",
+                )
                 return AgentResult(
                     text="[NO_REPLY]",
                     pending_actions=pending_actions,
@@ -1153,10 +1200,22 @@ async def run_agent(
                     logger.info("[agent] awaited background vision fallback result")
                     continue
             if content_len == 0:
+                _record_reply_trace_stage(
+                    key="agent_finish",
+                    label="Agent 收尾",
+                    status="warn",
+                    detail="reason=empty_stop text=[NO_REPLY]",
+                )
                 return AgentResult(
                     text="[NO_REPLY]",
                     pending_actions=pending_actions,
                 )
+            _record_reply_trace_stage(
+                key="agent_finish",
+                label="Agent 收尾",
+                status="ok",
+                detail=f"reason=model_stop content_len={content_len} has_tool_call={bool(has_tool_call)}",
+            )
             return AgentResult(
                 text=response.content,
                 pending_actions=pending_actions,
@@ -1192,6 +1251,16 @@ async def run_agent(
             logger.info(f"[agent] tool_call name={tool_call.name}")
             tool = registry.get(tool_call.name)
             tool_args = dict(tool_call.arguments or {})
+            _record_reply_trace_stage(
+                key="agent_tool_call",
+                label="Agent 工具选择",
+                status="info",
+                detail=(
+                    f"step={_step + 1} tool={tool_call.name} "
+                    f"arg_keys={','.join(sorted(str(key)[:40] for key in tool_args.keys())) or '-'}"
+                ),
+            )
+            tool_started_at = time.monotonic()
             if tool is None:
                 result = f"工具 {tool_call.name} 不存在"
             else:
@@ -1206,6 +1275,16 @@ async def run_agent(
                     logger=logger,
                     budget_deadline=budget_deadline,
                 )
+            tool_elapsed_ms = int((time.monotonic() - tool_started_at) * 1000)
+            _record_reply_trace_stage(
+                key="agent_tool_result",
+                label="Agent 工具结果",
+                status=_tool_result_trace_status(result),
+                detail=(
+                    f"step={_step + 1} tool={tool_call.name} "
+                    f"result_len={len(str(result or ''))} elapsed_ms={tool_elapsed_ms}"
+                ),
+            )
             tool_result_preview_limit = (
                 1000
                 if str(tool_call.name or "").strip() == _IMAGE_GENERATION_TOOL_NAME
@@ -1237,6 +1316,12 @@ async def run_agent(
                 pending_actions=pending_actions,
             )
             if direct_result is not None:
+                _record_reply_trace_stage(
+                    key="agent_finish",
+                    label="Agent 收尾",
+                    status="ok",
+                    detail=f"reason=direct_tool_result tool={last_tool_name}",
+                )
                 return direct_result
 
             messages.append(
@@ -1249,6 +1334,12 @@ async def run_agent(
             await _append_evidence_guidance_if_needed()
 
     logger.warning("[agent] MAX_STEPS reached")
+    _record_reply_trace_stage(
+        key="agent_max_steps",
+        label="Agent 步数上限",
+        status="warn",
+        detail=f"max_steps={effective_max_steps} last_tool={last_tool_name or '-'}",
+    )
     if last_tool_result_text:
         logger.warning("[agent] using last tool result as fallback final answer")
         direct_result = _direct_tool_result_agent_result(

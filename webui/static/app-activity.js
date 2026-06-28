@@ -130,9 +130,79 @@ async function pickAuditFilter(action) {
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
 
+function renderTraceProcess() {
+  const detail = state.traceDetail;
+  if (!state.logTraceId) return "";
+  if (!detail) return `<div class="card muted">正在读取 trace 过程…</div>`;
+  if (detail.error) return `<div class="card"><div class="alert err">读取 trace 失败：${escapeHtml(detail.error)}</div></div>`;
+  const trace = detail.trace || {};
+  const process = detail.process || {};
+  const summary = process.summary || {};
+  const items = process.items || [];
+  const categoryLabel = {
+    agent: "Agent",
+    tool: "工具",
+    semantic: "语义",
+    send: "发送",
+    capture: "捕获",
+    dispatch: "分发",
+    runtime: "运行时",
+  };
+  const statusMeta = {
+    ok: { label: "正常", cls: "hs-ok" },
+    info: { label: "信息", cls: "hs-info" },
+    warn: { label: "注意", cls: "hs-warn" },
+    warning: { label: "注意", cls: "hs-warn" },
+    error: { label: "异常", cls: "hs-error" },
+    failed: { label: "异常", cls: "hs-error" },
+  };
+  const slow = (summary.slow_stages || []).map(item =>
+    `<span class="tag">${escapeHtml(item.label || item.key || "-")} · ${Number(item.duration_ms || 0).toLocaleString()}ms</span>`
+  ).join("");
+  const statCards = [
+    ["阶段", summary.stage_count || 0],
+    ["警告", summary.warn_count || 0],
+    ["错误", summary.error_count || 0],
+    ["日志", summary.log_count || 0],
+  ].map(([label, value]) => `<div class="trace-stat"><strong>${escapeHtml(String(value))}</strong><span>${escapeHtml(label)}</span></div>`).join("");
+  const timeline = items.map(item => {
+    const meta = statusMeta[String(item.status || "info").toLowerCase()] || statusMeta.info;
+    const duration = item.duration_ms != null ? `${Number(item.duration_ms || 0).toLocaleString()}ms` : "";
+    const offset = item.offset_ms ? `+${Number(item.offset_ms).toLocaleString()}ms` : "+0ms";
+    return `<div class="trace-step ${escapeAttr(item.category || "runtime")}">
+      <div class="trace-step-dot ${meta.cls}"></div>
+      <div class="trace-step-body">
+        <div class="trace-step-head">
+          <strong>${escapeHtml(item.label || item.key || "-")}</strong>
+          <span class="tag">${escapeHtml(categoryLabel[item.category] || item.category || "阶段")}</span>
+          <code>${escapeHtml(item.key || "")}</code>
+          <span class="muted">${escapeHtml(offset)}${duration ? " · " + escapeHtml(duration) : ""}</span>
+        </div>
+        ${item.detail ? `<div class="trace-step-detail">${escapeHtml(item.detail)}</div>` : ""}
+        ${item.hint ? `<div class="trace-step-hint">${escapeHtml(item.hint)}</div>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+  return `<div class="card trace-panel">
+    <div class="between" style="gap:10px;flex-wrap:wrap">
+      <h2 style="margin:0">Agent 过程可视化</h2>
+      <div class="row" style="gap:6px">
+        <span class="tag">trace ${escapeHtml(summary.trace_id || state.logTraceId)}</span>
+        ${summary.outcome ? `<span class="tag">outcome ${escapeHtml(summary.outcome)}</span>` : ""}
+        ${summary.diagnosis_code ? `<span class="tag">诊断 ${escapeHtml(summary.diagnosis_code)}</span>` : ""}
+      </div>
+    </div>
+    <p class="muted" style="font-size:12px;margin:8px 0 12px">展示的是可审计的运行阶段、耗时、工具名和脱敏摘要，不包含模型隐藏推理或完整工具结果。</p>
+    <div class="trace-stat-grid">${statCards}</div>
+    ${slow ? `<div class="trace-slow"><span class="muted">较慢阶段</span>${slow}</div>` : ""}
+    <div class="trace-timeline">${timeline || '<p class="muted">该 trace 暂无阶段记录。</p>'}</div>
+  </div>`;
+}
+
 function renderLogs() {
   const data = state.logs;
   if (!data) return `<div class="card muted">加载中…</div>`;
+  const tracePanel = renderTraceProcess();
   const levels = [
     {key:"", label:"全部"},
     {key:"DEBUG", label:"DEBUG+"},
@@ -155,6 +225,7 @@ function renderLogs() {
     </tr>`;
   }).join("");
   return `<div class="group-bar">${levelBar}</div>
+    ${tracePanel}
     <div class="card">
       <div class="between">
         <h2 style="margin:0">插件日志（最近 ${(data.entries||[]).length} 条）</h2>
@@ -164,7 +235,7 @@ function renderLogs() {
       <div class="field-input" style="margin-bottom:10px">
         <input id="log-query" type="text" placeholder="搜索消息 / source / trace_id" value="${escapeAttr(state.logQuery||'')}" onkeydown="if(event.key==='Enter') applyLogQuery()">
         <button class="btn small" onclick="applyLogQuery()">搜索</button>
-        <button class="btn small" onclick="state.logQuery=''; loadView().then(render)">重置</button>
+        <button class="btn small" onclick="state.logQuery=''; state.logTraceId=''; state.traceDetail=null; loadView().then(render)">重置</button>
       </div>
       <table><thead><tr><th>时间</th><th>级别</th><th>来源</th><th>消息</th><th>Trace</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5" class="muted">暂无</td></tr>'}</tbody></table>
@@ -178,11 +249,14 @@ async function pickLogLevel(level) {
 
 async function applyLogQuery() {
   state.logQuery = (document.getElementById("log-query")?.value || "").trim();
+  state.logTraceId = "";
+  state.traceDetail = null;
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
 
 async function filterLogsByTrace(traceId) {
   state.logQuery = traceId || "";
+  state.logTraceId = traceId || "";
   state.logLevel = "";
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
@@ -190,6 +264,7 @@ async function filterLogsByTrace(traceId) {
 async function openLogsForTrace(traceId) {
   state.view = "logs";
   state.logQuery = traceId || "";
+  state.logTraceId = traceId || "";
   state.logLevel = "";
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }

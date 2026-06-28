@@ -310,3 +310,45 @@ def test_persona_template_source_relevance_rejects_weak_character_mentions() -> 
         summary="测试太郎的母亲是《测试作品》的登场角色。",
         search_aliases=aliases,
     )
+
+
+def test_persona_template_validation_reports_quality_warnings() -> None:
+    module = load_personification_module(
+        "plugin.personification.webui.routes.persona_template_routes"
+    )
+    template = """
+name: 测试角色
+tts:
+  voice: default_zh
+status: |
+  心情: "平静"
+nick_name:
+  - 测试角色
+ack_phrases:
+  - 我看看
+initial_message: "我是测试角色"
+mute_keyword:
+  - 闭嘴
+input: |
+  {time}
+  {trigger_reason}
+  {schedule_instruction}
+  {history_new}
+  {history_last}
+  {status}
+  <output>
+  <message>消息正文</message>
+  </output>
+system: |
+  你是测试角色。作为助手回复用户问题。
+  ## 资料冲突与缺口
+  - 待确认
+""".strip()
+
+    validation = module._validate_template_yaml(template)
+
+    assert validation["valid"] is True
+    joined = "\n".join(validation["warnings"])
+    assert "system 偏短" in joined
+    assert "助手/客服式身份" in joined
+    assert "ack_phrases" in joined

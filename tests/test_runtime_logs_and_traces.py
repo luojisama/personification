@@ -80,3 +80,40 @@ def test_reply_turn_trace_records_and_finishes(_db_tmp) -> None:
 
     recent = traces.query_recent(session_type="group", group_id="123", user_id="456")
     assert recent and recent[0]["trace_id"] == trace_id
+
+
+def test_reply_turn_trace_builds_safe_process_view(_db_tmp) -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")
+    logs.clear_all()
+
+    trace_id = traces.start_trace(session_type="group", group_id="123", user_id="456")
+    token = traces.set_current_trace_id(trace_id)
+    try:
+        traces.record_stage(
+            key="agent_model_step",
+            label="Agent 模型步 1",
+            status="ok",
+            detail="finish=tool_calls elapsed_ms=1500 token=abc123",
+        )
+        traces.record_stage(
+            key="agent_tool_result",
+            label="Agent 工具结果",
+            status="warn",
+            detail="tool=web_search result_len=0 elapsed_ms=80",
+        )
+        traces.finish_trace(outcome="no_reply", diagnosis_code="agent_no_reply")
+    finally:
+        traces.reset_current_trace_id(token)
+    logs.record(level="WARNING", source="unit", message="slow stage", trace_id=trace_id, min_level="DEBUG")
+
+    row = traces.get_trace(trace_id)
+    view = traces.build_process_view(row, logs=logs.query_recent(trace_id=trace_id))
+
+    assert view["summary"]["trace_id"] == trace_id
+    assert view["summary"]["warn_count"] == 1
+    assert view["summary"]["log_levels"]["WARNING"] == 1
+    assert view["items"][0]["category"] == "agent"
+    assert view["items"][0]["duration_ms"] == 1500
+    assert view["summary"]["slow_stages"][0]["key"] == "agent_model_step"
+    assert "abc123" not in view["items"][0]["detail"]

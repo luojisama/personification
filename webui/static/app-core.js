@@ -24,7 +24,7 @@ let state = {
   stickers: null, stickerSearch: "", selectedSticker: null,
   theme: "dark", mobileNavOpen: false, eligibleAdmins: [],
   audit: null, auditFilter: "",
-  logs: null, logLevel: "", logQuery: "",
+  logs: null, logLevel: "", logQuery: "", logTraceId: "", traceDetail: null,
   proactiveStats: null, proactiveRecent: null, proactiveScope: "",
 };
 
@@ -237,8 +237,17 @@ async function loadView() {
     } else if (state.view === "logs") {
       const qs = new URLSearchParams({ limit: "220" });
       if (state.logLevel) qs.set("level", state.logLevel);
-      if (state.logQuery) qs.set("q", state.logQuery);
-      state.logs = await api("/logs/recent?" + qs.toString());
+      if (state.logTraceId) qs.set("trace_id", state.logTraceId);
+      else if (state.logQuery) qs.set("q", state.logQuery);
+      const traceTask = state.logTraceId
+        ? api("/logs/trace/" + encodeURIComponent(state.logTraceId)).catch(e => ({ error: e.message }))
+        : Promise.resolve(null);
+      const [logs, trace] = await Promise.all([
+        api("/logs/recent?" + qs.toString()),
+        traceTask,
+      ]);
+      state.logs = logs;
+      state.traceDetail = trace;
     } else if (state.view === "stickers") {
       state.stickers = await api("/stickers");
     } else if (state.view === "memory") {

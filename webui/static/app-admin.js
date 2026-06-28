@@ -24,7 +24,17 @@ function dashboardChartPath(points) {
     const p = points[0];
     return `M ${p.x.toFixed(1)} ${p.y.toFixed(1)} L ${(p.x + 0.1).toFixed(1)} ${p.y.toFixed(1)}`;
   }
-  return points.map((p, index) => `${index === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ");
+  if (points.length === 2) {
+    return points.map((p, index) => `${index === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ");
+  }
+  let path = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1];
+    const cur = points[i];
+    const dx = (cur.x - prev.x) * 0.32;
+    path += ` C ${(prev.x + dx).toFixed(1)} ${prev.y.toFixed(1)}, ${(cur.x - dx).toFixed(1)} ${cur.y.toFixed(1)}, ${cur.x.toFixed(1)} ${cur.y.toFixed(1)}`;
+  }
+  return path;
 }
 
 function renderDashboardLineChart(points, valueKey, tone) {
@@ -63,14 +73,23 @@ function renderDashboardLineChart(points, valueKey, tone) {
     return `<line x1="${padX}" y1="${y.toFixed(1)}" x2="${width - padX}" y2="${y.toFixed(1)}" stroke="currentColor" stroke-opacity="${ratio === 1 ? "0.22" : "0.10"}" stroke-width="1" vector-effect="non-scaling-stroke"></line>`;
   }).join("");
   const lastPoint = coords[coords.length - 1];
+  const markerEvery = coords.length <= 18 ? 1 : Math.ceil(coords.length / 12);
+  const markers = coords.map((point, index) => ({ point, index }))
+    .filter(({ point, index }) => hasData && (index === coords.length - 1 || (point.value > 0 && index % markerEvery === 0)))
+    .map(({ point, index }) => {
+      const label = rows[index] ? String(rows[index].label || rows[index].bucket || "") : "";
+      return `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="${index === coords.length - 1 ? "3.8" : "2.2"}" fill="var(--panel)" stroke="currentColor" stroke-width="${index === coords.length - 1 ? "2" : "1.4"}" opacity="${index === coords.length - 1 ? "1" : "0.72"}" vector-effect="non-scaling-stroke"><title>${escapeHtml(label)} ${escapeHtml(dashboardCompactNumber(point.value))} T</title></circle>`;
+    }).join("");
   const firstLabel = rows.length ? String(rows[0].label || rows[0].bucket || "") : "";
   const lastLabel = rows.length ? String(rows[rows.length - 1].label || rows[rows.length - 1].bucket || "") : "";
   return `<svg class="dashboard-line-chart ${tone || ""}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Token 消耗折线图">
     ${grid}
     ${area ? `<path d="${area}" fill="currentColor" opacity="0.10"></path>` : ""}
     ${path ? `<path d="${path}" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"></path>` : ""}
-    ${lastPoint && hasData ? `<circle cx="${lastPoint.x.toFixed(1)}" cy="${lastPoint.y.toFixed(1)}" r="3.8" fill="var(--panel)" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke"></circle>` : ""}
+    ${lastPoint && hasData ? `<line x1="${lastPoint.x.toFixed(1)}" y1="${padTop}" x2="${lastPoint.x.toFixed(1)}" y2="${plotBottom}" stroke="currentColor" stroke-opacity="0.12" stroke-width="1" vector-effect="non-scaling-stroke"></line>` : ""}
+    ${markers}
     ${hasData ? `<text x="${padX}" y="11" fill="currentColor" opacity="0.70" font-size="10">${escapeHtml(dashboardCompactNumber(maxRaw))} T</text>` : `<text x="${width / 2}" y="${height / 2}" fill="currentColor" opacity="0.55" font-size="12" text-anchor="middle">暂无数据</text>`}
+    ${lastPoint && hasData ? `<text x="${width - padX}" y="11" fill="currentColor" opacity="0.72" font-size="10" text-anchor="end">${escapeHtml(dashboardCompactNumber(lastPoint.value))} T</text>` : ""}
     <text x="${padX}" y="${height - 3}" fill="currentColor" opacity="0.55" font-size="10">${escapeHtml(firstLabel)}</text>
     <text x="${width - padX}" y="${height - 3}" fill="currentColor" opacity="0.55" font-size="10" text-anchor="end">${escapeHtml(lastLabel)}</text>
   </svg>`;
@@ -332,8 +351,8 @@ function renderHealth() {
     <h2>实际交互测试</h2>
     <p class="muted" style="font-size:12px">向「配置中心 → 运维」里设置的<b>测试群 / 测试私聊用户</b>真实注入一条消息，走完整回复链路（规则→缓冲→模型→发送），并回显 bot 实际回复。等待时间按回复超时配置加少量余量；会真的在 QQ 里发消息。</p>
     <div class="row" style="margin-top:10px">
-      <button class="btn primary" onclick="runInteraction('group')">测试群交互</button>
-      <button class="btn primary" onclick="runInteraction('private')">测试私聊交互</button>
+      <button class="btn primary" onclick="runInteraction('group')" ${state.interactionBusy?'disabled':''}>测试群交互</button>
+      <button class="btn primary" onclick="runInteraction('private')" ${state.interactionBusy?'disabled':''}>测试私聊交互</button>
       ${state.interactionBusy?'<span class="muted">交互中（按回复超时配置）…</span>':''}
     </div>
     ${renderInteractionResult(ir)}
@@ -342,8 +361,8 @@ function renderHealth() {
     <h2>QZone 首条转发测试</h2>
     <p class="muted" style="font-size:12px">指定一个 QQ，读取该用户空间第一条动态并真实转发到 bot 空间；成功后计入本月 QQ 空间额度。只用于管理员显式体检，不走自动转发决策。</p>
     <div class="row" style="margin-top:10px;gap:8px;align-items:center">
-      <input id="qzone-forward-target" type="text" placeholder="目标 QQ 或 [CQ:at]" value="${escapeAttr(qzf.target_user_id || "")}" oninput="state.qzoneForwardForm.target_user_id=this.value" style="width:220px">
-      <input id="qzone-forward-text" type="text" placeholder="转发附言，可空" value="${escapeAttr(qzf.forward_text || "")}" oninput="state.qzoneForwardForm.forward_text=this.value" style="min-width:220px;flex:1">
+      <input id="qzone-forward-target" type="text" placeholder="目标 QQ 或 [CQ:at]" value="${escapeAttr(qzf.target_user_id || "")}" oninput="state.qzoneForwardForm.target_user_id=this.value" style="width:220px" ${state.qzoneForwardBusy?'disabled':''}>
+      <input id="qzone-forward-text" type="text" placeholder="转发附言，可空" value="${escapeAttr(qzf.forward_text || "")}" oninput="state.qzoneForwardForm.forward_text=this.value" style="min-width:220px;flex:1" ${state.qzoneForwardBusy?'disabled':''}>
       <button class="btn primary" onclick="runQzoneForwardTest()" ${state.qzoneForwardBusy?'disabled':''}>${state.qzoneForwardBusy?'<span class="spinner"></span> 转发中…':'转发第一条'}</button>
     </div>
     ${renderQzoneForwardResult(state.qzoneForwardResult)}
@@ -459,6 +478,7 @@ async function recheckCategory(name) {
 }
 
 async function runInteraction(target) {
+  if (state.interactionBusy) return;
   state.interactionBusy = true; state.interactionResult = null; render();
   try {
     state.interactionResult = await api("/health/interaction-test", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ target }) });
@@ -811,6 +831,7 @@ async function openPersonaTemplateHistory(recordId) {
 }
 
 async function buildPersonaTemplate() {
+  if (state.personaTemplateBusy) return;
   const work = (state.personaTemplateForm.work_title || "").trim();
   const character = (state.personaTemplateForm.character_name || "").trim();
   if (!work || !character) { alertFlash("err", "请填写作品名和角色名"); return; }
