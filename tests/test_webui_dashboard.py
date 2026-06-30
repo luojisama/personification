@@ -64,6 +64,23 @@ def _runtime_with_data(tmp_path: Path, monkeypatch):
 
     profile_service_mod = load_personification_module("plugin.personification.core.profile_service")
     profile_service = profile_service_mod.ProfileService(memory_store=store)
+    user_profile_meta = load_personification_module("plugin.personification.core.user_profile_meta")
+    profile_service.upsert_user_profile_meta(
+        user_id="u_alpha",
+        meta=user_profile_meta.build_user_profile_meta(
+            "u_alpha",
+            stranger_info={
+                "nickname": "Alpha资料",
+                "sex": "unknown",
+                "age": 18,
+                "qid": "qid-alpha",
+                "longNick": "这里是 Alpha 的签名",
+            },
+            source="test_fixture",
+            now_ts=now_ts,
+        ),
+        source="test_fixture",
+    )
 
     favorability_mod = load_personification_module("plugin.personification.core.favorability")
     favorability_service = favorability_mod.FavorabilityService(plugin_config=cfg)
@@ -86,6 +103,14 @@ def _runtime_with_data(tmp_path: Path, monkeypatch):
             self.group_info_calls += 1
             names = {1: "测试一群", 2: "测试二群"}
             return {"group_id": group_id, "group_name": names.get(int(group_id), "")}
+
+        async def get_stranger_info(self, user_id: int):
+            return {
+                "user_id": user_id,
+                "nickname": "Alpha资料" if str(user_id) == "0" else "资料昵称",
+                "longNick": "协议签名",
+                "qid": "qid-live",
+            }
 
     info_bot = _InfoBot()
 
@@ -233,11 +258,17 @@ def test_personas_list_and_detail(_runtime_with_data) -> None:
     listed = next(p for p in body["profiles"] if p["user_id"] == "u_alpha")
     assert listed["favorability"]["available"] is True
     assert listed["favorability"]["score"] == 66.0
+    assert listed["avatar_url"].endswith("dst_uin=u_alpha&spec=640")
+    assert listed["homepage_url"] == "https://user.qzone.qq.com/u_alpha"
+    assert listed["qq_profile"]["signature"] == "这里是 Alpha 的签名"
 
     res2 = client.get("/personification/api/personas/u_alpha")
     assert res2.status_code == 200
     detail = res2.json()
     assert detail["core_profile"]["profile_text"] == "全局画像 Alpha"
+    assert detail["core_profile"]["qq_profile"]["avatar_url"].endswith("dst_uin=u_alpha&spec=640")
+    assert detail["core_profile"]["qq_profile"]["homepage_url"] == "https://user.qzone.qq.com/u_alpha"
+    assert detail["core_profile"]["qq_profile"]["signature"] == "这里是 Alpha 的签名"
     assert detail["favorability"]["score"] == 66.0
     assert detail["favorability"]["events"][0]["label"] == "管理员手动调整"
     assert len(detail["local_profiles"]) == 1
@@ -301,6 +332,9 @@ def test_profile_service_prompt_block(_runtime_with_data) -> None:
     svc = _runtime_with_data.runtime_bundle.profile_service
     block = svc.build_prompt_block(user_id="u_alpha", group_id="g1")
     assert "## 用户档案" in block
+    assert "[头像URL]" in block
+    assert "[主页] https://user.qzone.qq.com/u_alpha" in block
+    assert "[个性签名] 这里是 Alpha 的签名" in block
     assert "全局画像 Alpha" in block
     assert "g1 中是常驻成员" in block
 

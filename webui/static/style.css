@@ -179,6 +179,10 @@ main { padding:20px 26px; max-width:1400px; width:100%; min-width:0; }
 .persona-agent-card { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-top:10px; background:var(--bg); }
 .persona-agent-card summary { cursor:pointer; font-weight:600; }
 .persona-agent-card pre { white-space:pre-wrap; font-size:12.5px; background:var(--input-bg); padding:10px; border-radius:6px; overflow-x:auto; }
+.qq-profile-card { display:grid; grid-template-columns:96px minmax(0,1fr); gap:16px; align-items:start; }
+.qq-profile-avatar { width:96px; height:96px; border-radius:8px; object-fit:cover; background:#0b0d12; border:1px solid var(--line); }
+.qq-profile-body { min-width:0; }
+.qq-profile-links { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
 .agent-report-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:10px; }
 .agent-report-grid h4 { margin:0 0 6px; font-size:12px; color:var(--muted); }
 .agent-report-grid ul, .validation-list { margin:0; padding-left:18px; }
@@ -277,6 +281,8 @@ td code, .field-head code { word-break:break-all; }
   .remote-source-form { grid-template-columns:1fr; }
   .remote-source-form label { min-height:34px; display:flex; align-items:center; }
   .persona-builder-form, .agent-report-grid { grid-template-columns:1fr; }
+  .qq-profile-card { grid-template-columns:1fr; }
+  .qq-profile-avatar { width:88px; height:88px; }
   .sticker-grid { grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); }
   .dashboard-toolbar { align-items:stretch; flex-direction:column; margin-bottom:14px; }
   .dashboard-line-grid, .dashboard-usage-grid, .dashboard-pie-layout { grid-template-columns:1fr; gap:12px; }

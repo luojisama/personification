@@ -18,11 +18,13 @@ class _FakeBot:
         nickname: str = "测试昵称",
         group_name: str = "测试群",
         group_list: list[dict] | None = None,
+        stranger_extra: dict | None = None,
     ) -> None:
         self.fail = fail
         self.nickname = nickname
         self.group_name = group_name
         self.group_list = group_list or []
+        self.stranger_extra = stranger_extra or {}
         self.stranger_calls = 0
         self.group_calls = 0
         self.group_list_calls = 0
@@ -31,7 +33,7 @@ class _FakeBot:
         self.stranger_calls += 1
         if self.fail:
             raise RuntimeError("bot offline")
-        return {"user_id": user_id, "nickname": self.nickname}
+        return {"user_id": user_id, "nickname": self.nickname, **self.stranger_extra}
 
     async def get_group_info(self, *, group_id: int) -> dict:
         self.group_calls += 1
@@ -60,6 +62,40 @@ def test_get_user_nickname_caches_repeated_calls() -> None:
     assert nick1 == "艾莉"
     assert nick2 == "艾莉"
     assert bot.stranger_calls == 1, "命中缓存时不应再次调用 bot"
+
+
+def test_get_user_profile_normalizes_extended_fields_and_caches() -> None:
+    bot = _FakeBot(
+        nickname="艾莉",
+        stranger_extra={
+            "sex": "female",
+            "age": 18,
+            "qid": "q123",
+            "longNick": "今天也在写代码",
+            "level": "42",
+        },
+    )
+    profile1 = asyncio.run(onebot_cache.get_user_profile(bot, "12345"))
+    profile2 = asyncio.run(onebot_cache.get_user_profile(bot, "12345"))
+    assert profile1["nickname"] == "艾莉"
+    assert profile1["sex"] == "female"
+    assert profile1["age"] == 18
+    assert profile1["qid"] == "q123"
+    assert profile1["signature"] == "今天也在写代码"
+    assert profile1["level"] == "42"
+    assert profile1["avatar_url"].endswith("dst_uin=12345&spec=640")
+    assert profile1["homepage_url"] == "https://user.qzone.qq.com/12345"
+    assert profile2 == profile1
+    assert bot.stranger_calls == 1
+
+
+def test_get_user_profile_for_nonnumeric_id_uses_deterministic_urls_without_protocol_call() -> None:
+    bot = _FakeBot(nickname="不应调用")
+    profile = asyncio.run(onebot_cache.get_user_profile(bot, "u_alpha"))
+    assert profile["user_id"] == "u_alpha"
+    assert profile["avatar_url"].endswith("dst_uin=u_alpha&spec=640")
+    assert profile["homepage_url"] == "https://user.qzone.qq.com/u_alpha"
+    assert bot.stranger_calls == 0
 
 
 def test_get_group_name_caches_repeated_calls() -> None:

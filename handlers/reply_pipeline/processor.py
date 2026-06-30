@@ -436,6 +436,43 @@ def _build_image_only_context_message(
     )
 
 
+async def _capture_user_protocol_profile(
+    *,
+    runtime: Any,
+    bot: Any,
+    event: Any,
+    user_id: str,
+    source: str,
+) -> None:
+    profile_service = getattr(runtime, "profile_service", None)
+    if profile_service is None or not str(user_id or "").strip():
+        return
+    try:
+        from ...core.onebot_cache import get_user_profile
+        from ...core.user_profile_meta import build_user_profile_meta
+
+        protocol_profile = await get_user_profile(bot, str(user_id))
+        meta = build_user_profile_meta(
+            str(user_id),
+            sender=getattr(event, "sender", None),
+            stranger_info=protocol_profile,
+            source=source,
+        )
+        if meta:
+            profile_service.upsert_user_profile_meta(
+                user_id=str(user_id),
+                meta=meta,
+                source=source,
+            )
+    except Exception as exc:
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            try:
+                logger.debug(f"[user_profile_meta] capture failed uid={user_id}: {exc}")
+            except Exception:
+                pass
+
+
 async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, Any], deps: ReplyProcessorDeps) -> None:
     session = deps.session
     persona = deps.persona
@@ -938,6 +975,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         sender_role = extract_sender_role(event)
         if sender_role:
             incoming_relation_metadata["sender_role"] = sender_role
+    if isinstance(event, types.message_event_cls):
+        await _capture_user_protocol_profile(
+            runtime=runtime,
+            bot=bot,
+            event=event,
+            user_id=user_id,
+            source="reply_pipeline",
+        )
 
     tool_image_urls = list(image_urls)
     # 真实照片（不含表情包），仅这部分允许走文本摘要降级；表情包不打标。

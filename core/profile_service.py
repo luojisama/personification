@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from .memory_store import MemoryStore
+from .user_profile_meta import (
+    compact_user_profile_meta_summary,
+    merge_profile_json_with_meta,
+    render_user_profile_meta,
+)
 
 
 @dataclass
@@ -11,9 +16,12 @@ class ProfileSnapshot:
     profile_text: str
     profile_json: dict[str, Any]
     updated_at: float
+    source: str = ""
 
     def snippet(self, max_chars: int = 150) -> str:
         text = str(self.profile_text or "").strip()
+        if not text:
+            text = compact_user_profile_meta_summary(self.profile_json.get("qq_profile", {}))
         if max_chars <= 0 or not text:
             return ""
         if len(text) <= max_chars:
@@ -33,6 +41,7 @@ class ProfileService:
             profile_text=str(data.get("profile_text", "") or ""),
             profile_json=dict(data.get("profile_json", {}) or {}),
             updated_at=float(data.get("updated_at", 0) or 0),
+            source=str(data.get("source", "") or ""),
         )
 
     def upsert_core_profile(
@@ -49,6 +58,28 @@ class ProfileService:
             profile_json=profile_json,
             source=source,
         )
+
+    def upsert_user_profile_meta(
+        self,
+        *,
+        user_id: str,
+        meta: dict[str, Any],
+        source: str = "profile_meta",
+    ) -> ProfileSnapshot | None:
+        uid = str(user_id or "").strip()
+        if not uid or not isinstance(meta, dict):
+            return self.get_core_profile(uid)
+        current = self.get_core_profile(uid)
+        profile_text = current.profile_text if current is not None else ""
+        profile_json = dict(current.profile_json if current is not None else {})
+        merged_json = merge_profile_json_with_meta(profile_json, {**meta, "source": source})
+        self.upsert_core_profile(
+            user_id=uid,
+            profile_text=profile_text,
+            profile_json=merged_json,
+            source=(current.source if current is not None and current.source else source),
+        )
+        return self.get_core_profile(uid)
 
     def get_local_profile(self, *, group_id: str, user_id: str) -> ProfileSnapshot | None:
         data = self.memory_store.get_local_profile(group_id=group_id, user_id=user_id)
@@ -91,6 +122,10 @@ class ProfileService:
         """
         lines: list[str] = []
         core = self.get_core_profile(str(user_id or ""))
+        if core and core.profile_json:
+            meta_block = render_user_profile_meta(core.profile_json.get("qq_profile", {}))
+            if meta_block:
+                lines.append(meta_block)
         if core and core.profile_text:
             lines.append(f"[全局印象] {core.snippet(220)}")
         if str(group_id or "").strip():

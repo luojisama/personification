@@ -15,21 +15,24 @@ import time
 from collections import OrderedDict
 from typing import Any, Iterable
 
+from .user_profile_meta import build_user_profile_meta
+
 _DEFAULT_TTL_SECONDS = 1800  # 30 分钟
 _MAX_ENTRIES = 500
 
 _user_cache: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
+_user_profile_cache: "OrderedDict[str, tuple[float, dict[str, Any]]]" = OrderedDict()
 _group_cache: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
 _user_lock = asyncio.Lock()
 _group_lock = asyncio.Lock()
 
 
-def _evict_if_needed(cache: "OrderedDict[str, tuple[float, str]]") -> None:
+def _evict_if_needed(cache: "OrderedDict[str, tuple[float, Any]]") -> None:
     while len(cache) > _MAX_ENTRIES:
         cache.popitem(last=False)
 
 
-def _get_cached(cache: "OrderedDict[str, tuple[float, str]]", key: str) -> str | None:
+def _get_cached(cache: "OrderedDict[str, tuple[float, Any]]", key: str) -> Any | None:
     item = cache.get(key)
     if item is None:
         return None
@@ -42,9 +45,9 @@ def _get_cached(cache: "OrderedDict[str, tuple[float, str]]", key: str) -> str |
 
 
 def _set_cached(
-    cache: "OrderedDict[str, tuple[float, str]]",
+    cache: "OrderedDict[str, tuple[float, Any]]",
     key: str,
-    value: str,
+    value: Any,
     ttl: int,
 ) -> None:
     cache[key] = (time.time() + ttl, value)
@@ -92,6 +95,13 @@ def _extract_group_names(data: Any) -> dict[str, str]:
     return names
 
 
+def _numeric_onebot_id(value: str) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 async def _refresh_group_names_from_list(bot: Any, *, ttl: int) -> dict[str, str]:
     if bot is None:
         return {}
@@ -121,18 +131,45 @@ async def get_user_nickname(
         cached = _get_cached(_user_cache, key)
         if cached is not None:
             return cached
-    if bot is None:
-        return ""
-    nickname = ""
-    try:
-        info = await _call_onebot_api(bot, "get_stranger_info", user_id=int(key))
-        if isinstance(info, dict):
-            nickname = str(info.get("nickname", "") or "")
-    except Exception:
-        nickname = ""
+    profile = await get_user_profile(bot, key, ttl=ttl)
+    nickname = str(profile.get("nickname", "") or "")
     async with _user_lock:
         _set_cached(_user_cache, key, nickname, ttl)
     return nickname
+
+
+async def get_user_profile(
+    bot: Any,
+    user_id: str | int,
+    *,
+    ttl: int = _DEFAULT_TTL_SECONDS,
+) -> dict[str, Any]:
+    """Return normalized QQ profile fields for prompt/WebUI use.
+
+    Standard OneBot only guarantees nickname/sex/age; adapters may add qid,
+    signature, levels, or other account fields. Missing/failed fields degrade to
+    deterministic avatar/homepage URLs and do not raise.
+    """
+    key = str(user_id).strip()
+    if not key:
+        return {}
+    async with _user_lock:
+        cached = _get_cached(_user_profile_cache, key)
+        if cached is not None:
+            return dict(cached)
+    raw: dict[str, Any] = {}
+    numeric_id = _numeric_onebot_id(key)
+    if bot is not None and numeric_id is not None:
+        try:
+            info = await _call_onebot_api(bot, "get_stranger_info", user_id=numeric_id)
+            if isinstance(info, dict):
+                raw = dict(info)
+        except Exception:
+            raw = {}
+    profile = build_user_profile_meta(key, stranger_info=raw, source="onebot_cache")
+    async with _user_lock:
+        _set_cached(_user_profile_cache, key, dict(profile), ttl)
+    return dict(profile)
 
 
 async def get_group_name(
@@ -215,7 +252,8 @@ async def get_group_name_map(
 def _clear_caches_for_testing() -> None:
     """仅供测试使用，清空两层缓存。"""
     _user_cache.clear()
+    _user_profile_cache.clear()
     _group_cache.clear()
 
 
-__all__ = ["get_user_nickname", "get_group_name", "get_group_name_map"]
+__all__ = ["get_user_nickname", "get_user_profile", "get_group_name", "get_group_name_map"]

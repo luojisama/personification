@@ -814,7 +814,7 @@ function renderPersonas() {
   if (state.personasAvailable === false) return `<div class="card muted">profile_service 未就绪</div>`;
   if (state.selectedPersona) return renderPersonaDetail();
   const rows = state.personas.map(p => `<tr>
-    <td><img class="avatar" src="https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
+    <td><img class="avatar" src="${escapeAttr(p.avatar_url || `https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100`)}" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
     <td><code>${escapeHtml(p.user_id)}</code></td>
     <td>${escapeHtml(p.nickname || '')}</td>
     <td>${renderFavorabilityBadge(p.favorability)}</td>
@@ -890,6 +890,40 @@ async function openPersona(uid) {
   } catch (e) { alertFlash("err", e.message); }
 }
 
+function renderQqProfileCard(core, userId) {
+  const meta = (core && core.qq_profile) || {};
+  const avatar = meta.avatar_url || `https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(userId)}&spec=640`;
+  const homepage = meta.homepage_url || "";
+  const rows = [
+    ["昵称", meta.nickname],
+    ["群名片", meta.card],
+    ["备注", meta.remark],
+    ["性别", meta.sex],
+    ["年龄", meta.age],
+    ["QID", meta.qid],
+    ["等级", meta.level],
+    ["登录天数", meta.login_days],
+    ["地区", meta.area],
+    ["群角色", meta.role],
+    ["专属头衔", meta.title],
+    ["个性签名", meta.signature],
+  ].filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== "")
+   .map(([k, v]) => `<tr><td class="muted" style="white-space:nowrap">${escapeHtml(k)}</td><td>${escapeHtml(String(v))}</td></tr>`).join("");
+  return `<div class="card">
+    <h2>QQ 资料快照</h2>
+    <div class="qq-profile-card">
+      <img class="qq-profile-avatar" src="${escapeAttr(avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer">
+      <div class="qq-profile-body">
+        ${rows ? `<table><tbody>${rows}</tbody></table>` : '<p class="muted">暂无协议资料字段。</p>'}
+        <div class="qq-profile-links">
+          ${meta.avatar_url ? `<a class="btn small" href="${escapeAttr(meta.avatar_url)}" target="_blank" rel="noreferrer">查看头像</a>` : ''}
+          ${homepage ? `<a class="btn small" href="${escapeAttr(homepage)}" target="_blank" rel="noreferrer">打开主页</a>` : ''}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderPersonaDetail() {
   const p = state.selectedPersona;
   const core = p.core_profile;
@@ -915,7 +949,8 @@ function renderPersonaDetail() {
   </div>`;
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedPersona=null;render()">返回列表</button><span class="muted">用户 ${escapeHtml(p.user_id)}</span></div>
     ${renderFavorabilityCard(p.favorability, "用户好感度")}
-    <div class="card"><h2>全局印象</h2>${core ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(core.profile_text || '')}</pre>` : '<p class="muted">无全局画像</p>'}</div>
+    ${renderQqProfileCard(core, p.user_id)}
+    <div class="card"><h2>全局印象</h2>${core && core.profile_text ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(core.profile_text || '')}</pre>` : '<p class="muted">无全局画像</p>'}</div>
     ${structCard}
     <h3 style="margin-bottom:10px">各群印象（${(p.local_profiles||[]).length}）</h3>
     ${locals || '<p class="muted">无各群画像</p>'}`;
