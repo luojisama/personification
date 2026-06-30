@@ -858,6 +858,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         isinstance(event, types.group_message_event_cls)
         and (not is_direct_mention)
         and (not is_active_followup)
+        and (not is_solo_speaker_follow)
         and runtime.should_avoid_interrupting(str(group_id), is_random_chat)
     ):
         runtime.logger.info(f"拟人插件：群 {group_id} 讨论热度高，触发 KY 规避，本轮保持沉默。")
@@ -1351,6 +1352,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             has_newer_batch=_batch_has_newer_messages(state),
             batch_runtime_ref=state.get("batch_runtime_ref"),
             solo_speaker_follow=is_solo_speaker_follow,
+            favorability_service=persona.favorability_service,
         )
         return
 
@@ -2368,6 +2370,25 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             assistant_text=final_visible_reply_text,
             is_private=is_private_session,
         )
+        try:
+            service = getattr(persona, "favorability_service", None)
+            if service is not None and hasattr(service, "apply_user_reply_interaction"):
+                result = service.apply_user_reply_interaction(
+                    user_id,
+                    now=runtime.get_current_time(),
+                    group_id="" if is_private_session else str(group_id),
+                    is_direct=bool(is_direct_mention or not is_random_chat or is_active_followup),
+                    is_random_chat=bool(is_random_chat),
+                )
+                delta = float(result.get("delta", 0.0) or 0.0)
+                if delta > 0:
+                    runtime.logger.debug(
+                        f"拟人插件：记录与 {user_name}({user_id}) 的成功回复互动，好感度 +{delta:.2f} "
+                        f"(今日已加: {float(result.get('daily_used', 0.0) or 0.0):.2f}/"
+                        f"{float(result.get('daily_cap', 0.0) or 0.0):.2f})"
+                    )
+        except Exception as exc:
+            runtime.logger.debug(f"拟人插件：记录成功回复互动好感事件失败: {exc}")
         schedule_inner_state_update_after_reply(
             runtime=runtime,
             user_text=raw_message_text or message_text or message_content,

@@ -45,6 +45,14 @@ def test_target_inference_treats_reply_to_bot_as_bot_target() -> None:
     assert result == target_inference.TARGET_BOT
 
 
+def test_target_inference_normalizes_constants_for_downstream_labels() -> None:
+    assert target_inference.normalize_message_target_for_review(target_inference.TARGET_BOT) == "bot"
+    assert target_inference.normalize_message_target_for_plan(target_inference.TARGET_BOT) == "bot"
+    assert target_inference.normalize_message_target_for_review(target_inference.TARGET_OTHERS) == "others"
+    assert target_inference.normalize_message_target_for_plan(target_inference.TARGET_OTHERS) == "someone_else"
+    assert target_inference.normalize_message_target_for_review(target_inference.TARGET_UNCLEAR) == "uncertain"
+
+
 def test_record_message_marks_same_bot_generic_output_as_plugin_source() -> None:
     captured: dict[str, object] = {}
 

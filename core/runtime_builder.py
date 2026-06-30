@@ -494,6 +494,7 @@ def build_plugin_runtime(
         memory_curator=memory_curator,
         knowledge_store=knowledge_store,
         inner_state_updater=inner_state_updater,
+        favorability_service=favorability_service,
     )
 
     get_custom_title = build_custom_title_getter(
@@ -663,6 +664,7 @@ def build_plugin_runtime(
             memory_curator=memory_curator,
             knowledge_store=knowledge_store,
             inner_state_updater=inner_state_updater,
+            favorability_service=favorability_service,
         )
         reply_processor_deps.runtime.process_yaml_response_logic = yaml_response_processor
         reply_processor_deps.runtime.agent_tool_caller = new_agent_tool_caller

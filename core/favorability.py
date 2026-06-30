@@ -7,8 +7,9 @@ from typing import Any, Callable
 
 
 DEFAULT_FAVORABILITY_EVENT_DELTAS: dict[str, float] = {
-    "group_good_atmosphere": 0.10,
-    "user_interesting_chat": 0.05,
+    "group_good_atmosphere": 0.20,
+    "user_interesting_chat": 0.12,
+    "user_reply_interaction": 0.03,
     "user_perm_blacklist": -30.0,
     "user_perm_blacklist_removed": 0.0,
     "manual_adjust": 0.0,
@@ -692,6 +693,28 @@ class FavorabilityService:
             reason=reason,
             group_id=str(group_id or "").strip(),
             now=now,
+        )
+
+    def apply_user_reply_interaction(
+        self,
+        user_id: str,
+        *,
+        now: Any = None,
+        group_id: str = "",
+        is_direct: bool = False,
+        is_random_chat: bool = False,
+        reason: str = "成功完成一轮可见回复互动",
+    ) -> dict[str, Any]:
+        return self.apply_event(
+            str(user_id or "").strip(),
+            "user_reply_interaction",
+            reason=reason,
+            group_id=str(group_id or "").strip(),
+            now=now,
+            metadata={
+                "is_direct": bool(is_direct),
+                "is_random_chat": bool(is_random_chat),
+            },
         )
 
     def apply_perm_blacklist(

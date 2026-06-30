@@ -57,6 +57,7 @@ from ...core.response_review import (
     rewrite_agent_reply_ooc,
     review_response_text,
 )
+from ...core.target_inference import normalize_message_target_for_plan, normalize_message_target_for_review
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.prompt_loader import pick_ack_phrase
 from ...core.qq_expression_library import (
@@ -465,6 +466,7 @@ async def process_yaml_response_logic(
     memory_curator: Any = None,
     knowledge_store: Any = None,
     inner_state_updater: Any = None,
+    favorability_service: Any = None,
     disable_network_hooks: bool = False,
     batched_events: List[Dict[str, Any]] | None = None,
     repeat_clusters: List[Dict[str, Any]] | None = None,
@@ -487,6 +489,8 @@ async def process_yaml_response_logic(
     lite_tool_caller = lite_tool_caller or agent_tool_caller
     lite_call_ai_api = lite_call_ai_api or call_ai_api
     review_call_ai_api = review_call_ai_api or lite_call_ai_api or call_ai_api
+    planner_message_target = normalize_message_target_for_plan(message_target)
+    review_message_target = normalize_message_target_for_review(message_target)
 
     def _has_newer_batch_now() -> bool:
         return bool(has_newer_batch or _batch_ref_has_newer_messages(batch_runtime_ref))
@@ -715,7 +719,7 @@ async def process_yaml_response_logic(
                 is_random_chat=is_random_chat,
                 is_direct_mention=is_direct_mention,
                 has_images=bool(last_images),
-                message_target=str(message_target or ""),
+                message_target=planner_message_target,
                 tool_caller=lite_tool_caller,
                 fallback_tool_caller=agent_tool_caller,
                 recent_context=recent_context_hint,
@@ -778,7 +782,7 @@ async def process_yaml_response_logic(
             turn_plan = turn_plan_from_semantic_frame(
                 semantic_frame,
                 has_images=bool(last_images),
-                message_target=str(message_target or ""),
+                message_target=planner_message_target,
             )
             attach_turn_plan_to_semantic_frame(semantic_frame, turn_plan)
             if semantic_fallback_reason:
@@ -806,7 +810,7 @@ async def process_yaml_response_logic(
                     is_random_chat=is_random_chat,
                     is_direct_mention=is_direct_mention,
                     has_images=bool(last_images),
-                    message_target=str(message_target or ""),
+                    message_target=planner_message_target,
                     tool_caller=lite_tool_caller,
                     fallback_tool_caller=agent_tool_caller,
                     recent_context=recent_context_hint,
@@ -870,7 +874,7 @@ async def process_yaml_response_logic(
         is_private=is_private_session,
         is_direct_mention=is_direct_mention,
         is_random_chat=is_random_chat,
-        message_target=str(message_target or ""),
+        message_target=review_message_target,
         solo_speaker_follow=solo_speaker_follow,
     )
     if arbitration == "no_reply":
@@ -1868,6 +1872,24 @@ async def process_yaml_response_logic(
         )
     except Exception as e:
         logger.debug(f"[emotion] YAML update after reply failed: {e}")
+    try:
+        if favorability_service is not None and hasattr(favorability_service, "apply_user_reply_interaction"):
+            result = favorability_service.apply_user_reply_interaction(
+                user_id,
+                now=get_current_time(),
+                group_id="" if is_private_session else group_id,
+                is_direct=bool(is_direct_mention or not is_random_chat),
+                is_random_chat=bool(is_random_chat),
+            )
+            delta = float(result.get("delta", 0.0) or 0.0)
+            if delta > 0:
+                logger.debug(
+                    f"拟人插件 (YAML)：记录与 {user_name}({user_id}) 的成功回复互动，好感度 +{delta:.2f} "
+                    f"(今日已加: {float(result.get('daily_used', 0.0) or 0.0):.2f}/"
+                    f"{float(result.get('daily_cap', 0.0) or 0.0):.2f})"
+                )
+    except Exception as exc:
+        logger.debug(f"拟人插件 (YAML)：记录成功回复互动好感事件失败: {exc}")
     schedule_inner_state_update_after_reply(
         inner_state_updater=inner_state_updater,
         logger=logger,
@@ -1971,6 +1993,7 @@ def build_yaml_response_processor(
     memory_curator: Any = None,
     knowledge_store: Any = None,
     inner_state_updater: Any = None,
+    favorability_service: Any = None,
 ) -> Callable[..., Awaitable[None]]:
     async def _processor(
         bot: Any,
@@ -2041,6 +2064,7 @@ def build_yaml_response_processor(
             memory_curator=runtime_overrides.get("memory_curator", memory_curator),
             knowledge_store=runtime_overrides.get("knowledge_store", knowledge_store),
             inner_state_updater=runtime_overrides.get("inner_state_updater", inner_state_updater),
+            favorability_service=runtime_overrides.get("favorability_service", favorability_service),
             disable_network_hooks=bool(runtime_overrides.get("disable_network_hooks", False)),
             batched_events=list(runtime_overrides.get("batched_events") or []),
             repeat_clusters=list(runtime_overrides.get("repeat_clusters") or []),

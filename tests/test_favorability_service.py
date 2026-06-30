@@ -123,6 +123,30 @@ def test_positive_events_update_legacy_counters_and_daily_caps(monkeypatch) -> N
     assert group_profile["daily_positive_count"] == 0.1
 
 
+def test_reply_interaction_event_uses_shared_daily_positive_cap(monkeypatch) -> None:  # noqa: ANN001
+    store = _FakeStore()
+    monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    service = favorability.FavorabilityService(
+        plugin_config=_config(
+            personification_favorability_default_score=20.0,
+            personification_favorability_daily_positive_cap=0.05,
+        )
+    )
+    now = datetime(2026, 6, 24, 8, 0, tzinfo=timezone.utc)
+
+    first = service.apply_user_reply_interaction("10001", now=now, group_id="200", is_direct=True)
+    second = service.apply_user_reply_interaction("10001", now=now, group_id="200", is_random_chat=True)
+    profile = service.get_user_data("10001")
+
+    assert first["delta"] == 0.03
+    assert second["delta"] == 0.02
+    assert second["status"] == "applied"
+    assert profile["favorability"] == 20.05
+    assert profile["daily_positive_count"] == 0.05
+    assert profile["favorability_events"][-1]["type"] == "user_reply_interaction"
+    assert profile["favorability_events"][-1]["metadata"]["is_random_chat"] is True
+
+
 def test_negative_event_blacklist_clamps_by_daily_cap(monkeypatch) -> None:  # noqa: ANN001
     store = _FakeStore()
     monkeypatch.setattr(favorability, "get_data_store", lambda: store)

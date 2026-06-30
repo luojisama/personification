@@ -6,6 +6,7 @@ from typing import Any
 _EVENT_LABELS: dict[str, str] = {
     "group_good_atmosphere": "群聊氛围良好",
     "user_interesting_chat": "有趣互动",
+    "user_reply_interaction": "回复互动",
     "user_perm_blacklist": "加入永久黑名单",
     "user_perm_blacklist_removed": "移出永久黑名单",
     "manual_adjust": "管理员手动调整",

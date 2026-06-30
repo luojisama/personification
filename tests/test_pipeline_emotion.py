@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from ._loader import load_personification_module
 
 pipeline_emotion = load_personification_module("plugin.personification.handlers.reply_pipeline.pipeline_emotion")
+target_inference = load_personification_module("plugin.personification.core.target_inference")
 
 
 class _SleepingToolCaller:
@@ -152,6 +153,26 @@ def test_turn_plan_timeout_uses_metadata_fallback(monkeypatch) -> None:  # noqa:
     assert plan.reply_action == "reply"
     assert plan.output_mode == "chat_short"
     assert getattr(plan, "fallback_reason", "") == "turn_plan_timeout"
+
+
+def test_turn_plan_metadata_fallback_accepts_structural_bot_target() -> None:
+    async def _run():
+        return await pipeline_emotion.plan_turn_with_timeout(
+            "接着问一句",
+            plugin_config=SimpleNamespace(),
+            is_group=True,
+            is_random_chat=True,
+            is_direct_mention=False,
+            message_target=target_inference.TARGET_BOT,
+            tool_caller=None,
+            metric_mode="test",
+        )
+
+    plan, _elapsed_ms, fallback_reason, _timeout_s, source = asyncio.run(_run())
+    assert fallback_reason == "turn_plan_no_caller"
+    assert source == "metadata"
+    assert plan.reply_action == "reply"
+    assert plan.message_target == "bot"
 
 
 def test_turn_plan_timeout_tries_secondary_llm_before_metadata(monkeypatch) -> None:  # noqa: ANN001

@@ -31,6 +31,7 @@ from ...core.response_review import (
     arbitrate_reply_mode,
     extract_recent_bot_reply_texts,
 )
+from ...core.target_inference import normalize_message_target_for_plan, normalize_message_target_for_review
 from .pipeline_context import batch_has_newer_messages
 
 _EMOTIONAL_SUPPORT_HINT = load_prompt("emotional_support_hint")
@@ -232,6 +233,7 @@ async def plan_turn_with_timeout(
 ) -> tuple[Any, float, str, float, str]:
     timeout_s = semantic_frame_timeout_seconds(plugin_config)
     started_at = time.monotonic()
+    planner_message_target = normalize_message_target_for_plan(message_target)
     primary_caller, secondary_caller = _effective_callers(tool_caller, fallback_tool_caller)
     if primary_caller is None:
         turn_plan = metadata_fallback_turn_plan(
@@ -239,7 +241,7 @@ async def plan_turn_with_timeout(
             is_random_chat=is_random_chat,
             is_direct_mention=is_direct_mention,
             has_images=has_images,
-            message_target=message_target,
+            message_target=planner_message_target,
             qzone_event_type=qzone_event_type,
         )
         _mark_fallback_reason(turn_plan, "turn_plan_no_caller")
@@ -254,7 +256,7 @@ async def plan_turn_with_timeout(
                     is_random_chat=is_random_chat,
                     is_direct_mention=is_direct_mention,
                     has_images=has_images,
-                    message_target=message_target,
+                    message_target=planner_message_target,
                     qzone_event_type=qzone_event_type,
                     tool_caller=caller,
                     recent_context=recent_context,
@@ -296,7 +298,7 @@ async def plan_turn_with_timeout(
         is_random_chat=is_random_chat,
         is_direct_mention=is_direct_mention,
         has_images=has_images,
-        message_target=message_target,
+        message_target=planner_message_target,
         qzone_event_type=qzone_event_type,
     )
     _mark_fallback_reason(turn_plan, fallback_reason)
@@ -493,7 +495,7 @@ async def prepare_reply_semantics(
         turn_plan = turn_plan_from_semantic_frame(
             semantic_frame,
             has_images=has_images,
-            message_target=message_target,
+            message_target=normalize_message_target_for_plan(message_target),
         )
         attach_turn_plan_to_semantic_frame(semantic_frame, turn_plan)
         if semantic_fallback_reason:
@@ -581,7 +583,7 @@ async def prepare_reply_semantics(
         is_private=is_private_session,
         is_direct_mention=is_direct_mention,
         is_random_chat=is_random_chat,
-        message_target=str(message_target or ""),
+        message_target=normalize_message_target_for_review(message_target),
         solo_speaker_follow=solo_speaker_follow,
     )
     emotion_block = compose_reply_emotion_block(
@@ -615,7 +617,7 @@ def should_speak_in_random_chat(
         return False
     if solo_speaker_follow:
         return True
-    if str(message_target or "").strip() == "bot":
+    if normalize_message_target_for_review(message_target) == "bot":
         return True
     return True
 

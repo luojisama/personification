@@ -219,10 +219,6 @@ async def personification_rule(
         else:
             state.pop("solo_speaker_follow", None)
 
-        if message_target == TARGET_OTHERS and not solo_speaker_follow:
-            state["is_random_chat"] = False
-            return False
-
         if group_chat_active_state:
             last_user_id = str(group_chat_active_state.get("last_user_id", "") or "").strip()
             topic = str(group_chat_active_state.get("topic", "") or "").strip()
@@ -231,9 +227,11 @@ async def personification_rule(
             current_prob = float(max(0.0, min(1.0, group_chat_follow_probability)))
 
             if same_user:
-                current_prob = max(current_prob, 0.92)
+                current_prob = max(current_prob, 0.95)
             elif related_topic:
-                current_prob = max(current_prob, 0.78)
+                current_prob = max(current_prob, 0.84)
+            elif message_target == TARGET_OTHERS:
+                current_prob = 0.0
             else:
                 current_prob *= 0.35
 
@@ -242,10 +240,16 @@ async def personification_rule(
                 state["active_followup"] = group_chat_active_state
                 return True
 
+        if message_target == TARGET_OTHERS and not solo_speaker_follow:
+            state["is_random_chat"] = False
+            return False
+
         if solo_speaker_follow:
-            current_prob = min(1.0, max(probability * 1.45, 0.72))
+            current_prob = min(1.0, max(probability * 1.65, 0.78))
             if msg_len <= 4:
-                current_prob = max(current_prob, 0.68)
+                current_prob = max(current_prob, 0.70)
+            elif msg_len >= 18:
+                current_prob = max(current_prob, 0.84)
             if random.random() < current_prob:
                 state["is_random_chat"] = True
                 return True
@@ -253,13 +257,13 @@ async def personification_rule(
         is_unsuitable_time = not is_rest_time(allow_unsuitable_prob=0.0)
         current_prob = probability * (0.55 if is_unsuitable_time else 1.0)
         if message_target == TARGET_BOT:
-            current_prob = max(current_prob, probability)
+            current_prob = max(current_prob, min(1.0, max(probability * 1.8, 0.60)))
         if msg_len <= 1:
             current_prob *= 0.5
         elif msg_len <= 4:
             current_prob *= 0.8
         elif msg_len >= 24:
-            current_prob *= 1.1
+            current_prob *= 1.2
         if idle_active_state:
             topic = str(idle_active_state.get("topic", "") or "").strip()
             if topic and _topic_related(plain_text, topic):
