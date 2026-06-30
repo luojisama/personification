@@ -265,6 +265,15 @@ EXTRA_CONFIG_SPECS: tuple[dict[str, Any], ...] = (
        "表情包视觉打标使用的模型名；留空复用主模型，填写后仅覆盖表情包/视觉打标角色。", group="表情包", advanced=True),
     _s("personification_labeler_concurrency", "int", 3, "打标并发数",
        "批量打标时的并发请求数。", group="表情包", min=1, advanced=True),
+    _s("personification_sticker_labeler_research_enabled", "bool", True, "打标联网增强",
+       "表情包视觉打标后，允许模型按 OCR/视觉初稿规划少量检索词，联网查角色、梗或出处，再复核标签。",
+       group="表情包", advanced=True, aliases=("表情包联网打标", "打标多步推理")),
+    _s("personification_sticker_labeler_research_max_queries", "int", 2, "打标检索词上限",
+       "单张表情包打标时最多执行多少个联网检索词；模型认为不需要查证时可为 0。",
+       group="表情包", min=0, max=4, advanced=True),
+    _s("personification_sticker_labeler_research_timeout", "float", 12.0, "打标联网超时",
+       "单个表情包打标联网增强的总等待秒数；超时后保留原视觉打标结果。",
+       group="表情包", min=1, max=60, advanced=True),
 
     # ──────────── TTS 语音（补充） ────────────
     _s("personification_tts_enabled", "bool", False, "TTS 启用",

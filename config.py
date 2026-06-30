@@ -218,6 +218,9 @@ class Config(BaseModel):
     personification_labeler_api_key: str = ""
     personification_labeler_model: str = ""
     personification_labeler_concurrency: int = 3
+    personification_sticker_labeler_research_enabled: bool = True
+    personification_sticker_labeler_research_max_queries: int = 2
+    personification_sticker_labeler_research_timeout: float = 12.0
     personification_fallback_enabled: bool = True
     personification_fallback_api_type: str = ""
     personification_fallback_api_url: str = ""

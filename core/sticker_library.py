@@ -9,6 +9,7 @@ import mimetypes
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -80,6 +81,29 @@ decision 四选一：
 
 tag_correction 仅在一次标注有误时更正 mood_tags 和 scene_tags，否则填空数组。
 reason 20字内中文。"""
+
+STICKER_RESEARCH_QUERY_PROMPT = """你是表情包打标检索规划器。根据视觉初稿判断是否需要联网查证角色、作品、梗出处或图中文字含义。
+只输出 JSON，不要 markdown。
+
+{
+  "queries": ["检索词1", "检索词2"],
+  "reason": "为什么需要或不需要联网"
+}
+
+要求：
+1. 只有出现可识别角色名、作品名、梗句、截图文字、网络流行梗或不确定出处时才给 queries。
+2. 普通表情、无明确文字、纯表情动作、无法识别主体时返回空数组。
+3. 每个 query 必须短而具体，优先中文；最多 2 个。
+4. 不要编造角色名或出处。"""
+
+STICKER_RESEARCH_REFINE_PROMPT = STICKER_VISION_PROMPT + """
+
+额外上下文：下面会给出第一轮视觉初稿和联网检索摘要。请重新检查图片语义、OCR、角色/作品/梗信息，输出最终 JSON。
+约束：
+1. 联网资料只用于消除角色、作品、梗句或出处的不确定性；不要把搜索结果里无关内容塞进描述。
+2. 如果联网资料与图片不匹配，优先相信图片和 OCR，并在 use_hint/avoid_hint 上保持保守。
+3. description/use_hint/avoid_hint 要面向“什么时候适合发这张表情包”，不是写百科介绍。
+4. 仍然只能返回 JSON 对象。"""
 
 
 @dataclass(frozen=True)
@@ -407,6 +431,207 @@ def normalize_sticker_vision_result(raw: Any, *, vision_route: str = "", meme_po
     return result
 
 
+def _sticker_labeler_research_enabled(runtime: Any) -> bool:
+    cfg = getattr(runtime, "plugin_config", None)
+    return bool(getattr(cfg, "personification_sticker_labeler_research_enabled", True))
+
+
+def _sticker_labeler_research_max_queries(runtime: Any) -> int:
+    cfg = getattr(runtime, "plugin_config", None)
+    try:
+        value = int(getattr(cfg, "personification_sticker_labeler_research_max_queries", 2) or 0)
+    except (TypeError, ValueError):
+        value = 2
+    return max(0, min(4, value))
+
+
+def _sticker_labeler_research_timeout(runtime: Any) -> float:
+    cfg = getattr(runtime, "plugin_config", None)
+    try:
+        value = float(getattr(cfg, "personification_sticker_labeler_research_timeout", 12.0) or 12.0)
+    except (TypeError, ValueError):
+        value = 12.0
+    return max(1.0, min(60.0, value))
+
+
+def _parse_sticker_research_queries(raw: Any, *, limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+    payload = _parse_json_payload(raw)
+    queries_raw = payload.get("queries") if isinstance(payload, dict) else []
+    if not isinstance(queries_raw, list):
+        return []
+    queries: list[str] = []
+    seen: set[str] = set()
+    for item in queries_raw:
+        query = re.sub(r"\s+", " ", str(item or "")).strip()
+        if not query or len(query) > 80:
+            continue
+        lowered = query.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        queries.append(query)
+        if len(queries) >= limit:
+            break
+    return queries
+
+
+def _fallback_sticker_research_queries(result: StickerVisionResult, *, limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+    seeds: list[str] = []
+    ocr_text = re.sub(r"\s+", " ", result.ocr_text).strip()
+    if 2 <= len(ocr_text) <= 40:
+        seeds.append(f"{ocr_text} 表情包 梗")
+    if result.style == "meme" and result.summary:
+        seeds.append(f"{result.summary[:30]} 表情包")
+    out: list[str] = []
+    seen: set[str] = set()
+    for seed in seeds:
+        key = seed.lower()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(seed)
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def _plan_sticker_research_queries(
+    *,
+    runtime: Any,
+    result: StickerVisionResult,
+    limit: int,
+) -> list[str]:
+    if limit <= 0:
+        return []
+    caller = getattr(runtime, "lite_call_ai_api", None) or getattr(runtime, "call_ai_api", None)
+    if caller is None:
+        return _fallback_sticker_research_queries(result, limit=limit)
+    payload = {
+        "summary": result.summary,
+        "description": result.description,
+        "ocr_text": result.ocr_text,
+        "style": result.style,
+        "mood_tags": result.mood_tags,
+        "scene_tags": result.scene_tags,
+        "use_hint": result.use_hint,
+        "avoid_hint": result.avoid_hint,
+    }
+    messages = [
+        {"role": "system", "content": STICKER_RESEARCH_QUERY_PROMPT},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    try:
+        raw = await caller(messages, max_tokens=240, temperature=0.1, use_builtin_search=False)
+    except TypeError:
+        try:
+            raw = await caller(messages)
+        except Exception:
+            return _fallback_sticker_research_queries(result, limit=limit)
+    except Exception:
+        return _fallback_sticker_research_queries(result, limit=limit)
+    payload = _parse_json_payload(raw)
+    if isinstance(payload.get("queries"), list):
+        return _parse_sticker_research_queries(payload, limit=limit)
+    return _fallback_sticker_research_queries(result, limit=limit)
+
+
+async def _run_sticker_research(
+    *,
+    runtime: Any,
+    queries: list[str],
+    timeout_s: float,
+) -> str:
+    if not queries:
+        return ""
+    from .web_grounding import do_web_search
+
+    logger = getattr(runtime, "logger", None)
+
+    def _now() -> Any:
+        getter = getattr(runtime, "get_current_time", None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception:
+                pass
+        return datetime.now()
+
+    async def _search_one(query: str) -> str:
+        try:
+            return await do_web_search(
+                query,
+                context_hint="表情包打标：只查角色、作品、梗出处或图中文字含义",
+                get_now=_now,
+                logger=logger,
+            )
+        except Exception:
+            return ""
+
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*[_search_one(query) for query in queries], return_exceptions=True),
+            timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        return ""
+    parts: list[str] = []
+    for query, raw in zip(queries, results):
+        text = "" if isinstance(raw, BaseException) else str(raw or "").strip()
+        if text:
+            parts.append(f"### query: {query}\n{text[:1800]}")
+    return "\n\n".join(parts).strip()
+
+
+async def _refine_sticker_with_research(
+    *,
+    runtime: Any,
+    image_refs: Sequence[str],
+    initial: StickerVisionResult,
+    research_context: str,
+    fallback_vision_caller: Any = None,
+    meme_policy: str,
+) -> StickerVisionResult:
+    if not research_context:
+        return initial
+    initial_payload = {
+        "summary": initial.summary,
+        "description": initial.description,
+        "ocr_text": initial.ocr_text,
+        "use_hint": initial.use_hint,
+        "avoid_hint": initial.avoid_hint,
+        "mood_tags": initial.mood_tags,
+        "scene_tags": initial.scene_tags,
+        "proactive_send": initial.proactive_send,
+        "should_collect": initial.should_collect,
+        "collect_confidence": initial.collect_confidence,
+        "collect_reason": initial.collect_reason,
+        "is_sticker": initial.is_sticker,
+        "style": initial.style,
+    }
+    prompt = (
+        STICKER_RESEARCH_REFINE_PROMPT
+        + "\n\n【第一轮视觉初稿】\n"
+        + json.dumps(initial_payload, ensure_ascii=False)
+        + "\n\n【联网检索摘要】\n"
+        + research_context[:3600]
+    )
+    try:
+        raw, route = await analyze_images_with_route_or_fallback(
+            runtime=runtime,
+            prompt=prompt,
+            image_refs=image_refs,
+            fallback_vision_caller=fallback_vision_caller,
+        )
+    except Exception:
+        return initial
+    refined = normalize_sticker_vision_result(raw, vision_route=route, meme_policy=meme_policy)
+    route_suffix = f"{refined.vision_route}+web_research" if refined.vision_route else "web_research"
+    return dataclasses.replace(refined, vision_route=route_suffix)
+
+
 async def analyze_sticker_image(
     *,
     runtime: Any,
@@ -421,7 +646,35 @@ async def analyze_sticker_image(
         image_refs=image_refs,
         fallback_vision_caller=fallback_vision_caller,
     )
-    return normalize_sticker_vision_result(raw, vision_route=route, meme_policy=meme_policy)
+    initial = normalize_sticker_vision_result(raw, vision_route=route, meme_policy=meme_policy)
+    if not _sticker_labeler_research_enabled(runtime):
+        return initial
+    timeout_s = _sticker_labeler_research_timeout(runtime)
+
+    async def _research_and_refine() -> StickerVisionResult:
+        queries = await _plan_sticker_research_queries(
+            runtime=runtime,
+            result=initial,
+            limit=_sticker_labeler_research_max_queries(runtime),
+        )
+        research_context = await _run_sticker_research(
+            runtime=runtime,
+            queries=queries,
+            timeout_s=timeout_s,
+        )
+        return await _refine_sticker_with_research(
+            runtime=runtime,
+            image_refs=image_refs,
+            initial=initial,
+            research_context=research_context,
+            fallback_vision_caller=fallback_vision_caller,
+            meme_policy=meme_policy,
+        )
+
+    try:
+        return await asyncio.wait_for(_research_and_refine(), timeout=timeout_s + 2.0)
+    except Exception:
+        return initial
 
 
 def recall_similar_stickers(
@@ -583,6 +836,8 @@ __all__ = [
     "STICKER_SCHEMA_VERSION",
     "STICKER_VISION_PROMPT",
     "STICKER_SECOND_JUDGE_PROMPT",
+    "STICKER_RESEARCH_QUERY_PROMPT",
+    "STICKER_RESEARCH_REFINE_PROMPT",
     "SUPPORTED_STICKER_SUFFIXES",
     "StickerVisionResult",
     "analyze_sticker_image",
