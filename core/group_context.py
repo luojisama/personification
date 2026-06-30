@@ -266,6 +266,7 @@ def render_group_context_structured(messages: list[dict[str, Any]], trigger_msg_
         source_map = {
             "bot_reply": "拟人回复",
             "plugin": "其他插件输出",
+            "plugin_command": "用户调用其它插件/命令",
             "system": "系统消息",
             "bot": "机器人消息",
             "mface": "表情包",

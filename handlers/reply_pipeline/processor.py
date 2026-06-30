@@ -77,7 +77,12 @@ from ...core.sticker_feedback import (
 )
 from ...core.web_grounding import extract_forward_message_content
 from ...utils import build_group_context_window, get_recent_group_msgs
-from ..event_rules import _extract_recordable_group_message, split_segment_if_long
+from ..event_rules import (
+    _extract_recordable_group_message,
+    _looks_like_plugin_command_interaction,
+    _render_plugin_command_interaction,
+    split_segment_if_long,
+)
 from .pipeline_context import (
     batch_has_newer_messages as _batch_has_newer_messages,
     build_base_system_prompt as _build_base_system_prompt,
@@ -162,8 +167,10 @@ def _record_muted_group_message(
     if bool(getattr(event, "_personification_muted_recorded", False)):
         return
     raw_msg, image_count, visual_summary = _extract_recordable_group_message(event)
-    if not raw_msg or raw_msg.startswith("/") or len(raw_msg) >= 500:
+    if not raw_msg or len(raw_msg) >= 500:
         return
+    is_command_interaction = _looks_like_plugin_command_interaction(raw_msg)
+    record_content = _render_plugin_command_interaction(raw_msg) if is_command_interaction else raw_msg
     user_id = str(getattr(event, "user_id", "") or "")
     sender = getattr(event, "sender", None)
     nickname = (
@@ -176,10 +183,15 @@ def _record_muted_group_message(
         nickname = custom_title
     from ...core.message_relations import build_event_relation_metadata
 
+    source_kind = (
+        "plugin"
+        if bot_self_id and user_id == bot_self_id
+        else ("plugin_command" if is_command_interaction else "user")
+    )
     runtime.record_group_msg(
         str(getattr(event, "group_id", "") or ""),
         str(nickname or user_id),
-        raw_msg,
+        record_content,
         is_bot=bool(bot_self_id and user_id == bot_self_id),
         user_id=user_id,
         sender_role=extract_sender_role(event),
@@ -188,7 +200,7 @@ def _record_muted_group_message(
         **build_event_relation_metadata(
             event,
             bot_self_id=bot_self_id,
-            source_kind="plugin" if bot_self_id and user_id == bot_self_id else "user",
+            source_kind=source_kind,
         ),
     )
     try:

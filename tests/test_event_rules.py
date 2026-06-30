@@ -134,3 +134,22 @@ def test_reply_to_bot_target_gets_structural_probability_boost(monkeypatch) -> N
     assert result is True
     assert state["is_random_chat"] is True
     assert state["message_target"] == target_inference.TARGET_BOT
+
+
+def test_group_plugin_command_is_record_only_not_random_reply(monkeypatch) -> None:  # noqa: ANN001
+    event = _GroupEvent("/天气 北京")
+    state: dict = {}
+
+    monkeypatch.setattr(event_rules.random, "random", lambda: 0.0)
+
+    result = asyncio.run(
+        event_rules.personification_rule(
+            event,
+            state,
+            **_base_kwargs(probability=1.0),
+        )
+    )
+
+    assert result is False
+    assert state["is_random_chat"] is False
+    assert state["message_target"] == target_inference.TARGET_OTHERS

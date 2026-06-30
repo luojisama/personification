@@ -99,7 +99,15 @@ def _load_messages_since(
             source_kind = str(metadata.get("source_kind", "") or "").strip().lower()
             if role in {"assistant", "bot", "system"}:
                 continue
-            if bool(metadata.get("is_bot")) or source_kind in {"bot", "bot_reply", "plugin", "system", "self_log", "self_reply"}:
+            if bool(metadata.get("is_bot")) or source_kind in {
+                "bot",
+                "bot_reply",
+                "plugin",
+                "plugin_command",
+                "system",
+                "self_log",
+                "self_reply",
+            }:
                 continue
             text = ""
             if isinstance(content, list):

@@ -83,6 +83,37 @@ def test_record_message_marks_same_bot_generic_output_as_plugin_source() -> None
     assert captured["kwargs"]["source_kind"] == "plugin"
 
 
+def test_record_user_plugin_command_as_context_only_source() -> None:
+    captured: dict[str, object] = {}
+
+    def _record_group_msg(*args, **kwargs):  # noqa: ANN001
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return 250
+
+    event = SimpleNamespace(
+        group_id="123",
+        user_id="10001",
+        self_id="bot-1",
+        sender=SimpleNamespace(card="甲", nickname="甲"),
+        message_id="msg-cmd",
+        message=None,
+        reply=None,
+        get_plaintext=lambda: "/天气 北京",
+    )
+
+    group_id, should_analyze = event_rules.resolve_record_message(
+        event,
+        get_custom_title=lambda _uid: "",
+        record_group_msg=_record_group_msg,
+    )
+
+    assert group_id == "123"
+    assert should_analyze is False
+    assert captured["args"][2] == "[用户调用其它插件/命令] /天气 北京"
+    assert captured["kwargs"]["source_kind"] == "plugin_command"
+
+
 def test_group_context_renders_plugin_source() -> None:
     text = group_context.render_group_context_structured(
         [
@@ -97,6 +128,22 @@ def test_group_context_renders_plugin_source() -> None:
     )
 
     assert "来源=其他插件输出" in text
+
+
+def test_group_context_renders_plugin_command_source() -> None:
+    text = group_context.render_group_context_structured(
+        [
+            {
+                "nickname": "甲",
+                "user_id": "10001",
+                "content": "[用户调用其它插件/命令] /天气 北京",
+                "source_kind": "plugin_command",
+                "message_id": "m1",
+            }
+        ]
+    )
+
+    assert "来源=用户调用其它插件/命令" in text
 
 
 def test_group_conversation_context_tracks_quote_chain_and_bot_replies() -> None:

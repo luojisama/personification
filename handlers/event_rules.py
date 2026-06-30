@@ -192,6 +192,10 @@ async def personification_rule(
             return True
 
         plain_text = str(event.get_plaintext() or "").strip()
+        if _looks_like_plugin_command_interaction(plain_text):
+            state["is_random_chat"] = False
+            state["message_target"] = TARGET_OTHERS
+            return False
         msg_len = len(plain_text)
         if get_recent_group_msgs is not None:
             try:
@@ -373,6 +377,16 @@ def _extract_recordable_group_message(event: Any) -> tuple[str, int, str]:
     return content, image_count, visual_summary
 
 
+def _looks_like_plugin_command_interaction(text: str) -> bool:
+    """Structural command marker used only to label/skip command interactions."""
+    return str(text or "").lstrip().startswith("/")
+
+
+def _render_plugin_command_interaction(text: str) -> str:
+    command = re.sub(r"\s+", " ", str(text or "")).strip()[:180]
+    return f"[用户调用其它插件/命令] {command}" if command else "[用户调用其它插件/命令]"
+
+
 def resolve_record_message(
     event: Any,
     *,
@@ -387,8 +401,10 @@ def resolve_record_message(
         return None, False
 
     raw_msg, image_count, visual_summary = _extract_recordable_group_message(event)
-    if not raw_msg or raw_msg.startswith("/") or len(raw_msg) >= 500:
+    if not raw_msg or len(raw_msg) >= 500:
         return None, False
+    is_command_interaction = _looks_like_plugin_command_interaction(raw_msg)
+    record_content = _render_plugin_command_interaction(raw_msg) if is_command_interaction else raw_msg
 
     group_id = str(event.group_id)
     user_id = str(event.user_id)
@@ -405,15 +421,16 @@ def resolve_record_message(
         nickname = custom_title
 
     is_bot_message = bool(self_id) and user_id == self_id
+    source_kind = "plugin" if is_bot_message else ("plugin_command" if is_command_interaction else "user")
     relation_metadata = build_event_relation_metadata(
         event,
         bot_self_id=self_id,
-        source_kind="plugin" if is_bot_message else "user",
+        source_kind=source_kind,
     )
     count = record_group_msg(
         group_id,
         nickname,
-        raw_msg,
+        record_content,
         is_bot=is_bot_message,
         user_id=user_id,
         sender_role=extract_sender_role(event),
@@ -421,6 +438,8 @@ def resolve_record_message(
         visual_summary=visual_summary,
         **relation_metadata,
     )
+    if source_kind != "user":
+        return group_id, False
     if should_trigger_auto_analyze is None:
         return group_id, count >= 200
     return group_id, bool(should_trigger_auto_analyze(group_id, count))
