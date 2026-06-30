@@ -8,6 +8,7 @@ from ..utils import build_group_context_window, get_group_topic_summary
 from .chat_intent import infer_turn_semantic_frame_with_llm
 from .context_policy import sanitize_history_text
 from .group_context import render_group_context_structured
+from .group_member_aliases import render_group_alias_context
 from .group_relations import summarize_group_relationships
 from .message_relations import extract_event_message_id, extract_reply_message_id
 from .prompt_hooks import HookContext, register_prompt_hook
@@ -268,6 +269,34 @@ async def _group_relationship_hook(ctx: HookContext) -> Optional[str]:
         bot_self_id=str(getattr(ctx.bot, "self_id", "") or ""),
     )
     return summary or None
+
+
+async def _group_member_alias_hook(ctx: HookContext) -> Optional[str]:
+    if ctx.is_private:
+        return None
+    recent = build_group_context_window(ctx.group_id, limit=30)
+    known_names: dict[str, list[str]] = {}
+    for msg in recent:
+        if not isinstance(msg, dict):
+            continue
+        uid = str(msg.get("user_id", "") or "").strip()
+        nickname = str(
+            msg.get("nickname")
+            or msg.get("speaker")
+            or msg.get("user_name")
+            or msg.get("role")
+            or ""
+        ).strip()
+        if uid and nickname:
+            known_names.setdefault(uid, [])
+            if nickname not in known_names[uid]:
+                known_names[uid].append(nickname)
+    return render_group_alias_context(
+        ctx.group_id,
+        user_id=ctx.user_id,
+        known_names=known_names,
+        limit=20,
+    ) or None
 
 
 async def _web_search_hook(ctx: HookContext) -> Optional[str]:
@@ -544,6 +573,7 @@ def register_all_builtin_hooks() -> None:
     register_prompt_hook("group_anti_loop", _group_anti_loop_hook, priority=41, phase="system_context")
     register_prompt_hook("user_persona", _user_persona_hook, priority=20, phase="system_context")
     register_prompt_hook("private_memory_recall", _private_memory_recall_hook, priority=21, phase="system_context")
+    register_prompt_hook("group_member_alias", _group_member_alias_hook, priority=24, phase="system_context")
     register_prompt_hook("group_style", _group_style_hook, priority=25, phase="system_context")
     register_prompt_hook("recent_group_context", _recent_group_context_hook, priority=26, phase="system_context")
     register_prompt_hook("group_relationship", _group_relationship_hook, priority=27, phase="system_context")

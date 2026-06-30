@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,6 +39,28 @@ def _runtime_with_data(tmp_path: Path, monkeypatch):
     store.initialize()
     store.upsert_core_profile(user_id="u_alpha", profile_text="全局画像 Alpha")
     store.upsert_local_profile(group_id="g1", user_id="u_alpha", profile_text="g1 中是常驻成员")
+
+    utils = load_personification_module("plugin.personification.utils")
+    utils.init_utils_config(cfg)
+    now_ts = time.time()
+    utils.record_group_msg(
+        "g1",
+        "Alpha",
+        "这条先留个上下文",
+        user_id="u_alpha",
+        message_id="m-alpha",
+        time=now_ts - 20,
+    )
+    utils.record_group_msg(
+        "g1",
+        "Beta",
+        "回复 Alpha 的话",
+        user_id="u_beta",
+        message_id="m-beta",
+        reply_to_msg_id="m-alpha",
+        reply_to_user_id="u_alpha",
+        time=now_ts - 10,
+    )
 
     profile_service_mod = load_personification_module("plugin.personification.core.profile_service")
     profile_service = profile_service_mod.ProfileService(memory_store=store)
@@ -121,6 +144,9 @@ def _login(client) -> None:
         json={"qq": "10001", "code": code, "device_label": "测试"},
     )
     assert res2.status_code == 200, res2.text
+    csrf = client.cookies.get("personification_webui_csrf", "")
+    if csrf:
+        client.headers["X-Personification-CSRF"] = csrf
 
 
 def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
@@ -226,13 +252,43 @@ def test_groups_list_and_detail(_runtime_with_data) -> None:
     body = res.json()
     assert any(group["group_id"] == "g1" for group in body["groups"])
 
+    alias_res = client.put(
+        "/personification/api/groups/g1/aliases/u_alpha",
+        json={"aliases": "阿尔法、alpha哥", "note": "常用外号"},
+    )
+    assert alias_res.status_code == 200, alias_res.text
+    assert alias_res.json()["entry"]["aliases"] == ["阿尔法", "alpha哥"]
+    alias_only_res = client.put(
+        "/personification/api/groups/g1/aliases/u_beta",
+        json={"aliases": ["小贝"]},
+    )
+    assert alias_only_res.status_code == 200, alias_only_res.text
+
     res2 = client.get("/personification/api/groups/g1/personas")
     assert res2.status_code == 200
     detail = res2.json()
     assert any(p["user_id"] == "u_alpha" for p in detail["profiles"])
+    assert any(p["user_id"] == "u_beta" for p in detail["profiles"])
     assert detail["group_favorability"]["score"] == 88.0
     member = next(p for p in detail["profiles"] if p["user_id"] == "u_alpha")
     assert member["favorability"]["score"] == 66.0
+    assert member["aliases"] == ["阿尔法", "alpha哥"]
+    assert member["alias_note"] == "常用外号"
+    assert "Alpha" in member["known_names"]
+    assert "阿尔法" in member["known_names"]
+    assert any(edge["direction"] == "in" and edge["peer_label"] == "Beta" for edge in member["relationship_edges"])
+    beta = next(p for p in detail["profiles"] if p["user_id"] == "u_beta")
+    assert beta["aliases"] == ["小贝"]
+
+    aliases = client.get("/personification/api/groups/g1/aliases")
+    assert aliases.status_code == 200
+    assert {entry["user_id"] for entry in aliases.json()["aliases"]} >= {"u_alpha", "u_beta"}
+
+    alias_mod = load_personification_module("plugin.personification.core.group_member_aliases")
+    block = alias_mod.render_group_alias_context("g1", user_id="u_alpha", known_names={"u_alpha": ["Alpha"]})
+    assert "群成员称呼映射" in block
+    assert "当前说话人：QQ u_alpha" in block
+    assert "阿尔法 / alpha哥" in block
 
     res3 = client.get("/personification/api/groups/g1/style")
     assert res3.status_code == 200

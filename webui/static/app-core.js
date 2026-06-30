@@ -5,7 +5,7 @@ let state = {
   devices: [], pendingDevices: [], trustedDevices: [], devicePending: false, loginRequestId: "", loginPolling: false, alert: null, loading: false, loadingMessage: "",
   dashboard: null, dashboardWindow: "month", dashboardDetail: null,
   personas: [], selectedPersona: null, personaSearch: "",
-  groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [],
+  groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [], groupAliasDrafts: {},
   groupFavorability: null,
   groupSwitches: [], newGroupId: "",
   skills: [], skillFilter: "", skillSummary: null, skillRemoteSources: [], skillMcpTools: [],

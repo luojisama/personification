@@ -1157,6 +1157,7 @@ async function openGroup(gid) {
   try {
     state.selectedGroup = gid;
     state.groupRawChat = null;
+    state.groupAliasDrafts = {};
     const [personas, style, knowledge, memes, agentState] = await Promise.all([
       api("/groups/" + encodeURIComponent(gid) + "/personas"),
       api("/groups/" + encodeURIComponent(gid) + "/style"),
@@ -1173,6 +1174,69 @@ async function openGroup(gid) {
     state.groupAgentState = agentState;
     render();
   } catch (e) { alertFlash("err", e.message); }
+}
+
+function splitAliasInput(raw) {
+  return String(raw || "").split(/[\n,，、;；|/]+/).map(x => x.trim()).filter(Boolean);
+}
+
+function getAliasDraft(uid, p) {
+  const key = String(uid || "");
+  const current = state.groupAliasDrafts && state.groupAliasDrafts[key];
+  if (current) return current;
+  return {
+    aliasesText: (p.aliases || []).join("、"),
+    note: p.alias_note || "",
+  };
+}
+
+function setGroupAliasDraft(uid, field, value) {
+  const key = String(uid || "");
+  state.groupAliasDrafts = state.groupAliasDrafts || {};
+  const current = state.groupAliasDrafts[key] || { aliasesText: "", note: "" };
+  state.groupAliasDrafts[key] = { ...current, [field]: value };
+}
+
+async function refreshGroupDetailLight() {
+  const gid = state.selectedGroup;
+  if (!gid) return;
+  const [personas, agentState] = await Promise.all([
+    api("/groups/" + encodeURIComponent(gid) + "/personas"),
+    api("/groups/" + encodeURIComponent(gid) + "/agent-state").catch(() => state.groupAgentState),
+  ]);
+  state.groupPersonas = personas.profiles || [];
+  state.groupFavorability = personas.group_favorability || state.groupFavorability;
+  state.groupAgentState = agentState;
+}
+
+async function saveGroupMemberAliases(uid) {
+  const gid = state.selectedGroup;
+  if (!gid || !uid) return;
+  const draft = getAliasDraft(uid, {});
+  try {
+    await api("/groups/" + encodeURIComponent(gid) + "/aliases/" + encodeURIComponent(uid), {
+      method: "PUT",
+      headers: {"content-type": "application/json"},
+      body: JSON.stringify({ aliases: splitAliasInput(draft.aliasesText), note: draft.note || "" }),
+    });
+    if (state.groupAliasDrafts) delete state.groupAliasDrafts[String(uid)];
+    await refreshGroupDetailLight();
+    alertFlash("ok", "已保存群成员外号");
+    render();
+  } catch (e) { alertFlash("err", "保存外号失败：" + e.message); }
+}
+
+async function clearGroupMemberAliases(uid) {
+  const gid = state.selectedGroup;
+  if (!gid || !uid) return;
+  if (!confirm("清空该成员在本群的外号映射？")) return;
+  try {
+    await api("/groups/" + encodeURIComponent(gid) + "/aliases/" + encodeURIComponent(uid), { method: "DELETE" });
+    if (state.groupAliasDrafts) delete state.groupAliasDrafts[String(uid)];
+    await refreshGroupDetailLight();
+    alertFlash("ok", "已清空群成员外号");
+    render();
+  } catch (e) { alertFlash("err", "清空外号失败：" + e.message); }
 }
 
 async function rebuildGroupKnowledge() {
@@ -1223,7 +1287,11 @@ function renderGroupAgentState() {
   const edgeBlock = edges.length
     ? `<table style="font-size:12.5px"><thead><tr><th>关系</th><th>类型</th><th>权重</th><th>最近</th></tr></thead><tbody>${
         edges.map(e => `<tr>
-          <td><code>${escapeHtml(e.src)}</code> → <code>${escapeHtml(e.dst)}</code></td>
+          <td>
+            <code>${escapeHtml(e.src)}</code>${e.src_label && e.src_label !== e.src ? ` <span class="muted">${escapeHtml(e.src_label)}</span>` : ''}
+            →
+            <code>${escapeHtml(e.dst)}</code>${e.dst_label && e.dst_label !== e.dst ? ` <span class="muted">${escapeHtml(e.dst_label)}</span>` : ''}
+          </td>
           <td><span class="tag">${escapeHtml(e.kind)}</span></td>
           <td>${Number(e.weight||0).toFixed(2)}</td>
           <td class="muted">${e.last_seen_at ? new Date(e.last_seen_at*1000).toLocaleDateString() : '-'}</td>
@@ -1270,6 +1338,38 @@ function renderGroupKnowledgeCard() {
   </div>`;
 }
 
+function renderMemberAliasEditor(p) {
+  const draft = getAliasDraft(p.user_id, p);
+  const names = (p.known_names || []).filter(Boolean);
+  const nameTags = names.length
+    ? `<div class="member-known-names">${names.slice(0, 6).map(n => `<span class="tag">${escapeHtml(n)}</span>`).join("")}</div>`
+    : '<div class="muted" style="font-size:12px">暂无称呼候选</div>';
+  const hasSaved = (p.aliases || []).length || p.alias_note;
+  return `<div class="member-alias-editor">
+    <div class="member-alias-title">${escapeHtml(p.nickname || names[0] || "") || '<span class="muted">无昵称</span>'}</div>
+    ${nameTags}
+    <input type="text" placeholder="外号，如：老王、车神" value="${escapeAttr(draft.aliasesText || "")}" oninput="setGroupAliasDraft('${escapeAttr(p.user_id)}','aliasesText',this.value)">
+    <input type="text" placeholder="备注（可选）" value="${escapeAttr(draft.note || "")}" oninput="setGroupAliasDraft('${escapeAttr(p.user_id)}','note',this.value)">
+    <div class="member-alias-actions">
+      <button class="btn small primary" onclick="saveGroupMemberAliases('${escapeAttr(p.user_id)}')">保存</button>
+      ${hasSaved ? `<button class="btn small" onclick="clearGroupMemberAliases('${escapeAttr(p.user_id)}')">清空</button>` : ''}
+    </div>
+  </div>`;
+}
+
+function renderMemberRelationDigest(p) {
+  const edges = p.relationship_edges || [];
+  const edgeLines = edges.slice(0, 4).map(e => {
+    const dir = e.direction === 'out' ? '常接' : '常被接';
+    return `<div><span class="tag">${escapeHtml(dir)}</span> ${escapeHtml(e.peer_label || e.peer_user_id || '')} <span class="muted">${escapeHtml(e.kind || '')}/${Number(e.weight||0).toFixed(2)}</span></div>`;
+  }).join("");
+  const profile = p.snippet ? `<div class="member-profile-snippet">${escapeHtml(p.snippet)}</div>` : '<div class="muted">暂无画像摘要</div>';
+  return `<div class="member-relation-digest">
+    ${edgeLines || '<div class="muted">暂无显著关系边</div>'}
+    ${profile}
+  </div>`;
+}
+
 function renderGroupDetail() {
   const gid = state.selectedGroup;
   const rows = state.groupPersonas.map(p => {
@@ -1283,9 +1383,9 @@ function renderGroupDetail() {
     return `<tr>
       <td><img class="avatar" src="https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
       <td><code>${escapeHtml(p.user_id)}</code></td>
-      <td>${escapeHtml(p.nickname || '')}</td>
+      <td>${renderMemberAliasEditor(p)}</td>
       <td>${renderFavorabilityBadge(p.favorability)}</td>
-      <td>${escapeHtml(p.snippet)}</td>
+      <td>${renderMemberRelationDigest(p)}</td>
       <td>${emoCol}</td>
       <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
     </tr>`;
@@ -1297,15 +1397,15 @@ function renderGroupDetail() {
     <td>${escapeHtml((m.aliases||[]).join("、"))}</td>
     <td class="muted" style="font-size:12px">${escapeHtml(m.scope || '')}/${escapeHtml(m.risk_level || '')}/${Number(m.confidence||0).toFixed(2)}</td>
   </tr>`).join("");
-  return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;state.groupRawChat=null;state.groupFavorability=null;state.groupStyleSnapIdx=0;render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
+  return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;state.groupRawChat=null;state.groupFavorability=null;state.groupStyleSnapIdx=0;state.groupAliasDrafts={};render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
     ${renderFavorabilityCard(state.groupFavorability, "群好感度")}
     ${renderGroupAgentState()}
     ${renderGroupStyle(style)}
     ${renderGroupKnowledgeCard()}
     <div class="card"><h2>梗词典 / 概念锚点（${(state.groupMemes||[]).length}）</h2>
       ${memeRows ? `<table><thead><tr><th>词条</th><th>含义</th><th>别名</th><th>范围/风险/置信度</th></tr></thead><tbody>${memeRows}</tbody></table>` : '<p class="muted">暂无匹配词条，公共热梗种子会在首次查询后自动初始化。</p>'}</div>
-    <div class="card"><h2>群内成员画像（${state.groupPersonas.length}）</h2>
-      <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>昵称</th><th>好感度</th><th>摘要</th><th>近期情绪</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">无</td></tr>'}</tbody></table></div>
+    <div class="card"><h2>群内成员理解（${state.groupPersonas.length}）</h2>
+      <table class="group-member-understanding"><thead><tr><th style="width:40px"></th><th>QQ</th><th>称呼 / 外号</th><th>好感度</th><th>关系与画像</th><th>近期情绪</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">无</td></tr>'}</tbody></table></div>
     ${renderGroupRawChat()}`;
 }
 

@@ -9,6 +9,12 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from ...core import webui_audit_log
 from ...core.db import connect_sync
+from ...core.group_member_aliases import (
+    delete_group_member_aliases,
+    list_group_member_aliases,
+    merge_known_names,
+    set_group_member_aliases,
+)
 from ...core.meme_dictionary import delete_meme_entry, list_meme_entries, upsert_meme_entry
 from ...core.onebot_cache import get_group_name_map, get_user_nickname
 from ..deps import AdminIdentity, get_client_ip, require_admin
@@ -96,6 +102,110 @@ def _get_first_bot(runtime) -> Any | None:
         if bot is not None:
             return bot
     return None
+
+
+def _load_recent_group_member_names(group_id: str, *, limit: int = 500) -> dict[str, list[str]]:
+    names: dict[str, list[str]] = {}
+    try:
+        with connect_sync() as conn:
+            rows = conn.execute(
+                """
+                SELECT user_id, nickname
+                FROM group_messages
+                WHERE group_id=? AND user_id<>'' AND nickname<>''
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (str(group_id), max(1, int(limit))),
+            ).fetchall()
+    except Exception:
+        return {}
+    for row in rows:
+        uid = str(row["user_id"] if hasattr(row, "__getitem__") else "").strip()
+        nickname = str(row["nickname"] if hasattr(row, "__getitem__") else "").strip()
+        if not uid or not nickname:
+            continue
+        names[uid] = merge_known_names(names.get(uid, []), nickname)
+    return names
+
+
+def _load_member_relationship_edges(
+    group_id: str,
+    member_ids: set[str],
+    *,
+    names_by_user: dict[str, list[str]],
+    limit_per_member: int = 5,
+) -> dict[str, list[dict[str, Any]]]:
+    if not member_ids:
+        return {}
+    try:
+        import time as _time
+
+        from ...core.group_relation_edges import _decayed_weight
+
+        with connect_sync() as conn:
+            rows = conn.execute(
+                """
+                SELECT src_user_id, dst_user_id, edge_kind, weight, last_seen_at
+                FROM group_relation_edges
+                WHERE group_id=?
+                ORDER BY last_seen_at DESC
+                LIMIT 500
+                """,
+                (str(group_id),),
+            ).fetchall()
+        now_ts = _time.time()
+    except Exception:
+        return {}
+
+    def _label(uid: str) -> str:
+        names = merge_known_names(names_by_user.get(uid, []))
+        return names[0] if names else uid
+
+    by_user: dict[str, list[dict[str, Any]]] = {uid: [] for uid in member_ids}
+    for row in rows:
+        src = str(row["src_user_id"] if hasattr(row, "__getitem__") else "").strip()
+        dst = str(row["dst_user_id"] if hasattr(row, "__getitem__") else "").strip()
+        if not src or not dst or (src not in member_ids and dst not in member_ids):
+            continue
+        try:
+            decayed = _decayed_weight(
+                float(row["weight"] if hasattr(row, "__getitem__") else 0.0),
+                float(row["last_seen_at"] if hasattr(row, "__getitem__") else 0.0),
+                now_ts=now_ts,
+            )
+        except Exception:
+            decayed = 0.0
+        if decayed <= 0.1:
+            continue
+        edge_kind = str(row["edge_kind"] if hasattr(row, "__getitem__") else "").strip()
+        last_seen_at = float(row["last_seen_at"] if hasattr(row, "__getitem__") else 0.0)
+        if src in member_ids:
+            by_user.setdefault(src, []).append(
+                {
+                    "direction": "out",
+                    "peer_user_id": dst,
+                    "peer_label": _label(dst),
+                    "kind": edge_kind,
+                    "weight": round(decayed, 2),
+                    "last_seen_at": last_seen_at,
+                }
+            )
+        if dst in member_ids:
+            by_user.setdefault(dst, []).append(
+                {
+                    "direction": "in",
+                    "peer_user_id": src,
+                    "peer_label": _label(src),
+                    "kind": edge_kind,
+                    "weight": round(decayed, 2),
+                    "last_seen_at": last_seen_at,
+                }
+            )
+    for uid, edges in list(by_user.items()):
+        edges.sort(key=lambda item: (-float(item.get("weight", 0) or 0), str(item.get("peer_user_id", ""))))
+        by_user[uid] = edges[: max(1, int(limit_per_member))]
+    return by_user
 
 
 _REBUILD_RATELIMIT_NS = "group_style_rebuild_ratelimit"
@@ -241,6 +351,8 @@ def build_group_router(*, runtime) -> APIRouter:
             raise HTTPException(status_code=503, detail="profile_service 未就绪")
         profiles = svc.list_local_profiles(group_id)
         seen = {str(p.get("user_id", "")) for p in profiles}
+        aliases_by_user = list_group_member_aliases(group_id)
+        recent_names_by_user = _load_recent_group_member_names(group_id)
         # 本地群画像通常为空（没有专门的本地画像构建流程）。回退：把本群近期活跃成员
         # 的【全局画像】并进来，避免「群内成员画像」一直显示为 0。
         try:
@@ -266,8 +378,30 @@ def build_group_router(*, runtime) -> APIRouter:
                 seen.add(uid)
         except Exception as exc:
             getattr(runtime, "logger", None) and runtime.logger.debug(f"[group personas] 全局画像回退失败: {exc}")
+        for uid in sorted(set(aliases_by_user.keys()) - seen):
+            profiles.append(
+                {
+                    "user_id": uid,
+                    "profile_text": "",
+                    "profile_json": {"scope": "group_alias"},
+                    "updated_at": float(aliases_by_user.get(uid, {}).get("updated_at", 0) or 0),
+                }
+            )
+            seen.add(uid)
         profiles.sort(key=lambda p: float(p.get("updated_at", 0) or 0), reverse=True)
         bot = _get_first_bot(runtime)
+
+        names_for_edges = {
+            uid: merge_known_names(names, aliases_by_user.get(uid, {}).get("aliases", []))
+            for uid, names in recent_names_by_user.items()
+        }
+        for uid, entry in aliases_by_user.items():
+            names_for_edges[uid] = merge_known_names(names_for_edges.get(uid, []), entry.get("aliases", []))
+        relationship_edges = _load_member_relationship_edges(
+            group_id,
+            {str(p.get("user_id", "") or "").strip() for p in profiles if str(p.get("user_id", "") or "").strip()},
+            names_by_user=names_for_edges,
+        )
 
         # 拉一次 emotion_state 给每条 persona 附上"近期情绪"
         emotion_per_user: dict[str, dict[str, Any]] = {}
@@ -283,13 +417,28 @@ def build_group_router(*, runtime) -> APIRouter:
 
         items: list[dict[str, Any]] = []
         for p in profiles:
-            uid = p["user_id"]
+            uid = str(p["user_id"])
             text = p.get("profile_text") or ""
             entry_emotion = emotion_per_user.get(str(uid), {})
+            nickname = await get_user_nickname(bot, uid)
+            alias_entry = aliases_by_user.get(
+                str(uid),
+                {"user_id": str(uid), "aliases": [], "note": "", "updated_at": 0.0, "updated_by": ""},
+            )
+            known_names = merge_known_names(
+                nickname,
+                recent_names_by_user.get(str(uid), []),
+                alias_entry.get("aliases", []),
+            )
             items.append(
                 {
                     "user_id": uid,
-                    "nickname": await get_user_nickname(bot, uid),
+                    "nickname": nickname,
+                    "known_names": known_names,
+                    "aliases": list(alias_entry.get("aliases") or []),
+                    "alias_note": str(alias_entry.get("note", "") or ""),
+                    "alias_updated_at": float(alias_entry.get("updated_at", 0) or 0),
+                    "alias_updated_by": str(alias_entry.get("updated_by", "") or ""),
                     "snippet": str(text)[:240],
                     "profile_text": str(text),
                     "updated_at": p.get("updated_at", 0),
@@ -305,17 +454,85 @@ def build_group_router(*, runtime) -> APIRouter:
                         scope="user",
                         include_events=False,
                     ),
+                    "relationship_edges": relationship_edges.get(str(uid), []),
                 }
             )
         return {
             "group_id": group_id,
             "profiles": items,
+            "group_aliases": sorted(aliases_by_user.values(), key=lambda item: str(item.get("user_id", ""))),
             "group_favorability": serialize_favorability(
                 runtime,
                 f"group_{group_id}",
                 scope="group",
                 include_events=True,
             ),
+        }
+
+    @router.get("/{group_id}/aliases")
+    async def aliases(group_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
+        entries = list_group_member_aliases(group_id)
+        return {
+            "group_id": str(group_id),
+            "aliases": sorted(entries.values(), key=lambda item: str(item.get("user_id", ""))),
+        }
+
+    @router.put("/{group_id}/aliases/{user_id}")
+    async def save_aliases(
+        group_id: str,
+        user_id: str,
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        try:
+            payload = dict(body or {})
+            aliases_value = payload.get("aliases", payload.get("alias_text", ""))
+            entry = set_group_member_aliases(
+                group_id,
+                user_id,
+                aliases_value,
+                note=str(payload.get("note", "") or ""),
+                updated_by=admin.qq,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        webui_audit_log.record(
+            action="group_alias_upsert",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=f"{group_id}:{user_id}",
+            ip_hash=get_client_ip(request),
+            detail={"aliases": entry.get("aliases", []), "has_note": bool(entry.get("note"))},
+        )
+        entries = list_group_member_aliases(group_id)
+        return {
+            "success": True,
+            "entry": entry,
+            "aliases": sorted(entries.values(), key=lambda item: str(item.get("user_id", ""))),
+        }
+
+    @router.delete("/{group_id}/aliases/{user_id}")
+    async def delete_aliases(
+        group_id: str,
+        user_id: str,
+        request: Request,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        changed = delete_group_member_aliases(group_id, user_id)
+        webui_audit_log.record(
+            action="group_alias_delete",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=f"{group_id}:{user_id}",
+            ip_hash=get_client_ip(request),
+            detail={"changed": changed},
+        )
+        entries = list_group_member_aliases(group_id)
+        return {
+            "success": True,
+            "deleted": changed,
+            "aliases": sorted(entries.values(), key=lambda item: str(item.get("user_id", ""))),
         }
 
     @router.get("/{group_id}/style")
@@ -471,15 +688,29 @@ def build_group_router(*, runtime) -> APIRouter:
             now_ts = _time.time()
             from ...core.group_relation_edges import _decayed_weight
 
+            aliases_by_user = list_group_member_aliases(group_id)
+            recent_names_by_user = _load_recent_group_member_names(group_id)
+
+            def _member_label(uid: str) -> str:
+                alias_entry = aliases_by_user.get(uid, {})
+                names = merge_known_names(recent_names_by_user.get(uid, []), alias_entry.get("aliases", []))
+                return names[0] if names else uid
+
             scored = []
             for row in rows:
                 w = _decayed_weight(float(row["weight"] or 0), float(row["last_seen_at"] or 0), now_ts=now_ts)
                 if w <= 0.1:
                     continue
+                src = str(row["src_user_id"] or "")
+                dst = str(row["dst_user_id"] or "")
                 scored.append(
                     {
-                        "src": str(row["src_user_id"] or ""),
-                        "dst": str(row["dst_user_id"] or ""),
+                        "src": src,
+                        "dst": dst,
+                        "src_label": _member_label(src),
+                        "dst_label": _member_label(dst),
+                        "src_aliases": list((aliases_by_user.get(src) or {}).get("aliases") or []),
+                        "dst_aliases": list((aliases_by_user.get(dst) or {}).get("aliases") or []),
                         "kind": str(row["edge_kind"] or ""),
                         "weight": round(w, 2),
                         "last_seen_at": float(row["last_seen_at"] or 0),
