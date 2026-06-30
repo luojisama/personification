@@ -228,25 +228,74 @@ function dashboardPieRowTitle(row, total) {
   ].join("\n");
 }
 
-function renderDashboardGroupPie(rows) {
+function dashboardPiePoint(cx, cy, radius, ratio) {
+  const angle = ratio * Math.PI * 2 - Math.PI / 2;
+  return {
+    x: cx + radius * Math.cos(angle),
+    y: cy + radius * Math.sin(angle),
+  };
+}
+
+function dashboardPieSegmentPath(startRatio, endRatio) {
+  const cx = 50;
+  const cy = 50;
+  const outer = 48;
+  const inner = 27;
+  const start = Number(startRatio || 0);
+  let end = Number(endRatio || 0);
+  if (end - start >= 0.9999) end = start + 0.9999;
+  if (end <= start) end = start + 0.0001;
+  const outerStart = dashboardPiePoint(cx, cy, outer, start);
+  const outerEnd = dashboardPiePoint(cx, cy, outer, end);
+  const innerEnd = dashboardPiePoint(cx, cy, inner, end);
+  const innerStart = dashboardPiePoint(cx, cy, inner, start);
+  const largeArc = end - start > 0.5 ? 1 : 0;
+  return [
+    `M ${outerStart.x.toFixed(3)} ${outerStart.y.toFixed(3)}`,
+    `A ${outer} ${outer} 0 ${largeArc} 1 ${outerEnd.x.toFixed(3)} ${outerEnd.y.toFixed(3)}`,
+    `L ${innerEnd.x.toFixed(3)} ${innerEnd.y.toFixed(3)}`,
+    `A ${inner} ${inner} 0 ${largeArc} 0 ${innerStart.x.toFixed(3)} ${innerStart.y.toFixed(3)}`,
+    "Z",
+  ].join(" ");
+}
+
+function renderDashboardPieSvg(data, total, colors) {
+  if (!data.length || total <= 0) {
+    return `<svg class="dashboard-pie-svg" viewBox="0 0 100 100" role="img" aria-label="暂无群消耗占比">
+      <circle class="dashboard-pie-empty" cx="50" cy="50" r="37" fill="none" stroke="currentColor" stroke-opacity="0.18" stroke-width="22"><title>暂无群用量</title></circle>
+    </svg>`;
+  }
+  let cursor = 0;
+  const slices = data.map((row, index) => {
+    const pct = Number(row.total_tokens || 0) / total;
+    const start = cursor;
+    const end = Math.min(1, cursor + pct);
+    cursor = end;
+    const title = dashboardPieRowTitle(row, total);
+    return `<path class="dashboard-pie-slice" d="${dashboardPieSegmentPath(start, end)}" fill="${colors[index % colors.length]}" role="listitem" aria-label="${escapeAttr(title.replace(/\n/g, " · "))}" vector-effect="non-scaling-stroke"><title>${escapeHtml(title)}</title></path>`;
+  }).join("");
+  return `<svg class="dashboard-pie-svg" viewBox="0 0 100 100" role="img" aria-label="群消耗占比饼图">
+    ${slices}
+  </svg>`;
+}
+
+function renderDashboardGroupPie(rows, options = {}) {
+  const modal = !!options.modal;
   const colors = ["#4f8cff", "#20c997", "#ffb020", "#ff6b6b", "#9775fa", "#38bdf8", "#f472b6", "#94d82d", "#ffa94d", "#adb5bd"];
   const source = (rows || []).filter(row => Number(row.total_tokens || 0) > 0);
   const top = source.slice(0, 9);
   const rest = source.slice(9);
   const restTokens = rest.reduce((sum, row) => sum + Number(row.total_tokens || 0), 0);
   const data = restTokens > 0
-    ? [...top, { group_label: "其他群", total_tokens: restTokens, call_count: rest.reduce((sum, row) => sum + Number(row.call_count || 0), 0) }]
+    ? [...top, {
+        group_label: "其他群",
+        total_tokens: restTokens,
+        prompt_tokens: rest.reduce((sum, row) => sum + Number(row.prompt_tokens || 0), 0),
+        completion_tokens: rest.reduce((sum, row) => sum + Number(row.completion_tokens || 0), 0),
+        call_count: rest.reduce((sum, row) => sum + Number(row.call_count || 0), 0),
+      }]
     : top;
   const total = data.reduce((sum, row) => sum + Number(row.total_tokens || 0), 0);
-  let cursor = 0;
-  const gradient = data.length && total > 0
-    ? data.map((row, index) => {
-        const pct = Number(row.total_tokens || 0) / total * 100;
-        const start = cursor;
-        cursor += pct;
-        return `${colors[index % colors.length]} ${start.toFixed(3)}% ${cursor.toFixed(3)}%`;
-      }).join(", ")
-    : "#2b3138 0% 100%";
   const legend = data.map((row, index) => {
     const pct = total > 0 ? Number(row.total_tokens || 0) / total * 100 : 0;
     const label = dashboardGroupLabel(row);
@@ -261,17 +310,15 @@ function renderDashboardGroupPie(rows) {
       <span class="dashboard-pie-token">${escapeHtml(dashboardCompactNumber(row.total_tokens || 0))} T</span>
     </div>`;
   }).join("");
-  const pieTitle = data.length
-    ? data.map(row => dashboardPieRowTitle(row, total)).join("\n\n")
-    : "暂无群用量";
-  return `<div class="card dashboard-panel">
+  return `<div class="${modal ? "dashboard-modal-pie" : "card dashboard-panel"}">
     <div class="dashboard-panel-head">
       <h2>群消耗占比（总计）</h2>
-      <button class="btn small" onclick="openDashboardPieDetail()">放大</button>
+      ${modal ? "" : '<button class="btn small" onclick="openDashboardPieDetail()">放大</button>'}
     </div>
     <div class="dashboard-pie-layout">
-      <div class="dashboard-pie" style="background:conic-gradient(${gradient})" onclick="openDashboardPieDetail()" title="${escapeAttr(pieTitle)}">
-        <div><strong>${escapeHtml(dashboardCompactNumber(total))} T</strong><span>总 token</span></div>
+      <div class="dashboard-pie" ${modal ? "" : 'onclick="openDashboardPieDetail()"'} title="${data.length ? "" : "暂无群用量"}">
+        ${renderDashboardPieSvg(data, total, colors)}
+        <div class="dashboard-pie-center"><strong>${escapeHtml(dashboardCompactNumber(total))} T</strong><span>总 token</span></div>
       </div>
       <div class="dashboard-pie-legend">${legend || '<p class="muted">暂无群用量。</p>'}</div>
     </div>
@@ -391,7 +438,7 @@ function renderDashboardDetailModal(charts, tones) {
           </div>
           <button class="btn small" onclick="closeDashboardDetail()">关闭</button>
         </div>
-        ${renderDashboardGroupPie(rows).replace('class="card dashboard-panel"', 'class="dashboard-modal-pie"').replace('<button class="btn small" onclick="openDashboardPieDetail()">放大</button>', '')}
+        ${renderDashboardGroupPie(rows, { modal: true })}
         ${dashboardPieDetailTable(rows)}
       </div>
     </div>`;
