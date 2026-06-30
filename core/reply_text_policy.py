@@ -29,6 +29,13 @@ _URL_RE = re.compile(r"https?://\S+")
 _LEADING_FORMULAIC_TIC_RE = re.compile(
     r"^\s*(?:等下|等一下|啊这|不是)\s*[，,、。！？!?.…]*\s*"
 )
+_OBSERVER_STATUS_TIC_RE = re.compile(
+    r"^\s*(?:我\s*)?(?:先\s*)?"
+    r"(?:(?:潜水|围观|观望|路过)(?:一下)?|蹲一下|看看情况|看下情况|看情况)"
+    r"\s*[，,、。！？!?.…]*\s*"
+    r"(?:(?:等(?:一会儿?|会儿?|下)?|晚点|回头)?\s*再\s*(?:说|看|聊)(?:吧)?)?"
+    r"\s*[，,、。！？!?.…]*\s*"
+)
 _FORMULAIC_TAIBA_RE = re.compile(
     r"(?P<prefix>^|[，,。！？!?；;\n…]+\s*)"
     r"(?:这也太|这也有点|这也够|你这也太|这听着也太|这看着也太)"
@@ -66,6 +73,7 @@ def _normalize_formulaic_reply_tics(text: str) -> str:
     emotion, or whether the bot should speak.
     """
     cleaned = str(text or "")
+    cleaned = _OBSERVER_STATUS_TIC_RE.sub("", cleaned)
     cleaned = _LEADING_FORMULAIC_TIC_RE.sub("", cleaned)
 
     def _replace_taiba(match: re.Match[str]) -> str:
@@ -102,7 +110,8 @@ def looks_like_formulaic_reply_tic(text: Any) -> bool:
             zheye_problem = True
             break
     return bool(
-        _LEADING_FORMULAIC_TIC_RE.search(raw)
+        _OBSERVER_STATUS_TIC_RE.search(raw)
+        or _LEADING_FORMULAIC_TIC_RE.search(raw)
         or _FORMULAIC_TAIBA_RE.search(raw)
         or zheye_problem
     )

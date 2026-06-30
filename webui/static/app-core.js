@@ -3,7 +3,7 @@ let state = {
   logged: false, qq: "", view: "dashboard",
   entries: [], groups: [], activeGroup: null, configSearch: "", configSearchComposing: false, configSearchDraft: "",
   devices: [], pendingDevices: [], trustedDevices: [], devicePending: false, loginRequestId: "", loginPolling: false, alert: null, loading: false, loadingMessage: "",
-  dashboard: null, dashboardWindow: "month",
+  dashboard: null, dashboardWindow: "month", dashboardDetail: null,
   personas: [], selectedPersona: null, personaSearch: "",
   groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [],
   groupFavorability: null,

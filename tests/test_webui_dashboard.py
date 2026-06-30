@@ -160,6 +160,10 @@ def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
     assert body["total_consumption"]["series"][-1]["cumulative_total_tokens"] == body["total"]["total_tokens"]
     assert {chart["key"] for chart in body["dashboard_overview"]["charts"]} == {"day", "week", "month", "total"}
     assert len(body["dashboard_overview"]["charts"]) == 4
+    day_chart = next(chart for chart in body["dashboard_overview"]["charts"] if chart["key"] == "day")
+    assert len(day_chart["series"]) == 24
+    assert all("bucket_hour" in point for point in day_chart["series"])
+    assert day_chart["series"][-1]["total_tokens"] == body["total"]["total_tokens"]
     purposes = {row["purpose"]: row for row in body["by_purpose"]}
     assert purposes["persona_template_synthesis"]["purpose_label"] == "人设构建：模板生成"
     assert purposes["persona_template_synthesis"]["total_tokens"] == 100

@@ -54,11 +54,15 @@ def test_normalize_visible_reply_text_reduces_formulaic_opening_tics() -> None:
     assert reply_text_policy.normalize_visible_reply_text("这也抽得太狠了吧") == "抽得挺狠"
     assert reply_text_policy.normalize_visible_reply_text("被雷炸了，这也太刺激了吧") == "被雷炸了，挺刺激的"
     assert reply_text_policy.normalize_visible_reply_text("这也行") == "这也行"
+    assert reply_text_policy.normalize_visible_reply_text("我先看看情况，等会再说") == ""
+    assert reply_text_policy.normalize_visible_reply_text("先看看情况等会再说吧") == ""
+    assert reply_text_policy.normalize_visible_reply_text("我先围观一下，别急着吵") == "别急着吵"
 
 
 def test_looks_like_formulaic_reply_tic_detects_repeated_reply_templates() -> None:
     assert reply_text_policy.looks_like_formulaic_reply_tic("等下，这什么表情")
     assert reply_text_policy.looks_like_formulaic_reply_tic("被雷炸了，这也太刺激了吧")
+    assert reply_text_policy.looks_like_formulaic_reply_tic("我先看看情况，等会再说")
     assert not reply_text_policy.looks_like_formulaic_reply_tic("这也行")
 
 

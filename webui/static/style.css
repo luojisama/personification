@@ -91,15 +91,21 @@ main { padding:20px 26px; max-width:1400px; width:100%; min-width:0; }
 .dashboard-line-card { min-width:0; min-height:226px; border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:16px; display:flex; flex-direction:column; gap:10px; overflow:hidden; }
 .dashboard-line-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; min-width:0; flex-wrap:wrap; }
 .dashboard-line-head strong { font-size:24px; line-height:1.1; letter-spacing:0; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.dashboard-chart-open { margin-left:auto; }
 .dashboard-line-meta { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--muted); font-size:12px; min-width:0; }
 .dashboard-line-meta span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dashboard-line-chart-wrap { min-width:0; margin-top:auto; cursor:zoom-in; }
 .dashboard-line-chart { width:100%; height:128px; margin-top:auto; display:block; overflow:visible; }
+.dashboard-line-chart.large { height:280px; min-height:240px; }
+.dashboard-line-hotspot { cursor:crosshair; }
 .dashboard-line-chart.blue { color:#4f8cff; }
 .dashboard-line-chart.green { color:#20c997; }
 .dashboard-line-chart.orange { color:#ffb020; }
 .dashboard-line-chart.purple { color:#9775fa; }
 .dashboard-usage-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; align-items:start; }
 .dashboard-panel { min-height:300px; overflow:hidden; }
+.dashboard-panel-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px; }
+.dashboard-panel-head h2 { margin:0; }
 .dashboard-model-table { table-layout:fixed; }
 .dashboard-model-table th:nth-child(1), .dashboard-model-table td:nth-child(1) { width:42%; }
 .dashboard-model-table th:nth-child(2), .dashboard-model-table td:nth-child(2) { width:110px; }
@@ -109,15 +115,27 @@ main { padding:20px 26px; max-width:1400px; width:100%; min-width:0; }
 [data-theme="light"] .dashboard-token-bar div { background:#cfe1ff; }
 .dashboard-token-bar span { position:relative; z-index:1; display:flex; align-items:center; height:100%; padding-left:10px; font-weight:600; white-space:nowrap; }
 .dashboard-pie-layout { display:grid; grid-template-columns:180px minmax(0,1fr); gap:20px; align-items:center; margin-top:8px; }
-.dashboard-pie { width:180px; aspect-ratio:1; border-radius:50%; padding:22px; display:grid; place-items:center; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.08); }
+.dashboard-pie { width:180px; aspect-ratio:1; border-radius:50%; padding:22px; display:grid; place-items:center; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.08); cursor:zoom-in; }
 .dashboard-pie > div { width:100%; height:100%; border-radius:50%; background:var(--panel); display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; border:1px solid var(--line); }
 .dashboard-pie strong { font-size:20px; line-height:1.1; letter-spacing:0; }
 .dashboard-pie span { color:var(--muted); font-size:12px; margin-top:4px; }
 .dashboard-pie-legend { display:flex; flex-direction:column; gap:8px; min-width:0; }
 .dashboard-pie-legend-row { display:grid; grid-template-columns:12px minmax(0,1fr) 58px 72px; gap:8px; align-items:center; min-height:24px; font-size:13px; }
+.dashboard-pie-legend-row:hover { background:var(--hover-bg); border-radius:5px; }
 .dashboard-pie-dot { width:10px; height:10px; border-radius:50%; }
 .dashboard-pie-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .dashboard-pie-percent, .dashboard-pie-token { color:var(--muted); text-align:right; white-space:nowrap; }
+.dashboard-modal-backdrop { position:fixed; inset:0; z-index:80; display:flex; align-items:center; justify-content:center; padding:24px; background:rgba(0,0,0,0.58); }
+.dashboard-modal { width:min(1120px,96vw); max-height:min(86vh,900px); overflow:auto; background:var(--panel); border:1px solid var(--line); border-radius:10px; box-shadow:0 18px 50px rgba(0,0,0,0.35); padding:18px; }
+.dashboard-modal-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:14px; }
+.dashboard-modal-head h2 { margin:0; font-size:17px; }
+.dashboard-modal-head p { margin:3px 0 0; }
+.dashboard-modal-chart { border:1px solid var(--line); border-radius:8px; background:var(--bg); padding:12px; margin-bottom:14px; }
+.dashboard-detail-table { max-height:360px; border:1px solid var(--line); border-radius:8px; }
+.dashboard-detail-table table { min-width:720px; }
+.dashboard-modal-pie { border:1px solid var(--line); border-radius:8px; background:var(--bg); padding:14px; margin-bottom:14px; }
+.dashboard-modal-pie .dashboard-pie-layout { grid-template-columns:220px minmax(0,1fr); }
+.dashboard-modal-pie .dashboard-pie { width:220px; cursor:default; }
 .qzone-quota-line { display:flex; align-items:baseline; gap:10px; margin-bottom:8px; flex-wrap:wrap; }
 .qzone-quota-remain { margin-left:auto; }
 .qzone-recent-list { list-style:none; margin:0; padding:0; display:grid; gap:8px; }
@@ -252,8 +270,15 @@ td code, .field-head code { word-break:break-all; }
   .dashboard-line-head { gap:6px; }
   .dashboard-line-head strong { font-size:21px; }
   .dashboard-line-chart { height:118px; }
+  .dashboard-line-chart.large { height:220px; min-height:200px; }
   .dashboard-pie { width:min(220px,72vw); justify-self:center; }
   .dashboard-pie-legend-row { grid-template-columns:12px minmax(0,1fr) 48px 58px; font-size:12px; gap:6px; }
+  .dashboard-modal-backdrop { align-items:stretch; padding:10px; }
+  .dashboard-modal { width:100%; max-height:calc(100vh - 20px); padding:12px; border-radius:8px; }
+  .dashboard-modal-head { align-items:flex-start; }
+  .dashboard-modal-chart { padding:8px; }
+  .dashboard-modal-pie .dashboard-pie-layout { grid-template-columns:1fr; }
+  .dashboard-modal-pie .dashboard-pie { width:min(240px,72vw); }
   .dashboard-model-table th:nth-child(2), .dashboard-model-table td:nth-child(2) { width:78px; }
   .dashboard-token-bar { min-width:90px; }
   .trace-stat-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }

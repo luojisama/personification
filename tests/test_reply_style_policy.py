@@ -16,6 +16,9 @@ def test_reply_style_policy_keeps_visual_context_internal() -> None:
     assert "不要假装知道画面内容" in prompt
     assert "最近上下文已经说明原因" in prompt
     assert "不要主动讲图里是什么" in prompt
+    assert "讨论与闲聊基调" in prompt
+    assert "不要只附和、感叹" in prompt
+    assert "把群友刚说的话换一种说法转述" in prompt
     assert "不要堆砌互联网热词" in prompt
     assert "等下/等一下/你这也/这图也" in prompt
     assert "固定起手与口癖复用纪律" in prompt
@@ -42,8 +45,17 @@ def test_observer_posture_policy_prefers_silence_over_status_announcement() -> N
     prompt = reply_style_policy.build_observer_posture_policy_prompt()
 
     assert "潜水" in prompt
+    assert "等会再说" in prompt
     assert "[NO_REPLY]" in prompt
     assert "具体反应" in prompt
+
+
+def test_conversational_baseline_discourages_echo_and_empty_affirmation() -> None:
+    prompt = reply_style_policy.build_conversational_baseline_policy_prompt()
+
+    assert "参与讨论的群友" in prompt
+    assert "新角度" in prompt
+    assert "宁可少说或沉默" in prompt
 
 
 def test_direct_visual_guard_does_not_ask_to_describe_image() -> None:

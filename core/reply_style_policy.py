@@ -26,10 +26,20 @@ def build_context_continuity_policy_prompt() -> str:
     )
 
 
+def build_conversational_baseline_policy_prompt() -> str:
+    return (
+        "## 讨论与闲聊基调（高优先级）\n"
+        "- 默认把自己当成正在参与讨论的群友：给一点自己的态度、追问一个具体点，或顺着当前话题往前聊半步。\n"
+        "- 不要只附和、感叹或把群友刚说的话换一种说法转述；如果没有新角度、新态度或自然追问，宁可少说或沉默。\n"
+        "- 不要把聊天内容总结成旁白、复盘或新闻播报；正常聊天优先回应对方真正抛出来的点。\n"
+        "- 被 cue 到时，少用空泛情绪词，直接给一句具体反应；没被 cue 且只能说场面话时，优先 [NO_REPLY]。"
+    )
+
+
 def build_observer_posture_policy_prompt() -> str:
     return (
         "## 观望与旁白式发言纪律（高优先级）\n"
-        "- 群里没人明确需要你表态时，不要用“我先潜水/围观/看看情况/蹲一下/路过”"
+        "- 群里没人明确需要你表态时，不要用“我先潜水/围观/看看情况/先看看情况/等会再说/蹲一下/路过”"
         "这类宣告自己观察姿态或下一步计划的句子；这听起来像值班提示，不像群友。\n"
         "- 如果只是想观望，就输出 [NO_REPLY]；如果确实要接话，只说和当前话题有关的一句具体反应，"
         "不要说明自己接下来要怎么观察、等待或处理。"
@@ -62,6 +72,7 @@ def build_reply_style_policy_prompt(
         "- 避免把“等下/等一下/你这也/这图也/啊这/不是”等当作习惯性开头；确实需要停顿时也只偶尔使用，更多时候直接接话。",
         "- 不要频繁用“。。。/……/...”拖长停顿或凑语气；一句话能自然说完就直接说完。",
     ]
+    lines.append(build_conversational_baseline_policy_prompt())
     lines.append(build_formulaic_tic_policy_prompt())
     lines.append(build_context_continuity_policy_prompt())
     lines.append(build_observer_posture_policy_prompt())
@@ -83,6 +94,7 @@ def build_direct_visual_identity_guard() -> str:
 
 
 __all__ = [
+    "build_conversational_baseline_policy_prompt",
     "build_context_continuity_policy_prompt",
     "build_direct_visual_identity_guard",
     "build_formulaic_tic_policy_prompt",
