@@ -171,6 +171,72 @@ async function reloadSkillRuntime() {
   } catch (e) { alertFlash("err", "重载失败：" + e.message); }
 }
 
+function pluginKnowledgeStrategyLabel(value) {
+  const v = String(value || "").toLowerCase();
+  if (v === "full_source" || v === "full_source_single_unit") return "单次全量";
+  if (v === "module_bundles" || v === "module_bundle_multistage") return "模块分批";
+  if (v === "chunk_batches" || v === "chunk_batch_multistage") return "chunk 分批";
+  return v || "未知策略";
+}
+
+function pluginKnowledgeCoverage(item) {
+  if (!item) return {};
+  return item.source_coverage || {};
+}
+
+function pluginKnowledgeCoverageText(c) {
+  const files = Number(c.source_file_count || 0);
+  const chunks = Number(c.source_chunk_count || 0);
+  const chars = Number(c.source_chars || 0);
+  const units = Number(c.analysis_unit_count || 0);
+  const mode = c.analysis_mode || c.analysis_strategy || "";
+  const parts = [];
+  if (files || chunks) parts.push(`${files} 文件 / ${chunks} chunk`);
+  if (chars) parts.push(`${chars.toLocaleString()} 字符`);
+  if (units) parts.push(`${units} 个分析单元`);
+  if (mode) parts.push(pluginKnowledgeStrategyLabel(mode));
+  return parts.join(" · ") || "暂无源码覆盖统计";
+}
+
+function renderPluginKnowledgeCoverage(c) {
+  const full = c.full_input ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">全量输入</span>' : '<span class="tag required">覆盖未确认</span>';
+  const trunc = c.source_truncated ? '<span class="tag required">存在截断</span>' : '<span class="tag">未截断</span>';
+  const complete = c.source_complete === false ? '<span class="tag required">快照不完整</span>' : '<span class="tag">完整快照</span>';
+  return `<div style="margin:10px 0 12px">
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">${full}${complete}${trunc}<span class="tag">${escapeHtml(pluginKnowledgeStrategyLabel(c.analysis_mode || c.analysis_strategy))}</span></div>
+    <div class="muted" style="font-size:12.5px">${escapeHtml(pluginKnowledgeCoverageText(c))}</div>
+    <div class="muted" style="font-size:12.5px;margin-top:4px">${escapeHtml(c.note || "大型插件会拆成多个模型调用，但每个源码 chunk 都会进入分析，不按样本抽取。")}</div>
+  </div>`;
+}
+
+function normalizePluginKnowledgeFeatures(features) {
+  if (Array.isArray(features)) return features.map((item, index) => {
+    if (typeof item === "string") return { key: `feature_${index + 1}`, title: item, summary: "", detail: "" };
+    return Object.assign({ key: item.feature_key || item.key || `feature_${index + 1}` }, item || {});
+  });
+  if (features && typeof features === "object") {
+    return Object.entries(features).map(([key, value]) => {
+      if (value && typeof value === "object") return Object.assign({ key }, value);
+      return { key, title: key, summary: String(value || ""), detail: "" };
+    });
+  }
+  return [];
+}
+
+function renderPluginKnowledgeSourceFiles(snapshot) {
+  const files = snapshot && Array.isArray(snapshot.files) ? snapshot.files : [];
+  if (!files.length) return "";
+  const rows = files.slice(0, 120).map(f => `<tr>
+    <td><code>${escapeHtml(f.path || "")}</code></td>
+    <td class="muted">${Number(f.line_count || 0)}</td>
+    <td class="muted">${Number(f.size || 0).toLocaleString()}</td>
+    <td class="muted">${escapeHtml((f.symbols || []).slice(0, 8).join(", "))}</td>
+  </tr>`).join("");
+  const more = files.length > 120 ? `<div class="muted" style="margin-top:6px">还有 ${files.length - 120} 个源码文件未在表格中展开，完整数据见 JSON。</div>` : "";
+  return `<h3>源码文件</h3>
+    <div class="table-wrap"><table><thead><tr><th>文件</th><th>行数</th><th>字符</th><th>符号</th></tr></thead><tbody>${rows}</tbody></table></div>${more}`;
+}
+
 function renderPluginKnowledge() {
   if (state.pluginKnowledgeAvailable === false) return `<div class="card muted">knowledge_store 未就绪</div>`;
   if (state.selectedPluginKnowledge) return renderPluginKnowledgeDetail();
@@ -178,22 +244,29 @@ function renderPluginKnowledge() {
   const searchResults = state.pluginKnowledgeSearchResults;
   const matchedSet = searchResults ? new Set(searchResults.results || []) : null;
   const displayList = matchedSet ? list.filter(p => matchedSet.has(p.plugin_name)) : list;
-  const rows = displayList.map(p => `<tr>
+  const rows = displayList.map(p => {
+    const coverage = pluginKnowledgeCoverage(p);
+    return `<tr>
     <td><strong>${escapeHtml(p.display_name || p.plugin_name)}</strong>${p.category ? ` <span class="tag">${escapeHtml(p.category)}</span>` : ''}</td>
     <td><code>${escapeHtml(p.plugin_name)}</code></td>
     <td>${escapeHtml(p.summary || '')}</td>
     <td class="muted" style="font-size:12px">
       ${p.has_runtime_data ? '<span class="tag">runtime</span>' : ''}
       ${p.has_source_data ? `<span class="tag">source(${p.source_file_count}f/${p.source_chunk_count}c)</span>` : ''}
+      ${coverage.full_input ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">全量</span>' : ''}
+      ${(p.analysis_mode || p.analysis_strategy) ? `<span class="tag">${escapeHtml(pluginKnowledgeStrategyLabel(p.analysis_mode || p.analysis_strategy))}</span>` : ''}
+      ${p.source_chars ? `<span class="tag">${Number(p.source_chars || 0).toLocaleString()} chars</span>` : ''}
     </td>
     <td><button class="btn small" onclick="openPluginKnowledge('${escapeAttr(p.plugin_name)}')">详情</button></td>
-  </tr>`).join("");
+  </tr>`;
+  }).join("");
   const searchInfo = matchedSet ? `<div class="muted" style="margin-bottom:8px">搜索 "${escapeHtml(state.pluginKnowledgeSearchQ || '')}" 命中 ${matchedSet.size} 条 <button class="btn small" onclick="clearPluginKnowledgeSearch()">清除</button></div>` : '';
   return `<div class="card">
     <div class="row" style="margin-bottom:12px;gap:8px;align-items:center">
       <input id="pk-search-input" placeholder="按插件名/关键词/摘要搜索" value="${escapeAttr(state.pluginKnowledgeSearchQ || '')}" onkeydown="if(event.key==='Enter')triggerPluginKnowledgeSearch()" style="flex:1">
       <button class="btn" onclick="triggerPluginKnowledgeSearch()">搜索</button>
     </div>
+    <div class="muted" style="margin-bottom:10px;font-size:12.5px">构建说明：插件知识库读取每个插件根目录下完整可读 Python 源码。小插件可一次传入模型；大插件会按模块或 chunk 拆成多次分析，所有 chunk 都会参与，不做抽样。skeleton 预览可能截断，但源码快照与分析输入不截断。</div>
     ${searchInfo}
     <h2>插件知识库（${displayList.length} / ${list.length}）</h2>
     <table><thead><tr><th>名称</th><th>plugin_name</th><th>摘要</th><th>数据</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">暂无插件知识，等待自动构建或手动触发。</td></tr>'}</tbody></table>
@@ -227,20 +300,26 @@ async function openPluginKnowledge(name) {
 function renderPluginKnowledgeDetail() {
   const d = state.selectedPluginKnowledge;
   const e = d.entry || {};
-  const features = Array.isArray(e.features) ? e.features : [];
+  const coverage = d.source_coverage || e.source_coverage || (d.source_snapshot && d.source_snapshot.source_coverage) || {};
+  const features = normalizePluginKnowledgeFeatures(e.features);
   const featureRows = features.map(f => {
-    if (typeof f === "string") return `<li>${escapeHtml(f)}</li>`;
-    const name = f.name || f.feature || "";
-    const desc = f.description || f.desc || "";
-    return `<li><strong>${escapeHtml(name)}</strong>${desc ? `：${escapeHtml(desc)}` : ''}</li>`;
+    const name = f.title || f.name || f.feature || f.key || "";
+    const desc = f.summary || f.description || f.desc || f.detail || "";
+    const meta = [
+      f.key ? `<code>${escapeHtml(f.key)}</code>` : "",
+      f.files && f.files.length ? `<span class="muted">${escapeHtml(f.files.slice(0, 4).join(", "))}</span>` : "",
+    ].filter(Boolean).join(" ");
+    return `<li><strong>${escapeHtml(name)}</strong>${desc ? `：${escapeHtml(desc)}` : ''}${meta ? `<div style="font-size:12px;margin-top:3px">${meta}</div>` : ''}</li>`;
   }).join("");
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedPluginKnowledge=null;render()">返回列表</button><span class="muted">插件 ${escapeHtml(d.plugin_name)}</span></div>
     <div class="card">
       <h2>${escapeHtml(e.display_name || d.plugin_name)} <code style="font-size:13px;color:var(--muted)">${escapeHtml(d.plugin_name)}</code></h2>
       ${e.summary ? `<p>${escapeHtml(e.summary)}</p>` : ''}
+      ${renderPluginKnowledgeCoverage(coverage)}
       ${(e.keywords && e.keywords.length) ? `<div style="margin:6px 0">${e.keywords.map(k => `<span class="tag">${escapeHtml(k)}</span>`).join("")}</div>` : ''}
       ${e.architecture_summary ? `<h3>架构摘要</h3><pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(e.architecture_summary)}</pre>` : ''}
       ${features.length ? `<h3>功能列表</h3><ul>${featureRows}</ul>` : ''}
+      ${renderPluginKnowledgeSourceFiles(d.source_snapshot)}
       <details style="margin-top:12px"><summary class="muted">完整 JSON</summary><pre style="white-space:pre-wrap;font-size:12px;background:#0b0d12;padding:10px;border-radius:6px;overflow-x:auto">${escapeHtml(JSON.stringify(e, null, 2))}</pre></details>
     </div>`;
 }
