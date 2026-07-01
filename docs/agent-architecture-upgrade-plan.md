@@ -10,11 +10,11 @@
 
 ## 当前评分
 
-当前架构约 8.2/10。
+当前架构约 8.3/10。
 
 - 优点：完整 Agent 覆盖面已经很大；TurnPlan、语义帧、工具筛选、skillpack、trace、WebUI 观测都有基础；扩展能力主要靠工具而不是核心分支。
-- 进展：`speech_act` 说话动作层、发送型工具 metadata 契约、`tool_contracts`、`final_synthesis`、`loop_utils` 与 `prompting` 分层、随机插话结构静默门控、坏例回放报表、Agent 预算模式 shadow/adaptive、短期话题状态注入与 WebUI trace 信号已经落地，回复基调、外发工具静默收尾和“该沉默就沉默”的入口兜底不再只靠事后补救。
-- 短板：runner 仍承担较多上下文与工具循环编排；真实坏例回放和量化评估还需要继续扩样；延迟预算虽可显式 adaptive 接管，但默认仍是 shadow，生产收益要在 trace 和灰度里验证；短期话题状态还处在结构化注入与观测阶段，还要用真实坏例验证模型侧收益。
+- 进展：`speech_act` 说话动作层、发送型工具 metadata 契约、`tool_contracts`、`final_synthesis`、`loop_utils`、`prompting` 与 `tool_loop` 分层、随机插话结构静默门控、坏例回放报表、Agent 预算模式 shadow/adaptive、短期话题状态注入与 WebUI trace 信号已经落地，回复基调、外发工具静默收尾和“该沉默就沉默”的入口兜底不再只靠事后补救。
+- 短板：runner 仍承担 stop/fallback 分支主体、证据调度闭包和一部分上下文编排；真实坏例回放和量化评估还需要继续扩样；延迟预算虽可显式 adaptive 接管，但默认仍是 shadow，生产收益要在 trace 和灰度里验证；短期话题状态还处在结构化注入与观测阶段，还要用真实坏例验证模型侧收益。
 
 ## 阶段一：说话动作层
 
@@ -72,14 +72,14 @@
 
 ## 阶段三：runner 分层拆解
 
-状态：已落地工具结果契约层与最终合成层第一刀。
+状态：已落地工具结果契约层、最终合成层、提示组装层和工具循环 I/O 层。
 
 目标：降低 `agent/runtime/runner.py` 的维护压力。
 
 建议拆分：
 
 - `planning_context`：意图、TurnPlan、query rewrite、候选工具提示。
-- `tool_loop`：模型工具循环、预算、工具结果回灌。
+- `tool_loop`：模型 step I/O、usage 记账、工具结果回灌。
 - `tool_contracts`：副作用工具、直出媒体、失败格式化、静默收尾、意图推荐工具。
 - `final_synthesis`：工具结果拟人化、证据综合提示、最终回复收口。
 
@@ -88,8 +88,10 @@
 - `agent/runtime/final_synthesis.py` 承接 `AgentResult`、发送型工具直接收尾转 `AgentResult`、最大步数/时间预算耗尽时基于最后工具结果的人设化收口。
 - `agent/runtime/loop_utils.py` 承接工具循环通用小件：工具签名、工具结果 trace 状态、空 stop 原始响应摘要、builtin search caller 判断、ack 安全发送和 reply trace 记录。
 - `agent/runtime/prompting.py` 承接 Agent 系统提示组装：工具纪律、聊天基调、`speech_act`、多话题边界、意图专属提示、媒体输出纪律、检索计划和图片上下文提示。
-- `agent/runtime/runner.py` 保持兼容导出，只负责在对应阶段调用 `direct_tool_result_agent_result()`、`synthesize_max_steps_result()`、`append_agent_system_prompts()` 或 loop utils。
+- `agent/runtime/tool_loop.py` 承接模型 step I/O、usage 记账、`tool_calls` / tool result 消息回填，以及工具调用/结果 trace。
+- `agent/runtime/runner.py` 保持兼容导出，只负责在对应阶段调用 `direct_tool_result_agent_result()`、`synthesize_max_steps_result()`、`append_agent_system_prompts()`、`observe_model_step()` 或 tool loop / loop utils。
 - `tests/test_final_synthesis.py` 直接覆盖外发工具静默、空结果 `[NO_REPLY]`、最后工具结果拟人化包装三类收口行为。
+- `tests/test_tool_loop.py` 直接覆盖 assistant tool-call 消息回填、fallback 单工具交换回填、模型空 stop 观测与 trace。
 
 验收：
 

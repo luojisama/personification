@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 import time
 from typing import Any, Awaitable, Callable, List
@@ -52,11 +51,19 @@ from .loop_utils import (
     caller_supports_builtin_search as _caller_supports_builtin_search,
     record_reply_trace_stage as _record_reply_trace_stage,
     safe_ack as _safe_ack,
-    summarize_tool_response_raw as _summarize_tool_response_raw,
     tool_result_trace_status as _tool_result_trace_status,
     tool_signature as _tool_signature,
 )
 from .prompting import append_agent_system_prompts
+from .tool_loop import (
+    append_assistant_tool_calls_message,
+    append_single_tool_call_exchange,
+    append_tool_result_message,
+    observe_model_step,
+    selected_tool_names,
+    trace_tool_call,
+    trace_tool_result,
+)
 from .tool_args import (
     _query_variants_for_tool,
     _rewrite_tool_args,
@@ -527,11 +534,7 @@ async def run_agent(
             chat_intent=runtime_chat_intent,
             plugin_question_intent=plugin_query_intent,
         )
-        selected_names = [
-            _schema_tool_name(schema)
-            for schema in active_schemas
-            if _schema_tool_name(schema)
-        ]
+        selected_names = selected_tool_names(active_schemas, _schema_tool_name)
         logger.debug(f"[agent] exposed {len(active_schemas)} tools to model")
         logger.info(f"[agent] selected tools: {', '.join(selected_names) if selected_names else 'none'}")
         model_started_at = time.monotonic()
@@ -541,67 +544,16 @@ async def run_agent(
             use_builtin_search,
         )
         model_elapsed_ms = int((time.monotonic() - model_started_at) * 1000)
-        try:
-            usage = getattr(response, "usage", None) or {}
-            if isinstance(usage, dict) and (usage.get("prompt_tokens") or usage.get("completion_tokens")):
-                from ...core import llm_context as _llm_ctx
-                from ...core import token_ledger as _ledger
-
-                ctx = _llm_ctx.current_llm_context()
-                # 从 tool_caller 类名推导 provider，比从 model 名推导更准确
-                # （特别针对 Codex 使用 chatgpt OAuth、model 字段含 "gpt" 易误判的情况）
-                caller_cls = type(tool_caller).__name__.lower()
-                if "codex" in caller_cls:
-                    provider_label = "codex"
-                elif "anthropic" in caller_cls or "claudecode" in caller_cls or "claude" in caller_cls:
-                    provider_label = "anthropic"
-                elif "geminicli" in caller_cls:
-                    provider_label = "gemini"
-                elif "gemini" in caller_cls:
-                    provider_label = "gemini"
-                elif "openai" in caller_cls:
-                    provider_label = "openai"
-                else:
-                    provider_label = ""  # 让 token_ledger 从 model 名自行推导
-                _ledger.record_llm_call(
-                    model=str(getattr(response, "model_used", "") or ""),
-                    prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
-                    completion_tokens=int(usage.get("completion_tokens", 0) or 0),
-                    group_id=str(ctx.get("group_id", "") or ""),
-                    user_id=str(ctx.get("user_id", "") or ""),
-                    purpose=str(ctx.get("purpose", "") or "agent"),
-                    provider=provider_label,
-                )
-        except Exception:
-            pass
-        content_len = len(str(response.content or "").strip())
-        logger.info(
-            f"[agent] step={_step + 1} finish_reason={response.finish_reason} "
-            f"tool_calls={len(response.tool_calls)} content_len={content_len} "
-            f"model_elapsed_ms={model_elapsed_ms}"
+        content_len = observe_model_step(
+            response=response,
+            tool_caller=tool_caller,
+            logger=logger,
+            step=_step + 1,
+            selected_names=selected_names,
+            runtime_chat_intent=runtime_chat_intent,
+            model_elapsed_ms=model_elapsed_ms,
+            record_trace=_record_reply_trace_stage,
         )
-        record_timing(
-            "agent.model_step_ms",
-            model_elapsed_ms,
-            intent=runtime_chat_intent or "unknown",
-            finish_reason=str(response.finish_reason or ""),
-        )
-        _record_reply_trace_stage(
-            key="agent_model_step",
-            label=f"Agent 模型步 {_step + 1}",
-            status="ok" if content_len > 0 or response.tool_calls else "warn",
-            detail=(
-                f"intent={runtime_chat_intent or '-'} step={_step + 1} "
-                f"tools={','.join(selected_names[:8]) if selected_names else '-'} "
-                f"finish={response.finish_reason} tool_calls={len(response.tool_calls)} "
-                f"content_len={content_len} elapsed_ms={model_elapsed_ms}"
-            ),
-        )
-        if response.finish_reason == "stop" and not response.tool_calls and content_len == 0:
-            logger.warning(
-                "[agent] provider returned empty stop response "
-                + _summarize_tool_response_raw(response.raw)
-            )
         if response.finish_reason == "stop" and not response.tool_calls and content_len > 0:
             if _evidence_synthesizer_enabled(plugin_config) and has_tool_call:
                 await _append_evidence_guidance_if_needed(draft_answer_text=str(response.content or ""))
@@ -783,28 +735,13 @@ async def run_agent(
                             ),
                         )
                         fallback_id = f"fallback-{fallback_name}-{_step + 1}"
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": "",
-                                "tool_calls": [
-                                    {
-                                        "id": fallback_id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": fallback_name,
-                                            "arguments": json.dumps(fallback_args, ensure_ascii=False),
-                                        },
-                                    }
-                                ],
-                            }
-                        )
-                        messages.append(
-                            tool_caller.build_tool_result_message(
-                                fallback_id,
-                                fallback_name,
-                                fallback_result,
-                            )
+                        append_single_tool_call_exchange(
+                            messages=messages,
+                            tool_caller=tool_caller,
+                            call_id=fallback_id,
+                            tool_name=fallback_name,
+                            tool_args=fallback_args,
+                            result=fallback_result,
                         )
                         last_tool_name = str(fallback_name or "").strip()
                         if str(fallback_result or "").strip():
@@ -898,39 +835,16 @@ async def run_agent(
             if not has_tool_call and not ack_sent and ack_sender is not None:
                 ack_sent = True
                 await _safe_ack(ack_sender, "", logger)
-            messages.append(
-                {
-                    "role": "assistant",
-                    # 必须用空字符串而非 None：部分严格 provider（Rust 反序列化）
-                    # 会把 null 当作"缺失字段"直接 400 拒绝。
-                    "content": response.content if response.content else "",
-                    "tool_calls": [
-                        {
-                            "id": tool_call.id,
-                            "type": "function",
-                            "function": {
-                                "name": tool_call.name,
-                                "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
-                            },
-                        }
-                        for tool_call in response.tool_calls
-                    ],
-                }
-            )
+            append_assistant_tool_calls_message(messages=messages, response=response)
 
         for tool_call in response.tool_calls:
             has_tool_call = True
             logger.info(f"[agent] tool_call name={tool_call.name}")
             tool = registry.get(tool_call.name)
-            tool_args = dict(tool_call.arguments or {})
-            _record_reply_trace_stage(
-                key="agent_tool_call",
-                label="Agent 工具选择",
-                status="info",
-                detail=(
-                    f"step={_step + 1} tool={tool_call.name} "
-                    f"arg_keys={','.join(sorted(str(key)[:40] for key in tool_args.keys())) or '-'}"
-                ),
+            tool_args = trace_tool_call(
+                tool_call=tool_call,
+                step=_step + 1,
+                record_trace=_record_reply_trace_stage,
             )
             tool_started_at = time.monotonic()
             if tool is None:
@@ -948,14 +862,13 @@ async def run_agent(
                     budget_deadline=budget_deadline,
                 )
             tool_elapsed_ms = int((time.monotonic() - tool_started_at) * 1000)
-            _record_reply_trace_stage(
-                key="agent_tool_result",
-                label="Agent 工具结果",
-                status=_tool_result_trace_status(result),
-                detail=(
-                    f"step={_step + 1} tool={tool_call.name} "
-                    f"result_len={len(str(result or ''))} elapsed_ms={tool_elapsed_ms}"
-                ),
+            trace_tool_result(
+                tool_name=str(tool_call.name or "").strip(),
+                result=result,
+                step=_step + 1,
+                elapsed_ms=tool_elapsed_ms,
+                record_trace=_record_reply_trace_stage,
+                status_for_result=_tool_result_trace_status,
             )
             tool_result_preview_limit = (
                 1000
@@ -997,12 +910,11 @@ async def run_agent(
                 )
                 return direct_result
 
-            messages.append(
-                tool_caller.build_tool_result_message(
-                    tool_call.id,
-                    tool_call.name,
-                    result,
-                )
+            append_tool_result_message(
+                messages=messages,
+                tool_caller=tool_caller,
+                tool_call=tool_call,
+                result=result,
             )
             await _append_evidence_guidance_if_needed()
 
