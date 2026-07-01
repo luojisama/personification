@@ -44,6 +44,7 @@ class Config(BaseModel):
 
     personification_agent_enabled: bool = True
     personification_agent_max_steps: int = 10
+    personification_agent_budget_mode: str = "shadow"
     personification_response_timeout: int = 180
     personification_image_input_mode: str = "auto"
     personification_image_detail: str = "auto"

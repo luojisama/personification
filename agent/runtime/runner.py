@@ -52,7 +52,7 @@ from .tool_args import (
     _schema_allowed_parameters,
     _tool_allows_parameter,
 )
-from .budgeting import derive_agent_budget_profile, render_agent_budget_trace_detail
+from .budgeting import apply_agent_budget_profile, derive_agent_budget_profile, render_agent_budget_trace_detail
 from .tool_selection import (
     _normalize_agent_max_steps,
     _schema_tool_name,
@@ -482,6 +482,13 @@ async def run_agent(
         actual_max_steps=effective_max_steps,
         actual_time_budget_seconds=time_budget_seconds,
     )
+    budget_mode = getattr(plugin_config, "personification_agent_budget_mode", "shadow")
+    effective_max_steps, time_budget_seconds, budget_profile, budget_applied = apply_agent_budget_profile(
+        budget_profile,
+        mode=budget_mode,
+        actual_max_steps=effective_max_steps,
+        actual_time_budget_seconds=time_budget_seconds,
+    )
     record_counter(
         "agent.budget_profile_total",
         mode=budget_profile.mode,
@@ -502,7 +509,11 @@ async def run_agent(
             actual_max_steps=effective_max_steps,
             actual_time_budget_seconds=time_budget_seconds,
         ),
-        hint="当前仅 shadow 观测，不直接改变生产超时或工具步数",
+        hint=(
+            "当前已按 adaptive 模式接管本轮 Agent 步数和剩余秒数"
+            if budget_applied
+            else "当前仅 shadow 观测，不直接改变生产超时或工具步数"
+        ),
     )
     _record_reply_trace_stage(
         key="agent_start",

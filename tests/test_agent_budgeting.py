@@ -92,3 +92,45 @@ def test_budget_trace_detail_exposes_safe_signals() -> None:
     assert "suggested_steps=4" in detail
     assert "actual_steps=10" in detail
     assert "source=shadow" in detail
+
+
+def test_budget_profile_shadow_keeps_runtime_limits() -> None:
+    profile = budgeting.derive_agent_budget_profile(
+        turn_plan=SimpleNamespace(reply_action="reply", speech_act="participate", research_need="none", tool_intent=[]),
+        intent_decision=SimpleNamespace(chat_intent="banter"),
+        actual_max_steps=10,
+        actual_time_budget_seconds=150,
+    )
+
+    steps, seconds, sourced, applied = budgeting.apply_agent_budget_profile(
+        profile,
+        mode="shadow",
+        actual_max_steps=10,
+        actual_time_budget_seconds=150,
+    )
+
+    assert applied is False
+    assert steps == 10
+    assert seconds == 150
+    assert sourced.source == "shadow"
+
+
+def test_budget_profile_adaptive_applies_suggested_limits() -> None:
+    profile = budgeting.derive_agent_budget_profile(
+        turn_plan=SimpleNamespace(reply_action="reply", speech_act="participate", research_need="none", tool_intent=[]),
+        intent_decision=SimpleNamespace(chat_intent="banter"),
+        actual_max_steps=10,
+        actual_time_budget_seconds=150,
+    )
+
+    steps, seconds, sourced, applied = budgeting.apply_agent_budget_profile(
+        profile,
+        mode="adaptive",
+        actual_max_steps=10,
+        actual_time_budget_seconds=150,
+    )
+
+    assert applied is True
+    assert steps == 2
+    assert seconds == 18.0
+    assert sourced.source == "adaptive"

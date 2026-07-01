@@ -990,6 +990,24 @@ def _build_entries() -> list[ConfigEntry]:
             parser=_int_parser,
         ),
         ConfigEntry(
+            key="agent_budget_mode",
+            field_name="personification_agent_budget_mode",
+            display_name="Agent 预算模式",
+            value_type="str",
+            default="shadow",
+            scope=GLOBAL_SCOPE,
+            description=(
+                "Agent 预算画像的生效方式。shadow 只记录建议步数/秒数，不改变生产行为；"
+                "adaptive 会按 TurnPlan、意图和工具需求缩短闲聊预算、保留查证预算。"
+            ),
+            category="config",
+            choices=("shadow", "adaptive"),
+            help_aliases=("agent预算", "预算模式", "agent_budget_mode"),
+            parser=_str_parser,
+            group="Agent",
+            advanced=True,
+        ),
+        ConfigEntry(
             key="real_embedding_enabled",
             field_name="personification_real_embedding_enabled",
             display_name="真实向量记忆",

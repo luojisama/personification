@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 
@@ -14,6 +14,28 @@ class AgentBudgetProfile:
 
 
 _LOOKUP_TOOL_INTENTS = {"lookup_web", "lookup_plugin", "memory", "vision"}
+_BUDGET_MODE_ALIASES = {
+    "": "shadow",
+    "shadow": "shadow",
+    "observe": "shadow",
+    "observed": "shadow",
+    "dry_run": "shadow",
+    "dry-run": "shadow",
+    "off": "shadow",
+    "disabled": "shadow",
+    "false": "shadow",
+    "0": "shadow",
+    "关闭": "shadow",
+    "禁用": "shadow",
+    "adaptive": "adaptive",
+    "apply": "adaptive",
+    "enabled": "adaptive",
+    "on": "adaptive",
+    "true": "adaptive",
+    "1": "adaptive",
+    "自适应": "adaptive",
+    "启用": "adaptive",
+}
 
 
 def _norm(value: Any) -> str:
@@ -53,6 +75,40 @@ def _limit_seconds(actual_time_budget_seconds: float | None, suggested: float | 
     except (TypeError, ValueError):
         return value
     return min(actual, value)
+
+
+def normalize_agent_budget_mode(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return _BUDGET_MODE_ALIASES.get(text, "shadow")
+
+
+def apply_agent_budget_profile(
+    profile: AgentBudgetProfile,
+    *,
+    mode: Any = "shadow",
+    actual_max_steps: int | None = None,
+    actual_time_budget_seconds: float | None = None,
+) -> tuple[int, float | None, AgentBudgetProfile, bool]:
+    normalized_mode = normalize_agent_budget_mode(mode)
+    sourced_profile = replace(profile, source=normalized_mode)
+    try:
+        current_steps = max(0, int(actual_max_steps or 0))
+    except (TypeError, ValueError):
+        current_steps = 0
+    if normalized_mode != "adaptive":
+        return current_steps, actual_time_budget_seconds, sourced_profile, False
+    try:
+        suggested_steps = max(0, int(profile.suggested_max_steps or 0))
+    except (TypeError, ValueError):
+        suggested_steps = current_steps
+    return (
+        suggested_steps,
+        profile.suggested_time_budget_seconds
+        if profile.suggested_time_budget_seconds is not None
+        else actual_time_budget_seconds,
+        sourced_profile,
+        True,
+    )
 
 
 def derive_agent_budget_profile(
@@ -158,6 +214,8 @@ def render_agent_budget_trace_detail(
 
 __all__ = [
     "AgentBudgetProfile",
+    "apply_agent_budget_profile",
     "derive_agent_budget_profile",
+    "normalize_agent_budget_mode",
     "render_agent_budget_trace_detail",
 ]

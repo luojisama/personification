@@ -10,11 +10,11 @@
 
 ## 当前评分
 
-当前架构约 8.0/10。
+当前架构约 8.1/10。
 
 - 优点：完整 Agent 覆盖面已经很大；TurnPlan、语义帧、工具筛选、skillpack、trace、WebUI 观测都有基础；扩展能力主要靠工具而不是核心分支。
-- 进展：`speech_act` 说话动作层、发送型工具 metadata 契约、第一块 `tool_contracts` 分层、随机插话结构静默门控、坏例回放报表、Agent 预算模式 shadow trace、短期话题状态注入与 WebUI trace 信号已经落地，回复基调、外发工具静默收尾和“该沉默就沉默”的入口兜底不再只靠事后补救。
-- 短板：runner 仍承担太多阶段；真实坏例回放和量化评估还需要继续扩样；延迟预算目前只做 shadow 观测，尚未实际接管生产步数/超时；短期话题状态还处在结构化注入与观测阶段，还要用真实坏例验证模型侧收益。
+- 进展：`speech_act` 说话动作层、发送型工具 metadata 契约、第一块 `tool_contracts` 分层、随机插话结构静默门控、坏例回放报表、Agent 预算模式 shadow/adaptive、短期话题状态注入与 WebUI trace 信号已经落地，回复基调、外发工具静默收尾和“该沉默就沉默”的入口兜底不再只靠事后补救。
+- 短板：runner 仍承担太多阶段；真实坏例回放和量化评估还需要继续扩样；延迟预算虽可显式 adaptive 接管，但默认仍是 shadow，生产收益要在 trace 和灰度里验证；短期话题状态还处在结构化注入与观测阶段，还要用真实坏例验证模型侧收益。
 
 ## 阶段一：说话动作层
 
@@ -114,7 +114,7 @@
 
 ## 阶段五：延迟预算分层
 
-状态：已落地 shadow 观测，不直接改变生产超时或工具步数。
+状态：已落地 shadow 观测和可选 adaptive 接管；默认 `personification_agent_budget_mode=shadow`，不改变生产超时或工具步数，显式设置为 `adaptive` 后才按预算画像调整本轮 Agent 步数和剩余秒数。
 
 目标：短闲聊不要每轮都付完整查证/工具循环成本，复杂查询也不要被短预算截断。
 
@@ -128,6 +128,7 @@
 验收：
 
 - trace 中能看到本轮预算模式、建议步数/秒数和实际步数/秒数。
+- adaptive 模式下 trace `source=adaptive`，且 `agent_start.max_steps` 与实际 deadline 使用预算画像后的值。
 - WebUI 慢阶段能区分语义帧、TurnPlan、工具循环、证据综合、发送层拟人延迟。
 - 短闲聊 P95 明显下降，同时复杂查询不退化。
 
@@ -189,7 +190,7 @@
 
 - `speech_act` 先默认启用提示注入，但 TurnPlan 接管仍尊重现有开关。
 - runner 拆分保持函数签名兼容。
-- 新预算策略先 shadow 记录，不直接改变生产超时。
+- 新预算策略默认 shadow 记录；只有显式设置 `personification_agent_budget_mode=adaptive` 才接管生产步数/剩余秒数。
 - replay 通过后再考虑默认打开更激进的策略。
 
 验收：
