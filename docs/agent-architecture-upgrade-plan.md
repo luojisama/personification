@@ -90,6 +90,8 @@
 
 ## 阶段四：真实坏例回放与量化评估
 
+状态：本轮已落地冷启动坏回复质量样例与报表汇总。
+
 目标：把回复自然度从“调 prompt 凭感觉”推进到“可回放、可比较、可灰度”。
 
 回放集至少覆盖：
@@ -106,7 +108,7 @@
 验收：
 
 - 每个坏例有输入上下文、期望 `speech_act`、期望回复/沉默边界和失败原因标签。
-- `tools.personification_chat_sim` 或 replay 脚本能输出 JSON/Markdown 对比报告。
+- `scripts/replay_corpus.py` 能输出 Markdown 对比报告，汇总 plan diff、质量标签、回复边界和坏回复样例。
 - 新 prompt 或结构改动先看回放集差异，再灰度上线。
 
 ## 阶段五：延迟预算分层

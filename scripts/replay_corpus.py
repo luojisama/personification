@@ -10,6 +10,7 @@
 - 加载 messages + metadata
 - 调用 metadata_fallback_turn_plan 生成新 plan
 - 与 expected_frame 对比，输出差异
+- 汇总人工标注的坏回复样例、失败标签和回复边界
 - 不调用真实 LLM（避免成本和波动）
 
 输出 markdown 报表，列出每段 diff 与命中情况，作为 PR 审查参考。
@@ -34,6 +35,9 @@ class ReplayRecord:
     expected_frame: dict[str, Any]
     metadata: dict[str, Any]
     expected_reply: str = ""
+    bad_reply_examples: list[dict[str, Any]] = field(default_factory=list)
+    quality_tags: list[str] = field(default_factory=list)
+    reply_boundary: str = ""
     note: str = ""
 
 
@@ -68,6 +72,8 @@ def load_records(paths: list[str]) -> list[ReplayRecord]:
                 if not isinstance(data, dict):
                     continue
                 metadata = data.get("metadata", {}) or {}
+                bad_reply_examples = data.get("bad_reply_examples", []) or []
+                quality_tags = data.get("quality_tags", []) or []
                 records.append(
                     ReplayRecord(
                         file=str(file_path),
@@ -76,6 +82,11 @@ def load_records(paths: list[str]) -> list[ReplayRecord]:
                         expected_frame=dict(data.get("expected_frame", {}) or {}),
                         metadata=dict(metadata),
                         expected_reply=str(data.get("expected_reply", "") or ""),
+                        bad_reply_examples=list(bad_reply_examples) if isinstance(bad_reply_examples, list) else [],
+                        quality_tags=[str(item or "").strip() for item in quality_tags if str(item or "").strip()]
+                        if isinstance(quality_tags, list)
+                        else [],
+                        reply_boundary=str(data.get("reply_boundary", "") or ""),
                         note=str(metadata.get("note", "") or ""),
                     )
                 )
@@ -139,6 +150,7 @@ def compute_actual_plan(record: ReplayRecord) -> dict[str, Any]:
     )
     return {
         "reply_action": plan.reply_action,
+        "speech_act": plan.speech_act,
         "memory_need": plan.memory_need,
         "research_need": plan.research_need,
         "vision_need": plan.vision_need,
@@ -153,6 +165,7 @@ def compute_actual_plan(record: ReplayRecord) -> dict[str, Any]:
 
 
 _PLAN_TO_FRAME_KEY_MAP = {
+    "speech_act": "speech_act",
     "ambiguity_level": "ambiguity_level",
     "output_mode": "output_mode",
 }
@@ -180,12 +193,14 @@ def render_report(diffs: list[ReplayDiff]) -> str:
     total = len(diffs)
     aligned = sum(1 for d in diffs if not d.diffs)
     misaligned = total - aligned
+    bad_example_total = sum(len(d.record.bad_reply_examples) for d in diffs)
     lines: list[str] = [
         "# 拟人插件回放对比报表",
         "",
         f"- 样本总数：{total}",
         f"- 元数据 fallback 与历史 frame 一致：{aligned}",
         f"- 有 diff 的样本：{misaligned}",
+        f"- 标注坏回复样例：{bad_example_total}",
         "",
         "**说明**：本报表仅对比 metadata fallback 输出与历史 frame，未调用 LLM。"
         "差异是预期的（fallback 必须保守），仅作为 PR 审查参考，不做硬断言。",
@@ -199,6 +214,25 @@ def render_report(diffs: list[ReplayDiff]) -> str:
     for scene, count in sorted(scene_counts.items()):
         lines.append(f"- {scene or 'unknown'}: {count}")
     lines.append("")
+    tag_counts: dict[str, int] = {}
+    boundary_counts: dict[str, int] = {}
+    for d in diffs:
+        for tag in d.record.quality_tags:
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        if d.record.reply_boundary:
+            boundary_counts[d.record.reply_boundary] = boundary_counts.get(d.record.reply_boundary, 0) + 1
+    if tag_counts:
+        lines.append("## 质量标签")
+        lines.append("")
+        for tag, count in sorted(tag_counts.items()):
+            lines.append(f"- {tag}: {count}")
+        lines.append("")
+    if boundary_counts:
+        lines.append("## 回复边界")
+        lines.append("")
+        for boundary, count in sorted(boundary_counts.items()):
+            lines.append(f"- {boundary}: {count}")
+        lines.append("")
     lines.append("## 差异明细")
     lines.append("")
     for d in diffs:
@@ -210,6 +244,21 @@ def render_report(diffs: list[ReplayDiff]) -> str:
         lines.append(f"- 期望 frame: `{json.dumps(d.record.expected_frame, ensure_ascii=False)}`")
         lines.append(f"- 元数据 plan: `{json.dumps(d.actual_plan, ensure_ascii=False)}`")
         lines.append(f"- 期望回复: `{d.record.expected_reply}`")
+        if d.record.reply_boundary:
+            lines.append(f"- 回复边界: `{d.record.reply_boundary}`")
+        if d.record.quality_tags:
+            lines.append(f"- 质量标签: `{', '.join(d.record.quality_tags)}`")
+        if d.record.bad_reply_examples:
+            examples = [
+                {
+                    "label": str(item.get("label", "") or ""),
+                    "text": str(item.get("text", "") or ""),
+                    "why": str(item.get("why", "") or ""),
+                }
+                for item in d.record.bad_reply_examples
+                if isinstance(item, dict)
+            ]
+            lines.append(f"- 坏回复样例: `{json.dumps(examples, ensure_ascii=False)}`")
         for diff_line in d.diffs:
             lines.append(f"  - {diff_line}")
         lines.append("")
