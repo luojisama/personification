@@ -41,7 +41,7 @@ def test_webui_trace_detail_returns_process_view(_runtime_context) -> None:
         key="agent_tool_result",
         label="Agent 工具结果",
         status="ok",
-        detail="tool=wiki_lookup result_len=120 elapsed_ms=42",
+        detail="speech_act=source_summary tool=wiki_lookup result_len=120 elapsed_ms=42",
     )
     traces.finish_trace(trace_id=trace_id, outcome="ok", diagnosis_code="ok")
     logs.record(level="INFO", source="unit", message="trace log", trace_id=trace_id, min_level="DEBUG")
@@ -54,6 +54,8 @@ def test_webui_trace_detail_returns_process_view(_runtime_context) -> None:
     assert body["trace"]["trace_id"] == trace_id
     assert body["logs"][0]["trace_id"] == trace_id
     assert body["process"]["items"][0]["category"] == "tool"
+    assert body["process"]["items"][0]["signals"]["speech_act"] == "source_summary"
+    assert body["process"]["items"][0]["signals"]["tool"] == "wiki_lookup"
     assert body["process"]["summary"]["stage_count"] == 1
 
 

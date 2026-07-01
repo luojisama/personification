@@ -94,7 +94,7 @@ def test_reply_turn_trace_builds_safe_process_view(_db_tmp) -> None:
             key="agent_model_step",
             label="Agent 模型步 1",
             status="ok",
-            detail="finish=tool_calls elapsed_ms=1500 token=abc123",
+            detail="action=reply speech_act=participate finish=tool_calls elapsed_ms=1500 token=abc123",
         )
         traces.record_stage(
             key="agent_tool_result",
@@ -115,5 +115,7 @@ def test_reply_turn_trace_builds_safe_process_view(_db_tmp) -> None:
     assert view["summary"]["log_levels"]["WARNING"] == 1
     assert view["items"][0]["category"] == "agent"
     assert view["items"][0]["duration_ms"] == 1500
+    assert view["items"][0]["signals"]["speech_act"] == "participate"
+    assert view["items"][1]["signals"]["tool"] == "web_search"
     assert view["summary"]["slow_stages"][0]["key"] == "agent_model_step"
     assert "abc123" not in view["items"][0]["detail"]

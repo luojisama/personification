@@ -1192,6 +1192,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             detail=(
                 f"intent={message_intent} ambiguity={getattr(intent_decision, 'ambiguity_level', '')} "
                 f"silence={getattr(intent_decision, 'recommend_silence', False)} "
+                f"speech_act={getattr(semantic_frame, 'speech_act', '-') or '-'} "
                 f"emotion={getattr(semantic_frame, 'bot_emotion', '')} "
                 f"output={getattr(semantic_frame, 'output_mode', '') or '-'} "
                 f"elapsed_ms={int((time.monotonic() - started_at) * 1000)}"

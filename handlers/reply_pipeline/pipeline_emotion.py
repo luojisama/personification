@@ -454,6 +454,7 @@ async def prepare_reply_semantics(
                     f"fallback=metadata "
                     f"source={plan_source} "
                     f"action={getattr(turn_plan, 'reply_action', '')} "
+                    f"speech_act={getattr(turn_plan, 'speech_act', '')} "
                     f"output={getattr(turn_plan, 'output_mode', '')}"
                 ),
                 hint=semantic_frame_timeout_hint(plan_timeout_s),
@@ -513,6 +514,7 @@ async def prepare_reply_semantics(
                     f"fallback=metadata "
                     f"source={semantic_source} "
                     f"intent={getattr(semantic_frame, 'chat_intent', '')} "
+                    f"speech_act={getattr(turn_plan, 'speech_act', '')} "
                     f"ambiguity={getattr(semantic_frame, 'ambiguity_level', '')}"
                 ),
                 hint=semantic_frame_timeout_hint(semantic_timeout_s),
@@ -524,6 +526,7 @@ async def prepare_reply_semantics(
                 status="ok",
                 detail=(
                     f"intent={getattr(semantic_frame, 'chat_intent', '')} "
+                    f"speech_act={getattr(turn_plan, 'speech_act', '')} "
                     f"ambiguity={getattr(semantic_frame, 'ambiguity_level', '')} "
                     f"emotion={getattr(semantic_frame, 'bot_emotion', '')} "
                     f"source={semantic_source} "

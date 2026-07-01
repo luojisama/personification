@@ -10,10 +10,11 @@
 
 ## 当前评分
 
-当前架构约 7/10。
+当前架构约 7.5/10。
 
 - 优点：完整 Agent 覆盖面已经很大；TurnPlan、语义帧、工具筛选、skillpack、trace、WebUI 观测都有基础；扩展能力主要靠工具而不是核心分支。
-- 短板：回复“聊天动作”还不够结构化；发送型工具的副作用收尾曾依赖 runner 工具名集合；runner 仍承担太多阶段；真实坏例回放和量化评估不足；延迟预算还没有充分按场景分层。
+- 进展：`speech_act` 说话动作层、发送型工具 metadata 契约和第一块 `tool_contracts` 分层已经落地，回复基调与外发工具静默收尾不再只靠事后补救。
+- 短板：runner 仍承担太多阶段；真实坏例回放和量化评估不足；延迟预算还没有充分按场景分层；短期话题状态还需要继续增强。
 
 ## 阶段一：说话动作层
 
@@ -58,7 +59,8 @@
 落点：
 
 - `agent/runtime/tool_catalog.py` 提供默认契约和 `tool_runtime_metadata()`。
-- `agent/runtime/runner.py` 读取契约决定工具结果是否直接收尾为 `[SILENCE]`。
+- `agent/runtime/tool_contracts.py` 读取契约决定工具结果是否直接收尾为 `[SILENCE]`，并承接直出媒体、图片生成失败格式化和意图推荐工具逻辑。
+- `agent/runtime/runner.py` 只调用契约层，不再直接维护副作用工具收尾细节。
 - QQ 表情、本地表情包、联网搜图直发等工具统一走 `side_effect=send_message` + `final_behavior=silence_on_success`。
 
 验收：
@@ -69,13 +71,15 @@
 
 ## 阶段三：runner 分层拆解
 
+状态：本轮已落地第一块工具结果契约层。
+
 目标：降低 `agent/runtime/runner.py` 的维护压力。
 
 建议拆分：
 
 - `planning_context`：意图、TurnPlan、query rewrite、候选工具提示。
 - `tool_loop`：模型工具循环、预算、工具结果回灌。
-- `tool_result_contracts`：副作用工具、直出媒体、失败格式化、静默收尾。
+- `tool_contracts`：副作用工具、直出媒体、失败格式化、静默收尾、意图推荐工具。
 - `final_synthesis`：工具结果拟人化、证据综合提示、最终回复收口。
 
 验收：

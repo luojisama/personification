@@ -802,6 +802,7 @@ async def process_yaml_response_logic(
                         f"fallback=metadata "
                         f"source={semantic_source} "
                         f"intent={getattr(semantic_frame, 'chat_intent', '')} "
+                        f"speech_act={getattr(turn_plan, 'speech_act', '')} "
                         f"ambiguity={getattr(semantic_frame, 'ambiguity_level', '')}"
                     ),
                     hint=semantic_frame_timeout_hint(semantic_timeout_s),
@@ -867,6 +868,7 @@ async def process_yaml_response_logic(
         status="info",
         detail=(
             f"intent={message_intent or '-'} "
+            f"speech_act={getattr(turn_plan, 'speech_act', getattr(semantic_frame, 'speech_act', '-')) or '-'} "
             f"ambiguity={intent_ambiguity_level or '-'} "
             f"recommend_silence={bool(intent_recommend_silence)}"
         ),

@@ -13,7 +13,6 @@ from ...core.metrics import record_counter, record_timing
 from ...core.time_ctx import get_configured_now
 from ..tool_registry import ToolRegistry
 from ...core.message_parts import extract_text_from_parts
-from ...core.qq_expression_tools import expression_tool_result_queued
 from ...core.reply_style_policy import build_media_understanding_output_policy_prompt, build_speech_act_policy_prompt
 from ...core.web_grounding import merge_grounding_topic
 from .constants import (
@@ -59,12 +58,10 @@ from .tool_selection import (
     _select_tool_schemas,
     _semantic_tool_guidance,
 )
-from .tool_catalog import tool_runtime_metadata
+from .tool_contracts import direct_tool_result_from_contract, recommended_tools_for_chat_intent
 from .wrappers import (
     _IMAGE_B64_TOOL_RESULT_RE,
     _extract_persona_system_prompt,
-    _format_image_generation_failure,
-    _is_direct_media_tool_result,
     _render_tool_result_for_user,
     _wrap_tool_result_in_persona,
 )
@@ -302,29 +299,6 @@ def _should_review_banter_lookup_draft(*, ambiguity_level: str, draft_answer_tex
     return "?" in draft or "？" in draft
 
 
-def _metadata_tags(metadata: dict[str, Any]) -> set[str]:
-    value = metadata.get("intent_tags", [])
-    if isinstance(value, str):
-        return {item.strip() for item in value.split(",") if item.strip()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return {str(item or "").strip() for item in value if str(item or "").strip()}
-    return set()
-
-
-def _recommended_tools_for_chat_intent(registry: ToolRegistry, chat_intent: str) -> list[str]:
-    intent = str(chat_intent or "").strip()
-    if intent == "image_generation":
-        return ["generate_image"] if registry.get("generate_image") is not None else []
-    if intent != "expression":
-        return []
-    names: list[str] = []
-    for tool in registry.active():
-        metadata = tool_runtime_metadata(registry, tool.name)
-        if "expression" in _metadata_tags(metadata):
-            names.append(tool.name)
-    return names[:6]
-
-
 def _direct_tool_result_agent_result(
     *,
     registry: ToolRegistry | None,
@@ -332,35 +306,17 @@ def _direct_tool_result_agent_result(
     result_text: str,
     pending_actions: List[dict],
 ) -> "AgentResult | None":
-    text = str(result_text or "").strip()
-    normalized_tool_name = str(tool_name or "").strip()
-    metadata = tool_runtime_metadata(registry, normalized_tool_name)
-    final_behavior = str(metadata.get("final_behavior", "") or "").strip()
-    side_effect = str(metadata.get("side_effect", "") or "").strip()
-    if (
-        side_effect == "send_message"
-        and final_behavior == "silence_on_success"
-        and expression_tool_result_queued(text)
-    ):
+    result = direct_tool_result_from_contract(
+        registry=registry,
+        tool_name=tool_name,
+        result_text=result_text,
+    )
+    if result is not None:
         return AgentResult(
-            text="[SILENCE]",
+            text=result.text,
             pending_actions=pending_actions,
-            direct_output=False,
-            bypass_length_limits=False,
-        )
-    if _is_direct_media_tool_result(normalized_tool_name, text):
-        return AgentResult(
-            text=text,
-            pending_actions=pending_actions,
-            direct_output=False,
-            bypass_length_limits=True,
-        )
-    if normalized_tool_name == _IMAGE_GENERATION_TOOL_NAME:
-        return AgentResult(
-            text=_format_image_generation_failure(text),
-            pending_actions=pending_actions,
-            direct_output=False,
-            bypass_length_limits=False,
+            direct_output=result.direct_output,
+            bypass_length_limits=result.bypass_length_limits,
         )
     return None
 
@@ -539,7 +495,7 @@ async def run_agent(
             query_candidates=[preliminary_query_text] if preliminary_query_text else [],
             context_clues=[],
             need_image_understanding=bool(user_images),
-            recommended_tools=_recommended_tools_for_chat_intent(registry, runtime_chat_intent),
+            recommended_tools=recommended_tools_for_chat_intent(registry, runtime_chat_intent),
             search_plan=[],
         )
         _record_reply_trace_stage(

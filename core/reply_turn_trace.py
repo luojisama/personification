@@ -16,6 +16,9 @@ _CURRENT_TRACE_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     default="",
 )
 _ELAPSED_RE = re.compile(r"(?:elapsed_ms=|耗时\s*)(\d{1,9})(?:\s*ms)?", re.I)
+_SIGNAL_KEY_RE = re.compile(
+    r"(?:^|\s)(action|speech_act|output|intent|ambiguity|tool|reason|source)=([^\s]+)"
+)
 
 
 def new_trace_id() -> str:
@@ -249,6 +252,16 @@ def _elapsed_from_detail(detail: Any) -> int | None:
         return None
 
 
+def _signals_from_detail(detail: Any) -> dict[str, str]:
+    signals: dict[str, str] = {}
+    for match in _SIGNAL_KEY_RE.finditer(str(detail or "")):
+        key = str(match.group(1) or "").strip()
+        value = sanitize_text(match.group(2) or "")[:80]
+        if key and value and key not in signals:
+            signals[key] = value
+    return signals
+
+
 def build_process_view(trace: dict[str, Any] | None, *, logs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Build a WebUI-safe process timeline.
 
@@ -298,6 +311,7 @@ def build_process_view(trace: dict[str, Any] | None, *, logs: list[dict[str, Any
             "status": status,
             "category": category,
             "detail": detail,
+            "signals": _signals_from_detail(detail),
             "hint": hint,
             "ts": ts,
             "offset_ms": int((ts - base_ts) * 1000) if ts > 0 and base_ts > 0 else 0,
