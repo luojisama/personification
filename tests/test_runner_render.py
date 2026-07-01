@@ -442,6 +442,63 @@ def test_run_agent_uses_precomputed_intent_without_reinferring(monkeypatch) -> N
     assert len(caller.calls) == 1
 
 
+def test_run_agent_records_budget_profile_without_enforcing_it(monkeypatch) -> None:  # noqa: ANN001
+    stages: list[dict[str, object]] = []
+
+    def _capture_stage(**kwargs):  # noqa: ANN001
+        stages.append(dict(kwargs))
+
+    monkeypatch.setattr(runner, "_record_reply_trace_stage", _capture_stage)
+
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="直接接一句就行。",
+                tool_calls=[],
+                raw={},
+            )
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "这局又寄了"}],
+            registry=tool_registry.ToolRegistry(),
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=10,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="capability",
+                ambiguity_level="low",
+            ),
+            turn_plan=SimpleNamespace(
+                reply_action="reply",
+                speech_act="participate",
+                research_need="none",
+                output_mode="chat_short",
+                tool_intent=["none"],
+            ),
+            time_budget_seconds=150,
+        )
+    )
+
+    budget_stage = next(stage for stage in stages if stage["key"] == "agent_budget")
+    assert "budget=light_chat" in budget_stage["detail"]
+    assert "suggested_steps=2" in budget_stage["detail"]
+    assert "actual_steps=10" in budget_stage["detail"]
+    assert result.text == "直接接一句就行。"
+    assert len(caller.calls) == 1
+
+
 def test_run_agent_returns_no_reply_when_time_budget_is_exhausted() -> None:
     caller = _FakeToolCaller([])
 

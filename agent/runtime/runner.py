@@ -52,6 +52,7 @@ from .tool_args import (
     _schema_allowed_parameters,
     _tool_allows_parameter,
 )
+from .budgeting import derive_agent_budget_profile, render_agent_budget_trace_detail
 from .tool_selection import (
     _normalize_agent_max_steps,
     _schema_tool_name,
@@ -474,6 +475,34 @@ async def run_agent(
     evidence_turn_plan = _plan_for_evidence(turn_plan, intent_decision, has_images=bool(user_images))
     effective_max_steps = _normalize_agent_max_steps(
         max_steps if max_steps is not None else getattr(plugin_config, "personification_agent_max_steps", DEFAULT_AGENT_MAX_STEPS)
+    )
+    budget_profile = derive_agent_budget_profile(
+        turn_plan=turn_plan,
+        intent_decision=intent_decision,
+        actual_max_steps=effective_max_steps,
+        actual_time_budget_seconds=time_budget_seconds,
+    )
+    record_counter(
+        "agent.budget_profile_total",
+        mode=budget_profile.mode,
+        source=budget_profile.source,
+    )
+    if budget_profile.suggested_time_budget_seconds is not None:
+        record_timing(
+            "agent.budget_suggested_ms",
+            budget_profile.suggested_time_budget_seconds * 1000.0,
+            mode=budget_profile.mode,
+        )
+    _record_reply_trace_stage(
+        key="agent_budget",
+        label="Agent 预算模式",
+        status="info",
+        detail=render_agent_budget_trace_detail(
+            budget_profile,
+            actual_max_steps=effective_max_steps,
+            actual_time_budget_seconds=time_budget_seconds,
+        ),
+        hint="当前仅 shadow 观测，不直接改变生产超时或工具步数",
     )
     _record_reply_trace_stage(
         key="agent_start",

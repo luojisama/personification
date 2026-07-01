@@ -130,6 +130,34 @@ async function pickAuditFilter(action) {
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
 
+function traceSignalLabel(key) {
+  return ({
+    action: "动作",
+    speech_act: "说话",
+    output: "输出",
+    intent: "意图",
+    ambiguity: "歧义",
+    tool: "工具",
+    budget: "预算",
+    suggested_steps: "建议步数",
+    actual_steps: "实际步数",
+    suggested_seconds: "建议秒数",
+    actual_seconds: "实际秒数",
+    reason: "原因",
+    source: "来源",
+  })[key] || key;
+}
+
+function renderTraceSignalTags(signals) {
+  const entries = Object.entries(signals || {}).filter(([key, value]) => key && value);
+  if (!entries.length) return "";
+  return `<div class="trace-step-signals">${
+    entries.map(([key, value]) =>
+      `<span class="tag" title="${escapeAttr(key)}">${escapeHtml(traceSignalLabel(key))}: ${escapeHtml(String(value))}</span>`
+    ).join("")
+  }</div>`;
+}
+
 function renderTraceProcess() {
   const detail = state.traceDetail;
   if (!state.logTraceId) return "";
@@ -178,6 +206,7 @@ function renderTraceProcess() {
           <code>${escapeHtml(item.key || "")}</code>
           <span class="muted">${escapeHtml(offset)}${duration ? " · " + escapeHtml(duration) : ""}</span>
         </div>
+        ${renderTraceSignalTags(item.signals)}
         ${item.detail ? `<div class="trace-step-detail">${escapeHtml(item.detail)}</div>` : ""}
         ${item.hint ? `<div class="trace-step-hint">${escapeHtml(item.hint)}</div>` : ""}
       </div>

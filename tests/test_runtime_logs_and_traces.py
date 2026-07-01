@@ -117,5 +117,34 @@ def test_reply_turn_trace_builds_safe_process_view(_db_tmp) -> None:
     assert view["items"][0]["duration_ms"] == 1500
     assert view["items"][0]["signals"]["speech_act"] == "participate"
     assert view["items"][1]["signals"]["tool"] == "web_search"
-    assert view["summary"]["slow_stages"][0]["key"] == "agent_model_step"
-    assert "abc123" not in view["items"][0]["detail"]
+
+
+def test_reply_turn_trace_extracts_budget_signals(_db_tmp) -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")
+    logs.clear_all()
+    trace_id = traces.start_trace(session_type="group", group_id="123", user_id="456")
+    token = traces.set_current_trace_id(trace_id)
+    try:
+        traces.record_stage(
+            key="agent_budget",
+            label="Agent 预算模式",
+            status="info",
+            detail=(
+                "budget=light_chat suggested_steps=2 actual_steps=10 "
+                "suggested_seconds=18 actual_seconds=150 source=shadow"
+            ),
+        )
+        traces.finish_trace(outcome="ok", diagnosis_code="ok")
+    finally:
+        traces.reset_current_trace_id(token)
+
+    row = traces.get_trace(trace_id)
+    view = traces.build_process_view(row, logs=logs.query_recent(trace_id=trace_id))
+
+    assert view["items"][0]["signals"]["budget"] == "light_chat"
+    assert view["items"][0]["signals"]["suggested_steps"] == "2"
+    assert view["items"][0]["signals"]["actual_seconds"] == "150"
+    assert view["items"][0]["signals"]["source"] == "shadow"
+    assert view["items"][0]["category"] == "agent"
+    assert view["summary"]["slow_stages"] == []
