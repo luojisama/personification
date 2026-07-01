@@ -1844,14 +1844,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         if has_block_marker:
             reply_content = reply_content.replace("[BLOCK]", "").replace("<BLOCK>", "").strip()
 
-        has_silence_marker = "[SILENCE]" in reply_content or "<SILENCE>" in reply_content
+        has_silence_marker = has_silence_control_marker(reply_content)
         if has_silence_marker:
             if _record_pending_action_history_if_any():
                 runtime.logger.info("拟人插件：Agent 静默动作已写入会话历史。")
             runtime.logger.info(f"AI 决定结束与群 {group_id} 中 {user_name}({user_id}) 的对话 (SILENCE)")
             return
 
-        if used_agent and ("[NO_REPLY]" in reply_content or "<NO_REPLY>" in reply_content):
+        if used_agent and has_silence_control_marker(reply_content):
             runtime.logger.info("拟人插件：Agent 文本含 NO_REPLY 标记，保持沉默。")
             await _maybe_silence_reaction()
             return

@@ -144,11 +144,16 @@ def strip_visible_reasoning_trace(text: Any) -> str:
 
 def has_silence_control_marker(text: Any) -> bool:
     raw = str(text or "")
-    if any(marker in raw for marker in _SILENCE_MARKERS):
-        return True
     stripped = raw.strip()
     if not stripped:
         return False
+    if stripped in _SILENCE_MARKERS:
+        return True
+    for marker in _SILENCE_MARKERS:
+        if stripped.startswith(marker):
+            leftover = stripped[len(marker) :].strip()
+            if not leftover or leftover in {":", "："}:
+                return True
     if stripped.lower() in _SILENCE_BARE_WORDS:
         return True
     if _SILENCE_PREFIX_PATTERN.match(stripped):
@@ -186,6 +191,7 @@ def strip_response_control_markers(text: Any) -> str:
         flags=re.IGNORECASE,
     )
     for marker in _SILENCE_MARKERS:
+        cleaned = re.sub(rf"^\s*{re.escape(marker)}\s*[:：]?\s*", "", cleaned, count=1)
         cleaned = cleaned.replace(marker, "")
     cleaned = _SILENCE_LEADING_LINE_PATTERN.sub("", cleaned, count=1)
     cleaned = _SILENCE_PREFIX_PATTERN.sub("", cleaned, count=1)

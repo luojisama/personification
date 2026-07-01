@@ -41,6 +41,8 @@ _QZONE_CASUAL_TONE_DISCIPLINE = (
     "少用连续铺景的叙述开头（比如一上来交代时间、天气、外面声音、杯子里的东西），"
     "也不要堆“光、风、疲惫、安静、突然发现”这类意象去撑气氛。"
     "优先像手机上随手敲的一句：短、轻、可以半截、可以吐槽，不必把前因后果说圆。"
+    "不要写成整齐的二段式机灵句，尤其别用“脑子/胃/手/嘴先开始……”这类器官拟人、先后对仗、"
+    "看似俏皮但模板感很重的句式；宁可更普通、更像真的随手敲。"
 )
 
 
@@ -451,6 +453,11 @@ _NET_SLANG_TIC_RE = re.compile(
     re.IGNORECASE,
 )
 
+_QZONE_STIFF_TIC_RE = re.compile(
+    r"([脑胃手嘴眼心身体][子睛脚]?[没不还已]?[在先]?.{0,10}[催拐喊动馋困累]|"
+    r".{1,12}[，,；;].{0,8}先.{0,12}了|今天只想.{2,18})"
+)
+
 
 async def _rewrite_qzone_net_slang(
     text: str,
@@ -501,6 +508,54 @@ async def _rewrite_qzone_net_slang(
     return str(getattr(response, "content", "") or "").strip()
 
 
+async def _rewrite_qzone_stiff_tic(
+    text: str,
+    *,
+    tool_caller: Any,
+    registry: Any = None,
+    plugin_config: Any = None,
+    agent_max_steps: int = 4,
+    persona_system: Any = "",
+    timeout: float = 8.0,
+    logger: Any = None,
+) -> str:
+    """把模板化的机灵句/器官拟人句改成更真一点的随手短句。"""
+    if tool_caller is None:
+        return ""
+    messages: list[dict[str, Any]] = []
+    persona = str(persona_system or "").strip()
+    if persona:
+        messages.append({"role": "system", "content": persona[:1200]})
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "下面这条 QQ 空间说说有点像模板化的机灵句：二段式、先后对仗、器官拟人、"
+                "或“今天只想……”这种太工整的口播感。请保留角色口吻和原本的小念头，"
+                "改写成更像真人随手敲的一句日常碎碎念。可以更普通、更短、更松散，"
+                "不要解释为什么改，不要补设定，不要喊口号，12-45 个中文字符。只输出改写后的句子。"
+            ),
+        }
+    )
+    messages.append({"role": "user", "content": str(text or "").strip()[:300]})
+    try:
+        if registry is not None:
+            return await run_text_agent(
+                messages=messages,
+                plugin_config=plugin_config,
+                logger=logger,
+                tool_caller=tool_caller,
+                registry=registry,
+                max_steps=agent_max_steps,
+                trigger_reason="qzone_stiff_tic_rewrite",
+                chat_intent_hint="qzone_stiff_tic_rewrite",
+            )
+        response = await asyncio.wait_for(tool_caller.chat_with_tools(messages, [], False), timeout=timeout)
+    except Exception:
+        return ""
+    return str(getattr(response, "content", "") or "").strip()
+
+
 async def _review_qzone_post(
     text: str,
     *,
@@ -517,6 +572,7 @@ async def _review_qzone_post(
        用群聊同款的 `is_agent_reply_ooc` 正则 + `rewrite_agent_reply_ooc` 重写兜住；
        重写失败则丢弃该条（宁缺勿发）。
     2) 再兜一层『(也)太……了吧 / X爆了 / 绝了 / yyds』等营业感叹腔，改写成平铺直叙。
+    3) 对看起来过度工整的 QZone 机灵句做一次轻改写，避免“越改越怪”的模板感。
     """
     if not text or tool_caller is None:
         return text
@@ -547,6 +603,21 @@ async def _review_qzone_post(
             text = toned
         elif logger is not None:
             logger.info(f"[qzone] net-slang rewrite ineffective, keeping: {text}")
+    if text and _QZONE_STIFF_TIC_RE.search(text):
+        toned = await _rewrite_qzone_stiff_tic(
+            text,
+            tool_caller=tool_caller,
+            registry=registry,
+            plugin_config=plugin_config,
+            agent_max_steps=agent_max_steps,
+            persona_system=persona_system,
+            logger=logger,
+        )
+        toned = _trim_qzone_content(toned)
+        if toned and not _QZONE_STIFF_TIC_RE.search(toned):
+            text = toned
+        elif logger is not None:
+            logger.info(f"[qzone] stiff-tic rewrite ineffective, keeping: {text}")
     return text
 
 
@@ -809,6 +880,8 @@ async def generate_ai_diary(
         "5. 语气贴合角色，但不要互联网黑话、热梗、夸张营业感、AI 客服腔、对仗工整的总结句或文艺旁白句。\n"
         "5b. 严禁用『(也)太……了吧 / ……爆了 / ……绝了 / 谁懂啊 / 笑死 / 绷不住了 / yyds / 好耶』这类营业感叹腔收尾或起势；"
         "把这种感叹换成平铺直叙的一句话，或干脆只描述那个画面/动作本身，不喊口号、不强行制造情绪。\n"
+        "5c. 避开看似俏皮但像生成器模板的表达：不要让脑子、胃、手、嘴等器官轮流上台催促，"
+        "不要写“X 没在怎样，Y 先怎样了”这类过分整齐的对仗句。\n"
         "6. 不要列条目、不要标题、不要 hashtag、不要说自己是 AI。\n"
         "7. 必须避开最近说说已经反复出现的话题、题材、具体意象、食物、动作和句式；如果最近写过类似的，就彻底换一个不同的话题和角度。\n"
         "8. 触发点要小而具体，写成自己的即时反应，不要新闻播报、不要复述大家正在热议的主话题。\n"

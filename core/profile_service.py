@@ -115,6 +115,36 @@ class ProfileService:
     def list_local_profiles(self, group_id: str) -> list[dict[str, Any]]:
         return self.memory_store.list_local_profiles(group_id)
 
+    @staticmethod
+    def _render_structured_profile_card(profile_json: dict[str, Any]) -> str:
+        structured = profile_json.get("structured") if isinstance(profile_json, dict) else {}
+        if not isinstance(structured, dict) or not structured:
+            return ""
+        rows: list[str] = []
+        portrait = str(structured.get("portrait", "") or "").strip()
+        if portrait:
+            rows.append(f"[人物轮廓] {portrait[:260]}")
+        compact_fields = [
+            ("称呼偏好", "nickname_pref"),
+            ("兴趣", "interests"),
+            ("作息", "routine"),
+            ("说话风格", "communication_style"),
+            ("情绪基线", "emotion_baseline"),
+            ("社交模式", "social_mode"),
+            ("关系", "relationship"),
+            ("近期关注", "recent_focus"),
+            ("雷区", "taboos"),
+            ("互动建议", "interaction_advice"),
+        ]
+        facts: list[str] = []
+        for label, key in compact_fields:
+            value = str(structured.get(key, "") or "").strip()
+            if value:
+                facts.append(f"{label}: {value[:120]}")
+        if facts:
+            rows.append("[立体人物卡] " + "；".join(facts[:8]))
+        return "\n".join(rows)
+
     def build_prompt_block(self, *, user_id: str, group_id: str = "") -> str:
         """生成注入到 system prompt 的"用户档案"段落。
 
@@ -126,6 +156,9 @@ class ProfileService:
             meta_block = render_user_profile_meta(core.profile_json.get("qq_profile", {}))
             if meta_block:
                 lines.append(meta_block)
+            structured_block = self._render_structured_profile_card(core.profile_json)
+            if structured_block:
+                lines.append(structured_block)
         if core and core.profile_text:
             lines.append(f"[全局印象] {core.snippet(220)}")
         if str(group_id or "").strip():

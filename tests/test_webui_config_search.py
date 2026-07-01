@@ -21,3 +21,15 @@ def test_config_search_is_ime_aware_and_searches_aliases() -> None:
     assert "configSearchHaystack" in app_config_js
     assert "configSearchEntryScore" in app_config_js
     assert "configEditDistanceWithin" in app_config_js
+
+
+def test_config_api_pool_model_probe_dropdown_is_present() -> None:
+    app_config_js = (
+        Path(__file__).resolve().parents[1] / "webui" / "static" / "app-config.js"
+    ).read_text(encoding="utf-8")
+    assert "probeApiProviderModels" in app_config_js
+    assert 'api("/config/provider-models"' in app_config_js
+    assert "<datalist" in app_config_js
+    assert "探测模型" in app_config_js
+    assert "sanitizeApiProvider" in app_config_js
+    assert "delete out._model_options" in app_config_js

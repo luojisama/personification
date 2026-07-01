@@ -135,10 +135,11 @@ async def _schedule_hook(ctx: HookContext) -> Optional[str]:
             "仅用于保持时间语义自然，比如早晚问候、作息口吻，不强制限制是否回复。"
         )
 
+    schedule_text = str(group_config.get("schedule_prompt", "") or "").strip()
     return (
         "## 当前时间与状态参考\n"
         f"- 当前时间：{ctx.current_time_str}\n"
-        f"{ctx.runtime.get_schedule_prompt_injection()}"
+        f"{ctx.runtime.get_schedule_prompt_injection(schedule_text)}"
     )
 
 

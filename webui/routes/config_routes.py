@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import re
 from typing import Any
+from urllib.parse import urlencode
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
 from ...core import config_registry, env_writer, webui_audit_log
@@ -85,6 +89,132 @@ _RECOMMENDED_DEFAULTS: dict[str, Any] = {
     "personification_group_knowledge_daily_limit": 6,
     "personification_group_knowledge_min_messages": 50,
 }
+
+
+def _provider_timeout(provider: dict[str, Any]) -> float:
+    try:
+        return max(3.0, min(30.0, float(provider.get("timeout", 12) or 12)))
+    except (TypeError, ValueError):
+        return 12.0
+
+
+def _normalize_base_url(raw: str, default: str) -> str:
+    value = str(raw or "").strip().rstrip("/") or default.rstrip("/")
+    for suffix in ("/chat/completions", "/messages", "/responses", "/models"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)]
+    return value.rstrip("/")
+
+
+def _append_version_path(base: str, version: str = "v1") -> str:
+    base = base.rstrip("/")
+    return base if base.endswith(f"/{version}") else f"{base}/{version}"
+
+
+def _normalize_gemini_models_base(raw: str) -> str:
+    base = _normalize_base_url(raw, "https://generativelanguage.googleapis.com")
+    match = re.match(r"^(?P<root>.+/(?:v1beta|v1))(?:/.*)?$", base)
+    if match:
+        return match.group("root").rstrip("/")
+    return f"{base.rstrip('/')}/v1beta"
+
+
+def _models_endpoint(provider: dict[str, Any]) -> tuple[str, dict[str, str], dict[str, str]]:
+    from ...core.provider_router import normalize_api_type
+
+    api_type = normalize_api_type(provider.get("api_type"))
+    api_key = str(provider.get("api_key", "") or "").strip()
+    if api_type == "anthropic":
+        base = _normalize_base_url(str(provider.get("api_url", "") or ""), "https://api.anthropic.com")
+        headers = {"anthropic-version": "2023-06-01"}
+        if api_key:
+            headers["x-api-key"] = api_key
+        return f"{_append_version_path(base)}/models", headers, {}
+    if api_type == "gemini":
+        base = _normalize_gemini_models_base(str(provider.get("api_url", "") or ""))
+        params = {"key": api_key} if api_key else {}
+        return f"{base}/models", {}, params
+    base = _normalize_base_url(str(provider.get("api_url", "") or ""), "https://api.openai.com/v1")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    return f"{base}/models", headers, {}
+
+
+def _parse_model_list(api_type: str, payload: Any) -> list[dict[str, str]]:
+    if not isinstance(payload, dict):
+        return []
+    models: list[dict[str, str]] = []
+    if api_type == "gemini":
+        raw_items = payload.get("models") or []
+        for item in raw_items if isinstance(raw_items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            raw_name = str(item.get("name", "") or "").strip()
+            model_id = raw_name.removeprefix("models/")
+            if not model_id:
+                continue
+            methods = item.get("supportedGenerationMethods") or []
+            if isinstance(methods, list) and methods and "generateContent" not in methods:
+                continue
+            models.append(
+                {
+                    "id": model_id,
+                    "label": str(item.get("displayName", "") or model_id),
+                    "source": "gemini_models",
+                }
+            )
+        return models
+    raw_items = payload.get("data") or payload.get("models") or []
+    for item in raw_items if isinstance(raw_items, list) else []:
+        if isinstance(item, str):
+            model_id = item.strip()
+            label = model_id
+        elif isinstance(item, dict):
+            model_id = str(item.get("id") or item.get("name") or "").strip()
+            label = str(item.get("display_name") or item.get("displayName") or model_id).strip()
+        else:
+            continue
+        if model_id:
+            models.append({"id": model_id, "label": label or model_id, "source": f"{api_type}_models"})
+    return models
+
+
+async def _probe_http_models(provider: dict[str, Any]) -> tuple[list[dict[str, str]], str]:
+    from ...core.provider_router import normalize_api_type
+
+    api_type = normalize_api_type(provider.get("api_type"))
+    url, headers, params = _models_endpoint(provider)
+    proxy = str(provider.get("proxy", "") or "").strip()
+    timeout = httpx.Timeout(_provider_timeout(provider), connect=5.0)
+    client_kwargs: dict[str, Any] = {"timeout": timeout, "follow_redirects": True}
+    if proxy:
+        client_kwargs["proxy"] = proxy
+    async with httpx.AsyncClient(**client_kwargs) as client:
+        response = await client.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        payload = response.json()
+    models = _parse_model_list(api_type, payload)
+    return models, url + (("?" + urlencode({"key": "***"})) if params.get("key") else "")
+
+
+def _cached_cli_models(runtime: Any, provider: dict[str, Any]) -> list[dict[str, str]]:
+    from ...core.model_router import collect_available_models
+
+    try:
+        items = collect_available_models(
+            getattr(runtime, "plugin_config", None),
+            get_configured_api_providers=lambda: [provider],
+        )
+        return [
+            {
+                "id": str(item.get("model", "") or "").strip(),
+                "label": str(item.get("model", "") or "").strip(),
+                "source": str(item.get("source", "") or "local_cache"),
+            }
+            for item in items
+            if str(item.get("model", "") or "").strip()
+        ]
+    except Exception:
+        return []
 
 
 def _entry_to_view(entry: Any, *, plugin_config: Any) -> ConfigEntryView:
@@ -236,5 +366,41 @@ def build_config_router(*, runtime) -> APIRouter:
             env_json_path=result.get("env_json_path"),
             new_value=normalized if not entry.secret else "***",
         )
+
+    @router.post("/provider-models")
+    async def provider_models(
+        body: dict | None = None,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...core.provider_router import normalize_api_type
+
+        provider = (body or {}).get("provider", body or {})
+        if not isinstance(provider, dict):
+            raise HTTPException(status_code=400, detail="provider 必须是对象")
+        api_type = normalize_api_type(provider.get("api_type"))
+        cli_types = {"openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}
+        if api_type in cli_types:
+            cached = _cached_cli_models(runtime, provider)
+            return {
+                "api_type": api_type,
+                "source": "local_cache",
+                "manual_allowed": True,
+                "models": cached,
+            }
+        if api_type not in {"openai", "anthropic", "gemini"}:
+            raise HTTPException(status_code=400, detail=f"暂不支持探测 {api_type} 的模型列表")
+        try:
+            models, source_url = await asyncio.wait_for(_probe_http_models(provider), timeout=_provider_timeout(provider) + 2.0)
+        except httpx.HTTPStatusError as exc:
+            status = getattr(exc.response, "status_code", "unknown")
+            raise HTTPException(status_code=502, detail=f"模型列表探测失败：HTTP {status}") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"模型列表探测失败：{str(exc)[:160]}") from exc
+        return {
+            "api_type": api_type,
+            "source": source_url,
+            "manual_allowed": True,
+            "models": sorted(models, key=lambda item: item.get("id", "")),
+        }
 
     return router

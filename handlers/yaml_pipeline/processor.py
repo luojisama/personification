@@ -1003,8 +1003,12 @@ async def process_yaml_response_logic(
     system_schedule_instruction = ""
 
     if schedule_active:
-        system_schedule_instruction = get_schedule_prompt_injection()
-        schedule_instruction = "2. **时间锚定**：参考【当前时间】判断作息状态。**作息状态仅作为回复的背景设定（占比约20%），主要精力应放在回应对方的内容上。**如果当前是上课或深夜（非休息时间），你回复了消息说明你正在“偷偷玩手机”或“熬夜”，请表现出这种紧张感或困意。"
+        schedule_prompt_text = str(group_config.get("schedule_prompt", "") or "").strip()
+        system_schedule_instruction = get_schedule_prompt_injection(schedule_prompt_text)
+        if schedule_prompt_text:
+            schedule_instruction = "2. **时间锚定**：参考【当前时间】和本群自定义作息表判断轻量状态。作息只占背景，不要压过正在聊的内容。"
+        else:
+            schedule_instruction = "2. **时间锚定**：参考【当前时间】保持时间语义正确；当前未配置具体作息表，不要自动推断上课/上班/睡觉等状态。"
     else:
         system_prompt = f"{schedule_disabled_override_prompt()}\n\n{system_prompt}"
         system_schedule_instruction = (
@@ -1487,7 +1491,7 @@ async def process_yaml_response_logic(
             asyncio.create_task(_notify_superusers())
         _trace_no_reply("block_marker", diagnosis_code="blocked", detail="模型返回 BLOCK 控制标记")
         return
-    if "[SILENCE]" in reply_content or "<SILENCE>" in reply_content:
+    if has_silence_control_marker(reply_content):
         if _record_pending_action_history_if_any():
             logger.info("拟人插件 (YAML)：Agent 静默动作已写入会话历史。")
         logger.info("AI (YAML) 决定保持沉默 (SILENCE)")

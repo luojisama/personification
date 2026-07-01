@@ -15,6 +15,7 @@ from .final_synthesis import AgentResult
 
 
 _CONTROL_REPLIES = frozenset({"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"})
+_REVISION_FLAGS = frozenset({"formulaic_tic", "style_risk"})
 
 
 def _is_control_reply(text: str) -> bool:
@@ -125,7 +126,7 @@ async def finalize_agent_reply_quality(
     final_text = visible_text or raw_text
     revision_attempted = False
 
-    if flags and tool_caller is not None:
+    if flags and tool_caller is not None and any(flag in _REVISION_FLAGS for flag in flags):
         revision_attempted = True
         rewritten = await rewrite_agent_reply_ooc(
             tool_caller=tool_caller,
@@ -134,8 +135,9 @@ async def finalize_agent_reply_quality(
             timeout=8.0,
             output_mode=_turn_plan_output_mode(turn_plan),
         )
-        if rewritten:
-            final_text = normalize_visible_reply_text(strip_response_control_markers(rewritten))
+        candidate = normalize_visible_reply_text(strip_response_control_markers(rewritten)) if rewritten else ""
+        if candidate:
+            final_text = candidate
             action = "rewritten"
 
     if not final_text:

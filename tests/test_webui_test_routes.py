@@ -83,6 +83,68 @@ def test_chat_all_requires_prompt(_runtime_context) -> None:
     assert res.status_code == 400
 
 
+def test_config_provider_models_probes_openai_compatible(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    captured: dict = {}
+
+    class _Resp:
+        def raise_for_status(self):  # noqa: ANN201
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {"data": [{"id": "gpt-test"}, {"id": "gpt-test-mini"}]}
+
+    class _Client:
+        def __init__(self, **kwargs):  # noqa: ANN001
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def get(self, url, headers=None, params=None):  # noqa: ANN001, ANN201
+            captured["url"] = url
+            captured["headers"] = headers or {}
+            captured["params"] = params or {}
+            return _Resp()
+
+    monkeypatch.setattr(config_routes.httpx, "AsyncClient", _Client)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    res = client.post(
+        "/personification/api/config/provider-models",
+        json={"provider": {"api_type": "openai", "api_url": "https://example.test/v1", "api_key": "sk-test"}},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert captured["url"] == "https://example.test/v1/models"
+    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+    assert [m["id"] for m in body["models"]] == ["gpt-test", "gpt-test-mini"]
+
+
+def test_config_provider_models_endpoint_normalizes_version_paths() -> None:
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+
+    anthropic_url, anthropic_headers, _ = config_routes._models_endpoint(  # noqa: SLF001
+        {"api_type": "anthropic", "api_url": "https://api.anthropic.com/v1", "api_key": "ak-test"}
+    )
+    assert anthropic_url == "https://api.anthropic.com/v1/models"
+    assert anthropic_headers["x-api-key"] == "ak-test"
+    assert anthropic_headers["anthropic-version"]
+
+    gemini_url, _, gemini_params = config_routes._models_endpoint(  # noqa: SLF001
+        {
+            "api_type": "gemini",
+            "api_url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent",
+            "api_key": "gk-test",
+        }
+    )
+    assert gemini_url == "https://generativelanguage.googleapis.com/v1beta/models"
+    assert gemini_params["key"] == "gk-test"
+
+
 def test_persona_prompt_inline_system_prompt(_runtime_context) -> None:
     _runtime_context.plugin_config.personification_system_prompt = "你是一个活泼的群友" * 10
     _runtime_context.plugin_config.personification_prompt_path = ""
@@ -228,6 +290,102 @@ system: |
         "persona_template_research",
         "persona_template_research",
         "persona_template_synthesis",
+    ]
+
+
+def test_persona_template_builder_supports_custom_description(_runtime_context) -> None:
+    class _MainCaller:
+        def __init__(self):
+            self.calls = []
+            self.contexts = []
+
+        async def __call__(self, messages, **kwargs):
+            self.calls.append({"messages": messages, "kwargs": kwargs})
+            llm_context = load_personification_module("plugin.personification.core.llm_context")
+            self.contexts.append(dict(llm_context.current_llm_context()))
+            user_text = str(messages[-1]["content"])
+            if "原创人设描述" in user_text or "用户描述资料" in user_text:
+                return """
+name: 星野露
+tts:
+  voice: default_zh
+  style: 平静 自然
+  user_hint: 用自然语气朗读。
+status: |
+  心情: "平静"
+  状态: "观察群聊"
+  记忆: ""
+  动作: "看群消息"
+nick_name:
+  - 星野露
+ack_phrases:
+  - 我看看
+initial_message: "我是星野露"
+mute_keyword:
+  - 闭嘴
+input: |
+  # 当前时间
+  {time}
+  # 触发原因
+  {trigger_reason}
+  {schedule_instruction}
+  # 对话历史
+  {history_new}
+  # 当前消息
+  {history_last}
+  # 当前状态
+  {status}
+  <output>
+  <message>消息正文</message>
+  </output>
+system: |
+  你是星野露，不是 AI 助手。
+  ## 角色身份与不可替换锚点
+  - 自定义人设。
+  ## 资料冲突与缺口
+  - 无
+""".strip()
+            return '{"facts":["用户描述事实"],"conflicts":[],"unknowns":[]}'
+
+    caller = _MainCaller()
+    old_get_bots = _runtime_context.app_module.get_runtime_context().get_bots
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=_runtime_context.plugin_config,
+        superusers={"10001"},
+        get_bots=old_get_bots,
+        logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+        runtime_bundle=SimpleNamespace(call_ai_api=caller),
+    )
+
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    res = client.post(
+        "/personification/api/persona-template/build",
+        json={
+            "mode": "custom",
+            "persona_name": "星野露",
+            "gender": "女",
+            "personality": "温柔但会吐槽",
+            "traits": "喜欢在群里用外号称呼熟人",
+            "hobbies": "观星、游戏",
+            "description": "一个夜猫子原创角色，说话轻，熟了之后会自然插话。",
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["mode"] == "custom"
+    assert body["work_title"] == "自定义人设"
+    assert body["character_name"] == "星野露"
+    assert body["sources"][0]["kind"] == "custom_description"
+    assert body["template_valid"] is True
+    assert len(body["subagents"]) == 3
+    assert all(call["kwargs"].get("use_builtin_search") is False for call in caller.calls)
+    purposes = [ctx.get("purpose") for ctx in caller.contexts]
+    assert purposes == [
+        "persona_template_custom_research",
+        "persona_template_custom_research",
+        "persona_template_custom_research",
+        "persona_template_custom_synthesis",
     ]
 
 

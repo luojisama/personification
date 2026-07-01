@@ -203,6 +203,7 @@ def render_group_alias_context(
     lines = [
         "## 群成员称呼映射",
         "这些是管理员确认的群内外号/称呼。看到这些称呼时，先按对应 QQ 用户理解，再结合上下文决定是否接话。",
+        "回复当前说话人、提到某个群员或自然插话时，可以优先使用对应群内称呼；不确定对象或会显得突兀时，就不要强行点名。",
     ]
     for uid, entry in sorted(entries.items(), key=_sort_key)[: max(1, int(limit or 1))]:
         aliases = list(entry.get("aliases") or [])

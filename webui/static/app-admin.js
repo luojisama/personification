@@ -1031,7 +1031,7 @@ function renderPersonaDetail() {
   </div>`).join("");
   const structured = (core && core.structured) || {};
   const corr = (core && core.user_corrections) || {};
-  const SKEY = {gender:"性别",age_group:"年龄段",occupation:"职业",interests:"兴趣",routine:"作息",communication_style:"沟通风格",emotion_baseline:"情绪基线",social_mode:"社交模式",knowledge:"知识结构",relationship:"关系",taboos:"雷区",memory_anchors:"记忆锚点",recent_focus:"近期关注",content_pref:"内容偏好",nickname_pref:"称呼偏好"};
+  const SKEY = {gender:"性别",age_group:"年龄段",occupation:"职业",portrait:"人物描述",interests:"兴趣",routine:"作息",communication_style:"沟通风格",emotion_baseline:"情绪基线",social_mode:"社交模式",knowledge:"知识结构",relationship:"关系",taboos:"雷区",memory_anchors:"记忆锚点",recent_focus:"近期关注",content_pref:"内容偏好",nickname_pref:"称呼偏好",interaction_advice:"互动建议"};
   const structRows = Object.keys(structured).map(k => `<tr>
       <td style="white-space:nowrap">${escapeHtml(SKEY[k]||k)}${corr[SKEY[k]]||corr[k]?' <span class="device-status approved">已更正</span>':''}</td>
       <td>${escapeHtml(String(structured[k]))}</td>
@@ -1094,6 +1094,30 @@ function renderPersonaBuilder() {
   const validationList = errors.map(x => `<li>${escapeHtml(x)}</li>`).join("");
   const ref = (r && r.template_reference) || {};
   const taskProgress = Math.max(0, Math.min(100, Number(task.progress || 0)));
+  const form = state.personaTemplateForm || {};
+  const buildMode = form.mode || "source";
+  const modeSwitch = `<div class="toggle persona-builder-mode">
+      <button class="${buildMode==='source'?'on':''}" onclick="state.personaTemplateForm.mode='source';render()">作品角色</button>
+      <button class="${buildMode==='custom'?'on':''}" onclick="state.personaTemplateForm.mode='custom';render()">自定义描述</button>
+    </div>`;
+  const sourceForm = `<div class="persona-builder-form">
+      <input id="persona-builder-work" type="text" placeholder="作品名" value="${escapeAttr(form.work_title || "")}" oninput="state.personaTemplateForm.work_title=this.value">
+      <input id="persona-builder-character" type="text" placeholder="角色名" value="${escapeAttr(form.character_name || "")}" oninput="state.personaTemplateForm.character_name=this.value">
+      <button class="btn primary" onclick="buildPersonaTemplate()" ${state.personaTemplateBusy?'disabled':''}>${state.personaTemplateBusy?'<span class="spinner"></span> 构建中…':'开始构建'}</button>
+    </div>`;
+  const customForm = `<div class="persona-builder-custom">
+      <div class="persona-builder-form custom-head">
+        <input type="text" placeholder="人设名称" value="${escapeAttr(form.persona_name || "")}" oninput="state.personaTemplateForm.persona_name=this.value">
+        <input type="text" placeholder="性别" value="${escapeAttr(form.gender || "")}" oninput="state.personaTemplateForm.gender=this.value">
+        <button class="btn primary" onclick="buildPersonaTemplate()" ${state.personaTemplateBusy?'disabled':''}>${state.personaTemplateBusy?'<span class="spinner"></span> 构建中…':'开始构建'}</button>
+      </div>
+      <div class="persona-builder-form custom-grid">
+        <input type="text" placeholder="性格" value="${escapeAttr(form.personality || "")}" oninput="state.personaTemplateForm.personality=this.value">
+        <input type="text" placeholder="特点" value="${escapeAttr(form.traits || "")}" oninput="state.personaTemplateForm.traits=this.value">
+        <input type="text" placeholder="爱好" value="${escapeAttr(form.hobbies || "")}" oninput="state.personaTemplateForm.hobbies=this.value">
+      </div>
+      <textarea class="persona-builder-description" placeholder="长文描述：可以直接粘贴你对这个人设的完整设想、说话习惯、背景、禁忌、群聊表现…" oninput="state.personaTemplateForm.description=this.value">${escapeHtml(form.description || "")}</textarea>
+    </div>`;
   const progressBlock = state.personaTemplateBusy || task.task_id
     ? `<div class="persona-progress">
         <div class="between" style="gap:10px">
@@ -1117,11 +1141,8 @@ function renderPersonaBuilder() {
   }).join("");
   return `<div class="card">
     <h2>自动构建人设模板</h2>
-    <div class="persona-builder-form">
-      <input id="persona-builder-work" type="text" placeholder="作品名" value="${escapeAttr(state.personaTemplateForm.work_title || "")}" oninput="state.personaTemplateForm.work_title=this.value">
-      <input id="persona-builder-character" type="text" placeholder="角色名" value="${escapeAttr(state.personaTemplateForm.character_name || "")}" oninput="state.personaTemplateForm.character_name=this.value">
-      <button class="btn primary" onclick="buildPersonaTemplate()" ${state.personaTemplateBusy?'disabled':''}>${state.personaTemplateBusy?'<span class="spinner"></span> 构建中…':'开始构建'}</button>
-    </div>
+    ${modeSwitch}
+    ${buildMode === "custom" ? customForm : sourceForm}
     ${progressBlock}
   </div>
   <div class="card">
@@ -1188,9 +1209,17 @@ async function openPersonaTemplateHistory(recordId) {
 
 async function buildPersonaTemplate() {
   if (state.personaTemplateBusy) return;
-  const work = (state.personaTemplateForm.work_title || "").trim();
-  const character = (state.personaTemplateForm.character_name || "").trim();
-  if (!work || !character) { alertFlash("err", "请填写作品名和角色名"); return; }
+  const form = state.personaTemplateForm || {};
+  const mode = form.mode || "source";
+  const work = (form.work_title || "").trim();
+  const character = (form.character_name || "").trim();
+  const personaName = (form.persona_name || "").trim();
+  if (mode === "custom") {
+    const hasDetail = [form.gender, form.personality, form.traits, form.hobbies, form.description].some(v => String(v || "").trim());
+    if (!personaName || !hasDetail) { alertFlash("err", "请填写人设名称，并至少补充一项描述"); return; }
+  } else if (!work || !character) {
+    alertFlash("err", "请填写作品名和角色名"); return;
+  }
   state.personaTemplateBusy = true;
   state.personaTemplateResult = null;
   state.personaTemplateTask = { status:"queued", stage:"queued", message:"已加入构建队列...", progress:1 };
@@ -1199,7 +1228,15 @@ async function buildPersonaTemplate() {
     const started = await api("/persona-template/build-task", {
       method:"POST",
       headers:{"content-type":"application/json"},
-      body: JSON.stringify({work_title: work, character_name: character}),
+      body: JSON.stringify(mode === "custom" ? {
+        mode: "custom",
+        persona_name: personaName,
+        gender: form.gender || "",
+        personality: form.personality || "",
+        traits: form.traits || "",
+        hobbies: form.hobbies || "",
+        description: form.description || "",
+      } : {work_title: work, character_name: character}),
     });
     state.personaTemplateTask = started;
     render();
@@ -1338,12 +1375,13 @@ async function openGroup(gid) {
     state.selectedGroup = gid;
     state.groupRawChat = null;
     state.groupAliasDrafts = {};
-    const [personas, style, knowledge, memes, agentState] = await Promise.all([
+    const [personas, style, knowledge, memes, agentState, schedule] = await Promise.all([
       api("/groups/" + encodeURIComponent(gid) + "/personas"),
       api("/groups/" + encodeURIComponent(gid) + "/style"),
       api("/groups/" + encodeURIComponent(gid) + "/knowledge").catch(() => ({knowledge: [], autobuild_status: null})),
       api("/groups/" + encodeURIComponent(gid) + "/memes").catch(() => ({memes: []})),
       api("/groups/" + encodeURIComponent(gid) + "/agent-state").catch(() => null),
+      api("/groups/" + encodeURIComponent(gid) + "/schedule").catch(() => null),
     ]);
     state.groupPersonas = personas.profiles;
     state.groupFavorability = personas.group_favorability || null;
@@ -1352,6 +1390,7 @@ async function openGroup(gid) {
     state.groupKnowledgeAutobuild = knowledge.autobuild_status || null;
     state.groupMemes = memes.memes || [];
     state.groupAgentState = agentState;
+    state.groupSchedule = schedule;
     render();
   } catch (e) { alertFlash("err", e.message); }
 }
@@ -1444,6 +1483,58 @@ async function loadGroupRawChat() {
   } catch (e) { alertFlash("err", "加载对话原文失败：" + e.message); }
 }
 
+function renderGroupRelationGraph(edges) {
+  const list = Array.isArray(edges) ? edges.slice(0, 24) : [];
+  if (!list.length) return '<p class="muted" style="margin:6px 0 0">暂无可绘制的群员关系图</p>';
+  const nodeMap = new Map();
+  for (const e of list) {
+    for (const side of ["src", "dst"]) {
+      const id = String(e[side] || "");
+      if (!id) continue;
+      const label = String(e[side + "_label"] || id);
+      const current = nodeMap.get(id) || { id, label, weight: 0 };
+      current.weight += Number(e.weight || 0);
+      if (label && label !== id) current.label = label;
+      nodeMap.set(id, current);
+    }
+  }
+  const nodes = Array.from(nodeMap.values()).slice(0, 16);
+  const centerX = 260, centerY = 160, radius = nodes.length <= 6 ? 102 : 122;
+  nodes.forEach((n, i) => {
+    const angle = -Math.PI / 2 + (2 * Math.PI * i / Math.max(1, nodes.length));
+    n.x = centerX + Math.cos(angle) * radius;
+    n.y = centerY + Math.sin(angle) * radius;
+  });
+  const pos = new Map(nodes.map(n => [n.id, n]));
+  const colorFor = (kind) => ({reply:"#6aa8ff",quote:"#9775fa",mention:"#20c997",turn:"#ffb020",repeat:"#f87171",co_topic:"#34d399"})[kind] || "#8a91a3";
+  const edgeLines = list.map(e => {
+    const a = pos.get(String(e.src || ""));
+    const b = pos.get(String(e.dst || ""));
+    if (!a || !b) return "";
+    const w = Math.max(1.2, Math.min(5, 1 + Number(e.weight || 0) * 0.35));
+    return `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="${colorFor(e.kind)}" stroke-width="${w.toFixed(1)}" opacity="0.58">
+      <title>${escapeHtml(a.label)} → ${escapeHtml(b.label)} · ${escapeHtml(e.kind || "relation")} · ${Number(e.weight || 0).toFixed(2)}</title>
+    </line>`;
+  }).join("");
+  const nodeSvg = nodes.map(n => {
+    const r = Math.max(15, Math.min(25, 13 + Math.sqrt(Math.max(0, n.weight || 0)) * 3));
+    const label = String(n.label || n.id);
+    const short = label.length > 7 ? label.slice(0, 7) + "…" : label;
+    return `<g class="relation-node" transform="translate(${n.x.toFixed(1)} ${n.y.toFixed(1)})">
+      <circle r="${r.toFixed(1)}"></circle>
+      <text text-anchor="middle" dominant-baseline="central">${escapeHtml(short)}</text>
+      <title>${escapeHtml(label)} (${escapeHtml(n.id)})</title>
+    </g>`;
+  }).join("");
+  return `<div class="relation-graph">
+    <svg viewBox="0 0 520 320" role="img" aria-label="群员关系图">
+      <rect x="1" y="1" width="518" height="318" rx="8"></rect>
+      <g class="relation-edges">${edgeLines}</g>
+      <g>${nodeSvg}</g>
+    </svg>
+  </div>`;
+}
+
 function renderGroupAgentState() {
   const s = state.groupAgentState;
   if (!s) return '';
@@ -1485,7 +1576,9 @@ function renderGroupAgentState() {
       <div style="min-width:160px"><div class="muted" style="font-size:12px">消息总数</div><div>${stats.message_count || 0}</div></div>
       <div style="min-width:200px"><div class="muted" style="font-size:12px">最近活跃</div><div>${escapeHtml(lastAct)}</div></div>
     </div>
-    <details><summary class="muted" style="cursor:pointer">显著记忆 Top-${memories.length}</summary>${memBlock}</details>
+    <h3 style="margin:12px 0 8px">群员关系图</h3>
+    ${renderGroupRelationGraph(edges)}
+    <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">显著记忆 Top-${memories.length}</summary>${memBlock}</details>
     <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">群内关系 Top-${edges.length}</summary>${edgeBlock}</details>
   </div>`;
 }
@@ -1516,6 +1609,64 @@ function renderGroupKnowledgeCard() {
     ${autoLine}
     ${knowledgeRows ? `<table><thead><tr><th>术语</th><th>解释</th><th>类型</th><th>更新</th></tr></thead><tbody>${knowledgeRows}</tbody></table>` : '<p class="muted">暂无群知识。可点击「立即重建」手动触发分析，或开启「群知识库自动构建」后等待定时扫描。</p>'}
   </div>`;
+}
+
+function renderGroupScheduleCard() {
+  const s = state.groupSchedule || { enabled:false, schedule_prompt:"" };
+  const enabled = !!s.enabled;
+  const generating = !!state.groupScheduleGenerating;
+  return `<div class="card">
+    <div class="between" style="gap:10px;flex-wrap:wrap">
+      <h2 style="margin:0">群作息表</h2>
+      <div class="toggle">
+        <button class="${enabled?'on':''}" onclick="saveGroupSchedule(true)">开</button>
+        <button class="${!enabled?'on':''}" onclick="saveGroupSchedule(false)">关</button>
+      </div>
+    </div>
+    <p class="muted" style="font-size:12px;margin:4px 0 10px">默认关闭且不内置硬编码作息；开启后只把下方内容作为轻量背景。</p>
+    <textarea id="group-schedule-text" class="group-schedule-text" placeholder="留空则只提供当前时间，不自动推断上课/上班/睡觉。">${escapeHtml(s.schedule_prompt || "")}</textarea>
+    <div class="row" style="margin-top:8px">
+      <button class="btn small primary" onclick="saveGroupSchedule(${enabled ? "true" : "false"})">保存作息</button>
+      <button class="btn small" onclick="autoGenerateGroupSchedule()" ${generating?'disabled':''}>${generating?'生成中…':'按人设自动生成'}</button>
+    </div>
+  </div>`;
+}
+
+async function saveGroupSchedule(enabled) {
+  const gid = state.selectedGroup;
+  if (!gid) return;
+  const text = document.getElementById("group-schedule-text")?.value || "";
+  try {
+    const out = await api("/groups/" + encodeURIComponent(gid) + "/schedule", {
+      method:"PUT",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({ enabled: !!enabled, schedule_prompt: text }),
+    });
+    state.groupSchedule = out;
+    alertFlash("ok", "群作息已保存");
+    render();
+  } catch (e) { alertFlash("err", "保存作息失败：" + e.message); }
+}
+
+async function autoGenerateGroupSchedule() {
+  const gid = state.selectedGroup;
+  if (!gid || state.groupScheduleGenerating) return;
+  state.groupScheduleGenerating = true; render();
+  try {
+    const out = await api("/groups/" + encodeURIComponent(gid) + "/schedule/auto-generate", {
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body: "{}",
+    });
+    const saved = await api("/groups/" + encodeURIComponent(gid) + "/schedule", {
+      method:"PUT",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({ enabled: true, schedule_prompt: out.schedule_prompt || "" }),
+    });
+    state.groupSchedule = saved;
+    alertFlash("ok", "已自动生成并启用群作息");
+  } catch (e) { alertFlash("err", "自动生成作息失败：" + e.message); }
+  state.groupScheduleGenerating = false; render();
 }
 
 function renderMemberAliasEditor(p) {
@@ -1580,9 +1731,11 @@ function renderGroupDetail() {
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;state.groupRawChat=null;state.groupFavorability=null;state.groupStyleSnapIdx=0;state.groupAliasDrafts={};render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
     ${renderFavorabilityCard(state.groupFavorability, "群好感度")}
     ${renderGroupAgentState()}
+    ${renderGroupScheduleCard()}
     ${renderGroupStyle(style)}
     ${renderGroupKnowledgeCard()}
     <div class="card"><h2>梗词典 / 概念锚点（${(state.groupMemes||[]).length}）</h2>
+      <p class="muted" style="font-size:12px;margin-top:0">词条会持久保留；列表只是当前读取视图，不会因为数量变多自动清理旧梗。</p>
       ${memeRows ? `<table><thead><tr><th>词条</th><th>含义</th><th>别名</th><th>范围/风险/置信度</th></tr></thead><tbody>${memeRows}</tbody></table>` : '<p class="muted">暂无匹配词条，公共热梗种子会在首次查询后自动初始化。</p>'}</div>
     <div class="card"><h2>群内成员理解（${state.groupPersonas.length}）</h2>
       <table class="group-member-understanding"><thead><tr><th style="width:40px"></th><th>QQ</th><th>称呼 / 外号</th><th>好感度</th><th>关系与画像</th><th>近期情绪</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">无</td></tr>'}</tbody></table></div>

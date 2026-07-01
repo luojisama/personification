@@ -340,6 +340,7 @@ def test_groups_list_and_detail(_runtime_with_data) -> None:
     alias_mod = load_personification_module("plugin.personification.core.group_member_aliases")
     block = alias_mod.render_group_alias_context("g1", user_id="u_alpha", known_names={"u_alpha": ["Alpha"]})
     assert "群成员称呼映射" in block
+    assert "可以优先使用对应群内称呼" in block
     assert "当前说话人：QQ u_alpha" in block
     assert "阿尔法 / alpha哥" in block
 
@@ -349,16 +350,47 @@ def test_groups_list_and_detail(_runtime_with_data) -> None:
     assert style["group_id"] == "g1"
     assert style["style_text"] == ""  # 暂未写入
 
+    schedule = client.get("/personification/api/groups/g1/schedule")
+    assert schedule.status_code == 200
+    assert schedule.json()["enabled"] is False
+    saved_schedule = client.put(
+        "/personification/api/groups/g1/schedule",
+        json={"enabled": True, "schedule_prompt": "- 晚上更活跃\n- 作息仅作背景，不限制是否回复"},
+    )
+    assert saved_schedule.status_code == 200
+    assert saved_schedule.json()["enabled"] is True
+    assert "晚上更活跃" in saved_schedule.json()["schedule_prompt"]
+
 
 def test_profile_service_prompt_block(_runtime_with_data) -> None:
     svc = _runtime_with_data.runtime_bundle.profile_service
+    current = svc.get_core_profile("u_alpha")
+    profile_json = dict(current.profile_json if current else {})
+    profile_json["structured"] = {
+        "portrait": "Alpha 是群里的常驻成员，熟人感强，喜欢用短句接话。",
+        "nickname_pref": "可以叫阿尔法",
+        "interaction_advice": "像熟人一样自然插话，少写解释。",
+    }
+    svc.upsert_core_profile(user_id="u_alpha", profile_text="全局画像 Alpha", profile_json=profile_json)
     block = svc.build_prompt_block(user_id="u_alpha", group_id="g1")
     assert "## 用户档案" in block
     assert "[头像URL]" in block
     assert "[主页] https://user.qzone.qq.com/u_alpha" in block
     assert "[个性签名] 这里是 Alpha 的签名" in block
+    assert "[人物轮廓] Alpha 是群里的常驻成员" in block
+    assert "称呼偏好: 可以叫阿尔法" in block
+    assert "互动建议: 像熟人一样自然插话" in block
     assert "全局画像 Alpha" in block
     assert "g1 中是常驻成员" in block
 
     block2 = svc.build_prompt_block(user_id="u_missing")
     assert block2 == ""
+
+
+def test_group_relation_graph_frontend_present() -> None:
+    app_admin_js = (Path(__file__).resolve().parents[1] / "webui" / "static" / "app-admin.js").read_text(
+        encoding="utf-8"
+    )
+    assert "renderGroupRelationGraph" in app_admin_js
+    assert "群员关系图" in app_admin_js
+    assert "relation-node" in app_admin_js

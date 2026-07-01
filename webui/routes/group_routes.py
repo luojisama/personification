@@ -35,6 +35,54 @@ def _memory_store(runtime) -> Any | None:
     return getattr(bundle, "memory_store", None)
 
 
+async def _call_group_schedule_model(runtime: Any, group_id: str, messages: list[dict[str, str]], *, purpose: str) -> str:
+    bundle = getattr(runtime, "runtime_bundle", None)
+    caller = getattr(bundle, "call_ai_api", None)
+    if not callable(caller):
+        raise RuntimeError("主模型调用器未就绪")
+    from ...core.llm_context import reset_llm_context, set_llm_context
+
+    token = set_llm_context(purpose=purpose, group_id=str(group_id or ""))
+    try:
+        result = await caller(messages, use_builtin_search=False, temperature=0.15, timeout=60)
+    finally:
+        reset_llm_context(token)
+    return str(result or "").strip()
+
+
+def _group_schedule_context(runtime: Any, group_id: str) -> str:
+    store = _memory_store(runtime)
+    parts: list[str] = []
+    if store is not None:
+        try:
+            profiles = list(store.list_local_profiles(str(group_id)))[:20]
+            if profiles:
+                lines = []
+                for row in profiles[:12]:
+                    uid = str(row.get("user_id", "") or "")
+                    snippet = str(row.get("profile_text", "") or "").strip()[:160]
+                    if uid and snippet:
+                        lines.append(f"- {uid}: {snippet}")
+                if lines:
+                    parts.append("群成员画像：\n" + "\n".join(lines))
+        except Exception:
+            pass
+        try:
+            rows = list(store.list_recent_memories(group_id=str(group_id), limit=30))
+            mems = [
+                f"- {str(row.get('memory_type',''))}: {str(row.get('summary','')).strip()[:140]}"
+                for row in rows[:12]
+                if str(row.get("summary", "") or "").strip()
+            ]
+            if mems:
+                parts.append("近期群记忆：\n" + "\n".join(mems))
+        except Exception:
+            pass
+    if not parts:
+        parts.append("（暂无足够群画像/记忆；请生成保守、可编辑的空白作息建议。）")
+    return "\n\n".join(parts)
+
+
 def _knowledge_autobuild_status(runtime, group_id: str) -> dict[str, Any]:
     """读取 group_knowledge_autobuild 的运行状态：上次时间、今日次数、距下次间隔。"""
     try:
@@ -535,6 +583,109 @@ def build_group_router(*, runtime) -> APIRouter:
             "aliases": sorted(entries.values(), key=lambda item: str(item.get("user_id", ""))),
         }
 
+    @router.get("/{group_id}/schedule")
+    async def group_schedule(group_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
+        from ...utils import get_group_config
+
+        cfg = get_group_config(str(group_id))
+        return {
+            "group_id": str(group_id),
+            "enabled": bool(cfg.get("schedule_enabled", False)),
+            "schedule_prompt": str(cfg.get("schedule_prompt", "") or ""),
+            "global_enabled": bool(getattr(runtime.plugin_config, "personification_schedule_global", False)),
+        }
+
+    @router.put("/{group_id}/schedule")
+    async def save_group_schedule(
+        group_id: str,
+        request: Request,
+        payload: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...utils import set_group_schedule_enabled, set_group_schedule_prompt
+
+        enabled = bool(payload.get("enabled", False))
+        prompt = str(payload.get("schedule_prompt", payload.get("prompt", "")) or "").strip()
+        set_group_schedule_enabled(str(group_id), enabled)
+        set_group_schedule_prompt(str(group_id), prompt)
+        webui_audit_log.record(
+            action="group_schedule_update",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=group_id,
+            ip_hash=get_client_ip(request),
+            detail={"enabled": enabled, "chars": len(prompt)},
+        )
+        return {"success": True, "group_id": str(group_id), "enabled": enabled, "schedule_prompt": prompt}
+
+    @router.post("/{group_id}/schedule/auto-generate")
+    async def auto_generate_group_schedule(
+        group_id: str,
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        context = _group_schedule_context(runtime, str(group_id))
+        persona_hint = str(body.get("persona_hint", "") or "").strip()
+        base_user = (
+            "请为拟人 bot 生成一份可编辑的本群角色作息表。"
+            "目标不是限制回复，而是给角色更自然的生活状态。"
+            "只基于给定画像/群记忆/人设补充；证据不足要保守。"
+            "\n\n群上下文：\n"
+            f"{context}\n\n"
+            f"人设补充：{persona_hint or '（无）'}"
+        )
+        focus_items = [
+            ("日常节律子agent", "提取可推断的昼夜节律、在线时段、休息时段，不足就写未知"),
+            ("群聊状态子agent", "判断哪些状态适合群聊中自然带出，哪些不应限制回复"),
+            ("交叉验证子agent", "找出冲突、过度臆测和应留空的部分"),
+        ]
+        subagents: list[dict[str, str]] = []
+        for name, focus in focus_items:
+            raw = await _call_group_schedule_model(
+                runtime,
+                str(group_id),
+                [
+                    {"role": "system", "content": "你是作息表生成的只读子agent，只输出简短要点，不要写成最终表格。"},
+                    {"role": "user", "content": f"{base_user}\n\n你的关注点：{focus}"},
+                ],
+                purpose="group_schedule_research",
+            )
+            subagents.append({"name": name, "focus": focus, "raw": raw[:1200]})
+        synthesis = await _call_group_schedule_model(
+            runtime,
+            str(group_id),
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是拟人插件的作息表合成器。输出一份可直接注入 prompt 的中文作息表，"
+                        "默认保守、可编辑，不要编造学校/工作等身份。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"{base_user}\n\n三个子agent报告：\n"
+                        + json.dumps(subagents, ensure_ascii=False, indent=2)
+                        + "\n\n输出要求：6-10 行以内；包含在线/休息/高能量/低能量/不确定项；"
+                        "明确写“作息仅作背景，不限制是否回复”。只输出作息表正文。"
+                    ),
+                },
+            ],
+            purpose="group_schedule_synthesis",
+        )
+        prompt = synthesis.strip()[:1600]
+        webui_audit_log.record(
+            action="group_schedule_generate",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=group_id,
+            ip_hash=get_client_ip(request),
+            detail={"chars": len(prompt), "subagent_count": len(subagents)},
+        )
+        return {"group_id": str(group_id), "schedule_prompt": prompt, "subagents": subagents}
+
     @router.get("/{group_id}/style")
     async def style(group_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
         from ...core.group_style_autobuild import list_style_snapshots
@@ -717,7 +868,7 @@ def build_group_router(*, runtime) -> APIRouter:
                     }
                 )
             scored.sort(key=lambda e: e["weight"], reverse=True)
-            top_edges = scored[:10]
+            top_edges = scored[:24]
         except Exception:
             top_edges = []
 
@@ -770,13 +921,13 @@ def build_group_router(*, runtime) -> APIRouter:
     @router.get("/{group_id}/knowledge")
     async def group_knowledge(
         group_id: str,
-        limit: int = 50,
+        limit: int = 1000,
         _: AdminIdentity = Depends(require_admin),
     ) -> dict:
         store = _memory_store(runtime)
         if store is None:
             raise HTTPException(status_code=503, detail="memory_store 未就绪")
-        per_type_limit = max(1, min(int(limit), 200))
+        per_type_limit = max(1, min(int(limit), 2000))
         knowledge: list[dict[str, Any]] = []
         try:
             for memory_type in ("group_knowledge", "group_meme", "concept_anchor"):
@@ -881,11 +1032,11 @@ def build_group_router(*, runtime) -> APIRouter:
     @router.get("/{group_id}/memes")
     async def group_memes(
         group_id: str,
-        limit: int = 100,
+        limit: int = 1000,
         _: AdminIdentity = Depends(require_admin),
     ) -> dict:
         try:
-            items = list_meme_entries(group_id=group_id, limit=max(1, min(int(limit), 300)))
+            items = list_meme_entries(group_id=group_id, limit=max(1, min(int(limit), 2000)))
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
         return {"group_id": group_id, "memes": items}

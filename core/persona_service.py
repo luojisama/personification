@@ -92,6 +92,7 @@ _STRUCTURED_FIELD_MAP: dict[str, str] = {
     "情绪基线": "emotion_baseline", "社交模式": "social_mode", "知识结构": "knowledge",
     "称呼与昵称": "nickname_pref", "关系与亲密度": "relationship", "雷区与禁忌": "taboos",
     "记忆锚点": "memory_anchors", "近期关注": "recent_focus", "内容偏好": "content_pref",
+    "人物描述": "portrait", "互动建议": "interaction_advice",
 }
 
 _STRUCTURED_LINE = re.compile(r"[【\[]\s*([^】\]]+?)\s*[】\]]\s*[:：]?\s*(.+)")

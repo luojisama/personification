@@ -65,6 +65,8 @@ main { padding:20px 26px; max-width:1400px; width:100%; min-width:0; }
 .api-provider-field { display:flex; flex-direction:column; gap:4px; min-width:0; }
 .api-provider-field label { color:var(--muted); font-size:12px; }
 .api-provider-field input, .api-provider-field select { width:100%; min-width:0; }
+.api-provider-model-field { grid-column:span 2; }
+.api-provider-model-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px; align-items:center; }
 .api-provider-actions { display:flex; gap:8px; flex-wrap:wrap; }
 .api-pool-empty { border:1px dashed var(--line); border-radius:8px; padding:14px; color:var(--muted); }
 .btn { padding:7px 14px; border-radius:6px; border:1px solid var(--line); background:var(--panel); color:var(--text); transition:border-color .15s, background .15s, transform .05s; }
@@ -95,6 +97,13 @@ main { padding:20px 26px; max-width:1400px; width:100%; min-width:0; }
 .member-alias-actions { display:flex; gap:6px; flex-wrap:wrap; }
 .member-relation-digest { display:grid; gap:5px; min-width:0; font-size:12.5px; line-height:1.45; }
 .member-profile-snippet { color:var(--muted); word-break:break-word; }
+.relation-graph { width:100%; max-width:760px; border:1px solid var(--line); border-radius:8px; background:var(--bg); overflow:hidden; }
+.relation-graph svg { display:block; width:100%; min-height:220px; color:var(--text); }
+.relation-graph rect { fill:var(--bg); stroke:var(--line); }
+.relation-node circle { fill:var(--panel); stroke:var(--accent); stroke-width:1.5; }
+.relation-node text { fill:var(--text); font-size:11px; pointer-events:none; }
+.relation-edges line { stroke-linecap:round; }
+.group-schedule-text { width:100%; min-height:130px; resize:vertical; }
 .dashboard-toolbar { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin-bottom:18px; }
 .dashboard-line-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; margin-bottom:18px; }
 .dashboard-line-card { min-width:0; min-height:226px; border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:16px; display:flex; flex-direction:column; gap:10px; overflow:hidden; }
@@ -168,6 +177,10 @@ main { padding:20px 26px; max-width:1400px; width:100%; min-width:0; }
 .remote-source-form label { color:var(--muted); white-space:nowrap; font-size:12px; }
 .persona-builder-form { display:grid; grid-template-columns:minmax(160px,1fr) minmax(160px,1fr) auto; gap:8px; align-items:center; }
 .persona-builder-form input { min-width:0; width:100%; }
+.persona-builder-mode { margin:0 0 10px; }
+.persona-builder-custom { display:grid; gap:8px; }
+.persona-builder-form.custom-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.persona-builder-description { width:100%; min-height:120px; resize:vertical; }
 .persona-progress { margin-top:14px; border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--bg); }
 .persona-progress-bar { height:8px; border-radius:99px; background:var(--input-bg); border:1px solid var(--line); overflow:hidden; margin-top:8px; }
 .persona-progress-bar div { height:100%; background:var(--accent); transition:width .25s; }
@@ -283,10 +296,12 @@ td code, .field-head code { word-break:break-all; }
   .row input[type=text], .row input[type=number], .row select { min-width:0; max-width:100%; }
   .field-input input[type=text], .field-input input[type=number], .field-input textarea { min-width:0; max-width:100%; width:100%; }
   .api-provider-grid { grid-template-columns:1fr; }
+  .api-provider-model-field { grid-column:auto; }
+  .api-provider-model-row { grid-template-columns:1fr; }
   .skill-summary { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .remote-source-form { grid-template-columns:1fr; }
   .remote-source-form label { min-height:34px; display:flex; align-items:center; }
-  .persona-builder-form, .agent-report-grid { grid-template-columns:1fr; }
+  .persona-builder-form, .persona-builder-form.custom-grid, .agent-report-grid { grid-template-columns:1fr; }
   .qq-profile-card { grid-template-columns:1fr; }
   .qq-profile-avatar { width:88px; height:88px; }
   .sticker-grid { grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); }

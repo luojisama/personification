@@ -260,6 +260,31 @@ def test_review_qzone_post_rewrites_net_slang_tic() -> None:
     assert not diary_flow._NET_SLANG_TIC_RE.search(result)
 
 
+def test_review_qzone_post_rewrites_stiff_qzone_tic() -> None:
+    """器官拟人/先后对仗这类模板化机灵句会被改松一点。"""
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            assert tools == []
+            assert "模板化的机灵句" in messages[1]["content"]
+            return _Resp("有点想吃夜宵了")
+
+        def build_tool_result_message(self, *_a):  # noqa: ANN001
+            return {}
+
+    result = asyncio.run(
+        diary_flow._review_qzone_post(
+            "脑子没在加班，胃先开始催了。",
+            tool_caller=_Caller(),
+            persona_system="你是某角色",
+            logger=_Logger(),
+        )
+    )
+
+    assert result == "有点想吃夜宵了"
+    assert not diary_flow._QZONE_STIFF_TIC_RE.search(result)
+
+
 def test_review_qzone_post_keeps_clean_text_untouched() -> None:
     """不含营业感叹腔/搜索腔的正文不调用改写，原样返回。"""
 

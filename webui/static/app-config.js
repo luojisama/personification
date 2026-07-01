@@ -267,6 +267,17 @@ function normalizeApiPoolValue(value) {
   return [];
 }
 
+function sanitizeApiProvider(provider) {
+  const out = {...(provider || {})};
+  delete out._model_options;
+  delete out._model_source;
+  return out;
+}
+
+function sanitizeApiProviders(providers) {
+  return (providers || []).map(p => sanitizeApiProvider(p));
+}
+
 function defaultApiProvider(index) {
   return {
     name: `provider_${index + 1}`,
@@ -320,6 +331,28 @@ function renderApiProviderCard(field, provider, index) {
       <input type="${escapeAttr(type)}" value="${escapeAttr(value)}" ${extra}>
     </div>`;
   };
+  const modelFieldHtml = () => {
+    if (!apiProviderFieldVisible(apiType, "model")) return "";
+    const value = provider.model == null ? "" : provider.model;
+    const options = Array.isArray(provider._model_options) ? provider._model_options : [];
+    const listId = `api-provider-models-${field}-${index}`.replace(/[^\w-]/g, "-");
+    const optionHtml = options.map(item => {
+      const id = typeof item === "string" ? item : (item.id || item.model || "");
+      const label = typeof item === "string" ? item : (item.label || item.source || "");
+      if (!id) return "";
+      return `<option value="${escapeAttr(id)}" label="${escapeAttr(label || id)}"></option>`;
+    }).join("");
+    const sourceHint = options.length ? `<div class="muted" style="font-size:11px">已探测 ${options.length} 个模型，可输入筛选或手填。</div>` : "";
+    return `<div class="api-provider-field api-provider-model-field" data-provider-field="model">
+      <label>模型</label>
+      <div class="api-provider-model-row">
+        <input type="text" list="${escapeAttr(listId)}" value="${escapeAttr(value)}" placeholder="先探测或手动填写模型 ID">
+        <button class="btn small" type="button" onclick="probeApiProviderModels('${escapeAttr(field)}', ${index}, this)">探测模型</button>
+      </div>
+      <datalist id="${escapeAttr(listId)}">${optionHtml}</datalist>
+      ${sourceHint}
+    </div>`;
+  };
   return `<div class="api-provider-card" data-provider-index="${index}">
     <div class="api-provider-head">
       <div class="api-provider-title">Provider ${index + 1}</div>
@@ -337,7 +370,7 @@ function renderApiProviderCard(field, provider, index) {
       </div>
       ${fieldHtml("api_url", "API URL")}
       ${fieldHtml("api_key", "API Key", "password")}
-      ${fieldHtml("model", "模型")}
+      ${modelFieldHtml()}
       ${fieldHtml("auth_path", "Auth Path")}
       ${fieldHtml("project", "Project")}
       ${fieldHtml("proxy", "代理")}
@@ -360,12 +393,12 @@ function readApiPoolEditor(field) {
   if (raw && raw.style.display !== "none" && raw.value.trim()) {
     try {
       const parsed = JSON.parse(raw.value);
-      return Array.isArray(parsed) ? parsed : [];
+      return Array.isArray(parsed) ? sanitizeApiProviders(parsed) : [];
     } catch {
       throw new Error("API Pool JSON 格式错误");
     }
   }
-  return Array.from(root.querySelectorAll(".api-provider-card")).map((card, index) => {
+  return sanitizeApiProviders(Array.from(root.querySelectorAll(".api-provider-card")).map((card, index) => {
     const provider = defaultApiProvider(index);
     card.querySelectorAll("[data-provider-field]").forEach(wrap => {
       const name = wrap.dataset.providerField;
@@ -378,7 +411,7 @@ function readApiPoolEditor(field) {
       else delete provider[name];
     });
     return provider;
-  });
+  }));
 }
 
 function writeApiPoolEditor(field, providers) {
@@ -387,7 +420,7 @@ function writeApiPoolEditor(field, providers) {
   const list = root.querySelector(".api-provider-list");
   list.innerHTML = providers.map((provider, index) => renderApiProviderCard(field, provider, index)).join("") || '<div class="api-pool-empty">暂无 provider，点击“添加 Provider”创建。</div>';
   const raw = root.querySelector("[data-api-pool-raw]");
-  if (raw) raw.value = JSON.stringify(providers, null, 2);
+  if (raw) raw.value = JSON.stringify(sanitizeApiProviders(providers), null, 2);
 }
 
 function refreshApiPoolEditor(field) {
@@ -423,6 +456,35 @@ async function saveApiPool(field) {
   try {
     await saveField(field, readApiPoolEditor(field));
   } catch (e) { alertFlash("err", e.message); }
+}
+
+async function probeApiProviderModels(field, index, btn) {
+  let providers;
+  try {
+    providers = readApiPoolEditor(field);
+  } catch (e) {
+    alertFlash("err", e.message);
+    return;
+  }
+  const provider = providers[index];
+  if (!provider) return;
+  const oldText = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "探测中…"; }
+  try {
+    const result = await api("/config/provider-models", {
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({provider}),
+    });
+    const models = result.models || [];
+    providers[index] = {...provider, _model_options: models};
+    writeApiPoolEditor(field, providers);
+    alertFlash(models.length ? "ok" : "err", models.length ? `已探测 ${models.length} 个模型` : "未探测到模型，请手动填写");
+  } catch (e) {
+    alertFlash("err", "模型探测失败：" + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = oldText || "探测模型"; }
+  }
 }
 
 function activeSourceLabel(src) {

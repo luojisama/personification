@@ -1878,13 +1878,19 @@ async def _run_subagent(
     work_title: str,
     character_name: str,
     source_text: str,
+    use_builtin_search: bool = True,
+    purpose: str = "persona_template_research",
 ) -> dict[str, Any]:
     system = (
         "你是拟人插件 WebUI 的只读资料研究子agent。"
-        "只能基于给出的资料和你能通过主模型内置搜索查到的可靠信息做交叉验证。"
-        "不要编造设定；不确定就写入 conflicts 或 unknowns。"
-        "重点提取能迁移到群聊拟人 bot 的身份锚点、说话节奏、边界和关系称呼。"
-        "输出 JSON，不要输出寒暄。"
+        + (
+            "只能基于给出的资料和你能通过主模型内置搜索查到的可靠信息做交叉验证。"
+            if use_builtin_search
+            else "只能基于用户给出的描述做交叉验证；不要联网补设定，不要把描述外的内容编造成事实。"
+        )
+        + "不要编造设定；不确定就写入 conflicts 或 unknowns。"
+        + "重点提取能迁移到群聊拟人 bot 的身份锚点、说话节奏、边界和关系称呼。"
+        + "输出 JSON，不要输出寒暄。"
     )
     user = f"""
 任务：为《{work_title}》的角色「{character_name}」构建人设模板前置研究。
@@ -1914,9 +1920,9 @@ async def _run_subagent(
         caller,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=0.1,
-        use_builtin_search=True,
+        use_builtin_search=use_builtin_search,
         timeout=_RESEARCH_TIMEOUT_SECONDS,
-        purpose="persona_template_research",
+        purpose=purpose,
         stage_label=f"{agent_name}研究",
     )
     parsed = _extract_json_object(text)
@@ -2004,6 +2010,184 @@ async def _synthesize_template(
     )
 
 
+def _custom_persona_source_text(spec: dict[str, str]) -> str:
+    rows = [
+        ("人设名称", spec.get("persona_name", "")),
+        ("性别", spec.get("gender", "")),
+        ("性格", spec.get("personality", "")),
+        ("特点", spec.get("traits", "")),
+        ("爱好", spec.get("hobbies", "")),
+        ("长文描述", spec.get("description", "")),
+    ]
+    return "\n".join(f"{label}：{str(value or '').strip() or '未填写'}" for label, value in rows)
+
+
+async def _synthesize_custom_template(
+    *,
+    caller: Any,
+    spec: dict[str, str],
+    source_text: str,
+    subagents: list[dict[str, Any]],
+    reference_template: dict[str, Any],
+) -> str:
+    reports = json.dumps(
+        [{"name": item.get("name"), "focus": item.get("focus"), "report": item.get("report")} for item in subagents],
+        ensure_ascii=False,
+        indent=2,
+    )
+    persona_name = spec["persona_name"]
+    system = (
+        "你是 NoneBot 拟人插件的人设 YAML 构建器。"
+        "这次不是从已有作品角色检索资料，而是根据用户自定义描述创建一个原创人设。"
+        "用户描述是最高优先级来源；不得联网补设定，不得把没写的经历、作品出处、真实身份编造成事实。"
+        "输出必须只有 YAML 本体，不能有 Markdown 代码围栏、标题或解释。"
+    )
+    reference = reference_template.get("content") or "（未读取到当前模板；请按字段规范生成）"
+    user = f"""
+请根据用户给出的原创人设描述，生成插件内可直接使用的人设 YAML：{persona_name}
+
+硬性要求：
+- 输出完整 YAML，顶层字段必须包含：{", ".join(_REQUIRED_TEMPLATE_KEYS)}。
+- 顶层结构、input 输出格式和占位符请参考“当前插件正在使用的人设 YAML”。
+- input 必须保留占位符：{", ".join(_REQUIRED_INPUT_PLACEHOLDERS)}。
+- system 内必须使用清晰小节，至少包含：
+  - ## 角色身份与不可替换锚点
+  - ## 性格与行为模式
+  - ## 群聊说话方式
+  - ## 关系与称呼
+  - ## 兴趣爱好与日常锚点
+  - ## 安全边界与扮演边界
+  - ## 资料冲突与缺口
+- 自定义人设要鲜活、能在群聊里自然插话；不要写成客服、助手、设定说明书或关键词触发规则。
+- 性别、性格、特点、爱好和长文描述都要进入 system，但要转成角色本人可执行的说话/行为约束。
+- ack_phrases 给 4-8 条短促自然的接话短句，避免“收到/我来查”。
+- status 写当前心情、动作和状态基线，不要塞长篇设定。
+- 不确定、用户没写、互相冲突的点写入“## 资料冲突与缺口”，不要补成事实。
+- 最终输出只能是 YAML，不要代码围栏，不要额外说明。
+
+当前插件正在使用的人设 YAML 参考：
+{reference}
+
+用户描述资料：
+{source_text}
+
+三个子agent交叉验证报告：
+{reports}
+""".strip()
+    return await _call_main_model(
+        caller,
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        temperature=0.25,
+        use_builtin_search=False,
+        timeout=_SYNTHESIS_TIMEOUT_SECONDS,
+        purpose="persona_template_custom_synthesis",
+        stage_label="自定义人设模板生成",
+    )
+
+
+async def _run_custom_persona_template_build(
+    *,
+    runtime: Any,
+    spec: dict[str, str],
+    actor: str = "",
+    source: str = "webui",
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    caller = _main_ai_caller(runtime)
+    if caller is None:
+        raise RuntimeError("主模型调用器未就绪")
+    progress = progress or _default_progress
+    started = time.time()
+    persona_name = spec["persona_name"]
+    source_text = _custom_persona_source_text(spec)
+    await progress("custom_research", "正在运行 3 个自定义人设子agent...", 35)
+    focus_items = [
+        ("身份性格子agent", "身份锚点、性别表达、性格底色、不可替换特征"),
+        ("说话关系子agent", "群聊说话节奏、称呼方式、插话边界、亲疏表达"),
+        ("日常校验子agent", "爱好、作息/日常锚点、资料冲突、可执行边界"),
+    ]
+    subagents = await asyncio.gather(
+        *[
+            _run_subagent(
+                caller=caller,
+                agent_name=name,
+                focus=focus,
+                work_title="自定义人设",
+                character_name=persona_name,
+                source_text=source_text,
+                use_builtin_search=False,
+                purpose="persona_template_custom_research",
+            )
+            for name, focus in focus_items
+        ]
+    )
+    reference_template = _configured_template_reference(runtime)
+    await progress("template_synthesis", "正在按插件 YAML 结构合成原创人设...", 78)
+    template = await _synthesize_custom_template(
+        caller=caller,
+        spec=spec,
+        source_text=source_text,
+        subagents=list(subagents),
+        reference_template=reference_template,
+    )
+    validation = _validate_template_yaml(template)
+    if not validation.get("valid"):
+        await progress("template_repair", "正在修复模板结构与占位符...", 88)
+        repaired = await _repair_template_yaml(
+            caller=caller,
+            work_title="自定义人设",
+            character_name=persona_name,
+            template=template,
+            validation=validation,
+            reference_template=reference_template,
+        )
+        repaired_validation = _validate_template_yaml(repaired)
+        if repaired_validation.get("valid"):
+            template = repaired_validation["template"]
+            validation = repaired_validation
+        else:
+            template = _strip_yaml_fence(template)
+    await progress("finalize", "正在整理输出结果...", 95)
+    conflicts: list[str] = []
+    for item in subagents:
+        report = item.get("report") if isinstance(item, dict) else {}
+        raw_conflicts = report.get("conflicts", []) if isinstance(report, dict) else []
+        if isinstance(raw_conflicts, list):
+            conflicts.extend(str(x) for x in raw_conflicts if str(x).strip())
+    sources = [
+        {
+            "kind": "custom_description",
+            "source": "用户描述",
+            "title": persona_name,
+            "summary": _clip_text(source_text, _SOURCE_SUMMARY_LIMIT),
+            "confidence": 1.0,
+        }
+    ]
+    result = {
+        "success": True,
+        "mode": "custom",
+        "work_title": "自定义人设",
+        "character_name": persona_name,
+        "model_role": "configured_main",
+        "duration_ms": int((time.time() - started) * 1000),
+        "sources": sources,
+        "subagents": list(subagents),
+        "conflicts": conflicts[:20],
+        "template": validation.get("template") or _strip_yaml_fence(template),
+        "template_valid": bool(validation.get("valid")),
+        "template_errors": list(validation.get("errors") or [])[:20],
+        "template_warnings": list(validation.get("warnings") or [])[:20],
+        "template_keys": list(validation.get("keys") or []),
+        "template_reference": reference_template,
+    }
+    record = record_persona_template_result(result, actor=actor, source=source)
+    result["history_record"] = summarize_persona_template_record(record)
+    export_path = write_persona_template_export_file(record, plugin_config=getattr(runtime, "plugin_config", None))
+    result["export_path"] = str(export_path)
+    await progress("done", "自定义人设模板已完成。", 100)
+    return result
+
+
 def build_persona_template_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/persona-template", tags=["persona-template"])
 
@@ -2017,6 +2201,35 @@ def build_persona_template_router(*, runtime) -> APIRouter:
         if _main_ai_caller(runtime) is None:
             raise HTTPException(status_code=503, detail="主模型调用器未就绪")
         return work_title, character_name
+
+    def _parse_custom_build_body(body: dict) -> dict[str, str]:
+        persona_name = str(body.get("persona_name") or body.get("character_name") or "").strip()
+        gender = str(body.get("gender", "") or "").strip()
+        personality = str(body.get("personality", "") or "").strip()
+        traits = str(body.get("traits", "") or "").strip()
+        hobbies = str(body.get("hobbies", "") or "").strip()
+        description = str(body.get("description", "") or "").strip()
+        if not persona_name:
+            raise HTTPException(status_code=400, detail="人设名称不能为空")
+        if len(persona_name) > 80:
+            raise HTTPException(status_code=400, detail="人设名称过长")
+        if not any([gender, personality, traits, hobbies, description]):
+            raise HTTPException(status_code=400, detail="请至少填写性别、性格、特点、爱好或长文描述中的一项")
+        if len(description) > 6000:
+            raise HTTPException(status_code=400, detail="长文描述过长，最多 6000 字")
+        if _main_ai_caller(runtime) is None:
+            raise HTTPException(status_code=503, detail="主模型调用器未就绪")
+        return {
+            "persona_name": persona_name,
+            "gender": gender[:120],
+            "personality": personality[:600],
+            "traits": traits[:800],
+            "hobbies": hobbies[:800],
+            "description": description,
+        }
+
+    def _is_custom_build(body: dict) -> bool:
+        return str(body.get("mode", "") or "").strip().lower() in {"custom", "description", "原创", "自定义"}
 
     @router.get("/history")
     async def history(
@@ -2052,7 +2265,11 @@ def build_persona_template_router(*, runtime) -> APIRouter:
         body: dict = Body(default_factory=dict),
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
-        work_title, character_name = _parse_build_body(body)
+        is_custom = _is_custom_build(body)
+        custom_spec = _parse_custom_build_body(body) if is_custom else {}
+        work_title, character_name = (
+            ("自定义人设", custom_spec["persona_name"]) if is_custom else _parse_build_body(body)
+        )
         task = _PersonaTemplateTask(
             task_id=uuid.uuid4().hex,
             work_title=work_title,
@@ -2081,14 +2298,23 @@ def build_persona_template_router(*, runtime) -> APIRouter:
                     progress=3,
                     status="running",
                 )
-                task.result = await _run_persona_template_build(
-                    runtime=runtime,
-                    work_title=work_title,
-                    character_name=character_name,
-                    actor=admin.qq,
-                    source="webui",
-                    progress=_progress,
-                )
+                if is_custom:
+                    task.result = await _run_custom_persona_template_build(
+                        runtime=runtime,
+                        spec=custom_spec,
+                        actor=admin.qq,
+                        source="webui",
+                        progress=_progress,
+                    )
+                else:
+                    task.result = await _run_persona_template_build(
+                        runtime=runtime,
+                        work_title=work_title,
+                        character_name=character_name,
+                        actor=admin.qq,
+                        source="webui",
+                        progress=_progress,
+                    )
                 await _set_task_progress(
                     task,
                     stage="done",
@@ -2106,6 +2332,7 @@ def build_persona_template_router(*, runtime) -> APIRouter:
                         "source_count": len((task.result or {}).get("sources") or []),
                         "subagent_count": len((task.result or {}).get("subagents") or []),
                         "mode": "task",
+                        "build_mode": "custom" if is_custom else "source",
                     },
                     outcome="ok",
                 )
@@ -2124,7 +2351,7 @@ def build_persona_template_router(*, runtime) -> APIRouter:
                     device_id=admin.device_id,
                     target=f"{work_title}/{character_name}",
                     ip_hash=get_client_ip(request),
-                    detail={"error": task.error, "mode": "task"},
+                    detail={"error": task.error, "mode": "task", "build_mode": "custom" if is_custom else "source"},
                     outcome="error",
                 )
 
@@ -2147,15 +2374,27 @@ def build_persona_template_router(*, runtime) -> APIRouter:
         body: dict = Body(default_factory=dict),
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
-        work_title, character_name = _parse_build_body(body)
+        is_custom = _is_custom_build(body)
+        custom_spec = _parse_custom_build_body(body) if is_custom else {}
+        work_title, character_name = (
+            ("自定义人设", custom_spec["persona_name"]) if is_custom else _parse_build_body(body)
+        )
         try:
-            result = await _run_persona_template_build(
-                runtime=runtime,
-                work_title=work_title,
-                character_name=character_name,
-                actor=admin.qq,
-                source="webui",
-            )
+            if is_custom:
+                result = await _run_custom_persona_template_build(
+                    runtime=runtime,
+                    spec=custom_spec,
+                    actor=admin.qq,
+                    source="webui",
+                )
+            else:
+                result = await _run_persona_template_build(
+                    runtime=runtime,
+                    work_title=work_title,
+                    character_name=character_name,
+                    actor=admin.qq,
+                    source="webui",
+                )
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         webui_audit_log.record(
@@ -2168,6 +2407,7 @@ def build_persona_template_router(*, runtime) -> APIRouter:
                 "source_count": len(result.get("sources") or []),
                 "subagent_count": len(result.get("subagents") or []),
                 "mode": "sync",
+                "build_mode": "custom" if is_custom else "source",
             },
             outcome="ok",
         )

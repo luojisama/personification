@@ -10,6 +10,9 @@ from ._loader import load_personification_module
 
 
 sticker_library = load_personification_module("plugin.personification.core.sticker_library")
+sticker_labeler_impl = load_personification_module(
+    "plugin.personification.skills.skillpacks.sticker_labeler.scripts.impl"
+)
 web_grounding = load_personification_module("plugin.personification.core.web_grounding")
 
 
@@ -203,3 +206,51 @@ def test_parse_research_queries_sanitizes_duplicates_and_limit() -> None:
         "角色 台词",
         "另一个 梗",
     ]
+
+
+def test_sticker_labeler_includes_gif_and_uses_contact_sheet(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    gif_understanding = load_personification_module("plugin.personification.core.gif_understanding")
+    gif_file = tmp_path / "motion.gif"
+    gif_file.write_bytes(b"GIF89a-demo")
+    labeler = sticker_labeler_impl.StickerLabeler(tmp_path, logger=_logger())
+    assert gif_file in labeler.list_sticker_files()
+
+    monkeypatch.setattr(
+        gif_understanding,
+        "build_gif_contact_sheet_data_url",
+        lambda payload, config: {
+            "data_url": "data:image/jpeg;base64,abc",
+            "frame_count": 12,
+            "sampled_frames": 4,
+            "duration_ms": 900,
+        },
+    )
+    captured: dict[str, Any] = {}
+
+    async def _fake_analyze(**kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        return sticker_library.StickerVisionResult(
+            summary="挥手拒绝",
+            description="角色连续挥手，文字和动作表达拒绝",
+            ocr_text="不行",
+            use_hint="拒绝请求时发",
+            avoid_hint="严肃道歉时不适合",
+            mood_tags=["拒绝"],
+            scene_tags=["拒绝请求"],
+            proactive_send=False,
+            should_collect=True,
+            collect_reason="动图明确",
+            is_sticker=True,
+            style="anime",
+            vision_route="route_direct",
+            collect_confidence=0.9,
+        )
+
+    monkeypatch.setattr(sticker_labeler_impl, "analyze_sticker_image", _fake_analyze)
+    runtime = SimpleNamespace(plugin_config=SimpleNamespace(), vision_caller=None)
+    result = asyncio.run(labeler.label_file(gif_file, runtime))
+
+    assert captured["image_refs"] == ["data:image/jpeg;base64,abc"]
+    assert "GIF/动态表情" in captured["prompt"]
+    assert "总帧数约 12" in captured["prompt"]
+    assert result["description"] == "角色连续挥手，文字和动作表达拒绝"

@@ -55,6 +55,23 @@ def test_finalize_agent_reply_quality_normalizes_markdown_without_llm() -> None:
     assert "action=normalized" in traces[-1]["detail"]
 
 
+def test_finalize_agent_reply_quality_does_not_rewrite_local_normalization() -> None:
+    caller = _RewriteCaller("[NO_REPLY]")
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result("SILENCE: 这个事得看具体情况"),
+            tool_caller=caller,
+            messages=[],
+            reason="unit",
+        )
+    )
+
+    assert result.text == "这个事得看具体情况"
+    assert caller.calls == []
+    assert result.quality_checks[-1]["action"] == "normalized"
+
+
 def test_finalize_agent_reply_quality_rewrites_observer_posture_once() -> None:
     caller = _RewriteCaller("那先别绕远，卡在哪个点了")
     traces: list[dict[str, object]] = []
