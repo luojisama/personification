@@ -4,7 +4,6 @@ import asyncio
 import json
 import re
 import time
-from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, List
 
 from ..query_rewriter import ContextualQueryRewrite, QueryRewriteContext, contextual_query_rewriter
@@ -53,16 +52,16 @@ from .tool_args import (
     _tool_allows_parameter,
 )
 from .budgeting import apply_agent_budget_profile, derive_agent_budget_profile, render_agent_budget_trace_detail
+from .final_synthesis import AgentResult, direct_tool_result_agent_result, synthesize_max_steps_result
 from .tool_selection import (
     _normalize_agent_max_steps,
     _schema_tool_name,
     _select_tool_schemas,
     _semantic_tool_guidance,
 )
-from .tool_contracts import direct_tool_result_from_contract, recommended_tools_for_chat_intent
+from .tool_contracts import recommended_tools_for_chat_intent
 from .wrappers import (
     _IMAGE_B64_TOOL_RESULT_RE,
-    _extract_persona_system_prompt,
     _render_tool_result_for_user,
     _wrap_tool_result_in_persona,
 )
@@ -174,14 +173,6 @@ _BUILTIN_SEARCH_CALLER_NAMES = frozenset({
     "AntigravityCliToolCaller",
     "ClaudeCodeToolCaller",
 })
-
-
-@dataclass
-class AgentResult:
-    text: str
-    pending_actions: List[dict]
-    direct_output: bool = False
-    bypass_length_limits: bool = False
 
 
 def _summarize_tool_response_raw(raw: Any) -> str:
@@ -298,28 +289,6 @@ def _should_review_banter_lookup_draft(*, ambiguity_level: str, draft_answer_tex
         return True
     draft = str(draft_answer_text or "").strip()
     return "?" in draft or "？" in draft
-
-
-def _direct_tool_result_agent_result(
-    *,
-    registry: ToolRegistry | None,
-    tool_name: str,
-    result_text: str,
-    pending_actions: List[dict],
-) -> "AgentResult | None":
-    result = direct_tool_result_from_contract(
-        registry=registry,
-        tool_name=tool_name,
-        result_text=result_text,
-    )
-    if result is not None:
-        return AgentResult(
-            text=result.text,
-            pending_actions=pending_actions,
-            direct_output=result.direct_output,
-            bypass_length_limits=result.bypass_length_limits,
-        )
-    return None
 
 
 def _tool_signature(tool_name: str, tool_args: dict[str, Any]) -> str:
@@ -857,30 +826,15 @@ async def run_agent(
                 f"forcing answer from last_tool_result={bool(last_tool_result_text)}"
             )
             if last_tool_result_text:
-                direct_result = _direct_tool_result_agent_result(
+                return await synthesize_max_steps_result(
                     registry=registry,
                     tool_name=last_tool_name,
                     result_text=last_tool_result_text,
+                    user_query_text=user_query_text,
+                    messages=messages,
                     pending_actions=pending_actions,
-                )
-                if direct_result is not None:
-                    return direct_result
-                rendered_tool_result = _render_tool_result_for_user(
-                    last_tool_name,
-                    last_tool_result_text,
-                    user_query_text,
-                )
-                return AgentResult(
-                    text=await _wrap_tool_result_in_persona(
-                        tool_caller=tool_caller,
-                        rendered_tool_result=rendered_tool_result,
-                        user_query_text=user_query_text,
-                        persona_system=_extract_persona_system_prompt(messages),
-                        turn_plan=turn_plan,
-                    ),
-                    pending_actions=pending_actions,
-                    direct_output=False,
-                    bypass_length_limits=False,
+                    tool_caller=tool_caller,
+                    turn_plan=turn_plan,
                 )
             return AgentResult(
                 text="[NO_REPLY]",
@@ -1348,7 +1302,7 @@ async def run_agent(
                 else:
                     empty_lookup_tools.discard(last_tool_name)
             semantic_fallback_attempted = False
-            direct_result = _direct_tool_result_agent_result(
+            direct_result = direct_tool_result_agent_result(
                 registry=registry,
                 tool_name=last_tool_name,
                 result_text=result,
@@ -1381,30 +1335,15 @@ async def run_agent(
     )
     if last_tool_result_text:
         logger.warning("[agent] using last tool result as fallback final answer")
-        direct_result = _direct_tool_result_agent_result(
+        return await synthesize_max_steps_result(
             registry=registry,
             tool_name=last_tool_name,
             result_text=last_tool_result_text,
+            user_query_text=user_query_text,
+            messages=messages,
             pending_actions=pending_actions,
-        )
-        if direct_result is not None:
-            return direct_result
-        rendered_tool_result = _render_tool_result_for_user(
-            last_tool_name,
-            last_tool_result_text,
-            user_query_text,
-        )
-        return AgentResult(
-            text=await _wrap_tool_result_in_persona(
-                tool_caller=tool_caller,
-                rendered_tool_result=rendered_tool_result,
-                user_query_text=user_query_text,
-                persona_system=_extract_persona_system_prompt(messages),
-                turn_plan=turn_plan,
-            ),
-            pending_actions=pending_actions,
-            direct_output=False,
-            bypass_length_limits=False,
+            tool_caller=tool_caller,
+            turn_plan=turn_plan,
         )
     return AgentResult(
         text="[NO_REPLY]",
