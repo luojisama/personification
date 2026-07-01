@@ -54,6 +54,7 @@ from .loop_utils import (
     tool_result_trace_status as _tool_result_trace_status,
 )
 from .prompting import append_agent_system_prompts
+from .reply_quality import finalize_agent_reply_quality
 from .stop_flow import (
     StopFlowState,
     _has_lookup_schema,
@@ -226,6 +227,18 @@ async def run_agent(
     if callable(bind_actions):
         bind_actions(pending_actions)
     stop_state = StopFlowState()
+
+    async def _finalize_result(result: AgentResult, *, reason: str) -> AgentResult:
+        return await finalize_agent_reply_quality(
+            result,
+            tool_caller=tool_caller,
+            messages=messages,
+            turn_plan=turn_plan,
+            record_trace=_record_reply_trace_stage,
+            logger=logger,
+            reason=reason,
+        )
+
     evidence_synthesis_rounds = 0
     last_evidence_tool_count = 0
     max_evidence_synthesis_rounds = 2
@@ -414,11 +427,14 @@ async def run_agent(
             use_builtin_search=use_builtin_search,
             logger=logger,
         ):
-            return AgentResult(
-                text=status_reply or "[NO_REPLY]",
-                pending_actions=pending_actions,
-                direct_output=False,
-                bypass_length_limits=False,
+            return await _finalize_result(
+                AgentResult(
+                    text=status_reply or "[NO_REPLY]",
+                    pending_actions=pending_actions,
+                    direct_output=False,
+                    bypass_length_limits=False,
+                ),
+                reason="background_image_generation",
             )
     append_agent_system_prompts(
         messages=messages,
@@ -496,19 +512,25 @@ async def run_agent(
                 f"forcing answer from last_tool_result={bool(stop_state.last_tool_result_text)}"
             )
             if stop_state.last_tool_result_text:
-                return await synthesize_max_steps_result(
-                    registry=registry,
-                    tool_name=stop_state.last_tool_name,
-                    result_text=stop_state.last_tool_result_text,
-                    user_query_text=user_query_text,
-                    messages=messages,
-                    pending_actions=pending_actions,
-                    tool_caller=tool_caller,
-                    turn_plan=turn_plan,
+                return await _finalize_result(
+                    await synthesize_max_steps_result(
+                        registry=registry,
+                        tool_name=stop_state.last_tool_name,
+                        result_text=stop_state.last_tool_result_text,
+                        user_query_text=user_query_text,
+                        messages=messages,
+                        pending_actions=pending_actions,
+                        tool_caller=tool_caller,
+                        turn_plan=turn_plan,
+                    ),
+                    reason="time_budget_last_tool",
                 )
-            return AgentResult(
-                text="[NO_REPLY]",
-                pending_actions=pending_actions,
+            return await _finalize_result(
+                AgentResult(
+                    text="[NO_REPLY]",
+                    pending_actions=pending_actions,
+                ),
+                reason="time_budget_empty",
             )
         await _append_evidence_guidance_if_needed()
         active_schemas = _select_tool_schemas(
@@ -570,7 +592,7 @@ async def run_agent(
             if stop_decision.action == "continue":
                 continue
             if stop_decision.result is not None:
-                return stop_decision.result
+                return await _finalize_result(stop_decision.result, reason="model_stop")
 
         if response.tool_calls:
             if not stop_state.has_tool_call and not ack_sent and ack_sender is not None:
@@ -649,7 +671,7 @@ async def run_agent(
                     status="ok",
                     detail=f"reason=direct_tool_result tool={stop_state.last_tool_name}",
                 )
-                return direct_result
+                return await _finalize_result(direct_result, reason="direct_tool_result")
 
             append_tool_result_message(
                 messages=messages,
@@ -668,17 +690,23 @@ async def run_agent(
     )
     if stop_state.last_tool_result_text:
         logger.warning("[agent] using last tool result as fallback final answer")
-        return await synthesize_max_steps_result(
-            registry=registry,
-            tool_name=stop_state.last_tool_name,
-            result_text=stop_state.last_tool_result_text,
-            user_query_text=user_query_text,
-            messages=messages,
-            pending_actions=pending_actions,
-            tool_caller=tool_caller,
-            turn_plan=turn_plan,
+        return await _finalize_result(
+            await synthesize_max_steps_result(
+                registry=registry,
+                tool_name=stop_state.last_tool_name,
+                result_text=stop_state.last_tool_result_text,
+                user_query_text=user_query_text,
+                messages=messages,
+                pending_actions=pending_actions,
+                tool_caller=tool_caller,
+                turn_plan=turn_plan,
+            ),
+            reason="max_steps_last_tool",
         )
-    return AgentResult(
-        text="[NO_REPLY]",
-        pending_actions=pending_actions,
+    return await _finalize_result(
+        AgentResult(
+            text="[NO_REPLY]",
+            pending_actions=pending_actions,
+        ),
+        reason="max_steps_empty",
     )

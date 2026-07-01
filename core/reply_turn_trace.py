@@ -17,7 +17,7 @@ _CURRENT_TRACE_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 _ELAPSED_RE = re.compile(r"(?:elapsed_ms=|耗时\s*)(\d{1,9})(?:\s*ms)?", re.I)
 _SIGNAL_KEY_RE = re.compile(
-    r"(?:^|\s)(action|speech_act|output|intent|ambiguity|tool|budget|suggested_steps|actual_steps|suggested_seconds|actual_seconds|topic_thread|topic_speaker|reply_to_bot|bot_in_thread|parallel_threads|participants|reason|source)=([^\s]+)"
+    r"(?:^|\s)(action|speech_act|output|intent|ambiguity|tool|budget|suggested_steps|actual_steps|suggested_seconds|actual_seconds|topic_thread|topic_speaker|reply_to_bot|bot_in_thread|parallel_threads|participants|reason|source|flags|revision|chars)=([^\s]+)"
 )
 
 

@@ -151,6 +151,9 @@ function traceSignalLabel(key) {
     participants: "参与者",
     reason: "原因",
     source: "来源",
+    flags: "质量标记",
+    revision: "修订",
+    chars: "字数",
   })[key] || key;
 }
 

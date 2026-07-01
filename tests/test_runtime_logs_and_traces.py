@@ -150,6 +150,36 @@ def test_reply_turn_trace_extracts_budget_signals(_db_tmp) -> None:
     assert view["summary"]["slow_stages"] == []
 
 
+def test_reply_turn_trace_extracts_reply_quality_signals(_db_tmp) -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")
+    logs.clear_all()
+    trace_id = traces.start_trace(session_type="group", group_id="123", user_id="456")
+    token = traces.set_current_trace_id(trace_id)
+    try:
+        traces.record_stage(
+            key="agent_reply_quality",
+            label="Agent 回复质量",
+            status="warn",
+            detail=(
+                "action=rewritten source=model_stop flags=formulaic_tic,style_risk "
+                "revision=true elapsed_ms=120 chars=12->10"
+            ),
+        )
+        traces.finish_trace(outcome="ok", diagnosis_code="ok")
+    finally:
+        traces.reset_current_trace_id(token)
+
+    row = traces.get_trace(trace_id)
+    view = traces.build_process_view(row, logs=logs.query_recent(trace_id=trace_id))
+
+    assert view["items"][0]["category"] == "agent"
+    assert view["items"][0]["signals"]["action"] == "rewritten"
+    assert view["items"][0]["signals"]["flags"] == "formulaic_tic,style_risk"
+    assert view["items"][0]["signals"]["revision"] == "true"
+    assert view["items"][0]["signals"]["chars"] == "12->10"
+
+
 def test_reply_turn_trace_extracts_topic_state_signals(_db_tmp) -> None:
     traces = load_personification_module("plugin.personification.core.reply_turn_trace")
     logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")

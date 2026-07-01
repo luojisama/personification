@@ -261,6 +261,109 @@ def test_run_agent_returns_immediately_for_banter_stop_without_tools(monkeypatch
     assert len(caller.calls) == 1
 
 
+def test_run_agent_final_quality_rewrites_observer_reply(monkeypatch) -> None:  # noqa: ANN001
+    stages: list[dict[str, object]] = []
+
+    def _capture_stage(**kwargs):  # noqa: ANN001
+        stages.append(dict(kwargs))
+
+    monkeypatch.setattr(runner, "_record_reply_trace_stage", _capture_stage)
+
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="我先看看情况，等会再说",
+                tool_calls=[],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="那先别绕远，卡在哪个点了",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[
+                {"role": "system", "content": "你是群里的正常成员。" * 80},
+                {"role": "user", "content": "这题写不动了"},
+            ],
+            registry=tool_registry.ToolRegistry(),
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=1,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+        )
+    )
+
+    quality_stage = next(stage for stage in stages if stage["key"] == "agent_reply_quality")
+    assert result.text == "那先别绕远，卡在哪个点了"
+    assert result.quality_checks[-1]["action"] == "rewritten"
+    assert len(caller.calls) == 2
+    assert caller.calls[1]["tools"] == []
+    assert "action=rewritten" in quality_stage["detail"]
+
+
+def test_run_agent_final_quality_silences_unfixed_ooc_reply() -> None:
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="根据搜索结果，我先看看情况，等会再说",
+                tool_calls=[],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="我先看看情况，等会再说",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "明天会下雨吗"}],
+            registry=tool_registry.ToolRegistry(),
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=1,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="medium",
+            ),
+        )
+    )
+
+    assert result.text == "[SILENCE]"
+    assert result.quality_checks[-1]["action"] == "silenced"
+    assert len(caller.calls) == 2
+
+
 def test_run_agent_retries_lookup_when_banter_draft_asks_group_about_unknown_term(monkeypatch) -> None:  # noqa: ANN001
     handled: list[dict[str, object]] = []
 

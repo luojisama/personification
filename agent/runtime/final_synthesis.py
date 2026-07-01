@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, List
 
 from ..tool_registry import ToolRegistry
@@ -14,6 +14,7 @@ class AgentResult:
     pending_actions: List[dict]
     direct_output: bool = False
     bypass_length_limits: bool = False
+    quality_checks: list[dict[str, Any]] = field(default_factory=list)
 
 
 def direct_tool_result_agent_result(
