@@ -52,12 +52,16 @@ from .loop_utils import (
     record_reply_trace_stage as _record_reply_trace_stage,
     safe_ack as _safe_ack,
     tool_result_trace_status as _tool_result_trace_status,
-    tool_signature as _tool_signature,
 )
 from .prompting import append_agent_system_prompts
+from .stop_flow import (
+    StopFlowState,
+    _has_lookup_schema,
+    _should_review_banter_lookup_draft,
+    handle_model_stop,
+)
 from .tool_loop import (
     append_assistant_tool_calls_message,
-    append_single_tool_call_exchange,
     append_tool_result_message,
     observe_model_step,
     selected_tool_names,
@@ -86,9 +90,7 @@ from .wrappers import (
 )
 from .fallbacks import (
     _cancel_task_safely,
-    _inject_background_tool_result,
     _parse_json_tool_result,
-    _run_background_vision_fallback,
     _select_semantic_fallback_tool,
     _tool_result_indicates_empty,
 )
@@ -187,18 +189,6 @@ async def _classify_deferred_lookup_reply(
     return verdict == "RETRY_SEARCH"
 
 
-def _has_lookup_schema(schemas: list[dict]) -> bool:
-    return any(_schema_tool_name(schema) in _RETRYABLE_LOOKUP_TOOLS for schema in list(schemas or []))
-
-
-def _should_review_banter_lookup_draft(*, ambiguity_level: str, draft_answer_text: str) -> bool:
-    # 只用结构性信号控制是否追加一次模型审查，避免把具体话题词写进代码语义。
-    if str(ambiguity_level or "").strip() == "high":
-        return True
-    draft = str(draft_answer_text or "").strip()
-    return "?" in draft or "？" in draft
-
-
 async def run_agent(
     messages: List[dict],
     registry: ToolRegistry,
@@ -235,16 +225,10 @@ async def run_agent(
     bind_actions = getattr(executor, "bind_pending_actions", None)
     if callable(bind_actions):
         bind_actions(pending_actions)
-    last_tool_name = ""
-    last_tool_result_text = ""
-    last_fallback_signature = ""
-    empty_lookup_tools: set[str] = set()
-    semantic_fallback_attempted = False
-    tool_result_records: list[dict[str, Any]] = []
+    stop_state = StopFlowState()
     evidence_synthesis_rounds = 0
     last_evidence_tool_count = 0
     max_evidence_synthesis_rounds = 2
-    pending_evidence_followup_query = ""
     user_text = _extract_latest_user_text(messages)
     focus_query_text = _clean_user_query_text(_extract_focus_query_text(user_text))
     contextual_query_text = _recover_followup_query_from_context(user_text, focus_query_text)
@@ -397,7 +381,6 @@ async def run_agent(
             context_hint,
         )
     )
-    has_tool_call = False
     ack_sent = False
     budget_deadline = (
         time.monotonic() + max(0.0, float(time_budget_seconds or 0.0))
@@ -449,19 +432,19 @@ async def run_agent(
     )
 
     async def _append_evidence_guidance_if_needed(*, draft_answer_text: str = "") -> EvidenceSynthesis | None:
-        nonlocal evidence_synthesis_rounds, last_evidence_tool_count, semantic_fallback_attempted, pending_evidence_followup_query
+        nonlocal evidence_synthesis_rounds, last_evidence_tool_count
         if not _evidence_synthesizer_enabled(plugin_config):
             return None
         if evidence_synthesis_rounds >= max_evidence_synthesis_rounds:
             return None
-        if not tool_result_records or len(tool_result_records) <= last_evidence_tool_count:
+        if not stop_state.tool_result_records or len(stop_state.tool_result_records) <= last_evidence_tool_count:
             return None
         started_at = time.monotonic()
         evidence = await synthesize_evidence_with_llm(
             tool_caller=tool_caller,
             turn_plan=evidence_turn_plan,
             candidate_memories=list(candidate_memories or [])[:12],
-            tool_results=tool_result_records[:8],
+            tool_results=stop_state.tool_result_records[:8],
             draft_answer_text=draft_answer_text,
             url_summaries=list(url_summaries or [])[:5],
             group_context=context_hint,
@@ -469,7 +452,7 @@ async def run_agent(
             cross_verify_enabled=bool(getattr(plugin_config, "personification_cross_verify_enabled", False)),
         )
         evidence_synthesis_rounds += 1
-        last_evidence_tool_count = len(tool_result_records)
+        last_evidence_tool_count = len(stop_state.tool_result_records)
         record_counter(
             "evidence_synthesizer.synthesis_total",
             needs_more_research=bool(evidence.needs_more_research),
@@ -481,8 +464,8 @@ async def run_agent(
         )
         messages.append({"role": "system", "content": _evidence_guidance(evidence)})
         if evidence.needs_more_research:
-            semantic_fallback_attempted = False
-            pending_evidence_followup_query = str(evidence.research_followup_query or "").strip()
+            stop_state.semantic_fallback_attempted = False
+            stop_state.pending_evidence_followup_query = str(evidence.research_followup_query or "").strip()
         logger.info(
             "[agent] evidence synthesis "
             f"round={evidence_synthesis_rounds} selected_memories={len(evidence.selected_memory_ids)} "
@@ -510,13 +493,13 @@ async def run_agent(
         if budget_deadline is not None and time.monotonic() >= budget_deadline:
             logger.warning(
                 f"[agent] time budget exhausted at step={_step + 1}, "
-                f"forcing answer from last_tool_result={bool(last_tool_result_text)}"
+                f"forcing answer from last_tool_result={bool(stop_state.last_tool_result_text)}"
             )
-            if last_tool_result_text:
+            if stop_state.last_tool_result_text:
                 return await synthesize_max_steps_result(
                     registry=registry,
-                    tool_name=last_tool_name,
-                    result_text=last_tool_result_text,
+                    tool_name=stop_state.last_tool_name,
+                    result_text=stop_state.last_tool_result_text,
                     user_query_text=user_query_text,
                     messages=messages,
                     pending_actions=pending_actions,
@@ -555,290 +538,48 @@ async def run_agent(
             record_trace=_record_reply_trace_stage,
         )
         if response.finish_reason == "stop" and not response.tool_calls and content_len > 0:
-            if _evidence_synthesizer_enabled(plugin_config) and has_tool_call:
+            if _evidence_synthesizer_enabled(plugin_config) and stop_state.has_tool_call:
                 await _append_evidence_guidance_if_needed(draft_answer_text=str(response.content or ""))
         if response.finish_reason == "stop":
-            banter_requires_lookup_retry = False
-            if runtime_chat_intent == "banter" and not response.tool_calls and content_len > 0:
-                if (
-                    not has_tool_call
-                    and not semantic_fallback_attempted
-                    and bool(user_query_text)
-                    and _has_lookup_schema(active_schemas)
-                    and _should_review_banter_lookup_draft(
-                        ambiguity_level=str(getattr(intent_decision, "ambiguity_level", "") or ""),
-                        draft_answer_text=str(response.content or ""),
-                    )
-                ):
-                    lookup_review_started_at = time.monotonic()
-                    banter_requires_lookup_retry = await _classify_deferred_lookup_reply(
-                        tool_caller=tool_caller,
-                        user_query_text=user_query_text,
-                        assistant_reply_text=str(response.content or ""),
-                        previous_tool_name=last_tool_name,
-                        previous_tool_result_text=last_tool_result_text,
-                    )
-                    lookup_review_elapsed_ms = int((time.monotonic() - lookup_review_started_at) * 1000)
-                    record_timing(
-                        "agent.banter_lookup_review_ms",
-                        lookup_review_elapsed_ms,
-                        retry=bool(banter_requires_lookup_retry),
-                    )
-                    _record_reply_trace_stage(
-                        key="agent_banter_lookup_review",
-                        label="Banter 查证裁判",
-                        status="warn" if banter_requires_lookup_retry else "ok",
-                        detail=(
-                            f"retry={bool(banter_requires_lookup_retry)} "
-                            f"elapsed_ms={lookup_review_elapsed_ms}"
-                        ),
-                        hint="若此阶段经常较慢，配置 lite_model 并关闭严格主模型模式",
-                    )
-                    if banter_requires_lookup_retry:
-                        logger.info("[agent] banter draft requested lookup retry")
-                if not banter_requires_lookup_retry:
-                    _record_reply_trace_stage(
-                        key="agent_finish",
-                        label="Agent 收尾",
-                        status="ok",
-                        detail=f"reason=banter_stop content_len={content_len}",
-                    )
-                    return AgentResult(
-                        text=str(response.content or "").strip(),
-                        pending_actions=pending_actions,
-                        bypass_length_limits=False,
-                    )
-            if (
-                response.vision_unavailable
-                and bool(
-                    getattr(
-                        plugin_config,
-                        "personification_fallback_enabled",
-                        getattr(plugin_config, "personification_vision_fallback_enabled", True),
-                    )
-                )
-                and registry.get("vision_analyze") is not None
-            ):
-                try:
-                    background = await _run_background_vision_fallback(
-                        registry=registry,
-                        query=user_query_text or user_text or "请分析图片",
-                        images=user_images,
-                    )
-                except Exception as e:
-                    logger.warning(f"[agent] vision fallback failed: {e}")
-                    background = None
-                if background is not None:
-                    bg_name, bg_args, bg_result = background
-                    await _inject_background_tool_result(
-                        messages=messages,
-                        tool_caller=tool_caller,
-                        tool_name=bg_name,
-                        tool_args=bg_args,
-                        result=bg_result,
-                        step=_step + 1,
-                    )
-                    has_tool_call = True
-                    last_tool_name = bg_name
-                    last_tool_result_text = bg_result
-                    logger.info("[agent] injected background vision fallback result")
-                    continue
-            fallback_lookup = None
-            previous_tool_empty = _tool_result_indicates_empty(last_tool_result_text)
-            non_banter_fallback_needed = (
-                runtime_chat_intent != "banter"
-                and (
-                    not has_tool_call
-                    or bool(pending_evidence_followup_query)
-                    or content_len == 0
-                    or response.vision_unavailable
-                )
-            )
-            should_run_fallback_lookup = (
-                not semantic_fallback_attempted
-                and bool(user_query_text)
-                and (non_banter_fallback_needed or banter_requires_lookup_retry)
-            )
-            if should_run_fallback_lookup:
-                semantic_fallback_attempted = True
-                fallback_query_text = pending_evidence_followup_query or user_query_text
-                fallback_planner_started_at = time.monotonic()
-                fallback_lookup = await _select_semantic_fallback_tool(
-                    tool_caller=tool_caller,
-                    registry=registry,
-                    user_query_text=fallback_query_text,
-                    rewritten_query=rewritten_query,
-                    draft_answer_text=response.content,
-                    context_hint=context_hint,
-                    has_images=bool(user_images),
-                    chat_intent=runtime_chat_intent,
-                    plugin_question_intent=plugin_query_intent,
-                    user_images=user_images,
-                    previous_tool_name=last_tool_name,
-                    previous_tool_result_text=last_tool_result_text,
-                )
-                fallback_planner_elapsed_ms = int((time.monotonic() - fallback_planner_started_at) * 1000)
-                record_timing(
-                    "agent.semantic_fallback_planner_ms",
-                    fallback_planner_elapsed_ms,
-                    selected=bool(fallback_lookup),
-                    intent=runtime_chat_intent or "unknown",
-                )
-                _record_reply_trace_stage(
-                    key="agent_semantic_fallback",
-                    label="语义 fallback 选工具",
-                    status="ok" if fallback_lookup else "warn",
-                    detail=(
-                        f"selected={fallback_lookup[0] if fallback_lookup else '-'} "
-                        f"intent={runtime_chat_intent or '-'} elapsed_ms={fallback_planner_elapsed_ms}"
-                    ),
-                )
-                if fallback_lookup is None and pending_evidence_followup_query:
-                    pending_evidence_followup_query = ""
-            if fallback_lookup is not None:
-                fallback_name, fallback_args = fallback_lookup
-                if fallback_name in empty_lookup_tools:
-                    logger.info(f"[agent] semantic fallback skipped previously empty tool: {fallback_name}")
-                    fallback_lookup = None
-                elif fallback_name == last_tool_name and previous_tool_empty:
-                    logger.info(f"[agent] semantic fallback skipped immediate empty tool repeat: {fallback_name}")
-                    fallback_lookup = None
-            if fallback_lookup is not None:
-                fallback_name, fallback_args = fallback_lookup
-                fallback_signature = _tool_signature(fallback_name, fallback_args)
-                if fallback_signature == last_fallback_signature:
-                    logger.info("[agent] semantic fallback repeated same tool signature; skipping")
-                    fallback_lookup = None
-                else:
-                    last_fallback_signature = fallback_signature
-                    fallback_tool = registry.get(fallback_name)
-                    if fallback_tool is not None:
-                        fallback_tool_started_at = time.monotonic()
-                        fallback_args, fallback_result = await _execute_tool_with_retries(
-                            registry=registry,
-                            tool_name=fallback_name,
-                            tool_args=fallback_args,
-                            rewritten_query=rewritten_query,
-                            user_images=user_images,
-                            previous_tool_name=last_tool_name,
-                            previous_tool_result_text=last_tool_result_text,
-                            logger=logger,
-                            budget_deadline=budget_deadline,
-                        )
-                        _record_reply_trace_stage(
-                            key="agent_fallback_tool",
-                            label="fallback 工具执行",
-                            status="ok" if str(fallback_result or "").strip() else "warn",
-                            detail=(
-                                f"tool={fallback_name} "
-                                f"elapsed_ms={int((time.monotonic() - fallback_tool_started_at) * 1000)}"
-                            ),
-                        )
-                        fallback_id = f"fallback-{fallback_name}-{_step + 1}"
-                        append_single_tool_call_exchange(
-                            messages=messages,
-                            tool_caller=tool_caller,
-                            call_id=fallback_id,
-                            tool_name=fallback_name,
-                            tool_args=fallback_args,
-                            result=fallback_result,
-                        )
-                        last_tool_name = str(fallback_name or "").strip()
-                        if str(fallback_result or "").strip():
-                            last_tool_result_text = str(fallback_result).strip()
-                        has_tool_call = True
-                        pending_evidence_followup_query = ""
-                        tool_result_records.append(
-                            _build_tool_result_record(
-                                tool_name=fallback_name,
-                                tool_args=fallback_args,
-                                result=fallback_result,
-                            )
-                        )
-                        semantic_fallback_attempted = False
-                        logger.info(f"[agent] fallback tool_call name={fallback_name}")
-                        await _append_evidence_guidance_if_needed()
-                        continue
-                    logger.info(f"[agent] semantic fallback selected unavailable tool: {fallback_name}")
-            if banter_requires_lookup_retry:
-                _record_reply_trace_stage(
-                    key="agent_finish",
-                    label="Agent 收尾",
-                    status="warn",
-                    detail="reason=banter_lookup_retry_failed text=[NO_REPLY]",
-                )
-                return AgentResult(
-                    text="[NO_REPLY]",
-                    pending_actions=pending_actions,
-                    bypass_length_limits=False,
-                )
-            if (
-                content_len == 0
-                and bool(
-                    getattr(
-                        plugin_config,
-                        "personification_fallback_enabled",
-                        getattr(plugin_config, "personification_vision_fallback_enabled", True),
-                    )
-                )
-                and registry.get("vision_analyze") is not None
-                and user_images
-            ):
-                try:
-                    background = await _run_background_vision_fallback(
-                        registry=registry,
-                        query=user_query_text or user_text or "请分析图片",
-                        images=user_images,
-                    )
-                except Exception as e:
-                    logger.warning(f"[agent] deferred vision fallback failed: {e}")
-                    background = None
-                if background is not None:
-                    bg_name, bg_args, bg_result = background
-                    await _inject_background_tool_result(
-                        messages=messages,
-                        tool_caller=tool_caller,
-                        tool_name=bg_name,
-                        tool_args=bg_args,
-                        result=bg_result,
-                        step=_step + 1,
-                    )
-                    has_tool_call = True
-                    last_tool_name = bg_name
-                    last_tool_result_text = bg_result
-                    logger.info("[agent] awaited background vision fallback result")
-                    continue
-            if content_len == 0:
-                _record_reply_trace_stage(
-                    key="agent_finish",
-                    label="Agent 收尾",
-                    status="warn",
-                    detail="reason=empty_stop text=[NO_REPLY]",
-                )
-                return AgentResult(
-                    text="[NO_REPLY]",
-                    pending_actions=pending_actions,
-                )
-            _record_reply_trace_stage(
-                key="agent_finish",
-                label="Agent 收尾",
-                status="ok",
-                detail=f"reason=model_stop content_len={content_len} has_tool_call={bool(has_tool_call)}",
-            )
-            return AgentResult(
-                text=response.content,
+            stop_decision = await handle_model_stop(
+                state=stop_state,
+                response=response,
+                content_len=content_len,
+                active_schemas=active_schemas,
+                runtime_chat_intent=runtime_chat_intent,
+                intent_decision=intent_decision,
+                registry=registry,
+                tool_caller=tool_caller,
+                logger=logger,
+                messages=messages,
                 pending_actions=pending_actions,
-                bypass_length_limits=has_tool_call,
+                plugin_config=plugin_config,
+                user_query_text=user_query_text,
+                user_text=user_text,
+                user_images=user_images,
+                rewritten_query=rewritten_query,
+                context_hint=context_hint,
+                plugin_query_intent=plugin_query_intent,
+                budget_deadline=budget_deadline,
+                step=_step + 1,
+                record_trace=_record_reply_trace_stage,
+                append_evidence_guidance=_append_evidence_guidance_if_needed,
+                classify_deferred_lookup_reply=_classify_deferred_lookup_reply,
+                select_semantic_fallback_tool=_select_semantic_fallback_tool,
             )
+            if stop_decision.action == "continue":
+                continue
+            if stop_decision.result is not None:
+                return stop_decision.result
 
         if response.tool_calls:
-            if not has_tool_call and not ack_sent and ack_sender is not None:
+            if not stop_state.has_tool_call and not ack_sent and ack_sender is not None:
                 ack_sent = True
                 await _safe_ack(ack_sender, "", logger)
             append_assistant_tool_calls_message(messages=messages, response=response)
 
         for tool_call in response.tool_calls:
-            has_tool_call = True
+            stop_state.has_tool_call = True
             logger.info(f"[agent] tool_call name={tool_call.name}")
             tool = registry.get(tool_call.name)
             tool_args = trace_tool_call(
@@ -856,8 +597,8 @@ async def run_agent(
                     tool_args=tool_args,
                     rewritten_query=rewritten_query,
                     user_images=user_images,
-                    previous_tool_name=last_tool_name,
-                    previous_tool_result_text=last_tool_result_text,
+                    previous_tool_name=stop_state.last_tool_name,
+                    previous_tool_result_text=stop_state.last_tool_result_text,
                     logger=logger,
                     budget_deadline=budget_deadline,
                 )
@@ -879,25 +620,25 @@ async def run_agent(
                 f"[agent] tool_result name={tool_call.name} "
                 f"preview={str(result).replace(chr(10), ' ')[:tool_result_preview_limit]}"
             )
-            last_tool_name = str(tool_call.name or "").strip()
+            stop_state.last_tool_name = str(tool_call.name or "").strip()
             if str(result or "").strip():
-                last_tool_result_text = str(result).strip()
-            tool_result_records.append(
+                stop_state.last_tool_result_text = str(result).strip()
+            stop_state.tool_result_records.append(
                 _build_tool_result_record(
-                    tool_name=last_tool_name,
+                    tool_name=stop_state.last_tool_name,
                     tool_args=tool_args,
                     result=result,
                 )
             )
-            if last_tool_name in _RETRYABLE_LOOKUP_TOOLS:
+            if stop_state.last_tool_name in _RETRYABLE_LOOKUP_TOOLS:
                 if _tool_result_indicates_empty(result):
-                    empty_lookup_tools.add(last_tool_name)
+                    stop_state.empty_lookup_tools.add(stop_state.last_tool_name)
                 else:
-                    empty_lookup_tools.discard(last_tool_name)
-            semantic_fallback_attempted = False
+                    stop_state.empty_lookup_tools.discard(stop_state.last_tool_name)
+            stop_state.semantic_fallback_attempted = False
             direct_result = direct_tool_result_agent_result(
                 registry=registry,
-                tool_name=last_tool_name,
+                tool_name=stop_state.last_tool_name,
                 result_text=result,
                 pending_actions=pending_actions,
             )
@@ -906,7 +647,7 @@ async def run_agent(
                     key="agent_finish",
                     label="Agent 收尾",
                     status="ok",
-                    detail=f"reason=direct_tool_result tool={last_tool_name}",
+                    detail=f"reason=direct_tool_result tool={stop_state.last_tool_name}",
                 )
                 return direct_result
 
@@ -923,14 +664,14 @@ async def run_agent(
         key="agent_max_steps",
         label="Agent 步数上限",
         status="warn",
-        detail=f"max_steps={effective_max_steps} last_tool={last_tool_name or '-'}",
+        detail=f"max_steps={effective_max_steps} last_tool={stop_state.last_tool_name or '-'}",
     )
-    if last_tool_result_text:
+    if stop_state.last_tool_result_text:
         logger.warning("[agent] using last tool result as fallback final answer")
         return await synthesize_max_steps_result(
             registry=registry,
-            tool_name=last_tool_name,
-            result_text=last_tool_result_text,
+            tool_name=stop_state.last_tool_name,
+            result_text=stop_state.last_tool_result_text,
             user_query_text=user_query_text,
             messages=messages,
             pending_actions=pending_actions,
