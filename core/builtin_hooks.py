@@ -7,7 +7,7 @@ from ..skills.skillpacks.friend_request_tool.scripts.impl import check_friend_re
 from ..utils import build_group_context_window, get_group_topic_summary
 from .chat_intent import infer_turn_semantic_frame_with_llm
 from .context_policy import sanitize_history_text
-from .group_context import render_group_context_structured
+from .group_context import build_group_conversation_context, render_group_conversation_context
 from .group_member_aliases import render_group_alias_context
 from .group_relations import summarize_group_relationships
 from .message_relations import extract_event_message_id, extract_reply_message_id
@@ -73,6 +73,9 @@ def _format_recent_group_context(
     limit: int = 6,
     trigger_msg_id: str = "",
     reply_to_msg_id: str = "",
+    trigger_user_id: str = "",
+    bot_self_id: str = "",
+    repeat_clusters: list[dict[str, Any]] | None = None,
 ) -> str:
     recent = build_group_context_window(
         group_id,
@@ -81,7 +84,14 @@ def _format_recent_group_context(
     )
     if not recent:
         return ""
-    return render_group_context_structured(recent, trigger_msg_id=trigger_msg_id)
+    context = build_group_conversation_context(
+        recent_messages=recent,
+        trigger_msg_id=trigger_msg_id,
+        trigger_user_id=trigger_user_id,
+        bot_self_id=bot_self_id,
+        repeat_clusters=repeat_clusters,
+    )
+    return render_group_conversation_context(context)
 
 
 def _is_domain_sensitive_frame(frame: Any) -> bool:
@@ -225,6 +235,9 @@ async def _recent_group_context_hook(ctx: HookContext) -> Optional[str]:
         limit=6,
         trigger_msg_id=extract_event_message_id(ctx.event),
         reply_to_msg_id=extract_reply_message_id(ctx.event),
+        trigger_user_id=ctx.user_id,
+        bot_self_id=str(getattr(ctx.bot, "self_id", "") or ""),
+        repeat_clusters=ctx.repeat_clusters,
     )
     frame = await _ensure_semantic_frame(ctx, recent_context=base_recent)
     is_meta_question = bool(getattr(frame, "meta_question", False))
@@ -234,6 +247,9 @@ async def _recent_group_context_hook(ctx: HookContext) -> Optional[str]:
         limit=8 if is_meta_question else 6,
         trigger_msg_id=extract_event_message_id(ctx.event),
         reply_to_msg_id=extract_reply_message_id(ctx.event),
+        trigger_user_id=ctx.user_id,
+        bot_self_id=str(getattr(ctx.bot, "self_id", "") or ""),
+        repeat_clusters=ctx.repeat_clusters,
     )
     if not recent_block:
         return None

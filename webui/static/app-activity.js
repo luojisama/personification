@@ -143,6 +143,12 @@ function traceSignalLabel(key) {
     actual_steps: "实际步数",
     suggested_seconds: "建议秒数",
     actual_seconds: "实际秒数",
+    topic_thread: "话题线程",
+    topic_speaker: "当前发言",
+    reply_to_bot: "回复bot",
+    bot_in_thread: "bot在线程",
+    parallel_threads: "并行线程",
+    participants: "参与者",
     reason: "原因",
     source: "来源",
   })[key] || key;

@@ -10,11 +10,11 @@
 
 ## 当前评分
 
-当前架构约 7.8/10。
+当前架构约 8.0/10。
 
 - 优点：完整 Agent 覆盖面已经很大；TurnPlan、语义帧、工具筛选、skillpack、trace、WebUI 观测都有基础；扩展能力主要靠工具而不是核心分支。
-- 进展：`speech_act` 说话动作层、发送型工具 metadata 契约、第一块 `tool_contracts` 分层、随机插话结构静默门控、坏例回放报表、Agent 预算模式 shadow trace 已经落地，回复基调、外发工具静默收尾和“该沉默就沉默”的入口兜底不再只靠事后补救。
-- 短板：runner 仍承担太多阶段；真实坏例回放和量化评估还需要继续扩样；延迟预算目前只做 shadow 观测，尚未实际接管生产步数/超时；短期话题状态还需要继续增强。
+- 进展：`speech_act` 说话动作层、发送型工具 metadata 契约、第一块 `tool_contracts` 分层、随机插话结构静默门控、坏例回放报表、Agent 预算模式 shadow trace、短期话题状态注入与 WebUI trace 信号已经落地，回复基调、外发工具静默收尾和“该沉默就沉默”的入口兜底不再只靠事后补救。
+- 短板：runner 仍承担太多阶段；真实坏例回放和量化评估还需要继续扩样；延迟预算目前只做 shadow 观测，尚未实际接管生产步数/超时；短期话题状态还处在结构化注入与观测阶段，还要用真实坏例验证模型侧收益。
 
 ## 阶段一：说话动作层
 
@@ -133,17 +133,26 @@
 
 ## 阶段六：短期话题状态
 
+状态：已落地第一批结构化注入与 trace 观测。
+
 目标：减少群聊接错话题、跨人拼接、问已知信息。
 
-建议维护轻量 topic state：
+已维护轻量 topic state：
 
-- 当前话题摘要。
-- 主要参与者。
-- bot 上一句是否被接住。
-- 当前消息是在接谁的话。
-- 是否直接 cue bot。
+- 当前消息、当前线程与主要参与者。
+- bot 是否在当前线程最近发过言。
+- 当前消息是在回复谁、是否回复 bot。
+- 当前消息提及了谁。
+- 同时存在多少其它线程。
 
-这仍是结构化上下文，不是关键词语义路由。模型拿 topic state 做判断，代码只负责维护事实线索。
+落点：
+
+- `core/group_context.py` 生成 `ShortTermTopicState`，并渲染为群聊上下文的第一块提示。
+- `core/builtin_hooks.py` 的近期群聊 hook 改为注入完整 `GroupConversationContext`，使普通 Agent prompt 能拿到 topic state。
+- 普通回复和 YAML 回复分别记录 `topic_state` / `yaml_topic_state` trace 阶段。
+- WebUI trace 信号标签展示 `topic_thread`、`reply_to_bot`、`bot_in_thread`、`parallel_threads` 等结构信号。
+
+这仍是结构化上下文，不是关键词语义路由。模型拿 topic state 做判断，代码只负责维护事实线索；后续收益要继续通过真实坏例回放和生产 trace 验证。
 
 验收：
 
@@ -153,7 +162,7 @@
 
 ## 阶段七：WebUI 诊断面
 
-状态：已在 trace 过程视图中展示 `speech_act`、工具、预算模式等可抽取信号；仍需继续扩充 review、工具契约命中和 topic state 的显式阶段。
+状态：已在 trace 过程视图中展示 `speech_act`、工具、预算模式、短期 topic state 等可抽取信号；仍需继续扩充 review 和工具契约命中阶段。
 
 目标：让调参和排错能看见 Agent 的结构决定，而不是只看最终回复。
 

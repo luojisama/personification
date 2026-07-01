@@ -148,3 +148,28 @@ def test_reply_turn_trace_extracts_budget_signals(_db_tmp) -> None:
     assert view["items"][0]["signals"]["source"] == "shadow"
     assert view["items"][0]["category"] == "agent"
     assert view["summary"]["slow_stages"] == []
+
+
+def test_reply_turn_trace_extracts_topic_state_signals(_db_tmp) -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")
+    logs.clear_all()
+    trace_id = traces.start_trace(session_type="group", group_id="123", user_id="456")
+    token = traces.set_current_trace_id(trace_id)
+    try:
+        traces.record_stage(
+            key="topic_state",
+            label="短期话题状态",
+            status="info",
+            detail="topic_thread=ta topic_speaker=u1 reply_to_bot=true bot_in_thread=true parallel_threads=2 participants=3",
+        )
+        traces.finish_trace(outcome="ok", diagnosis_code="ok")
+    finally:
+        traces.reset_current_trace_id(token)
+
+    row = traces.get_trace(trace_id)
+    view = traces.build_process_view(row, logs=logs.query_recent(trace_id=trace_id))
+
+    assert view["items"][0]["signals"]["topic_thread"] == "ta"
+    assert view["items"][0]["signals"]["reply_to_bot"] == "true"
+    assert view["items"][0]["signals"]["parallel_threads"] == "2"

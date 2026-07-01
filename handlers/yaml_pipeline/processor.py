@@ -21,7 +21,11 @@ from ...core.emotion_state import (
     render_inner_state_hint,
     update_emotion_state_after_turn,
 )
-from ...core.group_context import build_group_conversation_context, render_group_conversation_context
+from ...core.group_context import (
+    build_group_conversation_context,
+    render_group_conversation_context,
+    render_topic_state_trace_detail,
+)
 from ...core.metrics import record_counter, record_timing
 from ...core.message_relations import extract_event_message_id, extract_reply_message_id, extract_send_message_id
 from ...core.image_input import (
@@ -682,6 +686,15 @@ async def process_yaml_response_logic(
         )
         recent_context_hint = render_group_conversation_context(conversation_context)
         relationship_hint = relationship_hint or conversation_context.relationship_hint
+        topic_detail = render_topic_state_trace_detail(conversation_context.topic_state)
+        if topic_detail:
+            _trace_stage(
+                key="yaml_topic_state",
+                label="YAML 短期话题状态",
+                status="info",
+                detail=topic_detail,
+                hint="结构化线索用于判断当前消息接谁的话，不替代 LLM 语义判断",
+            )
     else:
         recent_window = []
     recent_bot_replies = extract_recent_bot_reply_texts(

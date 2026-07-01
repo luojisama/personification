@@ -6,6 +6,7 @@ from ._loader import load_personification_module
 
 event_rules = load_personification_module("plugin.personification.handlers.event_rules")
 group_context = load_personification_module("plugin.personification.core.group_context")
+builtin_hooks = load_personification_module("plugin.personification.core.builtin_hooks")
 target_inference = load_personification_module("plugin.personification.core.target_inference")
 db = load_personification_module("plugin.personification.core.db")
 data_store = load_personification_module("plugin.personification.core.data_store")
@@ -235,3 +236,107 @@ def test_group_context_prioritizes_current_thread() -> None:
     assert [item["message_id"] for item in context.current_thread_messages] == ["a1", "a2"]
     assert "当前对话线程" in rendered
     assert "其他同时进行的群聊线程" in rendered
+
+
+def test_group_context_renders_short_term_topic_state() -> None:
+    context = group_context.build_group_conversation_context(
+        recent_messages=[
+            {
+                "message_id": "a1",
+                "thread_id": "ta",
+                "nickname": "甲",
+                "user_id": "u1",
+                "content": "先聊构建速度",
+            },
+            {
+                "message_id": "a2",
+                "thread_id": "ta",
+                "reply_to_msg_id": "a1",
+                "reply_to_user_id": "u1",
+                "nickname": "bot",
+                "user_id": "bot-1",
+                "content": "我刚接了一句",
+                "source_kind": "bot_reply",
+            },
+            {
+                "message_id": "b1",
+                "thread_id": "tb",
+                "nickname": "乙",
+                "user_id": "u2",
+                "content": "另一个话题",
+            },
+            {
+                "message_id": "a3",
+                "thread_id": "ta",
+                "reply_to_msg_id": "a2",
+                "reply_to_user_id": "bot-1",
+                "mentioned_ids": ["bot-1"],
+                "nickname": "甲",
+                "user_id": "u1",
+                "content": "那继续怎么优化",
+            },
+        ],
+        trigger_msg_id="a3",
+        trigger_user_id="u1",
+        bot_self_id="bot-1",
+    )
+
+    rendered = group_context.render_group_conversation_context(context)
+    trace_detail = group_context.render_topic_state_trace_detail(context.topic_state)
+
+    assert context.topic_state.current_thread_id == "ta"
+    assert context.topic_state.current_speaker == "甲"
+    assert context.topic_state.reply_to_speaker == "bot"
+    assert context.topic_state.is_reply_to_bot is True
+    assert context.topic_state.bot_in_current_thread is True
+    assert context.topic_state.parallel_thread_count == 1
+    assert "本轮短期话题状态" in rendered
+    assert "当前消息回复对象：bot（bot）" in rendered
+    assert "同时存在其它线程：1 个" in rendered
+    assert "topic_thread=ta" in trace_detail
+    assert "reply_to_bot=true" in trace_detail
+
+
+def test_recent_group_context_hook_uses_short_term_topic_state(monkeypatch) -> None:
+    def _fake_group_context_window(*_args, **_kwargs):  # noqa: ANN001
+        return [
+            {
+                "message_id": "m1",
+                "thread_id": "thread-a",
+                "nickname": "甲",
+                "user_id": "u1",
+                "content": "刚才那个方案我觉得可以再收窄",
+            },
+            {
+                "message_id": "m2",
+                "thread_id": "thread-a",
+                "nickname": "bot",
+                "user_id": "bot-1",
+                "content": "我接了一句",
+                "source_kind": "bot_reply",
+            },
+            {
+                "message_id": "m3",
+                "thread_id": "thread-a",
+                "reply_to_msg_id": "m2",
+                "reply_to_user_id": "bot-1",
+                "mentioned_ids": ["bot-1"],
+                "nickname": "甲",
+                "user_id": "u1",
+                "content": "那你说下一步怎么做",
+            },
+        ]
+
+    monkeypatch.setattr(builtin_hooks, "build_group_context_window", _fake_group_context_window)
+
+    rendered = builtin_hooks._format_recent_group_context(
+        "123",
+        trigger_msg_id="m3",
+        reply_to_msg_id="m2",
+        trigger_user_id="u1",
+        bot_self_id="bot-1",
+    )
+
+    assert "本轮短期话题状态" in rendered
+    assert "当前消息回复对象：bot（bot）" in rendered
+    assert "bot 是否在当前线程最近发过言：是" in rendered
