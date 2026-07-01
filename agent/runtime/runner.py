@@ -7,7 +7,6 @@ import time
 from typing import Any, Awaitable, Callable, List
 
 from ..query_rewriter import ContextualQueryRewrite, QueryRewriteContext, contextual_query_rewriter
-from ...core.error_utils import log_exception
 from ...core.metrics import record_counter, record_timing
 from ...core.time_ctx import get_configured_now
 from ..tool_registry import ToolRegistry
@@ -17,7 +16,12 @@ from ...core.web_grounding import merge_grounding_topic
 from .constants import (
     DEFAULT_AGENT_MAX_STEPS,
 )
-from .executor import _execute_tool_with_retries
+from .executor import (
+    _execute_tool_with_retries,
+    _invoke_tool_handler,
+    _remaining_time_budget_seconds,
+    _tool_timeout_result,
+)
 from .evidence import (
     EvidenceSynthesis,
     build_tool_result_record as _build_tool_result_record,
@@ -43,6 +47,15 @@ from .intent import (
     _infer_intent_decision_with_context,
     _recover_followup_query_from_context,
     _render_message_text,
+)
+from .loop_utils import (
+    _RETRYABLE_LOOKUP_TOOLS,
+    caller_supports_builtin_search as _caller_supports_builtin_search,
+    record_reply_trace_stage as _record_reply_trace_stage,
+    safe_ack as _safe_ack,
+    summarize_tool_response_raw as _summarize_tool_response_raw,
+    tool_result_trace_status as _tool_result_trace_status,
+    tool_signature as _tool_signature,
 )
 from .tool_args import (
     _query_variants_for_tool,
@@ -74,23 +87,6 @@ from .fallbacks import (
     _tool_result_indicates_empty,
 )
 
-_QUERY_REWRITE_TOOL_NAMES = frozenset(
-    {
-        "parallel_research",
-        "web_search",
-        "search_web",
-        "wiki_lookup",
-        "resolve_acg_entity",
-        "vision_analyze",
-        "analyze_image",
-        "collect_resources",
-        "search_images",
-        "search_and_send_images",
-    }
-)
-_RETRYABLE_LOOKUP_TOOLS = frozenset(
-    {"parallel_research", "web_search", "search_web", "wiki_lookup", "resolve_acg_entity", "collect_resources", "search_images", "search_and_send_images"}
-)
 _TIME_SENSITIVE_SEARCH_TOOLS = frozenset({"web_search", "search_web"})
 _TIME_SENSITIVE_RE = re.compile("\u6700\u65b0|\u8fd1\u671f|\u73b0\u5728|\u4eca\u5e74|\u4eca\u5929|\u5f53\u524d|latest|recent|now", re.IGNORECASE)
 
@@ -132,100 +128,6 @@ def _maybe_inject_date_to_query(tool_name: str, args: dict[str, Any]) -> dict[st
     if date_str in query:
         return args
     return {**args, "query": f"{query} ({date_str})"}
-_PLUGIN_KNOWLEDGE_TOOL_NAMES = frozenset(
-    {"search_plugin_knowledge", "search_plugin_source", "list_plugins", "list_plugin_features", "get_feature_detail"}
-)
-_PLUGIN_LATEST_EXTRA_TOOL_NAMES = frozenset({"web_search", "search_official_site", "search_github_repos"})
-_NETWORK_TOOL_NAMES = frozenset(
-    {
-        "parallel_research",
-        "web_search",
-        "search_web",
-        "multi_search_engine",
-        "collect_resources",
-        "search_images",
-        "search_and_send_images",
-        "search_official_site",
-        "search_github_repos",
-        "wiki_lookup",
-        "get_baike_entry",
-        "get_daily_news",
-        "get_ai_news",
-        "get_trending",
-        "get_history_today",
-        "get_epic_games",
-        "get_gold_price",
-        "get_exchange_rate",
-        "weather",
-    }
-)
-_BANTER_BLOCKED_TOOL_NAMES = frozenset(
-    set(_NETWORK_TOOL_NAMES)
-    | set(_PLUGIN_KNOWLEDGE_TOOL_NAMES)
-    | {"vision_analyze", "analyze_image", "resolve_acg_entity"}
-)
-_BUILTIN_SEARCH_CALLER_NAMES = frozenset({
-    "GeminiToolCaller",
-    "AnthropicToolCaller",
-    "OpenAICodexToolCaller",
-    # 三个 CLI 协议 caller 内部也已注入对应原生 search 工具（impl.py:3203/3741/4005）
-    "GeminiCliToolCaller",
-    "AntigravityCliToolCaller",
-    "ClaudeCodeToolCaller",
-})
-
-
-def _summarize_tool_response_raw(raw: Any) -> str:
-    if not isinstance(raw, dict):
-        if raw is None:
-            return "raw=none"
-        return f"raw_type={type(raw).__name__}"
-
-    output = raw.get("output", [])
-    if isinstance(output, list):
-        output_items = len(output)
-        output_types = ",".join(
-            str(item.get("type", "?"))
-            for item in output[:3]
-            if isinstance(item, dict)
-        ) or "none"
-    else:
-        output_items = "n/a"
-        output_types = "n/a"
-    usage = raw.get("usage", {})
-    output_tokens = usage.get("output_tokens", "?") if isinstance(usage, dict) else "?"
-    status = raw.get("status", "?")
-    model = raw.get("model", "?")
-    return (
-        f"status={status} model={model} output_items={output_items} "
-        f"output_types={output_types} output_tokens={output_tokens}"
-    )
-
-
-async def _invoke_tool_handler(
-    *,
-    tool_name: str,
-    tool: Any,
-    tool_args: dict[str, Any],
-) -> str:
-    if tool.local:
-        return await tool.handler(**tool_args)
-    from ..mcp.bridge import McpBridge
-
-    return await McpBridge().call_remote(tool_name, tool_args)
-
-
-def _remaining_time_budget_seconds(deadline: float | None) -> float | None:
-    if deadline is None:
-        return None
-    return max(0.0, float(deadline) - time.monotonic())
-
-
-def _tool_timeout_result(tool_name: str) -> str:
-    normalized_tool_name = str(tool_name or "").strip()
-    if normalized_tool_name == _IMAGE_GENERATION_TOOL_NAME:
-        return "图片生成失败：生成超时，请稍后重试"
-    return "工具调用失败：超时"
 
 
 async def _classify_deferred_lookup_reply(
@@ -289,61 +191,6 @@ def _should_review_banter_lookup_draft(*, ambiguity_level: str, draft_answer_tex
         return True
     draft = str(draft_answer_text or "").strip()
     return "?" in draft or "？" in draft
-
-
-def _tool_signature(tool_name: str, tool_args: dict[str, Any]) -> str:
-    return (
-        f"{str(tool_name or '').strip()}:"
-        f"{json.dumps(tool_args or {}, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
-    )
-
-
-def _tool_result_trace_status(result: Any) -> str:
-    text = str(result or "").strip()
-    if not text:
-        return "warn"
-    if text.startswith("工具调用失败") or (text.startswith("工具 ") and text.endswith("不存在")):
-        return "error"
-    if _tool_result_indicates_empty(text):
-        return "warn"
-    return "ok"
-
-
-def _caller_supports_builtin_search(tool_caller: Any) -> bool:
-    return tool_caller.__class__.__name__ in _BUILTIN_SEARCH_CALLER_NAMES
-
-
-async def _safe_ack(
-    ack_sender: Callable[[str], Awaitable[None]],
-    text: str,
-    logger: Any,
-) -> None:
-    try:
-        await ack_sender(text)
-    except Exception as exc:
-        logger.debug(f"[agent] ack send failed: {exc}")
-
-
-def _record_reply_trace_stage(
-    *,
-    key: str,
-    label: str,
-    status: str = "info",
-    detail: Any = "",
-    hint: str = "",
-) -> None:
-    try:
-        from ...core import reply_turn_trace
-
-        reply_turn_trace.record_stage(
-            key=key,
-            label=label,
-            status=status,
-            detail=detail,
-            hint=hint,
-        )
-    except Exception:
-        pass
 
 
 async def run_agent(
