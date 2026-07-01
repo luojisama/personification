@@ -45,6 +45,32 @@ def test_arbitrate_reply_mode_handles_key_combinations() -> None:
     assert reply == "reply"
 
 
+def test_arbitrate_reply_mode_silences_uncertain_random_chat_even_with_low_confidence() -> None:
+    decision = response_review.arbitrate_reply_mode(
+        intent_decision=SimpleNamespace(ambiguity_level="high", recommend_silence=True, confidence=0.18),
+        is_private=False,
+        is_direct_mention=False,
+        is_random_chat=True,
+        message_target="uncertain",
+        solo_speaker_follow=False,
+    )
+
+    assert decision == "no_reply"
+
+
+def test_arbitrate_reply_mode_keeps_direct_random_chat_replyable() -> None:
+    decision = response_review.arbitrate_reply_mode(
+        intent_decision=SimpleNamespace(ambiguity_level="high", recommend_silence=True, confidence=0.18),
+        is_private=False,
+        is_direct_mention=True,
+        is_random_chat=True,
+        message_target="bot",
+        solo_speaker_follow=False,
+    )
+
+    assert decision == "clarify"
+
+
 def test_is_agent_reply_ooc_detects_search_style_phrasing_and_urls() -> None:
     assert response_review.is_agent_reply_ooc("根据搜索结果，先给你两条相关链接：https://example.com/very/long/path")
     assert response_review.is_agent_reply_ooc("我查了一下，这个设定后来改过")

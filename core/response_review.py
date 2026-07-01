@@ -152,7 +152,16 @@ def arbitrate_reply_mode(
         and message_target == "others"
         and confidence >= _SILENCE_CONFIDENCE_THRESHOLD
     )
-    if hard_silence:
+    random_chat_structural_silence = (
+        not is_private
+        and is_random_chat
+        and not is_direct_mention
+        and not solo_speaker_follow
+        and recommend_silence
+        and ambiguity == "high"
+        and message_target in {"", "others", "uncertain"}
+    )
+    if hard_silence or random_chat_structural_silence:
         return "no_reply"
     if ambiguity == "high" and (is_private or is_direct_mention or message_target == "bot"):
         return "clarify"

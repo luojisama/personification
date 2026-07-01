@@ -10,15 +10,15 @@
 
 ## 当前评分
 
-当前架构约 7.5/10。
+当前架构约 7.6/10。
 
 - 优点：完整 Agent 覆盖面已经很大；TurnPlan、语义帧、工具筛选、skillpack、trace、WebUI 观测都有基础；扩展能力主要靠工具而不是核心分支。
-- 进展：`speech_act` 说话动作层、发送型工具 metadata 契约和第一块 `tool_contracts` 分层已经落地，回复基调与外发工具静默收尾不再只靠事后补救。
+- 进展：`speech_act` 说话动作层、发送型工具 metadata 契约、第一块 `tool_contracts` 分层和随机插话结构静默门控已经落地，回复基调、外发工具静默收尾和“该沉默就沉默”的入口兜底不再只靠事后补救。
 - 短板：runner 仍承担太多阶段；真实坏例回放和量化评估不足；延迟预算还没有充分按场景分层；短期话题状态还需要继续增强。
 
 ## 阶段一：说话动作层
 
-状态：本轮已落地第一批。
+状态：本轮已落地第一批，并补充随机插话结构静默门控。
 
 新增 TurnPlan `speech_act` 字段，让模型在回合规划阶段明确最终可见回复承担的聊天动作：
 
@@ -35,6 +35,7 @@
 
 - `agent/runtime/planner.py` 负责生成、解析、fallback 和 semantic frame 互转。
 - `core/reply_style_policy.py` 负责把 `speech_act` 转成模型侧输出纪律。
+- `core/response_review.py::arbitrate_reply_mode()` 在随机插话、非直呼、非连续独聊、语义帧建议沉默且目标不是 bot 时直接静默，避免低置信 fallback 继续放行到 Agent 生成观望式废话。
 - 普通回复、YAML 回复、Agent runner 都注入同一说话动作提示。
 - `reply_turn_trace` 记录 `speech_act`，方便后续观测和灰度。
 
