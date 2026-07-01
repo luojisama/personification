@@ -13,8 +13,8 @@ from ...core.metrics import record_counter, record_timing
 from ...core.time_ctx import get_configured_now
 from ..tool_registry import ToolRegistry
 from ...core.message_parts import extract_text_from_parts
-from ...core.qq_expression_tools import QQ_EXPRESSION_TOOL_NAMES, expression_tool_result_queued
-from ...core.reply_style_policy import build_media_understanding_output_policy_prompt
+from ...core.qq_expression_tools import expression_tool_result_queued
+from ...core.reply_style_policy import build_media_understanding_output_policy_prompt, build_speech_act_policy_prompt
 from ...core.web_grounding import merge_grounding_topic
 from .constants import (
     DEFAULT_AGENT_MAX_STEPS,
@@ -59,6 +59,7 @@ from .tool_selection import (
     _select_tool_schemas,
     _semantic_tool_guidance,
 )
+from .tool_catalog import tool_runtime_metadata
 from .wrappers import (
     _IMAGE_B64_TOOL_RESULT_RE,
     _extract_persona_system_prompt,
@@ -75,9 +76,6 @@ from .fallbacks import (
     _select_semantic_fallback_tool,
     _tool_result_indicates_empty,
 )
-
-_QUEUED_ACTION_TOOL_NAMES = QQ_EXPRESSION_TOOL_NAMES | {"send_local_sticker", "search_and_send_images"}
-
 
 _QUERY_REWRITE_TOOL_NAMES = frozenset(
     {
@@ -304,15 +302,46 @@ def _should_review_banter_lookup_draft(*, ambiguity_level: str, draft_answer_tex
     return "?" in draft or "？" in draft
 
 
+def _metadata_tags(metadata: dict[str, Any]) -> set[str]:
+    value = metadata.get("intent_tags", [])
+    if isinstance(value, str):
+        return {item.strip() for item in value.split(",") if item.strip()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return {str(item or "").strip() for item in value if str(item or "").strip()}
+    return set()
+
+
+def _recommended_tools_for_chat_intent(registry: ToolRegistry, chat_intent: str) -> list[str]:
+    intent = str(chat_intent or "").strip()
+    if intent == "image_generation":
+        return ["generate_image"] if registry.get("generate_image") is not None else []
+    if intent != "expression":
+        return []
+    names: list[str] = []
+    for tool in registry.active():
+        metadata = tool_runtime_metadata(registry, tool.name)
+        if "expression" in _metadata_tags(metadata):
+            names.append(tool.name)
+    return names[:6]
+
+
 def _direct_tool_result_agent_result(
     *,
+    registry: ToolRegistry | None,
     tool_name: str,
     result_text: str,
     pending_actions: List[dict],
 ) -> "AgentResult | None":
     text = str(result_text or "").strip()
     normalized_tool_name = str(tool_name or "").strip()
-    if normalized_tool_name in _QUEUED_ACTION_TOOL_NAMES and expression_tool_result_queued(text):
+    metadata = tool_runtime_metadata(registry, normalized_tool_name)
+    final_behavior = str(metadata.get("final_behavior", "") or "").strip()
+    side_effect = str(metadata.get("side_effect", "") or "").strip()
+    if (
+        side_effect == "send_message"
+        and final_behavior == "silence_on_success"
+        and expression_tool_result_queued(text)
+    ):
         return AgentResult(
             text="[SILENCE]",
             pending_actions=pending_actions,
@@ -510,11 +539,7 @@ async def run_agent(
             query_candidates=[preliminary_query_text] if preliminary_query_text else [],
             context_clues=[],
             need_image_understanding=bool(user_images),
-            recommended_tools=(
-                ["generate_image"]
-                if runtime_chat_intent == "image_generation"
-                else list(QQ_EXPRESSION_TOOL_NAMES) if runtime_chat_intent == "expression" else []
-            ),
+            recommended_tools=_recommended_tools_for_chat_intent(registry, runtime_chat_intent),
             search_plan=[],
         )
         _record_reply_trace_stage(
@@ -616,6 +641,17 @@ async def run_agent(
             ),
         }
     )
+    if turn_plan is not None:
+        messages.append(
+            {
+                "role": "system",
+                "content": build_speech_act_policy_prompt(
+                    speech_act=str(getattr(turn_plan, "speech_act", "") or ""),
+                    output_mode=str(getattr(turn_plan, "output_mode", "") or ""),
+                    session_goal=str(getattr(turn_plan, "session_goal", "") or ""),
+                ),
+            }
+        )
     messages.append(
         {
             "role": "system",
@@ -826,6 +862,7 @@ async def run_agent(
             )
             if last_tool_result_text:
                 direct_result = _direct_tool_result_agent_result(
+                    registry=registry,
                     tool_name=last_tool_name,
                     result_text=last_tool_result_text,
                     pending_actions=pending_actions,
@@ -1316,6 +1353,7 @@ async def run_agent(
                     empty_lookup_tools.discard(last_tool_name)
             semantic_fallback_attempted = False
             direct_result = _direct_tool_result_agent_result(
+                registry=registry,
                 tool_name=last_tool_name,
                 result_text=result,
                 pending_actions=pending_actions,
@@ -1348,6 +1386,7 @@ async def run_agent(
     if last_tool_result_text:
         logger.warning("[agent] using last tool result as fallback final answer")
         direct_result = _direct_tool_result_agent_result(
+            registry=registry,
             tool_name=last_tool_name,
             result_text=last_tool_result_text,
             pending_actions=pending_actions,

@@ -85,6 +85,7 @@ def attach_turn_plan_to_semantic_frame(semantic_frame: Any, turn_plan: Any) -> N
     try:
         semantic_frame.turn_plan = turn_plan
         semantic_frame.output_mode = turn_plan.output_mode
+        semantic_frame.speech_act = turn_plan.speech_act
         semantic_frame.session_goal = turn_plan.session_goal
     except Exception:
         pass
@@ -464,6 +465,7 @@ async def prepare_reply_semantics(
                 status="ok",
                 detail=(
                     f"action={getattr(turn_plan, 'reply_action', '')} "
+                    f"speech_act={getattr(turn_plan, 'speech_act', '')} "
                     f"output={getattr(turn_plan, 'output_mode', '')} "
                     f"source={plan_source} "
                     f"elapsed_ms={int(plan_elapsed_ms)}"
@@ -574,6 +576,8 @@ async def prepare_reply_semantics(
                 )
                 if shadow_plan.reply_action != turn_plan.reply_action:
                     record_counter("turn_planner.diff_total", field="reply_action")
+                if getattr(shadow_plan, "speech_act", "") != getattr(turn_plan, "speech_act", ""):
+                    record_counter("turn_planner.diff_total", field="speech_act")
                 if shadow_plan.output_mode != turn_plan.output_mode:
                     record_counter("turn_planner.diff_total", field="output_mode")
     intent_decision = semantic_frame.to_intent_decision()

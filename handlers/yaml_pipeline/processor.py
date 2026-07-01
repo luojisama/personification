@@ -47,6 +47,7 @@ from ...core.repeat_follow import maybe_follow_repeat_cluster
 from ...core.reply_style_policy import (
     build_direct_visual_identity_guard,
     build_reply_style_policy_prompt,
+    build_speech_act_policy_prompt,
 )
 from ...core.response_review import (
     ReplyArbitrationIntent,
@@ -754,6 +755,7 @@ async def process_yaml_response_logic(
                         f"fallback=metadata "
                         f"source={plan_source} "
                         f"action={getattr(turn_plan, 'reply_action', '')} "
+                        f"speech_act={getattr(turn_plan, 'speech_act', '')} "
                         f"output={getattr(turn_plan, 'output_mode', '')}"
                     ),
                     hint=semantic_frame_timeout_hint(plan_timeout_s),
@@ -848,6 +850,8 @@ async def process_yaml_response_logic(
                     )
                     if shadow_plan.reply_action != turn_plan.reply_action:
                         record_counter("turn_planner.diff_total", field="yaml_reply_action")
+                    if getattr(shadow_plan, "speech_act", "") != getattr(turn_plan, "speech_act", ""):
+                        record_counter("turn_planner.diff_total", field="yaml_speech_act")
                     if shadow_plan.output_mode != turn_plan.output_mode:
                         record_counter("turn_planner.diff_total", field="yaml_output_mode")
     intent_decision = semantic_frame.to_intent_decision()
@@ -936,6 +940,12 @@ async def process_yaml_response_logic(
     system_prompt += "\n\n" + build_reply_style_policy_prompt(
         has_visual_context=bool(last_images),
         photo_like=photo_like,
+    )
+    turn_plan_for_prompt = getattr(semantic_frame, "turn_plan", turn_plan)
+    system_prompt += "\n\n" + build_speech_act_policy_prompt(
+        speech_act=str(getattr(turn_plan_for_prompt, "speech_act", getattr(semantic_frame, "speech_act", "")) or ""),
+        output_mode=str(getattr(turn_plan_for_prompt, "output_mode", getattr(semantic_frame, "output_mode", "")) or ""),
+        session_goal=str(getattr(turn_plan_for_prompt, "session_goal", getattr(semantic_frame, "session_goal", "")) or ""),
     )
     primary_api_type, primary_model = primary_route_signature(
         plugin_config,

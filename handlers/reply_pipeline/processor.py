@@ -46,7 +46,7 @@ from ...core.group_roles import extract_sender_role
 from ...core.target_inference import TARGET_OTHERS, TARGET_UNCLEAR, infer_message_target
 from ...core.tts_service import extract_persona_tts_config
 from ...core.repeat_follow import maybe_follow_repeat_cluster
-from ...core.reply_style_policy import build_direct_visual_identity_guard
+from ...core.reply_style_policy import build_direct_visual_identity_guard, build_speech_act_policy_prompt
 from ...core.response_review import (
     is_agent_reply_ooc,
     make_passthrough_review_decision,
@@ -1422,6 +1422,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             runtime.plugin_config,
             get_configured_api_providers=runtime.get_configured_api_providers,
         ),
+    )
+    turn_plan = getattr(semantic_frame, "turn_plan", None)
+    system_prompt += "\n\n" + build_speech_act_policy_prompt(
+        speech_act=str(getattr(turn_plan, "speech_act", getattr(semantic_frame, "speech_act", "")) or ""),
+        output_mode=str(getattr(turn_plan, "output_mode", getattr(semantic_frame, "output_mode", "")) or ""),
+        session_goal=str(getattr(turn_plan, "session_goal", getattr(semantic_frame, "session_goal", "")) or ""),
     )
     _msg_target = state.get("message_target")
     if _msg_target in (TARGET_OTHERS, TARGET_UNCLEAR):

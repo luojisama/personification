@@ -9,6 +9,16 @@ from ...core.reply_style_policy import build_context_continuity_policy_prompt
 
 
 ReplyAction = Literal["reply", "silence", "ask_clarify"]
+SpeechAct = Literal[
+    "participate",
+    "answer",
+    "ask_followup",
+    "clarify",
+    "tease",
+    "execute_action",
+    "source_summary",
+    "silence",
+]
 MemoryNeed = Literal["none", "light", "deep"]
 ResearchNeed = Literal["none", "low", "medium", "high"]
 VisionNeed = Literal["none", "summary", "native"]
@@ -19,6 +29,16 @@ MessageTarget = Literal["bot", "someone_else", "broadcast", "uncertain"]
 
 
 ALLOWED_REPLY_ACTIONS = {"reply", "silence", "ask_clarify"}
+ALLOWED_SPEECH_ACTS = {
+    "participate",
+    "answer",
+    "ask_followup",
+    "clarify",
+    "tease",
+    "execute_action",
+    "source_summary",
+    "silence",
+}
 ALLOWED_MEMORY_NEEDS = {"none", "light", "deep"}
 ALLOWED_RESEARCH_NEEDS = {"none", "low", "medium", "high"}
 ALLOWED_VISION_NEEDS = {"none", "summary", "native"}
@@ -40,6 +60,7 @@ OUTPUT_MODE_LENGTHS: dict[str, tuple[int, int]] = {
 @dataclass
 class TurnPlan:
     reply_action: ReplyAction = "reply"
+    speech_act: SpeechAct = "participate"
     memory_need: MemoryNeed = "none"
     research_need: ResearchNeed = "none"
     vision_need: VisionNeed = "none"
@@ -108,6 +129,27 @@ def _coerce_tool_intents(value: Any) -> list[ToolIntent]:
     return items[:5]
 
 
+def default_speech_act(
+    *,
+    reply_action: str = "",
+    output_mode: str = "",
+    tool_intents: list[str] | None = None,
+) -> SpeechAct:
+    if str(reply_action or "").strip() == "silence":
+        return "silence"
+    if str(reply_action or "").strip() == "ask_clarify":
+        return "clarify"
+    intents = {str(item or "").strip() for item in list(tool_intents or [])}
+    if "expression" in intents or "image_gen" in intents:
+        return "execute_action"
+    mode = str(output_mode or "").strip()
+    if mode == "source_summary":
+        return "source_summary"
+    if mode in {"chat_answer", "structured_help"}:
+        return "answer"
+    return "participate"
+
+
 def parse_turn_plan_payload(payload: Any) -> TurnPlan | None:
     if not isinstance(payload, dict):
         return None
@@ -115,15 +157,22 @@ def parse_turn_plan_payload(payload: Any) -> TurnPlan | None:
     if not reply_action:
         return None
     output_mode = _enum_value(payload.get("output_mode"), ALLOWED_OUTPUT_MODES, "chat_short")
+    tool_intent = _coerce_tool_intents(payload.get("tool_intent"))
+    speech_act = _enum_value(
+        payload.get("speech_act"),
+        ALLOWED_SPEECH_ACTS,
+        default_speech_act(reply_action=reply_action, output_mode=output_mode, tool_intents=list(tool_intent)),
+    )
     confidence = max(0.0, min(1.0, _coerce_float(payload.get("confidence"), 0.0)))
     return TurnPlan(
         reply_action=reply_action,  # type: ignore[arg-type]
+        speech_act=speech_act,  # type: ignore[arg-type]
         memory_need=_enum_value(payload.get("memory_need"), ALLOWED_MEMORY_NEEDS, "none"),  # type: ignore[arg-type]
         research_need=_enum_value(payload.get("research_need"), ALLOWED_RESEARCH_NEEDS, "none"),  # type: ignore[arg-type]
         vision_need=_enum_value(payload.get("vision_need"), ALLOWED_VISION_NEEDS, "none"),  # type: ignore[arg-type]
         qzone_continue=_coerce_bool(payload.get("qzone_continue"), False),
         output_mode=output_mode,  # type: ignore[arg-type]
-        tool_intent=_coerce_tool_intents(payload.get("tool_intent")),
+        tool_intent=tool_intent,
         ambiguity_level=_enum_value(payload.get("ambiguity_level"), ALLOWED_AMBIGUITY_LEVELS, "low"),  # type: ignore[arg-type]
         confidence=confidence,
         reason=str(payload.get("reason", "") or "").strip()[:80],
@@ -172,6 +221,7 @@ def metadata_fallback_turn_plan(
     if qzone_event:
         return TurnPlan(
             reply_action="reply",
+            speech_act="participate",
             memory_need="light",
             research_need="none",
             vision_need="none",
@@ -187,6 +237,7 @@ def metadata_fallback_turn_plan(
     if is_group and is_random_chat and not is_direct_mention and target not in {"bot", "broadcast"}:
         return TurnPlan(
             reply_action="silence",
+            speech_act="silence",
             memory_need="none",
             research_need="none",
             vision_need="summary" if has_images else "none",
@@ -201,6 +252,7 @@ def metadata_fallback_turn_plan(
         )
     return TurnPlan(
         reply_action="reply",
+        speech_act="participate",
         memory_need="light" if is_group else "none",
         research_need="none",
         vision_need="summary" if has_images else "none",
@@ -281,6 +333,7 @@ async def plan_turn_with_llm(
         "输出严格 JSON，不要 markdown，不要解释。\n"
         "JSON 结构："
         '{"reply_action":"reply|silence|ask_clarify",'
+        '"speech_act":"participate|answer|ask_followup|clarify|tease|execute_action|source_summary|silence",'
         '"memory_need":"none|light|deep",'
         '"research_need":"none|low|medium|high",'
         '"vision_need":"none|summary|native",'
@@ -294,13 +347,15 @@ async def plan_turn_with_llm(
         '"reason":"极短中文原因"}\n'
         "判别要求：\n"
         "1. reply_action 只决定回不回复；群聊不确定是否 cue bot 时用 silence。\n"
-        "2. message_target 由 @、引用、称呼、上下文共同判断；uncertain 时通常 silence。\n"
-        "3. 风格、用户态度、bot 情绪、TTS 和表情不要在这里决定。\n"
-        "4. 工具意图只给候选方向，不要因为工具存在就强行使用。\n"
-        "4b. 用户明确要求发送 QQ 表情、小黄脸、收藏表情、推荐表情，或这轮只适合发 QQ 表情时，tool_intent 包含 expression。\n"
-        "5. research_need=high 只给明显需要多源查证、时效或争议的问题。\n"
-        "6. output_mode 控制最终回复长度和形态：chat_short 接梗，chat_answer 普通答，structured_help 教程，source_summary 检索摘要，qzone_reply 空间评论。\n"
-        "7. fallback 只能当模型不确定时参考，不要机械照抄。\n"
+        "2. speech_act 决定最终回复承担的聊天动作：participate=参与讨论/闲聊推进半步，answer=回答问题，ask_followup=追问一个具体点，"
+        "clarify=信息不足时短澄清，tease=轻吐槽接梗，execute_action=调用会外发内容的工具后少说或静默，source_summary=基于证据总结，silence=不说。\n"
+        "3. message_target 由 @、引用、称呼、上下文共同判断；uncertain 时通常 silence。\n"
+        "4. 风格、用户态度、bot 情绪、TTS 和表情不要在这里决定。\n"
+        "5. 工具意图只给候选方向，不要因为工具存在就强行使用。\n"
+        "5b. 用户明确要求发送 QQ 表情、小黄脸、收藏表情、推荐表情，或这轮只适合发 QQ 表情时，tool_intent 包含 expression，speech_act 通常是 execute_action。\n"
+        "6. research_need=high 只给明显需要多源查证、时效或争议的问题。\n"
+        "7. output_mode 控制最终回复长度和形态：chat_short 接梗，chat_answer 普通答，structured_help 教程，source_summary 检索摘要，qzone_reply 空间评论。\n"
+        "8. fallback 只能当模型不确定时参考，不要机械照抄。\n"
         f"{build_context_continuity_policy_prompt()}\n"
     )
     user_content = (
@@ -318,7 +373,7 @@ async def plan_turn_with_llm(
         f"复读线索：{'; '.join(repeat_lines) if repeat_lines else '无'}\n"
         f"可用工具元数据：\n{_render_tool_metadata(available_tools)}\n"
         "metadata fallback："
-        f"reply_action={fallback.reply_action}, memory={fallback.memory_need}, research={fallback.research_need}, "
+        f"reply_action={fallback.reply_action}, speech_act={fallback.speech_act}, memory={fallback.memory_need}, research={fallback.research_need}, "
         f"vision={fallback.vision_need}, output_mode={fallback.output_mode}, target={fallback.message_target}, "
         f"ambiguity={fallback.ambiguity_level}"
         + (f"\n{group_knowledge_hint}" if group_knowledge_hint else "")
@@ -362,6 +417,11 @@ def turn_plan_from_semantic_frame(frame: Any, *, has_images: bool = False, messa
         tool_intent = ["expression"]
     elif chat_intent == "explanation":
         output_mode = "chat_answer"
+    speech_act = default_speech_act(
+        reply_action="silence" if recommend_silence else "reply",
+        output_mode=output_mode,
+        tool_intents=list(tool_intent),
+    )
     if has_images and "vision" not in tool_intent:
         tool_intent = [item for item in tool_intent if item != "none"] + ["vision"]
     ambiguity = str(getattr(frame, "ambiguity_level", "low") or "low").strip()
@@ -370,6 +430,7 @@ def turn_plan_from_semantic_frame(frame: Any, *, has_images: bool = False, messa
     confidence = max(0.0, min(1.0, _coerce_float(getattr(frame, "confidence", 0.0), 0.0)))
     return TurnPlan(
         reply_action="silence" if recommend_silence else "reply",
+        speech_act=speech_act,
         memory_need="light" if chat_intent in {"banter", "explanation"} else "none",
         research_need=research_need,
         vision_need="summary" if has_images else "none",
@@ -423,6 +484,7 @@ def turn_plan_to_semantic_frame(plan: TurnPlan) -> Any:
     try:
         frame.turn_plan = plan
         frame.output_mode = plan.output_mode
+        frame.speech_act = plan.speech_act
         frame.session_goal = plan.session_goal
         frame.message_target = plan.message_target
     except Exception:
@@ -432,7 +494,9 @@ def turn_plan_to_semantic_frame(plan: TurnPlan) -> Any:
 
 __all__ = [
     "OUTPUT_MODE_LENGTHS",
+    "SpeechAct",
     "TurnPlan",
+    "default_speech_act",
     "extract_json_payload",
     "metadata_fallback_turn_plan",
     "normalize_plan_text",

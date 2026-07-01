@@ -31,6 +31,7 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
             "vision_need": "native",
             "qzone_continue": "true",
             "output_mode": "source_summary",
+            "speech_act": "source_summary",
             "tool_intent": ["none", "lookup_web", "memory"],
             "ambiguity_level": "medium",
             "message_target": "bot",
@@ -43,6 +44,7 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
     assert plan is not None
     assert plan.memory_need == "deep"
     assert plan.research_need == "high"
+    assert plan.speech_act == "source_summary"
     assert plan.qzone_continue is True
     assert plan.tool_intent == ["lookup_web", "memory"]
     assert plan.confidence == 1.0
@@ -54,6 +56,7 @@ def test_turn_plan_to_semantic_frame_maps_lookup_plugin() -> None:
         reply_action="reply",
         research_need="low",
         output_mode="structured_help",
+        speech_act="answer",
         tool_intent=["lookup_plugin", "lookup_web"],
         ambiguity_level="low",
         confidence=0.7,
@@ -66,6 +69,7 @@ def test_turn_plan_to_semantic_frame_maps_lookup_plugin() -> None:
     assert frame.plugin_question_intent == "latest"
     assert frame.recommend_silence is False
     assert frame.output_mode == "structured_help"
+    assert frame.speech_act == "answer"
 
 
 def test_turn_planner_prompt_includes_media_context_discipline() -> None:
@@ -81,6 +85,7 @@ def test_turn_planner_prompt_includes_media_context_discipline() -> None:
                     "content": (
                         '{"reply_action":"silence","memory_need":"none","research_need":"none",'
                         '"vision_need":"summary","qzone_continue":false,"output_mode":"chat_short",'
+                        '"speech_act":"silence",'
                         '"tool_intent":["vision"],"ambiguity_level":"high",'
                         '"message_target":"uncertain","session_goal":"等待更多上下文",'
                         '"confidence":0.84,"reason":"媒体占位"}'
@@ -103,6 +108,30 @@ def test_turn_planner_prompt_includes_media_context_discipline() -> None:
     system_prompt = captured["messages"][0]["content"]  # type: ignore[index]
     assert "媒体占位纪律" in system_prompt
     assert "低信息跟帖或媒体占位" in system_prompt
+    assert "speech_act" in system_prompt
     assert "优先保持沉默" in system_prompt
     assert "优先回答文字 cue 或最近同一话题" in system_prompt
     assert plan.reply_action == "silence"
+    assert plan.speech_act == "silence"
+
+
+def test_turn_plan_defaults_speech_act_from_output_and_tools() -> None:
+    lookup_plan = planner.parse_turn_plan_payload(
+        {
+            "reply_action": "reply",
+            "output_mode": "source_summary",
+            "tool_intent": ["lookup_web"],
+        }
+    )
+    expression_plan = planner.parse_turn_plan_payload(
+        {
+            "reply_action": "reply",
+            "output_mode": "chat_short",
+            "tool_intent": ["expression"],
+        }
+    )
+
+    assert lookup_plan is not None
+    assert lookup_plan.speech_act == "source_summary"
+    assert expression_plan is not None
+    assert expression_plan.speech_act == "execute_action"

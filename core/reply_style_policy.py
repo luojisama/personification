@@ -1,6 +1,41 @@
 from __future__ import annotations
 
 
+_SPEECH_ACT_DESCRIPTIONS = {
+    "participate": (
+        "本轮要像参与讨论的群友自然接话：给一个具体态度、接住当前点，或顺着话题推进半步；"
+        "不要只附和、感叹、复述或总结群友原话。"
+    ),
+    "answer": (
+        "本轮要直接回答对方真正问的点：先给结论或判断，再补必要的一两句；"
+        "不要写成客服说明、百科解释或长教程。"
+    ),
+    "ask_followup": (
+        "本轮要追问一个具体、能推进聊天的小问题；问题必须贴着当前话题，"
+        "不要用空泛的“然后呢/怎么说”凑互动。"
+    ),
+    "clarify": (
+        "本轮只在信息真的不足时短澄清对象、范围或指代；能根据上下文和工具判断时先内部判断，"
+        "不要把不懂的点直接甩回群里。"
+    ),
+    "tease": (
+        "本轮是轻吐槽或接梗：短、具体、带一点态度即可；不要解释笑点，"
+        "也不要把吐槽写成复盘。"
+    ),
+    "execute_action": (
+        "本轮主要目标是执行工具或发送图片/表情等外发动作；如果动作已经成功排队或发送，"
+        "最终可见文字应保持 [SILENCE] 或极短状态，不要再补一段解释。"
+    ),
+    "source_summary": (
+        "本轮要基于证据给出简明总结：讲结论和不确定处，不暴露检索过程、工具名、URL 列表或内部步骤。"
+    ),
+    "silence": (
+        "本轮适合不说话；如果没有必须发出的内容，直接输出 [NO_REPLY] 或 [SILENCE]，"
+        "不要用观望、等待、稍后再说之类旁白替代沉默。"
+    ),
+}
+
+
 def build_formulaic_tic_policy_prompt() -> str:
     return (
         "## 固定起手与口癖复用纪律（高优先级）\n"
@@ -82,6 +117,28 @@ def build_reply_style_policy_prompt(
     return "\n".join(lines)
 
 
+def build_speech_act_policy_prompt(
+    *,
+    speech_act: str = "",
+    output_mode: str = "",
+    session_goal: str = "",
+) -> str:
+    normalized = str(speech_act or "").strip()
+    if normalized not in _SPEECH_ACT_DESCRIPTIONS:
+        normalized = "participate"
+    lines = [
+        "## 本轮说话动作（高优先级）",
+        f"- speech_act={normalized}：{_SPEECH_ACT_DESCRIPTIONS[normalized]}",
+    ]
+    mode = str(output_mode or "").strip()
+    if mode:
+        lines.append(f"- output_mode={mode} 只控制长度和形态，不允许覆盖 speech_act 的聊天动作。")
+    goal = str(session_goal or "").strip()
+    if goal:
+        lines.append(f"- 本轮短目标：{goal[:80]}。围绕这个目标说，别把上下文扩写成旁白。")
+    return "\n".join(lines)
+
+
 def build_direct_visual_identity_guard() -> str:
     return (
         "\n\n## 图片处理规则（重要）\n"
@@ -101,4 +158,5 @@ __all__ = [
     "build_media_understanding_output_policy_prompt",
     "build_observer_posture_policy_prompt",
     "build_reply_style_policy_prompt",
+    "build_speech_act_policy_prompt",
 ]

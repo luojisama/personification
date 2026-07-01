@@ -472,6 +472,68 @@ def test_run_agent_returns_no_reply_when_time_budget_is_exhausted() -> None:
     assert caller.calls == []
 
 
+def test_run_agent_uses_tool_metadata_contract_for_queued_action_silence() -> None:
+    async def _handler(**_kwargs):  # noqa: ANN001
+        return json.dumps({"ok": True, "queued": True, "kind": "custom_action"}, ensure_ascii=False)
+
+    registry = tool_registry.ToolRegistry()
+    registry.register(
+        tool_registry.AgentTool(
+            name="send_custom_expression",
+            description="send custom expression",
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=_handler,
+            metadata={
+                "intent_tags": ["expression"],
+                "evidence_kind": "action",
+                "side_effect": "send_message",
+                "final_behavior": "silence_on_success",
+            },
+        )
+    )
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-custom",
+                        name="send_custom_expression",
+                        arguments={},
+                    )
+                ],
+                raw={},
+            )
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "发个表情"}],
+            registry=registry,
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=2,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="expression",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+        )
+    )
+
+    assert result.text == "[SILENCE]"
+    assert len(caller.calls) == 1
+
+
 def test_run_agent_sends_ack_when_first_tool_call_appears(monkeypatch) -> None:  # noqa: ANN001
     ack_calls: list[str] = []
 

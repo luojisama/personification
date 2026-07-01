@@ -58,6 +58,29 @@ def test_conversational_baseline_discourages_echo_and_empty_affirmation() -> Non
     assert "宁可少说或沉默" in prompt
 
 
+def test_speech_act_policy_guides_discussion_action() -> None:
+    prompt = reply_style_policy.build_speech_act_policy_prompt(
+        speech_act="participate",
+        output_mode="chat_short",
+        session_goal="接住当前话题",
+    )
+
+    assert "本轮说话动作" in prompt
+    assert "speech_act=participate" in prompt
+    assert "参与讨论" in prompt
+    assert "不要只附和、感叹、复述" in prompt
+    assert "output_mode=chat_short" in prompt
+    assert "接住当前话题" in prompt
+
+
+def test_speech_act_policy_for_action_prefers_silence_after_send() -> None:
+    prompt = reply_style_policy.build_speech_act_policy_prompt(speech_act="execute_action")
+
+    assert "发送图片/表情" in prompt
+    assert "[SILENCE]" in prompt
+    assert "不要再补一段解释" in prompt
+
+
 def test_direct_visual_guard_does_not_ask_to_describe_image() -> None:
     prompt = reply_style_policy.build_direct_visual_identity_guard()
 
