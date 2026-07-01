@@ -40,6 +40,102 @@ function dashboardSeriesPointTitle(row, valueKey) {
   ].filter(Boolean).join("\n");
 }
 
+let dashboardTooltipEventsBound = false;
+
+function dashboardTooltipHtml(text) {
+  return String(text || "")
+    .split("\n")
+    .filter(line => line.trim())
+    .map((line, index) => `<div class="${index === 0 ? "title" : ""}">${escapeHtml(line)}</div>`)
+    .join("");
+}
+
+function dashboardTooltipAttr(text) {
+  const value = String(text || "").trim();
+  return value ? ` data-dashboard-tooltip="${escapeAttr(value)}"` : "";
+}
+
+function dashboardTooltipElement() {
+  let el = document.getElementById("dashboard-tooltip");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "dashboard-tooltip";
+    el.className = "dashboard-tooltip";
+    el.setAttribute("role", "tooltip");
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+function positionDashboardTooltip(event) {
+  const el = document.getElementById("dashboard-tooltip");
+  if (!el || !el.classList.contains("visible")) return;
+  const source = event && typeof event.clientX === "number"
+    ? { x: event.clientX, y: event.clientY }
+    : null;
+  if (!source) return;
+  const pad = 12;
+  const gap = 14;
+  const rect = el.getBoundingClientRect();
+  let left = source.x + gap;
+  let top = source.y + gap;
+  if (left + rect.width + pad > window.innerWidth) {
+    left = Math.max(pad, source.x - rect.width - gap);
+  }
+  if (top + rect.height + pad > window.innerHeight) {
+    top = Math.max(pad, source.y - rect.height - gap);
+  }
+  el.style.left = `${Math.max(pad, left)}px`;
+  el.style.top = `${Math.max(pad, top)}px`;
+}
+
+function showDashboardTooltip(target, event) {
+  const text = target && target.getAttribute("data-dashboard-tooltip");
+  if (!text) return;
+  const el = dashboardTooltipElement();
+  el.innerHTML = dashboardTooltipHtml(text);
+  el.classList.add("visible");
+  positionDashboardTooltip(event);
+}
+
+function hideDashboardTooltip() {
+  const el = document.getElementById("dashboard-tooltip");
+  if (el) el.classList.remove("visible");
+}
+
+function initDashboardTooltipEvents() {
+  if (dashboardTooltipEventsBound) return;
+  dashboardTooltipEventsBound = true;
+  document.addEventListener("mouseover", event => {
+    const target = event.target && event.target.closest && event.target.closest("[data-dashboard-tooltip]");
+    if (target) showDashboardTooltip(target, event);
+  });
+  document.addEventListener("mousemove", event => {
+    const target = event.target && event.target.closest && event.target.closest("[data-dashboard-tooltip]");
+    if (target) positionDashboardTooltip(event);
+  });
+  document.addEventListener("mouseout", event => {
+    const target = event.target && event.target.closest && event.target.closest("[data-dashboard-tooltip]");
+    if (!target) return;
+    const next = event.relatedTarget && event.relatedTarget.closest && event.relatedTarget.closest("[data-dashboard-tooltip]");
+    if (next !== target) hideDashboardTooltip();
+  });
+  document.addEventListener("focusin", event => {
+    const target = event.target && event.target.closest && event.target.closest("[data-dashboard-tooltip]");
+    if (!target) return;
+    const rect = target.getBoundingClientRect();
+    showDashboardTooltip(target, { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 });
+  });
+  document.addEventListener("focusout", event => {
+    if (event.target && event.target.closest && event.target.closest("[data-dashboard-tooltip]")) {
+      hideDashboardTooltip();
+    }
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape") hideDashboardTooltip();
+  });
+}
+
 function dashboardChartPath(points) {
   if (!points.length) return "";
   if (points.length === 1) {
@@ -105,7 +201,7 @@ function renderDashboardLineChart(points, valueKey, tone, options = {}) {
     .filter(({ point, index }) => hasData && (index === coords.length - 1 || (point.value > 0 && index % markerEvery === 0)))
     .map(({ point, index }) => {
       const title = rows[index] ? dashboardSeriesPointTitle(rows[index], valueKey) : "";
-      return `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="${index === coords.length - 1 ? "3.8" : "2.2"}" fill="var(--panel)" stroke="currentColor" stroke-width="${index === coords.length - 1 ? "2" : "1.4"}" opacity="${index === coords.length - 1 ? "1" : "0.72"}" vector-effect="non-scaling-stroke"><title>${escapeHtml(title)}</title></circle>`;
+      return `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="${index === coords.length - 1 ? "3.8" : "2.2"}" fill="var(--panel)" stroke="currentColor" stroke-width="${index === coords.length - 1 ? "2" : "1.4"}" opacity="${index === coords.length - 1 ? "1" : "0.72"}" vector-effect="non-scaling-stroke"${dashboardTooltipAttr(title)}><title>${escapeHtml(title)}</title></circle>`;
     }).join("");
   const slotWidth = coords.length > 1
     ? (width - padX * 2) / Math.max(1, coords.length - 1)
@@ -114,7 +210,7 @@ function renderDashboardLineChart(points, valueKey, tone, options = {}) {
   const hotspots = coords.map((point, index) => {
     const x = Math.max(0, Math.min(width - hotWidth, point.x - hotWidth / 2));
     const title = rows[index] ? dashboardSeriesPointTitle(rows[index], valueKey) : "";
-    return `<rect class="dashboard-line-hotspot" x="${x.toFixed(1)}" y="${padTop}" width="${hotWidth.toFixed(1)}" height="${plotHeight.toFixed(1)}" fill="transparent"><title>${escapeHtml(title)}</title></rect>`;
+    return `<rect class="dashboard-line-hotspot" x="${x.toFixed(1)}" y="${padTop}" width="${hotWidth.toFixed(1)}" height="${plotHeight.toFixed(1)}" fill="transparent" tabindex="0"${dashboardTooltipAttr(title)}><title>${escapeHtml(title)}</title></rect>`;
   }).join("");
   const firstLabel = rows.length ? String(rows[0].label || rows[0].bucket || "") : "";
   const lastLabel = rows.length ? String(rows[rows.length - 1].label || rows[rows.length - 1].bucket || "") : "";
@@ -272,7 +368,7 @@ function renderDashboardPieSvg(data, total, colors) {
     const end = Math.min(1, cursor + pct);
     cursor = end;
     const title = dashboardPieRowTitle(row, total);
-    return `<path class="dashboard-pie-slice" d="${dashboardPieSegmentPath(start, end)}" fill="${colors[index % colors.length]}" role="listitem" aria-label="${escapeAttr(title.replace(/\n/g, " · "))}" vector-effect="non-scaling-stroke"><title>${escapeHtml(title)}</title></path>`;
+    return `<path class="dashboard-pie-slice" d="${dashboardPieSegmentPath(start, end)}" fill="${colors[index % colors.length]}" role="listitem" tabindex="0" aria-label="${escapeAttr(title.replace(/\n/g, " · "))}" vector-effect="non-scaling-stroke"${dashboardTooltipAttr(title)}><title>${escapeHtml(title)}</title></path>`;
   }).join("");
   return `<svg class="dashboard-pie-svg" viewBox="0 0 100 100" role="img" aria-label="群消耗占比饼图">
     ${slices}
@@ -303,7 +399,8 @@ function renderDashboardGroupPie(rows, options = {}) {
     const title = row.group_name
       ? `${row.group_name}${groupId ? ` · 群号 ${groupId}` : ""}`
       : `${row.group_name_missing ? "群名获取失败；" : ""}${groupId ? `群号 ${groupId}` : label}`;
-    return `<div class="dashboard-pie-legend-row" title="${escapeAttr(dashboardPieRowTitle(row, total))}">
+    const detail = dashboardPieRowTitle(row, total);
+    return `<div class="dashboard-pie-legend-row" title="${escapeAttr(detail)}" tabindex="0"${dashboardTooltipAttr(detail)}>
       <span class="dashboard-pie-dot" style="background:${colors[index % colors.length]}"></span>
       <span class="dashboard-pie-name" title="${escapeAttr(title)}">${escapeHtml(label)}</span>
       <span class="dashboard-pie-percent">${escapeHtml(dashboardPercent(pct))}</span>
@@ -449,6 +546,7 @@ function renderDashboardDetailModal(charts, tones) {
 function renderDashboard() {
   const d = state.dashboard;
   if (!d) return `<div class="card muted">加载中…</div>`;
+  initDashboardTooltipEvents();
   const overview = d.dashboard_overview || {};
   const charts = dashboardOverviewCharts(d);
   const tones = ["blue", "green", "orange", "purple"];

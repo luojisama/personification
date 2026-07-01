@@ -189,18 +189,103 @@ def diff_plan_vs_expected(actual: dict[str, Any], expected: dict[str, Any]) -> l
     return diffs
 
 
-def render_report(diffs: list[ReplayDiff]) -> str:
+def build_report_payload(diffs: list[ReplayDiff]) -> dict[str, Any]:
+    scene_counts: dict[str, int] = {}
+    tag_counts: dict[str, int] = {}
+    boundary_counts: dict[str, int] = {}
+    bad_examples_by_tag: dict[str, int] = {}
+    diff_count_by_tag: dict[str, int] = {}
+    diff_count_by_boundary: dict[str, int] = {}
+
+    for diff in diffs:
+        record = diff.record
+        scene_key = record.scene or "unknown"
+        scene_counts[scene_key] = scene_counts.get(scene_key, 0) + 1
+        if record.reply_boundary:
+            boundary_counts[record.reply_boundary] = boundary_counts.get(record.reply_boundary, 0) + 1
+            if diff.diffs:
+                diff_count_by_boundary[record.reply_boundary] = diff_count_by_boundary.get(record.reply_boundary, 0) + 1
+        for tag in record.quality_tags:
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+            if diff.diffs:
+                diff_count_by_tag[tag] = diff_count_by_tag.get(tag, 0) + 1
+        for example in record.bad_reply_examples:
+            if not isinstance(example, dict):
+                continue
+            label = str(example.get("label", "") or "").strip()
+            if not label:
+                continue
+            bad_examples_by_tag[label] = bad_examples_by_tag.get(label, 0) + 1
+
+    quality_rows = []
+    for tag in sorted(set(tag_counts) | set(bad_examples_by_tag)):
+        quality_rows.append(
+            {
+                "tag": tag,
+                "samples": tag_counts.get(tag, 0),
+                "bad_examples": bad_examples_by_tag.get(tag, 0),
+                "diff_samples": diff_count_by_tag.get(tag, 0),
+            }
+        )
+
+    boundary_rows = []
+    for boundary in sorted(boundary_counts):
+        boundary_rows.append(
+            {
+                "boundary": boundary,
+                "samples": boundary_counts.get(boundary, 0),
+                "diff_samples": diff_count_by_boundary.get(boundary, 0),
+            }
+        )
+
+    detail_rows = []
+    for diff in diffs:
+        detail_rows.append(
+            {
+                "file": diff.record.file,
+                "line_no": diff.record.line_no,
+                "scene": diff.record.scene,
+                "note": diff.record.note,
+                "expected_frame": diff.record.expected_frame,
+                "actual_plan": diff.actual_plan,
+                "expected_reply": diff.record.expected_reply,
+                "reply_boundary": diff.record.reply_boundary,
+                "quality_tags": list(diff.record.quality_tags),
+                "bad_reply_examples": list(diff.record.bad_reply_examples),
+                "diffs": list(diff.diffs),
+            }
+        )
+
     total = len(diffs)
-    aligned = sum(1 for d in diffs if not d.diffs)
-    misaligned = total - aligned
-    bad_example_total = sum(len(d.record.bad_reply_examples) for d in diffs)
+    aligned = sum(1 for item in diffs if not item.diffs)
+    return {
+        "summary": {
+            "total": total,
+            "aligned": aligned,
+            "misaligned": total - aligned,
+            "bad_reply_examples": sum(len(item.record.bad_reply_examples) for item in diffs),
+        },
+        "scene_counts": dict(sorted(scene_counts.items())),
+        "quality_coverage": quality_rows,
+        "reply_boundary_coverage": boundary_rows,
+        "details": detail_rows,
+    }
+
+
+def render_json_report(diffs: list[ReplayDiff]) -> str:
+    return json.dumps(build_report_payload(diffs), ensure_ascii=False, indent=2)
+
+
+def render_report(diffs: list[ReplayDiff]) -> str:
+    payload = build_report_payload(diffs)
+    summary = payload["summary"]
     lines: list[str] = [
         "# 拟人插件回放对比报表",
         "",
-        f"- 样本总数：{total}",
-        f"- 元数据 fallback 与历史 frame 一致：{aligned}",
-        f"- 有 diff 的样本：{misaligned}",
-        f"- 标注坏回复样例：{bad_example_total}",
+        f"- 样本总数：{summary['total']}",
+        f"- 元数据 fallback 与历史 frame 一致：{summary['aligned']}",
+        f"- 有 diff 的样本：{summary['misaligned']}",
+        f"- 标注坏回复样例：{summary['bad_reply_examples']}",
         "",
         "**说明**：本报表仅对比 metadata fallback 输出与历史 frame，未调用 LLM。"
         "差异是预期的（fallback 必须保守），仅作为 PR 审查参考，不做硬断言。",
@@ -208,30 +293,26 @@ def render_report(diffs: list[ReplayDiff]) -> str:
         "## 按场景分布",
         "",
     ]
-    scene_counts: dict[str, int] = {}
-    for d in diffs:
-        scene_counts[d.record.scene] = scene_counts.get(d.record.scene, 0) + 1
-    for scene, count in sorted(scene_counts.items()):
-        lines.append(f"- {scene or 'unknown'}: {count}")
+    for scene, count in payload["scene_counts"].items():
+        lines.append(f"- {scene}: {count}")
     lines.append("")
-    tag_counts: dict[str, int] = {}
-    boundary_counts: dict[str, int] = {}
-    for d in diffs:
-        for tag in d.record.quality_tags:
-            tag_counts[tag] = tag_counts.get(tag, 0) + 1
-        if d.record.reply_boundary:
-            boundary_counts[d.record.reply_boundary] = boundary_counts.get(d.record.reply_boundary, 0) + 1
-    if tag_counts:
-        lines.append("## 质量标签")
+    if payload["quality_coverage"]:
+        lines.append("## 质量覆盖矩阵")
         lines.append("")
-        for tag, count in sorted(tag_counts.items()):
-            lines.append(f"- {tag}: {count}")
+        lines.append("| 标签 | 样本 | 坏例 | fallback diff |")
+        lines.append("|---|---:|---:|---:|")
+        for row in payload["quality_coverage"]:
+            lines.append(
+                f"| {row['tag']} | {row['samples']} | {row['bad_examples']} | {row['diff_samples']} |"
+            )
         lines.append("")
-    if boundary_counts:
+    if payload["reply_boundary_coverage"]:
         lines.append("## 回复边界")
         lines.append("")
-        for boundary, count in sorted(boundary_counts.items()):
-            lines.append(f"- {boundary}: {count}")
+        lines.append("| 边界 | 样本 | fallback diff |")
+        lines.append("|---|---:|---:|")
+        for row in payload["reply_boundary_coverage"]:
+            lines.append(f"| {row['boundary']} | {row['samples']} | {row['diff_samples']} |")
         lines.append("")
     lines.append("## 差异明细")
     lines.append("")
@@ -278,6 +359,12 @@ def main() -> int:
         default="-",
         help="输出报表路径；'-' 表示打印到 stdout",
     )
+    parser.add_argument(
+        "--format",
+        choices=("markdown", "json"),
+        default="markdown",
+        help="输出格式：markdown 或 json",
+    )
     args = parser.parse_args()
 
     records = load_records(args.input)
@@ -292,7 +379,7 @@ def main() -> int:
         diff.diffs = diff_plan_vs_expected(actual_plan, record.expected_frame)
         diffs.append(diff)
 
-    report = render_report(diffs)
+    report = render_json_report(diffs) if args.format == "json" else render_report(diffs)
     if args.output == "-" or args.output == "":
         print(report)
     else:

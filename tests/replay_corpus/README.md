@@ -41,6 +41,14 @@ python plugin/personification/scripts/replay_corpus.py --input plugin/personific
 ```
 
 输出 markdown 报表，包含每段的 plan diff、质量标签、回复边界和坏回复样例汇总。
+报表会额外生成“质量覆盖矩阵”，按 `quality_tags` 统计样本数、坏例数和 fallback diff 数，
+方便观察附和、感叹、转述、旁白式观望等自然度风险是否已有回放覆盖。
+
+需要机器读取时可输出 JSON：
+
+```powershell
+python plugin/personification/scripts/replay_corpus.py --input plugin/personification/tests/replay_corpus/*.jsonl --format json --output replay_report.json
+```
 
 ## 当前样本
 

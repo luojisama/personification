@@ -124,6 +124,28 @@ def test_replay_report_includes_speech_act_and_quality_sections() -> None:
     report = replay.render_report(diffs)
 
     assert "speech_act" in report
-    assert "质量标签" in report
+    assert "质量覆盖矩阵" in report
     assert "回复边界" in report
     assert "坏回复样例" in report
+    assert "fallback diff" in report
+
+
+def test_replay_report_json_exposes_quality_coverage() -> None:
+    replay = _load_replay_script()
+    records = replay.load_records([str(_CORPUS_DIR / "bad_reply_quality.jsonl")])
+    diffs = []
+    for record in records:
+        actual_plan = replay.compute_actual_plan(record)
+        diff = replay.ReplayDiff(record=record, actual_plan=actual_plan)
+        diff.diffs = replay.diff_plan_vs_expected(actual_plan, record.expected_frame)
+        diffs.append(diff)
+
+    payload = json.loads(replay.render_json_report(diffs))
+
+    assert payload["summary"]["total"] == len(records)
+    quality = {row["tag"]: row for row in payload["quality_coverage"]}
+    assert quality["observer_posture"]["bad_examples"] >= 1
+    assert quality["empty_agreement"]["samples"] >= 1
+    boundaries = {row["boundary"]: row for row in payload["reply_boundary_coverage"]}
+    assert boundaries["no_reply"]["samples"] >= 1
+    assert payload["details"][0]["actual_plan"]["speech_act"]

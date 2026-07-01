@@ -248,6 +248,28 @@ def test_dashboard_window_validation(_runtime_with_data) -> None:
     assert res.status_code == 422
 
 
+def test_dashboard_frontend_charts_have_detail_affordances() -> None:
+    root = Path(__file__).resolve().parent.parent
+    app_js = (root / "webui" / "static" / "app-admin.js").read_text(encoding="utf-8")
+    style_css = (root / "webui" / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "function dashboardTooltipAttr" in app_js
+    assert "initDashboardTooltipEvents();" in app_js
+    assert "class=\"dashboard-line-hotspot\"" in app_js
+    assert "class=\"dashboard-pie-slice\"" in app_js
+    assert "class=\"dashboard-pie-legend-row\"" in app_js
+    assert app_js.count("data-dashboard-tooltip") >= 4
+    assert app_js.count("tabindex=\"0\"") >= 3
+    assert "openDashboardLineDetail" in app_js
+    assert "openDashboardPieDetail" in app_js
+    assert "renderDashboardDetailModal" in app_js
+    assert "dashboardSeriesPointTitle" in app_js
+    assert "提示词令牌" in app_js
+    assert "回复令牌" in app_js
+    assert ".dashboard-tooltip" in style_css
+    assert ".dashboard-tooltip.visible" in style_css
+
+
 def test_personas_list_and_detail(_runtime_with_data) -> None:
     client = _build_client(_runtime_with_data)
     _login(client)

@@ -107,6 +107,7 @@ main { padding:20px 26px; max-width:1400px; width:100%; min-width:0; }
 .dashboard-line-chart { width:100%; height:128px; margin-top:auto; display:block; overflow:visible; }
 .dashboard-line-chart.large { height:280px; min-height:240px; }
 .dashboard-line-hotspot { cursor:crosshair; pointer-events:all; }
+.dashboard-line-hotspot:focus, .dashboard-pie-slice:focus, .dashboard-pie-legend-row:focus { outline:none; filter:brightness(1.12); }
 .dashboard-line-chart.blue { color:#4f8cff; }
 .dashboard-line-chart.green { color:#20c997; }
 .dashboard-line-chart.orange { color:#ffb020; }
@@ -150,6 +151,9 @@ main { padding:20px 26px; max-width:1400px; width:100%; min-width:0; }
 .dashboard-modal-pie .dashboard-pie-layout { grid-template-columns:220px minmax(0,1fr); }
 .dashboard-modal-pie .dashboard-pie { width:220px; cursor:default; }
 .dashboard-modal-pie .dashboard-pie-slice { cursor:default; }
+.dashboard-tooltip { position:fixed; z-index:120; max-width:min(340px,calc(100vw - 24px)); padding:9px 11px; border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--text); box-shadow:0 10px 28px rgba(0,0,0,0.34); pointer-events:none; opacity:0; transform:translateY(3px); transition:opacity .12s, transform .12s; font-size:12.5px; line-height:1.45; white-space:normal; }
+.dashboard-tooltip.visible { opacity:1; transform:translateY(0); }
+.dashboard-tooltip .title { font-weight:600; margin-bottom:3px; }
 .qzone-quota-line { display:flex; align-items:baseline; gap:10px; margin-bottom:8px; flex-wrap:wrap; }
 .qzone-quota-remain { margin-left:auto; }
 .qzone-recent-list { list-style:none; margin:0; padding:0; display:grid; gap:8px; }
