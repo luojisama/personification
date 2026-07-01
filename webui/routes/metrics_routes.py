@@ -135,7 +135,7 @@ def _billing_summary(summary: dict, provider_usage: list[dict]) -> dict:
             "limited_provider_count": len(limited),
             "unlimited": len(limited) == 0,
         },
-        "note": "本地 token 账本当前没有模型单价配置，费用字段显示为 $0.00；额度进度按 provider token 月度额度统计。",
+        "note": "本地令牌账本当前没有模型单价配置，费用字段显示为 $0.00；额度进度按 provider 月度令牌额度统计。",
     }
 
 

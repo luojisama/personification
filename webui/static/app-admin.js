@@ -33,9 +33,9 @@ function dashboardSeriesPointTitle(row, valueKey) {
   return [
     label,
     metricLine,
-    `总 token：${dashboardFullNumber(item.total_tokens || 0)}`,
-    `Prompt：${dashboardFullNumber(item.prompt_tokens || 0)}`,
-    `Completion：${dashboardFullNumber(item.completion_tokens || 0)}`,
+    `总计令牌：${dashboardFullNumber(item.total_tokens || 0)}`,
+    `提示词令牌：${dashboardFullNumber(item.prompt_tokens || 0)}`,
+    `回复令牌：${dashboardFullNumber(item.completion_tokens || 0)}`,
     `请求次数：${dashboardFullNumber(item.call_count || 0)}`,
   ].filter(Boolean).join("\n");
 }
@@ -118,15 +118,15 @@ function renderDashboardLineChart(points, valueKey, tone, options = {}) {
   }).join("");
   const firstLabel = rows.length ? String(rows[0].label || rows[0].bucket || "") : "";
   const lastLabel = rows.length ? String(rows[rows.length - 1].label || rows[rows.length - 1].bucket || "") : "";
-  return `<svg class="dashboard-line-chart ${large ? "large" : ""} ${tone || ""}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Token 消耗折线图">
+  return `<svg class="dashboard-line-chart ${large ? "large" : ""} ${tone || ""}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="令牌消耗折线图">
     ${grid}
     ${area ? `<path d="${area}" fill="currentColor" opacity="0.10"></path>` : ""}
     ${path ? `<path d="${path}" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"></path>` : ""}
     ${lastPoint && hasData ? `<line x1="${lastPoint.x.toFixed(1)}" y1="${padTop}" x2="${lastPoint.x.toFixed(1)}" y2="${plotBottom}" stroke="currentColor" stroke-opacity="0.12" stroke-width="1" vector-effect="non-scaling-stroke"></line>` : ""}
     ${markers}
     ${hotspots}
-    ${hasData ? `<text x="${padX}" y="11" fill="currentColor" opacity="0.70" font-size="10">${escapeHtml(dashboardCompactNumber(maxRaw))} T</text>` : `<text x="${width / 2}" y="${height / 2}" fill="currentColor" opacity="0.55" font-size="12" text-anchor="middle">暂无数据</text>`}
-    ${lastPoint && hasData ? `<text x="${width - padX}" y="11" fill="currentColor" opacity="0.72" font-size="10" text-anchor="end">${escapeHtml(dashboardCompactNumber(lastPoint.value))} T</text>` : ""}
+    ${hasData ? `<text x="${padX}" y="11" fill="currentColor" opacity="0.70" font-size="10">${escapeHtml(dashboardCompactNumber(maxRaw))} 令牌</text>` : `<text x="${width / 2}" y="${height / 2}" fill="currentColor" opacity="0.55" font-size="12" text-anchor="middle">暂无数据</text>`}
+    ${lastPoint && hasData ? `<text x="${width - padX}" y="11" fill="currentColor" opacity="0.72" font-size="10" text-anchor="end">${escapeHtml(dashboardCompactNumber(lastPoint.value))} 令牌</text>` : ""}
     <text x="${padX}" y="${height - 3}" fill="currentColor" opacity="0.55" font-size="10">${escapeHtml(firstLabel)}</text>
     <text x="${width - padX}" y="${height - 3}" fill="currentColor" opacity="0.55" font-size="10" text-anchor="end">${escapeHtml(lastLabel)}</text>
   </svg>`;
@@ -144,12 +144,12 @@ function renderDashboardLineCard(chart, tone) {
   return `<div class="dashboard-line-card">
     <div class="dashboard-line-head">
       <span class="muted">${escapeHtml(chart && chart.label || "")}</span>
-      <strong>${escapeHtml(tokenText)} T</strong>
+      <strong>${escapeHtml(tokenText)} 令牌</strong>
       <button class="btn small dashboard-chart-open" onclick="openDashboardLineDetail('${escapeAttr(key)}')">放大</button>
     </div>
     <div class="dashboard-line-meta">
       <span>${escapeHtml(callText)} 次请求</span>
-      <span>P/C ${escapeHtml(promptText)} / ${escapeHtml(completionText)}</span>
+      <span>提示/回复 ${escapeHtml(promptText)} / ${escapeHtml(completionText)}</span>
     </div>
     <div class="dashboard-line-chart-wrap" onclick="openDashboardLineDetail('${escapeAttr(key)}')">
       ${renderDashboardLineChart(series, valueKey, tone, { chartKey: key })}
@@ -175,7 +175,7 @@ function renderDashboardModelUsage(rows) {
   return `<div class="card dashboard-panel">
     <h2>模型用量（总计）</h2>
     <table class="dashboard-model-table">
-      <thead><tr><th>模型名</th><th>请求次数</th><th>Token 消耗</th></tr></thead>
+      <thead><tr><th>模型名</th><th>请求次数</th><th>令牌消耗</th></tr></thead>
       <tbody>${body || '<tr><td colspan="3" class="muted">暂无模型用量。</td></tr>'}</tbody>
     </table>
   </div>`;
@@ -201,7 +201,7 @@ function renderDashboardPurposeUsage(rows) {
   return `<div class="card dashboard-panel">
     <h2>功能用量（总计）</h2>
     <table class="dashboard-model-table">
-      <thead><tr><th>功能</th><th>请求次数</th><th>Token 消耗</th></tr></thead>
+      <thead><tr><th>功能</th><th>请求次数</th><th>令牌消耗</th></tr></thead>
       <tbody>${body || '<tr><td colspan="3" class="muted">暂无功能用量。</td></tr>'}</tbody>
     </table>
   </div>`;
@@ -221,9 +221,9 @@ function dashboardPieRowTitle(row, total) {
   return [
     label + (groupId ? `（${groupId}）` : ""),
     `占比：${dashboardPercent(pct)}`,
-    `总 token：${dashboardFullNumber(row.total_tokens || 0)}`,
-    `Prompt：${dashboardFullNumber(row.prompt_tokens || 0)}`,
-    `Completion：${dashboardFullNumber(row.completion_tokens || 0)}`,
+    `总计令牌：${dashboardFullNumber(row.total_tokens || 0)}`,
+    `提示词令牌：${dashboardFullNumber(row.prompt_tokens || 0)}`,
+    `回复令牌：${dashboardFullNumber(row.completion_tokens || 0)}`,
     `请求次数：${dashboardFullNumber(row.call_count || 0)}`,
   ].join("\n");
 }
@@ -307,7 +307,7 @@ function renderDashboardGroupPie(rows, options = {}) {
       <span class="dashboard-pie-dot" style="background:${colors[index % colors.length]}"></span>
       <span class="dashboard-pie-name" title="${escapeAttr(title)}">${escapeHtml(label)}</span>
       <span class="dashboard-pie-percent">${escapeHtml(dashboardPercent(pct))}</span>
-      <span class="dashboard-pie-token">${escapeHtml(dashboardCompactNumber(row.total_tokens || 0))} T</span>
+      <span class="dashboard-pie-token">${escapeHtml(dashboardCompactNumber(row.total_tokens || 0))} 令牌</span>
     </div>`;
   }).join("");
   return `<div class="${modal ? "dashboard-modal-pie" : "card dashboard-panel"}">
@@ -318,7 +318,7 @@ function renderDashboardGroupPie(rows, options = {}) {
     <div class="dashboard-pie-layout">
       <div class="dashboard-pie" ${modal ? "" : 'onclick="openDashboardPieDetail()"'} title="${data.length ? "" : "暂无群用量"}">
         ${renderDashboardPieSvg(data, total, colors)}
-        <div class="dashboard-pie-center"><strong>${escapeHtml(dashboardCompactNumber(total))} T</strong><span>总 token</span></div>
+        <div class="dashboard-pie-center"><strong>${escapeHtml(dashboardCompactNumber(total))} 令牌</strong><span>总令牌</span></div>
       </div>
       <div class="dashboard-pie-legend">${legend || '<p class="muted">暂无群用量。</p>'}</div>
     </div>
@@ -369,7 +369,7 @@ function dashboardLineDetailTable(rows, valueKey) {
   }).join("");
   return `<div class="table-wrap dashboard-detail-table">
     <table>
-      <thead><tr><th>时间桶</th><th>标签</th><th>请求</th><th>Prompt</th><th>Completion</th><th>Total</th>${valueKey !== "total_tokens" ? "<th>曲线值</th>" : ""}</tr></thead>
+      <thead><tr><th>时间桶</th><th>标签</th><th>请求</th><th>提示词</th><th>回复</th><th>总计</th>${valueKey !== "total_tokens" ? "<th>曲线值</th>" : ""}</tr></thead>
       <tbody>${body || `<tr><td colspan="${colspan}" class="muted">暂无明细。</td></tr>`}</tbody>
     </table>
   </div>`;
@@ -393,7 +393,7 @@ function dashboardPieDetailTable(rows) {
   }).join("");
   return `<div class="table-wrap dashboard-detail-table">
     <table>
-      <thead><tr><th>群</th><th>群号</th><th>占比</th><th>请求</th><th>Prompt</th><th>Completion</th><th>Total</th></tr></thead>
+      <thead><tr><th>群</th><th>群号</th><th>占比</th><th>请求</th><th>提示词</th><th>回复</th><th>总计</th></tr></thead>
       <tbody>${body || '<tr><td colspan="7" class="muted">暂无群用量。</td></tr>'}</tbody>
     </table>
   </div>`;
@@ -415,7 +415,7 @@ function renderDashboardDetailModal(charts, tones) {
         <div class="dashboard-modal-head">
           <div>
             <h2>${escapeHtml(chart.label || "图表明细")}</h2>
-            <p class="muted">${dashboardFullNumber(total.total_tokens || 0)} token · ${dashboardFullNumber(total.call_count || 0)} 次请求</p>
+            <p class="muted">${dashboardFullNumber(total.total_tokens || 0)} 令牌 · ${dashboardFullNumber(total.call_count || 0)} 次请求</p>
           </div>
           <button class="btn small" onclick="closeDashboardDetail()">关闭</button>
         </div>
@@ -434,7 +434,7 @@ function renderDashboardDetailModal(charts, tones) {
         <div class="dashboard-modal-head">
           <div>
             <h2>群消耗占比明细</h2>
-            <p class="muted">${dashboardFullNumber(total)} token · ${dashboardFullNumber(rows.length)} 个群</p>
+            <p class="muted">${dashboardFullNumber(total)} 令牌 · ${dashboardFullNumber(rows.length)} 个群</p>
           </div>
           <button class="btn small" onclick="closeDashboardDetail()">关闭</button>
         </div>
@@ -456,7 +456,7 @@ function renderDashboard() {
   const empty = totalTokens === 0;
   return `<div class="dashboard-toolbar">
       <div>
-        <h2 style="margin:0">Token 消耗统计</h2>
+        <h2 style="margin:0">令牌消耗统计</h2>
         <p class="muted" style="margin:4px 0 0;font-size:12px">24h、7天、30天与全量累计；模型、功能与群占比使用总计账本。</p>
       </div>
       <a href="#logs" onclick="state.view='logs'; loadView().then(render)">查看日志 →</a>
@@ -464,7 +464,7 @@ function renderDashboard() {
     <div class="dashboard-line-grid">
       ${charts.slice(0, 4).map((chart, index) => renderDashboardLineCard(chart, tones[index % tones.length])).join("")}
     </div>
-    ${empty ? `<div class="alert info">暂无 token 数据。LLM 调用记录写入后，这里会展示本地 token 账本统计。</div>` : ""}
+    ${empty ? `<div class="alert info">暂无令牌数据。LLM 调用记录写入后，这里会展示本地令牌账本统计。</div>` : ""}
     <div class="dashboard-usage-grid">
       ${renderDashboardModelUsage(overview.model_usage || ((d.total_consumption || {}).by_model || d.by_model || []))}
       ${renderDashboardPurposeUsage(overview.purpose_usage || ((d.total_consumption || {}).by_purpose || d.by_purpose || []))}

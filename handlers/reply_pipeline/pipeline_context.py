@@ -29,6 +29,7 @@ from ...skill_runtime.runtime_api import SkillRuntime
 from ...skills.skillpacks.friend_request_tool.scripts.main import build_friend_request_tool_for_runtime
 from ...skills.skillpacks.group_info_tool.scripts.main import build_group_info_tool_for_runtime
 from ...skills.skillpacks.plugin_invoker.scripts.main import build_invoke_plugin_tool_for_runtime
+from ...skills.skillpacks.resource_collector.scripts.main import build_send_image_tools
 from ...skills.skillpacks.sticker_tool.scripts.impl import build_send_sticker_tool
 
 
@@ -695,6 +696,18 @@ async def run_agent_if_enabled(
         bot=bot,
         plugin_config=runtime.plugin_config,
     )
+    try:
+        skill_runtime_for_images = SkillRuntime(
+            plugin_config=runtime.plugin_config,
+            logger=runtime.logger,
+            get_now=lambda: int(time.time()),
+            vision_caller=getattr(runtime, "vision_caller", None),
+            tool_caller=runtime.agent_tool_caller,
+        )
+        for tool in build_send_image_tools(skill_runtime_for_images, executor):
+            runtime_registry.register(tool)
+    except Exception as exc:
+        runtime.logger.debug(f"拟人插件：注册联网搜图发送工具失败: {exc}")
     try:
         from ...core.sticker_library import resolve_sticker_dir
 

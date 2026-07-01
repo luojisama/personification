@@ -76,7 +76,7 @@ from .fallbacks import (
     _tool_result_indicates_empty,
 )
 
-_QUEUED_ACTION_TOOL_NAMES = QQ_EXPRESSION_TOOL_NAMES | {"send_local_sticker"}
+_QUEUED_ACTION_TOOL_NAMES = QQ_EXPRESSION_TOOL_NAMES | {"send_local_sticker", "search_and_send_images"}
 
 
 _QUERY_REWRITE_TOOL_NAMES = frozenset(
@@ -90,10 +90,11 @@ _QUERY_REWRITE_TOOL_NAMES = frozenset(
         "analyze_image",
         "collect_resources",
         "search_images",
+        "search_and_send_images",
     }
 )
 _RETRYABLE_LOOKUP_TOOLS = frozenset(
-    {"parallel_research", "web_search", "search_web", "wiki_lookup", "resolve_acg_entity", "collect_resources", "search_images"}
+    {"parallel_research", "web_search", "search_web", "wiki_lookup", "resolve_acg_entity", "collect_resources", "search_images", "search_and_send_images"}
 )
 _TIME_SENSITIVE_SEARCH_TOOLS = frozenset({"web_search", "search_web"})
 _TIME_SENSITIVE_RE = re.compile("\u6700\u65b0|\u8fd1\u671f|\u73b0\u5728|\u4eca\u5e74|\u4eca\u5929|\u5f53\u524d|latest|recent|now", re.IGNORECASE)
@@ -148,6 +149,7 @@ _NETWORK_TOOL_NAMES = frozenset(
         "multi_search_engine",
         "collect_resources",
         "search_images",
+        "search_and_send_images",
         "search_official_site",
         "search_github_repos",
         "wiki_lookup",

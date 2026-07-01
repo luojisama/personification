@@ -43,6 +43,7 @@ _IMAGE_GENERATION_CONTEXT_TOOL_NAMES = frozenset(
         "web_search",
         "search_web",
         "search_images",
+        "search_and_send_images",
         "collect_resources",
         "wiki_lookup",
         "resolve_acg_entity",
@@ -74,6 +75,7 @@ _NETWORK_TOOL_NAMES = frozenset(
         "multi_search_engine",
         "collect_resources",
         "search_images",
+        "search_and_send_images",
         "search_official_site",
         "search_github_repos",
         "wiki_lookup",
@@ -358,6 +360,7 @@ def semantic_tool_guidance() -> str:
         "“这是什么梗/哪个游戏/什么意思”。"
         "插件技术问题优先本地插件知识和源码工具。"
         "用户明确要求生成图片时，必须调用 generate_image，不要只给提示词。"
+        "用户明确要求联网搜已有图片或壁纸并发出来时，优先调用 search_and_send_images，不要把搜索链接当最终回复。"
         "涉及本地天气、出行、城市或附近状态时，如果用户没明说地点，先看已注入的用户档案；仍不确定可调用记忆工具确认，不能猜城市。"
         "最终回复只输出纯文本，不要 markdown、项目符号列表、编号列表，也不要说正在查询、根据搜索结果或我需要确认一下。"
         "群聊接梗场景优先像群友接话，不要为了显得聪明而滥用工具。"

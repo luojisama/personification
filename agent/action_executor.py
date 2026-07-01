@@ -54,6 +54,16 @@ class ActionExecutor:
                     message += text
                 await self.bot.send(self.event, message)
                 return "已发送 QQ 图片表情"
+            case "send_image_url":
+                url = str(params.get("url", "") or "").strip()
+                if not url:
+                    return "图片发送失败：缺少图片 URL"
+                text = str(params.get("text", "") or "").strip()
+                message = MessageSegment.image(url)
+                if text:
+                    message += text
+                await self.bot.send(self.event, message)
+                return "已发送图片"
             case "send_qq_mface":
                 data = params.get("data") if isinstance(params, dict) else {}
                 if not isinstance(data, dict) or not data:

@@ -402,7 +402,7 @@ async def contextual_query_rewriter(
         '  "query_candidates": ["首轮失败后可依次尝试的候选查询"],\n'
         '  "context_clues": ["影响检索的上下文线索"],\n'
         '  "need_image_understanding": true,\n'
-        '  "recommended_tools": ["按优先级排序的工具名，如 vision_analyze/resolve_acg_entity/collect_resources/wiki_lookup/web_search/search_images"],\n'
+        '  "recommended_tools": ["按优先级排序的工具名，如 vision_analyze/resolve_acg_entity/collect_resources/wiki_lookup/web_search/search_images/search_and_send_images"],\n'
         '  "search_plan": ["1-3 步中文短句，说明应该怎样检索"]\n'
         "}"
     )

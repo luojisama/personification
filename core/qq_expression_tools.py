@@ -249,6 +249,9 @@ def qq_action_history_text(action: Any) -> str:
     if action_type == "send_qq_image_expression":
         summary = str(params.get("summary", "") or "").strip()
         return f"[QQ收藏表情:{summary}]" if summary else "[QQ收藏表情]"
+    if action_type == "send_image_url":
+        summary = str(params.get("summary", "") or "").strip()
+        return str(params.get("history_text", "") or "").strip() or (f"[联网图片:{summary}]" if summary else "[联网图片]")
     if action_type == "send_qq_mface":
         data = params.get("data") if isinstance(params, dict) else {}
         return semantic_text_for_qq_expression_segment("mface", data, default_mface_kind=str(params.get("kind", "super") or "super"))

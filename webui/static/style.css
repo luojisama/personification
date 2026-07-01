@@ -99,7 +99,7 @@ main { padding:20px 26px; max-width:1400px; width:100%; min-width:0; }
 .dashboard-line-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; margin-bottom:18px; }
 .dashboard-line-card { min-width:0; min-height:226px; border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:16px; display:flex; flex-direction:column; gap:10px; overflow:hidden; }
 .dashboard-line-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; min-width:0; flex-wrap:wrap; }
-.dashboard-line-head strong { font-size:24px; line-height:1.1; letter-spacing:0; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.dashboard-line-head strong { font-size:22px; line-height:1.15; letter-spacing:0; white-space:nowrap; font-variant-numeric:tabular-nums; }
 .dashboard-chart-open { margin-left:auto; }
 .dashboard-line-meta { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--muted); font-size:12px; min-width:0; }
 .dashboard-line-meta span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -130,7 +130,7 @@ main { padding:20px 26px; max-width:1400px; width:100%; min-width:0; }
 .dashboard-pie-slice:hover { filter:brightness(1.12); opacity:.92; }
 .dashboard-pie-empty { stroke:var(--line); }
 .dashboard-pie-center { position:relative; z-index:1; width:54%; height:54%; border-radius:50%; background:var(--panel); display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; border:1px solid var(--line); pointer-events:none; box-shadow:0 0 0 1px rgba(255,255,255,0.04); }
-.dashboard-pie strong { font-size:20px; line-height:1.1; letter-spacing:0; }
+.dashboard-pie strong { font-size:16px; line-height:1.15; letter-spacing:0; max-width:92%; word-break:break-word; }
 .dashboard-pie span { color:var(--muted); font-size:12px; margin-top:4px; }
 .dashboard-pie-legend { display:flex; flex-direction:column; gap:8px; min-width:0; }
 .dashboard-pie-legend-row { display:grid; grid-template-columns:12px minmax(0,1fr) 58px 72px; gap:8px; align-items:center; min-height:24px; font-size:13px; }

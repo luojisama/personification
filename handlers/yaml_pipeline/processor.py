@@ -78,6 +78,7 @@ from ...core.sticker_feedback import (
 from ...core.target_inference import TARGET_OTHERS
 from ...core.tts_service import extract_persona_tts_config
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_YAML
+from ...skill_runtime.runtime_api import SkillRuntime
 
 from ...agent.action_executor import ActionExecutor
 from ...agent.loop import run_agent
@@ -105,6 +106,7 @@ from ...skills.skillpacks.sticker_tool.scripts.impl import (
     reset_current_image_context,
     set_current_image_context,
 )
+from ...skills.skillpacks.resource_collector.scripts.main import build_send_image_tools
 from ...utils import build_group_context_window, get_group_topic_summary, get_recent_group_msgs
 
 
@@ -1237,6 +1239,18 @@ async def process_yaml_response_logic(
             bot=bot,
             plugin_config=plugin_config,
         )
+        try:
+            skill_runtime_for_images = SkillRuntime(
+                plugin_config=plugin_config,
+                logger=logger,
+                get_now=lambda: int(time.time()),
+                vision_caller=vision_caller,
+                tool_caller=agent_tool_caller,
+            )
+            for tool in build_send_image_tools(skill_runtime_for_images, executor):
+                agent_tool_registry.register(tool)
+        except Exception as exc:
+            logger.debug(f"拟人插件 (YAML)：注册联网搜图发送工具失败: {exc}")
         try:
             sticker_dir = resolve_sticker_dir(getattr(plugin_config, "personification_sticker_path", None))
             if sticker_dir.exists() and sticker_dir.is_dir():
