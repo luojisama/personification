@@ -124,6 +124,54 @@ def test_config_provider_models_probes_openai_compatible(_runtime_context, monke
     assert [m["id"] for m in body["models"]] == ["gpt-test", "gpt-test-mini"]
 
 
+def test_config_provider_models_probes_gemini_openai_compatible(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    captured: dict = {}
+
+    class _Resp:
+        def raise_for_status(self):  # noqa: ANN201
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {"data": [{"id": "gemini-2.5-flash"}, {"id": "gemini-2.5-pro"}]}
+
+    class _Client:
+        def __init__(self, **kwargs):  # noqa: ANN001
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def get(self, url, headers=None, params=None):  # noqa: ANN001, ANN201
+            captured["url"] = url
+            captured["headers"] = headers or {}
+            captured["params"] = params or {}
+            return _Resp()
+
+    monkeypatch.setattr(config_routes.httpx, "AsyncClient", _Client)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    res = client.post(
+        "/personification/api/config/provider-models",
+        json={
+            "provider": {
+                "api_type": "gemini",
+                "api_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+                "api_key": "gk-test",
+            }
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/openai/models"
+    assert captured["headers"]["Authorization"] == "Bearer gk-test"
+    assert captured["params"] == {}
+    assert [m["id"] for m in body["models"]] == ["gemini-2.5-flash", "gemini-2.5-pro"]
+
+
 def test_config_provider_models_cli_routes_return_selectable_candidates(_runtime_context) -> None:  # noqa: ANN001
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
@@ -148,14 +196,15 @@ def test_config_provider_models_cli_routes_return_selectable_candidates(_runtime
 def test_config_provider_models_endpoint_normalizes_version_paths() -> None:
     config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
 
-    anthropic_url, anthropic_headers, _ = config_routes._models_endpoint(  # noqa: SLF001
+    anthropic_url, anthropic_headers, _, anthropic_parser = config_routes._models_endpoint(  # noqa: SLF001
         {"api_type": "anthropic", "api_url": "https://api.anthropic.com/v1", "api_key": "ak-test"}
     )
     assert anthropic_url == "https://api.anthropic.com/v1/models"
     assert anthropic_headers["x-api-key"] == "ak-test"
     assert anthropic_headers["anthropic-version"]
+    assert anthropic_parser == "anthropic"
 
-    gemini_url, _, gemini_params = config_routes._models_endpoint(  # noqa: SLF001
+    gemini_url, _, gemini_params, gemini_parser = config_routes._models_endpoint(  # noqa: SLF001
         {
             "api_type": "gemini",
             "api_url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent",
@@ -164,6 +213,35 @@ def test_config_provider_models_endpoint_normalizes_version_paths() -> None:
     )
     assert gemini_url == "https://generativelanguage.googleapis.com/v1beta/models"
     assert gemini_params["key"] == "gk-test"
+    assert gemini_parser == "gemini"
+
+    gemini_openai_url, gemini_openai_headers, gemini_openai_params, gemini_openai_parser = (  # noqa: SLF001
+        config_routes._models_endpoint(
+            {
+                "api_type": "gemini",
+                "api_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                "api_key": "gk-openai",
+            }
+        )
+    )
+    assert gemini_openai_url == "https://generativelanguage.googleapis.com/v1beta/openai/models"
+    assert gemini_openai_headers["Authorization"] == "Bearer gk-openai"
+    assert gemini_openai_params == {}
+    assert gemini_openai_parser == "gemini_openai"
+
+    openai_gemini_url, openai_gemini_headers, openai_gemini_params, openai_gemini_parser = (  # noqa: SLF001
+        config_routes._models_endpoint(
+            {
+                "api_type": "openai",
+                "api_url": "https://generativelanguage.googleapis.com/v1beta",
+                "api_key": "gk-openai",
+            }
+        )
+    )
+    assert openai_gemini_url == "https://generativelanguage.googleapis.com/v1beta/openai/models"
+    assert openai_gemini_headers["Authorization"] == "Bearer gk-openai"
+    assert openai_gemini_params == {}
+    assert openai_gemini_parser == "openai"
 
 
 def test_persona_prompt_inline_system_prompt(_runtime_context) -> None:

@@ -119,7 +119,22 @@ def _normalize_gemini_models_base(raw: str) -> str:
     return f"{base.rstrip('/')}/v1beta"
 
 
-def _models_endpoint(provider: dict[str, Any]) -> tuple[str, dict[str, str], dict[str, str]]:
+def _is_google_gemini_base(raw: str) -> bool:
+    return "generativelanguage.googleapis.com" in str(raw or "").lower()
+
+
+def _has_openai_path(raw: str) -> bool:
+    return re.search(r"(^|/)openai(/|$)", str(raw or "").strip().lower().rstrip("/")) is not None
+
+
+def _normalize_openai_models_base(raw: str) -> str:
+    base = _normalize_base_url(raw, "https://api.openai.com/v1")
+    if _is_google_gemini_base(base) and not _has_openai_path(base):
+        return f"{_normalize_gemini_models_base(base)}/openai"
+    return base.rstrip("/")
+
+
+def _models_endpoint(provider: dict[str, Any]) -> tuple[str, dict[str, str], dict[str, str], str]:
     from ...core.provider_router import normalize_api_type
 
     api_type = normalize_api_type(provider.get("api_type"))
@@ -129,14 +144,19 @@ def _models_endpoint(provider: dict[str, Any]) -> tuple[str, dict[str, str], dic
         headers = {"anthropic-version": "2023-06-01"}
         if api_key:
             headers["x-api-key"] = api_key
-        return f"{_append_version_path(base)}/models", headers, {}
+        return f"{_append_version_path(base)}/models", headers, {}, "anthropic"
     if api_type == "gemini":
-        base = _normalize_gemini_models_base(str(provider.get("api_url", "") or ""))
+        raw_base = str(provider.get("api_url", "") or "")
+        if _has_openai_path(raw_base):
+            base = _normalize_openai_models_base(raw_base)
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            return f"{base}/models", headers, {}, "gemini_openai"
+        base = _normalize_gemini_models_base(raw_base)
         params = {"key": api_key} if api_key else {}
-        return f"{base}/models", {}, params
-    base = _normalize_base_url(str(provider.get("api_url", "") or ""), "https://api.openai.com/v1")
+        return f"{base}/models", {}, params, "gemini"
+    base = _normalize_openai_models_base(str(provider.get("api_url", "") or ""))
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    return f"{base}/models", headers, {}
+    return f"{base}/models", headers, {}, "openai"
 
 
 def _parse_model_list(api_type: str, payload: Any) -> list[dict[str, str]]:
@@ -179,10 +199,7 @@ def _parse_model_list(api_type: str, payload: Any) -> list[dict[str, str]]:
 
 
 async def _probe_http_models(provider: dict[str, Any]) -> tuple[list[dict[str, str]], str]:
-    from ...core.provider_router import normalize_api_type
-
-    api_type = normalize_api_type(provider.get("api_type"))
-    url, headers, params = _models_endpoint(provider)
+    url, headers, params, parser_api_type = _models_endpoint(provider)
     proxy = str(provider.get("proxy", "") or "").strip()
     timeout = httpx.Timeout(_provider_timeout(provider), connect=5.0)
     client_kwargs: dict[str, Any] = {"timeout": timeout, "follow_redirects": True}
@@ -192,7 +209,7 @@ async def _probe_http_models(provider: dict[str, Any]) -> tuple[list[dict[str, s
         response = await client.get(url, headers=headers, params=params)
         response.raise_for_status()
         payload = response.json()
-    models = _parse_model_list(api_type, payload)
+    models = _parse_model_list(parser_api_type, payload)
     return models, url + (("?" + urlencode({"key": "***"})) if params.get("key") else "")
 
 
