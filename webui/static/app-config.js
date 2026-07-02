@@ -345,8 +345,9 @@ function renderApiProviderCard(field, provider, index) {
       return `<option value="${escapeAttr(id)}" label="${escapeAttr(label || id)}"></option>`;
     }).join("");
     const probeDone = provider._model_probe_done === true;
-    const selectHtml = options.length || probeDone ? `<select id="${escapeAttr(selectId)}" data-provider-model-select onchange="selectApiProviderModel(this)" aria-label="选择模型" ${options.length ? "" : "disabled"}>
-      <option value="">选择模型</option>
+    const selectPlaceholder = options.length ? "选择模型" : (probeDone ? "未探测到可选模型" : "先探测模型");
+    const selectHtml = `<select id="${escapeAttr(selectId)}" data-provider-model-select onchange="selectApiProviderModel(this)" aria-label="选择模型">
+      <option value="">${escapeHtml(selectPlaceholder)}</option>
       ${options.map(item => {
         const id = typeof item === "string" ? item : (item.id || item.model || "");
         const label = typeof item === "string" ? item : (item.label || item.source || "");
@@ -354,7 +355,7 @@ function renderApiProviderCard(field, provider, index) {
         const text = label && label !== id ? `${id} · ${label}` : id;
         return `<option value="${escapeAttr(id)}" ${value===id?'selected':''}>${escapeHtml(text)}</option>`;
       }).join("")}
-    </select>` : "";
+    </select>`;
     const modelSource = provider._model_source ? `，来源：${provider._model_source}` : "";
     const sourceHint = options.length
       ? `<div class="muted" style="font-size:11px">已探测 ${options.length} 个模型${escapeHtml(modelSource)}，可输入筛选或手填。</div>`
