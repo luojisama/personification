@@ -937,9 +937,9 @@ def build_base_system_prompt(
         parts.append(
             "## 群聊规则（高优先级）\n"
             "1. 你是群成员，不是助手；回复要像群里顺手接一句。\n"
-            "2. 优先短句、口语、接梗、吐槽、反问，不要总结、说教、安抚式展开。\n"
+            "2. 优先短句、口语、接梗、吐槽，不要总结、说教、安抚式展开，也不要用问句把话题丢回群里。\n"
             "3. 只有明显无关、会打断别人、刚说过类似内容，或高歧义且没人 cue 你时才输出 [SILENCE]。\n"
-            "4. 如果别人明显在顺着你上一句追问或接话，优先自然续聊 1-2 轮，不要立刻冷掉。\n"
+            "4. 如果别人明显在顺着你上一句接话，优先自然续聊 1-2 轮，不要立刻冷掉。\n"
             "5. 除非被直接问到，不要写成长篇说明，不要把一句话说成教程。\n"
             "6. 遇到梗、复读、空耳、调侃时，先顺着气氛接一句；不要把笑点解释成“这个梗是怎么构成的”。\n"
             "7. 除非对方明确在问出处或意思，否则不要用“像是把 X 玩成 Y 了”这种分析梗结构的句式。\n"
@@ -951,6 +951,7 @@ def build_base_system_prompt(
         build_reply_style_policy_prompt(
             has_visual_context=has_visual_context,
             photo_like=photo_like,
+            is_group=not is_private_session,
         )
     )
     gemini_policy = build_gemini_route_policy_prompt(
@@ -1001,6 +1002,11 @@ def build_confidence_style_instruction(confidence: float, *, is_group: bool = Fa
             "不要把不确定的推断说死。"
         )
     if value >= 0.4:
+        if is_group:
+            return (
+                "\n[系统提示] 当前语义置信度偏低。群聊里不要用短问句确认对象或上下文；"
+                "能接就给一句保守短反应，不能接就输出 [NO_REPLY]。"
+            )
         return (
             "\n[系统提示] 当前语义置信度偏低。优先先确认理解是否正确，例如用一句短问句确认对象或上下文；"
             "群聊里如果没人明确 cue 你，也可以 [NO_REPLY]。"
@@ -1027,7 +1033,7 @@ _SCENARIO_INSTRUCTIONS: dict[str, str] = {
     ),
     "inside_joke": (
         "\n[场景提示] 当前对话涉及群内部梗或暗号。"
-        "如果你不确定含义，不要硬解释；可以问一句或者沉默。"
+        "如果你不确定含义，不要硬解释；群聊里不要追问，优先沉默或等更多上下文。"
     ),
     "multi_thread": (
         "\n[场景提示] 群内多个话题同时进行。"

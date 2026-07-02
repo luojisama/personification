@@ -73,7 +73,7 @@ def test_finalize_agent_reply_quality_does_not_rewrite_local_normalization() -> 
 
 
 def test_finalize_agent_reply_quality_rewrites_observer_posture_once() -> None:
-    caller = _RewriteCaller("那先别绕远，卡在哪个点了")
+    caller = _RewriteCaller("那先别绕远，就看当前这个点")
     traces: list[dict[str, object]] = []
 
     result = asyncio.run(
@@ -86,13 +86,47 @@ def test_finalize_agent_reply_quality_rewrites_observer_posture_once() -> None:
         )
     )
 
-    assert result.text == "那先别绕远，卡在哪个点了"
+    assert result.text == "那先别绕远，就看当前这个点"
     assert len(caller.calls) == 1
     assert caller.calls[0]["tools"] == []
     assert result.quality_checks[-1]["action"] == "rewritten"
     assert result.quality_checks[-1]["revision_attempted"] is True
     assert "formulaic_tic" in result.quality_checks[-1]["flags"]
     assert "action=rewritten" in traces[-1]["detail"]
+
+
+def test_finalize_agent_reply_quality_rewrites_group_visible_question() -> None:
+    caller = _RewriteCaller("地点没拿准，我别乱猜天气。")
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result("你那边是哪儿啊，我别乱猜天气。"),
+            tool_caller=caller,
+            messages=[{"role": "system", "content": "你是群友。"}],
+            reason="unit",
+        )
+    )
+
+    assert result.text == "地点没拿准，我别乱猜天气。"
+    assert len(caller.calls) == 1
+    assert "group_visible_question" in result.quality_checks[-1]["flags"]
+    assert result.quality_checks[-1]["action"] == "rewritten"
+
+
+def test_finalize_agent_reply_quality_silences_group_question_rewrite_if_still_question() -> None:
+    caller = _RewriteCaller("你那边是哪儿啊")
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result("你那边是哪儿啊，我别乱猜天气。"),
+            tool_caller=caller,
+            messages=[{"role": "system", "content": "你是群友。"}],
+            reason="unit",
+        )
+    )
+
+    assert result.text == "[SILENCE]"
+    assert result.quality_checks[-1]["action"] == "silenced"
 
 
 def test_finalize_agent_reply_quality_silences_when_revision_still_ooc() -> None:

@@ -202,6 +202,7 @@ def test_turn_plan_timeout_tries_secondary_llm_before_metadata(monkeypatch) -> N
     assert timeout_s == 1.0
     assert source == "secondary"
     assert elapsed_ms >= 0
-    assert plan.reply_action == "ask_clarify"
+    assert plan.reply_action == "reply"
+    assert plan.speech_act == "answer"
     assert plan.output_mode == "chat_answer"
     assert getattr(plan, "llm_source", "") == "secondary"

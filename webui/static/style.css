@@ -66,7 +66,7 @@ main { padding:20px 26px; max-width:1400px; width:100%; min-width:0; }
 .api-provider-field label { color:var(--muted); font-size:12px; }
 .api-provider-field input, .api-provider-field select { width:100%; min-width:0; }
 .api-provider-model-field { grid-column:span 2; }
-.api-provider-model-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px; align-items:center; }
+.api-provider-model-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(140px,0.55fr) auto; gap:6px; align-items:center; }
 .api-provider-actions { display:flex; gap:8px; flex-wrap:wrap; }
 .api-pool-empty { border:1px dashed var(--line); border-radius:8px; padding:14px; color:var(--muted); }
 .btn { padding:7px 14px; border-radius:6px; border:1px solid var(--line); background:var(--panel); color:var(--text); transition:border-color .15s, background .15s, transform .05s; }

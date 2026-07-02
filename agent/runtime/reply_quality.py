@@ -8,6 +8,7 @@ from ...core.metrics import record_counter, record_timing
 from ...core.reply_text_policy import (
     looks_like_formulaic_reply_tic,
     looks_like_markdown_reply,
+    looks_like_question_reply,
     normalize_visible_reply_text,
 )
 from ...core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
@@ -15,7 +16,7 @@ from .final_synthesis import AgentResult
 
 
 _CONTROL_REPLIES = frozenset({"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"})
-_REVISION_FLAGS = frozenset({"formulaic_tic", "style_risk"})
+_REVISION_FLAGS = frozenset({"formulaic_tic", "style_risk", "group_visible_question"})
 
 
 def _is_control_reply(text: str) -> bool:
@@ -58,7 +59,18 @@ def _copy_result_with_quality(
     )
 
 
-def _quality_flags(raw_text: str, visible_text: str) -> list[str]:
+def _looks_like_group_context(messages: list[dict[str, Any]], turn_plan: Any = None) -> bool:
+    for message in list(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        content = str(message.get("content", "") or "")
+        if any(marker in content for marker in ("群聊", "群里", "群友", "群成员")):
+            return True
+    target = str(getattr(turn_plan, "message_target", "") or "").strip()
+    return target in {"broadcast", "someone_else", "uncertain"}
+
+
+def _quality_flags(raw_text: str, visible_text: str, *, is_group: bool = False) -> list[str]:
     flags: list[str] = []
     if looks_like_markdown_reply(raw_text):
         flags.append("markdown_or_trace")
@@ -66,6 +78,8 @@ def _quality_flags(raw_text: str, visible_text: str) -> list[str]:
         flags.append("formulaic_tic")
     if is_agent_reply_ooc(raw_text):
         flags.append("style_risk")
+    if is_group and looks_like_question_reply(visible_text or raw_text):
+        flags.append("group_visible_question")
     if visible_text != str(raw_text or "").strip():
         flags.append("normalized")
     if not visible_text:
@@ -121,7 +135,8 @@ async def finalize_agent_reply_quality(
 
     stripped = strip_response_control_markers(raw_text)
     visible_text = normalize_visible_reply_text(stripped)
-    flags = _quality_flags(raw_text, visible_text)
+    is_group = _looks_like_group_context(messages, turn_plan)
+    flags = _quality_flags(raw_text, visible_text, is_group=is_group)
     action = "accept"
     final_text = visible_text or raw_text
     revision_attempted = False
@@ -134,13 +149,21 @@ async def finalize_agent_reply_quality(
             persona_system=_persona_system_from_messages(messages),
             timeout=8.0,
             output_mode=_turn_plan_output_mode(turn_plan),
+            avoid_questions=is_group,
         )
         candidate = normalize_visible_reply_text(strip_response_control_markers(rewritten)) if rewritten else ""
         if candidate:
-            final_text = candidate
-            action = "rewritten"
+            if is_group and looks_like_question_reply(candidate):
+                final_text = "[SILENCE]"
+                action = "silenced"
+            else:
+                final_text = candidate
+                action = "rewritten"
 
     if not final_text:
+        final_text = "[SILENCE]"
+        action = "silenced"
+    elif is_group and "group_visible_question" in flags and action != "rewritten":
         final_text = "[SILENCE]"
         action = "silenced"
     elif flags and is_agent_reply_ooc(final_text):

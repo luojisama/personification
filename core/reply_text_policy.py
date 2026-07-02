@@ -49,6 +49,9 @@ _FORMULAIC_ZHEYE_RE = re.compile(
     r"(?P<core>[^，,。！？!?；;\n]{1,16}?)"
     r"(?=$|[，,。！？!?；;\n…])"
 )
+_QUESTION_MARK_RE = re.compile(r"[?？]")
+_QUESTION_TAIL_RE = re.compile(r"(?:吗|嘛|么|呢|哪(?:儿|里|边)?|什么|怎么|咋|谁|几|多少)[啊呀嘛呢吧呗]*[。.!！…~～]*$")
+_QUESTION_FRAGMENT_RE = re.compile(r"(?:哪儿|哪里|哪边|什么|怎么|咋|谁|几[点个]?|多少)[啊呀嘛呢吧呗]*[，,。！？!?]")
 
 
 def _polish_formulaic_core(core: str) -> str:
@@ -205,9 +208,27 @@ def looks_like_markdown_reply(text: Any) -> bool:
     )
 
 
+def looks_like_question_reply(text: Any) -> bool:
+    """Detect surface-form questions in final visible text.
+
+    This is an output-style guard only; it does not infer user intent or route
+    dialogue semantics.
+    """
+
+    raw = re.sub(r"\s+", "", str(text or "").strip())
+    if not raw:
+        return False
+    return bool(
+        _QUESTION_MARK_RE.search(raw)
+        or _QUESTION_TAIL_RE.search(raw)
+        or _QUESTION_FRAGMENT_RE.search(raw)
+    )
+
+
 __all__ = [
     "looks_like_formulaic_reply_tic",
     "looks_like_markdown_reply",
+    "looks_like_question_reply",
     "looks_like_visible_reasoning_trace",
     "normalize_visible_reply_text",
 ]

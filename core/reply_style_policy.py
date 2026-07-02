@@ -71,6 +71,16 @@ def build_conversational_baseline_policy_prompt() -> str:
     )
 
 
+def build_group_no_question_policy_prompt() -> str:
+    return (
+        "## 群聊不追问纪律（高优先级）\n"
+        "- 群聊里的可见回复默认不要用问句、反问句、澄清问句或征询式结尾来把话题丢回给群友。\n"
+        "- 信息不足时，优先根据上下文和工具在内部判断；仍不足就给一句保守短反应、承认不确定，或直接 [NO_REPLY]，不要追着群友补材料。\n"
+        "- 即使被 cue 到，也尽量给一个具体建议、态度或选择；确实缺少关键条件时短句说明缺什么即可，不要连续发问。\n"
+        "- 私聊可以自然追问；这条纪律只约束群聊可见输出。"
+    )
+
+
 def build_observer_posture_policy_prompt() -> str:
     return (
         "## 观望与旁白式发言纪律（高优先级）\n"
@@ -97,6 +107,7 @@ def build_reply_style_policy_prompt(
     *,
     has_visual_context: bool = False,
     photo_like: bool = False,
+    is_group: bool = False,
 ) -> str:
     lines = [
         "## 人设与输出风格（高优先级）",
@@ -108,6 +119,8 @@ def build_reply_style_policy_prompt(
         "- 不要频繁用“。。。/……/...”拖长停顿或凑语气；一句话能自然说完就直接说完。",
     ]
     lines.append(build_conversational_baseline_policy_prompt())
+    if is_group:
+        lines.append(build_group_no_question_policy_prompt())
     lines.append(build_formulaic_tic_policy_prompt())
     lines.append(build_context_continuity_policy_prompt())
     lines.append(build_observer_posture_policy_prompt())
@@ -122,9 +135,12 @@ def build_speech_act_policy_prompt(
     speech_act: str = "",
     output_mode: str = "",
     session_goal: str = "",
+    is_group: bool = False,
 ) -> str:
     normalized = str(speech_act or "").strip()
     if normalized not in _SPEECH_ACT_DESCRIPTIONS:
+        normalized = "participate"
+    if is_group and normalized in {"ask_followup", "clarify"}:
         normalized = "participate"
     lines = [
         "## 本轮说话动作（高优先级）",
@@ -136,6 +152,10 @@ def build_speech_act_policy_prompt(
     goal = str(session_goal or "").strip()
     if goal:
         lines.append(f"- 本轮短目标：{goal[:80]}。围绕这个目标说，别把上下文扩写成旁白。")
+    if is_group:
+        lines.append(
+            "- 当前是群聊：不要把 ask_followup/clarify 写成可见问句；改为具体短反应、保守判断或 [NO_REPLY]。"
+        )
     return "\n".join(lines)
 
 
@@ -155,6 +175,7 @@ __all__ = [
     "build_context_continuity_policy_prompt",
     "build_direct_visual_identity_guard",
     "build_formulaic_tic_policy_prompt",
+    "build_group_no_question_policy_prompt",
     "build_media_understanding_output_policy_prompt",
     "build_observer_posture_policy_prompt",
     "build_reply_style_policy_prompt",

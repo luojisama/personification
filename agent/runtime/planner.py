@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from ...core.reply_style_policy import build_context_continuity_policy_prompt
+from ...core.reply_style_policy import build_context_continuity_policy_prompt, build_group_no_question_policy_prompt
 
 
 ReplyAction = Literal["reply", "silence", "ask_clarify"]
@@ -267,6 +267,29 @@ def metadata_fallback_turn_plan(
     )
 
 
+def apply_group_no_question_turn_policy(
+    plan: TurnPlan,
+    *,
+    is_group: bool = False,
+    is_direct_mention: bool = False,
+) -> TurnPlan:
+    if not is_group:
+        return plan
+    if plan.reply_action != "ask_clarify" and plan.speech_act not in {"ask_followup", "clarify"}:
+        return plan
+    target = str(plan.message_target or "").strip()
+    if is_direct_mention or target == "bot":
+        plan.reply_action = "reply"
+        plan.speech_act = "answer" if plan.output_mode in {"chat_answer", "structured_help", "source_summary"} else "participate"
+        plan.session_goal = "群聊不追问，给出保守短反应"
+        return plan
+    plan.reply_action = "silence"
+    plan.speech_act = "silence"
+    plan.output_mode = "chat_short"
+    plan.session_goal = "群聊不追问，等待更多上下文"
+    return plan
+
+
 def _render_tool_metadata(tools: list[dict[str, Any]] | None) -> str:
     lines: list[str] = []
     for tool in list(tools or [])[:24]:
@@ -357,6 +380,7 @@ async def plan_turn_with_llm(
         "7. output_mode 控制最终回复长度和形态：chat_short 接梗，chat_answer 普通答，structured_help 教程，source_summary 检索摘要，qzone_reply 空间评论。\n"
         "8. fallback 只能当模型不确定时参考，不要机械照抄。\n"
         f"{build_context_continuity_policy_prompt()}\n"
+        f"{build_group_no_question_policy_prompt() if is_group else ''}\n"
     )
     user_content = (
         f"场景：{'群聊' if is_group else '私聊'}\n"
@@ -389,7 +413,11 @@ async def plan_turn_with_llm(
         )
         payload = extract_json_payload(str(getattr(response, "content", "") or ""))
         plan = parse_turn_plan_payload(payload) if payload is not None else None
-        return plan or fallback
+        return apply_group_no_question_turn_policy(
+            plan or fallback,
+            is_group=is_group,
+            is_direct_mention=is_direct_mention,
+        )
     except Exception:
         return fallback
 
@@ -496,6 +524,7 @@ __all__ = [
     "OUTPUT_MODE_LENGTHS",
     "SpeechAct",
     "TurnPlan",
+    "apply_group_no_question_turn_policy",
     "default_speech_act",
     "extract_json_payload",
     "metadata_fallback_turn_plan",

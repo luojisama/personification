@@ -58,6 +58,14 @@ def test_conversational_baseline_discourages_echo_and_empty_affirmation() -> Non
     assert "宁可少说或沉默" in prompt
 
 
+def test_group_reply_style_discourages_visible_questions() -> None:
+    prompt = reply_style_policy.build_reply_style_policy_prompt(is_group=True)
+
+    assert "群聊不追问纪律" in prompt
+    assert "不要用问句、反问句、澄清问句" in prompt
+    assert "不要追着群友补材料" in prompt
+
+
 def test_speech_act_policy_guides_discussion_action() -> None:
     prompt = reply_style_policy.build_speech_act_policy_prompt(
         speech_act="participate",
@@ -71,6 +79,16 @@ def test_speech_act_policy_guides_discussion_action() -> None:
     assert "不要只附和、感叹、复述" in prompt
     assert "output_mode=chat_short" in prompt
     assert "接住当前话题" in prompt
+
+
+def test_speech_act_policy_converts_group_clarify_to_participate() -> None:
+    prompt = reply_style_policy.build_speech_act_policy_prompt(
+        speech_act="clarify",
+        is_group=True,
+    )
+
+    assert "speech_act=participate" in prompt
+    assert "不要把 ask_followup/clarify 写成可见问句" in prompt
 
 
 def test_speech_act_policy_for_action_prefers_silence_after_send() -> None:

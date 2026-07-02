@@ -942,7 +942,7 @@ async def process_yaml_response_logic(
                 "如果上下文和现有证据不足，请优先承认不确定；群聊里若没人明确在 cue 你，且这轮明显会打断别人时，也可以保持沉默。"
             )
         if arbitration == "clarify":
-            system_prompt += "\n- 这轮高歧义但对方像是在直接问你，优先用一句短澄清问句确认对象。"
+            system_prompt += "\n- 这轮高歧义但对方像是在直接问你；群聊里不要用澄清问句追问，能判断就给保守短反应，不能判断就保持沉默。"
     system_prompt += (
         "\n\n## 基础输出规则\n"
         "- 输出纯文本，禁止使用 markdown 格式（不要用 **加粗**、*斜体*、# 标题、- 列表符号、`代码块`等）。\n"
@@ -955,12 +955,14 @@ async def process_yaml_response_logic(
     system_prompt += "\n\n" + build_reply_style_policy_prompt(
         has_visual_context=bool(last_images),
         photo_like=photo_like,
+        is_group=not is_private_session,
     )
     turn_plan_for_prompt = getattr(semantic_frame, "turn_plan", turn_plan)
     system_prompt += "\n\n" + build_speech_act_policy_prompt(
         speech_act=str(getattr(turn_plan_for_prompt, "speech_act", getattr(semantic_frame, "speech_act", "")) or ""),
         output_mode=str(getattr(turn_plan_for_prompt, "output_mode", getattr(semantic_frame, "output_mode", "")) or ""),
         session_goal=str(getattr(turn_plan_for_prompt, "session_goal", getattr(semantic_frame, "session_goal", "")) or ""),
+        is_group=not is_private_session,
     )
     primary_api_type, primary_model = primary_route_signature(
         plugin_config,

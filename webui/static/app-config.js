@@ -336,17 +336,29 @@ function renderApiProviderCard(field, provider, index) {
     const value = provider.model == null ? "" : provider.model;
     const options = Array.isArray(provider._model_options) ? provider._model_options : [];
     const listId = `api-provider-models-${field}-${index}`.replace(/[^\w-]/g, "-");
+    const selectId = `${listId}-select`;
     const optionHtml = options.map(item => {
       const id = typeof item === "string" ? item : (item.id || item.model || "");
       const label = typeof item === "string" ? item : (item.label || item.source || "");
       if (!id) return "";
       return `<option value="${escapeAttr(id)}" label="${escapeAttr(label || id)}"></option>`;
     }).join("");
+    const selectHtml = options.length ? `<select id="${escapeAttr(selectId)}" data-provider-model-select onchange="selectApiProviderModel(this)" aria-label="选择模型">
+      <option value="">选择模型</option>
+      ${options.map(item => {
+        const id = typeof item === "string" ? item : (item.id || item.model || "");
+        const label = typeof item === "string" ? item : (item.label || item.source || "");
+        if (!id) return "";
+        const text = label && label !== id ? `${id} · ${label}` : id;
+        return `<option value="${escapeAttr(id)}" ${value===id?'selected':''}>${escapeHtml(text)}</option>`;
+      }).join("")}
+    </select>` : "";
     const sourceHint = options.length ? `<div class="muted" style="font-size:11px">已探测 ${options.length} 个模型，可输入筛选或手填。</div>` : "";
     return `<div class="api-provider-field api-provider-model-field" data-provider-field="model">
       <label>模型</label>
       <div class="api-provider-model-row">
-        <input type="text" list="${escapeAttr(listId)}" value="${escapeAttr(value)}" placeholder="先探测或手动填写模型 ID">
+        <input type="text" data-provider-model-input list="${escapeAttr(listId)}" value="${escapeAttr(value)}" placeholder="先探测或手动填写模型 ID" oninput="syncApiProviderModelSelect(this)">
+        ${selectHtml}
         <button class="btn small" type="button" onclick="probeApiProviderModels('${escapeAttr(field)}', ${index}, this)">探测模型</button>
       </div>
       <datalist id="${escapeAttr(listId)}">${optionHtml}</datalist>
@@ -384,6 +396,23 @@ function renderApiProviderCard(field, provider, index) {
       </div>
     </div>
   </div>`;
+}
+
+function selectApiProviderModel(select) {
+  const field = select.closest("[data-provider-field]");
+  const input = field ? field.querySelector("[data-provider-model-input]") : null;
+  if (!input) return;
+  input.value = select.value || "";
+  markDirty(input);
+}
+
+function syncApiProviderModelSelect(input) {
+  markDirty(input);
+  const field = input.closest("[data-provider-field]");
+  const select = field ? field.querySelector("[data-provider-model-select]") : null;
+  if (!select) return;
+  const hasOption = Array.from(select.options).some(option => option.value === input.value);
+  select.value = hasOption ? input.value : "";
 }
 
 function readApiPoolEditor(field) {

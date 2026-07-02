@@ -448,7 +448,7 @@ def _build_image_only_context_message(
         )
     return (
         "[对方发送了一张图片，是在对你说话。"
-        "如果看不清内容，先接文字或最近上下文；信息不足时请对方补一句，不要硬猜图里是什么]"
+        "如果看不清内容，先接文字或最近上下文；信息不足时给一句保守短反应或保持安静，不要追问图里是什么]"
     )
 
 
@@ -1447,6 +1447,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         speech_act=str(getattr(turn_plan, "speech_act", getattr(semantic_frame, "speech_act", "")) or ""),
         output_mode=str(getattr(turn_plan, "output_mode", getattr(semantic_frame, "output_mode", "")) or ""),
         session_goal=str(getattr(turn_plan, "session_goal", getattr(semantic_frame, "session_goal", "")) or ""),
+        is_group=not is_private_session,
     )
     _msg_target = state.get("message_target")
     if _msg_target in (TARGET_OTHERS, TARGET_UNCLEAR):
@@ -1486,10 +1487,16 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     if qq_expression_enabled(runtime.plugin_config):
         system_prompt += "\n\n" + build_qq_expression_prompt()
     if arbitration == "clarify":
-        system_prompt += (
-            "\n[系统提示] 这轮高歧义但对方像是在直接问你。"
-            "优先用一句短澄清问句确认对象或范围，不要硬猜。"
-        )
+        if is_private_session:
+            system_prompt += (
+                "\n[系统提示] 这轮高歧义但对方像是在直接问你。"
+                "优先用一句短澄清问句确认对象或范围，不要硬猜。"
+            )
+        else:
+            system_prompt += (
+                "\n[系统提示] 这轮高歧义但对方像是在直接问你。"
+                "群聊里不要用澄清问句追问；能判断就给一句保守短反应，不能判断就输出 [NO_REPLY]。"
+            )
     if has_photo_input:
         system_prompt += (
             "\n[系统提示] 当前消息包含真实照片。照片只作为内部语境帮助你理解对方的情绪、关系和意图；"

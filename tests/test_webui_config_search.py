@@ -30,6 +30,9 @@ def test_config_api_pool_model_probe_dropdown_is_present() -> None:
     assert "probeApiProviderModels" in app_config_js
     assert 'api("/config/provider-models"' in app_config_js
     assert "<datalist" in app_config_js
+    assert "data-provider-model-select" in app_config_js
+    assert "selectApiProviderModel" in app_config_js
+    assert "syncApiProviderModelSelect" in app_config_js
     assert "探测模型" in app_config_js
     assert "sanitizeApiProvider" in app_config_js
     assert "delete out._model_options" in app_config_js

@@ -71,3 +71,9 @@ def test_looks_like_markdown_reply_detects_visible_formatting() -> None:
     assert reply_text_policy.looks_like_markdown_reply("- 22日雨\n- 23日雨")
     assert reply_text_policy.looks_like_markdown_reply("Step 1: 检查\nStep 2: 输出")
     assert not reply_text_policy.looks_like_markdown_reply("广州这两天雨多，伞别离手")
+
+
+def test_looks_like_question_reply_detects_visible_questions() -> None:
+    assert reply_text_policy.looks_like_question_reply("你那边是哪儿啊，我别乱猜天气。")
+    assert reply_text_policy.looks_like_question_reply("这个几点开始？")
+    assert not reply_text_policy.looks_like_question_reply("地点没拿准，我别乱猜天气。")

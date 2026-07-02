@@ -111,8 +111,40 @@ def test_turn_planner_prompt_includes_media_context_discipline() -> None:
     assert "speech_act" in system_prompt
     assert "优先保持沉默" in system_prompt
     assert "优先回答文字 cue 或最近同一话题" in system_prompt
+    assert "群聊不追问纪律" in system_prompt
     assert plan.reply_action == "silence"
     assert plan.speech_act == "silence"
+
+
+def test_group_turn_plan_converts_clarify_to_statement_policy() -> None:
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"reply_action":"ask_clarify","memory_need":"light","research_need":"low",'
+                        '"vision_need":"none","qzone_continue":false,"output_mode":"chat_answer",'
+                        '"speech_act":"clarify","tool_intent":["lookup_web"],"ambiguity_level":"medium",'
+                        '"message_target":"bot","session_goal":"先确认对象","confidence":0.8,"reason":"缺对象"}'
+                    )
+                },
+            )()
+
+    plan = asyncio.run(
+        planner.plan_turn_with_llm(
+            "这个现在是什么情况",
+            is_group=True,
+            is_direct_mention=True,
+            message_target="bot",
+            tool_caller=_Caller(),
+        )
+    )
+
+    assert plan.reply_action == "reply"
+    assert plan.speech_act == "answer"
+    assert "不追问" in plan.session_goal
 
 
 def test_turn_plan_defaults_speech_act_from_output_and_tools() -> None:
