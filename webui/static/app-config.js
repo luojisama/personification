@@ -279,6 +279,42 @@ function sanitizeApiProviders(providers) {
   return (providers || []).map(p => sanitizeApiProvider(p));
 }
 
+const apiProviderModelProbeCache = new Map();
+
+function apiProviderProbeCacheKey(field, index, provider) {
+  const parts = [
+    field,
+    index,
+    provider && provider.name,
+    provider && provider.api_type,
+    provider && provider.api_url,
+    provider && provider.auth_path,
+    provider && provider.project,
+  ];
+  return parts.map(item => String(item == null ? "" : item)).join("\u001f");
+}
+
+function cacheApiProviderModelProbe(field, index, provider) {
+  const key = apiProviderProbeCacheKey(field, index, provider);
+  if (provider && Array.isArray(provider._model_options)) {
+    apiProviderModelProbeCache.set(key, {
+      models: normalizeApiProviderModels(provider._model_options),
+      source: String(provider._model_source || ""),
+      done: provider._model_probe_done === true,
+    });
+  }
+}
+
+function hydrateApiProviderModelProbe(field, index, provider) {
+  const cloned = {...(provider || {})};
+  const cached = apiProviderModelProbeCache.get(apiProviderProbeCacheKey(field, index, cloned));
+  if (!cached) return cloned;
+  cloned._model_options = cached.models;
+  cloned._model_source = cached.source;
+  cloned._model_probe_done = cached.done;
+  return cloned;
+}
+
 function defaultApiProvider(index) {
   return {
     name: `provider_${index + 1}`,
@@ -375,7 +411,9 @@ function updateApiProviderModelControls(card, models, source) {
 }
 
 function renderApiPoolEditor(e) {
-  const providers = normalizeApiPoolValue(e.current);
+  const providers = normalizeApiPoolValue(e.current).map((provider, index) =>
+    hydrateApiProviderModelProbe(e.field_name, index, provider || {})
+  );
   const cards = providers.map((provider, index) => renderApiProviderCard(e.field_name, provider || {}, index)).join("");
   return `<div class="api-pool-editor" data-api-pool-field="${escapeAttr(e.field_name)}">
     <div class="api-provider-actions">
@@ -389,6 +427,7 @@ function renderApiPoolEditor(e) {
 }
 
 function renderApiProviderCard(field, provider, index) {
+  provider = hydrateApiProviderModelProbe(field, index, provider || {});
   const apiType = provider.api_type || "openai";
   const choices = ["openai", "openai_codex", "gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code"];
   const typeOptions = choices.map(c => `<option value="${escapeAttr(c)}" ${apiType===c?'selected':''}>${escapeHtml(c)}</option>`).join("");
@@ -571,6 +610,7 @@ async function probeApiProviderModels(field, index, btn) {
     });
     const models = normalizeApiProviderModels(result.models);
     providers[index] = {...provider, _model_options: models, _model_source: result.source || "", _model_probe_done: true};
+    cacheApiProviderModelProbe(field, index, providers[index]);
     const card = btn ? btn.closest(".api-provider-card") : null;
     updateApiProviderModelControls(card, models, result.source || "");
     writeApiPoolEditor(field, providers);

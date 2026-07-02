@@ -35,6 +35,9 @@ def test_config_api_pool_model_probe_dropdown_is_present() -> None:
     assert "syncApiProviderModelSelect" in app_config_js
     assert "normalizeApiProviderModels" in app_config_js
     assert "updateApiProviderModelControls" in app_config_js
+    assert "apiProviderModelProbeCache" in app_config_js
+    assert "hydrateApiProviderModelProbe" in app_config_js
+    assert "cacheApiProviderModelProbe(field, index, providers[index])" in app_config_js
     assert "item.id || item.model || item.name || item.slug" in app_config_js
     assert "探测模型" in app_config_js
     assert "sanitizeApiProvider" in app_config_js
