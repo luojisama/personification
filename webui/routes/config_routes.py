@@ -131,6 +131,8 @@ def _normalize_openai_models_base(raw: str) -> str:
     base = _normalize_base_url(raw, "https://api.openai.com/v1")
     if _is_google_gemini_base(base) and not _has_openai_path(base):
         return f"{_normalize_gemini_models_base(base)}/openai"
+    if not re.search(r"/v\d+(?:beta)?(?:/|$)", base):
+        return f"{base.rstrip('/')}/v1"
     return base.rstrip("/")
 
 
@@ -152,6 +154,9 @@ def _models_endpoint(provider: dict[str, Any]) -> tuple[str, dict[str, str], dic
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
             return f"{base}/models", headers, {}, "gemini_openai"
         base = _normalize_gemini_models_base(raw_base)
+        if not _is_google_gemini_base(base):
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            return f"{base}/models", headers, {}, "gemini"
         params = {"key": api_key} if api_key else {}
         return f"{base}/models", {}, params, "gemini"
     base = _normalize_openai_models_base(str(provider.get("api_url", "") or ""))
@@ -198,6 +203,15 @@ def _parse_model_list(api_type: str, payload: Any) -> list[dict[str, str]]:
     return models
 
 
+def _add_configured_model(models: list[dict[str, str]], provider: dict[str, Any]) -> None:
+    model_id = str(provider.get("model", "") or "").strip()
+    if not model_id:
+        return
+    if any(str(item.get("id", "") or "").lower() == model_id.lower() for item in models):
+        return
+    models.append({"id": model_id, "label": model_id, "source": "current_config"})
+
+
 async def _probe_http_models(provider: dict[str, Any]) -> tuple[list[dict[str, str]], str]:
     url, headers, params, parser_api_type = _models_endpoint(provider)
     proxy = str(provider.get("proxy", "") or "").strip()
@@ -210,6 +224,7 @@ async def _probe_http_models(provider: dict[str, Any]) -> tuple[list[dict[str, s
         response.raise_for_status()
         payload = response.json()
     models = _parse_model_list(parser_api_type, payload)
+    _add_configured_model(models, provider)
     return models, url + (("?" + urlencode({"key": "***"})) if params.get("key") else "")
 
 

@@ -115,13 +115,20 @@ def test_config_provider_models_probes_openai_compatible(_runtime_context, monke
     _login_as_admin(client, _runtime_context)
     res = client.post(
         "/personification/api/config/provider-models",
-        json={"provider": {"api_type": "openai", "api_url": "https://example.test/v1", "api_key": "sk-test"}},
+        json={
+            "provider": {
+                "api_type": "openai",
+                "api_url": "https://example.test/v1",
+                "api_key": "sk-test",
+                "model": "gpt-current-alias",
+            }
+        },
     )
     assert res.status_code == 200, res.text
     body = res.json()
     assert captured["url"] == "https://example.test/v1/models"
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
-    assert [m["id"] for m in body["models"]] == ["gpt-test", "gpt-test-mini"]
+    assert [m["id"] for m in body["models"]] == ["gpt-current-alias", "gpt-test", "gpt-test-mini"]
 
 
 def test_config_provider_models_probes_gemini_openai_compatible(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
@@ -242,6 +249,26 @@ def test_config_provider_models_endpoint_normalizes_version_paths() -> None:
     assert openai_gemini_headers["Authorization"] == "Bearer gk-openai"
     assert openai_gemini_params == {}
     assert openai_gemini_parser == "openai"
+
+    zellon_openai_url, zellon_openai_headers, zellon_openai_params, zellon_openai_parser = (  # noqa: SLF001
+        config_routes._models_endpoint(
+            {"api_type": "openai", "api_url": "https://anti.zellon.me", "api_key": "sk-zellon"}
+        )
+    )
+    assert zellon_openai_url == "https://anti.zellon.me/v1/models"
+    assert zellon_openai_headers["Authorization"] == "Bearer sk-zellon"
+    assert zellon_openai_params == {}
+    assert zellon_openai_parser == "openai"
+
+    zellon_gemini_url, zellon_gemini_headers, zellon_gemini_params, zellon_gemini_parser = (  # noqa: SLF001
+        config_routes._models_endpoint(
+            {"api_type": "gemini", "api_url": "https://anti.zellon.me", "api_key": "sk-zellon"}
+        )
+    )
+    assert zellon_gemini_url == "https://anti.zellon.me/v1beta/models"
+    assert zellon_gemini_headers["Authorization"] == "Bearer sk-zellon"
+    assert zellon_gemini_params == {}
+    assert zellon_gemini_parser == "gemini"
 
 
 def test_persona_prompt_inline_system_prompt(_runtime_context) -> None:
