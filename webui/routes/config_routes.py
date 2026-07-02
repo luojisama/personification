@@ -197,24 +197,64 @@ async def _probe_http_models(provider: dict[str, Any]) -> tuple[list[dict[str, s
 
 
 def _cached_cli_models(runtime: Any, provider: dict[str, Any]) -> list[dict[str, str]]:
+    from ...core.provider_router import normalize_api_type
     from ...core.model_router import collect_available_models
 
+    def _add_model(
+        bucket: list[dict[str, str]],
+        seen: set[str],
+        model: Any,
+        label: str = "",
+        source: str = "local_cache",
+    ) -> None:
+        model_id = str(model or "").strip()
+        if not model_id:
+            return
+        key = model_id.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        bucket.append({"id": model_id, "label": label or model_id, "source": source})
+
+    api_type = normalize_api_type(provider.get("api_type"))
+    models: list[dict[str, str]] = []
+    seen: set[str] = set()
     try:
         items = collect_available_models(
             getattr(runtime, "plugin_config", None),
             get_configured_api_providers=lambda: [provider],
         )
-        return [
-            {
-                "id": str(item.get("model", "") or "").strip(),
-                "label": str(item.get("model", "") or "").strip(),
-                "source": str(item.get("source", "") or "local_cache"),
-            }
-            for item in items
-            if str(item.get("model", "") or "").strip()
-        ]
+        for item in items:
+            model_id = str(item.get("model", "") or "").strip()
+            _add_model(models, seen, model_id, model_id, str(item.get("source", "") or "local_cache"))
     except Exception:
-        return []
+        pass
+
+    # CLI/OAuth providers do not expose a remote /models endpoint. Mirror the
+    # same fallback chain the runtime caller uses so WebUI probing still yields
+    # a real selectable list even before any local cache exists.
+    configured_model = str(provider.get("model", "") or "").strip()
+    try:
+        from ...skills.skillpacks.tool_caller.scripts import impl as tool_caller_impl
+
+        if api_type == "gemini_cli":
+            for model in tool_caller_impl._gemini_cli_model_candidates(configured_model):
+                _add_model(models, seen, model, model, "gemini_cli_candidates")
+        elif api_type == "antigravity_cli":
+            for model in tool_caller_impl._antigravity_cli_model_candidates(configured_model):
+                _add_model(models, seen, model, model, "antigravity_cli_candidates")
+    except Exception:
+        pass
+
+    if api_type == "openai_codex":
+        _add_model(models, seen, configured_model or "gpt-5.3-codex", source="codex_default")
+    elif api_type == "gemini_cli":
+        _add_model(models, seen, configured_model or "auto-gemini-3", source="gemini_cli_default")
+    elif api_type == "antigravity_cli":
+        _add_model(models, seen, configured_model or "auto-gemini-3", source="antigravity_cli_default")
+    elif api_type == "claude_code":
+        _add_model(models, seen, configured_model or "claude-opus-4-7", source="claude_code_default")
+    return models
 
 
 def _entry_to_view(entry: Any, *, plugin_config: Any) -> ConfigEntryView:

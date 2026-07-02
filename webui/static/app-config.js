@@ -271,6 +271,7 @@ function sanitizeApiProvider(provider) {
   const out = {...(provider || {})};
   delete out._model_options;
   delete out._model_source;
+  delete out._model_probe_done;
   return out;
 }
 
@@ -343,7 +344,8 @@ function renderApiProviderCard(field, provider, index) {
       if (!id) return "";
       return `<option value="${escapeAttr(id)}" label="${escapeAttr(label || id)}"></option>`;
     }).join("");
-    const selectHtml = options.length ? `<select id="${escapeAttr(selectId)}" data-provider-model-select onchange="selectApiProviderModel(this)" aria-label="选择模型">
+    const probeDone = provider._model_probe_done === true;
+    const selectHtml = options.length || probeDone ? `<select id="${escapeAttr(selectId)}" data-provider-model-select onchange="selectApiProviderModel(this)" aria-label="选择模型" ${options.length ? "" : "disabled"}>
       <option value="">选择模型</option>
       ${options.map(item => {
         const id = typeof item === "string" ? item : (item.id || item.model || "");
@@ -353,7 +355,10 @@ function renderApiProviderCard(field, provider, index) {
         return `<option value="${escapeAttr(id)}" ${value===id?'selected':''}>${escapeHtml(text)}</option>`;
       }).join("")}
     </select>` : "";
-    const sourceHint = options.length ? `<div class="muted" style="font-size:11px">已探测 ${options.length} 个模型，可输入筛选或手填。</div>` : "";
+    const modelSource = provider._model_source ? `，来源：${provider._model_source}` : "";
+    const sourceHint = options.length
+      ? `<div class="muted" style="font-size:11px">已探测 ${options.length} 个模型${escapeHtml(modelSource)}，可输入筛选或手填。</div>`
+      : (probeDone ? `<div class="muted" style="font-size:11px">未探测到可选模型，仍可手动填写模型 ID。</div>` : "");
     return `<div class="api-provider-field api-provider-model-field" data-provider-field="model">
       <label>模型</label>
       <div class="api-provider-model-row">
@@ -505,8 +510,8 @@ async function probeApiProviderModels(field, index, btn) {
       headers:{"content-type":"application/json"},
       body: JSON.stringify({provider}),
     });
-    const models = result.models || [];
-    providers[index] = {...provider, _model_options: models};
+    const models = Array.isArray(result.models) ? result.models : [];
+    providers[index] = {...provider, _model_options: models, _model_source: result.source || "", _model_probe_done: true};
     writeApiPoolEditor(field, providers);
     alertFlash(models.length ? "ok" : "err", models.length ? `已探测 ${models.length} 个模型` : "未探测到模型，请手动填写");
   } catch (e) {

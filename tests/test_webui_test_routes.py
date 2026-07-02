@@ -124,6 +124,27 @@ def test_config_provider_models_probes_openai_compatible(_runtime_context, monke
     assert [m["id"] for m in body["models"]] == ["gpt-test", "gpt-test-mini"]
 
 
+def test_config_provider_models_cli_routes_return_selectable_candidates(_runtime_context) -> None:  # noqa: ANN001
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    cases = {
+        "gemini_cli": "gemini-2.5-flash",
+        "antigravity_cli": "gemini-3.5-flash-low",
+        "claude_code": "claude-opus-4-7",
+        "openai_codex": "gpt-5.3-codex",
+    }
+    for api_type, expected in cases.items():
+        res = client.post(
+            "/personification/api/config/provider-models",
+            json={"provider": {"api_type": api_type, "model": ""}},
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["source"] == "local_cache"
+        assert expected in {item["id"] for item in body["models"]}
+
+
 def test_config_provider_models_endpoint_normalizes_version_paths() -> None:
     config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
 

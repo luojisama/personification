@@ -36,3 +36,6 @@ def test_config_api_pool_model_probe_dropdown_is_present() -> None:
     assert "探测模型" in app_config_js
     assert "sanitizeApiProvider" in app_config_js
     assert "delete out._model_options" in app_config_js
+    assert "delete out._model_probe_done" in app_config_js
+    assert "_model_probe_done: true" in app_config_js
+    assert "未探测到可选模型" in app_config_js
