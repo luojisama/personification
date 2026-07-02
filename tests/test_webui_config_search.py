@@ -33,6 +33,9 @@ def test_config_api_pool_model_probe_dropdown_is_present() -> None:
     assert "data-provider-model-select" in app_config_js
     assert "selectApiProviderModel" in app_config_js
     assert "syncApiProviderModelSelect" in app_config_js
+    assert "normalizeApiProviderModels" in app_config_js
+    assert "updateApiProviderModelControls" in app_config_js
+    assert "item.id || item.model || item.name || item.slug" in app_config_js
     assert "探测模型" in app_config_js
     assert "sanitizeApiProvider" in app_config_js
     assert "delete out._model_options" in app_config_js
@@ -41,3 +44,4 @@ def test_config_api_pool_model_probe_dropdown_is_present() -> None:
     assert "先探测模型" in app_config_js
     assert "未探测到可选模型" in app_config_js
     assert "options.length || probeDone" not in app_config_js
+    assert "const models = normalizeApiProviderModels(result.models)" in app_config_js

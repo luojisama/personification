@@ -306,6 +306,74 @@ function apiProviderFieldVisible(apiType, field) {
   return !["auth_path", "project"].includes(field);
 }
 
+function apiProviderModelId(item) {
+  if (typeof item === "string") return item.trim();
+  if (!item || typeof item !== "object") return "";
+  return String(item.id || item.model || item.name || item.slug || "").trim();
+}
+
+function apiProviderModelLabel(item, id) {
+  if (typeof item === "string") return id;
+  if (!item || typeof item !== "object") return id;
+  return String(item.label || item.display_name || item.displayName || item.source || id || "").trim();
+}
+
+function normalizeApiProviderModels(items) {
+  const rawItems = Array.isArray(items) ? items : [];
+  const seen = new Set();
+  const models = [];
+  rawItems.forEach(item => {
+    const id = apiProviderModelId(item);
+    if (!id) return;
+    const key = id.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    const label = apiProviderModelLabel(item, id);
+    models.push({id, label});
+  });
+  return models;
+}
+
+function renderApiProviderModelDatalistOptions(models) {
+  return normalizeApiProviderModels(models).map(item =>
+    `<option value="${escapeAttr(item.id)}" label="${escapeAttr(item.label || item.id)}"></option>`
+  ).join("");
+}
+
+function renderApiProviderModelSelectOptions(models, value) {
+  return normalizeApiProviderModels(models).map(item => {
+    const text = item.label && item.label !== item.id ? `${item.id} · ${item.label}` : item.id;
+    return `<option value="${escapeAttr(item.id)}" ${value===item.id?'selected':''}>${escapeHtml(text)}</option>`;
+  }).join("");
+}
+
+function updateApiProviderModelControls(card, models, source) {
+  if (!card) return;
+  const field = card.querySelector('[data-provider-field="model"]');
+  if (!field) return;
+  const input = field.querySelector("[data-provider-model-input]");
+  const select = field.querySelector("[data-provider-model-select]");
+  const datalistId = input ? input.getAttribute("list") : "";
+  const datalist = datalistId ? document.getElementById(datalistId) : null;
+  const currentValue = input ? input.value : "";
+  const normalized = normalizeApiProviderModels(models);
+  if (select) {
+    const placeholder = normalized.length ? "选择模型" : "未探测到可选模型";
+    select.innerHTML = `<option value="">${escapeHtml(placeholder)}</option>${renderApiProviderModelSelectOptions(normalized, currentValue)}`;
+    select.value = normalized.some(item => item.id === currentValue) ? currentValue : "";
+  }
+  if (datalist) datalist.innerHTML = renderApiProviderModelDatalistOptions(normalized);
+  const oldHint = field.querySelector("[data-provider-model-hint]");
+  if (oldHint) oldHint.remove();
+  const hint = document.createElement("div");
+  hint.className = "muted";
+  hint.dataset.providerModelHint = "1";
+  hint.style.fontSize = "11px";
+  const modelSource = source ? `，来源：${source}` : "";
+  hint.textContent = normalized.length ? `已探测 ${normalized.length} 个模型${modelSource}，可输入筛选或手填。` : "未探测到可选模型，仍可手动填写模型 ID。";
+  field.appendChild(hint);
+}
+
 function renderApiPoolEditor(e) {
   const providers = normalizeApiPoolValue(e.current);
   const cards = providers.map((provider, index) => renderApiProviderCard(e.field_name, provider || {}, index)).join("");
@@ -338,28 +406,18 @@ function renderApiProviderCard(field, provider, index) {
     const options = Array.isArray(provider._model_options) ? provider._model_options : [];
     const listId = `api-provider-models-${field}-${index}`.replace(/[^\w-]/g, "-");
     const selectId = `${listId}-select`;
-    const optionHtml = options.map(item => {
-      const id = typeof item === "string" ? item : (item.id || item.model || "");
-      const label = typeof item === "string" ? item : (item.label || item.source || "");
-      if (!id) return "";
-      return `<option value="${escapeAttr(id)}" label="${escapeAttr(label || id)}"></option>`;
-    }).join("");
+    const normalizedOptions = normalizeApiProviderModels(options);
+    const optionHtml = renderApiProviderModelDatalistOptions(normalizedOptions);
     const probeDone = provider._model_probe_done === true;
-    const selectPlaceholder = options.length ? "选择模型" : (probeDone ? "未探测到可选模型" : "先探测模型");
+    const selectPlaceholder = normalizedOptions.length ? "选择模型" : (probeDone ? "未探测到可选模型" : "先探测模型");
     const selectHtml = `<select id="${escapeAttr(selectId)}" data-provider-model-select onchange="selectApiProviderModel(this)" aria-label="选择模型">
       <option value="">${escapeHtml(selectPlaceholder)}</option>
-      ${options.map(item => {
-        const id = typeof item === "string" ? item : (item.id || item.model || "");
-        const label = typeof item === "string" ? item : (item.label || item.source || "");
-        if (!id) return "";
-        const text = label && label !== id ? `${id} · ${label}` : id;
-        return `<option value="${escapeAttr(id)}" ${value===id?'selected':''}>${escapeHtml(text)}</option>`;
-      }).join("")}
+      ${renderApiProviderModelSelectOptions(normalizedOptions, value)}
     </select>`;
     const modelSource = provider._model_source ? `，来源：${provider._model_source}` : "";
-    const sourceHint = options.length
-      ? `<div class="muted" style="font-size:11px">已探测 ${options.length} 个模型${escapeHtml(modelSource)}，可输入筛选或手填。</div>`
-      : (probeDone ? `<div class="muted" style="font-size:11px">未探测到可选模型，仍可手动填写模型 ID。</div>` : "");
+    const sourceHint = normalizedOptions.length
+      ? `<div class="muted" data-provider-model-hint style="font-size:11px">已探测 ${normalizedOptions.length} 个模型${escapeHtml(modelSource)}，可输入筛选或手填。</div>`
+      : (probeDone ? `<div class="muted" data-provider-model-hint style="font-size:11px">未探测到可选模型，仍可手动填写模型 ID。</div>` : "");
     return `<div class="api-provider-field api-provider-model-field" data-provider-field="model">
       <label>模型</label>
       <div class="api-provider-model-row">
@@ -511,8 +569,10 @@ async function probeApiProviderModels(field, index, btn) {
       headers:{"content-type":"application/json"},
       body: JSON.stringify({provider}),
     });
-    const models = Array.isArray(result.models) ? result.models : [];
+    const models = normalizeApiProviderModels(result.models);
     providers[index] = {...provider, _model_options: models, _model_source: result.source || "", _model_probe_done: true};
+    const card = btn ? btn.closest(".api-provider-card") : null;
+    updateApiProviderModelControls(card, models, result.source || "");
     writeApiPoolEditor(field, providers);
     alertFlash(models.length ? "ok" : "err", models.length ? `已探测 ${models.length} 个模型` : "未探测到模型，请手动填写");
   } catch (e) {
