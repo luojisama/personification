@@ -17,7 +17,7 @@ _CURRENT_TRACE_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 _ELAPSED_RE = re.compile(r"(?:elapsed_ms=|耗时\s*)(\d{1,9})(?:\s*ms)?", re.I)
 _SIGNAL_KEY_RE = re.compile(
-    r"(?:^|\s)(action|speech_act|output|intent|ambiguity|tool|budget|suggested_steps|actual_steps|suggested_seconds|actual_seconds|topic_thread|topic_speaker|reply_to_bot|bot_in_thread|parallel_threads|participants|reason|source|flags|revision|chars)=([^\s]+)"
+    r"(?:^|\s)(action|speech_act|output|intent|ambiguity|tool|budget|suggested_steps|actual_steps|suggested_seconds|actual_seconds|topic_thread|topic_speaker|reply_to_bot|bot_in_thread|parallel_threads|participants|reason|source|flags|revision|chars|address_mode|quote|at|target|query|finish)=([^\s]+)"
 )
 
 
@@ -262,6 +262,73 @@ def _signals_from_detail(detail: Any) -> dict[str, str]:
     return signals
 
 
+def _compact_value(value: Any, *, limit: int = 80) -> str:
+    text = sanitize_text(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
+def _append_unique(values: list[str], value: Any, *, limit: int = 80, max_items: int = 6) -> None:
+    text = _compact_value(value, limit=limit)
+    if text and text not in values and len(values) < max_items:
+        values.append(text)
+
+
+def _build_agent_inspection(items: list[dict[str, Any]]) -> dict[str, Any]:
+    understanding: dict[str, str] = {}
+    addressing: dict[str, str] = {}
+    tools: list[dict[str, Any]] = []
+    questions: list[str] = []
+    quality: list[str] = []
+    budget: dict[str, str] = {}
+    for item in items:
+        key = str(item.get("key") or "")
+        detail = str(item.get("detail") or "")
+        signals = item.get("signals") if isinstance(item.get("signals"), dict) else {}
+        if key in {"semantic_frame", "agent_intent", "agent_result"}:
+            for name in ("intent", "ambiguity", "speech_act", "output"):
+                if signals.get(name) and name not in understanding:
+                    understanding[name] = str(signals[name])
+        if key == "addressing_plan":
+            for name in ("address_mode", "source", "quote", "at", "target"):
+                if signals.get(name):
+                    addressing[name] = str(signals[name])
+        if key in {"agent_tool_call", "agent_tool_result"} or item.get("category") == "tool":
+            tool_name = str(signals.get("tool") or "")
+            if not tool_name:
+                match = re.search(r"(?:tool|name)=([^\s]+)", detail)
+                tool_name = str(match.group(1)) if match else ""
+            entry = {
+                "stage": "result" if "result" in key else "call",
+                "tool": _compact_value(tool_name or item.get("label") or key, limit=48),
+                "status": str(item.get("status") or ""),
+                "detail": _compact_value(detail, limit=180),
+                "duration_ms": item.get("duration_ms"),
+            }
+            if entry["tool"] or entry["detail"]:
+                tools.append(entry)
+        if key in {"agent_query_rewrite", "agent_budget", "semantic_frame"}:
+            for name in ("query", "reason"):
+                if signals.get(name):
+                    _append_unique(questions, signals[name])
+            if key == "agent_query_rewrite" and detail:
+                _append_unique(questions, detail, limit=140)
+        if key == "agent_reply_quality":
+            _append_unique(quality, detail, limit=160)
+        if key == "agent_budget":
+            for name in ("budget", "suggested_steps", "actual_steps", "suggested_seconds", "actual_seconds", "source"):
+                if signals.get(name):
+                    budget[name] = str(signals[name])
+    return {
+        "understanding": understanding,
+        "addressing": addressing,
+        "tools": tools[:10],
+        "questions": questions[:6],
+        "quality": quality[:4],
+        "budget": budget,
+    }
+
+
 def build_process_view(trace: dict[str, Any] | None, *, logs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Build a WebUI-safe process timeline.
 
@@ -358,6 +425,7 @@ def build_process_view(trace: dict[str, Any] | None, *, logs: list[dict[str, Any
             "slow_stages": slow_items[:5],
         },
         "items": items,
+        "agent_inspection": _build_agent_inspection(items),
     }
 
 

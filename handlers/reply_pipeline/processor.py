@@ -1211,6 +1211,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 f"intent={message_intent} ambiguity={getattr(intent_decision, 'ambiguity_level', '')} "
                 f"silence={getattr(intent_decision, 'recommend_silence', False)} "
                 f"speech_act={getattr(semantic_frame, 'speech_act', '-') or '-'} "
+                f"address_mode={getattr(semantic_frame, 'address_mode', '-') or '-'} "
                 f"emotion={getattr(semantic_frame, 'bot_emotion', '')} "
                 f"output={getattr(semantic_frame, 'output_mode', '') or '-'} "
                 f"elapsed_ms={int((time.monotonic() - started_at) * 1000)}"
@@ -1335,6 +1336,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 user_id=bot_self_id,
                 reply_to_msg_id=incoming_relation_metadata.get("message_id"),
                 reply_to_user_id=user_id,
+                mentioned_ids=[],
                 source_kind="bot_reply",
             )
         return True
@@ -2227,44 +2229,34 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         )
                         segments[typo_idx] = mutated
 
-                # @ / 引用 由 LLM 决定（semantic_frame.address_mode）更拟人；
-                # auto 或私聊时回退到原有启发式规则，行为平滑兜底。
-                _addr_mode = str(getattr(semantic_frame, "address_mode", "auto") or "auto").lower()
-                if not is_private_session and _addr_mode in ("none", "at", "quote", "at_quote"):
-                    _quote_enabled = bool(
-                        getattr(runtime.plugin_config, "personification_humanize_quote_reply_enabled", True)
+                address_plan = _humanize.decide_addressing(
+                    plugin_config=runtime.plugin_config,
+                    state=state,
+                    event=event,
+                    group_id=str(group_id),
+                    user_id=user_id,
+                    is_private=is_private_session,
+                    has_newer_batch=_batch_has_newer_messages(state),
+                    address_mode=getattr(semantic_frame, "address_mode", "auto"),
+                )
+                quote_message_id = address_plan.get("quote_message_id")
+                at_target = address_plan.get("at_target")
+                try:
+                    from ...core import reply_turn_trace
+
+                    reply_turn_trace.record_stage(
+                        key="addressing_plan",
+                        label="发送指向",
+                        status="info",
+                        detail=(
+                            f"address_mode={address_plan.get('mode') or 'none'} "
+                            f"source={address_plan.get('source') or '-'} "
+                            f"quote={bool(quote_message_id)} at={bool(at_target)} "
+                            f"target={str(at_target or '-')}"
+                        ),
                     )
-                    _at_enabled = bool(
-                        getattr(runtime.plugin_config, "personification_humanize_at_enabled", True)
-                    )
-                    quote_message_id = (
-                        getattr(event, "message_id", None)
-                        if (_addr_mode in ("quote", "at_quote") and _quote_enabled)
-                        else None
-                    )
-                    at_target = (
-                        user_id
-                        if (_addr_mode in ("at", "at_quote") and _at_enabled and user_id)
-                        else None
-                    )
-                else:
-                    quote_message_id = _humanize.should_quote_reply(
-                        plugin_config=runtime.plugin_config,
-                        state=state,
-                        event=event,
-                        group_id=str(group_id),
-                        user_id=user_id,
-                        is_private=is_private_session,
-                        has_newer_batch=_batch_has_newer_messages(state),
-                    )
-                    at_target = _humanize.should_at_target(
-                        plugin_config=runtime.plugin_config,
-                        state=state,
-                        event=event,
-                        user_id=user_id,
-                        is_private=is_private_session,
-                        quote_message_id=quote_message_id,
-                    )
+                except Exception:
+                    pass
 
                 humanize_typing = _humanize.typing_enabled(runtime.plugin_config)
                 typing_cps = float(
@@ -2336,16 +2328,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         continue
                     if i == 0:
                         try:
-                            seg_cls = runtime.message_segment_cls
-                            prefix = None
-                            if quote_message_id is not None:
-                                prefix = seg_cls.reply(int(quote_message_id))
-                            if at_target:
-                                at_seg = seg_cls.at(int(at_target))
-                                prefix = at_seg if prefix is None else (prefix + at_seg)
-                                outgoing = prefix + seg_cls.text(" ") + outgoing
-                            elif prefix is not None:
-                                outgoing = prefix + outgoing
+                            outgoing = _humanize.prepend_addressing_segments(
+                                message_segment_cls=runtime.message_segment_cls,
+                                outgoing=outgoing,
+                                quote_message_id=quote_message_id,
+                                at_target=at_target,
+                            )
                         except Exception:
                             outgoing = rendered_seg.message
                     send_result = await bot.send(event, outgoing)
@@ -2475,7 +2463,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     "message_id": sent_message_id or None,
                     "reply_to_msg_id": incoming_relation_metadata.get("message_id"),
                     "reply_to_user_id": user_id,
-                    "mentioned_ids": [],
+                    "mentioned_ids": [str(at_target)] if at_target else [],
                     "is_at_bot": False,
                 }
             )

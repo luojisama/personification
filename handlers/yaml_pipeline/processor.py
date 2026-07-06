@@ -96,6 +96,7 @@ from ..reply_pipeline.pipeline_emotion import (
     schedule_inner_state_update_after_reply,
     semantic_frame_timeout_hint,
 )
+from ..reply_pipeline import humanize as _humanize
 from ..reply_pipeline.pipeline_context import (
     batch_has_newer_messages as _shared_batch_has_newer_messages,
     clone_tool_registry as _clone_tool_registry,
@@ -1737,6 +1738,29 @@ async def process_yaml_response_logic(
 
     sent_as_tts = False
     sent_message_id = ""
+    address_plan = _humanize.decide_addressing(
+        plugin_config=plugin_config,
+        state={"batched_events": list(batched_events or [])},
+        event=event,
+        group_id=group_id,
+        user_id=user_id,
+        is_private=is_private_session,
+        has_newer_batch=_has_newer_batch_now(),
+        address_mode=getattr(semantic_frame, "address_mode", "auto"),
+    )
+    quote_message_id = address_plan.get("quote_message_id")
+    at_target = address_plan.get("at_target")
+    _trace_stage(
+        key="addressing_plan",
+        label="发送指向",
+        status="info",
+        detail=(
+            f"address_mode={address_plan.get('mode') or 'none'} "
+            f"source={address_plan.get('source') or '-'} "
+            f"quote={bool(quote_message_id)} at={bool(at_target)} "
+            f"target={str(at_target or '-')}"
+        ),
+    )
     if (
         assistant_text
         and not has_generated_image
@@ -1801,7 +1825,7 @@ async def process_yaml_response_logic(
                     if not merged_segments and text.strip():
                         merged_segments = [text]
 
-                    for seg in merged_segments:
+                    for seg_index, seg in enumerate(merged_segments):
                         if seg.strip():
                             if _has_newer_batch_now():
                                 logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
@@ -1816,7 +1840,18 @@ async def process_yaml_response_logic(
                             )
                             if not rendered_seg.message:
                                 continue
-                            send_result = await bot.send(event, rendered_seg.message)
+                            outgoing = rendered_seg.message
+                            if not sent_message_id and seg_index == 0:
+                                try:
+                                    outgoing = _humanize.prepend_addressing_segments(
+                                        message_segment_cls=message_segment_cls,
+                                        outgoing=outgoing,
+                                        quote_message_id=quote_message_id,
+                                        at_target=at_target,
+                                    )
+                                except Exception:
+                                    outgoing = rendered_seg.message
+                            send_result = await bot.send(event, outgoing)
                             if not sent_message_id:
                                 sent_message_id = extract_send_message_id(send_result)
                             await asyncio.sleep(random.uniform(0.4, 1.0))
@@ -1872,7 +1907,17 @@ async def process_yaml_response_logic(
                     logger=logger,
                 )
                 if rendered_reply.message:
-                    send_result = await bot.send(event, rendered_reply.message)
+                    outgoing = rendered_reply.message
+                    try:
+                        outgoing = _humanize.prepend_addressing_segments(
+                            message_segment_cls=message_segment_cls,
+                            outgoing=outgoing,
+                            quote_message_id=quote_message_id,
+                            at_target=at_target,
+                        )
+                    except Exception:
+                        outgoing = rendered_reply.message
+                    send_result = await bot.send(event, outgoing)
                 else:
                     send_result = None
                 if send_result is not None and not sent_message_id:
@@ -1903,7 +1948,7 @@ async def process_yaml_response_logic(
         message_id=sent_message_id or None,
         reply_to_msg_id=str(getattr(event, "message_id", "") or "") or None,
         reply_to_user_id=None if is_private_session else user_id,
-        mentioned_ids=[],
+        mentioned_ids=[str(at_target)] if at_target else [],
         is_at_bot=False,
     )
     try:
@@ -1974,6 +2019,7 @@ async def process_yaml_response_logic(
             message_id=sent_message_id or None,
             reply_to_msg_id=str(getattr(event, "message_id", "") or "") or None,
             reply_to_user_id=user_id,
+            mentioned_ids=[str(at_target)] if at_target else [],
             source_kind="bot_reply",
         )
     record_counter(

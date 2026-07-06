@@ -203,3 +203,47 @@ def test_reply_turn_trace_extracts_topic_state_signals(_db_tmp) -> None:
     assert view["items"][0]["signals"]["topic_thread"] == "ta"
     assert view["items"][0]["signals"]["reply_to_bot"] == "true"
     assert view["items"][0]["signals"]["parallel_threads"] == "2"
+
+
+def test_reply_turn_trace_builds_agent_inspection_summary(_db_tmp) -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")
+    logs.clear_all()
+    trace_id = traces.start_trace(session_type="group", group_id="123", user_id="456")
+    token = traces.set_current_trace_id(trace_id)
+    try:
+        traces.record_stage(
+            key="semantic_frame",
+            label="语义帧",
+            status="ok",
+            detail="intent=lookup ambiguity=low speech_act=source_summary output=source_summary address_mode=quote",
+        )
+        traces.record_stage(
+            key="agent_query_rewrite",
+            label="Agent 查询改写",
+            status="ok",
+            detail="query=大鸟居明日香_动画_剧情 elapsed_ms=20",
+        )
+        traces.record_stage(
+            key="agent_tool_call",
+            label="Agent 工具调用",
+            status="ok",
+            detail="tool=resolve_acg_entity elapsed_ms=120",
+        )
+        traces.record_stage(
+            key="addressing_plan",
+            label="发送指向",
+            status="info",
+            detail="address_mode=quote source=semantic_frame quote=true at=false target=-",
+        )
+        traces.finish_trace(outcome="ok", diagnosis_code="ok")
+    finally:
+        traces.reset_current_trace_id(token)
+
+    view = traces.build_process_view(traces.get_trace(trace_id), logs=logs.query_recent(trace_id=trace_id))
+    inspection = view["agent_inspection"]
+
+    assert inspection["understanding"]["intent"] == "lookup"
+    assert inspection["addressing"]["address_mode"] == "quote"
+    assert inspection["tools"][0]["tool"] == "resolve_acg_entity"
+    assert inspection["questions"][0] == "大鸟居明日香_动画_剧情"

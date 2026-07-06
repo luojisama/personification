@@ -301,6 +301,9 @@ async def infer_turn_semantic_frame_with_llm(
         "或群友分享了图片/视频/链接而你无法确定其内容或出处（例如配图只配了一个短词、视频/分享卡片标题里有陌生词），"
         "倾向 chat_intent=lookup（先查证再接话），不要只因为是短句、像闲聊就判成 banter——"
         "先搞懂群友在聊什么再接话才更像真人。\n"
+        "1c. 如果最新消息说“这个动画/这段动画/这个角色/这张图/这个场面”等指代词，且最近上下文刚出现 ACG 角色、作品、抽卡结果、图片或卡面，"
+        "要把它当成在评价那个具体对象；优先 chat_intent=lookup、domain_focus=game_anime，查清角色/作品/剧情或动画出处后再参与讨论。"
+        "不要只回“确实挺强/有那味了”这类空泛附和。\n"
         "2. plugin_question 只在对方确实在问 bot/插件/本地实现/配置/能力时使用。"
         "用户让 bot 直接生成、绘制、制作图片/海报/头像/梗图时，chat_intent=image_generation，不要标成 plugin_question；"
         "用户让 bot 联网搜已有图片、壁纸、插画、图包或参考图时，chat_intent=lookup，不要误判成生成图片。\n"
@@ -335,6 +338,8 @@ async def infer_turn_semantic_frame_with_llm(
         "- quote：需要精确指向对方那条具体消息（尤其是隔了好几条、容易认错）时，引用回复\n"
         "- at_quote：两者都用（少用，仅在既要指人又要指那条消息时）\n"
         "- auto：拿不准就给 auto，交给默认规则。私聊一律 none/auto。\n"
+        "当你是在接一条 @bot 的群消息但回复内容实际需要承接前面某个群友/插件输出时，优先选择 quote 或 at_quote 指向当前触发消息，"
+        "不要让后续群友误以为你在无对象地泛泛评价。\n"
         f"{build_context_continuity_policy_prompt()}\n"
     )
     user_content = (

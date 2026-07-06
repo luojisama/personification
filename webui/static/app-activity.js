@@ -154,6 +154,12 @@ function traceSignalLabel(key) {
     flags: "质量标记",
     revision: "修订",
     chars: "字数",
+    address_mode: "指向",
+    quote: "引用",
+    at: "@",
+    target: "目标",
+    query: "查询",
+    finish: "结束",
   })[key] || key;
 }
 
@@ -176,6 +182,7 @@ function renderTraceProcess() {
   const process = detail.process || {};
   const summary = process.summary || {};
   const items = process.items || [];
+  const inspection = process.agent_inspection || {};
   const categoryLabel = {
     agent: "Agent",
     tool: "工具",
@@ -202,6 +209,61 @@ function renderTraceProcess() {
     ["错误", summary.error_count || 0],
     ["日志", summary.log_count || 0],
   ].map(([label, value]) => `<div class="trace-stat"><strong>${escapeHtml(String(value))}</strong><span>${escapeHtml(label)}</span></div>`).join("");
+  const understanding = inspection.understanding || {};
+  const addressing = inspection.addressing || {};
+  const budget = inspection.budget || {};
+  const readableKeys = {
+    intent: "理解",
+    ambiguity: "歧义",
+    speech_act: "说话动作",
+    output: "输出模式",
+    address_mode: "发送方式",
+    source: "来源",
+    quote: "引用",
+    at: "@",
+    target: "目标",
+    budget: "预算",
+    suggested_steps: "建议步数",
+    actual_steps: "实际步数",
+    suggested_seconds: "建议秒数",
+    actual_seconds: "实际秒数",
+  };
+  const kvTags = (obj) => Object.entries(obj || {})
+    .filter(([_, value]) => value)
+    .map(([key, value]) => `<span class="tag" title="${escapeAttr(key)}">${escapeHtml(readableKeys[key] || key)}: ${escapeHtml(String(value))}</span>`)
+    .join("");
+  const toolRows = (inspection.tools || []).map(tool => `<tr>
+    <td><span class="tag">${escapeHtml(tool.stage === "result" ? "结果" : "调用")}</span></td>
+    <td><code>${escapeHtml(tool.tool || "-")}</code></td>
+    <td>${escapeHtml(tool.status || "-")}</td>
+    <td>${tool.duration_ms != null ? `${Number(tool.duration_ms || 0).toLocaleString()}ms` : "-"}</td>
+    <td>${escapeHtml(tool.detail || "")}</td>
+  </tr>`).join("");
+  const questionTags = (inspection.questions || []).map(q => `<span class="tag">${escapeHtml(q)}</span>`).join("");
+  const qualityTags = (inspection.quality || []).map(q => `<div class="trace-step-detail">${escapeHtml(q)}</div>`).join("");
+  const inspectionBlock = `<div class="trace-inspection-grid">
+    <div class="trace-inspection-card">
+      <h3>怎么理解发言</h3>
+      <div class="trace-step-signals">${kvTags(understanding) || '<span class="muted">暂无语义信号</span>'}</div>
+    </div>
+    <div class="trace-inspection-card">
+      <h3>怎么发送</h3>
+      <div class="trace-step-signals">${kvTags(addressing) || '<span class="muted">默认直发</span>'}</div>
+    </div>
+    <div class="trace-inspection-card">
+      <h3>想查什么</h3>
+      <div class="trace-step-signals">${questionTags || '<span class="muted">本轮未记录检索计划</span>'}</div>
+    </div>
+    <div class="trace-inspection-card">
+      <h3>预算</h3>
+      <div class="trace-step-signals">${kvTags(budget) || '<span class="muted">暂无预算信号</span>'}</div>
+    </div>
+  </div>
+  <details class="trace-tool-detail" ${toolRows ? "open" : ""}>
+    <summary>工具调用明细（${Number((inspection.tools || []).length || 0)}）</summary>
+    ${toolRows ? `<table><thead><tr><th>阶段</th><th>工具</th><th>状态</th><th>耗时</th><th>脱敏摘要</th></tr></thead><tbody>${toolRows}</tbody></table>` : '<p class="muted">本轮未调用工具。</p>'}
+  </details>
+  ${qualityTags ? `<details class="trace-tool-detail"><summary>回复质量闭环</summary>${qualityTags}</details>` : ""}`;
   const timeline = items.map(item => {
     const meta = statusMeta[String(item.status || "info").toLowerCase()] || statusMeta.info;
     const duration = item.duration_ms != null ? `${Number(item.duration_ms || 0).toLocaleString()}ms` : "";
@@ -232,6 +294,7 @@ function renderTraceProcess() {
     </div>
     <p class="muted" style="font-size:12px;margin:8px 0 12px">展示的是可审计的运行阶段、耗时、工具名和脱敏摘要，不包含模型隐藏推理或完整工具结果。</p>
     <div class="trace-stat-grid">${statCards}</div>
+    ${inspectionBlock}
     ${slow ? `<div class="trace-slow"><span class="muted">较慢阶段</span>${slow}</div>` : ""}
     <div class="trace-timeline">${timeline || '<p class="muted">该 trace 暂无阶段记录。</p>'}</div>
   </div>`;
