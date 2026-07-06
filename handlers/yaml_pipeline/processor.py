@@ -548,6 +548,13 @@ async def process_yaml_response_logic(
             detail={"reason": reason},
         )
 
+    _trace_stage(
+        key="incoming_message",
+        label="收到消息",
+        status="info",
+        detail=str(raw_message_text or "")[:500],
+    )
+
     now = get_current_time()
     week_days = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     weekday_str = week_days[now.weekday()]
@@ -2034,6 +2041,12 @@ async def process_yaml_response_logic(
         scene="private" if is_private_session else "group",
     )
     _trace_stage(
+        key="outgoing_message",
+        label="发送消息",
+        status="ok",
+        detail=str(assistant_history_text or "")[:500],
+    )
+    _trace_stage(
         key="yaml_reply_success",
         label="YAML 回复完成",
         status="ok",
@@ -2046,6 +2059,8 @@ async def process_yaml_response_logic(
             "reply_chars": len(assistant_history_text),
             "tts": bool(sent_as_tts),
             "sticker": bool(stickers_sent),
+            "incoming_text": str(raw_message_text or history_last_text or trigger_reason or "")[:500],
+            "outgoing_text": str(assistant_history_text or "")[:500],
         },
     )
 

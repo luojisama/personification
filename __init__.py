@@ -634,6 +634,18 @@ async def _load_custom_skills() -> None:
         )
     else:
         logger.info("[custom_skills] 已加载内置 skill")
+    try:
+        from .core.tool_health import schedule_tool_health_probes
+
+        schedule_tool_health_probes(
+            registry=registry,
+            scheduler=scheduler,
+            logger=logger,
+            startup_delay_seconds=10.0,
+            timeout_seconds=20.0,
+        )
+    except Exception as exc:
+        logger.warning(f"[tool_health] 启动工具巡检失败：{exc}")
 
 
 @get_driver().on_startup

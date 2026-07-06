@@ -6,17 +6,30 @@ function renderSkills() {
     return hay.includes(search);
   }) : state.skills;
   const rows = items.map(s => {
-    const active = s.enabled_by_config && !s.user_disabled;
+    const active = s.enabled_by_config && !s.user_disabled && !s.health_disabled;
+    const health = s.health || {};
+    const healthChecked = Number(health.last_checked_at || 0);
+    const healthTime = healthChecked ? new Date(healthChecked * 1000).toLocaleString() : "";
+    const healthDetail = healthChecked
+      ? `<div class="muted" style="font-size:11.5px;margin-top:4px">巡检 ${escapeHtml(healthTime)} · ${Number(health.latency_ms || 0)}ms${health.last_error ? ` · ${escapeHtml(String(health.last_error).slice(0,120))}` : ""}</div>`
+      : "";
     const tags = [
       s.category ? `<span class="tag">${escapeHtml(s.category)}</span>` : "",
       s.source_kind ? `<span class="tag">${escapeHtml(s.source_kind)}</span>` : "",
       s.mcp ? '<span class="tag source-runtime_config">MCP</span>' : "",
       s.local === false && !s.mcp ? '<span class="tag">remote</span>' : "",
+      s.health_disabled ? '<span class="tag required">巡检屏蔽</span>' : "",
+      healthChecked && !s.health_disabled ? '<span class="tag">巡检可用</span>' : "",
     ].filter(Boolean).join("");
+    const status = active
+      ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">启用</span>'
+      : s.health_disabled
+        ? '<span class="tag required">临时屏蔽</span>'
+        : '<span class="tag" style="background:rgba(248,113,113,0.18);color:var(--danger)">禁用</span>';
     return `<tr>
       <td><strong>${escapeHtml(s.name)}</strong><div style="margin-top:4px">${tags}</div></td>
-      <td class="muted" style="font-size:12.5px">${escapeHtml((s.description||"").slice(0,140))}</td>
-      <td>${active ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">启用</span>' : '<span class="tag" style="background:rgba(248,113,113,0.18);color:var(--danger)">禁用</span>'}</td>
+      <td class="muted" style="font-size:12.5px">${escapeHtml((s.description||"").slice(0,140))}${healthDetail}</td>
+      <td>${status}</td>
       <td>
         <div class="toggle">
           <button class="${!s.user_disabled?'on':''}" onclick="toggleSkill('${escapeAttr(s.name)}', false)">开</button>
@@ -52,6 +65,7 @@ function renderSkillSummary() {
   return `<div class="skill-summary">
     <div class="skill-stat"><span class="muted">可用工具</span><strong>${Number(s.active || 0)}</strong><small>/ ${Number(s.total || 0)}</small></div>
     <div class="skill-stat"><span class="muted">用户禁用</span><strong>${Number(s.user_disabled || 0)}</strong></div>
+    <div class="skill-stat"><span class="muted">巡检屏蔽</span><strong>${Number(s.health_disabled || 0)}</strong><small>5h 复测</small></div>
     <div class="skill-stat"><span class="muted">远程源</span><strong>${Number(s.remote_sources_enabled || 0)}</strong><small>${remoteStatus}</small></div>
     <div class="skill-stat"><span class="muted">待审核</span><strong>${Number(s.remote_pending || 0)}</strong><small>${review}</small></div>
     <div class="skill-stat"><span class="muted">MCP</span><strong>${Number(s.mcp_tools || 0)}</strong><small>stdio</small></div>

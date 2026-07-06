@@ -743,6 +743,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         message_text = _fold_consecutive_sticker_placeholders(message_text)
         raw_message_text = message_text
         message_content = message_text.strip()
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.record_stage(
+                key="incoming_message",
+                label="收到消息",
+                status="info",
+                detail=(raw_message_text or message_content or "")[:500],
+            )
+        except Exception:
+            pass
         is_private_context = str(group_id).startswith(session.private_session_prefix)
         if isinstance(event, types.private_message_event_cls) and session.looks_like_private_command(message_content):
             runtime.logger.debug(f"拟人插件：私聊命令消息已跳过，用户 {user_id}")
@@ -2532,6 +2543,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             from ...core import reply_turn_trace
 
             reply_turn_trace.record_stage(
+                key="outgoing_message",
+                label="发送消息",
+                status="ok",
+                detail=str(final_visible_reply_text or "")[:500],
+            )
+            reply_turn_trace.record_stage(
                 key="reply_success",
                 label="回复完成",
                 status="ok",
@@ -2544,6 +2561,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     "reply_chars": len(final_visible_reply_text),
                     "tts": bool(sent_as_tts),
                     "sticker": bool(sticker_name),
+                    "incoming_text": str(raw_message_text or message_text or message_content or "")[:500],
+                    "outgoing_text": str(final_visible_reply_text or "")[:500],
                 },
             )
         except Exception:

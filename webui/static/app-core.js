@@ -24,7 +24,7 @@ let state = {
   stickers: null, stickerSearch: "", selectedSticker: null,
   theme: "dark", mobileNavOpen: false, eligibleAdmins: [],
   audit: null, auditFilter: "",
-  logs: null, logLevel: "", logQuery: "", logTraceId: "", traceDetail: null,
+  logs: null, traces: null, logLevel: "", logQuery: "", logTraceId: "", traceDetail: null, selectedTraceId: "",
   proactiveStats: null, proactiveRecent: null, proactiveScope: "",
 };
 
@@ -155,6 +155,8 @@ function loadingMessageForView(view) {
     plugin_manager: "正在检查插件更新...",
     persona_builder: "正在准备人设构建工具...",
     logs: "正在拉取插件日志...",
+    traces: "正在拉取消息 Trace...",
+    trace_detail: "正在打开 Trace 详情...",
     audit: "正在读取审计记录...",
     qq: "正在读取 QQ 账号信息...",
   })[view] || "正在加载页面...";
@@ -237,17 +239,17 @@ async function loadView() {
     } else if (state.view === "logs") {
       const qs = new URLSearchParams({ limit: "220" });
       if (state.logLevel) qs.set("level", state.logLevel);
-      if (state.logTraceId) qs.set("trace_id", state.logTraceId);
-      else if (state.logQuery) qs.set("q", state.logQuery);
-      const traceTask = state.logTraceId
-        ? api("/logs/trace/" + encodeURIComponent(state.logTraceId)).catch(e => ({ error: e.message }))
-        : Promise.resolve(null);
-      const [logs, trace] = await Promise.all([
-        api("/logs/recent?" + qs.toString()),
-        traceTask,
-      ]);
+      if (state.logQuery) qs.set("q", state.logQuery);
+      const logs = await api("/logs/recent?" + qs.toString());
       state.logs = logs;
-      state.traceDetail = trace;
+    } else if (state.view === "traces") {
+      state.traces = await api("/logs/traces?limit=120");
+    } else if (state.view === "trace_detail") {
+      if (!state.selectedTraceId) {
+        state.traceDetail = { error: "未选择 trace" };
+      } else {
+        state.traceDetail = await api("/logs/trace/" + encodeURIComponent(state.selectedTraceId)).catch(e => ({ error: e.message }));
+      }
     } else if (state.view === "stickers") {
       state.stickers = await api("/stickers");
     } else if (state.view === "memory") {
@@ -349,6 +351,7 @@ function renderLayout() {
         ${navItem('persona_prompt','人设预览')}
         ${navItem('persona_builder','人设构建')}
         ${navItem('proactive','主动诊断')}
+        ${navItem('traces','消息 Trace')}
         ${navItem('audit','审计日志')}
         ${navItem('logs','插件日志')}
         ${navItem('qq','QQ 管理')}
@@ -398,6 +401,8 @@ function renderView() {
   if (state.view === "stickers") return renderStickers();
   if (state.view === "audit") return renderAudit();
   if (state.view === "logs") return renderLogs();
+  if (state.view === "traces") return renderTraces();
+  if (state.view === "trace_detail") return renderTraceDetail();
   if (state.view === "proactive") return renderProactive();
   return `<div class="card"><h2>${escapeHtml(viewTitle())}</h2><p class="muted">该视图暂未实现。</p></div>`;
 }

@@ -207,6 +207,12 @@ def build_skill_router(*, runtime) -> APIRouter:
                 "mcp_tools": mcp_tools,
             }
         overrides = skill_overrides.list_overrides()
+        try:
+            from ...core.tool_health import get_tool_health_statuses
+
+            health_by_name = {item.get("name"): item for item in get_tool_health_statuses()}
+        except Exception:
+            health_by_name = {}
         skills = []
         mcp_names = {item["name"] for item in mcp_tools}
         for tool in registry.all():
@@ -218,6 +224,8 @@ def build_skill_router(*, runtime) -> APIRouter:
             user_disabled = bool(override.get("disabled", False))
             metadata = dict(tool.metadata or {})
             is_mcp = tool.name in mcp_names or str(metadata.get("category") or "").lower() == "mcp"
+            health = health_by_name.get(tool.name) or {}
+            health_disabled = bool(health and not health.get("available", True))
             skills.append(
                 {
                     "name": tool.name,
@@ -228,6 +236,8 @@ def build_skill_router(*, runtime) -> APIRouter:
                     "mcp": bool(is_mcp),
                     "enabled_by_config": enabled_by_config,
                     "user_disabled": user_disabled,
+                    "health_disabled": health_disabled,
+                    "health": health,
                     "reason": override.get("reason", ""),
                 }
             )
@@ -236,7 +246,9 @@ def build_skill_router(*, runtime) -> APIRouter:
                 summary["disabled_by_config"] += 1
             if user_disabled:
                 summary["user_disabled"] += 1
-            if enabled_by_config and not user_disabled:
+            if health_disabled:
+                summary["health_disabled"] = int(summary.get("health_disabled", 0) or 0) + 1
+            if enabled_by_config and not user_disabled and not health_disabled:
                 summary["active"] += 1
         skills.sort(key=lambda x: (x["category"], x["name"]))
         return {

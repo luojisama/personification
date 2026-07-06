@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -14,6 +15,8 @@ from ._loader import load_personification_module
 def _runtime_context(tmp_path: Path, monkeypatch):
     data_store_mod = load_personification_module("plugin.personification.core.data_store")
     paths = load_personification_module("plugin.personification.core.paths")
+    tool_health = load_personification_module("plugin.personification.core.tool_health")
+    tool_health.reset_tool_health_statuses()
     monkeypatch.setattr(paths, "get_data_dir", lambda _cfg=None: tmp_path)
     cfg = SimpleNamespace(
         personification_data_dir=str(tmp_path),
@@ -166,6 +169,27 @@ def test_skill_page_reports_remote_sources_and_mcp_tools(_runtime_context) -> No
     finally:
         mcp_mod._REGISTERED_MCP_TOOLS.clear()
         mcp_mod._REGISTERED_MCP_TOOLS.update(original)
+
+
+def test_skill_page_reports_tool_health_disabled(_runtime_context) -> None:
+    tool_health = load_personification_module("plugin.personification.core.tool_health")
+    web_search = _runtime_context.registry.get("web_search")
+    assert web_search is not None
+    web_search.metadata.update({"requires_network": True, "side_effect": "none"})
+
+    result = asyncio.run(tool_health.probe_registry_tools(registry=_runtime_context.registry, timeout_seconds=1))
+    assert result["disabled"] == 1
+
+    client = _build_client(_runtime_context)
+    _login(client, _runtime_context)
+    res = client.get("/personification/api/skills")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    names = {s["name"]: s for s in body["skills"]}
+    assert names["web_search"]["health_disabled"] is True
+    assert names["web_search"]["health"]["available"] is False
+    assert body["summary"]["health_disabled"] == 1
+    assert body["summary"]["active"] == 1
 
 
 def test_remote_skill_review_endpoint_updates_status(_runtime_context) -> None:

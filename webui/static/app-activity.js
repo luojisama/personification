@@ -175,7 +175,8 @@ function renderTraceSignalTags(signals) {
 
 function renderTraceProcess() {
   const detail = state.traceDetail;
-  if (!state.logTraceId) return "";
+  const activeTraceId = state.selectedTraceId || state.logTraceId || "";
+  if (!activeTraceId) return "";
   if (!detail) return `<div class="card muted">正在读取 trace 过程…</div>`;
   if (detail.error) return `<div class="card"><div class="alert err">读取 trace 失败：${escapeHtml(detail.error)}</div></div>`;
   const trace = detail.trace || {};
@@ -287,7 +288,7 @@ function renderTraceProcess() {
     <div class="between" style="gap:10px;flex-wrap:wrap">
       <h2 style="margin:0">Agent 过程可视化</h2>
       <div class="row" style="gap:6px">
-        <span class="tag">trace ${escapeHtml(summary.trace_id || state.logTraceId)}</span>
+        <span class="tag">trace ${escapeHtml(summary.trace_id || activeTraceId)}</span>
         ${summary.outcome ? `<span class="tag">outcome ${escapeHtml(summary.outcome)}</span>` : ""}
         ${summary.diagnosis_code ? `<span class="tag">诊断 ${escapeHtml(summary.diagnosis_code)}</span>` : ""}
       </div>
@@ -300,10 +301,49 @@ function renderTraceProcess() {
   </div>`;
 }
 
+function renderTraceDetail() {
+  return `<div class="between" style="margin-bottom:10px;gap:8px;flex-wrap:wrap">
+    <button class="btn small" onclick="state.view='traces'; loadView().then(render)">返回消息 Trace</button>
+    ${state.selectedTraceId ? `<button class="btn small" onclick="openLogsForTrace('${escapeAttr(state.selectedTraceId)}')">查看同 Trace 日志</button>` : ""}
+  </div>
+  ${renderTraceProcess()}`;
+}
+
+function renderTraces() {
+  const data = state.traces;
+  if (!data) return `<div class="card muted">加载中…</div>`;
+  const outcomeLabel = (value) => {
+    const text = String(value || "-");
+    const cls = text === "ok" ? "hs-ok" : (text === "failed" ? "hs-error" : (text === "no_reply" ? "hs-warn" : "hs-info"));
+    return `<span class="tag"><span class="dot ${cls}" style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:4px"></span>${escapeHtml(text)}</span>`;
+  };
+  const rows = (data.entries || []).map(e => {
+    const time = e.ts ? new Date(e.ts * 1000).toLocaleString() : "-";
+    const scene = e.session_type === "group" ? `群 ${e.group_id || "-"}` : "私聊";
+    const traceBtn = `<button class="btn small" onclick="openTraceDetail('${escapeAttr(e.trace_id)}')">${escapeHtml(e.trace_id || "-")}</button>`;
+    return `<tr>
+      <td class="muted" style="font-size:12px;white-space:nowrap">${escapeHtml(time)}</td>
+      <td>${escapeHtml(scene)}<br><code style="font-size:11px">${escapeHtml(e.user_id || "-")}</code></td>
+      <td style="white-space:pre-wrap;word-break:break-word">${escapeHtml(e.incoming_text || "")}</td>
+      <td style="white-space:pre-wrap;word-break:break-word">${escapeHtml(e.outgoing_text || "")}</td>
+      <td>${outcomeLabel(e.outcome)}<br><span class="muted" style="font-size:11px">${escapeHtml(e.diagnosis_code || "")}</span></td>
+      <td>${traceBtn}<br><span class="muted" style="font-size:11px">阶段 ${Number(e.stage_count || 0)} · 警告 ${Number(e.warn_count || 0)} · 异常 ${Number(e.error_count || 0)}</span></td>
+    </tr>`;
+  }).join("");
+  return `<div class="card">
+    <div class="between" style="gap:10px;flex-wrap:wrap">
+      <h2 style="margin:0">收/发消息与 Trace</h2>
+      <button class="btn small" onclick="loadView().then(render)">刷新</button>
+    </div>
+    <p class="muted" style="font-size:12px;margin:8px 0 12px">这里按回合展示收到什么、最终发出什么和对应 Trace。点击 Trace 进入独立详情页查看可审计过程、工具调用、预算、发送指向和异常阶段。</p>
+    <div class="table-wrap"><table><thead><tr><th>时间</th><th>会话</th><th>收到</th><th>发出</th><th>结果</th><th>Trace</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="6" class="muted">暂无 Trace</td></tr>'}</tbody></table></div>
+  </div>`;
+}
+
 function renderLogs() {
   const data = state.logs;
   if (!data) return `<div class="card muted">加载中…</div>`;
-  const tracePanel = renderTraceProcess();
   const levels = [
     {key:"", label:"全部"},
     {key:"DEBUG", label:"DEBUG+"},
@@ -316,7 +356,7 @@ function renderLogs() {
     const time = new Date(e.ts * 1000).toLocaleString();
     const level = String(e.level || "INFO");
     const cls = level === "ERROR" || level === "CRITICAL" ? "hs-error" : (level === "WARNING" ? "hs-warn" : (level === "DEBUG" ? "hs-info" : "hs-ok"));
-    const trace = e.trace_id ? `<button class="btn small" onclick="filterLogsByTrace('${escapeAttr(e.trace_id)}')">${escapeHtml(e.trace_id)}</button>` : '<span class="muted">-</span>';
+    const trace = e.trace_id ? `<button class="btn small" onclick="openTraceDetail('${escapeAttr(e.trace_id)}')">${escapeHtml(e.trace_id)}</button>` : '<span class="muted">-</span>';
     return `<tr>
       <td class="muted" style="font-size:12px;white-space:nowrap">${escapeHtml(time)}</td>
       <td><span class="dot ${cls}" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px"></span><code style="font-size:11px">${escapeHtml(level)}</code></td>
@@ -326,7 +366,6 @@ function renderLogs() {
     </tr>`;
   }).join("");
   return `<div class="group-bar">${levelBar}</div>
-    ${tracePanel}
     <div class="card">
       <div class="between">
         <h2 style="margin:0">插件日志（最近 ${(data.entries||[]).length} 条）</h2>
@@ -362,10 +401,17 @@ async function filterLogsByTrace(traceId) {
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
 
+async function openTraceDetail(traceId) {
+  state.view = "trace_detail";
+  state.selectedTraceId = traceId || "";
+  state.logTraceId = "";
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
 async function openLogsForTrace(traceId) {
   state.view = "logs";
   state.logQuery = traceId || "";
-  state.logTraceId = traceId || "";
+  state.logTraceId = "";
   state.logLevel = "";
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
