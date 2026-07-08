@@ -702,9 +702,10 @@ async def _send_persona_template_forward(bot: Any, event: Any, result: dict[str,
 async def _send_persona_template_file(bundle: Any, event: Any, export_path: str) -> str:
     if not export_path:
         return "未生成导出文件。"
-    path = Path(export_path)
+    path = Path(export_path).expanduser()
     if not path.is_file():
         return "导出文件不存在。"
+    path = path.resolve()
     from ..core.file_sender import build_file_sender
 
     sender = build_file_sender(get_bots=bundle.get_bots, logger=bundle.logger)
@@ -747,7 +748,13 @@ async def handle_persona_template_command(
 
     await matcher.send(f"开始构建《{work_title}》的「{character_name}」人设模板。")
     announced: set[str] = set()
-    stage_allowlist = {"query_moegirl", "relation_mapping", "template_synthesis"}
+    stage_allowlist = {
+        "query_moegirl",
+        "relation_mapping",
+        "source_gathering",
+        "subagent_research",
+        "template_synthesis",
+    }
 
     async def _progress(stage: str, message: str, _percent: int) -> None:
         if stage in stage_allowlist and stage not in announced:

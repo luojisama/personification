@@ -248,6 +248,9 @@ class Config(BaseModel):
     personification_plugin_invoker_max_output_chars: int = 1500
     personification_plugin_invoker_extra_danger_keywords: list[str] = []
     personification_image_gen_enabled: bool = True
+    personification_image_gen_api_type: str = "auto"
+    personification_image_gen_api_url: str = ""
+    personification_image_gen_api_key: str = ""
     personification_image_gen_model: str = "gpt-image-2"
     personification_image_gen_nanobanan_model: str = "gemini-3-pro-image-preview"
     personification_image_gen_background_enabled: bool = True

@@ -598,9 +598,8 @@ def test_nanobanan_tool_only_on_gemini_cli_route() -> None:
     runtime = _DummyRuntime(plugin_config=cfg, tool_caller=gemini_caller)
     nano_tool = build_image_gen_nanobanan_tool(runtime)
     codex_tool = build_image_gen_tool(runtime)
-    assert nano_tool is not None and nano_tool.name == "generate_image_nanobanan"
-    # Codex 路由的 generate_image 不应该在 gemini-cli caller 上激活
-    assert codex_tool is None
+    assert nano_tool is not None and nano_tool.name == "generate_image"
+    assert codex_tool is not None and codex_tool.name == "generate_image"
 
 
 def test_nanobanan_tool_available_on_antigravity_cli_route() -> None:
@@ -608,7 +607,7 @@ def test_nanobanan_tool_available_on_antigravity_cli_route() -> None:
     agy_caller = caller_impl.AntigravityCliToolCaller(model="gemini-3.1-pro-preview")
     runtime = _DummyRuntime(plugin_config=cfg, tool_caller=agy_caller)
     nano_tool = build_image_gen_nanobanan_tool(runtime)
-    assert nano_tool is not None and nano_tool.name == "generate_image_nanobanan"
+    assert nano_tool is not None and nano_tool.name == "generate_image"
 
 
 def test_nanobanan_tool_disabled_on_openai_route() -> None:

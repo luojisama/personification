@@ -408,6 +408,15 @@ system: |
     )
     assert detail.status_code == 200, detail.text
     assert detail.json()["result"]["template"] == body["template"]
+    apply_path = Path(_runtime_context.plugin_config.personification_data_dir) / "active_persona.yaml"
+    _runtime_context.plugin_config.personification_prompt_path = str(apply_path)
+    applied = client.post(
+        "/personification/api/persona-template/apply",
+        json={"record_id": body["history_record"]["record_id"]},
+    )
+    assert applied.status_code == 200, applied.text
+    assert Path(applied.json()["path"]).is_file()
+    assert "system:" in apply_path.read_text(encoding="utf-8")
     assert len(caller.calls) == 4
     assert all(call["kwargs"].get("use_builtin_search") is True for call in caller.calls[:3])
     purposes = [ctx.get("purpose") for ctx in caller.contexts]

@@ -201,7 +201,7 @@ def write_persona_template_export_file(record_or_result: dict[str, Any], *, plug
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{work}_{character}_{record_id}.yaml.txt"
     target.write_text(render_persona_template_export(record_or_result), encoding="utf-8")
-    return target
+    return target.resolve()
 
 
 __all__ = [

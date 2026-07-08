@@ -1164,7 +1164,10 @@ function renderPersonaBuilder() {
     ${validationList ? `<div class="alert ${valid?'info':'err'}" style="margin-top:12px"><ul class="validation-list">${validationList}</ul></div>` : ""}
     <div class="between" style="margin:16px 0 8px">
       <h3 style="margin:0">插件 YAML 模板</h3>
-      <button class="btn small" onclick="copyPersonaTemplate()">复制</button>
+      <div class="row">
+        <button class="btn small primary" onclick="applyPersonaTemplate()">应用</button>
+        <button class="btn small" onclick="copyPersonaTemplate()">复制</button>
+      </div>
     </div>
     <pre class="persona-template-code">${escapeHtml(r.template || "")}</pre>
     <h3 style="margin:16px 0 8px">资料来源（${sources.length}）</h3>
@@ -1178,10 +1181,40 @@ async function copyPersonaTemplate() {
   const text = state.personaTemplateResult && state.personaTemplateResult.template;
   if (!text) return;
   try {
-    await navigator.clipboard.writeText(text);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.setAttribute("readonly", "");
+      el.style.position = "fixed";
+      el.style.left = "-9999px";
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
     alertFlash("ok", "已复制 YAML 模板");
   } catch (e) {
     alertFlash("err", "复制失败：" + e.message);
+  }
+}
+
+async function applyPersonaTemplate() {
+  const result = state.personaTemplateResult;
+  if (!result || !result.template) return;
+  if (!confirm("应用后会写入当前人设 YAML 文件，并刷新运行时服务。继续吗？")) return;
+  try {
+    const recordId = result.history_record && result.history_record.record_id;
+    const body = recordId ? { record_id: recordId } : { result };
+    const applied = await api("/persona-template/apply", {
+      method: "POST",
+      headers: {"content-type":"application/json"},
+      body: JSON.stringify(body),
+    });
+    alertFlash("ok", "已应用人设：" + (applied.path || "当前配置"));
+  } catch (e) {
+    alertFlash("err", "应用失败：" + e.message);
   }
 }
 

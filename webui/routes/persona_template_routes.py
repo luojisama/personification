@@ -17,6 +17,7 @@ import yaml
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from ...core import webui_audit_log
+from ...core.paths import get_data_dir
 from ...core.llm_context import reset_llm_context, set_llm_context
 from ...core.persona_template_history import (
     list_persona_template_records,
@@ -556,6 +557,52 @@ def _configured_template_reference(runtime: Any) -> dict[str, Any]:
         "exists": False,
         "keys": [],
         "content": "",
+    }
+
+
+def _template_apply_target(runtime: Any, result: dict[str, Any]) -> Path:
+    plugin_config = getattr(runtime, "plugin_config", None)
+    configured = ""
+    if plugin_config is not None:
+        configured = str(getattr(plugin_config, "personification_prompt_path", "") or "").strip()
+        if not configured:
+            configured = str(getattr(plugin_config, "personification_system_path", "") or "").strip()
+    configured = configured.strip('"').strip("'")
+    if configured:
+        path = _resolve_prompt_path(configured)
+        if path.suffix.lower() not in {".yml", ".yaml"}:
+            raise RuntimeError("当前人设路径不是 YAML 文件，请先在配置中心设置 personification_prompt_path 为 .yaml/.yml")
+        return path
+    work = re.sub(r"[^\w\u3400-\u9fff.-]+", "_", str(result.get("work_title") or "persona")).strip("_")[:64] or "persona"
+    character = re.sub(r"[^\w\u3400-\u9fff.-]+", "_", str(result.get("character_name") or "template")).strip("_")[:64] or "template"
+    return Path(get_data_dir(plugin_config)) / "persona_templates" / f"{work}_{character}_applied.yaml"
+
+
+def _apply_persona_template(runtime: Any, result: dict[str, Any]) -> dict[str, Any]:
+    template = str(result.get("template") or "").strip()
+    if not template:
+        raise RuntimeError("没有可应用的 YAML 模板")
+    validation = _validate_template_yaml(template)
+    if not validation.get("valid"):
+        errors = "；".join(str(item) for item in list(validation.get("errors") or [])[:3])
+        raise RuntimeError(f"YAML 校验未通过，不能应用：{errors or '结构不完整'}")
+    target = _template_apply_target(runtime, result)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(validation.get("template") or template, encoding="utf-8")
+    plugin_config = getattr(runtime, "plugin_config", None)
+    if plugin_config is not None and not str(getattr(plugin_config, "personification_prompt_path", "") or "").strip():
+        setattr(plugin_config, "personification_prompt_path", str(target))
+    bundle = _runtime_bundle(runtime)
+    save_config = getattr(bundle, "save_plugin_runtime_config", None) if bundle is not None else None
+    if callable(save_config):
+        save_config()
+    reload_services = getattr(bundle, "reload_runtime_services", None) if bundle is not None else None
+    if callable(reload_services):
+        reload_services()
+    return {
+        "applied": True,
+        "path": str(target.resolve()),
+        "template_keys": list(validation.get("keys") or []),
     }
 
 
@@ -2258,6 +2305,37 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             if str(record.get("record_id", "")) == str(record_id):
                 return record
         raise HTTPException(status_code=404, detail="未找到该人设构建历史记录")
+
+    @router.post("/apply")
+    async def apply_template(
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        record_id = str(body.get("record_id", "") or "").strip()
+        result = body.get("result") if isinstance(body.get("result"), dict) else None
+        if record_id:
+            records = list_persona_template_records(limit=100)
+            for record in records:
+                if str(record.get("record_id", "")) == record_id:
+                    result = record.get("result") if isinstance(record.get("result"), dict) else None
+                    break
+        if not isinstance(result, dict):
+            raise HTTPException(status_code=400, detail="缺少可应用的人设构建结果")
+        try:
+            applied = _apply_persona_template(runtime, result)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        webui_audit_log.record(
+            action="persona_template_apply",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=f"{result.get('work_title', '')}/{result.get('character_name', '')}",
+            ip_hash=get_client_ip(request),
+            detail={"path": applied.get("path", ""), "record_id": record_id},
+            outcome="ok",
+        )
+        return applied
 
     @router.post("/build-task")
     async def build_template_task(
