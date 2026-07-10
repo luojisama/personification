@@ -84,6 +84,21 @@ def test_generate_ai_diary_injects_recent_posts_and_enables_builtin_search(monke
 
     async def _call_ai(messages, **kwargs):  # noqa: ANN001
         calls.append({"messages": messages, "kwargs": kwargs})
+        if "发布前审阅器" in str(messages[0].get("content", "")):
+            return json.dumps(
+                {
+                    "accept": True,
+                    "coherent": True,
+                    "grounded": True,
+                    "novel": True,
+                    "same_topic": False,
+                    "same_scene": False,
+                    "same_syntax": False,
+                    "topic_key": "game_update",
+                    "reason": "新主题",
+                },
+                ensure_ascii=False,
+            )
         return json.dumps({"content": "新游戏更新看着有点想摸一下", "image_prompt": ""}, ensure_ascii=False)
 
     result = asyncio.run(
@@ -193,7 +208,19 @@ def test_build_qzone_post_rewrites_ooc_search_talk() -> None:
     class _Caller:
         async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
             assert tools == []  # rewrite 走空工具
-            return _Resp("外面风有点大")
+            if "发布前审阅器" in str(messages[0].get("content", "")):
+                return _Resp(json.dumps({
+                    "accept": True,
+                    "coherent": True,
+                    "grounded": True,
+                    "novel": True,
+                    "same_topic": False,
+                    "same_scene": False,
+                    "same_syntax": False,
+                    "topic_key": "wind",
+                    "reason": "自然",
+                }, ensure_ascii=False))
+            return _Resp("外面的风吹得窗帘一直晃个不停")
 
         def build_tool_result_message(self, *_a):  # noqa: ANN001
             return {}
@@ -209,7 +236,7 @@ def test_build_qzone_post_rewrites_ooc_search_talk() -> None:
         )
     )
 
-    assert result == "外面风有点大"
+    assert result == "外面的风吹得窗帘一直晃个不停"
 
 
 def test_build_qzone_post_drops_when_ooc_rewrite_fails() -> None:
@@ -331,12 +358,23 @@ def test_build_qzone_post_can_attach_local_sticker_image(tmp_path) -> None:
     )
 
     class _Caller:
-        async def chat_with_tools(self, *_args, **_kwargs):  # noqa: ANN001
-            raise AssertionError("clean post with local sticker should not call LLM")
+        async def chat_with_tools(self, messages, *_args, **_kwargs):  # noqa: ANN001
+            assert "发布前审阅器" in str(messages[0].get("content", ""))
+            return _Resp(json.dumps({
+                "accept": True,
+                "coherent": True,
+                "grounded": True,
+                "novel": True,
+                "same_topic": False,
+                "same_scene": False,
+                "same_syntax": False,
+                "topic_key": "sunlight",
+                "reason": "自然",
+            }, ensure_ascii=False))
 
     result = asyncio.run(
         diary_flow._build_qzone_post_with_optional_image(
-            content="下午三点的阳光有点刺眼",
+            content="下午三点的阳光照得屏幕有点刺眼",
             image_prompt="quiet daily anime image by the window",
             tool_caller=_Caller(),
             plugin_config=SimpleNamespace(personification_sticker_path=str(tmp_path)),
@@ -346,7 +384,7 @@ def test_build_qzone_post_can_attach_local_sticker_image(tmp_path) -> None:
         )
     )
 
-    assert result.startswith("下午三点的阳光有点刺眼")
+    assert result.startswith("下午三点的阳光照得屏幕有点刺眼")
     assert f"[IMAGE_B64]{base64.b64encode(payload).decode('ascii')}[/IMAGE_B64]" in result
 
 
@@ -421,10 +459,94 @@ def test_generate_once_recovers_persona_profile_from_dict() -> None:
         diary_flow._generate_once(persona, "写说说", call_ai_api=_call)
     )
     system = captured["messages"][0]["content"]
-    assert isinstance(system, dict)
-    snapshot = system["system"].split("## 人设快照", 1)[1]
+    assert isinstance(system, str)
+    snapshot = system.split("## 人设快照", 1)[1]
     assert "高冷知性，话不多" in snapshot and "短句、克制、偶尔毒舌" in snapshot
     assert "群聊接话规则X" not in snapshot  # group-chat 边界规则不带入发空间
+
+
+def test_qzone_persona_projection_excludes_chat_template_and_static_status() -> None:
+    persona = {
+        "name": "绪山真寻",
+        "status": "静态状态不应进入空间",
+        "input": "<think>群聊 XML 模板</think>",
+        "system": "你是绪山真寻本人。\n\n=== 轻量工具约束（对用户不可见）===\n你首先是群聊成员。",
+        "persona_profile": {
+            "identity_rules": ["怕生少女与懒散游戏脑的反差"],
+            "style_rules": ["短句但语义完整"],
+        },
+        "qzone_style": {"grounding": "具体经历必须有事件依据"},
+    }
+
+    projected = diary_flow._project_qzone_system_prompt(persona)
+
+    assert "绪山真寻本人" in projected
+    assert "具体经历必须有事件依据" in projected
+    assert "静态状态不应进入空间" not in projected
+    assert "群聊 XML 模板" not in projected
+    assert "<think>" not in projected
+    assert "你首先是群聊成员" not in projected
+
+
+def test_qzone_semantic_review_rejects_same_topic_with_low_text_overlap() -> None:
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            assert tools == [] and use_builtin_search is False
+            request = json.loads(messages[1]["content"])
+            assert request["candidate"] == "一到饭点，脑子就开始排队炸鸡排了"
+            assert "今天只想吃炸鸡排" in request["recent_posts"]
+            return _Resp(json.dumps({
+                "accept": False,
+                "coherent": False,
+                "grounded": True,
+                "novel": False,
+                "same_topic": True,
+                "same_scene": True,
+                "same_syntax": False,
+                "topic_key": "food_craving",
+                "reason": "同一食欲主题且动作搭配不自然",
+            }, ensure_ascii=False))
+
+    review = asyncio.run(diary_flow._review_qzone_semantics(
+        "一到饭点，脑子就开始排队炸鸡排了",
+        recent_posts=["今天只想吃炸鸡排"],
+        source_context="当前心情平静，没有饮食事件",
+        persona_system="你是绪山真寻",
+        tool_caller=_Caller(),
+        logger=_Logger(),
+    ))
+
+    assert review is not None
+    assert review["accepted"] is False
+    assert review["same_topic"] is True
+
+
+def test_qzone_stiff_rewrite_failure_drops_original() -> None:
+    class _Caller:
+        async def chat_with_tools(self, _messages, _tools, _use_builtin_search):  # noqa: ANN001
+            return _Resp("脑子没在加班，胃先开始催了。")
+
+    result = asyncio.run(diary_flow._review_qzone_post(
+        "脑子没在加班，胃先开始催了。",
+        tool_caller=_Caller(),
+        persona_system="你是绪山真寻",
+        logger=_Logger(),
+    ))
+
+    assert result == ""
+
+
+def test_qzone_post_rejects_content_below_minimum_length() -> None:
+    result = asyncio.run(diary_flow._build_qzone_post_with_optional_image(
+        content="今天只想吃炸鸡排",
+        image_prompt="",
+        tool_caller=None,
+        logger=_Logger(),
+        recent_posts=[],
+        persona_system="你是绪山真寻",
+    ))
+
+    assert result == ""
 
 
 def test_format_qzone_quota_block_tight_budget() -> None:

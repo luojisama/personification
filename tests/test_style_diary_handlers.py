@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from ._loader import load_personification_module
+
+
+style_handlers = load_personification_module(
+    "plugin.personification.handlers.style_diary_handlers"
+)
+periodic_jobs = load_personification_module(
+    "plugin.personification.jobs.periodic_jobs"
+)
+task_builders = load_personification_module(
+    "plugin.personification.jobs.task_builders"
+)
+diary_flow = load_personification_module(
+    "plugin.personification.flows.diary_flow"
+)
+
+
+class _Finished(Exception):
+    pass
+
+
+class _Matcher:
+    async def send(self, _message: str) -> None:
+        return None
+
+    async def finish(self, message: str) -> None:
+        raise _Finished(message)
+
+
+def test_manual_diary_publish_records_shared_qzone_state(monkeypatch) -> None:  # noqa: ANN001
+    recorded: list[str] = []
+    state_updates: list[str] = []
+
+    async def _update_cookie(_bot):  # noqa: ANN001
+        return True, "ok"
+
+    async def _generate(_bot):  # noqa: ANN001
+        return "手柄刚充上电，结果现在又有点困了"
+
+    setattr(_generate, "mark_published", lambda content: state_updates.append(content))
+
+    async def _publish(_content, _bot_id):  # noqa: ANN001
+        return True, "ok"
+
+    monkeypatch.setattr(
+        periodic_jobs,
+        "record_qzone_post",
+        lambda content, *, now: recorded.append(content),
+    )
+
+    with pytest.raises(_Finished, match="发布成功"):
+        asyncio.run(style_handlers.handle_manual_diary_command(
+            _Matcher(),
+            bot=type("Bot", (), {"self_id": "10001"})(),
+            qzone_publish_available=True,
+            update_qzone_cookie=_update_cookie,
+            generate_ai_diary=_generate,
+            publish_qzone_shuo=_publish,
+        ))
+
+    assert recorded == ["手柄刚充上电，结果现在又有点困了"]
+    assert state_updates == recorded
+
+
+def test_diary_task_binds_post_success_state_callback(monkeypatch) -> None:  # noqa: ANN001
+    updates: list[dict] = []
+
+    async def _flow(_bot, **_kwargs):  # noqa: ANN001
+        return "刚把游戏存档整理完，终于不用怕按错了"
+
+    monkeypatch.setattr(
+        diary_flow,
+        "schedule_diary_state_update",
+        lambda **kwargs: updates.append(kwargs),
+    )
+    task = task_builders.build_generate_ai_diary_task(
+        plugin_config=object(),
+        generate_ai_diary_flow=_flow,
+        load_prompt=lambda: "persona",
+        call_ai_api=lambda *_args, **_kwargs: None,
+        logger=object(),
+        agent_tool_caller="caller",
+        agent_data_dir="data-dir",
+    )
+
+    assert asyncio.run(task(object())) == "刚把游戏存档整理完，终于不用怕按错了"
+    task.mark_published("刚把游戏存档整理完，终于不用怕按错了")
+
+    assert updates[0]["diary_text"] == "刚把游戏存档整理完，终于不用怕按错了"
+    assert updates[0]["tool_caller"] == "caller"
+    assert updates[0]["data_dir"] == "data-dir"

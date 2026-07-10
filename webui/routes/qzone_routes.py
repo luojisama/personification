@@ -118,6 +118,9 @@ def build_qzone_router(*, runtime) -> APIRouter:
             return {"ok": False, "error": f"发布失败：{msg}", "content": content[:2000]}
 
         state = record_qzone_post(content, now=get_configured_now())
+        mark_published = getattr(generate, "mark_published", None)
+        if callable(mark_published):
+            mark_published(content)
         cfg = getattr(runtime, "plugin_config", None)
         quota = build_qzone_quota(
             state=state,

@@ -22,6 +22,7 @@ def append_agent_system_prompts(
     direct_image_input: bool,
     is_group: bool | None = None,
     is_direct_mention: bool = False,
+    surface: str = "",
 ) -> None:
     group_context = bool(is_group) if is_group is not None else any(
         isinstance(message, dict)
@@ -35,6 +36,33 @@ def append_agent_system_prompts(
             "content": _semantic_tool_guidance(),
         }
     )
+    if surface:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    f"当前任务属于非聊天生成面：{surface}。"
+                    "严格遵守最新用户消息要求的输出格式；不要套用群聊接话、追问、@、引用、"
+                    "[NO_REPLY] 或聊天短句质量规则。需要事实查证时可以使用工具，"
+                    "但不得把工具过程写进最终结果。"
+                ),
+            }
+        )
+        if rewritten_query.primary_query:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"当前任务主查询：{rewritten_query.primary_query}\n"
+                        + (
+                            f"候选查询：{'；'.join(rewritten_query.query_candidates[:4])}\n"
+                            if rewritten_query.query_candidates else ""
+                        )
+                        + "仅在任务确实需要外部事实时使用这些查询；创作与审阅任务不要为了调用工具而调用。"
+                    ),
+                }
+            )
+        return
     messages.append(
         {
             "role": "system",

@@ -68,6 +68,8 @@ async def run_text_agent(
     use_builtin_search_hint: bool = False,
     trigger_reason: str = "",
     chat_intent_hint: str = "",
+    surface: str = "",
+    structured_output: bool = False,
 ) -> str:
     """Run the complete Agent loop for flows that only need a text result.
 
@@ -114,6 +116,9 @@ async def run_text_agent(
         logger=logger,
         max_steps=max_steps,
         query_rewrite_context=QueryRewriteContext(trigger_reason=trigger_reason),
+        is_group=False if surface else None,
+        surface=surface,
+        finalize_quality=not structured_output,
     )
     text = str(getattr(result, "text", "") or "").strip()
     if text in {"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"}:

@@ -38,3 +38,30 @@ def test_agent_prompting_includes_directed_exchange_behavior() -> None:
     assert "否认、反击、自辩" in combined
     assert "2-4 条短消息" in combined
     assert "轻松调侃时允许一句不索要信息的反击式反问" in combined
+
+
+def test_qzone_surface_skips_group_chat_reply_discipline() -> None:
+    messages: list[dict] = []
+
+    prompting.append_agent_system_prompts(
+        messages=messages,
+        runtime_chat_intent="general",
+        plugin_query_intent="",
+        intent_decision=SimpleNamespace(ambiguity_level="low"),
+        rewritten_query=SimpleNamespace(
+            primary_query="",
+            query_candidates=[],
+            context_clues=[],
+            search_plan=[],
+        ),
+        turn_plan=None,
+        user_images=[],
+        direct_image_input=False,
+        is_group=False,
+        surface="qzone_post",
+    )
+
+    combined = "\n".join(str(item.get("content", "")) for item in messages)
+    assert "非聊天生成面：qzone_post" in combined
+    assert "最终对用户的回复必须自然、像群聊里的活人接话" not in combined
+    assert "群聊里通常多个话题并行" not in combined

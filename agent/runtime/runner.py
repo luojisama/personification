@@ -213,6 +213,8 @@ async def run_agent(
     ack_sender: Callable[[str], Awaitable[None]] | None = None,
     is_group: bool | None = None,
     is_direct_mention: bool = False,
+    surface: str = "",
+    finalize_quality: bool = True,
 ) -> AgentResult:
     use_builtin_search = (
         bool(
@@ -231,6 +233,8 @@ async def run_agent(
     stop_state = StopFlowState()
 
     async def _finalize_result(result: AgentResult, *, reason: str) -> AgentResult:
+        if not finalize_quality:
+            return result
         return await finalize_agent_reply_quality(
             result,
             tool_caller=tool_caller,
@@ -451,6 +455,7 @@ async def run_agent(
         direct_image_input=direct_image_input,
         is_group=is_group,
         is_direct_mention=is_direct_mention,
+        surface=surface,
     )
 
     async def _append_evidence_guidance_if_needed(*, draft_answer_text: str = "") -> EvidenceSynthesis | None:

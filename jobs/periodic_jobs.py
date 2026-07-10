@@ -97,7 +97,10 @@ def record_qzone_post(content: str, *, now: Any, kind: str = "post") -> Dict[str
     if kind_key and kind_key != "post":
         counter_key = f"{kind_key}_count"
         state[counter_key] = int(state.get(counter_key, 0) or 0) + 1
-    state["last_post_at"] = time.time()
+    try:
+        state["last_post_at"] = float(now.timestamp())
+    except Exception:
+        state["last_post_at"] = time.time()
     _remember_qzone_post(state, content)
     store.save_sync("qzone_post_state", state)
     return state
@@ -239,13 +242,12 @@ async def run_auto_post_diary(
     logger.info("拟人插件：正在自动发布空间说说...")
     success, msg = await publish_qzone_shuo(diary_content, bot.self_id)
     if success:
-        store = get_data_store()
-        state = store.load_sync("qzone_post_state")
-        if not isinstance(state, dict):
-            state = {}
-        _remember_qzone_post(state, diary_content)
-        state["last_post_at"] = time.time()
-        store.save_sync("qzone_post_state", state)
+        from ..core.time_ctx import get_configured_now
+
+        record_qzone_post(diary_content, now=get_configured_now())
+        mark_published = getattr(generate_ai_diary, "mark_published", None)
+        if callable(mark_published):
+            mark_published(diary_content)
         logger.info("拟人插件：空间说说发布成功！")
         return True
 
@@ -365,11 +367,10 @@ async def run_proactive_qzone_post(
         logger.error(f"拟人插件：主动说说发布失败：{msg}")
         return False
 
-    state["period"] = period
-    state["count"] = int(state.get("count", 0) or 0) + 1
-    state["last_post_at"] = now_ts
-    _remember_qzone_post(state, content)
-    store.save_sync("qzone_post_state", state)
+    record_qzone_post(content, now=now)
+    mark_published = getattr(maybe_generate_qzone_post, "mark_published", None)
+    if callable(mark_published):
+        mark_published(content)
     logger.info("拟人插件：已根据当前状态主动发布一条空间说说。")
     return True
 

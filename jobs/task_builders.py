@@ -26,6 +26,18 @@ def build_generate_ai_diary_task(
             data_dir=agent_data_dir,
         )
 
+    def _mark_published(content: str) -> None:
+        from ..flows.diary_flow import schedule_diary_state_update
+
+        schedule_diary_state_update(
+            diary_text=content,
+            tool_caller=agent_tool_caller,
+            data_dir=agent_data_dir,
+            logger=logger,
+        )
+
+    setattr(_generate_ai_diary, "mark_published", _mark_published)
+
     return _generate_ai_diary
 
 
@@ -163,6 +175,18 @@ def build_maybe_generate_qzone_post_task(
             agent_max_steps=agent_max_steps,
             quota=quota,
         )
+
+    def _mark_published(content: str) -> None:
+        from ..flows.diary_flow import schedule_diary_state_update
+
+        schedule_diary_state_update(
+            diary_text=content,
+            tool_caller=agent_tool_caller,
+            data_dir=agent_data_dir,
+            logger=logger,
+        )
+
+    setattr(_maybe_generate_qzone_post, "mark_published", _mark_published)
 
     return _maybe_generate_qzone_post
 

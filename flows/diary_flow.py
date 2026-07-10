@@ -15,6 +15,7 @@ from ..core.context_policy import strip_response_control_markers
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_group_emotion_memory, load_emotion_state
 from ..core.persona_profile import load_persona_profile
+from ..core.prompt_loader import AGENT_GUIDANCE_MARKER
 from ..core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
 from ..core.sticker_library import (
     list_local_sticker_files,
@@ -40,7 +41,8 @@ _QZONE_CASUAL_TONE_DISCIPLINE = (
     "额外口吻纪律：不要写成镜头旁白、散文描写、状态报告或“我正在陈述一个画面”的完整句。"
     "少用连续铺景的叙述开头（比如一上来交代时间、天气、外面声音、杯子里的东西），"
     "也不要堆“光、风、疲惫、安静、突然发现”这类意象去撑气氛。"
-    "优先像手机上随手敲的一句：短、轻、可以半截、可以吐槽，不必把前因后果说圆。"
+    "优先像手机上随手敲的一句：短、轻、可以省略不重要的背景，但句子本身要能读懂，"
+    "动作主体、对象和前后关系不能错位。"
     "不要写成整齐的二段式机灵句，尤其别用“脑子/胃/手/嘴先开始……”这类器官拟人、先后对仗、"
     "看似俏皮但模板感很重的句式；宁可更普通、更像真的随手敲。"
 )
@@ -191,6 +193,52 @@ def _format_recent_qzone_posts(posts: list[str]) -> str:
     if not posts:
         return "- 暂无"
     return "\n".join(f"- {item}" for item in posts[-8:])
+
+
+def _render_qzone_style(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "\n".join(f"- {str(item).strip()}" for item in value if str(item).strip())
+    if isinstance(value, dict):
+        lines: list[str] = []
+        for key, item in value.items():
+            if isinstance(item, list):
+                rendered = "；".join(str(part).strip() for part in item if str(part).strip())
+            else:
+                rendered = str(item or "").strip()
+            if rendered:
+                lines.append(f"- {key}: {rendered}")
+        return "\n".join(lines)
+    return ""
+
+
+def _project_qzone_system_prompt(system_prompt: Any) -> str:
+    """Project a YAML persona onto the QZone surface without chat/XML fields."""
+    if not isinstance(system_prompt, dict):
+        base = str(system_prompt or "").strip()
+        snapshot = _render_qzone_persona_snapshot(system_prompt).strip()
+        return "\n\n".join(part for part in (base, snapshot) if part).strip()
+    parts: list[str] = []
+    name = str(system_prompt.get("name", "") or "").strip()
+    if name:
+        parts.append(f"角色名：{name}")
+    system = str(
+        system_prompt.get("qzone_system")
+        or system_prompt.get("system", "")
+        or ""
+    ).strip()
+    if AGENT_GUIDANCE_MARKER in system:
+        system = system.split(AGENT_GUIDANCE_MARKER, 1)[0].rstrip()
+    if system:
+        parts.append(system)
+    snapshot = _render_qzone_persona_snapshot(system_prompt).strip()
+    if snapshot:
+        parts.append(snapshot)
+    qzone_style = _render_qzone_style(system_prompt.get("qzone_style"))
+    if qzone_style:
+        parts.append("## QQ 空间专属表达\n" + qzone_style)
+    return "\n\n".join(parts).strip()
 
 
 def _format_qzone_quota_block(quota: Optional[dict]) -> str:
@@ -501,6 +549,8 @@ async def _rewrite_qzone_net_slang(
                 max_steps=agent_max_steps,
                 trigger_reason="qzone_net_slang_rewrite",
                 chat_intent_hint="qzone_net_slang_rewrite",
+                surface="qzone_post_rewrite",
+                structured_output=True,
             )
         response = await asyncio.wait_for(tool_caller.chat_with_tools(messages, [], False), timeout=timeout)
     except Exception:
@@ -549,6 +599,8 @@ async def _rewrite_qzone_stiff_tic(
                 max_steps=agent_max_steps,
                 trigger_reason="qzone_stiff_tic_rewrite",
                 chat_intent_hint="qzone_stiff_tic_rewrite",
+                surface="qzone_post_rewrite",
+                structured_output=True,
             )
         response = await asyncio.wait_for(tool_caller.chat_with_tools(messages, [], False), timeout=timeout)
     except Exception:
@@ -601,8 +653,10 @@ async def _review_qzone_post(
         toned = _trim_qzone_content(toned)
         if toned and not _NET_SLANG_TIC_RE.search(toned):
             text = toned
-        elif logger is not None:
-            logger.info(f"[qzone] net-slang rewrite ineffective, keeping: {text}")
+        else:
+            if logger is not None:
+                logger.info(f"[qzone] net-slang rewrite ineffective, drop post: {text}")
+            return ""
     if text and _QZONE_STIFF_TIC_RE.search(text):
         toned = await _rewrite_qzone_stiff_tic(
             text,
@@ -616,9 +670,84 @@ async def _review_qzone_post(
         toned = _trim_qzone_content(toned)
         if toned and not _QZONE_STIFF_TIC_RE.search(toned):
             text = toned
-        elif logger is not None:
-            logger.info(f"[qzone] stiff-tic rewrite ineffective, keeping: {text}")
+        else:
+            if logger is not None:
+                logger.info(f"[qzone] stiff-tic rewrite ineffective, drop post: {text}")
+            return ""
     return text
+
+
+async def _review_qzone_semantics(
+    text: str,
+    *,
+    recent_posts: list[str],
+    source_context: str,
+    persona_system: str,
+    tool_caller: Any = None,
+    call_ai_api: Callable[..., Awaitable[Optional[str]]] | None = None,
+    timeout: float = 10.0,
+    logger: Any = None,
+) -> dict[str, Any] | None:
+    """Use an LLM to judge coherence, grounding and semantic novelty."""
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是 QQ 空间短动态的发布前审阅器，只判断，不改写。"
+                "判断句子是否自然可理解，动作主体与对象是否合理，具体外部事件是否有上下文依据，"
+                "并与最近动态比较主题、场景和句式是否实质重复。"
+                "主观感受、愿望和轻微情绪不要求外部证据；但路过、购买、食用、游玩、见到某物等"
+                "具体已发生动作必须能从可用素材中找到依据。不要因为措辞不同就把同一主题判为新内容。"
+                "输出严格 JSON："
+                '{"accept":true,"coherent":true,"grounded":true,"novel":true,'
+                '"same_topic":false,"same_scene":false,"same_syntax":false,'
+                '"topic_key":"简短主题","reason":"极短原因"}。'
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "candidate": text,
+                    "recent_posts": list(recent_posts or [])[-8:],
+                    "available_context": str(source_context or "")[:5000],
+                    "persona": str(persona_system or "")[:1600],
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    raw = ""
+    try:
+        if tool_caller is not None:
+            response = await asyncio.wait_for(
+                tool_caller.chat_with_tools(messages, [], False),
+                timeout=timeout,
+            )
+            raw = str(getattr(response, "content", "") or "")
+        elif call_ai_api is not None:
+            raw = str(
+                await asyncio.wait_for(
+                    call_ai_api(messages, use_builtin_search=False),
+                    timeout=timeout,
+                )
+                or ""
+            )
+        else:
+            return None
+    except Exception as exc:
+        if logger is not None:
+            logger.info(f"[qzone] semantic review failed, drop post: {exc}")
+        return None
+    payload = _extract_json_object(raw)
+    if not payload:
+        if logger is not None:
+            logger.info("[qzone] semantic review returned invalid JSON, drop post")
+        return None
+    required_true = all(payload.get(key) is True for key in ("accept", "coherent", "grounded", "novel"))
+    repeated = any(payload.get(key) is True for key in ("same_topic", "same_scene", "same_syntax"))
+    payload["accepted"] = bool(required_true and not repeated)
+    return payload
 
 
 async def _build_qzone_post_with_optional_image(
@@ -632,6 +761,8 @@ async def _build_qzone_post_with_optional_image(
     logger: Any,
     recent_posts: Optional[list[str]] = None,
     persona_system: Any = "",
+    source_context: str = "",
+    call_ai_api: Callable[..., Awaitable[Optional[str]]] | None = None,
 ) -> str:
     text = _trim_qzone_content(content)
     if not text:
@@ -647,8 +778,28 @@ async def _build_qzone_post_with_optional_image(
     )
     if not text:
         return ""
+    if not 12 <= len(text) <= 50:
+        logger.info(f"[qzone] drop generated post because length is out of range: chars={len(text)}")
+        return ""
     if _is_too_similar_to_recent_qzone_post(text, recent_posts or []):
         logger.info(f"[qzone] skip generated post because it repeats recent content: {text}")
+        return ""
+    semantic_review = await _review_qzone_semantics(
+        text,
+        recent_posts=recent_posts or [],
+        source_context=source_context,
+        persona_system=str(persona_system or ""),
+        tool_caller=tool_caller,
+        call_ai_api=call_ai_api,
+        logger=logger,
+    )
+    if semantic_review is not None and not semantic_review.get("accepted"):
+        logger.info(
+            "[qzone] skip generated post after semantic review: "
+            f"topic={semantic_review.get('topic_key', '')} reason={semantic_review.get('reason', '')}"
+        )
+        return ""
+    if semantic_review is None and (tool_caller is not None or call_ai_api is not None):
         return ""
     image_marker = await _maybe_generate_qzone_image_marker(
         tool_caller=tool_caller,
@@ -754,16 +905,7 @@ async def _generate_once(
     agent_max_steps: int = 4,
 ) -> str:
     # 在格式 guard 之外再注入人设快照，强化发空间时的角色一致性。
-    suffix = _render_qzone_persona_snapshot(system_prompt) + _FLOW_OUTPUT_GUARD
-    if isinstance(system_prompt, str):
-        system_text = system_prompt + suffix
-    elif isinstance(system_prompt, dict):
-        copied = dict(system_prompt)
-        sys_text = str(copied.get("system", "") or "")
-        copied["system"] = sys_text + suffix
-        system_text = copied
-    else:
-        system_text = system_prompt
+    system_text = _project_qzone_system_prompt(system_prompt) + _FLOW_OUTPUT_GUARD
     messages = [
         {"role": "system", "content": system_text},
         {"role": "user", "content": user_prompt},
@@ -798,6 +940,8 @@ async def _generate_once(
                     use_builtin_search_hint=use_builtin_search,
                     trigger_reason="qzone_diary",
                     chat_intent_hint="qzone_diary",
+                    surface="qzone_post",
+                    structured_output=True,
                 )
             except Exception as exc:
                 if logger is not None:
@@ -820,7 +964,7 @@ async def _generate_once(
     return clean_generated_text(stripped or result)
 
 
-def _schedule_diary_state_update(
+def schedule_diary_state_update(
     *,
     diary_text: str,
     tool_caller: Any,
@@ -853,6 +997,7 @@ async def generate_ai_diary(
 ) -> str:
     """Generate a short Qzone post from recent chat context."""
     system_prompt = load_prompt()
+    qzone_persona = _project_qzone_system_prompt(system_prompt)
     chat_context = await get_recent_chat_context(bot, logger)
     recent_posts = _load_recent_qzone_posts()
     emotion_hint = ""
@@ -875,8 +1020,8 @@ async def generate_ai_diary(
         f"{_QZONE_CASUAL_TONE_DISCIPLINE}\n"
         "1. 正文 12-50 个中文字符，像随手发的一句日常碎碎念。\n"
         "2. 只抓一个很小的生活瞬间或念头，不要总结聊天、日报、作文或公告。\n"
-        "3. 允许跳跃：可以半句话突然转到另一个画面，或在一个观察后接一句不相关的吐槽；不必上下文连贯。\n"
-        "4. 标点可以省略，可用空格、句号、问号代替逗号；可以是反问、牢骚、发现、未说完的半句；不必有结论。\n"
+        "3. 可以省略不重要的背景，但句子必须语义完整、能独立读懂；动作主体、对象、因果和先后关系不能错位。\n"
+        "4. 标点可以省略，可用空格、句号、问号代替逗号；可以是反问、牢骚或没有结论的小发现，但不要故意截断关键前因。\n"
         "5. 语气贴合角色，但不要互联网黑话、热梗、夸张营业感、AI 客服腔、对仗工整的总结句或文艺旁白句。\n"
         "5b. 严禁用『(也)太……了吧 / ……爆了 / ……绝了 / 谁懂啊 / 笑死 / 绷不住了 / yyds / 好耶』这类营业感叹腔收尾或起势；"
         "把这种感叹换成平铺直叙的一句话，或干脆只描述那个画面/动作本身，不喊口号、不强行制造情绪。\n"
@@ -885,7 +1030,9 @@ async def generate_ai_diary(
         "6. 不要列条目、不要标题、不要 hashtag、不要说自己是 AI。\n"
         "7. 必须避开最近说说已经反复出现的话题、题材、具体意象、食物、动作和句式；如果最近写过类似的，就彻底换一个不同的话题和角度。\n"
         "8. 触发点要小而具体，写成自己的即时反应，不要新闻播报、不要复述大家正在热议的主话题。\n"
-        "9. image_prompt 只有在适合配一张日常氛围图时填写英文画面描述；不适合就留空。"
+        "9. 只有素材明确支持时才能写已经发生的具体动作，例如路过、购买、吃过、玩过或亲眼看到；"
+        "没有事件依据时只写当前心情、愿望或挂念，不要编造生活经历。\n"
+        "10. image_prompt 只有在适合配一张日常氛围图时填写英文画面描述；不适合就留空。"
     )
     recent_block = "最近已经发过的说说，禁止复读这些内容或近似句式：\n" + _format_recent_qzone_posts(recent_posts)
     diversity_hint = _pick_diversity_hint()
@@ -925,23 +1072,25 @@ async def generate_ai_diary(
                 agent_max_steps=agent_max_steps,
                 logger=logger,
                 recent_posts=recent_posts,
-                persona_system=system_prompt,
+                persona_system=qzone_persona,
+                source_context="\n\n".join(part for part in (chat_context, emotion_hint) if part),
+                call_ai_api=call_ai_api,
             )
         elif raw_rich_result:
-            rich_result = _trim_qzone_content(raw_rich_result)
-            if _is_too_similar_to_recent_qzone_post(rich_result, recent_posts):
-                logger.info(f"[qzone] skip rich raw post because it repeats recent content: {rich_result}")
-                rich_result = ""
+            logger.info("[qzone] rich generation returned non-JSON output, reject draft")
         if rich_result:
-            _schedule_diary_state_update(
-                diary_text=rich_result,
-                tool_caller=tool_caller,
-                data_dir=data_dir,
-                logger=logger,
-            )
             return rich_result
 
         logger.warning("[diary] rich prompt generation failed, fallback to basic prompt")
+
+    rejected_draft = ""
+    if chat_context and payload:
+        rejected_draft = _trim_qzone_content(str(payload.get("content", "") or ""))
+    rejected_block = (
+        "本轮刚被拒绝的草稿如下。不要只换词，必须换掉它的主题、场景和句式：\n"
+        f"- {rejected_draft}\n\n"
+        if rejected_draft else ""
+    )
 
     basic_prompt = (
         "请直接写一条自然的短说说，像是角色自己随手发的碎碎念。\n"
@@ -949,6 +1098,7 @@ async def generate_ai_diary(
         "重点是每次换着题材来，别老写同一类东西。\n\n"
         f"{diversity_hint}\n\n"
         f"{recent_block}\n\n"
+        f"{rejected_block}"
         f"{base_requirements}"
     )
     raw_result = await _generate_once(
@@ -973,20 +1123,14 @@ async def generate_ai_diary(
             agent_max_steps=agent_max_steps,
             logger=logger,
             recent_posts=recent_posts,
-            persona_system=system_prompt,
+            persona_system=qzone_persona,
+            source_context="\n\n".join(part for part in (chat_context, emotion_hint) if part),
+            call_ai_api=call_ai_api,
         )
     else:
-        result = _trim_qzone_content(raw_result)
-        if _is_too_similar_to_recent_qzone_post(result, recent_posts):
-            logger.info(f"[qzone] skip basic raw post because it repeats recent content: {result}")
-            result = ""
-    if result:
-        _schedule_diary_state_update(
-            diary_text=result,
-            tool_caller=tool_caller,
-            data_dir=data_dir,
-            logger=logger,
-        )
+        if raw_result:
+            logger.info("[qzone] basic generation returned non-JSON output, reject draft")
+        result = ""
     return result
 
 
@@ -1005,6 +1149,7 @@ async def maybe_generate_proactive_qzone_post(
 ) -> str:
     """根据近期聊天、内心状态与本月额度，决定是否主动发一条更日常的空间动态。"""
     system_prompt = load_prompt()
+    qzone_persona = _project_qzone_system_prompt(system_prompt)
     chat_context = await get_recent_chat_context(bot, logger)
     if not chat_context:
         chat_context = "最近群聊可用文本很少；可以把今天的游戏、动漫、轻新闻或自己的状态当成触发点。"
@@ -1067,7 +1212,10 @@ async def maybe_generate_proactive_qzone_post(
         f"6. {_QZONE_CASUAL_TONE_DISCIPLINE}\n"
         "7. 触发点可以是当下心情、一个生活小观察，或今天游戏、动漫、轻新闻里的一个细节，但写成自己的日常反应、不要复述群里正在热议的主话题、不要像新闻标题。\n"
         f"8. {_pick_diversity_hint()}\n"
-        "9. 如果适合配图，image_prompt 写英文画面描述，要求贴合人设和正文氛围；不适合就留空。"
+        "9. 句子必须能独立读懂，动作主体、对象、因果和先后关系不能错位。"
+        "只有上面的聊天、挂念或状态明确支持时，才能声称自己已经路过、购买、吃过、玩过或看到某物；"
+        "没有事件依据时只写主观心情、愿望或挂念。\n"
+        "10. 如果适合配图，image_prompt 写英文画面描述，要求贴合人设和正文氛围；不适合就留空。"
     )
     result = await _generate_once(
         system_prompt,
@@ -1095,23 +1243,29 @@ async def maybe_generate_proactive_qzone_post(
             agent_max_steps=agent_max_steps,
             logger=logger,
             recent_posts=recent_posts,
-            persona_system=system_prompt,
+            persona_system=qzone_persona,
+            source_context=(
+                f"当前心情：{mood}\n当前精力：{energy}\n最近挂念：\n{pending_block}\n"
+                f"近期群情绪记忆：\n{emotion_hint or '- 暂无'}\n最近聊天：\n{chat_context}"
+            ),
+            call_ai_api=call_ai_api,
         )
     if result.startswith("POST|"):
         text = _trim_qzone_content(result.split("|", 1)[1])
-        text = await _review_qzone_post(
-            text,
+        return await _build_qzone_post_with_optional_image(
+            content=text,
+            image_prompt="",
             tool_caller=tool_caller,
             registry=registry,
             plugin_config=plugin_config,
             agent_max_steps=agent_max_steps,
-            persona_system=system_prompt,
             logger=logger,
+            recent_posts=recent_posts,
+            persona_system=qzone_persona,
+            source_context=(
+                f"当前心情：{mood}\n当前精力：{energy}\n最近挂念：\n{pending_block}\n"
+                f"近期群情绪记忆：\n{emotion_hint or '- 暂无'}\n最近聊天：\n{chat_context}"
+            ),
+            call_ai_api=call_ai_api,
         )
-        if not text:
-            return ""
-        if _is_too_similar_to_recent_qzone_post(text, recent_posts):
-            logger.info(f"[qzone] skip POST raw post because it repeats recent content: {text}")
-            return ""
-        return text
     return ""

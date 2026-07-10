@@ -60,6 +60,13 @@ async def handle_manual_diary_command(
 
     success, msg = await publish_qzone_shuo(diary_content, bot.self_id)
     if success:
+        from ..core.time_ctx import get_configured_now
+        from ..jobs.periodic_jobs import record_qzone_post
+
+        record_qzone_post(diary_content, now=get_configured_now())
+        mark_published = getattr(generate_ai_diary, "mark_published", None)
+        if callable(mark_published):
+            mark_published(diary_content)
         visible_content = _render_qzone_content_for_notice(diary_content)
         await matcher.finish(f"✅ AI 说说发布成功！\n\n内容：\n{visible_content}")
     await matcher.finish(f"❌ {msg}")
