@@ -112,6 +112,8 @@ def test_turn_planner_prompt_includes_media_context_discipline() -> None:
     assert "优先保持沉默" in system_prompt
     assert "优先回答文字 cue 或最近同一话题" in system_prompt
     assert "群聊不追问纪律" in system_prompt
+    assert "明确 @/直呼 bot 只表示轮到 bot 回应" in system_prompt
+    assert "不要因为出现 @ 就把 chat_short 强行升级成长回答" in system_prompt
     assert plan.reply_action == "silence"
     assert plan.speech_act == "silence"
 

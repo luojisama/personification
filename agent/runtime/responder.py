@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ...core.reply_style_policy import build_directed_exchange_policy_prompt
 from .planner import OUTPUT_MODE_LENGTHS, extract_json_payload
 
 
@@ -179,6 +180,18 @@ def _build_persona_responder_instruction(
         "- 如果工具结果明显为空或与问题无关，也要承认信息不足，而不是绕开。\n"
         "- 但闲聊、共情、表达情绪、复述用户观点这些**不需要外部事实**的话题，依然要正常回答，不要滥用『不知道』。"
     )
+    directed_exchange_prompt = build_directed_exchange_policy_prompt(
+        is_direct_mention=is_direct_mention,
+        is_group=is_direct_mention,
+        speech_act=str(getattr(semantic_frame, "speech_act", "") or ""),
+        output_mode=output_mode,
+    )
+    if directed_exchange_prompt:
+        instruction += (
+            "\n\n"
+            + directed_exchange_prompt
+            + "\n需要拆成多条时，在 reply_text 字符串内部用两个换行符分隔，仍然只输出一个合法 JSON 对象。"
+        )
     if lorebook_section:
         instruction = f"{lorebook_section}\n\n{instruction}"
     peer_section = _peer_plugins_section()

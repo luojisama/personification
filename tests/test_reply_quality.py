@@ -129,6 +129,28 @@ def test_finalize_agent_reply_quality_silences_group_question_rewrite_if_still_q
     assert result.quality_checks[-1]["action"] == "silenced"
 
 
+def test_finalize_agent_reply_quality_keeps_direct_banter_retort() -> None:
+    caller = _RewriteCaller("不该调用")
+    text = "杂鱼哥哥你说谁嗷嗷叫呢！"
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result(text),
+            tool_caller=caller,
+            messages=[{"role": "system", "content": "你是群友。"}],
+            turn_plan=SimpleNamespace(speech_act="tease", output_mode="chat_short", message_target="bot"),
+            is_group=True,
+            is_direct_mention=True,
+            reason="unit",
+        )
+    )
+
+    assert result.text == text
+    assert caller.calls == []
+    assert "group_visible_question" not in result.quality_checks[-1]["flags"]
+    assert result.quality_checks[-1]["action"] == "accept"
+
+
 def test_finalize_agent_reply_quality_silences_when_revision_still_ooc() -> None:
     caller = _RewriteCaller("我先看看情况，等会再说")
 

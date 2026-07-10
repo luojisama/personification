@@ -251,6 +251,7 @@ async def infer_turn_semantic_frame_with_llm(
     *,
     is_group: bool = False,
     is_random_chat: bool = False,
+    is_direct_mention: bool = False,
     tool_caller: Any = None,
     recent_context: str = "",
     relationship_hint: str = "",
@@ -297,6 +298,9 @@ async def infer_turn_semantic_frame_with_llm(
         '"reason":"一句极短中文原因"}\n'
         "判别要求：\n"
         "1. chat_intent 关注用户这一轮真正想让 bot 做什么，而不是句子里表面词汇。\n"
+        "1a. 对方明确 @/直呼 bot 只表示这轮在叫你回应，不等于 chat_intent=explanation。"
+        "如果正文是在调侃、甩锅、轻挑衅、玩笑指控或接梗，仍应判为 banter，并让 user_attitude、bot_emotion、expression_style 体现具体互动；"
+        "只有真的在索取知识解释、查证或步骤时才判 explanation/lookup。\n"
         "1b. 如果最新消息引用了一个你不确定含义的专有名词/梗/节目名/人名/外号，"
         "或群友分享了图片/视频/链接而你无法确定其内容或出处（例如配图只配了一个短词、视频/分享卡片标题里有陌生词），"
         "倾向 chat_intent=lookup（先查证再接话），不要只因为是短句、像闲聊就判成 banter——"
@@ -340,11 +344,14 @@ async def infer_turn_semantic_frame_with_llm(
         "- auto：拿不准就给 auto，交给默认规则。私聊一律 none/auto。\n"
         "当你是在接一条 @bot 的群消息但回复内容实际需要承接前面某个群友/插件输出时，优先选择 quote 或 at_quote 指向当前触发消息，"
         "不要让后续群友误以为你在无对象地泛泛评价。\n"
+        "15. 明确 @/直呼 bot 时，除非消息为空、纯动作请求已由工具完成或安全原因必须拒绝，否则 recommend_silence 应为 false；"
+        "轻松调侃场景优先给出有立场的即时反应，不要只生成‘在呢/哈哈/怎么了’。\n"
         f"{build_context_continuity_policy_prompt()}\n"
     )
     user_content = (
         f"场景：{'群聊' if is_group else '私聊'}\n"
         f"是否随机插话：{'是' if is_random_chat else '否'}\n"
+        f"是否明确 @/直呼 bot：{'是' if is_direct_mention else '否'}\n"
         f"最新消息：{normalized}\n"
         f"最近上下文：{str(recent_context or '').strip()[:700] or '无'}\n"
         f"互动关系：{str(relationship_hint or '').strip()[:500] or '无'}\n"

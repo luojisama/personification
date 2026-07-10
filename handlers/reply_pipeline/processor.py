@@ -50,7 +50,11 @@ from ...core.group_roles import extract_sender_role
 from ...core.target_inference import TARGET_OTHERS, TARGET_UNCLEAR, infer_message_target
 from ...core.tts_service import extract_persona_tts_config
 from ...core.repeat_follow import maybe_follow_repeat_cluster
-from ...core.reply_style_policy import build_direct_visual_identity_guard, build_speech_act_policy_prompt
+from ...core.reply_style_policy import (
+    build_direct_visual_identity_guard,
+    build_directed_exchange_policy_prompt,
+    build_speech_act_policy_prompt,
+)
 from ...core.response_review import (
     is_agent_reply_ooc,
     make_passthrough_review_decision,
@@ -1462,6 +1466,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         session_goal=str(getattr(turn_plan, "session_goal", getattr(semantic_frame, "session_goal", "")) or ""),
         is_group=not is_private_session,
     )
+    directed_exchange_prompt = build_directed_exchange_policy_prompt(
+        is_direct_mention=is_direct_mention,
+        is_group=not is_private_session,
+        speech_act=str(getattr(turn_plan, "speech_act", getattr(semantic_frame, "speech_act", "")) or ""),
+        output_mode=str(getattr(turn_plan, "output_mode", getattr(semantic_frame, "output_mode", "")) or ""),
+    )
+    if directed_exchange_prompt:
+        system_prompt += "\n\n" + directed_exchange_prompt
     _msg_target = state.get("message_target")
     if _msg_target in (TARGET_OTHERS, TARGET_UNCLEAR):
         system_prompt += (
@@ -1526,11 +1538,18 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         str(getattr(runtime.plugin_config, "personification_humanize_fragment_style", "prompt") or "off").strip().lower()
         == "prompt"
     ):
-        system_prompt += (
-            "\n[输出风格] 像 QQ 群友聊天那样说话：需要多句时拆成 1-3 条短消息，"
-            "条与条之间用空行分隔；单条尽量不超过 40 字，口语化，可以只接半句，"
-            "不要写成完整段落或书面文。"
-        )
+        if is_direct_mention:
+            system_prompt += (
+                "\n[输出风格] 这是明确叫到你的群聊回合。普通回答保持 1-2 条；"
+                "只有调侃、自辩或情绪确实在递进时才拆成 2-4 条短消息。"
+                "条与条之间用空行分隔，单条尽量不超过 40 字，每条都要有独立作用。"
+            )
+        else:
+            system_prompt += (
+                "\n[输出风格] 像 QQ 群友聊天那样说话：需要多句时拆成 1-3 条短消息，"
+                "条与条之间用空行分隔；单条尽量不超过 40 字，口语化，可以只接半句，"
+                "不要写成完整段落或书面文。"
+            )
 
     available_stickers: List[str] = []
     group_config = persona.get_group_config(str(group_id))
@@ -1793,6 +1812,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 original_text=reply_content,
                 persona_system=system_prompt,
                 output_mode=str(getattr(semantic_frame, "output_mode", "chat_short") or "chat_short"),
+                avoid_questions=not is_private_session,
+                allow_rhetorical_banter=bool(
+                    is_direct_mention
+                    and str(getattr(turn_plan, "speech_act", "") or "") in {"", "participate", "tease"}
+                ),
             )
             if rewritten_ooc:
                 reply_content = rewritten_ooc

@@ -117,6 +117,43 @@ def test_semantic_frame_prompt_includes_media_context_discipline() -> None:
     assert frame.recommend_silence is True
 
 
+def test_semantic_frame_prompt_treats_direct_mention_as_turn_cue_not_formal_qa() -> None:
+    captured: dict[str, object] = {}
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            captured["messages"] = messages
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"chat_intent":"banter","plugin_question_intent":"capability",'
+                        '"ambiguity_level":"low","recommend_silence":false,'
+                        '"user_attitude":"调侃甩锅","bot_emotion":"不服气",'
+                        '"expression_style":"短句反击","confidence":0.9}'
+                    )
+                },
+            )()
+
+    frame = asyncio.run(
+        chat_intent.infer_turn_semantic_frame_with_llm(
+            "不小心把糯米撒你身上，你嗷嗷叫半天",
+            is_group=True,
+            is_direct_mention=True,
+            tool_caller=_Caller(),
+        )
+    )
+
+    system_prompt = captured["messages"][0]["content"]  # type: ignore[index]
+    user_prompt = captured["messages"][1]["content"]  # type: ignore[index]
+    assert "只表示这轮在叫你回应" in system_prompt
+    assert "调侃、甩锅、轻挑衅" in system_prompt
+    assert "是否明确 @/直呼 bot：是" in user_prompt
+    assert frame.chat_intent == "banter"
+    assert frame.recommend_silence is False
+
+
 def test_parse_address_mode_field() -> None:
     """LLM 输出的 address_mode 被解析进语义帧；非法/缺失回退 auto。"""
     assert chat_intent._parse_turn_semantic_frame_payload(

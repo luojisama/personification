@@ -50,6 +50,7 @@ from ...core.gemini_profile import (
 from ...core.repeat_follow import maybe_follow_repeat_cluster
 from ...core.reply_style_policy import (
     build_direct_visual_identity_guard,
+    build_directed_exchange_policy_prompt,
     build_reply_style_policy_prompt,
     build_speech_act_policy_prompt,
 )
@@ -972,6 +973,14 @@ async def process_yaml_response_logic(
         session_goal=str(getattr(turn_plan_for_prompt, "session_goal", getattr(semantic_frame, "session_goal", "")) or ""),
         is_group=not is_private_session,
     )
+    directed_exchange_prompt = build_directed_exchange_policy_prompt(
+        is_direct_mention=is_direct_mention,
+        is_group=not is_private_session,
+        speech_act=str(getattr(turn_plan_for_prompt, "speech_act", getattr(semantic_frame, "speech_act", "")) or ""),
+        output_mode=str(getattr(turn_plan_for_prompt, "output_mode", getattr(semantic_frame, "output_mode", "")) or ""),
+    )
+    if directed_exchange_prompt:
+        system_prompt += "\n\n" + directed_exchange_prompt
     primary_api_type, primary_model = primary_route_signature(
         plugin_config,
         get_configured_api_providers=get_configured_api_providers,
@@ -1352,6 +1361,8 @@ async def process_yaml_response_logic(
                         ),
                     ),
                     ack_sender=ack_sender,
+                    is_group=not is_private_session,
+                    is_direct_mention=is_direct_mention,
                 )
             except Exception as exc:
                 if not (
@@ -1384,6 +1395,11 @@ async def process_yaml_response_logic(
                     original_text=reply_content,
                     persona_system=system_prompt,
                     output_mode=str(getattr(semantic_frame, "output_mode", "chat_short") or "chat_short"),
+                    avoid_questions=not is_private_session,
+                    allow_rhetorical_banter=bool(
+                        is_direct_mention
+                        and str(getattr(turn_plan_for_prompt, "speech_act", "") or "") in {"", "participate", "tease"}
+                    ),
                 )
                 if rewritten_ooc:
                     reply_content = rewritten_ooc

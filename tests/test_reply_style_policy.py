@@ -64,6 +64,23 @@ def test_group_reply_style_discourages_visible_questions() -> None:
     assert "群聊不追问纪律" in prompt
     assert "不要用问句、反问句、澄清问句" in prompt
     assert "不要追着群友补材料" in prompt
+    assert "不索要信息的反问/反击句" in prompt
+
+
+def test_directed_exchange_policy_separates_answers_from_banter() -> None:
+    prompt = reply_style_policy.build_directed_exchange_policy_prompt(
+        is_direct_mention=True,
+        is_group=True,
+        speech_act="tease",
+        output_mode="chat_short",
+    )
+
+    assert "不表示所有内容都要写成正式问答" in prompt
+    assert "先给结论或选择" in prompt
+    assert "否认、反击、自辩" in prompt
+    assert "2-4 条短消息" in prompt
+    assert "即时反应" in prompt
+    assert "不要每次被 @ 都固定连发四条" in prompt
 
 
 def test_speech_act_policy_guides_discussion_action() -> None:

@@ -828,6 +828,8 @@ async def run_agent_if_enabled(
             total_timeout_seconds=response_timeout_seconds,
         ),
         ack_sender=ack_sender,
+        is_group=hasattr(event, "group_id") and not str(getattr(event, "group_id", "")).startswith("private_"),
+        is_direct_mention=is_direct_mention,
     )
     action_history_parts: list[str] = []
     for action in result.pending_actions:

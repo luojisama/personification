@@ -74,11 +74,47 @@ def build_conversational_baseline_policy_prompt() -> str:
 def build_group_no_question_policy_prompt() -> str:
     return (
         "## 群聊不追问纪律（高优先级）\n"
-        "- 群聊里的可见回复默认不要用问句、反问句、澄清问句或征询式结尾来把话题丢回给群友。\n"
+        "- 群聊里的可见回复默认不要用问句、反问句、澄清问句或征询式结尾来索要更多信息、把判断责任丢回给群友。\n"
         "- 信息不足时，优先根据上下文和工具在内部判断；仍不足就给一句保守短反应、承认不确定，或直接 [NO_REPLY]，不要追着群友补材料。\n"
         "- 即使被 cue 到，也尽量给一个具体建议、态度或选择；确实缺少关键条件时短句说明缺什么即可，不要连续发问。\n"
+        "- 轻松调侃、反击或自辩时，可以有一句不索要信息的反问/反击句；它必须在推进情绪或立场，不能拿来逃避回答。\n"
         "- 私聊可以自然追问；这条纪律只约束群聊可见输出。"
     )
+
+
+def build_directed_exchange_policy_prompt(
+    *,
+    is_direct_mention: bool = False,
+    is_group: bool = False,
+    speech_act: str = "",
+    output_mode: str = "",
+) -> str:
+    """Guide an explicitly directed turn without turning every @ into formal Q&A."""
+
+    if not is_direct_mention:
+        return ""
+    normalized_act = str(speech_act or "").strip()
+    normalized_mode = str(output_mode or "").strip()
+    lines = [
+        "## 直呼/@ 后的回应方式（高优先级）",
+        "- 对方 @ 你表示这轮明确轮到你说话，不表示所有内容都要写成正式问答、客服解释或完整说明文；先按正文判断是在认真询问、调侃、抱怨、挑衅还是接梗。",
+        "- 先抓住对方话里一个最具体的动作、称呼或指控回应，不要只回‘哈哈/在呢/好的/怎么了’，也不要把原话换个说法复述一遍。",
+        "- 认真事实问题先给结论或选择，再补最必要的一两句；能一句答清就不要铺背景，答完可以顺手带一点符合关系的人设态度。",
+        "- 调侃、甩锅、轻挑衅或玩笑指控时，要从角色自己的立场即时反应：可以点名、否认、反击、自辩、闹别扭或把锅推回去；不要突然切成中立分析员解释这句话。",
+        "- 称呼或外号只在关系和语境合适时自然用一次，不要每句都 @ 对方，也不要机械重复对方昵称。",
+        "- 只有最近上下文确实出现多人起哄、复读或笑你时，才可以转向群体说‘你们’并回应围观；不要凭空编造全群反应。",
+    ]
+    if is_group:
+        if normalized_act in {"participate", "tease"} or normalized_mode == "chat_short":
+            lines.extend(
+                [
+                    "- 如果这一轮有明显情绪递进，可以拆成 2-4 条短消息：即时反应 → 针对具体点反驳/接梗 → 自我立场或收尾；条与条之间用空行分隔。",
+                    "- 多条消息必须各自承担不同作用，不要把一个完整句子硬切碎，也不要每次被 @ 都固定连发四条。",
+                ]
+            )
+        else:
+            lines.append("- 普通知识问答优先 1-2 条消息说清；只有结论和补充确实需要分开时才用空行拆条。")
+    return "\n".join(lines)
 
 
 def build_observer_posture_policy_prompt() -> str:
@@ -173,6 +209,7 @@ def build_direct_visual_identity_guard() -> str:
 __all__ = [
     "build_conversational_baseline_policy_prompt",
     "build_context_continuity_policy_prompt",
+    "build_directed_exchange_policy_prompt",
     "build_direct_visual_identity_guard",
     "build_formulaic_tic_policy_prompt",
     "build_group_no_question_policy_prompt",

@@ -70,7 +70,13 @@ def _looks_like_group_context(messages: list[dict[str, Any]], turn_plan: Any = N
     return target in {"broadcast", "someone_else", "uncertain"}
 
 
-def _quality_flags(raw_text: str, visible_text: str, *, is_group: bool = False) -> list[str]:
+def _quality_flags(
+    raw_text: str,
+    visible_text: str,
+    *,
+    is_group: bool = False,
+    allow_rhetorical_banter: bool = False,
+) -> list[str]:
     flags: list[str] = []
     if looks_like_markdown_reply(raw_text):
         flags.append("markdown_or_trace")
@@ -78,7 +84,10 @@ def _quality_flags(raw_text: str, visible_text: str, *, is_group: bool = False) 
         flags.append("formulaic_tic")
     if is_agent_reply_ooc(raw_text):
         flags.append("style_risk")
-    if is_group and looks_like_question_reply(visible_text or raw_text):
+    if is_group and looks_like_question_reply(
+        visible_text or raw_text,
+        allow_exclamatory_rhetorical=allow_rhetorical_banter,
+    ):
         flags.append("group_visible_question")
     if visible_text != str(raw_text or "").strip():
         flags.append("normalized")
@@ -93,6 +102,8 @@ async def finalize_agent_reply_quality(
     tool_caller: Any,
     messages: list[dict[str, Any]],
     turn_plan: Any = None,
+    is_group: bool | None = None,
+    is_direct_mention: bool = False,
     record_trace: Callable[..., None] | None = None,
     logger: Any = None,
     reason: str = "",
@@ -135,8 +146,19 @@ async def finalize_agent_reply_quality(
 
     stripped = strip_response_control_markers(raw_text)
     visible_text = normalize_visible_reply_text(stripped)
-    is_group = _looks_like_group_context(messages, turn_plan)
-    flags = _quality_flags(raw_text, visible_text, is_group=is_group)
+    group_context = _looks_like_group_context(messages, turn_plan) if is_group is None else bool(is_group)
+    speech_act = str(getattr(turn_plan, "speech_act", "") or "").strip()
+    allow_rhetorical_banter = bool(
+        group_context
+        and is_direct_mention
+        and speech_act in {"", "participate", "tease"}
+    )
+    flags = _quality_flags(
+        raw_text,
+        visible_text,
+        is_group=group_context,
+        allow_rhetorical_banter=allow_rhetorical_banter,
+    )
     action = "accept"
     final_text = visible_text or raw_text
     revision_attempted = False
@@ -149,11 +171,15 @@ async def finalize_agent_reply_quality(
             persona_system=_persona_system_from_messages(messages),
             timeout=8.0,
             output_mode=_turn_plan_output_mode(turn_plan),
-            avoid_questions=is_group,
+            avoid_questions=group_context,
+            allow_rhetorical_banter=allow_rhetorical_banter,
         )
         candidate = normalize_visible_reply_text(strip_response_control_markers(rewritten)) if rewritten else ""
         if candidate:
-            if is_group and looks_like_question_reply(candidate):
+            if group_context and looks_like_question_reply(
+                candidate,
+                allow_exclamatory_rhetorical=allow_rhetorical_banter,
+            ):
                 final_text = "[SILENCE]"
                 action = "silenced"
             else:
@@ -163,7 +189,7 @@ async def finalize_agent_reply_quality(
     if not final_text:
         final_text = "[SILENCE]"
         action = "silenced"
-    elif is_group and "group_visible_question" in flags and action != "rewritten":
+    elif group_context and "group_visible_question" in flags and action != "rewritten":
         final_text = "[SILENCE]"
         action = "silenced"
     elif flags and is_agent_reply_ooc(final_text):

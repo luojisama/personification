@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...core.reply_style_policy import (
+    build_directed_exchange_policy_prompt,
     build_media_understanding_output_policy_prompt,
     build_speech_act_policy_prompt,
 )
@@ -19,7 +20,15 @@ def append_agent_system_prompts(
     turn_plan: Any,
     user_images: list[str],
     direct_image_input: bool,
+    is_group: bool | None = None,
+    is_direct_mention: bool = False,
 ) -> None:
+    group_context = bool(is_group) if is_group is not None else any(
+        isinstance(message, dict)
+        and message.get("role") == "system"
+        and any(marker in str(message.get("content", "") or "") for marker in ("群聊", "群里", "群友", "群成员"))
+        for message in list(messages or [])
+    )
     messages.append(
         {
             "role": "system",
@@ -39,7 +48,8 @@ def append_agent_system_prompts(
                 "遇到不认识的专有名词、外号、梗、游戏/动漫/卡牌术语或圈内说法，不要直接问群友那是什么，先用可用工具查证。"
                 "如果用户说“这个动画/这段动画/这个角色/这张图”是在接最近上下文里的 ACG 角色、抽卡、卡面、图片或视频，"
                 "先查清角色、作品、剧情/动画出处，再用一句具体评价参与讨论；不要泛泛附和“确实挺强”。"
-                "群聊里的可见回复不要用问句、反问句或澄清问句把问题丢回给群友；信息不足时给保守短反应或 [NO_REPLY]。"
+                "群聊里的可见回复不要用追问、澄清问句或征询式结尾把信息缺口丢回给群友；"
+                "轻松调侃时允许一句不索要信息的反击式反问。信息不足时给保守短反应或 [NO_REPLY]。"
                 "涉及本地天气、出行、城市或附近状态时，如果用户没明说地点，先看已注入的用户档案；仍不确定可调用记忆工具确认，不能猜城市。"
                 "最终只输出纯文本，不要 markdown、标题、项目符号列表、编号列表、URL 列表，也不要说“我需要确认一下”“根据搜索结果”。"
             ),
@@ -53,9 +63,18 @@ def append_agent_system_prompts(
                     speech_act=str(getattr(turn_plan, "speech_act", "") or ""),
                     output_mode=str(getattr(turn_plan, "output_mode", "") or ""),
                     session_goal=str(getattr(turn_plan, "session_goal", "") or ""),
+                    is_group=group_context,
                 ),
             }
         )
+    directed_exchange_prompt = build_directed_exchange_policy_prompt(
+        is_direct_mention=is_direct_mention,
+        is_group=group_context,
+        speech_act=str(getattr(turn_plan, "speech_act", "") or ""),
+        output_mode=str(getattr(turn_plan, "output_mode", "") or ""),
+    )
+    if directed_exchange_prompt:
+        messages.append({"role": "system", "content": directed_exchange_prompt})
     messages.append(
         {
             "role": "system",

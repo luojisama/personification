@@ -211,6 +211,8 @@ async def run_agent(
     quote_chain: list[dict[str, Any]] | None = None,
     time_budget_seconds: float | None = None,
     ack_sender: Callable[[str], Awaitable[None]] | None = None,
+    is_group: bool | None = None,
+    is_direct_mention: bool = False,
 ) -> AgentResult:
     use_builtin_search = (
         bool(
@@ -234,6 +236,8 @@ async def run_agent(
             tool_caller=tool_caller,
             messages=messages,
             turn_plan=turn_plan,
+            is_group=is_group,
+            is_direct_mention=is_direct_mention,
             record_trace=_record_reply_trace_stage,
             logger=logger,
             reason=reason,
@@ -445,6 +449,8 @@ async def run_agent(
         turn_plan=turn_plan,
         user_images=user_images,
         direct_image_input=direct_image_input,
+        is_group=is_group,
+        is_direct_mention=is_direct_mention,
     )
 
     async def _append_evidence_guidance_if_needed(*, draft_answer_text: str = "") -> EvidenceSynthesis | None:
