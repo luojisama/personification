@@ -1084,7 +1084,7 @@ def build_qzone_services(
     logger: Any,
 ) -> tuple[bool, Callable[[str, str], Awaitable[tuple[bool, str]]], Callable[[Any], Awaitable[tuple[bool, str]]]]:
     qzone_enabled = bool(getattr(plugin_config, "personification_qzone_enabled", False))
-    async def update_qzone_cookie(bot: Any) -> tuple[bool, str]:
+    async def update_qzone_cookie(bot: Any, *, force: bool = False) -> tuple[bool, str]:
         """自动获取并刷新 Qzone Cookie，供定时任务或手动命令调用。"""
         if not qzone_enabled:
             return False, "Qzone 功能未启用"
@@ -1093,7 +1093,8 @@ def build_qzone_services(
             if _AUTH_STATE["refreshing"]:
                 return False, "Qzone Cookie 正在刷新"
             if (
-                _AUTH_STATE["status"] == "healthy"
+                not force
+                and _AUTH_STATE["status"] == "healthy"
                 and _AUTH_STATE["last_success_at"]
                 and now - float(_AUTH_STATE["last_success_at"]) < _AUTH_REFRESH_CACHE_SECONDS
             ):

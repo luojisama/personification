@@ -862,11 +862,42 @@ function renderQzone() {
   const pct = limit > 0 ? Math.min(100, Math.round(used / limit * 100)) : 0;
   const barColor = pct >= 90 ? "var(--danger)" : (pct >= 70 ? "var(--warn)" : "var(--ok)");
   const enabledPill = (on, label) => `<span class="device-status ${on?'approved':'pending'}">${label}：${on?'开':'关'}</span>`;
+  const auth = q.auth || {}, scan = q.scan || {}, social = q.social || {}, inbound = q.inbound || {};
+  const statusText = auth.status === 'healthy' ? '认证正常' : auth.status === 'auth_blocked' ? '认证受限' : auth.status === 'refresh_failed' ? '刷新失败' : '尚未验证';
+  const statusClass = auth.status === 'healthy' ? 'ok' : auth.status === 'unknown' ? 'info' : 'warn';
+  const scanText = scan.running ? `${scan.owner==='social'?'好友动态扫描':'留言轮询'}运行 ${Number(scan.running_seconds||0)} 秒` : '当前空闲';
+  const resultDigest = item => {
+    const result = item.last_result || {};
+    if (!item.last_scan_at) return '尚未执行';
+    if (result.status === 'timed_out') return '最近执行超时';
+    if (result.skipped) return `最近跳过：${escapeHtml(result.reason||'busy')}`;
+    if (item.last_error) return `最近失败：${escapeHtml(item.last_error)}`;
+    return `最近完成：动态 ${Number(result.feeds_seen||0)} · 回复 ${Number(result.replied||0)} · 失败 ${Number(result.failed||0)}`;
+  };
   const recent = (q.recent_contents || []).slice().reverse();
   const recentRows = recent.length
     ? recent.map(c => `<li class="qzone-recent-item">${escapeHtml(c)}</li>`).join("")
     : '<li class="qzone-recent-item muted">暂无记录</li>';
-  return `<div class="card">
+  return `<section class="qzone-ops-grid">
+    <div class="card qzone-runtime-card">
+      <div class="between"><div><span class="eyebrow">RUNTIME HEALTH</span><h2>空间运行状态</h2></div><span class="ops-status ${statusClass}"><span></span>${statusText}</span></div>
+      <div class="qzone-runtime-grid">
+        <div><small>Cookie</small><strong>${q.cookie_configured?'已配置':'未配置'}</strong><span>${auth.last_success_at?`最近刷新 ${_fmtTs(auth.last_success_at)}`:'等待刷新'}</span></div>
+        <div><small>扫描协调器</small><strong>${scanText}</strong><span>忙碌跳过 ${Number(scan.busy_skip_count||0)} 次</span></div>
+        <div><small>好友互动</small><strong>${social.job&&social.job.registered?'已注册':'未注册'}</strong><span>${resultDigest(social)}</span></div>
+        <div><small>留言轮询</small><strong>${inbound.job&&inbound.job.registered?'已注册':'未注册'}</strong><span>${resultDigest(inbound)}</span></div>
+      </div>
+      ${auth.cooldown_remaining_seconds>0?`<div class="alert err">检测到登录页或验证码，已暂停空间请求，冷却剩余 ${_fmtDuration(auth.cooldown_remaining_seconds)}。</div>`:''}
+      ${auth.last_error?`<p class="muted qzone-error-line">${escapeHtml(auth.last_error)}</p>`:''}
+      <div class="row">
+        <button class="btn small" onclick="runQzoneAction('refresh')" ${state.qzoneActionBusy?'disabled':''}>${state.qzoneActionBusy==='refresh'?'<span class="spinner"></span> 刷新中…':'刷新 Cookie'}</button>
+        <button class="btn small" onclick="runQzoneAction('social')" ${state.qzoneActionBusy||!q.social_enabled?'disabled':''}>运行好友扫描</button>
+        <button class="btn small" onclick="runQzoneAction('inbound')" ${state.qzoneActionBusy||!q.inbound_enabled?'disabled':''}>运行留言轮询</button>
+      </div>
+      ${state.qzoneActionResult?`<div class="alert ${state.qzoneActionResult.ok?'ok':'err'}">${escapeHtml(state.qzoneActionResult.message||state.qzoneActionResult.status||state.qzoneActionResult.error||'操作完成')}</div>`:''}
+    </div>
+  </section>
+  <div class="card">
     <div class="between" style="margin-bottom:4px">
       <h2 style="margin:0">本月发空间额度</h2>
       <div class="row">${enabledPill(q.enabled,'空间总开关')}${enabledPill(q.proactive_enabled,'主动发说说')}</div>
@@ -907,15 +938,30 @@ async function triggerQzonePost() {
   if (state.qzoneBusy) return;
   if (!confirm("确定现在强制发一条空间说说？会真实发布到 QQ 空间，并计入本月额度。")) return;
   state.qzoneBusy = true; state.qzonePostResult = null; render();
+  if (!state.qzoneOperationId) state.qzoneOperationId = (globalThis.crypto&&globalThis.crypto.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
   try {
-    const r = await api("/qzone/post-now", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({}) });
+    const r = await api("/qzone/post-now", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({operation_id:state.qzoneOperationId}) });
     state.qzonePostResult = r;
+    state.qzoneOperationId = "";
     if (r && r.quota && state.qzone) state.qzone.quota = r.quota;
     if (r && r.ok) { try { await loadView(); } catch {} }
   } catch (e) {
     state.qzonePostResult = { ok:false, error: e.message };
   }
   state.qzoneBusy = false; render();
+}
+
+async function runQzoneAction(kind) {
+  if (state.qzoneActionBusy) return;
+  state.qzoneActionBusy = kind; state.qzoneActionResult = null; render();
+  try {
+    const path = kind === 'refresh' ? '/qzone/refresh-cookie' : '/qzone/scan-now';
+    const options = kind === 'refresh' ? {method:'POST'} : {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind})};
+    const result = await api(path, options);
+    state.qzoneActionResult = result;
+    await loadView();
+  } catch (e) { state.qzoneActionResult = {ok:false,error:e.message}; }
+  state.qzoneActionBusy = ""; render();
 }
 
 function renderPersonas() {

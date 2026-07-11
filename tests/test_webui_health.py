@@ -379,3 +379,68 @@ def test_qzone_forward_test_forwards_first_feed_and_counts_quota(_runtime_contex
 def test_health_requires_auth(_runtime_context) -> None:
     client = _build_client(_runtime_context)
     assert client.get("/personification/api/health/check").status_code == 401
+
+
+def test_qzone_status_and_operations_are_observable_without_cookie_leak(_runtime_context) -> None:
+    cfg = _runtime_context.plugin_config
+    cfg.personification_qzone_enabled = True
+    cfg.personification_qzone_social_enabled = True
+    cfg.personification_qzone_inbound_enabled = True
+    cfg.personification_qzone_cookie = "uin=o10000; p_skey=must-not-leak;"
+    calls = []
+
+    class Bot:
+        self_id = "10000"
+
+        async def call_api(self, _name, **kwargs):
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+        async def send_private_msg(self, **kwargs):
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+    class Scheduler:
+        def get_job(self, job_id):  # noqa: ANN001
+            return SimpleNamespace(next_run_time=None) if job_id else None
+
+    async def refresh(_bot, *, force=False):
+        calls.append(("refresh", force))
+        return True, "p_skey=must-not-leak"
+
+    async def social(*, force=False):
+        calls.append(("social", force))
+        return {"ok": True, "status": "success", "feeds_seen": 1}
+
+    async def inbound(*, force=False):
+        calls.append(("inbound", force))
+        return {"ok": True, "status": "success", "inbound_comments": 1}
+
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=cfg,
+        superusers={"10001"},
+        get_bots=lambda: {"10000": Bot()},
+        logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+        runtime_bundle=SimpleNamespace(
+            qzone_publish_available=True,
+            update_qzone_cookie=refresh,
+            qzone_social_scan=social,
+            qzone_inbound_poll=inbound,
+            scheduler=Scheduler(),
+        ),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+
+    status = client.get("/personification/api/qzone/status")
+    refreshed = client.post("/personification/api/qzone/refresh-cookie")
+    scanned = client.post("/personification/api/qzone/scan-now", json={"kind": "inbound"})
+
+    assert status.status_code == 200, status.text
+    assert status.json()["cookie_configured"] is True
+    assert status.json()["social"]["job"]["registered"] is True
+    assert refreshed.json() == {"ok": True, "status": "refreshed", "message": "ok"}
+    assert scanned.json()["inbound_comments"] == 1
+    assert calls == [("refresh", True), ("inbound", True)]
+    assert "must-not-leak" not in status.text + refreshed.text + scanned.text

@@ -15,6 +15,7 @@ let state = {
   personaAvatarCandidateId: "", personaSignatureCandidateId: "", personaProfileBotId: "",
   personaPrompt: null, personaPromptPath: "", health: null, healthBusyCat: "", interactionResult: null, interactionBusy: false,
   qzoneForwardForm: { target_user_id: "", forward_text: "" }, qzoneForwardResult: null, qzoneForwardBusy: false,
+  qzoneActionBusy: "", qzoneActionResult: null, qzoneOperationId: "",
   pluginUpdateStatus: null, pluginUpdateHistory: null, pluginUpdateBusy: false, pluginUpdateChecking: false, pluginUpdateResult: null,
   qqInfo: null, qqGroups: [], qqFriends: [],
   memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false, memoryLimit: 200,

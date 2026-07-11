@@ -170,6 +170,14 @@ main { padding:20px 26px 48px; max-width:none; width:100%; min-width:0; height:1
 .qzone-quota-remain { margin-left:auto; }
 .qzone-recent-list { list-style:none; margin:0; padding:0; display:grid; gap:8px; }
 .qzone-recent-item { padding:9px 11px; border:1px solid var(--line); border-radius:8px; background:var(--bg); line-height:1.55; word-break:break-word; }
+.qzone-ops-grid { display:grid; gap:16px; margin-bottom:16px; }
+.qzone-runtime-card { overflow:hidden; background:linear-gradient(135deg,var(--panel),color-mix(in srgb,var(--accent) 5%,var(--panel))); }
+.qzone-runtime-card h2 { margin:4px 0 0; }
+.qzone-runtime-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:16px 0; }
+.qzone-runtime-grid>div { min-width:0; padding:12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); display:grid; gap:3px; }
+.qzone-runtime-grid small,.qzone-runtime-grid span { color:var(--muted); font-size:12px; }
+.qzone-runtime-grid strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.qzone-error-line { padding:8px 10px; border-left:2px solid var(--warn); background:color-mix(in srgb,var(--warn) 6%,transparent); }
 .toolbar { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
 .skill-summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:14px; }
 .skill-stat { border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--panel); min-height:72px; display:flex; flex-direction:column; justify-content:space-between; gap:4px; }
@@ -359,6 +367,7 @@ td code, .field-head code { word-break:break-all; }
   .qzone-quota-remain { margin-left:0; }
   .qzone-recent-list { gap:7px; }
   .qzone-recent-item { padding:8px 10px; font-size:13px; }
+  .qzone-runtime-grid { grid-template-columns:1fr; }
   .loading-hint { display:flex; width:100%; }
   .persona-history-item { align-items:flex-start; flex-direction:column; }
   /* 触摸目标加大，避免误触 */

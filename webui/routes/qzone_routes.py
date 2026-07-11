@@ -29,12 +29,17 @@ def _bundle_attr(runtime, name: str) -> Any:
 
 def _build_status(runtime) -> dict[str, Any]:
     from ...core.data_store import get_data_store
+    from ...core.qzone_service import get_qzone_auth_status
+    from ...core.sensitive_data import sanitize_object
     from ...core.time_ctx import get_configured_now
+    from ...flows.qzone_social_flow import get_qzone_scan_status
     from ...jobs.periodic_jobs import build_qzone_quota
 
     cfg = getattr(runtime, "plugin_config", None)
     enabled = bool(getattr(cfg, "personification_qzone_enabled", False))
     proactive_enabled = bool(getattr(cfg, "personification_qzone_proactive_enabled", False))
+    social_enabled = bool(getattr(cfg, "personification_qzone_social_enabled", False))
+    inbound_enabled = bool(getattr(cfg, "personification_qzone_inbound_enabled", False))
     monthly_limit = int(getattr(cfg, "personification_qzone_monthly_limit", 30) or 30)
     min_interval_hours = float(getattr(cfg, "personification_qzone_min_interval_hours", 12.0) or 0)
     check_interval = int(getattr(cfg, "personification_qzone_check_interval", 60) or 60)
@@ -54,10 +59,42 @@ def _build_status(runtime) -> dict[str, Any]:
     last_post_at = float(state.get("last_post_at", 0) or 0)
     next_eligible_at = float(quota.get("next_eligible_at", 0) or 0)
     now_ts = time.time()
+    social_state = get_data_store().load_sync("qzone_social_state")
+    if not isinstance(social_state, dict):
+        social_state = {}
+    scheduler = _bundle_attr(runtime, "scheduler")
+
+    def _job_status(job_id: str) -> dict[str, Any]:
+        try:
+            job = scheduler.get_job(job_id) if scheduler is not None and hasattr(scheduler, "get_job") else None
+        except Exception:
+            job = None
+        return {
+            "registered": job is not None,
+            "next_run_at": job.next_run_time.timestamp() if job is not None and getattr(job, "next_run_time", None) else 0,
+        }
+
     return {
         "enabled": enabled,
         "proactive_enabled": proactive_enabled,
+        "social_enabled": social_enabled,
+        "inbound_enabled": inbound_enabled,
         "publish_available": bool(_bundle_attr(runtime, "qzone_publish_available")),
+        "cookie_configured": bool(str(getattr(cfg, "personification_qzone_cookie", "") or "").strip()),
+        "auth": sanitize_object(get_qzone_auth_status()),
+        "scan": get_qzone_scan_status(),
+        "social": {
+            "last_scan_at": float(social_state.get("last_scan_at", 0) or 0),
+            "last_result": social_state.get("last_result") if isinstance(social_state.get("last_result"), dict) else {},
+            "last_error": str(social_state.get("last_error", "") or ""),
+            "job": _job_status("personification_qzone_social_scan"),
+        },
+        "inbound": {
+            "last_scan_at": float(social_state.get("last_inbound_scan_at", 0) or 0),
+            "last_result": social_state.get("last_inbound_result") if isinstance(social_state.get("last_inbound_result"), dict) else {},
+            "last_error": str(social_state.get("last_inbound_error", "") or ""),
+            "job": _job_status("personification_qzone_inbound_poll"),
+        },
         "quota": quota,
         "check_interval_minutes": check_interval,
         "quiet_hour_start": quiet_start,
@@ -161,5 +198,55 @@ def build_qzone_router(*, runtime) -> APIRouter:
             "operation_id": operation_id,
             "duplicate": bool(published.get("duplicate")),
         }
+
+    @router.post("/refresh-cookie")
+    async def refresh_cookie(
+        request: Request,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        update_cookie = _bundle_attr(runtime, "update_qzone_cookie")
+        bot = _first_bot(runtime)
+        if not callable(update_cookie) or bot is None:
+            raise HTTPException(status_code=503, detail="Cookie 刷新能力未就绪或 Bot 未连接")
+        try:
+            ok, message = await update_cookie(bot, force=True)
+        except Exception as exc:
+            ok, message = False, str(exc)
+        webui_audit_log.record(
+            action="qzone_cookie_refresh",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=str(getattr(bot, "self_id", "") or ""),
+            ip_hash=get_client_ip(request),
+            detail={"ok": bool(ok), "status": "refreshed" if ok else "failed"},
+            outcome="ok" if ok else "failed",
+        )
+        from ...core.sensitive_data import sanitize_text
+
+        return {"ok": bool(ok), "status": "refreshed" if ok else "failed", "message": "ok" if ok else sanitize_text(message, limit=240)}
+
+    @router.post("/scan-now")
+    async def scan_now(
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        kind = str(body.get("kind") or "inbound").strip().lower()
+        if kind not in {"social", "inbound"}:
+            raise HTTPException(status_code=400, detail="kind 只能是 social 或 inbound")
+        runner = _bundle_attr(runtime, "qzone_social_scan" if kind == "social" else "qzone_inbound_poll")
+        if not callable(runner):
+            raise HTTPException(status_code=503, detail="对应空间扫描任务未初始化")
+        result = await runner(force=True)
+        webui_audit_log.record(
+            action="qzone_scan_now",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=kind,
+            ip_hash=get_client_ip(request),
+            detail={"status": result.get("status") or ("success" if result.get("ok") else "failed"), "skipped": bool(result.get("skipped"))},
+            outcome="ok" if result.get("ok") else "failed",
+        )
+        return result
 
     return router
