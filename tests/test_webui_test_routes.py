@@ -646,6 +646,44 @@ def test_avatar_search_rejects_web_fallback_rows_without_image_urls() -> None:
     assert diagnostics["web_fallback_row_count"] > 0
 
 
+def test_avatar_search_writes_aggregate_warning_without_urls() -> None:
+    module = load_personification_module("plugin.personification.webui.routes.persona_template_routes")
+    diagnostics = {}
+    messages = []
+    logger = SimpleNamespace(info=messages.append, warning=messages.append)
+
+    async def fake_searcher(_query, **_kwargs):
+        return json.dumps({
+            "source_type": "web",
+            "results": [],
+            "image_search_diagnostics": {
+                "http_status": 200,
+                "content_type": "text/html",
+                "response_bytes": 1200,
+                "raw_item_count": 0,
+                "direct_image_count": 0,
+                "error_type": "",
+            },
+        })
+
+    results = asyncio.run(module._search_avatar_image_sources(
+        work_title="测试作品",
+        character_name="测试角色",
+        logger=logger,
+        searcher=fake_searcher,
+        diagnostics=diagnostics,
+    ))
+
+    assert results == []
+    assert diagnostics["empty_parse_count"] == diagnostics["query_count"]
+    assert diagnostics["http_status_counts"] == {"200": diagnostics["query_count"]}
+    assert diagnostics["content_type_counts"] == {"text/html": diagnostics["query_count"]}
+    assert diagnostics["response_bytes"] > 0
+    assert len(messages) == 1
+    assert "空解析=" in messages[0]
+    assert "example.test" not in messages[0]
+
+
 def test_persona_template_source_relevance_rejects_weak_character_mentions() -> None:
     module = load_personification_module(
         "plugin.personification.webui.routes.persona_template_routes"

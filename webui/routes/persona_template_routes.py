@@ -7,6 +7,7 @@ import re
 import shutil
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -819,6 +820,7 @@ async def _search_avatar_image_sources(
     results: list[dict[str, Any]] = []
     query_failures = 0
     web_fallback_rows = 0
+    image_diagnostics: list[dict[str, Any]] = []
     async with httpx.AsyncClient(follow_redirects=False, timeout=12.0) as client:
         async def one(query: str) -> list[dict[str, Any]]:
             nonlocal query_failures, web_fallback_rows
@@ -833,6 +835,9 @@ async def _search_avatar_image_sources(
                 return []
             rows = payload.get("results") if isinstance(payload, dict) else []
             source_type = str(payload.get("source_type") or "") if isinstance(payload, dict) else ""
+            image_diag = payload.get("image_search_diagnostics") if isinstance(payload, dict) else None
+            if isinstance(image_diag, dict):
+                image_diagnostics.append(image_diag)
             items: list[dict[str, Any]] = []
             for row in list(rows or []):
                 if not isinstance(row, dict):
@@ -860,13 +865,55 @@ async def _search_avatar_image_sources(
             if url and url not in seen:
                 seen.add(url)
                 results.append(item)
+    http_status_counts = Counter(
+        int(item.get("http_status") or 0)
+        for item in image_diagnostics
+        if int(item.get("http_status") or 0) > 0
+    )
+    error_type_counts = Counter(
+        str(item.get("error_type") or "")
+        for item in image_diagnostics
+        if str(item.get("error_type") or "")
+    )
+    content_type_counts = Counter(
+        str(item.get("content_type") or "unknown")
+        for item in image_diagnostics
+    )
+    raw_item_count = sum(int(item.get("raw_item_count") or 0) for item in image_diagnostics)
+    response_bytes = sum(int(item.get("response_bytes") or 0) for item in image_diagnostics)
+    empty_parse_count = sum(
+        int(item.get("http_status") or 0) == 200
+        and int(item.get("response_bytes") or 0) > 0
+        and int(item.get("raw_item_count") or 0) == 0
+        for item in image_diagnostics
+    )
+    summary = {
+        "query_count": len(queries),
+        "query_failure_count": query_failures,
+        "web_fallback_row_count": web_fallback_rows,
+        "direct_image_count": len(results),
+        "image_diagnostic_count": len(image_diagnostics),
+        "raw_item_count": raw_item_count,
+        "response_bytes": response_bytes,
+        "empty_parse_count": empty_parse_count,
+        "http_status_counts": {str(key): value for key, value in sorted(http_status_counts.items())},
+        "content_type_counts": dict(sorted(content_type_counts.items())),
+        "error_type_counts": dict(sorted(error_type_counts.items())),
+    }
     if diagnostics is not None:
-        diagnostics.update({
-            "query_count": len(queries),
-            "query_failure_count": query_failures,
-            "web_fallback_row_count": web_fallback_rows,
-            "direct_image_count": len(results),
-        })
+        diagnostics.update(summary)
+    log_message = (
+        "头像图片搜索完成："
+        f"查询={summary['query_count']}，直链={summary['direct_image_count']}，"
+        f"调用异常={summary['query_failure_count']}，网页降级条目={summary['web_fallback_row_count']}，"
+        f"HTTP={summary['http_status_counts']}，类型={summary['content_type_counts']}，"
+        f"响应字节={summary['response_bytes']}，原始条目={summary['raw_item_count']}，"
+        f"空解析={summary['empty_parse_count']}，引擎异常={summary['error_type_counts']}"
+    )
+    warning_status = any(status in http_status_counts for status in (403, 429))
+    log_method = getattr(logger, "warning" if not results or warning_status or error_type_counts else "info", None)
+    if callable(log_method):
+        log_method(log_message)
     return results[:60]
 
 
