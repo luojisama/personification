@@ -95,6 +95,9 @@ def test_static_frontend_assets_are_served(_runtime_context) -> None:
     assert admin_js.status_code == 200
     assert "renderHealth" in admin_js.text
     assert "runQzoneForwardTest" in admin_js.text
+    assert 'item.safety_status==="pass"&&item.vision_status==="verified"' in admin_js.text
+    assert "没有通过目标角色视觉审核的头像" in admin_js.text
+    assert "character_confidence" in admin_js.text
 
     tools_js = client.get("/personification/static/app-tools.js")
     assert tools_js.status_code == 200

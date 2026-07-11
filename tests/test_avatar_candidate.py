@@ -290,6 +290,22 @@ def test_avatar_text_score_does_not_treat_query_as_evidence() -> None:
     assert score <= 0.1
 
 
+def test_history_summary_counts_only_verified_avatars() -> None:
+    history = load_personification_module("plugin.personification.core.persona_template_history")
+    summary = history.summarize_persona_template_record({
+        "result": {
+            "avatar_candidates": [
+                {"candidate_id": "1", "vision_status": "verified"},
+                {"candidate_id": "2", "vision_status": "unavailable"},
+            ],
+            "avatar_review_summary": {"verified_count": 1, "reviewed_count": 2},
+        }
+    })
+    assert summary["avatar_candidate_count"] == 1
+    assert summary["verified_avatar_count"] == 1
+    assert summary["avatar_reviewed_count"] == 2
+
+
 def test_candidate_file_rejects_symlink_escape(tmp_path, monkeypatch) -> None:
     if not hasattr(__import__("os"), "symlink"):
         pytest.skip("symlinks unsupported")

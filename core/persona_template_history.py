@@ -158,6 +158,15 @@ def append_persona_template_apply_audit(record_id: str, event: dict[str, Any]) -
 
 def summarize_persona_template_record(record: dict[str, Any]) -> dict[str, Any]:
     result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    avatar_review = result.get("avatar_review_summary") if isinstance(result.get("avatar_review_summary"), dict) else {}
+    verified_count = int(
+        avatar_review.get("verified_count")
+        or len([
+            item
+            for item in list(result.get("avatar_candidates") or [])
+            if isinstance(item, dict) and item.get("vision_status") == "verified"
+        ])
+    )
     return {
         "record_id": record.get("record_id", ""),
         "work_title": record.get("work_title", ""),
@@ -171,7 +180,9 @@ def summarize_persona_template_record(record: dict[str, Any]) -> dict[str, Any]:
         "subagent_count": int(record.get("subagent_count") or len(result.get("subagents") or [])),
         "template_keys": list(result.get("template_keys") or [])[:32],
         "revision": str(result.get("revision") or ""),
-        "avatar_candidate_count": len(result.get("avatar_candidates") or []),
+        "avatar_candidate_count": verified_count,
+        "verified_avatar_count": verified_count,
+        "avatar_reviewed_count": int(avatar_review.get("reviewed_count") or 0),
         "signature_candidate_count": len(result.get("signature_candidates") or []),
         "profile_status": str(result.get("profile_status") or ""),
     }
