@@ -59,6 +59,39 @@ def test_plugin_runtime_logs_sanitize_filter_and_clear(_db_tmp) -> None:
     assert logs.query_recent(limit=10) == []
 
 
+def test_plugin_runtime_logs_cursor_page_contract(_db_tmp) -> None:
+    logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")
+    logs.clear_all()
+    for index in range(5):
+        logs.record(level="INFO", source="unit", message=f"page-item-{index}", min_level="DEBUG")
+
+    first = logs.query_page(limit=2)
+    second = logs.query_page(limit=2, cursor=first["next_cursor"])
+    third = logs.query_page(limit=2, cursor=second["next_cursor"])
+
+    assert [item["message"] for item in first["entries"]] == ["page-item-4", "page-item-3"]
+    assert [item["message"] for item in second["entries"]] == ["page-item-2", "page-item-1"]
+    assert [item["message"] for item in third["entries"]] == ["page-item-0"]
+    assert first["has_more"] is True
+    assert second["has_more"] is True
+    assert third["has_more"] is False
+    assert third["next_cursor"] == 0
+    assert len({item["id"] for page in (first, second, third) for item in page["entries"]}) == 5
+    assert logs.writer_status()["pending"] == 0
+
+
+def test_plugin_runtime_logs_search_treats_wildcards_literally(_db_tmp) -> None:
+    logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")
+    logs.clear_all()
+    logs.record(level="INFO", source="unit", message="literal 100%_done", min_level="DEBUG")
+    logs.record(level="INFO", source="unit", message="literal 100XXdone", min_level="DEBUG")
+
+    page = logs.query_page(limit=10, q="%_")
+
+    assert [item["message"] for item in page["entries"]] == ["literal 100%_done"]
+    assert page["filters"]["q"] == "%_"
+
+
 def test_reply_turn_trace_records_and_finishes(_db_tmp) -> None:
     traces = load_personification_module("plugin.personification.core.reply_turn_trace")
     trace_id = traces.start_trace(

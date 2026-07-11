@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from starlette.concurrency import run_in_threadpool
 
 from ...core import plugin_runtime_logs, reply_turn_trace
 from ..deps import AdminIdentity, require_admin
@@ -19,20 +20,26 @@ def build_log_router(*, runtime) -> APIRouter:
         _: AdminIdentity = Depends(require_admin),
     ) -> dict:
         cfg = getattr(runtime, "plugin_config", None)
-        pruned = plugin_runtime_logs.maybe_prune(config=cfg)
-        rows = plugin_runtime_logs.query_recent(
-            limit=limit,
-            level=level,
-            q=q,
-            cursor=cursor,
-            trace_id=trace_id,
-        )
-        return {
-            "entries": rows,
-            "next_cursor": rows[-1]["id"] if rows else 0,
-            "retention_days": plugin_runtime_logs.retention_days_from_config(cfg),
-            "pruned": pruned,
-        }
+
+        def _query() -> dict:
+            pruned = plugin_runtime_logs.maybe_prune(config=cfg)
+            page = plugin_runtime_logs.query_page(
+                limit=limit,
+                level=level,
+                q=q,
+                cursor=cursor,
+                trace_id=trace_id,
+            )
+            page.update(
+                {
+                    "retention_days": plugin_runtime_logs.retention_days_from_config(cfg),
+                    "pruned": pruned,
+                    "writer": plugin_runtime_logs.writer_status(),
+                }
+            )
+            return page
+
+        return await run_in_threadpool(_query)
 
     @router.get("/trace/{trace_id}")
     async def trace_detail(
@@ -42,7 +49,7 @@ def build_log_router(*, runtime) -> APIRouter:
         trace = reply_turn_trace.get_trace(trace_id)
         if trace is None:
             raise HTTPException(status_code=404, detail="未找到该 trace")
-        rows = plugin_runtime_logs.query_recent(limit=120, trace_id=trace_id)
+        rows = await run_in_threadpool(plugin_runtime_logs.query_recent, limit=120, trace_id=trace_id)
         return {
             "trace": trace,
             "logs": rows,
@@ -94,7 +101,7 @@ def build_log_router(*, runtime) -> APIRouter:
 
     @router.delete("/clear")
     async def clear(_: AdminIdentity = Depends(require_admin)) -> dict:
-        deleted = plugin_runtime_logs.clear_all()
+        deleted = await run_in_threadpool(plugin_runtime_logs.clear_all)
         return {"deleted": deleted}
 
     return router
