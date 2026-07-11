@@ -14,6 +14,7 @@ MIN_PORTRAIT_QUALITY = 0.45
 TARGET_VERIFIED_CANDIDATES = 12
 MAX_VISUAL_REVIEWS = 60
 REVIEW_BATCH_SIZE = 8
+VISUAL_REVIEW_TIMEOUT_SECONDS = 45.0
 
 VisualReviewer = Callable[[str, str], Awaitable[tuple[str, str]]]
 
@@ -259,16 +260,24 @@ async def review_avatar_candidates(
     effective_reviewer = reviewer or default_reviewer
     verified = 0
     reviewed = 0
-    for start in range(0, len(selected), REVIEW_BATCH_SIZE):
-        if verified >= max(10, int(target_verified)):
+    cursor = 0
+    required_verified = max(10, int(target_verified))
+    while cursor < len(selected):
+        if verified >= required_verified:
             break
-        batch = selected[start : start + REVIEW_BATCH_SIZE]
+        remaining = required_verified - verified
+        batch_size = min(REVIEW_BATCH_SIZE, remaining, len(selected) - cursor)
+        batch = selected[cursor : cursor + batch_size]
+        cursor += batch_size
 
         async def one(candidate: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
             try:
-                raw, route = await effective_reviewer(
-                    prompt,
-                    _data_url(candidate_path(candidate), str(candidate.get("mime") or "image/jpeg")),
+                raw, route = await asyncio.wait_for(
+                    effective_reviewer(
+                        prompt,
+                        _data_url(candidate_path(candidate), str(candidate.get("mime") or "image/jpeg")),
+                    ),
+                    timeout=VISUAL_REVIEW_TIMEOUT_SECONDS,
                 )
                 return candidate, normalize_avatar_visual_review(raw, route=route)
             except Exception as exc:
@@ -295,12 +304,13 @@ async def review_avatar_candidates(
         reverse=True,
     )
     status_counts = Counter(str(item.get("vision_status") or "not_reviewed") for item in prepared)
+    usable_reviews = sum(status_counts.get(status, 0) for status in ("verified", "rejected", "uncertain"))
     summary = {
         "safe_count": len(prepared),
         "reviewed_count": reviewed,
         "verified_count": status_counts.get("verified", 0),
         "status_counts": dict(status_counts),
-        "vision_available": reviewed > 0 and status_counts.get("unavailable", 0) < reviewed,
+        "vision_available": usable_reviews > 0,
     }
     return prepared, summary
 

@@ -271,6 +271,63 @@ def test_visual_review_hard_filters_wrong_candidates_without_pillow(tmp_path) ->
     assert all(item["vision_status"] == "rejected" for item in reviewed[10:])
 
 
+def test_visual_review_stops_at_target_and_marks_total_errors_unavailable(tmp_path, monkeypatch) -> None:
+    candidates = []
+    paths = {}
+    for index in range(20):
+        candidate_id = f"{index:032x}"
+        path = tmp_path / f"{candidate_id}.jpg"
+        path.write_bytes(f"candidate-{index}".encode())
+        paths[candidate_id] = path
+        candidates.append({
+            "candidate_id": candidate_id,
+            "source": "official",
+            "title": f"测试作品 目标角色 {index}",
+            "page_url": "https://example.test/character",
+            "mime": "image/jpeg",
+            "aspect_score": 0.8,
+            "safety_status": "pass",
+        })
+    calls = 0
+
+    async def verified_reviewer(_prompt: str, _image_ref: str):
+        nonlocal calls
+        calls += 1
+        return _review_payload(match="yes"), "mock"
+
+    _reviewed, summary = asyncio.run(relevance.review_avatar_candidates(
+        runtime=object(),
+        candidates=candidates,
+        work_title="测试作品",
+        character_name="目标角色",
+        aliases={"work_aliases": ["测试作品"], "character_aliases": ["目标角色"]},
+        candidate_path=lambda item: paths[item["candidate_id"]],
+        reviewer=verified_reviewer,
+        target_verified=10,
+    ))
+    assert calls == 10
+    assert summary["verified_count"] == 10
+
+    monkeypatch.setattr(relevance, "VISUAL_REVIEW_TIMEOUT_SECONDS", 0.001)
+
+    async def hanging_reviewer(_prompt: str, _image_ref: str):
+        await asyncio.sleep(0.05)
+        return _review_payload(match="yes"), "mock"
+
+    _reviewed, failed_summary = asyncio.run(relevance.review_avatar_candidates(
+        runtime=object(),
+        candidates=candidates[:2],
+        work_title="测试作品",
+        character_name="目标角色",
+        aliases={"work_aliases": ["测试作品"], "character_aliases": ["目标角色"]},
+        candidate_path=lambda item: paths[item["candidate_id"]],
+        reviewer=hanging_reviewer,
+        target_verified=10,
+    ))
+    assert failed_summary["status_counts"]["error"] == 2
+    assert failed_summary["vision_available"] is False
+
+
 @pytest.mark.parametrize("raw,route,status", [
     ("", "vision_unavailable", "unavailable"),
     ("not-json", "mock", "invalid_response"),
