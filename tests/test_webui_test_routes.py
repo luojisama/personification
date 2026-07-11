@@ -604,6 +604,29 @@ def test_avatar_search_uses_planned_aliases_without_real_network() -> None:
     assert all(item["query"] in calls for item in results)
 
 
+def test_avatar_search_rejects_web_fallback_rows_without_image_urls() -> None:
+    module = load_personification_module("plugin.personification.webui.routes.persona_template_routes")
+    diagnostics = {}
+
+    async def fake_searcher(_query, **_kwargs):
+        return json.dumps({
+            "source_type": "web",
+            "results": [{"title": "角色页面", "url": "https://example.test/character"}],
+        })
+
+    results = asyncio.run(module._search_avatar_image_sources(
+        work_title="测试作品",
+        character_name="测试角色",
+        logger=None,
+        searcher=fake_searcher,
+        diagnostics=diagnostics,
+    ))
+
+    assert results == []
+    assert diagnostics["direct_image_count"] == 0
+    assert diagnostics["web_fallback_row_count"] > 0
+
+
 def test_persona_template_source_relevance_rejects_weak_character_mentions() -> None:
     module = load_personification_module(
         "plugin.personification.webui.routes.persona_template_routes"

@@ -6,6 +6,7 @@ import io
 import re
 import uuid
 import warnings
+from collections import Counter
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
@@ -155,8 +156,10 @@ async def build_avatar_candidates(
     plugin_config: Any = None,
     fetcher: Fetcher | None = None,
     resolver: Callable[..., Awaitable[Any]] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     extracted = extract_image_urls(sources)
+    failure_counts: Counter[str] = Counter()
     output_dir = Path(get_data_dir(plugin_config)) / "persona_avatar_candidates" / revision
     output_dir.mkdir(parents=True, exist_ok=True)
     candidates: list[dict[str, Any]] = []
@@ -203,7 +206,22 @@ async def build_avatar_candidates(
                 "suffix": suffix,
             }
             return candidate, encoded, suffix
-        except Exception:
+        except Exception as exc:
+            message = str(exc).lower()
+            if "pillow" in message:
+                failure_counts["dependency_missing"] += 1
+            elif "resolve" in message or "address" in message:
+                failure_counts["dns_or_address"] += 1
+            elif "mime" in message or "magic" in message:
+                failure_counts["not_an_image"] += 1
+            elif "http " in message or "redirect" in message:
+                failure_counts["http_error"] += 1
+            elif "too large" in message or "size limit" in message:
+                failure_counts["too_large"] += 1
+            elif "decoder" in message or "dimensions" in message:
+                failure_counts["decode_rejected"] += 1
+            else:
+                failure_counts["download_error"] += 1
             return None, None, ""
 
     results = await asyncio.gather(*(process(item) for item in extracted))
@@ -213,6 +231,7 @@ async def build_avatar_candidates(
         sha256 = candidate["sha256"]
         phash = candidate["phash"]
         if sha256 in sha_seen or any(phash_distance(phash, old) <= 5 for old in phashes):
+            failure_counts["duplicate"] += 1
             continue
         sha_seen.add(sha256)
         phashes.append(phash)
@@ -221,6 +240,12 @@ async def build_avatar_candidates(
         (output_dir / f"{candidate['candidate_id']}{suffix}").write_bytes(encoded)
         candidates.append(candidate)
     candidates.sort(key=lambda item: float(item["fit_score"]), reverse=True)
+    if diagnostics is not None:
+        diagnostics.update({
+            "extracted_url_count": len(extracted),
+            "safe_count": len(candidates),
+            "failure_counts": dict(failure_counts),
+        })
     return candidates
 
 

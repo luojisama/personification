@@ -727,6 +727,8 @@ async def _collect_profile_candidates(
     resolver = getattr(runtime, "avatar_candidate_resolver", None)
     image_searcher = getattr(runtime, "avatar_candidate_searcher", None)
     visual_reviewer = getattr(runtime, "avatar_candidate_reviewer", None)
+    avatar_diagnostics: dict[str, Any] = {}
+    search_diagnostics: dict[str, Any] = {}
     avatar_sources = list(sources)
     if not callable(fetcher):
         avatar_sources.extend(
@@ -736,6 +738,7 @@ async def _collect_profile_candidates(
                 logger=getattr(runtime, "logger", None),
                 search_aliases=search_aliases,
                 searcher=image_searcher if callable(image_searcher) else None,
+                diagnostics=search_diagnostics,
             )
         )
     safe_avatars, signatures = await asyncio.gather(
@@ -745,6 +748,7 @@ async def _collect_profile_candidates(
             plugin_config=getattr(runtime, "plugin_config", None),
             fetcher=fetcher if callable(fetcher) else None,
             resolver=resolver if callable(resolver) else None,
+            diagnostics=avatar_diagnostics,
         ),
         _generate_signature_candidates(
             caller=caller,
@@ -766,6 +770,8 @@ async def _collect_profile_candidates(
         candidate_path=lambda item: candidate_file(item, plugin_config=getattr(runtime, "plugin_config", None)),
         reviewer=visual_reviewer if callable(visual_reviewer) else None,
     )
+    review_summary["search_diagnostics"] = search_diagnostics
+    review_summary["download_diagnostics"] = avatar_diagnostics
     avatars = [item for item in reviewed_avatars if item.get("vision_status") == "verified"][:20]
     for candidate in signatures:
         candidate["revision"] = revision
@@ -779,6 +785,7 @@ async def _search_avatar_image_sources(
     logger: Any,
     search_aliases: dict[str, list[str]] | None = None,
     searcher: Any = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not callable(searcher):
         try:
@@ -807,8 +814,11 @@ async def _search_avatar_image_sources(
         ))
     queries = _dedupe_keep_order(queries, limit=12)
     results: list[dict[str, Any]] = []
+    query_failures = 0
+    web_fallback_rows = 0
     async with httpx.AsyncClient(follow_redirects=False, timeout=12.0) as client:
         async def one(query: str) -> list[dict[str, Any]]:
+            nonlocal query_failures, web_fallback_rows
             try:
                 raw = await asyncio.wait_for(
                     searcher(query, limit=12, http_client=client, logger=logger),
@@ -816,14 +826,18 @@ async def _search_avatar_image_sources(
                 )
                 payload = json.loads(raw)
             except Exception:
+                query_failures += 1
                 return []
             rows = payload.get("results") if isinstance(payload, dict) else []
+            source_type = str(payload.get("source_type") or "") if isinstance(payload, dict) else ""
             items: list[dict[str, Any]] = []
             for row in list(rows or []):
                 if not isinstance(row, dict):
                     continue
-                image_url = str(row.get("image_url") or row.get("url") or "").strip()
+                image_url = str(row.get("image_url") or "").strip()
                 if not image_url:
+                    if source_type and source_type != "image":
+                        web_fallback_rows += 1
                     continue
                 items.append({
                     "source": str(row.get("source") or "image_search"),
@@ -843,6 +857,13 @@ async def _search_avatar_image_sources(
             if url and url not in seen:
                 seen.add(url)
                 results.append(item)
+    if diagnostics is not None:
+        diagnostics.update({
+            "query_count": len(queries),
+            "query_failure_count": query_failures,
+            "web_fallback_row_count": web_fallback_rows,
+            "direct_image_count": len(results),
+        })
     return results[:60]
 
 

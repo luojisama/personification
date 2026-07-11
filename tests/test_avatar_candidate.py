@@ -172,6 +172,26 @@ def test_avatar_candidates_dedupe_and_persist_ten(tmp_path, monkeypatch) -> None
     assert all(avatar.candidate_file(item).is_file() for item in candidates)
 
 
+def test_avatar_candidate_diagnostics_classify_non_image_responses(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(avatar, "get_data_dir", lambda _config=None: tmp_path)
+    diagnostics = {}
+
+    async def fetcher(url: str):
+        return b"<html>not an image</html>", "text/html", url
+
+    candidates = asyncio.run(avatar.build_avatar_candidates(
+        [{"image_url": "https://example.test/not-image", "source": "mock"}],
+        revision="d" * 32,
+        fetcher=fetcher,
+        resolver=_public_resolver,
+        diagnostics=diagnostics,
+    ))
+
+    assert candidates == []
+    assert diagnostics["extracted_url_count"] == 1
+    assert diagnostics["failure_counts"]["not_an_image"] == 1
+
+
 def _review_payload(*, match: str, confidence: float = 0.95, quality: float = 0.8) -> str:
     return __import__("json").dumps({
         "target_match": match,
