@@ -12,6 +12,8 @@ from ..core.db import connect_sync
 
 
 _IMAGE_B64_RE = re.compile(r"\[IMAGE_B64\][A-Za-z0-9+/=\r\n]+\[/IMAGE_B64\]")
+_QZONE_SOCIAL_SCAN_TIMEOUT_SECONDS = 180.0
+_QZONE_INBOUND_TIMEOUT_SECONDS = 90.0
 
 
 def build_qzone_quota(
@@ -615,12 +617,24 @@ async def run_qzone_social_scan(
     else:
         if not cookie_ok:
             logger.warning(f"拟人插件：空间互动刷新 Cookie 失败（{cookie_msg}），尝试使用旧 Cookie。")
-    result = await scan_qzone_social_feeds(
-        bot,
-        target_user_id=str(target_user_id or ""),
-        allow_open_user=bool(force),
-    )
-    if result.get("ok"):
+    try:
+        result = await asyncio.wait_for(
+            scan_qzone_social_feeds(
+                bot,
+                target_user_id=str(target_user_id or ""),
+                allow_open_user=bool(force),
+            ),
+            timeout=_QZONE_SOCIAL_SCAN_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        result = {"ok": False, "status": "timed_out", "last_error": "qzone_social_scan_timed_out"}
+    if result.get("skipped"):
+        log = logger.warning if int(result.get("running_seconds", 0) or 0) > _QZONE_SOCIAL_SCAN_TIMEOUT_SECONDS else logger.info
+        log(
+            "拟人插件：空间互动扫描忙碌跳过，"
+            f"当前任务 {result.get('busy_by', '')}，已运行 {result.get('running_seconds', 0)} 秒。"
+        )
+    elif result.get("ok"):
         logger.info(
             "拟人插件：空间互动扫描完成，"
             f"用户 {result.get('scanned_users', 0)}，动态 {result.get('feeds_seen', 0)}，"
@@ -656,8 +670,20 @@ async def run_qzone_inbound_poll(
     else:
         if not cookie_ok:
             logger.warning(f"拟人插件：空间消息轮询刷新 Cookie 失败（{cookie_msg}），尝试使用旧 Cookie。")
-    result = await poll_qzone_inbound_messages(bot)
-    if result.get("ok"):
+    try:
+        result = await asyncio.wait_for(
+            poll_qzone_inbound_messages(bot),
+            timeout=_QZONE_INBOUND_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        result = {"ok": False, "status": "timed_out", "last_error": "qzone_inbound_poll_timed_out"}
+    if result.get("skipped"):
+        log = logger.warning if int(result.get("running_seconds", 0) or 0) > _QZONE_SOCIAL_SCAN_TIMEOUT_SECONDS else logger.info
+        log(
+            "拟人插件：空间消息轮询忙碌跳过，"
+            f"当前任务 {result.get('busy_by', '')}，已运行 {result.get('running_seconds', 0)} 秒。"
+        )
+    elif result.get("ok"):
         logger.info(
             "拟人插件：空间消息轮询完成，"
             f"说说 {result.get('feeds_seen', 0)}，留言 {result.get('inbound_comments', 0)}，"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 import time
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
@@ -21,7 +22,75 @@ from .diary_flow import clean_generated_text
 
 
 _STORE_NAME = "qzone_social_state"
-_SCAN_LOCK = asyncio.Lock()
+
+
+class _QzoneScanLease:
+    def __init__(self, coordinator: "_QzoneScanCoordinator", token: str) -> None:
+        self._coordinator = coordinator
+        self._token = token
+
+    async def __aenter__(self) -> "_QzoneScanLease":
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        self._coordinator.release(self._token)
+
+
+class _QzoneScanCoordinator:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._owner = ""
+        self._token = ""
+        self._started_at = 0.0
+        self._busy_skip_count = 0
+
+    def try_acquire(self, owner: str) -> _QzoneScanLease | None:
+        with self._lock:
+            if self._token:
+                self._busy_skip_count += 1
+                return None
+            self._owner = str(owner or "scan")
+            self._token = f"{self._owner}:{time.monotonic_ns()}"
+            self._started_at = time.time()
+            return _QzoneScanLease(self, self._token)
+
+    def release(self, token: str) -> None:
+        with self._lock:
+            if token != self._token:
+                return
+            self._owner = ""
+            self._token = ""
+            self._started_at = 0.0
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "running": bool(self._token),
+                "owner": self._owner,
+                "started_at": self._started_at,
+                "running_seconds": max(0, int(time.time() - self._started_at)) if self._started_at else 0,
+                "busy_skip_count": self._busy_skip_count,
+            }
+
+
+_SCAN_COORDINATOR = _QzoneScanCoordinator()
+
+
+def get_qzone_scan_status() -> dict[str, Any]:
+    return _SCAN_COORDINATOR.status()
+
+
+def _busy_scan_result() -> dict[str, Any]:
+    status = get_qzone_scan_status()
+    return {
+        "ok": True,
+        "status": "skipped",
+        "skipped": True,
+        "reason": "busy",
+        "busy_by": status.get("owner", ""),
+        "running_seconds": status.get("running_seconds", 0),
+        "last_error": "",
+    }
 
 # 权限保密用户黑名单：对方设置了"主人设置了保密"等访问限制时，记录 uin 跳过后续扫描。
 # 每 7 天自动重检一次，若仍无权限则继续保持在黑名单。
@@ -1413,9 +1482,10 @@ async def scan_qzone_social_feeds(
     target_user_id: str = "",
     allow_open_user: bool = False,
 ) -> dict[str, Any]:
-    if _SCAN_LOCK.locked():
-        return {"ok": False, "skipped": True, "last_error": "qzone_social_scan_already_running"}
-    async with _SCAN_LOCK:
+    lease = _SCAN_COORDINATOR.try_acquire("social")
+    if lease is None:
+        return _busy_scan_result()
+    async with lease:
         now = get_now()
         today = now.strftime("%Y-%m-%d")
         state = _normalize_state(now)
@@ -1767,9 +1837,10 @@ async def scan_qzone_inbound_messages(
     agent_max_steps: int = 4,
 ) -> dict[str, Any]:
     """Poll comments under the bot's own Qzone feeds and let the LLM decide replies."""
-    if _SCAN_LOCK.locked():
-        return {"ok": False, "skipped": True, "last_error": "qzone_scan_already_running"}
-    async with _SCAN_LOCK:
+    lease = _SCAN_COORDINATOR.try_acquire("inbound")
+    if lease is None:
+        return _busy_scan_result()
+    async with lease:
         state = _normalize_state(get_now())
         result: dict[str, Any] = {
             "ok": True,

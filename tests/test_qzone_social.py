@@ -301,6 +301,51 @@ def test_qzone_forward_timeout_does_not_try_fallback_endpoint(monkeypatch) -> No
     assert len(calls) == 1
 
 
+def test_qzone_auth_page_with_success_literal_is_rejected() -> None:
+    try:
+        ok, msg = qzone_service._qzone_payload_success(
+            {"script": "value"},
+            '\ufeff<html><script>window.fake={"code":0}</script>验证码</html>',
+        )
+        assert ok is False
+        assert "验证码" in msg
+        assert qzone_service.get_qzone_auth_status()["status"] == "auth_blocked"
+    finally:
+        with qzone_service._AUTH_STATE_LOCK:
+            qzone_service._AUTH_STATE.update({
+                "status": "unknown",
+                "refreshing": False,
+                "last_refresh_at": 0.0,
+                "last_success_at": 0.0,
+                "last_failure_at": 0.0,
+                "last_error": "",
+                "cooldown_until": 0.0,
+            })
+
+
+def test_qzone_scan_busy_is_structured_skip() -> None:
+    async def run():
+        lease = qzone_flow._SCAN_COORDINATOR.try_acquire("social")
+        assert lease is not None
+        async with lease:
+            return await qzone_flow.scan_qzone_inbound_messages(
+                bot=None,
+                plugin_config=None,
+                qzone_social_service=None,
+                load_prompt=lambda: "",
+                call_ai_api=lambda *_args: None,
+                load_proactive_state=lambda: {},
+                get_now=lambda: datetime.now(),
+                logger=_Logger(),
+            )
+
+    result = asyncio.run(run())
+    assert result["ok"] is True
+    assert result["status"] == "skipped"
+    assert result["reason"] == "busy"
+    assert result["busy_by"] == "social"
+
+
 def test_proactive_candidates_require_profile_and_not_favorability_threshold() -> None:
     candidates = proactive_flow._build_candidates(
         all_user_data={

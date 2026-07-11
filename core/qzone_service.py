@@ -4,12 +4,58 @@ import base64
 import html
 import json
 import re
+import threading
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import httpx
 
 from .config_manager import _restrict_sensitive_file_permissions
+
+
+_AUTH_STATE_LOCK = threading.Lock()
+_AUTH_STATE: dict[str, Any] = {
+    "status": "unknown",
+    "refreshing": False,
+    "last_refresh_at": 0.0,
+    "last_success_at": 0.0,
+    "last_failure_at": 0.0,
+    "last_error": "",
+    "cooldown_until": 0.0,
+}
+_AUTH_REFRESH_CACHE_SECONDS = 300
+_AUTH_FAILURE_COOLDOWN_SECONDS = 15 * 60
+_COOKIE_FILE_LOCK = threading.Lock()
+
+
+def get_qzone_auth_status() -> dict[str, Any]:
+    with _AUTH_STATE_LOCK:
+        state = dict(_AUTH_STATE)
+    state["cooldown_remaining_seconds"] = max(0, int(float(state.get("cooldown_until", 0) or 0) - time.time()))
+    return state
+
+
+def _set_qzone_auth_failure(message: Any, *, auth_failure: bool = False) -> None:
+    now = time.time()
+    with _AUTH_STATE_LOCK:
+        _AUTH_STATE.update({
+            "status": "auth_blocked" if auth_failure else "refresh_failed",
+            "last_failure_at": now,
+            "last_error": str(message or "")[:240],
+            "cooldown_until": now + _AUTH_FAILURE_COOLDOWN_SECONDS if auth_failure else 0.0,
+        })
+
+
+def _looks_like_qzone_auth_page(raw_text: Any) -> bool:
+    text = str(raw_text or "").lstrip("\ufeff\r\n\t ").lower()
+    return (
+        text.startswith(("<html", "<!doctype"))
+        or "安全验证" in text
+        or "验证码" in text
+        or "login.qzone.qq.com" in text
+        or "ptlogin" in text
+    )
 
 
 def _get_g_tk(p_skey: str) -> int:
@@ -28,26 +74,30 @@ def _get_cookie_from_config(plugin_config: Any) -> str:
 
 
 def _persist_cookie_to_env(cookie: str, logger: Any) -> None:
-    cookie_line = f'personification_qzone_cookie="{cookie}"\n'
+    cookie_line = f"personification_qzone_cookie={json.dumps(str(cookie or ''), ensure_ascii=False)}\n"
     for env_path in (Path(".env.prod"), Path(".env")):
         if not env_path.exists():
             continue
         try:
-            lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
-            new_lines = []
-            found = False
-            for line in lines:
-                if line.strip().startswith("personification_qzone_cookie="):
+            with _COOKIE_FILE_LOCK:
+                lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+                new_lines = []
+                found = False
+                for line in lines:
+                    if line.strip().startswith("personification_qzone_cookie="):
+                        new_lines.append(cookie_line)
+                        found = True
+                    else:
+                        new_lines.append(line)
+                if not found:
+                    if new_lines and not new_lines[-1].endswith(("\n", "\r\n")):
+                        new_lines[-1] = new_lines[-1] + "\n"
                     new_lines.append(cookie_line)
-                    found = True
-                else:
-                    new_lines.append(line)
-            if not found:
-                if new_lines and not new_lines[-1].endswith(("\n", "\r\n")):
-                    new_lines[-1] = new_lines[-1] + "\n"
-                new_lines.append(cookie_line)
-            env_path.write_text("".join(new_lines), encoding="utf-8")
-            _restrict_sensitive_file_permissions(env_path)
+                temporary = env_path.with_name(f".{env_path.name}.qzone.tmp")
+                temporary.write_text("".join(new_lines), encoding="utf-8")
+                _restrict_sensitive_file_permissions(temporary)
+                temporary.replace(env_path)
+                _restrict_sensitive_file_permissions(env_path)
             return
         except Exception as e:
             logger.error(f"拟人插件：保存 Qzone Cookie 到 {env_path} 失败: {e}")
@@ -105,6 +155,9 @@ def _format_cookie_for_qzone(cookie: str, qq: str, p_skey: str) -> str:
 
 
 def _resolve_qzone_context(plugin_config: Any, bot_id: str) -> tuple[bool, str, dict[str, Any]]:
+    auth = get_qzone_auth_status()
+    if auth.get("cooldown_remaining_seconds", 0) > 0:
+        return False, "Qzone 认证处于冷却期，请刷新 Cookie 后重试", {}
     cookie = _get_cookie_from_config(plugin_config)
     if not cookie:
         return False, "未配置 Qzone Cookie", {}
@@ -545,10 +598,11 @@ def _extract_msglist_payload(payload: dict[str, Any]) -> list[Any]:
 
 
 def _qzone_payload_success(payload: dict[str, Any], raw_text: str = "") -> tuple[bool, str]:
+    if _looks_like_qzone_auth_page(raw_text):
+        message = "Qzone 返回了登录页面或验证码，请刷新 Cookie"
+        _set_qzone_auth_failure(message, auth_failure=True)
+        return False, message
     if not payload:
-        raw_lower = str(raw_text or "").strip().lower()
-        if raw_lower.startswith("<html") or raw_lower.startswith("<!doctype"):
-            return False, "Qzone 返回了登录页面或验证码，请刷新 Cookie"
         return False, "Qzone 返回无法解析"
     for key in ("code", "ret", "subcode"):
         if key in payload:
@@ -1034,20 +1088,45 @@ def build_qzone_services(
         """自动获取并刷新 Qzone Cookie，供定时任务或手动命令调用。"""
         if not qzone_enabled:
             return False, "Qzone 功能未启用"
+        now = time.time()
+        with _AUTH_STATE_LOCK:
+            if _AUTH_STATE["refreshing"]:
+                return False, "Qzone Cookie 正在刷新"
+            if (
+                _AUTH_STATE["status"] == "healthy"
+                and _AUTH_STATE["last_success_at"]
+                and now - float(_AUTH_STATE["last_success_at"]) < _AUTH_REFRESH_CACHE_SECONDS
+            ):
+                return True, "cached"
+            _AUTH_STATE["refreshing"] = True
+            _AUTH_STATE["last_refresh_at"] = now
         try:
             cookies_resp = await bot.get_cookies(domain="qzone.qq.com")
             cookie = str(cookies_resp.get("cookies", "") or "").strip()
             if not cookie:
+                _set_qzone_auth_failure("自动获取 Cookie 失败，返回结果为空")
                 return False, "自动获取 Cookie 失败，返回结果为空"
             if "p_skey" not in cookie:
+                _set_qzone_auth_failure("获取到的 Cookie 不完整（缺少 p_skey）")
                 return False, "获取到的 Cookie 不完整（缺少 p_skey）"
             if "uin=" not in cookie:
                 cookie = f"uin=o{bot.self_id}; {cookie}"
             plugin_config.personification_qzone_cookie = cookie
             _persist_cookie_to_env(cookie, logger)
+            with _AUTH_STATE_LOCK:
+                _AUTH_STATE.update({
+                    "status": "healthy",
+                    "last_success_at": time.time(),
+                    "last_error": "",
+                    "cooldown_until": 0.0,
+                })
             return True, "ok"
         except Exception as e:
+            _set_qzone_auth_failure(e)
             return False, str(e)
+        finally:
+            with _AUTH_STATE_LOCK:
+                _AUTH_STATE["refreshing"] = False
 
     async def publish_qzone_shuo(content: str, bot_id: str) -> tuple[bool, str]:
         if not qzone_enabled:
@@ -1128,12 +1207,12 @@ def build_qzone_services(
                 return False, f"请求失败，状态码：{resp.status_code}"
 
             resp_text = resp.text
+            if _looks_like_qzone_auth_page(resp_text):
+                message = "Qzone 返回了登录页面或验证码，请尝试重新获取空间 Cookie"
+                _set_qzone_auth_failure(message, auth_failure=True)
+                return False, message
             if '"code":0' in resp_text or '"code": 0' in resp_text:
                 return True, "发布成功"
-
-            resp_lower = resp_text.strip().lower()
-            if resp_lower.startswith("<html") or resp_lower.startswith("<!doctype"):
-                return False, "Qzone 返回了登录页面或验证码，请尝试重新获取空间 Cookie"
 
             msg_match = re.search(r'"message":"([^"]+)"', resp_text)
             err_msg = msg_match.group(1) if msg_match else resp_text[:100]

@@ -247,8 +247,8 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
         if deps.qzone_social_service is not None:
             async def _recheck_qzone_permissions() -> None:
                 from ..flows.qzone_social_flow import recheck_qzone_permission_blocked_users
-                bots = deps.get_bots() if callable(deps.get_bots) else []
-                for bot in (bots or []):
+                bots = deps.get_bots() if callable(deps.get_bots) else {}
+                for bot in (bots or {}).values():
                     try:
                         await recheck_qzone_permission_blocked_users(
                             bot=bot,
