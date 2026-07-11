@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -306,7 +308,7 @@ def test_persona_prompt_missing_path_reports_not_exists(_runtime_context, tmp_pa
 def test_persona_template_builder_uses_main_model(_runtime_context, monkeypatch) -> None:
     persona_template_routes = load_personification_module("plugin.personification.webui.routes.persona_template_routes")
 
-    async def _fake_sources(*, runtime, work_title, character_name):
+    async def _fake_sources(*, runtime, work_title, character_name, search_aliases=None):
         return [
             {
                 "kind": "wiki",
@@ -320,6 +322,10 @@ def test_persona_template_builder_uses_main_model(_runtime_context, monkeypatch)
         ]
 
     monkeypatch.setattr(persona_template_routes, "_gather_persona_sources", _fake_sources)
+    async def _fake_avatar_search(**_kwargs):
+        return []
+
+    monkeypatch.setattr(persona_template_routes, "_search_avatar_image_sources", _fake_avatar_search)
 
     class _MainCaller:
         def __init__(self):
@@ -417,10 +423,12 @@ system: |
     assert applied.status_code == 200, applied.text
     assert Path(applied.json()["path"]).is_file()
     assert "system:" in apply_path.read_text(encoding="utf-8")
-    assert len(caller.calls) == 5
-    assert all(call["kwargs"].get("use_builtin_search") is True for call in caller.calls[:3])
+    assert len(caller.calls) == 6
+    assert caller.calls[0]["kwargs"].get("use_builtin_search") is False
+    assert all(call["kwargs"].get("use_builtin_search") is True for call in caller.calls[1:4])
     purposes = [ctx.get("purpose") for ctx in caller.contexts]
     assert purposes == [
+        "persona_template_alias_planning",
         "persona_template_research",
         "persona_template_research",
         "persona_template_research",
@@ -566,6 +574,36 @@ def test_persona_template_search_queries_use_generic_aliases() -> None:
     assert any(query.startswith("site:") and "Example Hero" in query for query in site_queries)
 
 
+def test_avatar_search_uses_planned_aliases_without_real_network() -> None:
+    module = load_personification_module("plugin.personification.webui.routes.persona_template_routes")
+    calls = []
+
+    async def fake_searcher(query, **_kwargs):
+        calls.append(query)
+        return json.dumps({"results": [{
+            "source": "mock",
+            "title": query,
+            "image_url": f"https://images.example.test/{len(calls)}.png",
+            "page_url": "https://example.test/character",
+        }]})
+
+    aliases = {
+        "work_aliases": ["测试作品", "Test Work"],
+        "character_aliases": ["测试太郎", "Test Taro"],
+    }
+    results = asyncio.run(module._search_avatar_image_sources(
+        work_title="测试作品",
+        character_name="测试太郎",
+        logger=None,
+        search_aliases=aliases,
+        searcher=fake_searcher,
+    ))
+
+    assert results
+    assert any("Test Work" in query and "Test Taro" in query for query in calls)
+    assert all(item["query"] in calls for item in results)
+
+
 def test_persona_template_source_relevance_rejects_weak_character_mentions() -> None:
     module = load_personification_module(
         "plugin.personification.webui.routes.persona_template_routes"
@@ -654,10 +692,12 @@ def test_persona_profile_apply_blocks_cross_record_and_returns_partial(_runtime_
     revision_b = "b" * 32
     avatar_id = "1" * 32
     signature_id = "2" * 32
+    unverified_avatar_id = "3" * 32
     data_dir = Path(_runtime_context.plugin_config.personification_data_dir)
     image_dir = data_dir / "persona_avatar_candidates" / revision_a
     image_dir.mkdir(parents=True, exist_ok=True)
     (image_dir / f"{avatar_id}.jpg").write_bytes(b"sanitized-image")
+    (image_dir / f"{unverified_avatar_id}.jpg").write_bytes(b"safe-but-unverified")
     record_a = history_mod.record_persona_template_result(
         {
             "work_title": "作品 A",
@@ -669,6 +709,14 @@ def test_persona_profile_apply_blocks_cross_record_and_returns_partial(_runtime_
                 "suffix": ".jpg",
                 "mime": "image/jpeg",
                 "safety_status": "pass",
+                "vision_status": "verified",
+            }, {
+                "candidate_id": unverified_avatar_id,
+                "revision": revision_a,
+                "suffix": ".jpg",
+                "mime": "image/jpeg",
+                "safety_status": "pass",
+                "vision_status": "unavailable",
             }],
             "signature_candidates": [],
         }
@@ -711,6 +759,19 @@ def test_persona_profile_apply_blocks_cross_record_and_returns_partial(_runtime_
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
     bot.calls.clear()
+    rejected = client.post(
+        "/personification/api/persona-template/profile-apply",
+        json={
+            "bot_id": "bot",
+            "record_id": record_a["record_id"],
+            "revision": revision_a,
+            "avatar_candidate_id": unverified_avatar_id,
+            "confirm_avatar": True,
+        },
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["status"] == "failed"
+    assert bot.calls == []
     response = client.post(
         "/personification/api/persona-template/profile-apply",
         json={

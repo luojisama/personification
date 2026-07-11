@@ -28,6 +28,7 @@ from ...core.persona_template_history import (
     write_persona_template_export_file,
 )
 from ...core.avatar_candidate import AvatarCandidateError, build_avatar_candidates, candidate_file
+from ...core.avatar_relevance import review_avatar_candidates
 from ..deps import AdminIdentity, get_client_ip, require_admin
 
 
@@ -720,9 +721,12 @@ async def _collect_profile_candidates(
     sources: list[dict[str, Any]],
     source_text: str,
     revision: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    search_aliases: dict[str, list[str]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     fetcher = getattr(runtime, "avatar_candidate_fetcher", None)
     resolver = getattr(runtime, "avatar_candidate_resolver", None)
+    image_searcher = getattr(runtime, "avatar_candidate_searcher", None)
+    visual_reviewer = getattr(runtime, "avatar_candidate_reviewer", None)
     avatar_sources = list(sources)
     if not callable(fetcher):
         avatar_sources.extend(
@@ -730,9 +734,11 @@ async def _collect_profile_candidates(
                 work_title=work_title,
                 character_name=character_name,
                 logger=getattr(runtime, "logger", None),
+                search_aliases=search_aliases,
+                searcher=image_searcher if callable(image_searcher) else None,
             )
         )
-    avatars, signatures = await asyncio.gather(
+    safe_avatars, signatures = await asyncio.gather(
         build_avatar_candidates(
             avatar_sources,
             revision=revision,
@@ -747,28 +753,65 @@ async def _collect_profile_candidates(
             source_text=source_text,
         ),
     )
+    bundle = _runtime_bundle(runtime)
+    deps = getattr(bundle, "reply_processor_deps", None) if bundle is not None else None
+    visual_runtime = getattr(deps, "runtime", None) if deps is not None else None
+    visual_runtime = visual_runtime or runtime
+    reviewed_avatars, review_summary = await review_avatar_candidates(
+        runtime=visual_runtime,
+        candidates=safe_avatars,
+        work_title=work_title,
+        character_name=character_name,
+        aliases=search_aliases,
+        candidate_path=lambda item: candidate_file(item, plugin_config=getattr(runtime, "plugin_config", None)),
+        reviewer=visual_reviewer if callable(visual_reviewer) else None,
+    )
+    avatars = [item for item in reviewed_avatars if item.get("vision_status") == "verified"][:20]
     for candidate in signatures:
         candidate["revision"] = revision
-    return avatars, signatures
+    return avatars, signatures, review_summary
 
 
-async def _search_avatar_image_sources(*, work_title: str, character_name: str, logger: Any) -> list[dict[str, Any]]:
-    try:
-        from ...skills.skillpacks.resource_collector.scripts.impl import search_images
-    except Exception:
-        return []
-    queries = [
-        f"{work_title} {character_name} 官方头像",
-        f"{work_title} {character_name} 官方立绘",
-        f"{work_title} {character_name} 角色视觉图",
-        f"{character_name} character icon",
-    ]
+async def _search_avatar_image_sources(
+    *,
+    work_title: str,
+    character_name: str,
+    logger: Any,
+    search_aliases: dict[str, list[str]] | None = None,
+    searcher: Any = None,
+) -> list[dict[str, Any]]:
+    if not callable(searcher):
+        try:
+            from ...skills.skillpacks.resource_collector.scripts.impl import search_images as searcher
+        except Exception:
+            return []
+    works = _alias_values(search_aliases, "work_aliases", work_title)[:3]
+    characters = _alias_values(search_aliases, "character_aliases", character_name)[:5]
+    pairs: list[tuple[str, str]] = []
+    for index in range(max(len(works), len(characters))):
+        pair = (works[index % len(works)], characters[index % len(characters)])
+        if pair not in pairs:
+            pairs.append(pair)
+    for work in works:
+        for character in characters:
+            pair = (work, character)
+            if pair not in pairs:
+                pairs.append(pair)
+    queries: list[str] = []
+    for work, character in pairs:
+        queries.extend((
+            f"{work} {character} 官方头像",
+            f"{work} {character} 官方立绘",
+            f"{character} {work} character icon",
+            f"{character} {work} character profile",
+        ))
+    queries = _dedupe_keep_order(queries, limit=12)
     results: list[dict[str, Any]] = []
     async with httpx.AsyncClient(follow_redirects=False, timeout=12.0) as client:
         async def one(query: str) -> list[dict[str, Any]]:
             try:
                 raw = await asyncio.wait_for(
-                    search_images(query, limit=15, http_client=client, logger=logger),
+                    searcher(query, limit=12, http_client=client, logger=logger),
                     timeout=15.0,
                 )
                 payload = json.loads(raw)
@@ -819,11 +862,17 @@ async def _run_persona_template_build(
 
     started = time.time()
     await progress("alias_planning", "正在梳理检索别名...", 5)
+    search_aliases = await _plan_search_aliases(
+        runtime=runtime,
+        work_title=work_title,
+        character_name=character_name,
+    )
     await progress("source_gathering", "正在收集百科与联网资料...", 12)
     sources = await _gather_persona_sources(
         runtime=runtime,
         work_title=work_title,
         character_name=character_name,
+        search_aliases=search_aliases,
     )
     source_text = _source_corpus(sources)
     revision = uuid.uuid4().hex
@@ -853,10 +902,11 @@ async def _run_persona_template_build(
             sources=sources,
             source_text=source_text,
             revision=revision,
+            search_aliases=search_aliases,
         ),
     )
     subagents = list(research_results[0])
-    avatar_candidates, signature_candidates = research_results[1]
+    avatar_candidates, signature_candidates, avatar_review_summary = research_results[1]
     for candidate in avatar_candidates:
         base = f"/api/persona-template/avatar-candidates/{revision}/{candidate['candidate_id']}"
         candidate["thumbnail_endpoint"] = f"{base}/thumbnail"
@@ -912,16 +962,26 @@ async def _run_persona_template_build(
         "template_keys": list(validation.get("keys") or []),
         "template_reference": reference_template,
         "avatar_candidates": avatar_candidates,
+        "avatar_review_summary": avatar_review_summary,
         "signature_candidates": signature_candidates,
         "profile_status": (
             "complete"
-            if len(avatar_candidates) >= 10
+            if int(avatar_review_summary.get("verified_count", 0) or 0) >= 10
             and 3 <= len(signature_candidates) <= 5
             and any(item.get("safety_status") == "pass" for item in signature_candidates)
             else "incomplete"
         ),
         "profile_incomplete_reasons": [
-            *([f"safe_avatar_candidates={len(avatar_candidates)}, required=10"] if len(avatar_candidates) < 10 else []),
+            *(
+                ["avatar_vision_unavailable"]
+                if not avatar_review_summary.get("vision_available", False)
+                else []
+            ),
+            *(
+                [f"verified_avatar_candidates={avatar_review_summary.get('verified_count', 0)}, required=10"]
+                if int(avatar_review_summary.get("verified_count", 0) or 0) < 10
+                else []
+            ),
             *(["signature_candidates must contain 3-5 structured items"] if not 3 <= len(signature_candidates) <= 5 else []),
             *(["no safe signature candidate"] if not any(item.get("safety_status") == "pass" for item in signature_candidates) else []),
         ],
@@ -1890,10 +1950,11 @@ async def _gather_persona_sources(
     runtime: Any,
     work_title: str,
     character_name: str,
+    search_aliases: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     plugin_config = getattr(runtime, "plugin_config", None)
     logger = getattr(runtime, "logger", None)
-    search_aliases = await _plan_search_aliases(
+    search_aliases = search_aliases or await _plan_search_aliases(
         runtime=runtime,
         work_title=work_title,
         character_name=character_name,
@@ -2484,6 +2545,8 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             raise HTTPException(status_code=404, detail="候选不属于该构建记录")
         if candidate.get("safety_status") != "pass":
             raise HTTPException(status_code=400, detail="候选未通过安全校验")
+        if kind == "avatar" and candidate.get("vision_status") != "verified":
+            raise HTTPException(status_code=400, detail="头像候选未通过目标角色视觉审核")
         return record, candidate
 
     def _bot(bot_id: Any) -> Any:
@@ -2525,7 +2588,11 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             )
             if candidate is not None:
                 break
-        if candidate is None or candidate.get("safety_status") != "pass":
+        if (
+            candidate is None
+            or candidate.get("safety_status") != "pass"
+            or candidate.get("vision_status") != "verified"
+        ):
             raise HTTPException(status_code=404, detail="安全头像候选不存在")
         try:
             path = candidate_file(candidate, plugin_config=getattr(runtime, "plugin_config", None))
