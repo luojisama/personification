@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,8 @@ from .routes.qzone_routes import build_qzone_router
 from .routes.skill_routes import build_skill_router
 from .routes.sticker_routes import build_sticker_router
 from .routes.test_routes import build_test_router
+from .routes.agent_status_routes import build_agent_status_router
+from .routes.data_transfer_routes import build_data_transfer_router
 
 
 @dataclass
@@ -87,6 +90,8 @@ def build_router() -> APIRouter:
     router.include_router(build_health_router(runtime=runtime))
     router.include_router(build_log_router(runtime=runtime))
     router.include_router(build_qq_router(runtime=runtime))
+    router.include_router(build_agent_status_router(runtime=runtime))
+    router.include_router(build_data_transfer_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -111,6 +116,7 @@ _STATIC_ROOT = _STATIC_INDEX_PATH.parent
 _STATIC_CONTENT_TYPES = {
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
+    ".svg": "image/svg+xml",
 }
 
 
@@ -129,7 +135,7 @@ def _asset_version(filename: str) -> str:
 
 def _render_index_html() -> str:
     html = _load_index_html()
-    for filename in (
+    assets = (
         "style.css",
         "app-core.js",
         "app-activity.js",
@@ -138,7 +144,11 @@ def _render_index_html() -> str:
         "app-tools.js",
         "app-config.js",
         "app-auth.js",
-    ):
+        "app-operations.js",
+    )
+    versions = {filename: _asset_version(filename) for filename in assets}
+    html = html.replace("__PERSONIFICATION_ASSET_VERSIONS__", json.dumps(versions, ensure_ascii=False))
+    for filename in assets:
         html = html.replace(
             f"/personification/static/{filename}",
             f"/personification/static/{filename}?v={_asset_version(filename)}",

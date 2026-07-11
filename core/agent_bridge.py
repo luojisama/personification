@@ -6,6 +6,7 @@ from typing import Any
 from ..agent.runtime.runner import run_agent
 from ..agent.tool_registry import ToolRegistry
 from ..agent.query_rewriter import QueryRewriteContext
+from .visible_output import guard_visible_text
 
 
 class _NullLogger:
@@ -123,4 +124,4 @@ async def run_text_agent(
     text = str(getattr(result, "text", "") or "").strip()
     if text in {"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"}:
         return ""
-    return text
+    return guard_visible_text(text, logger=logger, surface=surface or "agent_bridge")

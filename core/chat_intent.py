@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .reply_style_policy import build_context_continuity_policy_prompt
@@ -17,6 +18,10 @@ ChatIntent = Literal["banter", "explanation", "lookup", "plugin_question", "imag
 PluginQuestionIntent = Literal["capability", "implementation", "latest"]
 AmbiguityLevel = Literal["low", "medium", "high"]
 EmotionIntensity = Literal["low", "medium", "high"]
+DomainFocus = Literal["general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"]
+EvidencePolicy = Literal["none", "light", "standard", "strict"]
+AdvicePermission = Literal["not_needed", "ask_first", "allowed"]
+CareRiskLevel = Literal["none", "concern", "high"]
 ConversationScenario = Literal[
     "normal",
     "casual_banter",
@@ -43,6 +48,15 @@ class IntentDecision:
 
 
 @dataclass
+class EmotionalSupport:
+    needed: bool = False
+    listen: bool = False
+    validate: bool = False
+    advice_permission: AdvicePermission = "not_needed"
+    risk_level: CareRiskLevel = "none"
+
+
+@dataclass
 class TurnSemanticFrame:
     chat_intent: ChatIntent = "banter"
     plugin_question_intent: PluginQuestionIntent = "capability"
@@ -51,7 +65,9 @@ class TurnSemanticFrame:
     requires_emotional_care: bool = False
     sticker_appropriate: bool = True
     meta_question: bool = False
-    domain_focus: str = "general"
+    domain_focus: DomainFocus = "general"
+    evidence_policy: EvidencePolicy = "none"
+    emotional_support: EmotionalSupport = field(default_factory=EmotionalSupport)
     user_attitude: str = "日常交流"
     bot_emotion: str = "平静"
     emotion_intensity: EmotionIntensity = "medium"
@@ -165,6 +181,37 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
+_VALID_DOMAIN_FOCUS = {"general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"}
+_VALID_EVIDENCE_POLICIES = {"none", "light", "standard", "strict"}
+_VALID_ADVICE_PERMISSIONS = {"not_needed", "ask_first", "allowed"}
+_VALID_CARE_RISKS = {"none", "concern", "high"}
+
+
+def _parse_emotional_support(value: Any, *, legacy_needed: bool = False) -> EmotionalSupport:
+    if isinstance(value, Mapping):
+        data = value
+    elif value is not None:
+        data = {
+            key: getattr(value, key)
+            for key in ("needed", "listen", "validate", "advice_permission", "risk_level")
+            if hasattr(value, key)
+        }
+    else:
+        data = {}
+    if not data:
+        return EmotionalSupport(needed=legacy_needed, listen=legacy_needed, validate=legacy_needed)
+    needed = _coerce_bool(data.get("needed"), legacy_needed)
+    advice_permission = str(data.get("advice_permission", "not_needed") or "not_needed").strip().lower()
+    risk_level = str(data.get("risk_level", "none") or "none").strip().lower()
+    return EmotionalSupport(
+        needed=needed,
+        listen=_coerce_bool(data.get("listen"), needed),
+        validate=_coerce_bool(data.get("validate"), needed),
+        advice_permission=advice_permission if advice_permission in _VALID_ADVICE_PERMISSIONS else "not_needed",  # type: ignore[arg-type]
+        risk_level=risk_level if risk_level in _VALID_CARE_RISKS else "none",  # type: ignore[arg-type]
+    )
+
+
 def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None:
     if not isinstance(payload, dict):
         return None
@@ -184,16 +231,27 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
         confidence = float(payload.get("confidence", 0.0) or 0.0)
     except (TypeError, ValueError):
         confidence = 0.0
-    domain_focus = str(payload.get("domain_focus", "general") or "general").strip() or "general"
+    domain_focus = str(payload.get("domain_focus", "general") or "general").strip().lower()
+    if domain_focus == "knowledge":
+        domain_focus = "general"
+    if domain_focus not in _VALID_DOMAIN_FOCUS:
+        domain_focus = "general"
+    evidence_policy = str(payload.get("evidence_policy", "none") or "none").strip().lower()
+    if evidence_policy not in _VALID_EVIDENCE_POLICIES:
+        evidence_policy = "none"
+    legacy_care = _coerce_bool(payload.get("requires_emotional_care", False))
+    emotional_support = _parse_emotional_support(payload.get("emotional_support"), legacy_needed=legacy_care)
     return TurnSemanticFrame(
         chat_intent=chat_intent,  # type: ignore[arg-type]
         plugin_question_intent=plugin_question_intent,  # type: ignore[arg-type]
         ambiguity_level=ambiguity_level,  # type: ignore[arg-type]
         recommend_silence=_coerce_bool(payload.get("recommend_silence", False)),
-        requires_emotional_care=_coerce_bool(payload.get("requires_emotional_care", False)),
+        requires_emotional_care=emotional_support.needed,
         sticker_appropriate=_coerce_bool(payload.get("sticker_appropriate", True), True),
         meta_question=_coerce_bool(payload.get("meta_question", False)),
-        domain_focus=domain_focus[:32],
+        domain_focus=domain_focus,  # type: ignore[arg-type]
+        evidence_policy=evidence_policy,  # type: ignore[arg-type]
+        emotional_support=emotional_support,
         user_attitude=str(payload.get("user_attitude", "") or "").strip() or "日常交流",
         bot_emotion=str(payload.get("bot_emotion", "") or "").strip() or "平静",
         emotion_intensity=emotion_intensity,  # type: ignore[arg-type]
@@ -285,7 +343,9 @@ async def infer_turn_semantic_frame_with_llm(
         '"requires_emotional_care":false,'
         '"sticker_appropriate":true,'
         '"meta_question":false,'
-        '"domain_focus":"general|social|realtime|game_anime|plugin|knowledge|emotion",'
+        '"domain_focus":"general|social|technology|science|game_anime|plugin|realtime|emotion",'
+        '"evidence_policy":"none|light|standard|strict",'
+        '"emotional_support":{"needed":false,"listen":false,"validate":false,"advice_permission":"not_needed|ask_first|allowed","risk_level":"none|concern|high"},'
         '"user_attitude":"一句短中文，描述用户这轮对 bot 的态度",'
         '"bot_emotion":"一句短中文，描述 bot 当前自然产生的情绪",'
         '"emotion_intensity":"low|medium|high",'
@@ -314,8 +374,10 @@ async def infer_turn_semantic_frame_with_llm(
         "2b. 用户让 bot 发送 QQ 小黄脸、系统表情、收藏表情、推荐表情，或这轮明确只需要发一个 QQ 表情回应时，"
         "chat_intent=expression；不要把这种动作请求标成普通闲聊或解释。\n"
         "3. meta_question=true 表示这句更像在问上一条消息是谁发的、为什么触发、接的是谁的话，而不是问正文知识点。\n"
-        "4. requires_emotional_care=true 只在用户明显需要被安抚、接住情绪、失落/委屈/脆弱时使用；普通吐槽、调侃、玩梗不要滥开。"
-        "群聊里如果不确定对方是不是在对你倾诉，优先保持 false。\n"
+        "4. emotional_support 结构化判断用户是否需要倾听和情绪确认、是否已允许建议、以及是否存在风险；普通吐槽、调侃、玩梗不要滥开。"
+        "群聊里如果不确定对方是不是在对你倾诉，needed 优先 false；requires_emotional_care 与 needed 保持一致以兼容旧字段。\n"
+        "4b. evidence_policy 按事实要求决定：普通闲聊 none，轻量背景 light，一般事实 standard，技术/科学/时效/高影响结论 strict。"
+        "domain_focus 必须使用给定枚举，不要自造 knowledge 等值。\n"
         "5. sticker_appropriate=false 表示这轮不适合发表情包，例如严肃澄清、情绪安抚、风险话题、直接答疑、明显冷淡/敌意或容易显得轻浮的场景。\n"
         "6. user_attitude 要体现用户这一轮对 bot 的态度，如调侃、求助、冷淡、试探、亲近、挑衅、认真追问。\n"
         "7. bot_emotion 要结合当前内心状态、关系线索和最近互动，自然给出，不要机械复制用户情绪。\n"
@@ -411,6 +473,9 @@ __all__ = [
     "ChatIntent",
     "ConversationScenario",
     "EmotionIntensity",
+    "EmotionalSupport",
+    "EvidencePolicy",
+    "DomainFocus",
     "IntentDecision",
     "PluginQuestionIntent",
     "TurnSemanticFrame",

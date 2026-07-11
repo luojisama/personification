@@ -15,6 +15,7 @@ from typing import Any
 from ..framework import SocialContext, run_social_text_agent
 from ..gate import gate_should_send
 from ..quota import is_quota_exceeded, mark_sent
+from ....core.visible_output import guard_visible_text
 
 _SCENARIO = "festival_greeting"
 
@@ -207,6 +208,11 @@ async def _try_send(
             return False
         if rewritten:
             final_text = rewritten
+    final_text = guard_visible_text(
+        final_text, logger=ctx.logger, surface="social_festival_greeting", allow_direct_media=False
+    )
+    if not final_text:
+        return False
     try:
         await bot.send_private_msg(user_id=int(uid), message=final_text)
     except Exception as exc:
@@ -220,7 +226,11 @@ async def _try_send(
 async def _generate(ctx: SocialContext, snippet: str, occasion_label: str) -> str:
     prompt = _GREETING_PROMPT.format(occasion_label=occasion_label, persona_snippet=snippet or "<无画像>")
     messages = [{"role": "user", "content": prompt}]
-    if ctx.tool_caller and ctx.tool_registry:
+    if (
+        getattr(ctx.plugin_config, "personification_agent_enabled", True)
+        and ctx.tool_caller
+        and ctx.tool_registry
+    ):
         try:
             text = await run_social_text_agent(
                 ctx,

@@ -33,6 +33,14 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
             "sticker_appropriate": False,
             "meta_question": True,
             "domain_focus": "plugin",
+            "evidence_policy": "strict",
+            "emotional_support": {
+                "needed": True,
+                "listen": True,
+                "validate": True,
+                "advice_permission": "ask_first",
+                "risk_level": "concern",
+            },
             "user_attitude": "认真追问",
             "bot_emotion": "平静",
             "emotion_intensity": "high",
@@ -52,6 +60,8 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
     assert valid.recommend_silence is True
     assert valid.requires_emotional_care is True
     assert valid.sticker_appropriate is False
+    assert valid.evidence_policy == "strict"
+    assert valid.emotional_support.risk_level == "concern"
     assert invalid is None
 
 
@@ -169,3 +179,20 @@ def test_parse_address_mode_field() -> None:
         {"chat_intent": "banter"}
     ).address_mode == "auto"
     assert chat_intent.TurnSemanticFrame().address_mode == "auto"
+
+
+def test_semantic_frame_rejects_unknown_domain_and_evidence_values() -> None:
+    frame = chat_intent._parse_turn_semantic_frame_payload(
+        {"chat_intent": "banter", "domain_focus": "knowledge", "evidence_policy": "maximum"}
+    )
+
+    assert frame.domain_focus == "general"
+    assert frame.evidence_policy == "none"
+
+
+def test_semantic_frame_maps_legacy_knowledge_domain() -> None:
+    frame = chat_intent._parse_turn_semantic_frame_payload(
+        {"chat_intent": "explanation", "domain_focus": "knowledge"}
+    )
+
+    assert frame.domain_focus == "general"

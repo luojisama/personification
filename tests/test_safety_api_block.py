@@ -6,6 +6,9 @@ from types import SimpleNamespace
 from ._loader import load_personification_module
 
 safety_filter = load_personification_module("plugin.personification.core.safety_filter")
+visible_output = load_personification_module("plugin.personification.core.visible_output")
+provider_router = load_personification_module("plugin.personification.core.provider_router")
+provider_health = load_personification_module("plugin.personification.core.provider_health")
 
 
 def _resp(finish_reason="stop", content="", raw=None):
@@ -44,6 +47,13 @@ def test_normal_response_not_flagged() -> None:
     raw = {"promptFeedback": {"blockReason": "BLOCK_REASON_UNSPECIFIED"},
            "candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "hi"}]}}]}
     assert safety_filter.detect_api_block(_resp(content="hi", raw=raw)) == ""
+
+
+def test_route_safety_uses_exact_refusal_not_broad_refusal() -> None:
+    assert safety_filter.detect_route_safety_issue(_resp(content="I can't discuss that.")) == (
+        "exact_provider_refusal"
+    )
+    assert safety_filter.detect_route_safety_issue(_resp(content="I can't wait to see it")) == ""
 
 
 def test_none_and_garbage_safe() -> None:
@@ -98,3 +108,133 @@ def test_sanitize_passes_through_normal() -> None:
 
     out = asyncio.run(safety_filter.sanitize_or_retry(call=_call, purpose="t"))
     assert out is good
+
+
+def test_screenshot_server_refusal_is_never_visible() -> None:
+    text = "严重违规安全限制已被触发。因此，无法为您生成完整的回复。"
+    assert safety_filter.detect_refusal(text) is True
+    decision = visible_output.assess_visible_text(text)
+    assert decision.allowed is False
+    assert visible_output.guard_visible_text(text, surface="test") == ""
+
+
+def test_visible_output_does_not_misclassify_natural_language() -> None:
+    assert visible_output.assess_visible_text("I can't wait to see it").allowed is True
+    assert visible_output.assess_visible_text("如果情况持续，可以考虑咨询专业人士").allowed is True
+
+
+def test_media_does_not_bypass_residual_or_caption_checks() -> None:
+    import base64
+
+    media = base64.b64encode(b"small-image-placeholder").decode("ascii")
+    leaked = f"[IMAGE_B64]{media}[/IMAGE_B64]\nAuthorization: Bearer secret-token-value"
+    assert visible_output.assess_visible_text(leaked).allowed is False
+    assert visible_output.assess_visible_text(f"[IMAGE_B64]{media}").allowed is False
+    assert visible_output.assess_visible_text(
+        f"[IMAGE_B64]{media}[/IMAGE_B64]", allow_direct_media=False
+    ).allowed is False
+
+
+def test_visible_output_scans_beyond_old_prefix_limit() -> None:
+    text = "正常内容" * 500 + "\napi_key=very-secret-token"
+    assert visible_output.assess_visible_text(text).allowed is False
+
+
+def test_nested_cli_block_reason_is_detected() -> None:
+    response = _resp(raw={"response": {"candidates": [{"finishReason": "SAFETY"}]}})
+    assert safety_filter.detect_api_block(response).startswith("gemini:")
+
+
+def test_provider_router_reframes_blocked_context_before_retry(monkeypatch) -> None:  # noqa: ANN001
+    calls: list[list[dict]] = []
+    responses = [
+        SimpleNamespace(
+            finish_reason="stop",
+            content="严重违规安全限制已被触发，因此无法回答。",
+            raw={"response": {"candidates": [{"finishReason": "SAFETY"}]}},
+            tool_calls=[],
+            vision_unavailable=False,
+        ),
+        SimpleNamespace(
+            finish_reason="stop",
+            content="这事换个角度看就顺了",
+            raw={},
+            tool_calls=[],
+            vision_unavailable=False,
+        ),
+    ]
+
+    async def _call(_provider, messages, **_kwargs):  # noqa: ANN001
+        calls.append(messages)
+        return responses.pop(0)
+
+    monkeypatch.setattr(provider_router, "_call_provider_once", _call)
+    monkeypatch.setattr(provider_router, "_mark_provider_success", lambda _name: None)
+    logger = SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None)
+
+    async def run():
+        return await provider_router._try_provider_chain(
+            [{"name": "p", "api_type": "openai", "model": "m", "max_retries": 1}],
+            messages=[
+                {"role": "system", "content": "正常人设规则"},
+                {"role": "system", "content": "## 用户档案\n某人资料"},
+                {"role": "user", "content": "继续聊刚才的话题"},
+            ],
+            plugin_config=object(),
+            logger=logger,
+        )
+
+    response, errors, _vision = asyncio.run(run())
+    assert response.content == "这事换个角度看就顺了"
+    assert any("safety_block" in item for item in errors)
+    assert calls[1][1]["role"] == "system"
+    assert calls[1][1]["content"] == "## 用户档案\n某人资料"
+    assert calls[1][-1]["role"] == "system"
+
+
+def test_safe_reframe_only_demotes_explicit_untrusted_metadata() -> None:
+    messages = [
+        {"role": "system", "content": "## 用户档案\n标题不能触发降级"},
+        {
+            "role": "system",
+            "content": "外部资料",
+            "_personification_untrusted": True,
+        },
+    ]
+
+    reframed = safety_filter.build_safe_reframe_messages(messages)
+
+    assert reframed[0] == messages[0]
+    assert reframed[1]["role"] == "user"
+    assert "_personification_untrusted" not in reframed[1]
+
+
+def test_provider_health_records_block_as_failure_and_safe_retry_as_success(monkeypatch) -> None:  # noqa: ANN001
+    results: list[tuple[bool, str]] = []
+    responses = [
+        _resp(finish_reason="content_filter"),
+        _resp(content="安全重试成功"),
+    ]
+
+    class _Caller:
+        async def chat_with_tools(self, **_kwargs):  # noqa: ANN003
+            return responses.pop(0)
+
+    monkeypatch.setattr(provider_router, "_build_provider_caller", lambda *_a, **_k: _Caller())
+    monkeypatch.setattr(
+        provider_health,
+        "record_request_result",
+        lambda **kwargs: results.append((kwargs["success"], kwargs["error_kind"])),
+    )
+    provider = {
+        "name": "p",
+        "api_type": "openai",
+        "api_key": "k",
+        "api_url": "https://example.invalid",
+        "model": "m",
+    }
+
+    asyncio.run(provider_router._call_provider_once(provider, [], plugin_config=object()))
+    asyncio.run(provider_router._call_provider_once(provider, [], plugin_config=object()))
+
+    assert results == [(False, "safety_block"), (True, "")]

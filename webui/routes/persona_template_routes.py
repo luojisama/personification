@@ -14,17 +14,20 @@ from urllib.parse import quote, urljoin
 
 import httpx
 import yaml
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
 from ...core import webui_audit_log
 from ...core.paths import get_data_dir
 from ...core.llm_context import reset_llm_context, set_llm_context
 from ...core.persona_template_history import (
+    append_persona_template_apply_audit,
+    get_persona_template_record,
     list_persona_template_records,
     record_persona_template_result,
     summarize_persona_template_record,
     write_persona_template_export_file,
 )
+from ...core.avatar_candidate import AvatarCandidateError, build_avatar_candidates, candidate_file
 from ..deps import AdminIdentity, get_client_ip, require_admin
 
 
@@ -644,6 +647,162 @@ def _get_task(task_id: str) -> _PersonaTemplateTask | None:
     return _TASKS.get(str(task_id or ""))
 
 
+def _validate_signature_text(value: Any) -> tuple[str, list[str]]:
+    text = str(value or "").strip()
+    errors: list[str] = []
+    if not 2 <= len(text) <= 80:
+        errors.append("length")
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        errors.append("control_character")
+    if re.search(r"https?://|www\.", text, flags=re.I):
+        errors.append("url")
+    if re.search(r"(?:我是|作为)\s*(?:AI|人工智能|语言模型|助手)|(?:AI|人工智能)\s*助手", text, flags=re.I):
+        errors.append("ai_identity_leak")
+    return text, errors
+
+
+async def _generate_signature_candidates(
+    *,
+    caller: Any,
+    work_title: str,
+    character_name: str,
+    source_text: str,
+) -> list[dict[str, Any]]:
+    prompt = f"""
+为《{work_title}》的角色「{character_name}」生成 3-5 条 QQ 个性签名候选。
+只输出 JSON：{{"candidates":[{{"text":"签名","rationale":"与角色的关系","fit_score":0.0}}]}}。
+每条 2-80 字，不含 URL、��制字符，不得自称 AI、人工智能、语言模型、助手；不确定的角色事实不要写。
+资料：{source_text[:5000]}
+""".strip()
+    raw = await _call_main_model(
+        caller,
+        [{"role": "system", "content": "你只生成结构化角色签名候选 JSON，不输出解释。"}, {"role": "user", "content": prompt}],
+        temperature=0.35,
+        use_builtin_search=False,
+        timeout=45,
+        purpose="persona_template_signature_candidates",
+        stage_label="签名候选生成",
+    )
+    parsed = _extract_json_object(raw)
+    rows = parsed.get("candidates") if isinstance(parsed.get("candidates"), list) else []
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows[:5]:
+        if not isinstance(row, dict):
+            continue
+        text, errors = _validate_signature_text(row.get("text"))
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        try:
+            score = max(0.0, min(1.0, float(row.get("fit_score") or 0)))
+        except (TypeError, ValueError):
+            score = 0.0
+        candidates.append({
+            "candidate_id": uuid.uuid4().hex,
+            "text": text,
+            "rationale": _clip_text(row.get("rationale"), 240),
+            "fit_score": score,
+            "safety_status": "pass" if not errors else "reject",
+            "validation_errors": errors,
+        })
+    if not 3 <= len(candidates) <= 5:
+        return candidates
+    return candidates
+
+
+async def _collect_profile_candidates(
+    *,
+    runtime: Any,
+    caller: Any,
+    work_title: str,
+    character_name: str,
+    sources: list[dict[str, Any]],
+    source_text: str,
+    revision: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    fetcher = getattr(runtime, "avatar_candidate_fetcher", None)
+    resolver = getattr(runtime, "avatar_candidate_resolver", None)
+    avatar_sources = list(sources)
+    if not callable(fetcher):
+        avatar_sources.extend(
+            await _search_avatar_image_sources(
+                work_title=work_title,
+                character_name=character_name,
+                logger=getattr(runtime, "logger", None),
+            )
+        )
+    avatars, signatures = await asyncio.gather(
+        build_avatar_candidates(
+            avatar_sources,
+            revision=revision,
+            plugin_config=getattr(runtime, "plugin_config", None),
+            fetcher=fetcher if callable(fetcher) else None,
+            resolver=resolver if callable(resolver) else None,
+        ),
+        _generate_signature_candidates(
+            caller=caller,
+            work_title=work_title,
+            character_name=character_name,
+            source_text=source_text,
+        ),
+    )
+    for candidate in signatures:
+        candidate["revision"] = revision
+    return avatars, signatures
+
+
+async def _search_avatar_image_sources(*, work_title: str, character_name: str, logger: Any) -> list[dict[str, Any]]:
+    try:
+        from ...skills.skillpacks.resource_collector.scripts.impl import search_images
+    except Exception:
+        return []
+    queries = [
+        f"{work_title} {character_name} 官方头像",
+        f"{work_title} {character_name} 官方立绘",
+        f"{work_title} {character_name} 角色视觉图",
+        f"{character_name} character icon",
+    ]
+    results: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(follow_redirects=False, timeout=12.0) as client:
+        async def one(query: str) -> list[dict[str, Any]]:
+            try:
+                raw = await asyncio.wait_for(
+                    search_images(query, limit=15, http_client=client, logger=logger),
+                    timeout=15.0,
+                )
+                payload = json.loads(raw)
+            except Exception:
+                return []
+            rows = payload.get("results") if isinstance(payload, dict) else []
+            items: list[dict[str, Any]] = []
+            for row in list(rows or []):
+                if not isinstance(row, dict):
+                    continue
+                image_url = str(row.get("image_url") or row.get("url") or "").strip()
+                if not image_url:
+                    continue
+                items.append({
+                    "source": str(row.get("source") or "image_search"),
+                    "title": str(row.get("title") or query),
+                    "page_url": str(row.get("page_url") or row.get("source_url") or ""),
+                    "image_url": image_url,
+                    "thumbnail_url": str(row.get("thumbnail_url") or ""),
+                    "query": query,
+                })
+            return items
+
+        batches = await asyncio.gather(*(one(query) for query in queries))
+    seen: set[str] = set()
+    for batch in batches:
+        for item in batch:
+            url = str(item.get("image_url") or "")
+            if url and url not in seen:
+                seen.add(url)
+                results.append(item)
+    return results[:60]
+
+
 async def _run_persona_template_build(
     *,
     runtime: Any,
@@ -667,14 +826,15 @@ async def _run_persona_template_build(
         character_name=character_name,
     )
     source_text = _source_corpus(sources)
+    revision = uuid.uuid4().hex
     await progress("subagent_research", f"已收集 {len(sources)} 个资料源，正在运行 3 个研究子agent...", 44)
     focus_items = [
         ("基础设定子agent", "官方身份、百科摘要、基础人设、剧情定位、资料可信度"),
         ("性格台词子agent", "性格模式、口癖、说话节奏、萌点、群聊可迁移表达"),
         ("关系视觉子agent", "角色关系、立绘/服装/视觉锚点、冲突资料与缺口"),
     ]
-    subagents = await asyncio.gather(
-        *[
+    research_results = await asyncio.gather(
+        asyncio.gather(*[
             _run_subagent(
                 caller=caller,
                 agent_name=name,
@@ -684,8 +844,23 @@ async def _run_persona_template_build(
                 source_text=source_text,
             )
             for name, focus in focus_items
-        ]
+        ]),
+        _collect_profile_candidates(
+            runtime=runtime,
+            caller=caller,
+            work_title=work_title,
+            character_name=character_name,
+            sources=sources,
+            source_text=source_text,
+            revision=revision,
+        ),
     )
+    subagents = list(research_results[0])
+    avatar_candidates, signature_candidates = research_results[1]
+    for candidate in avatar_candidates:
+        base = f"/api/persona-template/avatar-candidates/{revision}/{candidate['candidate_id']}"
+        candidate["thumbnail_endpoint"] = f"{base}/thumbnail"
+        candidate["original_endpoint"] = f"{base}/original"
     reference_template = _configured_template_reference(runtime)
     await progress("template_synthesis", "正在按插件 YAML 结构生成人设模板...", 78)
     template = await _synthesize_template(
@@ -722,6 +897,7 @@ async def _run_persona_template_build(
             conflicts.extend(str(x) for x in raw_conflicts if str(x).strip())
     result = {
         "success": True,
+        "revision": revision,
         "work_title": work_title,
         "character_name": character_name,
         "model_role": "configured_main",
@@ -735,6 +911,20 @@ async def _run_persona_template_build(
         "template_warnings": list(validation.get("warnings") or [])[:20],
         "template_keys": list(validation.get("keys") or []),
         "template_reference": reference_template,
+        "avatar_candidates": avatar_candidates,
+        "signature_candidates": signature_candidates,
+        "profile_status": (
+            "complete"
+            if len(avatar_candidates) >= 10
+            and 3 <= len(signature_candidates) <= 5
+            and any(item.get("safety_status") == "pass" for item in signature_candidates)
+            else "incomplete"
+        ),
+        "profile_incomplete_reasons": [
+            *([f"safe_avatar_candidates={len(avatar_candidates)}, required=10"] if len(avatar_candidates) < 10 else []),
+            *(["signature_candidates must contain 3-5 structured items"] if not 3 <= len(signature_candidates) <= 5 else []),
+            *(["no safe signature candidate"] if not any(item.get("safety_status") == "pass" for item in signature_candidates) else []),
+        ],
     }
     record = record_persona_template_result(result, actor=actor, source=source)
     result["history_record"] = summarize_persona_template_record(record)
@@ -2277,6 +2467,128 @@ def build_persona_template_router(*, runtime) -> APIRouter:
 
     def _is_custom_build(body: dict) -> bool:
         return str(body.get("mode", "") or "").strip().lower() in {"custom", "description", "原创", "自定义"}
+
+    def _record_candidate(record_id: str, revision: str, candidate_id: str, kind: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        record = get_persona_template_record(record_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="未找到该人设构建历史记录")
+        result = record.get("result") if isinstance(record.get("result"), dict) else {}
+        if not revision or str(result.get("revision") or "") != revision:
+            raise HTTPException(status_code=409, detail="构建 revision 已变化，请刷新后重试")
+        field = "avatar_candidates" if kind == "avatar" else "signature_candidates"
+        candidate = next(
+            (item for item in result.get(field, []) if isinstance(item, dict) and str(item.get("candidate_id") or "") == candidate_id),
+            None,
+        )
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="候选不属于该构建记录")
+        if candidate.get("safety_status") != "pass":
+            raise HTTPException(status_code=400, detail="候选未通过安全校验")
+        return record, candidate
+
+    def _bot(bot_id: Any) -> Any:
+        try:
+            bots = runtime.get_bots() if callable(getattr(runtime, "get_bots", None)) else {}
+        except Exception:
+            bots = {}
+        selected = str(bot_id or "").strip()
+        if not selected:
+            raise HTTPException(status_code=400, detail="缺少 bot_id")
+        bot = next((item for key, item in bots.items() if str(getattr(item, "self_id", "") or key) == selected), None)
+        if bot is None:
+            raise HTTPException(status_code=404, detail="目标 Bot 未连接")
+        return bot
+
+    async def _bot_call(bot: Any, api: str, **kwargs: Any) -> Any:
+        try:
+            return await bot.call_api(api, **kwargs)
+        except Exception as exc:
+            raise RuntimeError(f"{api}: {_clip_text(exc, 160)}") from exc
+
+    @router.get("/avatar-candidates/{revision}/{candidate_id}/{variant}")
+    async def download_avatar_candidate(
+        revision: str,
+        candidate_id: str,
+        variant: str,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> Response:
+        if variant not in {"thumbnail", "original"}:
+            raise HTTPException(status_code=404, detail="未知图片版本")
+        candidate: dict[str, Any] | None = None
+        for record in list_persona_template_records(limit=100):
+            result = record.get("result") if isinstance(record.get("result"), dict) else {}
+            if str(result.get("revision") or "") != revision:
+                continue
+            candidate = next(
+                (item for item in result.get("avatar_candidates", []) if isinstance(item, dict) and item.get("candidate_id") == candidate_id),
+                None,
+            )
+            if candidate is not None:
+                break
+        if candidate is None or candidate.get("safety_status") != "pass":
+            raise HTTPException(status_code=404, detail="安全头像候选不存在")
+        try:
+            path = candidate_file(candidate, plugin_config=getattr(runtime, "plugin_config", None))
+        except AvatarCandidateError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return Response(content=path.read_bytes(), media_type=str(candidate.get("mime") or "application/octet-stream"), headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"})
+
+    @router.post("/profile-apply")
+    async def apply_profile_candidates(
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        record_id = str(body.get("record_id") or "").strip()
+        revision = str(body.get("revision") or "").strip()
+        avatar_id = str(body.get("avatar_candidate_id") or "").strip()
+        signature_id = str(body.get("signature_candidate_id") or "").strip()
+        if not record_id or not revision or not (avatar_id or signature_id):
+            raise HTTPException(status_code=400, detail="需要 record_id、revision 和至少一个候选 ID")
+        if avatar_id and body.get("confirm_avatar") is not True:
+            raise HTTPException(status_code=400, detail="应用头像需要 confirm_avatar=true")
+        if signature_id and body.get("confirm_signature") is not True:
+            raise HTTPException(status_code=400, detail="应用签名需要 confirm_signature=true")
+        bot = _bot(body.get("bot_id"))
+        bot_id = str(getattr(bot, "self_id", "") or body.get("bot_id"))
+        results: dict[str, Any] = {}
+        if avatar_id:
+            try:
+                _, candidate = _record_candidate(record_id, revision, avatar_id, "avatar")
+                path = candidate_file(candidate, plugin_config=getattr(runtime, "plugin_config", None))
+                await _bot_call(bot, "set_qq_avatar", file=str(path))
+                results["avatar"] = {"status": "applied", "candidate_id": avatar_id}
+            except (HTTPException, RuntimeError, AvatarCandidateError) as exc:
+                results["avatar"] = {"status": "failed", "candidate_id": avatar_id, "error": getattr(exc, "detail", str(exc))}
+        if signature_id:
+            try:
+                _, candidate = _record_candidate(record_id, revision, signature_id, "signature")
+                await _bot_call(bot, "set_self_longnick", longNick=str(candidate.get("text") or ""))
+                results["signature"] = {"status": "applied", "candidate_id": signature_id}
+            except (HTTPException, RuntimeError) as exc:
+                results["signature"] = {"status": "failed", "candidate_id": signature_id, "error": getattr(exc, "detail", str(exc))}
+        applied = sum(item.get("status") == "applied" for item in results.values())
+        status = "applied" if applied == len(results) else "partial" if applied else "failed"
+        audit = {
+            "actor": admin.qq,
+            "device_id": admin.device_id,
+            "revision": revision,
+            "bot_id": bot_id,
+            "status": status,
+            "confirmed": {"avatar": bool(avatar_id), "signature": bool(signature_id)},
+            "results": results,
+        }
+        append_persona_template_apply_audit(record_id, audit)
+        webui_audit_log.record(
+            action="persona_template_profile_apply",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=record_id,
+            ip_hash=get_client_ip(request),
+            detail={"revision": revision, "bot_id": bot_id, "status": status, "results": results},
+            outcome="ok" if status == "applied" else status,
+        )
+        return {"success": status == "applied", "status": status, "record_id": record_id, "revision": revision, "results": results}
 
     @router.get("/history")
     async def history(

@@ -12,6 +12,7 @@ let state = {
   skillSourceForm: { source: "", name: "", ref: "", subdir: "", kind: "auto", preferFirst: false, autoApprove: false },
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
   personaTemplateForm: { mode: "source", work_title: "", character_name: "", persona_name: "", gender: "", personality: "", traits: "", hobbies: "", description: "" }, personaTemplateResult: null, personaTemplateBusy: false, personaTemplateTask: null, personaTemplateHistory: [],
+  personaAvatarCandidateId: "", personaSignatureCandidateId: "", personaProfileBotId: "",
   personaPrompt: null, personaPromptPath: "", health: null, healthBusyCat: "", interactionResult: null, interactionBusy: false,
   qzoneForwardForm: { target_user_id: "", forward_text: "" }, qzoneForwardResult: null, qzoneForwardBusy: false,
   pluginUpdateStatus: null, pluginUpdateHistory: null, pluginUpdateBusy: false, pluginUpdateChecking: false, pluginUpdateResult: null,
@@ -26,7 +27,32 @@ let state = {
   audit: null, auditFilter: "",
   logs: null, traces: null, logLevel: "", logQuery: "", logTraceId: "", traceDetail: null, selectedTraceId: "",
   proactiveStats: null, proactiveRecent: null, proactiveScope: "",
+  agentStatus: null, transferExport: null, transferImport: null, transferBotInfo: null,
 };
+
+const VIEW_ASSETS = {
+  dashboard:"app-admin.js",health:"app-admin.js",qzone:"app-admin.js",personas:"app-admin.js",groups:"app-admin.js",group_switch:"app-admin.js",persona_prompt:"app-admin.js",persona_builder:"app-admin.js",qq:"app-admin.js",
+  config:"app-config.js",memory:"app-content.js",memory_graph:"app-content.js",stickers:"app-content.js",
+  skills:"app-tools.js",plugin_knowledge:"app-tools.js",plugin_manager:"app-tools.js",test:"app-tools.js",
+  proactive:"app-activity.js",audit:"app-activity.js",logs:"app-activity.js",traces:"app-activity.js",trace_detail:"app-activity.js",
+  agent_status:"app-operations.js",data_transfer:"app-operations.js",
+};
+const _loadedAssets = new Set(["app-core.js","app-auth.js"]);
+const _assetInflight = new Map();
+let _viewAbortController = null;
+let _navigationId = 0;
+
+function ensureViewAsset(view) {
+  const filename=VIEW_ASSETS[view];
+  if(!filename||_loadedAssets.has(filename))return Promise.resolve();
+  if(_assetInflight.has(filename))return _assetInflight.get(filename);
+  const promise=new Promise((resolve,reject)=>{const script=document.createElement("script");const version=(window.PERSONIFICATION_ASSET_VERSIONS||{})[filename]||"";script.src=`/personification/static/${filename}${version?`?v=${encodeURIComponent(version)}`:""}`;script.onload=()=>{_loadedAssets.add(filename);resolve();};script.onerror=()=>reject(new Error(`页面资源加载失败：${filename}`));document.head.appendChild(script);});
+  _assetInflight.set(filename,promise);
+  promise.finally(()=>_assetInflight.delete(filename));
+  return promise;
+}
+
+function safeHttpUrl(value) { try { const url=new URL(String(value||""),location.origin); return /^(https?):$/.test(url.protocol)?url.href:""; } catch { return ""; } }
 
 function readCookie(name) {
   const items = (document.cookie || "").split("; ");
@@ -54,7 +80,9 @@ async function api(path, opts = {}) {
     return _apiInflight.get(dedupKey);
   }
   const promise = (async () => {
-    const res = await fetch(API + path, { credentials: "include", ...opts, headers });
+    const requestOpts = { credentials: "include", ...opts, headers };
+    if (method === "GET" && !requestOpts.signal && _viewAbortController) requestOpts.signal = _viewAbortController.signal;
+    const res = await fetch(API + path, requestOpts);
     if (res.status === 401) { state.logged = false; render(); throw new Error("未登录"); }
     if (!res.ok) {
       let detail = res.statusText;
@@ -139,6 +167,8 @@ function closeMobileNav() {
   if (state.mobileNavOpen) { state.mobileNavOpen = false; render(); }
 }
 
+document.addEventListener("keydown",event=>{if(event.key==="Escape"&&state.mobileNavOpen)closeMobileNav();});
+
 function loadingMessageForView(view) {
   return ({
     dashboard: "正在统计 Token 消耗...",
@@ -159,19 +189,27 @@ function loadingMessageForView(view) {
     trace_detail: "正在打开 Trace 详情...",
     audit: "正在读取审计记录...",
     qq: "正在读取 QQ 账号信息...",
+    agent_status: "正在汇总 Agent 运行状态...",
+    data_transfer: "正在打开安全迁移工作台...",
   })[view] || "正在加载页面...";
 }
 
 async function loadView() {
+  const navigationId = ++_navigationId;
+  const view = state.view;
+  _viewAbortController?.abort();
+  _viewAbortController = new AbortController();
+  await ensureViewAsset(view);
+  if(navigationId!==_navigationId)return;
   state.loading = true;
-  state.loadingMessage = loadingMessageForView(state.view);
+  state.loadingMessage = loadingMessageForView(view);
   if (state.logged) render();
   try {
-    if (state.view === "config") {
+    if (view === "config") {
       const data = await api("/config/entries");
       state.entries = data.entries; state.groups = data.groups;
       if (!state.activeGroup || !state.groups.includes(state.activeGroup)) state.activeGroup = state.groups[0] || null;
-    } else if (state.view === "devices") {
+    } else if (view === "devices") {
       const [data, pend, trust] = await Promise.all([
         api("/auth/devices"),
         api("/auth/pending-devices").catch(() => ({ devices: [] })),
@@ -180,50 +218,56 @@ async function loadView() {
       state.devices = data.devices; state.currentDeviceId = data.current_device_id;
       state.pendingDevices = pend.devices || [];
       state.trustedDevices = trust.devices || [];
-    } else if (state.view === "dashboard") {
+    } else if (view === "dashboard") {
       state.dashboard = await api("/metrics/summary?window=" + encodeURIComponent(state.dashboardWindow));
-    } else if (state.view === "personas") {
+    } else if (view === "personas") {
       const data = await api("/personas");
       state.personas = data.profiles; state.personasAvailable = data.available;
-    } else if (state.view === "groups") {
+    } else if (view === "groups") {
       const data = await api("/groups");
       state.groupList = data.groups; state.groupsAvailable = data.available;
-    } else if (state.view === "group_switch") {
+    } else if (view === "group_switch") {
       const data = await api("/groups/whitelist");
       state.groupSwitches = data.groups;
-    } else if (state.view === "skills") {
+    } else if (view === "skills") {
       const data = await api("/skills");
       state.skills = data.skills; state.skillsAvailable = data.available;
       state.skillSummary = data.summary || null;
       state.skillRemoteSources = data.remote_sources || [];
       state.skillMcpTools = data.mcp_tools || [];
-    } else if (state.view === "test") {
+    } else if (view === "test") {
       /* nothing to preload */
-    } else if (state.view === "persona_builder") {
-      const history = await api("/persona-template/history?limit=8").catch(() => ({ records: [] }));
+    } else if (view === "persona_builder") {
+      const [history, botInfo] = await Promise.all([
+        api("/persona-template/history?limit=8").catch(() => ({ records: [] })),
+        api("/qq/info").catch(() => ({ bots: [] })),
+      ]);
       state.personaTemplateHistory = history.records || [];
-    } else if (state.view === "qq") {
+      state.qqInfo = botInfo;
+      const botIds=(botInfo.bots||[]).map(item=>String(item.bot_id||"")).filter(Boolean);
+      if(!botIds.includes(state.personaProfileBotId))state.personaProfileBotId=botIds[0]||"";
+    } else if (view === "qq") {
       const [info, groups, friends] = await Promise.all([
         api("/qq/info").catch(e => ({ error: e.message })),
         api("/qq/groups").catch(() => ({ groups: [] })),
         api("/qq/friends").catch(() => ({ friends: [] })),
       ]);
       state.qqInfo = info; state.qqGroups = groups.groups || []; state.qqFriends = friends.friends || [];
-    } else if (state.view === "health") {
+    } else if (view === "health") {
       state.health = await api("/health/check");  // 默认读缓存，秒开
-    } else if (state.view === "qzone") {
+    } else if (view === "qzone") {
       state.qzone = await api("/qzone/status");
-    } else if (state.view === "plugin_manager") {
+    } else if (view === "plugin_manager") {
       const [status, history] = await Promise.all([
         api("/plugin-manager/status"),
         api("/plugin-manager/history?limit=30"),
       ]);
       state.pluginUpdateStatus = status;
       state.pluginUpdateHistory = history;
-    } else if (state.view === "persona_prompt") {
+    } else if (view === "persona_prompt") {
       const qs = state.personaPromptPath ? ("?path=" + encodeURIComponent(state.personaPromptPath)) : "";
       state.personaPrompt = await api("/test/persona-prompt" + qs);
-    } else if (state.view === "proactive") {
+    } else if (view === "proactive") {
       const qs = new URLSearchParams({ since_hours: "72" });
       if (state.proactiveScope) qs.set("scope", state.proactiveScope);
       const [stats, recent] = await Promise.all([
@@ -232,27 +276,27 @@ async function loadView() {
       ]);
       state.proactiveStats = stats;
       state.proactiveRecent = recent;
-    } else if (state.view === "audit") {
+    } else if (view === "audit") {
       const qs = new URLSearchParams({ limit: "150" });
       if (state.auditFilter) qs.set("action", state.auditFilter);
       state.audit = await api("/audit/recent?" + qs.toString());
-    } else if (state.view === "logs") {
+    } else if (view === "logs") {
       const qs = new URLSearchParams({ limit: "220" });
       if (state.logLevel) qs.set("level", state.logLevel);
       if (state.logQuery) qs.set("q", state.logQuery);
       const logs = await api("/logs/recent?" + qs.toString());
       state.logs = logs;
-    } else if (state.view === "traces") {
+    } else if (view === "traces") {
       state.traces = await api("/logs/traces?limit=120");
-    } else if (state.view === "trace_detail") {
+    } else if (view === "trace_detail") {
       if (!state.selectedTraceId) {
         state.traceDetail = { error: "未选择 trace" };
       } else {
         state.traceDetail = await api("/logs/trace/" + encodeURIComponent(state.selectedTraceId)).catch(e => ({ error: e.message }));
       }
-    } else if (state.view === "stickers") {
+    } else if (view === "stickers") {
       state.stickers = await api("/stickers");
-    } else if (state.view === "memory") {
+    } else if (view === "memory") {
       const qs = new URLSearchParams({ limit: String(state.memoryLimit || 200) });
       if (state.memoryFilter) qs.set("memory_type", state.memoryFilter);
       if (state.memoryIncludeSelf) qs.set("include_self", "true");
@@ -269,12 +313,12 @@ async function loadView() {
       state.memoryInnerState = inner;
       state.memoryPalaceZones = zones.zones || [];
       state.memoryVectorIndex = vectorIndex;
-    } else if (state.view === "plugin_knowledge") {
+    } else if (view === "plugin_knowledge") {
       const data = await api("/plugin-knowledge/list");
       state.pluginKnowledgeList = data.plugins || [];
       state.pluginKnowledgeAvailable = data.available;
       state.pluginKnowledgeTotal = data.total || 0;
-    } else if (state.view === "memory_graph") {
+    } else if (view === "memory_graph") {
       const qs = new URLSearchParams({ limit: String(state.memoryGraphLimit || 100) });
       if (state.memoryGraphGroupId) qs.set("group_id", state.memoryGraphGroupId);
       if (state.memoryGraphMinSalience) qs.set("min_salience", String(state.memoryGraphMinSalience));
@@ -287,8 +331,28 @@ async function loadView() {
         state.groupList = groupsResp.groups;
         state.groupsAvailable = groupsResp.available;
       }
+    } else if (view === "agent_status") {
+      state.agentStatus = await api("/agent-status");
+    } else if (view === "data_transfer") {
+      state.transferBotInfo = await api("/qq/info").catch(() => null);
     }
-  } finally { state.loading = false; state.loadingMessage = ""; }
+  } catch (e) {
+    if (e && e.name === "AbortError") return;
+    throw e;
+  } finally {
+    if (navigationId === _navigationId) { state.loading = false; state.loadingMessage = ""; }
+  }
+}
+
+function viewTitle() {
+  return ({agent_status:"Agent 状态",data_transfer:"数据迁移",dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",plugin_manager:"插件管理",test:"模型测试",persona_prompt:"人设预览",persona_builder:"人设构建",audit:"审计日志",logs:"插件日志",traces:"消息 Trace",trace_detail:"Trace 详情",proactive:"主动诊断",health:"功能体检",qzone:"QQ 空间",qq:"QQ 管理",devices:"设备管理"})[state.view] || state.view;
+}
+
+async function navigateToView(view,{fromHistory=false}={}) {
+  if(!fromHistory&&location.hash!==`#${view}`)history.pushState(null,"",`#${view}`);
+  state.view=view;
+  if(state.mobileNavOpen)state.mobileNavOpen=false;
+  try{await loadView();render();}catch(e){alertFlash("err",e.message);}
 }
 
 function render() {
@@ -323,7 +387,8 @@ function render() {
 }
 
 function renderLayout() {
-  const navItem = (v, label) => `<a href="#${v}" class="${state.view===v?'active':''}" onclick="closeMobileNav()">${label}</a>`;
+  const navIcon = (kind) => `<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${kind==='pulse'?'M3 12h4l2-6 4 12 2-6h6':kind==='transfer'?'M7 7h11m-3-3 3 3-3 3M17 17H6m3 3-3-3 3-3':kind==='shield'?'M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4m-3 9l2 2 4-5':kind==='users'?'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8m13 18v-2a4 4 0 0 0-3-3.87':'M4 17a8 8 0 1 1 16 0M12 13l4-4'}"/></svg>`;
+  const navItem = (v,label,icon="gauge") => `<a href="#${v}" class="${state.view===v?'active':''}" aria-current="${state.view===v?'page':'false'}">${navIcon(icon)}<span>${label}</span></a>`;
   const themeIcon = state.theme === "dark" ? "🌙" : "☀";
   const loadingHint = state.loading
     ? `<div class="loading-hint"><span class="spinner"></span><span>${escapeHtml(state.loadingMessage || "正在加载页面...")}</span></div>`
@@ -331,19 +396,23 @@ function renderLayout() {
   return `${state.loading ? '<div class="progress-bar"></div>' : ''}
     <div class="layout">
     ${state.mobileNavOpen ? '<div class="scrim" onclick="toggleMobileNav()"></div>' : ''}
-    <aside class="${state.mobileNavOpen?'open':''}">
+    <aside id="console-sidebar" class="${state.mobileNavOpen?'open':''}">
       <h1>拟人插件控制台</h1>
-      <nav>
+      <nav aria-label="控制台导航">
+        <div class="nav-group-label">运行</div>
+        ${navItem('agent_status','Agent 状态','pulse')}
         ${navItem('dashboard','仪表盘')}
         ${navItem('health','功能体检')}
         ${navItem('qzone','QQ 空间')}
         ${navItem('config','配置中心')}
-        ${navItem('personas','用户画像')}
+        <div class="nav-group-label">拟人与记忆</div>
+        ${navItem('personas','用户画像','users')}
         ${navItem('groups','群信息')}
         ${navItem('group_switch','群开关')}
         ${navItem('memory','Agent 记忆')}
         ${navItem('memory_graph','记忆宫殿')}
         ${navItem('stickers','表情包')}
+        <div class="nav-group-label">能力</div>
         ${navItem('skills','Skill 管理')}
         ${navItem('plugin_knowledge','插件知识库')}
         ${navItem('plugin_manager','插件管理')}
@@ -352,7 +421,9 @@ function renderLayout() {
         ${navItem('persona_builder','人设构建')}
         ${navItem('proactive','主动诊断')}
         ${navItem('traces','消息 Trace')}
-        ${navItem('audit','审计日志')}
+        <div class="nav-group-label">运维</div>
+        ${navItem('data_transfer','数据迁移','transfer')}
+        ${navItem('audit','审计日志','shield')}
         ${navItem('logs','插件日志')}
         ${navItem('qq','QQ 管理')}
         ${navItem('devices','设备管理')}
@@ -361,7 +432,7 @@ function renderLayout() {
     <main>
       <div class="topbar between">
         <div style="display:flex;align-items:center;min-width:0;flex:1">
-          <button class="mobile-nav-toggle" onclick="toggleMobileNav()" aria-label="菜单">≡</button>
+           <button class="mobile-nav-toggle" onclick="toggleMobileNav()" aria-label="菜单" aria-controls="console-sidebar" aria-expanded="${state.mobileNavOpen?'true':'false'}">≡</button>
           <div style="min-width:0">
             <div class="breadcrumb">控制台 <span class="sep">›</span> ${escapeHtml(viewTitle())}</div>
             <strong style="font-size:17px">${escapeHtml(viewTitle())}</strong>
@@ -404,5 +475,7 @@ function renderView() {
   if (state.view === "traces") return renderTraces();
   if (state.view === "trace_detail") return renderTraceDetail();
   if (state.view === "proactive") return renderProactive();
+  if (state.view === "agent_status") return renderAgentStatus();
+  if (state.view === "data_transfer") return renderDataTransfer();
   return `<div class="card"><h2>${escapeHtml(viewTitle())}</h2><p class="muted">该视图暂未实现。</p></div>`;
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -186,8 +187,26 @@ def _render_turn_plan(plan: TurnPlan | Any) -> str:
         "tool_intent": list(getattr(plan, "tool_intent", []) or []),
         "ambiguity_level": str(getattr(plan, "ambiguity_level", "") or ""),
         "session_goal": str(getattr(plan, "session_goal", "") or ""),
+        "domain_focus": str(getattr(plan, "domain_focus", "general") or "general"),
+        "evidence_policy": str(getattr(plan, "evidence_policy", "none") or "none"),
     }
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _independent_source_count(tool_results: list[dict[str, Any]] | None) -> int:
+    sources: set[str] = set()
+    for item in list(tool_results or []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("tool_name", "") or item.get("name", "") or "").strip()
+        result = str(item.get("result", "") or item.get("text", "") or "")
+        if name in _PARALLEL_RESEARCH_TOOL_NAMES and _extract_verification_labels(name, result):
+            return 2
+        for url in re.findall(r"https?://[^\s\]\[()<>\"']+", result):
+            host = (urlparse(url).hostname or "").lower()
+            if host:
+                sources.add(host.removeprefix("www."))
+    return len(sources)
 
 
 def _render_memories(candidate_memories: list[dict[str, Any]] | None) -> str:
@@ -307,6 +326,7 @@ async def synthesize_evidence_with_llm(
                 '"research_followup_query":""}\n'
                 "要求：不要选择冒犯风险、过期、明显不相关的记忆。"
                 "如果工具结果互相冲突或不足，写 uncertainty_notes；只有确实需要再查时才 needs_more_research=true。"
+                "当 TurnPlan.evidence_policy=strict 时，关键事实至少需要两个相互独立的来源；独立来源不足必须 needs_more_research=true 并给出后续查询。"
             ),
         },
         {
@@ -328,7 +348,14 @@ async def synthesize_evidence_with_llm(
         return fallback
     payload = extract_json_payload(str(getattr(response, "content", "") or ""))
     parsed = parse_evidence_synthesis_payload(payload, candidate_memories=candidate_memories)
-    return parsed or fallback
+    result = parsed or fallback
+    if str(getattr(turn_plan, "evidence_policy", "none") or "none") == "strict" and _independent_source_count(tool_results) < 2:
+        result.needs_more_research = True
+        if not result.research_followup_query:
+            result.research_followup_query = str(getattr(turn_plan, "session_goal", "") or "补充独立来源交叉核验")[:160]
+        if "独立来源不足" not in result.uncertainty_notes:
+            result.uncertainty_notes.append("独立来源不足")
+    return result
 
 
 __all__ = [

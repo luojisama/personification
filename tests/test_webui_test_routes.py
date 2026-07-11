@@ -417,13 +417,14 @@ system: |
     assert applied.status_code == 200, applied.text
     assert Path(applied.json()["path"]).is_file()
     assert "system:" in apply_path.read_text(encoding="utf-8")
-    assert len(caller.calls) == 4
+    assert len(caller.calls) == 5
     assert all(call["kwargs"].get("use_builtin_search") is True for call in caller.calls[:3])
     purposes = [ctx.get("purpose") for ctx in caller.contexts]
     assert purposes == [
         "persona_template_research",
         "persona_template_research",
         "persona_template_research",
+        "persona_template_signature_candidates",
         "persona_template_synthesis",
     ]
 
@@ -645,3 +646,90 @@ system: |
     assert "system 偏短" in joined
     assert "助手/客服式身份" in joined
     assert "ack_phrases" in joined
+
+
+def test_persona_profile_apply_blocks_cross_record_and_returns_partial(_runtime_context) -> None:
+    history_mod = load_personification_module("plugin.personification.core.persona_template_history")
+    revision_a = "a" * 32
+    revision_b = "b" * 32
+    avatar_id = "1" * 32
+    signature_id = "2" * 32
+    data_dir = Path(_runtime_context.plugin_config.personification_data_dir)
+    image_dir = data_dir / "persona_avatar_candidates" / revision_a
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / f"{avatar_id}.jpg").write_bytes(b"sanitized-image")
+    record_a = history_mod.record_persona_template_result(
+        {
+            "work_title": "作品 A",
+            "character_name": "角色 A",
+            "revision": revision_a,
+            "avatar_candidates": [{
+                "candidate_id": avatar_id,
+                "revision": revision_a,
+                "suffix": ".jpg",
+                "mime": "image/jpeg",
+                "safety_status": "pass",
+            }],
+            "signature_candidates": [],
+        }
+    )
+    history_mod.record_persona_template_result(
+        {
+            "work_title": "作品 B",
+            "character_name": "角色 B",
+            "revision": revision_b,
+            "avatar_candidates": [],
+            "signature_candidates": [{
+                "candidate_id": signature_id,
+                "revision": revision_b,
+                "text": "另一个记录的签名",
+                "safety_status": "pass",
+            }],
+        }
+    )
+
+    class _Bot:
+        def __init__(self):
+            self.calls = []
+
+        async def call_api(self, api, **kwargs):
+            self.calls.append((api, kwargs))
+            if api == "send_private_msg":
+                _runtime_context.sent.append(kwargs)
+
+        async def send_private_msg(self, **kwargs):
+            _runtime_context.sent.append(kwargs)
+
+    bot = _Bot()
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=_runtime_context.plugin_config,
+        superusers={"10001"},
+        get_bots=lambda: {"bot": bot},
+        logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+        runtime_bundle=SimpleNamespace(call_ai_api=lambda *_a, **_k: None),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    bot.calls.clear()
+    response = client.post(
+        "/personification/api/persona-template/profile-apply",
+        json={
+            "bot_id": "bot",
+            "record_id": record_a["record_id"],
+            "revision": revision_a,
+            "avatar_candidate_id": avatar_id,
+            "signature_candidate_id": signature_id,
+            "confirm_avatar": True,
+            "confirm_signature": True,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "partial", body
+    assert body["results"]["avatar"]["status"] == "applied"
+    assert body["results"]["signature"]["status"] == "failed"
+    assert [call[0] for call in bot.calls] == ["set_qq_avatar"]
+    restored = history_mod.get_persona_template_record(record_a["record_id"])
+    assert restored["result"]["avatar_candidates"][0]["candidate_id"] == avatar_id
+    assert restored["profile_apply_audit"][-1]["status"] == "partial"

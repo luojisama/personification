@@ -57,7 +57,7 @@ def _base_kwargs(**overrides):  # noqa: ANN001
     return kwargs
 
 
-def test_active_followup_can_continue_related_target_others(monkeypatch) -> None:  # noqa: ANN001
+def test_active_followup_does_not_override_structural_target_others(monkeypatch) -> None:  # noqa: ANN001
     event = _GroupEvent("这个话题继续聊")
     state: dict = {}
     now = time.time()
@@ -82,7 +82,7 @@ def test_active_followup_can_continue_related_target_others(monkeypatch) -> None
         )
     )
 
-    assert result is True
+    assert result is False
     assert state["is_random_chat"] is False
     assert state["active_followup"]["topic"] == "这个话题"
 

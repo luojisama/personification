@@ -33,14 +33,26 @@ def test_qq_nickname_requires_value_and_auth(_runtime_context) -> None:
 
 
 def test_qq_leave_group_passes_group_id(_runtime_context) -> None:
+    from ._loader import load_personification_module
+
+    directory = load_personification_module("plugin.personification.core.group_directory")
+    directory.record_observed_group("100", "123456", source="test")
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
     _set_csrf(client)
     res = client.post("/personification/api/qq/groups/123456/leave", json={})
     assert res.status_code == 400
-    res = client.post("/personification/api/qq/groups/123456/leave", json={"confirm": "123456"})
+    res = client.post("/personification/api/qq/groups/123456/leave", json={"bot_id": "100", "confirm": "123456", "is_dismiss": False})
     assert res.status_code == 200
     assert any(m.get("group_id") == 123456 for m in _runtime_context.sent)
+
+
+def test_qq_leave_rejects_implicit_bot_and_string_boolean(_runtime_context) -> None:
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+    assert client.post("/personification/api/qq/groups/1/leave", json={"confirm": "1", "is_dismiss": False}).status_code == 400
+    assert client.post("/personification/api/qq/groups/1/leave", json={"bot_id": "100", "confirm": "1", "is_dismiss": "false"}).status_code == 400
 
 
 def test_qq_delete_friend(_runtime_context) -> None:

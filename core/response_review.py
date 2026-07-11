@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
 
 from ..agent.runtime.planner import OUTPUT_MODE_LENGTHS
@@ -20,6 +20,7 @@ class ResponseReviewDecision:
     action: str
     text: str
     reason: str = ""
+    flags: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,9 @@ def _render_semantic_frame_hint(semantic_frame: Any) -> str:
             "expression_style": str(getattr(semantic_frame, "expression_style", "") or ""),
             "emotion_intensity": str(getattr(semantic_frame, "emotion_intensity", "") or ""),
             "domain_focus": str(getattr(semantic_frame, "domain_focus", "") or ""),
+            "evidence_policy": str(getattr(semantic_frame, "evidence_policy", "") or ""),
+            "requires_emotional_care": bool(getattr(semantic_frame, "requires_emotional_care", False)),
+            "emotional_support": getattr(getattr(semantic_frame, "emotional_support", None), "__dict__", {}),
             "persona_info_added": str(getattr(semantic_frame, "persona_response_info_added", "") or ""),
             "persona_echoed_user_phrase": bool(getattr(semantic_frame, "persona_response_echoed_user_phrase", False)),
         },
@@ -198,7 +202,67 @@ def _parse_review_payload(raw: str) -> ResponseReviewDecision | None:
         return None
     revised = str(payload.get("text", "") or "").strip()
     reason = str(payload.get("reason", "") or "").strip()
-    return ResponseReviewDecision(action=action, text=revised, reason=reason)
+    raw_flags = payload.get("flags", [])
+    flags = tuple(
+        dict.fromkeys(
+            str(item or "").strip().lower()
+            for item in (raw_flags if isinstance(raw_flags, list) else [])
+            if str(item or "").strip()
+        )
+    )[:8]
+    return ResponseReviewDecision(action=action, text=revised, reason=reason, flags=flags)
+
+
+_CARE_REJECT_FLAGS = {
+    "dismissive",
+    "invalidating",
+    "unsolicited_advice",
+    "medicalizing",
+    "diagnosis",
+    "overpromise",
+    "dependency_encouragement",
+    "risk_mishandled",
+}
+
+
+def _care_fail_closed_decision(
+    *, is_private: bool, is_direct_mention: bool, risk_level: str, reason: str, flags: tuple[str, ...] = ()
+) -> ResponseReviewDecision:
+    if is_private or is_direct_mention:
+        fallback = (
+            "先别一个人扛，尽快联系身边可信任的人；如果眼下有危险，直接联系当地急救或警方。"
+            if risk_level == "high"
+            else "先不用急着把话说完整，我听着。"
+        )
+        return ResponseReviewDecision(
+            action="rewrite",
+            text=fallback,
+            reason=reason,
+            flags=flags,
+        )
+    return ResponseReviewDecision(action="no_reply", text="", reason=reason, flags=flags)
+
+
+async def _validate_care_rewrite(
+    call_ai_api: Callable[[list[dict[str, Any]]], Awaitable[Any]], *, rewritten_text: str, semantic_hint: str
+) -> ResponseReviewDecision | None:
+    try:
+        raw = await call_ai_api(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是情绪支持回复的安全复核器。只判断给定改写是否仍有轻视或否定感受、未经允许建议、医疗化诊断、"
+                        "过度承诺、诱导依赖或风险处理不当。只输出 JSON："
+                        '{"action":"accept|no_reply","text":"","reason":"...","flags":[]}。'
+                    ),
+                },
+                {"role": "user", "content": f"语义情绪帧：{semantic_hint}\n待复核改写：{rewritten_text}"},
+            ]
+        )
+    except Exception:
+        return None
+    return _parse_review_payload(str(raw or ""))
 
 
 def _parse_bool_payload(raw: str) -> bool | None:
@@ -362,12 +426,17 @@ async def review_response_text(
         return ResponseReviewDecision(action="no_reply", text="", reason="recent_duplicate")
     semantic_hint = _render_semantic_frame_hint(semantic_frame)
     output_mode_hint = _output_mode_hint(semantic_frame)
+    care_required = bool(
+        getattr(semantic_frame, "requires_emotional_care", False)
+        or getattr(getattr(semantic_frame, "emotional_support", None), "needed", False)
+    )
+    care_risk = str(getattr(getattr(semantic_frame, "emotional_support", None), "risk_level", "none") or "none")
     review_messages = [
         {
             "role": "system",
             "content": (
                 "你是回复审阅器。检查候选回复是否自然、贴题、像正常群友/私聊对象会说的话。"
-                "如果合理，输出 JSON：{\"action\":\"accept\",\"text\":\"\",\"reason\":\"...\"}。"
+                "如果合理，输出 JSON：{\"action\":\"accept\",\"text\":\"\",\"reason\":\"...\",\"flags\":[]}。"
                 "如果内容偏解释腔、AI味重、误解对象、和当前话题不贴，输出 "
                 "{\"action\":\"rewrite\",\"text\":\"改写后的最终回复\",\"reason\":\"...\"}。"
                 "如果这轮更适合沉默，输出 {\"action\":\"no_reply\",\"text\":\"\",\"reason\":\"...\"}。"
@@ -376,6 +445,8 @@ async def review_response_text(
                 f"{'当前又是明确点名后的互动；如果原话是在调侃、甩锅或轻挑衅，可以保留一句不索要信息的反问式回击，再给出自己的立场。' if is_direct_mention and not is_private else ''}"
                 "普通短句 banter、顺着上一句接话、轻量吐槽，优先 accept 或 rewrite，不要轻易 no_reply。"
                 "只输出 JSON，不要解释。"
+                "情绪支持轮次还要检查并在 flags 返回：dismissive/invalidating/unsolicited_advice/medicalizing/diagnosis/overpromise/dependency_encouragement/risk_mishandled。"
+                "候选若忽视倾听/确认、未经允许给建议、医疗化诊断、过度承诺、诱导依赖或错误处理风险，必须 rewrite 或 no_reply，不能 accept。"
                 "\n## 必须 rewrite 的 AI 味回复模式（重点检查）\n1. 「回声评论」：把用户说的话原样重复后加“太真实了/太直球了/太 X 了吧/真的假的”等感叹——必须改写为不重复原话的短句接话。\n2. 候选回复中超过 3 个连续字与用户原话重叠，且没有新增信息或立场——必须 rewrite。\n3. 候选只是在用感叹词复述用户语义，没有新事实、延续话题、转向或明确态度——必须 rewrite。\n4. 「安抚式客服腔」：以“别这么说/已经很够用了/不要这样想/你很棒的”开头——改写为自然接话。\n5. 「旁白式观察」：类似“真去做了啊/真的行动了/居然真的 XX 了”的旁白——改写为参与式短句。\n6. 「梗分析腔」：用“像是把 X 玩成 Y 了/意思就是/可以理解成”解释梗结构——改写为直接接梗。\n7. 「营业感叹腔」：用“(也)太……了吧/……爆了/绝了/谁懂啊/笑死/绷不住了/yyds”这类口号式感叹收尾或起势——改写成平铺直叙的接话，去掉感叹营业腔和网络流行语，不喊口号。\n8. 「固定起手口癖」：用“等下，/等一下，”开头，或反复用“这也/这也太/你这也/这听着也”评价用户、图片、表情、剧情——必须换一种自然说法，不要保留这个开头或句式。\n改写原则：去掉对用户发言的复述和分析，按 output_mode 的长度要求输出；改写后不得引入新的回声模式、营业感叹腔或固定起手口癖。"
                 "\n9. 出现 markdown 格式、标题、项目符号列表、编号列表、代码块、链接列表时，必须改成纯文本短句。"
                 "\n10. 出现 Step 1/Step 2、步骤 1/步骤 2 这类内部推理、审查清单或草稿过程时，必须 rewrite，只保留最终要对用户说的一句。"
@@ -407,17 +478,55 @@ async def review_response_text(
     try:
         raw = await call_ai_api(review_messages)
     except Exception:
+        if care_required:
+            return _care_fail_closed_decision(
+                is_private=is_private, is_direct_mention=is_direct_mention, risk_level=care_risk, reason="care_review_failed"
+            )
         return ResponseReviewDecision(action="accept", text=candidate, reason="review_failed")
     parsed = _parse_review_payload(str(raw or ""))
     if parsed is None:
+        if care_required:
+            return _care_fail_closed_decision(
+                is_private=is_private, is_direct_mention=is_direct_mention, risk_level=care_risk, reason="care_review_unparseable"
+            )
         return ResponseReviewDecision(action="accept", text=candidate, reason="review_unparseable")
+    care_reject_flags = tuple(flag for flag in parsed.flags if flag in _CARE_REJECT_FLAGS)
+    if care_required and care_reject_flags and not (parsed.action == "rewrite" and parsed.text):
+        return _care_fail_closed_decision(
+            is_private=is_private,
+            is_direct_mention=is_direct_mention,
+            risk_level=care_risk,
+            reason=parsed.reason or "care_review_rejected",
+            flags=care_reject_flags,
+        )
     if parsed.action == "rewrite" and parsed.text:
-        return ResponseReviewDecision(action="rewrite", text=parsed.text, reason=parsed.reason)
+        if care_required:
+            safety = await _validate_care_rewrite(
+                call_ai_api, rewritten_text=parsed.text, semantic_hint=semantic_hint
+            )
+            unsafe_flags = tuple(flag for flag in (safety.flags if safety else ()) if flag in _CARE_REJECT_FLAGS)
+            if safety is None or safety.action != "accept" or unsafe_flags:
+                return _care_fail_closed_decision(
+                    is_private=is_private,
+                    is_direct_mention=is_direct_mention,
+                    risk_level=care_risk,
+                    reason="care_rewrite_unverified",
+                    flags=unsafe_flags,
+                )
+        return ResponseReviewDecision(action="rewrite", text=parsed.text, reason=parsed.reason, flags=parsed.flags)
     if parsed.action == "no_reply":
         if is_direct_mention:
-            return ResponseReviewDecision(action="accept", text=candidate, reason=parsed.reason or "direct_mention_no_reply_blocked")
-        return ResponseReviewDecision(action="no_reply", text="", reason=parsed.reason)
-    return ResponseReviewDecision(action="accept", text=candidate, reason=parsed.reason)
+            if care_required:
+                return _care_fail_closed_decision(
+                    is_private=is_private,
+                    is_direct_mention=True,
+                    risk_level=care_risk,
+                    reason=parsed.reason or "care_no_reply_blocked",
+                    flags=parsed.flags,
+                )
+            return ResponseReviewDecision(action="accept", text=candidate, reason=parsed.reason or "direct_mention_no_reply_blocked", flags=parsed.flags)
+        return ResponseReviewDecision(action="no_reply", text="", reason=parsed.reason, flags=parsed.flags)
+    return ResponseReviewDecision(action="accept", text=candidate, reason=parsed.reason, flags=parsed.flags)
 
 
 async def rewrite_agent_reply_ooc(

@@ -4,6 +4,8 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
+from .safety_filter import build_safe_reframe_messages, detect_route_safety_issue
+
 
 _EMITTED_ROUTE_WARNINGS: set[str] = set()
 _ROUTE_WARNING_LOCK = threading.RLock()
@@ -531,15 +533,7 @@ def _is_invalid_tool_response(response: ToolCallerResponse) -> bool:
     if response.tool_calls:
         return False
     if str(response.content or "").strip():
-        normalized = " ".join(str(response.content or "").strip().lower().split())
-        return normalized in {
-            "i can't discuss that.",
-            "i cant discuss that.",
-            "i cannot discuss that.",
-            "i'm sorry, but i can't discuss that.",
-            "抱歉，我不能讨论这个。",
-            "抱歉，我无法讨论这个。",
-        }
+        return False
     return True
 
 
@@ -613,6 +607,19 @@ class RoutedToolCaller:
             except Exception as exc:
                 last_error = exc
                 continue
+            safety_issue = detect_route_safety_issue(response)
+            if safety_issue:
+                try:
+                    response = await caller.chat_with_tools(
+                        build_safe_reframe_messages(self._strip_route_markers(messages)),
+                        tools,
+                        use_builtin_search,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    continue
+                if detect_route_safety_issue(response):
+                    continue
             if response.vision_unavailable:
                 saw_vision_unavailable = True
                 continue

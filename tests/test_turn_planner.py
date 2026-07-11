@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import asyncio
 
 from ._loader import load_personification_module
@@ -36,6 +38,19 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
             "ambiguity_level": "medium",
             "message_target": "bot",
             "session_goal": "查证后回答",
+            "domain_focus": "technology",
+            "evidence_policy": "strict",
+            "emotional_support": {
+                "needed": True,
+                "listen": True,
+                "validate": True,
+                "advice_permission": "ask_first",
+                "risk_level": "concern",
+            },
+            "user_attitude": "认真求助",
+            "bot_emotion": "关切",
+            "emotion_intensity": "high",
+            "expression_style": "先听再回应",
             "confidence": 1.8,
             "reason": "test",
         }
@@ -49,6 +64,9 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
     assert plan.tool_intent == ["lookup_web", "memory"]
     assert plan.confidence == 1.0
     assert plan.length_bounds == (80, 240)
+    assert plan.domain_focus == "technology"
+    assert plan.evidence_policy == "strict"
+    assert plan.emotional_support.advice_permission == "ask_first"
 
 
 def test_turn_plan_to_semantic_frame_maps_lookup_plugin() -> None:
@@ -70,6 +88,62 @@ def test_turn_plan_to_semantic_frame_maps_lookup_plugin() -> None:
     assert frame.recommend_silence is False
     assert frame.output_mode == "structured_help"
     assert frame.speech_act == "answer"
+
+
+def test_turn_plan_semantic_frame_round_trip_preserves_care_and_emotion() -> None:
+    plan = planner.TurnPlan(
+        domain_focus="emotion",
+        evidence_policy="light",
+        emotional_support=planner.EmotionalSupport(
+            needed=True,
+            listen=True,
+            validate=True,
+            advice_permission="ask_first",
+            risk_level="concern",
+        ),
+        user_attitude="脆弱地求助",
+        bot_emotion="认真关切",
+        emotion_intensity="high",
+        expression_style="先倾听确认",
+    )
+
+    frame = planner.turn_plan_to_semantic_frame(plan)
+    restored = planner.turn_plan_from_semantic_frame(frame)
+
+    assert frame.requires_emotional_care is True
+    assert restored.domain_focus == "emotion"
+    assert restored.evidence_policy == "light"
+    assert restored.emotional_support == plan.emotional_support
+    assert restored.user_attitude == "脆弱地求助"
+    assert restored.bot_emotion == "认真关切"
+
+
+def test_legacy_turn_plan_derives_plugin_and_realtime_domains_when_new_field_missing() -> None:
+    plugin_plan = planner.parse_turn_plan_payload(
+        {"reply_action": "reply", "output_mode": "structured_help", "tool_intent": ["lookup_plugin"]}
+    )
+    realtime_plan = planner.parse_turn_plan_payload(
+        {"reply_action": "reply", "output_mode": "source_summary", "tool_intent": ["lookup_web"]}
+    )
+
+    assert plugin_plan.domain_focus == "plugin"
+    assert realtime_plan.domain_focus == "realtime"
+
+
+def test_semantic_adapter_accepts_legacy_knowledge_and_object_emotional_support() -> None:
+    frame = SimpleNamespace(
+        chat_intent="explanation",
+        domain_focus="knowledge",
+        emotional_support=SimpleNamespace(
+            needed=True, listen=True, validate=False, advice_permission="allowed", risk_level="concern"
+        ),
+    )
+
+    plan = planner.turn_plan_from_semantic_frame(frame)
+
+    assert plan.domain_focus == "general"
+    assert plan.emotional_support.needed is True
+    assert plan.emotional_support.advice_permission == "allowed"
 
 
 def test_turn_planner_prompt_includes_media_context_discipline() -> None:

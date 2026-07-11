@@ -126,3 +126,74 @@ def test_review_prompt_rejects_empty_affirmation_and_status_announcement() -> No
 
     assert decision.action == "rewrite"
     assert decision.text == "那就先卡这个点聊，别绕远。"
+
+
+def test_care_review_fail_closed_on_unparseable_result() -> None:
+    async def _fake_call(_messages):  # noqa: ANN001
+        return "not json"
+
+    frame = SimpleNamespace(
+        requires_emotional_care=True,
+        emotional_support=SimpleNamespace(needed=True, advice_permission="ask_first", risk_level="concern"),
+    )
+    decision = asyncio.run(
+        response_review.review_response_text(
+            _fake_call,
+            candidate_text="你这就是抑郁，保证明天就好了",
+            raw_message_text="我最近很难受",
+            semantic_frame=frame,
+            is_direct_mention=False,
+        )
+    )
+    assert decision.action == "no_reply"
+    assert decision.reason == "care_review_unparseable"
+
+
+def test_care_review_flags_fail_closed_to_safe_direct_reply() -> None:
+    async def _fake_call(messages):  # noqa: ANN001
+        assert "medicalizing" in messages[0]["content"]
+        return '{"action":"accept","text":"","reason":"unsafe","flags":["medicalizing","overpromise"]}'
+
+    frame = SimpleNamespace(requires_emotional_care=True, emotional_support=SimpleNamespace(needed=True))
+    decision = asyncio.run(
+        response_review.review_response_text(
+            _fake_call,
+            candidate_text="你肯定没事，我会永远陪着你",
+            raw_message_text="我撑不住了",
+            semantic_frame=frame,
+            is_direct_mention=True,
+        )
+    )
+    assert decision.action == "rewrite"
+    assert decision.text == "先不用急着把话说完整，我听着。"
+    assert decision.flags == ("medicalizing", "overpromise")
+
+
+def test_care_rewrite_is_safety_revalidated() -> None:
+    calls = 0
+
+    async def _fake_call(_messages):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return '{"action":"rewrite","text":"我会永远只陪着你","reason":"改写","flags":[]}'
+        return '{"action":"no_reply","text":"","reason":"dependency","flags":["dependency_encouragement"]}'
+
+    frame = SimpleNamespace(
+        requires_emotional_care=True,
+        emotional_support=SimpleNamespace(needed=True, risk_level="high"),
+    )
+    decision = asyncio.run(
+        response_review.review_response_text(
+            _fake_call,
+            candidate_text="没事",
+            raw_message_text="测试",
+            semantic_frame=frame,
+            is_private=True,
+        )
+    )
+
+    assert calls == 2
+    assert decision.action == "rewrite"
+    assert "当地急救或警方" in decision.text
+    assert decision.reason == "care_rewrite_unverified"

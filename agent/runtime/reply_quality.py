@@ -12,6 +12,7 @@ from ...core.reply_text_policy import (
     normalize_visible_reply_text,
 )
 from ...core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
+from ...core.visible_output import assess_visible_text
 from .final_synthesis import AgentResult
 
 
@@ -119,6 +120,27 @@ async def finalize_agent_reply_quality(
     started_at = time.monotonic()
     raw_text = str(getattr(result, "text", "") or "").strip()
     direct_output = bool(getattr(result, "direct_output", False))
+    visibility = assess_visible_text(raw_text)
+    if not visibility.allowed:
+        check = {
+            "action": "silenced",
+            "reason": visibility.reason,
+            "source": str(reason or ""),
+            "flags": ["unsafe_visible_output"],
+            "revision_attempted": False,
+            "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+            "original_chars": len(raw_text),
+            "final_chars": len("[SILENCE]"),
+        }
+        record_counter("agent.reply_quality_total", action="silenced")
+        if record_trace is not None:
+            record_trace(
+                key="agent_reply_quality",
+                label="Agent 回复质量",
+                status="warn",
+                detail=f"action=silenced reason={visibility.reason} flags=unsafe_visible_output",
+            )
+        return _copy_result_with_quality(result, text="[SILENCE]", check=check)
     skipped = direct_output or _is_control_reply(raw_text) or _is_direct_media_reply(raw_text)
     if skipped:
         check = {

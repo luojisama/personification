@@ -63,12 +63,11 @@ def test_index_serves_static_frontend(_runtime_context) -> None:
     assert "拟人插件 控制台" in res.text
     assert re.search(r'<link rel="stylesheet" href="/personification/static/style\.css\?v=[^"]+">', res.text)
     assert re.search(r'<script src="/personification/static/app-core\.js\?v=[^"]+" defer></script>', res.text)
-    assert re.search(r'<script src="/personification/static/app-activity\.js\?v=[^"]+" defer></script>', res.text)
-    assert re.search(r'<script src="/personification/static/app-content\.js\?v=[^"]+" defer></script>', res.text)
-    assert re.search(r'<script src="/personification/static/app-admin\.js\?v=[^"]+" defer></script>', res.text)
-    assert re.search(r'<script src="/personification/static/app-tools\.js\?v=[^"]+" defer></script>', res.text)
-    assert re.search(r'<script src="/personification/static/app-config\.js\?v=[^"]+" defer></script>', res.text)
     assert re.search(r'<script src="/personification/static/app-auth\.js\?v=[^"]+" defer></script>', res.text)
+    assert "PERSONIFICATION_ASSET_VERSIONS" in res.text
+    for lazy_asset in ("app-activity.js", "app-content.js", "app-admin.js", "app-tools.js", "app-config.js", "app-operations.js"):
+        assert lazy_asset in res.text
+        assert f'<script src="/personification/static/{lazy_asset}' not in res.text
     assert "no-store" in res.headers.get("cache-control", "")
 
 

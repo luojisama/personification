@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .message_parts import normalize_message_parts
+from .safety_filter import build_safe_reframe_messages, detect_route_safety_issue
 from .visual_capabilities import error_indicates_vision_unavailable, heuristic_supports_vision
 
 
@@ -669,8 +670,11 @@ async def _call_provider_once(
         )
         # vision_unavailable 算业务失败（影响 success_rate），让后续真正能识图的
         # provider 自然排前面；error_kind 标 vision_unavailable 便于诊断
-        success = not bool(getattr(response, "vision_unavailable", False))
-        if not success:
+        safety_issue = detect_route_safety_issue(response)
+        success = not bool(getattr(response, "vision_unavailable", False)) and not safety_issue
+        if safety_issue:
+            error_kind = "safety_block"
+        elif not success:
             error_kind = "vision_unavailable"
     except Exception as exc:
         try:
@@ -787,26 +791,6 @@ def _strip_image_parts_for_text_only_provider(
     return converted
 
 
-GENERIC_REFUSAL_TEXTS = {
-    "i can't discuss that.",
-    "i cant discuss that.",
-    "i cannot discuss that.",
-    "i'm sorry, but i can't discuss that.",
-    "抱歉，我不能讨论这个。",
-    "抱歉，我无法讨论这个。",
-}
-
-
-def _is_generic_refusal_response(response: ToolCallerResponse) -> bool:
-    if response.tool_calls:
-        return False
-    content = (response.content or "").strip()
-    if not content:
-        return False
-    normalized = " ".join(content.lower().split())
-    return normalized in GENERIC_REFUSAL_TEXTS
-
-
 def _is_invalid_route_response(response: ToolCallerResponse) -> bool:
     if response.tool_calls:
         return False
@@ -814,7 +798,7 @@ def _is_invalid_route_response(response: ToolCallerResponse) -> bool:
         return True
     if not str(response.content or "").strip():
         return True
-    return _is_generic_refusal_response(response)
+    return False
 
 
 def _error_text(error: Exception) -> str:
@@ -865,6 +849,7 @@ async def _try_provider_chain(
             )
         retries = _provider_max_retries(provider)
         skip_provider = False
+        safety_reframed = False
         for attempt in range(retries):
             try:
                 response = await _call_provider_once(
@@ -874,6 +859,38 @@ async def _try_provider_chain(
                     tools=tools,
                     use_builtin_search=use_builtin_search,
                 )
+                safety_issue = detect_route_safety_issue(response)
+                if safety_issue:
+                    reason = safety_issue
+                    errors.append(f"{provider['name']}#{attempt + 1}: safety_block:{reason}")
+                    logger.warning(
+                        f"personification: provider {provider['name']} returned blocked output "
+                        f"({reason}); visible text discarded"
+                    )
+                    if not safety_reframed:
+                        provider_messages = build_safe_reframe_messages(provider_messages)
+                        safety_reframed = True
+                        try:
+                            response = await _call_provider_once(
+                                provider,
+                                provider_messages,
+                                plugin_config=plugin_config,
+                                tools=tools,
+                                use_builtin_search=use_builtin_search,
+                            )
+                        except Exception as safety_exc:
+                            errors.append(f"{provider['name']}#safety: {_error_text(safety_exc)}")
+                            _mark_provider_failure(provider["name"], safety_exc)
+                            skip_provider = True
+                            break
+                        retry_issue = detect_route_safety_issue(response)
+                        if not retry_issue and not _is_invalid_route_response(response):
+                            _mark_provider_success(provider["name"])
+                            return response, errors, saw_vision_unavailable
+                        errors.append(f"{provider['name']}#safety: safety_block:{retry_issue}")
+                        _mark_provider_failure(provider["name"], RuntimeError("provider safety block"))
+                    skip_provider = True
+                    break
                 if response.vision_unavailable:
                     saw_vision_unavailable = True
                     errors.append(f"{provider['name']}#{attempt + 1}: vision_unavailable")

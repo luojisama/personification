@@ -16,7 +16,8 @@ from ...core.group_member_aliases import (
     set_group_member_aliases,
 )
 from ...core.meme_dictionary import delete_meme_entry, list_meme_entries, upsert_meme_entry
-from ...core.onebot_cache import get_group_name_map, get_user_nickname
+from ...core.group_directory import discover_group_union
+from ...core.onebot_cache import get_user_nickname
 from ..deps import AdminIdentity, get_client_ip, require_admin
 from .favorability_view import serialize_favorability
 
@@ -262,53 +263,23 @@ _REBUILD_WINDOW_SECONDS = 300
 _REBUILD_MAX_PER_WINDOW = 3
 
 
-def _collect_all_known_groups(runtime) -> tuple[list[str], dict[str, str]]:
-    """合并 memory_store / 动态白名单 / 配置白名单 / group_configs，返回去重排序的群号列表。
-
-    第二个返回值是 group_id -> 来源标签（memory|dynamic|config|group_config）。"""
-    from ...utils import load_whitelist, load_group_configs
-
-    svc = _profile_service(runtime)
-    known_from_svc = [str(g) for g in (svc.list_groups() if svc else [])]
-    config_whitelist = [str(g) for g in (getattr(runtime.plugin_config, "personification_whitelist", []) or [])]
-    dynamic_whitelist = [str(g) for g in load_whitelist()]
-    group_configs = load_group_configs() if callable(load_group_configs) else {}
-    if not isinstance(group_configs, dict):
-        group_configs = {}
-    config_keys = [str(g) for g in group_configs.keys()]
-    all_ids = sorted(set(known_from_svc) | set(dynamic_whitelist) | set(config_whitelist) | set(config_keys))
-    source: dict[str, str] = {}
-    for gid in all_ids:
-        if gid in known_from_svc:
-            source[gid] = "memory"
-        elif gid in config_keys:
-            source[gid] = "group_config"
-        elif gid in config_whitelist:
-            source[gid] = "config_file"
-        elif gid in dynamic_whitelist:
-            source[gid] = "dynamic"
-        else:
-            source[gid] = "unknown"
-    return all_ids, source
-
-
 def build_group_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/groups", tags=["groups"])
 
     @router.get("")
     async def list_groups(_: AdminIdentity = Depends(require_admin)) -> dict:
         svc = _profile_service(runtime)
-        all_ids, source_map = _collect_all_known_groups(runtime)
-        bot = _get_first_bot(runtime)
-        name_map = await get_group_name_map(bot, all_ids)
+        groups = await discover_group_union(runtime)
         items: list[dict[str, Any]] = []
-        for gid in all_ids:
+        for group in groups:
+            gid = str(group["group_id"])
+            sources = list(group.get("sources", []))
             items.append(
                 {
+                    **group,
                     "group_id": gid,
-                    "group_name": name_map.get(gid, ""),
-                    "source": source_map.get(gid, ""),
-                    "has_memory": source_map.get(gid) == "memory",
+                    "source": sources[0] if len(sources) == 1 else "union",
+                    "has_memory": "profile_memory" in sources,
                     "favorability": serialize_favorability(
                         runtime,
                         f"group_{gid}",
@@ -323,16 +294,13 @@ def build_group_router(*, runtime) -> APIRouter:
     async def get_group_switches(_: AdminIdentity = Depends(require_admin)) -> dict:
         from ...utils import load_whitelist, load_group_configs, is_group_whitelisted
 
-        svc = _profile_service(runtime)
-        bot = _get_first_bot(runtime)
         config_whitelist = list(getattr(runtime.plugin_config, "personification_whitelist", []) or [])
         dynamic_whitelist = load_whitelist()
         group_configs = load_group_configs()
-        known_from_svc = [str(g) for g in (svc.list_groups() if svc else [])]
-        all_ids = sorted({str(g) for g in known_from_svc} | set(dynamic_whitelist) | set(config_whitelist))
-        name_map = await get_group_name_map(bot, all_ids)
+        groups = await discover_group_union(runtime)
         items: list[dict[str, Any]] = []
-        for gid in all_ids:
+        for group in groups:
+            gid = str(group["group_id"])
             enabled = is_group_whitelisted(gid, config_whitelist)
             cfg = group_configs.get(gid, {}) if isinstance(group_configs, dict) else {}
             if not isinstance(cfg, dict):
@@ -348,10 +316,13 @@ def build_group_router(*, runtime) -> APIRouter:
             items.append(
                 {
                     "group_id": gid,
-                    "group_name": name_map.get(gid, ""),
+                    "group_name": group.get("group_name", ""),
                     "enabled": enabled,
                     "source": source,
-                    "readonly": gid in config_whitelist and "enabled" not in cfg,
+                    "readonly": False,
+                    "static_config_readonly": gid in config_whitelist,
+                    "static_config_note": "静态白名单只读；此开关写入 group_config.enabled 并优先覆盖" if gid in config_whitelist else "",
+                    "sources": group.get("sources", []),
                 }
             )
         return {"groups": items}
@@ -362,9 +333,9 @@ def build_group_router(*, runtime) -> APIRouter:
         request: Request,
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
-        from ...utils import add_group_to_whitelist
+        from ...utils import set_group_enabled
 
-        added = add_group_to_whitelist(group_id)
+        set_group_enabled(group_id, True)
         webui_audit_log.record(
             action="group_whitelist_add",
             qq=admin.qq,
@@ -372,7 +343,7 @@ def build_group_router(*, runtime) -> APIRouter:
             target=group_id,
             ip_hash=get_client_ip(request),
         )
-        return {"success": True, "added": added, "group_id": group_id}
+        return {"success": True, "enabled": True, "group_id": group_id, "authority": "group_config.enabled"}
 
     @router.delete("/{group_id}/whitelist")
     async def disable_group(
@@ -380,9 +351,9 @@ def build_group_router(*, runtime) -> APIRouter:
         request: Request,
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
-        from ...utils import remove_group_from_whitelist
+        from ...utils import set_group_enabled
 
-        removed = remove_group_from_whitelist(group_id)
+        set_group_enabled(group_id, False)
         webui_audit_log.record(
             action="group_whitelist_remove",
             qq=admin.qq,
@@ -390,7 +361,7 @@ def build_group_router(*, runtime) -> APIRouter:
             target=group_id,
             ip_hash=get_client_ip(request),
         )
-        return {"success": True, "removed": removed, "group_id": group_id}
+        return {"success": True, "enabled": False, "group_id": group_id, "authority": "group_config.enabled"}
 
     @router.get("/{group_id}/personas")
     async def personas(group_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
@@ -780,7 +751,6 @@ def build_group_router(*, runtime) -> APIRouter:
         from ...core.emotion_state import (
             describe_group_emotion_memory,
             load_emotion_state,
-            render_inner_state_hint,
         )
 
         store = _memory_store(runtime)
@@ -796,7 +766,12 @@ def build_group_router(*, runtime) -> APIRouter:
             data_dir = get_personification_data_dir(runtime.plugin_config)
             loaded = await load_inner_state(data_dir)
             if isinstance(loaded, dict):
-                inner_state_hint = render_inner_state_hint(loaded)
+                inner_state_hint = " / ".join(
+                    value for value in (
+                        str(loaded.get("mood", "") or "").strip(),
+                        str(loaded.get("energy", "") or "").strip(),
+                    ) if value
+                )
         except Exception:
             inner_state_hint = ""
 

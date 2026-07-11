@@ -19,6 +19,17 @@ def handle_record_message_event(
         record_group_msg=record_group_msg,
         should_trigger_auto_analyze=should_trigger_auto_analyze,
     )
+    if group_id:
+        try:
+            from ..core.group_directory import record_observed_group
+
+            record_observed_group(
+                getattr(event, "self_id", "unknown"),
+                group_id,
+                source="group_message_event",
+            )
+        except Exception:
+            pass
     if group_id and create_summary_task is not None:
         create_summary_task(group_id)
     if group_id and should_auto_analyze:

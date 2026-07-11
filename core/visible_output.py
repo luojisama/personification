@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+import re
+from base64 import b64decode
+from binascii import Error as BinasciiError
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlsplit
+
+_CONTROL_OUTPUTS = frozenset({"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"})
+_MEDIA_TAGS = {"IMAGE_B64", "IMAGE_URL", "AUDIO_B64"}
+_MEDIA_BLOCK_RE = re.compile(
+    r"\[(IMAGE_B64|IMAGE_URL|AUDIO_B64)\](.*?)\[/\1\]",
+    re.DOTALL,
+)
+_ANY_MEDIA_MARKER_RE = re.compile(r"\[/?(?:IMAGE_B64|IMAGE_URL|AUDIO_B64)\]")
+_INTERNAL_OUTPUT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:严重|高危)?违规安全限制(?:已)?被触发"),
+    re.compile(r"(?:服务器|服务端|供应商|provider).{0,16}(?:拦截|风控|安全策略)", re.IGNORECASE),
+    re.compile(r"(?:finish[_ ]?reason|block[_ ]?reason|content[_ ]?filter)\s*[:=]", re.IGNORECASE),
+    re.compile(r"(?:system|developer)\s+(?:prompt|message)\s*[:=]", re.IGNORECASE),
+    re.compile(r"(?:traceback|stack trace|internal server error)\b", re.IGNORECASE),
+    re.compile(r"(?:api[_ -]?key|authorization)\s*[:=]\s*(?:bearer\s+)?[A-Za-z0-9_.-]{8,}", re.IGNORECASE),
+)
+
+
+@dataclass(frozen=True)
+class VisibleOutputDecision:
+    allowed: bool
+    text: str
+    reason: str = ""
+
+
+def _valid_media_payload(kind: str, payload: str) -> bool:
+    value = str(payload or "").strip()
+    if not value:
+        return False
+    if kind == "IMAGE_URL":
+        parsed = urlsplit(value)
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname) and not parsed.username and not parsed.password
+    try:
+        decoded = b64decode(value, validate=True)
+    except (ValueError, BinasciiError):
+        return False
+    return 0 < len(decoded) <= 20 * 1024 * 1024
+
+
+def _visible_residual(candidate: str, *, allow_direct_media: bool) -> tuple[str, str]:
+    blocks = list(_MEDIA_BLOCK_RE.finditer(candidate))
+    if not blocks:
+        if _ANY_MEDIA_MARKER_RE.search(candidate):
+            return "", "invalid_media_block"
+        return candidate, ""
+    if not allow_direct_media:
+        return "", "media_not_allowed"
+    for block in blocks:
+        if block.group(1) not in _MEDIA_TAGS or not _valid_media_payload(block.group(1), block.group(2)):
+            return "", "invalid_media_payload"
+    residual = _MEDIA_BLOCK_RE.sub(" ", candidate)
+    if _ANY_MEDIA_MARKER_RE.search(residual):
+        return "", "invalid_media_block"
+    return residual.strip(), ""
+
+
+def assess_visible_text(text: Any, *, allow_control: bool = True, allow_direct_media: bool = True) -> VisibleOutputDecision:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return VisibleOutputDecision(False, "", "empty")
+    if allow_control and candidate in _CONTROL_OUTPUTS:
+        return VisibleOutputDecision(True, candidate)
+    residual, media_error = _visible_residual(candidate, allow_direct_media=allow_direct_media)
+    if media_error:
+        return VisibleOutputDecision(False, "", media_error)
+    for pattern in _INTERNAL_OUTPUT_PATTERNS:
+        if pattern.search(residual):
+            return VisibleOutputDecision(False, "", "internal_or_policy_output")
+    return VisibleOutputDecision(True, candidate)
+
+
+def guard_visible_text(
+    text: Any,
+    *,
+    logger: Any = None,
+    surface: str = "",
+    allow_direct_media: bool = True,
+) -> str:
+    decision = assess_visible_text(text, allow_direct_media=allow_direct_media)
+    if decision.allowed:
+        return decision.text
+    if logger is not None:
+        try:
+            logger.warning(
+                f"[visible_output] blocked surface={surface or 'unknown'} reason={decision.reason}"
+            )
+        except Exception:
+            pass
+    return ""
+
+
+__all__ = ["VisibleOutputDecision", "assess_visible_text", "guard_visible_text"]

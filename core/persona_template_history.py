@@ -125,6 +125,37 @@ def get_latest_persona_template_record(work_title: str, character_name: str) -> 
     return records[0] if records else None
 
 
+def get_persona_template_record(record_id: str) -> dict[str, Any] | None:
+    wanted = str(record_id or "")
+    return next(
+        (record for record in list_persona_template_records(limit=100) if str(record.get("record_id") or "") == wanted),
+        None,
+    )
+
+
+def append_persona_template_apply_audit(record_id: str, event: dict[str, Any]) -> dict[str, Any] | None:
+    updated: dict[str, Any] | None = None
+
+    def _mutate(current: Any) -> dict[str, Any]:
+        nonlocal updated
+        payload = current if isinstance(current, dict) else {}
+        records = [item for item in payload.get("records", []) if isinstance(item, dict)]
+        for record in records:
+            if str(record.get("record_id") or "") != str(record_id or ""):
+                continue
+            audit = [item for item in record.get("profile_apply_audit", []) if isinstance(item, dict)]
+            audit.append({**event, "created_at": time.time()})
+            record["profile_apply_audit"] = audit[-50:]
+            updated = record
+            break
+        payload["records"] = records
+        payload["updated_at"] = time.time()
+        return payload
+
+    get_data_store().mutate_sync(_NAMESPACE, _mutate)
+    return updated
+
+
 def summarize_persona_template_record(record: dict[str, Any]) -> dict[str, Any]:
     result = record.get("result") if isinstance(record.get("result"), dict) else {}
     return {
@@ -139,6 +170,10 @@ def summarize_persona_template_record(record: dict[str, Any]) -> dict[str, Any]:
         "source_count": int(record.get("source_count") or len(result.get("sources") or [])),
         "subagent_count": int(record.get("subagent_count") or len(result.get("subagents") or [])),
         "template_keys": list(result.get("template_keys") or [])[:32],
+        "revision": str(result.get("revision") or ""),
+        "avatar_candidate_count": len(result.get("avatar_candidates") or []),
+        "signature_candidate_count": len(result.get("signature_candidates") or []),
+        "profile_status": str(result.get("profile_status") or ""),
     }
 
 
@@ -205,8 +240,10 @@ def write_persona_template_export_file(record_or_result: dict[str, Any], *, plug
 
 
 __all__ = [
+    "append_persona_template_apply_audit",
     "build_persona_template_key",
     "get_latest_persona_template_record",
+    "get_persona_template_record",
     "list_persona_template_records",
     "record_persona_template_result",
     "render_persona_template_export",

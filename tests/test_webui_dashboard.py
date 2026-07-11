@@ -362,6 +362,31 @@ def test_groups_list_and_detail(_runtime_with_data) -> None:
     assert "晚上更活跃" in saved_schedule.json()["schedule_prompt"]
 
 
+def test_group_switch_writes_authoritative_group_config(_runtime_with_data) -> None:
+    client = _build_client(_runtime_with_data)
+    _login(client)
+    utils = load_personification_module("plugin.personification.utils")
+    _runtime_with_data.plugin_config.personification_whitelist = ["static-group"]
+    utils.save_whitelist(["dynamic-group"])
+
+    disabled = client.delete("/personification/api/groups/static-group/whitelist")
+    assert disabled.status_code == 200
+    assert utils.get_group_config("static-group")["enabled"] is False
+    assert utils.is_group_whitelisted("static-group", ["static-group"]) is False
+
+    enabled = client.post("/personification/api/groups/dynamic-group/whitelist")
+    assert enabled.status_code == 200
+    assert utils.get_group_config("dynamic-group")["enabled"] is True
+    utils.save_whitelist([])
+    assert utils.is_group_whitelisted("dynamic-group", []) is True
+
+    listed = client.get("/personification/api/groups/whitelist")
+    static = next(item for item in listed.json()["groups"] if item["group_id"] == "static-group")
+    assert static["enabled"] is False
+    assert static["source"] == "group_config"
+    assert static["static_config_readonly"] is True
+
+
 def test_profile_service_prompt_block(_runtime_with_data) -> None:
     svc = _runtime_with_data.runtime_bundle.profile_service
     current = svc.get_core_profile("u_alpha")

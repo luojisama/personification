@@ -4,6 +4,7 @@ import json
 import hashlib
 import sqlite3
 import struct
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -30,6 +31,15 @@ SEARCH_STATS_RETENTION_DAYS = 30
 SEARCH_STATS_PRUNE_INTERVAL_SECONDS = 3600
 VECTOR_CHUNK_MODEL_VERSION = EMBED_MODEL_VERSION
 VECTOR_CHUNK_TEXT_LIMIT = 900
+
+_MAINTENANCE_LOCKS: dict[str, threading.RLock] = {}
+_MAINTENANCE_LOCKS_GUARD = threading.Lock()
+
+
+def _shared_maintenance_lock(root: Path) -> threading.RLock:
+    key = str(root.resolve())
+    with _MAINTENANCE_LOCKS_GUARD:
+        return _MAINTENANCE_LOCKS.setdefault(key, threading.RLock())
 
 
 def _plugin_data_dir(plugin_config: Any | None = None) -> Path:
@@ -152,6 +162,7 @@ class MemoryStore:
         self.shared_dir = self.grouped_memory_dir / "shared"
         self.memory_palace_dir = self.root_dir / "memory_palace"
         self.recycle_bin_dir = self.root_dir / "_legacy_recycle_bin"
+        self.maintenance_lock = _shared_maintenance_lock(self.root_dir)
         self._fts_available = False
         self._last_search_stats_prune_ts = 0.0
 
@@ -261,6 +272,22 @@ class MemoryStore:
             conn.commit()
 
     def upsert_local_profile(
+        self,
+        *,
+        group_id: str,
+        user_id: str,
+        profile_text: str,
+        profile_json: dict[str, Any] | None = None,
+    ) -> None:
+        with self.maintenance_lock:
+            self._upsert_local_profile_unlocked(
+                group_id=group_id,
+                user_id=user_id,
+                profile_text=profile_text,
+                profile_json=profile_json,
+            )
+
+    def _upsert_local_profile_unlocked(
         self,
         *,
         group_id: str,
@@ -413,6 +440,10 @@ class MemoryStore:
         return out
 
     def write_memory_item(self, item: dict[str, Any]) -> str:
+        with self.maintenance_lock:
+            return self._write_memory_item_unlocked(item)
+
+    def _write_memory_item_unlocked(self, item: dict[str, Any]) -> str:
         payload = self._normalize_memory_item(item)
         memory_id = str(payload["memory_id"])
         searchable_text = self._build_searchable_text(payload)

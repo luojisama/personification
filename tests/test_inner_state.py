@@ -27,11 +27,18 @@ def test_normalize_inner_state_compacts_llm_sentence_mood_and_pending_objects() 
     assert state["relation_warmth"] == {"u1": 1.0, "u2": -1.0}
 
 
-def test_merge_state_keeps_mood_short_and_does_not_concatenate() -> None:
+def test_merge_state_keeps_mood_short_and_does_not_concatenate(monkeypatch) -> None:  # noqa: ANN001
+    class _NoonDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            current = datetime.now(tz)
+            return cls(current.year, current.month, current.day, 12, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(inner_state, "datetime", _NoonDateTime)
     current = {
         "mood": "平静",
         "energy": "正常",
-        "updated_at": (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": (_NoonDateTime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
     }
     merged = inner_state._merge_state(
         current,

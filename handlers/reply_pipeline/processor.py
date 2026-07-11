@@ -2071,13 +2071,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 rewrite_reply=_rewrite_for_repeat,
             )
 
+        care_review_required = bool(
+            getattr(semantic_frame, "requires_emotional_care", False)
+            or getattr(getattr(semantic_frame, "emotional_support", None), "needed", False)
+        )
         should_review_agent_reply = bool(used_agent and tool_image_urls and not _IMAGE_B64_RE.search(reply_content or ""))
-        if used_agent and not should_review_agent_reply:
+        if used_agent and not should_review_agent_reply and not care_review_required:
             review_decision = make_passthrough_review_decision(
                 reply_content,
                 reason="agent_passthrough",
             )
-        elif not bool(getattr(runtime.plugin_config, "personification_response_review_enabled", False)):
+        elif not care_review_required and not bool(getattr(runtime.plugin_config, "personification_response_review_enabled", False)):
             review_decision = make_passthrough_review_decision(
                 reply_content,
                 reason="review_disabled",
@@ -2163,6 +2167,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             except Exception as exc:
                 log_exception(runtime.logger, "[reply_processor] get_group_member_info failed", exc, level="debug")
         final_reply = normalize_visible_reply_text(reply_content)
+        from ...core.visible_output import guard_visible_text
+
+        final_reply = guard_visible_text(final_reply, logger=runtime.logger, surface="normal_reply")
+        if not final_reply and not _IMAGE_B64_RE.search(str(reply_content or "")):
+            return
         qq_auto_marker = maybe_choose_auto_qq_expression_marker(
             plugin_config=runtime.plugin_config,
             semantic_frame=semantic_frame,

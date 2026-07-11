@@ -83,11 +83,11 @@ async function doLogout() {
 }
 
 function attachLayout() {
+  document.querySelectorAll(".qq-leave-group").forEach(button => button.addEventListener("click", () => qqLeaveGroup(button.dataset.groupId, button.dataset.groupName)));
   document.querySelectorAll("aside nav a").forEach(a => {
     a.addEventListener("click", async (ev) => {
       ev.preventDefault();
-      state.view = a.getAttribute("href").slice(1);
-      try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+      await navigateToView(a.getAttribute("href").slice(1));
     });
   });
 }
@@ -227,7 +227,7 @@ function escapeAttr(s) { return escapeHtml(s).replace(/'/g, "&#39;"); }
 
 window.addEventListener("hashchange", async () => {
   const v = location.hash.slice(1);
-  if (v) { state.view = v; try { await loadView(); } catch {} render(); }
+  if (v && v !== state.view) await navigateToView(v, {fromHistory:true});
 });
 
 if (location.hash) state.view = location.hash.slice(1);

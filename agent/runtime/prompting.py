@@ -4,6 +4,8 @@ from typing import Any
 
 from ...core.reply_style_policy import (
     build_directed_exchange_policy_prompt,
+    build_domain_evidence_policy_prompt,
+    build_emotional_support_policy_prompt,
     build_media_understanding_output_policy_prompt,
     build_speech_act_policy_prompt,
 )
@@ -95,6 +97,15 @@ def append_agent_system_prompts(
                 ),
             }
         )
+        domain_prompt = build_domain_evidence_policy_prompt(
+            domain_focus=str(getattr(turn_plan, "domain_focus", "general") or "general"),
+            evidence_policy=str(getattr(turn_plan, "evidence_policy", "none") or "none"),
+        )
+        if domain_prompt:
+            messages.append({"role": "system", "content": domain_prompt})
+        support_prompt = build_emotional_support_policy_prompt(getattr(turn_plan, "emotional_support", None))
+        if support_prompt:
+            messages.append({"role": "system", "content": support_prompt})
     directed_exchange_prompt = build_directed_exchange_policy_prompt(
         is_direct_mention=is_direct_mention,
         is_group=group_context,

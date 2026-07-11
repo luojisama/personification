@@ -14,6 +14,7 @@ from typing import Any
 from ..framework import SocialContext, run_social_text_agent
 from ..gate import gate_should_send
 from ..quota import is_quota_exceeded, mark_sent
+from ....core.visible_output import guard_visible_text
 
 _SCENARIO_MORNING = "morning_greeting"
 _SCENARIO_EVENING = "evening_greeting"
@@ -103,6 +104,11 @@ async def _run_greetings(ctx: SocialContext, *, time_of_day: str) -> None:
                 continue
             if rewritten:
                 final_text = rewritten
+        final_text = guard_visible_text(
+            final_text, logger=ctx.logger, surface="social_greeting", allow_direct_media=False
+        )
+        if not final_text:
+            continue
         try:
             await bot.send_private_msg(user_id=int(user_id), message=final_text)
         except Exception as exc:
@@ -156,7 +162,11 @@ async def _generate_greeting(ctx: SocialContext, persona_snippet: str, time_of_d
     label = "早安问候" if time_of_day == "morning" else "晚安问候"
     prompt = _GREETING_PROMPT.format(time_label=label, persona_snippet=persona_snippet or "<无画像>")
     messages = [{"role": "user", "content": prompt}]
-    if ctx.tool_caller and ctx.tool_registry:
+    if (
+        getattr(ctx.plugin_config, "personification_agent_enabled", True)
+        and ctx.tool_caller
+        and ctx.tool_registry
+    ):
         try:
             text = await run_social_text_agent(
                 ctx,

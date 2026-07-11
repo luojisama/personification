@@ -15,6 +15,7 @@ from ..core.emotion_state import describe_user_emotion_memory, load_emotion_stat
 from ..core.image_input import summarize_images_with_vision
 from ..core.qzone_service import _extract_qzone_comments
 from ..core.time_ctx import inject_current_time_context
+from ..core.visible_output import guard_visible_text
 from ..jobs.periodic_jobs import build_qzone_quota, record_qzone_post
 from .diary_flow import clean_generated_text
 
@@ -732,7 +733,11 @@ async def _decide_feed_action(
         ]
     )
     result = ""
-    if agent_tool_caller is not None and agent_tool_registry is not None:
+    if (
+        getattr(plugin_config, "personification_agent_enabled", True)
+        and agent_tool_caller is not None
+        and agent_tool_registry is not None
+    ):
         try:
             result = await run_text_agent(
                 messages=messages,
@@ -938,7 +943,11 @@ async def _decide_bot_comment_reply(
         ]
     )
     result = ""
-    if agent_tool_caller is not None and agent_tool_registry is not None:
+    if (
+        getattr(plugin_config, "personification_agent_enabled", True)
+        and agent_tool_caller is not None
+        and agent_tool_registry is not None
+    ):
         try:
             result = await run_text_agent(
                 messages=messages,
@@ -1144,6 +1153,12 @@ async def _scan_bot_space_comments(
                 )
                 continue
             reply = str(decision.get("reply", "") or "").strip()
+            reply = guard_visible_text(
+                reply,
+                logger=logger,
+                surface="qzone_comment_reply",
+                allow_direct_media=False,
+            )
             if not reply:
                 _mark_comment_processed(
                     state,
@@ -1336,6 +1351,12 @@ async def _scan_bot_outbound_comment_replies(
                         new_max_seen = created_at
                     continue
                 reply_text = str(decision.get("reply", "") or "").strip()
+                reply_text = guard_visible_text(
+                    reply_text,
+                    logger=logger,
+                    surface="qzone_outbound_comment_reply",
+                    allow_direct_media=False,
+                )
                 if not reply_text:
                     bot_replies_state[comment_key] = {
                         "at": time.time(),
@@ -1563,9 +1584,28 @@ async def scan_qzone_social_feeds(
 
                     acted = False
                     comment_text = str(decision.get("comment", "") or "")
+                    if action in {"comment", "like_comment"}:
+                        comment_text = guard_visible_text(
+                            comment_text,
+                            logger=logger,
+                            surface="qzone_feed_comment",
+                            allow_direct_media=False,
+                        )
+                        if not comment_text:
+                            result["ignored"] += 1
+                            continue
                     reaction_text = comment_text
                     if action == "forward":
                         forward_text = str(decision.get("forward_text", "") or "")
+                        forward_text = guard_visible_text(
+                            forward_text,
+                            logger=logger,
+                            surface="qzone_forward_text",
+                            allow_direct_media=False,
+                        )
+                        if str(decision.get("forward_text", "") or "").strip() and not forward_text:
+                            result["ignored"] += 1
+                            continue
                         reaction_text = forward_text
                         forward_ok, forward_msg = await qzone_social_service.forward_feed(
                             feed=feed,

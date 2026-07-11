@@ -195,6 +195,42 @@ def build_speech_act_policy_prompt(
     return "\n".join(lines)
 
 
+def build_domain_evidence_policy_prompt(*, domain_focus: str = "general", evidence_policy: str = "none") -> str:
+    domain = str(domain_focus or "general").strip()
+    evidence = str(evidence_policy or "none").strip()
+    if domain in {"technology", "science"}:
+        return (
+            "## 技术/科学事实纪律（高优先级）\n"
+            f"- domain_focus={domain}, evidence_policy={evidence}：区分事实、推断和个人判断；关键 claim 必须有可核验依据。\n"
+            "- 检查来源权威性、发布日期与信息 freshness；严格证据轮次的重要结论至少用两个相互独立的来源交叉确认，不能把转载链当多个来源。\n"
+            "- 证据不足就缩小结论并明确不确定处，不编造引用；最终仍用当前人设的自然口吻，不写论文、检索报告或来源清单。"
+        )
+    if domain == "game_anime":
+        return (
+            "## 游戏/动漫讨论纪律（高优先级）\n"
+            f"- evidence_policy={evidence}：可以按问题自主使用 game_info、wiki_lookup、web_search 和群梗/记忆工具查版本、设定、攻略或梗出处。\n"
+            "- 查清后像真正参与讨论的人自然接话；可以在语境合适时自然用一个梗，但不要堆梗、解释笑点或写成百科摘要。"
+        )
+    return ""
+
+
+def build_emotional_support_policy_prompt(emotional_support: object = None) -> str:
+    needed = bool(getattr(emotional_support, "needed", False))
+    if not needed:
+        return ""
+    listen = bool(getattr(emotional_support, "listen", False))
+    validate = bool(getattr(emotional_support, "validate", False))
+    permission = str(getattr(emotional_support, "advice_permission", "not_needed") or "not_needed")
+    risk = str(getattr(emotional_support, "risk_level", "none") or "none")
+    return (
+        "## 本轮情绪支持策略（高优先级）\n"
+        f"- listen={str(listen).lower()}, validate={str(validate).lower()}, advice_permission={permission}, risk_level={risk}。\n"
+        "- 先倾听并具体确认对方当下感受，不诊断、不贴病名、不说教，也不保证一切会好或承诺自己永远都在。\n"
+        "- advice_permission=ask_first 时先尊重对方是否想听建议；allowed 才给少量可执行建议；not_needed 时不要擅自进入解决方案模式。\n"
+        "- 风险升高时保持简短、稳定、现实，鼓励联系身边可信任的人或当地紧急支持；不要独自承担救援角色。"
+    )
+
+
 def build_direct_visual_identity_guard() -> str:
     return (
         "\n\n## 图片处理规则（重要）\n"
@@ -213,6 +249,8 @@ __all__ = [
     "build_direct_visual_identity_guard",
     "build_formulaic_tic_policy_prompt",
     "build_group_no_question_policy_prompt",
+    "build_domain_evidence_policy_prompt",
+    "build_emotional_support_policy_prompt",
     "build_media_understanding_output_policy_prompt",
     "build_observer_posture_policy_prompt",
     "build_reply_style_policy_prompt",

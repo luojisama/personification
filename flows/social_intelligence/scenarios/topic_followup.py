@@ -13,6 +13,7 @@ from .. import pending_topics as pt
 from ..framework import SocialContext, run_social_text_agent
 from ..gate import gate_should_send
 from ..quota import is_quota_exceeded, mark_sent
+from ....core.visible_output import guard_visible_text
 
 _SCENARIO = "topic_followup"
 
@@ -96,6 +97,12 @@ async def topic_followup_handler(ctx: SocialContext) -> None:
                 continue
             if rewritten:
                 final_text = rewritten
+        final_text = guard_visible_text(
+            final_text, logger=ctx.logger, surface="social_topic_followup", allow_direct_media=False
+        )
+        if not final_text:
+            pt.mark_skipped(topic_id)
+            continue
         try:
             await bot.send_private_msg(user_id=int(uid), message=final_text)
         except Exception as exc:
@@ -125,7 +132,11 @@ async def _generate_followup(ctx: SocialContext, topic_entry: dict) -> str:
         topic=str(topic_entry.get("topic", "") or "")[:120],
     )
     messages = [{"role": "user", "content": prompt}]
-    if ctx.tool_caller and ctx.tool_registry:
+    if (
+        getattr(ctx.plugin_config, "personification_agent_enabled", True)
+        and ctx.tool_caller
+        and ctx.tool_registry
+    ):
         try:
             text = await run_social_text_agent(
                 ctx,

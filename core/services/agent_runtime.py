@@ -85,6 +85,7 @@ def build_agent_tool_registry(
         from ...skills.skillpacks.parallel_research.scripts.main import (
             build_tools as build_parallel_research_tools,
         )
+        from ...skills.skillpacks.game_info.scripts.main import build_tools as build_game_info_tools
         from ...skills.skillpacks.vision_analyze.scripts.main import (
             build_tools as build_vision_tools,
         )
@@ -134,6 +135,8 @@ def build_agent_tool_registry(
         for tool in build_acg_tools(legacy_runtime):
             registry.register(tool)
         for tool in build_parallel_research_tools(legacy_runtime):
+            registry.register(tool)
+        for tool in build_game_info_tools(legacy_runtime):
             registry.register(tool)
         for tool in build_memory_tools(legacy_runtime):
             registry.register(tool)

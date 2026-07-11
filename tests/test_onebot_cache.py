@@ -184,3 +184,38 @@ def test_failure_result_is_cached_too() -> None:
     assert nick1 == ""
     assert nick2 == ""
     assert bot.stranger_calls == 1, "失败结果应被缓存，不应每次都重试 bot"
+
+
+def test_cache_is_scoped_by_bot_self_id() -> None:
+    first = _FakeBot(nickname="甲", group_name="甲群")
+    second = _FakeBot(nickname="乙", group_name="乙群")
+    first.self_id = "10001"
+    second.self_id = "10002"
+    assert asyncio.run(onebot_cache.get_user_nickname(first, "123")) == "甲"
+    assert asyncio.run(onebot_cache.get_user_nickname(second, "123")) == "乙"
+    assert asyncio.run(onebot_cache.get_group_name(first, "456")) == "甲群"
+    assert asyncio.run(onebot_cache.get_group_name(second, "456")) == "乙群"
+    assert first.stranger_calls == second.stranger_calls == 1
+    assert first.group_calls == second.group_calls == 1
+
+
+def test_concurrent_group_misses_share_one_protocol_call() -> None:
+    bot = _FakeBot(group_name="并发群")
+
+    async def run() -> list[str]:
+        return await asyncio.gather(*(onebot_cache.get_group_name(bot, "789") for _ in range(8)))
+
+    assert asyncio.run(run()) == ["并发群"] * 8
+    assert bot.group_calls == 1
+
+
+def test_failure_cache_uses_short_ttl(monkeypatch) -> None:
+    now = 1000.0
+    monkeypatch.setattr(onebot_cache.time, "time", lambda: now)
+    bot = _FakeBot(fail=True)
+    assert asyncio.run(onebot_cache.get_group_name(bot, "98765")) == ""
+    assert asyncio.run(onebot_cache.get_group_name(bot, "98765")) == ""
+    assert bot.group_calls == 1
+    now += onebot_cache._FAILURE_TTL_SECONDS + 1
+    assert asyncio.run(onebot_cache.get_group_name(bot, "98765")) == ""
+    assert bot.group_calls == 2

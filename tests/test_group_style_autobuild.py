@@ -191,13 +191,13 @@ def _webui_runtime_with_style(tmp_path: Path, monkeypatch):
     store = memory_store_mod.MemoryStore(plugin_config=cfg, logger=SimpleNamespace(warning=lambda *_a, **_k: None))
     store.initialize()
     # 注入足够的群对话样本
-    for i in range(30):
+    for i in range(40):
         store.append_group_message(
             group_id="g_style",
             role="user" if i % 2 == 0 else "assistant",
             content={"text": f"消息 #{i}"},
             metadata={"user_id": f"u{i%5}"},
-            created_at=time.time() - (30 - i),
+            created_at=time.time() - (40 - i),
         )
 
     class _StyleMockCaller:

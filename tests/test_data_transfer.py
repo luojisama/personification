@@ -1,0 +1,344 @@
+from __future__ import annotations
+
+import io
+import json
+import sqlite3
+import threading
+import time
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from ._loader import load_personification_module
+
+
+@pytest.fixture
+def transfer(tmp_path: Path):
+    db = load_personification_module("plugin.personification.core.db")
+    service_mod = load_personification_module("plugin.personification.core.data_transfer.service")
+    db_path = db.init_db_sync(tmp_path)
+    return service_mod.DataTransferService(data_dir=tmp_path / "transfer", db_path=db_path), db_path
+
+
+def _seed(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO group_messages(group_id,user_id,content,timestamp) VALUES('g1','u1','one',1)")
+        conn.execute("INSERT INTO group_messages(group_id,user_id,content,timestamp) VALUES('g2','u2','secret-other-group',2)")
+        conn.execute("INSERT INTO session_messages(session_id,role,content,timestamp) VALUES('group_g1','user','session-one',1)")
+        conn.execute("INSERT INTO session_messages(session_id,role,content,timestamp) VALUES('private_u1','user','private-secret',1)")
+        conn.execute("INSERT INTO conversation_threads VALUES('g1:t1','g1','topic','[]',1,2)")
+        conn.execute("INSERT INTO group_relation_edges VALUES('g1','u1','u2','reply',1,2,'m1')")
+        conn.execute("INSERT INTO group_style_snapshots(group_id,style_text,created_at) VALUES('g1','style',1)")
+        conn.execute("INSERT INTO kv_store VALUES('group_config','__root__',?,1)", (json.dumps({"g1": {"enabled": True, "custom_prompt": "safe", "api_key": "never"}, "g2": {"custom_prompt": "other"}}),))
+        conn.execute("INSERT INTO kv_store VALUES('webui_devices','__root__','{\"token\":{}}',1)")
+        conn.execute("INSERT INTO kv_store VALUES('proactive_state','__root__','{\"g1\":{\"active\":true}}',1)")
+        conn.commit()
+
+
+def _archive_bytes(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def _apply_from_plan(service, task_id: str, *, bot_id: str = "bot1", group_id: str = "g1", mode: str = "merge"):
+    plan = service.dry_run(task_id, target_bot_id=bot_id, target_group_id=group_id, mode=mode)
+    return service.apply(task_id, target_bot_id=bot_id, target_group_id=group_id, mode=mode, plan_token=plan["plan_token"])
+
+
+def test_group_safe_export_scope_and_secret_exclusion(transfer) -> None:
+    service, db_path = transfer
+    _seed(db_path)
+    task = service.create_export(bot_id="bot1", group_id="g1")
+    path = service.export_path(task["task_id"])
+    with zipfile.ZipFile(path) as archive:
+        names = set(archive.namelist())
+        assert all("sqlite" not in name for name in names)
+        combined = b"".join(archive.read(name) for name in names if name.startswith("datasets/"))
+        assert b"secret-other-group" not in combined
+        assert b"private-secret" not in combined
+        assert b"token" not in combined
+        assert b"api_key" not in combined
+        manifest = json.loads(archive.read("manifest.json"))
+        assert "group_messages" not in manifest["datasets"]
+        assert manifest["scope"] == {"kind": "group", "group_id": "g1"}
+        assert manifest["source"] == {"bot_id": "bot1", "group_id": "g1"}
+        assert "auth" in manifest["excluded"] and "qzone" in manifest["excluded"]
+
+
+def test_inspect_rejects_zip_slip_duplicate_and_undeclared(transfer, tmp_path: Path) -> None:
+    service, _ = transfer
+    error_type = load_personification_module("plugin.personification.core.data_transfer.service").DataTransferError
+    for index, builder in enumerate((
+        lambda z: z.writestr("../escape", b"x"),
+        lambda z: (z.writestr("same", b"1"), z.writestr("same", b"2")),
+        lambda z: z.writestr("undeclared", b"x"),
+        lambda z: (z.writestr("A.json", b"1"), z.writestr("a.json", b"2")),
+    )):
+        path = tmp_path / f"bad{index}.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("manifest.json", b"{}")
+            builder(archive)
+        task = service.store_upload(io.BytesIO(path.read_bytes()))
+        with pytest.raises(error_type):
+            service.inspect(task["task_id"])
+
+
+def test_dry_run_identity_apply_idempotency_replace_and_rollback(transfer) -> None:
+    service, db_path = transfer
+    _seed(db_path)
+    constants = load_personification_module("plugin.personification.core.data_transfer.constants")
+    exported = service.create_export(bot_id="bot1", group_id="g1", datasets=constants.DATASETS)
+    uploaded = service.store_upload(io.BytesIO(_archive_bytes(service.export_path(exported["task_id"]))))
+    with pytest.raises(Exception, match="cross-bot"):
+        service.dry_run(uploaded["task_id"], target_bot_id="bot2", target_group_id="g1")
+    plan = service.dry_run(uploaded["task_id"], target_bot_id="bot1", target_group_id="g1", mode="scope-replace")
+    assert plan["activations"] == []
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE group_messages SET content='changed' WHERE group_id='g1'")
+        conn.commit()
+    first = service.apply(uploaded["task_id"], target_bot_id="bot1", target_group_id="g1", mode="scope-replace", plan_token=plan["plan_token"])
+    second = service.apply(uploaded["task_id"], target_bot_id="bot1", target_group_id="g1", mode="scope-replace", plan_token=plan["plan_token"])
+    assert second["idempotent"] is True
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT content FROM group_messages WHERE group_id='g1'").fetchone()[0] == "one"
+        assert conn.execute("SELECT content FROM group_messages WHERE group_id='g2'").fetchone()[0] == "secret-other-group"
+        conn.execute("INSERT INTO group_messages(group_id,user_id,content,timestamp) VALUES('g2','u3','created-after-import',3)")
+        conn.commit()
+    rolled = service.rollback(first["journal_id"])
+    assert rolled["success"] is True
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT content FROM group_messages WHERE group_id='g1'").fetchone()[0] == "changed"
+        assert conn.execute("SELECT content FROM group_messages WHERE content='created-after-import'").fetchone()[0] == "created-after-import"
+
+
+def test_apply_requires_matching_unmodified_plan_token(transfer) -> None:
+    service, db_path = transfer
+    _seed(db_path)
+    exported = service.create_export(bot_id="bot1", group_id="g1")
+    uploaded = service.store_upload(io.BytesIO(_archive_bytes(service.export_path(exported["task_id"]))))
+    plan = service.dry_run(uploaded["task_id"], target_bot_id="bot1", target_group_id="g1", mode="merge")
+    with pytest.raises(Exception, match="plan token"):
+        service.apply(uploaded["task_id"], target_bot_id="bot1", target_group_id="g1", mode="scope-replace", plan_token=plan["plan_token"])
+    forged = plan["plan_token"][:-1] + ("A" if plan["plan_token"][-1] != "A" else "B")
+    with pytest.raises(Exception, match="plan token"):
+        service.apply(uploaded["task_id"], target_bot_id="bot1", target_group_id="g1", plan_token=forged)
+
+
+def test_apply_failure_auto_rolls_back_and_leaves_terminal_journal(transfer, monkeypatch) -> None:
+    service, db_path = transfer
+    _seed(db_path)
+    exported = service.create_export(bot_id="bot1", group_id="g1", datasets=["group_messages"])
+    uploaded = service.store_upload(io.BytesIO(_archive_bytes(service.export_path(exported["task_id"]))))
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE group_messages SET content='before-failure' WHERE group_id='g1'")
+        conn.commit()
+    plan = service.dry_run(uploaded["task_id"], target_bot_id="bot1", target_group_id="g1", mode="scope-replace")
+
+    def fail_memory(*_args, **_kwargs):
+        raise RuntimeError("injected memory failure")
+
+    monkeypatch.setattr(service, "_apply_memory_scope", fail_memory)
+    with pytest.raises(RuntimeError, match="injected"):
+        service.apply(uploaded["task_id"], target_bot_id="bot1", target_group_id="g1", mode="scope-replace", plan_token=plan["plan_token"])
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT content FROM group_messages WHERE group_id='g1'").fetchone()[0] == "before-failure"
+        assert conn.execute("SELECT content FROM group_messages WHERE group_id='g2'").fetchone()[0] == "secret-other-group"
+        status = conn.execute("SELECT status FROM data_transfer_journal ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+    assert status == "rolled_back"
+
+
+def test_merge_existing_autoincrement_id_and_rollback_use_same_key(transfer) -> None:
+    service, db_path = transfer
+    _seed(db_path)
+    exported = service.create_export(bot_id="bot1", group_id="g1", datasets=["group_messages"])
+    uploaded = service.store_upload(io.BytesIO(_archive_bytes(service.export_path(exported["task_id"]))))
+    with sqlite3.connect(db_path) as conn:
+        original_id = conn.execute("SELECT id FROM group_messages WHERE group_id='g1'").fetchone()[0]
+        conn.execute("UPDATE group_messages SET content='target-before-merge' WHERE id=?", (original_id,))
+        conn.commit()
+
+    applied = _apply_from_plan(service, uploaded["task_id"], mode="merge")
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT id,content FROM group_messages WHERE id=?", (original_id,)).fetchall()
+    assert rows == [(original_id, "one")]
+
+    service.rollback(applied["journal_id"])
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT id,content FROM group_messages WHERE id=?", (original_id,)).fetchall()
+    assert rows == [(original_id, "target-before-merge")]
+
+
+def test_main_snapshot_and_apply_hold_one_immediate_transaction(transfer, monkeypatch) -> None:
+    service, db_path = transfer
+    _seed(db_path)
+    exported = service.create_export(bot_id="bot1", group_id="g1", datasets=["group_messages"])
+    uploaded = service.store_upload(io.BytesIO(_archive_bytes(service.export_path(exported["task_id"]))))
+    original = service._write_scope_snapshot
+    writer_started = threading.Event()
+    writer_done = threading.Event()
+    writer: list[threading.Thread] = []
+
+    def concurrent_write() -> None:
+        writer_started.set()
+        with sqlite3.connect(db_path, timeout=5) as conn:
+            conn.execute("INSERT INTO group_messages(group_id,user_id,content,timestamp) VALUES('g2','u9','concurrent-main',9)")
+            conn.commit()
+        writer_done.set()
+
+    def observed_snapshot(*args, **kwargs):
+        thread = threading.Thread(target=concurrent_write)
+        writer.append(thread)
+        thread.start()
+        assert writer_started.wait(1)
+        time.sleep(0.05)
+        assert not writer_done.is_set()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_write_scope_snapshot", observed_snapshot)
+    _apply_from_plan(service, uploaded["task_id"], mode="merge")
+    writer[0].join(2)
+    assert writer_done.is_set()
+
+
+def test_checksum_and_cross_group_rows_rejected(transfer) -> None:
+    service, db_path = transfer
+    _seed(db_path)
+    constants = load_personification_module("plugin.personification.core.data_transfer.constants")
+    exported = service.create_export(bot_id="bot1", group_id="g1", datasets=constants.DATASETS)
+    source = service.export_path(exported["task_id"])
+    broken = io.BytesIO()
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(broken, "w") as target:
+        for name in original.namelist():
+            data = original.read(name)
+            if name.endswith("group_messages.json"):
+                rows = json.loads(data)
+                rows[0]["group_id"] = "g2"
+                data = json.dumps(rows).encode()
+            target.writestr(name, data)
+    uploaded = service.store_upload(io.BytesIO(broken.getvalue()))
+    with pytest.raises(Exception, match="checksum mismatch"):
+        service.inspect(uploaded["task_id"])
+
+
+def test_webui_routes_require_admin(transfer) -> None:
+    _, db_path = transfer
+    route_mod = load_personification_module("plugin.personification.webui.routes.data_transfer_routes")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from types import SimpleNamespace
+
+    runtime = SimpleNamespace(plugin_config=SimpleNamespace(personification_data_dir=str(db_path.parent)))
+    app = FastAPI()
+    app.include_router(route_mod.build_data_transfer_router(runtime=runtime))
+    client = TestClient(app)
+    assert client.post("/api/data-transfer/exports/create", json={"bot_id": "b", "group_id": "g"}).status_code == 401
+    assert client.get("/api/data-transfer/exports/unknown/status").status_code == 401
+    assert client.get("/api/data-transfer/imports/unknown/inspect").status_code == 401
+    assert client.post("/api/data-transfer/imports/unknown/rollback").status_code == 401
+
+
+def test_group_profiles_and_memories_round_trip_with_rollback(tmp_path: Path) -> None:
+    db = load_personification_module("plugin.personification.core.db")
+    memory_mod = load_personification_module("plugin.personification.core.memory_store")
+    service_mod = load_personification_module("plugin.personification.core.data_transfer.service")
+    db_path = db.init_db_sync(tmp_path / "main")
+    cfg = type("Cfg", (), {
+        "personification_data_dir": str(tmp_path / "runtime"),
+        "personification_memory_enabled": True,
+        "personification_memory_palace_enabled": True,
+    })()
+    store = memory_mod.MemoryStore(cfg)
+    store.initialize()
+    store.upsert_local_profile(
+        group_id="g1",
+        user_id="u1",
+        profile_text="本群画像",
+        profile_json={"qq_profile": {"nickname": "小明", "email": "must-not-export@example.com"}},
+    )
+    store.write_memory_item({
+        "memory_id": "m1",
+        "memory_type": "group_knowledge",
+        "palace_zone": "group",
+        "summary": "这个群最近在做迁移测试",
+        "group_id": "g1",
+    })
+    service = service_mod.DataTransferService(
+        data_dir=tmp_path / "transfer",
+        db_path=db_path,
+        memory_store=store,
+    )
+    exported = service.create_export(bot_id="bot1", group_id="g1")
+    package = service.export_path(exported["task_id"])
+    with zipfile.ZipFile(package) as archive:
+        payload = b"".join(archive.read(name) for name in archive.namelist() if name.startswith("datasets/"))
+        assert "本群画像".encode() in payload
+        assert "这个群最近在做迁移测试".encode() in payload
+        assert b"must-not-export@example.com" not in payload
+
+    store.upsert_local_profile(group_id="g1", user_id="u1", profile_text="目标端修改", profile_json={})
+    store.write_memory_item({"memory_id": "m1", "memory_type": "group_knowledge", "palace_zone": "group", "summary": "目标端修改", "group_id": "g1"})
+    uploaded = service.store_upload(io.BytesIO(package.read_bytes()))
+    applied = _apply_from_plan(service, uploaded["task_id"], mode="scope-replace")
+    assert store.get_local_profile(group_id="g1", user_id="u1")["profile_text"] == "本群画像"
+    assert store.get_memory_item("m1")["summary"] == "这个群最近在做迁移测试"
+    service.rollback(applied["journal_id"])
+    assert store.get_local_profile(group_id="g1", user_id="u1")["profile_text"] == "目标端修改"
+    assert store.get_memory_item("m1")["summary"] == "目标端修改"
+
+
+def test_memory_id_owned_by_another_group_is_rejected(tmp_path: Path) -> None:
+    db = load_personification_module("plugin.personification.core.db")
+    memory_mod = load_personification_module("plugin.personification.core.memory_store")
+    service_mod = load_personification_module("plugin.personification.core.data_transfer.service")
+    db_path = db.init_db_sync(tmp_path / "main")
+    cfg = type("Cfg", (), {"personification_data_dir": str(tmp_path / "runtime"), "personification_memory_enabled": True, "personification_memory_palace_enabled": True})()
+    store = memory_mod.MemoryStore(cfg)
+    store.initialize()
+    store.write_memory_item({"memory_id": "shared-id", "summary": "source", "group_id": "g1"})
+    source_service = service_mod.DataTransferService(data_dir=tmp_path / "source-transfer", db_path=db_path, memory_store=store)
+    exported = source_service.create_export(bot_id="bot1", group_id="g1", datasets=["group_memories"])
+    store.write_memory_item({"memory_id": "shared-id", "summary": "other group", "group_id": "g2", "revision": 99})
+    uploaded = source_service.store_upload(io.BytesIO(source_service.export_path(exported["task_id"]).read_bytes()))
+    plan = source_service.dry_run(uploaded["task_id"], target_bot_id="bot1", target_group_id="g1")
+    with pytest.raises(Exception, match="another group"):
+        source_service.apply(uploaded["task_id"], target_bot_id="bot1", target_group_id="g1", plan_token=plan["plan_token"])
+
+
+def test_migration_and_normal_memory_profile_writes_share_maintenance_lock(tmp_path: Path, monkeypatch) -> None:
+    db = load_personification_module("plugin.personification.core.db")
+    memory_mod = load_personification_module("plugin.personification.core.memory_store")
+    service_mod = load_personification_module("plugin.personification.core.data_transfer.service")
+    db_path = db.init_db_sync(tmp_path / "main")
+    cfg = type("Cfg", (), {"personification_data_dir": str(tmp_path / "runtime"), "personification_memory_enabled": True, "personification_memory_palace_enabled": True})()
+    store = memory_mod.MemoryStore(cfg)
+    store.initialize()
+    store.write_memory_item({"memory_id": "m1", "summary": "package", "group_id": "g1"})
+    service = service_mod.DataTransferService(data_dir=tmp_path / "transfer", db_path=db_path, memory_store=store)
+    exported = service.create_export(bot_id="bot1", group_id="g1", datasets=["group_memories"])
+    uploaded = service.store_upload(io.BytesIO(service.export_path(exported["task_id"]).read_bytes()))
+    original = service._apply_memory_scope
+    writer_started = threading.Event()
+    writer_done = threading.Event()
+    writer: list[threading.Thread] = []
+
+    def concurrent_write() -> None:
+        writer_started.set()
+        store.write_memory_item({"memory_id": "m2", "summary": "normal concurrent write", "group_id": "g1"})
+        store.upsert_local_profile(group_id="g1", user_id="u2", profile_text="normal profile write", profile_json={})
+        writer_done.set()
+
+    def observed_apply(*args, **kwargs):
+        thread = threading.Thread(target=concurrent_write)
+        writer.append(thread)
+        thread.start()
+        assert writer_started.wait(1)
+        time.sleep(0.05)
+        assert not writer_done.is_set()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_apply_memory_scope", observed_apply)
+    _apply_from_plan(service, uploaded["task_id"])
+    writer[0].join(2)
+    assert writer_done.is_set()
+    assert store.get_memory_item("m2")["summary"] == "normal concurrent write"
+    assert store.get_local_profile(group_id="g1", user_id="u2")["profile_text"] == "normal profile write"

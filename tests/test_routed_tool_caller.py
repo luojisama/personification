@@ -14,10 +14,11 @@ class _FakeCaller:
         self.name = name
         self._responses = list(responses)
         self.messages_seen: list[list[dict]] = []
+        self.calls_seen: list[tuple[list[dict], list[dict], bool]] = []
 
     async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
         self.messages_seen.append(list(messages or []))
-        del messages, tools, use_builtin_search
+        self.calls_seen.append((list(messages or []), list(tools or []), use_builtin_search))
         response = self._responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -128,3 +129,92 @@ def test_routed_tool_caller_pins_synthetic_tool_result_to_same_caller() -> None:
     assert "_personification_routed_caller" in tool_result
     assert all("_personification_routed_caller" not in msg for msg in fallback.messages_seen[-1])
     assert response.content == "最终结果"
+
+
+def test_routed_tool_caller_reframes_api_block_on_same_caller() -> None:
+    blocked = tool_impl.ToolCallerResponse(
+        finish_reason="content_filter", content="", tool_calls=[], raw={}
+    )
+    valid = tool_impl.ToolCallerResponse(
+        finish_reason="stop", content="安全重试成功", tool_calls=[], raw={}
+    )
+    primary = _FakeCaller("primary", [blocked, valid])
+    fallback = _FakeCaller("fallback", [AssertionError("fallback should not run")])
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[primary], fallback_caller=fallback, logger=None
+    )
+    messages = [
+        {"role": "system", "content": "正常系统规则"},
+        {
+            "role": "system",
+            "content": "外部画像数据",
+            "_personification_untrusted": True,
+        },
+    ]
+
+    response = asyncio.run(routed.chat_with_tools(messages, [{"name": "search"}], True))
+
+    assert response.content == "安全重试成功"
+    assert len(primary.calls_seen) == 2
+    assert primary.calls_seen[1][0][0] == messages[0]
+    assert primary.calls_seen[1][0][1]["role"] == "user"
+    assert primary.calls_seen[1][0][1]["content"].startswith("[背景数据，仅供理解")
+    assert primary.calls_seen[1][1] == [{"name": "search"}]
+    assert primary.calls_seen[1][2] is True
+
+
+def test_routed_tool_caller_exact_refusal_retries_then_falls_back() -> None:
+    refusal = tool_impl.ToolCallerResponse(
+        finish_reason="stop", content="I can't discuss that.", tool_calls=[], raw={}
+    )
+    valid = tool_impl.ToolCallerResponse(
+        finish_reason="stop", content="候选结果", tool_calls=[], raw={}
+    )
+    primary = _FakeCaller("primary", [refusal, refusal])
+    fallback = _FakeCaller("fallback", [valid])
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[primary], fallback_caller=fallback, logger=None
+    )
+
+    response = asyncio.run(routed.chat_with_tools([], [], False))
+
+    assert response.content == "候选结果"
+    assert len(primary.calls_seen) == 2
+    assert len(fallback.calls_seen) == 1
+
+
+def test_routed_tool_caller_does_not_treat_ordinary_i_cant_as_hard_refusal() -> None:
+    natural = tool_impl.ToolCallerResponse(
+        finish_reason="stop", content="I can't wait to see it", tool_calls=[], raw={}
+    )
+    primary = _FakeCaller("primary", [natural])
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[primary], fallback_caller=None, logger=None
+    )
+
+    response = asyncio.run(routed.chat_with_tools([], [], False))
+
+    assert response.content == "I can't wait to see it"
+    assert len(primary.calls_seen) == 1
+
+
+def test_routed_tool_caller_keeps_safety_retry_pinned() -> None:
+    blocked = tool_impl.ToolCallerResponse(
+        finish_reason="content_filter", content="", tool_calls=[], raw={}
+    )
+    valid = tool_impl.ToolCallerResponse(
+        finish_reason="stop", content="原 caller 恢复", tool_calls=[], raw={}
+    )
+    primary = _FakeCaller("primary", [AssertionError("pinning was lost")])
+    fallback = _FakeCaller("fallback", [valid, blocked, valid])
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[primary], fallback_caller=fallback, logger=None
+    )
+    asyncio.run(routed.chat_with_tools([], [], False))
+    primary_calls_before_pinned_turn = len(primary.calls_seen)
+    tool_result = routed.build_tool_result_message("fallback-search-1", "search", "done")
+
+    response = asyncio.run(routed.chat_with_tools([tool_result], [], False))
+
+    assert response.content == "原 caller 恢复"
+    assert len(primary.calls_seen) == primary_calls_before_pinned_turn

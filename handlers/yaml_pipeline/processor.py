@@ -789,6 +789,7 @@ async def process_yaml_response_logic(
                     plugin_config=plugin_config,
                     is_group=not is_private_session,
                     is_random_chat=is_random_chat,
+                    is_direct_mention=is_direct_mention,
                     tool_caller=lite_tool_caller,
                     fallback_tool_caller=agent_tool_caller,
                     recent_context=recent_context_hint,
@@ -1595,7 +1596,7 @@ async def process_yaml_response_logic(
         except Exception as e:
             logger.debug(f"[yaml_response_handler] banter regenerate skipped: {e}")
 
-    if not used_agent and not is_private_session and message_intent == "banter":
+    if not is_private_session and message_intent == "banter":
         async def _rewrite_for_repeat(cluster_text: str, original_reply: str) -> str:
             return str(
                 await call_ai_api(
@@ -1629,7 +1630,7 @@ async def process_yaml_response_logic(
             raw_message_text=raw_message_text or history_last_text,
             message_intent=message_intent,
             is_private_session=is_private_session,
-            is_random_chat=False,
+            is_random_chat=is_random_chat,
             is_direct_mention=is_direct_mention,
             has_newer_batch=_has_newer_batch_now(),
             rewrite_reply=_rewrite_for_repeat,
@@ -1637,13 +1638,17 @@ async def process_yaml_response_logic(
         if assistant_text:
             parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
 
+    care_review_required = bool(
+        getattr(semantic_frame, "requires_emotional_care", False)
+        or getattr(getattr(semantic_frame, "emotional_support", None), "needed", False)
+    )
     should_review_agent_reply = bool(used_agent and tool_image_urls and not _IMAGE_B64_RE.search(assistant_text or ""))
-    if used_agent and not should_review_agent_reply:
+    if used_agent and not should_review_agent_reply and not care_review_required:
         review_decision = make_passthrough_review_decision(
             assistant_text,
             reason="agent_passthrough",
         )
-    elif not bool(getattr(plugin_config, "personification_response_review_enabled", False)):
+    elif not care_review_required and not bool(getattr(plugin_config, "personification_response_review_enabled", False)):
         review_decision = make_passthrough_review_decision(
             assistant_text,
             reason="review_disabled",
@@ -1688,6 +1693,12 @@ async def process_yaml_response_logic(
     elif cleaned_assistant_text != assistant_text:
         parsed = {"messages": [{"text": cleaned_assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
     assistant_text = cleaned_assistant_text
+    from ...core.visible_output import guard_visible_text
+
+    assistant_text = guard_visible_text(assistant_text, logger=logger, surface="yaml_reply")
+    if not assistant_text:
+        _trace_no_reply("unsafe_visible_output", diagnosis_code="blocked", detail="最终可见输出被安全门拦截")
+        return
     qq_auto_marker = maybe_choose_auto_qq_expression_marker(
         plugin_config=plugin_config,
         semantic_frame=semantic_frame,

@@ -17,27 +17,6 @@ except Exception:  # pragma: no cover - fallback for lightweight unit-test stubs
     T_State = dict[str, Any]
 
 
-def _normalize_topic_text(text: Any) -> str:
-    normalized = str(text or "").strip().lower()
-    return "".join(ch for ch in normalized if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
-
-
-def _topic_related(message_text: str, topic: str) -> bool:
-    normalized_text = _normalize_topic_text(message_text)
-    normalized_topic = _normalize_topic_text(topic)
-    if len(normalized_text) < 2 or len(normalized_topic) < 2:
-        return False
-    if normalized_topic in normalized_text or normalized_text in normalized_topic:
-        return True
-
-    max_span = min(6, len(normalized_topic))
-    for span in range(max_span, 1, -1):
-        for start in range(0, len(normalized_topic) - span + 1):
-            if normalized_topic[start : start + span] in normalized_text:
-                return True
-    return False
-
-
 def _detect_solo_speaker_follow(
     recent_msgs: list[dict[str, Any]],
     *,
@@ -71,15 +50,6 @@ def _detect_solo_speaker_follow(
         return {}
 
     topic_seed = str(same_user_msgs[-1].get("content", "") or "").strip()
-    if current_text:
-        topic_match = any(
-            _topic_related(current_text, str(msg.get("content", "") or "").strip())
-            or _topic_related(str(msg.get("content", "") or "").strip(), current_text)
-            for msg in same_user_msgs[-3:]
-        )
-        if not topic_match and topic_seed and not _topic_related(current_text, topic_seed):
-            return {}
-
     return {
         "user_id": current_user,
         "count": len(same_user_msgs),
@@ -225,17 +195,16 @@ async def personification_rule(
 
         if group_chat_active_state:
             last_user_id = str(group_chat_active_state.get("last_user_id", "") or "").strip()
-            topic = str(group_chat_active_state.get("topic", "") or "").strip()
             same_user = bool(last_user_id) and last_user_id == user_id
-            related_topic = _topic_related(plain_text, topic)
             current_prob = float(max(0.0, min(1.0, group_chat_follow_probability)))
 
-            if same_user:
-                current_prob = max(current_prob, 0.95)
-            elif related_topic:
-                current_prob = max(current_prob, 0.84)
-            elif message_target == TARGET_OTHERS:
+            recent_bot_participated = any(bool(msg.get("is_bot")) for msg in recent_msgs[-4:])
+            if message_target == TARGET_OTHERS:
                 current_prob = 0.0
+            elif message_target == TARGET_BOT:
+                current_prob = max(current_prob, 0.95)
+            elif same_user and recent_bot_participated:
+                current_prob = max(current_prob, 0.84)
             else:
                 current_prob *= 0.35
 
@@ -269,11 +238,7 @@ async def personification_rule(
         elif msg_len >= 24:
             current_prob *= 1.2
         if idle_active_state:
-            topic = str(idle_active_state.get("topic", "") or "").strip()
-            if topic and _topic_related(plain_text, topic):
-                current_prob = min(1.0, max(current_prob, probability * 0.9))
-            else:
-                current_prob = min(current_prob, probability * 0.8)
+            current_prob = min(1.0, max(current_prob, probability * 0.9))
         if random.random() < min(1.0, current_prob):
             state["is_random_chat"] = True
             return True

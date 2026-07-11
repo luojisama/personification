@@ -321,6 +321,36 @@ DDL_STATEMENTS = (
     CREATE INDEX IF NOT EXISTS idx_meme_dictionary_scope
         ON meme_dictionary(scope, group_id, updated_at DESC)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS data_transfer_tasks (
+        task_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        package_id TEXT NOT NULL DEFAULT '',
+        group_id TEXT NOT NULL DEFAULT '',
+        bot_id TEXT NOT NULL DEFAULT '',
+        mode TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        error TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS data_transfer_journal (
+        journal_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        package_id TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        bot_id TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        backup_path TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        detail TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
 )
 
 

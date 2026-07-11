@@ -4,6 +4,8 @@ from typing import Any
 
 from nonebot.adapters.onebot.v11 import MessageSegment
 
+from ..core.visible_output import guard_visible_text
+
 
 class ActionExecutor:
     def __init__(self, bot: Any, event: Any, config: Any, logger: Any) -> None:
@@ -22,7 +24,7 @@ class ActionExecutor:
         return item
 
     async def send_text(self, text: str) -> None:
-        content = str(text or "").strip()
+        content = guard_visible_text(text, logger=self.logger, surface="agent_action_text", allow_direct_media=False)
         if content:
             await self.bot.send(self.event, content)
 
@@ -38,7 +40,7 @@ class ActionExecutor:
                 return "已发送表情包"
             case "send_qq_face":
                 face_id = int(params["face_id"])
-                text = str(params.get("text", "") or "").strip()
+                text = guard_visible_text(params.get("text", ""), logger=self.logger, surface="qq_face_caption", allow_direct_media=False)
                 message = MessageSegment.face(face_id)
                 if text:
                     message += text
@@ -48,7 +50,7 @@ class ActionExecutor:
                 url = str(params.get("url", "") or "").strip()
                 if not url:
                     return "QQ 表情发送失败：缺少图片 URL"
-                text = str(params.get("text", "") or "").strip()
+                text = guard_visible_text(params.get("text", ""), logger=self.logger, surface="qq_image_caption", allow_direct_media=False)
                 message = MessageSegment.image(url)
                 if text:
                     message += text
@@ -58,7 +60,7 @@ class ActionExecutor:
                 url = str(params.get("url", "") or "").strip()
                 if not url:
                     return "图片发送失败：缺少图片 URL"
-                text = str(params.get("text", "") or "").strip()
+                text = guard_visible_text(params.get("text", ""), logger=self.logger, surface="image_caption", allow_direct_media=False)
                 message = MessageSegment.image(url)
                 if text:
                     message += text
@@ -68,7 +70,7 @@ class ActionExecutor:
                 data = params.get("data") if isinstance(params, dict) else {}
                 if not isinstance(data, dict) or not data:
                     return "QQ mface 发送失败：缺少 mface 数据"
-                text = str(params.get("text", "") or "").strip()
+                text = guard_visible_text(params.get("text", ""), logger=self.logger, surface="mface_caption", allow_direct_media=False)
                 message = MessageSegment("mface", data)
                 if text:
                     message += text

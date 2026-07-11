@@ -5,6 +5,7 @@ import importlib
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -249,6 +250,54 @@ def test_news_push_early_returns_when_scenario_disabled() -> None:
     ctx.plugin_config.personification_social_news_enabled = False
     asyncio.run(news_push.news_push_handler(ctx))
     ctx.get_bots.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("agent_enabled", "tool_registry"),
+    [(False, object()), (True, None)],
+)
+def test_greeting_direct_model_fallback_blocks_visible_policy_output(
+    monkeypatch, agent_enabled: bool, tool_registry: object | None
+) -> None:
+    greetings = _load_si_submodule("scenarios.greetings")
+    sent: list[str] = []
+
+    class _Bot:
+        async def send_private_msg(self, *, user_id, message):  # noqa: ANN001, ANN201
+            sent.append(str(message))
+
+    class _Caller:
+        async def chat_with_tools(self, *_args, **_kwargs):  # noqa: ANN002, ANN003
+            return SimpleNamespace(content="provider 安全策略已拦截，请稍后再试")
+
+    class _PersonaStore:
+        def list_core_profiles(self):  # noqa: ANN201
+            return [{"user_id": "10001", "profile_text": "熟悉的朋友", "updated_at": 1}]
+
+    ctx = framework.SocialContext(
+        plugin_config=SimpleNamespace(
+            personification_agent_enabled=agent_enabled,
+            personification_social_intelligence_enabled=True,
+            personification_social_daily_quota_per_user=2,
+            personification_social_greeting_cooldown_seconds=0,
+            personification_social_greeting_max_recipients=1,
+            personification_social_gate_enabled=False,
+            personification_persona_snippet_max_chars=150,
+        ),
+        logger=MagicMock(),
+        get_bots=lambda: {"bot": _Bot()},
+        get_whitelisted_groups=lambda: [],
+        tool_caller=_Caller(),
+        tool_registry=tool_registry,
+        persona_store=_PersonaStore(),
+        data_dir=None,
+        get_now=lambda: None,
+    )
+    monkeypatch.setattr(greetings, "is_quota_exceeded", lambda *_args, **_kwargs: False)
+
+    asyncio.run(greetings.morning_greetings_handler(ctx))
+
+    assert sent == []
 
 
 # ========== pending_topics & topic_extractor ==========

@@ -18,6 +18,7 @@ from typing import Any, Iterable
 from .user_profile_meta import build_user_profile_meta
 
 _DEFAULT_TTL_SECONDS = 1800  # 30 分钟
+_FAILURE_TTL_SECONDS = 15
 _MAX_ENTRIES = 500
 
 _user_cache: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
@@ -25,6 +26,12 @@ _user_profile_cache: "OrderedDict[str, tuple[float, dict[str, Any]]]" = OrderedD
 _group_cache: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
 _user_lock = asyncio.Lock()
 _group_lock = asyncio.Lock()
+_user_profile_inflight: dict[str, asyncio.Task[tuple[dict[str, Any], bool]]] = {}
+_group_inflight: dict[str, asyncio.Task[tuple[str, bool]]] = {}
+
+
+def _scoped_key(bot: Any, value: str) -> str:
+    return f"{str(getattr(bot, 'self_id', '') or 'unknown')}:{value}"
 
 
 def _evict_if_needed(cache: "OrderedDict[str, tuple[float, Any]]") -> None:
@@ -113,7 +120,7 @@ async def _refresh_group_names_from_list(bot: Any, *, ttl: int) -> dict[str, str
         return {}
     async with _group_lock:
         for group_id, group_name in names.items():
-            _set_cached(_group_cache, group_id, group_name, ttl)
+            _set_cached(_group_cache, _scoped_key(bot, group_id), group_name, ttl)
     return names
 
 
@@ -124,14 +131,15 @@ async def get_user_nickname(
     ttl: int = _DEFAULT_TTL_SECONDS,
 ) -> str:
     """按 user_id 取 QQ 昵称，命中缓存则不调 bot；任何失败返回空串。"""
-    key = str(user_id).strip()
-    if not key:
+    user_key = str(user_id).strip()
+    if not user_key:
         return ""
+    key = _scoped_key(bot, user_key)
     async with _user_lock:
         cached = _get_cached(_user_cache, key)
         if cached is not None:
             return cached
-    profile = await get_user_profile(bot, key, ttl=ttl)
+    profile = await get_user_profile(bot, user_key, ttl=ttl)
     nickname = str(profile.get("nickname", "") or "")
     async with _user_lock:
         _set_cached(_user_cache, key, nickname, ttl)
@@ -150,25 +158,40 @@ async def get_user_profile(
     signature, levels, or other account fields. Missing/failed fields degrade to
     deterministic avatar/homepage URLs and do not raise.
     """
-    key = str(user_id).strip()
-    if not key:
+    user_key = str(user_id).strip()
+    if not user_key:
         return {}
+    key = _scoped_key(bot, user_key)
     async with _user_lock:
         cached = _get_cached(_user_profile_cache, key)
         if cached is not None:
             return dict(cached)
-    raw: dict[str, Any] = {}
-    numeric_id = _numeric_onebot_id(key)
-    if bot is not None and numeric_id is not None:
-        try:
-            info = await _call_onebot_api(bot, "get_stranger_info", user_id=numeric_id)
-            if isinstance(info, dict):
-                raw = dict(info)
-        except Exception:
-            raw = {}
-    profile = build_user_profile_meta(key, stranger_info=raw, source="onebot_cache")
+    async def fetch() -> tuple[dict[str, Any], bool]:
+        raw: dict[str, Any] = {}
+        success = bot is None or _numeric_onebot_id(user_key) is None
+        numeric_id = _numeric_onebot_id(user_key)
+        if bot is not None and numeric_id is not None:
+            try:
+                info = await _call_onebot_api(bot, "get_stranger_info", user_id=numeric_id)
+                if isinstance(info, dict):
+                    raw, success = dict(info), True
+            except Exception:
+                pass
+        return build_user_profile_meta(user_key, stranger_info=raw, source="onebot_cache"), success
+
     async with _user_lock:
-        _set_cached(_user_profile_cache, key, dict(profile), ttl)
+        task = _user_profile_inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(fetch())
+            _user_profile_inflight[key] = task
+    try:
+        profile, success = await task
+    finally:
+        async with _user_lock:
+            if _user_profile_inflight.get(key) is task:
+                _user_profile_inflight.pop(key, None)
+    async with _user_lock:
+        _set_cached(_user_profile_cache, key, dict(profile), ttl if success else min(ttl, _FAILURE_TTL_SECONDS))
     return dict(profile)
 
 
@@ -179,24 +202,38 @@ async def get_group_name(
     ttl: int = _DEFAULT_TTL_SECONDS,
 ) -> str:
     """按 group_id 取群名，命中缓存则不调 bot；任何失败返回空串。"""
-    key = str(group_id).strip()
-    if not key:
+    group_key = str(group_id).strip()
+    if not group_key:
         return ""
+    key = _scoped_key(bot, group_key)
     async with _group_lock:
         cached = _get_cached(_group_cache, key)
         if cached is not None:
             return cached
     if bot is None:
         return ""
-    group_name = ""
-    try:
-        info = await _call_onebot_api(bot, "get_group_info", group_id=int(key))
-        if isinstance(info, dict):
-            group_name = str(info.get("group_name", "") or "")
-    except Exception:
-        group_name = ""
+    async def fetch() -> tuple[str, bool]:
+        try:
+            info = await _call_onebot_api(bot, "get_group_info", group_id=int(group_key))
+            if isinstance(info, dict):
+                return str(info.get("group_name", "") or ""), True
+        except Exception:
+            pass
+        return "", False
+
     async with _group_lock:
-        _set_cached(_group_cache, key, group_name, ttl)
+        task = _group_inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(fetch())
+            _group_inflight[key] = task
+    try:
+        group_name, success = await task
+    finally:
+        async with _group_lock:
+            if _group_inflight.get(key) is task:
+                _group_inflight.pop(key, None)
+    async with _group_lock:
+        _set_cached(_group_cache, key, group_name, ttl if success else min(ttl, _FAILURE_TTL_SECONDS))
     return group_name
 
 
@@ -224,7 +261,7 @@ async def get_group_name_map(
     needs_refresh: list[str] = []
     async with _group_lock:
         for key in keys:
-            cached = _get_cached(_group_cache, key)
+            cached = _get_cached(_group_cache, _scoped_key(bot, key))
             if cached:
                 result[key] = cached
             else:
@@ -254,6 +291,8 @@ def _clear_caches_for_testing() -> None:
     _user_cache.clear()
     _user_profile_cache.clear()
     _group_cache.clear()
+    _user_profile_inflight.clear()
+    _group_inflight.clear()
 
 
 __all__ = ["get_user_nickname", "get_user_profile", "get_group_name", "get_group_name_map"]

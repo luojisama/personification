@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 from ..agent.inner_state import DEFAULT_STATE, load_inner_state
 from ..core.context_policy import strip_response_control_markers
 from ..core.agent_bridge import run_text_agent
+from ..core.visible_output import guard_visible_text
 from ..core.emotion_state import (
     describe_group_emotion_memory,
     describe_user_emotion_memory,
@@ -663,7 +664,11 @@ async def _decide_idle_output_mode(
     try:
         messages = [{"role": "user", "content": prompt}]
         raw = ""
-        if agent_tool_caller is not None and agent_tool_registry is not None:
+        if (
+            getattr(plugin_config, "personification_agent_enabled", True)
+            and agent_tool_caller is not None
+            and agent_tool_registry is not None
+        ):
             try:
                 raw = await run_text_agent(
                     messages=messages,
@@ -1030,7 +1035,11 @@ async def run_proactive_messaging(
             now=now,
         )
         decision = ""
-        if agent_tool_caller is not None and agent_tool_registry is not None:
+        if (
+            getattr(plugin_config, "personification_agent_enabled", True)
+            and agent_tool_caller is not None
+            and agent_tool_registry is not None
+        ):
             try:
                 decision = await run_text_agent(
                     messages=messages,
@@ -1089,6 +1098,15 @@ async def run_proactive_messaging(
         )
         return False
 
+    payload = guard_visible_text(
+        payload,
+        logger=logger,
+        surface="proactive_private",
+        allow_direct_media=False,
+    )
+    if not payload:
+        save_proactive_state(proactive_state)
+        return False
     await bot.send_private_msg(user_id=int(target_user_id), message=payload)
     _diag.record(
         scope="private",
@@ -1300,7 +1318,11 @@ async def run_group_idle_topic(
                     now=now,
                 )
                 topic = ""
-                if agent_tool_caller is not None and agent_tool_registry is not None:
+                if (
+                    getattr(plugin_config, "personification_agent_enabled", True)
+                    and agent_tool_caller is not None
+                    and agent_tool_registry is not None
+                ):
                     try:
                         topic = await run_text_agent(
                             messages=messages,
@@ -1364,6 +1386,15 @@ async def run_group_idle_topic(
                     logger=logger,
                     group_id=group_id,
                 )
+
+            topic = guard_visible_text(
+                topic,
+                logger=logger,
+                surface="proactive_group_idle",
+                allow_direct_media=False,
+            )
+            if not topic:
+                continue
 
             try:
                 # 根据 chosen_mode 决定发送方式

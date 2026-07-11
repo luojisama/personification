@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from ..agent.inner_state import load_inner_state, update_state_from_diary
 from ..core.agent_bridge import run_text_agent
+from ..core.visible_output import guard_visible_text
 from ..core.context_policy import strip_response_control_markers
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_group_emotion_memory, load_emotion_state
@@ -808,7 +809,11 @@ async def _build_qzone_post_with_optional_image(
         plugin_config=plugin_config,
         logger=logger,
     )
-    return f"{text}{image_marker}"
+    return guard_visible_text(
+        f"{text}{image_marker}",
+        logger=logger,
+        surface="qzone_post",
+    )
 
 
 async def get_recent_chat_context(bot: Any, logger: Any) -> str:
@@ -927,7 +932,11 @@ async def _generate_once(
     except Exception:
         _qz_token = None
     try:
-        if tool_caller is not None and registry is not None:
+        if (
+            getattr(plugin_config, "personification_agent_enabled", True)
+            and tool_caller is not None
+            and registry is not None
+        ):
             # 与群聊同等：走完整 Agent 管线，而不是轻量工具循环。
             try:
                 result = await run_text_agent(

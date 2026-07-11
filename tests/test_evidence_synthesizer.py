@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 from ._loader import load_personification_module
 
 evidence = load_personification_module("plugin.personification.agent.runtime.evidence")
@@ -68,3 +71,25 @@ def test_build_tool_result_record_truncates_result_text() -> None:
     assert record["tool_name"] == "web_search"
     assert record["args"] == {"query": "abc"}
     assert len(record["result"]) == 2400
+
+
+def test_strict_evidence_keeps_research_open_with_one_independent_source() -> None:
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            assert '"evidence_policy": "strict"' in messages[1]["content"]
+            return SimpleNamespace(
+                content='{"selected_memory_ids":[],"tool_evidence_digest":"单一结果",'
+                '"uncertainty_notes":[],"needs_more_research":false,"research_followup_query":""}'
+            )
+
+    result = asyncio.run(
+        evidence.synthesize_evidence_with_llm(
+            tool_caller=_Caller(),
+            turn_plan=SimpleNamespace(evidence_policy="strict", domain_focus="science", session_goal="核验结论"),
+            tool_results=[{"tool_name": "web_search", "result": "https://example.com/report"}],
+        )
+    )
+
+    assert result.needs_more_research is True
+    assert result.research_followup_query == "核验结论"
+    assert "独立来源不足" in result.uncertainty_notes
