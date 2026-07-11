@@ -136,7 +136,13 @@ def extract_image_urls(sources: list[dict[str, Any]], *, limit: int = 60) -> lis
             if not url or url in seen or not (path.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")) or value in values[:len(fields)]):
                 continue
             seen.add(url)
-            out.append({"source": str(source.get("source") or source.get("kind") or "source"), "page_url": page_url, "url": url})
+            out.append({
+                "source": str(source.get("source") or source.get("kind") or "source"),
+                "title": str(source.get("title") or ""),
+                "query": str(source.get("query") or ""),
+                "page_url": str(source.get("page_url") or page_url),
+                "url": url,
+            })
             if len(out) >= limit:
                 return out
     return out
@@ -181,6 +187,8 @@ async def build_avatar_candidates(
             candidate = {
                 "candidate_id": candidate_id,
                 "source": item["source"],
+                "title": item.get("title", ""),
+                "query": item.get("query", ""),
                 "page_url": item["page_url"],
                 "width": width,
                 "height": height,
@@ -189,7 +197,8 @@ async def build_avatar_candidates(
                 "phash": phash,
                 "phash_cluster": phash,
                 "safety_status": "pass",
-                "fit_score": round(min(width, height) / max(width, height), 4),
+                "aspect_score": round(min(width, height) / max(width, height), 4),
+                "fit_score": 0.0,
                 "revision": revision,
                 "suffix": suffix,
             }

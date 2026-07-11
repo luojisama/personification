@@ -9,6 +9,7 @@ from ._loader import load_personification_module
 
 
 avatar = load_personification_module("plugin.personification.core.avatar_candidate")
+relevance = load_personification_module("plugin.personification.core.avatar_relevance")
 safe_download = load_personification_module("plugin.personification.core.safe_image_download")
 
 
@@ -166,7 +167,127 @@ def test_avatar_candidates_dedupe_and_persist_ten(tmp_path, monkeypatch) -> None
     assert len(candidates) == 10
     assert len({item["sha256"] for item in candidates}) == 10
     assert all(item["safety_status"] == "pass" for item in candidates)
+    assert all(item["fit_score"] == 0 for item in candidates)
+    assert all(item["aspect_score"] > 0 for item in candidates)
     assert all(avatar.candidate_file(item).is_file() for item in candidates)
+
+
+def _review_payload(*, match: str, confidence: float = 0.95, quality: float = 0.8) -> str:
+    return __import__("json").dumps({
+        "target_match": match,
+        "recognized_identity": "目标角色" if match == "yes" else "其他角色",
+        "character_confidence": confidence,
+        "portrait_quality": quality,
+        "single_subject": True,
+        "is_cosplay_or_real_person": False,
+        "is_logo_cover_or_ui": False,
+        "content_safe": True,
+        "contradictions": [],
+        "reason": "视觉特征一致" if match == "yes" else "角色不一致",
+    }, ensure_ascii=False)
+
+
+def test_visual_review_filters_safe_but_wrong_characters(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(avatar, "get_data_dir", lambda _config=None: tmp_path)
+    sources = [
+        {
+            "source": "official" if index >= 4 else "image_search",
+            "title": f"测试作品 目标角色 {index}" if index >= 4 else f"其他角色 {index}",
+            "image_url": f"https://example.test/{index}.png",
+        }
+        for index in range(14)
+    ]
+
+    async def fetcher(url: str):
+        index = int(url.rsplit("/", 1)[-1].split(".", 1)[0])
+        size = (256, 256) if index < 4 else (240, 300)
+        return _image(index, size), "image/png", url
+
+    candidates = asyncio.run(avatar.build_avatar_candidates(
+        sources,
+        revision="c" * 32,
+        fetcher=fetcher,
+        resolver=_public_resolver,
+    ))
+
+    async def reviewer(_prompt: str, image_ref: str):
+        payload = __import__("base64").b64decode(image_ref.split(",", 1)[1])
+        Image = pytest.importorskip("PIL.Image")
+        with Image.open(io.BytesIO(payload)) as image:
+            is_wrong_square = image.size[0] == image.size[1]
+        return _review_payload(match="no" if is_wrong_square else "yes"), "mock"
+
+    reviewed, summary = asyncio.run(relevance.review_avatar_candidates(
+        runtime=object(),
+        candidates=candidates,
+        work_title="测试作品",
+        character_name="目标角色",
+        aliases={"work_aliases": ["测试作品"], "character_aliases": ["目标角色"]},
+        candidate_path=lambda item: avatar.candidate_file(item),
+        reviewer=reviewer,
+    ))
+
+    assert summary["verified_count"] == 10
+    assert all(item["vision_status"] == "verified" for item in reviewed[:10])
+    assert all(item["aspect_score"] < 1 for item in reviewed[:10])
+    assert all(item["vision_status"] == "rejected" for item in reviewed[10:])
+
+
+def test_visual_review_hard_filters_wrong_candidates_without_pillow(tmp_path) -> None:
+    candidates = []
+    paths = {}
+    for index in range(14):
+        candidate_id = f"{index:032x}"
+        path = tmp_path / f"{candidate_id}.jpg"
+        path.write_bytes((b"wrong-" if index < 4 else b"target-") + str(index).encode())
+        paths[candidate_id] = path
+        candidates.append({
+            "candidate_id": candidate_id,
+            "source": "official" if index >= 4 else "image_search",
+            "title": f"测试作品 目标角色 {index}" if index >= 4 else f"其他角色 {index}",
+            "page_url": "https://example.test/page",
+            "mime": "image/jpeg",
+            "aspect_score": 1.0 if index < 4 else 0.75,
+            "safety_status": "pass",
+        })
+
+    async def reviewer(_prompt: str, image_ref: str):
+        payload = __import__("base64").b64decode(image_ref.split(",", 1)[1])
+        return _review_payload(match="no" if payload.startswith(b"wrong-") else "yes"), "mock"
+
+    reviewed, summary = asyncio.run(relevance.review_avatar_candidates(
+        runtime=object(),
+        candidates=candidates,
+        work_title="测试作品",
+        character_name="目标角色",
+        aliases={"work_aliases": ["测试作品"], "character_aliases": ["目标角色"]},
+        candidate_path=lambda item: paths[item["candidate_id"]],
+        reviewer=reviewer,
+    ))
+
+    assert summary["verified_count"] == 10
+    assert [item["vision_status"] for item in reviewed[:10]] == ["verified"] * 10
+    assert all(item["fit_score"] > 0 for item in reviewed[:10])
+    assert all(item["vision_status"] == "rejected" for item in reviewed[10:])
+
+
+@pytest.mark.parametrize("raw,route,status", [
+    ("", "vision_unavailable", "unavailable"),
+    ("not-json", "mock", "invalid_response"),
+    (_review_payload(match="uncertain", confidence=0.6), "mock", "uncertain"),
+    (_review_payload(match="yes", confidence=0.7), "mock", "rejected"),
+])
+def test_visual_review_is_fail_closed(raw: str, route: str, status: str) -> None:
+    assert relevance.normalize_avatar_visual_review(raw, route=route)["vision_status"] == status
+
+
+def test_avatar_text_score_does_not_treat_query_as_evidence() -> None:
+    score = relevance.avatar_text_relevance(
+        {"title": "无标题图片", "query": "测试作品 目标角色 官方头像", "page_url": "https://cdn.test/a"},
+        work_aliases=["测试作品"],
+        character_aliases=["目标角色"],
+    )
+    assert score <= 0.1
 
 
 def test_candidate_file_rejects_symlink_escape(tmp_path, monkeypatch) -> None:
