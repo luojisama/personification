@@ -133,8 +133,13 @@ def extract_image_urls(sources: list[dict[str, Any]], *, limit: int = 60) -> lis
             values.extend(url_re.findall(str(source.get(key) or "")))
         for value in values:
             url = value.rstrip(".,);]}")
-            path = urlsplit(url).path.lower()
-            if not url or url in seen or not (path.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")) or value in values[:len(fields)]):
+            if not url or url in seen:
+                continue
+            try:
+                path = urlsplit(url).path.lower()
+            except ValueError:
+                continue
+            if not (path.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")) or value in values[:len(fields)]):
                 continue
             seen.add(url)
             out.append({

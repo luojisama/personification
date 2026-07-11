@@ -192,6 +192,17 @@ def test_avatar_candidate_diagnostics_classify_non_image_responses(tmp_path, mon
     assert diagnostics["failure_counts"]["not_an_image"] == 1
 
 
+def test_avatar_candidate_extraction_skips_malformed_ipv6_urls() -> None:
+    sources = [{
+        "image_url": "https://[broken/image.png",
+        "summary": "可用图片 https://example.test/avatar.png",
+    }]
+
+    extracted = avatar.extract_image_urls(sources)
+
+    assert [item["url"] for item in extracted] == ["https://example.test/avatar.png"]
+
+
 def _review_payload(*, match: str, confidence: float = 0.95, quality: float = 0.8) -> str:
     return __import__("json").dumps({
         "target_match": match,
