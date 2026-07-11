@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import sys
 import time
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -135,6 +137,7 @@ def test_custom_gemini_endpoint_uses_bearer_and_v1beta(monkeypatch) -> None:
         base_url="https://anti.zellon.me",
         model="gemini-3-flash-agent",
         thinking_mode="none",
+        timeout=77,
     )
 
     response = asyncio.run(caller.chat_with_tools([{"role": "user", "content": "hi"}], [], False))
@@ -142,9 +145,46 @@ def test_custom_gemini_endpoint_uses_bearer_and_v1beta(monkeypatch) -> None:
     assert captured["url"] == "https://anti.zellon.me/v1beta/models/gemini-3-flash-agent:generateContent"
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
     assert captured["params"] == {}
+    assert captured["client_kwargs"]["timeout"].read == 77
     assert "generationConfig" not in captured["json"]
     assert response.content == "ok"
     assert response.usage["total_tokens"] == 2
+
+
+def test_google_gemini_sdk_call_uses_configured_timeout(monkeypatch) -> None:
+    captured: dict = {}
+
+    class _Model:
+        async def generate_content_async(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN201
+            return {
+                "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+                "usageMetadata": {"totalTokenCount": 1},
+            }
+
+    genai = types.ModuleType("google.generativeai")
+    genai.GenerativeModel = lambda **_kwargs: _Model()
+    google = sys.modules.get("google") or types.ModuleType("google")
+    monkeypatch.setitem(sys.modules, "google", google)
+    monkeypatch.setitem(sys.modules, "google.generativeai", genai)
+    monkeypatch.setattr(google, "generativeai", genai, raising=False)
+    monkeypatch.setattr(caller_impl, "_configure_genai", lambda *_args, **_kwargs: None)
+
+    async def _wait_for(awaitable, *, timeout):  # noqa: ANN001, ANN202
+        captured["timeout"] = timeout
+        return await awaitable
+
+    monkeypatch.setattr(caller_impl.asyncio, "wait_for", _wait_for)
+    caller = caller_impl.GeminiToolCaller(
+        api_key="secret",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+        model="gemini-test",
+        timeout=83,
+    )
+
+    response = asyncio.run(caller.chat_with_tools([{"role": "user", "content": "hi"}], [], False))
+
+    assert response.content == "ok"
+    assert captured["timeout"] == 83
 
 
 def test_mimo_endpoint_detection_accepts_api_and_token_plan_urls() -> None:

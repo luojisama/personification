@@ -1138,11 +1138,13 @@ class GeminiToolCaller(ToolCaller):
         base_url: str,
         model: str,
         thinking_mode: str = "none",
+        timeout: float = 200.0,
     ) -> None:
         self.api_key = api_key
         self.base_url = _normalize_gemini_base_url(base_url)
         self.model = model
         self.thinking_mode = _normalize_thinking_mode(thinking_mode)
+        self.timeout = max(5.0, float(timeout or 200.0))
 
     async def _chat_with_custom_gemini_endpoint(
         self,
@@ -1181,7 +1183,10 @@ class GeminiToolCaller(ToolCaller):
         params: Dict[str, str] = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0), follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(self.timeout, connect=min(15.0, self.timeout)),
+            follow_redirects=True,
+        ) as client:
             response = await client.post(url, headers=headers, json=payload)
             if response.status_code in {401, 403} and self.api_key:
                 headers.pop("Authorization", None)
@@ -1247,9 +1252,12 @@ class GeminiToolCaller(ToolCaller):
                 system_instruction=system_instruction,
                 tools=tool_payload or None,
             )
-            response = await model.generate_content_async(
-                contents,
-                generation_config=generation_config or None,
+            response = await asyncio.wait_for(
+                model.generate_content_async(
+                    contents,
+                    generation_config=generation_config or None,
+                ),
+                timeout=self.timeout,
             )
 
             candidates = list(_obj_get(response, "candidates", []) or [])

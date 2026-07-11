@@ -325,7 +325,8 @@ function defaultApiProvider(index) {
     auth_path: "",
     project: "",
     proxy: "",
-    timeout: 60,
+    timeout: 200,
+    max_retries: 5,
     priority: index,
     enabled: true,
   };
@@ -489,7 +490,8 @@ function renderApiProviderCard(field, provider, index) {
       ${fieldHtml("auth_path", "Auth Path")}
       ${fieldHtml("project", "Project")}
       ${fieldHtml("proxy", "代理")}
-      ${fieldHtml("timeout", "超时（秒）", "number", 'step="1"')}
+      ${fieldHtml("timeout", "单次超时（秒）", "number", 'min="5" max="600" step="1"')}
+      ${fieldHtml("max_retries", "总尝试次数", "number", 'min="1" max="10" step="1" title="包含首次请求；5 表示首次加 4 次重试"')}
       <div class="api-provider-field" data-provider-field="enabled">
         <label>启用</label>
         <select>
@@ -538,7 +540,7 @@ function readApiPoolEditor(field) {
       if (!input) return;
       let value = input.value;
       if (name === "enabled") value = value === "true";
-      if (name === "priority" || name === "timeout") value = value === "" ? undefined : parseInt(value, 10);
+      if (name === "priority" || name === "timeout" || name === "max_retries") value = value === "" ? undefined : parseInt(value, 10);
       if (value !== "" && value !== undefined) provider[name] = value;
       else delete provider[name];
     });

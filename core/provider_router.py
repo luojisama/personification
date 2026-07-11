@@ -18,6 +18,14 @@ _CURSOR_LOCK = _PROVIDER_STATE_LOCK
 _LOGGED_PROVIDER_CONFIG_SIGNATURES: set[tuple[str, tuple[tuple[str, str, str], ...]]] = set()
 _RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS = 10 * 60
 _RATE_LIMIT_MAX_COOLDOWN_SECONDS = 30 * 60
+_DEFAULT_PROVIDER_TIMEOUT_SECONDS = 200.0
+_DEFAULT_PROVIDER_MAX_ATTEMPTS = 5
+_MAX_PROVIDER_ATTEMPTS = 10
+_RETRYABLE_HTTP_STATUSES = {408, 409, 425, 429}
+
+
+class _InvalidProviderResponse(RuntimeError):
+    pass
 
 
 def _tool_caller_impl() -> Any:
@@ -70,15 +78,19 @@ def _to_int(value: Any, default: int) -> int:
 
 
 def _provider_timeout(provider: Dict[str, Any]) -> float:
-    default_timeout = 120 if provider["api_type"] in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code"} else 60
     try:
-        return float(provider.get("timeout", default_timeout))
+        value = float(provider.get("timeout", _DEFAULT_PROVIDER_TIMEOUT_SECONDS))
     except (TypeError, ValueError):
-        return float(default_timeout)
+        value = _DEFAULT_PROVIDER_TIMEOUT_SECONDS
+    return max(5.0, min(value, 600.0))
 
 
 def _provider_max_retries(provider: Dict[str, Any]) -> int:
-    return max(1, _to_int(provider.get("max_retries", 2), 2))
+    value = _to_int(
+        provider.get("max_retries", _DEFAULT_PROVIDER_MAX_ATTEMPTS),
+        _DEFAULT_PROVIDER_MAX_ATTEMPTS,
+    )
+    return max(1, min(value, _MAX_PROVIDER_ATTEMPTS))
 
 
 def _override_provider_model(provider: Dict[str, Any], model_override: str = "") -> Dict[str, Any]:
@@ -228,7 +240,7 @@ def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str,
             "enabled": _to_bool(item.get("enabled", True), True),
             "priority": _to_int(item.get("priority", index), index),
             "timeout": _provider_timeout({**item, "api_type": api_type}),
-            "max_retries": max(1, _to_int(item.get("max_retries", 2), 2)),
+            "max_retries": _provider_max_retries(item),
             "supports_native_search": _to_bool(
                 item.get(
                     "supports_native_search",
@@ -360,8 +372,8 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
                 "project": project,
                 "enabled": True,
                 "priority": 0,
-                "timeout": 120 if legacy_type in {"gemini_cli", "antigravity_cli", "claude_code"} else 60,
-                "max_retries": 2,
+                "timeout": _DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+                "max_retries": _DEFAULT_PROVIDER_MAX_ATTEMPTS,
                 "supports_native_search": True,
             }
         ]
@@ -389,8 +401,8 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
             "project": "",
             "enabled": True,
             "priority": 0,
-            "timeout": 120 if legacy_type in {"gemini", "anthropic"} else 60,
-            "max_retries": 2,
+            "timeout": _DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+            "max_retries": _DEFAULT_PROVIDER_MAX_ATTEMPTS,
             "supports_native_search": legacy_type in {"gemini", "anthropic", "openai", "openai_codex"},
         }
     ]
@@ -553,7 +565,7 @@ def _mark_provider_failure(provider_name: str, error: Exception) -> float:
         PROVIDER_FAILURE_STATE[provider_name] = {
             "failures": failures,
             "cooldown_until": now_ts + cooldown,
-            "last_error": str(error),
+            "last_error": _error_text(error),
             "last_failed_at": now_ts,
             "last_status": _error_http_status(error) or None,
             "rate_limited": is_rate_limit,
@@ -620,7 +632,10 @@ def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
         "thinking_mode": thinking_mode,
     }
     if provider["api_type"] == "gemini":
-        return tool_impl.GeminiToolCaller(**common_kwargs)
+        return tool_impl.GeminiToolCaller(
+            **common_kwargs,
+            timeout=_provider_timeout(provider),
+        )
     if provider["api_type"] == "anthropic":
         return tool_impl.AnthropicToolCaller(
             **common_kwargs,
@@ -801,11 +816,36 @@ def _is_invalid_route_response(response: ToolCallerResponse) -> bool:
     return False
 
 
+def _provider_error_kind(error: Exception) -> str:
+    if isinstance(error, _InvalidProviderResponse):
+        return "invalid_response"
+    try:
+        from . import provider_health
+
+        return str(provider_health.classify_error(error) or "other")
+    except Exception:
+        return "other"
+
+
+def _is_retryable_provider_error(error: Exception) -> bool:
+    status = _error_http_status(error)
+    if status in _RETRYABLE_HTTP_STATUSES or 500 <= status < 600:
+        return True
+    return _provider_error_kind(error) in {"timeout", "connect", "invalid_response"}
+
+
+def _provider_retry_delay(error: Exception, attempt: int) -> float:
+    delay = float(min(8, 2 ** max(0, int(attempt))))
+    if _error_http_status(error) == 429:
+        delay = max(delay, min(30.0, _retry_after_seconds(error)))
+    return delay
+
+
 def _error_text(error: Exception) -> str:
-    text = str(error).strip()
-    if text:
-        return text
-    return f"{type(error).__name__}"
+    status = _error_http_status(error)
+    kind = _provider_error_kind(error)
+    error_type = type(error).__name__
+    return f"type={error_type} kind={kind} status={status or '-'}"
 
 
 def _errors_include_rate_limit(errors: List[str]) -> bool:
@@ -900,9 +940,7 @@ async def _try_provider_chain(
                     skip_provider = True
                     break
                 if _is_invalid_route_response(response):
-                    raise RuntimeError(
-                        f"empty or invalid route response: {str(response.content or '').strip()[:120]}"
-                    )
+                    raise _InvalidProviderResponse("empty or invalid route response")
                 _mark_provider_success(provider["name"])
                 return response, errors, saw_vision_unavailable
             except Exception as e:
@@ -917,34 +955,25 @@ async def _try_provider_chain(
                     break
                 error_text = _error_text(e)
                 errors.append(f"{provider['name']}#{attempt + 1}: {error_text}")
-                if _is_rate_limit_error(e):
-                    cooldown = _mark_provider_failure(provider["name"], e)
+                retryable = _is_retryable_provider_error(e)
+                has_next_attempt = attempt + 1 < retries
+                if retryable and has_next_attempt:
+                    delay = _provider_retry_delay(e, attempt)
                     logger.warning(
-                        f"personification: provider {provider['name']} rate limited "
-                        f"({attempt + 1}/{retries}); cooldown {int(cooldown)}s and switch: {error_text}"
+                        f"personification: provider {provider['name']} transient failure "
+                        f"attempt={attempt + 1}/{retries} {error_text}; retry_in={delay:g}s"
                     )
-                    break
+                    await asyncio.sleep(delay)
+                    continue
+
+                cooldown = _mark_provider_failure(provider["name"], e)
+                outcome = "attempts_exhausted" if retryable else "non_retryable"
                 logger.warning(
                     f"personification: provider {provider['name']} failed "
-                    f"({attempt + 1}/{retries}): {error_text}"
+                    f"attempt={attempt + 1}/{retries} outcome={outcome} {error_text}; "
+                    f"cooldown={int(cooldown)}s and switch"
                 )
-                try:
-                    from . import provider_health
-
-                    error_kind = provider_health.classify_error(e)
-                except Exception:
-                    error_kind = ""
-                if error_kind in {"timeout", "connect"}:
-                    cooldown = _mark_provider_failure(provider["name"], e)
-                    logger.warning(
-                        f"personification: provider {provider['name']} {error_kind}，"
-                        f"跳过剩余重试并 cooldown {int(cooldown)}s"
-                    )
-                    break
-                if attempt + 1 >= retries:
-                    _mark_provider_failure(provider["name"], e)
-                else:
-                    await asyncio.sleep(min(2, attempt + 1))
+                break
         if skip_provider:
             continue
         logger.warning(
@@ -1013,9 +1042,9 @@ async def call_ai_api(
             fallback_provider.setdefault("priority", 999)
             fallback_provider.setdefault(
                 "timeout",
-                120 if fallback_provider["api_type"] in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code"} else 60,
+                _DEFAULT_PROVIDER_TIMEOUT_SECONDS,
             )
-            fallback_provider.setdefault("max_retries", 2)
+            fallback_provider.setdefault("max_retries", _DEFAULT_PROVIDER_MAX_ATTEMPTS)
             fallback_provider.setdefault(
                 "supports_native_search",
                 fallback_provider["api_type"]

@@ -368,8 +368,9 @@ _DETAILED_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     ),
     "api_pools": (
         "多模型 API 池配置，按 priority 顺序尝试；某池连续失败会自动冷却 10 分钟。"
-        "每项包含 name/api_type/model/api_key/api_url/priority/enabled 等字段。",
-        '[{"name":"main","api_type":"openai","api_url":"...","api_key":"sk-...","model":"gpt-4o-mini","priority":1,"enabled":true}]',
+        "每项可配置 timeout（单次秒数）和 max_retries（含首次请求的总尝试次数），"
+        "缺省分别为 200 秒和 5 次；只对瞬时错误重试。",
+        '[{"name":"main","api_type":"openai","api_url":"...","api_key":"sk-...","model":"gpt-4o-mini","timeout":200,"max_retries":5,"priority":1,"enabled":true}]',
     ),
     "agent_enabled": (
         "Agent 工具调用模式总开关。关闭后回退到旧版「单次 LLM 调用」，无法用搜索/图像生成/记忆等工具。",

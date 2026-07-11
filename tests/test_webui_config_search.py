@@ -48,3 +48,15 @@ def test_config_api_pool_model_probe_dropdown_is_present() -> None:
     assert "未探测到可选模型" in app_config_js
     assert "options.length || probeDone" not in app_config_js
     assert "const models = normalizeApiProviderModels(result.models)" in app_config_js
+
+
+def test_config_api_pool_exposes_timeout_and_total_attempts() -> None:
+    app_config_js = (
+        Path(__file__).resolve().parents[1] / "webui" / "static" / "app-config.js"
+    ).read_text(encoding="utf-8")
+
+    assert "timeout: 200" in app_config_js
+    assert "max_retries: 5" in app_config_js
+    assert 'fieldHtml("timeout", "单次超时（秒）"' in app_config_js
+    assert 'fieldHtml("max_retries", "总尝试次数"' in app_config_js
+    assert 'name === "max_retries"' in app_config_js
