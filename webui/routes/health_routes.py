@@ -974,7 +974,13 @@ def build_health_router(*, runtime) -> APIRouter:
                 cookie_ok, cookie_msg = await update_cookie(bot)
             except Exception as exc:
                 cookie_ok, cookie_msg = False, str(exc)
-            cookie_result.update({"ok": bool(cookie_ok), "message": str(cookie_msg or "")[:300]})
+            if cookie_ok:
+                cookie_result.update({"ok": True, "status": "refreshed", "message": "ok"})
+            else:
+                from ...core.sensitive_data import sanitize_text
+
+                cookie_msg = sanitize_text(cookie_msg, limit=300)
+                cookie_result.update({"ok": False, "status": "failed", "message": cookie_msg})
             if not cookie_ok and logger is not None:
                 logger.warning(f"[webui] QZone 转发体检刷新 Cookie 失败：{cookie_msg}")
 

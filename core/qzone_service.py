@@ -1037,7 +1037,7 @@ def build_qzone_services(
                 cookie = f"uin=o{bot.self_id}; {cookie}"
             plugin_config.personification_qzone_cookie = cookie
             _persist_cookie_to_env(cookie, logger)
-            return True, cookie
+            return True, "ok"
         except Exception as e:
             return False, str(e)
 

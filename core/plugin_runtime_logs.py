@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from typing import Any
 
 from .db import connect_sync
+from .sensitive_data import sanitize_object, sanitize_text
 
 
 _LEVEL_ORDER = {
@@ -23,13 +23,6 @@ _DEFAULT_RETENTION_DAYS = 7
 _DEFAULT_MAX_ENTRIES = 10000
 _LAST_PRUNE_AT = 0.0
 
-_SECRET_PATTERNS = (
-    re.compile(r"(?i)(api[_-]?key|authorization|cookie|token|csrf|refresh[_-]?token|access[_-]?token)(\s*[:=]\s*)([^\s,;\"']+)"),
-    re.compile(r"(?i)(bearer\s+)[a-z0-9._~+/=-]{12,}"),
-    re.compile(r"(?i)(sk-[a-z0-9_-]{8})[a-z0-9_-]+"),
-)
-
-
 def _level_value(level: Any) -> int:
     text = str(level or "INFO").strip().upper()
     return _LEVEL_ORDER.get(text, 20)
@@ -42,44 +35,6 @@ def _normalize_level(level: Any) -> str:
     if text == "EXCEPTION":
         return "ERROR"
     return text if text in _LEVEL_ORDER else "INFO"
-
-
-def _limit_text(text: Any, limit: int = 4000) -> str:
-    value = str(text or "")
-    if len(value) <= limit:
-        return value
-    return value[: max(0, limit - 12)] + "...<truncated>"
-
-
-def sanitize_text(value: Any) -> str:
-    text = _limit_text(value)
-    for pattern in _SECRET_PATTERNS:
-        if pattern.pattern.lower().startswith("(?i)(bearer"):
-            text = pattern.sub(r"\1***", text)
-        elif "sk-" in pattern.pattern:
-            text = pattern.sub(r"\1***", text)
-        else:
-            text = pattern.sub(r"\1\2***", text)
-    return text
-
-
-def _sanitize_obj(value: Any, depth: int = 0) -> Any:
-    if depth > 3:
-        return "<nested>"
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for key, item in list(value.items())[:40]:
-            key_text = str(key or "")[:80]
-            if re.search(r"(?i)(key|token|secret|cookie|authorization|csrf)", key_text):
-                out[key_text] = "***"
-            else:
-                out[key_text] = _sanitize_obj(item, depth + 1)
-        return out
-    if isinstance(value, (list, tuple)):
-        return [_sanitize_obj(item, depth + 1) for item in list(value)[:40]]
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-    return sanitize_text(value)
 
 
 def _config_int(config: Any, name: str, default: int, *, minimum: int = 1) -> int:
@@ -114,7 +69,7 @@ def record(
     if _level_value(level) < _level_value(min_level):
         return
     try:
-        payload = json.dumps(_sanitize_obj(context or {}), ensure_ascii=False, separators=(",", ":"))
+        payload = json.dumps(sanitize_object(context or {}), ensure_ascii=False, separators=(",", ":"))
         with connect_sync() as conn:
             conn.execute(
                 """
@@ -127,7 +82,7 @@ def record(
                     sanitize_text(source)[:96],
                     sanitize_text(message),
                     payload[:4000],
-                    str(trace_id or "")[:64],
+                    sanitize_text(trace_id, limit=64),
                 ),
             )
             conn.commit()
@@ -237,6 +192,33 @@ def clear_all() -> int:
     return int(cursor.rowcount or 0)
 
 
+def scrub_sensitive_entries() -> int:
+    updated = 0
+    with connect_sync() as conn:
+        rows = conn.execute("SELECT id, source, message, context, trace_id FROM plugin_runtime_logs").fetchall()
+        for row in rows:
+            try:
+                context = json.loads(row["context"] or "{}")
+            except Exception:
+                context = {}
+            values = (
+                sanitize_text(row["source"], limit=96),
+                sanitize_text(row["message"]),
+                json.dumps(sanitize_object(context), ensure_ascii=False, separators=(",", ":"))[:4000],
+                sanitize_text(row["trace_id"], limit=64),
+            )
+            original = tuple(str(row[key] or "") for key in ("source", "message", "context", "trace_id"))
+            if values == original:
+                continue
+            conn.execute(
+                "UPDATE plugin_runtime_logs SET source=?, message=?, context=?, trace_id=? WHERE id=?",
+                (*values, int(row["id"])),
+            )
+            updated += 1
+        conn.commit()
+    return updated
+
+
 def _format_message(message: Any, args: tuple[Any, ...]) -> str:
     text = str(message or "")
     if not args:
@@ -342,5 +324,6 @@ __all__ = [
     "record",
     "retention_days_from_config",
     "sanitize_text",
+    "scrub_sensitive_entries",
     "wrap_logger",
 ]

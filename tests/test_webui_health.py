@@ -329,7 +329,7 @@ def test_qzone_forward_test_forwards_first_feed_and_counts_quota(_runtime_contex
 
     async def _update_cookie(bot):  # noqa: ANN001
         cookie_updates.append(getattr(bot, "self_id", ""))
-        return True, "ok"
+        return True, "uin=o10000; p_skey=must-not-leak; skey=also-secret;"
 
     logger = SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None)
     _runtime_context.app_module.set_runtime_context(
@@ -367,9 +367,13 @@ def test_qzone_forward_test_forwards_first_feed_and_counts_quota(_runtime_contex
     assert state["count"] == 1
     assert state["forward_count"] == 1
     assert body["quota"]["used"] == 1
+    assert "must-not-leak" not in str(body)
+    assert "also-secret" not in str(body)
     rows = audit_mod.query_recent(action="qzone_forward_test", limit=5)
     assert rows and rows[0]["target"] == "20001"
     assert rows[0]["outcome"] == "ok"
+    assert "must-not-leak" not in str(rows)
+    assert "also-secret" not in str(rows)
 
 
 def test_health_requires_auth(_runtime_context) -> None:

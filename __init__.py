@@ -477,11 +477,17 @@ async def _install_personification_webui() -> None:
         return
     # 启动期清理过期设备 token 与旧审计日志
     try:
-        from .core import webui_audit_log, webui_auth_store
+        from .core import plugin_runtime_logs, webui_audit_log, webui_auth_store
 
         pruned = webui_auth_store.prune_expired_devices()
         if pruned:
             logger.info(f"[webui] 启动期清理过期设备 token: {pruned} 条")
+        scrubbed = webui_audit_log.scrub_sensitive_details()
+        if scrubbed:
+            logger.warning(f"[webui] 启动期清洗历史审计敏感字段: {scrubbed} 条")
+        scrubbed_logs = plugin_runtime_logs.scrub_sensitive_entries()
+        if scrubbed_logs:
+            logger.warning(f"[webui] 启动期清洗历史运行日志敏感字段: {scrubbed_logs} 条")
         webui_audit_log.prune_old_entries()
     except Exception as exc:
         logger.warning(f"[webui] 启动期清理失败：{exc}")

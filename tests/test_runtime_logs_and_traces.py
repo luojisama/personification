@@ -25,7 +25,12 @@ def test_plugin_runtime_logs_sanitize_filter_and_clear(_db_tmp) -> None:
     logs.record(
         level="INFO",
         source="unit",
-        message="api_key=secret-value token=abc123 normal=ok",
+        message=(
+            "api_key=secret-value token=abc123 normal=ok\n"
+            "Authorization: Bearer real-bearer-secret\n"
+            '{"client_secret":"json-secret","password":"pass-secret"} '
+            "https://example.test/?access_token=url-secret&p_skey=qzone-secret"
+        ),
         context={"Authorization": "Bearer secret", "nested": {"cookie": "qq=1"}},
         trace_id="trace-1",
         min_level="DEBUG",
@@ -44,6 +49,8 @@ def test_plugin_runtime_logs_sanitize_filter_and_clear(_db_tmp) -> None:
     assert "normal=ok" in row["message"]
     assert "secret-value" not in row["message"]
     assert "abc123" not in row["message"]
+    for secret in ("real-bearer-secret", "json-secret", "pass-secret", "url-secret", "qzone-secret"):
+        assert secret not in row["message"]
     assert row["context"]["Authorization"] == "***"
     assert row["context"]["nested"]["cookie"] == "***"
 
