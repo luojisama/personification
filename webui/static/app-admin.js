@@ -1171,7 +1171,7 @@ function renderPersonaBuilder() {
         <strong>${escapeHtml(item.work_title || "")} / ${escapeHtml(item.character_name || "")}</strong>
         <div class="muted" style="font-size:12px">${escapeHtml(when)} · ${escapeHtml(valid)} · ${Number(item.source_count || 0)} 个来源</div>
       </div>
-      <button class="btn small" onclick="openPersonaTemplateHistory('${escapeAttr(item.record_id || "")}')">查看</button>
+      <div class="row"><button class="btn small" onclick="openPersonaTemplateHistory('${escapeAttr(item.record_id || "")}')">管理</button><button class="btn small danger" onclick="deletePersonaTemplateHistory('${escapeAttr(item.record_id || "")}', '${escapeAttr(item.character_name || "")}' )">删除</button></div>
     </div>`;
   }).join("");
   return `<div class="card">
@@ -1201,11 +1201,12 @@ function renderPersonaBuilder() {
     <div class="between" style="margin:16px 0 8px">
       <h3 style="margin:0">插件 YAML 模板</h3>
       <div class="row">
+        ${state.personaTemplateEditing?'<button class="btn small primary" onclick="savePersonaTemplateEdit()">保存修改</button><button class="btn small" onclick="state.personaTemplateEditing=false;render()">取消</button>':'<button class="btn small" onclick="state.personaTemplateEditing=true;render()">编辑</button>'}
         <button class="btn small primary" onclick="applyPersonaTemplate()">应用</button>
         <button class="btn small" onclick="copyPersonaTemplate()">复制</button>
       </div>
     </div>
-    <pre class="persona-template-code">${escapeHtml(r.template || "")}</pre>
+    ${state.personaTemplateEditing?`<textarea id="persona-template-editor" class="persona-builder-description" style="min-height:520px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">${escapeHtml(r.template || "")}</textarea>`:`<pre class="persona-template-code">${escapeHtml(r.template || "")}</pre>`}
     <h3 style="margin:16px 0 8px">资料来源（${sources.length}）</h3>
     <div class="persona-source-grid">${sourceCards || '<p class="muted">未抓取到资料来源。</p>'}</div>
     <h3 style="margin:16px 0 8px">子agent交叉验证（${subagents.length}）</h3>
@@ -1282,10 +1283,38 @@ async function openPersonaTemplateHistory(recordId) {
     state.personaTemplateResult = record.result || null;
     if (state.personaTemplateResult) state.personaTemplateResult.history_record = {record_id: record.record_id};
     state.personaTemplateTask = null;
+    state.personaTemplateEditing = false;
     render();
   } catch (e) {
     alertFlash("err", "读取历史失败：" + e.message);
   }
+}
+
+async function savePersonaTemplateEdit() {
+  const result = state.personaTemplateResult;
+  const recordId = result && result.history_record && result.history_record.record_id;
+  const editor = document.getElementById("persona-template-editor");
+  if (!recordId || !editor) return;
+  try {
+    const record = await api("/persona-template/history/" + encodeURIComponent(recordId), {method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({template:editor.value})});
+    state.personaTemplateResult = record.result || null;
+    if (state.personaTemplateResult) state.personaTemplateResult.history_record = {record_id:record.record_id};
+    state.personaTemplateEditing = false;
+    await refreshPersonaTemplateHistory();
+    alertFlash("ok", "人设 YAML 已保存");
+  } catch (e) { alertFlash("err", "保存失败：" + e.message); }
+}
+
+async function deletePersonaTemplateHistory(recordId, name) {
+  if (!recordId || !confirm(`确认删除已构建人设「${name||recordId}」？相关头像候选也会清理。`)) return;
+  try {
+    await api("/persona-template/history/" + encodeURIComponent(recordId), {method:"DELETE"});
+    const current = state.personaTemplateResult && state.personaTemplateResult.history_record;
+    if (current && current.record_id === recordId) state.personaTemplateResult = null;
+    state.personaTemplateEditing = false;
+    await refreshPersonaTemplateHistory();
+    alertFlash("ok", "已删除人设记录");
+  } catch (e) { alertFlash("err", "删除失败：" + e.message); }
 }
 
 async function buildPersonaTemplate() {

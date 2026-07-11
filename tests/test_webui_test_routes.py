@@ -423,6 +423,25 @@ system: |
     assert applied.status_code == 200, applied.text
     assert Path(applied.json()["path"]).is_file()
     assert "system:" in apply_path.read_text(encoding="utf-8")
+    edited_template = body["template"].replace('initial_message: "我是测试角色"', 'initial_message: "编辑后的人设"')
+    edited = client.put(
+        "/personification/api/persona-template/history/" + body["history_record"]["record_id"],
+        json={"template": edited_template},
+    )
+    assert edited.status_code == 200, edited.text
+    assert "编辑后的人设" in edited.json()["result"]["template"]
+    invalid_edit = client.put(
+        "/personification/api/persona-template/history/" + body["history_record"]["record_id"],
+        json={"template": "name: [invalid"},
+    )
+    assert invalid_edit.status_code == 400
+    deleted = client.delete(
+        "/personification/api/persona-template/history/" + body["history_record"]["record_id"]
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert client.get(
+        "/personification/api/persona-template/history/" + body["history_record"]["record_id"]
+    ).status_code == 404
     assert len(caller.calls) == 6
     assert caller.calls[0]["kwargs"].get("use_builtin_search") is False
     assert all(call["kwargs"].get("use_builtin_search") is True for call in caller.calls[1:4])

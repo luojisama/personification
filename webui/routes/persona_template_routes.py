@@ -4,6 +4,7 @@ import asyncio
 import html
 import json
 import re
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -21,9 +22,11 @@ from ...core.paths import get_data_dir
 from ...core.llm_context import reset_llm_context, set_llm_context
 from ...core.persona_template_history import (
     append_persona_template_apply_audit,
+    delete_persona_template_record,
     get_persona_template_record,
     list_persona_template_records,
     record_persona_template_result,
+    save_persona_template_record,
     summarize_persona_template_record,
     write_persona_template_export_file,
 )
@@ -2705,6 +2708,82 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             if str(record.get("record_id", "")) == str(record_id):
                 return record
         raise HTTPException(status_code=404, detail="未找到该人设构建历史记录")
+
+    @router.put("/history/{record_id}")
+    async def update_history_record(
+        request: Request,
+        record_id: str,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        record = get_persona_template_record(record_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="未找到该人设构建历史记录")
+        template = str(body.get("template") or "").strip()
+        if not template:
+            raise HTTPException(status_code=400, detail="人设 YAML 不能为空")
+        if len(template) > _TEMPLATE_REFERENCE_LIMIT:
+            raise HTTPException(status_code=400, detail=f"人设 YAML 过长，最多 {_TEMPLATE_REFERENCE_LIMIT} 字")
+        validation = _validate_template_yaml(template)
+        if not validation.get("valid"):
+            detail = "；".join(str(item) for item in validation.get("errors", [])[:5]) or "YAML 校验失败"
+            raise HTTPException(status_code=400, detail=detail)
+        result = dict(record.get("result") or {})
+        result.update({
+            "template": validation["template"],
+            "template_valid": True,
+            "template_errors": [],
+            "template_warnings": list(validation.get("warnings") or [])[:20],
+            "template_keys": list(validation.get("keys") or []),
+        })
+        updated = dict(record)
+        updated.update({
+            "template_valid": True,
+            "result": result,
+            "updated_at": time.time(),
+            "edited_by": admin.qq,
+        })
+        save_persona_template_record(updated)
+        webui_audit_log.record(
+            action="persona_template_edit",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=record_id,
+            ip_hash=get_client_ip(request),
+            detail={"template_keys": result["template_keys"]},
+            outcome="ok",
+        )
+        return updated
+
+    @router.delete("/history/{record_id}")
+    async def delete_history_record(
+        request: Request,
+        record_id: str,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        deleted = delete_persona_template_record(record_id)
+        if deleted is None:
+            raise HTTPException(status_code=404, detail="未找到该人设构建历史记录")
+        result = deleted.get("result") if isinstance(deleted.get("result"), dict) else {}
+        revision = str(result.get("revision") or "")
+        revision_still_used = any(
+            str((record.get("result") or {}).get("revision") or "") == revision
+            for record in list_persona_template_records(limit=100)
+            if isinstance(record.get("result"), dict)
+        )
+        if re.fullmatch(r"[0-9a-f]{32}", revision) and not revision_still_used:
+            candidate_dir = Path(get_data_dir(getattr(runtime, "plugin_config", None))) / "persona_avatar_candidates" / revision
+            shutil.rmtree(candidate_dir, ignore_errors=True)
+        webui_audit_log.record(
+            action="persona_template_delete",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=record_id,
+            ip_hash=get_client_ip(request),
+            detail={"work_title": deleted.get("work_title", ""), "character_name": deleted.get("character_name", "")},
+            outcome="ok",
+        )
+        return {"success": True, "record_id": record_id}
 
     @router.post("/apply")
     async def apply_template(

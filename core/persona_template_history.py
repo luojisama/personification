@@ -133,6 +133,27 @@ def get_persona_template_record(record_id: str) -> dict[str, Any] | None:
     )
 
 
+def delete_persona_template_record(record_id: str) -> dict[str, Any] | None:
+    deleted: dict[str, Any] | None = None
+
+    def _mutate(current: Any) -> dict[str, Any]:
+        nonlocal deleted
+        payload = current if isinstance(current, dict) else {}
+        records = [item for item in payload.get("records", []) if isinstance(item, dict)]
+        kept: list[dict[str, Any]] = []
+        for record in records:
+            if deleted is None and str(record.get("record_id") or "") == str(record_id or ""):
+                deleted = record
+            else:
+                kept.append(record)
+        payload["records"] = kept
+        payload["updated_at"] = time.time()
+        return payload
+
+    get_data_store().mutate_sync(_NAMESPACE, _mutate)
+    return deleted
+
+
 def append_persona_template_apply_audit(record_id: str, event: dict[str, Any]) -> dict[str, Any] | None:
     updated: dict[str, Any] | None = None
 
@@ -253,6 +274,7 @@ def write_persona_template_export_file(record_or_result: dict[str, Any], *, plug
 __all__ = [
     "append_persona_template_apply_audit",
     "build_persona_template_key",
+    "delete_persona_template_record",
     "get_latest_persona_template_record",
     "get_persona_template_record",
     "list_persona_template_records",
