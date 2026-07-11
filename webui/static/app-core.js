@@ -26,7 +26,7 @@ let state = {
   stickers: null, stickerSearch: "", selectedSticker: null,
   theme: "dark", mobileNavOpen: false, eligibleAdmins: [],
   audit: null, auditFilter: "",
-  logs: null, traces: null, logLevel: "", logQuery: "", logTraceId: "", traceDetail: null, selectedTraceId: "",
+  logs: null, traces: null, logLevel: "", logQuery: "", logTraceId: "", logLoadingMore: false, logExpandedIds: {}, traceDetail: null, selectedTraceId: "",
   proactiveStats: null, proactiveRecent: null, proactiveScope: "",
   agentStatus: null, transferExport: null, transferImport: null, transferBotInfo: null,
 };
@@ -282,9 +282,10 @@ async function loadView() {
       if (state.auditFilter) qs.set("action", state.auditFilter);
       state.audit = await api("/audit/recent?" + qs.toString());
     } else if (view === "logs") {
-      const qs = new URLSearchParams({ limit: "220" });
+      const qs = new URLSearchParams({ limit: "100" });
       if (state.logLevel) qs.set("level", state.logLevel);
       if (state.logQuery) qs.set("q", state.logQuery);
+      if (state.logTraceId) qs.set("trace_id", state.logTraceId);
       const logs = await api("/logs/recent?" + qs.toString());
       state.logs = logs;
     } else if (view === "traces") {

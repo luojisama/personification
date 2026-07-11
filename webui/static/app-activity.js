@@ -352,44 +352,76 @@ function renderLogs() {
     {key:"ERROR", label:"ERROR+"},
   ];
   const levelBar = levels.map(f => `<button class="${state.logLevel===f.key?'active':''}" onclick="pickLogLevel('${f.key}')">${escapeHtml(f.label)}</button>`).join("");
-  const rows = (data.entries || []).map(e => {
+  const entries = data.entries || [];
+  const rows = entries.map(e => {
     const time = new Date(e.ts * 1000).toLocaleString();
     const level = String(e.level || "INFO");
-    const cls = level === "ERROR" || level === "CRITICAL" ? "hs-error" : (level === "WARNING" ? "hs-warn" : (level === "DEBUG" ? "hs-info" : "hs-ok"));
-    const trace = e.trace_id ? `<button class="btn small" onclick="openTraceDetail('${escapeAttr(e.trace_id)}')">${escapeHtml(e.trace_id)}</button>` : '<span class="muted">-</span>';
-    return `<tr>
-      <td class="muted" style="font-size:12px;white-space:nowrap">${escapeHtml(time)}</td>
-      <td><span class="dot ${cls}" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px"></span><code style="font-size:11px">${escapeHtml(level)}</code></td>
-      <td>${escapeHtml(e.source||'-')}</td>
-      <td style="white-space:pre-wrap;word-break:break-word">${escapeHtml(e.message||'')}</td>
-      <td>${trace}</td>
-    </tr>`;
+    const levelKey = level === "ERROR" || level === "CRITICAL" ? "error" : (level === "WARNING" ? "warning" : (level === "DEBUG" ? "debug" : "info"));
+    const message = String(e.message || "");
+    const expanded = Boolean(state.logExpandedIds && state.logExpandedIds[e.id]);
+    const canFold = message.length > 220 || message.split("\n").length > 3;
+    const context = e.context && typeof e.context === "object" ? e.context : {};
+    const hasContext = Object.keys(context).length > 0;
+    const trace = e.trace_id ? `<button class="log-trace-link" onclick="openTraceDetail('${escapeAttr(e.trace_id)}')">trace ${escapeHtml(e.trace_id)}</button>` : "";
+    return `<article class="log-entry log-entry-${levelKey}">
+      <div class="log-level-rail" aria-hidden="true"></div>
+      <div class="log-entry-body">
+        <div class="log-entry-head">
+          <div class="log-entry-identity">
+            <span class="log-level log-level-${levelKey}">${escapeHtml(level)}</span>
+            <strong>${escapeHtml(e.source || "personification")}</strong>
+            <time datetime="${new Date(e.ts * 1000).toISOString()}">${escapeHtml(time)}</time>
+          </div>
+          <div class="log-entry-actions">
+            ${trace}
+            <button class="btn small" onclick="copyPluginLog(${Number(e.id)})">复制</button>
+            ${canFold ? `<button class="btn small" aria-expanded="${expanded?'true':'false'}" onclick="togglePluginLog(${Number(e.id)})">${expanded?'收起':'展开'}</button>` : ""}
+          </div>
+        </div>
+        <pre class="log-message ${canFold&&!expanded?'is-folded':''}">${escapeHtml(message)}</pre>
+        ${hasContext ? `<details class="log-context"><summary>结构化上下文 · ${Object.keys(context).length} 项</summary><pre>${escapeHtml(JSON.stringify(context,null,2))}</pre></details>` : ""}
+      </div>
+    </article>`;
   }).join("");
-  return `<div class="group-bar">${levelBar}</div>
-    <div class="card">
-      <div class="between">
-        <h2 style="margin:0">插件日志（最近 ${(data.entries||[]).length} 条）</h2>
-        <button class="btn small danger" onclick="clearPluginLogs()">清空</button>
+  const writer = data.writer || {};
+  const dropped = Number(writer.dropped || 0);
+  return `<section class="log-console">
+    <div class="card log-console-head">
+      <div class="log-console-title">
+        <div><span class="eyebrow">RUNTIME LOG STREAM</span><h2>插件日志</h2></div>
+        <div class="log-console-stats">
+          <span><strong>${entries.length}</strong> 已载入</span>
+          <span><strong>${Number(data.retention_days||7)}</strong> 天保留</span>
+          <span class="${dropped?'has-drop':''}"><strong>${dropped}</strong> 队列丢弃</span>
+        </div>
       </div>
-      <p class="muted" style="font-size:12px;margin:8px 0">只显示拟人插件 runtime logger 捕获到的日志；默认保留 ${Number(data.retention_days||7)} 天，每日自动清理。敏感 token、Cookie、API Key 会在写入前脱敏。</p>
-      <div class="field-input" style="margin-bottom:10px">
-        <input id="log-query" type="text" placeholder="搜索消息 / source / trace_id" value="${escapeAttr(state.logQuery||'')}" onkeydown="if(event.key==='Enter') applyLogQuery()">
-        <button class="btn small" onclick="applyLogQuery()">搜索</button>
-        <button class="btn small" onclick="state.logQuery=''; state.logTraceId=''; state.traceDetail=null; loadView().then(render)">重置</button>
+      <p class="muted log-console-note">只显示拟人插件 runtime logger 捕获到的日志。敏感 Token、Cookie、API Key 在入队前脱敏，长正文和结构化上下文默认折叠。</p>
+      <div class="log-console-tools">
+        <div class="group-bar">${levelBar}</div>
+        <div class="log-search">
+          <input id="log-query" type="search" placeholder="搜索消息、来源、上下文或 trace" value="${escapeAttr(state.logQuery||'')}" onkeydown="if(event.key==='Enter') applyLogQuery()">
+          <button class="btn primary" onclick="applyLogQuery()">搜索</button>
+          <button class="btn" onclick="resetPluginLogFilters()">重置</button>
+          <button class="btn" onclick="refreshPluginLogs()">刷新</button>
+          <button class="btn danger" onclick="clearPluginLogs()">清空</button>
+        </div>
       </div>
-      <table><thead><tr><th>时间</th><th>级别</th><th>来源</th><th>消息</th><th>Trace</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5" class="muted">暂无</td></tr>'}</tbody></table>
-    </div>`;
+    </div>
+    <div class="log-stream">${rows || '<div class="card log-empty"><strong>没有匹配的日志</strong><span>调整级别或搜索条件后再试。</span></div>'}</div>
+    ${data.has_more ? `<div class="log-load-more"><button class="btn" onclick="loadMorePluginLogs()" ${state.logLoadingMore?'disabled':''}>${state.logLoadingMore?'<span class="spinner"></span> 正在加载':'加载更早日志'}</button></div>` : (entries.length ? '<div class="log-stream-end">已到达当前筛选结果末尾</div>' : '')}
+  </section>`;
 }
 
 async function pickLogLevel(level) {
   state.logLevel = level;
+  state.logExpandedIds = {};
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
 
 async function applyLogQuery() {
   state.logQuery = (document.getElementById("log-query")?.value || "").trim();
   state.logTraceId = "";
+  state.logExpandedIds = {};
   state.traceDetail = null;
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
@@ -398,6 +430,7 @@ async function filterLogsByTrace(traceId) {
   state.logQuery = traceId || "";
   state.logTraceId = traceId || "";
   state.logLevel = "";
+  state.logExpandedIds = {};
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
 
@@ -411,8 +444,66 @@ async function openTraceDetail(traceId) {
 async function openLogsForTrace(traceId) {
   state.view = "logs";
   state.logQuery = traceId || "";
+  state.logTraceId = traceId || "";
+  state.logLevel = "";
+  state.logExpandedIds = {};
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+function togglePluginLog(id) {
+  state.logExpandedIds = {...(state.logExpandedIds || {}), [id]: !(state.logExpandedIds && state.logExpandedIds[id])};
+  render();
+}
+
+async function copyPluginLog(id) {
+  const entry = (state.logs?.entries || []).find(item => Number(item.id) === Number(id));
+  if (!entry) return;
+  const text = [
+    `[${new Date(entry.ts * 1000).toISOString()}] ${entry.level || "INFO"} ${entry.source || "personification"}`,
+    entry.message || "",
+    entry.trace_id ? `trace_id=${entry.trace_id}` : "",
+    entry.context && Object.keys(entry.context).length ? JSON.stringify(entry.context, null, 2) : "",
+  ].filter(Boolean).join("\n");
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+    else {
+      const area = document.createElement("textarea");
+      area.value = text; area.style.position = "fixed"; area.style.opacity = "0";
+      document.body.appendChild(area); area.select(); document.execCommand("copy"); area.remove();
+    }
+    alertFlash("ok", "日志已复制");
+  } catch (e) { alertFlash("err", "复制失败：" + e.message); }
+}
+
+async function loadMorePluginLogs() {
+  const current = state.logs;
+  if (!current?.has_more || !current.next_cursor || state.logLoadingMore) return;
+  state.logLoadingMore = true;
+  render();
+  try {
+    const qs = new URLSearchParams({limit:"100", cursor:String(current.next_cursor)});
+    if (state.logLevel) qs.set("level", state.logLevel);
+    if (state.logQuery) qs.set("q", state.logQuery);
+    if (state.logTraceId) qs.set("trace_id", state.logTraceId);
+    const page = await api("/logs/recent?" + qs.toString());
+    const seen = new Set((current.entries || []).map(item => Number(item.id)));
+    const appended = (page.entries || []).filter(item => !seen.has(Number(item.id)));
+    state.logs = {...page, entries:[...(current.entries || []), ...appended]};
+  } catch (e) { alertFlash("err", e.message); }
+  finally { state.logLoadingMore = false; render(); }
+}
+
+async function refreshPluginLogs() {
+  state.logExpandedIds = {};
+  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+}
+
+async function resetPluginLogFilters() {
+  state.logQuery = "";
   state.logTraceId = "";
   state.logLevel = "";
+  state.logExpandedIds = {};
+  state.traceDetail = null;
   try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
 }
 
@@ -421,6 +512,7 @@ async function clearPluginLogs() {
   try {
     const res = await api("/logs/clear", {method:"DELETE"});
     alertFlash("ok", "已清空 " + (res.deleted || 0) + " 条日志");
+    state.logExpandedIds = {};
     await loadView(); render();
   } catch (e) { alertFlash("err", e.message); }
 }
