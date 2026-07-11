@@ -303,7 +303,7 @@ function renderTraceProcess() {
 
 function renderTraceDetail() {
   return `<div class="between" style="margin-bottom:10px;gap:8px;flex-wrap:wrap">
-    <button class="btn small" onclick="state.view='traces'; loadView().then(render)">返回消息 Trace</button>
+    <button class="btn small" onclick="navigateToView('traces')">返回消息 Trace</button>
     ${state.selectedTraceId ? `<button class="btn small" onclick="openLogsForTrace('${escapeAttr(state.selectedTraceId)}')">查看同 Trace 日志</button>` : ""}
   </div>
   ${renderTraceProcess()}`;
@@ -435,19 +435,17 @@ async function filterLogsByTrace(traceId) {
 }
 
 async function openTraceDetail(traceId) {
-  state.view = "trace_detail";
   state.selectedTraceId = traceId || "";
   state.logTraceId = "";
-  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+  await navigateToView("trace_detail");
 }
 
 async function openLogsForTrace(traceId) {
-  state.view = "logs";
   state.logQuery = traceId || "";
   state.logTraceId = traceId || "";
   state.logLevel = "";
   state.logExpandedIds = {};
-  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+  await navigateToView("logs");
 }
 
 function togglePluginLog(id) {

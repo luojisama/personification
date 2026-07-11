@@ -42,6 +42,57 @@ const _loadedAssets = new Set(["app-core.js","app-auth.js"]);
 const _assetInflight = new Map();
 let _viewAbortController = null;
 let _navigationId = 0;
+const _SCROLL_STORAGE_KEY = "personification_webui_scroll_v1";
+let _scrollPersistFrame = 0;
+let _scrollPositions = {views:{}, sidebar:0};
+try {
+  const saved = JSON.parse(sessionStorage.getItem(_SCROLL_STORAGE_KEY) || "{}");
+  if (saved && typeof saved === "object") _scrollPositions = {views:saved.views || {}, sidebar:Number(saved.sidebar || 0)};
+} catch {}
+
+function normalizeView(view) {
+  const candidate = String(view || "").trim();
+  return candidate === "devices" || Object.prototype.hasOwnProperty.call(VIEW_ASSETS, candidate) ? candidate : "dashboard";
+}
+
+function persistScrollPositions() {
+  try { sessionStorage.setItem(_SCROLL_STORAGE_KEY, JSON.stringify(_scrollPositions)); } catch {}
+}
+
+function captureScrollState() {
+  if (_scrollPersistFrame) {
+    cancelAnimationFrame(_scrollPersistFrame);
+    _scrollPersistFrame = 0;
+  }
+  const main = document.querySelector(".layout > main");
+  const nav = document.querySelector("#console-sidebar nav");
+  if (main && main.dataset.loading !== "true") {
+    const renderedView = normalizeView(main.dataset.view);
+    _scrollPositions.views[renderedView] = Math.max(0, Math.round(main.scrollTop || 0));
+  }
+  if (nav) _scrollPositions.sidebar = Math.max(0, Math.round(nav.scrollTop || 0));
+  persistScrollPositions();
+}
+
+function restoreScrollState() {
+  const renderedView = normalizeView(state.view);
+  const mainScrollTop = Math.max(0, Number(_scrollPositions.views[renderedView] || 0));
+  const sidebarScrollTop = Math.max(0, Number(_scrollPositions.sidebar || 0));
+  requestAnimationFrame(() => {
+    const main = document.querySelector(".layout > main");
+    const nav = document.querySelector("#console-sidebar nav");
+    if (main && main.dataset.view === renderedView && main.dataset.loading !== "true") main.scrollTop = mainScrollTop;
+    if (nav) nav.scrollTop = sidebarScrollTop;
+  });
+}
+
+function queueScrollStateCapture() {
+  if (_scrollPersistFrame) return;
+  _scrollPersistFrame = requestAnimationFrame(() => {
+    _scrollPersistFrame = 0;
+    captureScrollState();
+  });
+}
 
 function ensureViewAsset(view) {
   const filename=VIEW_ASSETS[view];
@@ -351,14 +402,17 @@ function viewTitle() {
 }
 
 async function navigateToView(view,{fromHistory=false}={}) {
-  if(!fromHistory&&location.hash!==`#${view}`)history.pushState(null,"",`#${view}`);
-  state.view=view;
+  const nextView=normalizeView(view);
+  captureScrollState();
+  if(!fromHistory&&location.hash!==`#${nextView}`)history.pushState({view:nextView},"",`#${nextView}`);
+  state.view=nextView;
   if(state.mobileNavOpen)state.mobileNavOpen=false;
   try{await loadView();render();}catch(e){alertFlash("err",e.message);}
 }
 
 function render() {
   const root = document.getElementById("app");
+  captureScrollState();
   if (state.devicePending) { root.innerHTML = renderDevicePending(); return; }
   if (!state.logged) { root.innerHTML = renderLogin(); attachLogin(); return; }
   // 全量 innerHTML 重绘会让正在输入的搜索框失焦；记下焦点 + 光标位置，重绘后还原。
@@ -374,6 +428,7 @@ function render() {
   }
   root.innerHTML = renderLayout();
   attachLayout();
+  restoreScrollState();
   if (focusSnap) {
     const next = document.getElementById(focusSnap.id);
     if (next && (next.tagName === "INPUT" || next.tagName === "TEXTAREA")) {
@@ -431,7 +486,7 @@ function renderLayout() {
         ${navItem('devices','设备管理')}
       </nav>
     </aside>
-    <main>
+    <main data-view="${escapeAttr(state.view)}" data-loading="${state.loading?'true':'false'}">
       <div class="topbar between">
         <div style="display:flex;align-items:center;min-width:0;flex:1">
            <button class="mobile-nav-toggle" onclick="toggleMobileNav()" aria-label="菜单" aria-controls="console-sidebar" aria-expanded="${state.mobileNavOpen?'true':'false'}">≡</button>

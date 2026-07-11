@@ -90,6 +90,8 @@ function attachLayout() {
       await navigateToView(a.getAttribute("href").slice(1));
     });
   });
+  document.querySelector(".layout > main")?.addEventListener("scroll", queueScrollStateCapture, {passive:true});
+  document.querySelector("#console-sidebar nav")?.addEventListener("scroll", queueScrollStateCapture, {passive:true});
 }
 
 function renderLogin() {
@@ -225,10 +227,15 @@ async function doVerify() {
 function escapeHtml(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s).replace(/'/g, "&#39;"); }
 
-window.addEventListener("hashchange", async () => {
-  const v = location.hash.slice(1);
-  if (v && v !== state.view) await navigateToView(v, {fromHistory:true});
-});
+async function navigateFromBrowserHistory() {
+  const view = normalizeView(location.hash.slice(1));
+  if (view !== state.view) await navigateToView(view, {fromHistory:true});
+}
 
-if (location.hash) state.view = location.hash.slice(1);
+window.addEventListener("popstate", navigateFromBrowserHistory);
+window.addEventListener("hashchange", navigateFromBrowserHistory);
+window.addEventListener("beforeunload", captureScrollState);
+
+state.view = normalizeView(location.hash.slice(1));
+history.replaceState({view:state.view}, "", `#${state.view}`);
 bootstrap();

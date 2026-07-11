@@ -557,7 +557,7 @@ function renderDashboard() {
         <h2 style="margin:0">令牌消耗统计</h2>
         <p class="muted" style="margin:4px 0 0;font-size:12px">24h、7天、30天与全量累计；模型、功能与群占比使用总计账本。</p>
       </div>
-      <a href="#logs" onclick="state.view='logs'; loadView().then(render)">查看日志 →</a>
+      <a href="#logs" onclick="navigateToView('logs');return false">查看日志 →</a>
     </div>
     <div class="dashboard-line-grid">
       ${charts.slice(0, 4).map((chart, index) => renderDashboardLineCard(chart, tones[index % tones.length])).join("")}
