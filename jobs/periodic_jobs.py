@@ -1,10 +1,14 @@
 import calendar
+import asyncio
+import json
 import random
 import re
 import time
+import uuid
 from typing import Any, Callable, Dict, Iterable
 
 from ..core.data_store import get_data_store
+from ..core.db import connect_sync
 
 
 _IMAGE_B64_RE = re.compile(r"\[IMAGE_B64\][A-Za-z0-9+/=\r\n]+\[/IMAGE_B64\]")
@@ -76,34 +80,230 @@ def record_qzone_post(content: str, *, now: Any, kind: str = "post") -> Dict[str
 
     供 WebUI 手动「立即发一条」和自动转发复用，保证所有外显空间发布都计入月度额度。
     """
-    store = get_data_store()
-    state = store.load_sync("qzone_post_state")
-    if not isinstance(state, dict):
-        state = {}
-    period = now.strftime("%Y-%m")
-    if state.get("period") != period:
-        state = {
-            "period": period,
-            "count": 0,
-            "last_post_at": float(state.get("last_post_at", 0) or 0),
-            "last_content": str(state.get("last_content", "") or ""),
-            "recent_contents": list(state.get("recent_contents", []))
-            if isinstance(state.get("recent_contents"), list)
-            else [],
-        }
-    state["period"] = period
-    state["count"] = int(state.get("count", 0) or 0) + 1
-    kind_key = str(kind or "post").strip().lower()
-    if kind_key and kind_key != "post":
-        counter_key = f"{kind_key}_count"
-        state[counter_key] = int(state.get(counter_key, 0) or 0) + 1
+    operation_id = f"legacy-{uuid.uuid4().hex}"
+    reserve_qzone_publish(
+        operation_id=operation_id,
+        now=now,
+        monthly_limit=0,
+        min_interval_hours=0,
+        kind=kind,
+        force=True,
+    )
+    return finalize_qzone_publish(operation_id=operation_id, content=content, now=now, outcome="success")
+
+
+def _qzone_now_ts(now: Any) -> float:
     try:
-        state["last_post_at"] = float(now.timestamp())
+        return float(now.timestamp())
     except Exception:
-        state["last_post_at"] = time.time()
-    _remember_qzone_post(state, content)
-    store.save_sync("qzone_post_state", state)
+        return time.time()
+
+
+def _load_qzone_state_from_conn(conn: Any) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT value FROM kv_store WHERE namespace=? AND key=?",
+        ("qzone_post_state", "__root__"),
+    ).fetchone()
+    if not row:
+        return {}
+    try:
+        payload = json.loads(row["value"] or "{}")
+    except Exception:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_qzone_state_to_conn(conn: Any, state: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO kv_store(namespace, key, value, updated_at)
+        VALUES (?, ?, ?, unixepoch('now'))
+        ON CONFLICT(namespace, key)
+        DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+        """,
+        ("qzone_post_state", "__root__", json.dumps(state, ensure_ascii=False)),
+    )
+
+
+def reserve_qzone_publish(
+    *,
+    operation_id: str,
+    now: Any,
+    monthly_limit: int,
+    min_interval_hours: float,
+    kind: str = "post",
+    force: bool = False,
+    lease_seconds: int = 300,
+) -> dict[str, Any]:
+    op_id = str(operation_id or "").strip()[:96]
+    if not op_id:
+        raise ValueError("operation_id is required")
+    period = now.strftime("%Y-%m")
+    now_ts = _qzone_now_ts(now)
+    with connect_sync() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE qzone_publish_operations SET status='expired' WHERE status IN ('reserved','unknown') AND expires_at<=?",
+            (now_ts,),
+        )
+        existing = conn.execute(
+            "SELECT status, detail FROM qzone_publish_operations WHERE operation_id=?",
+            (op_id,),
+        ).fetchone()
+        if existing is not None:
+            existing_status = str(existing["status"])
+            if existing_status in {"released", "expired"}:
+                conn.execute("DELETE FROM qzone_publish_operations WHERE operation_id=?", (op_id,))
+            else:
+                conn.commit()
+                return {"ok": existing_status == "committed", "duplicate": True, "status": existing_status}
+        state = _load_qzone_state_from_conn(conn)
+        used = int(state.get("count", 0) or 0) if state.get("period") == period else 0
+        active_row = conn.execute(
+            "SELECT COUNT(*) AS count, MAX(reserved_at) AS latest FROM qzone_publish_operations WHERE period=? AND status IN ('reserved','unknown')",
+            (period,),
+        ).fetchone()
+        active = int(active_row["count"] or 0)
+        latest_reserved = float(active_row["latest"] or 0)
+        limit = max(0, int(monthly_limit or 0))
+        if not force and used + active >= limit:
+            conn.commit()
+            return {"ok": False, "status": "quota_blocked", "used": used, "reserved": active, "limit": limit}
+        interval_seconds = max(0.0, float(min_interval_hours or 0)) * 3600
+        last_effective = max(float(state.get("last_post_at", 0) or 0), latest_reserved)
+        if not force and interval_seconds and last_effective and now_ts - last_effective < interval_seconds:
+            conn.commit()
+            return {"ok": False, "status": "interval_blocked", "next_eligible_at": last_effective + interval_seconds}
+        conn.execute(
+            """
+            INSERT INTO qzone_publish_operations(operation_id, period, kind, status, reserved_at, expires_at, detail)
+            VALUES (?, ?, ?, 'reserved', ?, ?, '{}')
+            """,
+            (op_id, period, str(kind or "post")[:32], now_ts, now_ts + max(30, int(lease_seconds))),
+        )
+        conn.commit()
+    return {"ok": True, "status": "reserved", "operation_id": op_id}
+
+
+def finalize_qzone_publish(
+    *,
+    operation_id: str,
+    content: str,
+    now: Any,
+    outcome: str,
+    detail: str = "",
+) -> dict[str, Any]:
+    op_id = str(operation_id or "").strip()[:96]
+    normalized = str(outcome or "failed").strip().lower()
+    now_ts = _qzone_now_ts(now)
+    with connect_sync() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, period, kind FROM qzone_publish_operations WHERE operation_id=?",
+            (op_id,),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            raise ValueError("qzone publish operation does not exist")
+        if row["status"] == "committed":
+            state = _load_qzone_state_from_conn(conn)
+            conn.commit()
+            return state
+        if normalized == "success":
+            state = _load_qzone_state_from_conn(conn)
+            period = str(row["period"])
+            if state.get("period") != period:
+                state = {
+                    "period": period,
+                    "count": 0,
+                    "last_post_at": float(state.get("last_post_at", 0) or 0),
+                    "last_content": str(state.get("last_content", "") or ""),
+                    "recent_contents": list(state.get("recent_contents", [])) if isinstance(state.get("recent_contents"), list) else [],
+                }
+            state["count"] = int(state.get("count", 0) or 0) + 1
+            kind_key = str(row["kind"] or "post").strip().lower()
+            if kind_key and kind_key != "post":
+                counter_key = f"{kind_key}_count"
+                state[counter_key] = int(state.get(counter_key, 0) or 0) + 1
+            state["last_post_at"] = now_ts
+            _remember_qzone_post(state, content)
+            _save_qzone_state_to_conn(conn, state)
+            status = "committed"
+        else:
+            state = _load_qzone_state_from_conn(conn)
+            status = "unknown" if normalized == "unknown" else "released"
+        conn.execute(
+            "UPDATE qzone_publish_operations SET status=?, completed_at=?, detail=? WHERE operation_id=?",
+            (status, now_ts, json.dumps({"message": str(detail or "")[:300]}, ensure_ascii=False), op_id),
+        )
+        conn.commit()
     return state
+
+
+async def coordinated_qzone_publish(
+    *,
+    operation_id: str,
+    content: str,
+    now: Any,
+    monthly_limit: int,
+    min_interval_hours: float,
+    kind: str,
+    publish: Callable[[], Any],
+    force: bool = False,
+) -> dict[str, Any]:
+    reservation = await asyncio.to_thread(
+        reserve_qzone_publish,
+        operation_id=operation_id,
+        now=now,
+        monthly_limit=monthly_limit,
+        min_interval_hours=min_interval_hours,
+        kind=kind,
+        force=force,
+    )
+    if reservation.get("duplicate"):
+        state = await asyncio.to_thread(get_data_store().load_sync, "qzone_post_state")
+        return {**reservation, "success": reservation.get("status") == "committed", "state": state}
+    if not reservation.get("ok"):
+        return {**reservation, "success": False}
+    try:
+        result = await publish()
+    except (asyncio.TimeoutError, TimeoutError) as exc:
+        await asyncio.to_thread(
+            finalize_qzone_publish,
+            operation_id=operation_id,
+            content=content,
+            now=now,
+            outcome="unknown",
+            detail=type(exc).__name__,
+        )
+        return {"success": False, "status": "outcome_unknown", "message": type(exc).__name__}
+    except Exception as exc:
+        await asyncio.to_thread(
+            finalize_qzone_publish,
+            operation_id=operation_id,
+            content=content,
+            now=now,
+            outcome="failed",
+            detail=str(exc),
+        )
+        return {"success": False, "status": "failed", "message": str(exc)}
+    success, message = result if isinstance(result, tuple) and len(result) >= 2 else (False, "invalid_publish_result")
+    unknown = str(message or "").startswith("outcome_unknown")
+    state = await asyncio.to_thread(
+        finalize_qzone_publish,
+        operation_id=operation_id,
+        content=content,
+        now=now,
+        outcome="success" if success else "unknown" if unknown else "failed",
+        detail=str(message or ""),
+    )
+    return {
+        "success": bool(success),
+        "status": "committed" if success else "outcome_unknown" if unknown else "failed",
+        "message": str(message or ""),
+        "state": state,
+        "operation_id": operation_id,
+    }
 
 
 async def run_daily_group_fav_report(
@@ -240,18 +440,26 @@ async def run_auto_post_diary(
         return False
 
     logger.info("拟人插件：正在自动发布空间说说...")
-    success, msg = await publish_qzone_shuo(diary_content, bot.self_id)
-    if success:
-        from ..core.time_ctx import get_configured_now
+    from ..core.time_ctx import get_configured_now
 
-        record_qzone_post(diary_content, now=get_configured_now())
+    published = await coordinated_qzone_publish(
+        operation_id=f"auto-diary-{uuid.uuid4().hex}",
+        content=diary_content,
+        now=get_configured_now(),
+        monthly_limit=0,
+        min_interval_hours=0,
+        kind="post",
+        publish=lambda: publish_qzone_shuo(diary_content, bot.self_id),
+        force=True,
+    )
+    if published.get("success"):
         mark_published = getattr(generate_ai_diary, "mark_published", None)
         if callable(mark_published):
             mark_published(diary_content)
         logger.info("拟人插件：空间说说发布成功！")
         return True
 
-    logger.error(f"拟人插件：空间说说发布失败：{msg}")
+    logger.error(f"拟人插件：空间说说发布失败：{published.get('message') or published.get('status')}")
     return False
 
 
@@ -362,12 +570,19 @@ async def run_proactive_qzone_post(
     if not content:
         return False
 
-    success, msg = await publish_qzone_shuo(content, bot.self_id)
-    if not success:
-        logger.error(f"拟人插件：主动说说发布失败：{msg}")
+    published = await coordinated_qzone_publish(
+        operation_id=f"proactive-{uuid.uuid4().hex}",
+        content=content,
+        now=now,
+        monthly_limit=qzone_monthly_limit,
+        min_interval_hours=qzone_min_interval_hours,
+        kind="post",
+        publish=lambda: publish_qzone_shuo(content, bot.self_id),
+    )
+    if not published.get("success"):
+        logger.error(f"拟人插件：主动说说发布失败：{published.get('message') or published.get('status')}")
         return False
 
-    record_qzone_post(content, now=now)
     mark_published = getattr(maybe_generate_qzone_post, "mark_published", None)
     if callable(mark_published):
         mark_published(content)

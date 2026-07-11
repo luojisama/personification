@@ -16,7 +16,7 @@ from ..core.image_input import summarize_images_with_vision
 from ..core.qzone_service import _extract_qzone_comments
 from ..core.time_ctx import inject_current_time_context
 from ..core.visible_output import guard_visible_text
-from ..jobs.periodic_jobs import build_qzone_quota, record_qzone_post
+from ..jobs.periodic_jobs import build_qzone_quota, coordinated_qzone_publish
 from .diary_flow import clean_generated_text
 
 
@@ -1607,22 +1607,28 @@ async def scan_qzone_social_feeds(
                             result["ignored"] += 1
                             continue
                         reaction_text = forward_text
-                        forward_ok, forward_msg = await qzone_social_service.forward_feed(
-                            feed=feed,
-                            bot_id=str(getattr(bot, "self_id", "") or ""),
-                            content=forward_text,
+                        published = await coordinated_qzone_publish(
+                            operation_id=f"social-forward:{feed_key}:{today}",
+                            content=_format_qzone_forward_record(feed, forward_text),
+                            now=now,
+                            monthly_limit=int(getattr(plugin_config, "personification_qzone_monthly_limit", 30) or 30),
+                            min_interval_hours=float(getattr(plugin_config, "personification_qzone_min_interval_hours", 12.0) or 0),
+                            kind="forward",
+                            publish=lambda: qzone_social_service.forward_feed(
+                                feed=feed,
+                                bot_id=str(getattr(bot, "self_id", "") or ""),
+                                content=forward_text,
+                            ),
                         )
+                        forward_ok = bool(published.get("success"))
+                        forward_msg = str(published.get("message") or published.get("status") or "")
                         if forward_ok:
                             acted = True
                             forwarded_this_scan += 1
                             result["forwarded"] += 1
                             state["forward_count"] = int(state.get("forward_count", 0) or 0) + 1
                             friend_state["forward_count"] = int(friend_state.get("forward_count", 0) or 0) + 1
-                            updated_post_state = record_qzone_post(
-                                _format_qzone_forward_record(feed, forward_text),
-                                now=now,
-                                kind="forward",
-                            )
+                            updated_post_state = published.get("state") or get_data_store().load_sync("qzone_post_state")
                             forward_quota = build_qzone_quota(
                                 state=updated_post_state,
                                 now=now,

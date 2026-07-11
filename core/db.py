@@ -246,6 +246,22 @@ DDL_STATEMENTS = (
         ON plugin_runtime_logs(trace_id, ts DESC)
     """,
     """
+    CREATE TABLE IF NOT EXISTS qzone_publish_operations (
+        operation_id TEXT PRIMARY KEY,
+        period TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'post',
+        status TEXT NOT NULL,
+        reserved_at REAL NOT NULL,
+        expires_at REAL NOT NULL,
+        completed_at REAL NOT NULL DEFAULT 0,
+        detail TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_qzone_publish_ops_status
+        ON qzone_publish_operations(period, status, expires_at)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS reply_turn_traces (
         trace_id TEXT PRIMARY KEY,
         ts REAL NOT NULL,

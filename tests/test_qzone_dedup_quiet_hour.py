@@ -323,3 +323,81 @@ def test_build_qzone_quota_next_eligible_from_min_interval() -> None:
         min_interval_hours=6,
     )
     assert q["next_eligible_at"] == last + 6 * 3600
+
+
+def test_qzone_publish_reservation_allows_only_one_last_quota(tmp_path, monkeypatch) -> None:
+    _seed_state(tmp_path, monkeypatch, {"period": "2026-06", "count": 0, "last_post_at": 0})
+    now = datetime(2026, 6, 17, 14, 0)
+    calls = []
+
+    async def publish():
+        calls.append(True)
+        await asyncio.sleep(0.01)
+        return True, "ok"
+
+    async def run():
+        return await asyncio.gather(*[
+            periodic_jobs.coordinated_qzone_publish(
+                operation_id=f"concurrent-{index}",
+                content=f"内容 {index}",
+                now=now,
+                monthly_limit=1,
+                min_interval_hours=0,
+                kind="post",
+                publish=publish,
+            )
+            for index in range(2)
+        ])
+
+    results = asyncio.run(run())
+    assert sum(bool(item["success"]) for item in results) == 1
+    assert len(calls) == 1
+    state = load_personification_module("plugin.personification.core.data_store").get_data_store().load_sync("qzone_post_state")
+    assert state["count"] == 1
+
+
+def test_qzone_publish_operation_is_idempotent_and_timeout_is_unknown(tmp_path, monkeypatch) -> None:
+    _seed_state(tmp_path, monkeypatch, {"period": "2026-06", "count": 0, "last_post_at": 0})
+    now = datetime(2026, 6, 17, 14, 0)
+    calls = []
+
+    async def publish_ok():
+        calls.append("ok")
+        return True, "ok"
+
+    first = asyncio.run(periodic_jobs.coordinated_qzone_publish(
+        operation_id="same-operation",
+        content="同一内容",
+        now=now,
+        monthly_limit=3,
+        min_interval_hours=0,
+        kind="post",
+        publish=publish_ok,
+    ))
+    duplicate = asyncio.run(periodic_jobs.coordinated_qzone_publish(
+        operation_id="same-operation",
+        content="同一内容",
+        now=now,
+        monthly_limit=3,
+        min_interval_hours=0,
+        kind="post",
+        publish=publish_ok,
+    ))
+
+    async def publish_timeout():
+        raise asyncio.TimeoutError()
+
+    unknown = asyncio.run(periodic_jobs.coordinated_qzone_publish(
+        operation_id="unknown-operation",
+        content="结果未知",
+        now=now,
+        monthly_limit=3,
+        min_interval_hours=0,
+        kind="forward",
+        publish=publish_timeout,
+    ))
+
+    assert first["success"] is True
+    assert duplicate["success"] is True and duplicate["duplicate"] is True
+    assert calls == ["ok"]
+    assert unknown["status"] == "outcome_unknown"

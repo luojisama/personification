@@ -265,6 +265,42 @@ def test_qzone_forward_feed_uses_forward_endpoint(monkeypatch) -> None:  # noqa:
     assert calls[0]["data"]["con"] == "这句有点东西"
 
 
+def test_qzone_forward_timeout_does_not_try_fallback_endpoint(monkeypatch) -> None:  # noqa: ANN001
+    calls = []
+
+    class _Client:
+        def __init__(self, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args) -> None:  # noqa: ANN003
+            return None
+
+        async def post(self, url, **_kwargs):  # noqa: ANN001
+            calls.append(url)
+            raise qzone_service.httpx.TimeoutException("response lost")
+
+    monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
+    service = qzone_service.QzoneSocialService(
+        SimpleNamespace(
+            personification_qzone_enabled=True,
+            personification_qzone_cookie="uin=o99999; skey=sk; p_uin=o99999; p_skey=ps;",
+        ),
+        _Logger(),
+    )
+    ok, msg = asyncio.run(service.forward_feed(
+        feed={"feed_id": "feed1", "owner_uin": "20001", "topic_id": "20001_feed1__1"},
+        bot_id="99999",
+        content="只发一次",
+    ))
+
+    assert ok is False
+    assert msg.startswith("outcome_unknown")
+    assert len(calls) == 1
+
+
 def test_proactive_candidates_require_profile_and_not_favorability_threshold() -> None:
     candidates = proactive_flow._build_candidates(
         all_user_data={

@@ -5,11 +5,13 @@
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
-from ..deps import AdminIdentity, require_admin
+from ...core import webui_audit_log
+from ..deps import AdminIdentity, get_client_ip, require_admin
 
 
 def _first_bot(runtime) -> Any | None:
@@ -78,12 +80,13 @@ def build_qzone_router(*, runtime) -> APIRouter:
 
     @router.post("/post-now")
     async def post_now(
+        request: Request,
         body: dict = Body(default_factory=dict),
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
         """管理员手动强制发一条说说（绕过额度/间隔/agent 决策，但仍计入月度额度）。"""
         from ...core.time_ctx import get_configured_now
-        from ...jobs.periodic_jobs import build_qzone_quota, record_qzone_post
+        from ...jobs.periodic_jobs import build_qzone_quota, coordinated_qzone_publish
 
         logger = getattr(runtime, "logger", None)
         generate = _bundle_attr(runtime, "qzone_generate_post")
@@ -110,18 +113,30 @@ def build_qzone_router(*, runtime) -> APIRouter:
         if not content:
             return {"ok": False, "error": "本次没有生成出说说内容（可能被去重/审阅拦下），请稍后再试。"}
 
-        try:
-            success, msg = await publish(content, getattr(bot, "self_id", ""))
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"发布失败：{exc}") from exc
-        if not success:
-            return {"ok": False, "error": f"发布失败：{msg}", "content": content[:2000]}
+        cfg = getattr(runtime, "plugin_config", None)
+        operation_id = str(body.get("operation_id") or uuid.uuid4().hex)[:96]
+        published = await coordinated_qzone_publish(
+            operation_id=operation_id,
+            content=content,
+            now=get_configured_now(),
+            monthly_limit=int(getattr(cfg, "personification_qzone_monthly_limit", 30) or 30),
+            min_interval_hours=float(getattr(cfg, "personification_qzone_min_interval_hours", 12.0) or 0),
+            kind="post",
+            publish=lambda: publish(content, getattr(bot, "self_id", "")),
+            force=True,
+        )
+        if not published.get("success"):
+            return {
+                "ok": False,
+                "error": f"发布失败：{published.get('message') or published.get('status')}",
+                "content": content[:2000],
+                "operation_id": operation_id,
+            }
 
-        state = record_qzone_post(content, now=get_configured_now())
+        state = published.get("state") or {}
         mark_published = getattr(generate, "mark_published", None)
         if callable(mark_published):
             mark_published(content)
-        cfg = getattr(runtime, "plugin_config", None)
         quota = build_qzone_quota(
             state=state,
             now=get_configured_now(),
@@ -130,6 +145,21 @@ def build_qzone_router(*, runtime) -> APIRouter:
         )
         if logger is not None:
             logger.info(f"[webui] 管理员 {admin.qq} 手动发布了一条空间说说。")
-        return {"ok": True, "content": content[:2000], "quota": quota}
+        webui_audit_log.record(
+            action="qzone_post_now",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=str(getattr(bot, "self_id", "") or ""),
+            ip_hash=get_client_ip(request),
+            detail={"operation_id": operation_id, "duplicate": bool(published.get("duplicate"))},
+            outcome="ok",
+        )
+        return {
+            "ok": True,
+            "content": content[:2000],
+            "quota": quota,
+            "operation_id": operation_id,
+            "duplicate": bool(published.get("duplicate")),
+        }
 
     return router

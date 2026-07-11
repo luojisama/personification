@@ -722,21 +722,27 @@ class QzoneSocialService:
             ),
         ]
         last_msg = ""
-        for url, data in attempts:
+        for attempt_index, (url, data) in enumerate(attempts):
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     resp = await client.post(url, params={"g_tk": str(ctx["g_tk"])}, data=data, headers=headers)
             except Exception as exc:
-                last_msg = f"转发失败：{exc}"
-                continue
+                return False, f"outcome_unknown: 转发请求异常：{type(exc).__name__}"
             if resp.status_code != 200:
                 last_msg = f"转发失败，状态码：{resp.status_code}"
-                continue
+                if attempt_index == 0 and resp.status_code in {404, 405}:
+                    continue
+                if resp.status_code >= 500:
+                    return False, f"outcome_unknown: {last_msg}"
+                return False, last_msg
             payload = _parse_qzone_jsonp(resp.text)
             success, payload_msg = _qzone_payload_success(payload, resp.text)
             if success:
                 return True, "ok"
             last_msg = payload_msg
+            if "无法解析" in payload_msg:
+                return False, f"outcome_unknown: {payload_msg}"
+            return False, payload_msg
         return False, last_msg or "转发失败"
 
     async def _reply_comment_sub(
@@ -866,6 +872,8 @@ class QzoneSocialService:
             )
             if sub_ok:
                 return True, "ok"
+            if "请求异常" in sub_msg or "无法解析" in sub_msg or "outcome_unknown" in sub_msg:
+                return False, f"outcome_unknown: {sub_msg}"
             self.logger.warning(f"[qzone] 子评论回复失败，回退为顶级 @ 评论: {sub_msg}")
 
         url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"

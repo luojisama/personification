@@ -4,6 +4,7 @@ import asyncio
 import random
 import re
 import time
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -906,7 +907,7 @@ def build_health_router(*, runtime) -> APIRouter:
         """
         from ...core.data_store import get_data_store
         from ...core.time_ctx import get_configured_now
-        from ...jobs.periodic_jobs import build_qzone_quota, record_qzone_post
+        from ...jobs.periodic_jobs import build_qzone_quota, coordinated_qzone_publish
 
         cfg = getattr(runtime, "plugin_config", None)
         logger = getattr(runtime, "logger", None)
@@ -1032,20 +1033,18 @@ def build_health_router(*, runtime) -> APIRouter:
             }
 
         feed = feeds[0]
-        try:
-            forward_ok, forward_msg = await forward_method(
-                feed=feed,
-                bot_id=bot_id,
-                content=forward_text,
-            )
-        except Exception as exc:
-            _record_qzone_forward_test_audit(
-                admin=admin,
-                target_user_id=target_user_id,
-                outcome="forward_error",
-                detail={"error": str(exc)[:500], "feed": _qzone_feed_summary(feed), "cookie": cookie_result},
-            )
-            raise HTTPException(status_code=500, detail=f"转发失败：{exc}") from exc
+        operation_id = str(body.get("operation_id") or uuid.uuid4().hex)[:96]
+        published = await coordinated_qzone_publish(
+            operation_id=operation_id,
+            content=_format_qzone_forward_health_record(feed, forward_text),
+            now=get_configured_now(),
+            monthly_limit=monthly_limit,
+            min_interval_hours=min_interval_hours,
+            kind="forward",
+            publish=lambda: forward_method(feed=feed, bot_id=bot_id, content=forward_text),
+        )
+        forward_ok = bool(published.get("success"))
+        forward_msg = str(published.get("message") or published.get("status") or "")
         if not forward_ok:
             _record_qzone_forward_test_audit(
                 admin=admin,
@@ -1063,11 +1062,7 @@ def build_health_router(*, runtime) -> APIRouter:
                 "quota": quota_before,
             }
 
-        post_state = record_qzone_post(
-            _format_qzone_forward_health_record(feed, forward_text),
-            now=get_configured_now(),
-            kind="forward",
-        )
+        post_state = published.get("state") or get_data_store().load_sync("qzone_post_state")
         quota_after = build_qzone_quota(
             state=post_state,
             now=get_configured_now(),
