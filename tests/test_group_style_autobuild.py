@@ -281,7 +281,12 @@ def test_style_rebuild_rejects_insufficient_messages(_webui_runtime_with_style) 
     _login(client, _webui_runtime_with_style)
     res = client.post("/personification/api/groups/g_empty/style/rebuild", json={})
     assert res.status_code == 400
-    assert "样本太少" in res.json()["detail"]
+    report = res.json()["detail"]
+    assert report["code"] == "group_style_sample_insufficient"
+    assert report["phase"] == "source"
+    assert report["retryable"] is False
+    assert report["partial"] is False
+    assert report["outcome_unknown"] is False
 
 
 def test_style_rebuild_rate_limit(_webui_runtime_with_style) -> None:

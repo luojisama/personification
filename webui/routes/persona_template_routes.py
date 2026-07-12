@@ -49,6 +49,43 @@ _CHARACTER_SOURCE_THRESHOLD = 50
 _TASK_RETENTION_SECONDS = 6 * 60 * 60
 ProgressCallback = Callable[[str, str, int], Awaitable[None]]
 
+_DIAGNOSTIC_FIELDS = (
+    "ok",
+    "code",
+    "phase",
+    "title",
+    "message",
+    "details",
+    "steps",
+    "warnings",
+    "suggestion",
+    "retryable",
+    "partial",
+    "outcome_unknown",
+    "operation_id",
+    "trace_id",
+)
+
+_BUILD_STAGE_LABELS = {
+    "alias_planning": "规划检索别名",
+    "research": "收集并交叉验证资料",
+    "synthesis": "合成人设 YAML",
+    "repair": "修复人设 YAML",
+    "validation": "校验人设 YAML",
+    "avatar_review": "审核头像与签名候选",
+    "persistence": "保存构建历史与导出文件",
+}
+
+_TASK_STAGE_PHASES = {
+    "alias_planning": "alias_planning",
+    "source_gathering": "research",
+    "subagent_research": "research",
+    "custom_research": "research",
+    "template_synthesis": "synthesis",
+    "template_repair": "repair",
+    "finalize": "persistence",
+}
+
 _ROLE_PAGE_HINTS = (
     "人物列表",
     "角色列表",
@@ -155,9 +192,10 @@ class _PersonaTemplateTask:
     updated_at: float = field(default_factory=time.time)
     result: dict[str, Any] | None = None
     error: str = ""
+    diagnostic: dict[str, Any] | None = None
 
     def public(self) -> dict[str, Any]:
-        return {
+        payload = {
             "task_id": self.task_id,
             "work_title": self.work_title,
             "character_name": self.character_name,
@@ -170,6 +208,149 @@ class _PersonaTemplateTask:
             "result": self.result,
             "error": self.error,
         }
+        if self.diagnostic:
+            payload = _attach_operation_diagnostic(payload, self.diagnostic)
+        return payload
+
+
+class _PersonaTemplateStageError(RuntimeError):
+    def __init__(
+        self,
+        phase: str,
+        cause: BaseException | None = None,
+        *,
+        partial: bool = False,
+        validation: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(f"persona template operation failed during {phase}")
+        self.phase = phase
+        self.cause_type = type(cause).__name__ if cause is not None else "ValidationError"
+        self.partial = bool(partial)
+        self.validation = validation if isinstance(validation, dict) else None
+
+
+def _attach_operation_diagnostic(payload: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+    attached = dict(payload)
+    attached["diagnostic"] = report
+    for field_name in _DIAGNOSTIC_FIELDS:
+        attached.setdefault(field_name, report[field_name])
+    return attached
+
+
+def _exception_has_type(exc: BaseException | None, expected: tuple[type[BaseException], ...]) -> bool:
+    current = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, expected):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+async def _await_build_stage(phase: str, awaitable: Awaitable[Any]) -> Any:
+    try:
+        return await awaitable
+    except _PersonaTemplateStageError:
+        raise
+    except Exception as exc:
+        raise _PersonaTemplateStageError(phase, exc) from exc
+
+
+def _build_stage_failure_diagnostic(
+    exc: _PersonaTemplateStageError,
+    *,
+    operation_id: str = "",
+    build_mode: str = "source",
+) -> dict[str, Any]:
+    phase = exc.phase if exc.phase in _BUILD_STAGE_LABELS else "research"
+    label = _BUILD_STAGE_LABELS[phase]
+    timed_out = _exception_has_type(exc.__cause__, (asyncio.TimeoutError, TimeoutError))
+    validation = exc.validation or {}
+    field_errors = list(validation.get("field_errors") or [])[:20]
+    field_warnings = list(validation.get("field_warnings") or [])[:20]
+    if phase == "validation":
+        message = "生成内容未通过人设 YAML 结构校验。"
+        suggestion = "根据字段级错误修正模板结构、必需字段和运行占位符后重试。"
+        retryable = False
+    elif phase == "persistence":
+        message = "构建内容已生成，但保存历史或导出文件时失败。"
+        suggestion = "检查服务器数据目录权限和可用空间；若历史已保存，不要重复创建相同记录。"
+        retryable = not exc.partial
+    elif timed_out:
+        message = f"{label}超过等待时间，构建未完成。"
+        suggestion = "确认主模型和相关服务可用后重新构建。"
+        retryable = True
+    else:
+        message = f"{label}阶段未完成。"
+        suggestion = "检查对应服务的脱敏日志和运行状态后重试。"
+        retryable = True
+    report = operation_diagnostic(
+        ok=False,
+        code=f"persona_template_build_{phase}_failed",
+        phase=phase,
+        title="人设模板构建失败",
+        message=message,
+        details=(
+            operation_detail("构建模式", "custom" if build_mode == "custom" else "source", "info"),
+            operation_detail("失败类型", exc.cause_type, "error"),
+            *(
+                (operation_detail("字段错误数", len(field_errors), "error"),)
+                if field_errors
+                else ()
+            ),
+        ),
+        steps=(operation_step(phase, label, "error", message),),
+        warnings=tuple(str(item.get("message") or "") for item in field_warnings if isinstance(item, dict)),
+        suggestion=suggestion,
+        retryable=retryable,
+        partial=exc.partial,
+        operation_id=operation_id,
+        trace_id=uuid.uuid4().hex,
+    )
+    if field_errors or field_warnings:
+        report["field_errors"] = field_errors
+        report["field_warnings"] = field_warnings
+    return report
+
+
+def _build_success_diagnostic(
+    result: dict[str, Any],
+    *,
+    operation_id: str = "",
+    build_mode: str,
+) -> dict[str, Any]:
+    sources = len(result.get("sources") or [])
+    subagents = len(result.get("subagents") or [])
+    avatars = len(result.get("avatar_candidates") or [])
+    signatures = len(result.get("signature_candidates") or [])
+    warnings = tuple(str(item) for item in (result.get("template_warnings") or [])[:10] if str(item).strip())
+    return operation_diagnostic(
+        ok=True,
+        code="persona_template_build_complete",
+        phase="persistence",
+        title="人设模板构建完成",
+        message="资料研究、模板合成、结构校验与历史记录持久化均已完成。",
+        details=(
+            operation_detail("构建模式", build_mode),
+            operation_detail("资料来源", sources, "ok"),
+            operation_detail("子 Agent", subagents, "ok"),
+            operation_detail("头像候选", avatars, "ok" if avatars else "info"),
+            operation_detail("签名候选", signatures, "ok" if signatures else "info"),
+        ),
+        steps=(
+            operation_step("alias_planning", "规划角色检索别名", "ok", "检索身份与别名计划已完成。"),
+            operation_step("research", "研究角色资料", "ok", f"已整理 {sources} 个资料来源和 {subagents} 份子 Agent 报告。"),
+            operation_step("synthesis", "合成人设模板", "ok", "主模型已生成 YAML 模板。"),
+            operation_step("repair", "修复模板结构", "ok", "模板清理与必要修复已完成。"),
+            operation_step("validation", "校验 YAML 与运行字段", "ok", "模板已通过结构和运行占位符校验。"),
+            operation_step("avatar_review", "审核头像与签名候选", "ok" if avatars or signatures else "skipped", "候选资产审核已完成。" if avatars or signatures else "本次没有可保存的资料候选。"),
+            operation_step("persistence", "保存构建历史", "ok", "构建结果已写入历史记录。"),
+        ),
+        warnings=warnings,
+        suggestion="检查模板和候选资料后再决定是否应用到当前运行配置。",
+        operation_id=operation_id,
+    )
 
 
 _TASKS: dict[str, _PersonaTemplateTask] = {}
@@ -590,29 +771,151 @@ def _template_apply_target(runtime: Any, result: dict[str, Any]) -> Path:
 def _apply_persona_template(runtime: Any, result: dict[str, Any]) -> dict[str, Any]:
     template = str(result.get("template") or "").strip()
     if not template:
-        raise RuntimeError("没有可应用的 YAML 模板")
-    validation = _validate_template_yaml(template)
+        validation = {
+            "field_errors": [{"field": "template", "code": "required", "message": "人设 YAML 不能为空。"}],
+            "field_warnings": [],
+        }
+        raise _PersonaTemplateStageError("validation", validation=validation)
+    try:
+        validation = _validate_template_yaml(template)
+    except Exception as exc:
+        raise _PersonaTemplateStageError("validation", exc) from exc
     if not validation.get("valid"):
-        errors = "；".join(str(item) for item in list(validation.get("errors") or [])[:3])
-        raise RuntimeError(f"YAML 校验未通过，不能应用：{errors or '结构不完整'}")
-    target = _template_apply_target(runtime, result)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(validation.get("template") or template, encoding="utf-8")
+        raise _PersonaTemplateStageError("validation", validation=validation)
+    try:
+        target = _template_apply_target(runtime, result)
+    except Exception as exc:
+        raise _PersonaTemplateStageError("request_validation", exc) from exc
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(validation.get("template") or template, encoding="utf-8")
+    except Exception as exc:
+        raise _PersonaTemplateStageError("file_write", exc) from exc
     plugin_config = getattr(runtime, "plugin_config", None)
     if plugin_config is not None and not str(getattr(plugin_config, "personification_prompt_path", "") or "").strip():
         setattr(plugin_config, "personification_prompt_path", str(target))
     bundle = _runtime_bundle(runtime)
     save_config = getattr(bundle, "save_plugin_runtime_config", None) if bundle is not None else None
     if callable(save_config):
-        save_config()
+        try:
+            save_config()
+        except Exception as exc:
+            raise _PersonaTemplateStageError("config_save", exc, partial=True) from exc
     reload_services = getattr(bundle, "reload_runtime_services", None) if bundle is not None else None
     if callable(reload_services):
-        reload_services()
+        try:
+            reload_services()
+        except Exception as exc:
+            raise _PersonaTemplateStageError("runtime_reload", exc, partial=True) from exc
     return {
         "applied": True,
         "path": str(target.resolve()),
         "template_keys": list(validation.get("keys") or []),
     }
+
+
+def _template_apply_success_diagnostic(runtime: Any) -> dict[str, Any]:
+    bundle = _runtime_bundle(runtime)
+    has_config_save = callable(getattr(bundle, "save_plugin_runtime_config", None)) if bundle is not None else False
+    has_reload = callable(getattr(bundle, "reload_runtime_services", None)) if bundle is not None else False
+    return operation_diagnostic(
+        ok=True,
+        code="persona_template_applied",
+        phase="runtime_reload",
+        title="人设模板已应用",
+        message="人设 YAML 已写入；当前 runtime 提供的配置保存与服务刷新回调已执行。",
+        steps=(
+            operation_step("validation", "校验人设 YAML", "ok", "模板结构、字段和运行占位符有效。"),
+            operation_step("file_write", "写入人设 YAML", "ok", "目标文件已写入。"),
+            operation_step(
+                "config_save",
+                "保存运行时配置",
+                "ok" if has_config_save else "skipped",
+                "运行时配置已保存。" if has_config_save else "当前 runtime 未提供配置保存回调。",
+            ),
+            operation_step(
+                "runtime_reload",
+                "刷新运行时服务",
+                "ok" if has_reload else "skipped",
+                "运行时服务已刷新。" if has_reload else "当前 runtime 未提供服务刷新回调。",
+            ),
+        ),
+        suggestion="无需重复应用。",
+    )
+
+
+def _template_apply_failure_diagnostic(exc: _PersonaTemplateStageError) -> dict[str, Any]:
+    labels = {
+        "validation": "校验人设 YAML",
+        "request_validation": "确认应用目标",
+        "file_write": "写入人设 YAML",
+        "config_save": "保存运行时配置",
+        "runtime_reload": "刷新运行时服务",
+    }
+    phase = exc.phase if exc.phase in labels else "runtime_reload"
+    validation = exc.validation or {}
+    field_errors = list(validation.get("field_errors") or [])[:20]
+    field_warnings = list(validation.get("field_warnings") or [])[:20]
+    if phase == "validation":
+        code = "persona_template_apply_validation_failed"
+        message = "人设 YAML 未通过结构、字段或运行占位符校验，未写入文件。"
+        suggestion = "根据字段级错误修正 YAML 后重试。"
+        retryable = False
+    elif phase == "request_validation":
+        code = "persona_template_apply_target_invalid"
+        message = "当前人设文件目标不符合 YAML 应用要求，未写入文件。"
+        suggestion = "在配置中心设置有效的 .yaml 或 .yml 人设路径后重试。"
+        retryable = False
+    elif phase == "file_write":
+        code = "persona_template_apply_file_write_failed"
+        message = "服务器未能写入人设 YAML 文件。"
+        suggestion = "检查目标目录权限、可用空间和文件占用状态后重试。"
+        retryable = True
+    elif phase == "config_save":
+        code = "persona_template_apply_config_save_partial"
+        message = "人设 YAML 已写入，但运行时配置未能保存。"
+        suggestion = "先确认配置文件状态；修复配置持久化后再决定是否重试。"
+        retryable = False
+    else:
+        code = "persona_template_apply_runtime_reload_partial"
+        message = "人设 YAML 已写入，但运行时服务刷新失败。"
+        suggestion = "文件无需重复写入；修复运行时服务后执行 reload 或重启 Bot。"
+        retryable = False
+    phase_order = ("validation", "request_validation", "file_write", "config_save", "runtime_reload")
+    failed_index = phase_order.index(phase)
+    operation_steps = []
+    for index, step_phase in enumerate(phase_order):
+        if index < failed_index:
+            status = "ok"
+            step_message = "该步骤已完成或无需执行。"
+        elif index == failed_index:
+            status = "error"
+            step_message = message
+        else:
+            status = "skipped"
+            step_message = "因前序步骤失败而未执行。"
+        operation_steps.append(operation_step(step_phase, labels[step_phase], status, step_message))
+    report = operation_diagnostic(
+        ok=False,
+        code=code,
+        phase=phase,
+        title="人设模板应用未完整完成" if exc.partial else "人设模板应用失败",
+        message=message,
+        details=(
+            operation_detail("失败类型", exc.cause_type, "error"),
+            operation_detail("文件写入状态", "已写入" if exc.partial else "未确认写入", "warn" if exc.partial else "info"),
+        ),
+        steps=operation_steps,
+        warnings=tuple(str(item.get("message") or "") for item in field_warnings if isinstance(item, dict)),
+        suggestion=suggestion,
+        retryable=retryable,
+        partial=exc.partial,
+        trace_id=uuid.uuid4().hex,
+    )
+    if field_errors or field_warnings:
+        report["field_errors"] = field_errors
+        report["field_warnings"] = field_warnings
+    return report
 
 
 async def _set_task_progress(
@@ -635,6 +938,34 @@ async def _set_task_progress(
 
 async def _default_progress(_: str, __: str, ___: int) -> None:
     return None
+
+
+def _require_valid_template(validation: dict[str, Any]) -> None:
+    if validation.get("valid"):
+        return
+    raise _PersonaTemplateStageError("validation", validation=validation)
+
+
+def _persist_persona_template_result(
+    result: dict[str, Any],
+    *,
+    runtime: Any,
+    actor: str,
+    source: str,
+) -> None:
+    try:
+        record = record_persona_template_result(result, actor=actor, source=source)
+    except Exception as exc:
+        raise _PersonaTemplateStageError("persistence", exc) from exc
+    try:
+        result["history_record"] = summarize_persona_template_record(record)
+        export_path = write_persona_template_export_file(
+            record,
+            plugin_config=getattr(runtime, "plugin_config", None),
+        )
+        result["export_path"] = str(export_path)
+    except Exception as exc:
+        raise _PersonaTemplateStageError("persistence", exc, partial=True) from exc
 
 
 def _cleanup_finished_tasks() -> None:
@@ -934,17 +1265,23 @@ async def _run_persona_template_build(
 
     started = time.time()
     await progress("alias_planning", "正在梳理检索别名...", 5)
-    search_aliases = await _plan_search_aliases(
-        runtime=runtime,
-        work_title=work_title,
-        character_name=character_name,
+    search_aliases = await _await_build_stage(
+        "alias_planning",
+        _plan_search_aliases(
+            runtime=runtime,
+            work_title=work_title,
+            character_name=character_name,
+        ),
     )
     await progress("source_gathering", "正在收集百科与联网资料...", 12)
-    sources = await _gather_persona_sources(
-        runtime=runtime,
-        work_title=work_title,
-        character_name=character_name,
-        search_aliases=search_aliases,
+    sources = await _await_build_stage(
+        "research",
+        _gather_persona_sources(
+            runtime=runtime,
+            work_title=work_title,
+            character_name=character_name,
+            search_aliases=search_aliases,
+        ),
     )
     source_text = _source_corpus(sources)
     revision = uuid.uuid4().hex
@@ -955,26 +1292,32 @@ async def _run_persona_template_build(
         ("关系视觉子agent", "角色关系、立绘/服装/视觉锚点、冲突资料与缺口"),
     ]
     research_results = await asyncio.gather(
-        asyncio.gather(*[
-            _run_subagent(
+        _await_build_stage(
+            "research",
+            asyncio.gather(*[
+                _run_subagent(
+                    caller=caller,
+                    agent_name=name,
+                    focus=focus,
+                    work_title=work_title,
+                    character_name=character_name,
+                    source_text=source_text,
+                )
+                for name, focus in focus_items
+            ]),
+        ),
+        _await_build_stage(
+            "avatar_review",
+            _collect_profile_candidates(
+                runtime=runtime,
                 caller=caller,
-                agent_name=name,
-                focus=focus,
                 work_title=work_title,
                 character_name=character_name,
+                sources=sources,
                 source_text=source_text,
-            )
-            for name, focus in focus_items
-        ]),
-        _collect_profile_candidates(
-            runtime=runtime,
-            caller=caller,
-            work_title=work_title,
-            character_name=character_name,
-            sources=sources,
-            source_text=source_text,
-            revision=revision,
-            search_aliases=search_aliases,
+                revision=revision,
+                search_aliases=search_aliases,
+            ),
         ),
     )
     subagents = list(research_results[0])
@@ -985,31 +1328,45 @@ async def _run_persona_template_build(
         candidate["original_endpoint"] = f"{base}/original"
     reference_template = _configured_template_reference(runtime)
     await progress("template_synthesis", "正在按插件 YAML 结构生成人设模板...", 78)
-    template = await _synthesize_template(
-        caller=caller,
-        work_title=work_title,
-        character_name=character_name,
-        source_text=source_text,
-        subagents=list(subagents),
-        reference_template=reference_template,
-    )
-    validation = _validate_template_yaml(template)
-    if not validation.get("valid"):
-        await progress("template_repair", "正在修复模板结构与占位符...", 88)
-        repaired = await _repair_template_yaml(
+    template = await _await_build_stage(
+        "synthesis",
+        _synthesize_template(
             caller=caller,
             work_title=work_title,
             character_name=character_name,
-            template=template,
-            validation=validation,
+            source_text=source_text,
+            subagents=list(subagents),
             reference_template=reference_template,
+        ),
+    )
+    try:
+        validation = _validate_template_yaml(template)
+    except Exception as exc:
+        raise _PersonaTemplateStageError("validation", exc) from exc
+    if not validation.get("valid"):
+        await progress("template_repair", "正在修复模板结构与占位符...", 88)
+        repaired = await _await_build_stage(
+            "repair",
+            _repair_template_yaml(
+                caller=caller,
+                work_title=work_title,
+                character_name=character_name,
+                template=template,
+                validation=validation,
+                reference_template=reference_template,
+            ),
         )
-        repaired_validation = _validate_template_yaml(repaired)
+        try:
+            repaired_validation = _validate_template_yaml(repaired)
+        except Exception as exc:
+            raise _PersonaTemplateStageError("validation", exc) from exc
         if repaired_validation.get("valid"):
             template = repaired_validation["template"]
             validation = repaired_validation
         else:
             template = _strip_yaml_fence(template)
+            validation = repaired_validation
+    _require_valid_template(validation)
     await progress("finalize", "正在整理输出结果...", 95)
     conflicts: list[str] = []
     for item in subagents:
@@ -1058,10 +1415,7 @@ async def _run_persona_template_build(
             *(["no safe signature candidate"] if not any(item.get("safety_status") == "pass" for item in signature_candidates) else []),
         ],
     }
-    record = record_persona_template_result(result, actor=actor, source=source)
-    result["history_record"] = summarize_persona_template_record(record)
-    export_path = write_persona_template_export_file(record, plugin_config=getattr(runtime, "plugin_config", None))
-    result["export_path"] = str(export_path)
+    _persist_persona_template_result(result, runtime=runtime, actor=actor, source=source)
     await progress("done", "人设模板已完成。", 100)
     return result
 
@@ -2119,68 +2473,119 @@ def _validate_template_yaml(text: str) -> dict[str, Any]:
     raw = _strip_yaml_fence(text)
     errors: list[str] = []
     warnings: list[str] = []
+    field_errors: list[dict[str, str]] = []
+    field_warnings: list[dict[str, str]] = []
+
+    def add_field_error(field_name: str, code: str, message: str) -> None:
+        field_errors.append({"field": field_name, "code": code, "message": message})
+
+    def add_field_warning(field_name: str, code: str, message: str) -> None:
+        field_warnings.append({"field": field_name, "code": code, "message": message})
+
     try:
         parsed = yaml.safe_load(raw)
     except Exception as exc:
+        mark = getattr(exc, "problem_mark", None)
+        location = ""
+        if mark is not None:
+            try:
+                location = f"（第 {int(mark.line) + 1} 行，第 {int(mark.column) + 1} 列）"
+            except (AttributeError, TypeError, ValueError):
+                location = ""
+        message = f"YAML 语法无效{location}。"
         return {
             "valid": False,
-            "errors": [f"YAML 解析失败：{exc}"],
+            "errors": [f"YAML 解析失败：{message}"],
             "warnings": [],
+            "field_errors": [{"field": "yaml", "code": "parse_failed", "message": message}],
+            "field_warnings": [],
             "keys": [],
             "data": None,
             "template": raw,
         }
     if not isinstance(parsed, dict):
-        errors.append("YAML 顶层必须是对象/dict。")
+        message = "YAML 顶层必须是对象/dict。"
+        errors.append(message)
+        add_field_error("yaml", "top_level_type", message)
         parsed = {}
     keys = list(parsed.keys()) if isinstance(parsed, dict) else []
     missing = [key for key in _REQUIRED_TEMPLATE_KEYS if key not in parsed]
     if missing:
         errors.append("缺少必需顶层字段：" + "、".join(missing))
+        for key in missing:
+            add_field_error(key, "required", f"缺少必需顶层字段 {key}。")
     system_text = str(parsed.get("system") or "")
     if not isinstance(parsed.get("system"), str) or not system_text.strip():
-        errors.append("system 必须是非空字符串。")
+        message = "system 必须是非空字符串。"
+        errors.append(message)
+        add_field_error("system", "non_empty_string", message)
     else:
         if len(system_text.strip()) < 900:
-            warnings.append("system 偏短：建议补足身份锚点、性格、群聊口吻、关系、边界与资料缺口。")
+            message = "system 偏短：建议补足身份锚点、性格、群聊口吻、关系、边界与资料缺口。"
+            warnings.append(message)
+            add_field_warning("system", "content_short", message)
         missing_sections = [
             label
             for label, hints in _RECOMMENDED_SYSTEM_SECTIONS
             if not any(hint in system_text for hint in hints)
         ]
         if missing_sections:
-            warnings.append("system 建议补充小节：" + "、".join(missing_sections))
+            message = "system 建议补充小节：" + "、".join(missing_sections)
+            warnings.append(message)
+            add_field_warning("system", "recommended_sections_missing", message)
         if any(re.search(pattern, system_text, flags=re.I) for pattern in _ASSISTANT_ROLE_PATTERNS):
-            warnings.append("system 含助手/客服式身份措辞，建议改成角色本人在群里说话的边界。")
+            message = "system 含助手/客服式身份措辞，建议改成角色本人在群里说话的边界。"
+            warnings.append(message)
+            add_field_warning("system", "assistant_role_language", message)
     input_text = parsed.get("input")
     if not isinstance(input_text, str) or not input_text.strip():
-        errors.append("input 必须是非空字符串。")
+        message = "input 必须是非空字符串。"
+        errors.append(message)
+        add_field_error("input", "non_empty_string", message)
     else:
         missing_placeholders = [p for p in _REQUIRED_INPUT_PLACEHOLDERS if p not in input_text]
         if missing_placeholders:
-            errors.append("input 缺少插件运行占位符：" + "、".join(missing_placeholders))
+            message = "input 缺少插件运行占位符：" + "、".join(missing_placeholders)
+            errors.append(message)
+            add_field_error("input", "runtime_placeholders_missing", message)
         if "<output>" not in input_text or "<message>" not in input_text:
-            warnings.append("input 未显式包含 <output>/<message> 输出格式，YAML 回复路径可能无法解析多消息。")
+            message = "input 未显式包含 <output>/<message> 输出格式，YAML 回复路径可能无法解析多消息。"
+            warnings.append(message)
+            add_field_warning("input", "output_format_missing", message)
     if not isinstance(parsed.get("tts"), dict):
-        warnings.append("tts 建议使用 voice/style/user_hint 对象。")
+        message = "tts 建议使用 voice/style/user_hint 对象。"
+        warnings.append(message)
+        add_field_warning("tts", "object_recommended", message)
     for list_key in ("nick_name", "ack_phrases", "mute_keyword"):
         if list_key in parsed and not isinstance(parsed.get(list_key), list):
-            errors.append(f"{list_key} 必须是列表。")
+            message = f"{list_key} 必须是列表。"
+            errors.append(message)
+            add_field_error(list_key, "list_required", message)
     ack_phrases = parsed.get("ack_phrases")
     if isinstance(ack_phrases, list) and len([item for item in ack_phrases if str(item or "").strip()]) < 3:
-        warnings.append("ack_phrases 建议至少 3 条短促自然的接话短句，避免固定口癖反复出现。")
+        message = "ack_phrases 建议至少 3 条短促自然的接话短句，避免固定口癖反复出现。"
+        warnings.append(message)
+        add_field_warning("ack_phrases", "too_few_items", message)
     nick_names = parsed.get("nick_name")
     if isinstance(nick_names, list) and not [item for item in nick_names if str(item or "").strip()]:
-        warnings.append("nick_name 列表为空，建议加入角色常用称呼/别名。")
+        message = "nick_name 列表为空，建议加入角色常用称呼/别名。"
+        warnings.append(message)
+        add_field_warning("nick_name", "empty_list", message)
     status_text = parsed.get("status")
     if isinstance(status_text, str) and "{time}" in status_text:
-        warnings.append("status 不建议直接放运行占位符；时间事实应由 input 注入。")
-    if parsed.get("name") and not str(parsed.get("name")).strip():
-        errors.append("name 不能为空。")
+        message = "status 不建议直接放运行占位符；时间事实应由 input 注入。"
+        warnings.append(message)
+        add_field_warning("status", "runtime_placeholder", message)
+    if "name" in parsed and (not isinstance(parsed.get("name"), str) or not str(parsed.get("name")).strip()):
+        message = "name 不能为空。"
+        errors.append(message)
+        add_field_error("name", "non_empty", message)
     return {
         "valid": not errors,
         "errors": errors,
         "warnings": warnings,
+        "field_errors": field_errors,
+        "field_warnings": field_warnings,
         "keys": keys,
         "data": parsed,
         "template": raw,
@@ -2476,47 +2881,64 @@ async def _run_custom_persona_template_build(
         ("说话关系子agent", "群聊说话节奏、称呼方式、插话边界、亲疏表达"),
         ("日常校验子agent", "爱好、作息/日常锚点、资料冲突、可执行边界"),
     ]
-    subagents = await asyncio.gather(
-        *[
-            _run_subagent(
-                caller=caller,
-                agent_name=name,
-                focus=focus,
-                work_title="自定义人设",
-                character_name=persona_name,
-                source_text=source_text,
-                use_builtin_search=False,
-                purpose="persona_template_custom_research",
-            )
-            for name, focus in focus_items
-        ]
+    subagents = await _await_build_stage(
+        "research",
+        asyncio.gather(
+            *[
+                _run_subagent(
+                    caller=caller,
+                    agent_name=name,
+                    focus=focus,
+                    work_title="自定义人设",
+                    character_name=persona_name,
+                    source_text=source_text,
+                    use_builtin_search=False,
+                    purpose="persona_template_custom_research",
+                )
+                for name, focus in focus_items
+            ]
+        ),
     )
     reference_template = _configured_template_reference(runtime)
     await progress("template_synthesis", "正在按插件 YAML 结构合成原创人设...", 78)
-    template = await _synthesize_custom_template(
-        caller=caller,
-        spec=spec,
-        source_text=source_text,
-        subagents=list(subagents),
-        reference_template=reference_template,
+    template = await _await_build_stage(
+        "synthesis",
+        _synthesize_custom_template(
+            caller=caller,
+            spec=spec,
+            source_text=source_text,
+            subagents=list(subagents),
+            reference_template=reference_template,
+        ),
     )
-    validation = _validate_template_yaml(template)
+    try:
+        validation = _validate_template_yaml(template)
+    except Exception as exc:
+        raise _PersonaTemplateStageError("validation", exc) from exc
     if not validation.get("valid"):
         await progress("template_repair", "正在修复模板结构与占位符...", 88)
-        repaired = await _repair_template_yaml(
-            caller=caller,
-            work_title="自定义人设",
-            character_name=persona_name,
-            template=template,
-            validation=validation,
-            reference_template=reference_template,
+        repaired = await _await_build_stage(
+            "repair",
+            _repair_template_yaml(
+                caller=caller,
+                work_title="自定义人设",
+                character_name=persona_name,
+                template=template,
+                validation=validation,
+                reference_template=reference_template,
+            ),
         )
-        repaired_validation = _validate_template_yaml(repaired)
+        try:
+            repaired_validation = _validate_template_yaml(repaired)
+        except Exception as exc:
+            raise _PersonaTemplateStageError("validation", exc) from exc
         if repaired_validation.get("valid"):
             template = repaired_validation["template"]
             validation = repaired_validation
         else:
             template = _strip_yaml_fence(template)
+            validation = repaired_validation
+    _require_valid_template(validation)
     await progress("finalize", "正在整理输出结果...", 95)
     conflicts: list[str] = []
     for item in subagents:
@@ -2550,12 +2972,49 @@ async def _run_custom_persona_template_build(
         "template_keys": list(validation.get("keys") or []),
         "template_reference": reference_template,
     }
-    record = record_persona_template_result(result, actor=actor, source=source)
-    result["history_record"] = summarize_persona_template_record(record)
-    export_path = write_persona_template_export_file(record, plugin_config=getattr(runtime, "plugin_config", None))
-    result["export_path"] = str(export_path)
+    _persist_persona_template_result(result, runtime=runtime, actor=actor, source=source)
     await progress("done", "自定义人设模板已完成。", 100)
     return result
+
+
+def _history_validation_diagnostic(
+    validation: dict[str, Any],
+    *,
+    record_id: str,
+    ok: bool,
+) -> dict[str, Any]:
+    field_errors = list(validation.get("field_errors") or [])[:20]
+    field_warnings = list(validation.get("field_warnings") or [])[:20]
+    report = operation_diagnostic(
+        ok=ok,
+        code="persona_template_history_updated" if ok else "persona_template_history_validation_failed",
+        phase="history_validation",
+        title="人设 YAML 已保存" if ok else "人设 YAML 校验失败",
+        message=(
+            "历史记录中的人设 YAML 已通过校验并保存。"
+            if ok
+            else "提交内容未通过 YAML 结构、字段或运行占位符校验，历史记录未修改。"
+        ),
+        details=(
+            operation_detail("字段错误数", len(field_errors), "ok" if not field_errors else "error"),
+            operation_detail("字段警告数", len(field_warnings), "warn" if field_warnings else "ok"),
+        ),
+        steps=(
+            operation_step(
+                "history_validation",
+                "校验并保存历史 YAML",
+                "warn" if ok and field_warnings else "ok" if ok else "error",
+                "结构校验通过，质量警告已保留。" if ok and field_warnings else "结构校验通过并已保存。" if ok else "字段校验未通过，未保存。",
+            ),
+        ),
+        warnings=tuple(str(item.get("message") or "") for item in field_warnings if isinstance(item, dict)),
+        suggestion="可继续使用；建议按字段警告改善模板质量。" if ok and field_warnings else "根据 field_errors 修正对应字段后重试。" if not ok else "无需操作。",
+        retryable=not ok,
+        operation_id=record_id,
+    )
+    report["field_errors"] = field_errors
+    report["field_warnings"] = field_warnings
+    return report
 
 
 def build_persona_template_router(*, runtime) -> APIRouter:
@@ -2669,7 +3128,7 @@ def build_persona_template_router(*, runtime) -> APIRouter:
         try:
             path = candidate_file(candidate, plugin_config=getattr(runtime, "plugin_config", None))
         except AvatarCandidateError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise HTTPException(status_code=404, detail="头像候选文件当前不可用") from exc
         return Response(content=path.read_bytes(), media_type=str(candidate.get("mime") or "application/octet-stream"), headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"})
 
     @router.post("/profile-apply")
@@ -2813,13 +3272,41 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             raise HTTPException(status_code=404, detail="未找到该人设构建历史记录")
         template = str(body.get("template") or "").strip()
         if not template:
-            raise HTTPException(status_code=400, detail="人设 YAML 不能为空")
+            validation = {
+                "field_errors": [{"field": "template", "code": "required", "message": "人设 YAML 不能为空。"}],
+                "field_warnings": [],
+            }
+            report = _history_validation_diagnostic(validation, record_id=record_id, ok=False)
+            raise HTTPException(status_code=400, detail=report)
         if len(template) > _TEMPLATE_REFERENCE_LIMIT:
-            raise HTTPException(status_code=400, detail=f"人设 YAML 过长，最多 {_TEMPLATE_REFERENCE_LIMIT} 字")
-        validation = _validate_template_yaml(template)
+            validation = {
+                "field_errors": [{
+                    "field": "template",
+                    "code": "too_long",
+                    "message": f"人设 YAML 过长，最多 {_TEMPLATE_REFERENCE_LIMIT} 字。",
+                }],
+                "field_warnings": [],
+            }
+            report = _history_validation_diagnostic(validation, record_id=record_id, ok=False)
+            raise HTTPException(status_code=400, detail=report)
+        try:
+            validation = _validate_template_yaml(template)
+        except Exception as exc:
+            validation = {
+                "field_errors": [{
+                    "field": "yaml",
+                    "code": "validator_failed",
+                    "message": "服务器未能完成 YAML 校验。",
+                }],
+                "field_warnings": [],
+            }
+            report = _history_validation_diagnostic(validation, record_id=record_id, ok=False)
+            report["trace_id"] = uuid.uuid4().hex
+            report["details"].append(operation_detail("失败类型", type(exc).__name__, "error").to_dict())
+            raise HTTPException(status_code=500, detail=report) from exc
         if not validation.get("valid"):
-            detail = "；".join(str(item) for item in validation.get("errors", [])[:5]) or "YAML 校验失败"
-            raise HTTPException(status_code=400, detail=detail)
+            report = _history_validation_diagnostic(validation, record_id=record_id, ok=False)
+            raise HTTPException(status_code=400, detail=report)
         result = dict(record.get("result") or {})
         result.update({
             "template": validation["template"],
@@ -2842,10 +3329,18 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             device_id=admin.device_id,
             target=record_id,
             ip_hash=get_client_ip(request),
-            detail={"template_keys": result["template_keys"]},
+            detail={"template_keys": result["template_keys"], "warning_count": len(validation.get("field_warnings") or [])},
             outcome="ok",
         )
-        return updated
+        report = _history_validation_diagnostic(validation, record_id=record_id, ok=True)
+        return _attach_operation_diagnostic(
+            {
+                **updated,
+                "field_errors": report["field_errors"],
+                "field_warnings": report["field_warnings"],
+            },
+            report,
+        )
 
     @router.delete("/history/{record_id}")
     async def delete_history_record(
@@ -2858,24 +3353,69 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             raise HTTPException(status_code=404, detail="未找到该人设构建历史记录")
         result = deleted.get("result") if isinstance(deleted.get("result"), dict) else {}
         revision = str(result.get("revision") or "")
-        revision_still_used = any(
-            str((record.get("result") or {}).get("revision") or "") == revision
-            for record in list_persona_template_records(limit=100)
-            if isinstance(record.get("result"), dict)
-        )
-        if re.fullmatch(r"[0-9a-f]{32}", revision) and not revision_still_used:
-            candidate_dir = Path(get_data_dir(getattr(runtime, "plugin_config", None))) / "persona_avatar_candidates" / revision
-            shutil.rmtree(candidate_dir, ignore_errors=True)
+        cleanup_status = "skipped"
+        cleanup_message = "该记录没有可独立清理的头像候选目录。"
+        cleanup_error_type = ""
+        try:
+            revision_still_used = any(
+                str((record.get("result") or {}).get("revision") or "") == revision
+                for record in list_persona_template_records(limit=100)
+                if isinstance(record.get("result"), dict)
+            )
+            if re.fullmatch(r"[0-9a-f]{32}", revision) and not revision_still_used:
+                candidate_dir = Path(get_data_dir(getattr(runtime, "plugin_config", None))) / "persona_avatar_candidates" / revision
+                if candidate_dir.exists():
+                    shutil.rmtree(candidate_dir)
+                    cleanup_status = "ok"
+                    cleanup_message = "不再被引用的头像候选目录已清理。"
+                else:
+                    cleanup_message = "头像候选目录已不存在，无需清理。"
+            elif revision_still_used:
+                cleanup_message = "同 revision 仍被其它历史记录引用，已保留头像候选。"
+        except FileNotFoundError:
+            cleanup_message = "头像候选目录已不存在，无需清理。"
+        except Exception as exc:
+            cleanup_status = "error"
+            cleanup_message = "历史记录已删除，但头像候选目录清理失败。"
+            cleanup_error_type = type(exc).__name__
+        partial = cleanup_status == "error"
         webui_audit_log.record(
             action="persona_template_delete",
             qq=admin.qq,
             device_id=admin.device_id,
             target=record_id,
             ip_hash=get_client_ip(request),
-            detail={"work_title": deleted.get("work_title", ""), "character_name": deleted.get("character_name", "")},
-            outcome="ok",
+            detail={
+                "work_title": deleted.get("work_title", ""),
+                "character_name": deleted.get("character_name", ""),
+                "cleanup_status": cleanup_status,
+                "cleanup_error_type": cleanup_error_type,
+            },
+            outcome="partial" if partial else "ok",
         )
-        return {"success": True, "record_id": record_id}
+        report = operation_diagnostic(
+            ok=not partial,
+            code="persona_template_delete_cleanup_partial" if partial else "persona_template_history_deleted",
+            phase="delete_cleanup" if partial else "history_delete",
+            title="历史记录已删除，候选清理未完成" if partial else "人设历史记录已删除",
+            message=cleanup_message,
+            details=(
+                operation_detail("历史记录", "已删除", "ok"),
+                operation_detail("头像候选清理", cleanup_status, "error" if partial else "ok" if cleanup_status == "ok" else "info"),
+                *((operation_detail("失败类型", cleanup_error_type, "error"),) if cleanup_error_type else ()),
+            ),
+            steps=(
+                operation_step("history_delete", "删除人设历史记录", "ok", "历史记录已删除。"),
+                operation_step("delete_cleanup", "清理头像候选目录", cleanup_status, cleanup_message),
+            ),
+            warnings=("历史记录已删除；仅头像候选目录可能仍残留在服务器。",) if partial else (),
+            suggestion="检查数据目录权限后人工清理对应的孤立候选目录；不要恢复或重复删除历史记录。" if partial else "无需操作。",
+            retryable=False,
+            partial=partial,
+            operation_id=record_id,
+            trace_id=uuid.uuid4().hex if partial else "",
+        )
+        return _attach_operation_diagnostic({"success": True, "record_id": record_id}, report)
 
     @router.post("/apply")
     async def apply_template(
@@ -2892,11 +3432,39 @@ def build_persona_template_router(*, runtime) -> APIRouter:
                     result = record.get("result") if isinstance(record.get("result"), dict) else None
                     break
         if not isinstance(result, dict):
-            raise HTTPException(status_code=400, detail="缺少可应用的人设构建结果")
+            validation = {
+                "field_errors": [{"field": "result", "code": "required", "message": "缺少可应用的人设构建结果。"}],
+                "field_warnings": [],
+            }
+            failure = _template_apply_failure_diagnostic(
+                _PersonaTemplateStageError("validation", validation=validation)
+            )
+            raise HTTPException(status_code=400, detail=failure)
         try:
             applied = _apply_persona_template(runtime, result)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            stage_error = (
+                exc
+                if isinstance(exc, _PersonaTemplateStageError)
+                else _PersonaTemplateStageError("runtime_reload", exc, partial=True)
+            )
+            failure = _template_apply_failure_diagnostic(stage_error)
+            webui_audit_log.record(
+                action="persona_template_apply",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=f"{result.get('work_title', '')}/{result.get('character_name', '')}",
+                ip_hash=get_client_ip(request),
+                detail={
+                    "record_id": record_id,
+                    "code": failure["code"],
+                    "phase": failure["phase"],
+                    "trace_id": failure["trace_id"],
+                },
+                outcome="partial" if failure["partial"] else "error",
+            )
+            status_code = 400 if failure["phase"] in {"validation", "request_validation"} else 500
+            raise HTTPException(status_code=status_code, detail=failure) from exc
         webui_audit_log.record(
             action="persona_template_apply",
             qq=admin.qq,
@@ -2906,7 +3474,7 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             detail={"path": applied.get("path", ""), "record_id": record_id},
             outcome="ok",
         )
-        return applied
+        return _attach_operation_diagnostic(applied, _template_apply_success_diagnostic(runtime))
 
     @router.post("/build-task")
     async def build_template_task(
@@ -2964,6 +3532,11 @@ def build_persona_template_router(*, runtime) -> APIRouter:
                         source="webui",
                         progress=_progress,
                     )
+                task.diagnostic = _build_success_diagnostic(
+                    task.result or {},
+                    operation_id=task.task_id,
+                    build_mode="custom" if is_custom else "source",
+                )
                 await _set_task_progress(
                     task,
                     stage="done",
@@ -2986,11 +3559,22 @@ def build_persona_template_router(*, runtime) -> APIRouter:
                     outcome="ok",
                 )
             except Exception as exc:
-                task.error = _clip_text(exc, 500)
+                stage_error = (
+                    exc
+                    if isinstance(exc, _PersonaTemplateStageError)
+                    else _PersonaTemplateStageError(_TASK_STAGE_PHASES.get(task.stage, "research"), exc)
+                )
+                report = _build_stage_failure_diagnostic(
+                    stage_error,
+                    operation_id=task.task_id,
+                    build_mode="custom" if is_custom else "source",
+                )
+                task.diagnostic = report
+                task.error = report["message"]
                 await _set_task_progress(
                     task,
-                    stage="error",
-                    message=f"构建失败：{task.error}",
+                    stage=report["phase"],
+                    message=report["message"],
                     progress=max(1, task.progress),
                     status="error",
                 )
@@ -3000,9 +3584,21 @@ def build_persona_template_router(*, runtime) -> APIRouter:
                     device_id=admin.device_id,
                     target=f"{work_title}/{character_name}",
                     ip_hash=get_client_ip(request),
-                    detail={"error": task.error, "mode": "task", "build_mode": "custom" if is_custom else "source"},
+                    detail={
+                        "code": report["code"],
+                        "phase": report["phase"],
+                        "trace_id": report["trace_id"],
+                        "mode": "task",
+                        "build_mode": "custom" if is_custom else "source",
+                    },
                     outcome="error",
                 )
+                logger = getattr(runtime, "logger", None)
+                if logger is not None and callable(getattr(logger, "warning", None)):
+                    logger.warning(
+                        f"persona template build failed: code={report['code']} "
+                        f"phase={report['phase']} trace={report['trace_id']}"
+                    )
 
         asyncio.create_task(_runner())
         return task.public()
@@ -3044,8 +3640,26 @@ def build_persona_template_router(*, runtime) -> APIRouter:
                     actor=admin.qq,
                     source="webui",
                 )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            stage_error = (
+                exc
+                if isinstance(exc, _PersonaTemplateStageError)
+                else _PersonaTemplateStageError("research", exc)
+            )
+            report = _build_stage_failure_diagnostic(
+                stage_error,
+                build_mode="custom" if is_custom else "source",
+            )
+            webui_audit_log.record(
+                action="persona_template_build",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=f"{work_title}/{character_name}",
+                ip_hash=get_client_ip(request),
+                detail={"code": report["code"], "phase": report["phase"], "trace_id": report["trace_id"], "mode": "sync"},
+                outcome="error",
+            )
+            raise HTTPException(status_code=422 if report["phase"] == "validation" else 503, detail=report) from exc
         webui_audit_log.record(
             action="persona_template_build",
             qq=admin.qq,
@@ -3060,6 +3674,9 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             },
             outcome="ok",
         )
-        return result
+        return _attach_operation_diagnostic(
+            result,
+            _build_success_diagnostic(result, build_mode="custom" if is_custom else "source"),
+        )
 
     return router

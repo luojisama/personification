@@ -100,6 +100,20 @@ function configSearchEntryScore(entry, tokens) {
   return score;
 }
 
+function configRememberDiagnostic(value, fallbackTitle="配置操作未完成") {
+  const operation = value && value.diagnostic && typeof value.diagnostic === "object"
+    ? value.diagnostic
+    : (value instanceof Error ? operationDiagnosticFromError(value, fallbackTitle) : value);
+  if (!operation || typeof operation !== "object") return null;
+  state.configDiagnostics = [operation, ...(Array.isArray(state.configDiagnostics) ? state.configDiagnostics : [])].slice(0, 8);
+  return operation;
+}
+
+function configClearDiagnostics() {
+  state.configDiagnostics = [];
+  render();
+}
+
 function renderConfig() {
   const search = normalizeConfigSearchText(state.configSearch || "");
   const searchTokens = search ? search.split(/\s+/).filter(Boolean) : [];
@@ -127,6 +141,11 @@ function renderConfig() {
     return `<button class="${g===activeGroup?'active':''}" onclick="pickGroup('${escapeAttr(g)}')">${escapeHtml(g)} <span class="muted" style="font-size:11px">${visibleCount}/${groupEntries.length}</span></button>`;
   }).join("") : "";
   const heading = search ? `搜索结果（${items.length}）` : (activeGroup || '配置');
+  const diagnostics = (Array.isArray(state.configDiagnostics) ? state.configDiagnostics : [])
+    .map(item => renderOperationDiagnostic(item)).join("");
+  const diagnosticCard = diagnostics
+    ? `<div class="card"><div class="between"><h2>配置操作诊断</h2><button class="btn small" onclick="configClearDiagnostics()">清空</button></div>${diagnostics}</div>`
+    : "";
   return `<div class="toolbar">
       <input id="config-search-input" type="search" placeholder="搜索字段名 / 标签 / 描述…" value="${escapeAttr(state.configSearch)}" oncompositionstart="onConfigSearchCompositionStart(this)" oncompositionend="onConfigSearchCompositionEnd(this)" oninput="onConfigSearchInput(this,event)" style="flex:1;max-width:340px">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
@@ -138,6 +157,7 @@ function renderConfig() {
     <div class="alert" style="margin-bottom:10px">
       插件配置由数据目录下的 <code>env.json</code> 持久化；<code>.env.prod</code> 仅在首次启用时导入插件字段，后续 WebUI 保存不会改写它。<code>SUPERUSERS</code> 等 NoneBot 基础配置仍放在 <code>.env.prod</code>。
     </div>
+    ${diagnosticCard}
     ${groupBar ? `<div class="group-bar">${groupBar}</div>` : ''}
     <div class="card">
       <h2>${escapeHtml(heading)} ${hiddenAdvanced ? `<span class="muted" style="font-size:12px;font-weight:normal">（已折叠 ${hiddenAdvanced} 项高级配置）</span>` : ''}</h2>
@@ -149,11 +169,12 @@ async function applyRecommended() {
   if (!confirm("将一组推荐配置写入插件 env.json，覆盖现有插件配置；不会改写 .env.prod。继续？")) return;
   try {
     const result = await api("/config/apply-recommended", { method:"POST", headers:{"content-type":"application/json"}, body: "{}" });
+    const operation = configRememberDiagnostic(result, "推荐默认值应用未完成");
     const lines = [`已应用 ${result.applied.length} 项`];
-    if (result.skipped.length) lines.push(`跳过 ${result.skipped.length}：` + result.skipped.map(s=>s.field_name).slice(0,3).join("、"));
-    alertFlash("ok", lines.join("；"));
+    if (result.skipped.length) lines.push(`跳过 ${result.skipped.length}：` + result.skipped.map(s=>`${s.field_name}（${s.reason}）`).slice(0,3).join("、"));
+    alertFlash(operation?.ok === false ? "err" : "ok", operation?.title || lines.join("；"));
     await loadView(); render();
-  } catch (e) { alertFlash("err", "应用失败：" + e.message); }
+  } catch (e) { const operation = configRememberDiagnostic(e, "推荐默认值应用未完成"); alertFlash("err", operation?.title || "推荐默认值应用未完成"); }
 }
 
 function renderField(e) {
@@ -589,7 +610,7 @@ function toggleApiPoolRaw(btn) {
 async function saveApiPool(field) {
   try {
     await saveField(field, readApiPoolEditor(field));
-  } catch (e) { alertFlash("err", e.message); }
+  } catch (e) { const operation = configRememberDiagnostic(e, "API Pool 保存未完成"); alertFlash("err", operation?.title || "API Pool 保存未完成"); }
 }
 
 async function probeApiProviderModels(field, index, btn) {
@@ -597,7 +618,8 @@ async function probeApiProviderModels(field, index, btn) {
   try {
     providers = readApiPoolEditor(field);
   } catch (e) {
-    alertFlash("err", e.message);
+    const operation = configRememberDiagnostic(e, "Provider 模型探测参数无效");
+    alertFlash("err", operation?.title || "Provider 模型探测参数无效");
     return;
   }
   const provider = providers[index];
@@ -610,15 +632,17 @@ async function probeApiProviderModels(field, index, btn) {
       headers:{"content-type":"application/json"},
       body: JSON.stringify({provider}),
     });
+    const operation = configRememberDiagnostic(result, "Provider 模型探测未完成");
     const models = normalizeApiProviderModels(result.models);
     providers[index] = {...provider, _model_options: models, _model_source: result.source || "", _model_probe_done: true};
     cacheApiProviderModelProbe(field, index, providers[index]);
     const card = btn ? btn.closest(".api-provider-card") : null;
     updateApiProviderModelControls(card, models, result.source || "");
     writeApiPoolEditor(field, providers);
-    alertFlash(models.length ? "ok" : "err", models.length ? `已探测 ${models.length} 个模型` : "未探测到模型，请手动填写");
+    alertFlash(models.length ? "ok" : "err", operation?.title || (models.length ? `已探测 ${models.length} 个模型` : "未探测到模型，请手动填写"));
   } catch (e) {
-    alertFlash("err", "模型探测失败：" + e.message);
+    const operation = configRememberDiagnostic(e, "Provider 模型探测未完成");
+    alertFlash("err", operation?.title || "Provider 模型探测未完成");
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = oldText || "探测模型"; }
   }
@@ -644,9 +668,10 @@ async function commitTextField(field, btn, kind) {
 async function saveField(field, value) {
   try {
     const result = await api("/config/value", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ field_name: field, value }) });
-    if (result.success) { alertFlash("ok", `已保存 ${field} 到插件 env.json，重启后仍生效`); await loadView(); render(); }
-    else { alertFlash("err", `保存部分失败：${(result.errors||[]).join("；")}`); await loadView(); render(); }
-  } catch (e) { alertFlash("err", "保存失败：" + e.message); }
+    const operation = configRememberDiagnostic(result, "配置保存未完成");
+    if (result.success) { alertFlash("ok", operation?.title || `已保存 ${field} 到插件 env.json`); await loadView(); render(); }
+    else { alertFlash("err", operation?.title || "配置保存仅部分完成"); await loadView(); render(); }
+  } catch (e) { const operation = configRememberDiagnostic(e, "配置保存未完成"); alertFlash("err", operation?.title || "配置保存未完成"); }
 }
 
 function pickGroup(g) { state.activeGroup = g; render(); }

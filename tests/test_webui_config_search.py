@@ -60,3 +60,18 @@ def test_config_api_pool_exposes_timeout_and_total_attempts() -> None:
     assert 'fieldHtml("timeout", "单次超时（秒）"' in app_config_js
     assert 'fieldHtml("max_retries", "总尝试次数"' in app_config_js
     assert 'name === "max_retries"' in app_config_js
+
+
+def test_config_frontend_persists_and_renders_operation_diagnostics() -> None:
+    app_config_js = (
+        Path(__file__).resolve().parents[1] / "webui" / "static" / "app-config.js"
+    ).read_text(encoding="utf-8")
+
+    assert "function configRememberDiagnostic" in app_config_js
+    assert "state.configDiagnostics = [operation" in app_config_js
+    assert "renderOperationDiagnostic(item)" in app_config_js
+    assert "配置操作诊断" in app_config_js
+    assert "configRememberDiagnostic(result" in app_config_js
+    assert "configRememberDiagnostic(e" in app_config_js
+    assert '"模型探测失败：" + e.message' not in app_config_js
+    assert '"保存失败：" + e.message' not in app_config_js

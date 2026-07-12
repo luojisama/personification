@@ -1247,6 +1247,38 @@ function renderPersonaDetail() {
     ${locals || '<p class="muted">无各群画像</p>'}`;
 }
 
+const ADMIN_OPERATION_STORAGE_KEY = "personification_admin_operation_diagnostics_v1";
+
+function adminOperationEntries() {
+  if (Array.isArray(state.adminOperationDiagnostics)) return state.adminOperationDiagnostics;
+  try {
+    const saved=JSON.parse(sessionStorage.getItem(ADMIN_OPERATION_STORAGE_KEY)||"[]");
+    state.adminOperationDiagnostics=Array.isArray(saved)?saved.slice(0,16):[];
+  } catch { state.adminOperationDiagnostics=[]; }
+  return state.adminOperationDiagnostics;
+}
+
+function rememberAdminOperation(scope, value, fallbackTitle="管理操作未完成") {
+  const diagnostic=value&&value.diagnostic&&typeof value.diagnostic==="object"
+    ? value.diagnostic
+    : (value instanceof Error ? operationDiagnosticFromError(value,fallbackTitle) : value);
+  if(!diagnostic||typeof diagnostic!=="object"||!diagnostic.code)return null;
+  state.adminOperationDiagnostics=[{scope,diagnostic},...adminOperationEntries()].slice(0,16);
+  try{sessionStorage.setItem(ADMIN_OPERATION_STORAGE_KEY,JSON.stringify(state.adminOperationDiagnostics));}catch{}
+  return diagnostic;
+}
+
+function clearAdminOperations(scope) {
+  state.adminOperationDiagnostics=adminOperationEntries().filter(item=>item.scope!==scope);
+  try{sessionStorage.setItem(ADMIN_OPERATION_STORAGE_KEY,JSON.stringify(state.adminOperationDiagnostics));}catch{}
+  render();
+}
+
+function renderAdminOperations(scope,title) {
+  const items=adminOperationEntries().filter(item=>item.scope===scope).map(item=>renderOperationDiagnostic(item.diagnostic)).join("");
+  return items?`<div class="card"><div class="between"><h2>${escapeHtml(title)}</h2><button class="btn small" onclick="clearAdminOperations('${escapeAttr(scope)}')">清空</button></div>${items}</div>`:"";
+}
+
 function renderPersonaBuilder() {
   const r = state.personaTemplateResult;
   const task = state.personaTemplateTask || {};
@@ -1357,7 +1389,7 @@ function renderPersonaBuilder() {
       <div class="row"><button class="btn small" onclick="openPersonaTemplateHistory('${escapeAttr(item.record_id || "")}')">管理</button><button class="btn small danger" onclick="deletePersonaTemplateHistory('${escapeAttr(item.record_id || "")}', '${escapeAttr(item.character_name || "")}' )">删除</button></div>
     </div>`;
   }).join("");
-  return `<div class="card">
+  return `${renderAdminOperations("persona-template","人设构建与应用诊断")}<div class="card">
     <h2>自动构建人设模板</h2>
     ${modeSwitch}
     ${buildMode === "custom" ? customForm : sourceForm}
@@ -1432,9 +1464,10 @@ async function applyPersonaTemplate() {
       headers: {"content-type":"application/json"},
       body: JSON.stringify(body),
     });
-    alertFlash("ok", "已应用人设：" + (applied.path || "当前配置"));
+    const diagnostic=rememberAdminOperation("persona-template",applied,"人设应用未完成");
+    alertFlash("ok", diagnostic?.title||"人设已应用");render();
   } catch (e) {
-    alertFlash("err", "应用失败：" + e.message);
+    const diagnostic=rememberAdminOperation("persona-template",e,"人设应用未完成");alertFlash("err",diagnostic?.title||"人设应用未完成");render();
   }
 }
 
@@ -1445,8 +1478,8 @@ async function applyPersonaProfileAssets(recordId, revision) {
   if(!confirm("将选中的头像和签名应用到当前 QQ？两个动作会分别记录结果。"))return;
   try {
     const result=await api("/persona-template/profile-apply",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({bot_id:state.personaProfileBotId,record_id:recordId,revision,avatar_candidate_id:avatarId,signature_candidate_id:signatureId,confirm_avatar:Boolean(avatarId),confirm_signature:Boolean(signatureId)})});
-    state.personaProfileApplyResult=result;alertFlash(result.status==="applied"?"ok":"info",result.title||"QQ 资料应用完成");render();
-  } catch(e){state.personaProfileApplyResult=operationDiagnosticFromError(e,"QQ 资料应用失败");alertFlash("err",state.personaProfileApplyResult.title);render();}
+    state.personaProfileApplyResult=result;const diagnostic=rememberAdminOperation("persona-template",result,"QQ 资料应用失败");alertFlash(result.status==="applied"?"ok":"info",diagnostic?.title||"QQ 资料应用完成");render();
+  } catch(e){state.personaProfileApplyResult=operationDiagnosticFromError(e,"QQ 资料应用失败");rememberAdminOperation("persona-template",state.personaProfileApplyResult);alertFlash("err",state.personaProfileApplyResult.title);render();}
 }
 
 async function refreshPersonaTemplateHistory() {
@@ -1480,24 +1513,26 @@ async function savePersonaTemplateEdit() {
   if (!recordId || !editor) return;
   try {
     const record = await api("/persona-template/history/" + encodeURIComponent(recordId), {method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({template:editor.value})});
+    const diagnostic=rememberAdminOperation("persona-template",record,"人设 YAML 保存未完成");
     state.personaTemplateResult = record.result || null;
     if (state.personaTemplateResult) state.personaTemplateResult.history_record = {record_id:record.record_id};
     state.personaTemplateEditing = false;
     await refreshPersonaTemplateHistory();
-    alertFlash("ok", "人设 YAML 已保存");
-  } catch (e) { alertFlash("err", "保存失败：" + e.message); }
+    alertFlash("ok", diagnostic?.title||"人设 YAML 已保存");
+  } catch (e) { const diagnostic=rememberAdminOperation("persona-template",e,"人设 YAML 保存未完成");alertFlash("err",diagnostic?.title||"人设 YAML 保存未完成");render(); }
 }
 
 async function deletePersonaTemplateHistory(recordId, name) {
   if (!recordId || !confirm(`确认删除已构建人设「${name||recordId}」？相关头像候选也会清理。`)) return;
   try {
-    await api("/persona-template/history/" + encodeURIComponent(recordId), {method:"DELETE"});
+    const result=await api("/persona-template/history/" + encodeURIComponent(recordId), {method:"DELETE"});
+    const diagnostic=rememberAdminOperation("persona-template",result,"人设记录删除未完成");
     const current = state.personaTemplateResult && state.personaTemplateResult.history_record;
     if (current && current.record_id === recordId) state.personaTemplateResult = null;
     state.personaTemplateEditing = false;
     await refreshPersonaTemplateHistory();
-    alertFlash("ok", "已删除人设记录");
-  } catch (e) { alertFlash("err", "删除失败：" + e.message); }
+    alertFlash(diagnostic?.partial?"info":"ok",diagnostic?.title||"已删除人设记录");
+  } catch (e) { const diagnostic=rememberAdminOperation("persona-template",e,"人设记录删除未完成");alertFlash("err",diagnostic?.title||"人设记录删除未完成");render(); }
 }
 
 async function buildPersonaTemplate() {
@@ -1540,17 +1575,20 @@ async function buildPersonaTemplate() {
       state.personaTemplateTask = last;
       if (last.status === "done") {
         state.personaTemplateResult = last.result || null;
-        alertFlash("ok", "人设模板已生成");
+        const diagnostic=rememberAdminOperation("persona-template",last,"人设模板构建未完成");
+        alertFlash("ok", diagnostic?.title||"人设模板已生成");
         await refreshPersonaTemplateHistory();
         break;
       }
       if (last.status === "error") {
-        throw new Error(last.error || last.message || "构建失败");
+        rememberAdminOperation("persona-template",last,"人设模板构建未完成");
+        alertFlash("err",last.title||last.message||"人设模板构建未完成");
+        break;
       }
       render();
     }
   } catch (e) {
-    alertFlash("err", "构建失败：" + e.message);
+    const diagnostic=rememberAdminOperation("persona-template",e,"人设模板构建未完成");alertFlash("err",diagnostic?.title||"人设模板构建未完成");
   }
   state.personaTemplateBusy = false; render();
 }
@@ -1594,7 +1632,7 @@ function renderGroupSwitch() {
     </tr>`;
   }).join("");
   const enabledCount = list.filter(g => g.enabled).length;
-  return `<div class="card">
+  return `${renderAdminOperations("group","群开关操作诊断")}<div class="card">
     <div class="between" style="margin-bottom:14px">
       <h2 style="margin:0">群开关（${enabledCount} / ${list.length} 启用）</h2>
     </div>
@@ -1613,22 +1651,22 @@ function renderGroupSwitch() {
 
 async function enableGroup(gid) {
   try {
-    await api("/groups/" + encodeURIComponent(gid) + "/whitelist", { method: "POST" });
-    alertFlash("ok", "已启用群 " + gid);
+    const result=await api("/groups/" + encodeURIComponent(gid) + "/whitelist", { method: "POST" });
+    const diagnostic=rememberAdminOperation("group",result,"群启用未完成");alertFlash("ok",diagnostic?.title||("已启用群 "+gid));
     const data = await api("/groups/whitelist");
     state.groupSwitches = data.groups;
     render();
-  } catch (e) { alertFlash("err", e.message); }
+  } catch (e) { const diagnostic=rememberAdminOperation("group",e,"群启用未完成");alertFlash("err",diagnostic?.title||"群启用未完成");render(); }
 }
 
 async function disableGroup(gid) {
   try {
-    await api("/groups/" + encodeURIComponent(gid) + "/whitelist", { method: "DELETE" });
-    alertFlash("ok", "已禁用群 " + gid);
+    const result=await api("/groups/" + encodeURIComponent(gid) + "/whitelist", { method: "DELETE" });
+    const diagnostic=rememberAdminOperation("group",result,"群禁用未完成");alertFlash("ok",diagnostic?.title||("已禁用群 "+gid));
     const data = await api("/groups/whitelist");
     state.groupSwitches = data.groups;
     render();
-  } catch (e) { alertFlash("err", e.message); }
+  } catch (e) { const diagnostic=rememberAdminOperation("group",e,"群禁用未完成");alertFlash("err",diagnostic?.title||"群禁用未完成");render(); }
 }
 
 async function enableGroupNew() {
@@ -1726,16 +1764,17 @@ async function saveGroupMemberAliases(uid) {
   if (!gid || !uid) return;
   const draft = getAliasDraft(uid, {});
   try {
-    await api("/groups/" + encodeURIComponent(gid) + "/aliases/" + encodeURIComponent(uid), {
+    const result=await api("/groups/" + encodeURIComponent(gid) + "/aliases/" + encodeURIComponent(uid), {
       method: "PUT",
       headers: {"content-type": "application/json"},
       body: JSON.stringify({ aliases: splitAliasInput(draft.aliasesText), note: draft.note || "" }),
     });
+    const diagnostic=rememberAdminOperation("group",result,"群成员称呼保存未完成");
     if (state.groupAliasDrafts) delete state.groupAliasDrafts[String(uid)];
     await refreshGroupDetailLight();
-    alertFlash("ok", "已保存群成员外号");
+    alertFlash(diagnostic?.partial?"info":"ok",diagnostic?.title||"已保存群成员外号");
     render();
-  } catch (e) { alertFlash("err", "保存外号失败：" + e.message); }
+  } catch (e) { const diagnostic=rememberAdminOperation("group",e,"群成员称呼保存未完成");alertFlash("err",diagnostic?.title||"群成员称呼保存未完成");render(); }
 }
 
 async function clearGroupMemberAliases(uid) {
@@ -1743,12 +1782,13 @@ async function clearGroupMemberAliases(uid) {
   if (!gid || !uid) return;
   if (!confirm("清空该成员在本群的外号映射？")) return;
   try {
-    await api("/groups/" + encodeURIComponent(gid) + "/aliases/" + encodeURIComponent(uid), { method: "DELETE" });
+    const result=await api("/groups/" + encodeURIComponent(gid) + "/aliases/" + encodeURIComponent(uid), { method: "DELETE" });
+    const diagnostic=rememberAdminOperation("group",result,"群成员称呼删除未完成");
     if (state.groupAliasDrafts) delete state.groupAliasDrafts[String(uid)];
     await refreshGroupDetailLight();
-    alertFlash("ok", "已清空群成员外号");
+    alertFlash(diagnostic?.partial?"info":"ok",diagnostic?.title||"已清空群成员外号");
     render();
-  } catch (e) { alertFlash("err", "清空外号失败：" + e.message); }
+  } catch (e) { const diagnostic=rememberAdminOperation("group",e,"群成员称呼删除未完成");alertFlash("err",diagnostic?.title||"群成员称呼删除未完成");render(); }
 }
 
 async function rebuildGroupKnowledge() {
@@ -1758,11 +1798,11 @@ async function rebuildGroupKnowledge() {
   state.groupKnowledgeRebuilding = true; render();
   try {
     const out = await api("/groups/" + encodeURIComponent(gid) + "/knowledge/rebuild", { method:"POST", headers:{"content-type":"application/json"}, body: "{}" });
-    alertFlash("ok", "已重建群知识库，新增 " + (out.saved || 0) + " 条");
+    const diagnostic=rememberAdminOperation("group",out,"群知识重建未完成");alertFlash("ok",diagnostic?.title||("已重建群知识库，新增 "+(out.saved||0)+" 条"));
     const knowledge = await api("/groups/" + encodeURIComponent(gid) + "/knowledge");
     state.groupKnowledge = knowledge.knowledge || [];
     state.groupKnowledgeAutobuild = knowledge.autobuild_status || null;
-  } catch (e) { alertFlash("err", "重建失败：" + e.message); }
+  } catch (e) { const diagnostic=rememberAdminOperation("group",e,"群知识重建未完成");alertFlash("err",diagnostic?.title||"群知识重建未完成"); }
   state.groupKnowledgeRebuilding = false; render();
 }
 
@@ -1936,9 +1976,9 @@ async function saveGroupSchedule(enabled) {
       body: JSON.stringify({ enabled: !!enabled, schedule_prompt: text }),
     });
     state.groupSchedule = out;
-    alertFlash("ok", "群作息已保存");
+    const diagnostic=rememberAdminOperation("group",out,"群作息保存未完成");alertFlash(diagnostic?.partial?"info":"ok",diagnostic?.title||"群作息已保存");
     render();
-  } catch (e) { alertFlash("err", "保存作息失败：" + e.message); }
+  } catch (e) { const diagnostic=rememberAdminOperation("group",e,"群作息保存未完成");alertFlash("err",diagnostic?.title||"群作息保存未完成");render(); }
 }
 
 async function autoGenerateGroupSchedule() {
@@ -1951,14 +1991,15 @@ async function autoGenerateGroupSchedule() {
       headers:{"content-type":"application/json"},
       body: "{}",
     });
+    rememberAdminOperation("group",out,"群作息生成未完成");
     const saved = await api("/groups/" + encodeURIComponent(gid) + "/schedule", {
       method:"PUT",
       headers:{"content-type":"application/json"},
       body: JSON.stringify({ enabled: true, schedule_prompt: out.schedule_prompt || "" }),
     });
     state.groupSchedule = saved;
-    alertFlash("ok", "已自动生成并启用群作息");
-  } catch (e) { alertFlash("err", "自动生成作息失败：" + e.message); }
+    const diagnostic=rememberAdminOperation("group",saved,"群作息保存未完成");alertFlash("ok",diagnostic?.title||"已自动生成并启用群作息");
+  } catch (e) { const diagnostic=rememberAdminOperation("group",e,"群作息自动生成未完成");alertFlash("err",diagnostic?.title||"群作息自动生成未完成"); }
   state.groupScheduleGenerating = false; render();
 }
 
@@ -2022,6 +2063,7 @@ function renderGroupDetail() {
     <td class="muted" style="font-size:12px">${escapeHtml(m.scope || '')}/${escapeHtml(m.risk_level || '')}/${Number(m.confidence||0).toFixed(2)}</td>
   </tr>`).join("");
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;state.groupRawChat=null;state.groupFavorability=null;state.groupStyleSnapIdx=0;state.groupAliasDrafts={};render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
+    ${renderAdminOperations("group","群管理操作诊断")}
     ${renderFavorabilityCard(state.groupFavorability, "群好感度")}
     ${renderGroupAgentState()}
     ${renderGroupScheduleCard()}
@@ -2072,10 +2114,11 @@ async function rebuildGroupStyle() {
   state.groupStyleRebuilding = true; render();
   try {
     const out = await api("/groups/" + encodeURIComponent(gid) + "/style/rebuild", { method:"POST", headers:{"content-type":"application/json"}, body: "{}" });
+    const diagnostic=rememberAdminOperation("group",out,"群风格分析未完成");
     state.groupStyle = { ...state.groupStyle, snapshots: out.snapshots };
     state.groupStyleSnapIdx = 0;
-    alertFlash("ok", "已生成新群风格快照");
-  } catch (e) { alertFlash("err", "分析失败：" + e.message); }
+    alertFlash("ok",diagnostic?.title||"已生成新群风格快照");
+  } catch (e) { const diagnostic=rememberAdminOperation("group",e,"群风格分析未完成");alertFlash("err",diagnostic?.title||"群风格分析未完成"); }
   state.groupStyleRebuilding = false; render();
 }
 

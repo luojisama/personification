@@ -1,3 +1,34 @@
+const STICKER_DIAGNOSTICS_STORAGE_KEY = "personification_sticker_diagnostics_v1";
+
+function stickerDiagnostics() {
+  if (Array.isArray(state.stickerDiagnostics)) return state.stickerDiagnostics;
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(STICKER_DIAGNOSTICS_STORAGE_KEY) || "[]");
+    state.stickerDiagnostics = Array.isArray(saved) ? saved.slice(0, 8) : [];
+  } catch {
+    state.stickerDiagnostics = [];
+  }
+  return state.stickerDiagnostics;
+}
+
+function rememberStickerDiagnostic(value) {
+  const diagnostic = value && value.diagnostic && typeof value.diagnostic === "object"
+    ? value.diagnostic
+    : value;
+  if (!diagnostic || typeof diagnostic !== "object" || !diagnostic.code) return null;
+  state.stickerDiagnostics = [diagnostic, ...stickerDiagnostics()].slice(0, 8);
+  try {
+    sessionStorage.setItem(STICKER_DIAGNOSTICS_STORAGE_KEY, JSON.stringify(state.stickerDiagnostics));
+  } catch {}
+  return diagnostic;
+}
+
+function clearStickerDiagnostics() {
+  state.stickerDiagnostics = [];
+  try { sessionStorage.removeItem(STICKER_DIAGNOSTICS_STORAGE_KEY); } catch {}
+  render();
+}
+
 function renderStickers() {
   const data = state.stickers;
   if (!data) return `<div class="card muted">加载中…</div>`;
@@ -24,6 +55,10 @@ function renderStickers() {
       </div>
     </div>`;
   }).join("");
+  const diagnostics = stickerDiagnostics().map(item => renderOperationDiagnostic(item)).join("");
+  const diagnosticCard = diagnostics
+    ? `<div class="card"><div class="between"><h2>表情包操作诊断</h2><button class="btn small" onclick="clearStickerDiagnostics()">清空</button></div>${diagnostics}</div>`
+    : "";
   return `<div class="toolbar">
       <input id="sticker-search-input" type="search" placeholder="按文件名/描述/标签搜索…" value="${escapeAttr(state.stickerSearch)}" oninput="state.stickerSearch=this.value;render()" style="flex:1;max-width:340px">
       <span class="muted">共 ${data.total} 张，已标 ${data.labeled_count}</span>
@@ -33,6 +68,7 @@ function renderStickers() {
       <button class="btn" onclick="rescanStickers('force_all')" style="color:var(--warn)">全部重打标</button>
     </div>
     <p class="muted" style="font-size:12px;margin:0 0 12px">表情包目录：<code>${escapeHtml(data.sticker_dir)}</code>。删除会移到 trash/YYYYMMDD/ 子目录，可手动恢复。</p>
+    ${diagnosticCard}
     <div class="sticker-grid">${grid || '<p class="muted">暂无表情包</p>'}</div>
     ${state.selectedSticker ? renderStickerEdit() : ''}`;
 }
@@ -43,17 +79,17 @@ async function uploadStickerFromInput(input) {
   const form = new FormData();
   form.append("file", file);
   try {
-    const res = await fetch(API + "/stickers/upload", { method: "POST", credentials: "include", body: form });
-    if (!res.ok) {
-      let detail = res.statusText;
-      try { detail = (await res.json()).detail || detail; } catch {}
-      throw new Error(detail);
-    }
-    const out = await res.json();
+    const out = await api("/stickers/upload", { method: "POST", body: form });
+    rememberStickerDiagnostic(out);
     alertFlash("ok", `上传成功：${out.filename}${out.needs_labeling?'（待打标）':''}`);
     await loadView(); render();
-  } catch (e) { alertFlash("err", "上传失败：" + e.message); }
-  input.value = "";
+  } catch (e) {
+    const diagnostic = rememberStickerDiagnostic(operationDiagnosticFromError(e, "表情包上传未完成"));
+    alertFlash("err", diagnostic?.message || "表情包上传未完成");
+    if (diagnostic?.partial) { await loadView(); render(); }
+  } finally {
+    input.value = "";
+  }
 }
 
 async function rescanStickers(mode) {
@@ -61,9 +97,13 @@ async function rescanStickers(mode) {
   if (!confirm(`${label}：将清空对应表情包的标签元数据，等待下次启动或后台 labeler 扫描时重打。继续？`)) return;
   try {
     const out = await api("/stickers/rescan", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({mode}) });
+    rememberStickerDiagnostic(out);
     alertFlash("ok", `${label}：已清空 ${out.scheduled} 个条目`);
     await loadView(); render();
-  } catch (e) { alertFlash("err", "操作失败：" + e.message); }
+  } catch (e) {
+    const diagnostic = rememberStickerDiagnostic(operationDiagnosticFromError(e, "表情包扫描未完成"));
+    alertFlash("err", diagnostic?.message || "表情包扫描未完成");
+  }
 }
 
 function openStickerEdit(name) {
@@ -106,7 +146,7 @@ function renderStickerEdit() {
 async function saveSticker() {
   const s = state.selectedSticker;
   try {
-    await api("/stickers/" + encodeURIComponent(s.filename), {
+    const out = await api("/stickers/" + encodeURIComponent(s.filename), {
       method:"PATCH",
       headers:{"content-type":"application/json"},
       body: JSON.stringify({
@@ -115,29 +155,40 @@ async function saveSticker() {
         weight: s.weight,
       }),
     });
+    rememberStickerDiagnostic(out);
     alertFlash("ok", "已保存");
     state.selectedSticker = null;
     await loadView(); render();
-  } catch (e) { alertFlash("err", "保存失败：" + e.message); }
+  } catch (e) {
+    const diagnostic = rememberStickerDiagnostic(operationDiagnosticFromError(e, "表情包 metadata 保存未完成"));
+    alertFlash("err", diagnostic?.message || "表情包 metadata 保存未完成");
+  }
 }
 
 async function deleteSticker() {
   const s = state.selectedSticker;
   if (!s) return;
   await deleteStickerByName(s.filename);
-  state.selectedSticker = null;
 }
 
 async function deleteStickerByName(name) {
   if (!confirm(`将 ${name} 移到 trash 目录？可手动恢复。`)) return;
   try {
-    await api("/stickers/" + encodeURIComponent(name), { method:"DELETE" });
+    const out = await api("/stickers/" + encodeURIComponent(name), { method:"DELETE" });
+    rememberStickerDiagnostic(out);
     alertFlash("ok", `已移到回收：${name}`);
     if (state.selectedSticker && state.selectedSticker.filename === name) {
       state.selectedSticker = null;
     }
     await loadView(); render();
-  } catch (e) { alertFlash("err", "删除失败：" + e.message); }
+  } catch (e) {
+    const diagnostic = rememberStickerDiagnostic(operationDiagnosticFromError(e, "表情包回收未完成"));
+    alertFlash("err", diagnostic?.message || "表情包回收未完成");
+    if (diagnostic?.partial || diagnostic?.outcome_unknown) {
+      state.selectedSticker = null;
+      await loadView(); render();
+    }
+  }
 }
 
 function formatInnerPendingThoughts(value) {

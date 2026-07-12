@@ -1,5 +1,41 @@
+const _SKILL_OPERATION_RESULT_STORAGE_KEY = "personification_skill_operation_result_v1";
+
+function persistSkillOperationResult(input) {
+  const result = input && input.diagnostic && typeof input.diagnostic === "object" ? input.diagnostic : input;
+  state.skillOperationResult = result && typeof result === "object" ? result : null;
+  try {
+    if (state.skillOperationResult) sessionStorage.setItem(_SKILL_OPERATION_RESULT_STORAGE_KEY, JSON.stringify(state.skillOperationResult));
+    else sessionStorage.removeItem(_SKILL_OPERATION_RESULT_STORAGE_KEY);
+  } catch {}
+}
+
+function clearSkillOperationResult() {
+  persistSkillOperationResult(null);
+  render();
+}
+
+try {
+  const savedSkillOperationResult = JSON.parse(sessionStorage.getItem(_SKILL_OPERATION_RESULT_STORAGE_KEY) || "null");
+  if (savedSkillOperationResult && typeof savedSkillOperationResult === "object") state.skillOperationResult = savedSkillOperationResult;
+} catch {
+  try { sessionStorage.removeItem(_SKILL_OPERATION_RESULT_STORAGE_KEY); } catch {}
+}
+
+function renderSkillOperationResult() {
+  const result = state.skillOperationResult;
+  if (!result) return "";
+  return `<div class="card">
+    <div class="between" style="gap:12px;align-items:flex-start">
+      <div><h2 style="margin:0">最近一次 Skill 操作</h2><p class="muted" style="font-size:12px;margin:6px 0 0">刷新页面后仍保留；这里只保存服务端返回的脱敏 diagnostic。</p></div>
+      <button class="btn small" onclick="clearSkillOperationResult()">清除</button>
+    </div>
+    <div style="margin-top:12px">${renderOperationDiagnostic(result)}</div>
+  </div>`;
+}
+
 function renderSkills() {
-  if (state.skillsAvailable === false) return `<div class="card muted">tool_registry 未就绪</div>${renderRemoteSkillSources()}${renderMcpTools()}`;
+  const operationResult = renderSkillOperationResult();
+  if (state.skillsAvailable === false) return `${operationResult}<div class="card muted">tool_registry 未就绪</div>${renderRemoteSkillSources()}${renderMcpTools()}`;
   const search = (state.skillFilter || "").trim().toLowerCase();
   const items = search ? state.skills.filter(s => {
     const hay = [s.name, s.description, s.category, s.source_kind, s.mcp ? "mcp" : ""].join(" ").toLowerCase();
@@ -38,7 +74,7 @@ function renderSkills() {
       </td>
     </tr>`;
   }).join("");
-  return `${renderSkillSummary()}
+  return `${operationResult}${renderSkillSummary()}
     <div class="toolbar">
       <input id="skill-filter-input" type="search" placeholder="搜索 skill 名称…" value="${escapeAttr(state.skillFilter)}" oninput="state.skillFilter=this.value;render()" style="flex:1;max-width:340px">
       <span class="muted">共 ${state.skills.length} 个 skill</span>
@@ -140,18 +176,28 @@ function renderMcpTools() {
 
 async function toggleSkill(name, disabled) {
   try {
-    await api(`/skills/${encodeURIComponent(name)}/toggle`, { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({disabled}) });
+    const result = await api(`/skills/${encodeURIComponent(name)}/toggle`, { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({disabled}) });
+    persistSkillOperationResult(result);
     alertFlash("ok", `${name} 已${disabled?'禁用':'启用'}`);
     await loadView(); render();
-  } catch (e) { alertFlash("err", "切换失败：" + e.message); }
+  } catch (e) {
+    persistSkillOperationResult(operationDiagnosticFromError(e, "Skill 开关保存失败"));
+    alertFlash("err", "切换失败：" + e.message);
+    render();
+  }
 }
 
 async function setSkillRemoteEnabled(enabled) {
   try {
-    await api("/config/value", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({field_name:"personification_skill_remote_enabled", value: !!enabled}) });
+    const result = await api("/skills/remote/toggle", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({enabled: !!enabled}) });
+    persistSkillOperationResult(result);
     alertFlash("ok", enabled ? "远程 Skill 已开启" : "远程 Skill 已关闭");
     await loadView(); render();
-  } catch (e) { alertFlash("err", "保存失败：" + e.message); }
+  } catch (e) {
+    persistSkillOperationResult(operationDiagnosticFromError(e, "远程 Skill 开关保存失败"));
+    alertFlash("err", "保存失败：" + e.message);
+    render();
+  }
 }
 
 async function addRemoteSkillSource() {
@@ -163,26 +209,41 @@ async function addRemoteSkillSource() {
       prefer_first: !!f.preferFirst, auto_approve: !!f.autoApprove, enable_remote: true,
     };
     const result = await api("/skills/remote/source", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify(payload) });
+    persistSkillOperationResult(result);
     state.skillSourceForm = { source: "", name: "", ref: "", subdir: "", kind: "auto", preferFirst: false, autoApprove: false };
     alertFlash("ok", result.auto_approved ? "远程源已添加并批准，重载后生效" : "远程源已添加，审核后重载生效");
     await loadView(); render();
-  } catch (e) { alertFlash("err", "添加失败：" + e.message); }
+  } catch (e) {
+    persistSkillOperationResult(operationDiagnosticFromError(e, "远程 Skill 来源添加失败"));
+    alertFlash("err", "添加失败：" + e.message);
+    render();
+  }
 }
 
 async function reviewRemoteSkill(selector, status) {
   try {
     const result = await api("/skills/remote/review", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({selector, status}) });
+    persistSkillOperationResult(result);
     alertFlash("ok", `已更新 ${result.matched_count || 0} 个远程源`);
     await loadView(); render();
-  } catch (e) { alertFlash("err", "审核失败：" + e.message); }
+  } catch (e) {
+    persistSkillOperationResult(operationDiagnosticFromError(e, "远程 Skill 审核失败"));
+    alertFlash("err", "审核失败：" + e.message);
+    render();
+  }
 }
 
 async function reloadSkillRuntime() {
   try {
-    await api("/skills/reload", { method:"POST" });
+    const result = await api("/skills/reload", { method:"POST" });
+    persistSkillOperationResult(result);
     alertFlash("ok", "Skill 运行时已重载");
     await loadView(); render();
-  } catch (e) { alertFlash("err", "重载失败：" + e.message); }
+  } catch (e) {
+    persistSkillOperationResult(operationDiagnosticFromError(e, "Skill runtime 重载失败"));
+    alertFlash("err", "重载失败：" + e.message);
+    render();
+  }
 }
 
 function pluginKnowledgeStrategyLabel(value) {
