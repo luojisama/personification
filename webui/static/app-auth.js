@@ -26,10 +26,10 @@ function clearSmallOperations(scope) {
 }
 
 function renderSmallOperations(scope, title) {
-  const items = smallOperationEntries()
-    .filter(item => item.scope === scope)
-    .map(item => renderOperationDiagnostic(item.diagnostic))
-    .join("");
+  const items = renderOperationHistory(
+    smallOperationEntries().filter(item => item.scope === scope).map(item => item.diagnostic),
+    {group:`view-${state.view}`},
+  );
   return items ? `<div class="card"><div class="between"><h2>${escapeHtml(title)}</h2><button class="btn small" onclick="clearSmallOperations('${escapeAttr(scope)}')">清空</button></div>${items}</div>` : "";
 }
 
@@ -138,7 +138,8 @@ function attachLayout() {
 }
 
 function renderLogin() {
-  const themeIcon = state.theme === "dark" ? "🌙" : "☀";
+  const themeIcon = state.theme === "dark" ? renderIcon("sun") : renderIcon("moon");
+  const themeLabel = state.theme === "dark" ? "切换到浅色主题" : "切换到深色主题";
   const eligible = state.eligibleAdmins || [];
   let picker, hint;
   if (!eligible.length) {
@@ -160,7 +161,7 @@ function renderLogin() {
   }
   return `<div class="login-wrap"><div class="card"><div class="between">
       <h2 style="margin:0">拟人插件 WebUI 登录</h2>
-      <button class="btn small" onclick="toggleTheme()" title="切换主题">${themeIcon}</button>
+       <button class="btn small icon-btn" onclick="toggleTheme()" title="${themeLabel}" aria-label="${themeLabel}">${themeIcon}</button>
     </div>
     <div id="login-step1">
       <label>管理员 QQ</label>

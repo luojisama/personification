@@ -69,7 +69,7 @@ def test_config_frontend_persists_and_renders_operation_diagnostics() -> None:
 
     assert "function configRememberDiagnostic" in app_config_js
     assert "state.configDiagnostics = [operation" in app_config_js
-    assert "renderOperationDiagnostic(item)" in app_config_js
+    assert "renderOperationHistory(" in app_config_js
     assert "配置操作诊断" in app_config_js
     assert "configRememberDiagnostic(result" in app_config_js
     assert "configRememberDiagnostic(e" in app_config_js

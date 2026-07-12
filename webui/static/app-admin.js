@@ -579,7 +579,6 @@ const HEALTH_STATUS = {
 
 function renderInteractionResult(ir) {
   if (!ir) return "";
-  const operationDiagnostic = ir.code ? renderOperationDiagnostic(ir) : "";
   const alertCls = ir.replied ? "ok" : "err";
   const meta = [];
   if (ir.diagnosis_code) meta.push(`诊断码：${ir.diagnosis_code}`);
@@ -608,7 +607,7 @@ function renderInteractionResult(ir) {
   const traceSummary = last && (last.outcome || last.diagnosis_code)
     ? `<p class="muted" style="font-size:12px;margin:8px 0 0">链路收口：${escapeHtml(last.outcome || "-")} / ${escapeHtml(last.diagnosis_code || "-")}</p>`
     : "";
-  return `${operationDiagnostic}<div style="margin-top:10px">
+  return `<div style="margin-top:10px">
     <div class="alert ${alertCls}" style="white-space:pre-wrap">${escapeHtml(ir.detail || "")}${escapeHtml(reply)}</div>
     <div class="row" style="margin:6px 0 10px">
       ${meta.map(x => `<span class="tag">${escapeHtml(x)}</span>`).join("")}
@@ -622,7 +621,6 @@ function renderInteractionResult(ir) {
 
 function renderQzoneForwardResult(result) {
   if (!result) return "";
-  const operationDiagnostic = result.code ? renderOperationDiagnostic(result) : "";
   const ok = !!result.ok;
   const feed = result.feed || {};
   const quota = result.quota || {};
@@ -633,7 +631,7 @@ function renderQzoneForwardResult(result) {
     ? `已转发 ${result.target_user_id || ""} 的第一条空间动态`
     : (result.error || "转发测试失败");
   const feedText = feed.content ? `\n\n动态内容：${feed.content}` : "";
-  return `${operationDiagnostic}<div style="margin-top:10px">
+  return `<div style="margin-top:10px">
     <div class="alert ${ok?'ok':'err'}" style="white-space:pre-wrap">${escapeHtml(detail + feedText)}</div>
     <div class="row" style="margin-top:8px">
       ${result.stage ? `<span class="tag">阶段：${escapeHtml(result.stage)}</span>` : ""}
@@ -780,7 +778,7 @@ function renderQQ() {
       <td>${escapeHtml(f.remark||f.nickname||'')} <code>${escapeHtml(f.user_id)}</code></td>
       <td><button class="btn small danger" onclick="qqDeleteFriend('${escapeAttr(f.user_id)}','${escapeAttr(f.remark||f.nickname||'')}')">删好友</button></td>
     </tr>`).join("");
-  const diagnostics = (Array.isArray(state.qqDiagnostics) ? state.qqDiagnostics : []).map(item => renderOperationDiagnostic(item)).join("");
+  const diagnostics = renderOperationHistory(Array.isArray(state.qqDiagnostics) ? state.qqDiagnostics : [], {group:`view-${state.view}`});
   const diagnosticCard = diagnostics ? `<div class="card"><div class="between"><h2>QQ 操作诊断</h2><button class="btn small" onclick="qqClearDiagnostics()">清空</button></div>${diagnostics}</div>` : "";
   return `${infoCard}
     ${diagnosticCard}
@@ -1030,7 +1028,6 @@ function renderQzoneAuthRecovery(q, auth) {
       <div class="qzone-login-copy"><span class="ops-status info"><span></span>${escapeHtml(login.status||'preparing')}</span><h3>${escapeHtml(login.message||'等待腾讯登录')}</h3><p>二维码剩余 ${Number(login.expires_in_seconds||0)} 秒。请用手机 QQ 的扫一扫，不要使用图片识别或第三方扫码工具。</p><div class="row"><button class="btn small" onclick="cancelQzoneLogin()" ${state.qzoneAuthBusy?'disabled':''}>取消登录</button></div></div>
     </div>` : `<div class="qzone-auth-idle"><p>${auth.status==='healthy'?'当前凭证可用。需要切换或重新授权时，也可以主动生成新二维码。':'LLOneBot 无法提供有效 p_skey 时，从这里发起独立服务端登录。'}</p><button class="btn primary" onclick="startQzoneLogin()" ${state.qzoneAuthBusy||!state.qzoneBotId?'disabled':''}>${state.qzoneAuthBusy==='start'?'<span class="spinner"></span> 生成中…':'QQ 扫码恢复登录'}</button></div>`}
     ${terminalHint}
-    ${state.qzoneAuthResult?renderOperationDiagnostic(state.qzoneAuthResult.diagnostic||state.qzoneAuthResult):''}
     <details class="qzone-cookie-fallback"><summary>高级兜底：手动导入 Cookie</summary><p>仅在扫码受腾讯风控影响时使用。Cookie 不会回显或进入审计详情。${insecure?' 当前页面不是 HTTPS，请勿在公网传输凭证。':''}</p><textarea id="qzone-cookie-import" autocomplete="off" spellcheck="false" placeholder="uin=o...; p_uin=o...; skey=...; p_skey=...;"></textarea><div class="row"><button class="btn small" onclick="importQzoneCookie()" ${state.qzoneAuthBusy||!state.qzoneBotId?'disabled':''}>${state.qzoneAuthBusy==='import'?'<span class="spinner"></span> 验证中…':'验证并安装'}</button></div></details>
   </div>`;
 }
@@ -1076,7 +1073,6 @@ function renderQzone() {
         <button class="btn small" onclick="runQzoneAction('social')" ${state.qzoneActionBusy||!q.social_enabled?'disabled':''}>运行好友扫描</button>
         <button class="btn small" onclick="runQzoneAction('inbound')" ${state.qzoneActionBusy||!q.inbound_enabled?'disabled':''}>运行留言轮询</button>
       </div>
-      ${state.qzoneActionResult?renderOperationDiagnostic(state.qzoneActionResult.diagnostic||state.qzoneActionResult):''}
     </div>
   </section>
   ${renderQzoneAuthRecovery(q, auth)}
@@ -1109,7 +1105,6 @@ function renderQzone() {
       <button class="btn small" onclick="loadView().then(render)">刷新</button>
       <span class="muted" style="font-size:12px">「立即发一条」会强制生成并发布（绕过额度/间隔判断），但仍计入本月额度。</span>
     </div>
-    ${state.qzonePostResult ? renderOperationDiagnostic(state.qzonePostResult) : ''}
   </div>
   <div class="card">
     <h2>最近发过的说说（去重记忆）</h2>
@@ -1328,7 +1323,7 @@ function clearAdminOperations(scope) {
 }
 
 function renderAdminOperations(scope,title) {
-  const items=adminOperationEntries().filter(item=>item.scope===scope).map(item=>renderOperationDiagnostic(item.diagnostic)).join("");
+  const items=renderOperationHistory(adminOperationEntries().filter(item=>item.scope===scope).map(item=>item.diagnostic),{group:`view-${state.view}`});
   return items?`<div class="card"><div class="between"><h2>${escapeHtml(title)}</h2><button class="btn small" onclick="clearAdminOperations('${escapeAttr(scope)}')">清空</button></div>${items}</div>`:"";
 }
 
@@ -1394,8 +1389,8 @@ function renderPersonaBuilder() {
     if (Number(downloadDiag.extracted_url_count||0)>0 && failureParts.length) avatarDiagnostic = `已找到 ${Number(downloadDiag.extracted_url_count||0)} 条图片地址，但全部处理失败：${failureParts.join('；')}。`;
     else if (!Number(searchDiag.direct_image_count||0)) avatarDiagnostic = Number(searchDiag.web_fallback_row_count||0)>0 ? '图片搜索已降级为普通网页结果，没有获得可安全下载的图片直链。' : '图片搜索没有返回可用的图片直链。';
   }
-  const diagnosticBlock = avatarDiagnostic ? `<p class="muted" style="color:var(--warning)">${escapeHtml(avatarDiagnostic)}</p>` : '';
-  const profileAssets = r ? `<div class="persona-assets"><div class="between"><h3>已验证头像（${avatarCandidates.length}）</h3><span class="tag ${r.profile_status==='complete'?'':'required'}">${escapeHtml(r.profile_status==='complete'?'候选完整':'候选未完整')}</span></div>${avatarStats}${diagnosticBlock}<div class="avatar-candidate-grid">${avatarCards||'<p class="muted">没有通过目标角色视觉审核的头像。视觉不可用或不足 10 张时不会用未验证图片补位。</p>'}</div><div class="between"><h3>人设签名（${signatureCandidates.length}）</h3></div><div class="signature-candidate-list">${signatureRows||'<p class="muted">暂未生成可用签名。</p>'}</div><div class="row"><label>目标 Bot <select onchange="state.personaProfileBotId=this.value">${profileBotOptions}</select></label><button class="btn primary" onclick="applyPersonaProfileAssets('${escapeAttr(recordId)}','${escapeAttr(revision)}')" ${recordId&&revision&&state.personaProfileBotId&&(state.personaAvatarCandidateId||state.personaSignatureCandidateId)?'':'disabled'}>应用选中的头像与签名</button>${state.personaAvatarCandidateId?`<a class="btn" href="${API}/persona-template/avatar-candidates/${encodeURIComponent(revision)}/${encodeURIComponent(state.personaAvatarCandidateId)}/original" download>下载头像</a>`:''}</div>${state.personaProfileApplyResult?renderOperationDiagnostic(state.personaProfileApplyResult):''}</div>` : "";
+  const diagnosticBlock = avatarDiagnostic ? `<p class="muted" style="color:var(--warn)">${escapeHtml(avatarDiagnostic)}</p>` : '';
+  const profileAssets = r ? `<div class="persona-assets"><div class="between"><h3>已验证头像（${avatarCandidates.length}）</h3><span class="tag ${r.profile_status==='complete'?'':'required'}">${escapeHtml(r.profile_status==='complete'?'候选完整':'候选未完整')}</span></div>${avatarStats}${diagnosticBlock}<div class="avatar-candidate-grid">${avatarCards||'<p class="muted">没有通过目标角色视觉审核的头像。视觉不可用或不足 10 张时不会用未验证图片补位。</p>'}</div><div class="between"><h3>人设签名（${signatureCandidates.length}）</h3></div><div class="signature-candidate-list">${signatureRows||'<p class="muted">暂未生成可用签名。</p>'}</div><div class="row"><label>目标 Bot <select onchange="state.personaProfileBotId=this.value">${profileBotOptions}</select></label><button class="btn primary" onclick="applyPersonaProfileAssets('${escapeAttr(recordId)}','${escapeAttr(revision)}')" ${recordId&&revision&&state.personaProfileBotId&&(state.personaAvatarCandidateId||state.personaSignatureCandidateId)?'':'disabled'}>应用选中的头像与签名</button>${state.personaAvatarCandidateId?`<a class="btn" href="${API}/persona-template/avatar-candidates/${encodeURIComponent(revision)}/${encodeURIComponent(state.personaAvatarCandidateId)}/original" download>下载头像</a>`:''}</div></div>` : "";
   const taskProgress = Math.max(0, Math.min(100, Number(task.progress || 0)));
   const form = state.personaTemplateForm || {};
   const buildMode = form.mode || "source";

@@ -609,9 +609,9 @@ try {
 function renderTestOperationResult() {
   const result = state.testOperationResult;
   if (!result || !result.diagnostic) return "";
-  const providers = (result.providers || []).map(item => `<details style="margin-top:10px">
+  const providers = (result.providers || []).map(item => `<details name="provider-diagnostic" style="margin-top:10px">
     <summary>${escapeHtml(item.name)} · ${escapeHtml(item.diagnostic.code || "unknown")}</summary>
-    <div style="margin-top:10px">${renderOperationDiagnostic(item.diagnostic)}</div>
+    <div style="margin-top:10px">${renderOperationDiagnostic(item.diagnostic,{group:"provider-diagnostic",expanded:false})}</div>
   </details>`).join("");
   return `<div class="card">
     <div class="between" style="gap:12px;align-items:flex-start">

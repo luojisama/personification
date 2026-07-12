@@ -46,7 +46,7 @@ function renderStickers() {
       ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">已标</span>'
       : '<span class="tag" style="background:rgba(245,158,11,0.18);color:var(--warn)">待标</span>';
     return `<div class="sticker-card" onclick="openStickerEdit('${escapeAttr(s.filename)}')">
-      <button class="sticker-delete-btn" title="移到回收" onclick="event.stopPropagation();deleteStickerByName('${escapeAttr(s.filename)}')">×</button>
+      <button class="sticker-delete-btn" title="移到回收" aria-label="将 ${escapeAttr(s.filename)} 移到回收" onclick="event.stopPropagation();deleteStickerByName('${escapeAttr(s.filename)}')">${renderIcon('archive')}</button>
       <img src="${escapeAttr(s.thumbnail_url)}" loading="lazy" alt="${escapeAttr(s.filename)}">
       <div class="sticker-meta">
         <div class="sticker-name" title="${escapeAttr(s.filename)}">${escapeHtml(s.filename)}</div>
@@ -55,7 +55,7 @@ function renderStickers() {
       </div>
     </div>`;
   }).join("");
-  const diagnostics = stickerDiagnostics().map(item => renderOperationDiagnostic(item)).join("");
+  const diagnostics = renderOperationHistory(stickerDiagnostics(), {group:`view-${state.view}`});
   const diagnosticCard = diagnostics
     ? `<div class="card"><div class="between"><h2>表情包操作诊断</h2><button class="btn small" onclick="clearStickerDiagnostics()">清空</button></div>${diagnostics}</div>`
     : "";
@@ -241,7 +241,7 @@ function clearMemoryDiagnostics() {
 }
 
 function renderMemoryDiagnosticsCard() {
-  const diagnostics = memoryDiagnostics().map(item => renderOperationDiagnostic(item)).join("");
+  const diagnostics = renderOperationHistory(memoryDiagnostics(), {group:`view-${state.view}`});
   return diagnostics
     ? `<div class="card"><div class="between"><h2>记忆操作诊断</h2><button class="btn small" onclick="clearMemoryDiagnostics()">清空</button></div>${diagnostics}</div>`
     : "";

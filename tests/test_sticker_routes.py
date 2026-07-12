@@ -361,7 +361,7 @@ def test_sticker_frontend_persists_and_renders_operation_diagnostics() -> None:
     source = (Path(__file__).parents[1] / "webui" / "static" / "app-content.js").read_text(encoding="utf-8")
     assert "STICKER_DIAGNOSTICS_STORAGE_KEY" in source
     assert "sessionStorage.setItem(STICKER_DIAGNOSTICS_STORAGE_KEY" in source
-    assert "renderOperationDiagnostic(item)" in source
+    assert "renderOperationHistory(stickerDiagnostics()" in source
     assert source.count("rememberStickerDiagnostic(") >= 8
     assert source.count("operationDiagnosticFromError(") >= 4
     assert 'await api("/stickers/upload"' in source

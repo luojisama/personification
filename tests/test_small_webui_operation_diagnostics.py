@@ -276,4 +276,4 @@ def test_device_and_log_frontends_persist_diagnostic_cards() -> None:
     assert 'rememberSmallOperation("device", result' in auth_source
     assert 'renderSmallOperations("logs", "日志操作诊断")' in activity_source
     assert 'rememberSmallOperation("logs", res' in activity_source
-    assert "renderOperationDiagnostic(item.diagnostic)" in auth_source
+    assert "renderOperationHistory(" in auth_source

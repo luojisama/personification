@@ -141,8 +141,10 @@ function renderConfig() {
     return `<button class="${g===activeGroup?'active':''}" onclick="pickGroup('${escapeAttr(g)}')">${escapeHtml(g)} <span class="muted" style="font-size:11px">${visibleCount}/${groupEntries.length}</span></button>`;
   }).join("") : "";
   const heading = search ? `搜索结果（${items.length}）` : (activeGroup || '配置');
-  const diagnostics = (Array.isArray(state.configDiagnostics) ? state.configDiagnostics : [])
-    .map(item => renderOperationDiagnostic(item)).join("");
+  const diagnostics = renderOperationHistory(
+    Array.isArray(state.configDiagnostics) ? state.configDiagnostics : [],
+    {group:`view-${state.view}`},
+  );
   const diagnosticCard = diagnostics
     ? `<div class="card"><div class="between"><h2>配置操作诊断</h2><button class="btn small" onclick="configClearDiagnostics()">清空</button></div>${diagnostics}</div>`
     : "";

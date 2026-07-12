@@ -448,7 +448,7 @@ def test_data_transfer_create_route_preserves_result_and_returns_diagnostic(monk
 
 def test_data_transfer_frontend_renders_operation_diagnostics() -> None:
     source = (Path(__file__).parents[1] / "webui" / "static" / "app-operations.js").read_text(encoding="utf-8")
-    assert "renderOperationDiagnostic(value)" in source
+    assert "renderOperationHistory(items" in source
     assert source.count("operationDiagnosticFromError(") >= 6
     for legacy in ("打包失败：\"+e.message", "验包失败：\"+e.message", "预演失败：\"+e.message", "导入失败：\"+e.message", "回滚失败：\"+e.message"):
         assert legacy not in source

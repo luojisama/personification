@@ -174,6 +174,6 @@ def test_qq_frontend_keeps_and_renders_operation_diagnostics(_runtime_context) -
     assert js.status_code == 200
     assert "function qqRememberDiagnostic" in js.text
     assert "state.qqDiagnostics = [diagnostic" in js.text
-    assert "renderOperationDiagnostic(item)" in js.text
+    assert "renderOperationHistory(" in js.text
     assert "const botId=qqSelectedBotId();" in js.text
     assert "memberships.includes(selectedBotId)" in js.text

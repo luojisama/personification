@@ -170,7 +170,7 @@ def test_memory_frontend_is_read_only_and_renders_detailed_diagnostics() -> None
     assert "MEMORY_DIAGNOSTICS_STORAGE_KEY" in source
     assert "sessionStorage.setItem(MEMORY_DIAGNOSTICS_STORAGE_KEY" in source
     assert "renderMemoryDiagnosticsCard()" in source
-    assert "renderOperationDiagnostic(item)" in source
+    assert "renderOperationHistory(memoryDiagnostics()" in source
     assert "rememberMemoryDiagnostic(result)" in source
     assert "operationDiagnosticFromError(error, title)" in source
     for forbidden in (

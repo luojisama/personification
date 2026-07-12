@@ -72,3 +72,32 @@ def test_external_write_diagnostics_expose_retry_safety() -> None:
         assert "retryable" in source, filename
         assert "outcome_unknown" in source, filename
         assert "operation_id" in source, filename
+
+
+def test_operation_histories_are_deduplicated_single_open_accordions() -> None:
+    core = (STATIC / "app-core.js").read_text(encoding="utf-8")
+    history_surfaces = "\n".join(
+        (STATIC / filename).read_text(encoding="utf-8")
+        for filename in ("app-admin.js", "app-auth.js", "app-config.js", "app-content.js")
+    )
+
+    assert "function operationDiagnosticFingerprint" in core
+    assert "function renderOperationHistory" in core
+    assert "index === 0" in core
+    assert '<details class="operation-diagnostic' in core
+    assert 'data-operation-group' in core
+    assert 'item.open = false' in core
+    assert history_surfaces.count("renderOperationHistory(") >= 6
+
+
+def test_navigation_uses_distinct_accessible_svg_icons() -> None:
+    core = (STATIC / "app-core.js").read_text(encoding="utf-8")
+    auth = (STATIC / "app-auth.js").read_text(encoding="utf-8")
+
+    assert "const ICON_PATHS" in core
+    assert "function renderIcon" in core
+    assert "renderIcon('menu')" in core
+    assert "切换到浅色主题" in core and "切换到深色主题" in core
+    assert "切换到浅色主题" in auth and "切换到深色主题" in auth
+    for icon in ("heart-pulse", "sparkles", "brain", "database", "plug", "terminal", "archive", "user-cog"):
+        assert f"'{icon}'" in core

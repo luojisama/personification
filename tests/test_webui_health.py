@@ -647,8 +647,9 @@ def test_health_frontend_persists_and_renders_operation_diagnostics() -> None:
 
     assert 'renderAdminOperations("health","功能体检操作诊断")' in source
     assert source.count('rememberAdminOperation("health"') >= 8
-    assert "renderOperationDiagnostic(ir)" in source
-    assert "renderOperationDiagnostic(result)" in source
+    assert "renderOperationHistory(" in source
+    assert "renderOperationDiagnostic(ir)" not in source
+    assert "renderOperationDiagnostic(result)" not in source
     assert "qzoneForwardOperationId" in source
     assert 'state.qzoneForwardResult = { ok:false, error:e.message }' not in source
     assert '"交互测试失败：" + e.message' not in source

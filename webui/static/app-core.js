@@ -172,6 +172,30 @@ function _diagnosticValue(value) {
   return String(value);
 }
 
+function operationDiagnosticFingerprint(input) {
+  const d = input && input.diagnostic && typeof input.diagnostic === "object" ? input.diagnostic : input;
+  if (!d || typeof d !== "object") return "";
+  if (d.operation_id) return `operation:${d.operation_id}`;
+  if (d.trace_id) return `trace:${d.trace_id}`;
+  let details = "";
+  try { details = JSON.stringify(d.details || []); } catch {}
+  return [d.code, d.phase, d.title, d.message, details].map(value => String(value || "")).join("|");
+}
+
+function renderOperationHistory(inputs, options={}) {
+  const seen = new Set();
+  const excluded = new Set((options.exclude || []).map(operationDiagnosticFingerprint).filter(Boolean));
+  const items = [];
+  for (const input of Array.isArray(inputs) ? inputs : []) {
+    const fingerprint = operationDiagnosticFingerprint(input);
+    if (!fingerprint || seen.has(fingerprint) || excluded.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    items.push(input);
+  }
+  const group = String(options.group || `view-${state.view || "global"}`);
+  return items.map((item, index) => renderOperationDiagnostic(item, {group, expanded:index === 0})).join("");
+}
+
 function renderOperationDiagnostic(input, options={}) {
   if (!input) return "";
   const d = input.diagnostic && typeof input.diagnostic === "object" ? input.diagnostic : input;
@@ -181,19 +205,24 @@ function renderOperationDiagnostic(input, options={}) {
   const details = Array.isArray(d.details) ? d.details : [];
   const steps = Array.isArray(d.steps) ? d.steps : [];
   const warnings = Array.isArray(d.warnings) ? d.warnings : [];
+  const group = String(options.group || `view-${state.view || "global"}`);
+  const expanded = options.expanded !== false;
   const detailRows = details.map(item => `<div class="operation-detail ${escapeAttr(item.status||'info')}"><span>${escapeHtml(item.label||'详情')}</span><strong>${escapeHtml(_diagnosticValue(item.value))}</strong></div>`).join("");
   const stepRows = steps.map((item,index) => `<li class="operation-step ${escapeAttr(item.status||'unknown')}"><span class="operation-step-index">${String(index+1).padStart(2,'0')}</span><div><strong>${escapeHtml(item.label||item.key||'步骤')}</strong>${item.message?`<p>${escapeHtml(item.message)}</p>`:''}${Array.isArray(item.details)&&item.details.length?`<div class="operation-step-details">${item.details.map(child=>`<span>${escapeHtml(child.label||'详情')}：${escapeHtml(_diagnosticValue(child.value))}</span>`).join('')}</div>`:''}</div><em>${escapeHtml(item.status||'unknown')}</em></li>`).join("");
   const trace = d.trace_id ? `<button class="btn small operation-trace-button" data-operation-trace="${escapeAttr(d.trace_id)}">查看 Trace</button>` : "";
   const retryLabel = unknown ? "禁止直接重试" : (d.retryable ? "可以重试" : "不要直接重试");
-  return `<section class="operation-diagnostic ${tone}" role="status">
-    <header><div><span class="eyebrow">OPERATION DIAGNOSTIC</span><h3>${escapeHtml(d.title||(ok?'操作完成':'操作未完成'))}</h3><p>${escapeHtml(d.message||'未提供说明')}</p></div><span class="operation-code">${escapeHtml(d.code||(ok?'ok':'operation_failed'))}</span></header>
-    <div class="operation-meta"><span>阶段 <strong>${escapeHtml(d.phase||'未标记')}</strong></span><span>重试策略 <strong>${retryLabel}</strong></span>${d.partial?'<span><strong>部分完成</strong></span>':''}${unknown?'<span><strong>远端结果未知</strong></span>':''}</div>
-    ${detailRows?`<div class="operation-details">${detailRows}</div>`:''}
-    ${stepRows?`<ol class="operation-steps">${stepRows}</ol>`:''}
-    ${warnings.length?`<div class="operation-warnings"><strong>降级与警告</strong>${warnings.map(item=>`<p>${escapeHtml(item)}</p>`).join('')}</div>`:''}
-    ${d.suggestion?`<div class="operation-suggestion"><strong>建议处理</strong><p>${escapeHtml(d.suggestion)}</p></div>`:''}
-    ${(d.operation_id||d.trace_id)?`<footer>${d.operation_id?`<code>operation ${escapeHtml(d.operation_id)}</code>`:''}${d.trace_id?`<code>trace ${escapeHtml(d.trace_id)}</code>`:''}${trace}</footer>`:''}
-  </section>`;
+  return `<details class="operation-diagnostic ${tone}" data-operation-group="${escapeAttr(group)}" ${expanded?'open':''}>
+    <summary class="operation-summary"><span class="operation-summary-mark">${renderIcon(unknown?'alert-triangle':ok?'check':'alert-circle','operation-status-icon')}</span><span class="operation-summary-copy"><span class="eyebrow">OPERATION DIAGNOSTIC</span><strong>${escapeHtml(d.title||(ok?'操作完成':'操作未完成'))}</strong><small>${escapeHtml(d.phase||'未标记')}</small></span><span class="operation-code">${escapeHtml(d.code||(ok?'ok':'operation_failed'))}</span><span class="operation-chevron">${renderIcon('chevron-down','ui-icon')}</span></summary>
+    <div class="operation-diagnostic-body" role="status">
+      <header><p>${escapeHtml(d.message||'未提供说明')}</p></header>
+      <div class="operation-meta"><span>阶段 <strong>${escapeHtml(d.phase||'未标记')}</strong></span><span>重试策略 <strong>${retryLabel}</strong></span>${d.partial?'<span><strong>部分完成</strong></span>':''}${unknown?'<span><strong>远端结果未知</strong></span>':''}</div>
+      ${detailRows?`<div class="operation-details">${detailRows}</div>`:''}
+      ${stepRows?`<ol class="operation-steps">${stepRows}</ol>`:''}
+      ${warnings.length?`<div class="operation-warnings"><strong>降级与警告</strong>${warnings.map(item=>`<p>${escapeHtml(item)}</p>`).join('')}</div>`:''}
+      ${d.suggestion?`<div class="operation-suggestion"><strong>建议处理</strong><p>${escapeHtml(d.suggestion)}</p></div>`:''}
+      ${(d.operation_id||d.trace_id)?`<footer>${d.operation_id?`<code>operation ${escapeHtml(d.operation_id)}</code>`:''}${d.trace_id?`<code>trace ${escapeHtml(d.trace_id)}</code>`:''}${trace}</footer>`:''}
+    </div>
+  </details>`;
 }
 
 document.addEventListener("click", event => {
@@ -204,6 +233,15 @@ document.addEventListener("click", event => {
   state.selectedTraceId = traceId;
   navigateToView("trace_detail");
 });
+
+document.addEventListener("toggle", event => {
+  const current = event.target;
+  if (!(current instanceof HTMLDetailsElement) || !current.open || !current.matches(".operation-diagnostic[data-operation-group]")) return;
+  const group = current.getAttribute("data-operation-group");
+  document.querySelectorAll(".operation-diagnostic[data-operation-group]").forEach(item => {
+    if (item !== current && item.getAttribute("data-operation-group") === group) item.open = false;
+  });
+}, true);
 
 async function api(path, opts = {}) {
   const method = (opts.method || "GET").toUpperCase();
@@ -531,10 +569,48 @@ function render() {
   }
 }
 
+const ICON_PATHS = {
+  "activity": '<path d="M3 12h4l2-6 4 12 2-6h6"/>',
+  "alert-circle": '<circle cx="12" cy="12" r="9"/><path d="M12 8v5m0 3h.01"/>',
+  "alert-triangle": '<path d="M12 3 2.5 20h19L12 3Z"/><path d="M12 9v4m0 3h.01"/>',
+  "archive": '<path d="M4 7h16v13H4V7Zm-1-3h18v3H3V4Zm6 7h6"/>',
+  "book": '<path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H11v18H7.5A3.5 3.5 0 0 0 4 23V5.5ZM20 5.5A3.5 3.5 0 0 0 16.5 2H13v18h3.5A3.5 3.5 0 0 1 20 23V5.5Z"/>',
+  "bot": '<rect x="4" y="7" width="16" height="13" rx="3"/><path d="M9 12h.01M15 12h.01M8 16h8M12 3v4"/>',
+  "brain": '<path d="M9.5 4A3.5 3.5 0 0 0 6 7.5v.2A3.5 3.5 0 0 0 4 11v1a3.5 3.5 0 0 0 2 3.2v.3A3.5 3.5 0 0 0 9.5 19H12V4H9.5ZM14.5 4A3.5 3.5 0 0 1 18 7.5v.2a3.5 3.5 0 0 1 2 3.3v1a3.5 3.5 0 0 1-2 3.2v.3a3.5 3.5 0 0 1-3.5 3.5H12V4h2.5Z"/>',
+  "check": '<path d="m5 12 4 4L19 6"/>',
+  "chevron-down": '<path d="m6 9 6 6 6-6"/>',
+  "database": '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/>',
+  "gauge": '<path d="M4 17a8 8 0 1 1 16 0M12 13l4-4"/>',
+  "heart-pulse": '<path d="M3 12h4l2-4 4 8 2-4h6M20 7c-1.8-3-6-2.5-8 1-2-3.5-6.2-4-8-1"/>',
+  "image": '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 15-5-5L5 20"/>',
+  "layers": '<path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/>',
+  "menu": '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  "message-square": '<path d="M4 4h16v13H8l-4 4V4Z"/>',
+  "moon": '<path d="M20 15.5A8 8 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z"/>',
+  "plug": '<path d="M8 3v5m8-5v5M6 8h12v3a6 6 0 0 1-6 6v4m-3 0h6"/>',
+  "refresh": '<path d="M20 7v5h-5M4 17v-5h5M6.1 8a7 7 0 0 1 11.4-2L20 9M4 15l2.5 3a7 7 0 0 0 11.4-2"/>',
+  "search": '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+  "settings": '<circle cx="12" cy="12" r="3"/><path d="M19 13.5v-3l-2-.7-.8-1.9.9-1.9-2.1-2.1-1.9.9-1.9-.8L10.5 2h-3l-.7 2-1.9.8-1.9-.9L.9 6l.9 1.9-.8 1.9-2 .7v3l2 .7.8 1.9-.9 1.9L3 20.1l1.9-.9 1.9.8.7 2h3l.7-2 1.9-.8 1.9.9 2.1-2.1-.9-1.9.8-1.9 2-.7Z" transform="translate(2) scale(.84)"/>',
+  "shield": '<path d="M12 3 20 7v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4Zm-3 9 2 2 4-5"/>',
+  "sparkles": '<path d="m12 3 1.3 3.7L17 8l-3.7 1.3L12 13l-1.3-3.7L7 8l3.7-1.3L12 3ZM5 14l.8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8L5 14Zm13-1 1 2.8 3 1.2-3 1.2L18 21l-1-2.8-3-1.2 3-1.2 1-2.8Z"/>',
+  "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  "terminal": '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3m5 0h5"/>',
+  "transfer": '<path d="M7 7h11m-3-3 3 3-3 3M17 17H6m3 3-3-3 3-3"/>',
+  "users": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8m13 18v-2a4 4 0 0 0-3-3.87"/>',
+  "user-cog": '<circle cx="9" cy="8" r="4"/><path d="M2 21v-2a5 5 0 0 1 5-5h4m7-1v2m0 4v2m-4-4h2m4 0h2"/>',
+  "wand": '<path d="m15 4 5 5L8 21H3v-5L15 4Zm-4-1 1 2M21 13l-2-1M18 2l-1 2"/>',
+  "wrench": '<path d="M14 6a4 4 0 0 0-5 5L3 17l4 4 6-6a4 4 0 0 0 5-5l-3 3-3-3 2-4Z"/>',
+};
+
+function renderIcon(name, className="ui-icon") {
+  const content = ICON_PATHS[name] || ICON_PATHS.gauge;
+  return `<svg class="${escapeAttr(className)}" viewBox="0 0 24 24" aria-hidden="true">${content}</svg>`;
+}
+
 function renderLayout() {
-  const navIcon = (kind) => `<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${kind==='pulse'?'M3 12h4l2-6 4 12 2-6h6':kind==='transfer'?'M7 7h11m-3-3 3 3-3 3M17 17H6m3 3-3-3 3-3':kind==='shield'?'M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4m-3 9l2 2 4-5':kind==='users'?'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8m13 18v-2a4 4 0 0 0-3-3.87':'M4 17a8 8 0 1 1 16 0M12 13l4-4'}"/></svg>`;
-  const navItem = (v,label,icon="gauge") => `<a href="#${v}" class="${state.view===v?'active':''}" aria-current="${state.view===v?'page':'false'}">${navIcon(icon)}<span>${label}</span></a>`;
-  const themeIcon = state.theme === "dark" ? "🌙" : "☀";
+  const navItem = (v,label,icon="gauge") => `<a href="#${v}" class="${state.view===v?'active':''}" aria-current="${state.view===v?'page':'false'}">${renderIcon(icon,'nav-icon')}<span>${label}</span></a>`;
+  const themeIcon = state.theme === "dark" ? renderIcon("sun") : renderIcon("moon");
+  const themeLabel = state.theme === "dark" ? "切换到浅色主题" : "切换到深色主题";
   const loadingHint = state.loading
     ? `<div class="loading-hint"><span class="spinner"></span><span>${escapeHtml(state.loadingMessage || "正在加载页面...")}</span></div>`
     : "";
@@ -545,46 +621,46 @@ function renderLayout() {
       <h1>拟人插件控制台</h1>
       <nav aria-label="控制台导航">
         <div class="nav-group-label">运行</div>
-        ${navItem('agent_status','Agent 状态','pulse')}
-        ${navItem('dashboard','仪表盘')}
-        ${navItem('health','功能体检')}
-        ${navItem('qzone','QQ 空间')}
-        ${navItem('config','配置中心')}
+        ${navItem('agent_status','Agent 状态','activity')}
+        ${navItem('dashboard','仪表盘','gauge')}
+        ${navItem('health','功能体检','heart-pulse')}
+        ${navItem('qzone','QQ 空间','sparkles')}
+        ${navItem('config','配置中心','settings')}
         <div class="nav-group-label">拟人与记忆</div>
         ${navItem('personas','用户画像','users')}
-        ${navItem('groups','群信息')}
-        ${navItem('group_switch','群开关')}
-        ${navItem('memory','Agent 记忆')}
-        ${navItem('memory_graph','记忆宫殿')}
-        ${navItem('stickers','表情包')}
+        ${navItem('groups','群信息','message-square')}
+        ${navItem('group_switch','群开关','layers')}
+        ${navItem('memory','Agent 记忆','brain')}
+        ${navItem('memory_graph','记忆宫殿','database')}
+        ${navItem('stickers','表情包','image')}
         <div class="nav-group-label">能力</div>
-        ${navItem('skills','Skill 管理')}
-        ${navItem('plugin_knowledge','插件知识库')}
-        ${navItem('plugin_manager','插件管理')}
-        ${navItem('test','模型测试')}
-        ${navItem('persona_prompt','人设预览')}
-        ${navItem('persona_builder','人设构建')}
-        ${navItem('proactive','主动诊断')}
-        ${navItem('traces','消息 Trace')}
+        ${navItem('skills','Skill 管理','plug')}
+        ${navItem('plugin_knowledge','插件知识库','book')}
+        ${navItem('plugin_manager','插件管理','wrench')}
+        ${navItem('test','模型测试','terminal')}
+        ${navItem('persona_prompt','人设预览','bot')}
+        ${navItem('persona_builder','人设构建','wand')}
+        ${navItem('proactive','主动诊断','activity')}
+        ${navItem('traces','消息 Trace','search')}
         <div class="nav-group-label">运维</div>
         ${navItem('data_transfer','数据迁移','transfer')}
         ${navItem('audit','审计日志','shield')}
-        ${navItem('logs','插件日志')}
-        ${navItem('qq','QQ 管理')}
-        ${navItem('devices','设备管理')}
+        ${navItem('logs','插件日志','archive')}
+        ${navItem('qq','QQ 管理','user-cog')}
+        ${navItem('devices','设备管理','shield')}
       </nav>
     </aside>
     <main data-view="${escapeAttr(state.view)}" data-loading="${state.loading?'true':'false'}">
       <div class="topbar between">
         <div style="display:flex;align-items:center;min-width:0;flex:1">
-           <button class="mobile-nav-toggle" onclick="toggleMobileNav()" aria-label="菜单" aria-controls="console-sidebar" aria-expanded="${state.mobileNavOpen?'true':'false'}">≡</button>
+           <button class="mobile-nav-toggle" onclick="toggleMobileNav()" aria-label="菜单" aria-controls="console-sidebar" aria-expanded="${state.mobileNavOpen?'true':'false'}">${renderIcon('menu')}</button>
           <div style="min-width:0">
             <div class="breadcrumb">控制台 <span class="sep">›</span> ${escapeHtml(viewTitle())}</div>
             <strong style="font-size:17px">${escapeHtml(viewTitle())}</strong>
           </div>
         </div>
         <div class="row">
-          <button class="btn small" onclick="toggleTheme()" title="切换主题">${themeIcon}</button>
+          <button class="btn small icon-btn" onclick="toggleTheme()" title="${themeLabel}" aria-label="${themeLabel}">${themeIcon}</button>
           <span class="muted" title="登录 QQ">${escapeHtml(state.qq)}</span>
           <button class="btn small" onclick="doLogout()">退出</button>
         </div>
