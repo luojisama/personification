@@ -62,6 +62,7 @@ class QzoneGenerationReport:
     suggestion: str = "查看下方各次生成和审阅结果，再根据失败阶段调整 Provider、素材或重新生成。"
     retryable: bool = True
     details: list[OperationDetail] = field(default_factory=list)
+    last_review: dict[str, Any] = field(default_factory=dict)
 
     def add_step(
         self,
@@ -92,6 +93,23 @@ class QzoneGenerationReport:
         self.suggestion = suggestion or self.suggestion
         self.retryable = retryable
         self.details = list(details)
+
+    def mark_attempt_recoverable(self, attempt_key: str, message: str) -> None:
+        prefix = f"{attempt_key}_"
+        updated: list[OperationStep] = []
+        for item in self.steps:
+            if item.status == "error" and (item.key == attempt_key or item.key.startswith(prefix)):
+                updated.append(step(item.key, item.label, "warn", item.message, details=item.details))
+            else:
+                updated.append(item)
+        self.steps = updated
+        self.add_step(
+            f"{attempt_key}_repair",
+            "自动修复草稿",
+            "warn",
+            message,
+            details=(detail("失败代码", self.code, "warn"),),
+        )
 
     def to_diagnostic(self, *, ok: bool, content: str = "") -> dict[str, Any]:
         details = [] if ok else list(self.details)
@@ -256,6 +274,63 @@ def _format_recent_qzone_posts(posts: list[str]) -> str:
     if not posts:
         return "- 暂无"
     return "\n".join(f"- {item}" for item in posts[-8:])
+
+
+_QZONE_REPAIRABLE_CODES = {
+    "content_too_long",
+    "content_too_short",
+    "duplicate_recent_post",
+    "empty_after_control_cleanup",
+    "invalid_generation_json",
+    "missing_content",
+    "net_slang_rewrite_failed",
+    "ooc_rewrite_failed",
+    "semantic_incoherent",
+    "semantic_not_grounded",
+    "semantic_not_novel",
+    "semantic_rejected",
+    "semantic_same_scene",
+    "semantic_same_syntax",
+    "stiff_tic_rewrite_failed",
+    "visible_output_blocked",
+}
+
+
+def _build_qzone_repair_prompt(
+    *,
+    candidate: str,
+    report: QzoneGenerationReport,
+    recent_posts: list[str],
+    source_context: str,
+    requirements: str,
+) -> str:
+    review_keys = (
+        "coherent",
+        "grounded",
+        "novel",
+        "same_topic",
+        "same_scene",
+        "same_syntax",
+        "topic_key",
+        "reason",
+    )
+    review = {key: report.last_review.get(key) for key in review_keys if key in report.last_review}
+    payload = {
+        "rejected_candidate": _trim_qzone_content(candidate, max_chars=120),
+        "failure": {"code": report.code, "phase": report.phase, "review": review},
+        "available_context": str(source_context or "")[:5000],
+        "recent_posts": list(recent_posts or [])[-8:],
+    }
+    return (
+        "上一条 QQ 空间草稿没有通过发布检查。请直接生成一条新的合格草稿，不要解释修复过程。\n"
+        "下面的 failure 和 review 是审阅器的结构化结论：grounded=false 时必须删除无依据的已发生经历，"
+        "只使用 available_context 明确支持的事实，或改写成主观心情、愿望、挂念；"
+        "novel=false、same_topic/scene/syntax=true 时必须彻底更换对应主题、场景或句式，不能只替换几个词；"
+        "coherent=false 时修正主体、对象、因果和先后关系，但不能为了补全句子编造新事件。\n"
+        "输出严格 JSON：{\"content\":\"正文\",\"image_prompt\":\"可选英文配图提示词\"}。\n\n"
+        f"结构化拒稿信息：\n{json.dumps(payload, ensure_ascii=False)}\n\n"
+        f"发布要求：\n{requirements}"
+    )
 
 
 def _render_qzone_style(value: Any) -> str:
@@ -913,6 +988,8 @@ async def _build_qzone_post_with_optional_image(
     attempt_key: str = "draft",
     attempt_label: str = "候选草稿",
 ) -> str:
+    if report is not None:
+        report.last_review = {}
     text = _trim_qzone_content(content)
     if not text:
         if report is not None:
@@ -999,6 +1076,19 @@ async def _build_qzone_post_with_optional_image(
             f"topic={semantic_review.get('topic_key', '')} reason={semantic_review.get('reason', '')}"
         )
         if report is not None:
+            report.last_review = {
+                key: semantic_review.get(key)
+                for key in (
+                    "coherent",
+                    "grounded",
+                    "novel",
+                    "same_topic",
+                    "same_scene",
+                    "same_syntax",
+                    "topic_key",
+                    "reason",
+                )
+            }
             failed = []
             if semantic_review.get("coherent") is not True:
                 failed.append(("semantic_incoherent", "草稿语义不连贯", "审阅器认为动作主体、对象、因果或前后关系不完整。"))
@@ -1264,6 +1354,108 @@ async def _generate_once(
     return cleaned
 
 
+async def _repair_qzone_candidate(
+    *,
+    system_prompt: Any,
+    rejected_content: str,
+    recent_posts: list[str],
+    source_context: str,
+    requirements: str,
+    report: QzoneGenerationReport,
+    attempts_remaining: int,
+    plugin_config: Any,
+    call_ai_api: Callable[..., Awaitable[Optional[str]]],
+    tool_caller: Any,
+    registry: Any,
+    logger: Any,
+    agent_max_steps: int,
+    rejected_attempt_key: str,
+    attempt_offset: int = 1,
+) -> str:
+    candidate = _trim_qzone_content(rejected_content, max_chars=120)
+    previous_attempt_key = rejected_attempt_key
+    for index in range(max(0, int(attempts_remaining))):
+        if report.code not in _QZONE_REPAIRABLE_CODES:
+            break
+        repair_number = attempt_offset + index
+        attempt_key = f"repair_{repair_number}"
+        report.mark_attempt_recoverable(
+            previous_attempt_key,
+            "失败结论已反馈给 LLM，将生成新候选并重新执行全部发布检查。",
+        )
+        prompt = _build_qzone_repair_prompt(
+            candidate=candidate,
+            report=report,
+            recent_posts=recent_posts,
+            source_context=source_context,
+            requirements=requirements,
+        )
+        raw = await _generate_once(
+            system_prompt,
+            prompt,
+            plugin_config=plugin_config,
+            call_ai_api=call_ai_api,
+            use_builtin_search=False,
+            tool_caller=tool_caller,
+            registry=registry,
+            logger=logger,
+            agent_max_steps=agent_max_steps,
+            report=report,
+            attempt_key=f"{attempt_key}_generate",
+            attempt_label=f"自动修复草稿 {repair_number}",
+        )
+        payload = _extract_json_object(raw)
+        if not payload:
+            if raw:
+                report.add_step(
+                    f"{attempt_key}_parse",
+                    "自动修复 JSON 解析",
+                    "error",
+                    "模型返回了内容，但不是要求的 JSON object。",
+                )
+                report.fail(
+                    "invalid_generation_json",
+                    "structured_output",
+                    "自动修复草稿格式无效",
+                    "修复模型没有返回包含 content 和 image_prompt 的 JSON object。",
+                    suggestion="系统会在剩余修复预算内继续生成；预算耗尽后再由管理员重试。",
+                )
+            candidate = raw
+            previous_attempt_key = attempt_key
+            continue
+        candidate = _trim_qzone_content(str(payload.get("content", "") or ""), max_chars=120)
+        result = await _build_qzone_post_with_optional_image(
+            content=candidate,
+            image_prompt=str(payload.get("image_prompt", "") or ""),
+            tool_caller=tool_caller,
+            registry=registry,
+            plugin_config=plugin_config,
+            agent_max_steps=agent_max_steps,
+            logger=logger,
+            recent_posts=recent_posts,
+            persona_system=_project_qzone_system_prompt(system_prompt),
+            source_context=source_context,
+            call_ai_api=call_ai_api,
+            report=report,
+            attempt_key=attempt_key,
+            attempt_label=f"自动修复候选 {repair_number}",
+        )
+        if result:
+            return result
+        previous_attempt_key = attempt_key
+    if report.code in _QZONE_REPAIRABLE_CODES:
+        report.add_step(
+            "repair_budget_exhausted",
+            "自动修复预算",
+            "error",
+            "候选次数已达到上限，最后一条草稿仍未通过发布检查。",
+            details=(detail("候选上限", "3 次", "error"),),
+        )
+        report.message = f"系统已自动生成并审阅最多 3 个候选，最后一次仍未通过：{report.message}"
+        report.suggestion = "可以重新发起一次完整生成；系统会重新选题并再次自动审阅。"
+    return ""
+
+
 def schedule_diary_state_update(
     *,
     diary_text: str,
@@ -1297,6 +1489,7 @@ async def generate_ai_diary(
     _report: QzoneGenerationReport | None = None,
 ) -> str:
     """Generate a short Qzone post from recent chat context."""
+    _report = _report or QzoneGenerationReport()
     system_prompt = load_prompt()
     qzone_persona = _project_qzone_system_prompt(system_prompt)
     chat_context = await get_recent_chat_context(bot, logger, report=_report)
@@ -1339,6 +1532,8 @@ async def generate_ai_diary(
     )
     recent_block = "最近已经发过的说说，禁止复读这些内容或近似句式：\n" + _format_recent_qzone_posts(recent_posts)
     diversity_hint = _pick_diversity_hint()
+    source_context = "\n\n".join(part for part in (chat_context, emotion_hint) if part)
+    candidates_used = 0
 
     if chat_context:
         rich_prompt = (
@@ -1366,6 +1561,7 @@ async def generate_ai_diary(
             attempt_key="rich_generate",
             attempt_label="Rich 草稿生成",
         )
+        candidates_used += 1
         payload = _extract_json_object(raw_rich_result)
         rich_result = ""
         if payload:
@@ -1379,7 +1575,7 @@ async def generate_ai_diary(
                 logger=logger,
                 recent_posts=recent_posts,
                 persona_system=qzone_persona,
-                source_context="\n\n".join(part for part in (chat_context, emotion_hint) if part),
+                source_context=source_context,
                 call_ai_api=call_ai_api,
                 report=_report,
                 attempt_key="rich",
@@ -1409,6 +1605,17 @@ async def generate_ai_diary(
         f"- {rejected_draft}\n\n"
         if rejected_draft else ""
     )
+    rejection_feedback = ""
+    if chat_context and _report.code in _QZONE_REPAIRABLE_CODES:
+        rejection_feedback = (
+            "上一条草稿的结构化审阅结论如下，请据此重选事实表达、主题、场景和句式：\n"
+            f"{json.dumps({'code': _report.code, 'phase': _report.phase, 'review': _report.last_review}, ensure_ascii=False)}\n\n"
+        )
+    if chat_context and any(item.status == "error" and item.key.startswith("rich_") for item in _report.steps):
+        _report.mark_attempt_recoverable(
+            "rich",
+            "Rich 候选未通过，系统将继续尝试 Basic 生成。",
+        )
 
     basic_prompt = (
         "请直接写一条自然的短说说，像是角色自己随手发的碎碎念。\n"
@@ -1417,8 +1624,10 @@ async def generate_ai_diary(
         f"{diversity_hint}\n\n"
         f"{recent_block}\n\n"
         f"{rejected_block}"
+        f"{rejection_feedback}"
         f"{base_requirements}"
     )
+    candidates_used += 1
     raw_result = await _generate_once(
         system_prompt,
         basic_prompt,
@@ -1445,7 +1654,7 @@ async def generate_ai_diary(
             logger=logger,
             recent_posts=recent_posts,
             persona_system=qzone_persona,
-            source_context="\n\n".join(part for part in (chat_context, emotion_hint) if part),
+            source_context=source_context,
             call_ai_api=call_ai_api,
             report=_report,
             attempt_key="basic",
@@ -1464,7 +1673,24 @@ async def generate_ai_diary(
                     suggestion="检查当前模型的结构化输出能力、QZone prompt 和 Provider 返回。",
                 )
         result = ""
-    return result
+    if result:
+        return result
+    return await _repair_qzone_candidate(
+        system_prompt=system_prompt,
+        rejected_content=str(payload.get("content", "") or "") if payload else raw_result,
+        recent_posts=recent_posts,
+        source_context=source_context,
+        requirements=base_requirements,
+        report=_report,
+        attempts_remaining=max(0, 3 - candidates_used),
+        plugin_config=plugin_config,
+        call_ai_api=call_ai_api,
+        tool_caller=tool_caller,
+        registry=registry,
+        logger=logger,
+        agent_max_steps=agent_max_steps,
+        rejected_attempt_key="basic",
+    )
 
 
 async def generate_ai_diary_detailed(
@@ -1578,11 +1804,16 @@ async def maybe_generate_proactive_qzone_post(
     )
     if not result:
         return ""
+    source_context = (
+        f"当前心情：{mood}\n当前精力：{energy}\n最近挂念：\n{pending_block}\n"
+        f"近期群情绪记忆：\n{emotion_hint or '- 暂无'}\n最近聊天：\n{chat_context}"
+    )
     payload = _extract_json_object(result)
     if payload:
         if str(payload.get("action", "") or "").strip().lower() != "post":
             return ""
-        return await _build_qzone_post_with_optional_image(
+        report = QzoneGenerationReport()
+        post = await _build_qzone_post_with_optional_image(
             content=str(payload.get("content", "") or ""),
             image_prompt=str(payload.get("image_prompt", "") or ""),
             tool_caller=tool_caller,
@@ -1592,15 +1823,38 @@ async def maybe_generate_proactive_qzone_post(
             logger=logger,
             recent_posts=recent_posts,
             persona_system=qzone_persona,
-            source_context=(
-                f"当前心情：{mood}\n当前精力：{energy}\n最近挂念：\n{pending_block}\n"
-                f"近期群情绪记忆：\n{emotion_hint or '- 暂无'}\n最近聊天：\n{chat_context}"
-            ),
+            source_context=source_context,
             call_ai_api=call_ai_api,
+            report=report,
+            attempt_key="proactive",
+            attempt_label="主动说说候选",
+        )
+        if post:
+            return post
+        return await _repair_qzone_candidate(
+            system_prompt=system_prompt,
+            rejected_content=str(payload.get("content", "") or ""),
+            recent_posts=recent_posts,
+            source_context=source_context,
+            requirements=(
+                "正文 12-50 个中文字符，保持角色口吻和随手碎碎念风格。"
+                "只使用可用素材明确支持的已发生事实；没有依据时写主观心情、愿望或挂念。"
+                "避开近期说说的主题、场景和句式，输出严格 JSON。"
+            ),
+            report=report,
+            attempts_remaining=2,
+            plugin_config=plugin_config,
+            call_ai_api=call_ai_api,
+            tool_caller=tool_caller,
+            registry=registry,
+            logger=logger,
+            agent_max_steps=agent_max_steps,
+            rejected_attempt_key="proactive",
         )
     if result.startswith("POST|"):
         text = _trim_qzone_content(result.split("|", 1)[1])
-        return await _build_qzone_post_with_optional_image(
+        report = QzoneGenerationReport()
+        post = await _build_qzone_post_with_optional_image(
             content=text,
             image_prompt="",
             tool_caller=tool_caller,
@@ -1610,10 +1864,32 @@ async def maybe_generate_proactive_qzone_post(
             logger=logger,
             recent_posts=recent_posts,
             persona_system=qzone_persona,
-            source_context=(
-                f"当前心情：{mood}\n当前精力：{energy}\n最近挂念：\n{pending_block}\n"
-                f"近期群情绪记忆：\n{emotion_hint or '- 暂无'}\n最近聊天：\n{chat_context}"
-            ),
+            source_context=source_context,
             call_ai_api=call_ai_api,
+            report=report,
+            attempt_key="proactive_legacy",
+            attempt_label="主动说说兼容候选",
+        )
+        if post:
+            return post
+        return await _repair_qzone_candidate(
+            system_prompt=system_prompt,
+            rejected_content=text,
+            recent_posts=recent_posts,
+            source_context=source_context,
+            requirements=(
+                "正文 12-50 个中文字符，保持角色口吻和随手碎碎念风格。"
+                "只使用可用素材明确支持的已发生事实；没有依据时写主观心情、愿望或挂念。"
+                "避开近期说说的主题、场景和句式，输出严格 JSON。"
+            ),
+            report=report,
+            attempts_remaining=2,
+            plugin_config=plugin_config,
+            call_ai_api=call_ai_api,
+            tool_caller=tool_caller,
+            registry=registry,
+            logger=logger,
+            agent_max_steps=agent_max_steps,
+            rejected_attempt_key="proactive_legacy",
         )
     return ""

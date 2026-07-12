@@ -166,7 +166,9 @@ def test_generate_ai_diary_detailed_explains_duplicate_rejection(monkeypatch) ->
     assert result["content"] == ""
     assert result["diagnostic"]["code"] == "duplicate_recent_post"
     assert result["diagnostic"]["phase"] == "deduplication"
-    assert any(item["key"] == "basic_dedup" and item["status"] == "error" for item in result["diagnostic"]["steps"])
+    assert any(item["key"] == "basic_dedup" and item["status"] == "warn" for item in result["diagnostic"]["steps"])
+    assert any(item["key"] == "repair_2_dedup" and item["status"] == "error" for item in result["diagnostic"]["steps"])
+    assert result["diagnostic"]["steps"][-1]["key"] == "repair_budget_exhausted"
 
 
 def test_generate_ai_diary_detailed_explains_semantic_grounding_rejection(monkeypatch) -> None:  # noqa: ANN001
@@ -200,8 +202,54 @@ def test_generate_ai_diary_detailed_explains_semantic_grounding_rejection(monkey
     assert result["content"] == ""
     assert result["diagnostic"]["code"] == "semantic_not_grounded"
     semantic_steps = [item for item in result["diagnostic"]["steps"] if item["key"] == "basic_semantic"]
-    assert semantic_steps and semantic_steps[0]["status"] == "error"
+    assert semantic_steps and semantic_steps[0]["status"] == "warn"
     assert any(item["label"] == "事件依据" and item["status"] == "error" for item in semantic_steps[0]["details"])
+    assert any(item["key"] == "repair_2_semantic" and item["status"] == "error" for item in result["diagnostic"]["steps"])
+
+
+def test_generate_ai_diary_repairs_ungrounded_candidate_before_returning(monkeypatch) -> None:  # noqa: ANN001
+    logger = _Logger()
+    monkeypatch.setattr(diary_flow, "get_data_store", lambda: _Store({"recent_contents": []}))
+    generated: list[str] = []
+    reviews = 0
+
+    async def _call_ai(messages, **_kwargs):  # noqa: ANN001
+        nonlocal reviews
+        if "发布前审阅器" in str(messages[0].get("content", "")):
+            reviews += 1
+            accepted = reviews == 2
+            return json.dumps({
+                "accept": accepted,
+                "coherent": True,
+                "grounded": accepted,
+                "novel": True,
+                "same_topic": False,
+                "same_scene": False,
+                "same_syntax": False,
+                "topic_key": "game_wish" if accepted else "snack_purchase",
+                "reason": "主观愿望无需外部事件依据" if accepted else "素材没有购买事件",
+            }, ensure_ascii=False)
+        prompt = str(messages[-1].get("content", ""))
+        generated.append(prompt)
+        content = "有点想把今晚留给一局还没开的游戏" if "结构化拒稿信息" in prompt else "刚买完一大袋零食准备慢慢吃"
+        return json.dumps({"content": content, "image_prompt": ""}, ensure_ascii=False)
+
+    result = asyncio.run(
+        diary_flow.generate_ai_diary_detailed(
+            _Bot(),
+            load_prompt=lambda: "你是绪山真寻。",
+            call_ai_api=_call_ai,
+            logger=logger,
+        )
+    )
+
+    assert result["content"] == "有点想把今晚留给一局还没开的游戏"
+    assert result["diagnostic"]["ok"] is True
+    assert reviews == 2
+    assert len(generated) == 2
+    assert '"grounded": false' in generated[1]
+    assert any(item["key"] == "basic_semantic" and item["status"] == "warn" for item in result["diagnostic"]["steps"])
+    assert any(item["key"] == "repair_1_semantic" and item["status"] == "ok" for item in result["diagnostic"]["steps"])
 
 
 def test_generate_ai_diary_detailed_explains_invalid_json(monkeypatch) -> None:  # noqa: ANN001
@@ -702,3 +750,91 @@ def test_maybe_generate_proactive_injects_quota(monkeypatch) -> None:  # noqa: A
     assert "不要写成镜头旁白" in user_prompt
     assert "手机上随手敲的一句" in user_prompt
     assert result == ""  # action=skip
+
+
+def test_maybe_generate_proactive_repairs_rejected_post(monkeypatch) -> None:  # noqa: ANN001
+    class _Store:
+        def load_sync(self, _name):  # noqa: ANN001
+            return {}
+
+    monkeypatch.setattr(diary_flow, "get_data_store", lambda: _Store())
+    reviews = 0
+    generations = 0
+
+    async def _call(messages, **_kwargs):  # noqa: ANN001
+        nonlocal reviews, generations
+        if "发布前审阅器" in str(messages[0].get("content", "")):
+            reviews += 1
+            accepted = reviews == 2
+            return json.dumps({
+                "accept": accepted,
+                "coherent": True,
+                "grounded": accepted,
+                "novel": True,
+                "same_topic": False,
+                "same_scene": False,
+                "same_syntax": False,
+                "topic_key": "quiet_wish" if accepted else "train_trip",
+                "reason": "主观愿望" if accepted else "没有乘车事件依据",
+            }, ensure_ascii=False)
+        generations += 1
+        if generations == 1:
+            return json.dumps({"action": "post", "content": "刚坐完末班车耳边还留着一点杂音", "image_prompt": ""}, ensure_ascii=False)
+        return json.dumps({"content": "今晚只想安静地发一会儿呆", "image_prompt": ""}, ensure_ascii=False)
+
+    result = asyncio.run(
+        diary_flow.maybe_generate_proactive_qzone_post(
+            _Bot(),
+            load_prompt=lambda: "你是某角色",
+            call_ai_api=_call,
+            logger=_Logger(),
+        )
+    )
+
+    assert result == "今晚只想安静地发一会儿呆"
+    assert reviews == 2
+    assert generations == 2
+
+
+def test_maybe_generate_proactive_repairs_legacy_post_output(monkeypatch) -> None:  # noqa: ANN001
+    class _Store:
+        def load_sync(self, _name):  # noqa: ANN001
+            return {}
+
+    monkeypatch.setattr(diary_flow, "get_data_store", lambda: _Store())
+    reviews = 0
+    generations = 0
+
+    async def _call(messages, **_kwargs):  # noqa: ANN001
+        nonlocal reviews, generations
+        if "发布前审阅器" in str(messages[0].get("content", "")):
+            reviews += 1
+            accepted = reviews == 2
+            return json.dumps({
+                "accept": accepted,
+                "coherent": True,
+                "grounded": accepted,
+                "novel": True,
+                "same_topic": False,
+                "same_scene": False,
+                "same_syntax": False,
+                "topic_key": "quiet_wish" if accepted else "train_trip",
+                "reason": "主观愿望" if accepted else "没有乘车事件依据",
+            }, ensure_ascii=False)
+        generations += 1
+        if generations == 1:
+            return "POST|刚坐完末班车耳边还留着一点杂音"
+        return json.dumps({"content": "今晚有点想早点关灯躺一会儿", "image_prompt": ""}, ensure_ascii=False)
+
+    result = asyncio.run(
+        diary_flow.maybe_generate_proactive_qzone_post(
+            _Bot(),
+            load_prompt=lambda: "你是某角色",
+            call_ai_api=_call,
+            logger=_Logger(),
+        )
+    )
+
+    assert result == "今晚有点想早点关灯躺一会儿"
+    assert reviews == 2
+    assert generations == 2
