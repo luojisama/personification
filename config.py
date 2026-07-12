@@ -271,6 +271,7 @@ class Config(BaseModel):
     personification_qzone_check_interval: int = 60
     personification_qzone_monthly_limit: int = 30
     personification_qzone_agent_max_steps: int = 4
+    personification_qzone_semantic_review_timeout: float = 120.0
     personification_qzone_probability: float = 0.20
     personification_qzone_min_interval_hours: float = 12.0
     personification_qzone_social_enabled: bool = True

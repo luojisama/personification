@@ -988,6 +988,7 @@ async def _build_qzone_post_with_optional_image(
         persona_system=str(persona_system or ""),
         tool_caller=tool_caller,
         call_ai_api=call_ai_api,
+        timeout=float(getattr(plugin_config, "personification_qzone_semantic_review_timeout", 120.0)),
         logger=logger,
         report=report,
         attempt_key=attempt_key,

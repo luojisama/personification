@@ -54,6 +54,7 @@ def test_extra_entries_normalize_roundtrip() -> None:
     assert entries["tts_enabled"].normalize_value("开") is True
     assert entries["group_idle_minutes"].normalize_value("45") == 45
     assert entries["qzone_probability"].normalize_value("0.5") == 0.5
+    assert entries["qzone_semantic_review_timeout"].normalize_value("180") == 180.0
     assert entries["image_detail"].normalize_value("LOW") == "low"
     assert entries["whitelist"].normalize_value('["123"]') == ["123"]
     assert entries["favorability_enabled"].normalize_value("开") is True

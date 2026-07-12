@@ -602,6 +602,36 @@ def test_qzone_semantic_review_rejects_same_topic_with_low_text_overlap() -> Non
     assert review["same_topic"] is True
 
 
+def test_qzone_post_uses_configured_semantic_review_timeout(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict[str, float] = {}
+
+    async def _review(_text, **kwargs):  # noqa: ANN001
+        captured["timeout"] = kwargs["timeout"]
+        return {
+            "accepted": True,
+            "accept": True,
+            "coherent": True,
+            "grounded": True,
+            "novel": True,
+        }
+
+    monkeypatch.setattr(diary_flow, "_review_qzone_semantics", _review)
+    config = type("Config", (), {"personification_qzone_semantic_review_timeout": 180.0})()
+
+    result = asyncio.run(diary_flow._build_qzone_post_with_optional_image(
+        content="窗外刚好有一小块晚霞停在屋顶上",
+        image_prompt="",
+        tool_caller=None,
+        plugin_config=config,
+        logger=_Logger(),
+        recent_posts=[],
+        persona_system="你是绪山真寻",
+    ))
+
+    assert result == "窗外刚好有一小块晚霞停在屋顶上"
+    assert captured["timeout"] == 180.0
+
+
 def test_qzone_stiff_rewrite_failure_drops_original() -> None:
     class _Caller:
         async def chat_with_tools(self, _messages, _tools, _use_builtin_search):  # noqa: ANN001
