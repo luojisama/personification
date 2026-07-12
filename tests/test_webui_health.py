@@ -12,6 +12,8 @@ diagnostics = load_personification_module("plugin.personification.core.diagnosti
 ai_routes = load_personification_module("plugin.personification.core.ai_routes")
 visual_capabilities = load_personification_module("plugin.personification.core.visual_capabilities")
 health_routes = load_personification_module("plugin.personification.webui.routes.health_routes")
+qzone_auth = load_personification_module("plugin.personification.core.qzone_auth")
+qzone_service = load_personification_module("plugin.personification.core.qzone_service")
 
 
 class _FakeResp:
@@ -444,3 +446,122 @@ def test_qzone_status_and_operations_are_observable_without_cookie_leak(_runtime
     assert scanned.json()["inbound_comments"] == 1
     assert calls == [("refresh", True), ("inbound", True)]
     assert "must-not-leak" not in status.text + refreshed.text + scanned.text
+
+
+def test_qzone_login_routes_bind_owner_require_csrf_and_disable_qr_cache(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+    class Bot:
+        self_id = "10000"
+
+        async def call_api(self, _name, **kwargs):  # noqa: ANN003, ANN201
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+        async def send_private_msg(self, **kwargs):  # noqa: ANN003, ANN201
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+    calls: list[tuple[str, str]] = []
+
+    async def start(*, bot_id, owner_key, install_cookie):  # noqa: ANN001
+        calls.append((bot_id, owner_key))
+        assert callable(install_cookie)
+        return {
+            "session_id": "session-one",
+            "bot_id": bot_id,
+            "status": "waiting_scan",
+            "message": "请扫码",
+            "terminal": False,
+            "qr_ready": True,
+        }
+
+    def status(session_id, *, owner_key):  # noqa: ANN001
+        assert owner_key
+        return {"session_id": session_id, "bot_id": "10000", "status": "waiting_confirm", "terminal": False}
+
+    def qrcode(session_id, *, owner_key):  # noqa: ANN001
+        assert session_id == "session-one" and owner_key
+        return b"private-qr-png"
+
+    async def cancel(session_id, *, owner_key):  # noqa: ANN001
+        assert session_id == "session-one" and owner_key
+        return {"session_id": session_id, "bot_id": "10000", "status": "cancelled", "terminal": True}
+
+    monkeypatch.setattr(qzone_auth.qzone_login_manager, "start", start)
+    monkeypatch.setattr(qzone_auth.qzone_login_manager, "status", status)
+    monkeypatch.setattr(qzone_auth.qzone_login_manager, "qrcode", qrcode)
+    monkeypatch.setattr(qzone_auth.qzone_login_manager, "cancel", cancel)
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=_runtime_context.plugin_config,
+        superusers={"10001"},
+        get_bots=lambda: {"10000": Bot()},
+        logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+        runtime_bundle=SimpleNamespace(),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    client.headers.pop("X-Personification-CSRF", None)
+    missing_csrf = client.post("/personification/api/qzone/auth/login/start", json={"bot_id": "10000"})
+    assert missing_csrf.status_code == 403
+    _set_csrf(client)
+    started = client.post("/personification/api/qzone/auth/login/start", json={"bot_id": "10000"})
+    polled = client.get("/personification/api/qzone/auth/login/session-one/status")
+    image = client.get("/personification/api/qzone/auth/login/session-one/qrcode")
+    cancelled = client.post("/personification/api/qzone/auth/login/session-one/cancel")
+
+    assert started.status_code == 200
+    assert polled.json()["status"] == "waiting_confirm"
+    assert image.content == b"private-qr-png"
+    assert image.headers["content-type"].startswith("image/png")
+    assert "no-store" in image.headers["cache-control"]
+    assert cancelled.json()["status"] == "cancelled"
+    assert calls and calls[0][0] == "10000"
+
+    stranger = _build_client(_runtime_context)
+    assert stranger.get("/personification/api/qzone/auth/login/session-one/qrcode").status_code == 401
+
+
+def test_qzone_manual_cookie_import_never_echoes_or_audits_secret(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+    secret = "uin=o10000; p_skey=manual-super-secret;"
+    received: list[str] = []
+
+    class Bot:
+        self_id = "10000"
+
+        async def call_api(self, _name, **kwargs):  # noqa: ANN003, ANN201
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+        async def send_private_msg(self, **kwargs):  # noqa: ANN003, ANN201
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+    async def install(**kwargs):  # noqa: ANN003, ANN201
+        received.append(str(kwargs.get("cookie") or ""))
+        return True, "ok"
+
+    monkeypatch.setattr(qzone_service, "install_qzone_cookie", install)
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=_runtime_context.plugin_config,
+        superusers={"10001"},
+        get_bots=lambda: {"10000": Bot()},
+        logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+        runtime_bundle=SimpleNamespace(),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+
+    response = client.post(
+        "/personification/api/qzone/auth/cookie",
+        json={"bot_id": "10000", "cookie": secret},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "status": "installed", "message": "QZone Cookie 已验证并安装"}
+    assert received == [secret]
+    assert secret not in response.text
+
+    audit_mod = load_personification_module("plugin.personification.core.webui_audit_log")
+    rows = audit_mod.query_recent(action="qzone_cookie_import", limit=5)
+    assert rows
+    assert "manual-super-secret" not in str(rows[0])

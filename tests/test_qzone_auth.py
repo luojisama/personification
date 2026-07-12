@@ -131,6 +131,28 @@ def test_qzone_login_manager_handles_expiry_and_owner_isolation() -> None:
     assert terminal["qr_ready"] is False
 
 
+def test_qzone_login_manager_rejects_cross_admin_session_replacement() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/ptqrshow":
+            return httpx.Response(200, content=b"png", headers={"set-cookie": "qrsig=qrsig; Path=/"})
+        return httpx.Response(200, text=_callback("66", message="二维码未失效"))
+
+    async def install(_cookie: str, _bot_id: str, _source: str) -> tuple[bool, str]:
+        return True, "ok"
+
+    async def scenario() -> None:
+        manager = qzone_auth.QzoneLoginManager(
+            client_factory=_client_factory(handler),
+            poll_interval=0.01,
+        )
+        await manager.start(bot_id="99999", owner_key="owner-a", install_cookie=install)
+        with pytest.raises(RuntimeError, match="另一位管理员"):
+            await manager.start(bot_id="99999", owner_key="owner-b", install_cookie=install)
+        await manager.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_install_qzone_cookie_validates_identity_and_persists_only_after_probe(monkeypatch) -> None:  # noqa: ANN001
     persisted: list[str] = []
     config = SimpleNamespace(personification_qzone_cookie="old-cookie")

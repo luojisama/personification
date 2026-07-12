@@ -20,6 +20,7 @@ _QZONE_DAID = "5"
 _POLL_INTERVAL_SECONDS = 2.0
 _SESSION_TTL_SECONDS = 150.0
 _TERMINAL_RETENTION_SECONDS = 300.0
+_START_COOLDOWN_SECONDS = 5.0
 _MAX_REDIRECTS = 8
 _TERMINAL_STATES = {
     "success",
@@ -135,6 +136,7 @@ class QzoneLoginManager:
         self._lock = threading.RLock()
         self._sessions: dict[str, QzoneLoginSession] = {}
         self._active_by_bot: dict[str, str] = {}
+        self._last_start_by_owner: dict[str, float] = {}
 
     async def start(
         self,
@@ -147,10 +149,23 @@ class QzoneLoginManager:
         owner = str(owner_key or "").strip()
         if not bot.isdigit() or not owner:
             raise ValueError("登录目标无效")
+        now = time.time()
+        with self._lock:
+            active_id = self._active_by_bot.get(bot, "")
+            active_session = self._sessions.get(active_id)
+            if (
+                active_session is not None
+                and active_session.status not in _TERMINAL_STATES
+                and not secrets.compare_digest(active_session.owner_key, owner)
+            ):
+                raise RuntimeError("该 Bot 正由另一位管理员执行登录恢复")
+            last_start = float(self._last_start_by_owner.get(owner, 0.0) or 0.0)
+            if now - last_start < _START_COOLDOWN_SECONDS:
+                raise RuntimeError("登录请求过于频繁，请稍后重试")
+            self._last_start_by_owner[owner] = now
         await self.cancel_bot(bot)
         self._prune()
 
-        now = time.time()
         session = QzoneLoginSession(
             session_id=secrets.token_urlsafe(24),
             bot_id=bot,

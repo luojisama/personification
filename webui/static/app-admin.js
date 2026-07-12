@@ -853,6 +853,113 @@ function _fmtDuration(sec) {
   return `约 ${sec} 秒后`;
 }
 
+let _qzoneLoginPollTimer = 0;
+
+function _stopQzoneLoginPolling() {
+  if (_qzoneLoginPollTimer) clearTimeout(_qzoneLoginPollTimer);
+  _qzoneLoginPollTimer = 0;
+}
+
+function _scheduleQzoneLoginPolling() {
+  _stopQzoneLoginPolling();
+  if (!state.qzoneLogin || state.qzoneLogin.terminal || state.view !== 'qzone') return;
+  _qzoneLoginPollTimer = setTimeout(pollQzoneLogin, 1800);
+}
+
+async function pollQzoneLogin() {
+  _qzoneLoginPollTimer = 0;
+  const login = state.qzoneLogin;
+  if (!login || login.terminal || state.view !== 'qzone') return;
+  try {
+    state.qzoneLogin = await api(`/qzone/auth/login/${encodeURIComponent(login.session_id)}/status`);
+    if (state.qzoneLogin.status === 'success') {
+      state.qzoneAuthResult = {ok:true,message:'QZone 登录已恢复，后台扫描会在下一轮继续。'};
+      try { await loadView(); } catch {}
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;
+    state.qzoneAuthResult = {ok:false,message:e.message};
+    state.qzoneLogin = null;
+  }
+  render();
+  _scheduleQzoneLoginPolling();
+}
+
+async function startQzoneLogin() {
+  if (state.qzoneAuthBusy) return;
+  state.qzoneAuthBusy = 'start'; state.qzoneAuthResult = null; _stopQzoneLoginPolling(); render();
+  try {
+    state.qzoneLogin = await api('/qzone/auth/login/start', {
+      method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({bot_id:state.qzoneBotId})
+    });
+    _scheduleQzoneLoginPolling();
+  } catch (e) {
+    state.qzoneAuthResult = {ok:false,message:e.message};
+  }
+  state.qzoneAuthBusy = ''; render();
+}
+
+async function cancelQzoneLogin() {
+  const login = state.qzoneLogin;
+  if (!login || state.qzoneAuthBusy) return;
+  state.qzoneAuthBusy = 'cancel'; _stopQzoneLoginPolling(); render();
+  try {
+    state.qzoneLogin = await api(`/qzone/auth/login/${encodeURIComponent(login.session_id)}/cancel`, {method:'POST'});
+    state.qzoneAuthResult = {ok:true,message:'登录会话已取消'};
+  } catch (e) { state.qzoneAuthResult = {ok:false,message:e.message}; }
+  state.qzoneAuthBusy = ''; render();
+}
+
+async function importQzoneCookie() {
+  if (state.qzoneAuthBusy) return;
+  const input = document.getElementById('qzone-cookie-import');
+  const cookie = input ? input.value.trim() : '';
+  if (!cookie) { state.qzoneAuthResult = {ok:false,message:'请粘贴完整 Cookie'}; render(); return; }
+  if (input) input.value = '';
+  state.qzoneAuthBusy = 'import'; state.qzoneAuthResult = null; render();
+  try {
+    const result = await api('/qzone/auth/cookie', {
+      method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({bot_id:state.qzoneBotId,cookie})
+    });
+    state.qzoneAuthResult = result;
+    if (result.ok) { state.qzoneLogin = null; _stopQzoneLoginPolling(); try { await loadView(); } catch {} }
+  } catch (e) { state.qzoneAuthResult = {ok:false,message:e.message}; }
+  state.qzoneAuthBusy = ''; render();
+}
+
+function renderQzoneAuthRecovery(q, auth) {
+  const bots = Array.isArray(q.bots) ? q.bots : [];
+  const botIds = bots.map(item => String(item.bot_id || '')).filter(Boolean);
+  if (!botIds.includes(state.qzoneBotId)) state.qzoneBotId = botIds[0] || '';
+  const login = state.qzoneLogin;
+  const active = login && !login.terminal;
+  const phase = !login ? 0 : (login.status === 'waiting_scan' ? 1 : (login.status === 'waiting_confirm' ? 2 : (['verifying','success'].includes(login.status) ? 3 : 1)));
+  if (active && !_qzoneLoginPollTimer) setTimeout(_scheduleQzoneLoginPolling, 0);
+  const botOptions = bots.map(item => `<option value="${escapeAttr(item.bot_id)}" ${String(item.bot_id)===state.qzoneBotId?'selected':''}>QQ ${escapeHtml(item.bot_id)}</option>`).join('');
+  const qrUrl = login && login.qr_ready ? `${API}/qzone/auth/login/${encodeURIComponent(login.session_id)}/qrcode?v=${encodeURIComponent(login.updated_at||0)}` : '';
+  const terminalHint = login && login.terminal && login.status !== 'success'
+    ? `<div class="alert err">${escapeHtml(login.message || '本次登录未完成')}</div>` : '';
+  const insecure = location.protocol !== 'https:' && !['localhost','127.0.0.1','::1'].includes(location.hostname);
+  return `<div class="card qzone-auth-card">
+    <div class="qzone-auth-head">
+      <div><span class="eyebrow">ACCOUNT RECOVERY</span><h2>QZone 认证恢复</h2><p>使用手机 QQ 扫码并一键确认，凭证只在服务端验证和保存。</p></div>
+      <label class="qzone-bot-select"><small>目标 Bot</small><select onchange="state.qzoneBotId=this.value" ${active?'disabled':''}>${botOptions||'<option value="">无已连接 Bot</option>'}</select></label>
+    </div>
+    <div class="qzone-auth-track" aria-label="认证恢复进度">
+      <div class="${phase>=1?'active':''}"><span>01</span><strong>扫码</strong><small>手机 QQ 相机</small></div>
+      <div class="${phase>=2?'active':''}"><span>02</span><strong>确认</strong><small>核对登录账号</small></div>
+      <div class="${phase>=3?'active':''}"><span>03</span><strong>验证</strong><small>安装 p_skey</small></div>
+    </div>
+    ${active ? `<div class="qzone-login-stage">
+      <div class="qzone-qr-frame">${qrUrl?`<img src="${escapeAttr(qrUrl)}" alt="QQ 扫码登录二维码">`:'<span class="spinner"></span>'}</div>
+      <div class="qzone-login-copy"><span class="ops-status info"><span></span>${escapeHtml(login.status||'preparing')}</span><h3>${escapeHtml(login.message||'等待腾讯登录')}</h3><p>二维码剩余 ${Number(login.expires_in_seconds||0)} 秒。请用手机 QQ 的扫一扫，不要使用图片识别或第三方扫码工具。</p><div class="row"><button class="btn small" onclick="cancelQzoneLogin()" ${state.qzoneAuthBusy?'disabled':''}>取消登录</button></div></div>
+    </div>` : `<div class="qzone-auth-idle"><p>${auth.status==='healthy'?'当前凭证可用。需要切换或重新授权时，也可以主动生成新二维码。':'LLOneBot 无法提供有效 p_skey 时，从这里发起独立服务端登录。'}</p><button class="btn primary" onclick="startQzoneLogin()" ${state.qzoneAuthBusy||!state.qzoneBotId?'disabled':''}>${state.qzoneAuthBusy==='start'?'<span class="spinner"></span> 生成中…':'QQ 扫码恢复登录'}</button></div>`}
+    ${terminalHint}
+    ${state.qzoneAuthResult?`<div class="alert ${state.qzoneAuthResult.ok?'ok':'err'}">${escapeHtml(state.qzoneAuthResult.message||'操作完成')}</div>`:''}
+    <details class="qzone-cookie-fallback"><summary>高级兜底：手动导入 Cookie</summary><p>仅在扫码受腾讯风控影响时使用。Cookie 不会回显或进入审计详情。${insecure?' 当前页面不是 HTTPS，请勿在公网传输凭证。':''}</p><textarea id="qzone-cookie-import" autocomplete="off" spellcheck="false" placeholder="uin=o...; p_uin=o...; skey=...; p_skey=...;"></textarea><div class="row"><button class="btn small" onclick="importQzoneCookie()" ${state.qzoneAuthBusy||!state.qzoneBotId?'disabled':''}>${state.qzoneAuthBusy==='import'?'<span class="spinner"></span> 验证中…':'验证并安装'}</button></div></details>
+  </div>`;
+}
+
 function renderQzone() {
   const q = state.qzone;
   if (!q) return `<div class="card muted">加载中…</div>`;
@@ -863,7 +970,7 @@ function renderQzone() {
   const barColor = pct >= 90 ? "var(--danger)" : (pct >= 70 ? "var(--warn)" : "var(--ok)");
   const enabledPill = (on, label) => `<span class="device-status ${on?'approved':'pending'}">${label}：${on?'开':'关'}</span>`;
   const auth = q.auth || {}, scan = q.scan || {}, social = q.social || {}, inbound = q.inbound || {};
-  const statusText = auth.status === 'healthy' ? '认证正常' : auth.status === 'auth_blocked' ? '认证受限' : auth.status === 'refresh_failed' ? '刷新失败' : '尚未验证';
+  const statusText = auth.status === 'healthy' ? '认证正常' : auth.status === 'login_required' ? '需要登录' : auth.status === 'refresh_failed' ? '刷新失败' : '尚未验证';
   const statusClass = auth.status === 'healthy' ? 'ok' : auth.status === 'unknown' ? 'info' : 'warn';
   const scanText = scan.running ? `${scan.owner==='social'?'好友动态扫描':'留言轮询'}运行 ${Number(scan.running_seconds||0)} 秒` : '当前空闲';
   const resultDigest = item => {
@@ -890,13 +997,14 @@ function renderQzone() {
       ${auth.cooldown_remaining_seconds>0?`<div class="alert err">检测到登录页或验证码，已暂停空间请求，冷却剩余 ${_fmtDuration(auth.cooldown_remaining_seconds)}。</div>`:''}
       ${auth.last_error?`<p class="muted qzone-error-line">${escapeHtml(auth.last_error)}</p>`:''}
       <div class="row">
-        <button class="btn small" onclick="runQzoneAction('refresh')" ${state.qzoneActionBusy?'disabled':''}>${state.qzoneActionBusy==='refresh'?'<span class="spinner"></span> 刷新中…':'刷新 Cookie'}</button>
+        <button class="btn small" onclick="runQzoneAction('refresh')" ${state.qzoneActionBusy?'disabled':''}>${state.qzoneActionBusy==='refresh'?'<span class="spinner"></span> 刷新中…':'从 LLOneBot 刷新'}</button>
         <button class="btn small" onclick="runQzoneAction('social')" ${state.qzoneActionBusy||!q.social_enabled?'disabled':''}>运行好友扫描</button>
         <button class="btn small" onclick="runQzoneAction('inbound')" ${state.qzoneActionBusy||!q.inbound_enabled?'disabled':''}>运行留言轮询</button>
       </div>
       ${state.qzoneActionResult?`<div class="alert ${state.qzoneActionResult.ok?'ok':'err'}">${escapeHtml(state.qzoneActionResult.message||state.qzoneActionResult.status||state.qzoneActionResult.error||'操作完成')}</div>`:''}
     </div>
   </section>
+  ${renderQzoneAuthRecovery(q, auth)}
   <div class="card">
     <div class="between" style="margin-bottom:4px">
       <h2 style="margin:0">本月发空间额度</h2>
@@ -940,7 +1048,7 @@ async function triggerQzonePost() {
   state.qzoneBusy = true; state.qzonePostResult = null; render();
   if (!state.qzoneOperationId) state.qzoneOperationId = (globalThis.crypto&&globalThis.crypto.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
   try {
-    const r = await api("/qzone/post-now", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({operation_id:state.qzoneOperationId}) });
+    const r = await api("/qzone/post-now", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({operation_id:state.qzoneOperationId,bot_id:state.qzoneBotId}) });
     state.qzonePostResult = r;
     state.qzoneOperationId = "";
     if (r && r.quota && state.qzone) state.qzone.quota = r.quota;
@@ -956,7 +1064,7 @@ async function runQzoneAction(kind) {
   state.qzoneActionBusy = kind; state.qzoneActionResult = null; render();
   try {
     const path = kind === 'refresh' ? '/qzone/refresh-cookie' : '/qzone/scan-now';
-    const options = kind === 'refresh' ? {method:'POST'} : {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind})};
+    const options = kind === 'refresh' ? {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({bot_id:state.qzoneBotId})} : {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind})};
     const result = await api(path, options);
     state.qzoneActionResult = result;
     await loadView();

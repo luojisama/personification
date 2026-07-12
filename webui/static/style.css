@@ -178,6 +178,20 @@ main { padding:20px 26px 48px; max-width:none; width:100%; min-width:0; height:1
 .qzone-runtime-grid small,.qzone-runtime-grid span { color:var(--muted); font-size:12px; }
 .qzone-runtime-grid strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .qzone-error-line { padding:8px 10px; border-left:2px solid var(--warn); background:color-mix(in srgb,var(--warn) 6%,transparent); }
+.qzone-auth-card { position:relative; overflow:hidden; margin-bottom:16px; background:linear-gradient(145deg,color-mix(in srgb,var(--accent) 7%,var(--panel)),var(--panel) 48%); }
+.qzone-auth-card:before { content:""; position:absolute; inset:0 0 auto; height:3px; background:linear-gradient(90deg,var(--accent),var(--ok),transparent 82%); }
+.qzone-auth-head { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; }
+.qzone-auth-head h2 { margin:4px 0 5px; }.qzone-auth-head p { margin:0; color:var(--muted); }
+.qzone-bot-select { display:grid; gap:5px; min-width:160px; }.qzone-bot-select small { color:var(--muted); text-transform:uppercase; letter-spacing:.08em; }
+.qzone-auth-track { display:grid; grid-template-columns:repeat(3,1fr); margin:22px 0; border:1px solid var(--line); border-radius:9px; overflow:hidden; background:var(--bg); }
+.qzone-auth-track>div { position:relative; display:grid; grid-template-columns:auto 1fr; grid-template-rows:auto auto; column-gap:9px; padding:12px 14px; opacity:.45; }
+.qzone-auth-track>div+div { border-left:1px solid var(--line); }.qzone-auth-track>div.active { opacity:1; background:color-mix(in srgb,var(--accent) 7%,transparent); }
+.qzone-auth-track span { grid-row:1/3; align-self:center; font:700 18px/1 ui-monospace,Consolas,monospace; color:var(--accent); }.qzone-auth-track strong { font-size:13px; }.qzone-auth-track small { color:var(--muted); }
+.qzone-login-stage { display:grid; grid-template-columns:210px minmax(0,1fr); gap:26px; align-items:center; padding:18px; border:1px solid var(--line); border-radius:10px; background:var(--bg); }
+.qzone-qr-frame { display:grid; place-items:center; width:210px; aspect-ratio:1; padding:12px; border-radius:9px; background:#fff; box-shadow:0 12px 34px rgba(0,0,0,.25); }.qzone-qr-frame img { width:100%; height:100%; object-fit:contain; image-rendering:auto; }
+.qzone-login-copy h3 { margin:12px 0 6px; font-size:20px; }.qzone-login-copy p,.qzone-auth-idle p { color:var(--muted); line-height:1.65; }
+.qzone-auth-idle { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:16px 18px; border:1px dashed var(--line); border-radius:9px; }.qzone-auth-idle p { margin:0; }
+.qzone-cookie-fallback { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }.qzone-cookie-fallback summary { cursor:pointer; color:var(--muted); }.qzone-cookie-fallback p { color:var(--muted); font-size:12.5px; }.qzone-cookie-fallback textarea { width:100%; min-height:92px; resize:vertical; margin-bottom:9px; font:12px/1.5 ui-monospace,Consolas,monospace; }
 .toolbar { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
 .skill-summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:14px; }
 .skill-stat { border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--panel); min-height:72px; display:flex; flex-direction:column; justify-content:space-between; gap:4px; }
@@ -418,6 +432,7 @@ td code, .field-head code { word-break:break-all; }
   .qzone-recent-list { gap:7px; }
   .qzone-recent-item { padding:8px 10px; font-size:13px; }
   .qzone-runtime-grid { grid-template-columns:1fr; }
+  .qzone-auth-head,.qzone-auth-idle { align-items:stretch; flex-direction:column; }.qzone-bot-select { width:100%; }.qzone-auth-track { grid-template-columns:1fr; }.qzone-auth-track>div+div { border-left:0; border-top:1px solid var(--line); }.qzone-login-stage { grid-template-columns:1fr; justify-items:center; padding:14px; }.qzone-login-copy { width:100%; }.qzone-qr-frame { width:min(210px,100%); }
   .loading-hint { display:flex; width:100%; }
   .persona-history-item { align-items:flex-start; flex-direction:column; }
   /* 触摸目标加大，避免误触 */

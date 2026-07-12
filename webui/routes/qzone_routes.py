@@ -8,18 +8,28 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
 from ...core import webui_audit_log
 from ..deps import AdminIdentity, get_client_ip, require_admin
 
 
-def _first_bot(runtime) -> Any | None:
+def _get_bot(runtime, bot_id: str = "") -> Any | None:
     try:
         bots = runtime.get_bots() if callable(getattr(runtime, "get_bots", None)) else {}
     except Exception:
         return None
-    return next(iter(bots.values()), None) if bots else None
+    expected = str(bot_id or "").strip()
+    if expected:
+        for key, bot in (bots or {}).items():
+            if str(getattr(bot, "self_id", key) or "") == expected:
+                return bot
+        return None
+    return next(iter((bots or {}).values()), None)
+
+
+def _auth_owner(admin: AdminIdentity) -> str:
+    return f"{admin.qq}:{admin.device_id}"
 
 
 def _bundle_attr(runtime, name: str) -> Any:
@@ -63,6 +73,10 @@ def _build_status(runtime) -> dict[str, Any]:
     if not isinstance(social_state, dict):
         social_state = {}
     scheduler = _bundle_attr(runtime, "scheduler")
+    try:
+        bot_items = list((runtime.get_bots() or {}).items()) if callable(getattr(runtime, "get_bots", None)) else []
+    except Exception:
+        bot_items = []
 
     def _job_status(job_id: str) -> dict[str, Any]:
         try:
@@ -80,6 +94,7 @@ def _build_status(runtime) -> dict[str, Any]:
         "social_enabled": social_enabled,
         "inbound_enabled": inbound_enabled,
         "publish_available": bool(_bundle_attr(runtime, "qzone_publish_available")),
+        "bots": [{"bot_id": str(getattr(bot, "self_id", key) or key)} for key, bot in bot_items],
         "cookie_configured": bool(str(getattr(cfg, "personification_qzone_cookie", "") or "").strip()),
         "auth": sanitize_object(get_qzone_auth_status()),
         "scan": get_qzone_scan_status(),
@@ -132,7 +147,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
         if generate is None or publish is None:
             raise HTTPException(status_code=503, detail="发空间能力未就绪（qzone 未启用或运行时未初始化）")
 
-        bot = _first_bot(runtime)
+        bot = _get_bot(runtime, str(body.get("bot_id") or ""))
         if bot is None:
             raise HTTPException(status_code=503, detail="Bot 未连接")
 
@@ -202,10 +217,11 @@ def build_qzone_router(*, runtime) -> APIRouter:
     @router.post("/refresh-cookie")
     async def refresh_cookie(
         request: Request,
+        body: dict = Body(default_factory=dict),
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
         update_cookie = _bundle_attr(runtime, "update_qzone_cookie")
-        bot = _first_bot(runtime)
+        bot = _get_bot(runtime, str(body.get("bot_id") or ""))
         if not callable(update_cookie) or bot is None:
             raise HTTPException(status_code=503, detail="Cookie 刷新能力未就绪或 Bot 未连接")
         try:
@@ -224,6 +240,164 @@ def build_qzone_router(*, runtime) -> APIRouter:
         from ...core.sensitive_data import sanitize_text
 
         return {"ok": bool(ok), "status": "refreshed" if ok else "failed", "message": "ok" if ok else sanitize_text(message, limit=240)}
+
+    @router.post("/auth/login/start")
+    async def start_login(
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...core.qzone_auth import qzone_login_manager
+        from ...core.qzone_service import install_qzone_cookie
+
+        bot = _get_bot(runtime, str(body.get("bot_id") or ""))
+        if bot is None:
+            raise HTTPException(status_code=503, detail="目标 Bot 未连接")
+        bot_id = str(getattr(bot, "self_id", "") or "")
+
+        async def _install(cookie: str, expected_bot_id: str, source: str) -> tuple[bool, str]:
+            return await install_qzone_cookie(
+                cookie=cookie,
+                expected_bot_id=expected_bot_id,
+                plugin_config=getattr(runtime, "plugin_config", None),
+                logger=getattr(runtime, "logger", None),
+                source=source,
+            )
+
+        try:
+            result = await qzone_login_manager.start(
+                bot_id=bot_id,
+                owner_key=_auth_owner(admin),
+                install_cookie=_install,
+            )
+        except RuntimeError as exc:
+            webui_audit_log.record(
+                action="qzone_login_start",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=bot_id,
+                ip_hash=get_client_ip(request),
+                detail={"status": "rate_limited_or_busy"},
+                outcome="failed",
+            )
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except Exception as exc:
+            logger = getattr(runtime, "logger", None)
+            if logger is not None:
+                logger.warning(f"[qzone-auth] 生成登录二维码失败：{type(exc).__name__}")
+            webui_audit_log.record(
+                action="qzone_login_start",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=bot_id,
+                ip_hash=get_client_ip(request),
+                detail={"status": "upstream_failed", "error_type": type(exc).__name__},
+                outcome="failed",
+            )
+            raise HTTPException(status_code=502, detail="无法生成腾讯登录二维码，请稍后重试") from exc
+        webui_audit_log.record(
+            action="qzone_login_start",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=bot_id,
+            ip_hash=get_client_ip(request),
+            detail={"status": result.get("status")},
+            outcome="ok",
+        )
+        return result
+
+    @router.get("/auth/login/{session_id}/status")
+    async def login_status(
+        session_id: str,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...core.qzone_auth import qzone_login_manager
+
+        try:
+            return qzone_login_manager.status(session_id, owner_key=_auth_owner(admin))
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="登录会话不存在或已过期") from exc
+
+    @router.get("/auth/login/{session_id}/qrcode")
+    async def login_qrcode(
+        session_id: str,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> Response:
+        from ...core.qzone_auth import qzone_login_manager
+
+        try:
+            image = qzone_login_manager.qrcode(session_id, owner_key=_auth_owner(admin))
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="登录二维码不存在或已失效") from exc
+        return Response(
+            content=image,
+            media_type="image/png",
+            headers={"Cache-Control": "no-store, private", "Pragma": "no-cache"},
+        )
+
+    @router.post("/auth/login/{session_id}/cancel")
+    async def cancel_login(
+        session_id: str,
+        request: Request,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...core.qzone_auth import qzone_login_manager
+
+        try:
+            result = await qzone_login_manager.cancel(session_id, owner_key=_auth_owner(admin))
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="登录会话不存在或已过期") from exc
+        webui_audit_log.record(
+            action="qzone_login_cancel",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=str(result.get("bot_id") or ""),
+            ip_hash=get_client_ip(request),
+            detail={"status": "cancelled"},
+            outcome="ok",
+        )
+        return result
+
+    @router.post("/auth/cookie")
+    async def import_cookie(
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...core.qzone_service import install_qzone_cookie
+
+        cookie = str(body.get("cookie") or "").strip()
+        if not cookie or len(cookie) > 16_384:
+            raise HTTPException(status_code=400, detail="Cookie 为空或超过 16 KiB")
+        bot = _get_bot(runtime, str(body.get("bot_id") or ""))
+        if bot is None:
+            raise HTTPException(status_code=503, detail="目标 Bot 未连接")
+        bot_id = str(getattr(bot, "self_id", "") or "")
+        ok, reason = await install_qzone_cookie(
+            cookie=cookie,
+            expected_bot_id=bot_id,
+            plugin_config=getattr(runtime, "plugin_config", None),
+            logger=getattr(runtime, "logger", None),
+            source="manual",
+        )
+        messages = {
+            "missing_p_skey": "Cookie 缺少 p_skey",
+            "missing_uin": "Cookie 缺少有效 uin",
+            "account_mismatch": "Cookie QQ 与当前 Bot QQ 不一致",
+            "auth_blocked": "Cookie 已失效或仍被腾讯认证拦截",
+            "probe_failed": "暂时无法验证 Cookie，请稍后重试",
+        }
+        message = "QZone Cookie 已验证并安装" if ok else messages.get(reason, "Cookie 验证失败")
+        webui_audit_log.record(
+            action="qzone_cookie_import",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=bot_id,
+            ip_hash=get_client_ip(request),
+            detail={"source": "manual", "status": "installed" if ok else str(reason)[:32]},
+            outcome="ok" if ok else "failed",
+        )
+        return {"ok": bool(ok), "status": "installed" if ok else "failed", "message": message}
 
     @router.post("/scan-now")
     async def scan_now(
