@@ -40,7 +40,7 @@ def _set_qzone_auth_failure(message: Any, *, auth_failure: bool = False) -> None
     now = time.time()
     with _AUTH_STATE_LOCK:
         _AUTH_STATE.update({
-            "status": "auth_blocked" if auth_failure else "refresh_failed",
+            "status": "login_required" if auth_failure else "refresh_failed",
             "last_failure_at": now,
             "last_error": str(message or "")[:240],
             "cooldown_until": now + _AUTH_FAILURE_COOLDOWN_SECONDS if auth_failure else 0.0,
@@ -101,6 +101,110 @@ def _persist_cookie_to_env(cookie: str, logger: Any) -> None:
             return
         except Exception as e:
             logger.error(f"拟人插件：保存 Qzone Cookie 到 {env_path} 失败: {e}")
+
+
+def _parse_qzone_cookie(cookie: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for item in str(cookie or "").split(";"):
+        name, separator, value = item.strip().partition("=")
+        if not separator or not name or not value:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+            continue
+        values[name] = value.strip()
+    return values
+
+
+def _normalize_qzone_cookie(cookie: str) -> tuple[str, str, str]:
+    values = _parse_qzone_cookie(cookie)
+    p_skey = values.get("p_skey", "").strip()
+    raw_uin = values.get("uin") or values.get("p_uin") or ""
+    match = re.fullmatch(r"[o0]*(\d+)", raw_uin.strip())
+    if not p_skey:
+        raise ValueError("missing_p_skey")
+    if match is None:
+        raise ValueError("missing_uin")
+    qq = match.group(1)
+    preferred = ("uin", "p_uin", "skey", "p_skey")
+    ordered = [name for name in preferred if values.get(name)]
+    ordered.extend(name for name in values if name not in ordered and name not in {"qrsig", "pt_login_sig"})
+    normalized = "; ".join(f"{name}={values[name]}" for name in ordered) + ";"
+    return normalized, qq, p_skey
+
+
+async def _probe_qzone_cookie(cookie: str, qq: str, p_skey: str) -> tuple[bool, str]:
+    ctx = {
+        "cookie": cookie,
+        "formatted_cookie": _format_cookie_for_qzone(cookie, qq, p_skey),
+        "p_skey": p_skey,
+        "qq": qq,
+        "g_tk": _get_g_tk(p_skey),
+    }
+    url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
+    params = {
+        "uin": qq,
+        "ftype": "0",
+        "sort": "0",
+        "pos": "0",
+        "num": "1",
+        "replynum": "0",
+        "g_tk": str(ctx["g_tk"]),
+        "callback": "_Callback",
+        "code_version": "1",
+        "format": "jsonp",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=False) as client:
+            response = await client.get(url, params=params, headers=_qzone_headers(ctx, referer_uin=qq))
+    except Exception:
+        return False, "probe_failed"
+    if response.status_code != 200 or _looks_like_qzone_auth_page(response.text):
+        return False, "auth_blocked"
+    payload = _parse_qzone_jsonp(response.text)
+    if not payload:
+        return False, "probe_failed"
+    for key in ("code", "ret", "subcode"):
+        if key in payload:
+            try:
+                if int(payload.get(key) or 0) != 0:
+                    return False, "auth_blocked"
+            except Exception:
+                return False, "probe_failed"
+    return True, "ok"
+
+
+async def install_qzone_cookie(
+    *,
+    cookie: str,
+    expected_bot_id: str,
+    plugin_config: Any,
+    logger: Any,
+    source: str,
+    probe: Callable[[str, str, str], Awaitable[tuple[bool, str]]] | None = None,
+) -> tuple[bool, str]:
+    try:
+        normalized, qq, p_skey = _normalize_qzone_cookie(cookie)
+    except ValueError as exc:
+        return False, str(exc)
+    if qq != str(expected_bot_id or "").strip():
+        return False, "account_mismatch"
+    probe_cookie = probe or _probe_qzone_cookie
+    ok, reason = await probe_cookie(normalized, qq, p_skey)
+    if not ok:
+        _set_qzone_auth_failure(reason, auth_failure=reason == "auth_blocked")
+        return False, reason
+    plugin_config.personification_qzone_cookie = normalized
+    _persist_cookie_to_env(normalized, logger)
+    now = time.time()
+    with _AUTH_STATE_LOCK:
+        _AUTH_STATE.update({
+            "status": "healthy",
+            "last_success_at": now,
+            "last_error": "",
+            "cooldown_until": 0.0,
+            "source": str(source or "unknown")[:32],
+        })
+    return True, "ok"
 
 
 _IMAGE_B64_RE = re.compile(r"\[IMAGE_B64\]([A-Za-z0-9+/=\r\n]+)\[/IMAGE_B64\]")
@@ -1107,21 +1211,15 @@ def build_qzone_services(
             if not cookie:
                 _set_qzone_auth_failure("自动获取 Cookie 失败，返回结果为空")
                 return False, "自动获取 Cookie 失败，返回结果为空"
-            if "p_skey" not in cookie:
-                _set_qzone_auth_failure("获取到的 Cookie 不完整（缺少 p_skey）")
-                return False, "获取到的 Cookie 不完整（缺少 p_skey）"
             if "uin=" not in cookie:
                 cookie = f"uin=o{bot.self_id}; {cookie}"
-            plugin_config.personification_qzone_cookie = cookie
-            _persist_cookie_to_env(cookie, logger)
-            with _AUTH_STATE_LOCK:
-                _AUTH_STATE.update({
-                    "status": "healthy",
-                    "last_success_at": time.time(),
-                    "last_error": "",
-                    "cooldown_until": 0.0,
-                })
-            return True, "ok"
+            return await install_qzone_cookie(
+                cookie=cookie,
+                expected_bot_id=str(bot.self_id),
+                plugin_config=plugin_config,
+                logger=logger,
+                source="onebot",
+            )
         except Exception as e:
             _set_qzone_auth_failure(e)
             return False, str(e)

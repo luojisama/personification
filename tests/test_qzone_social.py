@@ -309,7 +309,7 @@ def test_qzone_auth_page_with_success_literal_is_rejected() -> None:
         )
         assert ok is False
         assert "验证码" in msg
-        assert qzone_service.get_qzone_auth_status()["status"] == "auth_blocked"
+        assert qzone_service.get_qzone_auth_status()["status"] == "login_required"
     finally:
         with qzone_service._AUTH_STATE_LOCK:
             qzone_service._AUTH_STATE.update({

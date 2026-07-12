@@ -767,6 +767,9 @@ async def _close_personification_runtime() -> None:
         except asyncio.CancelledError:
             pass
     _qzone_cookie_refresh_task = None
+    from .core.qzone_auth import qzone_login_manager
+
+    await qzone_login_manager.shutdown()
     await stop_plugin_knowledge_builder(
         logger=logger,
         knowledge_store=(
