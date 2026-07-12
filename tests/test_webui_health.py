@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,31 @@ visual_capabilities = load_personification_module("plugin.personification.core.v
 health_routes = load_personification_module("plugin.personification.webui.routes.health_routes")
 qzone_auth = load_personification_module("plugin.personification.core.qzone_auth")
 qzone_service = load_personification_module("plugin.personification.core.qzone_service")
+
+
+_OPERATION_FIELDS = {
+    "ok",
+    "code",
+    "phase",
+    "title",
+    "message",
+    "details",
+    "steps",
+    "warnings",
+    "suggestion",
+    "retryable",
+    "partial",
+    "outcome_unknown",
+    "operation_id",
+    "trace_id",
+}
+
+
+def _assert_operation_diagnostic(body: dict, *, ok: bool) -> None:
+    assert _OPERATION_FIELDS <= body.keys()
+    assert body["ok"] is ok
+    assert isinstance(body["details"], list)
+    assert isinstance(body["steps"], list)
 
 
 class _FakeResp:
@@ -103,6 +129,9 @@ def test_health_only_runs_single_category(_runtime_context) -> None:
     body = client.get("/personification/api/health/check", params={"only": "存储"}).json()
     assert body["partial"] is True
     assert [c["name"] for c in body["categories"]] == ["存储"]
+    assert body["code"] == "health_category_rechecked"
+    assert body["phase"] == "health_recheck"
+    _assert_operation_diagnostic(body, ok=True)
 
 
 def test_health_caches_full_run_and_serves_fast(_runtime_context, monkeypatch) -> None:
@@ -113,10 +142,32 @@ def test_health_caches_full_run_and_serves_fast(_runtime_context, monkeypatch) -
     # refresh 真跑并写缓存
     first = client.get("/personification/api/health/check", params={"refresh": "true"}).json()
     assert first["cached"] is False
+    assert first["code"] == "health_refresh_completed"
+    assert first["phase"] == "health_refresh"
+    _assert_operation_diagnostic(first, ok=True)
     # 默认读缓存
     second = client.get("/personification/api/health/check").json()
     assert second["cached"] is True
     assert second["generated_at"] == first["generated_at"]
+
+
+def test_health_refresh_exception_is_structured_without_raw_message(_runtime_context, monkeypatch) -> None:
+    async def _fail(**_kwargs):
+        raise RuntimeError("raw-refresh-secret")
+
+    monkeypatch.setattr(diagnostics, "run_diagnostics", _fail)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    response = client.get("/personification/api/health/check", params={"refresh": "true"})
+
+    assert response.status_code == 500
+    report = response.json()["detail"]
+    assert report["code"] == "health_refresh_failed"
+    assert report["phase"] == "health_refresh"
+    assert report["trace_id"]
+    assert "raw-refresh-secret" not in response.text
+    _assert_operation_diagnostic(report, ok=False)
 
 
 def test_health_includes_llm_subconfig_category(_runtime_context) -> None:
@@ -164,7 +215,14 @@ def test_interaction_wait_follows_reply_timeout() -> None:
     assert health_routes._interaction_wait_seconds(cfg) >= 185
 
 
-def _install_fake_interaction_runtime(_runtime_context, monkeypatch, *, group_id: str = "123456", user_id: str = "20001"):
+def _install_fake_interaction_runtime(
+    _runtime_context,
+    monkeypatch,
+    *,
+    group_id: str = "123456",
+    user_id: str = "20001",
+    rule_exc: Exception | None = None,
+):
     from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageEvent, MessageSegment
 
     processor = load_personification_module("plugin.personification.handlers.reply_pipeline.processor")
@@ -201,6 +259,8 @@ def _install_fake_interaction_runtime(_runtime_context, monkeypatch, *, group_id
             return {"shut_up_timestamp": 0}
 
     async def _rule(event, state):  # noqa: ANN001
+        if rule_exc is not None:
+            raise rule_exc
         state["is_random_chat"] = False
         state["message_target"] = "bot"
         return True
@@ -255,6 +315,9 @@ def test_interaction_test_private_uses_plugin_path_and_captures_reply(_runtime_c
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["replied"] is True
+    assert body["ok"] is True
+    assert body["code"] == "health_interaction_replied"
+    _assert_operation_diagnostic(body, ok=True)
     assert body["diagnosis_code"] == "ok"
     assert "自检回复" in body["reply"]
     stage_keys = [item["key"] for item in body["stages"]]
@@ -262,6 +325,9 @@ def test_interaction_test_private_uses_plugin_path_and_captures_reply(_runtime_c
     assert "buffer_dispatch" in stage_keys
     assert "fake_inner" in stage_keys
     assert "capture_reply" in stage_keys
+    assert {"rule_match", "buffer_dispatch", "fake_inner", "capture_reply"} <= {
+        item["key"] for item in body["steps"]
+    }
     assert any(item.get("api") == "send" for item in sent)
     logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")
     rows = logs.query_recent(trace_id=body["trace_id"], limit=20)
@@ -279,10 +345,35 @@ def test_interaction_test_group_uses_plugin_path_and_captures_reply(_runtime_con
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["replied"] is True
+    assert body["ok"] is True
+    assert body["code"] == "health_interaction_replied"
+    _assert_operation_diagnostic(body, ok=True)
     assert body["target"] == "group"
     assert body["diagnosis_code"] == "ok"
     assert "自检回复" in body["reply"]
     assert body["target_detail"]["group_id"] == _runtime_context.plugin_config.personification_webui_test_group_id
+
+
+def test_interaction_exception_is_structured_without_raw_message(_runtime_context, monkeypatch) -> None:
+    _install_fake_interaction_runtime(
+        _runtime_context,
+        monkeypatch,
+        rule_exc=RuntimeError("raw-interaction-secret"),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+
+    response = client.post("/personification/api/health/interaction-test", json={"target": "group"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["code"] == "health_interaction_rule_exception"
+    assert body["diagnosis_code"] == "rule_exception"
+    assert body["trace_id"]
+    assert "RuntimeError" in str(body["steps"])
+    assert "raw-interaction-secret" not in response.text
+    _assert_operation_diagnostic(body, ok=False)
 
 
 def test_qzone_forward_test_forwards_first_feed_and_counts_quota(_runtime_context) -> None:
@@ -357,6 +448,9 @@ def test_qzone_forward_test_forwards_first_feed_and_counts_quota(_runtime_contex
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["ok"] is True
+    assert body["code"] == "qzone_forward_published"
+    assert body["phase"] == "qzone_publish"
+    _assert_operation_diagnostic(body, ok=True)
     assert body["target_user_id"] == "20001"
     assert body["feed"]["feed_id"] == "feed-first"
     assert service.fetches[0]["target_uin"] == "20001"
@@ -376,6 +470,188 @@ def test_qzone_forward_test_forwards_first_feed_and_counts_quota(_runtime_contex
     assert rows[0]["outcome"] == "ok"
     assert "must-not-leak" not in str(rows)
     assert "also-secret" not in str(rows)
+
+
+def test_qzone_forward_fetch_exception_is_structured_and_safe(_runtime_context) -> None:
+    cfg = _runtime_context.plugin_config
+    cfg.personification_qzone_monthly_limit = 30
+    cfg.personification_qzone_min_interval_hours = 0
+
+    class _Bot:
+        self_id = "10000"
+
+        async def call_api(self, _name, **kwargs):  # noqa: ANN001, ANN003
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+        async def send_private_msg(self, **kwargs):  # noqa: ANN003
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+    class _Service:
+        async def fetch_user_feeds(self, **_kwargs):  # noqa: ANN003
+            raise RuntimeError("raw-fetch-secret")
+
+        async def forward_feed(self, **_kwargs):  # noqa: ANN003
+            raise AssertionError("publish must not run")
+
+    async def _refresh(_bot):  # noqa: ANN001
+        raise RuntimeError("raw-auth-secret")
+
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=cfg,
+        superusers={"10001"},
+        get_bots=lambda: {"10000": _Bot()},
+        logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+        runtime_bundle=SimpleNamespace(qzone_social_service=_Service(), update_qzone_cookie=_refresh),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+
+    response = client.post(
+        "/personification/api/health/qzone-forward-test",
+        json={"target_user_id": "20001", "operation_id": "fetch-safe-op"},
+    )
+
+    assert response.status_code == 500
+    report = response.json()["detail"]
+    assert report["code"] == "qzone_forward_fetch_exception"
+    assert report["phase"] == "qzone_fetch"
+    assert report["operation_id"] == "fetch-safe-op"
+    assert [item["key"] for item in report["steps"]] == ["quota", "auth", "fetch"]
+    assert "raw-fetch-secret" not in response.text
+    assert "raw-auth-secret" not in response.text
+    _assert_operation_diagnostic(report, ok=False)
+
+
+def test_qzone_forward_quota_block_is_structured_and_skips_external_calls(_runtime_context) -> None:
+    data_store_mod = load_personification_module("plugin.personification.core.data_store")
+    time_ctx = load_personification_module("plugin.personification.core.time_ctx")
+    cfg = _runtime_context.plugin_config
+    cfg.personification_qzone_monthly_limit = 1
+    cfg.personification_qzone_min_interval_hours = 0
+    data_store_mod.get_data_store().save_sync(
+        "qzone_post_state",
+        {"period": time_ctx.get_configured_now().strftime("%Y-%m"), "count": 1, "last_post_at": 0},
+    )
+    external_calls: list[str] = []
+
+    class _Bot:
+        self_id = "10000"
+
+        async def call_api(self, _name, **kwargs):  # noqa: ANN001, ANN003
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+        async def send_private_msg(self, **kwargs):  # noqa: ANN003
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+    class _Service:
+        async def fetch_user_feeds(self, **_kwargs):  # noqa: ANN003
+            external_calls.append("fetch")
+            return True, "ok", []
+
+        async def forward_feed(self, **_kwargs):  # noqa: ANN003
+            external_calls.append("publish")
+            return True, "ok"
+
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=cfg,
+        superusers={"10001"},
+        get_bots=lambda: {"10000": _Bot()},
+        logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+        runtime_bundle=SimpleNamespace(qzone_social_service=_Service()),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+
+    response = client.post(
+        "/personification/api/health/qzone-forward-test",
+        json={"target_user_id": "20001", "operation_id": "quota-block-op"},
+    )
+
+    assert response.status_code == 409
+    report = response.json()["detail"]
+    assert report["code"] == "qzone_forward_quota_blocked"
+    assert report["phase"] == "quota_check"
+    assert report["stage"] == "quota"
+    assert report["quota"]["remaining"] == 0
+    assert report["steps"][0]["status"] == "error"
+    assert external_calls == []
+    _assert_operation_diagnostic(report, ok=False)
+
+
+def test_qzone_forward_timeout_reports_outcome_unknown(_runtime_context) -> None:
+    cfg = _runtime_context.plugin_config
+    cfg.personification_qzone_monthly_limit = 30
+    cfg.personification_qzone_min_interval_hours = 0
+    feed = {"feed_id": "unknown-feed", "owner_uin": "20001", "content": "可能已转发"}
+
+    class _Bot:
+        self_id = "10000"
+
+        async def call_api(self, _name, **kwargs):  # noqa: ANN001, ANN003
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+        async def send_private_msg(self, **kwargs):  # noqa: ANN003
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+    class _Service:
+        async def fetch_user_feeds(self, **_kwargs):  # noqa: ANN003
+            return True, "ok", [feed]
+
+        async def forward_feed(self, **_kwargs):  # noqa: ANN003
+            raise TimeoutError("raw-publish-secret")
+
+    async def _refresh(_bot):  # noqa: ANN001
+        return True, "cookie-secret-must-not-leak"
+
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=cfg,
+        superusers={"10001"},
+        get_bots=lambda: {"10000": _Bot()},
+        logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+        runtime_bundle=SimpleNamespace(qzone_social_service=_Service(), update_qzone_cookie=_refresh),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+
+    response = client.post(
+        "/personification/api/health/qzone-forward-test",
+        json={"target_user_id": "20001", "operation_id": "unknown-forward-op"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["code"] == "qzone_forward_outcome_unknown"
+    assert body["phase"] == "qzone_publish"
+    assert body["outcome_unknown"] is True
+    assert body["retryable"] is False
+    assert body["operation_id"] == "unknown-forward-op"
+    assert body["stage"] == "forward"
+    assert body["feed"]["feed_id"] == "unknown-feed"
+    assert body["steps"][-1]["status"] == "unknown"
+    assert "raw-publish-secret" not in response.text
+    assert "cookie-secret-must-not-leak" not in response.text
+    _assert_operation_diagnostic(body, ok=False)
+
+
+def test_health_frontend_persists_and_renders_operation_diagnostics() -> None:
+    source = (Path(__file__).resolve().parents[1] / "webui" / "static" / "app-admin.js").read_text(encoding="utf-8")
+
+    assert 'renderAdminOperations("health","功能体检操作诊断")' in source
+    assert source.count('rememberAdminOperation("health"') >= 8
+    assert "renderOperationDiagnostic(ir)" in source
+    assert "renderOperationDiagnostic(result)" in source
+    assert "qzoneForwardOperationId" in source
+    assert 'state.qzoneForwardResult = { ok:false, error:e.message }' not in source
+    assert '"交互测试失败：" + e.message' not in source
 
 
 def test_health_requires_auth(_runtime_context) -> None:
@@ -442,8 +718,11 @@ def test_qzone_status_and_operations_are_observable_without_cookie_leak(_runtime
     assert status.status_code == 200, status.text
     assert status.json()["cookie_configured"] is True
     assert status.json()["social"]["job"]["registered"] is True
-    assert refreshed.json() == {"ok": True, "status": "refreshed", "message": "ok"}
+    assert refreshed.json()["status"] == "refreshed"
+    assert refreshed.json()["message"] == "ok"
+    assert refreshed.json()["diagnostic"]["code"] == "qzone_cookie_refreshed"
     assert scanned.json()["inbound_comments"] == 1
+    assert scanned.json()["diagnostic"]["code"] == "qzone_inbound_scan_completed"
     assert calls == [("refresh", True), ("inbound", True)]
     assert "must-not-leak" not in status.text + refreshed.text + scanned.text
 
@@ -573,11 +852,14 @@ def test_qzone_login_routes_bind_owner_require_csrf_and_disable_qr_cache(_runtim
     cancelled = client.post("/personification/api/qzone/auth/login/session-one/cancel")
 
     assert started.status_code == 200
+    assert started.json()["diagnostic"]["code"] == "qzone_login_started"
     assert polled.json()["status"] == "waiting_confirm"
+    assert polled.json()["diagnostic"]["code"] == "qzone_login_status_loaded"
     assert image.content == b"private-qr-png"
     assert image.headers["content-type"].startswith("image/png")
     assert "no-store" in image.headers["cache-control"]
     assert cancelled.json()["status"] == "cancelled"
+    assert cancelled.json()["diagnostic"]["code"] == "qzone_login_cancelled"
     assert calls and calls[0][0] == "10000"
 
     stranger = _build_client(_runtime_context)
@@ -620,7 +902,9 @@ def test_qzone_manual_cookie_import_never_echoes_or_audits_secret(_runtime_conte
         json={"bot_id": "10000", "cookie": secret},
     )
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "status": "installed", "message": "QZone Cookie 已验证并安装"}
+    assert response.json()["status"] == "installed"
+    assert response.json()["message"] == "QZone Cookie 已验证并安装"
+    assert response.json()["diagnostic"]["code"] == "qzone_cookie_installed"
     assert received == [secret]
     assert secret not in response.text
 

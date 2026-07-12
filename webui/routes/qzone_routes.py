@@ -11,7 +11,117 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
 from ...core import webui_audit_log
+from ...core.operation_diagnostics import detail, diagnostic, exception_diagnostic, normalize_diagnostic, step
+from ...core.sensitive_data import sanitize_object, sanitize_text
 from ..deps import AdminIdentity, get_client_ip, require_admin
+
+
+_DIAGNOSTIC_FIELDS = (
+    "ok",
+    "code",
+    "phase",
+    "title",
+    "message",
+    "details",
+    "steps",
+    "warnings",
+    "suggestion",
+    "retryable",
+    "partial",
+    "outcome_unknown",
+    "operation_id",
+    "trace_id",
+)
+_HIDDEN_LAST_ERROR = "最近操作失败，详细原因仅保留在服务端脱敏日志中。"
+_LOGIN_STATUS_MESSAGES = {
+    "preparing": "正在生成二维码",
+    "waiting_scan": "请使用手机 QQ 扫描二维码",
+    "waiting_confirm": "已扫码，请在手机 QQ 中确认登录",
+    "verifying": "登录已确认，正在验证 QZone 凭证",
+    "success": "QZone 登录已恢复",
+    "expired": "二维码已过期，请重新生成",
+    "cancelled": "登录已取消",
+    "risk_controlled": "腾讯拒绝了本次登录，请稍后重试或使用人工兜底",
+    "account_mismatch": "扫码 QQ 与当前 Bot QQ 不一致",
+    "failed": "登录会话未完成，请稍后重试",
+}
+
+
+def _attach_diagnostic(payload: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+    result = dict(payload)
+    result["diagnostic"] = report
+    for field in _DIAGNOSTIC_FIELDS:
+        result.setdefault(field, report[field])
+    return result
+
+
+def _safe_last_error(value: Any) -> str:
+    return _HIDDEN_LAST_ERROR if str(value or "").strip() else ""
+
+
+def _safe_scan_result(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result = sanitize_object(value)
+    if not isinstance(result, dict):
+        return {}
+    if result.get("last_error"):
+        result["last_error"] = _HIDDEN_LAST_ERROR
+    return result
+
+
+def _safe_login_result(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    result = sanitize_object(source)
+    if not isinstance(result, dict):
+        result = {}
+    # session_id is intentionally returned because it is required by the bound QR workflow.
+    result["session_id"] = sanitize_text(source.get("session_id") or "", limit=160)
+    result["bot_id"] = sanitize_text(source.get("bot_id") or "", limit=32)
+    status = sanitize_text(source.get("status") or "unknown", limit=48)
+    result["status"] = status
+    result["message"] = _LOGIN_STATUS_MESSAGES.get(status, "登录会话状态已更新")
+    return result
+
+
+def _exception_report(
+    runtime: Any,
+    exc: BaseException,
+    *,
+    code: str,
+    phase: str,
+    title: str,
+    message: str,
+    suggestion: str,
+    steps: tuple = (),
+    operation_id: str = "",
+    retryable: bool = True,
+) -> dict[str, Any]:
+    report = exception_diagnostic(
+        exc,
+        phase=phase,
+        title=title,
+        message=message,
+        suggestion=suggestion,
+        operation_id=operation_id,
+        retryable=retryable,
+    )
+    report["code"] = code
+    report["steps"] = [item.to_dict() for item in steps]
+    logger = getattr(runtime, "logger", None)
+    if logger is not None:
+        try:
+            logger.warning(
+                f"[webui.qzone] code={code} phase={phase} "
+                f"exception={type(exc).__name__} trace={report.get('trace_id', '')}"
+            )
+        except Exception:
+            pass
+    return report
+
+
+def _http_diagnostic(status_code: int, report: dict[str, Any]) -> HTTPException:
+    return HTTPException(status_code=status_code, detail=report)
 
 
 def _get_bot(runtime, bot_id: str = "") -> Any | None:
@@ -40,7 +150,6 @@ def _bundle_attr(runtime, name: str) -> Any:
 def _build_status(runtime) -> dict[str, Any]:
     from ...core.data_store import get_data_store
     from ...core.qzone_service import get_qzone_auth_status
-    from ...core.sensitive_data import sanitize_object
     from ...core.time_ctx import get_configured_now
     from ...flows.qzone_social_flow import get_qzone_scan_status
     from ...jobs.periodic_jobs import build_qzone_quota
@@ -88,7 +197,12 @@ def _build_status(runtime) -> dict[str, Any]:
             "next_run_at": job.next_run_time.timestamp() if job is not None and getattr(job, "next_run_time", None) else 0,
         }
 
-    return {
+    auth = sanitize_object(get_qzone_auth_status())
+    if not isinstance(auth, dict):
+        auth = {}
+    if auth.get("last_error"):
+        auth["last_error"] = _HIDDEN_LAST_ERROR
+    payload = {
         "enabled": enabled,
         "proactive_enabled": proactive_enabled,
         "social_enabled": social_enabled,
@@ -96,18 +210,18 @@ def _build_status(runtime) -> dict[str, Any]:
         "publish_available": bool(_bundle_attr(runtime, "qzone_publish_available")),
         "bots": [{"bot_id": str(getattr(bot, "self_id", key) or key)} for key, bot in bot_items],
         "cookie_configured": bool(str(getattr(cfg, "personification_qzone_cookie", "") or "").strip()),
-        "auth": sanitize_object(get_qzone_auth_status()),
+        "auth": auth,
         "scan": get_qzone_scan_status(),
         "social": {
             "last_scan_at": float(social_state.get("last_scan_at", 0) or 0),
-            "last_result": social_state.get("last_result") if isinstance(social_state.get("last_result"), dict) else {},
-            "last_error": str(social_state.get("last_error", "") or ""),
+            "last_result": _safe_scan_result(social_state.get("last_result")),
+            "last_error": _safe_last_error(social_state.get("last_error")),
             "job": _job_status("personification_qzone_social_scan"),
         },
         "inbound": {
             "last_scan_at": float(social_state.get("last_inbound_scan_at", 0) or 0),
-            "last_result": social_state.get("last_inbound_result") if isinstance(social_state.get("last_inbound_result"), dict) else {},
-            "last_error": str(social_state.get("last_inbound_error", "") or ""),
+            "last_result": _safe_scan_result(social_state.get("last_inbound_result")),
+            "last_error": _safe_last_error(social_state.get("last_inbound_error")),
             "job": _job_status("personification_qzone_inbound_poll"),
         },
         "quota": quota,
@@ -121,6 +235,20 @@ def _build_status(runtime) -> dict[str, Any]:
         "recent_contents": [str(x) for x in list(state.get("recent_contents", []))][-12:],
         "server_now": int(now_ts),
     }
+    report = diagnostic(
+        ok=True,
+        code="qzone_status_loaded",
+        phase="status_snapshot",
+        title="QZone 运行状态已加载",
+        message="额度、认证、扫描和调度状态已生成安全快照。",
+        details=(
+            detail("已连接 Bot", len(bot_items), "ok" if bot_items else "warn"),
+            detail("发布能力", "available" if payload["publish_available"] else "unavailable", "info"),
+        ),
+        steps=(step("status_snapshot", "生成状态快照", "ok", "持久状态和运行时状态已完成脱敏。"),),
+        retryable=False,
+    )
+    return _attach_diagnostic(payload, report)
 
 
 def build_qzone_router(*, runtime) -> APIRouter:
@@ -128,7 +256,20 @@ def build_qzone_router(*, runtime) -> APIRouter:
 
     @router.get("/status")
     async def status(_: AdminIdentity = Depends(require_admin)) -> dict:
-        return _build_status(runtime)
+        try:
+            return _build_status(runtime)
+        except Exception as exc:
+            report = _exception_report(
+                runtime,
+                exc,
+                code="qzone_status_exception",
+                phase="status_snapshot",
+                title="QZone 运行状态加载失败",
+                message="服务器未能生成 QZone 状态快照。",
+                suggestion="请根据 Trace ID 查看脱敏日志，修复状态存储或运行时依赖后重试。",
+                steps=(step("status_snapshot", "生成状态快照", "error", "状态读取异常中断。"),),
+            )
+            raise _http_diagnostic(500, report) from exc
 
     @router.post("/post-now")
     async def post_now(
@@ -138,33 +279,70 @@ def build_qzone_router(*, runtime) -> APIRouter:
     ) -> dict:
         """管理员手动强制发一条说说（绕过额度/间隔/agent 决策，但仍计入月度额度）。"""
         from ...core.time_ctx import get_configured_now
-        from ...core.operation_diagnostics import detail, diagnostic, normalize_diagnostic, step
         from ...core.qzone_service import get_qzone_auth_status
-        from ...core.sensitive_data import sanitize_text
         from ...jobs.periodic_jobs import build_qzone_quota, coordinated_qzone_publish
 
         logger = getattr(runtime, "logger", None)
-        generate = _bundle_attr(runtime, "qzone_generate_post")
-        publish = _bundle_attr(runtime, "publish_qzone_shuo")
-        update_cookie = _bundle_attr(runtime, "update_qzone_cookie")
+        operation_id = str(body.get("operation_id") or uuid.uuid4().hex)[:96]
+        try:
+            generate = _bundle_attr(runtime, "qzone_generate_post")
+            publish = _bundle_attr(runtime, "publish_qzone_shuo")
+            update_cookie = _bundle_attr(runtime, "update_qzone_cookie")
+        except Exception as exc:
+            report = _exception_report(
+                runtime,
+                exc,
+                code="qzone_post_preflight_exception",
+                phase="post_preflight",
+                title="QZone 发布预检异常",
+                message="服务器未能读取 QZone 发布能力。",
+                suggestion="请根据 Trace ID 检查运行时装配状态，修复后使用同一 Operation ID 重试。",
+                steps=(step("capabilities", "检查发布能力", "error", "运行时能力读取异常中断。"),),
+                operation_id=operation_id,
+            )
+            raise _http_diagnostic(500, report) from exc
         if generate is None or publish is None:
-            raise HTTPException(status_code=503, detail="发空间能力未就绪（qzone 未启用或运行时未初始化）")
+            report = diagnostic(
+                ok=False,
+                code="qzone_post_capability_unavailable",
+                phase="post_preflight",
+                title="QZone 发布能力未就绪",
+                message="说说生成或发布能力尚未完成运行时初始化。",
+                steps=(step("capabilities", "检查发布能力", "error", "必要能力不可用，未生成草稿。"),),
+                suggestion="确认 QZone 已启用并重载插件运行时后重试。",
+                retryable=True,
+                operation_id=operation_id,
+            )
+            raise _http_diagnostic(503, report)
 
         bot = _get_bot(runtime, str(body.get("bot_id") or ""))
         if bot is None:
-            raise HTTPException(status_code=503, detail="Bot 未连接")
+            report = diagnostic(
+                ok=False,
+                code="qzone_post_bot_unavailable",
+                phase="post_preflight",
+                title="目标 Bot 未连接",
+                message="没有找到可执行本次 QZone 发布的已连接 Bot。",
+                steps=(
+                    step("capabilities", "检查发布能力", "ok", "生成与发布能力可用。"),
+                    step("bot", "选择目标 Bot", "error", "目标 Bot 当前不可用。"),
+                ),
+                suggestion="等待目标 Bot 连接后，使用同一 Operation ID 重试。",
+                retryable=True,
+                operation_id=operation_id,
+            )
+            raise _http_diagnostic(503, report)
 
-        operation_id = str(body.get("operation_id") or uuid.uuid4().hex)[:96]
         warnings: list[str] = []
         if callable(update_cookie):
             try:
-                refresh_ok, refresh_message = await update_cookie(bot)
+                refresh_ok, _refresh_message = await update_cookie(bot)
                 if not refresh_ok:
-                    warnings.append(f"LLOneBot Cookie 刷新未成功，已继续尝试使用现有凭证：{sanitize_text(refresh_message, limit=180)}")
+                    warnings.append("LLOneBot Cookie 刷新未成功，已继续尝试使用现有凭证。")
             except Exception as exc:
                 if logger is not None:
-                    logger.warning(f"[webui] 手动发说说刷新 Cookie 失败：{exc}")
-                warnings.append(f"LLOneBot Cookie 刷新异常，已继续尝试使用现有凭证：{type(exc).__name__}")
+                    logger.warning(f"[webui.qzone] post cookie refresh exception={type(exc).__name__}")
+                warnings.append("LLOneBot Cookie 刷新异常，已继续尝试使用现有凭证。")
 
         try:
             detailed_generate = getattr(generate, "detailed", None)
@@ -224,18 +402,50 @@ def build_qzone_router(*, runtime) -> APIRouter:
             return generation_diag
 
         cfg = getattr(runtime, "plugin_config", None)
-        published = await coordinated_qzone_publish(
-            operation_id=operation_id,
-            content=content,
-            now=get_configured_now(),
-            monthly_limit=int(getattr(cfg, "personification_qzone_monthly_limit", 30) or 30),
-            min_interval_hours=float(getattr(cfg, "personification_qzone_min_interval_hours", 12.0) or 0),
-            kind="post",
-            publish=lambda: publish(content, getattr(bot, "self_id", "")),
-            force=True,
-        )
+        try:
+            published = await coordinated_qzone_publish(
+                operation_id=operation_id,
+                content=content,
+                now=get_configured_now(),
+                monthly_limit=int(getattr(cfg, "personification_qzone_monthly_limit", 30) or 30),
+                min_interval_hours=float(getattr(cfg, "personification_qzone_min_interval_hours", 12.0) or 0),
+                kind="post",
+                publish=lambda: publish(content, getattr(bot, "self_id", "")),
+                force=True,
+            )
+        except Exception as exc:
+            report = _exception_report(
+                runtime,
+                exc,
+                code="qzone_publish_orchestration_exception",
+                phase="qzone_publish",
+                title="QZone 发布协调流程异常",
+                message="发布协调器未返回可确认的操作状态。",
+                suggestion="先按 Operation ID 检查服务端操作记录和 QZone 实际状态，不要创建新的重复请求。",
+                steps=(
+                    step("draft_generation", "生成说说草稿", "ok", "草稿已生成。"),
+                    step("publish", "提交到 QZone", "unknown", "发布协调流程异常中断，远端结果未知。"),
+                ),
+                operation_id=operation_id,
+                retryable=False,
+            )
+            report["partial"] = True
+            report["outcome_unknown"] = True
+            webui_audit_log.record(
+                action="qzone_post_now",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=str(getattr(bot, "self_id", "") or ""),
+                ip_hash=get_client_ip(request),
+                detail={"operation_id": operation_id, "code": report["code"], "phase": report["phase"]},
+                outcome="failed",
+            )
+            raise _http_diagnostic(500, report) from exc
         if not published.get("success"):
-            publish_status = str(published.get("status") or "failed")
+            raw_publish_status = str(published.get("status") or "failed")
+            publish_status = raw_publish_status if raw_publish_status in {
+                "failed", "released", "reserved", "duplicate_reserved", "outcome_unknown", "unknown"
+            } else "failed"
             auth_status = get_qzone_auth_status()
             outcome_unknown = publish_status in {"outcome_unknown", "unknown"}
             if outcome_unknown:
@@ -259,7 +469,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
             else:
                 code = "qzone_publish_rejected"
                 title = "QZone 明确拒绝了发布"
-                message = sanitize_text(published.get("message") or "发布层返回失败状态", limit=260)
+                message = "发布层明确返回失败状态，本次未确认发布成功。"
                 suggestion = "根据发布层返回和认证状态修复问题；只有明确失败时才可以重新发布。"
                 retryable = True
             steps = list(generation_diag.get("steps") or [])
@@ -359,14 +569,98 @@ def build_qzone_router(*, runtime) -> APIRouter:
         body: dict = Body(default_factory=dict),
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
-        update_cookie = _bundle_attr(runtime, "update_qzone_cookie")
-        bot = _get_bot(runtime, str(body.get("bot_id") or ""))
-        if not callable(update_cookie) or bot is None:
-            raise HTTPException(status_code=503, detail="Cookie 刷新能力未就绪或 Bot 未连接")
         try:
-            ok, message = await update_cookie(bot, force=True)
+            update_cookie = _bundle_attr(runtime, "update_qzone_cookie")
         except Exception as exc:
-            ok, message = False, str(exc)
+            report = _exception_report(
+                runtime,
+                exc,
+                code="qzone_cookie_refresh_preflight_exception",
+                phase="cookie_refresh_preflight",
+                title="Cookie 刷新预检异常",
+                message="服务器未能读取 Cookie 刷新能力。",
+                suggestion="请根据 Trace ID 检查运行时装配状态后重试。",
+                steps=(step("capability", "检查刷新能力", "error", "运行时能力读取异常中断。"),),
+            )
+            raise _http_diagnostic(500, report) from exc
+        bot = _get_bot(runtime, str(body.get("bot_id") or ""))
+        if not callable(update_cookie):
+            report = diagnostic(
+                ok=False,
+                code="qzone_cookie_refresh_unavailable",
+                phase="cookie_refresh_preflight",
+                title="Cookie 刷新能力未就绪",
+                message="当前运行时没有可调用的 Cookie 刷新能力。",
+                steps=(step("capability", "检查刷新能力", "error", "刷新能力不可用。"),),
+                suggestion="确认 QZone 已启用并重载插件运行时后重试。",
+                retryable=True,
+            )
+            raise _http_diagnostic(503, report)
+        if bot is None:
+            report = diagnostic(
+                ok=False,
+                code="qzone_cookie_refresh_bot_unavailable",
+                phase="cookie_refresh_preflight",
+                title="目标 Bot 未连接",
+                message="没有找到可用于刷新 QZone Cookie 的已连接 Bot。",
+                steps=(
+                    step("capability", "检查刷新能力", "ok", "刷新能力可用。"),
+                    step("bot", "选择目标 Bot", "error", "目标 Bot 当前不可用。"),
+                ),
+                suggestion="等待目标 Bot 连接后重试。",
+                retryable=True,
+            )
+            raise _http_diagnostic(503, report)
+        refresh_exc: BaseException | None = None
+        try:
+            ok, _service_message = await update_cookie(bot, force=True)
+        except Exception as exc:
+            ok = False
+            refresh_exc = exc
+        if refresh_exc is not None:
+            report = _exception_report(
+                runtime,
+                refresh_exc,
+                code="qzone_cookie_refresh_exception",
+                phase="cookie_refresh",
+                title="Cookie 刷新异常中断",
+                message="Cookie 刷新调用发生内部异常，未返回可用凭证。",
+                suggestion="请根据 Trace ID 检查 OneBot 连接与刷新能力后重试。",
+                steps=(
+                    step("capability", "检查刷新能力", "ok", "刷新能力可用。"),
+                    step("bot", "选择目标 Bot", "ok", "目标 Bot 已连接。"),
+                    step("refresh_cookie", "刷新 Cookie", "error", "刷新调用异常中断。"),
+                ),
+            )
+        elif ok:
+            report = diagnostic(
+                ok=True,
+                code="qzone_cookie_refreshed",
+                phase="cookie_refresh",
+                title="QZone Cookie 已刷新",
+                message="LLOneBot 返回的凭证已完成验证和安装。",
+                steps=(
+                    step("capability", "检查刷新能力", "ok", "刷新能力可用。"),
+                    step("bot", "选择目标 Bot", "ok", "目标 Bot 已连接。"),
+                    step("refresh_cookie", "刷新 Cookie", "ok", "凭证已验证并安装。"),
+                ),
+                retryable=False,
+            )
+        else:
+            report = diagnostic(
+                ok=False,
+                code="qzone_cookie_refresh_failed",
+                phase="cookie_refresh",
+                title="QZone Cookie 刷新失败",
+                message="刷新能力明确返回失败，现有认证状态未被确认恢复。",
+                steps=(
+                    step("capability", "检查刷新能力", "ok", "刷新能力可用。"),
+                    step("bot", "选择目标 Bot", "ok", "目标 Bot 已连接。"),
+                    step("refresh_cookie", "刷新 Cookie", "error", "刷新能力返回失败状态。"),
+                ),
+                suggestion="检查 OneBot 登录状态，必要时使用 QZone 扫码认证恢复。",
+                retryable=True,
+            )
         webui_audit_log.record(
             action="qzone_cookie_refresh",
             qq=admin.qq,
@@ -376,9 +670,14 @@ def build_qzone_router(*, runtime) -> APIRouter:
             detail={"ok": bool(ok), "status": "refreshed" if ok else "failed"},
             outcome="ok" if ok else "failed",
         )
-        from ...core.sensitive_data import sanitize_text
-
-        return {"ok": bool(ok), "status": "refreshed" if ok else "failed", "message": "ok" if ok else sanitize_text(message, limit=240)}
+        return _attach_diagnostic(
+            {
+                "ok": bool(ok),
+                "status": "refreshed" if ok else "failed",
+                "message": "ok" if ok else "Cookie 刷新失败",
+            },
+            report,
+        )
 
     @router.post("/auth/login/start")
     async def start_login(
@@ -391,7 +690,17 @@ def build_qzone_router(*, runtime) -> APIRouter:
 
         bot = _get_bot(runtime, str(body.get("bot_id") or ""))
         if bot is None:
-            raise HTTPException(status_code=503, detail="目标 Bot 未连接")
+            report = diagnostic(
+                ok=False,
+                code="qzone_login_bot_unavailable",
+                phase="login_start",
+                title="目标 Bot 未连接",
+                message="没有找到可绑定本次 QZone 登录会话的已连接 Bot。",
+                steps=(step("bot", "选择目标 Bot", "error", "目标 Bot 当前不可用。"),),
+                suggestion="等待目标 Bot 连接后重试。",
+                retryable=True,
+            )
+            raise _http_diagnostic(503, report)
         bot_id = str(getattr(bot, "self_id", "") or "")
 
         async def _install(cookie: str, expected_bot_id: str, source: str) -> tuple[bool, str]:
@@ -419,7 +728,21 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 detail={"status": "rate_limited_or_busy"},
                 outcome="failed",
             )
-            raise HTTPException(status_code=429, detail=str(exc)) from exc
+            report = _exception_report(
+                runtime,
+                exc,
+                code="qzone_login_start_blocked",
+                phase="login_start",
+                title="暂时不能创建登录会话",
+                message="登录恢复当前受限频或其它活动会话保护。",
+                suggestion="等待当前会话结束或短暂冷却后重试，不要高频创建二维码。",
+                steps=(
+                    step("bot", "选择目标 Bot", "ok", "目标 Bot 已连接。"),
+                    step("create_session", "创建登录会话", "error", "会话保护拒绝了本次请求。"),
+                ),
+                retryable=True,
+            )
+            raise _http_diagnostic(429, report) from exc
         except Exception as exc:
             logger = getattr(runtime, "logger", None)
             if logger is not None:
@@ -433,17 +756,48 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 detail={"status": "upstream_failed", "error_type": type(exc).__name__},
                 outcome="failed",
             )
-            raise HTTPException(status_code=502, detail="无法生成腾讯登录二维码，请稍后重试") from exc
+            report = _exception_report(
+                runtime,
+                exc,
+                code="qzone_login_start_exception",
+                phase="login_start",
+                title="QZone 登录会话创建失败",
+                message="服务器未能完成腾讯登录二维码初始化。",
+                suggestion="请根据 Trace ID 检查网络和 Tencent 登录协议状态后重试。",
+                steps=(
+                    step("bot", "选择目标 Bot", "ok", "目标 Bot 已连接。"),
+                    step("create_session", "创建登录会话", "ok", "服务端会话已创建。"),
+                    step("request_qrcode", "请求登录二维码", "error", "二维码初始化异常中断。"),
+                ),
+                retryable=True,
+            )
+            raise _http_diagnostic(502, report) from exc
+        safe_result = _safe_login_result(result)
         webui_audit_log.record(
             action="qzone_login_start",
             qq=admin.qq,
             device_id=admin.device_id,
             target=bot_id,
             ip_hash=get_client_ip(request),
-            detail={"status": result.get("status")},
+            detail={"status": safe_result.get("status")},
             outcome="ok",
         )
-        return result
+        report = diagnostic(
+            ok=True,
+            code="qzone_login_started",
+            phase="login_start",
+            title="QZone 登录二维码已生成",
+            message="登录会话已绑定当前管理员设备与目标 Bot。",
+            details=(detail("会话状态", safe_result.get("status") or "unknown", "info"),),
+            steps=(
+                step("bot", "选择目标 Bot", "ok", "目标 Bot 已连接。"),
+                step("create_session", "创建登录会话", "ok", "服务端会话已创建并绑定。"),
+                step("request_qrcode", "请求登录二维码", "ok", "二维码已保存在服务端内存。"),
+            ),
+            suggestion="使用手机 QQ 扫码，并在会话过期前完成确认。",
+            retryable=False,
+        )
+        return _attach_diagnostic(safe_result, report)
 
     @router.get("/auth/login/{session_id}/status")
     async def login_status(
@@ -453,9 +807,45 @@ def build_qzone_router(*, runtime) -> APIRouter:
         from ...core.qzone_auth import qzone_login_manager
 
         try:
-            return qzone_login_manager.status(session_id, owner_key=_auth_owner(admin))
+            result = qzone_login_manager.status(session_id, owner_key=_auth_owner(admin))
         except LookupError as exc:
-            raise HTTPException(status_code=404, detail="登录会话不存在或已过期") from exc
+            report = diagnostic(
+                ok=False,
+                code="qzone_login_session_not_found",
+                phase="login_status",
+                title="登录会话不存在或已过期",
+                message="当前管理员设备无法访问该登录会话。",
+                steps=(step("load_session", "读取登录会话", "error", "没有找到匹配的有效会话。"),),
+                suggestion="重新创建 QZone 登录二维码。",
+                retryable=False,
+            )
+            raise _http_diagnostic(404, report) from exc
+        except Exception as exc:
+            report = _exception_report(
+                runtime,
+                exc,
+                code="qzone_login_status_exception",
+                phase="login_status",
+                title="登录会话状态读取失败",
+                message="服务器未能读取当前登录会话状态。",
+                suggestion="请根据 Trace ID 检查登录会话管理器后重试。",
+                steps=(step("load_session", "读取登录会话", "error", "会话状态读取异常中断。"),),
+            )
+            raise _http_diagnostic(500, report) from exc
+        safe_result = _safe_login_result(result)
+        terminal = bool(safe_result.get("terminal"))
+        report = diagnostic(
+            ok=True,
+            code="qzone_login_status_loaded",
+            phase="login_status",
+            title="登录会话状态已更新",
+            message="已读取当前设备绑定的 QZone 登录会话状态。",
+            details=(detail("会话状态", safe_result.get("status") or "unknown", "info"),),
+            steps=(step("load_session", "读取登录会话", "ok", "会话状态已安全返回。"),),
+            suggestion="会话已结束。" if terminal else "继续按页面提示完成扫码确认。",
+            retryable=False,
+        )
+        return _attach_diagnostic(safe_result, report)
 
     @router.get("/auth/login/{session_id}/qrcode")
     async def login_qrcode(
@@ -467,7 +857,29 @@ def build_qzone_router(*, runtime) -> APIRouter:
         try:
             image = qzone_login_manager.qrcode(session_id, owner_key=_auth_owner(admin))
         except LookupError as exc:
-            raise HTTPException(status_code=404, detail="登录二维码不存在或已失效") from exc
+            report = diagnostic(
+                ok=False,
+                code="qzone_login_qrcode_not_found",
+                phase="login_qrcode",
+                title="登录二维码不存在或已失效",
+                message="当前管理员设备无法读取该二维码。",
+                steps=(step("load_qrcode", "读取登录二维码", "error", "没有找到可用二维码。"),),
+                suggestion="重新创建 QZone 登录二维码。",
+                retryable=False,
+            )
+            raise _http_diagnostic(404, report) from exc
+        except Exception as exc:
+            report = _exception_report(
+                runtime,
+                exc,
+                code="qzone_login_qrcode_exception",
+                phase="login_qrcode",
+                title="登录二维码读取失败",
+                message="服务器未能读取当前登录二维码。",
+                suggestion="请根据 Trace ID 检查登录会话管理器后重试。",
+                steps=(step("load_qrcode", "读取登录二维码", "error", "二维码读取异常中断。"),),
+            )
+            raise _http_diagnostic(500, report) from exc
         return Response(
             content=image,
             media_type="image/png",
@@ -485,17 +897,59 @@ def build_qzone_router(*, runtime) -> APIRouter:
         try:
             result = await qzone_login_manager.cancel(session_id, owner_key=_auth_owner(admin))
         except LookupError as exc:
-            raise HTTPException(status_code=404, detail="登录会话不存在或已过期") from exc
+            report = diagnostic(
+                ok=False,
+                code="qzone_login_cancel_not_found",
+                phase="login_cancel",
+                title="登录会话不存在或已过期",
+                message="当前管理员设备无法取消该登录会话。",
+                steps=(
+                    step("load_session", "读取登录会话", "error", "没有找到匹配的有效会话。"),
+                    step("cancel_session", "取消登录会话", "skipped", "未执行取消。"),
+                ),
+                suggestion="刷新页面确认状态，必要时重新创建登录会话。",
+                retryable=False,
+            )
+            raise _http_diagnostic(404, report) from exc
+        except Exception as exc:
+            report = _exception_report(
+                runtime,
+                exc,
+                code="qzone_login_cancel_exception",
+                phase="login_cancel",
+                title="登录会话取消失败",
+                message="服务器未能完成登录会话清理。",
+                suggestion="请根据 Trace ID 检查会话状态后重试取消。",
+                steps=(
+                    step("load_session", "读取登录会话", "ok", "会话已定位。"),
+                    step("cancel_session", "取消登录会话", "error", "会话清理异常中断。"),
+                ),
+            )
+            raise _http_diagnostic(500, report) from exc
+        safe_result = _safe_login_result(result)
         webui_audit_log.record(
             action="qzone_login_cancel",
             qq=admin.qq,
             device_id=admin.device_id,
-            target=str(result.get("bot_id") or ""),
+            target=str(safe_result.get("bot_id") or ""),
             ip_hash=get_client_ip(request),
             detail={"status": "cancelled"},
             outcome="ok",
         )
-        return result
+        report = diagnostic(
+            ok=True,
+            code="qzone_login_cancelled",
+            phase="login_cancel",
+            title="QZone 登录会话已取消",
+            message="二维码、临时 token 和登录连接已按会话状态清理。",
+            details=(detail("会话状态", safe_result.get("status") or "cancelled", "ok"),),
+            steps=(
+                step("load_session", "读取登录会话", "ok", "会话已定位。"),
+                step("cancel_session", "取消登录会话", "ok", "会话资源已清理。"),
+            ),
+            retryable=False,
+        )
+        return _attach_diagnostic(safe_result, report)
 
     @router.post("/auth/cookie")
     async def import_cookie(
@@ -507,18 +961,69 @@ def build_qzone_router(*, runtime) -> APIRouter:
 
         cookie = str(body.get("cookie") or "").strip()
         if not cookie or len(cookie) > 16_384:
-            raise HTTPException(status_code=400, detail="Cookie 为空或超过 16 KiB")
+            report = diagnostic(
+                ok=False,
+                code="qzone_cookie_input_invalid",
+                phase="cookie_validation",
+                title="Cookie 输入无效",
+                message="Cookie 为空或超过允许的 16 KiB。",
+                steps=(step("validate_input", "校验 Cookie 输入", "error", "输入长度不符合要求。"),),
+                suggestion="粘贴目标 Bot 的完整 QZone Cookie 后重试。",
+                retryable=False,
+            )
+            raise _http_diagnostic(400, report)
         bot = _get_bot(runtime, str(body.get("bot_id") or ""))
         if bot is None:
-            raise HTTPException(status_code=503, detail="目标 Bot 未连接")
+            report = diagnostic(
+                ok=False,
+                code="qzone_cookie_import_bot_unavailable",
+                phase="cookie_validation",
+                title="目标 Bot 未连接",
+                message="没有找到可用于校验 Cookie 身份的已连接 Bot。",
+                steps=(
+                    step("validate_input", "校验 Cookie 输入", "ok", "输入长度符合要求。"),
+                    step("select_bot", "选择目标 Bot", "error", "目标 Bot 当前不可用。"),
+                ),
+                suggestion="等待目标 Bot 连接后重新粘贴 Cookie。",
+                retryable=True,
+            )
+            raise _http_diagnostic(503, report)
         bot_id = str(getattr(bot, "self_id", "") or "")
-        ok, reason = await install_qzone_cookie(
-            cookie=cookie,
-            expected_bot_id=bot_id,
-            plugin_config=getattr(runtime, "plugin_config", None),
-            logger=getattr(runtime, "logger", None),
-            source="manual",
-        )
+        try:
+            ok, reason = await install_qzone_cookie(
+                cookie=cookie,
+                expected_bot_id=bot_id,
+                plugin_config=getattr(runtime, "plugin_config", None),
+                logger=getattr(runtime, "logger", None),
+                source="manual",
+            )
+        except Exception as exc:
+            report = _exception_report(
+                runtime,
+                exc,
+                code="qzone_cookie_import_exception",
+                phase="cookie_install",
+                title="Cookie 验证安装异常",
+                message="服务器未能完成 Cookie 身份验证和安装。",
+                suggestion="请根据 Trace ID 检查认证探测和配置持久化状态后重试。",
+                steps=(
+                    step("validate_input", "校验 Cookie 输入", "ok", "输入长度符合要求。"),
+                    step("select_bot", "选择目标 Bot", "ok", "目标 Bot 已连接。"),
+                    step("verify_cookie", "验证 Cookie", "error", "认证验证异常中断。"),
+                    step("install_cookie", "安装 Cookie", "skipped", "未确认安装。"),
+                ),
+            )
+            webui_audit_log.record(
+                action="qzone_cookie_import",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=bot_id,
+                ip_hash=get_client_ip(request),
+                detail={"source": "manual", "status": "exception", "code": report["code"]},
+                outcome="failed",
+            )
+            raise _http_diagnostic(500, report) from exc
+        reason_code = str(reason or "")
         messages = {
             "missing_p_skey": "Cookie 缺少 p_skey",
             "missing_uin": "Cookie 缺少有效 uin",
@@ -526,17 +1031,60 @@ def build_qzone_router(*, runtime) -> APIRouter:
             "auth_blocked": "Cookie 已失效或仍被腾讯认证拦截",
             "probe_failed": "暂时无法验证 Cookie，请稍后重试",
         }
-        message = "QZone Cookie 已验证并安装" if ok else messages.get(reason, "Cookie 验证失败")
+        message = "QZone Cookie 已验证并安装" if ok else messages.get(reason_code, "Cookie 验证失败")
+        failure_codes = {
+            "missing_p_skey": "qzone_cookie_missing_p_skey",
+            "missing_uin": "qzone_cookie_missing_uin",
+            "account_mismatch": "qzone_cookie_account_mismatch",
+            "auth_blocked": "qzone_cookie_auth_blocked",
+            "probe_failed": "qzone_cookie_probe_failed",
+        }
+        safe_reason = reason_code if reason_code in failure_codes else "validation_failed"
         webui_audit_log.record(
             action="qzone_cookie_import",
             qq=admin.qq,
             device_id=admin.device_id,
             target=bot_id,
             ip_hash=get_client_ip(request),
-            detail={"source": "manual", "status": "installed" if ok else str(reason)[:32]},
+            detail={"source": "manual", "status": "installed" if ok else safe_reason},
             outcome="ok" if ok else "failed",
         )
-        return {"ok": bool(ok), "status": "installed" if ok else "failed", "message": message}
+        if ok:
+            report = diagnostic(
+                ok=True,
+                code="qzone_cookie_installed",
+                phase="cookie_install",
+                title="QZone Cookie 已安装",
+                message="Cookie 身份、目标 Bot 和只读 QZone 探测均已验证。",
+                steps=(
+                    step("validate_input", "校验 Cookie 输入", "ok", "输入长度符合要求。"),
+                    step("select_bot", "选择目标 Bot", "ok", "目标 Bot 已连接。"),
+                    step("verify_cookie", "验证 Cookie", "ok", "账号身份和 QZone 认证探测已通过。"),
+                    step("install_cookie", "安装 Cookie", "ok", "运行时配置已更新。"),
+                ),
+                retryable=False,
+            )
+        else:
+            report = diagnostic(
+                ok=False,
+                code=failure_codes.get(reason_code, "qzone_cookie_validation_failed"),
+                phase="cookie_validation",
+                title="QZone Cookie 验证失败",
+                message=message,
+                details=(detail("安全原因码", safe_reason, "error"),),
+                steps=(
+                    step("validate_input", "校验 Cookie 输入", "ok", "输入长度符合要求。"),
+                    step("select_bot", "选择目标 Bot", "ok", "目标 Bot 已连接。"),
+                    step("verify_cookie", "验证 Cookie", "error", "Cookie 未通过账号或只读认证探测。"),
+                    step("install_cookie", "安装 Cookie", "skipped", "无效凭证未写入配置。"),
+                ),
+                suggestion="按安全原因码修正凭证，或改用手机 QQ 扫码恢复登录。",
+                retryable=reason_code == "probe_failed",
+            )
+        return _attach_diagnostic(
+            {"ok": bool(ok), "status": "installed" if ok else "failed", "message": message},
+            report,
+        )
 
     @router.post("/scan-now")
     async def scan_now(
@@ -546,20 +1094,139 @@ def build_qzone_router(*, runtime) -> APIRouter:
     ) -> dict:
         kind = str(body.get("kind") or "inbound").strip().lower()
         if kind not in {"social", "inbound"}:
-            raise HTTPException(status_code=400, detail="kind 只能是 social 或 inbound")
-        runner = _bundle_attr(runtime, "qzone_social_scan" if kind == "social" else "qzone_inbound_poll")
+            report = diagnostic(
+                ok=False,
+                code="qzone_scan_kind_invalid",
+                phase="scan_preflight",
+                title="扫描类型无效",
+                message="kind 只能是 social 或 inbound。",
+                steps=(step("validate_kind", "校验扫描类型", "error", "扫描类型不受支持。"),),
+                suggestion="选择好友动态扫描或留言轮询。",
+                retryable=False,
+            )
+            raise _http_diagnostic(400, report)
+        try:
+            runner = _bundle_attr(runtime, "qzone_social_scan" if kind == "social" else "qzone_inbound_poll")
+        except Exception as exc:
+            report = _exception_report(
+                runtime,
+                exc,
+                code="qzone_scan_preflight_exception",
+                phase="scan_preflight",
+                title="QZone 扫描预检异常",
+                message="服务器未能读取对应扫描任务能力。",
+                suggestion="请根据 Trace ID 检查运行时装配状态后重试。",
+                steps=(
+                    step("validate_kind", "校验扫描类型", "ok", f"已选择 {kind}。"),
+                    step("capability", "检查扫描能力", "error", "运行时能力读取异常中断。"),
+                ),
+            )
+            raise _http_diagnostic(500, report) from exc
         if not callable(runner):
-            raise HTTPException(status_code=503, detail="对应空间扫描任务未初始化")
-        result = await runner(force=True)
+            report = diagnostic(
+                ok=False,
+                code="qzone_scan_unavailable",
+                phase="scan_preflight",
+                title="QZone 扫描任务未就绪",
+                message="对应扫描任务尚未完成运行时初始化。",
+                steps=(
+                    step("validate_kind", "校验扫描类型", "ok", f"已选择 {kind}。"),
+                    step("capability", "检查扫描能力", "error", "扫描能力不可用。"),
+                ),
+                suggestion="确认对应 QZone 功能已启用并重载插件运行时后重试。",
+                retryable=True,
+            )
+            raise _http_diagnostic(503, report)
+        try:
+            raw_result = await runner(force=True)
+        except Exception as exc:
+            report = _exception_report(
+                runtime,
+                exc,
+                code=f"qzone_{kind}_scan_exception",
+                phase="scan_execute",
+                title="QZone 扫描异常中断",
+                message="扫描任务发生内部异常，未返回可用结果。",
+                suggestion="请根据 Trace ID 检查扫描任务与认证状态后重试。",
+                steps=(
+                    step("validate_kind", "校验扫描类型", "ok", f"已选择 {kind}。"),
+                    step("capability", "检查扫描能力", "ok", "扫描能力可用。"),
+                    step("run_scan", "执行 QZone 扫描", "error", "扫描任务异常中断。"),
+                ),
+            )
+            webui_audit_log.record(
+                action="qzone_scan_now",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=kind,
+                ip_hash=get_client_ip(request),
+                detail={"status": "exception", "code": report["code"]},
+                outcome="failed",
+            )
+            raise _http_diagnostic(500, report) from exc
+        result = _safe_scan_result(raw_result)
+        skipped = bool(result.get("skipped"))
+        ok = bool(result.get("ok"))
+        if skipped:
+            report = diagnostic(
+                ok=True,
+                code="qzone_scan_skipped_busy",
+                phase="scan_skipped",
+                title="QZone 扫描已安全跳过",
+                message="另一轮扫描正在持有共享租约，本次没有重复启动。",
+                details=(detail("扫描类型", kind, "info"),),
+                steps=(
+                    step("validate_kind", "校验扫描类型", "ok", f"已选择 {kind}。"),
+                    step("capability", "检查扫描能力", "ok", "扫描能力可用。"),
+                    step("run_scan", "执行 QZone 扫描", "skipped", "共享扫描租约正忙。"),
+                ),
+                suggestion="等待当前扫描完成后刷新状态。",
+                retryable=False,
+            )
+        elif ok:
+            report = diagnostic(
+                ok=True,
+                code=f"qzone_{kind}_scan_completed",
+                phase="scan_complete",
+                title="QZone 扫描已完成",
+                message="扫描任务已返回明确完成状态。",
+                details=(
+                    detail("扫描类型", kind, "info"),
+                    detail("发现动态", int(result.get("feeds_seen", 0) or 0), "info"),
+                    detail("失败项目", int(result.get("failed", 0) or 0), "warn" if result.get("failed") else "info"),
+                ),
+                steps=(
+                    step("validate_kind", "校验扫描类型", "ok", f"已选择 {kind}。"),
+                    step("capability", "检查扫描能力", "ok", "扫描能力可用。"),
+                    step("run_scan", "执行 QZone 扫描", "ok", "扫描任务已完成。"),
+                ),
+                retryable=False,
+            )
+        else:
+            report = diagnostic(
+                ok=False,
+                code=f"qzone_{kind}_scan_failed",
+                phase="scan_execute",
+                title="QZone 扫描未完成",
+                message="扫描任务明确返回失败状态，底层 service message 未向客户端回显。",
+                details=(detail("扫描类型", kind, "info"),),
+                steps=(
+                    step("validate_kind", "校验扫描类型", "ok", f"已选择 {kind}。"),
+                    step("capability", "检查扫描能力", "ok", "扫描能力可用。"),
+                    step("run_scan", "执行 QZone 扫描", "error", "扫描任务返回失败状态。"),
+                ),
+                suggestion="检查 QZone 认证与服务端脱敏日志后重试。",
+                retryable=True,
+            )
         webui_audit_log.record(
             action="qzone_scan_now",
             qq=admin.qq,
             device_id=admin.device_id,
             target=kind,
             ip_hash=get_client_ip(request),
-            detail={"status": result.get("status") or ("success" if result.get("ok") else "failed"), "skipped": bool(result.get("skipped"))},
-            outcome="ok" if result.get("ok") else "failed",
+            detail={"status": report["code"], "skipped": skipped},
+            outcome="ok" if ok else "failed",
         )
-        return result
+        return _attach_diagnostic(result, report)
 
     return router

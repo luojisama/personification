@@ -385,7 +385,7 @@ function renderLogs() {
   }).join("");
   const writer = data.writer || {};
   const dropped = Number(writer.dropped || 0);
-  return `<section class="log-console">
+  return `${renderSmallOperations("logs", "日志操作诊断")}<section class="log-console">
     <div class="card log-console-head">
       <div class="log-console-title">
         <div><span class="eyebrow">RUNTIME LOG STREAM</span><h2>插件日志</h2></div>
@@ -509,8 +509,9 @@ async function clearPluginLogs() {
   if (!confirm("确认清空拟人插件持久日志？")) return;
   try {
     const res = await api("/logs/clear", {method:"DELETE"});
-    alertFlash("ok", "已清空 " + (res.deleted || 0) + " 条日志");
+    const diagnostic = rememberSmallOperation("logs", res, "插件日志清空未完成");
+    alertFlash(diagnostic?.partial ? "info" : "ok", diagnostic?.title || ("已清空 " + (res.deleted || 0) + " 条日志"));
     state.logExpandedIds = {};
     await loadView(); render();
-  } catch (e) { alertFlash("err", e.message); }
+  } catch (e) { const diagnostic = rememberSmallOperation("logs", e, "插件日志清空未完成"); alertFlash("err", diagnostic?.title || "插件日志清空未完成"); render(); }
 }

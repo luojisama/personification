@@ -579,6 +579,7 @@ const HEALTH_STATUS = {
 
 function renderInteractionResult(ir) {
   if (!ir) return "";
+  const operationDiagnostic = ir.code ? renderOperationDiagnostic(ir) : "";
   const alertCls = ir.replied ? "ok" : "err";
   const meta = [];
   if (ir.diagnosis_code) meta.push(`诊断码：${ir.diagnosis_code}`);
@@ -607,7 +608,7 @@ function renderInteractionResult(ir) {
   const traceSummary = last && (last.outcome || last.diagnosis_code)
     ? `<p class="muted" style="font-size:12px;margin:8px 0 0">链路收口：${escapeHtml(last.outcome || "-")} / ${escapeHtml(last.diagnosis_code || "-")}</p>`
     : "";
-  return `<div style="margin-top:10px">
+  return `${operationDiagnostic}<div style="margin-top:10px">
     <div class="alert ${alertCls}" style="white-space:pre-wrap">${escapeHtml(ir.detail || "")}${escapeHtml(reply)}</div>
     <div class="row" style="margin:6px 0 10px">
       ${meta.map(x => `<span class="tag">${escapeHtml(x)}</span>`).join("")}
@@ -621,6 +622,7 @@ function renderInteractionResult(ir) {
 
 function renderQzoneForwardResult(result) {
   if (!result) return "";
+  const operationDiagnostic = result.code ? renderOperationDiagnostic(result) : "";
   const ok = !!result.ok;
   const feed = result.feed || {};
   const quota = result.quota || {};
@@ -631,7 +633,7 @@ function renderQzoneForwardResult(result) {
     ? `已转发 ${result.target_user_id || ""} 的第一条空间动态`
     : (result.error || "转发测试失败");
   const feedText = feed.content ? `\n\n动态内容：${feed.content}` : "";
-  return `<div style="margin-top:10px">
+  return `${operationDiagnostic}<div style="margin-top:10px">
     <div class="alert ${ok?'ok':'err'}" style="white-space:pre-wrap">${escapeHtml(detail + feedText)}</div>
     <div class="row" style="margin-top:8px">
       ${result.stage ? `<span class="tag">阶段：${escapeHtml(result.stage)}</span>` : ""}
@@ -699,6 +701,7 @@ function renderHealth() {
       ${pill('error')}${pill('warn')}${pill('ok')}${pill('disabled')}
     </div>
   </div>
+  ${renderAdminOperations("health","功能体检操作诊断")}
   ${interactionCard}
   ${qzoneForwardCard}
   <div class="health-grid">${cats}</div>`;
@@ -706,7 +709,14 @@ function renderHealth() {
 
 async function refreshHealth() {
   state.loading = true; render();
-  try { state.health = await api("/health/check?refresh=true"); } catch (e) { alertFlash("err", "检测失败：" + e.message); }
+  try {
+    state.health = await api("/health/check?refresh=true");
+    const diagnostic = rememberAdminOperation("health", state.health, "功能体检刷新未完成");
+    alertFlash("ok", diagnostic?.title || "功能体检已刷新");
+  } catch (e) {
+    const diagnostic = rememberAdminOperation("health", e, "功能体检刷新未完成");
+    alertFlash("err", diagnostic?.title || "功能体检刷新未完成");
+  }
   state.loading = false; render();
 }
 
@@ -824,6 +834,7 @@ async function recheckCategory(name) {
   state.healthBusyCat = name; render();
   try {
     const r = await api("/health/check?only=" + encodeURIComponent(name));
+    const diagnostic = rememberAdminOperation("health", r, "功能分类重测未完成");
     const fresh = (r.categories || [])[0];
     if (fresh && state.health) {
       state.health.categories = state.health.categories.map(c => c.name === name ? fresh : c);
@@ -833,7 +844,11 @@ async function recheckCategory(name) {
       state.health.summary = sum;
       state.health.overall = sum.error ? 'error' : (sum.warn ? 'warn' : 'ok');
     }
-  } catch (e) { alertFlash("err", "重测失败：" + e.message); }
+    alertFlash("ok", diagnostic?.title || "功能分类重测已完成");
+  } catch (e) {
+    const diagnostic = rememberAdminOperation("health", e, "功能分类重测未完成");
+    alertFlash("err", diagnostic?.title || "功能分类重测未完成");
+  }
   state.healthBusyCat = ""; render();
 }
 
@@ -842,7 +857,13 @@ async function runInteraction(target) {
   state.interactionBusy = true; state.interactionResult = null; render();
   try {
     state.interactionResult = await api("/health/interaction-test", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ target }) });
-  } catch (e) { alertFlash("err", "交互测试失败：" + e.message); }
+    const diagnostic = rememberAdminOperation("health", state.interactionResult, "实际交互测试未完成");
+    alertFlash(state.interactionResult.replied ? "ok" : (state.interactionResult.outcome_unknown ? "info" : "err"), diagnostic?.title || "实际交互测试已结束");
+  } catch (e) {
+    state.interactionResult = operationDiagnosticFromError(e, "实际交互测试未完成");
+    const diagnostic = rememberAdminOperation("health", state.interactionResult, "实际交互测试未完成");
+    alertFlash("err", diagnostic?.title || "实际交互测试未完成");
+  }
   state.interactionBusy = false; render();
 }
 
@@ -855,15 +876,36 @@ async function runQzoneForwardTest() {
   if (!confirm("确认转发该用户空间第一条动态？这会真实发布到 bot 的 QQ 空间，并消耗本月空间额度。")) return;
   state.qzoneForwardBusy = true;
   state.qzoneForwardResult = null;
+  if (!state.qzoneForwardOperationId) state.qzoneForwardOperationId = (globalThis.crypto&&globalThis.crypto.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
   render();
   try {
     state.qzoneForwardResult = await api("/health/qzone-forward-test", {
       method:"POST",
       headers:{"content-type":"application/json"},
-      body: JSON.stringify({ target_user_id: target, forward_text: forwardText }),
+      body: JSON.stringify({ target_user_id: target, forward_text: forwardText, operation_id: state.qzoneForwardOperationId }),
     });
+    const diagnostic = rememberAdminOperation("health", state.qzoneForwardResult, "QZone 转发测试未完成");
+    if (!state.qzoneForwardResult.outcome_unknown && state.qzoneForwardResult.code !== "qzone_forward_in_progress") state.qzoneForwardOperationId = "";
+    alertFlash(state.qzoneForwardResult.ok ? "ok" : (state.qzoneForwardResult.outcome_unknown ? "info" : "err"), diagnostic?.title || "QZone 转发测试已结束");
   } catch (e) {
-    state.qzoneForwardResult = { ok:false, error:e.message };
+    const serverDiagnostic = e && e.diagnostic && typeof e.diagnostic === "object";
+    state.qzoneForwardResult = operationDiagnosticFromError(e, "QZone 转发测试未完成");
+    if (!serverDiagnostic) {
+      state.qzoneForwardResult = {
+        ...state.qzoneForwardResult,
+        code:"qzone_forward_request_outcome_unknown",
+        phase:"request",
+        title:"QZone 转发请求结果未知",
+        message:"浏览器没有收到服务器的明确结果，转发可能已经发生。",
+        suggestion:"保留当前 Operation ID，先检查 Bot 的 QQ 空间；确认状态前不要重复提交。",
+        retryable:false,
+        outcome_unknown:true,
+        operation_id:state.qzoneForwardOperationId,
+      };
+    }
+    const diagnostic = rememberAdminOperation("health", state.qzoneForwardResult, "QZone 转发测试未完成");
+    if (!state.qzoneForwardResult.outcome_unknown) state.qzoneForwardOperationId = "";
+    alertFlash(state.qzoneForwardResult.outcome_unknown ? "info" : "err", diagnostic?.title || "QZone 转发测试未完成");
   }
   state.qzoneForwardBusy = false;
   render();
@@ -901,13 +943,15 @@ async function pollQzoneLogin() {
   if (!login || login.terminal || state.view !== 'qzone') return;
   try {
     state.qzoneLogin = await api(`/qzone/auth/login/${encodeURIComponent(login.session_id)}/status`);
+    if(state.qzoneLogin.terminal||state.qzoneLogin.ok===false)rememberAdminOperation("qzone",state.qzoneLogin,"QZone 登录状态读取未完成");
     if (state.qzoneLogin.status === 'success') {
-      state.qzoneAuthResult = {ok:true,message:'QZone 登录已恢复，后台扫描会在下一轮继续。'};
+      state.qzoneAuthResult = state.qzoneLogin;
       try { await loadView(); } catch {}
     }
   } catch (e) {
     if (e && e.name === 'AbortError') return;
-    state.qzoneAuthResult = {ok:false,message:e.message};
+    state.qzoneAuthResult = operationDiagnosticFromError(e,"QZone 登录状态读取未完成");
+    rememberAdminOperation("qzone",state.qzoneAuthResult);
     state.qzoneLogin = null;
   }
   render();
@@ -921,9 +965,10 @@ async function startQzoneLogin() {
     state.qzoneLogin = await api('/qzone/auth/login/start', {
       method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({bot_id:state.qzoneBotId})
     });
+    rememberAdminOperation("qzone",state.qzoneLogin,"QZone 登录会话创建未完成");
     _scheduleQzoneLoginPolling();
   } catch (e) {
-    state.qzoneAuthResult = {ok:false,message:e.message};
+    state.qzoneAuthResult = operationDiagnosticFromError(e,"QZone 登录会话创建未完成");rememberAdminOperation("qzone",state.qzoneAuthResult);
   }
   state.qzoneAuthBusy = ''; render();
 }
@@ -934,8 +979,8 @@ async function cancelQzoneLogin() {
   state.qzoneAuthBusy = 'cancel'; _stopQzoneLoginPolling(); render();
   try {
     state.qzoneLogin = await api(`/qzone/auth/login/${encodeURIComponent(login.session_id)}/cancel`, {method:'POST'});
-    state.qzoneAuthResult = {ok:true,message:'登录会话已取消'};
-  } catch (e) { state.qzoneAuthResult = {ok:false,message:e.message}; }
+    state.qzoneAuthResult = state.qzoneLogin;rememberAdminOperation("qzone",state.qzoneLogin,"QZone 登录会话取消未完成");
+  } catch (e) { state.qzoneAuthResult=operationDiagnosticFromError(e,"QZone 登录会话取消未完成");rememberAdminOperation("qzone",state.qzoneAuthResult); }
   state.qzoneAuthBusy = ''; render();
 }
 
@@ -951,8 +996,9 @@ async function importQzoneCookie() {
       method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({bot_id:state.qzoneBotId,cookie})
     });
     state.qzoneAuthResult = result;
+    rememberAdminOperation("qzone",result,"QZone Cookie 导入未完成");
     if (result.ok) { state.qzoneLogin = null; _stopQzoneLoginPolling(); try { await loadView(); } catch {} }
-  } catch (e) { state.qzoneAuthResult = {ok:false,message:e.message}; }
+  } catch (e) { state.qzoneAuthResult=operationDiagnosticFromError(e,"QZone Cookie 导入未完成");rememberAdminOperation("qzone",state.qzoneAuthResult); }
   state.qzoneAuthBusy = ''; render();
 }
 
@@ -984,7 +1030,7 @@ function renderQzoneAuthRecovery(q, auth) {
       <div class="qzone-login-copy"><span class="ops-status info"><span></span>${escapeHtml(login.status||'preparing')}</span><h3>${escapeHtml(login.message||'等待腾讯登录')}</h3><p>二维码剩余 ${Number(login.expires_in_seconds||0)} 秒。请用手机 QQ 的扫一扫，不要使用图片识别或第三方扫码工具。</p><div class="row"><button class="btn small" onclick="cancelQzoneLogin()" ${state.qzoneAuthBusy?'disabled':''}>取消登录</button></div></div>
     </div>` : `<div class="qzone-auth-idle"><p>${auth.status==='healthy'?'当前凭证可用。需要切换或重新授权时，也可以主动生成新二维码。':'LLOneBot 无法提供有效 p_skey 时，从这里发起独立服务端登录。'}</p><button class="btn primary" onclick="startQzoneLogin()" ${state.qzoneAuthBusy||!state.qzoneBotId?'disabled':''}>${state.qzoneAuthBusy==='start'?'<span class="spinner"></span> 生成中…':'QQ 扫码恢复登录'}</button></div>`}
     ${terminalHint}
-    ${state.qzoneAuthResult?`<div class="alert ${state.qzoneAuthResult.ok?'ok':'err'}">${escapeHtml(state.qzoneAuthResult.message||'操作完成')}</div>`:''}
+    ${state.qzoneAuthResult?renderOperationDiagnostic(state.qzoneAuthResult.diagnostic||state.qzoneAuthResult):''}
     <details class="qzone-cookie-fallback"><summary>高级兜底：手动导入 Cookie</summary><p>仅在扫码受腾讯风控影响时使用。Cookie 不会回显或进入审计详情。${insecure?' 当前页面不是 HTTPS，请勿在公网传输凭证。':''}</p><textarea id="qzone-cookie-import" autocomplete="off" spellcheck="false" placeholder="uin=o...; p_uin=o...; skey=...; p_skey=...;"></textarea><div class="row"><button class="btn small" onclick="importQzoneCookie()" ${state.qzoneAuthBusy||!state.qzoneBotId?'disabled':''}>${state.qzoneAuthBusy==='import'?'<span class="spinner"></span> 验证中…':'验证并安装'}</button></div></details>
   </div>`;
 }
@@ -1014,7 +1060,7 @@ function renderQzone() {
   const recentRows = recent.length
     ? recent.map(c => `<li class="qzone-recent-item">${escapeHtml(c)}</li>`).join("")
     : '<li class="qzone-recent-item muted">暂无记录</li>';
-  return `<section class="qzone-ops-grid">
+  return `${renderAdminOperations("qzone","QZone 操作诊断")}<section class="qzone-ops-grid">
     <div class="card qzone-runtime-card">
       <div class="between"><div><span class="eyebrow">RUNTIME HEALTH</span><h2>空间运行状态</h2></div><span class="ops-status ${statusClass}"><span></span>${statusText}</span></div>
       <div class="qzone-runtime-grid">
@@ -1030,7 +1076,7 @@ function renderQzone() {
         <button class="btn small" onclick="runQzoneAction('social')" ${state.qzoneActionBusy||!q.social_enabled?'disabled':''}>运行好友扫描</button>
         <button class="btn small" onclick="runQzoneAction('inbound')" ${state.qzoneActionBusy||!q.inbound_enabled?'disabled':''}>运行留言轮询</button>
       </div>
-      ${state.qzoneActionResult?`<div class="alert ${state.qzoneActionResult.ok?'ok':'err'}">${escapeHtml(state.qzoneActionResult.message||state.qzoneActionResult.status||state.qzoneActionResult.error||'操作完成')}</div>`:''}
+      ${state.qzoneActionResult?renderOperationDiagnostic(state.qzoneActionResult.diagnostic||state.qzoneActionResult):''}
     </div>
   </section>
   ${renderQzoneAuthRecovery(q, auth)}
@@ -1079,11 +1125,16 @@ async function triggerQzonePost() {
   try {
     const r = await api("/qzone/post-now", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({operation_id:state.qzoneOperationId,bot_id:state.qzoneBotId}) });
     state.qzonePostResult = r;
-    state.qzoneOperationId = "";
+    rememberAdminOperation("qzone",r,"QZone 发布未完成");
+    if(!r.outcome_unknown&&r.code!=="qzone_publish_in_progress")state.qzoneOperationId="";
     if (r && r.quota && state.qzone) state.qzone.quota = r.quota;
     if (r && r.ok) { try { await loadView(); } catch {} }
   } catch (e) {
-    state.qzonePostResult = { ok:false, error: e.message };
+    const serverDiagnostic=e&&e.diagnostic&&typeof e.diagnostic==="object";
+    state.qzonePostResult=operationDiagnosticFromError(e,"QZone 发布未完成");
+    if(!serverDiagnostic)state.qzonePostResult={...state.qzonePostResult,code:"qzone_publish_request_outcome_unknown",phase:"request",title:"QZone 发布请求结果未知",message:"浏览器没有收到服务器的明确结果，发布可能已经发生。",suggestion:"保留当前 Operation ID，先检查 Bot 的 QQ 空间；确认状态前不要重复提交。",retryable:false,outcome_unknown:true,operation_id:state.qzoneOperationId};
+    rememberAdminOperation("qzone",state.qzonePostResult);
+    if(!state.qzonePostResult.outcome_unknown)state.qzoneOperationId="";
   }
   state.qzoneBusy = false; render();
 }
@@ -1096,8 +1147,9 @@ async function runQzoneAction(kind) {
     const options = kind === 'refresh' ? {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({bot_id:state.qzoneBotId})} : {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind})};
     const result = await api(path, options);
     state.qzoneActionResult = result;
+    rememberAdminOperation("qzone",result,"QZone 管理操作未完成");
     await loadView();
-  } catch (e) { state.qzoneActionResult = {ok:false,error:e.message}; }
+  } catch (e) { state.qzoneActionResult=operationDiagnosticFromError(e,"QZone 管理操作未完成");rememberAdminOperation("qzone",state.qzoneActionResult); }
   state.qzoneActionBusy = ""; render();
 }
 
@@ -1239,6 +1291,7 @@ function renderPersonaDetail() {
     <p class="muted" style="font-size:11px;margin-top:6px">用户确认的画像事实会保留到后续重生成，但只作为背景数据，不构成模型指令。</p>
   </div>`;
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedPersona=null;render()">返回列表</button><span class="muted">用户 ${escapeHtml(p.user_id)}</span></div>
+    ${renderAdminOperations("persona","画像更正诊断")}
     ${renderFavorabilityCard(p.favorability, "用户好感度")}
     ${renderQqProfileCard(core, p.user_id)}
     <div class="card"><h2>全局印象</h2>${core && core.profile_text ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(core.profile_text || '')}</pre>` : '<p class="muted">无全局画像</p>'}</div>
@@ -1598,11 +1651,11 @@ async function submitCorrection(uid) {
   const value = (document.getElementById("corr-value")?.value||"").trim();
   if (!field || !value) { alertFlash("err", "请填写字段与更正值"); return; }
   try {
-    await api("/personas/"+encodeURIComponent(uid)+"/correction", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({corrections:{[field]:value}})});
-    alertFlash("ok", "已提交更正");
+    const result=await api("/personas/"+encodeURIComponent(uid)+"/correction", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({corrections:{[field]:value}})});
+    const diagnostic=rememberAdminOperation("persona",result,"画像更正未完成");alertFlash(diagnostic?.partial?"info":"ok",diagnostic?.title||"已提交更正");
     state.selectedPersona = await api("/personas/"+encodeURIComponent(uid));
     render();
-  } catch (e) { alertFlash("err", e.message); }
+  } catch (e) { const diagnostic=rememberAdminOperation("persona",e,"画像更正未完成");alertFlash("err",diagnostic?.title||"画像更正未完成");render(); }
 }
 
 function renderGroupSwitch() {

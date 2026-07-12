@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from ...core import admin_acl, notify, webui_audit_log, webui_auth_store
+from ...core.operation_diagnostics import detail, diagnostic, exception_diagnostic, step
 from ..deps import (
     AdminIdentity,
     get_client_ip,
@@ -24,6 +26,125 @@ from ..schemas import (
 
 
 _CSRF_COOKIE_NAME = "personification_webui_csrf"
+
+
+def _record_device_audit(runtime: Any, **kwargs: Any) -> bool:
+    try:
+        webui_audit_log.record(**kwargs)
+        return True
+    except Exception as exc:
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.warning(
+                f"[device operation] audit_failed action={kwargs.get('action', '')} "
+                f"exception={type(exc).__name__}"
+            )
+        return False
+
+
+def _device_result(
+    payload: dict[str, Any],
+    *,
+    changed: bool,
+    code: str,
+    no_op_code: str,
+    title: str,
+    no_op_title: str,
+    message: str,
+    no_op_message: str,
+    target: str,
+    persist_label: str,
+    audit_ok: bool,
+) -> dict[str, Any]:
+    report = diagnostic(
+        ok=changed,
+        code=code if changed else no_op_code,
+        phase="operation_complete",
+        title=title if changed else no_op_title,
+        message=message if changed else no_op_message,
+        details=(detail("目标设备", target), detail("持久化变更", changed, "ok" if changed else "warn")),
+        steps=(
+            step("persist", persist_label, "ok" if changed else "warn", message if changed else no_op_message),
+            step(
+                "audit",
+                "记录管理员操作",
+                "ok" if audit_ok else "warn",
+                "审计记录已保存。" if audit_ok else "持久化结果已确认，但审计记录写入失败。",
+            ),
+        ),
+        warnings=() if audit_ok else ("设备状态结果已确认，但本次管理员审计记录未能写入。",),
+        suggestion="刷新设备列表确认当前状态。" if not changed else "",
+        retryable=False,
+        partial=bool(changed and not audit_ok),
+        outcome_unknown=False,
+    )
+    return {**payload, **report}
+
+
+def _raise_device_failure(
+    runtime: Any,
+    exc: BaseException,
+    *,
+    code: str,
+    title: str,
+    message: str,
+    target: str,
+    persist_label: str,
+    persistence_started: bool,
+) -> None:
+    report = exception_diagnostic(
+        exc,
+        phase="persistence" if persistence_started else "precondition",
+        title=title,
+        message=message,
+        suggestion=(
+            "先刷新设备列表确认当前状态；状态未生效时再重试。"
+            if persistence_started
+            else "刷新设备列表后重试。"
+        ),
+        retryable=not isinstance(exc, (ValueError, PermissionError)),
+    )
+    report["code"] = code
+    report["details"] = [detail("目标设备", target).to_dict(), *report.get("details", [])]
+    report["steps"] = [
+        step(
+            "persist",
+            persist_label,
+            "unknown" if persistence_started else "skipped",
+            "写入过程异常，最终状态需要重新读取确认。" if persistence_started else "读取操作前状态失败，未开始写入。",
+        ).to_dict(),
+        step("audit", "记录管理员操作", "skipped", "设备状态未得到明确结果。" if persistence_started else "未执行写操作。").to_dict(),
+    ]
+    report["partial"] = bool(persistence_started)
+    report["outcome_unknown"] = bool(persistence_started)
+    logger = getattr(runtime, "logger", None)
+    if logger is not None:
+        logger.warning(
+            f"[device operation] code={code} exception={type(exc).__name__} "
+            f"trace={report.get('trace_id', '')}"
+        )
+    raise HTTPException(status_code=500, detail=report) from exc
+
+
+def _raise_device_not_found(*, code: str, title: str, message: str, target: str, persist_label: str) -> None:
+    report = diagnostic(
+        ok=False,
+        code=code,
+        phase="precondition",
+        title=title,
+        message=message,
+        details=(detail("目标设备", target),),
+        steps=(
+            step("precondition", "确认设备归属与状态", "error", message),
+            step("persist", persist_label, "skipped", "未执行任何写入。"),
+            step("audit", "记录管理员操作", "skipped", "未执行写操作。"),
+        ),
+        suggestion="刷新设备列表后重新选择目标设备。",
+        retryable=False,
+        partial=False,
+        outcome_unknown=False,
+    )
+    raise HTTPException(status_code=404, detail=report)
 
 
 def _request_uses_https(request: Request) -> bool:
@@ -249,18 +370,41 @@ def build_auth_router(*, runtime) -> APIRouter:
         device_id: str,
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
-        pending_ids = {item["id"] for item in webui_auth_store.list_pending_devices()}
+        try:
+            pending_ids = {item["id"] for item in webui_auth_store.list_pending_devices()}
+        except Exception as exc:
+            _raise_device_failure(
+                runtime, exc, code="device_approve_precondition_failed", title="设备审批未开始",
+                message="服务器未能读取待审批设备状态。", target=device_id,
+                persist_label="批准设备", persistence_started=False,
+            )
         if device_id not in pending_ids:
-            raise HTTPException(status_code=404, detail="待审批设备不存在")
-        ok = webui_auth_store.approve_device(device_id)
-        webui_audit_log.record(
+            _raise_device_not_found(
+                code="device_approve_target_not_found", title="设备无法审批",
+                message="待审批设备不存在或状态已经变化。", target=device_id, persist_label="批准设备",
+            )
+        try:
+            ok = webui_auth_store.approve_device(device_id)
+        except Exception as exc:
+            _raise_device_failure(
+                runtime, exc, code="device_approve_persist_failed", title="设备审批未完成",
+                message="服务器未能确认设备审批状态已保存。", target=device_id,
+                persist_label="批准设备", persistence_started=True,
+            )
+        audit_ok = _record_device_audit(
+            runtime,
             action="device_approve",
             qq=admin.qq,
             device_id=admin.device_id,
             target=device_id,
             outcome="ok" if ok else "no_op",
         )
-        return {"success": ok}
+        return _device_result(
+            {"success": ok}, changed=ok, code="device_approved", no_op_code="device_approve_noop",
+            title="设备已批准", no_op_title="设备审批未产生变更",
+            message="设备审批状态已持久化。", no_op_message="设备状态未发生变更，请刷新列表确认。",
+            target=device_id, persist_label="批准设备", audit_ok=audit_ok,
+        )
 
     @router.delete("/devices/{device_id}")
     async def revoke_device(
@@ -268,19 +412,42 @@ def build_auth_router(*, runtime) -> APIRouter:
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
         # 允许撤销同 QQ 的设备，或任一待审批设备（拒绝新设备）
-        owned = {item["id"] for item in webui_auth_store.list_devices(admin.qq)}
-        pending = {item["id"] for item in webui_auth_store.list_pending_devices()}
+        try:
+            owned = {item["id"] for item in webui_auth_store.list_devices(admin.qq)}
+            pending = {item["id"] for item in webui_auth_store.list_pending_devices()}
+        except Exception as exc:
+            _raise_device_failure(
+                runtime, exc, code="device_revoke_precondition_failed", title="设备撤销未开始",
+                message="服务器未能读取设备归属状态。", target=device_id,
+                persist_label="撤销设备", persistence_started=False,
+            )
         if device_id not in owned and device_id not in pending:
-            raise HTTPException(status_code=404, detail="设备不存在或非本账号")
-        ok = webui_auth_store.revoke_device(device_id)
-        webui_audit_log.record(
+            _raise_device_not_found(
+                code="device_revoke_target_not_found", title="设备无法撤销",
+                message="设备不存在或不属于当前账号。", target=device_id, persist_label="撤销设备",
+            )
+        try:
+            ok = webui_auth_store.revoke_device(device_id)
+        except Exception as exc:
+            _raise_device_failure(
+                runtime, exc, code="device_revoke_persist_failed", title="设备撤销未完成",
+                message="服务器未能确认设备令牌已撤销。", target=device_id,
+                persist_label="撤销设备", persistence_started=True,
+            )
+        audit_ok = _record_device_audit(
+            runtime,
             action="device_revoke",
             qq=admin.qq,
             device_id=admin.device_id,
             target=device_id,
             outcome="ok" if ok else "no_op",
         )
-        return {"success": ok}
+        return _device_result(
+            {"success": ok}, changed=ok, code="device_revoked", no_op_code="device_revoke_noop",
+            title="设备已撤销", no_op_title="设备撤销未产生变更",
+            message="设备令牌已从持久化存储移除。", no_op_message="设备令牌未发生变更，请刷新列表确认。",
+            target=device_id, persist_label="撤销设备", audit_ok=audit_ok,
+        )
 
     @router.get("/trusted-devices")
     async def trusted_devices(admin: AdminIdentity = Depends(require_admin)) -> dict:
@@ -298,30 +465,77 @@ def build_auth_router(*, runtime) -> APIRouter:
     @router.post("/devices/{device_id}/trust")
     async def trust_device(device_id: str, admin: AdminIdentity = Depends(require_admin)) -> dict:
         """把某台已登录设备登记为免验证：之后同指纹(UA)从该 QQ 登录跳过验证。"""
-        target = next(
-            (it for it in webui_auth_store.list_devices(admin.qq) if it.get("id") == device_id),
-            None,
-        )
+        try:
+            target = next(
+                (it for it in webui_auth_store.list_devices(admin.qq) if it.get("id") == device_id),
+                None,
+            )
+        except Exception as exc:
+            _raise_device_failure(
+                runtime, exc, code="device_trust_precondition_failed", title="免验证登记未开始",
+                message="服务器未能读取目标设备状态。", target=device_id,
+                persist_label="登记免验证设备", persistence_started=False,
+            )
         if target is None:
-            raise HTTPException(status_code=404, detail="设备不存在或非本账号")
-        trust_id = webui_auth_store.add_trusted_device(
-            admin.qq, str(target.get("ua", "")), str(target.get("label", "")) or "免验证设备"
-        )
-        webui_audit_log.record(
+            _raise_device_not_found(
+                code="device_trust_target_not_found", title="设备无法设为免验证",
+                message="设备不存在或不属于当前账号。", target=device_id, persist_label="登记免验证设备",
+            )
+        try:
+            trust_id = webui_auth_store.add_trusted_device(
+                admin.qq, str(target.get("ua", "")), str(target.get("label", "")) or "免验证设备"
+            )
+        except Exception as exc:
+            _raise_device_failure(
+                runtime, exc, code="device_trust_persist_failed", title="免验证登记未完成",
+                message="服务器未能确认免验证设备已登记。", target=device_id,
+                persist_label="登记免验证设备", persistence_started=True,
+            )
+        audit_ok = _record_device_audit(
+            runtime,
             action="device_trust", qq=admin.qq, device_id=admin.device_id, target=device_id, outcome="ok"
         )
-        return {"success": True, "trust_id": trust_id}
+        return _device_result(
+            {"success": True, "trust_id": trust_id}, changed=True,
+            code="device_trusted", no_op_code="device_trust_noop",
+            title="设备已设为免验证", no_op_title="免验证登记未产生变更",
+            message="免验证设备记录已持久化。", no_op_message="免验证设备记录未发生变更。",
+            target=device_id, persist_label="登记免验证设备", audit_ok=audit_ok,
+        )
 
     @router.delete("/trusted-devices/{trust_id}")
     async def untrust_device(trust_id: str, admin: AdminIdentity = Depends(require_admin)) -> dict:
-        owned = {it["id"] for it in webui_auth_store.list_trusted_devices(admin.qq)}
+        try:
+            owned = {it["id"] for it in webui_auth_store.list_trusted_devices(admin.qq)}
+        except Exception as exc:
+            _raise_device_failure(
+                runtime, exc, code="device_untrust_precondition_failed", title="免验证移除未开始",
+                message="服务器未能读取免验证设备状态。", target=trust_id,
+                persist_label="移除免验证设备", persistence_started=False,
+            )
         if trust_id not in owned:
-            raise HTTPException(status_code=404, detail="免验证设备不存在或非本账号")
-        ok = webui_auth_store.remove_trusted_device(trust_id)
-        webui_audit_log.record(
+            _raise_device_not_found(
+                code="device_untrust_target_not_found", title="免验证设备无法移除",
+                message="免验证设备不存在或不属于当前账号。", target=trust_id, persist_label="移除免验证设备",
+            )
+        try:
+            ok = webui_auth_store.remove_trusted_device(trust_id)
+        except Exception as exc:
+            _raise_device_failure(
+                runtime, exc, code="device_untrust_persist_failed", title="免验证移除未完成",
+                message="服务器未能确认免验证设备记录已移除。", target=trust_id,
+                persist_label="移除免验证设备", persistence_started=True,
+            )
+        audit_ok = _record_device_audit(
+            runtime,
             action="device_untrust", qq=admin.qq, device_id=admin.device_id, target=trust_id,
             outcome="ok" if ok else "no_op",
         )
-        return {"success": ok}
+        return _device_result(
+            {"success": ok}, changed=ok, code="device_untrusted", no_op_code="device_untrust_noop",
+            title="免验证设备已移除", no_op_title="免验证移除未产生变更",
+            message="免验证设备记录已从持久化存储移除。", no_op_message="免验证设备记录未发生变更，请刷新列表确认。",
+            target=trust_id, persist_label="移除免验证设备", audit_ok=audit_ok,
+        )
 
     return router

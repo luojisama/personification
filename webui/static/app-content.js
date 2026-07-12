@@ -209,6 +209,51 @@ function formatInnerPendingThoughts(value) {
   return texts.slice(-3).join(" / ") || "-";
 }
 
+const MEMORY_DIAGNOSTICS_STORAGE_KEY = "personification_memory_diagnostics_v1";
+
+function memoryDiagnostics() {
+  if (Array.isArray(state.memoryDiagnostics)) return state.memoryDiagnostics;
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(MEMORY_DIAGNOSTICS_STORAGE_KEY) || "[]");
+    state.memoryDiagnostics = Array.isArray(saved) ? saved.slice(0, 12) : [];
+  } catch {
+    state.memoryDiagnostics = [];
+  }
+  return state.memoryDiagnostics;
+}
+
+function rememberMemoryDiagnostic(value) {
+  const diagnostic = value && value.diagnostic && typeof value.diagnostic === "object"
+    ? value.diagnostic
+    : value;
+  if (!diagnostic || typeof diagnostic !== "object" || !diagnostic.code) return null;
+  state.memoryDiagnostics = [diagnostic, ...memoryDiagnostics()].slice(0, 12);
+  try {
+    sessionStorage.setItem(MEMORY_DIAGNOSTICS_STORAGE_KEY, JSON.stringify(state.memoryDiagnostics));
+  } catch {}
+  return diagnostic;
+}
+
+function clearMemoryDiagnostics() {
+  state.memoryDiagnostics = [];
+  try { sessionStorage.removeItem(MEMORY_DIAGNOSTICS_STORAGE_KEY); } catch {}
+  render();
+}
+
+function renderMemoryDiagnosticsCard() {
+  const diagnostics = memoryDiagnostics().map(item => renderOperationDiagnostic(item)).join("");
+  return diagnostics
+    ? `<div class="card"><div class="between"><h2>记忆操作诊断</h2><button class="btn small" onclick="clearMemoryDiagnostics()">清空</button></div>${diagnostics}</div>`
+    : "";
+}
+
+function reportMemoryError(error, title) {
+  const diagnostic = rememberMemoryDiagnostic(operationDiagnosticFromError(error, title));
+  alertFlash("err", diagnostic?.message || title);
+  render();
+  return diagnostic;
+}
+
 const MEMORY_TYPE_LABELS = {
   semantic: "长期语义", fact: "事实记忆", group_knowledge: "群知识", group_meme: "群梗词典",
   concept_anchor: "概念锚点", user_persona: "用户画像", persona_knowledge: "人设知识",
@@ -245,10 +290,11 @@ function memoryNodeKindLabel(value, fallback) {
 function renderMemory() {
   const mem = state.memory;
   const inner = state.memoryInnerState;
-  if (state.selectedMemory) return renderMemoryDetail();
-  if (!mem) return `<div class="card muted">加载中…</div>`;
+  const diagnosticCard = renderMemoryDiagnosticsCard();
+  if (state.selectedMemory) return `${diagnosticCard}${renderMemoryDetail()}`;
+  if (!mem) return `${diagnosticCard}<div class="card muted">加载中…</div>`;
   if (!mem.palace_enabled) {
-    return `<div class="card"><h2>Agent 记忆</h2>
+    return `${diagnosticCard}<div class="card"><h2>Agent 记忆</h2>
       <p class="muted">memory palace 未启用。要查看长期记忆，需在配置中开启 <code>personification_memory_palace_enabled</code>。</p></div>`;
   }
   const filters = ["", "group_knowledge", "user_persona", "fact"].map(t =>
@@ -282,7 +328,7 @@ function renderMemory() {
       ${warmRows ? `<h3 style="margin-top:14px;margin-bottom:6px;font-size:13px">用户好感度</h3><table style="max-width:420px"><thead><tr><th>用户</th><th>好感</th></tr></thead><tbody>${warmRows}</tbody></table>`:''}</div>`;
   }
   const vectorPanel = renderMemoryVectorPanel();
-  return `${innerBlock}
+  return `${diagnosticCard}${innerBlock}
     ${vectorPanel}
     <div class="toolbar">
       <div class="group-bar" style="margin-bottom:0">${filters}</div>
@@ -350,7 +396,7 @@ function renderMemoryVectorPanel() {
 
 async function pickMemoryFilter(t) {
   state.memoryFilter = t;
-  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+  try { await loadView(); render(); } catch (e) { reportMemoryError(e, "记忆列表加载失败"); }
 }
 
 async function rebuildMemoryVectorIndex() {
@@ -358,11 +404,13 @@ async function rebuildMemoryVectorIndex() {
   render();
   try {
     const result = await api("/memory/vector-index/rebuild", { method:"POST" });
+    rememberMemoryDiagnostic(result);
     state.memoryVectorIndex = result.index || state.memoryVectorIndex;
-    alertFlash("ok", `已重建 ${result.rebuilt || 0} 条记忆索引`);
+    alertFlash("ok", result.message || `已重建 ${result.rebuilt || 0} 条记忆索引`);
     await loadView(); render();
   } catch (e) {
-    alertFlash("err", "重建失败：" + e.message);
+    const diagnostic = reportMemoryError(e, "记忆向量索引重建未完成");
+    if (diagnostic?.partial || diagnostic?.outcome_unknown) await loadView().catch(() => {});
   } finally {
     state.memoryVectorBusy = false;
     render();
@@ -378,40 +426,42 @@ async function testMemoryRecall() {
   if (state.memoryUserId) qs.set("user_id", state.memoryUserId);
   if (state.memoryGroupId) qs.set("group_id", state.memoryGroupId);
   try {
-    state.memorySearchResult = await api("/memory/search-test?" + qs.toString());
+    const result = await api("/memory/search-test?" + qs.toString());
+    rememberMemoryDiagnostic(result);
+    state.memorySearchResult = result;
     render();
   } catch (e) {
-    alertFlash("err", "召回测试失败：" + e.message);
+    reportMemoryError(e, "记忆召回测试未完成");
   }
 }
 
 async function toggleMemoryIncludeSelf(checked) {
   state.memoryIncludeSelf = !!checked;
-  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+  try { await loadView(); render(); } catch (e) { reportMemoryError(e, "记忆列表加载失败"); }
 }
 
 async function applyMemoryFilters() {
   state.memoryUserId = (document.getElementById("mem-user-input")?.value || "").trim();
   state.memoryGroupId = (document.getElementById("mem-group-input")?.value || "").trim();
-  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+  try { await loadView(); render(); } catch (e) { reportMemoryError(e, "记忆筛选加载失败"); }
 }
 
 async function pickPalaceZone(zone) {
   state.memoryPalaceZone = zone || "";
-  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+  try { await loadView(); render(); } catch (e) { reportMemoryError(e, "记忆分区加载失败"); }
 }
 
 async function pickMemoryLimit(value) {
   const n = Number(value || 200);
   state.memoryLimit = [100, 200, 500].includes(n) ? n : 200;
-  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+  try { await loadView(); render(); } catch (e) { reportMemoryError(e, "记忆列表加载失败"); }
 }
 
 async function clearMemoryFilters() {
   state.memoryUserId = "";
   state.memoryGroupId = "";
   state.memoryPalaceZone = "";
-  try { await loadView(); render(); } catch (e) { alertFlash("err", e.message); }
+  try { await loadView(); render(); } catch (e) { reportMemoryError(e, "记忆筛选重置失败"); }
 }
 
 async function openMemoryDetail(memoryId) {
@@ -419,7 +469,7 @@ async function openMemoryDetail(memoryId) {
   try {
     state.selectedMemory = await api("/memory/detail/" + encodeURIComponent(memoryId));
     render();
-  } catch (e) { alertFlash("err", e.message); }
+  } catch (e) { reportMemoryError(e, "记忆详情加载失败"); }
 }
 
 function renderMemoryDetail() {
@@ -491,7 +541,7 @@ function renderMemoryGraph() {
     ? `<div class="alert err" style="margin-bottom:10px">记忆宫殿不可用（${escapeHtml(data.reason||data.error||'未知原因')}）。检查 personification_memory_palace_enabled。</div>`
     : '';
   setTimeout(() => { try { renderMemoryGraphCanvas(); } catch(e) { console.warn('cytoscape', e); } }, 60);
-  return `<div class="card">
+  return `${renderMemoryDiagnosticsCard()}<div class="card">
     <div class="between" style="margin-bottom:10px">
       <h2 style="margin:0">记忆宫殿 力导向图</h2>
       <div class="row">
@@ -528,7 +578,9 @@ async function renderMemoryGraphCanvas() {
   const el = document.getElementById('memory-graph-canvas');
   if (!el) return;
   try { await ensureCytoscapeLoaded(); } catch (e) {
-    el.innerHTML = '<p class="muted" style="padding:20px">' + escapeHtml(e.message) + '</p>';
+    const diagnostic = rememberMemoryDiagnostic(operationDiagnosticFromError(e, "记忆图谱渲染依赖加载失败"));
+    el.innerHTML = '<p class="muted" style="padding:20px">' + escapeHtml(diagnostic?.message || '记忆图谱渲染依赖加载失败') + '</p>';
+    alertFlash('err', diagnostic?.message || '记忆图谱渲染依赖加载失败');
     return;
   }
   const nodes = (data.nodes || []).map(n => {
@@ -619,5 +671,5 @@ function exportMemoryGraphPNG() {
     a.href = url; a.download = 'memory-palace.png';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
-  } catch (e) { alertFlash('err', '导出失败：' + e.message); }
+  } catch (e) { reportMemoryError(e, '记忆图谱导出失败'); }
 }

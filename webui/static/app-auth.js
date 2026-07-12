@@ -1,3 +1,38 @@
+const SMALL_OPERATION_STORAGE_KEY = "personification_small_operation_diagnostics_v1";
+
+function smallOperationEntries() {
+  if (Array.isArray(state.smallOperationDiagnostics)) return state.smallOperationDiagnostics;
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(SMALL_OPERATION_STORAGE_KEY) || "[]");
+    state.smallOperationDiagnostics = Array.isArray(saved) ? saved.slice(0, 12) : [];
+  } catch { state.smallOperationDiagnostics = []; }
+  return state.smallOperationDiagnostics;
+}
+
+function rememberSmallOperation(scope, value, fallbackTitle="操作未完成") {
+  const diagnostic = value && value.diagnostic && typeof value.diagnostic === "object"
+    ? value.diagnostic
+    : (value instanceof Error ? operationDiagnosticFromError(value, fallbackTitle) : value);
+  if (!diagnostic || typeof diagnostic !== "object" || !diagnostic.code) return null;
+  state.smallOperationDiagnostics = [{scope, diagnostic}, ...smallOperationEntries()].slice(0, 12);
+  try { sessionStorage.setItem(SMALL_OPERATION_STORAGE_KEY, JSON.stringify(state.smallOperationDiagnostics)); } catch {}
+  return diagnostic;
+}
+
+function clearSmallOperations(scope) {
+  state.smallOperationDiagnostics = smallOperationEntries().filter(item => item.scope !== scope);
+  try { sessionStorage.setItem(SMALL_OPERATION_STORAGE_KEY, JSON.stringify(state.smallOperationDiagnostics)); } catch {}
+  render();
+}
+
+function renderSmallOperations(scope, title) {
+  const items = smallOperationEntries()
+    .filter(item => item.scope === scope)
+    .map(item => renderOperationDiagnostic(item.diagnostic))
+    .join("");
+  return items ? `<div class="card"><div class="between"><h2>${escapeHtml(title)}</h2><button class="btn small" onclick="clearSmallOperations('${escapeAttr(scope)}')">清空</button></div>${items}</div>` : "";
+}
+
 function renderDevices() {
   const rows = state.devices.map(d => {
     const isCurrent = d.id === state.currentDeviceId;
@@ -40,7 +75,7 @@ function renderDevices() {
     <p class="muted">以下新设备等待确认。请核对 QQ / 来源后再批准，拒绝将立即吊销其令牌。</p>
     <table><thead><tr><th>设备</th><th>UA</th><th>登记时间</th><th></th></tr></thead><tbody>${pendingRows}</tbody></table>
   </div>` : '';
-  return `${pendingCard}<div class="card">
+  return `${renderSmallOperations("device", "设备操作诊断")}${pendingCard}<div class="card">
     <h2>已登录设备</h2>
     <table><thead><tr><th>设备</th><th>状态</th><th>UA</th><th>最后活跃</th><th></th></tr></thead><tbody>${rows}</tbody></table>
   </div>${trustedCard}`;
@@ -49,32 +84,40 @@ function renderDevices() {
 async function trustDevice(id) {
   if (!confirm("将该设备设为免验证？之后从相同浏览器+QQ 登录会跳过验证码与审批。")) return;
   try {
-    await api("/auth/devices/" + encodeURIComponent(id) + "/trust", { method:"POST" });
-    alertFlash("ok", "已设为免验证设备");
+    const result = await api("/auth/devices/" + encodeURIComponent(id) + "/trust", { method:"POST" });
+    const diagnostic = rememberSmallOperation("device", result, "免验证登记未完成");
+    alertFlash(diagnostic?.ok === false || diagnostic?.partial ? "info" : "ok", diagnostic?.title || "已设为免验证设备");
     await loadView(); render();
-  } catch (e) { alertFlash("err", "操作失败：" + e.message); }
+  } catch (e) { const diagnostic = rememberSmallOperation("device", e, "免验证登记未完成"); alertFlash("err", diagnostic?.title || "免验证登记未完成"); render(); }
 }
 
 async function untrustDevice(id) {
   try {
-    await api("/auth/trusted-devices/" + encodeURIComponent(id), { method:"DELETE" });
-    alertFlash("ok", "已移除免验证");
+    const result = await api("/auth/trusted-devices/" + encodeURIComponent(id), { method:"DELETE" });
+    const diagnostic = rememberSmallOperation("device", result, "免验证移除未完成");
+    alertFlash(diagnostic?.ok === false || diagnostic?.partial ? "info" : "ok", diagnostic?.title || "已移除免验证");
     await loadView(); render();
-  } catch (e) { alertFlash("err", "操作失败：" + e.message); }
+  } catch (e) { const diagnostic = rememberSmallOperation("device", e, "免验证移除未完成"); alertFlash("err", diagnostic?.title || "免验证移除未完成"); render(); }
 }
 
 async function approveDevice(id) {
   try {
-    await api("/auth/devices/" + encodeURIComponent(id) + "/approve", { method:"POST" });
-    alertFlash("ok", "已批准");
+    const result = await api("/auth/devices/" + encodeURIComponent(id) + "/approve", { method:"POST" });
+    const diagnostic = rememberSmallOperation("device", result, "设备审批未完成");
+    alertFlash(diagnostic?.ok === false || diagnostic?.partial ? "info" : "ok", diagnostic?.title || "已批准");
     await loadView(); render();
-  } catch (e) { alertFlash("err", "批准失败：" + e.message); }
+  } catch (e) { const diagnostic = rememberSmallOperation("device", e, "设备审批未完成"); alertFlash("err", diagnostic?.title || "设备审批未完成"); render(); }
 }
 
 async function revokeDevice(id) {
   if (!confirm("撤销该设备？该设备下次访问将被踢出。")) return;
-  try { await api("/auth/devices/" + encodeURIComponent(id), { method:"DELETE" }); alertFlash("ok", "已撤销"); await loadView(); render(); }
-  catch (e) { alertFlash("err", "撤销失败：" + e.message); }
+  try {
+    const result = await api("/auth/devices/" + encodeURIComponent(id), { method:"DELETE" });
+    const diagnostic = rememberSmallOperation("device", result, "设备撤销未完成");
+    alertFlash(diagnostic?.ok === false || diagnostic?.partial ? "info" : "ok", diagnostic?.title || "已撤销");
+    await loadView(); render();
+  }
+  catch (e) { const diagnostic = rememberSmallOperation("device", e, "设备撤销未完成"); alertFlash("err", diagnostic?.title || "设备撤销未完成"); render(); }
 }
 
 async function doLogout() {

@@ -458,6 +458,7 @@ async function loadView() {
       state.pluginKnowledgeList = data.plugins || [];
       state.pluginKnowledgeAvailable = data.available;
       state.pluginKnowledgeTotal = data.total || 0;
+      state.pluginKnowledgeDiagnostic = data.diagnostic || null;
     } else if (view === "memory_graph") {
       const qs = new URLSearchParams({ limit: String(state.memoryGraphLimit || 100) });
       if (state.memoryGraphGroupId) qs.set("group_id", state.memoryGraphGroupId);

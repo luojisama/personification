@@ -169,6 +169,7 @@ def test_plugin_knowledge_routes_expose_full_input_coverage(tmp_path: Path) -> N
     assert item["source_coverage"]["full_input"] is True
     assert item["source_coverage"]["source_chars"] == 1200
     assert item["analysis_scope"] == "full_readable_python_source"
+    assert listed.json()["diagnostic"]["code"] == "plugin_knowledge_list_loaded"
 
     detail = client.get("/api/plugin-knowledge/detail/demo")
     assert detail.status_code == 200, detail.text
@@ -176,3 +177,4 @@ def test_plugin_knowledge_routes_expose_full_input_coverage(tmp_path: Path) -> N
     assert body["source_coverage"]["full_input"] is True
     assert body["source_coverage"]["source_chunk_count"] == 3
     assert body["source_snapshot"]["source_truncated"] is False
+    assert body["diagnostic"]["code"] == "plugin_knowledge_detail_loaded"

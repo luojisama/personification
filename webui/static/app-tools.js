@@ -181,8 +181,8 @@ async function toggleSkill(name, disabled) {
     alertFlash("ok", `${name} 已${disabled?'禁用':'启用'}`);
     await loadView(); render();
   } catch (e) {
-    persistSkillOperationResult(operationDiagnosticFromError(e, "Skill 开关保存失败"));
-    alertFlash("err", "切换失败：" + e.message);
+    const diagnostic=operationDiagnosticFromError(e,"Skill 开关保存失败");persistSkillOperationResult(diagnostic);
+    alertFlash("err",diagnostic.title||"Skill 开关保存失败");
     render();
   }
 }
@@ -194,8 +194,8 @@ async function setSkillRemoteEnabled(enabled) {
     alertFlash("ok", enabled ? "远程 Skill 已开启" : "远程 Skill 已关闭");
     await loadView(); render();
   } catch (e) {
-    persistSkillOperationResult(operationDiagnosticFromError(e, "远程 Skill 开关保存失败"));
-    alertFlash("err", "保存失败：" + e.message);
+    const diagnostic=operationDiagnosticFromError(e,"远程 Skill 开关保存失败");persistSkillOperationResult(diagnostic);
+    alertFlash("err",diagnostic.title||"远程 Skill 开关保存失败");
     render();
   }
 }
@@ -214,8 +214,8 @@ async function addRemoteSkillSource() {
     alertFlash("ok", result.auto_approved ? "远程源已添加并批准，重载后生效" : "远程源已添加，审核后重载生效");
     await loadView(); render();
   } catch (e) {
-    persistSkillOperationResult(operationDiagnosticFromError(e, "远程 Skill 来源添加失败"));
-    alertFlash("err", "添加失败：" + e.message);
+    const diagnostic=operationDiagnosticFromError(e,"远程 Skill 来源添加失败");persistSkillOperationResult(diagnostic);
+    alertFlash("err",diagnostic.title||"远程 Skill 来源添加失败");
     render();
   }
 }
@@ -227,8 +227,8 @@ async function reviewRemoteSkill(selector, status) {
     alertFlash("ok", `已更新 ${result.matched_count || 0} 个远程源`);
     await loadView(); render();
   } catch (e) {
-    persistSkillOperationResult(operationDiagnosticFromError(e, "远程 Skill 审核失败"));
-    alertFlash("err", "审核失败：" + e.message);
+    const diagnostic=operationDiagnosticFromError(e,"远程 Skill 审核失败");persistSkillOperationResult(diagnostic);
+    alertFlash("err",diagnostic.title||"远程 Skill 审核失败");
     render();
   }
 }
@@ -240,8 +240,8 @@ async function reloadSkillRuntime() {
     alertFlash("ok", "Skill 运行时已重载");
     await loadView(); render();
   } catch (e) {
-    persistSkillOperationResult(operationDiagnosticFromError(e, "Skill runtime 重载失败"));
-    alertFlash("err", "重载失败：" + e.message);
+    const diagnostic=operationDiagnosticFromError(e,"Skill runtime 重载失败");persistSkillOperationResult(diagnostic);
+    alertFlash("err",diagnostic.title||"Skill runtime 重载失败");
     render();
   }
 }
@@ -298,6 +298,20 @@ function normalizePluginKnowledgeFeatures(features) {
   return [];
 }
 
+const _PLUGIN_KNOWLEDGE_DIAGNOSTIC_KEY="personification_plugin_knowledge_diagnostic_v1";
+function rememberPluginKnowledgeDiagnostic(value) {
+  const diagnostic=value&&value.diagnostic&&typeof value.diagnostic==="object"?value.diagnostic:value;
+  if(!diagnostic||typeof diagnostic!=="object"||!diagnostic.code)return null;
+  state.pluginKnowledgeDiagnostic=diagnostic;
+  try{sessionStorage.setItem(_PLUGIN_KNOWLEDGE_DIAGNOSTIC_KEY,JSON.stringify(diagnostic));}catch{}
+  return diagnostic;
+}
+function pluginKnowledgeDiagnosticCard() {
+  let diagnostic=state.pluginKnowledgeDiagnostic;
+  if(!diagnostic){try{diagnostic=JSON.parse(sessionStorage.getItem(_PLUGIN_KNOWLEDGE_DIAGNOSTIC_KEY)||"null");}catch{diagnostic=null;}}
+  return diagnostic?`<div class="card"><div class="between"><h2>插件知识库诊断</h2><button class="btn small" onclick="state.pluginKnowledgeDiagnostic=null;try{sessionStorage.removeItem(_PLUGIN_KNOWLEDGE_DIAGNOSTIC_KEY)}catch{};render()">清空</button></div>${renderOperationDiagnostic(diagnostic)}</div>`:"";
+}
+
 function renderPluginKnowledgeSourceFiles(snapshot) {
   const files = snapshot && Array.isArray(snapshot.files) ? snapshot.files : [];
   if (!files.length) return "";
@@ -313,8 +327,9 @@ function renderPluginKnowledgeSourceFiles(snapshot) {
 }
 
 function renderPluginKnowledge() {
-  if (state.pluginKnowledgeAvailable === false) return `<div class="card muted">knowledge_store 未就绪</div>`;
-  if (state.selectedPluginKnowledge) return renderPluginKnowledgeDetail();
+  const diagnosticCard=pluginKnowledgeDiagnosticCard();
+  if (state.pluginKnowledgeAvailable === false) return `${diagnosticCard}<div class="card muted">knowledge_store 未就绪</div>`;
+  if (state.selectedPluginKnowledge) return `${diagnosticCard}${renderPluginKnowledgeDetail()}`;
   const list = state.pluginKnowledgeList || [];
   const searchResults = state.pluginKnowledgeSearchResults;
   const matchedSet = searchResults ? new Set(searchResults.results || []) : null;
@@ -336,7 +351,7 @@ function renderPluginKnowledge() {
   </tr>`;
   }).join("");
   const searchInfo = matchedSet ? `<div class="muted" style="margin-bottom:8px">搜索 "${escapeHtml(state.pluginKnowledgeSearchQ || '')}" 命中 ${matchedSet.size} 条 <button class="btn small" onclick="clearPluginKnowledgeSearch()">清除</button></div>` : '';
-  return `<div class="card">
+  return `${diagnosticCard}<div class="card">
     <div class="row" style="margin-bottom:12px;gap:8px;align-items:center">
       <input id="pk-search-input" placeholder="按插件名/关键词/摘要搜索" value="${escapeAttr(state.pluginKnowledgeSearchQ || '')}" onkeydown="if(event.key==='Enter')triggerPluginKnowledgeSearch()" style="flex:1">
       <button class="btn" onclick="triggerPluginKnowledgeSearch()">搜索</button>
@@ -355,8 +370,9 @@ async function triggerPluginKnowledgeSearch() {
   if (!q) { state.pluginKnowledgeSearchResults = null; render(); return; }
   try {
     state.pluginKnowledgeSearchResults = await api("/plugin-knowledge/search?" + new URLSearchParams({q, top_k: "30"}).toString());
+    rememberPluginKnowledgeDiagnostic(state.pluginKnowledgeSearchResults);
     render();
-  } catch (e) { alertFlash("err", e.message); }
+  } catch (e) { const diagnostic=rememberPluginKnowledgeDiagnostic(operationDiagnosticFromError(e,"插件知识搜索未完成"));alertFlash("err",diagnostic?.title||"插件知识搜索未完成");render(); }
 }
 
 function clearPluginKnowledgeSearch() {
@@ -368,8 +384,9 @@ function clearPluginKnowledgeSearch() {
 async function openPluginKnowledge(name) {
   try {
     state.selectedPluginKnowledge = await api("/plugin-knowledge/detail/" + encodeURIComponent(name));
+    rememberPluginKnowledgeDiagnostic(state.selectedPluginKnowledge);
     render();
-  } catch (e) { alertFlash("err", e.message); }
+  } catch (e) { const diagnostic=rememberPluginKnowledgeDiagnostic(operationDiagnosticFromError(e,"插件知识详情读取未完成"));alertFlash("err",diagnostic?.title||"插件知识详情读取未完成");render(); }
 }
 
 function renderPluginKnowledgeDetail() {
@@ -513,8 +530,8 @@ async function checkPluginUpdates() {
     persistPluginUpdateResult(status);
     state.pluginUpdateHistory = await api("/plugin-manager/history?limit=30").catch(() => state.pluginUpdateHistory);
   } catch (e) {
-    persistPluginUpdateResult(operationDiagnosticFromError(e, "插件更新检查未完成"));
-    alertFlash("err", "检查失败：" + e.message);
+    const diagnostic=operationDiagnosticFromError(e,"插件更新检查未完成");persistPluginUpdateResult(diagnostic);
+    alertFlash("err",diagnostic.title||"插件更新检查未完成");
   }
   state.pluginUpdateChecking = false;
   render();
@@ -534,16 +551,81 @@ async function applyPluginUpdate() {
     state.pluginUpdateHistory = await api("/plugin-manager/history?limit=30").catch(() => state.pluginUpdateHistory);
     alertFlash(result.ok ? "ok" : "err", result.message || result.error || (result.ok ? "更新完成" : "更新失败"));
   } catch (e) {
-    persistPluginUpdateResult(operationDiagnosticFromError(e, "插件更新未完成"));
-    alertFlash("err", "更新失败：" + e.message);
+    const diagnostic=operationDiagnosticFromError(e,"插件更新未完成");persistPluginUpdateResult(diagnostic);
+    alertFlash("err",diagnostic.title||"插件更新未完成");
   }
   state.pluginUpdateBusy = false;
   render();
 }
 
+const _TEST_OPERATION_RESULT_STORAGE_KEY = "personification_test_operation_result_v1";
+
+function testDiagnosticSnapshot(input) {
+  const d = input && input.diagnostic && typeof input.diagnostic === "object" ? input.diagnostic : input;
+  if (!d || typeof d !== "object" || !d.code) return null;
+  return {
+    ok: d.ok === true,
+    code: String(d.code || "operation_failed"),
+    phase: String(d.phase || ""),
+    title: String(d.title || ""),
+    message: String(d.message || d.error || ""),
+    details: Array.isArray(d.details) ? d.details : [],
+    steps: Array.isArray(d.steps) ? d.steps : [],
+    warnings: Array.isArray(d.warnings) ? d.warnings : [],
+    suggestion: String(d.suggestion || ""),
+    retryable: Boolean(d.retryable),
+    partial: Boolean(d.partial),
+    outcome_unknown: Boolean(d.outcome_unknown),
+    operation_id: String(d.operation_id || ""),
+    trace_id: String(d.trace_id || ""),
+  };
+}
+
+function persistTestOperationResult(input) {
+  const primary = testDiagnosticSnapshot(input);
+  const providers = Array.isArray(input && input.results) ? input.results.map(item => ({
+    name: String(item && item.name || "未命名 Provider"),
+    diagnostic: testDiagnosticSnapshot(item),
+  })).filter(item => item.diagnostic) : [];
+  state.testOperationResult = primary ? { diagnostic: primary, providers } : null;
+  try {
+    if (state.testOperationResult) sessionStorage.setItem(_TEST_OPERATION_RESULT_STORAGE_KEY, JSON.stringify(state.testOperationResult));
+    else sessionStorage.removeItem(_TEST_OPERATION_RESULT_STORAGE_KEY);
+  } catch {}
+}
+
+function clearTestOperationResult() {
+  persistTestOperationResult(null);
+  render();
+}
+
+try {
+  const savedTestOperationResult = JSON.parse(sessionStorage.getItem(_TEST_OPERATION_RESULT_STORAGE_KEY) || "null");
+  if (savedTestOperationResult && savedTestOperationResult.diagnostic) state.testOperationResult = savedTestOperationResult;
+} catch {
+  try { sessionStorage.removeItem(_TEST_OPERATION_RESULT_STORAGE_KEY); } catch {}
+}
+
+function renderTestOperationResult() {
+  const result = state.testOperationResult;
+  if (!result || !result.diagnostic) return "";
+  const providers = (result.providers || []).map(item => `<details style="margin-top:10px">
+    <summary>${escapeHtml(item.name)} · ${escapeHtml(item.diagnostic.code || "unknown")}</summary>
+    <div style="margin-top:10px">${renderOperationDiagnostic(item.diagnostic)}</div>
+  </details>`).join("");
+  return `<div class="card">
+    <div class="between" style="gap:12px;align-items:flex-start">
+      <div><h2 style="margin:0">最近一次模型 / Prompt 测试诊断</h2><p class="muted" style="font-size:12px;margin:6px 0 0">刷新页面后仍保留；仅保存服务端返回的脱敏 diagnostic，不保存模型正文。</p></div>
+      <button class="btn small" onclick="clearTestOperationResult()">清除</button>
+    </div>
+    <div style="margin-top:12px">${renderOperationDiagnostic(result.diagnostic)}</div>
+    ${providers}
+  </div>`;
+}
+
 function renderTest() {
   const r = state.testResult;
-  return `<div class="card">
+  return `${renderTestOperationResult()}<div class="card">
     <h2>模型调用测试</h2>
     <label class="muted">system prompt</label>
     <textarea oninput="state.testSystem=this.value" style="width:100%;min-height:60px;margin:6px 0">${escapeHtml(state.testSystem)}</textarea>
@@ -577,7 +659,9 @@ function renderTestAll() {
       ? '<span class="device-status approved">通过</span>'
       : (x.blocked_reason ? '<span class="device-status pending">被拦截</span>'
                           : '<span class="device-status pending" style="background:rgba(248,113,113,0.18);color:var(--danger)">失败</span>');
-    const detail = ok ? (escapeHtml((x.content||'').slice(0,200)) || '(空)') : escapeHtml(x.error || x.blocked_reason || '未知错误');
+    const diagnostic = x.diagnostic || x;
+    const failureText = [diagnostic.title, diagnostic.message].filter(Boolean).join("：");
+    const detail = ok ? (escapeHtml((x.content||'').slice(0,200)) || '(空)') : escapeHtml(failureText || x.error || x.blocked_reason || '未知错误');
     return `<tr>
       <td>${escapeHtml(x.name||'')}</td>
       <td class="muted">${escapeHtml(x.api_type||'')} / ${escapeHtml(x.model||'')}</td>
@@ -596,7 +680,13 @@ async function runTest() {
   state.testLoading = true; render();
   try {
     state.testResult = await api("/test/chat", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({prompt: state.testPrompt, system: state.testSystem}) });
-  } catch (e) { alertFlash("err", "调用失败：" + e.message); }
+    persistTestOperationResult(state.testResult);
+  } catch (e) {
+    const report = operationDiagnosticFromError(e, "路由模型测试未完成");
+    state.testResult = null;
+    persistTestOperationResult(report);
+    alertFlash("err", report.title || report.message || "路由模型测试未完成");
+  }
   state.testLoading = false; render();
 }
 
@@ -604,12 +694,19 @@ async function runTestAll() {
   state.testLoading = true; render();
   try {
     state.testAllResult = await api("/test/chat-all", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({prompt: state.testPrompt, system: state.testSystem}) });
-  } catch (e) { alertFlash("err", "测试失败：" + e.message); }
+    persistTestOperationResult(state.testAllResult);
+  } catch (e) {
+    const report = operationDiagnosticFromError(e, "全部 Provider 测试未完成");
+    state.testAllResult = null;
+    persistTestOperationResult(report);
+    alertFlash("err", report.title || report.message || "全部 Provider 测试未完成");
+  }
   state.testLoading = false; render();
 }
 
 function renderPersonaPrompt() {
   const p = state.personaPrompt;
+  if (p && p.diagnostic) persistTestOperationResult(p);
   const meta = p ? `<div class="row muted" style="font-size:12px;margin-bottom:8px;gap:14px">
       <span>来源：${escapeHtml(p.source||'-')}</span>
       ${p.resolved_path ? `<span>路径：<code>${escapeHtml(p.resolved_path)}</code></span>` : ''}
@@ -617,7 +714,7 @@ function renderPersonaPrompt() {
     </div>` : '';
   const body = p && (p.content || p.content === '')
     ? `<pre style="white-space:pre-wrap;margin:0;font-family:ui-monospace,Consolas,monospace;max-height:60vh;overflow:auto">${escapeHtml(p.content || '(空)')}</pre>`
-    : '<p class="muted">加载中…</p>';
+    : (p && p.diagnostic ? '' : '<p class="muted">加载中…</p>');
   return `<div class="card">
     <h2>人设预览</h2>
     <p class="muted" style="font-size:12.5px">默认显示当前生效的人设文件（prompt_path / system_path / system_prompt）。也可输入任意路径查看其内容。</p>
@@ -627,16 +724,36 @@ function renderPersonaPrompt() {
       ${state.personaPromptPath ? '<button class="btn" onclick="resetPersonaPrompt()">重置为当前配置</button>' : ''}
     </div>
   </div>
-  <div class="card">${meta}${body}</div>`;
+  <div class="card">${p && p.diagnostic ? renderOperationDiagnostic(p.diagnostic) : ''}${meta}${body}</div>`;
 }
 
 async function loadPersonaPrompt() {
   const el = document.getElementById("persona-path");
   if (el) state.personaPromptPath = el.value.trim();
-  try { await loadView(); render(); } catch (e) { alertFlash("err", "读取失败：" + e.message); }
+  try {
+    await loadView();
+    persistTestOperationResult(state.personaPrompt);
+    render();
+  } catch (e) {
+    const report = operationDiagnosticFromError(e, "人设 prompt 读取未完成");
+    state.personaPrompt = { diagnostic: report };
+    persistTestOperationResult(report);
+    alertFlash("err", report.title || report.message || "人设 prompt 读取未完成");
+    render();
+  }
 }
 
 async function resetPersonaPrompt() {
   state.personaPromptPath = "";
-  try { await loadView(); render(); } catch (e) { alertFlash("err", "读取失败：" + e.message); }
+  try {
+    await loadView();
+    persistTestOperationResult(state.personaPrompt);
+    render();
+  } catch (e) {
+    const report = operationDiagnosticFromError(e, "当前人设 prompt 读取未完成");
+    state.personaPrompt = { diagnostic: report };
+    persistTestOperationResult(report);
+    alertFlash("err", report.title || report.message || "当前人设 prompt 读取未完成");
+    render();
+  }
 }

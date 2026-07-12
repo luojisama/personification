@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from starlette.concurrency import run_in_threadpool
 
-from ...core import plugin_runtime_logs, reply_turn_trace
-from ..deps import AdminIdentity, require_admin
+from ...core import plugin_runtime_logs, reply_turn_trace, webui_audit_log
+from ...core.operation_diagnostics import detail, diagnostic, exception_diagnostic, step
+from ..deps import AdminIdentity, get_client_ip, require_admin
 
 
 def build_log_router(*, runtime) -> APIRouter:
@@ -100,9 +101,69 @@ def build_log_router(*, runtime) -> APIRouter:
         return {"entries": entries}
 
     @router.delete("/clear")
-    async def clear(_: AdminIdentity = Depends(require_admin)) -> dict:
-        deleted = await run_in_threadpool(plugin_runtime_logs.clear_all)
-        return {"deleted": deleted}
+    async def clear(
+        request: Request,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        try:
+            deleted = await run_in_threadpool(plugin_runtime_logs.clear_all)
+        except Exception as exc:
+            report = exception_diagnostic(
+                exc,
+                phase="persistence",
+                title="插件日志清空未完成",
+                message="服务器未能确认持久日志已清空。",
+                suggestion="先刷新日志列表确认当前状态；仍有日志时再重试。",
+                retryable=True,
+            )
+            report["code"] = "plugin_logs_clear_failed"
+            report["steps"] = [
+                step("persist", "清空持久日志", "unknown", "清理过程异常，最终状态需要重新读取确认。").to_dict(),
+                step("audit", "记录管理员操作", "skipped", "日志清理结果未知。").to_dict(),
+            ]
+            report["partial"] = True
+            report["outcome_unknown"] = True
+            logger = getattr(runtime, "logger", None)
+            if logger is not None:
+                logger.warning(
+                    f"[log operation] code=plugin_logs_clear_failed exception={type(exc).__name__} "
+                    f"trace={report.get('trace_id', '')}"
+                )
+            raise HTTPException(status_code=500, detail=report) from exc
+
+        audit_ok = True
+        try:
+            webui_audit_log.record(
+                action="plugin_logs_clear",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target="plugin_runtime_logs",
+                ip_hash=get_client_ip(request),
+                detail={"deleted": deleted},
+                outcome="ok",
+            )
+        except Exception as exc:
+            audit_ok = False
+            logger = getattr(runtime, "logger", None)
+            if logger is not None:
+                logger.warning(f"[log operation] audit_failed exception={type(exc).__name__}")
+        report = diagnostic(
+            ok=True,
+            code="plugin_logs_cleared",
+            phase="operation_complete",
+            title="插件日志已清空",
+            message="持久日志清理已完成。",
+            details=(detail("删除条数", deleted, "ok"),),
+            steps=(
+                step("persist", "清空持久日志", "ok", "日志删除事务已提交。"),
+                step("audit", "记录管理员操作", "ok" if audit_ok else "warn", "审计记录已保存。" if audit_ok else "日志已清空，但审计记录写入失败。"),
+            ),
+            warnings=() if audit_ok else ("日志已清空，但本次管理员审计记录未能写入。",),
+            retryable=False,
+            partial=not audit_ok,
+            outcome_unknown=False,
+        )
+        return {"deleted": deleted, **report}
 
     return router
 

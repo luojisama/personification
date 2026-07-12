@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -333,7 +334,7 @@ def _attach_diagnostic(result: dict[str, Any], operation_diagnostic: dict[str, A
     return payload
 
 
-def _exception_detail(exc: BaseException, *, operation: str) -> dict[str, Any]:
+def _exception_detail(exc: BaseException, *, operation: str, operation_id: str = "") -> dict[str, Any]:
     is_update = operation == "update"
     payload = exception_diagnostic(
         exc,
@@ -346,6 +347,7 @@ def _exception_detail(exc: BaseException, *, operation: str) -> dict[str, Any]:
             else "根据 Trace ID 检查脱敏日志后重试。"
         ),
         retryable=not is_update,
+        operation_id=operation_id,
     )
     payload["code"] = "plugin_update_exception" if is_update else "plugin_update_check_exception"
     payload["outcome_unknown"] = is_update
@@ -448,6 +450,7 @@ def build_plugin_manager_router(*, runtime) -> APIRouter:
         body: dict = Body(default_factory=dict),
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
+        operation_id = uuid.uuid4().hex
         if str(body.get("confirm", "") or "").strip().lower() != "update":
             raise HTTPException(
                 status_code=400,
@@ -466,7 +469,7 @@ def build_plugin_manager_router(*, runtime) -> APIRouter:
                 plugin_config=getattr(runtime, "plugin_config", None),
             )
         except Exception as exc:
-            failure = _exception_detail(exc, operation="update")
+            failure = _exception_detail(exc, operation="update", operation_id=operation_id)
             _audit(
                 action="plugin_update_apply",
                 admin=admin,
@@ -478,7 +481,9 @@ def build_plugin_manager_router(*, runtime) -> APIRouter:
                 logger.warning(f"[webui] 插件更新异常：{type(exc).__name__} trace={failure['trace_id']}")
             raise HTTPException(status_code=500, detail=failure) from exc
         result = _sanitize_manager_value(manager_result)
-        result = _attach_diagnostic(result, _update_diagnostic(result))
+        update_report = _update_diagnostic(result)
+        update_report["operation_id"] = operation_id
+        result = _attach_diagnostic(result, update_report)
         status_body = result.get("status") if isinstance(result.get("status"), dict) else {}
         target = str(((status_body or {}).get("source") or {}).get("upstream") or "")
         _audit(

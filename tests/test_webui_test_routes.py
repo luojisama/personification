@@ -5,6 +5,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
+import pytest
+
 from ._loader import load_personification_module
 
 # 复用 smoke 的 fixture + 登录
@@ -28,6 +31,25 @@ class _FakeCaller:
 
     async def chat_with_tools(self, messages, tools, use_builtin_search):
         return _FakeResp(content=self._content)
+
+
+class _RaisingCaller:
+    def __init__(self, exc: BaseException):
+        self._exc = exc
+
+    async def chat_with_tools(self, messages, tools, use_builtin_search):
+        raise self._exc
+
+
+def _set_routed_caller(runtime_context, caller) -> None:
+    current = runtime_context.app_module.get_runtime_context()
+    runtime_context.app_module.set_runtime_context(
+        plugin_config=runtime_context.plugin_config,
+        superusers={"10001"},
+        get_bots=current.get_bots,
+        logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+        runtime_bundle=SimpleNamespace(agent_tool_caller=caller),
+    )
 
 
 def _patch_ai_routes(monkeypatch, providers, caller_content="hi"):
@@ -57,6 +79,8 @@ def test_chat_all_probes_every_provider(_runtime_context, monkeypatch) -> None:
         assert r["ok"] is True
         assert r["duration_ms"] >= 0
         assert r["content"].endswith(":hi")
+        assert r["diagnostic"]["code"] == "provider_test_complete"
+    assert body["diagnostic"]["code"] == "provider_test_all_complete"
 
 
 def test_chat_all_flags_blocked_provider(_runtime_context, monkeypatch) -> None:
@@ -76,6 +100,126 @@ def test_chat_all_flags_blocked_provider(_runtime_context, monkeypatch) -> None:
     r = res.json()["results"][0]
     assert r["ok"] is False
     assert "SAFETY" in r["blocked_reason"]
+    assert r["diagnostic"]["code"] == "provider_test_blocked"
+    assert r["diagnostic"]["retryable"] is False
+
+
+def test_chat_single_preserves_response_fields_and_adds_diagnostic(_runtime_context) -> None:
+    _set_routed_caller(_runtime_context, _FakeCaller(content="single hello"))
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.post("/personification/api/test/chat", json={"prompt": "hi"})
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["content"] == "single hello"
+    assert body["finish_reason"] == "stop"
+    assert body["duration_ms"] >= 0
+    assert body["usage"] == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    assert body["model_used"] == "m"
+    assert body["diagnostic"]["code"] == "provider_test_complete"
+
+
+def test_chat_single_internal_failure_is_structured_and_redacted(_runtime_context) -> None:
+    _set_routed_caller(
+        _runtime_context,
+        _RaisingCaller(RuntimeError("https://private.example/chat?api_key=top-secret raw body")),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.post("/personification/api/test/chat", json={"prompt": "hi"})
+
+    assert res.status_code == 500, res.text
+    report = res.json()["detail"]
+    assert report["code"] == "provider_test_internal_error"
+    assert report["trace_id"]
+    serialized = json.dumps(report)
+    assert "private.example" not in serialized
+    assert "top-secret" not in serialized
+    assert "raw body" not in serialized
+
+
+def _provider_test_exception(kind: str) -> BaseException:
+    request = httpx.Request("POST", "https://private.example/chat?api_key=top-secret")
+    if kind == "auth":
+        response = httpx.Response(401, request=request, text="token=top-secret raw body")
+        return httpx.HTTPStatusError("Authorization: Bearer top-secret", request=request, response=response)
+    if kind == "timeout":
+        return asyncio.TimeoutError("token=top-secret raw body")
+    if kind == "network":
+        return httpx.ConnectError("https://private.example token=top-secret", request=request)
+    if kind == "parse":
+        return json.JSONDecodeError("token=top-secret", "raw body top-secret", 0)
+    return RuntimeError("https://private.example/?token=top-secret raw body")
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_code", "retryable"),
+    [
+        ("auth", "provider_test_auth_failed", False),
+        ("timeout", "provider_test_timeout", True),
+        ("network", "provider_test_network_failed", True),
+        ("parse", "provider_test_parse_failed", False),
+        ("internal", "provider_test_internal_error", True),
+    ],
+)
+def test_chat_all_provider_failures_are_classified_without_raw_output(
+    _runtime_context,
+    monkeypatch,
+    kind: str,
+    expected_code: str,
+    retryable: bool,
+) -> None:
+    provider = {
+        "name": "main",
+        "api_type": "openai",
+        "model": "gpt-test",
+        "priority": 1,
+        "api_key": "provider-secret",
+    }
+    ai_routes = load_personification_module("plugin.personification.core.ai_routes")
+    monkeypatch.setattr(ai_routes, "list_primary_providers", lambda pc, lg: [provider])
+    monkeypatch.setattr(
+        ai_routes,
+        "build_single_provider_caller",
+        lambda pc, prov, **kw: _RaisingCaller(_provider_test_exception(kind)),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.post("/personification/api/test/chat-all", json={"prompt": "hi"})
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    item = body["results"][0]
+    assert item["ok"] is False
+    assert item["diagnostic"]["code"] == expected_code
+    assert item["diagnostic"]["retryable"] is retryable
+    assert body["diagnostic"]["code"] == "provider_test_all_failed"
+    serialized = json.dumps(body)
+    assert "private.example" not in serialized
+    assert "top-secret" not in serialized
+    assert "raw body" not in serialized
+    assert "provider-secret" not in serialized
+
+
+def test_chat_all_reports_empty_model_output(_runtime_context, monkeypatch) -> None:
+    providers = [{"name": "empty", "api_type": "openai", "model": "gpt-test", "priority": 1}]
+    ai_routes = load_personification_module("plugin.personification.core.ai_routes")
+    monkeypatch.setattr(ai_routes, "list_primary_providers", lambda pc, lg: providers)
+    monkeypatch.setattr(ai_routes, "build_single_provider_caller", lambda pc, prov, **kw: _FakeCaller(content=""))
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.post("/personification/api/test/chat-all", json={"prompt": "hi"})
+
+    assert res.status_code == 200, res.text
+    item = res.json()["results"][0]
+    assert item["ok"] is False
+    assert item["content"] == ""
+    assert item["diagnostic"]["code"] == "provider_test_model_empty"
 
 
 def test_chat_all_requires_prompt(_runtime_context) -> None:
@@ -283,6 +427,9 @@ def test_persona_prompt_inline_system_prompt(_runtime_context) -> None:
     assert res.status_code == 200, res.text
     body = res.json()
     assert "活泼的群友" in body["content"]
+    assert body["exists"] is True
+    assert body["is_file"] is False
+    assert body["diagnostic"]["code"] == "persona_prompt_inline_loaded"
 
 
 def test_persona_prompt_reads_specified_path(_runtime_context, tmp_path) -> None:
@@ -295,6 +442,7 @@ def test_persona_prompt_reads_specified_path(_runtime_context, tmp_path) -> None
     body = res.json()
     assert body["is_file"] is True
     assert body["content"] == "自定义人设内容"
+    assert body["diagnostic"]["code"] == "persona_prompt_file_loaded"
 
 
 def test_persona_prompt_missing_path_reports_not_exists(_runtime_context, tmp_path) -> None:
@@ -302,7 +450,53 @@ def test_persona_prompt_missing_path_reports_not_exists(_runtime_context, tmp_pa
     _login_as_admin(client, _runtime_context)
     res = client.get("/personification/api/test/persona-prompt", params={"path": str(tmp_path / "nope.txt")})
     assert res.status_code == 200
-    assert res.json()["exists"] is False
+    body = res.json()
+    assert body["exists"] is False
+    assert body["diagnostic"]["code"] == "persona_prompt_path_not_found"
+    assert body["diagnostic"]["ok"] is False
+
+
+def test_persona_prompt_read_failure_is_structured_and_redacted(_runtime_context, monkeypatch) -> None:
+    prompt_loader = load_personification_module("plugin.personification.core.prompt_loader")
+
+    class _UnreadablePrompt:
+        def is_file(self):
+            return True
+
+        def stat(self):
+            return SimpleNamespace(st_size=32)
+
+        def read_text(self, **_kwargs):
+            raise PermissionError("C:/private/persona.txt?token=top-secret")
+
+    monkeypatch.setattr(prompt_loader, "_resolve_candidate_path", lambda _path: _UnreadablePrompt())
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.get("/personification/api/test/persona-prompt", params={"path": "persona.txt"})
+
+    assert res.status_code == 500, res.text
+    report = res.json()["detail"]
+    assert report["code"] == "persona_prompt_read_failed"
+    assert report["trace_id"]
+    serialized = json.dumps(report)
+    assert "private/persona" not in serialized
+    assert "top-secret" not in serialized
+
+
+def test_test_frontend_persists_and_renders_operation_diagnostics() -> None:
+    source = (Path(__file__).resolve().parents[1] / "webui" / "static" / "app-tools.js").read_text(encoding="utf-8")
+
+    assert "persistTestOperationResult(state.testResult)" in source
+    assert "persistTestOperationResult(state.testAllResult)" in source
+    assert "sessionStorage.setItem(_TEST_OPERATION_RESULT_STORAGE_KEY" in source
+    assert "testDiagnosticSnapshot" in source
+    assert "renderOperationDiagnostic(result.diagnostic)" in source
+    assert "renderOperationDiagnostic(p.diagnostic)" in source
+    assert 'operationDiagnosticFromError(e, "路由模型测试未完成")' in source
+    assert 'operationDiagnosticFromError(e, "全部 Provider 测试未完成")' in source
+    assert 'operationDiagnosticFromError(e, "人设 prompt 读取未完成")' in source
+    assert "不保存模型正文" in source
 
 
 def test_persona_template_builder_uses_main_model(_runtime_context, monkeypatch) -> None:

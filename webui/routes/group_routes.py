@@ -1985,10 +1985,47 @@ def build_group_router(*, runtime) -> APIRouter:
             scope = "group"
         payload["scope"] = scope
         payload["group_id"] = str(group_id)
-        ok = upsert_meme_entry(payload)
+        try:
+            ok = upsert_meme_entry(payload)
+        except Exception as exc:
+            _raise_unexpected_failure(
+                runtime,
+                exc,
+                status_code=500,
+                code="group_meme_persist_failed",
+                phase="persistence",
+                title="群梗词条保存失败",
+                message="服务器未能确认群梗词条已保存。",
+                suggestion="先刷新群梗词典确认当前词条；未生效时再重试。",
+                details=(detail("目标群", group_id), detail("词条", payload.get("term", "")), detail("范围", scope)),
+                steps=(
+                    step("validate", "校验群梗词条", "ok", "词条已进入持久化阶段。"),
+                    step("persist", "保存群梗词条", "unknown", "写入过程异常，最终状态需要重新读取确认。"),
+                    step("audit", "记录管理员操作", "skipped", "持久化结果未知。"),
+                ),
+                retryable=False,
+                partial=True,
+                outcome_unknown=True,
+            )
         if not ok:
-            raise HTTPException(status_code=400, detail="term 和 meaning/definition 不能为空")
-        webui_audit_log.record(
+            _raise_operation_failure(
+                status_code=400,
+                code="group_meme_invalid",
+                phase="request_validation",
+                title="群梗词条未保存",
+                message="term 和 meaning/definition 不能为空。",
+                details=(detail("目标群", group_id), detail("范围", scope)),
+                steps=(
+                    step("validate", "校验群梗词条", "error", "缺少有效词条或含义。"),
+                    step("persist", "保存群梗词条", "skipped", "未写入任何词条。"),
+                ),
+                suggestion="补充词条和含义后重新提交。",
+                retryable=False,
+                partial=False,
+                outcome_unknown=False,
+            )
+        audit_ok = _record_audit(
+            runtime,
             action="meme_upsert",
             qq=admin.qq,
             device_id=admin.device_id,
@@ -1996,7 +2033,21 @@ def build_group_router(*, runtime) -> APIRouter:
             ip_hash=get_client_ip(request),
             detail={"term": payload.get("term"), "scope": scope},
         )
-        return {"success": True, "entry": payload}
+        return _operation_success(
+            {"success": True, "entry": payload},
+            code="group_meme_saved",
+            phase="operation_complete",
+            title="群梗词条已保存",
+            message="群梗词条已持久化。",
+            details=(detail("目标群", group_id), detail("词条", payload.get("term", ""), "ok"), detail("范围", scope)),
+            steps=(
+                step("validate", "校验群梗词条", "ok", "词条和含义有效。"),
+                step("persist", "保存群梗词条", "ok", "群梗词条写入事务已提交。"),
+                step("audit", "记录管理员操作", "ok" if audit_ok else "warn", "审计记录已保存。" if audit_ok else "词条已保存，但审计记录写入失败。"),
+            ),
+            warnings=() if audit_ok else ("群梗词条已保存，但本次管理员审计记录未能写入。",),
+            partial=not audit_ok,
+        )
 
     @router.delete("/{group_id}/memes/{term}")
     async def delete_group_meme(
@@ -2007,8 +2058,29 @@ def build_group_router(*, runtime) -> APIRouter:
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
         normalized_scope = scope if scope in {"group", "concept"} else "group"
-        changed = delete_meme_entry(term=term, scope=normalized_scope, group_id=group_id)
-        webui_audit_log.record(
+        try:
+            changed = delete_meme_entry(term=term, scope=normalized_scope, group_id=group_id)
+        except Exception as exc:
+            _raise_unexpected_failure(
+                runtime,
+                exc,
+                status_code=500,
+                code="group_meme_delete_failed",
+                phase="persistence",
+                title="群梗词条删除失败",
+                message="服务器未能确认群梗词条已删除。",
+                suggestion="先刷新群梗词典确认词条是否仍存在；存在时再重试。",
+                details=(detail("目标群", group_id), detail("词条", term), detail("范围", normalized_scope)),
+                steps=(
+                    step("persist", "删除群梗词条", "unknown", "删除过程异常，最终状态需要重新读取确认。"),
+                    step("audit", "记录管理员操作", "skipped", "持久化结果未知。"),
+                ),
+                retryable=False,
+                partial=True,
+                outcome_unknown=True,
+            )
+        audit_ok = _record_audit(
+            runtime,
             action="meme_delete",
             qq=admin.qq,
             device_id=admin.device_id,
@@ -2016,6 +2088,19 @@ def build_group_router(*, runtime) -> APIRouter:
             ip_hash=get_client_ip(request),
             detail={"term": term, "scope": normalized_scope, "changed": changed},
         )
-        return {"success": True, "deleted": changed}
+        return _operation_success(
+            {"success": True, "deleted": changed},
+            code="group_meme_deleted" if changed else "group_meme_delete_noop",
+            phase="operation_complete",
+            title="群梗词条已删除" if changed else "群梗词条无需删除",
+            message="群梗词条删除事务已提交。" if changed else "目标群梗词条当前不存在。",
+            details=(detail("目标群", group_id), detail("词条", term), detail("范围", normalized_scope), detail("已删除", changed, "ok")),
+            steps=(
+                step("persist", "删除群梗词条", "ok", "删除结果已明确返回。"),
+                step("audit", "记录管理员操作", "ok" if audit_ok else "warn", "审计记录已保存。" if audit_ok else "删除结果已确认，但审计记录写入失败。"),
+            ),
+            warnings=() if audit_ok else ("删除结果已确认，但本次管理员审计记录未能写入。",),
+            partial=not audit_ok,
+        )
 
     return router
