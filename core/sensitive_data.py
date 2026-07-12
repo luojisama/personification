@@ -8,7 +8,7 @@ _HEADER_PATTERN = re.compile(
     r"(?im)\b(authorization|proxy-authorization|cookie|set-cookie)\s*:\s*[^\r\n]*"
 )
 _KEY_VALUE_PATTERN = re.compile(
-    r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|csrf|"
+    r"(?i)([\"']?(?:api[\s_-]?key|access[\s_-]?token|refresh[\s_-]?token|token|csrf|"
     r"client[_-]?secret|password|passwd|session(?:[_-]?id)?|p_skey|skey)[\"']?\s*[:=]\s*)"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;}&]+)"
 )

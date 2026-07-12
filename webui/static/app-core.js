@@ -118,6 +118,93 @@ function readCookie(name) {
 
 const _apiInflight = new Map();
 
+class ApiError extends Error {
+  constructor(diagnostic, status=0, path="") {
+    const info = diagnostic && typeof diagnostic === "object" ? diagnostic : {};
+    super(String(info.message || info.title || "请求失败"));
+    this.name = "ApiError";
+    this.status = Number(status || 0);
+    this.path = String(path || "");
+    this.diagnostic = info;
+    this.code = String(info.code || "request_failed");
+    this.phase = String(info.phase || "request");
+  }
+}
+
+function normalizeApiDiagnostic(payload, status=0) {
+  const root = payload && typeof payload === "object" ? payload : {};
+  const raw = root.detail && typeof root.detail === "object" && !Array.isArray(root.detail)
+    ? root.detail : (root.diagnostic && typeof root.diagnostic === "object" ? root.diagnostic : root);
+  const validation = Array.isArray(root.detail) ? root.detail : [];
+  const message = typeof root.detail === "string" ? root.detail
+    : String(raw.message || raw.error || (validation.length ? "请求参数未通过校验" : root.message || "请求失败"));
+  const details = Array.isArray(raw.details) ? raw.details.slice() : [];
+  for (const item of validation.slice(0, 8)) {
+    const where = Array.isArray(item.loc) ? item.loc.join(".") : "请求参数";
+    details.push({label:where,value:String(item.msg || "参数无效"),status:"error"});
+  }
+  return {
+    ok:false,
+    code:String(raw.code || (status === 401 ? "not_authenticated" : status === 403 ? "permission_denied" : status === 404 ? "not_found" : status === 429 ? "rate_limited" : "request_failed")),
+    phase:String(raw.phase || "request"),
+    title:String(raw.title || (status ? `请求未完成 · HTTP ${status}` : "请求未完成")),
+    message,
+    details,
+    steps:Array.isArray(raw.steps) ? raw.steps : [],
+    warnings:Array.isArray(raw.warnings) ? raw.warnings : [],
+    suggestion:String(raw.suggestion || ""),
+    retryable:Boolean(raw.retryable),
+    partial:Boolean(raw.partial),
+    outcome_unknown:Boolean(raw.outcome_unknown),
+    operation_id:String(raw.operation_id || ""),
+    trace_id:String(raw.trace_id || ""),
+  };
+}
+
+function operationDiagnosticFromError(error, fallbackTitle="操作未完成") {
+  if (error && error.diagnostic) return {...error.diagnostic,title:error.diagnostic.title||fallbackTitle};
+  return normalizeApiDiagnostic({title:fallbackTitle,message:String(error&&error.message||error||"未知错误")}, Number(error&&error.status||0));
+}
+
+function _diagnosticValue(value) {
+  if (value == null || value === "") return "—";
+  if (typeof value === "object") { try { return JSON.stringify(value); } catch { return String(value); } }
+  return String(value);
+}
+
+function renderOperationDiagnostic(input, options={}) {
+  if (!input) return "";
+  const d = input.diagnostic && typeof input.diagnostic === "object" ? input.diagnostic : input;
+  const ok = d.ok === true;
+  const unknown = Boolean(d.outcome_unknown);
+  const tone = unknown ? "unknown" : (ok ? "ok" : (d.partial ? "warn" : "error"));
+  const details = Array.isArray(d.details) ? d.details : [];
+  const steps = Array.isArray(d.steps) ? d.steps : [];
+  const warnings = Array.isArray(d.warnings) ? d.warnings : [];
+  const detailRows = details.map(item => `<div class="operation-detail ${escapeAttr(item.status||'info')}"><span>${escapeHtml(item.label||'详情')}</span><strong>${escapeHtml(_diagnosticValue(item.value))}</strong></div>`).join("");
+  const stepRows = steps.map((item,index) => `<li class="operation-step ${escapeAttr(item.status||'unknown')}"><span class="operation-step-index">${String(index+1).padStart(2,'0')}</span><div><strong>${escapeHtml(item.label||item.key||'步骤')}</strong>${item.message?`<p>${escapeHtml(item.message)}</p>`:''}${Array.isArray(item.details)&&item.details.length?`<div class="operation-step-details">${item.details.map(child=>`<span>${escapeHtml(child.label||'详情')}：${escapeHtml(_diagnosticValue(child.value))}</span>`).join('')}</div>`:''}</div><em>${escapeHtml(item.status||'unknown')}</em></li>`).join("");
+  const trace = d.trace_id ? `<button class="btn small operation-trace-button" data-operation-trace="${escapeAttr(d.trace_id)}">查看 Trace</button>` : "";
+  const retryLabel = unknown ? "禁止直接重试" : (d.retryable ? "可以重试" : "不要直接重试");
+  return `<section class="operation-diagnostic ${tone}" role="status">
+    <header><div><span class="eyebrow">OPERATION DIAGNOSTIC</span><h3>${escapeHtml(d.title||(ok?'操作完成':'操作未完成'))}</h3><p>${escapeHtml(d.message||'未提供说明')}</p></div><span class="operation-code">${escapeHtml(d.code||(ok?'ok':'operation_failed'))}</span></header>
+    <div class="operation-meta"><span>阶段 <strong>${escapeHtml(d.phase||'未标记')}</strong></span><span>重试策略 <strong>${retryLabel}</strong></span>${d.partial?'<span><strong>部分完成</strong></span>':''}${unknown?'<span><strong>远端结果未知</strong></span>':''}</div>
+    ${detailRows?`<div class="operation-details">${detailRows}</div>`:''}
+    ${stepRows?`<ol class="operation-steps">${stepRows}</ol>`:''}
+    ${warnings.length?`<div class="operation-warnings"><strong>降级与警告</strong>${warnings.map(item=>`<p>${escapeHtml(item)}</p>`).join('')}</div>`:''}
+    ${d.suggestion?`<div class="operation-suggestion"><strong>建议处理</strong><p>${escapeHtml(d.suggestion)}</p></div>`:''}
+    ${(d.operation_id||d.trace_id)?`<footer>${d.operation_id?`<code>operation ${escapeHtml(d.operation_id)}</code>`:''}${d.trace_id?`<code>trace ${escapeHtml(d.trace_id)}</code>`:''}${trace}</footer>`:''}
+  </section>`;
+}
+
+document.addEventListener("click", event => {
+  const target = event.target instanceof Element ? event.target.closest("[data-operation-trace]") : null;
+  if (!target) return;
+  const traceId = String(target.getAttribute("data-operation-trace") || "");
+  if (!traceId) return;
+  state.selectedTraceId = traceId;
+  navigateToView("trace_detail");
+});
+
 async function api(path, opts = {}) {
   const method = (opts.method || "GET").toUpperCase();
   const headers = { ...(opts.headers || {}) };
@@ -137,9 +224,9 @@ async function api(path, opts = {}) {
     const res = await fetch(API + path, requestOpts);
     if (res.status === 401) { state.logged = false; render(); throw new Error("未登录"); }
     if (!res.ok) {
-      let detail = res.statusText;
-      try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch {}
-      throw new Error(detail);
+      let payload = {message:res.statusText || "请求失败"};
+      try { payload = await res.json(); } catch {}
+      throw new ApiError(normalizeApiDiagnostic(payload, res.status), res.status, path);
     }
     return res.status === 204 ? null : await res.json();
   })();
