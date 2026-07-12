@@ -353,6 +353,24 @@ function pluginCommitRows(items, emptyText) {
     <tbody>${rows || `<tr><td colspan="4" class="muted">${escapeHtml(emptyText || "暂无记录")}</td></tr>`}</tbody></table>`;
 }
 
+const _PLUGIN_UPDATE_RESULT_STORAGE_KEY = "personification_plugin_update_result_v1";
+
+function persistPluginUpdateResult(input) {
+  const result = input && input.diagnostic && typeof input.diagnostic === "object" ? input.diagnostic : input;
+  state.pluginUpdateResult = result && typeof result === "object" ? result : null;
+  try {
+    if (state.pluginUpdateResult) sessionStorage.setItem(_PLUGIN_UPDATE_RESULT_STORAGE_KEY, JSON.stringify(state.pluginUpdateResult));
+    else sessionStorage.removeItem(_PLUGIN_UPDATE_RESULT_STORAGE_KEY);
+  } catch {}
+}
+
+try {
+  const savedPluginUpdateResult = JSON.parse(sessionStorage.getItem(_PLUGIN_UPDATE_RESULT_STORAGE_KEY) || "null");
+  if (savedPluginUpdateResult && typeof savedPluginUpdateResult === "object") state.pluginUpdateResult = savedPluginUpdateResult;
+} catch {
+  try { sessionStorage.removeItem(_PLUGIN_UPDATE_RESULT_STORAGE_KEY); } catch {}
+}
+
 function renderPluginManager() {
   const st = state.pluginUpdateStatus;
   if (!st) return `<div class="card muted">加载中…</div>`;
@@ -378,9 +396,7 @@ function renderPluginManager() {
     ? `<div class="alert err" style="margin-top:10px">本地有 ${Number(st.dirty_count || 0)} 项未提交改动，自动更新已禁用。<pre style="white-space:pre-wrap;margin:8px 0 0">${escapeHtml((st.dirty_preview || []).join("\n"))}</pre></div>`
     : "";
   const result = state.pluginUpdateResult;
-  const resultAlert = result
-    ? `<div class="alert ${result.ok?'ok':'err'}" style="margin-top:10px">${escapeHtml(result.message || result.error || (result.ok ? "操作完成" : "操作失败"))}</div>`
-    : "";
+  const resultDiagnostic = result ? `<div style="margin-top:12px">${renderOperationDiagnostic(result)}</div>` : "";
   return `<div class="card">
     <div class="between" style="gap:12px;align-items:flex-start">
       <div>
@@ -405,7 +421,7 @@ function renderPluginManager() {
       <tr><td class="muted">远端</td><td>${source.remote_url ? `<code>${escapeHtml(source.remote_url)}</code>` : '<span class="muted">未配置</span>'}</td></tr>
       <tr><td class="muted">状态</td><td>${escapeHtml(st.message || "-")}</td></tr>
     </tbody></table>
-    ${fetchAlert}${dirtyAlert}${resultAlert}
+    ${fetchAlert}${dirtyAlert}${resultDiagnostic}
     <div class="row" style="margin-top:14px">
       <button class="btn primary" onclick="checkPluginUpdates()" ${state.pluginUpdateChecking?'disabled':''}>${state.pluginUpdateChecking?'<span class="spinner"></span> 检查中…':'检查更新'}</button>
       <button class="btn danger" onclick="applyPluginUpdate()" ${canUpdate?'':'disabled'}>${state.pluginUpdateBusy?'<span class="spinner"></span> 更新中…':'应用更新'}</button>
@@ -429,14 +445,14 @@ async function reloadPluginManager() {
 async function checkPluginUpdates() {
   if (state.pluginUpdateChecking) return;
   state.pluginUpdateChecking = true;
-  state.pluginUpdateResult = null;
   render();
   try {
     const status = await api("/plugin-manager/check", { method:"POST", headers:{"content-type":"application/json"}, body:"{}" });
     state.pluginUpdateStatus = status;
+    persistPluginUpdateResult(status);
     state.pluginUpdateHistory = await api("/plugin-manager/history?limit=30").catch(() => state.pluginUpdateHistory);
-    alertFlash("ok", status.message || (status.update_available ? "发现更新" : "已是最新版本"));
   } catch (e) {
+    persistPluginUpdateResult(operationDiagnosticFromError(e, "插件更新检查未完成"));
     alertFlash("err", "检查失败：" + e.message);
   }
   state.pluginUpdateChecking = false;
@@ -449,16 +465,15 @@ async function applyPluginUpdate() {
   if (st.dirty) { alertFlash("err", "本地有未提交改动，不能自动更新"); return; }
   if (!confirm("确认更新拟人插件？将执行当前安装源的 fast-forward 更新，成功后需要重启 bot。")) return;
   state.pluginUpdateBusy = true;
-  state.pluginUpdateResult = null;
   render();
   try {
     const result = await api("/plugin-manager/update", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({confirm:"update"}) });
-    state.pluginUpdateResult = result;
+    persistPluginUpdateResult(result);
     if (result && result.status) state.pluginUpdateStatus = result.status;
     state.pluginUpdateHistory = await api("/plugin-manager/history?limit=30").catch(() => state.pluginUpdateHistory);
     alertFlash(result.ok ? "ok" : "err", result.message || result.error || (result.ok ? "更新完成" : "更新失败"));
   } catch (e) {
-    state.pluginUpdateResult = { ok:false, error:e.message };
+    persistPluginUpdateResult(operationDiagnosticFromError(e, "插件更新未完成"));
     alertFlash("err", "更新失败：" + e.message);
   }
   state.pluginUpdateBusy = false;

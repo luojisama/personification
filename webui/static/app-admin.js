@@ -710,19 +710,39 @@ async function refreshHealth() {
   state.loading = false; render();
 }
 
+function qqRememberDiagnostic(value, fallbackTitle="QQ 操作未完成") {
+  const diagnostic = value && value.diagnostic && typeof value.diagnostic === "object"
+    ? value.diagnostic
+    : (value instanceof Error ? operationDiagnosticFromError(value, fallbackTitle) : value);
+  if (!diagnostic || typeof diagnostic !== "object") return null;
+  state.qqDiagnostics = [diagnostic, ...(Array.isArray(state.qqDiagnostics) ? state.qqDiagnostics : [])].slice(0, 6);
+  return diagnostic;
+}
+
+function qqSelectedBotId() {
+  return String(state.qqBotId || document.getElementById("qq-bot-id")?.value || "").trim();
+}
+
+function qqClearDiagnostics() {
+  state.qqDiagnostics = [];
+  render();
+}
+
 function renderQQ() {
   const info = state.qqInfo || {};
   const groups = state.qqGroups || [];
   const friends = state.qqFriends || [];
   const bots = (info.bots || []).map(item => String(item.bot_id || "")).filter(Boolean);
-  const botOptions = bots.map(id => `<option value="${escapeAttr(id)}">${escapeHtml(id)}</option>`).join("");
+  const selectedBotId = bots.includes(String(state.qqBotId || "")) ? String(state.qqBotId) : (bots[0] || "");
+  state.qqBotId = selectedBotId;
+  const botOptions = bots.map(id => `<option value="${escapeAttr(id)}" ${id===selectedBotId?'selected':''}>${escapeHtml(id)}</option>`).join("");
   const infoCard = info.error
     ? `<div class="card"><div class="alert err">获取账号信息失败：${escapeHtml(info.error)}</div></div>`
     : `<div class="card">
         <h2>当前账号</h2>
         <div class="row"><span class="muted">QQ</span> <code>${escapeHtml(info.user_id||'')}</code>
           <span class="muted">昵称</span> <b>${escapeHtml(info.nickname||'')}</b></div>
-        <label class="field-input" style="margin-top:12px"><span>目标 Bot</span><select id="qq-bot-id">${botOptions}</select></label>
+        <label class="field-input" style="margin-top:12px"><span>目标 Bot</span><select id="qq-bot-id" onchange="state.qqBotId=this.value;render()">${botOptions}</select></label>
         <div class="field-input" style="margin-top:12px">
           <input id="qq-nick" type="text" placeholder="新昵称" value="${escapeAttr(info.nickname||'')}">
           <button class="btn small primary" onclick="qqSetNickname()">改昵称</button>
@@ -737,16 +757,23 @@ function renderQQ() {
         </div>
         <p class="muted" style="font-size:11px;margin-top:8px">部分操作依赖协议端扩展（NapCat 支持较全）；不支持时会提示失败。</p>
       </div>`;
-  const groupRows = groups.map(g => `<tr>
+  const groupRows = groups.map(g => {
+    const memberships = Array.isArray(g.bot_self_ids) ? g.bot_self_ids.map(String) : [];
+    const canLeave = Boolean(selectedBotId) && memberships.includes(selectedBotId);
+    return `<tr>
       <td>${escapeHtml(g.group_name||'')} <code>${escapeHtml(g.group_id)}</code></td>
       <td>${g.member_count}/${g.max_member_count||'-'}</td>
-      <td><button class="btn small danger qq-leave-group" data-group-id="${escapeAttr(g.group_id)}" data-group-name="${escapeAttr(g.group_name||'')}">退群</button></td>
-    </tr>`).join("");
+      <td><button class="btn small danger qq-leave-group" data-group-id="${escapeAttr(g.group_id)}" data-group-name="${escapeAttr(g.group_name||'')}" ${canLeave?'':'disabled title="所选 Bot 不在该群的已确认 membership 中"'}>退群</button></td>
+    </tr>`;
+  }).join("");
   const friendRows = friends.map(f => `<tr>
       <td>${escapeHtml(f.remark||f.nickname||'')} <code>${escapeHtml(f.user_id)}</code></td>
       <td><button class="btn small danger" onclick="qqDeleteFriend('${escapeAttr(f.user_id)}','${escapeAttr(f.remark||f.nickname||'')}')">删好友</button></td>
     </tr>`).join("");
+  const diagnostics = (Array.isArray(state.qqDiagnostics) ? state.qqDiagnostics : []).map(item => renderOperationDiagnostic(item)).join("");
+  const diagnosticCard = diagnostics ? `<div class="card"><div class="between"><h2>QQ 操作诊断</h2><button class="btn small" onclick="qqClearDiagnostics()">清空</button></div>${diagnostics}</div>` : "";
   return `${infoCard}
+    ${diagnosticCard}
     <div class="card"><h2>群列表（${groups.length}）</h2>
       <table><thead><tr><th>群</th><th>人数</th><th></th></tr></thead><tbody>${groupRows||'<tr><td colspan="3" class="muted">无</td></tr>'}</tbody></table>
     </div>
@@ -758,37 +785,39 @@ function renderQQ() {
 async function qqSetNickname() {
   const v = (document.getElementById("qq-nick")?.value||"").trim();
   if (!v || !confirm("确认修改 bot 昵称为：" + v + " ？")) return;
-  try { await api("/qq/nickname", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({nickname:v})}); alertFlash("ok","已修改"); await loadView(); render(); }
-  catch (e) { alertFlash("err", e.message); }
+  try { const result=await api("/qq/nickname", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({nickname:v})}); const d=qqRememberDiagnostic(result); alertFlash("ok",d?.title||"已修改"); await loadView(); render(); }
+  catch (e) { const d=qqRememberDiagnostic(e,"QQ 昵称修改失败"); alertFlash("err",d?.title||"QQ 昵称修改失败"); }
 }
 async function qqSetSignature() {
   const v = (document.getElementById("qq-sign")?.value||"").trim();
   if (!confirm("确认修改签名？")) return;
-  const botId=(document.getElementById("qq-bot-id")?.value||"").trim();
-  try { await api("/qq/signature", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({bot_id:botId,signature:v})}); alertFlash("ok","已修改"); }
-  catch (e) { alertFlash("err", e.message); }
+  const botId=qqSelectedBotId();
+  try { const result=await api("/qq/signature", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({bot_id:botId,signature:v})}); const d=qqRememberDiagnostic(result); alertFlash("ok",d?.title||"已修改"); }
+  catch (e) { const d=qqRememberDiagnostic(e,"QQ 签名修改失败"); alertFlash("err",d?.title||"QQ 签名修改失败"); }
 }
 async function qqSetAvatar() {
   const v = (document.getElementById("qq-avatar")?.value||"").trim();
   if (!v || !confirm("确认修改 bot 头像？")) return;
-  const botId=(document.getElementById("qq-bot-id")?.value||"").trim();
-  try { await api("/qq/avatar", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({bot_id:botId,file:v})}); alertFlash("ok","已修改"); }
-  catch (e) { alertFlash("err", e.message); }
+  const botId=qqSelectedBotId();
+  try { const result=await api("/qq/avatar", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({bot_id:botId,file:v})}); const d=qqRememberDiagnostic(result); alertFlash("ok",d?.title||"已修改"); }
+  catch (e) { const d=qqRememberDiagnostic(e,"QQ 头像修改失败"); alertFlash("err",d?.title||"QQ 头像修改失败"); }
 }
 async function qqLeaveGroup(gid, name) {
   const group=state.qqGroups.find(item=>String(item.group_id)===String(gid));
-  const memberships=(group&&group.bot_self_ids)||[];
-  const selected=(document.getElementById("qq-bot-id")?.value||"").trim();
-  const botId=memberships.includes(selected)?selected:(memberships[0]||"");
-  if(!botId){alertFlash("err","没有已确认属于该群的在线 Bot");return;}
+  const memberships=((group&&group.bot_self_ids)||[]).map(String);
+  const botId=qqSelectedBotId();
+  if(!botId||!memberships.includes(botId)){
+    const d=qqRememberDiagnostic({ok:false,code:"qq_membership_unconfirmed",phase:"membership_check",title:"无法确认目标 Bot 的群 membership",message:"所选 Bot 不在该群的已确认 membership 中。",details:[{label:"目标 Bot",value:botId||"未指定",status:"error"},{label:"目标群",value:String(gid),status:"info"}],steps:[{key:"membership_check",label:"检查群 membership",status:"error",message:"未通过服务端操作前约束。",details:[]}],suggestion:"选择已确认属于该群的在线 Bot 后再试。",retryable:false});
+    alertFlash("err",d.title);return;
+  }
   if (!confirm("确认让 bot 退出群「" + (name||gid) + "」？此操作不可撤销。")) return;
-  try { await api("/qq/groups/"+encodeURIComponent(gid)+"/leave", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({bot_id:botId,confirm:String(gid),is_dismiss:false})}); alertFlash("ok","已退群"); await loadView(); render(); }
-  catch (e) { alertFlash("err", e.message); }
+  try { const result=await api("/qq/groups/"+encodeURIComponent(gid)+"/leave", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({bot_id:botId,confirm:String(gid),is_dismiss:false})}); const d=qqRememberDiagnostic(result); alertFlash("ok",d?.title||"已退群"); await loadView(); render(); }
+  catch (e) { const d=qqRememberDiagnostic(e,"退出 QQ 群失败"); alertFlash("err",d?.title||"退出 QQ 群失败"); }
 }
 async function qqDeleteFriend(uid, name) {
   if (!confirm("确认删除好友「" + (name||uid) + "」？")) return;
-  try { await api("/qq/friends/"+encodeURIComponent(uid), {method:"DELETE",headers:{"content-type":"application/json"},body:JSON.stringify({confirm:String(uid)})}); alertFlash("ok","已删除"); await loadView(); render(); }
-  catch (e) { alertFlash("err", e.message); }
+  try { const result=await api("/qq/friends/"+encodeURIComponent(uid), {method:"DELETE",headers:{"content-type":"application/json"},body:JSON.stringify({confirm:String(uid)})}); const d=qqRememberDiagnostic(result); alertFlash("ok",d?.title||"已删除"); await loadView(); render(); }
+  catch (e) { const d=qqRememberDiagnostic(e,"删除 QQ 好友失败"); alertFlash("err",d?.title||"删除 QQ 好友失败"); }
 }
 
 async function recheckCategory(name) {
@@ -1281,7 +1310,7 @@ function renderPersonaBuilder() {
     else if (!Number(searchDiag.direct_image_count||0)) avatarDiagnostic = Number(searchDiag.web_fallback_row_count||0)>0 ? '图片搜索已降级为普通网页结果，没有获得可安全下载的图片直链。' : '图片搜索没有返回可用的图片直链。';
   }
   const diagnosticBlock = avatarDiagnostic ? `<p class="muted" style="color:var(--warning)">${escapeHtml(avatarDiagnostic)}</p>` : '';
-  const profileAssets = r ? `<div class="persona-assets"><div class="between"><h3>已验证头像（${avatarCandidates.length}）</h3><span class="tag ${r.profile_status==='complete'?'':'required'}">${escapeHtml(r.profile_status==='complete'?'候选完整':'候选未完整')}</span></div>${avatarStats}${diagnosticBlock}<div class="avatar-candidate-grid">${avatarCards||'<p class="muted">没有通过目标角色视觉审核的头像。视觉不可用或不足 10 张时不会用未验证图片补位。</p>'}</div><div class="between"><h3>人设签名（${signatureCandidates.length}）</h3></div><div class="signature-candidate-list">${signatureRows||'<p class="muted">暂未生成可用签名。</p>'}</div><div class="row"><label>目标 Bot <select onchange="state.personaProfileBotId=this.value">${profileBotOptions}</select></label><button class="btn primary" onclick="applyPersonaProfileAssets('${escapeAttr(recordId)}','${escapeAttr(revision)}')" ${recordId&&revision&&state.personaProfileBotId&&(state.personaAvatarCandidateId||state.personaSignatureCandidateId)?'':'disabled'}>应用选中的头像与签名</button>${state.personaAvatarCandidateId?`<a class="btn" href="${API}/persona-template/avatar-candidates/${encodeURIComponent(revision)}/${encodeURIComponent(state.personaAvatarCandidateId)}/original" download>下载头像</a>`:''}</div></div>` : "";
+  const profileAssets = r ? `<div class="persona-assets"><div class="between"><h3>已验证头像（${avatarCandidates.length}）</h3><span class="tag ${r.profile_status==='complete'?'':'required'}">${escapeHtml(r.profile_status==='complete'?'候选完整':'候选未完整')}</span></div>${avatarStats}${diagnosticBlock}<div class="avatar-candidate-grid">${avatarCards||'<p class="muted">没有通过目标角色视觉审核的头像。视觉不可用或不足 10 张时不会用未验证图片补位。</p>'}</div><div class="between"><h3>人设签名（${signatureCandidates.length}）</h3></div><div class="signature-candidate-list">${signatureRows||'<p class="muted">暂未生成可用签名。</p>'}</div><div class="row"><label>目标 Bot <select onchange="state.personaProfileBotId=this.value">${profileBotOptions}</select></label><button class="btn primary" onclick="applyPersonaProfileAssets('${escapeAttr(recordId)}','${escapeAttr(revision)}')" ${recordId&&revision&&state.personaProfileBotId&&(state.personaAvatarCandidateId||state.personaSignatureCandidateId)?'':'disabled'}>应用选中的头像与签名</button>${state.personaAvatarCandidateId?`<a class="btn" href="${API}/persona-template/avatar-candidates/${encodeURIComponent(revision)}/${encodeURIComponent(state.personaAvatarCandidateId)}/original" download>下载头像</a>`:''}</div>${state.personaProfileApplyResult?renderOperationDiagnostic(state.personaProfileApplyResult):''}</div>` : "";
   const taskProgress = Math.max(0, Math.min(100, Number(task.progress || 0)));
   const form = state.personaTemplateForm || {};
   const buildMode = form.mode || "source";
@@ -1416,8 +1445,8 @@ async function applyPersonaProfileAssets(recordId, revision) {
   if(!confirm("将选中的头像和签名应用到当前 QQ？两个动作会分别记录结果。"))return;
   try {
     const result=await api("/persona-template/profile-apply",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({bot_id:state.personaProfileBotId,record_id:recordId,revision,avatar_candidate_id:avatarId,signature_candidate_id:signatureId,confirm_avatar:Boolean(avatarId),confirm_signature:Boolean(signatureId)})});
-    alertFlash(result.status==="applied"?"ok":"info",result.status==="applied"?"头像与签名已应用":"部分应用完成，请检查结果");
-  } catch(e){alertFlash("err","资料应用失败："+e.message);}
+    state.personaProfileApplyResult=result;alertFlash(result.status==="applied"?"ok":"info",result.title||"QQ 资料应用完成");render();
+  } catch(e){state.personaProfileApplyResult=operationDiagnosticFromError(e,"QQ 资料应用失败");alertFlash("err",state.personaProfileApplyResult.title);render();}
 }
 
 async function refreshPersonaTemplateHistory() {

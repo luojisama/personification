@@ -342,3 +342,113 @@ def test_migration_and_normal_memory_profile_writes_share_maintenance_lock(tmp_p
     assert writer_done.is_set()
     assert store.get_memory_item("m2")["summary"] == "normal concurrent write"
     assert store.get_local_profile(group_id="g1", user_id="u2")["profile_text"] == "normal profile write"
+
+
+def test_data_transfer_success_diagnostics_preserve_operation_fields() -> None:
+    route_mod = load_personification_module("plugin.personification.webui.routes.data_transfer_routes")
+    cases = {
+        "create": {"task_id": "create-task", "status": "completed", "metadata": {"manifest": {"datasets": ["group_state"]}}},
+        "upload": {"task_id": "upload-task", "status": "uploaded", "metadata": {"size": 123}},
+        "inspect": {"valid": True, "manifest": {"package_id": "package"}, "counts": {"group_state": 1}},
+        "dry-run": {"valid": True, "mode": "merge", "changes": {"group_state": 1}, "plan_token": "safe-plan-token"},
+        "apply": {"success": True, "journal_id": "journal", "idempotent": False},
+        "rollback": {"success": True, "journal_id": "journal", "idempotent": False},
+    }
+    required = {"ok", "code", "phase", "title", "message", "details", "steps", "retryable", "partial", "outcome_unknown"}
+    for operation, original in cases.items():
+        payload = route_mod._success_payload(operation, original, mode="merge")
+        assert required <= payload.keys()
+        assert payload["ok"] is True
+        assert payload["phase"] == operation
+        assert payload["steps"]
+        for key, value in original.items():
+            assert payload[key] == value
+
+
+def test_data_transfer_error_diagnostics_use_safe_stable_codes() -> None:
+    route_mod = load_personification_module("plugin.personification.webui.routes.data_transfer_routes")
+    error_type = route_mod.DataTransferError
+    invalid = route_mod._data_transfer_error_diagnostic(
+        error_type(r"invalid package: C:\private\api-key-secret.zip"),
+        "inspect",
+        operation_id="task-1",
+    )
+    rendered = json.dumps(invalid, ensure_ascii=False)
+    assert invalid["code"] == "data_import_manifest_invalid"
+    assert invalid["phase"] == "inspect"
+    assert invalid["retryable"] is False
+    assert invalid["partial"] is False
+    assert invalid["outcome_unknown"] is False
+    assert "C:\\private" not in rendered
+    assert "api-key-secret" not in rendered
+
+    busy = route_mod._data_transfer_error_diagnostic(error_type("target scope is busy"), "apply")
+    assert busy["code"] == "data_transfer_scope_busy"
+    assert busy["retryable"] is True
+    assert busy["partial"] is False
+    assert busy["outcome_unknown"] is False
+
+    unavailable = route_mod._data_transfer_error_diagnostic(error_type("memory store is unavailable"), "apply")
+    assert unavailable["code"] == "data_import_memory_unavailable"
+    assert unavailable["retryable"] is False
+    assert unavailable["partial"] is True
+    assert unavailable["outcome_unknown"] is True
+
+
+def test_unexpected_apply_and_rollback_are_outcome_unknown_without_exception_text() -> None:
+    route_mod = load_personification_module("plugin.personification.webui.routes.data_transfer_routes")
+    for operation in ("apply", "rollback"):
+        report = route_mod._unexpected_diagnostic(RuntimeError(r"token=C:\private\secret"), operation, operation_id="op-1")
+        rendered = json.dumps(report, ensure_ascii=False)
+        assert report["code"] == f"data_import_{operation}_outcome_unknown"
+        assert report["retryable"] is False
+        assert report["partial"] is True
+        assert report["outcome_unknown"] is True
+        assert report["steps"][0]["status"] == "unknown"
+        assert "private" not in rendered
+        assert "secret" not in rendered
+
+
+def test_data_transfer_create_route_preserves_result_and_returns_diagnostic(monkeypatch) -> None:
+    route_mod = load_personification_module("plugin.personification.webui.routes.data_transfer_routes")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    class Bot:
+        self_id = "bot1"
+
+        async def get_group_list(self):
+            return [{"group_id": "g1"}]
+
+    class Service:
+        def create_export(self, **_kwargs):
+            return {
+                "task_id": "task-1",
+                "kind": "export",
+                "status": "completed",
+                "metadata": {"manifest": {"datasets": ["group_state"]}},
+            }
+
+    runtime = type("Runtime", (), {"get_bots": staticmethod(lambda: {"bot1": Bot()})})()
+    monkeypatch.setattr(route_mod, "_service", lambda _runtime: Service())
+    monkeypatch.setattr(route_mod, "_audit", lambda *_args, **_kwargs: None)
+    app = FastAPI()
+    app.include_router(route_mod.build_data_transfer_router(runtime=runtime))
+    app.dependency_overrides[route_mod.require_admin] = lambda: route_mod.AdminIdentity(qq="1", device_id="device", label="test")
+    response = TestClient(app).post("/api/data-transfer/exports/create", json={"bot_id": "bot1", "group_id": "g1"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["task_id"] == "task-1"
+    assert body["kind"] == "export"
+    assert body["status"] == "completed"
+    assert body["code"] == "data_export_created"
+    assert body["phase"] == "create"
+    assert body["steps"][-1]["status"] == "ok"
+
+
+def test_data_transfer_frontend_renders_operation_diagnostics() -> None:
+    source = (Path(__file__).parents[1] / "webui" / "static" / "app-operations.js").read_text(encoding="utf-8")
+    assert "renderOperationDiagnostic(value)" in source
+    assert source.count("operationDiagnosticFromError(") >= 6
+    for legacy in ("打包失败：\"+e.message", "验包失败：\"+e.message", "预演失败：\"+e.message", "导入失败：\"+e.message", "回滚失败：\"+e.message"):
+        assert legacy not in source

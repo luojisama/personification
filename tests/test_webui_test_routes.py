@@ -766,8 +766,9 @@ system: |
     assert "ack_phrases" in joined
 
 
-def test_persona_profile_apply_blocks_cross_record_and_returns_partial(_runtime_context) -> None:
+def test_persona_profile_apply_blocks_cross_record_and_returns_partial(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
     history_mod = load_personification_module("plugin.personification.core.persona_template_history")
+    route_mod = load_personification_module("plugin.personification.webui.routes.persona_template_routes")
     revision_a = "a" * 32
     revision_b = "b" * 32
     avatar_id = "1" * 32
@@ -778,6 +779,7 @@ def test_persona_profile_apply_blocks_cross_record_and_returns_partial(_runtime_
     image_dir.mkdir(parents=True, exist_ok=True)
     (image_dir / f"{avatar_id}.jpg").write_bytes(b"sanitized-image")
     (image_dir / f"{unverified_avatar_id}.jpg").write_bytes(b"safe-but-unverified")
+    monkeypatch.setattr(route_mod, "candidate_file", lambda candidate, **_kwargs: image_dir / f"{candidate['candidate_id']}.jpg")
     record_a = history_mod.record_persona_template_result(
         {
             "work_title": "作品 A",
@@ -851,6 +853,8 @@ def test_persona_profile_apply_blocks_cross_record_and_returns_partial(_runtime_
     )
     assert rejected.status_code == 200, rejected.text
     assert rejected.json()["status"] == "failed"
+    assert rejected.json()["code"] == "persona_profile_assets_failed"
+    assert rejected.json()["steps"][0]["status"] == "error"
     assert bot.calls == []
     response = client.post(
         "/personification/api/persona-template/profile-apply",
@@ -870,6 +874,11 @@ def test_persona_profile_apply_blocks_cross_record_and_returns_partial(_runtime_
     assert body["status"] == "partial", body
     assert body["results"]["avatar"]["status"] == "applied"
     assert body["results"]["signature"]["status"] == "failed"
+    assert body["code"] == "persona_profile_assets_partial"
+    assert body["partial"] is True
+    assert body["outcome_unknown"] is False
+    assert [item["status"] for item in body["steps"]] == ["ok", "error"]
+    assert "error" not in body["results"]["signature"]
     assert [call[0] for call in bot.calls] == ["set_qq_avatar"]
     restored = history_mod.get_persona_template_record(record_a["record_id"])
     assert restored["result"]["avatar_candidates"][0]["candidate_id"] == avatar_id

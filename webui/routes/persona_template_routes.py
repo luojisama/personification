@@ -33,6 +33,7 @@ from ...core.persona_template_history import (
 )
 from ...core.avatar_candidate import AvatarCandidateError, build_avatar_candidates, candidate_file
 from ...core.avatar_relevance import review_avatar_candidates
+from ...core.operation_diagnostics import detail as operation_detail, diagnostic as operation_diagnostic, step as operation_step
 from ..deps import AdminIdentity, get_client_ip, require_admin
 
 
@@ -2690,21 +2691,38 @@ def build_persona_template_router(*, runtime) -> APIRouter:
         bot = _bot(body.get("bot_id"))
         bot_id = str(getattr(bot, "self_id", "") or body.get("bot_id"))
         results: dict[str, Any] = {}
+        operation_id = uuid.uuid4().hex
+        operation_steps = []
+        any_unknown = False
         if avatar_id:
             try:
                 _, candidate = _record_candidate(record_id, revision, avatar_id, "avatar")
                 path = candidate_file(candidate, plugin_config=getattr(runtime, "plugin_config", None))
                 await _bot_call(bot, "set_qq_avatar", file=str(path))
-                results["avatar"] = {"status": "applied", "candidate_id": avatar_id}
+                results["avatar"] = {"status": "applied", "candidate_id": avatar_id, "code": "avatar_applied", "message": "协议端已明确确认头像应用成功。"}
+                operation_steps.append(operation_step("avatar", "应用 QQ 头像", "ok", "头像候选已通过校验并由协议端确认应用。"))
             except (HTTPException, RuntimeError, AvatarCandidateError) as exc:
-                results["avatar"] = {"status": "failed", "candidate_id": avatar_id, "error": getattr(exc, "detail", str(exc))}
+                cause = getattr(exc, "__cause__", None)
+                unknown = isinstance(cause, (asyncio.TimeoutError, TimeoutError, ConnectionError))
+                any_unknown = any_unknown or unknown
+                code = "avatar_outcome_unknown" if unknown else "avatar_candidate_rejected" if isinstance(exc, (HTTPException, AvatarCandidateError)) else "avatar_apply_failed"
+                message = "头像调用结果未知，请先检查当前 QQ 头像。" if unknown else "头像候选校验未通过。" if isinstance(exc, (HTTPException, AvatarCandidateError)) else "协议端明确未完成头像应用。"
+                results["avatar"] = {"status": "unknown" if unknown else "failed", "candidate_id": avatar_id, "code": code, "message": message, "error_type": type(exc).__name__}
+                operation_steps.append(operation_step("avatar", "应用 QQ 头像", "unknown" if unknown else "error", message))
         if signature_id:
             try:
                 _, candidate = _record_candidate(record_id, revision, signature_id, "signature")
                 await _bot_call(bot, "set_self_longnick", longNick=str(candidate.get("text") or ""))
-                results["signature"] = {"status": "applied", "candidate_id": signature_id}
+                results["signature"] = {"status": "applied", "candidate_id": signature_id, "code": "signature_applied", "message": "协议端已明确确认签名应用成功。"}
+                operation_steps.append(operation_step("signature", "应用 QQ 签名", "ok", "签名候选已通过校验并由协议端确认应用。"))
             except (HTTPException, RuntimeError) as exc:
-                results["signature"] = {"status": "failed", "candidate_id": signature_id, "error": getattr(exc, "detail", str(exc))}
+                cause = getattr(exc, "__cause__", None)
+                unknown = isinstance(cause, (asyncio.TimeoutError, TimeoutError, ConnectionError))
+                any_unknown = any_unknown or unknown
+                code = "signature_outcome_unknown" if unknown else "signature_candidate_rejected" if isinstance(exc, HTTPException) else "signature_apply_failed"
+                message = "签名调用结果未知，请先检查当前 QQ 签名。" if unknown else "签名候选校验未通过。" if isinstance(exc, HTTPException) else "协议端明确未完成签名应用。"
+                results["signature"] = {"status": "unknown" if unknown else "failed", "candidate_id": signature_id, "code": code, "message": message, "error_type": type(exc).__name__}
+                operation_steps.append(operation_step("signature", "应用 QQ 签名", "unknown" if unknown else "error", message))
         applied = sum(item.get("status") == "applied" for item in results.values())
         status = "applied" if applied == len(results) else "partial" if applied else "failed"
         audit = {
@@ -2726,7 +2744,34 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             detail={"revision": revision, "bot_id": bot_id, "status": status, "results": results},
             outcome="ok" if status == "applied" else status,
         )
-        return {"success": status == "applied", "status": status, "record_id": record_id, "revision": revision, "results": results}
+        if status == "applied":
+            code, title, message, suggestion = "persona_profile_assets_applied", "QQ 资料已全部应用", "头像和签名的所有已选项目均由协议端明确确认成功。", "无需重复提交。"
+        elif status == "partial":
+            code, title, message, suggestion = "persona_profile_assets_partial", "QQ 资料只完成了一部分", "部分项目已明确应用成功，另一些项目失败或结果未知。", "保留已成功项目；只处理失败项目。结果未知的项目必须先在 QQ 中人工核对。"
+        else:
+            code, title, message, suggestion = "persona_profile_assets_failed", "QQ 资料没有完成应用", "所选头像和签名均未得到明确成功结果。", "根据逐项结果修复候选或协议端问题；结果未知时先人工核对。"
+        report = operation_diagnostic(
+            ok=status == "applied",
+            code=code,
+            phase="profile_asset_apply",
+            title=title,
+            message=message,
+            details=tuple(
+                operation_detail(
+                    "头像" if key == "avatar" else "签名",
+                    item.get("message") or item.get("status"),
+                    "ok" if item.get("status") == "applied" else "warn" if item.get("status") == "unknown" else "error",
+                )
+                for key, item in results.items()
+            ),
+            steps=operation_steps,
+            suggestion=suggestion,
+            retryable=status == "failed" and not any_unknown,
+            partial=status == "partial",
+            outcome_unknown=any_unknown,
+            operation_id=operation_id,
+        )
+        return {**report, "success": status == "applied", "status": status, "record_id": record_id, "revision": revision, "results": results}
 
     @router.get("/history")
     async def history(
