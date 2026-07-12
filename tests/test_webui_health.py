@@ -448,6 +448,69 @@ def test_qzone_status_and_operations_are_observable_without_cookie_leak(_runtime
     assert "must-not-leak" not in status.text + refreshed.text + scanned.text
 
 
+def test_qzone_post_now_returns_exact_generation_diagnostic(_runtime_context) -> None:
+    class Bot:
+        self_id = "10000"
+
+        async def call_api(self, _name, **kwargs):  # noqa: ANN003, ANN201
+            _runtime_context.sent.append(kwargs)
+            return {"message_id": 1}
+
+    async def generate(_bot):  # noqa: ANN001
+        return ""
+
+    async def detailed(_bot):  # noqa: ANN001
+        return {
+            "content": "",
+            "diagnostic": {
+                "ok": False,
+                "code": "semantic_not_grounded",
+                "phase": "semantic_review",
+                "title": "草稿缺少事件依据",
+                "message": "草稿描述了没有素材支持的具体经历。",
+                "retryable": True,
+                "details": [{"label": "事件依据", "value": "未通过", "status": "error"}],
+                "steps": [{"key": "semantic", "label": "语义审阅", "status": "error", "message": "没有素材依据", "details": []}],
+            },
+        }
+
+    setattr(generate, "detailed", detailed)
+
+    async def refresh(_bot, *, force=False):  # noqa: ANN001
+        return True, "ok"
+
+    async def publish(_content, _bot_id):  # noqa: ANN001
+        raise AssertionError("generation rejection must not publish")
+
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=_runtime_context.plugin_config,
+        superusers={"10001"},
+        get_bots=lambda: {"10000": Bot()},
+        logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+        runtime_bundle=SimpleNamespace(
+            qzone_generate_post=generate,
+            publish_qzone_shuo=publish,
+            update_qzone_cookie=refresh,
+        ),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+
+    response = client.post(
+        "/personification/api/qzone/post-now",
+        json={"bot_id": "10000", "operation_id": "diagnostic-op"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["code"] == "semantic_not_grounded"
+    assert body["phase"] == "semantic_review"
+    assert body["operation_id"] == "diagnostic-op"
+    assert body["details"][0]["label"] == "事件依据"
+    assert body["steps"][0]["status"] == "error"
+
+
 def test_qzone_login_routes_bind_owner_require_csrf_and_disable_qr_cache(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
     class Bot:
         self_id = "10000"

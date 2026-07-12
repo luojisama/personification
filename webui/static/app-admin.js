@@ -1034,7 +1034,7 @@ function renderQzone() {
       <button class="btn small" onclick="loadView().then(render)">刷新</button>
       <span class="muted" style="font-size:12px">「立即发一条」会强制生成并发布（绕过额度/间隔判断），但仍计入本月额度。</span>
     </div>
-    ${state.qzonePostResult ? `<div class="alert ${state.qzonePostResult.ok?'ok':'err'}" style="margin-top:12px">${escapeHtml(state.qzonePostResult.ok ? ('已发布：'+(state.qzonePostResult.content||'')) : (state.qzonePostResult.error||'发布失败'))}</div>` : ''}
+    ${state.qzonePostResult ? renderOperationDiagnostic(state.qzonePostResult) : ''}
   </div>
   <div class="card">
     <h2>最近发过的说说（去重记忆）</h2>

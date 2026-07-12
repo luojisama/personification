@@ -26,6 +26,23 @@ def build_generate_ai_diary_task(
             data_dir=agent_data_dir,
         )
 
+    async def _generate_ai_diary_detailed(bot: Any) -> dict[str, Any]:
+        detailed = getattr(generate_ai_diary_flow, "detailed", None)
+        if not callable(detailed):
+            content = await _generate_ai_diary(bot)
+            return {"content": content, "diagnostic": {"ok": bool(content)}}
+        return await detailed(
+            bot,
+            load_prompt=load_prompt,
+            call_ai_api=call_ai_api,
+            logger=logger,
+            plugin_config=plugin_config,
+            tool_caller=agent_tool_caller,
+            registry=agent_tool_registry,
+            agent_max_steps=agent_max_steps,
+            data_dir=agent_data_dir,
+        )
+
     def _mark_published(content: str) -> None:
         from ..flows.diary_flow import schedule_diary_state_update
 
@@ -37,6 +54,7 @@ def build_generate_ai_diary_task(
         )
 
     setattr(_generate_ai_diary, "mark_published", _mark_published)
+    setattr(_generate_ai_diary, "detailed", _generate_ai_diary_detailed)
 
     return _generate_ai_diary
 

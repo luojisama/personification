@@ -6,15 +6,17 @@ import inspect
 import json
 import random
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from ..agent.inner_state import load_inner_state, update_state_from_diary
 from ..core.agent_bridge import run_text_agent
-from ..core.visible_output import guard_visible_text
+from ..core.visible_output import assess_visible_text
 from ..core.context_policy import strip_response_control_markers
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_group_emotion_memory, load_emotion_state
+from ..core.operation_diagnostics import OperationDetail, OperationStep, detail, diagnostic, step
 from ..core.persona_profile import load_persona_profile
 from ..core.prompt_loader import AGENT_GUIDANCE_MARKER
 from ..core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
@@ -47,6 +49,66 @@ _QZONE_CASUAL_TONE_DISCIPLINE = (
     "不要写成整齐的二段式机灵句，尤其别用“脑子/胃/手/嘴先开始……”这类器官拟人、先后对仗、"
     "看似俏皮但模板感很重的句式；宁可更普通、更像真的随手敲。"
 )
+
+
+@dataclass(slots=True)
+class QzoneGenerationReport:
+    steps: list[OperationStep] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    code: str = "generation_failed"
+    phase: str = "generation"
+    title: str = "没有生成可发布的说说"
+    message: str = "生成流程没有得到符合发布要求的正文。"
+    suggestion: str = "查看下方各次生成和审阅结果，再根据失败阶段调整 Provider、素材或重新生成。"
+    retryable: bool = True
+    details: list[OperationDetail] = field(default_factory=list)
+
+    def add_step(
+        self,
+        key: str,
+        label: str,
+        status: str,
+        message: str = "",
+        *,
+        details: tuple[OperationDetail, ...] = (),
+    ) -> None:
+        self.steps.append(step(key, label, status, message, details=details))
+
+    def fail(
+        self,
+        code: str,
+        phase: str,
+        title: str,
+        message: str,
+        *,
+        suggestion: str = "",
+        retryable: bool = True,
+        details: tuple[OperationDetail, ...] = (),
+    ) -> None:
+        self.code = code
+        self.phase = phase
+        self.title = title
+        self.message = message
+        self.suggestion = suggestion or self.suggestion
+        self.retryable = retryable
+        self.details = list(details)
+
+    def to_diagnostic(self, *, ok: bool, content: str = "") -> dict[str, Any]:
+        details = [] if ok else list(self.details)
+        if content:
+            details.insert(0, detail("最终正文长度", f"{len(content)} 字", "ok"))
+        return diagnostic(
+            ok=ok,
+            code="qzone_draft_ready" if ok else self.code,
+            phase="generation_complete" if ok else self.phase,
+            title="说说草稿已通过全部检查" if ok else self.title,
+            message="草稿已生成并通过机械、去重、语义和可见输出检查。" if ok else self.message,
+            details=details,
+            steps=self.steps,
+            warnings=self.warnings,
+            suggestion="可以继续提交到 QZone。" if ok else self.suggestion,
+            retryable=False if ok else self.retryable,
+        )
 
 
 def filter_sensitive_content(text: str) -> str:
@@ -460,6 +522,7 @@ async def _maybe_generate_qzone_image_marker(
     content: str = "",
     plugin_config: Any = None,
     logger: Any,
+    report: QzoneGenerationReport | None = None,
 ) -> str:
     prompt = str(image_prompt or "").strip()
     if not prompt:
@@ -473,6 +536,8 @@ async def _maybe_generate_qzone_image_marker(
     if sticker_marker:
         return sticker_marker
     if tool_caller is None:
+        if report is not None:
+            report.warnings.append("模型建议配图，但当前没有可用的图片生成调用器，已降级为纯文字。")
         return ""
     try:
         result = await generate_codex_image(
@@ -483,14 +548,20 @@ async def _maybe_generate_qzone_image_marker(
         )
     except Exception as exc:
         logger.warning(f"[qzone] Codex 配图生成失败: {exc}")
+        if report is not None:
+            report.warnings.append(f"配图生成异常，已降级为纯文字：{type(exc).__name__}")
         return ""
     if not isinstance(result, dict):
+        if report is not None:
+            report.warnings.append("配图工具返回格式无效，已降级为纯文字。")
         return ""
     b64 = str(result.get("b64_json", "") or "").strip()
     if not b64:
         error = str(result.get("error", "") or "").strip()
         if error:
             logger.warning(f"[qzone] Codex 配图生成失败: {error}")
+        if report is not None:
+            report.warnings.append("配图工具没有返回图片数据，已降级为纯文字。")
         return ""
     return f"\n[IMAGE_B64]{b64}[/IMAGE_B64]"
 
@@ -618,6 +689,8 @@ async def _review_qzone_post(
     agent_max_steps: int = 4,
     persona_system: Any = "",
     logger: Any,
+    report: QzoneGenerationReport | None = None,
+    attempt_key: str = "draft",
 ) -> str:
     """对生成的说说做去 AI 腔 + 去营业感叹腔审阅。
 
@@ -639,6 +712,14 @@ async def _review_qzone_post(
         if not rewritten:
             if logger is not None:
                 logger.info(f"[qzone] OOC rewrite failed, drop post: {text}")
+            if report is not None:
+                report.fail(
+                    "ooc_rewrite_failed",
+                    "style_review",
+                    "草稿包含不适合公开发布的生成痕迹",
+                    "草稿命中了 OOC、搜索过程或模型说明痕迹，自动改写没有得到合格结果。",
+                    suggestion="重新生成草稿；如果连续出现，请检查 QZone 人设和 Agent 输出。",
+                )
             return ""
         text = _trim_qzone_content(rewritten)
     if text and _NET_SLANG_TIC_RE.search(text):
@@ -657,6 +738,14 @@ async def _review_qzone_post(
         else:
             if logger is not None:
                 logger.info(f"[qzone] net-slang rewrite ineffective, drop post: {text}")
+            if report is not None:
+                report.fail(
+                    "net_slang_rewrite_failed",
+                    "style_review",
+                    "草稿的营业感改写未通过",
+                    "草稿命中了夸张营业感表达，自动改写后仍然命中相同风格限制。",
+                    suggestion="重新生成一条更平铺直叙的短说说。",
+                )
             return ""
     if text and _QZONE_STIFF_TIC_RE.search(text):
         toned = await _rewrite_qzone_stiff_tic(
@@ -674,7 +763,17 @@ async def _review_qzone_post(
         else:
             if logger is not None:
                 logger.info(f"[qzone] stiff-tic rewrite ineffective, drop post: {text}")
+            if report is not None:
+                report.fail(
+                    "stiff_tic_rewrite_failed",
+                    "style_review",
+                    "草稿的模板腔改写未通过",
+                    "草稿使用了过度工整或器官拟人的模板句式，自动改写后仍未消除。",
+                    suggestion="重新生成并更换主题、场景和句式。",
+                )
             return ""
+    if report is not None:
+        report.add_step(f"{attempt_key}_style", "文风与生成痕迹检查", "ok", "正文没有残留 OOC、营业感或模板腔问题。")
     return text
 
 
@@ -688,6 +787,8 @@ async def _review_qzone_semantics(
     call_ai_api: Callable[..., Awaitable[Optional[str]]] | None = None,
     timeout: float = 10.0,
     logger: Any = None,
+    report: QzoneGenerationReport | None = None,
+    attempt_key: str = "draft",
 ) -> dict[str, Any] | None:
     """Use an LLM to judge coherence, grounding and semantic novelty."""
     messages = [
@@ -735,19 +836,63 @@ async def _review_qzone_semantics(
                 or ""
             )
         else:
+            if report is not None:
+                report.fail(
+                    "semantic_reviewer_unavailable",
+                    "semantic_review",
+                    "语义审阅器不可用",
+                    "当前没有可调用的模型来检查连贯性、事件依据和重复度。",
+                    suggestion="检查主模型和 Agent runtime 是否已初始化。",
+                )
             return None
     except Exception as exc:
         if logger is not None:
             logger.info(f"[qzone] semantic review failed, drop post: {exc}")
+        if report is not None:
+            report.fail(
+                "semantic_review_timeout" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) else "semantic_review_failed",
+                "semantic_review",
+                "语义审阅没有完成",
+                "审阅模型调用超时。" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) else "审阅模型调用发生异常。",
+                suggestion="检查 Provider 状态和 QZone 审阅调用记录后重试。",
+                details=(detail("异常类型", type(exc).__name__, "error"),),
+            )
         return None
     payload = _extract_json_object(raw)
     if not payload:
         if logger is not None:
             logger.info("[qzone] semantic review returned invalid JSON, drop post")
+        if report is not None:
+            report.fail(
+                "semantic_review_invalid_json",
+                "semantic_review",
+                "语义审阅返回格式无效",
+                "审阅模型没有返回要求的 JSON 判定，无法确认草稿是否可以发布。",
+                suggestion="检查审阅模型结构化输出能力后重试。",
+            )
         return None
     required_true = all(payload.get(key) is True for key in ("accept", "coherent", "grounded", "novel"))
     repeated = any(payload.get(key) is True for key in ("same_topic", "same_scene", "same_syntax"))
     payload["accepted"] = bool(required_true and not repeated)
+    if report is not None:
+        status = "ok" if payload["accepted"] else "error"
+        report.add_step(
+            f"{attempt_key}_semantic",
+            "语义、依据与新颖度审阅",
+            status,
+            str(payload.get("reason") or ("全部判定通过" if payload["accepted"] else "至少一项判定未通过")),
+            details=tuple(
+                detail(label, "通过" if bool(payload.get(key)) == expected else "未通过", "ok" if bool(payload.get(key)) == expected else "error")
+                for key, label, expected in (
+                    ("coherent", "连贯性", True),
+                    ("grounded", "事件依据", True),
+                    ("novel", "内容新颖度", True),
+                    ("same_topic", "主题不重复", False),
+                    ("same_scene", "场景不重复", False),
+                    ("same_syntax", "句式不重复", False),
+                )
+            ),
+        )
     return payload
 
 
@@ -764,10 +909,30 @@ async def _build_qzone_post_with_optional_image(
     persona_system: Any = "",
     source_context: str = "",
     call_ai_api: Callable[..., Awaitable[Optional[str]]] | None = None,
+    report: QzoneGenerationReport | None = None,
+    attempt_key: str = "draft",
+    attempt_label: str = "候选草稿",
 ) -> str:
     text = _trim_qzone_content(content)
     if not text:
+        if report is not None:
+            report.add_step(f"{attempt_key}_content", attempt_label, "error", "JSON 中的 content 为空或清理后为空。")
+            report.fail(
+                "missing_content",
+                "structured_output",
+                "结构化结果缺少正文",
+                "模型返回了 JSON，但 content 字段为空或没有可见字符。",
+                suggestion="检查模型结构化输出能力后重新生成。",
+            )
         return ""
+    if report is not None:
+        report.add_step(
+            f"{attempt_key}_content",
+            attempt_label,
+            "ok",
+            "已提取候选正文。",
+            details=(detail("正文长度", f"{len(text)} 字", "info"),),
+        )
     text = await _review_qzone_post(
         text,
         tool_caller=tool_caller,
@@ -776,15 +941,46 @@ async def _build_qzone_post_with_optional_image(
         agent_max_steps=agent_max_steps,
         persona_system=persona_system,
         logger=logger,
+        report=report,
+        attempt_key=attempt_key,
     )
     if not text:
         return ""
     if not 12 <= len(text) <= 50:
         logger.info(f"[qzone] drop generated post because length is out of range: chars={len(text)}")
+        if report is not None:
+            too_short = len(text) < 12
+            report.add_step(
+                f"{attempt_key}_length",
+                "正文长度检查",
+                "error",
+                f"正文共 {len(text)} 字，要求 12–50 字。",
+            )
+            report.fail(
+                "content_too_short" if too_short else "content_too_long",
+                "mechanical_review",
+                "正文过短" if too_short else "正文过长",
+                f"候选正文共 {len(text)} 字，不符合 12–50 字的发布要求。",
+                suggestion="重新生成长度符合要求的短说说。",
+                details=(detail("实际长度", f"{len(text)} 字", "error"), detail("要求", "12–50 字", "info")),
+            )
         return ""
+    if report is not None:
+        report.add_step(f"{attempt_key}_length", "正文长度检查", "ok", f"正文共 {len(text)} 字，符合 12–50 字要求。")
     if _is_too_similar_to_recent_qzone_post(text, recent_posts or []):
         logger.info(f"[qzone] skip generated post because it repeats recent content: {text}")
+        if report is not None:
+            report.add_step(f"{attempt_key}_dedup", "近期说说去重", "error", "候选正文与近期说说存在明显字面或片段重复。")
+            report.fail(
+                "duplicate_recent_post",
+                "deduplication",
+                "草稿与近期说说重复",
+                "候选正文命中了近期内容的完全重复、包含关系或高相似片段检查。",
+                suggestion="重新生成，并彻底更换主题、场景和句式。",
+            )
         return ""
+    if report is not None:
+        report.add_step(f"{attempt_key}_dedup", "近期说说去重", "ok", "没有命中近期内容的字面重复检查。")
     semantic_review = await _review_qzone_semantics(
         text,
         recent_posts=recent_posts or [],
@@ -793,12 +989,35 @@ async def _build_qzone_post_with_optional_image(
         tool_caller=tool_caller,
         call_ai_api=call_ai_api,
         logger=logger,
+        report=report,
+        attempt_key=attempt_key,
     )
     if semantic_review is not None and not semantic_review.get("accepted"):
         logger.info(
             "[qzone] skip generated post after semantic review: "
             f"topic={semantic_review.get('topic_key', '')} reason={semantic_review.get('reason', '')}"
         )
+        if report is not None:
+            failed = []
+            if semantic_review.get("coherent") is not True:
+                failed.append(("semantic_incoherent", "草稿语义不连贯", "审阅器认为动作主体、对象、因果或前后关系不完整。"))
+            if semantic_review.get("grounded") is not True:
+                failed.append(("semantic_not_grounded", "草稿缺少事件依据", "草稿描述了具体已发生行为，但可用聊天、情绪或挂念中没有对应依据。"))
+            if semantic_review.get("novel") is not True or semantic_review.get("same_topic") is True:
+                failed.append(("semantic_not_novel", "草稿主题缺少新意", "草稿与近期说说使用了相同或高度接近的主题。"))
+            if semantic_review.get("same_scene") is True:
+                failed.append(("semantic_same_scene", "草稿场景重复", "草稿重复了近期说说已经使用的场景。"))
+            if semantic_review.get("same_syntax") is True:
+                failed.append(("semantic_same_syntax", "草稿句式重复", "草稿重复了近期说说已经使用的句式结构。"))
+            code, title, message = failed[0] if failed else ("semantic_rejected", "语义审阅未通过", "审阅器没有批准这条草稿。")
+            report.fail(
+                code,
+                "semantic_review",
+                title,
+                message,
+                suggestion="根据审阅明细重新生成；不要只替换几个词，要更换失败项对应的主题、场景或事实表达。",
+                details=(detail("审阅理由", str(semantic_review.get("reason") or "未提供"), "error"),),
+            )
         return ""
     if semantic_review is None and (tool_caller is not None or call_ai_api is not None):
         return ""
@@ -808,15 +1027,37 @@ async def _build_qzone_post_with_optional_image(
         content=text,
         plugin_config=plugin_config,
         logger=logger,
+        report=report,
     )
-    return guard_visible_text(
-        f"{text}{image_marker}",
-        logger=logger,
-        surface="qzone_post",
-    )
+    if report is not None:
+        report.add_step(
+            f"{attempt_key}_image",
+            "配图处理",
+            "ok" if image_marker else "skipped",
+            "已附加配图。" if image_marker else "本次使用纯文字发布，不影响正文。",
+        )
+    decision = assess_visible_text(f"{text}{image_marker}")
+    if not decision.allowed:
+        if logger is not None:
+            logger.warning(f"[visible_output] blocked surface=qzone_post reason={decision.reason}")
+        if report is not None:
+            report.add_step(f"{attempt_key}_visible", "最终可见输出安全检查", "error", f"输出被安全门拦截：{decision.reason or 'unknown'}")
+            report.fail(
+                "visible_output_blocked",
+                "visible_output",
+                "最终输出被安全门拦截",
+                "草稿包含无效媒体块、内部错误文本、Provider 策略文本或其它不可公开内容。",
+                suggestion="查看 Trace 中的安全原因代码后重新生成，不要直接发布原始输出。",
+                retryable=True,
+                details=(detail("安全原因", decision.reason or "unknown", "error"),),
+            )
+        return ""
+    if report is not None:
+        report.add_step(f"{attempt_key}_visible", "最终可见输出安全检查", "ok", "正文和媒体控制块均可公开发布。")
+    return decision.text
 
 
-async def get_recent_chat_context(bot: Any, logger: Any) -> str:
+async def get_recent_chat_context(bot: Any, logger: Any, report: QzoneGenerationReport | None = None) -> str:
     """Sample recent non-bot group messages as diary context."""
     try:
         group_list = await bot.get_group_list()
@@ -835,6 +1076,8 @@ async def get_recent_chat_context(bot: Any, logger: Any) -> str:
                 messages = await bot.get_group_msg_history(group_id=group_id, count=40)
             except Exception as e:
                 logger.warning(f"[diary] get group history failed: {group_id}: {e}")
+                if report is not None:
+                    report.warnings.append(f"群 {group_id} 的近期聊天读取失败，已跳过：{type(e).__name__}")
                 continue
 
             if not messages or "messages" not in messages:
@@ -871,6 +1114,8 @@ async def get_recent_chat_context(bot: Any, logger: Any) -> str:
         return "\n\n".join(context_parts)
     except Exception as e:
         logger.error(f"[diary] get recent chat context failed: {e}")
+        if report is not None:
+            report.warnings.append(f"近期群聊素材读取失败，已改用基础生成：{type(e).__name__}")
         return ""
 
 
@@ -908,6 +1153,9 @@ async def _generate_once(
     registry: Any = None,
     logger: Any = None,
     agent_max_steps: int = 4,
+    report: QzoneGenerationReport | None = None,
+    attempt_key: str = "generation",
+    attempt_label: str = "生成草稿",
 ) -> str:
     # 在格式 guard 之外再注入人设快照，强化发空间时的角色一致性。
     system_text = _project_qzone_system_prompt(system_prompt) + _FLOW_OUTPUT_GUARD
@@ -955,6 +1203,21 @@ async def _generate_once(
             except Exception as exc:
                 if logger is not None:
                     logger.warning(f"[diary] full Agent failed, skip direct-model fallback: {exc}")
+                if report is not None:
+                    report.add_step(
+                        attempt_key,
+                        attempt_label,
+                        "error",
+                        "Agent 调用发生异常，没有生成草稿。",
+                        details=(detail("异常类型", type(exc).__name__, "error"),),
+                    )
+                    report.fail(
+                        "agent_failed",
+                        "draft_generation",
+                        "Agent 没有完成草稿生成",
+                        "QZone Agent 调用异常，未得到可审阅的结构化输出。",
+                        suggestion="检查对应 Trace 的 Provider 尝试记录和 Agent timeout，再重试生成。",
+                    )
                 result = ""
         elif supports_builtin_search:
             result = await call_ai_api(messages, use_builtin_search=use_builtin_search)
@@ -967,10 +1230,37 @@ async def _generate_once(
             except Exception:
                 pass
     if not result:
+        if report is not None and not any(item.key == attempt_key for item in report.steps):
+            mode = "Agent" if getattr(plugin_config, "personification_agent_enabled", True) and tool_caller is not None and registry is not None else "Provider"
+            report.add_step(attempt_key, attempt_label, "error", f"{mode} 返回空内容，没有草稿可供解析。")
+            report.fail(
+                "agent_empty_output" if mode == "Agent" else "provider_empty_output",
+                "draft_generation",
+                f"{mode} 没有返回草稿",
+                f"{mode} 请求已结束，但可见输出为空。",
+                suggestion="检查 Provider 可用性、timeout 和 Agent 运行记录后重试。",
+            )
         return ""
     # 兜底：若 LLM 仍输出思维链 XML，剥除标签再走 clean_generated_text
     stripped = strip_response_control_markers(result)
-    return clean_generated_text(stripped or result)
+    cleaned = clean_generated_text(stripped or result)
+    if report is not None and not cleaned:
+        report.add_step(attempt_key, attempt_label, "error", "模型输出在移除控制标记后为空。")
+        report.fail(
+            "empty_after_control_cleanup",
+            "draft_generation",
+            "草稿只包含控制标记",
+            "模型返回内容没有可用于 QZone 的可见正文。",
+        )
+    elif report is not None:
+        report.add_step(
+            attempt_key,
+            attempt_label,
+            "ok",
+            "模型已返回候选结构化输出。",
+            details=(detail("原始输出长度", f"{len(cleaned)} 字", "ok"),),
+        )
+    return cleaned
 
 
 def schedule_diary_state_update(
@@ -1003,11 +1293,12 @@ async def generate_ai_diary(
     data_dir: Optional[Path] = None,
     registry: Any = None,
     agent_max_steps: int = 4,
+    _report: QzoneGenerationReport | None = None,
 ) -> str:
     """Generate a short Qzone post from recent chat context."""
     system_prompt = load_prompt()
     qzone_persona = _project_qzone_system_prompt(system_prompt)
-    chat_context = await get_recent_chat_context(bot, logger)
+    chat_context = await get_recent_chat_context(bot, logger, report=_report)
     recent_posts = _load_recent_qzone_posts()
     emotion_hint = ""
     if data_dir is not None:
@@ -1022,6 +1313,8 @@ async def generate_ai_diary(
                 emotion_hint = "最近群情绪记忆：\n" + "\n".join(f"- {hint}" for hint in group_hints)
         except Exception as e:
             logger.debug(f"[diary] load emotion_state failed: {e}")
+            if _report is not None:
+                _report.warnings.append(f"情绪状态读取失败，已在缺少该素材的情况下继续：{type(e).__name__}")
 
     base_requirements = (
         "请写一条自然、像真人随手发的 QQ 空间说说，不要写周记小作文。\n"
@@ -1068,6 +1361,9 @@ async def generate_ai_diary(
             registry=registry,
             logger=logger,
             agent_max_steps=agent_max_steps,
+            report=_report,
+            attempt_key="rich_generate",
+            attempt_label="Rich 草稿生成",
         )
         payload = _extract_json_object(raw_rich_result)
         rich_result = ""
@@ -1084,9 +1380,21 @@ async def generate_ai_diary(
                 persona_system=qzone_persona,
                 source_context="\n\n".join(part for part in (chat_context, emotion_hint) if part),
                 call_ai_api=call_ai_api,
+                report=_report,
+                attempt_key="rich",
+                attempt_label="Rich 候选正文",
             )
         elif raw_rich_result:
             logger.info("[qzone] rich generation returned non-JSON output, reject draft")
+            if _report is not None:
+                _report.add_step("rich_parse", "Rich JSON 解析", "error", "模型返回了内容，但不是要求的 JSON object。")
+                _report.fail(
+                    "invalid_generation_json",
+                    "structured_output",
+                    "Rich 草稿格式无效",
+                    "模型没有返回包含 content 和 image_prompt 的 JSON object。",
+                    suggestion="检查当前模型的结构化输出能力；系统会继续尝试 Basic 草稿。",
+                )
         if rich_result:
             return rich_result
 
@@ -1120,6 +1428,9 @@ async def generate_ai_diary(
         registry=registry,
         logger=logger,
         agent_max_steps=agent_max_steps,
+        report=_report,
+        attempt_key="basic_generate",
+        attempt_label="Basic 草稿生成",
     )
     payload = _extract_json_object(raw_result)
     if payload:
@@ -1135,12 +1446,39 @@ async def generate_ai_diary(
             persona_system=qzone_persona,
             source_context="\n\n".join(part for part in (chat_context, emotion_hint) if part),
             call_ai_api=call_ai_api,
+            report=_report,
+            attempt_key="basic",
+            attempt_label="Basic 候选正文",
         )
     else:
         if raw_result:
             logger.info("[qzone] basic generation returned non-JSON output, reject draft")
+            if _report is not None:
+                _report.add_step("basic_parse", "Basic JSON 解析", "error", "模型返回了内容，但不是要求的 JSON object。")
+                _report.fail(
+                    "invalid_generation_json",
+                    "structured_output",
+                    "Basic 草稿格式无效",
+                    "Rich fallback 后，Basic 生成仍未返回要求的 JSON object。",
+                    suggestion="检查当前模型的结构化输出能力、QZone prompt 和 Provider 返回。",
+                )
         result = ""
     return result
+
+
+async def generate_ai_diary_detailed(
+    bot: Any,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    report = QzoneGenerationReport()
+    content = await generate_ai_diary(bot, _report=report, **kwargs)
+    return {
+        "content": content,
+        "diagnostic": report.to_diagnostic(ok=bool(content), content=content),
+    }
+
+
+setattr(generate_ai_diary, "detailed", generate_ai_diary_detailed)
 
 
 async def maybe_generate_proactive_qzone_post(

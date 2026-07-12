@@ -138,6 +138,9 @@ def build_qzone_router(*, runtime) -> APIRouter:
     ) -> dict:
         """管理员手动强制发一条说说（绕过额度/间隔/agent 决策，但仍计入月度额度）。"""
         from ...core.time_ctx import get_configured_now
+        from ...core.operation_diagnostics import detail, diagnostic, normalize_diagnostic, step
+        from ...core.qzone_service import get_qzone_auth_status
+        from ...core.sensitive_data import sanitize_text
         from ...jobs.periodic_jobs import build_qzone_quota, coordinated_qzone_publish
 
         logger = getattr(runtime, "logger", None)
@@ -151,22 +154,76 @@ def build_qzone_router(*, runtime) -> APIRouter:
         if bot is None:
             raise HTTPException(status_code=503, detail="Bot 未连接")
 
+        operation_id = str(body.get("operation_id") or uuid.uuid4().hex)[:96]
+        warnings: list[str] = []
         if callable(update_cookie):
             try:
-                await update_cookie(bot)
+                refresh_ok, refresh_message = await update_cookie(bot)
+                if not refresh_ok:
+                    warnings.append(f"LLOneBot Cookie 刷新未成功，已继续尝试使用现有凭证：{sanitize_text(refresh_message, limit=180)}")
             except Exception as exc:
                 if logger is not None:
                     logger.warning(f"[webui] 手动发说说刷新 Cookie 失败：{exc}")
+                warnings.append(f"LLOneBot Cookie 刷新异常，已继续尝试使用现有凭证：{type(exc).__name__}")
 
         try:
-            content = await generate(bot)
+            detailed_generate = getattr(generate, "detailed", None)
+            if callable(detailed_generate):
+                generation = await detailed_generate(bot)
+                content = str(generation.get("content") or "") if isinstance(generation, dict) else ""
+                generation_diag = normalize_diagnostic(
+                    generation.get("diagnostic") if isinstance(generation, dict) else None,
+                    ok=bool(content),
+                )
+            else:
+                content = await generate(bot)
+                generation_diag = diagnostic(
+                    ok=bool(content),
+                    code="qzone_draft_ready" if content else "legacy_generator_empty",
+                    phase="draft_generation",
+                    title="说说草稿已生成" if content else "旧版生成器没有返回草稿",
+                    message="草稿已生成。" if content else "当前运行时未提供详细生成报告，且返回正文为空。",
+                    suggestion="重启插件加载最新运行时后再试。" if not content else "",
+                    retryable=not bool(content),
+                )
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"生成说说失败：{exc}") from exc
+            result = diagnostic(
+                ok=False,
+                code="qzone_generation_exception",
+                phase="draft_generation",
+                title="说说生成流程异常中断",
+                message="生成函数抛出异常，尚未进入 QZone 发布阶段。",
+                details=(detail("异常类型", type(exc).__name__, "error"),),
+                warnings=warnings,
+                suggestion="根据异常类型检查生成链路和 Provider 状态后重试。",
+                retryable=True,
+                operation_id=operation_id,
+            )
+            webui_audit_log.record(
+                action="qzone_post_now",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=str(getattr(bot, "self_id", "") or ""),
+                ip_hash=get_client_ip(request),
+                detail={"operation_id": operation_id, "code": result["code"], "phase": result["phase"]},
+                outcome="failed",
+            )
+            return result
         if not content:
-            return {"ok": False, "error": "本次没有生成出说说内容（可能被去重/审阅拦下），请稍后再试。"}
+            generation_diag["operation_id"] = operation_id
+            generation_diag["warnings"] = list(generation_diag.get("warnings") or []) + warnings
+            webui_audit_log.record(
+                action="qzone_post_now",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=str(getattr(bot, "self_id", "") or ""),
+                ip_hash=get_client_ip(request),
+                detail={"operation_id": operation_id, "code": generation_diag.get("code"), "phase": generation_diag.get("phase")},
+                outcome="failed",
+            )
+            return generation_diag
 
         cfg = getattr(runtime, "plugin_config", None)
-        operation_id = str(body.get("operation_id") or uuid.uuid4().hex)[:96]
         published = await coordinated_qzone_publish(
             operation_id=operation_id,
             content=content,
@@ -178,12 +235,77 @@ def build_qzone_router(*, runtime) -> APIRouter:
             force=True,
         )
         if not published.get("success"):
-            return {
-                "ok": False,
-                "error": f"发布失败：{published.get('message') or published.get('status')}",
-                "content": content[:2000],
-                "operation_id": operation_id,
-            }
+            publish_status = str(published.get("status") or "failed")
+            auth_status = get_qzone_auth_status()
+            outcome_unknown = publish_status in {"outcome_unknown", "unknown"}
+            if outcome_unknown:
+                code = "qzone_publish_outcome_unknown"
+                title = "QZone 发布结果未知"
+                message = "发布请求可能已经到达腾讯，但本次没有得到明确成功或失败结果。"
+                suggestion = "先打开 QQ 空间检查是否已经发布，禁止直接再次点击发布，以免产生重复说说。"
+                retryable = False
+            elif publish_status in {"reserved", "duplicate_reserved"}:
+                code = "qzone_publish_in_progress"
+                title = "相同发布请求仍在处理中"
+                message = "该 Operation ID 已有一个未完成的发布请求，当前没有再次向 QZone 外发。"
+                suggestion = "等待原请求完成并刷新状态，不要创建新的重复请求。"
+                retryable = False
+            elif auth_status.get("status") == "login_required":
+                code = "qzone_login_required"
+                title = "QZone 登录凭证已失效"
+                message = "腾讯返回了登录页、验证码或无效认证状态，本次草稿没有发布。"
+                suggestion = "先在上方“QZone 认证恢复”中扫码登录，确认认证健康后再重新发布。"
+                retryable = False
+            else:
+                code = "qzone_publish_rejected"
+                title = "QZone 明确拒绝了发布"
+                message = sanitize_text(published.get("message") or "发布层返回失败状态", limit=260)
+                suggestion = "根据发布层返回和认证状态修复问题；只有明确失败时才可以重新发布。"
+                retryable = True
+            steps = list(generation_diag.get("steps") or [])
+            steps.append(step("publish", "提交到 QZone", "unknown" if outcome_unknown else "error", message).to_dict())
+            result = diagnostic(
+                ok=False,
+                code=code,
+                phase="qzone_publish",
+                title=title,
+                message=message,
+                details=(
+                    detail("候选正文", content[:200], "ok"),
+                    detail("协调状态", publish_status, "error" if not outcome_unknown else "warn"),
+                ),
+                steps=tuple(
+                    step(
+                        str(item.get("key") or "step"),
+                        str(item.get("label") or "步骤"),
+                        str(item.get("status") or "unknown"),
+                        str(item.get("message") or ""),
+                        details=tuple(
+                            detail(str(child.get("label") or "详情"), child.get("value"), str(child.get("status") or "info"))
+                            for child in item.get("details") or []
+                            if isinstance(child, dict)
+                        ),
+                    )
+                    for item in steps
+                    if isinstance(item, dict)
+                ),
+                warnings=list(generation_diag.get("warnings") or []) + warnings,
+                suggestion=suggestion,
+                retryable=retryable,
+                outcome_unknown=outcome_unknown,
+                operation_id=operation_id,
+            )
+            result["content"] = content[:2000]
+            webui_audit_log.record(
+                action="qzone_post_now",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=str(getattr(bot, "self_id", "") or ""),
+                ip_hash=get_client_ip(request),
+                detail={"operation_id": operation_id, "code": code, "status": publish_status},
+                outcome="unknown" if outcome_unknown else "failed",
+            )
+            return result
 
         state = published.get("state") or {}
         mark_published = getattr(generate, "mark_published", None)
@@ -206,13 +328,30 @@ def build_qzone_router(*, runtime) -> APIRouter:
             detail={"operation_id": operation_id, "duplicate": bool(published.get("duplicate"))},
             outcome="ok",
         )
-        return {
-            "ok": True,
+        generation_steps = list(generation_diag.get("steps") or [])
+        generation_steps.append({"key": "publish", "label": "提交到 QZone", "status": "ok", "message": "腾讯已明确返回发布成功。", "details": []})
+        result = diagnostic(
+            ok=True,
+            code="qzone_post_published",
+            phase="publish_complete",
+            title="说说已经发布",
+            message="草稿通过全部检查，腾讯已明确确认发布成功。",
+            details=(detail("正文", content[:200], "ok"), detail("本月已用额度", quota.get("used", 0), "info")),
+            steps=tuple(
+                step(str(item.get("key") or "step"), str(item.get("label") or "步骤"), str(item.get("status") or "unknown"), str(item.get("message") or ""))
+                for item in generation_steps
+                if isinstance(item, dict)
+            ),
+            warnings=list(generation_diag.get("warnings") or []) + warnings,
+            suggestion="无需再次点击发布。",
+            operation_id=operation_id,
+        )
+        result.update({
             "content": content[:2000],
             "quota": quota,
-            "operation_id": operation_id,
             "duplicate": bool(published.get("duplicate")),
-        }
+        })
+        return result
 
     @router.post("/refresh-cookie")
     async def refresh_cookie(

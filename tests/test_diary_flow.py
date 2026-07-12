@@ -143,6 +143,87 @@ def test_generate_ai_diary_skips_too_similar_recent_post(monkeypatch) -> None:  
     assert any("repeats recent content" in item for item in logger.infos)
 
 
+def test_generate_ai_diary_detailed_explains_duplicate_rejection(monkeypatch) -> None:  # noqa: ANN001
+    logger = _Logger()
+    monkeypatch.setattr(
+        diary_flow,
+        "get_data_store",
+        lambda: _Store({"recent_contents": ["明天先靠炸鸡排和摸鱼慢慢回血"]}),
+    )
+
+    async def _call_ai(_messages, **_kwargs):  # noqa: ANN001
+        return json.dumps({"content": "明天先靠炸鸡排和摸鱼给自己回血一下", "image_prompt": ""}, ensure_ascii=False)
+
+    result = asyncio.run(
+        diary_flow.generate_ai_diary_detailed(
+            _Bot(),
+            load_prompt=lambda: "你是绪山真寻。",
+            call_ai_api=_call_ai,
+            logger=logger,
+        )
+    )
+
+    assert result["content"] == ""
+    assert result["diagnostic"]["code"] == "duplicate_recent_post"
+    assert result["diagnostic"]["phase"] == "deduplication"
+    assert any(item["key"] == "basic_dedup" and item["status"] == "error" for item in result["diagnostic"]["steps"])
+
+
+def test_generate_ai_diary_detailed_explains_semantic_grounding_rejection(monkeypatch) -> None:  # noqa: ANN001
+    logger = _Logger()
+    monkeypatch.setattr(diary_flow, "get_data_store", lambda: _Store({"recent_contents": []}))
+
+    async def _call_ai(messages, **_kwargs):  # noqa: ANN001
+        if "发布前审阅器" in str(messages[0].get("content", "")):
+            return json.dumps({
+                "accept": False,
+                "coherent": True,
+                "grounded": False,
+                "novel": True,
+                "same_topic": False,
+                "same_scene": False,
+                "same_syntax": False,
+                "topic_key": "snack",
+                "reason": "没有素材证明已经买过",
+            }, ensure_ascii=False)
+        return json.dumps({"content": "刚买完一大袋零食准备慢慢吃", "image_prompt": ""}, ensure_ascii=False)
+
+    result = asyncio.run(
+        diary_flow.generate_ai_diary_detailed(
+            _Bot(),
+            load_prompt=lambda: "你是绪山真寻。",
+            call_ai_api=_call_ai,
+            logger=logger,
+        )
+    )
+
+    assert result["content"] == ""
+    assert result["diagnostic"]["code"] == "semantic_not_grounded"
+    semantic_steps = [item for item in result["diagnostic"]["steps"] if item["key"] == "basic_semantic"]
+    assert semantic_steps and semantic_steps[0]["status"] == "error"
+    assert any(item["label"] == "事件依据" and item["status"] == "error" for item in semantic_steps[0]["details"])
+
+
+def test_generate_ai_diary_detailed_explains_invalid_json(monkeypatch) -> None:  # noqa: ANN001
+    logger = _Logger()
+    monkeypatch.setattr(diary_flow, "get_data_store", lambda: _Store({"recent_contents": []}))
+
+    async def _call_ai(_messages, **_kwargs):  # noqa: ANN001
+        return "这不是 JSON"
+
+    result = asyncio.run(
+        diary_flow.generate_ai_diary_detailed(
+            _Bot(),
+            load_prompt=lambda: "你是绪山真寻。",
+            call_ai_api=_call_ai,
+            logger=logger,
+        )
+    )
+
+    assert result["diagnostic"]["code"] == "invalid_generation_json"
+    assert any(item["key"] == "basic_parse" for item in result["diagnostic"]["steps"])
+
+
 def test_run_tool_loop_text_executes_tool_then_returns_content(monkeypatch) -> None:  # noqa: ANN001
     """工具循环：首轮返回 tool_calls 执行工具，次轮返回最终文本。"""
 
