@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import copy
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
 
 from ._loader import load_personification_module
 
@@ -53,3 +58,57 @@ def test_merge_state_keeps_mood_short_and_does_not_concatenate(monkeypatch) -> N
     assert "但有些" not in merged["mood"]
     assert merged["energy"] == "高"
     assert merged["pending_thoughts"] == [{"thought": "之后看一下日志"}]
+
+
+def test_inner_state_llm_update_does_not_block_state_reads(monkeypatch) -> None:  # noqa: ANN001
+    class _Store:
+        def __init__(self) -> None:
+            self.state = copy.deepcopy(inner_state.DEFAULT_STATE)
+            self.state["updated_at"] = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+            self.lock = asyncio.Lock()
+
+        async def load(self, _name: str):  # noqa: ANN001
+            async with self.lock:
+                return copy.deepcopy(self.state)
+
+        async def mutate(self, _name: str, mutator):  # noqa: ANN001
+            async with self.lock:
+                self.state = mutator(copy.deepcopy(self.state))
+                return copy.deepcopy(self.state)
+
+    class _Caller:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def chat_with_tools(self, **_kwargs):  # noqa: ANN001
+            self.started.set()
+            await self.release.wait()
+            return SimpleNamespace(content=json.dumps({"mood": "无语"}, ensure_ascii=False))
+
+    class _Logger:
+        def warning(self, _message: str) -> None:
+            return None
+
+    async def _run() -> None:
+        store = _Store()
+        caller = _Caller()
+        monkeypatch.setattr(inner_state, "_get_data_store", lambda: store)
+        task = asyncio.create_task(
+            inner_state.update_inner_state_after_chat(
+                Path("."),
+                caller,
+                "刚聊完一轮",
+                {},
+                "none",
+                _Logger(),
+            )
+        )
+        await asyncio.wait_for(caller.started.wait(), timeout=1)
+        loaded = await asyncio.wait_for(store.load("inner_state_v1"), timeout=0.1)
+        assert loaded["mood"] == inner_state.DEFAULT_STATE["mood"]
+        caller.release.set()
+        await asyncio.wait_for(task, timeout=1)
+        assert store.state["mood"] == "无语"
+
+    asyncio.run(_run())

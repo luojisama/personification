@@ -89,6 +89,10 @@ class DataStore:
         async with self._alock(name):
             await asyncio.to_thread(self.save_sync, name, data)
 
+    async def mutate(self, name: str, mutator: Callable[[Any], Any]) -> Any:
+        async with self._alock(name):
+            return await asyncio.to_thread(self.mutate_sync, name, mutator)
+
     async def update(self, name: str, patch: dict[str, Any]) -> dict[str, Any]:
         async with self._alock(name):
             return await asyncio.to_thread(self.update_sync, name, patch)

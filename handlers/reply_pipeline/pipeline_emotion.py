@@ -38,6 +38,7 @@ _EMOTIONAL_SUPPORT_HINT = load_prompt("emotional_support_hint")
 _DEFAULT_SEMANTIC_FRAME_TIMEOUT_SECONDS = 8.0
 _MIN_SEMANTIC_FRAME_TIMEOUT_SECONDS = 1.0
 _MAX_SEMANTIC_FRAME_TIMEOUT_SECONDS = 60.0
+_REPLY_STATE_LOAD_TIMEOUT_SECONDS = 2.0
 
 
 def _record_reply_trace_stage(
@@ -370,11 +371,22 @@ async def prepare_reply_semantics(
     data_dir = get_personification_data_dir(runtime.plugin_config)
     inner_state = dict(DEFAULT_INNER_STATE)
     emotion_state = {}
-    _is_result, _es_result = await asyncio.gather(
-        load_inner_state(data_dir),
-        load_emotion_state(data_dir),
-        return_exceptions=True,
-    )
+    state_load_started_at = time.monotonic()
+    state_load_timed_out = False
+    try:
+        _is_result, _es_result = await asyncio.wait_for(
+            asyncio.gather(
+                load_inner_state(data_dir),
+                load_emotion_state(data_dir),
+                return_exceptions=True,
+            ),
+            timeout=_REPLY_STATE_LOAD_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        state_load_timed_out = True
+        _is_result = asyncio.TimeoutError("inner_state_load_timeout")
+        _es_result = asyncio.TimeoutError("emotion_state_load_timeout")
+    state_load_elapsed_ms = int((time.monotonic() - state_load_started_at) * 1000)
     if isinstance(_is_result, BaseException):
         runtime.logger.debug(f"[emotion] load inner_state failed: {_is_result}")
     else:
@@ -383,6 +395,19 @@ async def prepare_reply_semantics(
         runtime.logger.debug(f"[emotion] load emotion_state failed: {_es_result}")
     else:
         emotion_state = _es_result
+    state_load_failed = state_load_timed_out or isinstance(_is_result, BaseException) or isinstance(_es_result, BaseException)
+    _record_reply_trace_stage(
+        key="reply_state_load",
+        label="回复状态加载",
+        status="warn" if state_load_failed else "ok",
+        detail=(
+            f"elapsed_ms={state_load_elapsed_ms} "
+            f"inner={'fallback' if isinstance(_is_result, BaseException) else 'ok'} "
+            f"emotion={'fallback' if isinstance(_es_result, BaseException) else 'ok'} "
+            f"timeout={str(state_load_timed_out).lower()}"
+        ),
+        hint="状态读取超时后使用默认值继续回复，不等待后台 inner-state LLM" if state_load_failed else "",
+    )
     emotion_memory_hint = render_emotion_memory_hint(
         emotion_state,
         user_id=user_id,

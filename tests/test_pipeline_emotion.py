@@ -206,3 +206,62 @@ def test_turn_plan_timeout_tries_secondary_llm_before_metadata(monkeypatch) -> N
     assert plan.speech_act == "answer"
     assert plan.output_mode == "chat_answer"
     assert getattr(plan, "llm_source", "") == "secondary"
+
+
+def test_prepare_reply_semantics_falls_back_when_state_load_blocks(monkeypatch) -> None:  # noqa: ANN001
+    stages: list[dict[str, object]] = []
+
+    async def _blocked_state_load(_data_dir):  # noqa: ANN001
+        await asyncio.sleep(10)
+        return {}
+
+    async def _emotion_state_load(_data_dir):  # noqa: ANN001
+        return {}
+
+    monkeypatch.setattr(pipeline_emotion, "_REPLY_STATE_LOAD_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(pipeline_emotion, "load_inner_state", _blocked_state_load)
+    monkeypatch.setattr(pipeline_emotion, "load_emotion_state", _emotion_state_load)
+    monkeypatch.setattr(pipeline_emotion, "_record_reply_trace_stage", lambda **kwargs: stages.append(kwargs))
+    monkeypatch.setattr(
+        pipeline_emotion,
+        "get_personification_data_dir",
+        lambda _config: None,
+    )
+
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_turn_planner_enabled=False,
+            personification_turn_planner_shadow_enabled=False,
+        ),
+        logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+        lite_tool_caller=None,
+        agent_tool_caller=None,
+        tool_registry=None,
+        memory_store=None,
+    )
+
+    prepared = asyncio.run(
+        pipeline_emotion.prepare_reply_semantics(
+            runtime=runtime,
+            recent_window=[],
+            group_id="private_1",
+            user_id="1",
+            is_private_session=True,
+            is_random_chat=False,
+            is_direct_mention=False,
+            raw_message_text="你翻译一下",
+            current_agent_message_content="你翻译一下",
+            recent_context_hint="",
+            relationship_hint="",
+            repeat_clusters=[],
+            message_target="bot",
+            solo_speaker_follow=False,
+            has_images=True,
+        )
+    )
+
+    state_stage = next(stage for stage in stages if stage["key"] == "reply_state_load")
+    assert state_stage["status"] == "warn"
+    assert "timeout=true" in str(state_stage["detail"])
+    assert prepared.inner_state == pipeline_emotion.DEFAULT_INNER_STATE
+    assert prepared.message_intent == "banter"
