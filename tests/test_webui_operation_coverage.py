@@ -90,6 +90,39 @@ def test_operation_histories_are_deduplicated_single_open_accordions() -> None:
     assert history_surfaces.count("renderOperationHistory(") >= 6
 
 
+def test_operation_diagnostic_summary_is_compact_and_accessible() -> None:
+    core = (STATIC / "app-core.js").read_text(encoding="utf-8")
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+
+    summary = re.search(r'<summary class="operation-summary">(.+?)</summary>', core, re.DOTALL)
+    assert summary is not None
+    markup = summary.group(1)
+    ordered_tokens = (
+        'class="operation-summary-mark"',
+        'class="operation-summary-copy"',
+        '<code class="operation-code">',
+        'class="operation-chevron"',
+    )
+    positions = [markup.index(token) for token in ordered_tokens]
+    assert positions == sorted(positions)
+    assert "PHASE / " in markup
+
+    assert core.count('role="status"') == 1
+    assert 'id="operation-live-region" class="sr-only" role="status"' in core
+    assert '<div class="operation-diagnostic-body">' in core
+    assert '<code class="operation-full-code">' in core
+
+    code_rule = re.search(r"\.operation-code\s*\{([^}]+)\}", css)
+    assert code_rule is not None
+    assert "white-space:nowrap" in code_rule.group(1)
+    assert "word-break:normal" in code_rule.group(1)
+    assert "text-overflow:ellipsis" in code_rule.group(1)
+    assert ".operation-summary:focus-visible" in css
+    assert "min-height:54px" in css
+    assert "min-height:68px" in css
+    assert ".operation-summary-copy small { display:none; }" not in css
+
+
 def test_navigation_uses_distinct_accessible_svg_icons() -> None:
     core = (STATIC / "app-core.js").read_text(encoding="utf-8")
     auth = (STATIC / "app-auth.js").read_text(encoding="utf-8")

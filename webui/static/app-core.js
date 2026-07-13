@@ -190,6 +190,25 @@ function operationDiagnosticFingerprint(input) {
   return [d.code, d.phase, d.title, d.message, details].map(value => String(value || "")).join("|");
 }
 
+let _operationAnnouncement = "";
+
+function queueOperationAnnouncement(diagnostic) {
+  if (!diagnostic || typeof diagnostic !== "object") return;
+  _operationAnnouncement = [
+    diagnostic.title || (diagnostic.ok === true ? "操作完成" : "操作未完成"),
+    diagnostic.phase ? `阶段 ${diagnostic.phase}` : "",
+    diagnostic.code ? `代码 ${diagnostic.code}` : "",
+  ].filter(Boolean).join("，");
+}
+
+function flushOperationAnnouncement() {
+  if (!_operationAnnouncement) return;
+  const region = document.getElementById("operation-live-region");
+  if (!region) return;
+  region.textContent = _operationAnnouncement;
+  _operationAnnouncement = "";
+}
+
 function renderOperationHistory(inputs, options={}) {
   const seen = new Set();
   const excluded = new Set((options.exclude || []).map(operationDiagnosticFingerprint).filter(Boolean));
@@ -219,9 +238,11 @@ function renderOperationDiagnostic(input, options={}) {
   const stepRows = steps.map((item,index) => `<li class="operation-step ${escapeAttr(item.status||'unknown')}"><span class="operation-step-index">${String(index+1).padStart(2,'0')}</span><div><strong>${escapeHtml(item.label||item.key||'步骤')}</strong>${item.message?`<p>${escapeHtml(item.message)}</p>`:''}${Array.isArray(item.details)&&item.details.length?`<div class="operation-step-details">${item.details.map(child=>`<span>${escapeHtml(child.label||'详情')}：${escapeHtml(_diagnosticValue(child.value))}</span>`).join('')}</div>`:''}</div><em>${escapeHtml(item.status||'unknown')}</em></li>`).join("");
   const trace = d.trace_id ? `<button class="btn small operation-trace-button" data-operation-trace="${escapeAttr(d.trace_id)}">查看 Trace</button>` : "";
   const retryLabel = unknown ? "禁止直接重试" : (d.retryable ? "可以重试" : "不要直接重试");
+  queueOperationAnnouncement(d);
   return `<details class="operation-diagnostic ${tone}" data-operation-group="${escapeAttr(group)}" ${expanded?'open':''}>
-    <summary class="operation-summary"><span class="operation-summary-mark">${renderIcon(unknown?'alert-triangle':ok?'check':'alert-circle','operation-status-icon')}</span><span class="operation-summary-copy"><span class="eyebrow">OPERATION DIAGNOSTIC</span><strong>${escapeHtml(d.title||(ok?'操作完成':'操作未完成'))}</strong><small>${escapeHtml(d.phase||'未标记')}</small></span><span class="operation-code">${escapeHtml(d.code||(ok?'ok':'operation_failed'))}</span><span class="operation-chevron">${renderIcon('chevron-down','ui-icon')}</span></summary>
-    <div class="operation-diagnostic-body" role="status">
+    <summary class="operation-summary"><span class="operation-summary-mark">${renderIcon(unknown?'alert-triangle':ok?'check':'alert-circle','operation-status-icon')}</span><span class="operation-summary-copy"><span class="eyebrow">OPERATION DIAGNOSTIC</span><strong>${escapeHtml(d.title||(ok?'操作完成':'操作未完成'))}</strong><small>PHASE / ${escapeHtml(d.phase||'未标记')}</small></span><code class="operation-code">${escapeHtml(d.code||(ok?'ok':'operation_failed'))}</code><span class="operation-chevron">${renderIcon('chevron-down','ui-icon')}</span></summary>
+    <div class="operation-diagnostic-body">
+      <code class="operation-full-code">${escapeHtml(d.code||(ok?'ok':'operation_failed'))}</code>
       <header><p>${escapeHtml(d.message||'未提供说明')}</p></header>
       <div class="operation-meta"><span>阶段 <strong>${escapeHtml(d.phase||'未标记')}</strong></span><span>重试策略 <strong>${retryLabel}</strong></span>${d.partial?'<span><strong>部分完成</strong></span>':''}${unknown?'<span><strong>远端结果未知</strong></span>':''}</div>
       ${detailRows?`<div class="operation-details">${detailRows}</div>`:''}
@@ -568,6 +589,7 @@ function render() {
   }
   root.innerHTML = renderLayout();
   attachLayout();
+  flushOperationAnnouncement();
   restoreScrollState();
   if (focusSnap) {
     const next = document.getElementById(focusSnap.id);
@@ -629,6 +651,7 @@ function renderLayout() {
     ? `<div class="loading-hint"><span class="spinner"></span><span>${escapeHtml(state.loadingMessage || "正在加载页面...")}</span></div>`
     : "";
   return `${state.loading ? '<div class="progress-bar"></div>' : ''}
+    <div id="operation-live-region" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     <div class="layout">
     ${state.mobileNavOpen ? '<div class="scrim" onclick="toggleMobileNav()"></div>' : ''}
     <aside id="console-sidebar" class="${state.mobileNavOpen?'open':''}">
