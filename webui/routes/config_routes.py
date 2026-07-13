@@ -176,7 +176,9 @@ async def _reload_runtime_step(runtime: Any, *, enabled: bool = True) -> tuple[A
             "当前进程配置未同步，因此未重载 runtime services。",
         ), ""
     bundle = getattr(runtime, "runtime_bundle", None)
-    reload_services = getattr(bundle, "reload_runtime_services", None) if bundle is not None else None
+    reload_services = getattr(bundle, "reload_all_runtime_services", None) if bundle is not None else None
+    if not callable(reload_services) and bundle is not None:
+        reload_services = getattr(bundle, "reload_runtime_services", None)
     if not callable(reload_services):
         return step(
             "runtime_reload",

@@ -90,6 +90,18 @@ class ToolRegistry:
             self._version += 1
             return self._version
 
+    def remove_names(self, names: set[str]) -> int:
+        targets = {str(name) for name in names if str(name)}
+        if not targets:
+            return self._version
+        with self._lock:
+            updated = {name: tool for name, tool in self._tools.items() if name not in targets}
+            if len(updated) == len(self._tools):
+                return self._version
+            self._tools = updated
+            self._version += 1
+            return self._version
+
     def active(self) -> List[AgentTool]:
         active_tools: List[AgentTool] = []
         for tool in self.all():

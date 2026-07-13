@@ -652,6 +652,13 @@ async def _load_custom_skills() -> None:
         )
     except Exception as exc:
         logger.warning(f"[tool_health] 启动工具巡检失败：{exc}")
+    try:
+        from .core.mcp_management import get_mcp_manager
+        from .webui.app import get_runtime_context
+
+        await get_mcp_manager(get_runtime_context()).reload()
+    except Exception as exc:
+        logger.warning(f"[mcp] 托管安装恢复失败：{type(exc).__name__}")
 
 
 @get_driver().on_startup
@@ -770,6 +777,9 @@ async def _close_personification_runtime() -> None:
     from .core.qzone_auth import qzone_login_manager
 
     await qzone_login_manager.shutdown()
+    from .core.mcp_management import shutdown_mcp_managers
+
+    await shutdown_mcp_managers()
     await stop_plugin_knowledge_builder(
         logger=logger,
         knowledge_store=(

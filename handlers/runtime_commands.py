@@ -1,3 +1,4 @@
+import inspect
 import json
 import re
 from pathlib import Path
@@ -223,7 +224,7 @@ async def handle_reload_config_command(
     *,
     plugin_config: Any,
     load_plugin_runtime_config: Callable[[], None] | None,
-    reload_runtime_services: Callable[[], None] | None,
+    reload_runtime_services: Callable[[], Any] | None,
     logger: Any,
 ) -> None:
     if load_plugin_runtime_config is None:
@@ -231,7 +232,9 @@ async def handle_reload_config_command(
     try:
         load_plugin_runtime_config()
         if reload_runtime_services is not None:
-            reload_runtime_services()
+            result = reload_runtime_services()
+            if inspect.isawaitable(result):
+                await result
     except Exception as exc:
         logger.warning(f"personification: reload config failed: {exc}")
         await matcher.finish(f"重载拟人配置失败：{exc}")

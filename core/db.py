@@ -439,6 +439,54 @@ DDL_STATEMENTS = (
     CREATE INDEX IF NOT EXISTS idx_tool_creator_events_task
         ON tool_creator_events(task_id, seq)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS mcp_installations (
+        installation_id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        source_url TEXT NOT NULL,
+        server_name TEXT NOT NULL,
+        server_title TEXT NOT NULL DEFAULT '',
+        server_version TEXT NOT NULL,
+        package_type TEXT NOT NULL,
+        package_identifier TEXT NOT NULL,
+        command TEXT NOT NULL,
+        args_json TEXT NOT NULL DEFAULT '[]',
+        env_json TEXT NOT NULL DEFAULT '{}',
+        secret_names_json TEXT NOT NULL DEFAULT '[]',
+        name_prefix TEXT NOT NULL,
+        desired_enabled INTEGER NOT NULL DEFAULT 1,
+        observed_status TEXT NOT NULL DEFAULT 'stopped',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        last_error TEXT NOT NULL DEFAULT '',
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_installations_identity
+        ON mcp_installations(source_url, server_name, server_version, package_identifier)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS mcp_tool_policies (
+        installation_id TEXT NOT NULL,
+        remote_name TEXT NOT NULL,
+        registered_name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        parameters_json TEXT NOT NULL DEFAULT '{}',
+        enabled INTEGER NOT NULL DEFAULT 0,
+        risk_level TEXT NOT NULL DEFAULT 'admin',
+        side_effect TEXT NOT NULL DEFAULT 'unknown',
+        publisher_read_only INTEGER NOT NULL DEFAULT 0,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY (installation_id, remote_name),
+        FOREIGN KEY (installation_id) REFERENCES mcp_installations(installation_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_tool_registered_name
+        ON mcp_tool_policies(registered_name)
+    """,
 )
 
 

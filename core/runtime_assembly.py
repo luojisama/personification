@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Callable, Dict
 
 from ..flows import FlowSetupDeps
@@ -151,6 +152,17 @@ class PluginRuntimeBundle:
     qzone_generate_post: Any = None
     get_knowledge_build_task: Any = None
     set_knowledge_build_task: Any = None
+
+    async def reload_all_runtime_services(self) -> dict[str, Any]:
+        from ..skill_runtime.reload import reload_all_runtime_services
+
+        runtime = SimpleNamespace(
+            plugin_config=self.plugin_config,
+            logger=self.logger,
+            get_bots=self.get_bots,
+            runtime_bundle=self,
+        )
+        return await reload_all_runtime_services(runtime)
 
     def make_flow_setup_deps(self) -> FlowSetupDeps:
         return FlowSetupDeps(
@@ -440,7 +452,7 @@ class PluginRuntimeBundle:
             handle_global_switch_command=handle_global_switch_command,
             handle_tts_global_switch_command=handle_tts_global_switch_command,
             load_plugin_runtime_config=self.load_plugin_runtime_config,
-            reload_runtime_services=self.reload_runtime_services,
+            reload_runtime_services=self.reload_all_runtime_services,
             apply_web_search_switch=apply_web_search_switch,
             apply_proactive_switch=apply_proactive_switch,
             apply_global_switch=apply_global_switch,

@@ -9,10 +9,6 @@ from typing import Any
 import yaml
 
 from ..agent.tool_registry import AgentTool, ToolRegistry
-from ..agent.runtime.tool_loop import (
-    append_assistant_tool_calls_message,
-    append_tool_result_message,
-)
 from ..skill_runtime.runtime_api import SkillRuntime
 
 
@@ -129,6 +125,11 @@ def build_generated_tool(
     execution = manifest["execution"]
 
     async def _handler(**kwargs: Any) -> str:
+        from ..agent.runtime.tool_loop import (
+            append_assistant_tool_calls_message,
+            append_tool_result_message,
+        )
+
         caller = runtime.tool_caller
         if caller is None:
             return "generated skill model caller is unavailable"

@@ -634,8 +634,15 @@ def build_plugin_runtime(
         )
         registry_version = None
         candidate_registry = None
+        extension_tools: list[Any] = []
         if tool_registry is not None:
-            registry_version = tool_registry.version
+            registry_version, registry_snapshot = tool_registry.snapshot()
+            extension_source_kinds = {"generated", "local", "mcp", "mcp_managed", "remote"}
+            extension_tools = [
+                tool
+                for tool in registry_snapshot.values()
+                if str((tool.metadata or {}).get("source_kind") or "").strip().lower() in extension_source_kinds
+            ]
             candidate_registry = build_agent_tool_registry(
                 plugin_config=plugin_config,
                 logger=logger,
@@ -652,6 +659,9 @@ def build_plugin_runtime(
                 memory_curator=memory_curator,
                 background_intelligence=background_intelligence,
             )
+            for tool in extension_tools:
+                if candidate_registry.get(tool.name) is None:
+                    candidate_registry.register(tool)
         yaml_response_processor = build_yaml_response_processor(
             get_current_time=get_current_local_time,
             format_time_context=format_time_context,

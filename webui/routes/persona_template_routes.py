@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import html
 import json
 import re
@@ -768,7 +769,7 @@ def _template_apply_target(runtime: Any, result: dict[str, Any]) -> Path:
     return Path(get_data_dir(plugin_config)) / "persona_templates" / f"{work}_{character}_applied.yaml"
 
 
-def _apply_persona_template(runtime: Any, result: dict[str, Any]) -> dict[str, Any]:
+async def _apply_persona_template(runtime: Any, result: dict[str, Any]) -> dict[str, Any]:
     template = str(result.get("template") or "").strip()
     if not template:
         validation = {
@@ -801,10 +802,14 @@ def _apply_persona_template(runtime: Any, result: dict[str, Any]) -> dict[str, A
             save_config()
         except Exception as exc:
             raise _PersonaTemplateStageError("config_save", exc, partial=True) from exc
-    reload_services = getattr(bundle, "reload_runtime_services", None) if bundle is not None else None
+    reload_services = getattr(bundle, "reload_all_runtime_services", None) if bundle is not None else None
+    if not callable(reload_services) and bundle is not None:
+        reload_services = getattr(bundle, "reload_runtime_services", None)
     if callable(reload_services):
         try:
-            reload_services()
+            reload_result = reload_services()
+            if inspect.isawaitable(reload_result):
+                await reload_result
         except Exception as exc:
             raise _PersonaTemplateStageError("runtime_reload", exc, partial=True) from exc
     return {
@@ -817,7 +822,13 @@ def _apply_persona_template(runtime: Any, result: dict[str, Any]) -> dict[str, A
 def _template_apply_success_diagnostic(runtime: Any) -> dict[str, Any]:
     bundle = _runtime_bundle(runtime)
     has_config_save = callable(getattr(bundle, "save_plugin_runtime_config", None)) if bundle is not None else False
-    has_reload = callable(getattr(bundle, "reload_runtime_services", None)) if bundle is not None else False
+    has_reload = bool(
+        bundle is not None
+        and (
+            callable(getattr(bundle, "reload_all_runtime_services", None))
+            or callable(getattr(bundle, "reload_runtime_services", None))
+        )
+    )
     return operation_diagnostic(
         ok=True,
         code="persona_template_applied",
@@ -3441,7 +3452,7 @@ def build_persona_template_router(*, runtime) -> APIRouter:
             )
             raise HTTPException(status_code=400, detail=failure)
         try:
-            applied = _apply_persona_template(runtime, result)
+            applied = await _apply_persona_template(runtime, result)
         except Exception as exc:
             stage_error = (
                 exc

@@ -208,6 +208,9 @@ class Config(BaseModel):
     personification_skill_update_interval: int = 3600
     personification_skill_default_timeout: int = 15
     personification_skill_mcp_timeout: int = 20
+    personification_mcp_registry_sources: List[Any] = []
+    personification_mcp_registry_timeout: int = 20
+    personification_mcp_secret_file: str = ""
     personification_skill_allow_unsafe_external: bool = False
     personification_skill_require_admin_review: bool = True
     personification_use_skillpacks: bool = False

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from itertools import count
@@ -15,6 +16,13 @@ _REGISTERED_MCP_TOOLS: dict[str, dict[str, Any]] = {}
 
 class McpProtocolError(RuntimeError):
     pass
+
+
+def _bounded_tool_result(value: str, *, max_chars: int = 131072) -> str:
+    text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n[truncated]"
 
 
 class McpStdioClient:
@@ -35,30 +43,56 @@ class McpStdioClient:
         self._seq = count(1)
         self._proc: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task[Any] | None = None
+        self._request_lock = asyncio.Lock()
+        self.protocol_version = "2025-06-18"
 
     async def __aenter__(self) -> "McpStdioClient":
-        self._proc = await asyncio.create_subprocess_exec(
-            self.command,
-            *self.args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self.cwd,
-            env=self.env,
-        )
-        self._stderr_task = asyncio.create_task(self._drain_stderr())
-        await self.initialize()
-        return self
+        try:
+            self._proc = await asyncio.create_subprocess_exec(
+                self.command,
+                *self.args,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.cwd,
+                env=self.env,
+                limit=4 * 1024 * 1024,
+            )
+            self._stderr_task = asyncio.create_task(self._drain_stderr())
+            await self.initialize()
+            return self
+        except BaseException:
+            await self._close()
+            raise
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        if self._proc is not None and self._proc.returncode is None:
-            self._proc.terminate()
+        await self._close()
+
+    async def _close(self) -> None:
+        process = self._proc
+        self._proc = None
+        if process is not None and process.stdin is not None:
+            with contextlib.suppress(Exception):
+                process.stdin.close()
+        if process is not None and process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.terminate()
             try:
-                await asyncio.wait_for(self._proc.wait(), timeout=2)
-            except Exception:
-                self._proc.kill()
-        if self._stderr_task is not None:
-            self._stderr_task.cancel()
+                await asyncio.wait_for(process.wait(), timeout=2)
+            except (TimeoutError, asyncio.TimeoutError):
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                with contextlib.suppress(Exception):
+                    await process.wait()
+        elif process is not None:
+            with contextlib.suppress(Exception):
+                await process.wait()
+        stderr_task = self._stderr_task
+        self._stderr_task = None
+        if stderr_task is not None:
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stderr_task
 
     async def _drain_stderr(self) -> None:
         if self._proc is None or self._proc.stderr is None:
@@ -71,36 +105,36 @@ class McpStdioClient:
     async def _write_message(self, payload: dict[str, Any]) -> None:
         if self._proc is None or self._proc.stdin is None:
             raise McpProtocolError("MCP process is not ready")
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-        self._proc.stdin.write(header + body)
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self._proc.stdin.write(body + b"\n")
         await self._proc.stdin.drain()
 
     async def _read_message(self) -> dict[str, Any]:
         if self._proc is None or self._proc.stdout is None:
             raise McpProtocolError("MCP process is not ready")
 
-        headers: dict[str, str] = {}
         while True:
             line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=self.timeout)
             if not line:
                 raise McpProtocolError("MCP server closed stdout")
             decoded = line.decode("utf-8", errors="replace").strip()
             if not decoded:
-                break
-            if ":" in decoded:
-                key, value = decoded.split(":", 1)
-                headers[key.strip().lower()] = value.strip()
-        length = int(headers.get("content-length") or 0)
-        if length <= 0:
-            raise McpProtocolError("Missing Content-Length")
-        body = await asyncio.wait_for(self._proc.stdout.readexactly(length), timeout=self.timeout)
-        parsed = json.loads(body.decode("utf-8", errors="replace"))
-        if not isinstance(parsed, dict):
-            raise McpProtocolError("Invalid MCP message payload")
-        return parsed
+                continue
+            try:
+                parsed = json.loads(decoded)
+            except Exception as exc:
+                raise McpProtocolError("Invalid newline-delimited MCP message") from exc
+            if not isinstance(parsed, dict):
+                raise McpProtocolError("Invalid MCP message payload")
+            if parsed.get("jsonrpc") != "2.0":
+                raise McpProtocolError("Invalid MCP JSON-RPC version")
+            return parsed
 
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        async with self._request_lock:
+            return await asyncio.wait_for(self._request_unlocked(method, params), timeout=self.timeout)
+
+    async def _request_unlocked(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
         request_id = next(self._seq)
         await self._write_message(
             {
@@ -112,10 +146,19 @@ class McpStdioClient:
         )
         while True:
             message = await self._read_message()
-            if message.get("id") != request_id:
+            response_id = message.get("id")
+            if type(response_id) is not int or response_id != request_id:
+                if response_id is not None and message.get("method"):
+                    await self._write_message(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": response_id,
+                            "error": {"code": -32601, "message": "Client capability not available"},
+                        }
+                    )
                 continue
             if "error" in message:
-                raise McpProtocolError(str(message.get("error")))
+                raise McpProtocolError("MCP server returned a JSON-RPC error")
             result = message.get("result")
             return result if isinstance(result, dict) else {}
 
@@ -129,10 +172,10 @@ class McpStdioClient:
         )
 
     async def initialize(self) -> None:
-        await self.request(
+        result = await self.request(
             "initialize",
             {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": self.protocol_version,
                 "capabilities": {},
                 "clientInfo": {
                     "name": "personification-skill-loader",
@@ -140,12 +183,33 @@ class McpStdioClient:
                 },
             },
         )
+        negotiated = str(result.get("protocolVersion") or "").strip()
+        if negotiated:
+            self.protocol_version = negotiated
         await self.notify("notifications/initialized", {})
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        result = await self.request("tools/list", {})
-        tools = result.get("tools")
-        return tools if isinstance(tools, list) else []
+        return await asyncio.wait_for(self._list_tools_unlocked(), timeout=self.timeout)
+
+    async def _list_tools_unlocked(self) -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = []
+        cursor = ""
+        seen_cursors: set[str] = set()
+        for _ in range(20):
+            params = {"cursor": cursor} if cursor else {}
+            result = await self.request("tools/list", params)
+            page = result.get("tools")
+            if isinstance(page, list):
+                tools.extend(item for item in page if isinstance(item, dict))
+            cursor = str(result.get("nextCursor") or "").strip()
+            if not cursor:
+                break
+            if cursor in seen_cursors:
+                raise McpProtocolError("MCP tools/list returned a repeated cursor")
+            seen_cursors.add(cursor)
+            if len(tools) > 1000:
+                raise McpProtocolError("MCP server exposed too many tools")
+        return tools
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         result = await self.request(
@@ -155,6 +219,8 @@ class McpStdioClient:
                 "arguments": arguments,
             },
         )
+        if result.get("isError") is True:
+            raise McpProtocolError(f"MCP tool execution failed: {name}")
         content = result.get("content")
         if isinstance(content, list):
             texts: list[str] = []
@@ -167,12 +233,12 @@ class McpStdioClient:
                 elif item.get("type") == "text" and item.get("content") is not None:
                     texts.append(str(item.get("content")))
             if texts:
-                return "\n".join(texts)
+                return _bounded_tool_result("\n".join(texts))
         if result.get("structuredContent") is not None:
-            return json.dumps(result["structuredContent"], ensure_ascii=False)
+            return _bounded_tool_result(json.dumps(result["structuredContent"], ensure_ascii=False))
         if result.get("content") is not None:
-            return json.dumps(result["content"], ensure_ascii=False)
-        return json.dumps(result, ensure_ascii=False)
+            return _bounded_tool_result(json.dumps(result["content"], ensure_ascii=False))
+        return _bounded_tool_result(json.dumps(result, ensure_ascii=False))
 
 
 def normalize_mcp_config(
