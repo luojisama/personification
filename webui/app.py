@@ -28,6 +28,7 @@ from .routes.qzone_routes import build_qzone_router
 from .routes.skill_routes import build_skill_router
 from .routes.sticker_routes import build_sticker_router
 from .routes.test_routes import build_test_router
+from .routes.tool_creator_routes import build_tool_creator_router
 from .routes.agent_status_routes import build_agent_status_router
 from .routes.data_transfer_routes import build_data_transfer_router
 
@@ -102,6 +103,7 @@ def build_router() -> APIRouter:
     router.include_router(build_qq_router(runtime=runtime))
     router.include_router(build_agent_status_router(runtime=runtime))
     router.include_router(build_data_transfer_router(runtime=runtime))
+    router.include_router(build_tool_creator_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:

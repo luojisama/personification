@@ -399,6 +399,46 @@ DDL_STATEMENTS = (
         detail TEXT NOT NULL DEFAULT '{}'
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS tool_creator_tasks (
+        task_id TEXT PRIMARY KEY,
+        created_by TEXT NOT NULL,
+        request_text TEXT NOT NULL,
+        suggested_name TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        progress INTEGER NOT NULL DEFAULT 0,
+        version INTEGER NOT NULL DEFAULT 1,
+        context_json TEXT NOT NULL DEFAULT '{}',
+        question_json TEXT NOT NULL DEFAULT '{}',
+        artifact_digest TEXT NOT NULL DEFAULT '',
+        artifact_path TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        lease_until REAL NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        completed_at REAL NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_tool_creator_tasks_status
+        ON tool_creator_tasks(status, updated_at DESC)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS tool_creator_events (
+        task_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at REAL NOT NULL,
+        PRIMARY KEY (task_id, seq)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_tool_creator_events_task
+        ON tool_creator_events(task_id, seq)
+    """,
 )
 
 
