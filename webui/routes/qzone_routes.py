@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import time
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
@@ -159,7 +158,7 @@ def _build_status(runtime) -> dict[str, Any]:
     proactive_enabled = bool(getattr(cfg, "personification_qzone_proactive_enabled", False))
     social_enabled = bool(getattr(cfg, "personification_qzone_social_enabled", False))
     inbound_enabled = bool(getattr(cfg, "personification_qzone_inbound_enabled", False))
-    monthly_limit = int(getattr(cfg, "personification_qzone_monthly_limit", 30) or 30)
+    monthly_limit = int(getattr(cfg, "personification_qzone_monthly_limit", 30))
     min_interval_hours = float(getattr(cfg, "personification_qzone_min_interval_hours", 12.0) or 0)
     check_interval = int(getattr(cfg, "personification_qzone_check_interval", 60) or 60)
     quiet_start = int(getattr(cfg, "personification_qzone_quiet_hour_start", 0) or 0)
@@ -283,7 +282,19 @@ def build_qzone_router(*, runtime) -> APIRouter:
         from ...jobs.periodic_jobs import build_qzone_quota, coordinated_qzone_publish
 
         logger = getattr(runtime, "logger", None)
-        operation_id = str(body.get("operation_id") or uuid.uuid4().hex)[:96]
+        operation_id = str(body.get("operation_id") or "").strip()[:96]
+        if not operation_id:
+            report = diagnostic(
+                ok=False,
+                code="qzone_operation_id_missing",
+                phase="input_validation",
+                title="缺少 Operation ID",
+                message="发布请求必须携带稳定的 Operation ID。",
+                steps=(step("operation_id", "校验 Operation ID", "error", "请求未提供 Operation ID。"),),
+                suggestion="由调用端生成一次 Operation ID，并在同一次操作的查询或重试中保持不变。",
+                retryable=False,
+            )
+            raise _http_diagnostic(400, report)
         try:
             generate = _bundle_attr(runtime, "qzone_generate_post")
             publish = _bundle_attr(runtime, "publish_qzone_shuo")
@@ -406,8 +417,9 @@ def build_qzone_router(*, runtime) -> APIRouter:
             published = await coordinated_qzone_publish(
                 operation_id=operation_id,
                 content=content,
+                bot_id=str(getattr(bot, "self_id", "") or ""),
                 now=get_configured_now(),
-                monthly_limit=int(getattr(cfg, "personification_qzone_monthly_limit", 30) or 30),
+                monthly_limit=int(getattr(cfg, "personification_qzone_monthly_limit", 30)),
                 min_interval_hours=float(getattr(cfg, "personification_qzone_min_interval_hours", 12.0) or 0),
                 kind="post",
                 publish=lambda: publish(content, getattr(bot, "self_id", "")),
@@ -444,7 +456,8 @@ def build_qzone_router(*, runtime) -> APIRouter:
         if not published.get("success"):
             raw_publish_status = str(published.get("status") or "failed")
             publish_status = raw_publish_status if raw_publish_status in {
-                "failed", "released", "reserved", "duplicate_reserved", "outcome_unknown", "unknown"
+                "definite_failure", "reserved", "dispatching", "outcome_unknown", "unknown",
+                "quota_blocked", "interval_blocked", "payload_conflict", "unresolved_payload"
             } else "failed"
             auth_status = get_qzone_auth_status()
             outcome_unknown = publish_status in {"outcome_unknown", "unknown"}
@@ -454,7 +467,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 message = "发布请求可能已经到达腾讯，但本次没有得到明确成功或失败结果。"
                 suggestion = "先打开 QQ 空间检查是否已经发布，禁止直接再次点击发布，以免产生重复说说。"
                 retryable = False
-            elif publish_status in {"reserved", "duplicate_reserved"}:
+            elif publish_status in {"reserved", "dispatching"}:
                 code = "qzone_publish_in_progress"
                 title = "相同发布请求仍在处理中"
                 message = "该 Operation ID 已有一个未完成的发布请求，当前没有再次向 QZone 外发。"
@@ -519,12 +532,12 @@ def build_qzone_router(*, runtime) -> APIRouter:
 
         state = published.get("state") or {}
         mark_published = getattr(generate, "mark_published", None)
-        if callable(mark_published):
+        if published.get("newly_committed") and callable(mark_published):
             mark_published(content)
         quota = build_qzone_quota(
             state=state,
             now=get_configured_now(),
-            monthly_limit=int(getattr(cfg, "personification_qzone_monthly_limit", 30) or 30),
+            monthly_limit=int(getattr(cfg, "personification_qzone_monthly_limit", 30)),
             min_interval_hours=float(getattr(cfg, "personification_qzone_min_interval_hours", 12.0) or 0),
         )
         if logger is not None:

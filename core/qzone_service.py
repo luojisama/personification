@@ -6,6 +6,7 @@ import json
 import re
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -27,6 +28,25 @@ _AUTH_STATE: dict[str, Any] = {
 _AUTH_REFRESH_CACHE_SECONDS = 300
 _AUTH_FAILURE_COOLDOWN_SECONDS = 15 * 60
 _COOKIE_FILE_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class QzoneWriteResult:
+    status: str
+    message: str
+    result_code: str = ""
+    remote_id: str = ""
+    remote_time: float = 0.0
+    detail: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def success(self) -> bool:
+        return self.status == "succeeded"
+
+    def __iter__(self):
+        # Existing command/tests may still unpack ``(ok, message)``.
+        yield self.success
+        yield self.message
 
 
 def get_qzone_auth_status() -> dict[str, Any]:
@@ -271,6 +291,9 @@ def _resolve_qzone_context(plugin_config: Any, bot_id: str) -> tuple[bool, str, 
     p_skey = pskey_match.group(1)
     uin_match = re.search(r"uin=[o0]*(\d+)", cookie)
     qq = uin_match.group(1) if uin_match else str(bot_id)
+    expected_bot_id = str(bot_id or "").strip()
+    if expected_bot_id and qq != expected_bot_id:
+        return False, "Qzone Cookie 与目标 Bot 不匹配", {}
     formatted_cookie = _format_cookie_for_qzone(cookie, qq, p_skey)
     return True, "", {
         "cookie": cookie,
@@ -719,6 +742,124 @@ def _qzone_payload_success(payload: dict[str, Any], raw_text: str = "") -> tuple
     return True, "ok"
 
 
+def _qzone_payload_result_code(payload: dict[str, Any]) -> str:
+    for key in ("code", "ret", "subcode"):
+        if key in payload:
+            return f"{key}_{payload.get(key)}"[:64]
+    return ""
+
+
+def _qzone_payload_remote_result(payload: dict[str, Any]) -> tuple[str, float]:
+    nested = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    remote_id = str(
+        payload.get("tid")
+        or payload.get("id")
+        or payload.get("feed_id")
+        or nested.get("tid")
+        or nested.get("id")
+        or nested.get("feed_id")
+        or ""
+    ).strip()
+    raw_time = (
+        payload.get("created_time")
+        or payload.get("abstime")
+        or payload.get("time")
+        or nested.get("created_time")
+        or nested.get("abstime")
+        or nested.get("time")
+        or 0
+    )
+    try:
+        remote_time = float(raw_time or 0)
+    except Exception:
+        remote_time = 0.0
+    return remote_id[:160], remote_time
+
+
+def _safe_qzone_payload_message(payload: dict[str, Any], default: str) -> str:
+    message = str(payload.get("message") or payload.get("msg") or "").strip()
+    if not message:
+        return default
+    message = re.sub(
+        r"(?i)(p_skey|skey|cookie|token|secret)\s*[=:]\s*[^\s;,]+",
+        r"\1=***",
+        message,
+    )
+    return message[:180]
+
+
+def _classify_qzone_write_response(response: Any, *, action: str) -> QzoneWriteResult:
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code in {408, 409, 425, 429} or status_code >= 500:
+        return QzoneWriteResult(
+            "unknown",
+            f"outcome_unknown: {action}响应状态无法确认",
+            f"http_{status_code}",
+        )
+    if status_code < 200 or status_code >= 300:
+        return QzoneWriteResult(
+            "definite_failure",
+            f"{action}失败，状态码：{status_code}",
+            f"http_{status_code}",
+        )
+    try:
+        raw_text = str(response.text or "")
+    except Exception as exc:
+        return QzoneWriteResult(
+            "unknown",
+            f"outcome_unknown: {action}响应读取失败",
+            "response_read_failed",
+            detail={"exception_type": type(exc).__name__},
+        )
+    if not raw_text.strip():
+        return QzoneWriteResult("unknown", f"outcome_unknown: {action}返回为空", "empty_2xx")
+    if _looks_like_qzone_auth_page(raw_text):
+        message = "Qzone 返回了登录页面或验证码，请刷新 Cookie 后核对实际结果"
+        _set_qzone_auth_failure(message, auth_failure=True)
+        return QzoneWriteResult("unknown", f"outcome_unknown: {message}", "auth_page_2xx")
+    payload = _parse_qzone_jsonp(raw_text)
+    if not payload:
+        return QzoneWriteResult("unknown", f"outcome_unknown: {action}返回无法解析", "unparseable_2xx")
+    success, payload_message = _qzone_payload_success(payload, raw_text)
+    result_code = _qzone_payload_result_code(payload)
+    if not success:
+        return QzoneWriteResult(
+            "definite_failure",
+            f"{action}失败：{_safe_qzone_payload_message(payload, '腾讯明确返回失败')}",
+            result_code or "explicit_failure",
+        )
+    if not result_code:
+        return QzoneWriteResult(
+            "unknown",
+            f"outcome_unknown: {action}返回缺少明确结果码",
+            "missing_result_code_2xx",
+        )
+    for key in ("code", "ret", "subcode"):
+        if key not in payload:
+            continue
+        try:
+            if int(payload.get(key)) != 0:
+                return QzoneWriteResult(
+                    "definite_failure",
+                    f"{action}失败：{_safe_qzone_payload_message(payload, '腾讯明确返回失败')}",
+                    result_code,
+                )
+        except Exception:
+            return QzoneWriteResult(
+                "unknown",
+                f"outcome_unknown: {action}返回了无效结果码",
+                "invalid_result_code_2xx",
+            )
+    remote_id, remote_time = _qzone_payload_remote_result(payload)
+    return QzoneWriteResult(
+        "succeeded",
+        "ok",
+        result_code,
+        remote_id=remote_id,
+        remote_time=remote_time,
+    )
+
+
 class QzoneSocialService:
     """Read and react to Qzone feeds through the same cookie used by shuoshuo publishing."""
 
@@ -821,10 +962,10 @@ class QzoneSocialService:
         feed: dict[str, Any],
         bot_id: str,
         content: str = "",
-    ) -> tuple[bool, str]:
+    ) -> QzoneWriteResult:
         ok, msg, ctx = self._context(bot_id)
         if not ok:
-            return False, msg
+            return QzoneWriteResult("definite_failure", msg, "preflight_context")
         feed_identity = _qzone_feed_reply_identity(feed)
         owner = feed_identity["owner"]
         feed_id = feed_identity["feed_id"]
@@ -832,7 +973,7 @@ class QzoneSocialService:
         appid = feed_identity["appid"] or "311"
         unikey = str(feed.get("unikey", "") or feed.get("curkey", "") or "").strip()
         if not owner or not feed_id or not topic_id:
-            return False, "动态缺少转发所需字段"
+            return QzoneWriteResult("definite_failure", "动态缺少转发所需字段", "preflight_feed_identity")
         text = _clean_qzone_text(content)[:120]
         full_cookie = str(ctx.get("cookie", "") or ctx.get("formatted_cookie", ""))
         headers = _qzone_headers(ctx, referer_uin=owner)
@@ -885,23 +1026,20 @@ class QzoneSocialService:
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     resp = await client.post(url, params={"g_tk": str(ctx["g_tk"])}, data=data, headers=headers)
             except Exception as exc:
-                return False, f"outcome_unknown: 转发请求异常：{type(exc).__name__}"
-            if resp.status_code != 200:
-                last_msg = f"转发失败，状态码：{resp.status_code}"
-                if attempt_index == 0 and resp.status_code in {404, 405}:
+                return QzoneWriteResult(
+                    "unknown",
+                    f"outcome_unknown: 转发请求异常：{type(exc).__name__}",
+                    "dispatch_exception",
+                    detail={"exception_type": type(exc).__name__},
+                )
+            classified = _classify_qzone_write_response(resp, action="转发")
+            if classified.status != "succeeded":
+                last_msg = classified.message
+                if attempt_index == 0 and classified.result_code in {"http_404", "http_405"}:
                     continue
-                if resp.status_code >= 500:
-                    return False, f"outcome_unknown: {last_msg}"
-                return False, last_msg
-            payload = _parse_qzone_jsonp(resp.text)
-            success, payload_msg = _qzone_payload_success(payload, resp.text)
-            if success:
-                return True, "ok"
-            last_msg = payload_msg
-            if "无法解析" in payload_msg:
-                return False, f"outcome_unknown: {payload_msg}"
-            return False, payload_msg
-        return False, last_msg or "转发失败"
+                return classified
+            return classified
+        return QzoneWriteResult("definite_failure", last_msg or "转发失败", "fallback_exhausted")
 
     async def _reply_comment_sub(
         self,
@@ -1186,7 +1324,7 @@ async def _upload_qzone_image(
 def build_qzone_services(
     plugin_config: Any,
     logger: Any,
-) -> tuple[bool, Callable[[str, str], Awaitable[tuple[bool, str]]], Callable[[Any], Awaitable[tuple[bool, str]]]]:
+) -> tuple[bool, Callable[[str, str], Awaitable[QzoneWriteResult]], Callable[[Any], Awaitable[tuple[bool, str]]]]:
     qzone_enabled = bool(getattr(plugin_config, "personification_qzone_enabled", False))
     async def update_qzone_cookie(bot: Any, *, force: bool = False) -> tuple[bool, str]:
         """自动获取并刷新 Qzone Cookie，供定时任务或手动命令调用。"""
@@ -1227,13 +1365,14 @@ def build_qzone_services(
             with _AUTH_STATE_LOCK:
                 _AUTH_STATE["refreshing"] = False
 
-    async def publish_qzone_shuo(content: str, bot_id: str) -> tuple[bool, str]:
+    async def publish_qzone_shuo(content: str, bot_id: str) -> QzoneWriteResult:
         if not qzone_enabled:
-            return False, "Qzone 功能未启用"
+            return QzoneWriteResult("definite_failure", "Qzone 功能未启用", "preflight_disabled")
         cookie = _get_cookie_from_config(plugin_config)
         if not cookie:
-            return False, "未配置 Qzone Cookie"
+            return QzoneWriteResult("definite_failure", "未配置 Qzone Cookie", "preflight_cookie_missing")
 
+        post_started = False
         try:
             content_without_image_markers, image_payloads = _extract_image_b64_markers(str(content or ""))
             cleaned_content = re.sub(
@@ -1242,15 +1381,30 @@ def build_qzone_services(
                 content_without_image_markers,
             ).strip()
             if not cleaned_content:
-                return False, "说说内容不能为空（已过滤图片和表情）"
+                return QzoneWriteResult(
+                    "definite_failure",
+                    "说说内容不能为空（已过滤图片和表情）",
+                    "preflight_content_empty",
+                )
 
             pskey_match = re.search(r"p_skey=([^; ]+)", cookie)
             if not pskey_match:
-                return False, "Cookie 缺少 p_skey 字段"
+                return QzoneWriteResult(
+                    "definite_failure",
+                    "Cookie 缺少 p_skey 字段",
+                    "preflight_p_skey_missing",
+                )
             p_skey = pskey_match.group(1)
 
             uin_match = re.search(r"uin=[o0]*(\d+)", cookie)
             qq = uin_match.group(1) if uin_match else str(bot_id)
+            expected_bot_id = str(bot_id or "").strip()
+            if expected_bot_id and qq != expected_bot_id:
+                return QzoneWriteResult(
+                    "definite_failure",
+                    "Qzone Cookie 与目标 Bot 不匹配",
+                    "preflight_account_mismatch",
+                )
 
             formatted_cookie = f"uin=o{qq}; p_skey={p_skey};"
             if "skey=" in cookie:
@@ -1301,23 +1455,32 @@ def build_qzone_services(
             }
 
             async with httpx.AsyncClient(timeout=10.0) as client:
+                post_started = True
                 resp = await client.post(url, data=data, headers=headers)
-            if resp.status_code != 200:
-                return False, f"请求失败，状态码：{resp.status_code}"
-
-            resp_text = resp.text
-            if _looks_like_qzone_auth_page(resp_text):
-                message = "Qzone 返回了登录页面或验证码，请尝试重新获取空间 Cookie"
-                _set_qzone_auth_failure(message, auth_failure=True)
-                return False, message
-            if '"code":0' in resp_text or '"code": 0' in resp_text:
-                return True, "发布成功"
-
-            msg_match = re.search(r'"message":"([^"]+)"', resp_text)
-            err_msg = msg_match.group(1) if msg_match else resp_text[:100]
-            return False, f"发布失败，返回：{err_msg}"
+            classified = _classify_qzone_write_response(resp, action="发布")
+            if classified.status == "succeeded":
+                return QzoneWriteResult(
+                    "succeeded",
+                    "发布成功",
+                    classified.result_code,
+                    remote_id=classified.remote_id,
+                    remote_time=classified.remote_time,
+                )
+            return classified
         except Exception as e:
-            return False, f"发生异常：{e}"
+            if post_started:
+                return QzoneWriteResult(
+                    "unknown",
+                    f"outcome_unknown: 发布请求异常：{type(e).__name__}",
+                    "dispatch_exception",
+                    detail={"exception_type": type(e).__name__},
+                )
+            return QzoneWriteResult(
+                "definite_failure",
+                f"发布前校验异常：{type(e).__name__}",
+                "preflight_exception",
+                detail={"exception_type": type(e).__name__},
+            )
 
     return qzone_enabled, publish_qzone_shuo, update_qzone_cookie
 

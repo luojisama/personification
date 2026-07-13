@@ -1,6 +1,7 @@
 import asyncio
 import random
 import re
+import uuid
 from typing import Any, Awaitable, Callable, Optional
 
 
@@ -41,7 +42,7 @@ async def handle_manual_diary_command(
     qzone_publish_available: bool,
     update_qzone_cookie: Callable[[Any], Awaitable[tuple[bool, str]]],
     generate_ai_diary: Callable[[Any], Awaitable[str]],
-    publish_qzone_shuo: Callable[[str, str], Awaitable[tuple[bool, str]]],
+    publish_qzone_shuo: Callable[[str, str], Awaitable[Any]],
 ) -> None:
     """处理手动发说说命令。"""
     if not qzone_publish_available:
@@ -58,18 +59,33 @@ async def handle_manual_diary_command(
     if not diary_content:
         await matcher.finish("AI 生成说说失败，请检查网络 or API 配置。")
 
-    success, msg = await publish_qzone_shuo(diary_content, bot.self_id)
-    if success:
-        from ..core.time_ctx import get_configured_now
-        from ..jobs.periodic_jobs import record_qzone_post
+    from ..core.time_ctx import get_configured_now
+    from ..jobs.periodic_jobs import coordinated_qzone_publish
 
-        record_qzone_post(diary_content, now=get_configured_now())
+    operation_id = f"manual-diary-{uuid.uuid4().hex}"
+    published = await coordinated_qzone_publish(
+        operation_id=operation_id,
+        bot_id=str(bot.self_id),
+        content=diary_content,
+        now=get_configured_now(),
+        monthly_limit=0,
+        min_interval_hours=0,
+        kind="post",
+        publish=lambda: publish_qzone_shuo(diary_content, str(bot.self_id)),
+        force=True,
+    )
+    if published.get("success"):
         mark_published = getattr(generate_ai_diary, "mark_published", None)
-        if callable(mark_published):
+        if published.get("newly_committed") and callable(mark_published):
             mark_published(diary_content)
         visible_content = _render_qzone_content_for_notice(diary_content)
-        await matcher.finish(f"✅ AI 说说发布成功！\n\n内容：\n{visible_content}")
-    await matcher.finish(f"❌ {msg}")
+        await matcher.finish(f"AI 说说发布成功！\nOperation ID：{operation_id}\n\n内容：\n{visible_content}")
+    status = str(published.get("status") or "unknown")
+    if status == "unknown":
+        await matcher.finish(f"空间发布结果未知，请先到空间核对，禁止直接重发。\nOperation ID：{operation_id}")
+    await matcher.finish(
+        f"空间发布失败：{published.get('message') or status}\nOperation ID：{operation_id}"
+    )
 
 
 async def handle_learn_style_command(

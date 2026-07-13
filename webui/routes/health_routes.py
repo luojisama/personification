@@ -1188,7 +1188,7 @@ def build_health_router(*, runtime) -> APIRouter:
             )
             raise HTTPException(status_code=503, detail=report)
 
-        monthly_limit = int(getattr(cfg, "personification_qzone_monthly_limit", 30) or 30)
+        monthly_limit = int(getattr(cfg, "personification_qzone_monthly_limit", 30))
         min_interval_hours = float(getattr(cfg, "personification_qzone_min_interval_hours", 12.0) or 0)
         try:
             now = get_configured_now()
@@ -1396,6 +1396,13 @@ def build_health_router(*, runtime) -> APIRouter:
             published = await coordinated_qzone_publish(
                 operation_id=operation_id,
                 content=_format_qzone_forward_health_record(feed, forward_text),
+                bot_id=bot_id,
+                payload_identity={
+                    "owner_uin": str(feed.get("owner_uin") or ""),
+                    "feed_id": str(feed.get("feed_id") or ""),
+                    "topic_id": str(feed.get("topic_id") or ""),
+                    "appid": str(feed.get("appid") or ""),
+                },
                 now=get_configured_now(),
                 monthly_limit=monthly_limit,
                 min_interval_hours=min_interval_hours,
@@ -1468,7 +1475,7 @@ def build_health_router(*, runtime) -> APIRouter:
                 retryable = False
                 step_status = "error"
                 audit_outcome = "interval_blocked"
-            elif publish_status in {"reserved", "duplicate_reserved"}:
+            elif publish_status in {"reserved", "dispatching"}:
                 code = "qzone_forward_in_progress"
                 title = "相同 QZone 转发仍在处理中"
                 message = "该 Operation ID 已存在未完成操作，本次没有重复向腾讯提交。"

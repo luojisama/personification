@@ -127,6 +127,57 @@ def test_qzone_post_preflight_errors_are_structured_and_safe(_runtime_context) -
     assert "raw-preflight-runtime-secret" not in broken.text
 
 
+def test_qzone_post_requires_operation_id(_runtime_context) -> None:
+    _install_runtime(_runtime_context, bundle=SimpleNamespace())
+    client = _admin_client(_runtime_context)
+
+    response = client.post(
+        "/personification/api/qzone/post-now",
+        json={"bot_id": "10000"},
+    )
+
+    assert response.status_code == 400
+    report = response.json()["detail"]
+    _assert_safe_report(report, code="qzone_operation_id_missing", phase="input_validation")
+
+
+def test_qzone_post_duplicate_success_does_not_mark_generated_content(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+    marked: list[str] = []
+
+    async def generate(_bot):  # noqa: ANN001
+        return "重复请求正文"
+
+    setattr(generate, "mark_published", lambda content: marked.append(content))
+
+    async def publish(_content, _bot_id):  # noqa: ANN001
+        raise AssertionError("duplicate operation must not dispatch")
+
+    async def coordinated(**_kwargs):  # noqa: ANN003
+        return {
+            "success": True,
+            "status": "succeeded",
+            "duplicate": True,
+            "newly_committed": False,
+            "state": {},
+        }
+
+    monkeypatch.setattr(periodic_jobs, "coordinated_qzone_publish", coordinated)
+    _install_runtime(
+        _runtime_context,
+        bundle=SimpleNamespace(qzone_generate_post=generate, publish_qzone_shuo=publish),
+    )
+    client = _admin_client(_runtime_context)
+
+    response = client.post(
+        "/personification/api/qzone/post-now",
+        json={"bot_id": "10000", "operation_id": "duplicate-success"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["duplicate"] is True
+    assert marked == []
+
+
 def test_qzone_post_hides_refresh_and_publish_service_messages(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
     async def generate(_bot):  # noqa: ANN001
         return "一条安全草稿"

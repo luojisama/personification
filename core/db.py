@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -248,18 +250,48 @@ DDL_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS qzone_publish_operations (
         operation_id TEXT PRIMARY KEY,
+        bot_id TEXT NOT NULL,
         period TEXT NOT NULL,
         kind TEXT NOT NULL DEFAULT 'post',
-        status TEXT NOT NULL,
-        reserved_at REAL NOT NULL,
-        expires_at REAL NOT NULL,
+        payload_hash TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL CHECK (
+            status IN ('reserved', 'dispatching', 'succeeded', 'definite_failure', 'unknown')
+        ),
+        fence_token INTEGER NOT NULL DEFAULT 1,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        reserved_at REAL NOT NULL DEFAULT 0,
+        dispatch_started_at REAL NOT NULL DEFAULT 0,
+        lease_expires_at REAL NOT NULL DEFAULT 0,
         completed_at REAL NOT NULL DEFAULT 0,
+        remote_id TEXT NOT NULL DEFAULT '',
+        remote_time REAL NOT NULL DEFAULT 0,
+        result_code TEXT NOT NULL DEFAULT '',
+        resolution_source TEXT NOT NULL DEFAULT '',
         detail TEXT NOT NULL DEFAULT '{}'
     )
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_qzone_publish_ops_status
-        ON qzone_publish_operations(period, status, expires_at)
+        ON qzone_publish_operations(period, status, lease_expires_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_qzone_publish_ops_payload
+        ON qzone_publish_operations(bot_id, kind, payload_hash, status)
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_qzone_publish_ops_remote
+        ON qzone_publish_operations(bot_id, remote_id)
+        WHERE remote_id <> '' AND status = 'succeeded'
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS qzone_monthly_usage (
+        period TEXT PRIMARY KEY,
+        confirmed_count INTEGER NOT NULL DEFAULT 0,
+        forward_count INTEGER NOT NULL DEFAULT 0,
+        updated_at REAL NOT NULL
+    )
     """,
     """
     CREATE TABLE IF NOT EXISTS reply_turn_traces (
@@ -447,6 +479,140 @@ def _ensure_group_style_schema(conn: sqlite3.Connection) -> None:
         )
 
 
+_QZONE_PUBLISH_V2_COLUMNS = {
+    "operation_id",
+    "bot_id",
+    "period",
+    "kind",
+    "payload_hash",
+    "payload_json",
+    "status",
+    "fence_token",
+    "created_at",
+    "updated_at",
+    "reserved_at",
+    "dispatch_started_at",
+    "lease_expires_at",
+    "completed_at",
+    "remote_id",
+    "remote_time",
+    "result_code",
+    "resolution_source",
+    "detail",
+}
+
+
+def _create_qzone_publish_v2_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE qzone_publish_operations (
+            operation_id TEXT PRIMARY KEY,
+            bot_id TEXT NOT NULL,
+            period TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'post',
+            payload_hash TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL CHECK (
+                status IN ('reserved', 'dispatching', 'succeeded', 'definite_failure', 'unknown')
+            ),
+            fence_token INTEGER NOT NULL DEFAULT 1,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            reserved_at REAL NOT NULL DEFAULT 0,
+            dispatch_started_at REAL NOT NULL DEFAULT 0,
+            lease_expires_at REAL NOT NULL DEFAULT 0,
+            completed_at REAL NOT NULL DEFAULT 0,
+            remote_id TEXT NOT NULL DEFAULT '',
+            remote_time REAL NOT NULL DEFAULT 0,
+            result_code TEXT NOT NULL DEFAULT '',
+            resolution_source TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+
+
+def _ensure_qzone_publish_schema(conn: sqlite3.Connection) -> None:
+    columns = _table_columns(conn, "qzone_publish_operations")
+    if not columns:
+        return
+    if _QZONE_PUBLISH_V2_COLUMNS.issubset(columns):
+        return
+
+    rows = conn.execute("SELECT * FROM qzone_publish_operations").fetchall()
+    conn.execute("ALTER TABLE qzone_publish_operations RENAME TO qzone_publish_operations_v1")
+    _create_qzone_publish_v2_table(conn)
+    now = float(conn.execute("SELECT unixepoch('now')").fetchone()[0])
+    for row in rows:
+        operation_id = str(row["operation_id"] or "")[:96]
+        old_status = str(row["status"] or "unknown").strip().lower()
+        status = {
+            "committed": "succeeded",
+            "released": "definite_failure",
+            "expired": "definite_failure",
+            "reserved": "unknown",
+            "unknown": "unknown",
+        }.get(old_status, "unknown")
+        reserved_at = float(row["reserved_at"] or 0)
+        completed_at = float(row["completed_at"] or 0)
+        created_at = reserved_at or completed_at or now
+        updated_at = completed_at or reserved_at or now
+        legacy_hash = hashlib.sha256(f"legacy:{operation_id}".encode("utf-8")).hexdigest()
+        conn.execute(
+            """
+            INSERT INTO qzone_publish_operations(
+                operation_id, bot_id, period, kind, payload_hash, payload_json,
+                status, fence_token, created_at, updated_at, reserved_at,
+                dispatch_started_at, lease_expires_at, completed_at, remote_id,
+                remote_time, result_code, resolution_source, detail
+            ) VALUES (?, '', ?, ?, ?, '{"legacy":true}', ?, 1, ?, ?, ?, 0, 0, ?, '', 0, ?, 'migration_v2', '{"migration":"v1"}')
+            """,
+            (
+                operation_id,
+                str(row["period"] or ""),
+                str(row["kind"] or "post")[:32],
+                legacy_hash,
+                status,
+                created_at,
+                updated_at,
+                reserved_at,
+                completed_at,
+                f"legacy_{old_status}"[:64],
+            ),
+        )
+    conn.execute("DROP TABLE qzone_publish_operations_v1")
+
+
+def _migrate_qzone_monthly_usage(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT value FROM kv_store WHERE namespace=? AND key=?",
+        ("qzone_post_state", "__root__"),
+    ).fetchone()
+    if row is None:
+        return
+    try:
+        state = json.loads(row["value"] or "{}")
+    except Exception:
+        return
+    if not isinstance(state, dict):
+        return
+    period = str(state.get("period") or "").strip()
+    if len(period) != 7 or period[4:5] != "-" or not period.replace("-", "").isdigit():
+        return
+    try:
+        confirmed_count = max(0, int(state.get("count", 0) or 0))
+        forward_count = max(0, int(state.get("forward_count", 0) or 0))
+    except Exception:
+        return
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO qzone_monthly_usage(period, confirmed_count, forward_count, updated_at)
+        VALUES (?, ?, ?, unixepoch('now'))
+        """,
+        (period, confirmed_count, forward_count),
+    )
+
+
 def init_db_sync(data_dir: str | Path) -> Path:
     global _db_path
     _db_path = Path(data_dir) / DB_FILENAME
@@ -455,9 +621,11 @@ def init_db_sync(data_dir: str | Path) -> Path:
         # 老表（缺该列）抛 OperationalError。
         _ensure_group_style_schema(conn)
         _ensure_group_message_schema(conn)
+        _ensure_qzone_publish_schema(conn)
         conn.commit()  # 让迁移立即可见，下面的 DDL CREATE INDEX 才能引用新列
         for ddl in DDL_STATEMENTS:
             conn.execute(ddl)
+        _migrate_qzone_monthly_usage(conn)
         conn.commit()
     return _db_path
 

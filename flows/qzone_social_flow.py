@@ -14,10 +14,10 @@ from ..core.context_policy import strip_response_control_markers
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_user_emotion_memory, load_emotion_state
 from ..core.image_input import summarize_images_with_vision
+from ..core.qzone_publish import build_qzone_quota, coordinated_qzone_publish
 from ..core.qzone_service import _extract_qzone_comments
 from ..core.time_ctx import inject_current_time_context
 from ..core.visible_output import guard_visible_text
-from ..jobs.periodic_jobs import build_qzone_quota, coordinated_qzone_publish
 from .diary_flow import clean_generated_text
 
 
@@ -314,7 +314,7 @@ def _build_qzone_forward_quota(plugin_config: Any, now: datetime) -> dict[str, A
         state = {}
     if not isinstance(state, dict):
         state = {}
-    monthly_limit = int(getattr(plugin_config, "personification_qzone_monthly_limit", 30) or 30)
+    monthly_limit = int(getattr(plugin_config, "personification_qzone_monthly_limit", 30))
     min_interval_hours = float(getattr(plugin_config, "personification_qzone_min_interval_hours", 12.0) or 0)
     return build_qzone_quota(
         state=state,
@@ -1680,8 +1680,15 @@ async def scan_qzone_social_feeds(
                         published = await coordinated_qzone_publish(
                             operation_id=f"social-forward:{feed_key}:{today}",
                             content=_format_qzone_forward_record(feed, forward_text),
+                            bot_id=str(getattr(bot, "self_id", "") or ""),
+                            payload_identity={
+                                "owner_uin": str(feed.get("owner_uin") or ""),
+                                "feed_id": str(feed.get("feed_id") or ""),
+                                "topic_id": str(feed.get("topic_id") or ""),
+                                "appid": str(feed.get("appid") or ""),
+                            },
                             now=now,
-                            monthly_limit=int(getattr(plugin_config, "personification_qzone_monthly_limit", 30) or 30),
+                            monthly_limit=int(getattr(plugin_config, "personification_qzone_monthly_limit", 30)),
                             min_interval_hours=float(getattr(plugin_config, "personification_qzone_min_interval_hours", 12.0) or 0),
                             kind="forward",
                             publish=lambda: qzone_social_service.forward_feed(
@@ -1703,7 +1710,7 @@ async def scan_qzone_social_feeds(
                                 state=updated_post_state,
                                 now=now,
                                 monthly_limit=int(
-                                    getattr(plugin_config, "personification_qzone_monthly_limit", 30) or 30
+                                    getattr(plugin_config, "personification_qzone_monthly_limit", 30)
                                 ),
                                 min_interval_hours=float(
                                     getattr(plugin_config, "personification_qzone_min_interval_hours", 12.0) or 0

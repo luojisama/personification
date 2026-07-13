@@ -400,4 +400,4 @@ def test_qzone_publish_operation_is_idempotent_and_timeout_is_unknown(tmp_path, 
     assert first["success"] is True
     assert duplicate["success"] is True and duplicate["duplicate"] is True
     assert calls == ["ok"]
-    assert unknown["status"] == "outcome_unknown"
+    assert unknown["status"] == "unknown"

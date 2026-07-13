@@ -34,7 +34,7 @@ class _Matcher:
 
 
 def test_manual_diary_publish_records_shared_qzone_state(monkeypatch) -> None:  # noqa: ANN001
-    recorded: list[str] = []
+    coordinated_calls: list[dict] = []
     state_updates: list[str] = []
 
     async def _update_cookie(_bot):  # noqa: ANN001
@@ -48,11 +48,13 @@ def test_manual_diary_publish_records_shared_qzone_state(monkeypatch) -> None:  
     async def _publish(_content, _bot_id):  # noqa: ANN001
         return True, "ok"
 
-    monkeypatch.setattr(
-        periodic_jobs,
-        "record_qzone_post",
-        lambda content, *, now: recorded.append(content),
-    )
+    async def _coordinated(**kwargs):  # noqa: ANN003
+        coordinated_calls.append(kwargs)
+        result = await kwargs["publish"]()
+        assert result == (True, "ok")
+        return {"success": True, "status": "succeeded", "newly_committed": True}
+
+    monkeypatch.setattr(periodic_jobs, "coordinated_qzone_publish", _coordinated)
 
     with pytest.raises(_Finished, match="发布成功"):
         asyncio.run(style_handlers.handle_manual_diary_command(
@@ -64,8 +66,9 @@ def test_manual_diary_publish_records_shared_qzone_state(monkeypatch) -> None:  
             publish_qzone_shuo=_publish,
         ))
 
-    assert recorded == ["手柄刚充上电，结果现在又有点困了"]
-    assert state_updates == recorded
+    assert coordinated_calls[0]["bot_id"] == "10001"
+    assert coordinated_calls[0]["content"] == "手柄刚充上电，结果现在又有点困了"
+    assert state_updates == ["手柄刚充上电，结果现在又有点困了"]
 
 
 def test_diary_task_binds_post_success_state_callback(monkeypatch) -> None:  # noqa: ANN001
@@ -95,3 +98,37 @@ def test_diary_task_binds_post_success_state_callback(monkeypatch) -> None:  # n
     assert updates[0]["diary_text"] == "刚把游戏存档整理完，终于不用怕按错了"
     assert updates[0]["tool_caller"] == "caller"
     assert updates[0]["data_dir"] == "data-dir"
+
+
+def test_manual_diary_unknown_does_not_mark_published(monkeypatch) -> None:  # noqa: ANN001
+    updates: list[str] = []
+
+    async def _update_cookie(_bot):  # noqa: ANN001
+        return True, "ok"
+
+    async def _generate(_bot):  # noqa: ANN001
+        return "结果未知的正文"
+
+    setattr(_generate, "mark_published", lambda content: updates.append(content))
+
+    async def _publish(_content, _bot_id):  # noqa: ANN001
+        return False, "outcome_unknown"
+
+    async def _coordinated(**_kwargs):  # noqa: ANN003
+        return {"success": False, "status": "unknown", "newly_committed": False}
+
+    monkeypatch.setattr(periodic_jobs, "coordinated_qzone_publish", _coordinated)
+
+    with pytest.raises(_Finished, match="结果未知"):
+        asyncio.run(
+            style_handlers.handle_manual_diary_command(
+                _Matcher(),
+                bot=type("Bot", (), {"self_id": "10001"})(),
+                qzone_publish_available=True,
+                update_qzone_cookie=_update_cookie,
+                generate_ai_diary=_generate,
+                publish_qzone_shuo=_publish,
+            )
+        )
+
+    assert updates == []
