@@ -269,6 +269,14 @@ main { padding:20px 26px 48px; max-width:none; width:100%; min-width:0; height:1
 .remote-source-form { display:grid; grid-template-columns:minmax(220px,2fr) minmax(120px,1fr) minmax(100px,0.7fr) minmax(120px,1fr) auto auto auto; gap:8px; align-items:center; margin:14px 0; }
 .remote-source-form input[type=text], .remote-source-form input:not([type]) { width:100%; min-width:0; }
 .remote-source-form label { color:var(--muted); white-space:nowrap; font-size:12px; }
+.mcp-search-row { display:grid; grid-template-columns:minmax(170px,.7fr) minmax(220px,2fr) auto; gap:8px; margin:14px 0; }
+.mcp-detail { display:grid; gap:12px; padding:14px; border:1px solid var(--line); border-radius:10px; background:var(--bg); }
+.mcp-detail>p { color:var(--muted); margin:0; }
+.mcp-input-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; }
+.mcp-input { display:grid; gap:4px; padding:10px; border:1px solid var(--line); border-radius:8px; }
+.mcp-input small { color:var(--muted); min-height:2.5em; }
+.mcp-installation { display:grid; gap:9px; padding:14px 0; border-top:1px solid var(--line); }
+.mcp-installation:first-of-type { border-top:0; }
 .persona-builder-form { display:grid; grid-template-columns:minmax(160px,1fr) minmax(160px,1fr) auto; gap:8px; align-items:center; }
 .persona-builder-form input { min-width:0; width:100%; }
 .persona-builder-mode { margin:0 0 10px; }
@@ -465,6 +473,7 @@ td code, .field-head code { word-break:break-all; }
   .tool-creator-intro { padding:18px; }
   .tool-creator-intro h1 { font-size:25px; }
   .remote-source-form { grid-template-columns:1fr; }
+  .mcp-search-row { grid-template-columns:1fr; }
   .remote-source-form label { min-height:34px; display:flex; align-items:center; }
   .persona-builder-form, .persona-builder-form.custom-grid, .agent-report-grid { grid-template-columns:1fr; }
   .ops-hero { align-items:flex-start; flex-direction:column; padding:20px; }.ops-stat-grid,.ops-grid,.transfer-plan-grid { grid-template-columns:1fr; }.ops-hero-state { width:100%; justify-content:space-between; }

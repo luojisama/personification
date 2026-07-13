@@ -18,6 +18,7 @@ let state = {
   skills: [], skillFilter: "", skillSummary: null, skillRemoteSources: [], skillMcpTools: [],
   skillSourceForm: { source: "", name: "", ref: "", subdir: "", kind: "auto", preferFirst: false, autoApprove: false },
   toolCreatorTasks: [], toolCreatorSelectedId: "", toolCreatorDetail: null, toolCreatorRequest: "", toolCreatorSuggestedName: "", toolCreatorAnswer: "", toolCreatorBusy: false, toolCreatorDiagnostic: null,
+  mcpSources: [], mcpSourceId: "official", mcpQuery: "", mcpResults: [], mcpNextCursor: "", mcpDetail: null, mcpPackageIndex: 0, mcpPrefix: "", mcpInstallations: [], mcpBusy: false,
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
   personaTemplateForm: { mode: "source", work_title: "", character_name: "", persona_name: "", gender: "", personality: "", traits: "", hobbies: "", description: "" }, personaTemplateResult: null, personaTemplateBusy: false, personaTemplateTask: null, personaTemplateHistory: [],
   personaAvatarCandidateId: "", personaSignatureCandidateId: "", personaProfileBotId: "",
@@ -442,11 +443,17 @@ async function loadView() {
       const data = await api("/groups/whitelist");
       state.groupSwitches = data.groups;
     } else if (view === "skills") {
-      const data = await api("/skills");
+      const [data, sourceData, installationData] = await Promise.all([
+        api("/skills"),
+        api("/mcp/sources").catch(() => ({sources:[]})),
+        api("/mcp/installations").catch(() => ({installations:[]})),
+      ]);
       state.skills = data.skills; state.skillsAvailable = data.available;
       state.skillSummary = data.summary || null;
       state.skillRemoteSources = data.remote_sources || [];
       state.skillMcpTools = data.mcp_tools || [];
+      state.mcpSources = sourceData.sources || [];
+      state.mcpInstallations = installationData.installations || [];
     } else if (view === "tool_creator") {
       const data = await api("/tool-creator/tasks?limit=40");
       state.toolCreatorTasks = data.tasks || [];

@@ -15,6 +15,7 @@ from .routes.proactive_routes import build_proactive_router
 from .routes.config_routes import build_config_router
 from .routes.group_routes import build_group_router
 from .routes.memory_routes import build_memory_router
+from .routes.mcp_routes import build_mcp_router
 from .routes.metrics_routes import build_metrics_router
 from .routes.persona_routes import build_persona_router
 from .routes.persona_template_routes import build_persona_template_router
@@ -91,6 +92,7 @@ def build_router() -> APIRouter:
     router.include_router(build_skill_router(runtime=runtime))
     router.include_router(build_test_router(runtime=runtime))
     router.include_router(build_memory_router(runtime=runtime))
+    router.include_router(build_mcp_router(runtime=runtime))
     router.include_router(build_sticker_router(runtime=runtime))
     router.include_router(build_audit_router(runtime=runtime))
     router.include_router(build_proactive_router(runtime=runtime))

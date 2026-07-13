@@ -172,7 +172,9 @@ def _status_label(status: str) -> str:
 
 def _runtime_reload_available(runtime: Any) -> bool:
     bundle = getattr(runtime, "runtime_bundle", None)
-    return callable(getattr(bundle, "reload_runtime_services", None))
+    return callable(getattr(bundle, "reload_all_runtime_services", None)) or callable(
+        getattr(bundle, "reload_runtime_services", None)
+    )
 
 
 def _mcp_tools_payload() -> list[dict[str, Any]]:
@@ -451,6 +453,7 @@ def build_skill_router(*, runtime) -> APIRouter:
             if enabled_by_config and not user_disabled and not health_disabled:
                 summary["active"] += 1
         skills.sort(key=lambda x: (x["category"], x["name"]))
+        summary["mcp_tools"] = len(mcp_names | {str(item["name"]) for item in skills if item.get("mcp")})
         return {
             "skills": skills,
             "available": True,
@@ -1065,7 +1068,9 @@ def build_skill_router(*, runtime) -> APIRouter:
     @router.post("/reload")
     async def reload_skills(admin: AdminIdentity = Depends(require_admin)) -> dict:
         bundle = getattr(runtime, "runtime_bundle", None)
-        reload_services = getattr(bundle, "reload_runtime_services", None)
+        reload_services = getattr(bundle, "reload_all_runtime_services", None)
+        if not callable(reload_services):
+            reload_services = getattr(bundle, "reload_runtime_services", None)
         if not callable(reload_services):
             raise HTTPException(
                 status_code=503,
