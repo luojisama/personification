@@ -74,7 +74,7 @@ from ...core.qq_expression_library import (
     qq_expression_enabled,
     render_qq_expression_message,
 )
-from ...core.qq_expression_tools import qq_action_history_text, register_send_qq_expression_tools
+from ...core.qq_expression_tools import register_send_qq_expression_tools
 from ...core.sticker_feedback import (
     build_sticker_feedback_scene_key,
     load_sticker_feedback,
@@ -98,6 +98,7 @@ from ..reply_pipeline.pipeline_emotion import (
     semantic_frame_timeout_hint,
 )
 from ..reply_pipeline import humanize as _humanize
+from ..reply_commit import acquire_reply_commit, execute_pending_actions
 from ..reply_pipeline.pipeline_context import (
     batch_has_newer_messages as _shared_batch_has_newer_messages,
     clone_tool_registry as _clone_tool_registry,
@@ -491,9 +492,11 @@ async def process_yaml_response_logic(
     semantic_frame: Any = None,
     has_newer_batch: bool = False,
     batch_runtime_ref: Dict[str, Any] | None = None,
+    reply_commit_state: Dict[str, Any] | None = None,
     solo_speaker_follow: bool = False,
 ) -> None:
     """处理基于 YAML 模板的新版响应逻辑。"""
+    reply_commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
     started_at = time.monotonic()
     lite_tool_caller = lite_tool_caller or agent_tool_caller
     lite_call_ai_api = lite_call_ai_api or call_ai_api
@@ -578,6 +581,26 @@ async def process_yaml_response_logic(
         detail=f"scene={'private' if is_private_session else 'group'} user={user_id} group={group_id or '-'}",
     )
     is_direct_mention = _event_mentions_bot(event, bot)
+    pending_action_executor: Any = None
+    pending_actions: list[dict[str, Any]] = []
+
+    async def _commit_pending_actions() -> None:
+        if not pending_actions:
+            return
+        await acquire_reply_commit(reply_commit_state)
+        if _has_newer_batch_now():
+            pending_actions.clear()
+            return
+        history_parts = await execute_pending_actions(
+            pending_action_executor,
+            pending_actions,
+        )
+        if history_parts:
+            setattr(
+                event,
+                "_personification_pending_action_history_text",
+                " ".join(history_parts),
+            )
 
     def _record_pending_action_history_if_any() -> bool:
         action_history_text = _consume_pending_action_history_text(event)
@@ -1410,15 +1433,15 @@ async def process_yaml_response_logic(
                 logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                 _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="Agent 结果生成后出现更新批次")
                 return
-            action_history_parts: list[str] = []
-            for action in agent_result.pending_actions:
-                await executor.execute(action["type"], action["params"])
-                history_text = qq_action_history_text(action)
-                if history_text:
-                    action_history_parts.append(history_text)
-            if action_history_parts:
-                setattr(event, "_personification_pending_action_history_text", " ".join(action_history_parts))
+            pending_action_executor = executor
+            pending_actions = list(agent_result.pending_actions)
             if agent_result.direct_output:
+                await acquire_reply_commit(reply_commit_state)
+                if _has_newer_batch_now():
+                    logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
+                    _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="直出消息提交前出现更新批次")
+                    return
+                await _commit_pending_actions()
                 raw_direct_output = str(reply_content or "").strip()
                 if _looks_like_translation_result(raw_direct_output):
                     try:
@@ -1519,6 +1542,7 @@ async def process_yaml_response_logic(
         _trace_no_reply("block_marker", diagnosis_code="blocked", detail="模型返回 BLOCK 控制标记")
         return
     if has_silence_control_marker(reply_content):
+        await _commit_pending_actions()
         if _record_pending_action_history_if_any():
             logger.info("拟人插件 (YAML)：Agent 静默动作已写入会话历史。")
         logger.info("AI (YAML) 决定保持沉默 (SILENCE)")
@@ -1544,6 +1568,10 @@ async def process_yaml_response_logic(
         logger.info(f"拟人插件: 执行动作: {action_text}")
         if "戳一戳" in action_text:
             try:
+                await acquire_reply_commit(reply_commit_state)
+                if _has_newer_batch_now():
+                    _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="YAML 动作提交前出现更新批次")
+                    return
                 await bot.send(event, message_segment_cls.poke(int(user_id)))
             except Exception as e:
                 logger.warning(f"拟人插件: 发送戳一戳失败: {e}")
@@ -1769,6 +1797,12 @@ async def process_yaml_response_logic(
         logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
         _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="发送前出现更新批次")
         return
+    await acquire_reply_commit(reply_commit_state)
+    if _has_newer_batch_now():
+        logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
+        _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="获得提交锁后出现更新批次")
+        return
+    await _commit_pending_actions()
 
     sent_as_tts = False
     sent_message_id = ""

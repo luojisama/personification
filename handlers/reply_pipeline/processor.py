@@ -91,6 +91,7 @@ from ..event_rules import (
     _render_plugin_command_interaction,
     split_segment_if_long,
 )
+from ..reply_commit import acquire_reply_commit, execute_pending_actions, release_reply_commit
 from .pipeline_context import (
     batch_has_newer_messages as _batch_has_newer_messages,
     build_base_system_prompt as _build_base_system_prompt,
@@ -397,6 +398,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             trace_mod.finish_trace(trace_id=trace_id, outcome="failed", diagnosis_code="internal_exception")
         raise
     finally:
+        release_reply_commit(state)
         if trace_mod is not None and trace_id:
             try:
                 last_trace = trace_mod.get_trace(trace_id) or {}
@@ -1399,6 +1401,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             semantic_frame=semantic_frame,
             has_newer_batch=_batch_has_newer_messages(state),
             batch_runtime_ref=state.get("batch_runtime_ref"),
+            reply_commit_state=state,
             solo_speaker_follow=is_solo_speaker_follow,
             favorability_service=persona.favorability_service,
         )
@@ -1662,6 +1665,28 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         reply_content = None
         used_agent = False
         bypass_length_limits = False
+        pending_action_executor = None
+        pending_actions: list[dict[str, Any]] = []
+
+        async def _commit_pending_actions() -> None:
+            if not pending_actions:
+                return
+            await acquire_reply_commit(state)
+            stale_reason = _stale_reply_abort_reason(state)
+            if stale_reason:
+                runtime.logger.info(f"拟人插件：{stale_reason}")
+                pending_actions.clear()
+                return
+            history_parts = await execute_pending_actions(
+                pending_action_executor,
+                pending_actions,
+            )
+            if history_parts:
+                setattr(
+                    event,
+                    "_personification_pending_action_history_text",
+                    " ".join(history_parts),
+                )
         if _should_use_agent_for_reply(
             plugin_config=runtime.plugin_config,
             tool_registry=runtime.tool_registry,
@@ -1690,7 +1715,13 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     except Exception:
                         pass
                     agent_started_at = time.monotonic()
-                    reply_content, used_agent, bypass_length_limits = await _run_agent_if_enabled(
+                    (
+                        reply_content,
+                        used_agent,
+                        bypass_length_limits,
+                        pending_action_executor,
+                        pending_actions,
+                    ) = await _run_agent_if_enabled(
                         bot=bot,
                         event=event,
                         messages=agent_messages,
@@ -1890,6 +1921,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
         has_silence_marker = has_silence_control_marker(reply_content)
         if has_silence_marker:
+            await _commit_pending_actions()
             if _record_pending_action_history_if_any():
                 runtime.logger.info("拟人插件：Agent 静默动作已写入会话历史。")
             runtime.logger.info(f"AI 决定结束与群 {group_id} 中 {user_name}({user_id}) 的对话 (SILENCE)")
@@ -2108,6 +2140,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             reply_content = review_decision.text.strip()
 
         if has_silence_control_marker(reply_content):
+            await _commit_pending_actions()
             if _record_pending_action_history_if_any():
                 runtime.logger.info("拟人插件：静默动作已写入会话历史。")
             runtime.logger.info(
@@ -2207,6 +2240,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         if stale_reason:
             runtime.logger.info(f"拟人插件：{stale_reason}")
             return
+        await acquire_reply_commit(state)
+        stale_reason = _stale_reply_abort_reason(state)
+        if stale_reason:
+            runtime.logger.info(f"拟人插件：{stale_reason}")
+            return
+        await _commit_pending_actions()
         if (
             final_reply
             and not sticker_segment

@@ -20,7 +20,7 @@ from ...core.message_parts import build_user_message_content
 from ...core.message_relations import build_event_relation_metadata
 from ...core.persona_profile import load_persona_profile, render_persona_snapshot
 from ...core.prompt_loader import pick_ack_phrase
-from ...core.qq_expression_tools import qq_action_history_text, register_send_qq_expression_tools
+from ...core.qq_expression_tools import register_send_qq_expression_tools
 from ...core.gemini_profile import build_gemini_route_policy_prompt
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_style_policy import build_reply_style_policy_prompt
@@ -680,13 +680,13 @@ async def run_agent_if_enabled(
     is_direct_mention: bool = False,
     response_timeout_seconds: float = _DEFAULT_RESPONSE_TIMEOUT_SECONDS,
     task_exc_logger: Callable[[str, Any], Any] | None = None,
-) -> tuple[str | None, bool, bool]:
+) -> tuple[str | None, bool, bool, Any | None, list[dict[str, Any]]]:
     if not (
         getattr(runtime.plugin_config, "personification_agent_enabled", True)
         and runtime.tool_registry
         and runtime.agent_tool_caller
     ):
-        return None, False, False
+        return None, False, False, None, []
 
     executor = ActionExecutor(bot, event, runtime.plugin_config, runtime.logger)
     runtime_registry = clone_tool_registry(runtime.tool_registry)
@@ -831,15 +831,13 @@ async def run_agent_if_enabled(
         is_group=hasattr(event, "group_id") and not str(getattr(event, "group_id", "")).startswith("private_"),
         is_direct_mention=is_direct_mention,
     )
-    action_history_parts: list[str] = []
-    for action in result.pending_actions:
-        await executor.execute(action["type"], action["params"])
-        history_text = qq_action_history_text(action)
-        if history_text:
-            action_history_parts.append(history_text)
-    if action_history_parts:
-        setattr(event, "_personification_pending_action_history_text", " ".join(action_history_parts))
-    return result.text, True, bool(getattr(result, "bypass_length_limits", False))
+    return (
+        result.text,
+        True,
+        bool(getattr(result, "bypass_length_limits", False)),
+        executor,
+        list(result.pending_actions),
+    )
 
 
 def stale_reply_abort_reason(state: Dict[str, Any]) -> str:
