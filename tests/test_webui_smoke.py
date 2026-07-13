@@ -90,6 +90,12 @@ def test_static_frontend_assets_are_served(_runtime_context) -> None:
     auth_js = client.get("/personification/static/app-auth.js")
     assert auth_js.status_code == 200
     assert "bootstrap();" in auth_js.text
+    assert 'select id="login-qq"' in auth_js.text
+    assert "输入管理员 QQ" not in auth_js.text
+    assert "未配置管理员" in auth_js.text
+    assert "await refreshEligibleAdmins()" in auth_js.text
+    assert "免验证设备" not in auth_js.text
+    assert "同意登录" not in auth_js.text
 
     admin_js = client.get("/personification/static/app-admin.js")
     assert admin_js.status_code == 200

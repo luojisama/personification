@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -26,6 +27,7 @@ from ..schemas import (
 
 
 _CSRF_COOKIE_NAME = "personification_webui_csrf"
+_LOGIN_CHALLENGE_COOKIE_NAME = "personification_webui_login_challenge"
 
 
 def _record_device_audit(runtime: Any, **kwargs: Any) -> bool:
@@ -164,21 +166,12 @@ def build_auth_router(*, runtime) -> APIRouter:
         device_label: str,
         request: Request,
         response: Response,
-        trusted: bool = False,
     ) -> bool:
-        """签发设备 token + 写 cookie + 审计 + 通知。返回 pending（是否待审批）。
-
-        trusted=True（免验证设备）直接批准，跳过审批。
-        """
+        """签发已批准的设备 token。管理员验证码本身就是设备授权。"""
         ip_hash = hashlib.sha256((ip or "").encode("utf-8")).hexdigest()[:16]
-        require_approval = (
-            not trusted
-            and bool(getattr(runtime.plugin_config, "personification_webui_require_device_approval", False))
-            and webui_auth_store.has_any_approved_device()
-        )
-        device_status = "pending" if require_approval else "approved"
-        token = webui_auth_store.issue_device_token(qq, ua, ip, label=device_label, status=device_status)
-        webui_auth_store.reset_login_attempts(ip)
+        token = webui_auth_store.issue_device_token(qq, ua, ip, label=device_label, status="approved")
+        webui_auth_store.reset_login_attempts(f"send:{ip}")
+        webui_auth_store.reset_login_attempts(f"verify:{ip}")
         record = webui_auth_store.lookup_device(token, ua=ua) or {}
         csrf_token = str(record.get("csrf_token", "") or "")
         cookie_max_age = 60 * 60 * 24 * 7
@@ -195,51 +188,56 @@ def build_auth_router(*, runtime) -> APIRouter:
         webui_audit_log.record(
             action="login_verify", qq=qq, ip_hash=ip_hash,
             device_id=hashlib.sha256(token.encode("utf-8")).hexdigest(),
-            target=str(device_label or ""),
-            outcome="pending" if require_approval else ("trusted" if trusted else "ok"),
+            target=str(device_label or ""), outcome="ok",
         )
-        return require_approval
+        return False
+
+    def _is_current_admin(qq: str) -> bool:
+        return qq in runtime.superusers or admin_acl.is_plugin_admin(qq)
 
     @router.post("/login", response_model=LoginResponse)
     async def login(payload: LoginRequest, request: Request, response: Response) -> LoginResponse:
         ip = get_client_ip(request)
-        if webui_auth_store.is_login_locked(ip):
-            raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试")
         qq = payload.qq.strip()
-        is_admin = qq in runtime.superusers or admin_acl.is_plugin_admin(qq)
-        if not is_admin:
-            webui_auth_store.record_login_attempt(ip)
+        send_rate_key = f"send:{ip}"
+        if webui_auth_store.is_login_locked(send_rate_key):
+            raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试")
+        if not _is_current_admin(qq):
+            webui_auth_store.record_login_attempt(send_rate_key)
             raise HTTPException(status_code=403, detail="该 QQ 非插件管理员")
-        ua = get_user_agent(request)
         ip_hash = hashlib.sha256((ip or "").encode("utf-8")).hexdigest()[:16]
 
-        # 免验证设备：当前浏览器指纹被登记为信任 → 直接登录，跳过验证码/批准
-        if webui_auth_store.match_trusted_device(qq, ua):
-            pending = _issue_session(
-                qq=qq, ua=ua, ip=ip, device_label="免验证设备",
-                request=request, response=response, trusted=True,
-            )
-            webui_audit_log.record(action="login_passwordless", qq=qq, ip_hash=ip_hash, outcome="ok")
-            return LoginResponse(sent=True, passwordless=True, pending=pending,
-                                 message="免验证设备，已直接登录")
-
-        # 常规：发送验证码 + 创建可在私聊批准的登录请求
-        code = webui_auth_store.create_verify_code(qq)
-        request_id, approve_code = webui_auth_store.create_login_request(qq, ua, ip, payload.qq.strip())
+        # 验证码绑定当前浏览器 challenge，其他匿名请求不能消费或覆盖。
+        challenge_token = request.cookies.get(_LOGIN_CHALLENGE_COOKIE_NAME, "") or secrets.token_urlsafe(32)
+        try:
+            code = webui_auth_store.create_verify_code(qq, challenge_token)
+        except webui_auth_store.VerifyCodeCooldownError as exc:
+            raise HTTPException(
+                status_code=429,
+                detail=f"验证码已发送，请 {exc.retry_after} 秒后重试",
+            ) from exc
+        webui_auth_store.record_login_attempt(send_rate_key)
         message = (
             f"【拟人插件 WebUI】登录请求\n"
-            f"验证码：{code}（5 分钟内有效）\n"
-            f"或直接回复『同意登录 {approve_code}』批准本次登录，回复『拒绝登录 {approve_code}』拒绝。\n"
-            f"来源 IP：{ip or '未知'}；若非本人操作请回复拒绝。"
+            f"验证码：{code}（自首次发送起 5 分钟内有效）\n"
+            f"来源 IP：{ip or '未知'}；若非本人操作请忽略。"
         )
         sent = await notify.send_to_admin(runtime.get_bots, qq, message)
         if not sent:
-            webui_auth_store.record_login_attempt(ip)
+            webui_auth_store.discard_verify_code(qq, challenge_token)
             webui_audit_log.record(action="login_code_sent", qq=qq, ip_hash=ip_hash, outcome="bot_unreachable")
             raise HTTPException(status_code=502, detail="无法向该 QQ 发送私聊（Bot 离线或非好友）")
+        response.set_cookie(
+            _LOGIN_CHALLENGE_COOKIE_NAME,
+            challenge_token,
+            max_age=300,
+            httponly=True,
+            secure=_request_uses_https(request),
+            samesite="lax",
+            path="/personification",
+        )
         webui_audit_log.record(action="login_code_sent", qq=qq, ip_hash=ip_hash)
-        return LoginResponse(sent=True, request_id=request_id,
-                             message="已发送验证码，也可在 QQ 私聊直接回复『同意登录』批准")
+        return LoginResponse(sent=True, message="已向所选管理员发送验证码，有效期以首次发送时间为准")
 
     @router.get("/login-status")
     async def login_status(
@@ -252,10 +250,14 @@ def build_auth_router(*, runtime) -> APIRouter:
         req = webui_auth_store.take_approved_login_request(request_id)
         if not req:
             return {"status": webui_auth_store.get_login_request_status(request_id)}
+        qq = str(req.get("qq", "") or "").strip()
+        if not _is_current_admin(qq):
+            webui_audit_log.record(action="login_verify", qq=qq, outcome="admin_revoked")
+            raise HTTPException(status_code=403, detail="管理员权限已撤销")
         ip = get_client_ip(request)
         ua = get_user_agent(request)
         pending = _issue_session(
-            qq=str(req.get("qq", "")), ua=ua, ip=ip,
+            qq=qq, ua=ua, ip=ip,
             device_label=str(req.get("label", "")), request=request, response=response,
         )
         return {"status": "approved", "success": True, "pending": pending}
@@ -263,12 +265,17 @@ def build_auth_router(*, runtime) -> APIRouter:
     @router.post("/verify", response_model=VerifyResponse)
     async def verify(payload: VerifyRequest, request: Request, response: Response) -> VerifyResponse:
         ip = get_client_ip(request)
-        if webui_auth_store.is_login_locked(ip):
+        verify_rate_key = f"verify:{ip}"
+        if webui_auth_store.is_login_locked(verify_rate_key):
             raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试")
         qq = payload.qq.strip()
         ip_hash = hashlib.sha256((ip or "").encode("utf-8")).hexdigest()[:16]
-        if not webui_auth_store.consume_verify_code(qq, payload.code):
-            webui_auth_store.record_login_attempt(ip)
+        if not _is_current_admin(qq):
+            webui_audit_log.record(action="login_verify", qq=qq, ip_hash=ip_hash, outcome="admin_revoked")
+            raise HTTPException(status_code=403, detail="管理员权限已撤销")
+        challenge_token = request.cookies.get(_LOGIN_CHALLENGE_COOKIE_NAME, "")
+        if not webui_auth_store.consume_verify_code(qq, payload.code, challenge_token):
+            webui_auth_store.record_login_attempt(verify_rate_key)
             webui_audit_log.record(action="login_verify", qq=qq, ip_hash=ip_hash, outcome="bad_code")
             raise HTTPException(status_code=403, detail="验证码错误或已过期")
         ua = get_user_agent(request)
@@ -289,6 +296,7 @@ def build_auth_router(*, runtime) -> APIRouter:
             pass
         if pending:
             return VerifyResponse(success=True, pending=True, message="设备已登记，等待管理员确认后方可使用")
+        response.delete_cookie(_LOGIN_CHALLENGE_COOKIE_NAME, path="/personification")
         return VerifyResponse(success=True, message="登录成功")
 
     @router.get("/me")
@@ -300,29 +308,24 @@ def build_auth_router(*, runtime) -> APIRouter:
         webui_auth_store.revoke_device(admin.device_id)
         response.delete_cookie(get_cookie_name(), path="/personification")
         response.delete_cookie(_CSRF_COOKIE_NAME, path="/personification")
+        response.delete_cookie(_LOGIN_CHALLENGE_COOKIE_NAME, path="/personification")
         return {"success": True}
 
     @router.get("/eligible-admins")
     async def eligible_admins() -> dict:
-        """返回登录页辅助信息。
-
-        默认不向未登录访客公开管理员 QQ；需要旧版下拉体验时显式开启
-        personification_webui_expose_admin_list。
-        """
-        if not bool(getattr(runtime.plugin_config, "personification_webui_expose_admin_list", False)):
-            return {"admins": [], "manual_entry": True, "source_hidden": True}
+        """返回登录页可选管理员；登录页不接受自行输入 QQ。"""
 
         from ...core import admin_acl as _acl
 
         seen: set[str] = set()
         out: list[dict[str, str]] = []
-        for qq in (runtime.superusers or set()):
+        for qq in sorted(runtime.superusers or set(), key=str):
             sid = str(qq or "").strip()
             if sid and sid not in seen:
                 seen.add(sid)
                 out.append({"qq": sid, "source": "SUPERUSERS (.env)"})
         try:
-            for qq in _acl.load_plugin_admins():
+            for qq in sorted(_acl.load_plugin_admins(), key=str):
                 sid = str(qq or "").strip()
                 if sid and sid not in seen:
                     seen.add(sid)
@@ -464,44 +467,8 @@ def build_auth_router(*, runtime) -> APIRouter:
 
     @router.post("/devices/{device_id}/trust")
     async def trust_device(device_id: str, admin: AdminIdentity = Depends(require_admin)) -> dict:
-        """把某台已登录设备登记为免验证：之后同指纹(UA)从该 QQ 登录跳过验证。"""
-        try:
-            target = next(
-                (it for it in webui_auth_store.list_devices(admin.qq) if it.get("id") == device_id),
-                None,
-            )
-        except Exception as exc:
-            _raise_device_failure(
-                runtime, exc, code="device_trust_precondition_failed", title="免验证登记未开始",
-                message="服务器未能读取目标设备状态。", target=device_id,
-                persist_label="登记免验证设备", persistence_started=False,
-            )
-        if target is None:
-            _raise_device_not_found(
-                code="device_trust_target_not_found", title="设备无法设为免验证",
-                message="设备不存在或不属于当前账号。", target=device_id, persist_label="登记免验证设备",
-            )
-        try:
-            trust_id = webui_auth_store.add_trusted_device(
-                admin.qq, str(target.get("ua", "")), str(target.get("label", "")) or "免验证设备"
-            )
-        except Exception as exc:
-            _raise_device_failure(
-                runtime, exc, code="device_trust_persist_failed", title="免验证登记未完成",
-                message="服务器未能确认免验证设备已登记。", target=device_id,
-                persist_label="登记免验证设备", persistence_started=True,
-            )
-        audit_ok = _record_device_audit(
-            runtime,
-            action="device_trust", qq=admin.qq, device_id=admin.device_id, target=device_id, outcome="ok"
-        )
-        return _device_result(
-            {"success": True, "trust_id": trust_id}, changed=True,
-            code="device_trusted", no_op_code="device_trust_noop",
-            title="设备已设为免验证", no_op_title="免验证登记未产生变更",
-            message="免验证设备记录已持久化。", no_op_message="免验证设备记录未发生变更。",
-            target=device_id, persist_label="登记免验证设备", audit_ok=audit_ok,
-        )
+        """UA 无法证明浏览器身份，旧免验证登记入口已停用。"""
+        raise HTTPException(status_code=410, detail="免验证设备功能已停用；退出或 Session 到期后请重新接收管理员验证码")
 
     @router.delete("/trusted-devices/{trust_id}")
     async def untrust_device(trust_id: str, admin: AdminIdentity = Depends(require_admin)) -> dict:

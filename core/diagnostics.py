@@ -507,9 +507,12 @@ async def _protocol_checks(get_bots: Any, cfg: Any, logger: Any) -> list[dict[st
 
 
 def _webui_checks(cfg: Any) -> list[dict[str, Any]]:
-    approval = bool(_get(cfg, "personification_webui_require_device_approval", True))
-    return [_check("device_approval", "新设备审批", _OK if approval else _WARN,
-                   detail="已开启" if approval else "已关闭：新设备直接放行")]
+    return [_check(
+        "device_approval",
+        "WebUI 登录授权",
+        _OK,
+        detail="管理员验证码通过后直接批准设备；有效 Session 内无需重复验证",
+    )]
 
 
 async def _run_category(name: str, *, cfg, bundle, su, get_bots, logger) -> list[dict[str, Any]]:

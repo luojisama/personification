@@ -498,10 +498,10 @@ class Config(BaseModel):
     # 私聊回复前显示"正在输入"（仅 NapCat 系支持）
     personification_humanize_input_status_enabled: bool = True
 
-    # WebUI 新设备登录需已批准设备确认（首个设备自动批准，防锁死）
-    personification_webui_require_device_approval: bool = True
-    # 登录页是否公开展示可登录管理员 QQ；公网暴露 WebUI 时建议保持关闭，改为手动输入 QQ
-    personification_webui_expose_admin_list: bool = False
+    # 兼容旧配置；当前管理员验证码通过后即批准设备，不再二次审批。
+    personification_webui_require_device_approval: bool = False
+    # 兼容旧配置；当前登录页固定展示可选管理员，不再接受手动输入 QQ。
+    personification_webui_expose_admin_list: bool = True
     personification_webui_log_retention_days: int = 7
     personification_webui_log_max_entries: int = 10000
     personification_webui_log_capture_level: str = "INFO"

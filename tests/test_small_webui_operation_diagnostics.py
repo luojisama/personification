@@ -105,20 +105,13 @@ def test_device_writes_preserve_fields_and_record_audit(monkeypatch) -> None:
     assert revoked["success"] is True
     assert revoked["code"] == "device_revoked"
 
-    monkeypatch.setattr(auth_routes.webui_auth_store, "add_trusted_device", lambda *_args: "trust-1")
-    trust = _endpoint(auth_routes, runtime, "/api/auth/devices/{device_id}/trust", "POST")
-    trusted = asyncio.run(trust("device-1", _admin()))
-    assert trusted["success"] is True
-    assert trusted["trust_id"] == "trust-1"
-    assert trusted["code"] == "device_trusted"
-
     monkeypatch.setattr(auth_routes.webui_auth_store, "list_trusted_devices", lambda _qq: [{"id": "trust-1"}])
     monkeypatch.setattr(auth_routes.webui_auth_store, "remove_trusted_device", lambda _trust_id: True)
     untrust = _endpoint(auth_routes, runtime, "/api/auth/trusted-devices/{trust_id}", "DELETE")
     untrusted = asyncio.run(untrust("trust-1", _admin()))
     assert untrusted["success"] is True
     assert untrusted["code"] == "device_untrusted"
-    assert audit_actions == ["device_approve", "device_revoke", "device_trust", "device_untrust"]
+    assert audit_actions == ["device_approve", "device_revoke", "device_untrust"]
 
 
 def test_device_persistence_failure_is_safe_unknown_and_audit_failure_is_partial(monkeypatch) -> None:
@@ -139,23 +132,24 @@ def test_device_persistence_failure_is_safe_unknown_and_audit_failure_is_partial
     _assert_contract(report, ok=False)
 
     monkeypatch.setattr(auth_routes.webui_auth_store, "list_devices", lambda _qq: [{"id": "device-1", "ua": "UA", "label": "main"}])
-    monkeypatch.setattr(auth_routes.webui_auth_store, "add_trusted_device", lambda *_args: "trust-1")
+    monkeypatch.setattr(auth_routes.webui_auth_store, "list_pending_devices", lambda: [])
+    monkeypatch.setattr(auth_routes.webui_auth_store, "revoke_device", lambda _device_id: True)
 
     def _audit_failure(**_kwargs) -> None:
         raise RuntimeError("raw-device-audit-secret")
 
     monkeypatch.setattr(auth_routes.webui_audit_log, "record", _audit_failure)
-    trust = _endpoint(auth_routes, runtime, "/api/auth/devices/{device_id}/trust", "POST")
-    result = asyncio.run(trust("device-1", _admin()))
+    revoke = _endpoint(auth_routes, runtime, "/api/auth/devices/{device_id}", "DELETE")
+    result = asyncio.run(revoke("device-1", _admin()))
     assert result["success"] is True
     assert result["partial"] is True
     assert result["outcome_unknown"] is False
     assert "raw-device-audit-secret" not in str(result)
 
     monkeypatch.setattr(auth_routes.webui_auth_store, "list_devices", lambda _qq: [])
-    status, report = _failure(trust("missing", _admin()))
+    status, report = _failure(revoke("missing", _admin()))
     assert status == 404
-    assert report["code"] == "device_trust_target_not_found"
+    assert report["code"] == "device_revoke_target_not_found"
     assert report["partial"] is False
     assert report["outcome_unknown"] is False
 

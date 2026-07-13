@@ -9,7 +9,7 @@ function readStoredQzoneOperationId() {
 let state = {
   logged: false, qq: "", view: "dashboard",
   entries: [], groups: [], activeGroup: null, configSearch: "", configSearchComposing: false, configSearchDraft: "",
-  devices: [], pendingDevices: [], trustedDevices: [], devicePending: false, loginRequestId: "", loginPolling: false, alert: null, loading: false, loadingMessage: "",
+  devices: [], devicePending: false, alert: null, loading: false, loadingMessage: "",
   dashboard: null, dashboardWindow: "month", dashboardDetail: null,
   personas: [], selectedPersona: null, personaSearch: "",
   groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [], groupAliasDrafts: {}, groupSchedule: null, groupScheduleGenerating: false,
@@ -289,7 +289,11 @@ async function api(path, opts = {}) {
     const requestOpts = { credentials: "include", ...opts, headers };
     if (method === "GET" && !requestOpts.signal && _viewAbortController) requestOpts.signal = _viewAbortController.signal;
     const res = await fetch(API + path, requestOpts);
-    if (res.status === 401) { state.logged = false; render(); throw new Error("未登录"); }
+    if (res.status === 401) {
+      state.logged = false;
+      refreshEligibleAdmins().finally(() => render());
+      throw new Error("未登录");
+    }
     if (!res.ok) {
       let payload = {message:res.statusText || "请求失败"};
       try { payload = await res.json(); } catch {}
@@ -350,10 +354,16 @@ async function bootstrap() {
   try { const me = await api("/auth/me"); state.logged = true; state.devicePending = false; state.qq = me.qq; await loadView(); }
   catch (e) { state.logged = false; state.devicePending = /DEVICE_PENDING/.test(String(e && e.message || "")); }
   if (state.devicePending) { render(); return; }
-  if (!state.logged) {
-    try { const ea = await fetch(API + "/auth/eligible-admins").then(r=>r.json()); state.eligibleAdmins = ea.admins||[]; } catch {}
-  }
+  if (!state.logged) await refreshEligibleAdmins();
   render();
+}
+
+async function refreshEligibleAdmins() {
+  try {
+    const response = await fetch(API + "/auth/eligible-admins", {credentials:"include"});
+    const data = await response.json();
+    state.eligibleAdmins = data.admins || [];
+  } catch { state.eligibleAdmins = []; }
 }
 
 function toggleTheme() {
@@ -416,14 +426,8 @@ async function loadView() {
       state.entries = data.entries; state.groups = data.groups;
       if (!state.activeGroup || !state.groups.includes(state.activeGroup)) state.activeGroup = state.groups[0] || null;
     } else if (view === "devices") {
-      const [data, pend, trust] = await Promise.all([
-        api("/auth/devices"),
-        api("/auth/pending-devices").catch(() => ({ devices: [] })),
-        api("/auth/trusted-devices").catch(() => ({ devices: [] })),
-      ]);
+      const data = await api("/auth/devices");
       state.devices = data.devices; state.currentDeviceId = data.current_device_id;
-      state.pendingDevices = pend.devices || [];
-      state.trustedDevices = trust.devices || [];
     } else if (view === "dashboard") {
       state.dashboard = await api("/metrics/summary?window=" + encodeURIComponent(state.dashboardWindow));
     } else if (view === "personas") {
