@@ -144,7 +144,7 @@ async def run_auto_post_diary(
 
     logger.info("拟人插件：正在自动更新 Qzone Cookie...")
     try:
-        cookie_ok, cookie_msg = await update_qzone_cookie(bot)
+        cookie_ok, cookie_msg = await update_qzone_cookie(bot, force=True)
     except Exception as e:
         logger.warning(f"拟人插件：Qzone Cookie 更新失败（{e}），将尝试使用旧 Cookie 继续发布。")
     else:
@@ -259,7 +259,7 @@ async def run_proactive_qzone_post(
 
     # 把月度额度快照交给 agent，让它自己把控发不发、发的节奏（硬上限仍由上面的 gate 兜底）。
     try:
-        cookie_ok, cookie_msg = await update_qzone_cookie(bot)
+        cookie_ok, cookie_msg = await update_qzone_cookie(bot, force=True)
     except Exception as e:
         logger.warning(f"拟人插件：主动说说刷新 Cookie 失败（{e}），尝试使用旧 Cookie。")
     else:

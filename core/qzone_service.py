@@ -1324,7 +1324,7 @@ async def _upload_qzone_image(
 def build_qzone_services(
     plugin_config: Any,
     logger: Any,
-) -> tuple[bool, Callable[[str, str], Awaitable[QzoneWriteResult]], Callable[[Any], Awaitable[tuple[bool, str]]]]:
+) -> tuple[bool, Callable[[str, str], Awaitable[QzoneWriteResult]], Callable[..., Awaitable[tuple[bool, str]]]]:
     qzone_enabled = bool(getattr(plugin_config, "personification_qzone_enabled", False))
     async def update_qzone_cookie(bot: Any, *, force: bool = False) -> tuple[bool, str]:
         """自动获取并刷新 Qzone Cookie，供定时任务或手动命令调用。"""

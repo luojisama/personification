@@ -86,12 +86,43 @@ def test_in_quiet_hour_disabled_when_start_eq_end() -> None:
 # ---- run_proactive_qzone_post 集成：quiet hour 直接 skip ----
 
 
+def test_auto_diary_forces_cookie_refresh_before_generation() -> None:
+    refresh_calls: list[bool] = []
+
+    async def _update_cookie(_bot, *, force=False):
+        refresh_calls.append(force)
+        return True, "ok"
+
+    async def _generate(_bot):
+        return ""
+
+    async def _publish(_content, _bot_id):
+        raise AssertionError("empty generation must not publish")
+
+    result = asyncio.run(periodic_jobs.run_auto_post_diary(
+        qzone_publish_available=True,
+        get_bots=lambda: {"1": SimpleNamespace(self_id="1")},
+        update_qzone_cookie=_update_cookie,
+        generate_ai_diary=_generate,
+        publish_qzone_shuo=_publish,
+        logger=SimpleNamespace(
+            info=lambda *_a, **_k: None,
+            warning=lambda *_a, **_k: None,
+            error=lambda *_a, **_k: None,
+        ),
+    ))
+
+    assert result is False
+    assert refresh_calls == [True]
+
+
 def test_proactive_qzone_post_skipped_in_quiet_hour() -> None:
     """3 点钟触发，quiet=0-7 → skip 且不调 publish_qzone_shuo。"""
     fake_now = datetime(2026, 5, 18, 3, 0)
     publish_called: list = []
 
-    async def _fake_update_cookie(_bot):
+    async def _fake_update_cookie(_bot, *, force=False):
+        assert force is True
         return True, "ok"
 
     async def _fake_maybe_generate(_bot, quota=None):
@@ -132,7 +163,8 @@ def test_proactive_qzone_post_runs_outside_quiet_hour(tmp_path, monkeypatch) -> 
     generated: list = []
     publish_called: list = []
 
-    async def _fake_update_cookie(_bot):
+    async def _fake_update_cookie(_bot, *, force=False):
+        assert force is True
         return True, "ok"
 
     async def _fake_maybe_generate(_bot, quota=None):
@@ -173,7 +205,8 @@ def test_proactive_qzone_probability_gate_skips_generation(tmp_path, monkeypatch
     generated: list = []
     published: list = []
 
-    async def _fake_update_cookie(_bot):
+    async def _fake_update_cookie(_bot, *, force=False):
+        assert force is True
         raise AssertionError("probability gate should run before cookie refresh")
 
     async def _fake_maybe_generate(_bot, quota=None):
@@ -210,7 +243,8 @@ def test_proactive_qzone_probability_gate_skips_generation(tmp_path, monkeypatch
 
 
 def _make_runner(now, *, monthly_limit, publish_called, generate=lambda: "今天写点什么"):
-    async def _upd(_bot):
+    async def _upd(_bot, *, force=False):
+        assert force is True
         return True, "ok"
 
     async def _gen(_bot, quota=None):

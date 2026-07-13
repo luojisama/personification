@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 from .test_webui_smoke import _build_client, _login_as_admin, _runtime_context  # noqa: F401
 
@@ -290,7 +292,8 @@ def test_qzone_post_hides_refresh_and_publish_service_messages(_runtime_context,
     async def publish(_content, _bot_id):  # noqa: ANN001
         return False, "publish-service-secret"
 
-    async def refresh(_bot):  # noqa: ANN001
+    async def refresh(_bot, *, force=False):  # noqa: ANN001
+        assert force is True
         return False, "cookie=refresh-service-secret"
 
     async def coordinated(**_kwargs):  # noqa: ANN003
@@ -333,6 +336,111 @@ def test_qzone_post_hides_refresh_and_publish_service_messages(_runtime_context,
     assert unknown_body["outcome_unknown"] is True
     assert unknown_body["retryable"] is False
     assert "raw-timeout-secret" not in unknown_response.text
+
+
+def test_qzone_post_stops_before_generation_when_forced_refresh_still_requires_login(
+    _runtime_context,
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    refresh_calls: list[bool] = []
+
+    async def refresh(_bot, *, force=False):  # noqa: ANN001
+        refresh_calls.append(force)
+        return False, "p_skey=must-not-leak"
+
+    async def generate(_bot):  # noqa: ANN001
+        raise AssertionError("login preflight must stop before generation")
+
+    async def publish(_content, _bot_id):  # noqa: ANN001
+        raise AssertionError("login preflight must stop before publish")
+
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda: {"status": "login_required"})
+    _install_runtime(
+        _runtime_context,
+        bundle=SimpleNamespace(
+            qzone_generate_post=generate,
+            publish_qzone_shuo=publish,
+            update_qzone_cookie=refresh,
+        ),
+    )
+    client = _admin_client(_runtime_context)
+
+    response = client.post(
+        "/personification/api/qzone/post-now",
+        json={"bot_id": "10000", "operation_id": "login-preflight-op"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    _assert_safe_report(body, code="qzone_login_required", phase="qzone_auth")
+    assert body["retryable"] is False
+    assert body["operation_id"] == "login-preflight-op"
+    assert [item["key"] for item in body["steps"]] == ["cookie_refresh"]
+    assert refresh_calls == [True]
+    assert "must-not-leak" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("publish_status", "expected_code", "expected_retryable", "expected_unknown"),
+    [
+        ("definite_failure", "qzone_login_required", True, False),
+        ("outcome_unknown", "qzone_publish_outcome_unknown", False, True),
+    ],
+)
+def test_qzone_post_recovers_login_without_automatically_replaying_write(
+    _runtime_context,
+    monkeypatch,
+    publish_status: str,
+    expected_code: str,
+    expected_retryable: bool,
+    expected_unknown: bool,
+) -> None:  # noqa: ANN001
+    auth_state = {"status": "healthy"}
+    refresh_calls: list[bool] = []
+    coordinated_calls: list[str] = []
+
+    async def refresh(_bot, *, force=False):  # noqa: ANN001
+        refresh_calls.append(force)
+        if len(refresh_calls) > 1:
+            auth_state["status"] = "healthy"
+        return True, "p_skey=must-not-leak"
+
+    async def generate(_bot):  # noqa: ANN001
+        return "登录恢复测试草稿"
+
+    async def publish(_content, _bot_id):  # noqa: ANN001
+        raise AssertionError("coordinator stub owns the single dispatch attempt")
+
+    async def coordinated(**_kwargs):  # noqa: ANN003
+        coordinated_calls.append(publish_status)
+        auth_state["status"] = "login_required"
+        return {"success": False, "status": publish_status, "message": "secret"}
+
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda: dict(auth_state))
+    monkeypatch.setattr(periodic_jobs, "coordinated_qzone_publish", coordinated)
+    _install_runtime(
+        _runtime_context,
+        bundle=SimpleNamespace(
+            qzone_generate_post=generate,
+            publish_qzone_shuo=publish,
+            update_qzone_cookie=refresh,
+        ),
+    )
+    client = _admin_client(_runtime_context)
+
+    response = client.post(
+        "/personification/api/qzone/post-now",
+        json={"bot_id": "10000", "operation_id": f"login-recovery-{publish_status}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    _assert_safe_report(body, code=expected_code, phase="qzone_publish", outcome_unknown=expected_unknown)
+    assert body["retryable"] is expected_retryable
+    assert [item["key"] for item in body["steps"]][-2:] == ["publish", "auth_recovery"]
+    assert refresh_calls == [True, True]
+    assert coordinated_calls == [publish_status]
+    assert "must-not-leak" not in response.text
 
 
 def test_qzone_post_orchestration_exception_is_safe_and_marked_unknown(_runtime_context, monkeypatch) -> None:  # noqa: ANN001

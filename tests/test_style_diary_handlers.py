@@ -37,7 +37,8 @@ def test_manual_diary_publish_records_shared_qzone_state(monkeypatch) -> None:  
     coordinated_calls: list[dict] = []
     state_updates: list[str] = []
 
-    async def _update_cookie(_bot):  # noqa: ANN001
+    async def _update_cookie(_bot, *, force=False):  # noqa: ANN001
+        assert force is True
         return True, "ok"
 
     async def _generate(_bot):  # noqa: ANN001
@@ -103,7 +104,8 @@ def test_diary_task_binds_post_success_state_callback(monkeypatch) -> None:  # n
 def test_manual_diary_unknown_does_not_mark_published(monkeypatch) -> None:  # noqa: ANN001
     updates: list[str] = []
 
-    async def _update_cookie(_bot):  # noqa: ANN001
+    async def _update_cookie(_bot, *, force=False):  # noqa: ANN001
+        assert force is True
         return True, "ok"
 
     async def _generate(_bot):  # noqa: ANN001

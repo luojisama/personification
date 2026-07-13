@@ -384,6 +384,8 @@ def test_qzone_generation_fast_fails_deterministic_provider_errors(status_code: 
     assert calls == 1
     assert report.code == expected_code
     assert report.retryable is False
+    assert "LLM Provider" in report.message
+    assert "不是 QQ 空间登录失败" in report.message
     assert {item.label: item.value for item in report.details} == {
         "实际执行": "1 次",
         "调用上限": "5 次",

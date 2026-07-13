@@ -420,7 +420,8 @@ def test_qzone_forward_test_forwards_first_feed_and_counts_quota(_runtime_contex
     service = _FakeQzoneService()
     cookie_updates = []
 
-    async def _update_cookie(bot):  # noqa: ANN001
+    async def _update_cookie(bot, *, force=False):  # noqa: ANN001
+        assert force is True
         cookie_updates.append(getattr(bot, "self_id", ""))
         return True, "uin=o10000; p_skey=must-not-leak; skey=also-secret;"
 
@@ -495,7 +496,8 @@ def test_qzone_forward_fetch_exception_is_structured_and_safe(_runtime_context) 
         async def forward_feed(self, **_kwargs):  # noqa: ANN003
             raise AssertionError("publish must not run")
 
-    async def _refresh(_bot):  # noqa: ANN001
+    async def _refresh(_bot, *, force=False):  # noqa: ANN001
+        assert force is True
         raise RuntimeError("raw-auth-secret")
 
     _runtime_context.app_module.set_runtime_context(
@@ -608,7 +610,8 @@ def test_qzone_forward_timeout_reports_outcome_unknown(_runtime_context) -> None
         async def forward_feed(self, **_kwargs):  # noqa: ANN003
             raise TimeoutError("raw-publish-secret")
 
-    async def _refresh(_bot):  # noqa: ANN001
+    async def _refresh(_bot, *, force=False):  # noqa: ANN001
+        assert force is True
         return True, "cookie-secret-must-not-leak"
 
     _runtime_context.app_module.set_runtime_context(
@@ -757,6 +760,7 @@ def test_qzone_post_now_returns_exact_generation_diagnostic(_runtime_context) ->
     setattr(generate, "detailed", detailed)
 
     async def refresh(_bot, *, force=False):  # noqa: ANN001
+        assert force is True
         return True, "ok"
 
     async def publish(_content, _bot_id):  # noqa: ANN001
@@ -788,7 +792,9 @@ def test_qzone_post_now_returns_exact_generation_diagnostic(_runtime_context) ->
     assert body["phase"] == "semantic_review"
     assert body["operation_id"] == "diagnostic-op"
     assert body["details"][0]["label"] == "事件依据"
-    assert body["steps"][0]["status"] == "error"
+    assert [item["key"] for item in body["steps"]] == ["cookie_refresh", "semantic"]
+    assert body["steps"][0]["status"] == "ok"
+    assert body["steps"][1]["status"] == "error"
 
 
 def test_qzone_login_routes_bind_owner_require_csrf_and_disable_qr_cache(_runtime_context, monkeypatch) -> None:  # noqa: ANN001

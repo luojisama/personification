@@ -246,15 +246,15 @@ def _classify_qzone_generation_error(exc: Exception) -> tuple[str, str, str, boo
     if status in {401, 403} or code == "provider_auth_failed":
         return (
             "qzone_generation_auth_failed",
-            "QZone 生成认证失败",
-            "生成模型认证或权限被拒绝，确定性失败不会重复调用。",
+            "草稿生成模型认证失败",
+            "LLM Provider 的认证或模型调用权限被拒绝；这不是 QQ 空间登录失败。",
             False,
         )
     if _is_deterministic_qzone_model_error(exc):
         return (
             "qzone_generation_model_unavailable",
-            "QZone 生成模型不可用",
-            "生成模型或请求配置确定性不可用，重复调用相同配置不会恢复。",
+            "草稿生成模型不可用",
+            "LLM Provider 的模型名称、endpoint 或请求参数确定性不可用；这不是 QQ 空间登录失败。",
             False,
         )
     if code == "provider_caller_unavailable":
@@ -1664,7 +1664,7 @@ async def _generate_once(
                         "draft_generation",
                         title,
                         message,
-                        suggestion="检查 QZone Provider 的认证、模型和 caller 配置后重新生成。",
+                        suggestion="检查 LLM Provider 的 API 认证、模型名称、endpoint 和 caller 配置后重新生成。",
                         retryable=False,
                         details=(
                             detail("实际执行", f"{generation_attempt} 次", "error"),

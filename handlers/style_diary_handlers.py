@@ -40,7 +40,7 @@ async def handle_manual_diary_command(
     *,
     bot: Any,
     qzone_publish_available: bool,
-    update_qzone_cookie: Callable[[Any], Awaitable[tuple[bool, str]]],
+    update_qzone_cookie: Callable[..., Awaitable[tuple[bool, str]]],
     generate_ai_diary: Callable[[Any], Awaitable[str]],
     publish_qzone_shuo: Callable[[str, str], Awaitable[Any]],
 ) -> None:
@@ -52,7 +52,7 @@ async def handle_manual_diary_command(
         )
 
     await matcher.send("正在刷新空间 Cookie、生成空间说说并发布，请稍候...")
-    cookie_ok, cookie_msg = await update_qzone_cookie(bot)
+    cookie_ok, cookie_msg = await update_qzone_cookie(bot, force=True)
     if not cookie_ok:
         await matcher.send(f"空间 Cookie 自动更新失败，继续尝试使用现有 Cookie 发布：{cookie_msg}")
     diary_content = await generate_ai_diary(bot)

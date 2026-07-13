@@ -1254,7 +1254,7 @@ def build_health_router(*, runtime) -> APIRouter:
         if callable(update_cookie):
             cookie_result["attempted"] = True
             try:
-                cookie_ok, _cookie_msg = await update_cookie(bot)
+                cookie_ok, _cookie_msg = await update_cookie(bot, force=True)
             except Exception as exc:
                 cookie_ok = False
                 cookie_result.update(

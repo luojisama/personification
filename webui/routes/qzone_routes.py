@@ -622,15 +622,61 @@ def build_qzone_router(*, runtime) -> APIRouter:
             raise _http_diagnostic(503, report)
 
         warnings: list[str] = []
+        auth_steps = []
+        refresh_ok: bool | None = None
         if callable(update_cookie):
             try:
-                refresh_ok, _refresh_message = await update_cookie(bot)
+                refresh_ok, _refresh_message = await update_cookie(bot, force=True)
                 if not refresh_ok:
-                    warnings.append("LLOneBot Cookie 刷新未成功，已继续尝试使用现有凭证。")
+                    warnings.append("LLOneBot Cookie 强制刷新未成功。")
+                auth_steps.append(step(
+                    "cookie_refresh",
+                    "强制刷新 QZone 登录凭证",
+                    "ok" if refresh_ok else "warn",
+                    "已从当前 Bot 获取并验证最新 Cookie。" if refresh_ok else "未取得可验证的新 Cookie。",
+                ))
             except Exception as exc:
                 if logger is not None:
                     logger.warning(f"[webui.qzone] post cookie refresh exception={type(exc).__name__}")
-                warnings.append("LLOneBot Cookie 刷新异常，已继续尝试使用现有凭证。")
+                warnings.append("LLOneBot Cookie 强制刷新异常。")
+                auth_steps.append(step(
+                    "cookie_refresh",
+                    "强制刷新 QZone 登录凭证",
+                    "warn",
+                    "自动刷新异常中断，未暴露底层凭证或响应。",
+                ))
+        else:
+            auth_steps.append(step(
+                "cookie_refresh",
+                "强制刷新 QZone 登录凭证",
+                "skipped",
+                "当前 runtime 未提供 Cookie 刷新能力。",
+            ))
+
+        auth_status = get_qzone_auth_status()
+        if refresh_ok is not True and auth_status.get("status") == "login_required":
+            result = diagnostic(
+                ok=False,
+                code="qzone_login_required",
+                phase="qzone_auth",
+                title="QZone 登录凭证需要人工恢复",
+                message="系统已自动尝试从当前 Bot 强制刷新 Cookie，但腾讯仍要求重新登录；尚未生成草稿或提交发布。",
+                steps=tuple(auth_steps),
+                warnings=warnings,
+                suggestion="在上方“QZone 认证恢复”扫码一次；成功后重新发起发布。",
+                retryable=False,
+                operation_id=operation_id,
+            )
+            webui_audit_log.record(
+                action="qzone_post_now",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=str(getattr(bot, "self_id", "") or ""),
+                ip_hash=get_client_ip(request),
+                detail={"operation_id": operation_id, "code": result["code"], "phase": result["phase"]},
+                outcome="failed",
+            )
+            return result
 
         try:
             detailed_generate = getattr(generate, "detailed", None)
@@ -660,6 +706,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 title="说说生成流程异常中断",
                 message="生成函数抛出异常，尚未进入 QZone 发布阶段。",
                 details=(detail("异常类型", type(exc).__name__, "error"),),
+                steps=tuple(auth_steps) + (step("draft_generation", "生成说说草稿", "error", "生成函数异常中断。"),),
                 warnings=warnings,
                 suggestion="根据异常类型检查生成链路和 Provider 状态后重试。",
                 retryable=True,
@@ -678,6 +725,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
         if not content:
             generation_diag["operation_id"] = operation_id
             generation_diag["warnings"] = list(generation_diag.get("warnings") or []) + warnings
+            generation_diag["steps"] = [item.to_dict() for item in auth_steps] + list(generation_diag.get("steps") or [])
             webui_audit_log.record(
                 action="qzone_post_now",
                 qq=admin.qq,
@@ -711,7 +759,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 title="QZone 发布协调流程异常",
                 message="发布协调器未返回可确认的操作状态。",
                 suggestion="先按 Operation ID 检查服务端操作记录和 QZone 实际状态，不要创建新的重复请求。",
-                steps=(
+                steps=tuple(auth_steps) + (
                     step("draft_generation", "生成说说草稿", "ok", "草稿已生成。"),
                     step("publish", "提交到 QZone", "unknown", "发布协调流程异常中断，远端结果未知。"),
                 ),
@@ -737,6 +785,32 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 "quota_blocked", "interval_blocked", "payload_conflict", "unresolved_payload"
             } else "failed"
             auth_status = get_qzone_auth_status()
+            auth_was_login_required = auth_status.get("status") == "login_required"
+            recovery_step = None
+            recovery_ok: bool | None = None
+            if auth_was_login_required and callable(update_cookie):
+                try:
+                    recovery_ok, _recovery_message = await update_cookie(bot, force=True)
+                    recovery_step = step(
+                        "auth_recovery",
+                        "发布失败后恢复登录凭证",
+                        "ok" if recovery_ok else "error",
+                        "已自动刷新并验证 Cookie；没有自动重发本次说说。" if recovery_ok else "自动刷新仍未取得有效 Cookie。",
+                    )
+                except Exception as exc:
+                    if logger is not None:
+                        logger.warning(f"[webui.qzone] post-auth recovery exception={type(exc).__name__}")
+                    recovery_step = step(
+                        "auth_recovery",
+                        "发布失败后恢复登录凭证",
+                        "error",
+                        "自动刷新异常中断；没有自动重发本次说说。",
+                    )
+                warnings.append(
+                    "检测到 QZone 登录失效，已自动刷新凭证；本次发布不会自动重发。"
+                    if recovery_ok
+                    else "检测到 QZone 登录失效，自动刷新仍未恢复；需要扫码登录。"
+                )
             outcome_unknown = publish_status in {"outcome_unknown", "unknown"}
             if outcome_unknown:
                 code = "qzone_publish_outcome_unknown"
@@ -750,20 +824,30 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 message = "该 Operation ID 已有一个未完成的发布请求，当前没有再次向 QZone 外发。"
                 suggestion = "等待原请求完成并刷新状态，不要创建新的重复请求。"
                 retryable = False
-            elif auth_status.get("status") == "login_required":
+            elif auth_was_login_required:
                 code = "qzone_login_required"
                 title = "QZone 登录凭证已失效"
-                message = "腾讯返回了登录页、验证码或无效认证状态，本次草稿没有发布。"
-                suggestion = "先在上方“QZone 认证恢复”中扫码登录，确认认证健康后再重新发布。"
-                retryable = False
+                message = (
+                    "腾讯要求重新登录；系统已自动刷新凭证，本次草稿没有自动重发。"
+                    if recovery_ok
+                    else "腾讯要求重新登录，自动刷新未恢复，本次草稿没有发布。"
+                )
+                suggestion = (
+                    "认证已恢复，可以重新发起一次新的发布操作。"
+                    if recovery_ok
+                    else "在上方“QZone 认证恢复”扫码登录，确认认证健康后再重新发布。"
+                )
+                retryable = bool(recovery_ok)
             else:
                 code = "qzone_publish_rejected"
                 title = "QZone 明确拒绝了发布"
                 message = "发布层明确返回失败状态，本次未确认发布成功。"
                 suggestion = "根据发布层返回和认证状态修复问题；只有明确失败时才可以重新发布。"
                 retryable = True
-            steps = list(generation_diag.get("steps") or [])
+            steps = [item.to_dict() for item in auth_steps] + list(generation_diag.get("steps") or [])
             steps.append(step("publish", "提交到 QZone", "unknown" if outcome_unknown else "error", message).to_dict())
+            if recovery_step is not None:
+                steps.append(recovery_step.to_dict())
             result = diagnostic(
                 ok=False,
                 code=code,
@@ -828,7 +912,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
             detail={"operation_id": operation_id, "duplicate": bool(published.get("duplicate"))},
             outcome="ok",
         )
-        generation_steps = list(generation_diag.get("steps") or [])
+        generation_steps = [item.to_dict() for item in auth_steps] + list(generation_diag.get("steps") or [])
         generation_steps.append({"key": "publish", "label": "提交到 QZone", "status": "ok", "message": "腾讯已明确返回发布成功。", "details": []})
         result = diagnostic(
             ok=True,
