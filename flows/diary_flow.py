@@ -1648,15 +1648,12 @@ async def _generate_once(
             if report is not None:
                 report.add_step(
                     step_key,
-                    f"{attempt_label} attempt {generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
+                    f"{attempt_label} · 第 {generation_attempt} 次",
                     "error",
                     message,
                     details=(
-                        detail(
-                            "生成调用",
-                            f"{generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
-                            "info",
-                        ),
+                        detail("实际执行", f"{generation_attempt} 次", "info"),
+                        detail("调用上限", f"{_QZONE_GENERATION_MAX_ATTEMPTS} 次", "info"),
                         detail("异常类型", type(exc).__name__, "error"),
                     ),
                 )
@@ -1670,11 +1667,9 @@ async def _generate_once(
                         suggestion="检查 QZone Provider 的认证、模型和 caller 配置后重新生成。",
                         retryable=False,
                         details=(
-                            detail(
-                                "生成调用",
-                                f"{generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
-                                "error",
-                            ),
+                            detail("实际执行", f"{generation_attempt} 次", "error"),
+                            detail("调用上限", f"{_QZONE_GENERATION_MAX_ATTEMPTS} 次", "info"),
+                            detail("终止原因", "确定性错误，已提前停止", "warn"),
                         ),
                     )
                 return ""
@@ -1706,15 +1701,12 @@ async def _generate_once(
             if report is not None:
                 report.add_step(
                     f"{attempt_key}_attempt_{generation_attempt}",
-                    f"{attempt_label} attempt {generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
+                    f"{attempt_label} · 第 {generation_attempt} 次",
                     "ok",
                     "模型已返回可解析的结构化候选。",
                     details=(
-                        detail(
-                            "生成调用",
-                            f"{generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
-                            "ok",
-                        ),
+                        detail("实际执行", f"{generation_attempt} 次", "ok"),
+                        detail("调用上限", f"{_QZONE_GENERATION_MAX_ATTEMPTS} 次", "info"),
                         detail("原始输出长度", f"{len(cleaned)} 字", "info"),
                     ),
                 )
@@ -1730,15 +1722,12 @@ async def _generate_once(
         if report is not None:
             report.add_step(
                 step_key,
-                f"{attempt_label} attempt {generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
+                f"{attempt_label} · 第 {generation_attempt} 次",
                 "error",
                 failure_message,
                 details=(
-                    detail(
-                        "生成调用",
-                        f"{generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
-                        "info",
-                    ),
+                    detail("实际执行", f"{generation_attempt} 次", "info"),
+                    detail("调用上限", f"{_QZONE_GENERATION_MAX_ATTEMPTS} 次", "info"),
                     detail("失败代码", last_failure_code, "error"),
                 ),
             )
@@ -1756,11 +1745,9 @@ async def _generate_once(
             suggestion="系统会在业务 candidate 预算允许时生成下一候选；全部候选耗尽后再重新发起完整生成。",
             retryable=True,
             details=(
-                detail(
-                    "生成调用",
-                    f"{_QZONE_GENERATION_MAX_ATTEMPTS}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
-                    "error",
-                ),
+                detail("实际执行", f"{_QZONE_GENERATION_MAX_ATTEMPTS} 次", "error"),
+                detail("调用上限", f"{_QZONE_GENERATION_MAX_ATTEMPTS} 次", "info"),
+                detail("终止原因", "已用完当前 candidate 的调用预算", "warn"),
                 detail("最后失败", last_failure_code or "unknown", "error"),
             ),
         )

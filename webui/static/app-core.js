@@ -244,7 +244,6 @@ function renderOperationDiagnostic(input, options={}) {
   return `<details class="operation-diagnostic ${tone}" data-operation-group="${escapeAttr(group)}" ${expanded?'open':''}>
     <summary class="operation-summary"><span class="operation-summary-mark">${renderIcon(unknown?'alert-triangle':ok?'check':'alert-circle','operation-status-icon')}</span><span class="operation-summary-copy"><span class="eyebrow">OPERATION DIAGNOSTIC</span><strong>${escapeHtml(d.title||(ok?'操作完成':'操作未完成'))}</strong><small>PHASE / ${escapeHtml(d.phase||'未标记')}</small></span><code class="operation-code">${escapeHtml(d.code||(ok?'ok':'operation_failed'))}</code><span class="operation-chevron">${renderIcon('chevron-down','ui-icon')}</span></summary>
     <div class="operation-diagnostic-body">
-      <code class="operation-full-code">${escapeHtml(d.code||(ok?'ok':'operation_failed'))}</code>
       <header><p>${escapeHtml(d.message||'未提供说明')}</p></header>
       <div class="operation-meta"><span>阶段 <strong>${escapeHtml(d.phase||'未标记')}</strong></span><span>重试策略 <strong>${retryLabel}</strong></span>${d.partial?'<span><strong>部分完成</strong></span>':''}${unknown?'<span><strong>远端结果未知</strong></span>':''}</div>
       ${detailRows?`<div class="operation-details">${detailRows}</div>`:''}

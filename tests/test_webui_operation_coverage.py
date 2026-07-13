@@ -110,7 +110,8 @@ def test_operation_diagnostic_summary_is_compact_and_accessible() -> None:
     assert core.count('role="status"') == 1
     assert 'id="operation-live-region" class="sr-only" role="status"' in core
     assert '<div class="operation-diagnostic-body">' in core
-    assert '<code class="operation-full-code">' in core
+    assert '<code class="operation-full-code">' not in core
+    assert core.count('<code class="operation-code">') == 1
 
     code_rule = re.search(r"\.operation-code\s*\{([^}]+)\}", css)
     assert code_rule is not None

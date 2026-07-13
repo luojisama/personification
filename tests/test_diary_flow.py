@@ -284,7 +284,11 @@ def test_generate_ai_diary_detailed_explains_invalid_json(monkeypatch) -> None: 
     assert len(attempts) == 5
     assert [item["status"] for item in attempts] == ["warn", "warn", "warn", "warn", "error"]
     assert any(
-        detail["label"] == "生成调用" and detail["value"] == "5/5"
+        detail["label"] == "实际执行" and detail["value"] == "5 次"
+        for detail in result["diagnostic"]["details"]
+    )
+    assert any(
+        detail["label"] == "调用上限" and detail["value"] == "5 次"
         for detail in result["diagnostic"]["details"]
     )
 
@@ -380,6 +384,11 @@ def test_qzone_generation_fast_fails_deterministic_provider_errors(status_code: 
     assert calls == 1
     assert report.code == expected_code
     assert report.retryable is False
+    assert {item.label: item.value for item in report.details} == {
+        "实际执行": "1 次",
+        "调用上限": "5 次",
+        "终止原因": "确定性错误，已提前停止",
+    }
 
 
 def test_qzone_generation_fast_fails_without_caller_and_propagates_cancel() -> None:
