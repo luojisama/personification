@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
+from .llm_context import use_single_attempt_retry_policy
 from .safety_filter import build_safe_reframe_messages, detect_route_safety_issue
 
 
@@ -604,17 +606,23 @@ class RoutedToolCaller:
                     tools,
                     use_builtin_search,
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 last_error = exc
                 continue
             safety_issue = detect_route_safety_issue(response)
             if safety_issue:
+                if use_single_attempt_retry_policy():
+                    continue
                 try:
                     response = await caller.chat_with_tools(
                         build_safe_reframe_messages(self._strip_route_markers(messages)),
                         tools,
                         use_builtin_search,
                     )
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
                     last_error = exc
                     continue

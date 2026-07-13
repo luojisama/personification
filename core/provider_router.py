@@ -6,6 +6,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from .llm_context import use_single_attempt_retry_policy
 from .message_parts import normalize_message_parts
 from .safety_filter import build_safe_reframe_messages, detect_route_safety_issue
 from .visual_capabilities import error_indicates_vision_unavailable, heuristic_supports_vision
@@ -26,6 +27,14 @@ _RETRYABLE_HTTP_STATUSES = {408, 409, 425, 429}
 
 class _InvalidProviderResponse(RuntimeError):
     pass
+
+
+class ProviderRouteError(RuntimeError):
+    def __init__(self, code: str, message: str, *, status_code: int = 0, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.code = str(code or "provider_route_failed")
+        self.status_code = int(status_code or 0)
+        self.retryable = bool(retryable)
 
 
 def _tool_caller_impl() -> Any:
@@ -887,7 +896,7 @@ async def _try_provider_chain(
                 f"personification: provider {provider['name']} not vision-capable; "
                 "stripped image parts to text placeholders"
             )
-        retries = _provider_max_retries(provider)
+        retries = 1 if use_single_attempt_retry_policy() else _provider_max_retries(provider)
         skip_provider = False
         safety_reframed = False
         for attempt in range(retries):
@@ -907,7 +916,7 @@ async def _try_provider_chain(
                         f"personification: provider {provider['name']} returned blocked output "
                         f"({reason}); visible text discarded"
                     )
-                    if not safety_reframed:
+                    if not safety_reframed and not use_single_attempt_retry_policy():
                         provider_messages = build_safe_reframe_messages(provider_messages)
                         safety_reframed = True
                         try:
@@ -943,6 +952,8 @@ async def _try_provider_chain(
                     raise _InvalidProviderResponse("empty or invalid route response")
                 _mark_provider_success(provider["name"])
                 return response, errors, saw_vision_unavailable
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 if contains_image_input and error_indicates_vision_unavailable(e):
                     saw_vision_unavailable = True
@@ -1070,6 +1081,39 @@ async def call_ai_api(
                 "configure a secondary provider or wait for the cooldown to expire"
             )
         logger.error("personification: all providers failed: " + " | ".join(errors))
+        if use_single_attempt_retry_policy():
+            statuses = {
+                status
+                for status in (400, 401, 403, 404, 422)
+                if any(f"status={status}" in item for item in errors)
+            }
+            if 401 in statuses or 403 in statuses:
+                status = 401 if 401 in statuses else 403
+                raise ProviderRouteError(
+                    "provider_auth_failed",
+                    "all configured providers rejected authentication or permission",
+                    status_code=status,
+                    retryable=False,
+                )
+            if statuses:
+                status = min(statuses)
+                raise ProviderRouteError(
+                    "provider_model_unavailable",
+                    "all configured providers failed with a deterministic request or model error",
+                    status_code=status,
+                    retryable=False,
+                )
+            raise ProviderRouteError(
+                "providers_exhausted",
+                "all configured providers failed their single attempt",
+                retryable=True,
+            )
     if saw_vision_unavailable:
         return _empty_vision_unavailable_response()
+    if use_single_attempt_retry_policy():
+        raise ProviderRouteError(
+            "provider_caller_unavailable",
+            "no configured provider caller is available",
+            retryable=False,
+        )
     return _empty_response()

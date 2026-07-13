@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from plugin.personification.core.image_refs import normalize_image_ref
+from plugin.personification.core.llm_context import use_single_attempt_retry_policy
 from plugin.personification.core.message_parts import extract_text_from_parts, normalize_message_parts
 from plugin.personification.core.time_ctx import build_current_time_context_block, inject_current_time_context
 
@@ -963,11 +964,14 @@ class OpenAIToolCaller(ToolCaller):
                 ),
                 **http_kwargs,
             )
-            client = AsyncOpenAI(
-                api_key=self.api_key,
-                base_url=self.base_url,
-                http_client=http_client,
-            )
+            client_kwargs: Dict[str, Any] = {
+                "api_key": self.api_key,
+                "base_url": self.base_url,
+                "http_client": http_client,
+            }
+            if use_single_attempt_retry_policy():
+                client_kwargs["max_retries"] = 0
+            client = AsyncOpenAI(**client_kwargs)
             if True:
                 all_tools = list(tools)
                 filtered_tools = [
@@ -1188,7 +1192,11 @@ class GeminiToolCaller(ToolCaller):
             follow_redirects=True,
         ) as client:
             response = await client.post(url, headers=headers, json=payload)
-            if response.status_code in {401, 403} and self.api_key:
+            if (
+                response.status_code in {401, 403}
+                and self.api_key
+                and not use_single_attempt_retry_policy()
+            ):
                 headers.pop("Authorization", None)
                 params["key"] = self.api_key
                 response = await client.post(url, headers=headers, params=params, json=payload)
@@ -1347,6 +1355,8 @@ class AnthropicToolCaller(ToolCaller):
                 "api_key": self.api_key,
                 "timeout": self.timeout,
             }
+            if use_single_attempt_retry_policy():
+                client_kwargs["max_retries"] = 0
             if self.base_url:
                 client_kwargs["base_url"] = self.base_url.rstrip("/")
             client = AsyncAnthropic(**client_kwargs)
@@ -1897,7 +1907,7 @@ class OpenAICodexToolCaller(ToolCaller):
         if not access_token:
             access_token, _ = await self._get_access_token()
         last_error: Optional[Exception] = None
-        for attempt in range(2):
+        for attempt in range(1 if use_single_attempt_retry_policy() else 2):
             try:
                 connect_timeout = 15.0
                 client_kwargs: dict[str, Any] = {
@@ -1978,7 +1988,7 @@ class OpenAICodexToolCaller(ToolCaller):
                 break
             except (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError, httpx.ConnectError) as e:
                 last_error = e
-                if attempt == 0:
+                if attempt == 0 and not use_single_attempt_retry_policy():
                     await asyncio.sleep(0.8)
                     continue
                 raise RuntimeError(
@@ -1986,7 +1996,11 @@ class OpenAICodexToolCaller(ToolCaller):
                 ) from e
             except Exception as e:
                 last_error = e
-                if attempt == 0 and "Server disconnected without sending a response" in str(e):
+                if (
+                    attempt == 0
+                    and not use_single_attempt_retry_policy()
+                    and "Server disconnected without sending a response" in str(e)
+                ):
                     await asyncio.sleep(0.8)
                     continue
                 raise
@@ -3407,7 +3421,7 @@ class GeminiCliToolCaller(ToolCaller):
         data: dict = {}
         # 第一次尝试用当前 token；如果 401 说明 token 已过期但本地未察觉（expiry 缺失或被绕过），
         # 强制刷新一次再重试。
-        for attempt in range(2):
+        for attempt in range(1 if use_single_attempt_retry_policy() else 2):
             try:
                 project = await self._load_code_assist_project(access_token)
                 data = {"cloudaicompanionProject": project}
@@ -3415,7 +3429,12 @@ class GeminiCliToolCaller(ToolCaller):
                 break
             except httpx.HTTPStatusError as exc:
                 load_error = exc
-                if exc.response is not None and exc.response.status_code == 401 and attempt == 0:
+                if (
+                    exc.response is not None
+                    and exc.response.status_code == 401
+                    and attempt == 0
+                    and not use_single_attempt_retry_policy()
+                ):
                     try:
                         new_token, _ = await self._get_access_token(force_refresh=True)
                     except Exception:
@@ -3490,6 +3509,8 @@ class GeminiCliToolCaller(ToolCaller):
                 request_obj["tools"] = tool_payload
 
             model_candidates = _gemini_cli_model_candidates(self.model)
+            if use_single_attempt_retry_policy():
+                model_candidates = model_candidates[:1]
             last_exc: Exception | None = None
             auth_refreshed_for_401 = False
             client_kwargs = self._http_client_kwargs(connect_timeout=15.0)
@@ -3534,6 +3555,7 @@ class GeminiCliToolCaller(ToolCaller):
                             exc.response is not None
                             and exc.response.status_code == 401
                             and not auth_refreshed_for_401
+                            and not use_single_attempt_retry_policy()
                         ):
                             auth_refreshed_for_401 = True
                             try:
@@ -4030,6 +4052,8 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                 request_obj["tools"] = tool_payload
 
             model_candidates = _antigravity_cli_model_candidates(self.model)
+            if use_single_attempt_retry_policy():
+                model_candidates = model_candidates[:1]
             last_exc: Exception | None = None
             auth_refreshed_for_401 = False
             project_refreshed_for_403 = False
@@ -4060,7 +4084,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                         "requestId": _uuid.uuid4().hex,
                     }
                     last_network_exc: Exception | None = None
-                    for attempt in range(4):
+                    for attempt in range(1 if use_single_attempt_retry_policy() else 4):
                         try:
                             resp = await client.post(
                                 _ANTIGRAVITY_CLI_STREAM_ENDPOINT,
@@ -4095,6 +4119,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                             exc.response is not None
                             and exc.response.status_code == 401
                             and not auth_refreshed_for_401
+                            and not use_single_attempt_retry_policy()
                         ):
                             auth_refreshed_for_401 = True
                             try:
@@ -4114,6 +4139,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                             exc.response is not None
                             and exc.response.status_code == 403
                             and not project_refreshed_for_403
+                            and not use_single_attempt_retry_policy()
                         ):
                             project_refreshed_for_403 = True
                             try:
@@ -4280,11 +4306,14 @@ class ClaudeCodeToolCaller(AnthropicToolCaller):
             if use_builtin_search:
                 tool_payload.append(dict(ANTHROPIC_BUILTIN_SEARCH_TOOL))
 
-            client = AsyncAnthropic(
-                auth_token=access_token,
-                timeout=self.timeout,
-                default_headers={"anthropic-beta": _CLAUDE_CODE_OAUTH_BETA},
-            )
+            client_kwargs: Dict[str, Any] = {
+                "auth_token": access_token,
+                "timeout": self.timeout,
+                "default_headers": {"anthropic-beta": _CLAUDE_CODE_OAUTH_BETA},
+            }
+            if use_single_attempt_retry_policy():
+                client_kwargs["max_retries"] = 0
+            client = AsyncAnthropic(**client_kwargs)
 
             payload: Dict[str, Any] = {
                 "model": self.model,

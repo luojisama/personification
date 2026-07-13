@@ -12,10 +12,14 @@ from typing import Any, Awaitable, Callable, Optional
 
 from ..agent.inner_state import load_inner_state, update_state_from_diary
 from ..core.agent_bridge import run_text_agent
-from ..core.visible_output import assess_visible_text
 from ..core.context_policy import strip_response_control_markers
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_group_emotion_memory, load_emotion_state
+from ..core.llm_context import (
+    LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+    reset_llm_context,
+    set_llm_context,
+)
 from ..core.operation_diagnostics import OperationDetail, OperationStep, detail, diagnostic, step
 from ..core.persona_profile import load_persona_profile
 from ..core.provider_health import classify_error as classify_provider_error
@@ -27,6 +31,7 @@ from ..core.sticker_library import (
     render_sticker_semantic_summary,
     resolve_sticker_dir,
 )
+from ..core.visible_output import assess_visible_text
 from ..skills.skillpacks.image_gen.scripts.impl import generate_image as generate_codex_image
 
 
@@ -50,6 +55,8 @@ _QZONE_CASUAL_TONE_DISCIPLINE = (
     "不要写成整齐的二段式机灵句，尤其别用“脑子/胃/手/嘴先开始……”这类器官拟人、先后对仗、"
     "看似俏皮但模板感很重的句式；宁可更普通、更像真的随手敲。"
 )
+
+_QZONE_GENERATION_MAX_ATTEMPTS = 5
 
 
 @dataclass(slots=True)
@@ -96,6 +103,16 @@ class QzoneGenerationReport:
         self.details = list(details)
 
     def mark_attempt_recoverable(self, attempt_key: str, message: str) -> None:
+        self.downgrade_attempt_errors(attempt_key)
+        self.add_step(
+            f"{attempt_key}_repair",
+            "自动修复草稿",
+            "warn",
+            message,
+            details=(detail("失败代码", self.code, "warn"),),
+        )
+
+    def downgrade_attempt_errors(self, attempt_key: str) -> None:
         prefix = f"{attempt_key}_"
         updated: list[OperationStep] = []
         for item in self.steps:
@@ -104,13 +121,6 @@ class QzoneGenerationReport:
             else:
                 updated.append(item)
         self.steps = updated
-        self.add_step(
-            f"{attempt_key}_repair",
-            "自动修复草稿",
-            "warn",
-            message,
-            details=(detail("失败代码", self.code, "warn"),),
-        )
 
     def to_diagnostic(self, *, ok: bool, content: str = "") -> dict[str, Any]:
         details = [] if ok else list(self.details)
@@ -191,7 +201,94 @@ def _qzone_reviewer_http_status(exc: Exception) -> int:
         return 0
 
 
+def _qzone_error_code(exc: Exception) -> str:
+    direct = str(getattr(exc, "code", "") or "").strip().lower()
+    if direct:
+        return direct
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return ""
+    payload = body.get("error") if isinstance(body.get("error"), dict) else body
+    return str(payload.get("code") or payload.get("type") or "").strip().lower()
+
+
+def _is_deterministic_qzone_model_error(exc: Exception) -> bool:
+    status = _qzone_reviewer_http_status(exc)
+    if status in {400, 404, 422}:
+        return True
+    code = _qzone_error_code(exc)
+    if code in {
+        "invalid_model",
+        "model_deprecated",
+        "model_not_available",
+        "model_not_found",
+        "provider_model_unavailable",
+        "unsupported_model",
+    }:
+        return True
+    text = str(exc or "").strip().lower()
+    return any(
+        marker in text
+        for marker in (
+            "model does not exist",
+            "model is invalid",
+            "model is not available",
+            "model not found",
+            "model unavailable",
+            "model was not found",
+        )
+    )
+
+
+def _classify_qzone_generation_error(exc: Exception) -> tuple[str, str, str, bool]:
+    status = _qzone_reviewer_http_status(exc)
+    code = _qzone_error_code(exc)
+    if status in {401, 403} or code == "provider_auth_failed":
+        return (
+            "qzone_generation_auth_failed",
+            "QZone 生成认证失败",
+            "生成模型认证或权限被拒绝，确定性失败不会重复调用。",
+            False,
+        )
+    if _is_deterministic_qzone_model_error(exc):
+        return (
+            "qzone_generation_model_unavailable",
+            "QZone 生成模型不可用",
+            "生成模型或请求配置确定性不可用，重复调用相同配置不会恢复。",
+            False,
+        )
+    if code == "provider_caller_unavailable":
+        return (
+            "qzone_generation_caller_unavailable",
+            "QZone 生成调用器不可用",
+            "当前没有可用的 Agent 或 Provider caller。",
+            False,
+        )
+    return (
+        "qzone_generation_call_failed",
+        "QZone 生成调用失败",
+        "生成调用发生可恢复异常，将在当前 candidate 的预算内重试。",
+        True,
+    )
+
+
+async def _run_qzone_llm_call(
+    purpose: str,
+    call: Callable[[], Awaitable[Any]],
+) -> Any:
+    token = set_llm_context(
+        purpose=purpose,
+        retry_policy=LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+    )
+    try:
+        return await call()
+    finally:
+        reset_llm_context(token)
+
+
 def _is_transient_qzone_reviewer_error(exc: Exception) -> bool:
+    if getattr(exc, "retryable", False) is True:
+        return True
     status = _qzone_reviewer_http_status(exc)
     if status in {408, 409, 425, 429} or 500 <= status < 600:
         return True
@@ -367,6 +464,7 @@ _QZONE_REPAIRABLE_CODES = {
     "missing_content",
     "net_slang_rewrite_failed",
     "ooc_rewrite_failed",
+    "qzone_generation_attempts_exhausted",
     "semantic_incoherent",
     "semantic_not_grounded",
     "semantic_not_novel",
@@ -375,6 +473,12 @@ _QZONE_REPAIRABLE_CODES = {
     "semantic_same_syntax",
     "stiff_tic_rewrite_failed",
     "visible_output_blocked",
+}
+
+_QZONE_TERMINAL_GENERATION_CODES = {
+    "qzone_generation_auth_failed",
+    "qzone_generation_caller_unavailable",
+    "qzone_generation_model_unavailable",
 }
 
 
@@ -697,12 +801,17 @@ async def _maybe_generate_qzone_image_marker(
             report.warnings.append("模型建议配图，但当前没有可用的图片生成调用器，已降级为纯文字。")
         return ""
     try:
-        result = await generate_codex_image(
-            prompt,
-            tool_caller=tool_caller,
-            size="1024x1024",
-            image_model="gpt-image-2",
+        result = await _run_qzone_llm_call(
+            "qzone_image_generation",
+            lambda: generate_codex_image(
+                prompt,
+                tool_caller=tool_caller,
+                size="1024x1024",
+                image_model="gpt-image-2",
+            ),
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         logger.warning(f"[qzone] Codex 配图生成失败: {exc}")
         if report is not None:
@@ -769,19 +878,27 @@ async def _rewrite_qzone_net_slang(
     messages.append({"role": "user", "content": str(text or "").strip()[:300]})
     try:
         if registry is not None:
-            return await run_text_agent(
-                messages=messages,
-                plugin_config=plugin_config,
-                logger=logger,
-                tool_caller=tool_caller,
-                registry=registry,
-                max_steps=agent_max_steps,
-                trigger_reason="qzone_net_slang_rewrite",
-                chat_intent_hint="qzone_net_slang_rewrite",
-                surface="qzone_post_rewrite",
-                structured_output=True,
+            return await _run_qzone_llm_call(
+                "qzone_net_slang_rewrite",
+                lambda: run_text_agent(
+                    messages=messages,
+                    plugin_config=plugin_config,
+                    logger=logger,
+                    tool_caller=tool_caller,
+                    registry=registry,
+                    max_steps=agent_max_steps,
+                    trigger_reason="qzone_net_slang_rewrite",
+                    chat_intent_hint="qzone_net_slang_rewrite",
+                    surface="qzone_post_rewrite",
+                    structured_output=True,
+                ),
             )
-        response = await asyncio.wait_for(tool_caller.chat_with_tools(messages, [], False), timeout=timeout)
+        response = await _run_qzone_llm_call(
+            "qzone_net_slang_rewrite",
+            lambda: asyncio.wait_for(tool_caller.chat_with_tools(messages, [], False), timeout=timeout),
+        )
+    except asyncio.CancelledError:
+        raise
     except Exception:
         return ""
     return str(getattr(response, "content", "") or "").strip()
@@ -819,19 +936,27 @@ async def _rewrite_qzone_stiff_tic(
     messages.append({"role": "user", "content": str(text or "").strip()[:300]})
     try:
         if registry is not None:
-            return await run_text_agent(
-                messages=messages,
-                plugin_config=plugin_config,
-                logger=logger,
-                tool_caller=tool_caller,
-                registry=registry,
-                max_steps=agent_max_steps,
-                trigger_reason="qzone_stiff_tic_rewrite",
-                chat_intent_hint="qzone_stiff_tic_rewrite",
-                surface="qzone_post_rewrite",
-                structured_output=True,
+            return await _run_qzone_llm_call(
+                "qzone_stiff_tic_rewrite",
+                lambda: run_text_agent(
+                    messages=messages,
+                    plugin_config=plugin_config,
+                    logger=logger,
+                    tool_caller=tool_caller,
+                    registry=registry,
+                    max_steps=agent_max_steps,
+                    trigger_reason="qzone_stiff_tic_rewrite",
+                    chat_intent_hint="qzone_stiff_tic_rewrite",
+                    surface="qzone_post_rewrite",
+                    structured_output=True,
+                ),
             )
-        response = await asyncio.wait_for(tool_caller.chat_with_tools(messages, [], False), timeout=timeout)
+        response = await _run_qzone_llm_call(
+            "qzone_stiff_tic_rewrite",
+            lambda: asyncio.wait_for(tool_caller.chat_with_tools(messages, [], False), timeout=timeout),
+        )
+    except asyncio.CancelledError:
+        raise
     except Exception:
         return ""
     return str(getattr(response, "content", "") or "").strip()
@@ -860,11 +985,14 @@ async def _review_qzone_post(
     if not text or tool_caller is None:
         return text
     if is_agent_reply_ooc(text):
-        rewritten = await rewrite_agent_reply_ooc(
-            tool_caller=tool_caller,
-            original_text=text,
-            persona_system=str(persona_system or "")[:1200],
-            output_mode="chat_short",
+        rewritten = await _run_qzone_llm_call(
+            "qzone_ooc_rewrite",
+            lambda: rewrite_agent_reply_ooc(
+                tool_caller=tool_caller,
+                original_text=text,
+                persona_system=str(persona_system or "")[:1200],
+                output_mode="chat_short",
+            ),
         )
         if not rewritten:
             if logger is not None:
@@ -992,6 +1120,22 @@ async def _review_qzone_semantics(
         return None
 
     candidate_attempt = 0
+
+    async def _call_reviewer_once() -> str:
+        if tool_caller is not None:
+            response = await asyncio.wait_for(
+                tool_caller.chat_with_tools(messages, [], False),
+                timeout=timeout,
+            )
+            return str(getattr(response, "content", "") or "")
+        return str(
+            await asyncio.wait_for(
+                call_ai_api(messages, use_builtin_search=False),  # type: ignore[misc]
+                timeout=timeout,
+            )
+            or ""
+        )
+
     while True:
         global_attempt = budget.claim()
         if global_attempt is None:
@@ -1005,20 +1149,7 @@ async def _review_qzone_semantics(
         candidate_attempt += 1
         raw = ""
         try:
-            if tool_caller is not None:
-                response = await asyncio.wait_for(
-                    tool_caller.chat_with_tools(messages, [], False),
-                    timeout=timeout,
-                )
-                raw = str(getattr(response, "content", "") or "")
-            else:
-                raw = str(
-                    await asyncio.wait_for(
-                        call_ai_api(messages, use_builtin_search=False),  # type: ignore[misc]
-                        timeout=timeout,
-                    )
-                    or ""
-                )
+            raw = await _run_qzone_llm_call("qzone_semantic_review", _call_reviewer_once)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1428,38 +1559,61 @@ async def _generate_once(
     report: QzoneGenerationReport | None = None,
     attempt_key: str = "generation",
     attempt_label: str = "生成草稿",
+    allow_legacy_post: bool = False,
 ) -> str:
     # 在格式 guard 之外再注入人设快照，强化发空间时的角色一致性。
     system_text = _project_qzone_system_prompt(system_prompt) + _FLOW_OUTPUT_GUARD
-    messages = [
+    base_messages = [
         {"role": "system", "content": system_text},
         {"role": "user", "content": user_prompt},
     ]
-    supports_builtin_search = True
-    try:
-        signature = inspect.signature(call_ai_api)
-        supports_builtin_search = (
-            "use_builtin_search" in signature.parameters
-            or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
-        )
-    except (TypeError, ValueError):
-        supports_builtin_search = True
-    _qz_token = None
-    try:
-        from ..core.llm_context import reset_llm_context, set_llm_context
+    agent_mode = bool(
+        getattr(plugin_config, "personification_agent_enabled", True)
+        and tool_caller is not None
+        and registry is not None
+    )
+    if not agent_mode and not callable(call_ai_api):
+        if report is not None:
+            report.add_step(
+                f"{attempt_key}_attempt_1",
+                f"{attempt_label} attempt 1/{_QZONE_GENERATION_MAX_ATTEMPTS}",
+                "error",
+                "当前没有可用的 Agent 或 Provider caller。",
+            )
+            report.fail(
+                "qzone_generation_caller_unavailable",
+                "draft_generation",
+                "QZone 生成调用器不可用",
+                "当前没有可用的 Agent 或 Provider caller，未执行恢复重试。",
+                retryable=False,
+            )
+        return ""
 
-        _qz_token = set_llm_context(purpose="qzone_diary")
-    except Exception:
-        _qz_token = None
-    try:
-        if (
-            getattr(plugin_config, "personification_agent_enabled", True)
-            and tool_caller is not None
-            and registry is not None
-        ):
-            # 与群聊同等：走完整 Agent 管线，而不是轻量工具循环。
-            try:
-                result = await run_text_agent(
+    supports_builtin_search = True
+    if callable(call_ai_api):
+        try:
+            signature = inspect.signature(call_ai_api)
+            supports_builtin_search = (
+                "use_builtin_search" in signature.parameters
+                or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+            )
+        except (TypeError, ValueError):
+            supports_builtin_search = True
+
+    last_failure_code = ""
+    for generation_attempt in range(1, _QZONE_GENERATION_MAX_ATTEMPTS + 1):
+        messages = [dict(message) for message in base_messages]
+        if generation_attempt > 1:
+            messages[-1]["content"] = (
+                f"{messages[-1]['content']}\n\n"
+                "上一次生成没有得到可用的结构化正文。请重新完成同一任务，"
+                "只输出要求的 JSON object；除 action=skip 外，content 必须是非空可见正文。"
+            )
+
+        async def _call_generation_once() -> Any:
+            if agent_mode:
+                # 与群聊同等：走完整 Agent 管线，而不是轻量工具循环。
+                return await run_text_agent(
                     messages=messages,
                     plugin_config=plugin_config,
                     logger=logger,
@@ -1472,67 +1626,145 @@ async def _generate_once(
                     surface="qzone_post",
                     structured_output=True,
                 )
-            except Exception as exc:
-                if logger is not None:
-                    logger.warning(f"[diary] full Agent failed, skip direct-model fallback: {exc}")
+            if supports_builtin_search:
+                return await call_ai_api(messages, use_builtin_search=use_builtin_search)
+            return await call_ai_api(messages)
+
+        try:
+            result = await _run_qzone_llm_call("qzone_generation", _call_generation_once)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            code, title, message, retryable = _classify_qzone_generation_error(exc)
+            last_failure_code = code
+            step_key = f"{attempt_key}_attempt_{generation_attempt}"
+            if logger is not None:
+                logger.warning(
+                    "[qzone] generation call failed: "
+                    f"attempt={generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS} "
+                    f"mode={'Agent' if agent_mode else 'Provider'} type={type(exc).__name__} "
+                    f"retry={retryable and generation_attempt < _QZONE_GENERATION_MAX_ATTEMPTS}"
+                )
+            if report is not None:
+                report.add_step(
+                    step_key,
+                    f"{attempt_label} attempt {generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
+                    "error",
+                    message,
+                    details=(
+                        detail(
+                            "生成调用",
+                            f"{generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
+                            "info",
+                        ),
+                        detail("异常类型", type(exc).__name__, "error"),
+                    ),
+                )
+            if not retryable:
                 if report is not None:
-                    report.add_step(
-                        attempt_key,
-                        attempt_label,
-                        "error",
-                        "Agent 调用发生异常，没有生成草稿。",
-                        details=(detail("异常类型", type(exc).__name__, "error"),),
-                    )
                     report.fail(
-                        "agent_failed",
+                        code,
                         "draft_generation",
-                        "Agent 没有完成草稿生成",
-                        "QZone Agent 调用异常，未得到可审阅的结构化输出。",
-                        suggestion="检查对应 Trace 的 Provider 尝试记录和 Agent timeout，再重试生成。",
+                        title,
+                        message,
+                        suggestion="检查 QZone Provider 的认证、模型和 caller 配置后重新生成。",
+                        retryable=False,
+                        details=(
+                            detail(
+                                "生成调用",
+                                f"{generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
+                                "error",
+                            ),
+                        ),
                     )
-                result = ""
-        elif supports_builtin_search:
-            result = await call_ai_api(messages, use_builtin_search=use_builtin_search)
+                return ""
+            if generation_attempt < _QZONE_GENERATION_MAX_ATTEMPTS:
+                if report is not None:
+                    report.downgrade_attempt_errors(step_key)
+                continue
+            break
+
+        raw_result = str(result or "")
+        stripped = strip_response_control_markers(raw_result)
+        cleaned = clean_generated_text(stripped)
+        payload = _extract_json_object(cleaned)
+        action = str(payload.get("action", "") or "").strip().lower() if payload else ""
+
+        if not raw_result.strip():
+            last_failure_code = "agent_empty_output" if agent_mode else "provider_empty_output"
+            failure_message = f"{'Agent' if agent_mode else 'Provider'} 返回空内容。"
+        elif not cleaned:
+            last_failure_code = "empty_after_control_cleanup"
+            failure_message = "模型输出只包含控制标记，移除后没有可见内容。"
+        elif payload is None and not (allow_legacy_post and cleaned.startswith("POST|")):
+            last_failure_code = "invalid_generation_json"
+            failure_message = "模型返回的内容不是要求的 JSON object。"
+        elif payload is not None and action != "skip" and not str(payload.get("content", "") or "").strip():
+            last_failure_code = "missing_content"
+            failure_message = "结构化结果缺少非空 content。"
         else:
-            result = await call_ai_api(messages)
-    finally:
-        if _qz_token is not None:
-            try:
-                reset_llm_context(_qz_token)
-            except Exception:
-                pass
-    if not result:
-        if report is not None and not any(item.key == attempt_key for item in report.steps):
-            mode = "Agent" if getattr(plugin_config, "personification_agent_enabled", True) and tool_caller is not None and registry is not None else "Provider"
-            report.add_step(attempt_key, attempt_label, "error", f"{mode} 返回空内容，没有草稿可供解析。")
-            report.fail(
-                "agent_empty_output" if mode == "Agent" else "provider_empty_output",
-                "draft_generation",
-                f"{mode} 没有返回草稿",
-                f"{mode} 请求已结束，但可见输出为空。",
-                suggestion="检查 Provider 可用性、timeout 和 Agent 运行记录后重试。",
+            if report is not None:
+                report.add_step(
+                    f"{attempt_key}_attempt_{generation_attempt}",
+                    f"{attempt_label} attempt {generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
+                    "ok",
+                    "模型已返回可解析的结构化候选。",
+                    details=(
+                        detail(
+                            "生成调用",
+                            f"{generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
+                            "ok",
+                        ),
+                        detail("原始输出长度", f"{len(cleaned)} 字", "info"),
+                    ),
+                )
+            return cleaned
+
+        step_key = f"{attempt_key}_attempt_{generation_attempt}"
+        if logger is not None:
+            logger.info(
+                "[qzone] generation response rejected: "
+                f"attempt={generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS} "
+                f"code={last_failure_code}"
             )
-        return ""
-    # 兜底：若 LLM 仍输出思维链 XML，剥除标签再走 clean_generated_text
-    stripped = strip_response_control_markers(result)
-    cleaned = clean_generated_text(stripped or result)
-    if report is not None and not cleaned:
-        report.add_step(attempt_key, attempt_label, "error", "模型输出在移除控制标记后为空。")
+        if report is not None:
+            report.add_step(
+                step_key,
+                f"{attempt_label} attempt {generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
+                "error",
+                failure_message,
+                details=(
+                    detail(
+                        "生成调用",
+                        f"{generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
+                        "info",
+                    ),
+                    detail("失败代码", last_failure_code, "error"),
+                ),
+            )
+        if generation_attempt < _QZONE_GENERATION_MAX_ATTEMPTS:
+            if report is not None:
+                report.downgrade_attempt_errors(step_key)
+            continue
+
+    if report is not None:
         report.fail(
-            "empty_after_control_cleanup",
+            "qzone_generation_attempts_exhausted",
             "draft_generation",
-            "草稿只包含控制标记",
-            "模型返回内容没有可用于 QZone 的可见正文。",
+            "QZone candidate 生成恢复预算已耗尽",
+            f"当前 candidate 已调用生成器 {_QZONE_GENERATION_MAX_ATTEMPTS}/{_QZONE_GENERATION_MAX_ATTEMPTS} 次，仍未得到可解析且含正文的结构化输出。",
+            suggestion="系统会在业务 candidate 预算允许时生成下一候选；全部候选耗尽后再重新发起完整生成。",
+            retryable=True,
+            details=(
+                detail(
+                    "生成调用",
+                    f"{_QZONE_GENERATION_MAX_ATTEMPTS}/{_QZONE_GENERATION_MAX_ATTEMPTS}",
+                    "error",
+                ),
+                detail("最后失败", last_failure_code or "unknown", "error"),
+            ),
         )
-    elif report is not None:
-        report.add_step(
-            attempt_key,
-            attempt_label,
-            "ok",
-            "模型已返回候选结构化输出。",
-            details=(detail("原始输出长度", f"{len(cleaned)} 字", "ok"),),
-        )
-    return cleaned
+    return ""
 
 
 async def _repair_qzone_candidate(
@@ -1796,7 +2028,11 @@ async def generate_ai_diary(
         if rich_result:
             return rich_result
 
-        if _report.code.startswith("semantic_reviewer_") or _report.code == "semantic_review_budget_exhausted":
+        if (
+            _report.code.startswith("semantic_reviewer_")
+            or _report.code == "semantic_review_budget_exhausted"
+            or _report.code in _QZONE_TERMINAL_GENERATION_CODES
+        ):
             return ""
 
         logger.warning("[diary] rich prompt generation failed, fallback to basic prompt")
@@ -2007,6 +2243,7 @@ async def maybe_generate_proactive_qzone_post(
         registry=registry,
         logger=logger,
         agent_max_steps=agent_max_steps,
+        allow_legacy_post=True,
     )
     if not result:
         return ""

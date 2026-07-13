@@ -11,6 +11,7 @@ from ._loader import load_personification_module
 
 
 diary_flow = load_personification_module("plugin.personification.flows.diary_flow")
+llm_context = load_personification_module("plugin.personification.core.llm_context")
 simple_loop = load_personification_module(
     "plugin.personification.agent.runtime.simple_loop"
 )
@@ -257,8 +258,11 @@ def test_generate_ai_diary_repairs_ungrounded_candidate_before_returning(monkeyp
 def test_generate_ai_diary_detailed_explains_invalid_json(monkeypatch) -> None:  # noqa: ANN001
     logger = _Logger()
     monkeypatch.setattr(diary_flow, "get_data_store", lambda: _Store({"recent_contents": []}))
+    calls = 0
 
     async def _call_ai(_messages, **_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
         return "这不是 JSON"
 
     result = asyncio.run(
@@ -270,8 +274,210 @@ def test_generate_ai_diary_detailed_explains_invalid_json(monkeypatch) -> None: 
         )
     )
 
-    assert result["diagnostic"]["code"] == "invalid_generation_json"
-    assert any(item["key"] == "basic_parse" for item in result["diagnostic"]["steps"])
+    assert result["diagnostic"]["code"] == "qzone_generation_attempts_exhausted"
+    assert calls == 15
+    attempts = [
+        item
+        for item in result["diagnostic"]["steps"]
+        if item["key"].startswith("repair_2_generate_attempt_")
+    ]
+    assert len(attempts) == 5
+    assert [item["status"] for item in attempts] == ["warn", "warn", "warn", "warn", "error"]
+    assert any(
+        detail["label"] == "生成调用" and detail["value"] == "5/5"
+        for detail in result["diagnostic"]["details"]
+    )
+
+
+def test_qzone_generation_recovers_structural_failures_within_five_calls() -> None:
+    responses = [
+        "",
+        "[NO_REPLY]",
+        "not-json",
+        json.dumps({"image_prompt": ""}, ensure_ascii=False),
+        json.dumps({"content": "窗边这点风刚好够吹散一点困意", "image_prompt": ""}, ensure_ascii=False),
+    ]
+    contexts: list[dict] = []
+    report = diary_flow.QzoneGenerationReport()
+
+    async def _call(_messages, **_kwargs):  # noqa: ANN001
+        contexts.append(dict(llm_context.current_llm_context()))
+        return responses.pop(0)
+
+    result = asyncio.run(diary_flow._generate_once(
+        "你是绪山真寻",
+        "写一条说说",
+        call_ai_api=_call,
+        report=report,
+        attempt_key="basic_generate",
+        attempt_label="Basic 草稿生成",
+    ))
+
+    assert json.loads(result)["content"] == "窗边这点风刚好够吹散一点困意"
+    assert len(contexts) == 5
+    assert all(item["retry_policy"] == llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT for item in contexts)
+    attempts = [item for item in report.steps if item.key.startswith("basic_generate_attempt_")]
+    assert [item.status for item in attempts] == ["warn", "warn", "warn", "warn", "ok"]
+
+
+def test_qzone_agent_exception_recovers_without_direct_provider_fallback(monkeypatch) -> None:  # noqa: ANN001
+    calls = 0
+    direct_calls = 0
+
+    async def _agent(**_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary agent failure")
+        return json.dumps({"content": "今晚有点想早点关灯躺一会儿", "image_prompt": ""}, ensure_ascii=False)
+
+    async def _direct(_messages, **_kwargs):  # noqa: ANN001
+        nonlocal direct_calls
+        direct_calls += 1
+        return ""
+
+    monkeypatch.setattr(diary_flow, "run_text_agent", _agent)
+    result = asyncio.run(diary_flow._generate_once(
+        "你是绪山真寻",
+        "写一条说说",
+        plugin_config=SimpleNamespace(personification_agent_enabled=True),
+        call_ai_api=_direct,
+        tool_caller=object(),
+        registry=object(),
+    ))
+
+    assert json.loads(result)["content"] == "今晚有点想早点关灯躺一会儿"
+    assert calls == 2
+    assert direct_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_code"),
+    [(401, "qzone_generation_auth_failed"), (403, "qzone_generation_auth_failed"), (404, "qzone_generation_model_unavailable")],
+)
+def test_qzone_generation_fast_fails_deterministic_provider_errors(status_code: int, expected_code: str) -> None:
+    class _ProviderError(RuntimeError):
+        def __init__(self) -> None:
+            super().__init__("provider rejected request")
+            self.response = SimpleNamespace(status_code=status_code)
+
+    calls = 0
+    report = diary_flow.QzoneGenerationReport()
+
+    async def _call(_messages, **_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        raise _ProviderError()
+
+    result = asyncio.run(diary_flow._generate_once(
+        "你是绪山真寻",
+        "写一条说说",
+        call_ai_api=_call,
+        report=report,
+    ))
+
+    assert result == ""
+    assert calls == 1
+    assert report.code == expected_code
+    assert report.retryable is False
+
+
+def test_qzone_generation_fast_fails_without_caller_and_propagates_cancel() -> None:
+    report = diary_flow.QzoneGenerationReport()
+    result = asyncio.run(diary_flow._generate_once(
+        "你是绪山真寻",
+        "写一条说说",
+        call_ai_api=None,
+        report=report,
+    ))
+    assert result == ""
+    assert report.code == "qzone_generation_caller_unavailable"
+    assert report.retryable is False
+
+    async def _cancel(_messages, **_kwargs):  # noqa: ANN001
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(diary_flow._generate_once(
+            "你是绪山真寻",
+            "写一条说说",
+            call_ai_api=_cancel,
+        ))
+
+
+def test_qzone_rich_candidate_recovers_on_fifth_generation_call(monkeypatch) -> None:  # noqa: ANN001
+    generation_calls = 0
+
+    async def _context(*_args, **_kwargs):  # noqa: ANN001
+        return "群友: 窗边刚吹进来一点风"
+
+    async def _call(messages, **_kwargs):  # noqa: ANN001
+        nonlocal generation_calls
+        if "发布前审阅器" in str(messages[0].get("content", "")):
+            return json.dumps({
+                "accept": True,
+                "coherent": True,
+                "grounded": True,
+                "novel": True,
+                "same_topic": False,
+                "same_scene": False,
+                "same_syntax": False,
+                "topic_key": "window",
+                "reason": "自然",
+            }, ensure_ascii=False)
+        generation_calls += 1
+        if generation_calls < 5:
+            return json.dumps({"image_prompt": ""}, ensure_ascii=False)
+        return json.dumps({"content": "窗边这点风刚好够吹散一点困意", "image_prompt": ""}, ensure_ascii=False)
+
+    monkeypatch.setattr(diary_flow, "get_recent_chat_context", _context)
+    result = asyncio.run(diary_flow.generate_ai_diary(
+        _Bot(),
+        load_prompt=lambda: "你是绪山真寻",
+        call_ai_api=_call,
+        logger=_Logger(),
+    ))
+
+    assert result == "窗边这点风刚好够吹散一点困意"
+    assert generation_calls == 5
+
+
+def test_qzone_proactive_candidate_recovers_on_fifth_generation_call(monkeypatch) -> None:  # noqa: ANN001
+    generation_calls = 0
+    monkeypatch.setattr(diary_flow, "get_data_store", lambda: _Store({}))
+
+    async def _call(messages, **_kwargs):  # noqa: ANN001
+        nonlocal generation_calls
+        if "发布前审阅器" in str(messages[0].get("content", "")):
+            return json.dumps({
+                "accept": True,
+                "coherent": True,
+                "grounded": True,
+                "novel": True,
+                "same_topic": False,
+                "same_scene": False,
+                "same_syntax": False,
+                "topic_key": "rest",
+                "reason": "自然",
+            }, ensure_ascii=False)
+        generation_calls += 1
+        if generation_calls < 5:
+            return "invalid-json"
+        return json.dumps({
+            "action": "post",
+            "content": "今晚有点想早点关灯躺一会儿",
+            "image_prompt": "",
+        }, ensure_ascii=False)
+
+    result = asyncio.run(diary_flow.maybe_generate_proactive_qzone_post(
+        _Bot(),
+        load_prompt=lambda: "你是绪山真寻",
+        call_ai_api=_call,
+        logger=_Logger(),
+    ))
+
+    assert result == "今晚有点想早点关灯躺一会儿"
+    assert generation_calls == 5
 
 
 def test_run_tool_loop_text_executes_tool_then_returns_content(monkeypatch) -> None:  # noqa: ANN001
