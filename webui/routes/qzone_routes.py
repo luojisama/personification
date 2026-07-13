@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
@@ -146,9 +147,30 @@ def _bundle_attr(runtime, name: str) -> Any:
     return getattr(bundle, name, None) if bundle is not None else None
 
 
+def _safe_publish_operation(operation: Any) -> dict[str, Any]:
+    source = operation if isinstance(operation, dict) else {}
+    payload = source.get("payload") if isinstance(source.get("payload"), dict) else {}
+    status = sanitize_text(source.get("status") or "unknown", limit=32)
+    return {
+        "operation_id": sanitize_text(source.get("operation_id") or "", limit=96),
+        "bot_id": sanitize_text(source.get("bot_id") or "", limit=32),
+        "kind": sanitize_text(source.get("kind") or "post", limit=32),
+        "status": status,
+        "created_at": float(source.get("created_at") or 0),
+        "updated_at": float(source.get("updated_at") or 0),
+        "dispatch_started_at": float(source.get("dispatch_started_at") or 0),
+        "completed_at": float(source.get("completed_at") or 0),
+        "result_code": sanitize_text(source.get("result_code") or "", limit=64),
+        "remote_id": sanitize_text(source.get("remote_id") or "", limit=160),
+        "content": sanitize_text(payload.get("content") or "", limit=200),
+        "action_required": "verify_remote" if status == "unknown" else "wait",
+    }
+
+
 def _build_status(runtime) -> dict[str, Any]:
     from ...core.data_store import get_data_store
     from ...core.qzone_service import get_qzone_auth_status
+    from ...core.qzone_publish import list_qzone_publish_operations
     from ...core.time_ctx import get_configured_now
     from ...flows.qzone_social_flow import get_qzone_scan_status
     from ...jobs.periodic_jobs import build_qzone_quota
@@ -234,6 +256,16 @@ def _build_status(runtime) -> dict[str, Any]:
         "recent_contents": [str(x) for x in list(state.get("recent_contents", []))][-12:],
         "server_now": int(now_ts),
     }
+    unresolved = [
+        _safe_publish_operation(item)
+        for item in list_qzone_publish_operations(limit=50)
+        if str(item.get("status") or "") in {"reserved", "dispatching", "unknown"}
+    ]
+    payload["reconciliation"] = {
+        "state": "unknown" if any(item["status"] == "unknown" for item in unresolved) else "in_progress" if unresolved else "clear",
+        "blocking": bool(unresolved),
+        "operations": unresolved[:20],
+    }
     report = diagnostic(
         ok=True,
         code="qzone_status_loaded",
@@ -254,7 +286,8 @@ def build_qzone_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/qzone", tags=["qzone"])
 
     @router.get("/status")
-    async def status(_: AdminIdentity = Depends(require_admin)) -> dict:
+    async def status(response: Response, _: AdminIdentity = Depends(require_admin)) -> dict:
+        response.headers["Cache-Control"] = "no-store, private"
         try:
             return _build_status(runtime)
         except Exception as exc:
@@ -269,6 +302,250 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 steps=(step("status_snapshot", "生成状态快照", "error", "状态读取异常中断。"),),
             )
             raise _http_diagnostic(500, report) from exc
+
+    @router.get("/operations/{operation_id}")
+    async def get_operation(
+        operation_id: str,
+        response: Response,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...core.qzone_publish import get_qzone_publish_operation
+
+        response.headers["Cache-Control"] = "no-store, private"
+        operation = get_qzone_publish_operation(operation_id)
+        if operation is None:
+            report = diagnostic(
+                ok=False,
+                code="qzone_operation_not_found",
+                phase="operation_lookup",
+                title="没有找到空间发布操作",
+                message="该 Operation ID 不存在或已不在当前数据存储中。",
+                retryable=False,
+                operation_id=str(operation_id or "")[:96],
+            )
+            raise _http_diagnostic(404, report)
+        return {"ok": True, "operation": _safe_publish_operation(operation)}
+
+    @router.post("/operations/{operation_id}/reconcile")
+    async def reconcile_operation(
+        operation_id: str,
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...core.qzone_publish import reconcile_qzone_publish_from_self_feed
+
+        bot_id = str(body.get("bot_id") or "").strip()
+        bot = _get_bot(runtime, bot_id)
+        service = _bundle_attr(runtime, "qzone_social_service")
+        if bot is None or service is None:
+            report = diagnostic(
+                ok=False,
+                code="qzone_reconcile_unavailable",
+                phase="reconcile_preflight",
+                title="空间对账能力不可用",
+                message="目标 Bot 未连接或本人动态读取服务尚未初始化。",
+                retryable=True,
+                operation_id=str(operation_id or "")[:96],
+            )
+            raise _http_diagnostic(503, report)
+        result = await reconcile_qzone_publish_from_self_feed(
+            operation_id=operation_id,
+            bot_id=str(getattr(bot, "self_id", bot_id) or bot_id),
+            qzone_social_service=service,
+        )
+        changed = bool(result.get("changed"))
+        ok = str(result.get("status") or "") == "succeeded"
+        report = diagnostic(
+            ok=ok,
+            code="qzone_reconcile_succeeded" if changed else "qzone_reconcile_pending",
+            phase="remote_reconciliation",
+            title="空间发布已对账" if changed else "暂未确认空间发布结果",
+            message="已在本人动态中找到唯一精确匹配并补齐本地记录。" if changed else "本人动态中暂未出现唯一精确匹配，operation 继续保持不可重发。",
+            details=(detail("匹配数量", int(result.get("match_count", 1 if changed else 0)), "ok" if changed else "warn"),),
+            suggestion="无需再次发布。" if changed else "稍后再次对账，或人工确认空间中确实不存在后再解除占用。",
+            retryable=not changed,
+            outcome_unknown=not changed,
+            operation_id=str(operation_id or "")[:96],
+        )
+        webui_audit_log.record(
+            action="qzone_publish_reconcile",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=bot_id,
+            ip_hash=get_client_ip(request),
+            detail={"operation_id": str(operation_id or "")[:96], "changed": changed},
+            outcome="ok" if changed else "unknown",
+        )
+        return _attach_diagnostic({**result, "ok": ok}, report)
+
+    @router.post("/operations/{operation_id}/resolve-absent")
+    async def resolve_operation_absent(
+        operation_id: str,
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...core.qzone_publish import resolve_qzone_publish_absent
+        from ...core.time_ctx import get_configured_now
+
+        bot_id = str(body.get("bot_id") or "").strip()
+        result = resolve_qzone_publish_absent(
+            operation_id=operation_id,
+            bot_id=bot_id,
+            now=get_configured_now(),
+        )
+        if str(result.get("status") or "") in {"not_found", "bot_conflict"}:
+            report = diagnostic(
+                ok=False,
+                code="qzone_operation_resolution_conflict",
+                phase="operation_resolution",
+                title="无法解除空间发布占用",
+                message="Operation ID 不存在或不属于所选 Bot。",
+                retryable=False,
+                operation_id=str(operation_id or "")[:96],
+            )
+            raise _http_diagnostic(409, report)
+        changed = bool(result.get("changed"))
+        report = diagnostic(
+            ok=True,
+            code="qzone_operation_confirmed_absent",
+            phase="operation_resolution",
+            title="已确认远端没有该条动态",
+            message="operation 已结束为明确失败；原 Operation ID 不会被再次外发。",
+            retryable=False,
+            operation_id=str(operation_id or "")[:96],
+        )
+        webui_audit_log.record(
+            action="qzone_publish_resolve_absent",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=bot_id,
+            ip_hash=get_client_ip(request),
+            detail={"operation_id": str(operation_id or "")[:96], "changed": changed},
+            outcome="ok",
+        )
+        return _attach_diagnostic({**result, "ok": True}, report)
+
+    @router.get("/reconcile-candidates")
+    async def reconciliation_candidates(
+        bot_id: str,
+        response: Response,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        response.headers["Cache-Control"] = "no-store, private"
+        bot = _get_bot(runtime, bot_id)
+        service = _bundle_attr(runtime, "qzone_social_service")
+        if bot is None or service is None:
+            raise _http_diagnostic(503, diagnostic(
+                ok=False,
+                code="qzone_history_reconcile_unavailable",
+                phase="history_reconcile_preflight",
+                title="无法读取本人空间动态",
+                message="目标 Bot 未连接或本人动态读取服务不可用。",
+                retryable=True,
+            ))
+        ok, _message, feeds = await service.fetch_user_feeds(
+            target_uin=str(getattr(bot, "self_id", bot_id) or bot_id),
+            bot_id=str(getattr(bot, "self_id", bot_id) or bot_id),
+            count=20,
+            include_comments=False,
+        )
+        if not ok:
+            raise _http_diagnostic(502, diagnostic(
+                ok=False,
+                code="qzone_history_reconcile_fetch_failed",
+                phase="history_reconcile_fetch",
+                title="本人空间动态读取失败",
+                message="当前无法生成可供确认的漏记候选。",
+                retryable=True,
+            ))
+        candidates = [
+            {
+                "feed_id": sanitize_text(item.get("feed_id") or "", limit=160),
+                "content": sanitize_text(item.get("content") or "", limit=200),
+                "created_at": float(item.get("created_at") or 0),
+            }
+            for item in feeds
+            if isinstance(item, dict) and str(item.get("feed_id") or "") and str(item.get("content") or "").strip()
+        ]
+        return {"ok": True, "bot_id": bot_id, "candidates": candidates}
+
+    @router.post("/reconcile-history")
+    async def reconcile_historical_feed(
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        from ...core.qzone_publish import record_historical_qzone_feed
+        from ...core.time_ctx import get_configured_now
+
+        bot_id = str(body.get("bot_id") or "").strip()
+        feed_id = str(body.get("feed_id") or "").strip()
+        bot = _get_bot(runtime, bot_id)
+        service = _bundle_attr(runtime, "qzone_social_service")
+        if bot is None or service is None or not feed_id:
+            raise _http_diagnostic(400, diagnostic(
+                ok=False,
+                code="qzone_history_reconcile_input_invalid",
+                phase="history_reconcile_preflight",
+                title="漏记补记参数无效",
+                message="必须选择已连接 Bot 和一条远端动态。",
+                retryable=False,
+            ))
+        ok, _message, feeds = await service.fetch_user_feeds(
+            target_uin=bot_id,
+            bot_id=bot_id,
+            count=40,
+            include_comments=False,
+        )
+        match = next((item for item in feeds if isinstance(item, dict) and str(item.get("feed_id") or "") == feed_id), None) if ok else None
+        if match is None:
+            raise _http_diagnostic(404, diagnostic(
+                ok=False,
+                code="qzone_history_feed_not_found",
+                phase="history_reconcile_verify",
+                title="远端动态已不存在",
+                message="再次读取本人空间后没有找到所选动态，本次未修改本地账本。",
+                retryable=True,
+            ))
+        now = get_configured_now()
+        occurred_at = datetime.fromtimestamp(float(match.get("created_at") or now.timestamp()), tz=now.tzinfo)
+        result = record_historical_qzone_feed(
+            bot_id=bot_id,
+            feed=match,
+            occurred_at=occurred_at,
+            resolved_at=now,
+        )
+        if not result.get("ok"):
+            raise _http_diagnostic(409, diagnostic(
+                ok=False,
+                code="qzone_history_reconcile_conflict",
+                phase="history_reconcile_commit",
+                title="漏记动态无法补记",
+                message="远端动态身份与目标 Bot 不一致，或动态缺少必要字段。",
+                retryable=False,
+            ))
+        report = diagnostic(
+            ok=True,
+            code="qzone_history_reconciled",
+            phase="history_reconcile_complete",
+            title="漏记动态已补入本地账本",
+            message="本月额度、上次发布时间和最近说说已按远端动态更新。",
+            details=(detail("远端时间", int(result.get("remote_time") or 0), "ok"),),
+            retryable=False,
+            operation_id=str(result.get("operation_id") or ""),
+        )
+        webui_audit_log.record(
+            action="qzone_history_reconcile",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=bot_id,
+            ip_hash=get_client_ip(request),
+            detail={"operation_id": result.get("operation_id"), "remote_id": feed_id[:160]},
+            outcome="ok",
+        )
+        return _attach_diagnostic({**result, "ok": True}, report)
 
     @router.post("/post-now")
     async def post_now(

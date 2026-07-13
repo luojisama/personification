@@ -10,6 +10,7 @@ data_store = load_personification_module("plugin.personification.core.data_store
 periodic_jobs = load_personification_module("plugin.personification.jobs.periodic_jobs")
 qzone_auth = load_personification_module("plugin.personification.core.qzone_auth")
 qzone_service = load_personification_module("plugin.personification.core.qzone_service")
+qzone_publish = load_personification_module("plugin.personification.core.qzone_publish")
 
 
 class _Bot:
@@ -91,6 +92,110 @@ def test_qzone_status_sanitizes_all_last_errors_and_adds_diagnostic(_runtime_con
     assert "raw-status-secret" not in response.text
     assert "status-cookie-secret" not in response.text
     assert "nested-secret" not in response.text
+
+
+def test_qzone_status_projects_unresolved_operations_without_cache(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        qzone_publish,
+        "list_qzone_publish_operations",
+        lambda **_kwargs: [{
+            "operation_id": "unknown-op",
+            "bot_id": "10000",
+            "kind": "post",
+            "status": "unknown",
+            "created_at": 1,
+            "dispatch_started_at": 2,
+            "result_code": "dispatch_timeout",
+            "payload": {"content": "安全正文", "cookie": "must-not-leak"},
+        }],
+    )
+    _install_runtime(_runtime_context, bundle=SimpleNamespace(qzone_publish_available=True))
+    client = _admin_client(_runtime_context)
+
+    response = client.get("/personification/api/qzone/status")
+    body = response.json()
+
+    assert response.headers["cache-control"] == "no-store, private"
+    assert body["reconciliation"]["state"] == "unknown"
+    assert body["reconciliation"]["operations"][0]["operation_id"] == "unknown-op"
+    assert body["reconciliation"]["operations"][0]["content"] == "安全正文"
+    assert "must-not-leak" not in response.text
+
+
+def test_qzone_operation_reconcile_and_history_routes(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+    feed = {
+        "feed_id": "remote-0448",
+        "owner_uin": "10000",
+        "content": "远端漏记正文",
+        "created_at": 1783918080,
+    }
+
+    class _Service:
+        async def fetch_user_feeds(self, **_kwargs):  # noqa: ANN003
+            return True, "ok", [feed]
+
+    monkeypatch.setattr(
+        qzone_publish,
+        "get_qzone_publish_operation",
+        lambda _operation_id: {
+            "operation_id": "unknown-op",
+            "bot_id": "10000",
+            "kind": "post",
+            "status": "unknown",
+            "payload": {"content": "远端漏记正文"},
+        },
+    )
+
+    async def _reconcile(**_kwargs):  # noqa: ANN003
+        return {"ok": True, "status": "succeeded", "changed": True, "operation_id": "unknown-op"}
+
+    monkeypatch.setattr(qzone_publish, "reconcile_qzone_publish_from_self_feed", _reconcile)
+    monkeypatch.setattr(
+        qzone_publish,
+        "resolve_qzone_publish_absent",
+        lambda **_kwargs: {"ok": True, "status": "definite_failure", "changed": True, "operation_id": "unknown-op"},
+    )
+    monkeypatch.setattr(
+        qzone_publish,
+        "record_historical_qzone_feed",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "succeeded",
+            "operation_id": "legacy-reconciled",
+            "remote_time": feed["created_at"],
+            "newly_committed": True,
+        },
+    )
+    _install_runtime(
+        _runtime_context,
+        bundle=SimpleNamespace(qzone_social_service=_Service(), qzone_publish_available=True),
+    )
+    client = _admin_client(_runtime_context)
+
+    detail_response = client.get("/personification/api/qzone/operations/unknown-op")
+    reconcile_response = client.post(
+        "/personification/api/qzone/operations/unknown-op/reconcile",
+        json={"bot_id": "10000"},
+    )
+    absent_response = client.post(
+        "/personification/api/qzone/operations/unknown-op/resolve-absent",
+        json={"bot_id": "10000"},
+    )
+    candidates_response = client.get(
+        "/personification/api/qzone/reconcile-candidates?bot_id=10000"
+    )
+    history_response = client.post(
+        "/personification/api/qzone/reconcile-history",
+        json={"bot_id": "10000", "feed_id": "remote-0448"},
+    )
+
+    assert detail_response.headers["cache-control"] == "no-store, private"
+    assert detail_response.json()["operation"]["status"] == "unknown"
+    assert reconcile_response.json()["code"] == "qzone_reconcile_succeeded"
+    assert absent_response.json()["code"] == "qzone_operation_confirmed_absent"
+    assert candidates_response.headers["cache-control"] == "no-store, private"
+    assert candidates_response.json()["candidates"][0]["feed_id"] == "remote-0448"
+    assert history_response.json()["code"] == "qzone_history_reconciled"
 
 
 def test_qzone_post_preflight_errors_are_structured_and_safe(_runtime_context) -> None:

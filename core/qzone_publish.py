@@ -292,6 +292,141 @@ def list_qzone_publish_operations(
     return [_row_to_operation(row) for row in rows]
 
 
+def resolve_qzone_publish_absent(
+    *, operation_id: str, bot_id: str, now: Any = None
+) -> dict[str, Any]:
+    op_id = str(operation_id or "").strip()[:96]
+    normalized_bot_id = str(bot_id or "").strip()
+    resolved_at = _now_ts(now) if now is not None else time.time()
+    with connect_sync() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, bot_id FROM qzone_publish_operations WHERE operation_id=?",
+            (op_id,),
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return {"ok": False, "status": "not_found", "operation_id": op_id}
+        if str(row["bot_id"] or "") != normalized_bot_id:
+            conn.commit()
+            return {"ok": False, "status": "bot_conflict", "operation_id": op_id}
+        current_status = str(row["status"] or "unknown")
+        if current_status != "unknown":
+            conn.commit()
+            return {
+                "ok": current_status == "definite_failure",
+                "status": current_status,
+                "operation_id": op_id,
+                "changed": False,
+            }
+        cursor = conn.execute(
+            """
+            UPDATE qzone_publish_operations
+            SET status='definite_failure', updated_at=?, completed_at=?, lease_expires_at=0,
+                result_code='admin_confirmed_absent', resolution_source='admin',
+                detail='{"resolution":"confirmed_absent"}'
+            WHERE operation_id=? AND status='unknown' AND bot_id=?
+            """,
+            (resolved_at, resolved_at, op_id, normalized_bot_id),
+        )
+        conn.commit()
+    return {
+        "ok": cursor.rowcount == 1,
+        "status": "definite_failure",
+        "operation_id": op_id,
+        "changed": cursor.rowcount == 1,
+    }
+
+
+def record_historical_qzone_feed(
+    *,
+    bot_id: str,
+    feed: dict[str, Any],
+    occurred_at: Any,
+    resolved_at: Any = None,
+) -> dict[str, Any]:
+    normalized_bot_id = str(bot_id or "").strip()
+    owner_uin = str(feed.get("owner_uin") or "").strip()
+    remote_id = str(feed.get("feed_id") or "").strip()[:160]
+    content = str(feed.get("content") or "").strip()
+    remote_time = float(feed.get("created_at") or _now_ts(occurred_at))
+    if not normalized_bot_id or owner_uin != normalized_bot_id:
+        return {"ok": False, "status": "bot_conflict"}
+    if not remote_id or not content:
+        return {"ok": False, "status": "invalid_feed"}
+    payload_hash, payload_json, _ = build_qzone_publish_payload(
+        bot_id=normalized_bot_id,
+        kind="post",
+        content=content,
+        payload_identity={"remote_id": remote_id, "legacy_reconciliation": True},
+    )
+    operation_id = f"legacy-reconciled-{hashlib.sha256(f'{normalized_bot_id}:{remote_id}'.encode()).hexdigest()[:48]}"
+    operation_period = _period(occurred_at)
+    completed_at = _now_ts(resolved_at) if resolved_at is not None else time.time()
+    with connect_sync() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            """
+            SELECT operation_id, status FROM qzone_publish_operations
+            WHERE bot_id=? AND remote_id=? AND status='succeeded'
+            LIMIT 1
+            """,
+            (normalized_bot_id, remote_id),
+        ).fetchone()
+        if existing is not None:
+            conn.commit()
+            return {
+                "ok": True,
+                "status": "succeeded",
+                "operation_id": str(existing["operation_id"]),
+                "duplicate": True,
+                "newly_committed": False,
+            }
+        conn.execute(
+            """
+            INSERT INTO qzone_publish_operations(
+                operation_id, bot_id, period, kind, payload_hash, payload_json,
+                status, fence_token, created_at, updated_at, reserved_at,
+                dispatch_started_at, lease_expires_at, completed_at, remote_id,
+                remote_time, result_code, resolution_source, detail
+            ) VALUES (?, ?, ?, 'post', ?, ?, 'succeeded', 1, ?, ?, ?, ?, 0, ?, ?, ?,
+                      'legacy_reconciled', 'admin_remote_feed', '{"resolution":"historical_feed"}')
+            """,
+            (
+                operation_id,
+                normalized_bot_id,
+                operation_period,
+                payload_hash,
+                payload_json,
+                completed_at,
+                completed_at,
+                completed_at,
+                completed_at,
+                completed_at,
+                remote_id,
+                remote_time,
+            ),
+        )
+        state = _apply_success_state(
+            conn,
+            operation_period=operation_period,
+            kind="post",
+            content=content,
+            event_time=remote_time,
+        )
+        conn.commit()
+    return {
+        "ok": True,
+        "success": True,
+        "status": "succeeded",
+        "operation_id": operation_id,
+        "remote_id": remote_id,
+        "remote_time": remote_time,
+        "newly_committed": True,
+        "state": state,
+    }
+
+
 def reserve_qzone_publish(
     *,
     operation_id: str,

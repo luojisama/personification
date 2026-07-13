@@ -1,4 +1,11 @@
 const API = "/personification/api";
+const QZONE_OPERATION_STORAGE_KEY = "personification_qzone_operation_id_v1";
+
+function readStoredQzoneOperationId() {
+  try { return String(sessionStorage.getItem(QZONE_OPERATION_STORAGE_KEY) || "").trim(); }
+  catch { return ""; }
+}
+
 let state = {
   logged: false, qq: "", view: "dashboard",
   entries: [], groups: [], activeGroup: null, configSearch: "", configSearchComposing: false, configSearchDraft: "",
@@ -15,7 +22,8 @@ let state = {
   personaAvatarCandidateId: "", personaSignatureCandidateId: "", personaProfileBotId: "",
   personaPrompt: null, personaPromptPath: "", health: null, healthBusyCat: "", interactionResult: null, interactionBusy: false,
   qzoneForwardForm: { target_user_id: "", forward_text: "" }, qzoneForwardResult: null, qzoneForwardBusy: false,
-  qzoneActionBusy: "", qzoneActionResult: null, qzoneOperationId: "", qzoneBotId: "", qzoneLogin: null, qzoneAuthBusy: "", qzoneAuthResult: null,
+  qzoneBusy: false, qzonePostResult: null, qzoneActionBusy: "", qzoneActionResult: null, qzoneOperationId: readStoredQzoneOperationId(), qzoneRecoveredOperation: null, qzoneBotId: "", qzoneLogin: null, qzoneAuthBusy: "", qzoneAuthResult: null,
+  qzoneReconcileBusy: "", qzoneCandidateBusy: false, qzoneCandidates: null, qzoneHistoryBusy: "",
   pluginUpdateStatus: null, pluginUpdateHistory: null, pluginUpdateBusy: false, pluginUpdateChecking: false, pluginUpdateResult: null,
   qqInfo: null, qqGroups: [], qqFriends: [],
   memory: null, memoryFilter: "", memoryInnerState: null, memoryIncludeSelf: false, memoryLimit: 200,
@@ -433,7 +441,9 @@ async function loadView() {
     } else if (view === "health") {
       state.health = await api("/health/check");  // 默认读缓存，秒开
     } else if (view === "qzone") {
-      state.qzone = await api("/qzone/status");
+      state.qzone = await api("/qzone/status", {cache:"no-store"});
+      if (typeof syncPersistedQzoneOperation === "function") await syncPersistedQzoneOperation(state.qzone);
+      if (typeof startQzoneSnapshotScheduler === "function") startQzoneSnapshotScheduler(false);
     } else if (view === "plugin_manager") {
       const [status, history] = await Promise.all([
         api("/plugin-manager/status"),
@@ -531,6 +541,7 @@ async function navigateToView(view,{fromHistory=false}={}) {
   const nextView=normalizeView(view);
   captureScrollState();
   if(!fromHistory&&location.hash!==`#${nextView}`)history.pushState({view:nextView},"",`#${nextView}`);
+  if(state.view==="qzone"&&nextView!=="qzone"&&typeof stopQzoneViewLifecycle==="function")stopQzoneViewLifecycle();
   state.view=nextView;
   if(state.mobileNavOpen)state.mobileNavOpen=false;
   try{await loadView();render();}catch(e){alertFlash("err",e.message);}
@@ -540,7 +551,10 @@ function render() {
   const root = document.getElementById("app");
   captureScrollState();
   if (state.devicePending) { root.innerHTML = renderDevicePending(); return; }
-  if (!state.logged) { root.innerHTML = renderLogin(); attachLogin(); return; }
+  if (!state.logged) {
+    if (state.view === "qzone" && typeof stopQzoneViewLifecycle === "function") stopQzoneViewLifecycle();
+    root.innerHTML = renderLogin(); attachLogin(); return;
+  }
   // 全量 innerHTML 重绘会让正在输入的搜索框失焦；记下焦点 + 光标位置，重绘后还原。
   const active = document.activeElement;
   let focusSnap = null;

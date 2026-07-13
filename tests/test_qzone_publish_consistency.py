@@ -610,3 +610,53 @@ def test_forward_reconcile_requires_original_feed_identity(tmp_path, monkeypatch
 
     assert wrong["status"] == "unknown" and wrong["match_count"] == 0
     assert exact["status"] == "succeeded" and exact["remote_id"] == "remote-forward"
+
+
+def test_admin_resolution_and_historical_feed_reconciliation_are_idempotent(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    _init_store(tmp_path, monkeypatch, {"period": "2026-07", "count": 2, "recent_contents": []})
+    now = datetime(2026, 7, 13, 5, 0)
+
+    async def _unknown():
+        return qzone_service.QzoneWriteResult("unknown", "lost", "timeout")
+
+    asyncio.run(qzone_publish.coordinated_qzone_publish(
+        operation_id="admin-resolve",
+        bot_id="10001",
+        content="远端实际不存在",
+        now=now,
+        monthly_limit=5,
+        min_interval_hours=0,
+        kind="post",
+        publish=_unknown,
+    ))
+    resolved = qzone_publish.resolve_qzone_publish_absent(
+        operation_id="admin-resolve",
+        bot_id="10001",
+        now=now + timedelta(minutes=1),
+    )
+    assert resolved["status"] == "definite_failure" and resolved["changed"] is True
+
+    feed = {
+        "feed_id": "remote-0448",
+        "owner_uin": "10001",
+        "content": "突然想把游戏里的默认头像换掉，可原来的看久了也没那么难看",
+        "created_at": datetime(2026, 7, 13, 4, 48).timestamp(),
+    }
+    first = qzone_publish.record_historical_qzone_feed(
+        bot_id="10001",
+        feed=feed,
+        occurred_at=datetime(2026, 7, 13, 4, 48),
+        resolved_at=now,
+    )
+    duplicate = qzone_publish.record_historical_qzone_feed(
+        bot_id="10001",
+        feed=feed,
+        occurred_at=datetime(2026, 7, 13, 4, 48),
+        resolved_at=now,
+    )
+    state = data_store.get_data_store().load_sync("qzone_post_state")
+
+    assert first["newly_committed"] is True
+    assert duplicate["duplicate"] is True and duplicate["newly_committed"] is False
+    assert state["count"] == 3
+    assert state["last_content"] == feed["content"]
