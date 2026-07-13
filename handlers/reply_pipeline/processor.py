@@ -555,9 +555,15 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         message_content = "[你被对方戳了戳，你感到有点疑惑和好奇，想知道对方要做什么]"
         sender_name = "戳戳怪"
         runtime.logger.info(f"拟人插件：检测到来自 {user_id} 的戳一戳")
-        poke_back_task = asyncio.create_task(
-            maybe_poke_back(bot, runtime, group_id=group_id, user_id=user_id)
-        )
+        async def _poke_back_after_commit_gate() -> None:
+            commit_lock = state.get("reply_commit_lock")
+            if isinstance(commit_lock, asyncio.Lock):
+                async with commit_lock:
+                    await maybe_poke_back(bot, runtime, group_id=group_id, user_id=user_id)
+                return
+            await maybe_poke_back(bot, runtime, group_id=group_id, user_id=user_id)
+
+        poke_back_task = asyncio.create_task(_poke_back_after_commit_gate())
         poke_back_task.add_done_callback(_task_exc_logger("humanize_poke_back", runtime.logger))
     elif isinstance(event, types.message_event_cls):
         user_id = str(event.user_id)
@@ -878,6 +884,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         runtime.logger.warning("拟人插件：未配置可用的 API provider，跳过回复")
         if is_direct_mention:
             try:
+                await acquire_reply_commit(state)
                 await bot.send(event, "在呢")
             except Exception as exc:
                 log_exception(runtime.logger, "[reply_processor] fallback presence reply failed", exc, level="debug")
@@ -911,6 +918,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     async def _maybe_silence_reaction() -> None:
         """NO_REPLY 沉默前的轻量回应（贴表情/拍一拍），never-raise。"""
         try:
+            await acquire_reply_commit(state)
             favorability = 0.0
             try:
                 favorability = float(persona.get_user_data(user_id).get("favorability", 0.0) or 0.0)
@@ -1742,6 +1750,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             getattr(runtime.plugin_config, "personification_response_timeout", 180) or 180
                         ),
                         task_exc_logger=_task_exc_logger,
+                        reply_commit_state=state,
                     )
                     try:
                         from ...core import reply_turn_trace

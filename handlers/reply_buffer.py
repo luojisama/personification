@@ -46,8 +46,8 @@ class ReplyConcurrencyController:
         self._direct_counts[key] = int(self._direct_counts.get(key, 0) or 0) + 1
         self._idle_event(key).clear()
         try:
-            async with self._global_semaphore:
-                async with self._session_semaphore(key):
+            async with self._session_semaphore(key):
+                async with self._global_semaphore:
                     yield self.commit_lock(key)
         finally:
             remaining = max(0, int(self._direct_counts.get(key, 1) or 1) - 1)
@@ -651,7 +651,28 @@ async def handle_reply_event(
     finished_exception_cls: Any = None,
 ) -> None:
     if isinstance(event, poke_event_cls):
-        await process_response_logic(bot, event, state)
+        if concurrency_controller is None:
+            await process_response_logic(bot, event, state)
+            return
+        bot_self_id = str(getattr(bot, "self_id", "") or "")
+        group_id = str(getattr(event, "group_id", "") or "")
+        user_id = str(getattr(event, "user_id", "") or "")
+        scope = group_id or f"private_{user_id}"
+        session_key = f"{bot_self_id}:{scope}" if bot_self_id else scope
+        direct_state = dict(state)
+        direct_state["batch_session_key"] = session_key
+        timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
+        async with concurrency_controller.direct_turn(session_key) as commit_lock:
+            direct_state["reply_commit_lock"] = commit_lock
+            try:
+                await asyncio.wait_for(
+                    process_response_logic(bot, event, direct_state),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"拟人插件：会话 {session_key} poke turn 超时（>{timeout_seconds:.0f}s），已终止本轮。"
+                )
         return
 
     if not isinstance(event, message_event_cls):
@@ -680,10 +701,6 @@ async def handle_reply_event(
                 active_task = entry.get("active_task")
                 if active_task and not active_task.done():
                     active_task.cancel()
-            _cancel_timer(entry)
-            entry["items"] = []
-            entry["pending_items"] = []
-            entry["pending_ready"] = False
         direct_state = dict(state)
         direct_state["batch_session_key"] = session_key
         direct_state["batch_event_count"] = 1

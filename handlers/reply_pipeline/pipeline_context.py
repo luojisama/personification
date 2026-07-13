@@ -24,6 +24,7 @@ from ...core.qq_expression_tools import register_send_qq_expression_tools
 from ...core.gemini_profile import build_gemini_route_policy_prompt
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_style_policy import build_reply_style_policy_prompt
+from ..reply_commit import acquire_reply_commit, release_reply_commit
 from ...core.visual_capabilities import VISUAL_ROUTE_REPLY_PLAIN
 from ...skill_runtime.runtime_api import SkillRuntime
 from ...skills.skillpacks.friend_request_tool.scripts.main import build_friend_request_tool_for_runtime
@@ -680,6 +681,7 @@ async def run_agent_if_enabled(
     is_direct_mention: bool = False,
     response_timeout_seconds: float = _DEFAULT_RESPONSE_TIMEOUT_SECONDS,
     task_exc_logger: Callable[[str, Any], Any] | None = None,
+    reply_commit_state: dict[str, Any] | None = None,
 ) -> tuple[str | None, bool, bool, Any | None, list[dict[str, Any]]]:
     if not (
         getattr(runtime.plugin_config, "personification_agent_enabled", True)
@@ -770,7 +772,12 @@ async def run_agent_if_enabled(
     ack_sender = None
     if ack_phrase:
         async def _ack_sender(text: str, *, _phrase: str = ack_phrase) -> None:
-            await bot.send(event, str(text or "").strip() or _phrase)
+            commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
+            await acquire_reply_commit(commit_state)
+            try:
+                await bot.send(event, str(text or "").strip() or _phrase)
+            finally:
+                release_reply_commit(commit_state)
         ack_sender = _ack_sender
     candidate_memories = await _recall_agent_candidate_memories(
         runtime=runtime,

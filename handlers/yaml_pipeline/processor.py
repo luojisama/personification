@@ -98,7 +98,7 @@ from ..reply_pipeline.pipeline_emotion import (
     semantic_frame_timeout_hint,
 )
 from ..reply_pipeline import humanize as _humanize
-from ..reply_commit import acquire_reply_commit, execute_pending_actions
+from ..reply_commit import acquire_reply_commit, execute_pending_actions, release_reply_commit
 from ..reply_pipeline.pipeline_context import (
     batch_has_newer_messages as _shared_batch_has_newer_messages,
     clone_tool_registry as _clone_tool_registry,
@@ -1347,7 +1347,11 @@ async def process_yaml_response_logic(
         ack_sender = None
         if ack_phrase:
             async def _ack_sender(text: str, *, _phrase: str = ack_phrase) -> None:
-                await bot.send(event, str(text or "").strip() or _phrase)
+                await acquire_reply_commit(reply_commit_state)
+                try:
+                    await bot.send(event, str(text or "").strip() or _phrase)
+                finally:
+                    release_reply_commit(reply_commit_state)
             ack_sender = _ack_sender
         _trace_stage(
             key="yaml_agent_start",
@@ -1551,6 +1555,22 @@ async def process_yaml_response_logic(
 
     status_text = str(parsed.get("status") or "").strip()
     action_text = str(parsed.get("action") or "").strip()
+    pending_yaml_poke = bool(schedule_active and "戳一戳" in action_text)
+
+    async def _commit_yaml_poke() -> bool:
+        nonlocal pending_yaml_poke
+        if not pending_yaml_poke:
+            return True
+        await acquire_reply_commit(reply_commit_state)
+        if _has_newer_batch_now():
+            _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="YAML 动作提交前出现更新批次")
+            return False
+        try:
+            await bot.send(event, message_segment_cls.poke(int(user_id)))
+            pending_yaml_poke = False
+        except Exception as exc:
+            logger.warning(f"拟人插件: 发送戳一戳失败: {exc}")
+        return True
 
     if schedule_active and status_text:
         bot_statuses[group_id] = {
@@ -1566,15 +1586,6 @@ async def process_yaml_response_logic(
 
     if schedule_active and action_text:
         logger.info(f"拟人插件: 执行动作: {action_text}")
-        if "戳一戳" in action_text:
-            try:
-                await acquire_reply_commit(reply_commit_state)
-                if _has_newer_batch_now():
-                    _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="YAML 动作提交前出现更新批次")
-                    return
-                await bot.send(event, message_segment_cls.poke(int(user_id)))
-            except Exception as e:
-                logger.warning(f"拟人插件: 发送戳一戳失败: {e}")
     elif not schedule_active:
         action_text = ""
 
@@ -1712,6 +1723,8 @@ async def process_yaml_response_logic(
     cleaned_assistant_text = strip_response_control_markers(assistant_text)
     cleaned_assistant_text = normalize_visible_reply_text(cleaned_assistant_text)
     if not cleaned_assistant_text:
+        if not await _commit_yaml_poke():
+            return
         _trace_no_reply("empty_visible_reply", diagnosis_code="model_empty", detail="清理控制标记后没有可见文本")
         return
     if parsed.get("messages"):
@@ -1803,6 +1816,8 @@ async def process_yaml_response_logic(
         _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="获得提交锁后出现更新批次")
         return
     await _commit_pending_actions()
+    if not await _commit_yaml_poke():
+        return
 
     sent_as_tts = False
     sent_message_id = ""

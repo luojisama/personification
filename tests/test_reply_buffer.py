@@ -308,6 +308,7 @@ def test_direct_turn_cancels_active_random_turn_only() -> None:
         timer_tasks: list[asyncio.Task[Any]] = []
         random_started = asyncio.Event()
         random_cancelled = asyncio.Event()
+        pending_finished = asyncio.Event()
         direct_finished = asyncio.Event()
 
         async def process_response_logic(_bot: Any, event: Any, _state: dict[str, Any]) -> None:
@@ -318,6 +319,8 @@ def test_direct_turn_cancels_active_random_turn_only() -> None:
                 except asyncio.CancelledError:
                     random_cancelled.set()
                     raise
+            elif int(event.message_id) == 2:
+                pending_finished.set()
             else:
                 direct_finished.set()
 
@@ -358,7 +361,22 @@ def test_direct_turn_cancels_active_random_turn_only() -> None:
 
         await reply_buffer.handle_reply_event(
             _Bot(),
-            _MentionEvent(2, "direct"),
+            _GroupEvent(2, "pending-random"),
+            {"is_random_chat": True},
+            poke_event_cls=type("PokeEvent", (), {}),
+            message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent,
+            process_response_logic=process_response_logic,
+            msg_buffer=msg_buffer,
+            start_buffer_timer=start_buffer_timer,
+            logger=_Logger(),
+            concurrency_controller=controller,
+            response_timeout_seconds=30,
+        )
+
+        await reply_buffer.handle_reply_event(
+            _Bot(),
+            _MentionEvent(3, "direct"),
             {},
             poke_event_cls=type("PokeEvent", (), {}),
             message_event_cls=_PrivateEvent,
@@ -373,6 +391,41 @@ def test_direct_turn_cancels_active_random_turn_only() -> None:
 
         await asyncio.wait_for(random_cancelled.wait(), timeout=1)
         await asyncio.wait_for(direct_finished.wait(), timeout=1)
+        await asyncio.wait_for(pending_finished.wait(), timeout=2)
         await asyncio.gather(*timer_tasks, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_session_queue_does_not_consume_global_slots() -> None:
+    async def run() -> None:
+        controller = reply_buffer.ReplyConcurrencyController(session_limit=1, global_limit=1)
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        order: list[str] = []
+
+        async def occupy_first() -> None:
+            async with controller.direct_turn("bot:group-a"):
+                order.append("a1")
+                first_started.set()
+                await release_first.wait()
+
+        async def queued_same_session() -> None:
+            async with controller.direct_turn("bot:group-a"):
+                order.append("a2")
+
+        async def other_session() -> None:
+            async with controller.direct_turn("bot:group-b"):
+                order.append("b1")
+
+        first = asyncio.create_task(occupy_first())
+        await first_started.wait()
+        queued = asyncio.create_task(queued_same_session())
+        other = asyncio.create_task(other_session())
+        await asyncio.sleep(0)
+        release_first.set()
+        await asyncio.gather(first, queued, other)
+
+        assert order == ["a1", "b1", "a2"]
 
     asyncio.run(run())
