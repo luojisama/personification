@@ -344,6 +344,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
     trace_id = ""
     trace_token = None
     trace_mod = None
+    cancelled = False
     try:
         from ...core.llm_context import reset_llm_context, set_llm_context
 
@@ -370,6 +371,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                 user_id=user_id,
                 detail={"source": "reply_pipeline", "message_id": str(getattr(event, "message_id", "") or "")},
             )
+            state["reply_trace_id"] = trace_id
             trace_token = trace_mod.set_current_trace_id(trace_id)
             trace_mod.record_stage(
                 trace_id=trace_id,
@@ -384,12 +386,15 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
         trace_mod = None
     try:
         await _process_response_logic_impl(bot, event, state, deps)
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
     except FinishedException:
-        if trace_mod is not None and trace_id:
+        if trace_mod is not None and trace_id and not cancelled:
             trace_mod.finish_trace(trace_id=trace_id, outcome="finished", diagnosis_code="finished_exception")
         raise
     except Exception as exc:
-        if trace_mod is not None and trace_id:
+        if trace_mod is not None and trace_id and not cancelled:
             trace_mod.record_stage(
                 trace_id=trace_id,
                 key="unhandled_exception",
@@ -401,7 +406,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
         raise
     finally:
         release_reply_commit(state)
-        if trace_mod is not None and trace_id:
+        if trace_mod is not None and trace_id and not cancelled:
             try:
                 last_trace = trace_mod.get_trace(trace_id) or {}
                 if not str(last_trace.get("outcome", "") or ""):
@@ -1058,7 +1063,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 status="ok" if (direct_image_input or agent_direct_image_input) else "warn",
                 detail=(
                     f"mode={image_input_mode} plain_direct={direct_image_input} "
-                    f"agent_direct={agent_direct_image_input} images={len(image_urls)} stickers={len(sticker_image_urls)}"
+                    f"agent_direct={agent_direct_image_input} images={len(image_urls)} "
+                    f"stickers={len(sticker_image_urls)} elapsed_ms=0"
                 ),
                 hint="" if (direct_image_input or agent_direct_image_input) else "将尝试视觉摘要 fallback 或文本占位",
             )
@@ -1188,6 +1194,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             sticker_like=False,
         )
 
+    semantic_prepare_started_at = time.monotonic()
     image_summary_suffix, prepared_semantics = await asyncio.gather(
         _image_summary_task(),
         prepare_reply_semantics(
@@ -1208,6 +1215,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             has_images=bool(tool_image_urls),
         ),
     )
+    semantic_prepare_elapsed_ms = int((time.monotonic() - semantic_prepare_started_at) * 1000)
     if image_summary_suffix and tool_image_urls:
         if not direct_image_input:
             current_text_message_content = (
@@ -1243,7 +1251,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 f"address_mode={getattr(semantic_frame, 'address_mode', '-') or '-'} "
                 f"emotion={getattr(semantic_frame, 'bot_emotion', '')} "
                 f"output={getattr(semantic_frame, 'output_mode', '') or '-'} "
-                f"elapsed_ms={int((time.monotonic() - started_at) * 1000)}"
+                f"elapsed_ms={semantic_prepare_elapsed_ms} "
+                f"turn_age_ms={int((time.monotonic() - started_at) * 1000)}"
             ),
         )
     except Exception:
@@ -1724,7 +1733,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             detail=(
                                 f"intent={message_intent} images={len(tool_image_urls)} "
                                 f"direct_image={agent_direct_image_input} "
-                                f"elapsed_ms={int((time.monotonic() - started_at) * 1000)}"
+                                f"elapsed_ms=0 turn_age_ms={int((time.monotonic() - started_at) * 1000)}"
                             ),
                         )
                     except Exception:

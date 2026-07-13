@@ -582,7 +582,10 @@ async def process_yaml_response_logic(
         key="yaml_start",
         label="YAML 回复开始",
         status="info",
-        detail=f"scene={'private' if is_private_session else 'group'} user={user_id} group={group_id or '-'}",
+        detail=(
+            f"scene={'private' if is_private_session else 'group'} "
+            f"user={user_id} group={group_id or '-'} elapsed_ms=0"
+        ),
     )
     is_direct_mention = _event_mentions_bot(event, bot)
     pending_action_executor: Any = None
@@ -1196,7 +1199,8 @@ async def process_yaml_response_logic(
             status="info",
             detail=(
                 f"images={len(last_images)} mode={image_input_mode} "
-                f"text_direct={bool(direct_image_input)} agent_direct={bool(agent_direct_image_input)}"
+                f"text_direct={bool(direct_image_input)} "
+                f"agent_direct={bool(agent_direct_image_input)} elapsed_ms=0"
             ),
         )
         if image_input_mode == "disabled":
@@ -1361,7 +1365,10 @@ async def process_yaml_response_logic(
             key="yaml_agent_start",
             label="YAML Agent 开始",
             status="info",
-            detail=f"images={len(tool_image_urls)} direct_image={bool(agent_direct_image_input)}",
+            detail=(
+                f"images={len(tool_image_urls)} direct_image={bool(agent_direct_image_input)} "
+                "elapsed_ms=0"
+            ),
         )
         try:
             try:

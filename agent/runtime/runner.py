@@ -361,7 +361,7 @@ async def run_agent(
         detail=(
             f"max_steps={effective_max_steps} builtin_search={bool(use_builtin_search)} "
             f"images={len(user_images)} required={str(bool(reply_required)).lower()} "
-            f"caller={type(tool_caller).__name__}"
+            f"caller={type(tool_caller).__name__} elapsed_ms=0"
         ),
     )
     rewrite_context = _derive_query_rewrite_context(

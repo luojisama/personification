@@ -4,6 +4,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict
 
+from ..core.response_review import required_reply_fallback_text
 from ..core.target_inference import normalize_message_target_for_review
 
 
@@ -12,6 +13,78 @@ _PRIVATE_BATCH_DELAY_SECONDS = 0.8
 _MAX_BATCH_EVENTS = 8
 _PROCESS_RESPONSE_TIMEOUT_SECONDS = 180.0
 _DIRECT_REPLY_PREEMPT_SECONDS = 8.0
+_TIMEOUT_FALLBACK_SEND_SECONDS = 10.0
+
+
+def _event_has_media(event: Any) -> bool:
+    try:
+        return any(
+            str(getattr(segment, "type", "") or "").strip().lower() in {"image", "mface", "gif"}
+            for segment in list(getattr(event, "message", []) or [])
+        )
+    except Exception:
+        return False
+
+
+async def _handle_reply_timeout(
+    *,
+    bot: Any,
+    event: Any,
+    state: dict[str, Any],
+    session_key: str,
+    timeout_seconds: float,
+    logger: Any,
+    commit_lock: asyncio.Lock | None = None,
+) -> None:
+    fallback_sent = False
+    fallback_error = ""
+    if bool(state.get("reply_required", False)):
+        fallback_text = required_reply_fallback_text(has_images=_event_has_media(event))
+        try:
+            if isinstance(commit_lock, asyncio.Lock):
+                async with commit_lock:
+                    await asyncio.wait_for(
+                        bot.send(event, fallback_text),
+                        timeout=_TIMEOUT_FALLBACK_SEND_SECONDS,
+                    )
+            else:
+                await asyncio.wait_for(
+                    bot.send(event, fallback_text),
+                    timeout=_TIMEOUT_FALLBACK_SEND_SECONDS,
+                )
+            fallback_sent = True
+        except Exception as exc:
+            fallback_error = type(exc).__name__
+            logger.warning(f"拟人插件：会话 {session_key} timeout fallback 发送失败: {exc}")
+    try:
+        from ..core import reply_turn_trace
+
+        trace_id = str(state.get("reply_trace_id", "") or "")
+        reply_turn_trace.record_stage(
+            trace_id=trace_id,
+            key="reply_timeout",
+            label="回复超时",
+            status="warn" if fallback_sent else "error",
+            detail=(
+                f"timeout_seconds={timeout_seconds:g} reply_required={str(bool(state.get('reply_required', False))).lower()} "
+                f"fallback_sent={str(fallback_sent).lower()} fallback_error={fallback_error or '-'} elapsed_ms=0"
+            ),
+            hint="强交互已发送安全 fallback；检查状态锁、provider、query rewrite 与工具耗时" if fallback_sent else "检查 provider、工具耗时与重试次数",
+        )
+        reply_turn_trace.finish_trace(
+            trace_id=trace_id,
+            outcome="degraded" if fallback_sent else "failed",
+            diagnosis_code="reply_timeout",
+            detail={
+                "timeout_seconds": timeout_seconds,
+                "session": session_key,
+                "reply_required": bool(state.get("reply_required", False)),
+                "fallback_sent": fallback_sent,
+                "fallback_error": fallback_error,
+            },
+        )
+    except Exception:
+        pass
 
 
 class ReplyConcurrencyController:
@@ -521,23 +594,14 @@ async def run_buffer_timer(
         logger.warning(
             f"拟人插件：会话 {key} 单轮回复超时（>{timeout_seconds:.0f}s），已放弃旧批次。"
         )
-        try:
-            from ..core import reply_turn_trace
-
-            reply_turn_trace.record_stage(
-                key="reply_timeout",
-                label="回复超时",
-                status="error",
-                detail=f"process_response_logic 超过 {timeout_seconds:.0f}s",
-                hint="检查 provider 超时、工具耗时、模型路由与重试次数",
-            )
-            reply_turn_trace.finish_trace(
-                outcome="failed",
-                diagnosis_code="reply_timeout",
-                detail={"timeout_seconds": timeout_seconds, "session": key},
-            )
-        except Exception:
-            pass
+        await _handle_reply_timeout(
+            bot=bot,
+            event=selected_event,
+            state=state,
+            session_key=key,
+            timeout_seconds=timeout_seconds,
+            logger=logger,
+        )
     except asyncio.CancelledError:
         if int(entry.get("superseded_generation", 0) or 0) >= current_generation:
             logger.info(f"拟人插件：会话 {key} 当前批次已被新的直呼消息抢占。")
@@ -664,7 +728,9 @@ async def handle_reply_event(
         session_key = f"{bot_self_id}:{scope}" if bot_self_id else scope
         direct_state = dict(state)
         direct_state["batch_session_key"] = session_key
+        direct_state["reply_required"] = True
         timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
+        direct_state["response_deadline"] = time.monotonic() + timeout_seconds
         async with concurrency_controller.direct_turn(session_key) as commit_lock:
             direct_state["reply_commit_lock"] = commit_lock
             try:
@@ -675,6 +741,15 @@ async def handle_reply_event(
             except asyncio.TimeoutError:
                 logger.warning(
                     f"拟人插件：会话 {session_key} poke turn 超时（>{timeout_seconds:.0f}s），已终止本轮。"
+                )
+                await _handle_reply_timeout(
+                    bot=bot,
+                    event=event,
+                    state=direct_state,
+                    session_key=session_key,
+                    timeout_seconds=timeout_seconds,
+                    logger=logger,
+                    commit_lock=commit_lock,
                 )
         return
 
@@ -726,6 +801,15 @@ async def handle_reply_event(
             except asyncio.TimeoutError:
                 logger.warning(
                     f"拟人插件：会话 {session_key} direct turn 超时（>{timeout_seconds:.0f}s），已终止本轮。"
+                )
+                await _handle_reply_timeout(
+                    bot=bot,
+                    event=event,
+                    state=direct_state,
+                    session_key=session_key,
+                    timeout_seconds=timeout_seconds,
+                    logger=logger,
+                    commit_lock=commit_lock,
                 )
             except asyncio.CancelledError:
                 raise

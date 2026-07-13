@@ -287,3 +287,34 @@ def test_reply_turn_trace_builds_agent_inspection_summary(_db_tmp) -> None:
     assert inspection["addressing"]["address_mode"] == "quote"
     assert inspection["tools"][0]["tool"] == "resolve_acg_entity"
     assert inspection["questions"][0] == "大鸟居明日香_动画_剧情"
+
+
+def test_process_view_does_not_attribute_wait_time_to_zero_duration_markers() -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    view = traces.build_process_view(
+        {
+            "trace_id": "trace-duration",
+            "outcome": "ok",
+            "diagnosis_code": "ok",
+            "stages": [
+                {
+                    "ts": 100.0,
+                    "key": "vision_mode",
+                    "label": "视觉路径",
+                    "status": "info",
+                    "detail": "mode=auto elapsed_ms=0",
+                },
+                {
+                    "ts": 225.0,
+                    "key": "semantic_frame_llm",
+                    "label": "语义帧 LLM",
+                    "status": "ok",
+                    "detail": "intent=explanation elapsed_ms=7290",
+                },
+            ],
+        }
+    )
+
+    assert view["items"][0]["duration_ms"] == 0
+    assert view["items"][1]["duration_ms"] == 7290
+    assert [item["key"] for item in view["summary"]["slow_stages"]] == ["semantic_frame_llm"]
