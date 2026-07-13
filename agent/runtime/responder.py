@@ -130,11 +130,12 @@ def _build_persona_responder_instruction(
 ) -> str:
     output_mode = str(getattr(semantic_frame, "output_mode", "") or "").strip() or "chat_short"
     min_chars, max_chars = OUTPUT_MODE_LENGTHS.get(output_mode, OUTPUT_MODE_LENGTHS["chat_short"])
-    no_reply_rule = (
-        "当前是强交互轮次，禁止输出 [NO_REPLY]。"
-        if reply_required or is_direct_mention
-        else "只有明显不该回复时才可把 reply_text 设为 [NO_REPLY]。"
-    )
+    if is_direct_mention:
+        no_reply_rule = "直呼/提及时禁止输出 [NO_REPLY]。"
+    elif reply_required:
+        no_reply_rule = "当前是强交互轮次，禁止输出 [NO_REPLY]。"
+    else:
+        no_reply_rule = "只有明显不该回复时才可把 reply_text 设为 [NO_REPLY]。"
     session_goal = str(getattr(semantic_frame, "session_goal", "") or "").strip()[:100]
     user_attitude = str(getattr(semantic_frame, "user_attitude", "") or "").strip()[:100]
     bot_emotion = str(getattr(semantic_frame, "bot_emotion", "") or "").strip()[:100]
