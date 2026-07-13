@@ -60,6 +60,8 @@ from ...core.response_review import (
     extract_recent_bot_reply_texts,
     is_agent_reply_ooc,
     make_passthrough_review_decision,
+    required_reply_fallback_text,
+    required_reply_needs_recovery,
     rewrite_agent_reply_ooc,
     review_response_text,
 )
@@ -494,6 +496,8 @@ async def process_yaml_response_logic(
     batch_runtime_ref: Dict[str, Any] | None = None,
     reply_commit_state: Dict[str, Any] | None = None,
     solo_speaker_follow: bool = False,
+    reply_required: bool = False,
+    response_deadline: float | None = None,
 ) -> None:
     """处理基于 YAML 模板的新版响应逻辑。"""
     reply_commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
@@ -1387,10 +1391,12 @@ async def process_yaml_response_logic(
                         total_timeout_seconds=float(
                             getattr(plugin_config, "personification_response_timeout", 180) or 180
                         ),
+                        response_deadline=response_deadline,
                     ),
                     ack_sender=ack_sender,
                     is_group=not is_private_session,
                     is_direct_mention=is_direct_mention,
+                    reply_required=reply_required,
                 )
             except Exception as exc:
                 if not (
@@ -1416,7 +1422,18 @@ async def process_yaml_response_logic(
                     f"direct_output={bool(getattr(agent_result, 'direct_output', False))} "
                     f"actions={len(getattr(agent_result, 'pending_actions', []) or [])}"
                 ),
-            )
+                )
+            if required_reply_needs_recovery(
+                reply_content,
+                reply_required=reply_required,
+                pending_actions=list(getattr(agent_result, "pending_actions", []) or []),
+                direct_output=bool(getattr(agent_result, "direct_output", False)),
+            ):
+                logger.warning("拟人插件 (YAML)：强交互 Agent 返回静默，改走基础模型恢复。")
+                reply_content = ""
+                used_agent = False
+                agent_result = None
+        if agent_result is not None:
             if not agent_result.direct_output and is_agent_reply_ooc(reply_content):
                 rewritten_ooc = await rewrite_agent_reply_ooc(
                     tool_caller=lite_tool_caller or agent_tool_caller,
@@ -1498,8 +1515,11 @@ async def process_yaml_response_logic(
         )
     if not reply_content:
         logger.warning("拟人插件 (YAML): 未能获取到 AI 回复内容")
-        _trace_no_reply("empty_model_reply", diagnosis_code="model_empty", detail="模型返回空内容")
-        return
+        if reply_required:
+            reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+        else:
+            _trace_no_reply("empty_model_reply", diagnosis_code="model_empty", detail="模型返回空内容")
+            return
     if _has_newer_batch_now():
         logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
         _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="模型回复生成后出现更新批次")
@@ -1705,6 +1725,7 @@ async def process_yaml_response_logic(
             is_private=is_private_session,
             is_random_chat=is_random_chat,
             is_direct_mention=is_direct_mention,
+            reply_required=reply_required,
             semantic_frame=semantic_frame,
         )
     if review_decision.action == "no_reply":
@@ -1715,6 +1736,9 @@ async def process_yaml_response_logic(
         assistant_text = sanitize_history_text(review_decision.text.strip())
         parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
 
+    if has_silence_control_marker(assistant_text) and reply_required and not pending_actions:
+        assistant_text = required_reply_fallback_text(has_images=bool(tool_image_urls))
+        parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
     if has_silence_control_marker(assistant_text):
         logger.info(f"拟人插件 (YAML)：最终回复含沉默控制标记，group={group_id} user={user_id}")
         _trace_no_reply("final_silence_marker", detail="最终回复含沉默控制标记")
@@ -1723,10 +1747,19 @@ async def process_yaml_response_logic(
     cleaned_assistant_text = strip_response_control_markers(assistant_text)
     cleaned_assistant_text = normalize_visible_reply_text(cleaned_assistant_text)
     if not cleaned_assistant_text:
-        if not await _commit_yaml_poke():
+        if reply_required:
+            cleaned_assistant_text = required_reply_fallback_text(has_images=bool(tool_image_urls))
+            parsed = {
+                "messages": [{"text": cleaned_assistant_text, "sticker": ""}],
+                "think": "",
+                "status": "",
+                "action": "",
+            }
+        else:
+            if not await _commit_yaml_poke():
+                return
+            _trace_no_reply("empty_visible_reply", diagnosis_code="model_empty", detail="清理控制标记后没有可见文本")
             return
-        _trace_no_reply("empty_visible_reply", diagnosis_code="model_empty", detail="清理控制标记后没有可见文本")
-        return
     if parsed.get("messages"):
         parsed = _normalize_parsed_message_texts(parsed)
         if not any(str(item.get("text", "") or "").strip() for item in parsed.get("messages", [])):

@@ -24,6 +24,7 @@ def append_agent_system_prompts(
     direct_image_input: bool,
     is_group: bool | None = None,
     is_direct_mention: bool = False,
+    reply_required: bool = False,
     surface: str = "",
 ) -> None:
     group_context = bool(is_group) if is_group is not None else any(
@@ -38,6 +39,17 @@ def append_agent_system_prompts(
             "content": _semantic_tool_guidance(),
         }
     )
+    if reply_required:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "当前是结构上必须回应的强交互轮次（私聊、明确 @/回复 bot 或其它直接指向）。"
+                    "除非发送型工具已经成功排队，或安全边界要求给出拒绝，否则禁止输出 [NO_REPLY] 或 [SILENCE]。"
+                    "证据不足时应简短说明不确定或请求对方重试，不能用沉默代替回应。"
+                ),
+            }
+        )
     if surface:
         messages.append(
             {

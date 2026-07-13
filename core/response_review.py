@@ -29,6 +29,27 @@ class ReplyArbitrationIntent:
     recommend_silence: bool = False
 
 
+def required_reply_fallback_text(*, has_images: bool = False) -> str:
+    if has_images:
+        return "这张图我刚刚没读出来，重发一下试试。"
+    return "刚刚卡了一下，再发一次吧。"
+
+
+def required_reply_needs_recovery(
+    text: Any,
+    *,
+    reply_required: bool,
+    pending_actions: Iterable[Any] = (),
+    direct_output: bool = False,
+) -> bool:
+    return bool(
+        reply_required
+        and not direct_output
+        and not list(pending_actions or [])
+        and str(text or "").strip() in {"", "[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"}
+    )
+
+
 def make_passthrough_review_decision(
     candidate_text: str,
     *,
@@ -417,12 +438,22 @@ async def review_response_text(
     is_private: bool = False,
     is_random_chat: bool = False,
     is_direct_mention: bool = False,
+    reply_required: bool = False,
     semantic_frame: Any = None,
 ) -> ResponseReviewDecision:
+    must_reply = bool(reply_required or is_direct_mention)
     candidate = str(candidate_text or "").strip()
     if not candidate:
+        if must_reply:
+            return ResponseReviewDecision(
+                action="rewrite",
+                text=required_reply_fallback_text(),
+                reason="required_empty_candidate",
+            )
         return ResponseReviewDecision(action="no_reply", text="", reason="empty_candidate")
     if recent_bot_replies and _looks_like_recent_duplicate(candidate, recent_bot_replies):
+        if must_reply:
+            return ResponseReviewDecision(action="accept", text=candidate, reason="required_recent_duplicate")
         return ResponseReviewDecision(action="no_reply", text="", reason="recent_duplicate")
     semantic_hint = _render_semantic_frame_hint(semantic_frame)
     output_mode_hint = _output_mode_hint(semantic_frame)
@@ -440,7 +471,7 @@ async def review_response_text(
                 "如果内容偏解释腔、AI味重、误解对象、和当前话题不贴，输出 "
                 "{\"action\":\"rewrite\",\"text\":\"改写后的最终回复\",\"reason\":\"...\"}。"
                 "如果这轮更适合沉默，输出 {\"action\":\"no_reply\",\"text\":\"\",\"reason\":\"...\"}。"
-                f"{'当前是直呼/提及 bot 的消息，禁止输出 no_reply。' if is_direct_mention else ''}"
+                f"{'当前是强交互消息，禁止输出 no_reply。' if must_reply else ''}"
                 f"{'当前是群聊，改写时不要用追问、澄清问句或征询式结尾索要信息；信息不足就给保守短反应或 no_reply。' if not is_private else ''}"
                 f"{'当前又是明确点名后的互动；如果原话是在调侃、甩锅或轻挑衅，可以保留一句不索要信息的反问式回击，再给出自己的立场。' if is_direct_mention and not is_private else ''}"
                 "普通短句 banter、顺着上一句接话、轻量吐槽，优先 accept 或 rewrite，不要轻易 no_reply。"
@@ -515,11 +546,11 @@ async def review_response_text(
                 )
         return ResponseReviewDecision(action="rewrite", text=parsed.text, reason=parsed.reason, flags=parsed.flags)
     if parsed.action == "no_reply":
-        if is_direct_mention:
+        if must_reply:
             if care_required:
                 return _care_fail_closed_decision(
                     is_private=is_private,
-                    is_direct_mention=True,
+                    is_direct_mention=is_direct_mention,
                     risk_level=care_risk,
                     reason=parsed.reason or "care_no_reply_blocked",
                     flags=parsed.flags,
@@ -580,6 +611,8 @@ __all__ = [
     "extract_recent_bot_reply_texts",
     "is_agent_reply_ooc",
     "make_passthrough_review_decision",
+    "required_reply_fallback_text",
+    "required_reply_needs_recovery",
     "recover_direct_mention_reply",
     "rewrite_agent_reply_ooc",
     "review_response_text",

@@ -109,6 +109,41 @@ def test_review_blocks_no_reply_for_direct_mention() -> None:
     assert decision.text == "我在"
 
 
+def test_review_blocks_no_reply_for_required_private_turn() -> None:
+    async def _fake_call(messages):  # noqa: ANN001
+        assert "强交互消息，禁止输出 no_reply" in messages[0]["content"]
+        return '{"action":"no_reply","text":"","reason":"bad"}'
+
+    decision = asyncio.run(
+        response_review.review_response_text(
+            _fake_call,
+            candidate_text="图里的文字是测试",
+            raw_message_text="你翻译一下",
+            is_private=True,
+            reply_required=True,
+        )
+    )
+
+    assert decision.action == "accept"
+    assert decision.text == "图里的文字是测试"
+
+
+def test_required_reply_recovery_preserves_successful_actions() -> None:
+    assert response_review.required_reply_needs_recovery(
+        "[NO_REPLY]",
+        reply_required=True,
+    )
+    assert not response_review.required_reply_needs_recovery(
+        "[SILENCE]",
+        reply_required=True,
+        pending_actions=[{"kind": "send_image"}],
+    )
+    assert not response_review.required_reply_needs_recovery(
+        "[NO_REPLY]",
+        reply_required=False,
+    )
+
+
 def test_review_prompt_rejects_empty_affirmation_and_status_announcement() -> None:
     async def _fake_call(messages):  # noqa: ANN001
         content = messages[0]["content"]

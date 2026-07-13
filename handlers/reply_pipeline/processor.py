@@ -58,6 +58,8 @@ from ...core.reply_style_policy import (
 from ...core.response_review import (
     is_agent_reply_ooc,
     make_passthrough_review_decision,
+    required_reply_fallback_text,
+    required_reply_needs_recovery,
     rewrite_agent_reply_ooc,
     review_response_text,
 )
@@ -914,6 +916,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         )
 
     is_private_session = str(group_id).startswith(session.private_session_prefix)
+    reply_required = bool(state.get("reply_required", False) or is_private_session or is_direct_mention)
+    response_deadline = state.get("response_deadline")
 
     async def _maybe_silence_reaction() -> None:
         """NO_REPLY 沉默前的轻量回应（贴表情/拍一拍），never-raise。"""
@@ -1412,6 +1416,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             reply_commit_state=state,
             solo_speaker_follow=is_solo_speaker_follow,
             favorability_service=persona.favorability_service,
+            reply_required=reply_required,
+            response_deadline=response_deadline,
         )
         return
 
@@ -1643,6 +1649,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             messages_to_use,
             semantic_frame=semantic_frame,
             is_direct_mention=is_direct_mention,
+            reply_required=reply_required,
             relationship_hint=relationship_hint,
             recent_bot_replies=recent_bot_replies,
             message_text=raw_message_text or message_text or message_content,
@@ -1746,9 +1753,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         turn_plan=getattr(semantic_frame, "turn_plan", None),
                         started_at=started_at,
                         is_direct_mention=is_direct_mention,
+                        reply_required=reply_required,
                         response_timeout_seconds=float(
                             getattr(runtime.plugin_config, "personification_response_timeout", 180) or 180
                         ),
+                        response_deadline=response_deadline,
                         task_exc_logger=_task_exc_logger,
                         reply_commit_state=state,
                     )
@@ -1781,6 +1790,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     bypass_length_limits = False
             finally:
                 reset_current_image_context(image_ctx_token)
+        if used_agent and required_reply_needs_recovery(
+            reply_content,
+            reply_required=reply_required,
+            pending_actions=pending_actions,
+        ):
+            runtime.logger.warning("拟人插件：强交互 Agent 返回静默，改走基础模型恢复。")
+            reply_content = ""
+            used_agent = False
         if used_agent and reply_content in ("[NO_REPLY]", "<NO_REPLY>"):
             runtime.logger.info("拟人插件：Agent 返回 NO_REPLY，保持沉默。")
             try:
@@ -1829,8 +1846,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             bypass_length_limits = False
             if not reply_content:
                 runtime.logger.warning("拟人插件：未能获取到 AI 回复内容")
-                if is_direct_mention:
-                    reply_content = random.choice(_FALLBACK_REPLIES)
+                if reply_required:
+                    reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
                 else:
                     try:
                         from ...core import reply_turn_trace
@@ -2140,6 +2157,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 is_private=is_private_session,
                 is_random_chat=is_random_chat,
                 is_direct_mention=is_direct_mention,
+                reply_required=reply_required,
                 semantic_frame=semantic_frame,
             )
         if review_decision.action == "no_reply":
@@ -2148,6 +2166,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         if review_decision.action == "rewrite" and review_decision.text:
             reply_content = review_decision.text.strip()
 
+        if has_silence_control_marker(reply_content) and reply_required and not pending_actions:
+            reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
         if has_silence_control_marker(reply_content):
             await _commit_pending_actions()
             if _record_pending_action_history_if_any():
@@ -2173,7 +2193,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         reply_content = strip_response_control_markers(reply_content)
         reply_content = normalize_visible_reply_text(reply_content)
         if not reply_content and not _IMAGE_B64_RE.search(str(reply_content or "")):
-            return
+            if not reply_required:
+                return
+            reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
 
         stale_reason = _stale_reply_abort_reason(state)
         if stale_reason:

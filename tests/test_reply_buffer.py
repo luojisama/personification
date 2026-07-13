@@ -301,6 +301,37 @@ def test_group_mentions_each_start_an_independent_direct_turn() -> None:
     asyncio.run(run())
 
 
+def test_private_and_group_mention_are_marked_reply_required() -> None:
+    async def run() -> None:
+        controller = reply_buffer.ReplyConcurrencyController(session_limit=2, global_limit=2)
+        captured: list[dict[str, Any]] = []
+
+        async def process_response_logic(_bot: Any, _event: Any, state: dict[str, Any]) -> None:
+            captured.append(dict(state))
+
+        for event in (_PrivateEvent(1, "private"), _MentionEvent(2, "mention")):
+            await reply_buffer.handle_reply_event(
+                _Bot(),
+                event,
+                {},
+                poke_event_cls=type("PokeEvent", (), {}),
+                message_event_cls=_PrivateEvent,
+                group_message_event_cls=_GroupEvent,
+                process_response_logic=process_response_logic,
+                msg_buffer={},
+                start_buffer_timer=lambda *_args: None,
+                logger=_Logger(),
+                concurrency_controller=controller,
+                response_timeout_seconds=30,
+            )
+
+        assert len(captured) == 2
+        assert all(state["reply_required"] is True for state in captured)
+        assert all(float(state["response_deadline"]) > 0 for state in captured)
+
+    asyncio.run(run())
+
+
 def test_direct_turn_cancels_active_random_turn_only() -> None:
     async def run() -> None:
         controller = reply_buffer.ReplyConcurrencyController(session_limit=3, global_limit=3)

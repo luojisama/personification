@@ -4,6 +4,8 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict
 
+from ..core.target_inference import normalize_message_target_for_review
+
 
 _GROUP_BATCH_DELAY_SECONDS = 1.2
 _PRIVATE_BATCH_DELAY_SECONDS = 0.8
@@ -493,6 +495,7 @@ async def run_buffer_timer(
     entry["current_trigger_type"] = trigger_type
     entry["current_is_random_chat"] = bool(state.get("is_random_chat", False))
     timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
+    state["response_deadline"] = time.monotonic() + timeout_seconds
     try:
         from ..core import reply_turn_trace
 
@@ -688,7 +691,13 @@ async def handle_reply_event(
     is_private_session = not isinstance(event, group_message_event_cls)
     is_direct_mention = _is_direct_mention(event, bot_self_id)
     is_reply_to_bot = _is_reply_to_bot(event, bot_self_id)
-    immediate_flush = bool(is_private_session or is_direct_mention or is_reply_to_bot)
+    targets_bot = normalize_message_target_for_review(state.get("message_target")) == "bot"
+    reply_required = bool(
+        not state.get("is_random_chat", False)
+        and (is_private_session or is_direct_mention or is_reply_to_bot or targets_bot)
+    )
+    state["reply_required"] = reply_required
+    immediate_flush = reply_required
     if immediate_flush and concurrency_controller is not None:
         entry = msg_buffer.get(session_key)
         if isinstance(entry, dict):
@@ -706,6 +715,7 @@ async def handle_reply_event(
         direct_state["batch_event_count"] = 1
         direct_state["batched_events"] = []
         timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
+        direct_state["response_deadline"] = time.monotonic() + timeout_seconds
         async with concurrency_controller.direct_turn(session_key) as commit_lock:
             direct_state["reply_commit_lock"] = commit_lock
             try:

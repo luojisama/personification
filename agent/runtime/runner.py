@@ -5,7 +5,12 @@ import re
 import time
 from typing import Any, Awaitable, Callable, List
 
-from ..query_rewriter import ContextualQueryRewrite, QueryRewriteContext, contextual_query_rewriter
+from ..query_rewriter import (
+    ContextualQueryRewrite,
+    QueryRewriteContext,
+    _fallback_rewrite,
+    contextual_query_rewriter,
+)
 from ...core.metrics import record_counter, record_timing
 from ...core.time_ctx import get_configured_now
 from ..tool_registry import ToolRegistry
@@ -98,6 +103,7 @@ from .fallbacks import (
 
 _TIME_SENSITIVE_SEARCH_TOOLS = frozenset({"web_search", "search_web"})
 _TIME_SENSITIVE_RE = re.compile("\u6700\u65b0|\u8fd1\u671f|\u73b0\u5728|\u4eca\u5e74|\u4eca\u5929|\u5f53\u524d|latest|recent|now", re.IGNORECASE)
+_QUERY_REWRITE_TIMEOUT_SECONDS = 8.0
 
 
 async def _spawn_active_learning(
@@ -213,6 +219,7 @@ async def run_agent(
     ack_sender: Callable[[str], Awaitable[None]] | None = None,
     is_group: bool | None = None,
     is_direct_mention: bool = False,
+    reply_required: bool = False,
     surface: str = "",
     finalize_quality: bool = True,
 ) -> AgentResult:
@@ -316,6 +323,11 @@ async def run_agent(
         actual_max_steps=effective_max_steps,
         actual_time_budget_seconds=time_budget_seconds,
     )
+    budget_deadline = (
+        time.monotonic() + max(0.0, float(time_budget_seconds or 0.0))
+        if time_budget_seconds is not None
+        else None
+    )
     record_counter(
         "agent.budget_profile_total",
         mode=budget_profile.mode,
@@ -348,7 +360,8 @@ async def run_agent(
         status="info",
         detail=(
             f"max_steps={effective_max_steps} builtin_search={bool(use_builtin_search)} "
-            f"images={len(user_images)} caller={type(tool_caller).__name__}"
+            f"images={len(user_images)} required={str(bool(reply_required)).lower()} "
+            f"caller={type(tool_caller).__name__}"
         ),
     )
     rewrite_context = _derive_query_rewrite_context(
@@ -356,7 +369,25 @@ async def run_agent(
         current_images=user_images,
         provided=query_rewrite_context,
     )
+    turn_tool_intents = {
+        str(item or "").strip()
+        for item in list(getattr(turn_plan, "tool_intent", []) or [])
+        if str(item or "").strip()
+    }
+    research_need = str(getattr(turn_plan, "research_need", "") or "").strip()
+    direct_native_image_answer = bool(
+        direct_image_input
+        and user_images
+        and runtime_chat_intent not in {"lookup", "plugin_question"}
+        and research_need not in {"medium", "high"}
+        and not (turn_tool_intents & {"lookup_web", "lookup_plugin"})
+    )
+    skip_rewrite_reason = ""
     if runtime_chat_intent in {"banter", "image_generation", "expression"}:
+        skip_rewrite_reason = f"intent_{runtime_chat_intent or 'unknown'}"
+    elif direct_native_image_answer:
+        skip_rewrite_reason = "direct_native_image"
+    if skip_rewrite_reason:
         rewritten_query = ContextualQueryRewrite(
             primary_query=preliminary_query_text,
             query_candidates=[preliminary_query_text] if preliminary_query_text else [],
@@ -369,26 +400,55 @@ async def run_agent(
             key="agent_query_rewrite",
             label="Agent 查询改写",
             status="info",
-            detail=f"skipped=true intent={runtime_chat_intent or '-'}",
+            detail=(
+                f"skipped=true intent={runtime_chat_intent or '-'} "
+                f"reason={skip_rewrite_reason} elapsed_ms=0"
+            ),
         )
     else:
         rewrite_started_at = time.monotonic()
-        rewritten_query = await contextual_query_rewriter(
-            tool_caller=tool_caller,
-            history_new=rewrite_context.history_new,
-            history_last=rewrite_context.history_last,
-            trigger_reason=rewrite_context.trigger_reason,
-            images=rewrite_context.images,
-            quoted_message=rewrite_context.quoted_message,
-            topic_hint=context_hint,
-        )
+        remaining_budget = _remaining_time_budget_seconds(budget_deadline)
+        rewrite_timeout = _QUERY_REWRITE_TIMEOUT_SECONDS
+        if remaining_budget is not None:
+            rewrite_timeout = min(rewrite_timeout, max(0.0, remaining_budget))
+        rewrite_timed_out = False
+        try:
+            if rewrite_timeout <= 0.0:
+                raise asyncio.TimeoutError
+            rewritten_query = await asyncio.wait_for(
+                contextual_query_rewriter(
+                    tool_caller=tool_caller,
+                    history_new=rewrite_context.history_new,
+                    history_last=rewrite_context.history_last,
+                    trigger_reason=rewrite_context.trigger_reason,
+                    images=rewrite_context.images,
+                    quoted_message=rewrite_context.quoted_message,
+                    topic_hint=context_hint,
+                ),
+                timeout=rewrite_timeout,
+            )
+        except asyncio.TimeoutError:
+            rewrite_timed_out = True
+            rewritten_query = _fallback_rewrite(
+                history_new=rewrite_context.history_new,
+                history_last=rewrite_context.history_last,
+                trigger_reason=rewrite_context.trigger_reason,
+                images=rewrite_context.images,
+                quoted_message=rewrite_context.quoted_message,
+                topic_hint=context_hint,
+            )
         rewrite_elapsed_ms = int((time.monotonic() - rewrite_started_at) * 1000)
         record_timing("agent.query_rewrite_ms", rewrite_elapsed_ms, intent=runtime_chat_intent or "unknown")
         _record_reply_trace_stage(
             key="agent_query_rewrite",
             label="Agent 查询改写",
-            status="ok",
-            detail=f"intent={runtime_chat_intent or '-'} elapsed_ms={rewrite_elapsed_ms}",
+            status="warn" if rewrite_timed_out else "ok",
+            detail=(
+                f"intent={runtime_chat_intent or '-'} elapsed_ms={rewrite_elapsed_ms} "
+                f"timeout={str(rewrite_timed_out).lower()} "
+                f"fallback={'structural' if rewrite_timed_out else 'none'}"
+            ),
+            hint="查询改写超时后使用结构化 fallback，继续进入 Agent 主模型" if rewrite_timed_out else "",
         )
     effective_query_text = (
         rewritten_query.primary_query
@@ -403,11 +463,6 @@ async def run_agent(
         )
     )
     ack_sent = False
-    budget_deadline = (
-        time.monotonic() + max(0.0, float(time_budget_seconds or 0.0))
-        if time_budget_seconds is not None
-        else None
-    )
     background_image_request = user_query_text or preliminary_query_text or user_text
     if (
         runtime_chat_intent == "image_generation"
@@ -455,6 +510,7 @@ async def run_agent(
         direct_image_input=direct_image_input,
         is_group=is_group,
         is_direct_mention=is_direct_mention,
+        reply_required=reply_required,
         surface=surface,
     )
 

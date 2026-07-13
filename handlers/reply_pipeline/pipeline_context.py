@@ -621,7 +621,10 @@ def compute_agent_time_budget(
     started_at: float | None,
     total_timeout_seconds: float = _DEFAULT_RESPONSE_TIMEOUT_SECONDS,
     reserve_seconds: float = _AGENT_TIME_BUDGET_RESERVE_SECONDS,
+    response_deadline: float | None = None,
 ) -> float | None:
+    if response_deadline is not None:
+        return max(0.0, float(response_deadline) - time.monotonic() - float(reserve_seconds))
     available = float(total_timeout_seconds) - float(reserve_seconds)
     if started_at is not None:
         available -= max(0.0, time.monotonic() - float(started_at))
@@ -679,7 +682,9 @@ async def run_agent_if_enabled(
     turn_plan: Any = None,
     started_at: float | None = None,
     is_direct_mention: bool = False,
+    reply_required: bool = False,
     response_timeout_seconds: float = _DEFAULT_RESPONSE_TIMEOUT_SECONDS,
+    response_deadline: float | None = None,
     task_exc_logger: Callable[[str, Any], Any] | None = None,
     reply_commit_state: dict[str, Any] | None = None,
 ) -> tuple[str | None, bool, bool, Any | None, list[dict[str, Any]]]:
@@ -833,10 +838,12 @@ async def run_agent_if_enabled(
         time_budget_seconds=compute_agent_time_budget(
             started_at=started_at,
             total_timeout_seconds=response_timeout_seconds,
+            response_deadline=response_deadline,
         ),
         ack_sender=ack_sender,
         is_group=hasattr(event, "group_id") and not str(getattr(event, "group_id", "")).startswith("private_"),
         is_direct_mention=is_direct_mention,
+        reply_required=reply_required,
     )
     return (
         result.text,
