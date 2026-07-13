@@ -110,12 +110,12 @@ class DataTransferService:
         try:
             encoded, encoded_signature = str(token).split(".", 1)
             payload = encoded.encode("ascii")
-            signature = base64.urlsafe_b64decode(encoded_signature + "=" * (-len(encoded_signature) % 4))
             actual = hmac.new(self._plan_secret(), payload, hashlib.sha256).digest()
+            expected_signature = base64.urlsafe_b64encode(actual).rstrip(b"=").decode("ascii")
             claims = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
         except Exception as exc:
             raise DataTransferError("invalid plan token") from exc
-        if not hmac.compare_digest(actual, signature) or not isinstance(claims, dict):
+        if not hmac.compare_digest(expected_signature, encoded_signature) or not isinstance(claims, dict):
             raise DataTransferError("invalid plan token")
         if float(claims.get("expires_at", 0) or 0) < time.time():
             raise DataTransferError("plan token expired")
