@@ -306,7 +306,16 @@ _GROUP_RULES: tuple[tuple[Callable[[str], bool], str], ...] = (
         or k.startswith("provider_"),
         "模型路由",
     ),
-    (lambda k: k in {"agent_max_steps", "response_timeout"}, "Agent"),
+    (
+        lambda k: k
+        in {
+            "agent_max_steps",
+            "response_timeout",
+            "reply_session_concurrency",
+            "reply_global_concurrency",
+        },
+        "Agent",
+    ),
 )
 
 _REQUIRED_KEYS: frozenset[str] = frozenset({"global_enabled", "api_pools"})
@@ -1134,6 +1143,34 @@ def _build_entries() -> list[ConfigEntry]:
             min_value=30,
             max_value=600,
             help_aliases=("回复超时", "单轮超时", "response_timeout"),
+            parser=_int_parser,
+        ),
+        ConfigEntry(
+            key="reply_session_concurrency",
+            field_name="personification_reply_session_concurrency",
+            display_name="单会话并发回复数",
+            value_type="int",
+            default=3,
+            scope=GLOBAL_SCOPE,
+            description="同一群或私聊可同时生成的明确回复 turn 数；发送阶段仍按会话互斥提交。",
+            category="config",
+            min_value=1,
+            max_value=8,
+            help_aliases=("单群并发", "会话并发", "reply_session_concurrency"),
+            parser=_int_parser,
+        ),
+        ConfigEntry(
+            key="reply_global_concurrency",
+            field_name="personification_reply_global_concurrency",
+            display_name="全局并发回复数",
+            value_type="int",
+            default=12,
+            scope=GLOBAL_SCOPE,
+            description="所有 Bot 和会话合计可同时生成的明确回复 turn 数，用于限制 Provider 压力。",
+            category="config",
+            min_value=1,
+            max_value=64,
+            help_aliases=("全局回复并发", "reply_global_concurrency"),
             parser=_int_parser,
         ),
         ConfigEntry(

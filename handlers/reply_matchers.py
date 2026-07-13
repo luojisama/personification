@@ -6,6 +6,7 @@ from nonebot import on_message, on_notice
 from nonebot.rule import Rule
 
 from ..core.group_mute import update_group_mute_from_notice
+from .reply_buffer import ReplyConcurrencyController
 
 try:
     from nonebot.typing import T_State
@@ -114,6 +115,10 @@ def register_reply_matchers(
         30.0,
         float(getattr(plugin_config, "personification_response_timeout", 180) or 180),
     )
+    concurrency_controller = ReplyConcurrencyController(
+        session_limit=int(getattr(plugin_config, "personification_reply_session_concurrency", 3) or 3),
+        global_limit=int(getattr(plugin_config, "personification_reply_global_concurrency", 12) or 12),
+    )
 
     async def _direct_reply_rule(event: Event, state: T_State) -> bool:
         result = await _evaluate_personification_rule(
@@ -161,6 +166,7 @@ def register_reply_matchers(
             finished_exception_cls=finished_exception_cls,
             delay=wait_seconds,
             response_timeout_seconds=response_timeout_seconds,
+            concurrency_controller=concurrency_controller,
         )
 
     @direct_reply_matcher.handle()
@@ -180,6 +186,9 @@ def register_reply_matchers(
                 _buffer_timer(key, _bot, wait_seconds)
             ),
             logger=logger,
+            concurrency_controller=concurrency_controller,
+            response_timeout_seconds=response_timeout_seconds,
+            finished_exception_cls=finished_exception_cls,
         )
 
     return {
@@ -189,4 +198,3 @@ def register_reply_matchers(
         "group_mute_notice_matcher": group_mute_notice_matcher,
         "handle_reply": _handle_reply,
     }
-

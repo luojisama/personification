@@ -1,6 +1,7 @@
 import asyncio
 import re
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict
 
 
@@ -9,6 +10,52 @@ _PRIVATE_BATCH_DELAY_SECONDS = 0.8
 _MAX_BATCH_EVENTS = 8
 _PROCESS_RESPONSE_TIMEOUT_SECONDS = 180.0
 _DIRECT_REPLY_PREEMPT_SECONDS = 8.0
+
+
+class ReplyConcurrencyController:
+    def __init__(self, *, session_limit: int = 3, global_limit: int = 12) -> None:
+        self._global_semaphore = asyncio.Semaphore(max(1, int(global_limit)))
+        self._session_limit = max(1, int(session_limit))
+        self._session_semaphores: dict[str, asyncio.Semaphore] = {}
+        self._commit_locks: dict[str, asyncio.Lock] = {}
+        self._direct_counts: dict[str, int] = {}
+        self._direct_idle: dict[str, asyncio.Event] = {}
+
+    def commit_lock(self, key: str) -> asyncio.Lock:
+        return self._commit_locks.setdefault(key, asyncio.Lock())
+
+    def _session_semaphore(self, key: str) -> asyncio.Semaphore:
+        return self._session_semaphores.setdefault(
+            key,
+            asyncio.Semaphore(self._session_limit),
+        )
+
+    def _idle_event(self, key: str) -> asyncio.Event:
+        event = self._direct_idle.get(key)
+        if event is None:
+            event = asyncio.Event()
+            event.set()
+            self._direct_idle[key] = event
+        return event
+
+    async def wait_for_direct_idle(self, key: str) -> None:
+        await self._idle_event(key).wait()
+
+    @asynccontextmanager
+    async def direct_turn(self, key: str):
+        self._direct_counts[key] = int(self._direct_counts.get(key, 0) or 0) + 1
+        self._idle_event(key).clear()
+        try:
+            async with self._global_semaphore:
+                async with self._session_semaphore(key):
+                    yield self.commit_lock(key)
+        finally:
+            remaining = max(0, int(self._direct_counts.get(key, 1) or 1) - 1)
+            if remaining:
+                self._direct_counts[key] = remaining
+            else:
+                self._direct_counts.pop(key, None)
+                self._idle_event(key).set()
 
 
 def _has_reply_semantics(event: Any) -> bool:
@@ -222,11 +269,18 @@ def _build_combined_message(
     return combined_message
 
 
-def _session_key(event: Any, *, group_message_event_cls: Any) -> str:
+def _session_key(
+    event: Any,
+    *,
+    group_message_event_cls: Any,
+    bot_self_id: str = "",
+) -> str:
     user_id = str(getattr(event, "user_id", "") or "")
     if isinstance(event, group_message_event_cls):
-        return str(getattr(event, "group_id", "") or "")
-    return f"private_{user_id}"
+        scope = str(getattr(event, "group_id", "") or "")
+    else:
+        scope = f"private_{user_id}"
+    return f"{bot_self_id}:{scope}" if bot_self_id else scope
 
 
 def _batch_delay(event: Any, *, group_message_event_cls: Any) -> float:
@@ -323,6 +377,7 @@ async def run_buffer_timer(
     finished_exception_cls: Any = None,
     delay: float = 0.0,
     response_timeout_seconds: float = _PROCESS_RESPONSE_TIMEOUT_SECONDS,
+    concurrency_controller: ReplyConcurrencyController | None = None,
 ) -> None:
     started_at = time.monotonic()
     await asyncio.sleep(max(0.0, float(delay or 0.0)))
@@ -342,6 +397,9 @@ async def run_buffer_timer(
     entry = msg_buffer.get(key)
     if not isinstance(entry, dict):
         return
+
+    if concurrency_controller is not None:
+        await concurrency_controller.wait_for_direct_idle(key)
 
     if entry.get("processing"):
         if entry.get("pending_items"):
@@ -371,6 +429,7 @@ async def run_buffer_timer(
                         finished_exception_cls=finished_exception_cls,
                         delay=_delay,
                         response_timeout_seconds=response_timeout_seconds,
+                        concurrency_controller=concurrency_controller,
                     )
                 ),
             )
@@ -539,6 +598,7 @@ async def run_buffer_timer(
                             finished_exception_cls=finished_exception_cls,
                             delay=_delay,
                             response_timeout_seconds=response_timeout_seconds,
+                            concurrency_controller=concurrency_controller,
                         )
                     ),
                 )
@@ -566,6 +626,7 @@ async def run_buffer_timer(
                             finished_exception_cls=finished_exception_cls,
                             delay=_delay,
                             response_timeout_seconds=response_timeout_seconds,
+                            concurrency_controller=concurrency_controller,
                         )
                     ),
                 )
@@ -585,6 +646,9 @@ async def handle_reply_event(
     msg_buffer: Dict[str, Dict[str, Any]],
     start_buffer_timer: Callable[[str, Any, float], Any],
     logger: Any,
+    concurrency_controller: ReplyConcurrencyController | None = None,
+    response_timeout_seconds: float = _PROCESS_RESPONSE_TIMEOUT_SECONDS,
+    finished_exception_cls: Any = None,
 ) -> None:
     if isinstance(event, poke_event_cls):
         await process_response_logic(bot, event, state)
@@ -593,16 +657,59 @@ async def handle_reply_event(
     if not isinstance(event, message_event_cls):
         return
 
-    session_key = _session_key(event, group_message_event_cls=group_message_event_cls)
-    delay = _batch_delay(event, group_message_event_cls=group_message_event_cls)
-    entry = msg_buffer.setdefault(session_key, _new_entry(delay))
-    entry["delay"] = delay
-
     bot_self_id = str(getattr(bot, "self_id", "") or "")
+    session_key = _session_key(
+        event,
+        group_message_event_cls=group_message_event_cls,
+        bot_self_id=bot_self_id,
+    )
+    delay = _batch_delay(event, group_message_event_cls=group_message_event_cls)
     is_private_session = not isinstance(event, group_message_event_cls)
     is_direct_mention = _is_direct_mention(event, bot_self_id)
     is_reply_to_bot = _is_reply_to_bot(event, bot_self_id)
     immediate_flush = bool(is_private_session or is_direct_mention or is_reply_to_bot)
+    if immediate_flush and concurrency_controller is not None:
+        entry = msg_buffer.get(session_key)
+        if isinstance(entry, dict):
+            if entry.get("processing"):
+                entry["newer_batch_for_current"] = True
+                entry["superseded_generation"] = max(
+                    int(entry.get("superseded_generation", 0) or 0),
+                    int(entry.get("current_generation", 0) or 0),
+                )
+                active_task = entry.get("active_task")
+                if active_task and not active_task.done():
+                    active_task.cancel()
+            _cancel_timer(entry)
+            entry["items"] = []
+            entry["pending_items"] = []
+            entry["pending_ready"] = False
+        direct_state = dict(state)
+        direct_state["batch_session_key"] = session_key
+        direct_state["batch_event_count"] = 1
+        direct_state["batched_events"] = []
+        timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
+        async with concurrency_controller.direct_turn(session_key) as commit_lock:
+            direct_state["reply_commit_lock"] = commit_lock
+            try:
+                await asyncio.wait_for(
+                    process_response_logic(bot, event, direct_state),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"拟人插件：会话 {session_key} direct turn 超时（>{timeout_seconds:.0f}s），已终止本轮。"
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if finished_exception_cls and isinstance(exc, finished_exception_cls):
+                    logger.debug("拟人插件：direct turn 提前结束（FinishedException）")
+                else:
+                    logger.exception(f"拟人插件：会话 {session_key} direct turn 处理失败")
+        return
+    entry = msg_buffer.setdefault(session_key, _new_entry(delay))
+    entry["delay"] = delay
     now_ts = time.monotonic()
     item = {
         "event": event,
@@ -611,6 +718,8 @@ async def handle_reply_event(
         "is_reply_to_bot": is_reply_to_bot,
         "received_at": now_ts,
     }
+    if concurrency_controller is not None:
+        item["state"]["reply_commit_lock"] = concurrency_controller.commit_lock(session_key)
 
     if entry.get("processing"):
         pending_items = list(entry.get("pending_items") or [])

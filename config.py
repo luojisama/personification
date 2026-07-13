@@ -46,6 +46,8 @@ class Config(BaseModel):
     personification_agent_max_steps: int = 10
     personification_agent_budget_mode: str = "shadow"
     personification_response_timeout: int = 180
+    personification_reply_session_concurrency: int = 3
+    personification_reply_global_concurrency: int = 12
     personification_image_input_mode: str = "auto"
     personification_image_detail: str = "auto"
     personification_sticker_vision_max: int = 3
