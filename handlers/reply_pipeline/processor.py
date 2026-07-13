@@ -2667,6 +2667,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             pass
         if is_direct_mention:
             try:
+                await acquire_reply_commit(state)
                 await bot.send(event, random.choice(_FALLBACK_REPLIES))
             except Exception as exc:
                 log_exception(runtime.logger, "[reply_processor] fallback direct mention send failed", exc, level="debug")
