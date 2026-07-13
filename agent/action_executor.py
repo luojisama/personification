@@ -14,6 +14,11 @@ class ActionExecutor:
         self.config = config
         self.logger = logger
         self.pending_actions: list[dict[str, Any]] = []
+        self.last_delivery_confirmed = False
+
+    async def _send(self, message: Any) -> None:
+        await self.bot.send(self.event, message)
+        self.last_delivery_confirmed = True
 
     def bind_pending_actions(self, actions: list[dict[str, Any]]) -> None:
         self.pending_actions = actions
@@ -26,17 +31,18 @@ class ActionExecutor:
     async def send_text(self, text: str) -> None:
         content = guard_visible_text(text, logger=self.logger, surface="agent_action_text", allow_direct_media=False)
         if content:
-            await self.bot.send(self.event, content)
+            await self._send(content)
 
     async def send_image_b64(self, image_b64: str) -> None:
         payload = str(image_b64 or "").strip()
         if payload:
-            await self.bot.send(self.event, MessageSegment.image(f"base64://{payload}"))
+            await self._send(MessageSegment.image(f"base64://{payload}"))
 
     async def execute(self, action: str, params: dict) -> str:
+        self.last_delivery_confirmed = False
         match action:
             case "send_sticker":
-                await self.bot.send(self.event, MessageSegment.image(params["path"]))
+                await self._send(MessageSegment.image(params["path"]))
                 return "已发送表情包"
             case "send_qq_face":
                 face_id = int(params["face_id"])
@@ -44,7 +50,7 @@ class ActionExecutor:
                 message = MessageSegment.face(face_id)
                 if text:
                     message += text
-                await self.bot.send(self.event, message)
+                await self._send(message)
                 return "已发送 QQ 表情"
             case "send_qq_image_expression":
                 url = str(params.get("url", "") or "").strip()
@@ -54,7 +60,7 @@ class ActionExecutor:
                 message = MessageSegment.image(url)
                 if text:
                     message += text
-                await self.bot.send(self.event, message)
+                await self._send(message)
                 return "已发送 QQ 图片表情"
             case "send_image_url":
                 url = str(params.get("url", "") or "").strip()
@@ -64,7 +70,7 @@ class ActionExecutor:
                 message = MessageSegment.image(url)
                 if text:
                     message += text
-                await self.bot.send(self.event, message)
+                await self._send(message)
                 return "已发送图片"
             case "send_qq_mface":
                 data = params.get("data") if isinstance(params, dict) else {}
@@ -74,13 +80,10 @@ class ActionExecutor:
                 message = MessageSegment("mface", data)
                 if text:
                     message += text
-                await self.bot.send(self.event, message)
+                await self._send(message)
                 return "已发送 QQ mface 表情"
             case "poke_user":
-                await self.bot.send(
-                    self.event,
-                    MessageSegment("poke", {"qq": params["user_id"]}),
-                )
+                await self._send(MessageSegment("poke", {"qq": params["user_id"]}))
                 return "已戳"
             case _:
                 self.logger.warning(f"[executor] unknown action: {action}")

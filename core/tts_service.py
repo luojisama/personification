@@ -610,6 +610,8 @@ class TtsService:
         group_style: str | None = None,
         persona_tts: dict[str, str] | None = None,
         pause_range: tuple[float, float] = (0.8, 1.4),
+        on_delivery_started: Callable[[], None] | None = None,
+        on_delivery_confirmed: Callable[[], None] | None = None,
     ) -> bool:
         audio_files = await self.synthesize(
             text,
@@ -629,7 +631,11 @@ class TtsService:
             return False
 
         for index, audio_file in enumerate(audio_files):
+            if on_delivery_started is not None:
+                on_delivery_started()
             await bot.send(event, message_segment_cls.record(audio_file.absolute().as_uri()))
+            if on_delivery_confirmed is not None:
+                on_delivery_confirmed()
             if index < len(audio_files) - 1:
                 await asyncio.sleep(random.uniform(*pause_range))
         return True

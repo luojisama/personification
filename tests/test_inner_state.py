@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from ._loader import load_personification_module
 
@@ -110,5 +113,36 @@ def test_inner_state_llm_update_does_not_block_state_reads(monkeypatch) -> None:
         caller.release.set()
         await asyncio.wait_for(task, timeout=1)
         assert store.state["mood"] == "无语"
+
+    asyncio.run(_run())
+
+
+def test_data_store_mutate_keeps_lock_until_cancelled_worker_finishes(monkeypatch) -> None:  # noqa: ANN001
+    data_store = load_personification_module("plugin.personification.core.data_store")
+    store = object.__new__(data_store.DataStore)
+    store._async_locks = {}
+    started = threading.Event()
+    release = threading.Event()
+
+    def _mutate_sync(_name: str, mutator):  # noqa: ANN001
+        started.set()
+        release.wait(timeout=2)
+        return mutator({"value": 0})
+
+    monkeypatch.setattr(store, "mutate_sync", _mutate_sync)
+
+    async def _run() -> None:
+        first = asyncio.create_task(store.mutate("state", lambda current: {"value": current["value"] + 1}))
+        assert await asyncio.to_thread(started.wait, 1)
+        first.cancel()
+        await asyncio.sleep(0)
+        first.cancel()
+        second = asyncio.create_task(store.mutate("state", lambda current: {"value": current["value"] + 2}))
+        await asyncio.sleep(0.02)
+        assert not second.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert await asyncio.wait_for(second, timeout=1) == {"value": 2}
 
     asyncio.run(_run())

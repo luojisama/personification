@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List
 
-from ...agent.inner_state import DEFAULT_STATE as DEFAULT_INNER_STATE, get_personification_data_dir, load_inner_state
+from ...agent.inner_state import get_personification_data_dir
 from ...agent.runtime.planner import (
     turn_plan_from_semantic_frame,
     turn_plan_to_semantic_frame,
@@ -16,7 +16,6 @@ from ...core.chat_intent import (
 )
 from ...core.emotion_state import (
     build_turn_emotion_prompt_block,
-    load_emotion_state,
     render_emotion_memory_hint,
     render_inner_state_hint,
     update_emotion_state_after_turn,
@@ -65,6 +64,7 @@ from ...core.response_review import (
     rewrite_agent_reply_ooc,
     review_response_text,
 )
+from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.target_inference import normalize_message_target_for_plan, normalize_message_target_for_review
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.prompt_loader import pick_ack_phrase
@@ -95,12 +95,20 @@ from ..reply_pipeline.pipeline_emotion import (
     attach_turn_plan_to_semantic_frame,
     compose_reply_emotion_block,
     infer_turn_semantic_frame_with_timeout,
+    load_reply_states_with_timeout,
     plan_turn_with_timeout,
     schedule_inner_state_update_after_reply,
     semantic_frame_timeout_hint,
 )
 from ..reply_pipeline import humanize as _humanize
-from ..reply_commit import acquire_reply_commit, execute_pending_actions, release_reply_commit
+from ..reply_commit import (
+    acquire_reply_commit,
+    execute_pending_actions,
+    mark_reply_delivery_complete,
+    mark_reply_delivery_confirmed,
+    mark_reply_delivery_started,
+    release_reply_commit,
+)
 from ..reply_pipeline.pipeline_context import (
     batch_has_newer_messages as _shared_batch_has_newer_messages,
     clone_tool_registry as _clone_tool_registry,
@@ -498,6 +506,8 @@ async def process_yaml_response_logic(
     solo_speaker_follow: bool = False,
     reply_required: bool = False,
     response_deadline: float | None = None,
+    prepared_inner_state: dict[str, Any] | None = None,
+    prepared_emotion_state: dict[str, Any] | None = None,
 ) -> None:
     """处理基于 YAML 模板的新版响应逻辑。"""
     reply_commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
@@ -591,6 +601,12 @@ async def process_yaml_response_logic(
     pending_action_executor: Any = None
     pending_actions: list[dict[str, Any]] = []
 
+    async def _send_reply(payload: Any) -> Any:
+        mark_reply_delivery_started(reply_commit_state)
+        result = await bot.send(event, payload)
+        mark_reply_delivery_confirmed(reply_commit_state)
+        return result
+
     async def _commit_pending_actions() -> None:
         if not pending_actions:
             return
@@ -601,6 +617,7 @@ async def process_yaml_response_logic(
         history_parts = await execute_pending_actions(
             pending_action_executor,
             pending_actions,
+            state=reply_commit_state,
         )
         if history_parts:
             setattr(
@@ -740,16 +757,22 @@ async def process_yaml_response_logic(
         recent_window if recent_window else get_recent_group_msgs(group_id, limit=8, expire_hours=0) if not is_private_session else []
     )
     data_dir = get_personification_data_dir(plugin_config)
-    inner_state = dict(DEFAULT_INNER_STATE)
-    try:
-        inner_state.update(await load_inner_state(data_dir))
-    except Exception as e:
-        logger.debug(f"[emotion] YAML load inner_state failed: {e}")
-    emotion_state = {}
-    try:
-        emotion_state = await load_emotion_state(data_dir)
-    except Exception as e:
-        logger.debug(f"[emotion] YAML load emotion_state failed: {e}")
+    if isinstance(prepared_inner_state, dict) and isinstance(prepared_emotion_state, dict):
+        inner_state = dict(prepared_inner_state)
+        emotion_state = dict(prepared_emotion_state)
+        _trace_stage(
+            key="yaml_state_reuse",
+            label="YAML 复用回复状态",
+            status="ok",
+            detail="source=prepared_semantics elapsed_ms=0",
+        )
+    else:
+        inner_state, emotion_state = await load_reply_states_with_timeout(
+            data_dir,
+            logger,
+            trace_key="yaml_state_load",
+            trace_label="YAML 状态加载",
+        )
     emotion_memory_hint = render_emotion_memory_hint(
         emotion_state,
         user_id=user_id,
@@ -1473,7 +1496,10 @@ async def process_yaml_response_logic(
                 raw_direct_output = str(reply_content or "").strip()
                 if _looks_like_translation_result(raw_direct_output):
                     try:
+                        mark_reply_delivery_started(reply_commit_state)
                         if await _send_translation_forward(bot, event, raw_direct_output):
+                            mark_reply_delivery_confirmed(reply_commit_state)
+                            mark_reply_delivery_complete(reply_commit_state)
                             _trace_stage(
                                 key="yaml_direct_output_success",
                                 label="YAML 直出完成",
@@ -1497,7 +1523,7 @@ async def process_yaml_response_logic(
                             logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                             _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="直出消息发送前出现更新批次")
                             return
-                        await bot.send(event, text)
+                        await _send_reply(text)
                         direct_segments_sent += 1
                         await asyncio.sleep(random.uniform(0.5, 1.2))
                 _trace_stage(
@@ -1506,6 +1532,7 @@ async def process_yaml_response_logic(
                     status="ok",
                     detail=f"segments={direct_segments_sent}",
                 )
+                mark_reply_delivery_complete(reply_commit_state)
                 _trace_finish(
                     outcome="ok",
                     diagnosis_code="ok",
@@ -1531,6 +1558,13 @@ async def process_yaml_response_logic(
         logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
         _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="模型回复生成后出现更新批次")
         return
+    if required_reply_needs_recovery(
+        reply_content,
+        reply_required=reply_required,
+        pending_actions=pending_actions,
+        direct_output=bool(getattr(agent_result, "direct_output", False)) if agent_result is not None else False,
+    ):
+        reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
     if used_agent and reply_content in ("[NO_REPLY]", "<NO_REPLY>"):
         logger.info("拟人插件 (YAML)：Agent 返回 NO_REPLY，保持沉默。")
         _trace_no_reply("agent_no_reply", detail="Agent 返回 NO_REPLY")
@@ -1570,15 +1604,27 @@ async def process_yaml_response_logic(
                         logger.warning(f"[BLOCK] 通知管理员 {_su} 失败: {_e}")
 
             asyncio.create_task(_notify_superusers())
-        _trace_no_reply("block_marker", diagnosis_code="blocked", detail="模型返回 BLOCK 控制标记")
-        return
+        if reply_required:
+            reply_content = "这个我不能接。"
+            parsed = parse_yaml_response(reply_content)
+        else:
+            _trace_no_reply("block_marker", diagnosis_code="blocked", detail="模型返回 BLOCK 控制标记")
+            return
     if has_silence_control_marker(reply_content):
         await _commit_pending_actions()
         if _record_pending_action_history_if_any():
             logger.info("拟人插件 (YAML)：Agent 静默动作已写入会话历史。")
         logger.info("AI (YAML) 决定保持沉默 (SILENCE)")
-        _trace_no_reply("silence_marker", detail="模型返回 SILENCE 控制标记")
-        return
+        if bool(reply_commit_state.get("reply_delivery_confirmed", False)):
+            mark_reply_delivery_complete(reply_commit_state)
+            _trace_finish(outcome="ok", diagnosis_code="ok", detail={"action_only": True})
+            return
+        if reply_required:
+            reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+            parsed = parse_yaml_response(reply_content)
+        else:
+            _trace_no_reply("silence_marker", detail="模型返回 SILENCE 控制标记")
+            return
 
     status_text = str(parsed.get("status") or "").strip()
     action_text = str(parsed.get("action") or "").strip()
@@ -1593,7 +1639,7 @@ async def process_yaml_response_logic(
             _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="YAML 动作提交前出现更新批次")
             return False
         try:
-            await bot.send(event, message_segment_cls.poke(int(user_id)))
+            await _send_reply(message_segment_cls.poke(int(user_id)))
             pending_yaml_poke = False
         except Exception as exc:
             logger.warning(f"拟人插件: 发送戳一戳失败: {exc}")
@@ -1748,8 +1794,17 @@ async def process_yaml_response_logic(
         parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
     if has_silence_control_marker(assistant_text):
         logger.info(f"拟人插件 (YAML)：最终回复含沉默控制标记，group={group_id} user={user_id}")
-        _trace_no_reply("final_silence_marker", detail="最终回复含沉默控制标记")
-        return
+        await _commit_pending_actions()
+        if bool(reply_commit_state.get("reply_delivery_confirmed", False)):
+            mark_reply_delivery_complete(reply_commit_state)
+            _trace_finish(outcome="ok", diagnosis_code="ok", detail={"action_only": True})
+            return
+        if reply_required:
+            assistant_text = required_reply_fallback_text(has_images=bool(tool_image_urls))
+            parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
+        else:
+            _trace_no_reply("final_silence_marker", detail="最终回复含沉默控制标记")
+            return
 
     cleaned_assistant_text = strip_response_control_markers(assistant_text)
     cleaned_assistant_text = normalize_visible_reply_text(cleaned_assistant_text)
@@ -1860,6 +1915,8 @@ async def process_yaml_response_logic(
         return
 
     sent_as_tts = False
+    delivery_partial = False
+    delivery_unknown = False
     sent_message_id = ""
     address_plan = _humanize.decide_addressing(
         plugin_config=plugin_config,
@@ -1918,9 +1975,18 @@ async def process_yaml_response_logic(
                     is_private=is_private_session,
                     persona_tts=persona_tts,
                     pause_range=(0.8, 1.5),
+                    on_delivery_started=lambda: mark_reply_delivery_started(reply_commit_state),
+                    on_delivery_confirmed=lambda: mark_reply_delivery_confirmed(reply_commit_state),
                 )
         except Exception as e:
-            logger.warning(f"[tts] YAML 自动语音发送失败，回退文字: {e}")
+            likely_delivered = is_likely_delivered_send_timeout(e)
+            if bool(reply_commit_state.get("reply_delivery_confirmed", False)) or likely_delivered:
+                sent_as_tts = True
+                delivery_unknown = likely_delivered
+                delivery_partial = not likely_delivered
+                logger.warning(f"[tts] YAML 自动语音发送结果不完整，不重复发送完整文字: {e}")
+            else:
+                logger.warning(f"[tts] YAML 自动语音发送失败，回退文字: {e}")
 
     if not sent_as_tts:
         clean_reply = ""
@@ -1974,7 +2040,7 @@ async def process_yaml_response_logic(
                                     )
                                 except Exception:
                                     outgoing = rendered_seg.message
-                            send_result = await bot.send(event, outgoing)
+                            send_result = await _send_reply(outgoing)
                             if not sent_message_id:
                                 sent_message_id = extract_send_message_id(send_result)
                             await asyncio.sleep(random.uniform(0.4, 1.0))
@@ -1984,7 +2050,7 @@ async def process_yaml_response_logic(
                         logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                         _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="图片发送前出现更新批次")
                         return
-                    send_result = await bot.send(event, message_segment_cls.image(f"base64://{image_b64}"))
+                    send_result = await _send_reply(message_segment_cls.image(f"base64://{image_b64}"))
                     if not sent_message_id:
                         sent_message_id = extract_send_message_id(send_result)
                     await asyncio.sleep(random.uniform(0.4, 1.0))
@@ -1996,7 +2062,9 @@ async def process_yaml_response_logic(
                             logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                             _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="表情发送前出现更新批次")
                             return
-                        send_result = await bot.send(event, message_segment_cls.image(f"file:///{chosen_sticker_path.absolute()}"))
+                        send_result = await _send_reply(
+                            message_segment_cls.image(f"file:///{chosen_sticker_path.absolute()}")
+                        )
                         if not sent_message_id:
                             sent_message_id = extract_send_message_id(send_result)
                         await record_sticker_sent(chosen_sticker_path.stem)
@@ -2040,7 +2108,7 @@ async def process_yaml_response_logic(
                         )
                     except Exception:
                         outgoing = rendered_reply.message
-                    send_result = await bot.send(event, outgoing)
+                    send_result = await _send_reply(outgoing)
                 else:
                     send_result = None
                 if send_result is not None and not sent_message_id:
@@ -2050,10 +2118,12 @@ async def process_yaml_response_logic(
                     logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                     _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="生成图片发送前出现更新批次")
                     return
-                send_result = await bot.send(event, message_segment_cls.image(f"base64://{image_b64}"))
+                send_result = await _send_reply(message_segment_cls.image(f"base64://{image_b64}"))
                 if not sent_message_id:
                     sent_message_id = extract_send_message_id(send_result)
 
+    if not delivery_partial and not delivery_unknown:
+        mark_reply_delivery_complete(reply_commit_state)
     session_id = build_private_session_id(user_id) if is_private_session else build_group_session_id(group_id)
     legacy_session_id = None if is_private_session else group_id
     # YAML 模式同样只写回最终用户可见文本，避免 session 中保留未发送的原始模板输出。
@@ -2165,16 +2235,20 @@ async def process_yaml_response_logic(
     _trace_stage(
         key="yaml_reply_success",
         label="YAML 回复完成",
-        status="ok",
+        status="warn" if delivery_partial or delivery_unknown else "ok",
         detail=f"chars={len(assistant_history_text)} tts={bool(sent_as_tts)} sticker={bool(stickers_sent)}",
     )
     _trace_finish(
-        outcome="ok",
-        diagnosis_code="ok",
+        outcome="outcome_unknown" if delivery_unknown else "partial" if delivery_partial else "ok",
+        diagnosis_code=(
+            "tts_send_outcome_unknown" if delivery_unknown else "tts_partial" if delivery_partial else "ok"
+        ),
         detail={
             "reply_chars": len(assistant_history_text),
             "tts": bool(sent_as_tts),
             "sticker": bool(stickers_sent),
+            "delivery_partial": delivery_partial,
+            "delivery_unknown": delivery_unknown,
             "incoming_text": str(raw_message_text or history_last_text or trigger_reason or "")[:500],
             "outgoing_text": str(assistant_history_text or "")[:500],
         },

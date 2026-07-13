@@ -142,6 +142,10 @@ def test_required_reply_recovery_preserves_successful_actions() -> None:
         "[NO_REPLY]",
         reply_required=False,
     )
+    assert response_review.required_reply_needs_recovery(
+        "<output><message>[SILENCE]</message></output>",
+        reply_required=True,
+    )
 
 
 def test_review_prompt_rejects_empty_affirmation_and_status_announcement() -> None:

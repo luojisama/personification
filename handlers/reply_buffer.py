@@ -38,9 +38,13 @@ async def _handle_reply_timeout(
 ) -> None:
     fallback_sent = False
     fallback_error = ""
-    if bool(state.get("reply_required", False)):
+    delivery_started = bool(state.get("reply_delivery_started", False))
+    delivery_confirmed = bool(state.get("reply_delivery_confirmed", False))
+    delivery_complete = bool(state.get("reply_delivery_complete", False))
+    if bool(state.get("reply_required", False)) and not delivery_started:
         fallback_text = required_reply_fallback_text(has_images=_event_has_media(event))
         try:
+            state["reply_delivery_started"] = True
             if isinstance(commit_lock, asyncio.Lock):
                 async with commit_lock:
                     await asyncio.wait_for(
@@ -53,9 +57,27 @@ async def _handle_reply_timeout(
                     timeout=_TIMEOUT_FALLBACK_SEND_SECONDS,
                 )
             fallback_sent = True
+            delivery_started = True
+            delivery_confirmed = True
+            delivery_complete = True
+            state["reply_delivery_confirmed"] = True
+            state["reply_delivery_complete"] = True
         except Exception as exc:
+            delivery_started = True
             fallback_error = type(exc).__name__
             logger.warning(f"拟人插件：会话 {session_key} timeout fallback 发送失败: {exc}")
+    if delivery_complete:
+        outcome = "degraded" if fallback_sent else "ok"
+        diagnosis_code = "reply_timeout" if fallback_sent else "post_send_timeout"
+    elif delivery_confirmed:
+        outcome = "partial"
+        diagnosis_code = "partial_reply_timeout"
+    elif delivery_started:
+        outcome = "outcome_unknown"
+        diagnosis_code = "send_outcome_unknown"
+    else:
+        outcome = "failed"
+        diagnosis_code = "reply_timeout"
     try:
         from ..core import reply_turn_trace
 
@@ -64,21 +86,31 @@ async def _handle_reply_timeout(
             trace_id=trace_id,
             key="reply_timeout",
             label="回复超时",
-            status="warn" if fallback_sent else "error",
+            status="warn" if delivery_confirmed else "error",
             detail=(
                 f"timeout_seconds={timeout_seconds:g} reply_required={str(bool(state.get('reply_required', False))).lower()} "
+                f"delivery_started={str(delivery_started).lower()} "
+                f"delivery_confirmed={str(delivery_confirmed).lower()} "
+                f"delivery_complete={str(delivery_complete).lower()} "
                 f"fallback_sent={str(fallback_sent).lower()} fallback_error={fallback_error or '-'} elapsed_ms=0"
             ),
-            hint="强交互已发送安全 fallback；检查状态锁、provider、query rewrite 与工具耗时" if fallback_sent else "检查 provider、工具耗时与重试次数",
+            hint=(
+                "强交互已发送安全 fallback；检查状态锁、provider、query rewrite 与工具耗时"
+                if fallback_sent
+                else "已有发送动作时不会自动补发；检查 provider、工具耗时与发送回执"
+            ),
         )
         reply_turn_trace.finish_trace(
             trace_id=trace_id,
-            outcome="degraded" if fallback_sent else "failed",
-            diagnosis_code="reply_timeout",
+            outcome=outcome,
+            diagnosis_code=diagnosis_code,
             detail={
                 "timeout_seconds": timeout_seconds,
                 "session": session_key,
                 "reply_required": bool(state.get("reply_required", False)),
+                "delivery_started": delivery_started,
+                "delivery_confirmed": delivery_confirmed,
+                "delivery_complete": delivery_complete,
                 "fallback_sent": fallback_sent,
                 "fallback_error": fallback_error,
             },

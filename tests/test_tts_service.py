@@ -5,9 +5,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 tts_service_mod = load_personification_module("plugin.personification.core.tts_service")
+send_outcome = load_personification_module("plugin.personification.core.send_outcome")
 
 
 class _Logger:
@@ -216,6 +219,49 @@ def test_tts_delivery_decision_disabled_does_not_call_planner_for_command() -> N
     assert decision.action == "voice"
     assert decision.style_hint == "自然"
     assert decision.reason == "llm_decision_disabled"
+
+
+def test_tts_delivery_receipts_wrap_real_send_only(monkeypatch) -> None:  # noqa: ANN001
+    service = _service()
+    events: list[str] = []
+
+    async def _synthesize(*_args, **_kwargs):  # noqa: ANN001
+        events.append("synthesized")
+        return [Path("first.wav"), Path("second.wav")]
+
+    class _Bot:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def send(self, _event, _message):  # noqa: ANN001
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("second failed")
+
+    monkeypatch.setattr(service, "synthesize", _synthesize)
+
+    with pytest.raises(RuntimeError, match="second failed"):
+        asyncio.run(
+            service.send_tts(
+                bot=_Bot(),
+                event=object(),
+                message_segment_cls=SimpleNamespace(record=lambda value: value),
+                text="两段语音",
+                pause_range=(0, 0),
+                on_delivery_started=lambda: events.append("started"),
+                on_delivery_confirmed=lambda: events.append("confirmed"),
+            )
+        )
+
+    assert events == ["synthesized", "started", "confirmed", "started"]
+
+
+def test_likely_delivered_send_timeout_is_outcome_unknown() -> None:
+    exc = RuntimeError("send failed")
+    exc.info = {"retcode": 1200, "wording": "invoke timeout"}  # type: ignore[attr-defined]
+
+    assert send_outcome.is_likely_delivered_send_timeout(exc)
+    assert not send_outcome.is_likely_delivered_send_timeout(RuntimeError("connection refused"))
 
 
 def test_tts_global_switch_disables_service_availability() -> None:

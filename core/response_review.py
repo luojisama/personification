@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
 
 from ..agent.runtime.planner import OUTPUT_MODE_LENGTHS
+from .context_policy import has_silence_control_marker
 from .reply_text_policy import (
     looks_like_formulaic_reply_tic,
     looks_like_markdown_reply,
@@ -46,7 +47,10 @@ def required_reply_needs_recovery(
         reply_required
         and not direct_output
         and not list(pending_actions or [])
-        and str(text or "").strip() in {"", "[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"}
+        and (
+            str(text or "").strip() in {"", "[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"}
+            or has_silence_control_marker(text)
+        )
     )
 
 

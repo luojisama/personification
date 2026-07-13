@@ -30,6 +30,22 @@ class DataStore:
             self._async_locks[name] = asyncio.Lock()
         return self._async_locks[name]
 
+    async def _run_locked_thread(self, func: Callable[..., Any], *args: Any) -> Any:
+        worker = asyncio.create_task(asyncio.to_thread(func, *args))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+            try:
+                worker.result()
+            except Exception:
+                pass
+            raise asyncio.CancelledError
+
     def _read(self, name: str) -> Any:
         with connect_sync() as conn:
             row = conn.execute(
@@ -87,15 +103,15 @@ class DataStore:
 
     async def save(self, name: str, data: Any) -> None:
         async with self._alock(name):
-            await asyncio.to_thread(self.save_sync, name, data)
+            await self._run_locked_thread(self.save_sync, name, data)
 
     async def mutate(self, name: str, mutator: Callable[[Any], Any]) -> Any:
         async with self._alock(name):
-            return await asyncio.to_thread(self.mutate_sync, name, mutator)
+            return await self._run_locked_thread(self.mutate_sync, name, mutator)
 
     async def update(self, name: str, patch: dict[str, Any]) -> dict[str, Any]:
         async with self._alock(name):
-            return await asyncio.to_thread(self.update_sync, name, patch)
+            return await self._run_locked_thread(self.update_sync, name, patch)
 
 
 _store: Optional[DataStore] = None

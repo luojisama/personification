@@ -63,6 +63,7 @@ from ...core.response_review import (
     rewrite_agent_reply_ooc,
     review_response_text,
 )
+from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_PLAIN
 from ...skills.skillpacks.sticker_tool.scripts.impl import (
@@ -93,7 +94,14 @@ from ..event_rules import (
     _render_plugin_command_interaction,
     split_segment_if_long,
 )
-from ..reply_commit import acquire_reply_commit, execute_pending_actions, release_reply_commit
+from ..reply_commit import (
+    acquire_reply_commit,
+    execute_pending_actions,
+    mark_reply_delivery_complete,
+    mark_reply_delivery_confirmed,
+    mark_reply_delivery_started,
+    release_reply_commit,
+)
 from .pipeline_context import (
     batch_has_newer_messages as _batch_has_newer_messages,
     build_base_system_prompt as _build_base_system_prompt,
@@ -889,10 +897,26 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
     if not runtime.get_configured_api_providers():
         runtime.logger.warning("拟人插件：未配置可用的 API provider，跳过回复")
-        if is_direct_mention:
+        required_without_provider = bool(
+            state.get("reply_required", False) or is_direct_mention or not hasattr(event, "group_id")
+        )
+        if required_without_provider:
             try:
                 await acquire_reply_commit(state)
-                await bot.send(event, "在呢")
+                mark_reply_delivery_started(state)
+                await bot.send(event, required_reply_fallback_text(has_images=bool(image_urls)))
+                mark_reply_delivery_confirmed(state)
+                mark_reply_delivery_complete(state)
+                try:
+                    from ...core import reply_turn_trace
+
+                    reply_turn_trace.finish_trace(
+                        outcome="degraded",
+                        diagnosis_code="no_provider",
+                        detail={"fallback_sent": True},
+                    )
+                except Exception:
+                    pass
             except Exception as exc:
                 log_exception(runtime.logger, "[reply_processor] fallback presence reply failed", exc, level="debug")
         return
@@ -1194,10 +1218,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             sticker_like=False,
         )
 
-    semantic_prepare_started_at = time.monotonic()
-    image_summary_suffix, prepared_semantics = await asyncio.gather(
-        _image_summary_task(),
-        prepare_reply_semantics(
+    async def _prepare_semantics_timed() -> tuple[Any, int]:
+        semantic_started_at = time.monotonic()
+        prepared = await prepare_reply_semantics(
             runtime=runtime,
             recent_window=recent_window,
             group_id=str(group_id),
@@ -1213,9 +1236,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             message_target=str(state.get("message_target", "") or ""),
             solo_speaker_follow=is_solo_speaker_follow,
             has_images=bool(tool_image_urls),
-        ),
+        )
+        return prepared, int((time.monotonic() - semantic_started_at) * 1000)
+
+    image_summary_suffix, prepared_with_elapsed = await asyncio.gather(
+        _image_summary_task(),
+        _prepare_semantics_timed(),
     )
-    semantic_prepare_elapsed_ms = int((time.monotonic() - semantic_prepare_started_at) * 1000)
+    prepared_semantics, semantic_prepare_elapsed_ms = prepared_with_elapsed
     if image_summary_suffix and tool_image_urls:
         if not direct_image_input:
             current_text_message_content = (
@@ -1427,6 +1455,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             favorability_service=persona.favorability_service,
             reply_required=reply_required,
             response_deadline=response_deadline,
+            prepared_inner_state=prepared_semantics.inner_state,
+            prepared_emotion_state=prepared_semantics.emotion_state,
         )
         return
 
@@ -1692,6 +1722,24 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         pending_action_executor = None
         pending_actions: list[dict[str, Any]] = []
 
+        async def _send_reply(payload: Any) -> Any:
+            mark_reply_delivery_started(state)
+            result = await bot.send(event, payload)
+            mark_reply_delivery_confirmed(state)
+            return result
+
+        def _finish_action_only_trace() -> None:
+            try:
+                from ...core import reply_turn_trace
+
+                reply_turn_trace.finish_trace(
+                    outcome="ok",
+                    diagnosis_code="ok",
+                    detail={"action_only": True},
+                )
+            except Exception:
+                pass
+
         async def _commit_pending_actions() -> None:
             if not pending_actions:
                 return
@@ -1704,6 +1752,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             history_parts = await execute_pending_actions(
                 pending_action_executor,
                 pending_actions,
+                state=state,
             )
             if history_parts:
                 setattr(
@@ -1950,6 +1999,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     reply_content = regenerated.strip()
             except Exception as e:
                 runtime.logger.debug(f"[reply_processor] banter regenerate skipped: {e}")
+        if required_reply_needs_recovery(
+            reply_content,
+            reply_required=reply_required,
+            pending_actions=pending_actions,
+        ):
+            reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
         has_block_marker = "[BLOCK]" in reply_content or "<BLOCK>" in reply_content
         if has_block_marker:
             reply_content = reply_content.replace("[BLOCK]", "").replace("<BLOCK>", "").strip()
@@ -1960,7 +2015,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if _record_pending_action_history_if_any():
                 runtime.logger.info("拟人插件：Agent 静默动作已写入会话历史。")
             runtime.logger.info(f"AI 决定结束与群 {group_id} 中 {user_name}({user_id}) 的对话 (SILENCE)")
-            return
+            if bool(state.get("reply_delivery_confirmed", False)):
+                mark_reply_delivery_complete(state)
+                _finish_action_only_trace()
+                return
+            if reply_required:
+                reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+            else:
+                return
 
         if used_agent and has_silence_control_marker(reply_content):
             runtime.logger.info("拟人插件：Agent 文本含 NO_REPLY 标记，保持沉默。")
@@ -1996,7 +2058,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
                 _t = asyncio.create_task(_notify_superusers())
                 _t.add_done_callback(_task_exc_logger("notify_superusers", runtime.logger))
-            return
+            if reply_required:
+                reply_content = "这个我不能接。"
+                has_block_marker = False
+            else:
+                return
 
         if not used_agent and ("[NO_REPLY]" in reply_content or "<NO_REPLY>" in reply_content):
             runtime.logger.info(
@@ -2184,7 +2250,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             runtime.logger.info(
                 f"拟人插件：最终回复含沉默控制标记，group={group_id} user={user_id}"
             )
-            return
+            if bool(state.get("reply_delivery_confirmed", False)):
+                mark_reply_delivery_complete(state)
+                _finish_action_only_trace()
+                return
+            if reply_required:
+                reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+            else:
+                return
         # 兼容 yaml_pipeline prompt 的 <output><message>...</message></output> 思维链结构：
         # 若 LLM 把回复包在 <message> 里（多条），用 \n\n 串接保留分段，下游 _split_segments 会再拆。
         try:
@@ -2275,6 +2348,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         )
         sent_message_id = ""
         sent_as_tts = False
+        delivery_partial = False
+        delivery_unknown = False
         tts_service = getattr(runtime, "tts_service", None)
         stale_reason = _stale_reply_abort_reason(state)
         if stale_reason:
@@ -2325,9 +2400,18 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         group_style=group_style,
                         persona_tts=persona_tts,
                         pause_range=(1.2, 2.0),
+                        on_delivery_started=lambda: mark_reply_delivery_started(state),
+                        on_delivery_confirmed=lambda: mark_reply_delivery_confirmed(state),
                     )
             except Exception as e:
-                runtime.logger.warning(f"[tts] 自动语音发送失败，回退文字: {e}")
+                likely_delivered = is_likely_delivered_send_timeout(e)
+                if bool(state.get("reply_delivery_confirmed", False)) or likely_delivered:
+                    sent_as_tts = True
+                    delivery_unknown = likely_delivered
+                    delivery_partial = not likely_delivered
+                    runtime.logger.warning(f"[tts] 自动语音发送结果不完整，不重复发送完整文字: {e}")
+                else:
+                    runtime.logger.warning(f"[tts] 自动语音发送失败，回退文字: {e}")
         if final_reply:
             if not sent_as_tts:
                 segments = runtime.split_text_into_segments(final_reply)
@@ -2459,7 +2543,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             )
                         except Exception:
                             outgoing = rendered_seg.message
-                    send_result = await bot.send(event, outgoing)
+                    send_result = await _send_reply(outgoing)
                     if not sent_message_id:
                         sent_message_id = extract_send_message_id(send_result)
                     if i < len(segments) - 1 or sticker_segment:
@@ -2475,7 +2559,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 if typo_correction and not _stale_reply_abort_reason(state):
                     await asyncio.sleep(random.uniform(1.0, 2.0))
                     try:
-                        await bot.send(event, typo_correction)
+                        await _send_reply(typo_correction)
                     except Exception as exc:
                         runtime.logger.debug(f"[humanize] 修正消息发送失败: {exc}")
 
@@ -2484,7 +2568,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if stale_reason:
                 runtime.logger.info(f"拟人插件：{stale_reason}")
                 return
-            send_result = await bot.send(event, runtime.message_segment_cls.image(f"base64://{image_b64}"))
+            send_result = await _send_reply(runtime.message_segment_cls.image(f"base64://{image_b64}"))
             if not sent_message_id:
                 sent_message_id = extract_send_message_id(send_result)
             if sticker_segment:
@@ -2495,7 +2579,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if stale_reason:
                 runtime.logger.info(f"拟人插件：{stale_reason}")
                 return
-            send_result = await bot.send(event, sticker_segment)
+            send_result = await _send_reply(sticker_segment)
             if not sent_message_id:
                 sent_message_id = extract_send_message_id(send_result)
             if sticker_name:
@@ -2508,6 +2592,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     ),
                     sticker_name,
                 )
+
+        if not delivery_partial and not delivery_unknown:
+            mark_reply_delivery_complete(state)
 
         assistant_metadata = {
             "scene": "reply",
@@ -2663,16 +2750,20 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             reply_turn_trace.record_stage(
                 key="reply_success",
                 label="回复完成",
-                status="ok",
+                status="warn" if delivery_partial or delivery_unknown else "ok",
                 detail=f"chars={len(final_visible_reply_text)} tts={bool(sent_as_tts)} sticker={bool(sticker_name)}",
             )
             reply_turn_trace.finish_trace(
-                outcome="ok",
-                diagnosis_code="ok",
+                outcome="outcome_unknown" if delivery_unknown else "partial" if delivery_partial else "ok",
+                diagnosis_code=(
+                    "tts_send_outcome_unknown" if delivery_unknown else "tts_partial" if delivery_partial else "ok"
+                ),
                 detail={
                     "reply_chars": len(final_visible_reply_text),
                     "tts": bool(sent_as_tts),
                     "sticker": bool(sticker_name),
+                    "delivery_partial": delivery_partial,
+                    "delivery_unknown": delivery_unknown,
                     "incoming_text": str(raw_message_text or message_text or message_content or "")[:500],
                     "outgoing_text": str(final_visible_reply_text or "")[:500],
                 },
@@ -2696,9 +2787,22 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             reply_turn_trace.finish_trace(outcome="failed", diagnosis_code="internal_exception", detail={"error": str(e)[:500]})
         except Exception:
             pass
-        if is_direct_mention:
+        if reply_required and not bool(state.get("reply_delivery_started", False)):
             try:
                 await acquire_reply_commit(state)
-                await bot.send(event, random.choice(_FALLBACK_REPLIES))
+                mark_reply_delivery_started(state)
+                await bot.send(event, required_reply_fallback_text(has_images=bool(tool_image_urls)))
+                mark_reply_delivery_confirmed(state)
+                mark_reply_delivery_complete(state)
+                try:
+                    from ...core import reply_turn_trace
+
+                    reply_turn_trace.finish_trace(
+                        outcome="degraded",
+                        diagnosis_code="internal_exception",
+                        detail={"fallback_sent": True, "error": str(e)[:500]},
+                    )
+                except Exception:
+                    pass
             except Exception as exc:
                 log_exception(runtime.logger, "[reply_processor] fallback direct mention send failed", exc, level="debug")

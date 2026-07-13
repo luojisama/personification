@@ -48,3 +48,36 @@ def test_pending_actions_execute_once_and_are_consumed(monkeypatch) -> None:  # 
         assert actions == []
 
     asyncio.run(run())
+
+
+def test_pending_actions_record_confirmed_delivery() -> None:
+    async def run() -> None:
+        executor = _Executor()
+        actions = [{"type": "send", "params": {"text": "hello"}}]
+        state: dict[str, Any] = {}
+
+        await reply_commit.execute_pending_actions(executor, actions, state=state)
+
+        assert state["reply_delivery_started"] is True
+        assert state["reply_delivery_confirmed"] is True
+
+    asyncio.run(run())
+
+
+def test_pending_action_without_external_send_is_not_confirmed() -> None:
+    class _FailedExecutor:
+        last_delivery_confirmed = False
+
+        async def execute(self, _action: str, _params: dict[str, Any]) -> str:
+            return "发送失败"
+
+    async def run() -> None:
+        actions = [{"type": "send_image_url", "params": {"url": ""}}]
+        state: dict[str, Any] = {}
+
+        await reply_commit.execute_pending_actions(_FailedExecutor(), actions, state=state)
+
+        assert state["reply_delivery_started"] is True
+        assert "reply_delivery_confirmed" not in state
+
+    asyncio.run(run())

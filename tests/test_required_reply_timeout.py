@@ -75,3 +75,86 @@ def test_required_image_timeout_sends_fallback_and_finishes_degraded(monkeypatch
     assert "fallback_sent=true" in str(stages[-1]["detail"])
     assert finished[-1]["outcome"] == "degraded"
     assert finished[-1]["diagnosis_code"] == "reply_timeout"
+
+
+def test_timeout_after_confirmed_delivery_does_not_send_fallback(monkeypatch) -> None:  # noqa: ANN001
+    finished: list[dict[str, object]] = []
+    monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **_kwargs: None)
+    monkeypatch.setattr(reply_turn_trace, "finish_trace", lambda **kwargs: finished.append(kwargs))
+
+    class _Bot:
+        async def send(self, _event, _message):  # noqa: ANN001
+            raise AssertionError("confirmed delivery must not trigger fallback")
+
+    asyncio.run(
+        reply_buffer._handle_reply_timeout(
+            bot=_Bot(),
+            event=SimpleNamespace(message=[]),
+            state={
+                "reply_required": True,
+                "reply_trace_id": "trace-confirmed",
+                "reply_delivery_started": True,
+                "reply_delivery_confirmed": True,
+                "reply_delivery_complete": True,
+            },
+            session_key="bot:private_1",
+            timeout_seconds=180.0,
+            logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        )
+    )
+
+    assert finished[-1]["outcome"] == "ok"
+    assert finished[-1]["diagnosis_code"] == "post_send_timeout"
+
+
+def test_timeout_after_first_segment_is_partial_not_ok(monkeypatch) -> None:  # noqa: ANN001
+    finished: list[dict[str, object]] = []
+    monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **_kwargs: None)
+    monkeypatch.setattr(reply_turn_trace, "finish_trace", lambda **kwargs: finished.append(kwargs))
+
+    asyncio.run(
+        reply_buffer._handle_reply_timeout(
+            bot=SimpleNamespace(),
+            event=SimpleNamespace(message=[]),
+            state={
+                "reply_required": True,
+                "reply_trace_id": "trace-partial",
+                "reply_delivery_started": True,
+                "reply_delivery_confirmed": True,
+            },
+            session_key="bot:private_1",
+            timeout_seconds=180.0,
+            logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        )
+    )
+
+    assert finished[-1]["outcome"] == "partial"
+    assert finished[-1]["diagnosis_code"] == "partial_reply_timeout"
+
+
+def test_timeout_with_unknown_send_outcome_does_not_retry(monkeypatch) -> None:  # noqa: ANN001
+    finished: list[dict[str, object]] = []
+    monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **_kwargs: None)
+    monkeypatch.setattr(reply_turn_trace, "finish_trace", lambda **kwargs: finished.append(kwargs))
+
+    class _Bot:
+        async def send(self, _event, _message):  # noqa: ANN001
+            raise AssertionError("unknown send outcome must not be retried")
+
+    asyncio.run(
+        reply_buffer._handle_reply_timeout(
+            bot=_Bot(),
+            event=SimpleNamespace(message=[]),
+            state={
+                "reply_required": True,
+                "reply_trace_id": "trace-unknown",
+                "reply_delivery_started": True,
+            },
+            session_key="bot:private_1",
+            timeout_seconds=180.0,
+            logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        )
+    )
+
+    assert finished[-1]["outcome"] == "outcome_unknown"
+    assert finished[-1]["diagnosis_code"] == "send_outcome_unknown"

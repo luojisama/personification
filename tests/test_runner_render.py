@@ -774,6 +774,86 @@ def test_run_agent_query_rewrite_consumes_agent_deadline(monkeypatch) -> None:  
     assert len(caller.calls) == 1
 
 
+def test_run_agent_invalid_query_rewrite_is_traced_as_structural_fallback(monkeypatch) -> None:  # noqa: ANN001
+    stages: list[dict[str, object]] = []
+    monkeypatch.setattr(runner, "_record_reply_trace_stage", lambda **kwargs: stages.append(kwargs))
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(finish_reason="stop", content="not-json", tool_calls=[], raw={}),
+            tool_impl.ToolCallerResponse(finish_reason="stop", content="继续回答", tool_calls=[], raw={}),
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "解释一下"}],
+            registry=tool_registry.ToolRegistry(),
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=2,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="explanation",
+                plugin_question_intent="capability",
+                ambiguity_level="low",
+            ),
+            time_budget_seconds=30,
+        )
+    )
+
+    rewrite_stage = next(stage for stage in stages if stage["key"] == "agent_query_rewrite")
+    assert result.text == "继续回答"
+    assert rewrite_stage["status"] == "warn"
+    assert "fallback=invalid_payload" in str(rewrite_stage["detail"])
+
+
+def test_run_agent_main_model_call_is_bounded_by_agent_deadline(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(runner, "_record_reply_trace_stage", lambda **_kwargs: None)
+
+    class _SlowMainCaller(_FakeToolCaller):
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            self.calls.append({"messages": messages, "tools": tools, "use_builtin_search": use_builtin_search})
+            await asyncio.sleep(10)
+
+    caller = _SlowMainCaller([])
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "你翻译一下"}],
+            registry=tool_registry.ToolRegistry(),
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=2,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+            ),
+            logger=_FakeLogger(),
+            current_image_urls=["data:image/png;base64,AA=="],
+            direct_image_input=True,
+            precomputed_intent=SimpleNamespace(
+                chat_intent="explanation",
+                plugin_question_intent="capability",
+                ambiguity_level="low",
+            ),
+            turn_plan=SimpleNamespace(
+                reply_action="reply",
+                speech_act="answer",
+                research_need="none",
+                output_mode="chat_answer",
+                tool_intent=["vision"],
+            ),
+            time_budget_seconds=0.01,
+        )
+    )
+
+    assert result.text == "[NO_REPLY]"
+    assert len(caller.calls) == 1
+
+
 def test_run_agent_uses_tool_metadata_contract_for_queued_action_silence() -> None:
     async def _handler(**_kwargs):  # noqa: ANN001
         return json.dumps({"ok": True, "queued": True, "kind": "custom_action"}, ensure_ascii=False)

@@ -332,6 +332,30 @@ def test_private_and_group_mention_are_marked_reply_required() -> None:
     asyncio.run(run())
 
 
+def test_random_bot_target_is_not_upgraded_to_required_reply() -> None:
+    async def run() -> None:
+        msg_buffer: dict[str, dict[str, Any]] = {}
+        state = {"is_random_chat": True, "message_target": "bot"}
+        await reply_buffer.handle_reply_event(
+            _Bot(),
+            _GroupEvent(1, "random"),
+            state,
+            poke_event_cls=type("PokeEvent", (), {}),
+            message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent,
+            process_response_logic=lambda *_args: None,
+            msg_buffer=msg_buffer,
+            start_buffer_timer=lambda *_args: None,
+            logger=_Logger(),
+            concurrency_controller=reply_buffer.ReplyConcurrencyController(),
+        )
+
+        assert state["reply_required"] is False
+        assert msg_buffer
+
+    asyncio.run(run())
+
+
 def test_direct_turn_cancels_active_random_turn_only() -> None:
     async def run() -> None:
         controller = reply_buffer.ReplyConcurrencyController(session_limit=3, global_limit=3)
