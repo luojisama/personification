@@ -357,7 +357,13 @@ def test_qzone_agent_exception_recovers_without_direct_provider_fallback(monkeyp
 
 @pytest.mark.parametrize(
     ("status_code", "expected_code"),
-    [(401, "qzone_generation_auth_failed"), (403, "qzone_generation_auth_failed"), (404, "qzone_generation_model_unavailable")],
+    [
+        (400, "qzone_generation_request_rejected"),
+        (401, "qzone_generation_auth_failed"),
+        (403, "qzone_generation_auth_failed"),
+        (404, "qzone_generation_model_unavailable"),
+        (422, "qzone_generation_request_rejected"),
+    ],
 )
 def test_qzone_generation_fast_fails_deterministic_provider_errors(status_code: int, expected_code: str) -> None:
     class _ProviderError(RuntimeError):
@@ -390,7 +396,44 @@ def test_qzone_generation_fast_fails_deterministic_provider_errors(status_code: 
         "实际执行": "1 次",
         "调用上限": "5 次",
         "终止原因": "确定性错误，已提前停止",
+        "HTTP status": status_code,
     }
+
+
+def test_qzone_generation_reads_wrapped_http_status_and_recovers_model_candidate() -> None:
+    class _ProviderError(RuntimeError):
+        def __init__(self, status_code: int) -> None:
+            super().__init__("provider rejected request")
+            self.response = SimpleNamespace(status_code=status_code)
+
+    wrapped = RuntimeError("safe outer error")
+    wrapped.__cause__ = _ProviderError(422)
+    assert diary_flow._classify_qzone_generation_error(wrapped)[0] == "qzone_generation_request_rejected"
+
+    calls = 0
+    report = diary_flow.QzoneGenerationReport()
+
+    async def _call(_messages, **_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            exc = _ProviderError(404)
+            exc.code = "provider_model_candidate_unavailable"
+            exc.retryable = True
+            raise exc
+        return json.dumps({"content": "模型候选切换后终于能写出来了", "image_prompt": ""}, ensure_ascii=False)
+
+    result = asyncio.run(diary_flow._generate_once(
+        "你是绪山真寻",
+        "写一条说说",
+        call_ai_api=_call,
+        report=report,
+    ))
+
+    assert json.loads(result)["content"] == "模型候选切换后终于能写出来了"
+    assert calls == 2
+    assert report.steps[0].status == "warn"
+    assert {item.label: item.value for item in report.steps[0].details}["HTTP status"] == 404
 
 
 def test_qzone_generation_fast_fails_without_caller_and_propagates_cancel() -> None:

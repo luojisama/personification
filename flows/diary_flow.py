@@ -190,31 +190,51 @@ def _mark_qzone_reviewer_budget_exhausted(
         report.suggestion = "重新发起一次完整生成；新的操作会获得独立的审阅预算。"
 
 
+def _qzone_exception_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(chain) < 6:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
 def _qzone_reviewer_http_status(exc: Exception) -> int:
-    response = getattr(exc, "response", None)
-    raw_status = getattr(response, "status_code", None) if response is not None else None
-    if raw_status is None:
-        raw_status = getattr(exc, "status_code", None)
-    try:
-        return int(raw_status or 0)
-    except (TypeError, ValueError):
-        return 0
+    for item in _qzone_exception_chain(exc):
+        response = getattr(item, "response", None)
+        values = (
+            getattr(response, "status_code", None) if response is not None else None,
+            getattr(item, "status_code", None),
+        )
+        for raw_status in values:
+            try:
+                status = int(raw_status or 0)
+            except (TypeError, ValueError):
+                continue
+            if status:
+                return status
+    return 0
 
 
 def _qzone_error_code(exc: Exception) -> str:
-    direct = str(getattr(exc, "code", "") or "").strip().lower()
-    if direct:
-        return direct
-    body = getattr(exc, "body", None)
-    if not isinstance(body, dict):
-        return ""
-    payload = body.get("error") if isinstance(body.get("error"), dict) else body
-    return str(payload.get("code") or payload.get("type") or "").strip().lower()
+    for item in _qzone_exception_chain(exc):
+        direct = str(getattr(item, "code", "") or "").strip().lower()
+        if direct:
+            return direct
+        body = getattr(item, "body", None)
+        if isinstance(body, dict):
+            payload = body.get("error") if isinstance(body.get("error"), dict) else body
+            nested = str(payload.get("code") or payload.get("type") or "").strip().lower()
+            if nested:
+                return nested
+    return ""
 
 
 def _is_deterministic_qzone_model_error(exc: Exception) -> bool:
     status = _qzone_reviewer_http_status(exc)
-    if status in {400, 404, 422}:
+    if status == 404:
         return True
     code = _qzone_error_code(exc)
     if code in {
@@ -243,11 +263,25 @@ def _is_deterministic_qzone_model_error(exc: Exception) -> bool:
 def _classify_qzone_generation_error(exc: Exception) -> tuple[str, str, str, bool]:
     status = _qzone_reviewer_http_status(exc)
     code = _qzone_error_code(exc)
+    if code == "provider_model_candidate_unavailable":
+        return (
+            "qzone_generation_model_candidate_unavailable",
+            "草稿模型候选暂不可用",
+            "当前 concrete model 候选不可用；下一次由 QZone generation budget 切换候选。",
+            True,
+        )
     if status in {401, 403} or code == "provider_auth_failed":
         return (
             "qzone_generation_auth_failed",
             "草稿生成模型认证失败",
             "LLM Provider 的认证或模型调用权限被拒绝；这不是 QQ 空间登录失败。",
+            False,
+        )
+    if status in {400, 422}:
+        return (
+            "qzone_generation_request_rejected",
+            "草稿生成请求被 Provider 拒绝",
+            "LLM Provider 拒绝了当前请求形态；通常表示 API type、endpoint、Agent tool schema 或请求参数不兼容，这不是 QQ 空间登录失败。",
             False,
         )
     if _is_deterministic_qzone_model_error(exc):
@@ -479,6 +513,7 @@ _QZONE_TERMINAL_GENERATION_CODES = {
     "qzone_generation_auth_failed",
     "qzone_generation_caller_unavailable",
     "qzone_generation_model_unavailable",
+    "qzone_generation_request_rejected",
 }
 
 
@@ -1636,6 +1671,8 @@ async def _generate_once(
             raise
         except Exception as exc:
             code, title, message, retryable = _classify_qzone_generation_error(exc)
+            http_status = _qzone_reviewer_http_status(exc)
+            provider_error_code = _qzone_error_code(exc)
             last_failure_code = code
             step_key = f"{attempt_key}_attempt_{generation_attempt}"
             if logger is not None:
@@ -1643,34 +1680,44 @@ async def _generate_once(
                     "[qzone] generation call failed: "
                     f"attempt={generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS} "
                     f"mode={'Agent' if agent_mode else 'Provider'} type={type(exc).__name__} "
+                    f"status={http_status or '-'} code={provider_error_code or '-'} "
                     f"retry={retryable and generation_attempt < _QZONE_GENERATION_MAX_ATTEMPTS}"
                 )
             if report is not None:
+                attempt_details = [
+                    detail("实际执行", f"{generation_attempt} 次", "info"),
+                    detail("调用上限", f"{_QZONE_GENERATION_MAX_ATTEMPTS} 次", "info"),
+                    detail("异常类型", type(exc).__name__, "error"),
+                ]
+                if http_status:
+                    attempt_details.append(detail("HTTP status", http_status, "error"))
                 report.add_step(
                     step_key,
                     f"{attempt_label} · 第 {generation_attempt} 次",
                     "error",
                     message,
-                    details=(
-                        detail("实际执行", f"{generation_attempt} 次", "info"),
-                        detail("调用上限", f"{_QZONE_GENERATION_MAX_ATTEMPTS} 次", "info"),
-                        detail("异常类型", type(exc).__name__, "error"),
-                    ),
+                    details=tuple(attempt_details),
                 )
             if not retryable:
                 if report is not None:
+                    suggestion = "检查 LLM Provider 的 API 认证、模型名称、endpoint 和 caller 配置后重新生成。"
+                    if code == "qzone_generation_request_rejected":
+                        suggestion = "检查该 Provider 的 API type、endpoint、Agent function calling 支持和请求参数兼容性。"
+                    failure_details = [
+                        detail("实际执行", f"{generation_attempt} 次", "error"),
+                        detail("调用上限", f"{_QZONE_GENERATION_MAX_ATTEMPTS} 次", "info"),
+                        detail("终止原因", "确定性错误，已提前停止", "warn"),
+                    ]
+                    if http_status:
+                        failure_details.append(detail("HTTP status", http_status, "error"))
                     report.fail(
                         code,
                         "draft_generation",
                         title,
                         message,
-                        suggestion="检查 LLM Provider 的 API 认证、模型名称、endpoint 和 caller 配置后重新生成。",
+                        suggestion=suggestion,
                         retryable=False,
-                        details=(
-                            detail("实际执行", f"{generation_attempt} 次", "error"),
-                            detail("调用上限", f"{_QZONE_GENERATION_MAX_ATTEMPTS} 次", "info"),
-                            detail("终止原因", "确定性错误，已提前停止", "warn"),
-                        ),
+                        details=tuple(failure_details),
                     )
                 return ""
             if generation_attempt < _QZONE_GENERATION_MAX_ATTEMPTS:

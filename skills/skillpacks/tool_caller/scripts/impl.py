@@ -4052,7 +4052,15 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                 request_obj["tools"] = tool_payload
 
             model_candidates = _antigravity_cli_model_candidates(self.model)
-            if use_single_attempt_retry_policy():
+            single_attempt = use_single_attempt_retry_policy()
+            next_single_attempt_model = ""
+            if single_attempt:
+                preferred_model = str(getattr(self, "_preferred_concrete_model", "") or "").strip()
+                if preferred_model in model_candidates:
+                    preferred_index = model_candidates.index(preferred_model)
+                    model_candidates = model_candidates[preferred_index:] + model_candidates[:preferred_index]
+                if len(model_candidates) > 1:
+                    next_single_attempt_model = model_candidates[1]
                 model_candidates = model_candidates[:1]
             last_exc: Exception | None = None
             auth_refreshed_for_401 = False
@@ -4116,6 +4124,17 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                     except httpx.HTTPStatusError as exc:
                         last_exc = exc
                         if (
+                            single_attempt
+                            and exc.response is not None
+                            and exc.response.status_code == 404
+                            and next_single_attempt_model
+                        ):
+                            # QZone owns the retry budget. Rotate only the next full
+                            # generation attempt instead of issuing another request here.
+                            self._preferred_concrete_model = next_single_attempt_model
+                            exc.code = "provider_model_candidate_unavailable"
+                            exc.retryable = True
+                        if (
                             exc.response is not None
                             and exc.response.status_code == 401
                             and not auth_refreshed_for_401
@@ -4169,6 +4188,8 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                         raise
                 if last_exc is not None and not data:
                     raise last_exc
+                if selected_model_name:
+                    self._preferred_concrete_model = selected_model_name
 
             inner_response = data.get("response") if isinstance(data, dict) else None
             if isinstance(inner_response, dict):
