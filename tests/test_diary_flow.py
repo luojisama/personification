@@ -5,6 +5,8 @@ import base64
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 
@@ -648,6 +650,292 @@ def test_qzone_semantic_review_rejects_same_topic_with_low_text_overlap() -> Non
     assert review is not None
     assert review["accepted"] is False
     assert review["same_topic"] is True
+
+
+def test_qzone_semantic_reviewer_retries_invalid_json_for_same_candidate() -> None:
+    report = diary_flow.QzoneGenerationReport()
+    calls = 0
+
+    async def _call(_messages, **_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return "not-json"
+        return json.dumps({
+            "accept": True,
+            "coherent": True,
+            "grounded": True,
+            "novel": True,
+            "same_topic": False,
+            "same_scene": False,
+            "same_syntax": False,
+            "topic_key": "window",
+            "reason": "自然",
+        }, ensure_ascii=False)
+
+    review = asyncio.run(diary_flow._review_qzone_semantics(
+        "窗边这点风刚好够吹散一点困意",
+        recent_posts=[],
+        source_context="窗边有风",
+        persona_system="你是绪山真寻",
+        call_ai_api=_call,
+        logger=_Logger(),
+        report=report,
+        attempt_key="basic",
+    ))
+
+    assert review is not None and review["accepted"] is True
+    assert calls == 2
+    retry_step = next(item for item in report.steps if item.key == "basic_semantic_attempt_1")
+    assert retry_step.status == "warn"
+    semantic_step = next(item for item in report.steps if item.key == "basic_semantic")
+    assert any(item.label == "审阅调用" and item.value == "2/5" for item in semantic_step.details)
+
+
+def test_qzone_semantic_reviewer_retries_incomplete_schema() -> None:
+    calls = 0
+
+    async def _call(_messages, **_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return json.dumps({"accept": True, "reason": "missing fields"})
+        return json.dumps({
+            "accept": True,
+            "coherent": True,
+            "grounded": True,
+            "novel": True,
+            "same_topic": False,
+            "same_scene": False,
+            "same_syntax": False,
+            "topic_key": "window",
+            "reason": "自然",
+        }, ensure_ascii=False)
+
+    review = asyncio.run(diary_flow._review_qzone_semantics(
+        "窗边这点风刚好够吹散一点困意",
+        recent_posts=[],
+        source_context="窗边有风",
+        persona_system="你是绪山真寻",
+        call_ai_api=_call,
+        logger=_Logger(),
+    ))
+
+    assert review is not None and review["accepted"] is True
+    assert calls == 2
+
+
+def test_qzone_semantic_reject_does_not_retry_same_candidate() -> None:
+    calls = 0
+
+    async def _call(_messages, **_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        return json.dumps({
+            "accept": False,
+            "coherent": True,
+            "grounded": False,
+            "novel": True,
+            "same_topic": False,
+            "same_scene": False,
+            "same_syntax": False,
+            "topic_key": "purchase",
+            "reason": "没有购买依据",
+        }, ensure_ascii=False)
+
+    review = asyncio.run(diary_flow._review_qzone_semantics(
+        "刚买完一袋零食准备慢慢吃",
+        recent_posts=[],
+        source_context="",
+        persona_system="你是绪山真寻",
+        call_ai_api=_call,
+        logger=_Logger(),
+    ))
+
+    assert review is not None and review["accepted"] is False
+    assert calls == 1
+
+
+def test_qzone_semantic_reviewer_retries_timeout_and_5xx_with_shared_budget() -> None:
+    class _TransientError(RuntimeError):
+        def __init__(self) -> None:
+            super().__init__("service unavailable")
+            self.response = SimpleNamespace(status_code=503)
+
+    calls = 0
+    budget = diary_flow.QzoneReviewerBudget()
+
+    async def _call(_messages, **_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.TimeoutError
+        if calls == 2:
+            raise _TransientError()
+        return json.dumps({
+            "accept": True,
+            "coherent": True,
+            "grounded": True,
+            "novel": True,
+            "same_topic": False,
+            "same_scene": False,
+            "same_syntax": False,
+            "topic_key": "night",
+            "reason": "自然",
+        }, ensure_ascii=False)
+
+    review = asyncio.run(diary_flow._review_qzone_semantics(
+        "今晚有点想早点关灯躺一会儿",
+        recent_posts=[],
+        source_context="",
+        persona_system="你是绪山真寻",
+        call_ai_api=_call,
+        logger=_Logger(),
+        reviewer_budget=budget,
+    ))
+
+    assert review is not None and review["accepted"] is True
+    assert calls == 3
+    assert budget.calls_used == 3
+
+
+def test_qzone_semantic_reviewer_stops_at_five_calls(monkeypatch) -> None:  # noqa: ANN001
+    logger = _Logger()
+    monkeypatch.setattr(diary_flow, "get_data_store", lambda: _Store({"recent_contents": []}))
+    reviewer_calls = 0
+    generation_calls = 0
+
+    async def _call(messages, **_kwargs):  # noqa: ANN001
+        nonlocal reviewer_calls, generation_calls
+        if "发布前审阅器" in str(messages[0].get("content", "")):
+            reviewer_calls += 1
+            return ""
+        generation_calls += 1
+        return json.dumps({"content": "今晚有点想早点关灯躺一会儿", "image_prompt": ""}, ensure_ascii=False)
+
+    result = asyncio.run(diary_flow.generate_ai_diary_detailed(
+        _Bot(),
+        load_prompt=lambda: "你是绪山真寻。",
+        call_ai_api=_call,
+        logger=logger,
+    ))
+
+    assert result["content"] == ""
+    assert reviewer_calls == 5
+    assert generation_calls == 1
+    assert result["diagnostic"]["code"] == "semantic_review_budget_exhausted"
+    exhausted = next(item for item in result["diagnostic"]["steps"] if item["key"] == "reviewer_budget_exhausted")
+    assert any(item["label"] == "审阅调用" and item["value"] == "5/5" for item in exhausted["details"])
+
+
+def test_qzone_semantic_reviewer_budget_is_shared_with_repair_candidate(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(diary_flow, "get_data_store", lambda: _Store({"recent_contents": []}))
+    reviewer_calls = 0
+    generation_calls = 0
+
+    async def _call(messages, **_kwargs):  # noqa: ANN001
+        nonlocal reviewer_calls, generation_calls
+        if "发布前审阅器" in str(messages[0].get("content", "")):
+            reviewer_calls += 1
+            if reviewer_calls == 1:
+                return json.dumps({
+                    "accept": False,
+                    "coherent": True,
+                    "grounded": False,
+                    "novel": True,
+                    "same_topic": False,
+                    "same_scene": False,
+                    "same_syntax": False,
+                    "topic_key": "purchase",
+                    "reason": "没有购买依据",
+                }, ensure_ascii=False)
+            if reviewer_calls == 2:
+                return "invalid-json"
+            return json.dumps({
+                "accept": True,
+                "coherent": True,
+                "grounded": True,
+                "novel": True,
+                "same_topic": False,
+                "same_scene": False,
+                "same_syntax": False,
+                "topic_key": "rest",
+                "reason": "改为主观愿望",
+            }, ensure_ascii=False)
+        generation_calls += 1
+        content = "刚买完一袋零食准备慢慢吃" if generation_calls == 1 else "今晚有点想早点关灯躺一会儿"
+        return json.dumps({"content": content, "image_prompt": ""}, ensure_ascii=False)
+
+    result = asyncio.run(diary_flow.generate_ai_diary_detailed(
+        _Bot(),
+        load_prompt=lambda: "你是绪山真寻。",
+        call_ai_api=_call,
+        logger=_Logger(),
+    ))
+
+    assert result["content"] == "今晚有点想早点关灯躺一会儿", result
+    assert generation_calls == 2
+    assert reviewer_calls == 3
+    repair_step = next(item for item in result["diagnostic"]["steps"] if item["key"] == "repair_1_semantic")
+    assert any(item["label"] == "审阅调用" and item["value"] == "3/5" for item in repair_step["details"])
+
+
+def test_qzone_semantic_reviewer_fast_fails_auth_and_propagates_cancel() -> None:
+    class _AuthError(RuntimeError):
+        def __init__(self) -> None:
+            super().__init__("unauthorized")
+            self.response = SimpleNamespace(status_code=401)
+
+    auth_calls = 0
+    auth_report = diary_flow.QzoneGenerationReport()
+
+    unavailable_budget = diary_flow.QzoneReviewerBudget()
+    unavailable_report = diary_flow.QzoneGenerationReport()
+    unavailable_review = asyncio.run(diary_flow._review_qzone_semantics(
+        "窗边这点风刚好够吹散一点困意",
+        recent_posts=[],
+        source_context="",
+        persona_system="你是绪山真寻",
+        logger=_Logger(),
+        report=unavailable_report,
+        reviewer_budget=unavailable_budget,
+    ))
+    assert unavailable_review is None
+    assert unavailable_budget.calls_used == 0
+    assert unavailable_report.code == "semantic_reviewer_unavailable"
+    assert unavailable_report.retryable is False
+
+    async def _auth_call(_messages, **_kwargs):  # noqa: ANN001
+        nonlocal auth_calls
+        auth_calls += 1
+        raise _AuthError()
+
+    auth_review = asyncio.run(diary_flow._review_qzone_semantics(
+        "窗边这点风刚好够吹散一点困意",
+        recent_posts=[],
+        source_context="",
+        persona_system="你是绪山真寻",
+        call_ai_api=_auth_call,
+        logger=_Logger(),
+        report=auth_report,
+    ))
+    assert auth_review is None
+    assert auth_calls == 1
+    assert auth_report.code == "semantic_reviewer_auth_failed"
+    assert auth_report.retryable is False
+
+    async def _cancel_call(_messages, **_kwargs):  # noqa: ANN001
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(diary_flow._review_qzone_semantics(
+            "窗边这点风刚好够吹散一点困意",
+            recent_posts=[],
+            source_context="",
+            persona_system="你是绪山真寻",
+            call_ai_api=_cancel_call,
+            logger=_Logger(),
+        ))
 
 
 def test_qzone_post_uses_configured_semantic_review_timeout(monkeypatch) -> None:  # noqa: ANN001

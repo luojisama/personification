@@ -18,6 +18,7 @@ from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_group_emotion_memory, load_emotion_state
 from ..core.operation_diagnostics import OperationDetail, OperationStep, detail, diagnostic, step
 from ..core.persona_profile import load_persona_profile
+from ..core.provider_health import classify_error as classify_provider_error
 from ..core.prompt_loader import AGENT_GUIDANCE_MARKER
 from ..core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
 from ..core.sticker_library import (
@@ -127,6 +128,87 @@ class QzoneGenerationReport:
             suggestion="可以继续提交到 QZone。" if ok else self.suggestion,
             retryable=False if ok else self.retryable,
         )
+
+
+@dataclass(slots=True)
+class QzoneReviewerBudget:
+    max_calls: int = 5
+    calls_used: int = 0
+
+    @property
+    def remaining(self) -> int:
+        return max(0, int(self.max_calls) - int(self.calls_used))
+
+    def claim(self) -> int | None:
+        if self.remaining <= 0:
+            return None
+        self.calls_used += 1
+        return self.calls_used
+
+
+def _mark_qzone_reviewer_budget_exhausted(
+    report: QzoneGenerationReport | None,
+    *,
+    budget: QzoneReviewerBudget,
+    attempt_key: str,
+    replace_failure: bool,
+) -> None:
+    if report is None:
+        return
+    if not any(item.key == "reviewer_budget_exhausted" for item in report.steps):
+        report.add_step(
+            "reviewer_budget_exhausted",
+            "语义审阅调用预算",
+            "error",
+            "本次 candidate/repair 操作已用完语义审阅调用预算。",
+            details=(
+                detail("审阅调用", f"{budget.calls_used}/{budget.max_calls}", "error"),
+                detail("耗尽位置", attempt_key, "info"),
+            ),
+        )
+    if replace_failure:
+        report.fail(
+            "semantic_review_budget_exhausted",
+            "semantic_review",
+            "语义审阅调用预算已耗尽",
+            f"本次操作已调用审阅器 {budget.calls_used}/{budget.max_calls} 次，仍未得到有效判定。",
+            suggestion="重新发起一次完整生成；新的操作会获得独立的审阅预算。",
+            details=(detail("审阅调用", f"{budget.calls_used}/{budget.max_calls}", "error"),),
+        )
+    else:
+        report.message = f"{report.message} 本次审阅预算已用完，无法再审阅新的 repair 候选。"
+        report.suggestion = "重新发起一次完整生成；新的操作会获得独立的审阅预算。"
+
+
+def _qzone_reviewer_http_status(exc: Exception) -> int:
+    response = getattr(exc, "response", None)
+    raw_status = getattr(response, "status_code", None) if response is not None else None
+    if raw_status is None:
+        raw_status = getattr(exc, "status_code", None)
+    try:
+        return int(raw_status or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_transient_qzone_reviewer_error(exc: Exception) -> bool:
+    status = _qzone_reviewer_http_status(exc)
+    if status in {408, 409, 425, 429} or 500 <= status < 600:
+        return True
+    return classify_provider_error(exc) in {"timeout", "connect", "rate_limit", "5xx"}
+
+
+def _is_valid_qzone_review_payload(payload: dict[str, Any]) -> bool:
+    required_boolean_fields = (
+        "accept",
+        "coherent",
+        "grounded",
+        "novel",
+        "same_topic",
+        "same_scene",
+        "same_syntax",
+    )
+    return all(isinstance(payload.get(key), bool) for key in required_boolean_fields)
 
 
 def filter_sensitive_content(text: str) -> str:
@@ -864,6 +946,7 @@ async def _review_qzone_semantics(
     logger: Any = None,
     report: QzoneGenerationReport | None = None,
     attempt_key: str = "draft",
+    reviewer_budget: QzoneReviewerBudget | None = None,
 ) -> dict[str, Any] | None:
     """Use an LLM to judge coherence, grounding and semantic novelty."""
     messages = [
@@ -894,69 +977,159 @@ async def _review_qzone_semantics(
             ),
         },
     ]
-    raw = ""
-    try:
-        if tool_caller is not None:
-            response = await asyncio.wait_for(
-                tool_caller.chat_with_tools(messages, [], False),
-                timeout=timeout,
+    budget = reviewer_budget or QzoneReviewerBudget()
+    if tool_caller is None and call_ai_api is None:
+        if report is not None:
+            report.fail(
+                "semantic_reviewer_unavailable",
+                "semantic_review",
+                "语义审阅器不可用",
+                "当前没有可调用的模型来检查连贯性、事件依据和重复度。",
+                suggestion="检查主模型和 Agent runtime 是否已初始化。",
+                retryable=False,
+                details=(detail("审阅调用", f"{budget.calls_used}/{budget.max_calls}", "error"),),
             )
-            raw = str(getattr(response, "content", "") or "")
-        elif call_ai_api is not None:
-            raw = str(
-                await asyncio.wait_for(
-                    call_ai_api(messages, use_builtin_search=False),
+        return None
+
+    candidate_attempt = 0
+    while True:
+        global_attempt = budget.claim()
+        if global_attempt is None:
+            _mark_qzone_reviewer_budget_exhausted(
+                report,
+                budget=budget,
+                attempt_key=attempt_key,
+                replace_failure=True,
+            )
+            return None
+        candidate_attempt += 1
+        raw = ""
+        try:
+            if tool_caller is not None:
+                response = await asyncio.wait_for(
+                    tool_caller.chat_with_tools(messages, [], False),
                     timeout=timeout,
                 )
-                or ""
-            )
-        else:
+                raw = str(getattr(response, "content", "") or "")
+            else:
+                raw = str(
+                    await asyncio.wait_for(
+                        call_ai_api(messages, use_builtin_search=False),  # type: ignore[misc]
+                        timeout=timeout,
+                    )
+                    or ""
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            transient = _is_transient_qzone_reviewer_error(exc)
+            status_code = _qzone_reviewer_http_status(exc)
+            can_retry = transient and budget.remaining > 0
+            if logger is not None:
+                logger.info(
+                    "[qzone] semantic review call failed: "
+                    f"attempt={global_attempt}/{budget.max_calls} type={type(exc).__name__} "
+                    f"status={status_code or '-'} retry={can_retry}"
+                )
             if report is not None:
+                report.add_step(
+                    f"{attempt_key}_semantic_attempt_{global_attempt}",
+                    f"语义审阅调用 {global_attempt}",
+                    "warn" if can_retry else "error",
+                    "调用失败，将使用共享预算重试同一候选。" if can_retry else "调用失败，不能继续审阅当前候选。",
+                    details=(
+                        detail("全局调用", f"{global_attempt}/{budget.max_calls}", "info"),
+                        detail("本候选调用", str(candidate_attempt), "info"),
+                        detail("异常类型", type(exc).__name__, "error"),
+                        *((detail("HTTP 状态", str(status_code), "error"),) if status_code else ()),
+                    ),
+                )
+            if can_retry:
+                continue
+            if transient and budget.remaining <= 0:
+                _mark_qzone_reviewer_budget_exhausted(
+                    report,
+                    budget=budget,
+                    attempt_key=attempt_key,
+                    replace_failure=True,
+                )
+                return None
+            if report is not None:
+                if status_code in {401, 403}:
+                    code = "semantic_reviewer_auth_failed"
+                    title = "语义审阅认证失败"
+                    message = "审阅模型认证或权限被拒绝，确定性失败不会重复调用。"
+                elif status_code == 404:
+                    code = "semantic_reviewer_model_missing"
+                    title = "语义审阅模型不可用"
+                    message = "审阅模型或调用端点不存在，确定性失败不会重复调用。"
+                else:
+                    code = "semantic_reviewer_uncallable"
+                    title = "语义审阅器无法调用"
+                    message = "审阅调用发生确定性错误，重复调用同一配置不会恢复。"
                 report.fail(
-                    "semantic_reviewer_unavailable",
+                    code,
                     "semantic_review",
-                    "语义审阅器不可用",
-                    "当前没有可调用的模型来检查连贯性、事件依据和重复度。",
-                    suggestion="检查主模型和 Agent runtime 是否已初始化。",
+                    title,
+                    message,
+                    suggestion="检查 reviewer 的 Provider、认证和模型配置后重新生成。",
+                    retryable=False,
+                    details=(
+                        detail("审阅调用", f"{global_attempt}/{budget.max_calls}", "error"),
+                        detail("异常类型", type(exc).__name__, "error"),
+                    ),
                 )
             return None
-    except Exception as exc:
-        if logger is not None:
-            logger.info(f"[qzone] semantic review failed, drop post: {exc}")
-        if report is not None:
-            report.fail(
-                "semantic_review_timeout" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) else "semantic_review_failed",
-                "semantic_review",
-                "语义审阅没有完成",
-                "审阅模型调用超时。" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) else "审阅模型调用发生异常。",
-                suggestion="检查 Provider 状态和 QZone 审阅调用记录后重试。",
-                details=(detail("异常类型", type(exc).__name__, "error"),),
+
+        payload = _extract_json_object(raw)
+        if not payload or not _is_valid_qzone_review_payload(payload):
+            empty = not raw.strip()
+            invalid_schema = bool(payload)
+            can_retry = budget.remaining > 0
+            if logger is not None:
+                logger.info(
+                    "[qzone] semantic review returned empty response, retry" if empty and can_retry
+                    else "[qzone] semantic review returned invalid payload, retry" if can_retry
+                    else "[qzone] semantic review returned no valid JSON, budget exhausted"
+                )
+            if report is not None:
+                report.add_step(
+                    f"{attempt_key}_semantic_attempt_{global_attempt}",
+                    f"语义审阅调用 {global_attempt}",
+                    "warn" if can_retry else "error",
+                    (
+                        "审阅器返回空响应"
+                        if empty
+                        else "审阅器返回的 JSON schema 不完整"
+                        if invalid_schema
+                        else "审阅器返回 invalid JSON"
+                    )
+                    + ("，将重试同一候选。" if can_retry else "，且共享预算已耗尽。"),
+                    details=(
+                        detail("全局调用", f"{global_attempt}/{budget.max_calls}", "info"),
+                        detail("本候选调用", str(candidate_attempt), "info"),
+                    ),
+                )
+            if can_retry:
+                continue
+            _mark_qzone_reviewer_budget_exhausted(
+                report,
+                budget=budget,
+                attempt_key=attempt_key,
+                replace_failure=True,
             )
-        return None
-    payload = _extract_json_object(raw)
-    if not payload:
-        if logger is not None:
-            logger.info("[qzone] semantic review returned invalid JSON, drop post")
+            return None
+
+        required_true = all(payload.get(key) is True for key in ("accept", "coherent", "grounded", "novel"))
+        repeated = any(payload.get(key) is True for key in ("same_topic", "same_scene", "same_syntax"))
+        payload["accepted"] = bool(required_true and not repeated)
         if report is not None:
-            report.fail(
-                "semantic_review_invalid_json",
-                "semantic_review",
-                "语义审阅返回格式无效",
-                "审阅模型没有返回要求的 JSON 判定，无法确认草稿是否可以发布。",
-                suggestion="检查审阅模型结构化输出能力后重试。",
-            )
-        return None
-    required_true = all(payload.get(key) is True for key in ("accept", "coherent", "grounded", "novel"))
-    repeated = any(payload.get(key) is True for key in ("same_topic", "same_scene", "same_syntax"))
-    payload["accepted"] = bool(required_true and not repeated)
-    if report is not None:
-        status = "ok" if payload["accepted"] else "error"
-        report.add_step(
-            f"{attempt_key}_semantic",
-            "语义、依据与新颖度审阅",
-            status,
-            str(payload.get("reason") or ("全部判定通过" if payload["accepted"] else "至少一项判定未通过")),
-            details=tuple(
+            status = "ok" if payload["accepted"] else "error"
+            review_details = [
+                detail("审阅调用", f"{global_attempt}/{budget.max_calls}", "info"),
+                detail("本候选调用", str(candidate_attempt), "info"),
+            ]
+            review_details.extend(
                 detail(label, "通过" if bool(payload.get(key)) == expected else "未通过", "ok" if bool(payload.get(key)) == expected else "error")
                 for key, label, expected in (
                     ("coherent", "连贯性", True),
@@ -966,9 +1139,15 @@ async def _review_qzone_semantics(
                     ("same_scene", "场景不重复", False),
                     ("same_syntax", "句式不重复", False),
                 )
-            ),
-        )
-    return payload
+            )
+            report.add_step(
+                f"{attempt_key}_semantic",
+                "语义、依据与新颖度审阅",
+                status,
+                str(payload.get("reason") or ("全部判定通过" if payload["accepted"] else "至少一项判定未通过")),
+                details=tuple(review_details),
+            )
+        return payload
 
 
 async def _build_qzone_post_with_optional_image(
@@ -987,6 +1166,7 @@ async def _build_qzone_post_with_optional_image(
     report: QzoneGenerationReport | None = None,
     attempt_key: str = "draft",
     attempt_label: str = "候选草稿",
+    reviewer_budget: QzoneReviewerBudget | None = None,
 ) -> str:
     if report is not None:
         report.last_review = {}
@@ -1069,6 +1249,7 @@ async def _build_qzone_post_with_optional_image(
         logger=logger,
         report=report,
         attempt_key=attempt_key,
+        reviewer_budget=reviewer_budget,
     )
     if semantic_review is not None and not semantic_review.get("accepted"):
         logger.info(
@@ -1110,7 +1291,7 @@ async def _build_qzone_post_with_optional_image(
                 details=(detail("审阅理由", str(semantic_review.get("reason") or "未提供"), "error"),),
             )
         return ""
-    if semantic_review is None and (tool_caller is not None or call_ai_api is not None):
+    if semantic_review is None:
         return ""
     image_marker = await _maybe_generate_qzone_image_marker(
         tool_caller=tool_caller,
@@ -1371,12 +1552,22 @@ async def _repair_qzone_candidate(
     agent_max_steps: int,
     rejected_attempt_key: str,
     attempt_offset: int = 1,
+    reviewer_budget: QzoneReviewerBudget | None = None,
 ) -> str:
+    reviewer_budget = reviewer_budget or QzoneReviewerBudget()
     candidate = _trim_qzone_content(rejected_content, max_chars=120)
     previous_attempt_key = rejected_attempt_key
     for index in range(max(0, int(attempts_remaining))):
         if report.code not in _QZONE_REPAIRABLE_CODES:
             break
+        if reviewer_budget.remaining <= 0:
+            _mark_qzone_reviewer_budget_exhausted(
+                report,
+                budget=reviewer_budget,
+                attempt_key=previous_attempt_key,
+                replace_failure=False,
+            )
+            return ""
         repair_number = attempt_offset + index
         attempt_key = f"repair_{repair_number}"
         report.mark_attempt_recoverable(
@@ -1439,11 +1630,19 @@ async def _repair_qzone_candidate(
             report=report,
             attempt_key=attempt_key,
             attempt_label=f"自动修复候选 {repair_number}",
+            reviewer_budget=reviewer_budget,
         )
         if result:
             return result
         previous_attempt_key = attempt_key
     if report.code in _QZONE_REPAIRABLE_CODES:
+        if reviewer_budget.remaining <= 0:
+            _mark_qzone_reviewer_budget_exhausted(
+                report,
+                budget=reviewer_budget,
+                attempt_key=previous_attempt_key,
+                replace_failure=False,
+            )
         report.add_step(
             "repair_budget_exhausted",
             "自动修复预算",
@@ -1534,6 +1733,7 @@ async def generate_ai_diary(
     diversity_hint = _pick_diversity_hint()
     source_context = "\n\n".join(part for part in (chat_context, emotion_hint) if part)
     candidates_used = 0
+    reviewer_budget = QzoneReviewerBudget()
 
     if chat_context:
         rich_prompt = (
@@ -1580,6 +1780,7 @@ async def generate_ai_diary(
                 report=_report,
                 attempt_key="rich",
                 attempt_label="Rich 候选正文",
+                reviewer_budget=reviewer_budget,
             )
         elif raw_rich_result:
             logger.info("[qzone] rich generation returned non-JSON output, reject draft")
@@ -1594,6 +1795,9 @@ async def generate_ai_diary(
                 )
         if rich_result:
             return rich_result
+
+        if _report.code.startswith("semantic_reviewer_") or _report.code == "semantic_review_budget_exhausted":
+            return ""
 
         logger.warning("[diary] rich prompt generation failed, fallback to basic prompt")
 
@@ -1659,6 +1863,7 @@ async def generate_ai_diary(
             report=_report,
             attempt_key="basic",
             attempt_label="Basic 候选正文",
+            reviewer_budget=reviewer_budget,
         )
     else:
         if raw_result:
@@ -1690,6 +1895,7 @@ async def generate_ai_diary(
         logger=logger,
         agent_max_steps=agent_max_steps,
         rejected_attempt_key="basic",
+        reviewer_budget=reviewer_budget,
     )
 
 
@@ -1808,6 +2014,7 @@ async def maybe_generate_proactive_qzone_post(
         f"当前心情：{mood}\n当前精力：{energy}\n最近挂念：\n{pending_block}\n"
         f"近期群情绪记忆：\n{emotion_hint or '- 暂无'}\n最近聊天：\n{chat_context}"
     )
+    reviewer_budget = QzoneReviewerBudget()
     payload = _extract_json_object(result)
     if payload:
         if str(payload.get("action", "") or "").strip().lower() != "post":
@@ -1828,6 +2035,7 @@ async def maybe_generate_proactive_qzone_post(
             report=report,
             attempt_key="proactive",
             attempt_label="主动说说候选",
+            reviewer_budget=reviewer_budget,
         )
         if post:
             return post
@@ -1850,6 +2058,7 @@ async def maybe_generate_proactive_qzone_post(
             logger=logger,
             agent_max_steps=agent_max_steps,
             rejected_attempt_key="proactive",
+            reviewer_budget=reviewer_budget,
         )
     if result.startswith("POST|"):
         text = _trim_qzone_content(result.split("|", 1)[1])
@@ -1869,6 +2078,7 @@ async def maybe_generate_proactive_qzone_post(
             report=report,
             attempt_key="proactive_legacy",
             attempt_label="主动说说兼容候选",
+            reviewer_budget=reviewer_budget,
         )
         if post:
             return post
@@ -1891,5 +2101,6 @@ async def maybe_generate_proactive_qzone_post(
             logger=logger,
             agent_max_steps=agent_max_steps,
             rejected_attempt_key="proactive_legacy",
+            reviewer_budget=reviewer_budget,
         )
     return ""
