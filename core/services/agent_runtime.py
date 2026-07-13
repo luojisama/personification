@@ -12,6 +12,7 @@ from ...skill_runtime.loader import load_builtin_skillpacks_sync
 from ...skill_runtime.runtime_api import SkillRuntime
 from ..ai_routes import build_routed_tool_caller
 from ..file_sender import build_file_sender
+from ..generated_skills import register_generated_skills
 from ..llm_context import current_llm_context
 from ..model_router import (
     MODEL_ROLE_AGENT,
@@ -298,6 +299,23 @@ def build_agent_tool_registry(
         registry.register(build_gold_price_tool(_60s_base, logger, _60s_local_base))
         registry.register(build_baike_tool(_60s_base, logger, _60s_local_base))
         registry.register(build_exchange_rate_tool(_60s_base, logger, _60s_local_base))
+    generated_runtime = SkillRuntime(
+        plugin_config=plugin_config,
+        logger=logger,
+        get_now=get_now,
+        scheduler=scheduler,
+        data_dir=data_dir,
+        persona_store=persona_store,
+        vision_caller=vision_caller,
+        get_bots=get_bots,
+        tool_caller=tool_caller,
+        knowledge_store=knowledge_store,
+        memory_store=memory_store,
+        profile_service=profile_service,
+        memory_curator=memory_curator,
+        background_intelligence=background_intelligence,
+    )
+    register_generated_skills(registry=registry, runtime=generated_runtime)
     apply_tool_metadata_defaults(registry)
     return registry
 

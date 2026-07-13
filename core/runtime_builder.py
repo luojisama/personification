@@ -149,6 +149,7 @@ from .runtime_config import get_runtime_load_info
 from .runtime_state import get_shared_http_client, schedule_disabled_override_prompt
 from .service_factory import (
     build_agent_runtime_deps,
+    build_agent_tool_registry,
     build_ai_api_caller,
     build_custom_title_getter,
     build_grounding_context_builder,
@@ -631,6 +632,26 @@ def build_plugin_runtime(
             warn=True,
             model_override=get_model_override_for_role(plugin_config, MODEL_ROLE_STICKER),
         )
+        registry_version = None
+        candidate_registry = None
+        if tool_registry is not None:
+            registry_version = tool_registry.version
+            candidate_registry = build_agent_tool_registry(
+                plugin_config=plugin_config,
+                logger=logger,
+                get_now=get_current_local_time,
+                tool_caller=new_agent_tool_caller,
+                persona_store=persona_store,
+                vision_caller=new_vision_caller,
+                scheduler=scheduler,
+                data_dir=data_dir,
+                get_bots=get_bots,
+                knowledge_store=knowledge_store,
+                memory_store=memory_store,
+                profile_service=profile_service,
+                memory_curator=memory_curator,
+                background_intelligence=background_intelligence,
+            )
         yaml_response_processor = build_yaml_response_processor(
             get_current_time=get_current_local_time,
             format_time_context=format_time_context,
@@ -666,6 +687,8 @@ def build_plugin_runtime(
             inner_state_updater=inner_state_updater,
             favorability_service=favorability_service,
         )
+        if tool_registry is not None and candidate_registry is not None and registry_version is not None:
+            tool_registry.replace_all(candidate_registry.all(), expected_version=registry_version)
         reply_processor_deps.runtime.process_yaml_response_logic = yaml_response_processor
         reply_processor_deps.runtime.agent_tool_caller = new_agent_tool_caller
         reply_processor_deps.runtime.lite_tool_caller = new_lite_tool_caller
