@@ -239,6 +239,33 @@ main { padding:20px 26px 48px; max-width:none; width:100%; min-width:0; height:1
 .skill-stat { border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--panel); min-height:72px; display:flex; flex-direction:column; justify-content:space-between; gap:4px; }
 .skill-stat strong { font-size:22px; line-height:1.1; }
 .skill-stat small { color:var(--muted); font-size:12px; }
+.tool-creator-intro { padding:24px 26px; margin-bottom:14px; border:1px solid var(--line); border-radius:18px; background:linear-gradient(135deg,rgba(99,102,241,.16),rgba(14,165,233,.05) 52%,transparent); }
+.tool-creator-intro h1 { font-size:30px; margin:5px 0 8px; }
+.tool-creator-intro p { max-width:820px; color:var(--muted); line-height:1.7; margin:0; }
+.tool-creator-compose textarea,.tool-creator-question textarea { width:100%; min-height:120px; margin:8px 0 10px; resize:vertical; }
+.tool-creator-compose input { min-width:260px; flex:1; }
+.tool-creator-workspace { display:grid; grid-template-columns:minmax(250px,330px) minmax(0,1fr); gap:14px; align-items:start; }
+.tool-creator-task-list { display:flex; flex-direction:column; gap:7px; }
+.tool-creator-task { display:flex; justify-content:space-between; gap:8px; align-items:center; width:100%; padding:11px; border:1px solid var(--line); border-radius:10px; background:transparent; color:var(--text); text-align:left; cursor:pointer; }
+.tool-creator-task.selected { border-color:var(--accent); background:rgba(99,102,241,.1); }
+.tool-creator-task span:first-child { display:flex; flex-direction:column; min-width:0; }
+.tool-creator-task strong { overflow:hidden; text-overflow:ellipsis; }
+.tool-creator-task small { color:var(--muted); font-size:11px; margin-top:3px; }
+.tool-creator-detail h2 { margin:4px 0; }
+.tool-creator-detail>.between>div { min-width:0; }
+.tool-creator-detail>.between p { white-space:pre-wrap; color:var(--muted); max-width:760px; }
+.tool-creator-progress { height:8px; background:rgba(148,163,184,.15); border-radius:999px; overflow:hidden; margin:15px 0 9px; }
+.tool-creator-progress span { display:block; height:100%; background:linear-gradient(90deg,var(--accent),#22d3ee); transition:width .25s ease; }
+.tool-creator-question,.tool-creator-artifact { margin:18px 0; padding:16px; border-radius:13px; border:1px solid rgba(245,158,11,.38); background:rgba(245,158,11,.07); }
+.tool-creator-artifact { border-color:rgba(52,211,153,.35); background:rgba(52,211,153,.05); }
+.tool-creator-artifact pre { max-height:360px; overflow:auto; white-space:pre-wrap; }
+.tool-creator-events { list-style:none; padding:0; margin:10px 0; display:flex; flex-direction:column; gap:8px; }
+.tool-creator-events li { display:grid; grid-template-columns:34px minmax(0,1fr) auto; gap:10px; padding:10px; border-left:2px solid var(--line); background:rgba(148,163,184,.04); }
+.tool-creator-events li>span { font-family:ui-monospace,monospace; color:var(--accent); }
+.tool-creator-events strong { font-size:13px; }
+.tool-creator-events p { margin:3px 0 0; color:var(--muted); font-size:12px; }
+.tool-creator-events time { color:var(--muted); font-size:11px; }
+.tool-creator-actions { margin-top:14px; }
 .remote-source-form { display:grid; grid-template-columns:minmax(220px,2fr) minmax(120px,1fr) minmax(100px,0.7fr) minmax(120px,1fr) auto auto auto; gap:8px; align-items:center; margin:14px 0; }
 .remote-source-form input[type=text], .remote-source-form input:not([type]) { width:100%; min-width:0; }
 .remote-source-form label { color:var(--muted); white-space:nowrap; font-size:12px; }
@@ -432,6 +459,11 @@ td code, .field-head code { word-break:break-all; }
   .api-provider-model-field { grid-column:auto; }
   .api-provider-model-row { grid-template-columns:1fr; }
   .skill-summary { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .tool-creator-workspace { grid-template-columns:1fr; }
+  .tool-creator-history { order:2; }
+  .tool-creator-detail { order:1; }
+  .tool-creator-intro { padding:18px; }
+  .tool-creator-intro h1 { font-size:25px; }
   .remote-source-form { grid-template-columns:1fr; }
   .remote-source-form label { min-height:34px; display:flex; align-items:center; }
   .persona-builder-form, .persona-builder-form.custom-grid, .agent-report-grid { grid-template-columns:1fr; }

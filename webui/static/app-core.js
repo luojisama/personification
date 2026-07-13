@@ -17,6 +17,7 @@ let state = {
   groupSwitches: [], newGroupId: "",
   skills: [], skillFilter: "", skillSummary: null, skillRemoteSources: [], skillMcpTools: [],
   skillSourceForm: { source: "", name: "", ref: "", subdir: "", kind: "auto", preferFirst: false, autoApprove: false },
+  toolCreatorTasks: [], toolCreatorSelectedId: "", toolCreatorDetail: null, toolCreatorRequest: "", toolCreatorSuggestedName: "", toolCreatorAnswer: "", toolCreatorBusy: false, toolCreatorDiagnostic: null,
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
   personaTemplateForm: { mode: "source", work_title: "", character_name: "", persona_name: "", gender: "", personality: "", traits: "", hobbies: "", description: "" }, personaTemplateResult: null, personaTemplateBusy: false, personaTemplateTask: null, personaTemplateHistory: [],
   personaAvatarCandidateId: "", personaSignatureCandidateId: "", personaProfileBotId: "",
@@ -42,7 +43,7 @@ let state = {
 const VIEW_ASSETS = {
   dashboard:"app-admin.js",health:"app-admin.js",qzone:"app-admin.js",personas:"app-admin.js",groups:"app-admin.js",group_switch:"app-admin.js",persona_prompt:"app-admin.js",persona_builder:"app-admin.js",qq:"app-admin.js",
   config:"app-config.js",memory:"app-content.js",memory_graph:"app-content.js",stickers:"app-content.js",
-  skills:"app-tools.js",plugin_knowledge:"app-tools.js",plugin_manager:"app-tools.js",test:"app-tools.js",
+  skills:"app-tools.js",tool_creator:"app-tool-creator.js",plugin_knowledge:"app-tools.js",plugin_manager:"app-tools.js",test:"app-tools.js",
   proactive:"app-activity.js",audit:"app-activity.js",logs:"app-activity.js",traces:"app-activity.js",trace_detail:"app-activity.js",
   agent_status:"app-operations.js",data_transfer:"app-operations.js",
 };
@@ -397,6 +398,7 @@ function loadingMessageForView(view) {
     memory_graph: "正在绘制记忆关系...",
     stickers: "正在加载表情包库...",
     skills: "正在扫描 Skill 和 MCP 工具...",
+    tool_creator: "正在恢复工具创建任务...",
     plugin_knowledge: "正在读取插件知识库...",
     plugin_manager: "正在检查插件更新...",
     persona_builder: "正在准备人设构建工具...",
@@ -445,6 +447,16 @@ async function loadView() {
       state.skillSummary = data.summary || null;
       state.skillRemoteSources = data.remote_sources || [];
       state.skillMcpTools = data.mcp_tools || [];
+    } else if (view === "tool_creator") {
+      const data = await api("/tool-creator/tasks?limit=40");
+      state.toolCreatorTasks = data.tasks || [];
+      if (!state.toolCreatorSelectedId && state.toolCreatorTasks.length) state.toolCreatorSelectedId = state.toolCreatorTasks[0].task_id;
+      if (state.toolCreatorSelectedId) {
+        state.toolCreatorDetail = await api("/tool-creator/tasks/" + encodeURIComponent(state.toolCreatorSelectedId)).catch(() => null);
+      } else {
+        state.toolCreatorDetail = null;
+      }
+      if (typeof startToolCreatorPolling === "function") startToolCreatorPolling();
     } else if (view === "test") {
       /* nothing to preload */
     } else if (view === "persona_builder") {
@@ -559,7 +571,7 @@ async function loadView() {
 }
 
 function viewTitle() {
-  return ({agent_status:"Agent 状态",data_transfer:"数据迁移",dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",plugin_knowledge:"插件知识库",plugin_manager:"插件管理",test:"模型测试",persona_prompt:"人设预览",persona_builder:"人设构建",audit:"审计日志",logs:"插件日志",traces:"消息 Trace",trace_detail:"Trace 详情",proactive:"主动诊断",health:"功能体检",qzone:"QQ 空间",qq:"QQ 管理",devices:"设备管理"})[state.view] || state.view;
+  return ({agent_status:"Agent 状态",data_transfer:"数据迁移",dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",tool_creator:"创建工具",plugin_knowledge:"插件知识库",plugin_manager:"插件管理",test:"模型测试",persona_prompt:"人设预览",persona_builder:"人设构建",audit:"审计日志",logs:"插件日志",traces:"消息 Trace",trace_detail:"Trace 详情",proactive:"主动诊断",health:"功能体检",qzone:"QQ 空间",qq:"QQ 管理",devices:"设备管理"})[state.view] || state.view;
 }
 
 async function navigateToView(view,{fromHistory=false}={}) {
@@ -567,6 +579,7 @@ async function navigateToView(view,{fromHistory=false}={}) {
   captureScrollState();
   if(!fromHistory&&location.hash!==`#${nextView}`)history.pushState({view:nextView},"",`#${nextView}`);
   if(state.view==="qzone"&&nextView!=="qzone"&&typeof stopQzoneViewLifecycle==="function")stopQzoneViewLifecycle();
+  if(state.view==="tool_creator"&&nextView!=="tool_creator"&&typeof stopToolCreatorPolling==="function")stopToolCreatorPolling();
   state.view=nextView;
   if(state.mobileNavOpen)state.mobileNavOpen=false;
   try{await loadView();render();}catch(e){alertFlash("err",e.message);}
@@ -676,6 +689,7 @@ function renderLayout() {
         ${navItem('stickers','表情包','image')}
         <div class="nav-group-label">能力</div>
         ${navItem('skills','Skill 管理','plug')}
+        ${navItem('tool_creator','创建工具','wand')}
         ${navItem('plugin_knowledge','插件知识库','book')}
         ${navItem('plugin_manager','插件管理','wrench')}
         ${navItem('test','模型测试','terminal')}
@@ -721,6 +735,7 @@ function renderView() {
   if (state.view === "groups") return renderGroups();
   if (state.view === "group_switch") return renderGroupSwitch();
   if (state.view === "skills") return renderSkills();
+  if (state.view === "tool_creator") return renderToolCreator();
   if (state.view === "plugin_knowledge") return renderPluginKnowledge();
   if (state.view === "plugin_manager") return renderPluginManager();
   if (state.view === "qq") return renderQQ();

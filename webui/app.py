@@ -154,6 +154,7 @@ def _render_index_html() -> str:
         "app-content.js",
         "app-admin.js",
         "app-tools.js",
+        "app-tool-creator.js",
         "app-config.js",
         "app-auth.js",
         "app-operations.js",
