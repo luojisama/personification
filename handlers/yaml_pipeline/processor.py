@@ -2373,9 +2373,15 @@ def build_yaml_response_processor(
             intent_recommend_silence=runtime_overrides.get("intent_recommend_silence"),
             recent_context_hint=str(runtime_overrides.get("recent_context_hint", "") or ""),
             relationship_hint=str(runtime_overrides.get("relationship_hint", "") or ""),
+            semantic_frame=runtime_overrides.get("semantic_frame"),
             has_newer_batch=bool(runtime_overrides.get("has_newer_batch", False)),
             batch_runtime_ref=runtime_overrides.get("batch_runtime_ref"),
+            reply_commit_state=runtime_overrides.get("reply_commit_state"),
             solo_speaker_follow=bool(runtime_overrides.get("solo_speaker_follow", False)),
+            reply_required=bool(runtime_overrides.get("reply_required", False)),
+            response_deadline=runtime_overrides.get("response_deadline"),
+            prepared_inner_state=runtime_overrides.get("prepared_inner_state"),
+            prepared_emotion_state=runtime_overrides.get("prepared_emotion_state"),
         )
 
     return _processor

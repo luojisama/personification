@@ -11,6 +11,8 @@ from ._loader import load_personification_module
 processor = load_personification_module("plugin.personification.handlers.reply_pipeline.processor")
 reply_buffer = load_personification_module("plugin.personification.handlers.reply_buffer")
 reply_turn_trace = load_personification_module("plugin.personification.core.reply_turn_trace")
+yaml_processor = load_personification_module("plugin.personification.handlers.yaml_pipeline.processor")
+yaml_handler = load_personification_module("plugin.personification.handlers.yaml_response_handler")
 
 
 def test_cancelled_reply_processor_does_not_finish_as_no_reply(monkeypatch) -> None:  # noqa: ANN001
@@ -158,3 +160,61 @@ def test_timeout_with_unknown_send_outcome_does_not_retry(monkeypatch) -> None: 
 
     assert finished[-1]["outcome"] == "outcome_unknown"
     assert finished[-1]["diagnosis_code"] == "send_outcome_unknown"
+
+
+def test_yaml_wrapper_preserves_required_reply_delivery_contract(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+
+    async def _process(*_args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        captured.update(kwargs)
+
+    monkeypatch.setattr(yaml_handler, "process_yaml_response_logic", _process)
+    wrapper = yaml_processor.build_yaml_response_processor(
+        get_current_time=lambda: None,
+        format_time_context=lambda _now: "",
+        bot_statuses={},
+        get_group_config=lambda _group_id: {},
+        plugin_config=SimpleNamespace(),
+        get_schedule_prompt_injection=lambda: "",
+        schedule_disabled_override_prompt=lambda: "",
+        build_grounding_context=lambda _query: None,
+        call_ai_api=lambda *_args, **_kwargs: None,
+        parse_yaml_response=lambda _text: {},
+        message_segment_cls=SimpleNamespace,
+        sanitize_history_text=str,
+        private_session_prefix="private_",
+        build_private_session_id=lambda user_id: f"private_{user_id}",
+        build_group_session_id=str,
+        append_session_message=lambda *_args, **_kwargs: None,
+        record_group_msg=None,
+        logger=SimpleNamespace(),
+        user_blacklist={},
+    )
+    semantic_frame = SimpleNamespace(chat_intent="chat")
+    delivery_state: dict[str, object] = {}
+    inner_state = {"mood": "calm"}
+    emotion_state = {"tone": "warm"}
+
+    asyncio.run(wrapper(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        "group-1",
+        "user-1",
+        "name",
+        "friend",
+        {},
+        [],
+        semantic_frame=semantic_frame,
+        reply_commit_state=delivery_state,
+        reply_required=True,
+        response_deadline=123.5,
+        prepared_inner_state=inner_state,
+        prepared_emotion_state=emotion_state,
+    ))
+
+    assert captured["semantic_frame"] is semantic_frame
+    assert captured["reply_commit_state"] is delivery_state
+    assert captured["reply_required"] is True
+    assert captured["response_deadline"] == 123.5
+    assert captured["prepared_inner_state"] is inner_state
+    assert captured["prepared_emotion_state"] is emotion_state
