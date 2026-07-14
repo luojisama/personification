@@ -5,7 +5,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
-from .llm_context import use_single_attempt_retry_policy
+from .llm_context import current_llm_context, use_single_attempt_retry_policy
 from .safety_filter import build_safe_reframe_messages, detect_route_safety_issue
 
 
@@ -38,6 +38,73 @@ class ProviderResolution:
     provider: dict[str, str]
     source: str
     ignored_sources: tuple[str, ...] = ()
+
+
+class RoutedToolCallerError(RuntimeError):
+    def __init__(self, attempts: list[dict[str, Any]]) -> None:
+        self.route_attempts = tuple(dict(item) for item in attempts)
+        selected = self._select_attempt(attempts)
+        self.code = str(selected.get("code") or "providers_exhausted")
+        self.status_code = int(selected.get("status_code") or 0)
+        self.retryable = bool(selected.get("retryable", True))
+        super().__init__("all routed tool callers failed")
+
+    @staticmethod
+    def _select_attempt(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+        priorities = (
+            lambda item: item.get("code") == "provider_model_candidate_unavailable",
+            lambda item: item.get("code") == "provider_auth_failed" or item.get("status_code") in {401, 403},
+            lambda item: item.get("status_code") in {400, 422},
+            lambda item: item.get("status_code") == 404,
+            lambda item: bool(item.get("retryable")),
+        )
+        for predicate in priorities:
+            matched = next((item for item in attempts if predicate(item)), None)
+            if matched is not None:
+                return matched
+        return attempts[-1] if attempts else {"code": "providers_exhausted", "retryable": True}
+
+
+def _exception_route_metadata(exc: BaseException) -> tuple[int, str, bool, str, str]:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    status_code = 0
+    code = ""
+    retryable = False
+    concrete_model = ""
+    next_model = ""
+    while current is not None and id(current) not in seen and len(seen) < 6:
+        seen.add(id(current))
+        if not code:
+            code = str(getattr(current, "code", "") or "").strip().lower()
+        if not status_code:
+            values = (
+                getattr(current, "status_code", None),
+                getattr(getattr(current, "response", None), "status_code", None),
+            )
+            for value in values:
+                try:
+                    status_code = int(value or 0)
+                except (TypeError, ValueError):
+                    continue
+                if status_code:
+                    break
+        retryable = retryable or getattr(current, "retryable", False) is True
+        if not concrete_model:
+            concrete_model = str(getattr(current, "concrete_model", "") or "").strip()
+        if not next_model:
+            next_model = str(getattr(current, "next_model", "") or "").strip()
+        current = current.__cause__ or current.__context__
+    if not code:
+        if status_code in {401, 403}:
+            code = "provider_auth_failed"
+        elif status_code in {400, 422}:
+            code = "provider_request_rejected"
+        elif status_code == 404:
+            code = "provider_model_unavailable"
+        else:
+            code = "provider_call_failed"
+    return status_code, code, retryable, concrete_model[:120], next_model[:120]
 
 
 def _normalize_api_type(api_type: str) -> str:
@@ -546,6 +613,7 @@ class RoutedToolCaller:
         primary_callers: list[ToolCaller],
         fallback_caller: ToolCaller | None,
         logger: Any,
+        route_descriptors: list[dict[str, Any]] | None = None,
     ) -> None:
         self._primary_callers = list(primary_callers)
         self._fallback_caller = fallback_caller
@@ -554,10 +622,31 @@ class RoutedToolCaller:
         self._default_result_caller: ToolCaller | None = primary_callers[0] if primary_callers else fallback_caller
         self._caller_route_keys: dict[int, str] = {}
         self._caller_by_route_key: dict[str, ToolCaller] = {}
+        self._caller_route_descriptors: dict[int, dict[str, Any]] = {}
+        descriptors = list(route_descriptors or [])
         for index, caller in enumerate([*self._primary_callers, *([self._fallback_caller] if self._fallback_caller else [])]):
             key = f"{index}:{type(caller).__name__}"
             self._caller_route_keys[id(caller)] = key
             self._caller_by_route_key[key] = caller
+            source = descriptors[index] if index < len(descriptors) else {}
+            self._caller_route_descriptors[id(caller)] = {
+                "provider": str(source.get("name") or f"route-{index + 1}")[:80],
+                "api_type": str(source.get("api_type") or "")[:48],
+                "model": str(source.get("model") or "")[:120],
+                "caller": type(caller).__name__[:80],
+            }
+
+    def _route_attempt(self, caller: ToolCaller, exc: BaseException) -> dict[str, Any]:
+        status_code, code, retryable, concrete_model, next_model = _exception_route_metadata(exc)
+        return {
+            **self._caller_route_descriptors.get(id(caller), {"caller": type(caller).__name__[:80]}),
+            "concrete_model": concrete_model,
+            "next_model": next_model,
+            "status_code": status_code,
+            "code": code,
+            "retryable": retryable,
+            "exception_type": type(exc).__name__[:80],
+        }
 
     def _caller_from_tool_result_markers(self, messages: list[dict]) -> ToolCaller | None:
         for message in reversed(list(messages or [])):
@@ -591,6 +680,7 @@ class RoutedToolCaller:
         use_builtin_search: bool,
     ) -> ToolCallerResponse:
         last_error: Exception | None = None
+        route_attempts: list[dict[str, Any]] = []
         saw_vision_unavailable = False
         pinned_caller = self._caller_from_tool_result_markers(messages)
         if pinned_caller is not None:
@@ -610,6 +700,7 @@ class RoutedToolCaller:
                 raise
             except Exception as exc:
                 last_error = exc
+                route_attempts.append(self._route_attempt(caller, exc))
                 continue
             safety_issue = detect_route_safety_issue(response)
             if safety_issue:
@@ -625,6 +716,7 @@ class RoutedToolCaller:
                     raise
                 except Exception as exc:
                     last_error = exc
+                    route_attempts.append(self._route_attempt(caller, exc))
                     continue
                 if detect_route_safety_issue(response):
                     continue
@@ -633,11 +725,13 @@ class RoutedToolCaller:
                 continue
             if _is_invalid_tool_response(response):
                 continue
-            self._default_result_caller = caller
-            for tool_call in list(response.tool_calls or []):
-                call_id = str(getattr(tool_call, "id", "") or "").strip()
-                if call_id:
-                    self._tool_call_callers[call_id] = caller
+            is_qzone_probe = str(current_llm_context().get("purpose") or "") == "qzone_provider_probe"
+            if not is_qzone_probe:
+                self._default_result_caller = caller
+                for tool_call in list(response.tool_calls or []):
+                    call_id = str(getattr(tool_call, "id", "") or "").strip()
+                    if call_id:
+                        self._tool_call_callers[call_id] = caller
             return response
         if saw_vision_unavailable:
             return _tool_caller_response_cls()(
@@ -648,6 +742,8 @@ class RoutedToolCaller:
                 vision_unavailable=True,
             )
         if last_error is not None:
+            if use_single_attempt_retry_policy():
+                raise RoutedToolCallerError(route_attempts) from last_error
             raise last_error
         return _tool_caller_response_cls()(
             finish_reason="stop",
@@ -697,6 +793,7 @@ def build_routed_tool_caller(
     ]
     fallback_resolution = resolve_global_fallback_provider(plugin_config, logger, warn=True)
     fallback_caller = None
+    route_descriptors = list(providers)
     if fallback_resolution is not None:
         fallback_signature = _provider_signature(fallback_resolution.provider)
         primary_signatures = {_provider_signature(provider) for provider in providers}
@@ -709,12 +806,14 @@ def build_routed_tool_caller(
                     model_override=model_override,
                 )
             )
+            route_descriptors.append(fallback_resolution.provider)
     if not primary_callers and fallback_caller is None:
         return _build_tool_caller(plugin_config)
     return RoutedToolCaller(
         primary_callers=primary_callers,
         fallback_caller=fallback_caller,
         logger=logger,
+        route_descriptors=route_descriptors,
     )
 
 

@@ -667,14 +667,16 @@ function renderTest() {
     <textarea oninput="state.testPrompt=this.value" style="width:100%;min-height:80px;margin:6px 0">${escapeHtml(state.testPrompt)}</textarea>
     <div class="row" style="margin-top:10px">
       <button class="btn primary" onclick="runTest()">发送（路由模型）</button>
+      <button class="btn" onclick="runTest('qzone')">QZone 兼容测试</button>
       <button class="btn" onclick="runTestAll()">测试全部 provider</button>
       ${state.testLoading?'<span class="muted">调用中…</span>':''}
     </div>
-    <p class="muted" style="margin-top:8px;font-size:12px">“测试全部 provider”会向 api_pools 里每个 provider 各发一次，分别返回延迟与内容，用于排查哪个供应商不通或被拦截。</p>
+    <p class="muted" style="margin-top:8px;font-size:12px">“QZone 兼容测试”使用 production single_attempt、只读 function schema 和 JSON instruction，但不会执行工具或发布内容；“测试全部 provider”会向 api_pools 里每个 provider 各发一次。</p>
   </div>
   ${r ? `<div class="card"><h2>响应（路由模型）</h2>
     <div class="row muted" style="font-size:12px;margin-bottom:8px">
       <span>模型 <code>${escapeHtml(r.model_used||'未知')}</code></span>
+      ${r.profile==='qzone'?'<span>QZone-compatible</span>':''}
       <span>finish=${escapeHtml(r.finish_reason||'')}</span>
       <span>${r.duration_ms}ms</span>
       <span>tokens prompt=${r.usage?.prompt_tokens||0} completion=${r.usage?.completion_tokens||0}</span>
@@ -710,10 +712,10 @@ function renderTestAll() {
   </div>`;
 }
 
-async function runTest() {
+async function runTest(profile="chat") {
   state.testLoading = true; render();
   try {
-    state.testResult = await api("/test/chat", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({prompt: state.testPrompt, system: state.testSystem}) });
+    state.testResult = await api("/test/chat", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({prompt: state.testPrompt, system: state.testSystem, profile}) });
     persistTestOperationResult(state.testResult);
   } catch (e) {
     const report = operationDiagnosticFromError(e, "路由模型测试未完成");

@@ -25,6 +25,7 @@ from ..core.persona_profile import load_persona_profile
 from ..core.provider_health import classify_error as classify_provider_error
 from ..core.prompt_loader import AGENT_GUIDANCE_MARKER
 from ..core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
+from ..core.runtime_identity import get_runtime_identity
 from ..core.sticker_library import (
     list_local_sticker_files,
     load_sticker_metadata,
@@ -124,6 +125,14 @@ class QzoneGenerationReport:
 
     def to_diagnostic(self, *, ok: bool, content: str = "") -> dict[str, Any]:
         details = [] if ok else list(self.details)
+        runtime_identity = get_runtime_identity()
+        details.extend(
+            (
+                detail("Build", runtime_identity["build_id"], "info"),
+                detail("Worker", runtime_identity["worker_id"], "info"),
+                detail("Process started", runtime_identity["process_started_at"], "info"),
+            )
+        )
         if content:
             details.insert(0, detail("最终正文长度", f"{len(content)} 字", "ok"))
         return diagnostic(
@@ -230,6 +239,37 @@ def _qzone_error_code(exc: Exception) -> str:
             if nested:
                 return nested
     return ""
+
+
+def _qzone_route_attempt_details(exc: Exception) -> list[OperationDetail]:
+    for item in _qzone_exception_chain(exc):
+        attempts = getattr(item, "route_attempts", None)
+        if not isinstance(attempts, (list, tuple)):
+            continue
+        result: list[OperationDetail] = []
+        for index, attempt in enumerate(attempts, start=1):
+            if not isinstance(attempt, dict):
+                continue
+            provider = str(attempt.get("provider") or f"route-{index}")
+            api_type = str(attempt.get("api_type") or "unknown")
+            configured_model = str(attempt.get("model") or "unknown")
+            concrete_model = str(attempt.get("concrete_model") or "")
+            model = (
+                f"{configured_model} -> {concrete_model}"
+                if concrete_model and concrete_model != configured_model
+                else concrete_model or configured_model
+            )
+            status = int(attempt.get("status_code") or 0)
+            code = str(attempt.get("code") or "provider_call_failed")
+            result.append(
+                detail(
+                    f"Provider route {index}",
+                    f"{provider} · {api_type} · {model} · HTTP {status or '-'} · {code}",
+                    "error",
+                )
+            )
+        return result
+    return []
 
 
 def _is_deterministic_qzone_model_error(exc: Exception) -> bool:
@@ -1673,6 +1713,7 @@ async def _generate_once(
             code, title, message, retryable = _classify_qzone_generation_error(exc)
             http_status = _qzone_reviewer_http_status(exc)
             provider_error_code = _qzone_error_code(exc)
+            route_attempt_details = _qzone_route_attempt_details(exc)
             last_failure_code = code
             step_key = f"{attempt_key}_attempt_{generation_attempt}"
             if logger is not None:
@@ -1681,6 +1722,7 @@ async def _generate_once(
                     f"attempt={generation_attempt}/{_QZONE_GENERATION_MAX_ATTEMPTS} "
                     f"mode={'Agent' if agent_mode else 'Provider'} type={type(exc).__name__} "
                     f"status={http_status or '-'} code={provider_error_code or '-'} "
+                    f"routes={len(route_attempt_details)} "
                     f"retry={retryable and generation_attempt < _QZONE_GENERATION_MAX_ATTEMPTS}"
                 )
             if report is not None:
@@ -1691,6 +1733,7 @@ async def _generate_once(
                 ]
                 if http_status:
                     attempt_details.append(detail("HTTP status", http_status, "error"))
+                attempt_details.extend(route_attempt_details)
                 report.add_step(
                     step_key,
                     f"{attempt_label} · 第 {generation_attempt} 次",
@@ -1710,6 +1753,7 @@ async def _generate_once(
                     ]
                     if http_status:
                         failure_details.append(detail("HTTP status", http_status, "error"))
+                    failure_details.extend(route_attempt_details)
                     report.fail(
                         code,
                         "draft_generation",

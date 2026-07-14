@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from plugin.personification.core.image_refs import normalize_image_ref
-from plugin.personification.core.llm_context import use_single_attempt_retry_policy
+from plugin.personification.core.llm_context import current_llm_context, use_single_attempt_retry_policy
 from plugin.personification.core.message_parts import extract_text_from_parts, normalize_message_parts
 from plugin.personification.core.time_ctx import build_current_time_context_block, inject_current_time_context
 
@@ -140,6 +140,19 @@ class ToolCaller(ABC):
         result: str,
     ) -> dict | ToolCallerResponse:
         raise NotImplementedError
+
+
+class ProviderModelCandidateUnavailable(httpx.HTTPStatusError):
+    def __init__(self, source: httpx.HTTPStatusError, *, concrete_model: str, next_model: str) -> None:
+        super().__init__(
+            "provider concrete model candidate is unavailable",
+            request=source.request,
+            response=source.response,
+        )
+        self.code = "provider_model_candidate_unavailable"
+        self.retryable = True
+        self.concrete_model = str(concrete_model or "")
+        self.next_model = str(next_model or "")
 
 
 def _configure_genai(api_key: str, base_url: str = "") -> None:
@@ -4053,6 +4066,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
 
             model_candidates = _antigravity_cli_model_candidates(self.model)
             single_attempt = use_single_attempt_retry_policy()
+            state_neutral_probe = str(current_llm_context().get("purpose") or "") == "qzone_provider_probe"
             next_single_attempt_model = ""
             if single_attempt:
                 preferred_model = str(getattr(self, "_preferred_concrete_model", "") or "").strip()
@@ -4131,9 +4145,13 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                         ):
                             # QZone owns the retry budget. Rotate only the next full
                             # generation attempt instead of issuing another request here.
-                            self._preferred_concrete_model = next_single_attempt_model
-                            exc.code = "provider_model_candidate_unavailable"
-                            exc.retryable = True
+                            if not state_neutral_probe:
+                                self._preferred_concrete_model = next_single_attempt_model
+                            raise ProviderModelCandidateUnavailable(
+                                exc,
+                                concrete_model=model_name,
+                                next_model=next_single_attempt_model,
+                            ) from exc
                         if (
                             exc.response is not None
                             and exc.response.status_code == 401
@@ -4188,7 +4206,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                         raise
                 if last_exc is not None and not data:
                     raise last_exc
-                if selected_model_name:
+                if selected_model_name and not state_neutral_probe:
                     self._preferred_concrete_model = selected_model_name
 
             inner_response = data.get("response") if isinstance(data, dict) else None

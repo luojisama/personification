@@ -126,7 +126,7 @@ def test_single_attempt_reuses_model_selected_by_normal_probe(monkeypatch) -> No
     assert requested_models == ["gemini-3-flash-agent"]
 
 
-def test_single_attempt_rotates_404_candidate_only_for_next_call(monkeypatch) -> None:  # noqa: ANN001
+def test_single_attempt_rotates_404_candidate_without_probe_state(monkeypatch) -> None:  # noqa: ANN001
     caller = impl.AntigravityCliToolCaller(
         model="auto-gemini-3",
         auth_path="",
@@ -156,6 +156,18 @@ def test_single_attempt_rotates_404_candidate_only_for_next_call(monkeypatch) ->
 
     monkeypatch.setattr(caller, "_get_access_token", _get_access_token)
     monkeypatch.setattr(impl, "_get_pooled_http_client", _get_client)
+    probe_token = llm_context.set_llm_context(
+        purpose="qzone_provider_probe",
+        retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+    )
+    try:
+        with pytest.raises(impl.httpx.HTTPStatusError):
+            asyncio.run(caller.chat_with_tools([{"role": "user", "content": "hi"}], [], False))
+    finally:
+        llm_context.reset_llm_context(probe_token)
+    assert getattr(caller, "_preferred_concrete_model", "") == ""
+    assert requested_models == ["gemini-3.5-flash-low"]
+
     token = llm_context.set_llm_context(
         purpose="qzone_generation",
         retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
@@ -164,14 +176,20 @@ def test_single_attempt_rotates_404_candidate_only_for_next_call(monkeypatch) ->
         with pytest.raises(impl.httpx.HTTPStatusError) as caught:
             asyncio.run(caller.chat_with_tools([{"role": "user", "content": "hi"}], [], False))
         assert getattr(caught.value, "code", "") == "provider_model_candidate_unavailable"
-        assert requested_models == ["gemini-3.5-flash-low"]
+        assert getattr(caught.value, "concrete_model", "") == "gemini-3.5-flash-low"
+        assert getattr(caught.value, "next_model", "") == "gemini-3-flash-agent"
+        assert requested_models == ["gemini-3.5-flash-low", "gemini-3.5-flash-low"]
 
         result = asyncio.run(caller.chat_with_tools([{"role": "user", "content": "hi"}], [], False))
     finally:
         llm_context.reset_llm_context(token)
 
     assert result.model_used == "gemini-3-flash-agent"
-    assert requested_models == ["gemini-3.5-flash-low", "gemini-3-flash-agent"]
+    assert requested_models == [
+        "gemini-3.5-flash-low",
+        "gemini-3.5-flash-low",
+        "gemini-3-flash-agent",
+    ]
 
 
 # ====== 协议端到端测试（mock httpx） ======

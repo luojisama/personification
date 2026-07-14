@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 ai_routes = load_personification_module("plugin.personification.core.ai_routes")
+llm_context = load_personification_module("plugin.personification.core.llm_context")
 tool_impl = load_personification_module("plugin.personification.skills.skillpacks.tool_caller.scripts.impl")
 
 
@@ -218,3 +221,74 @@ def test_routed_tool_caller_keeps_safety_retry_pinned() -> None:
 
     assert response.content == "原 caller 恢复"
     assert len(primary.calls_seen) == primary_calls_before_pinned_turn
+
+
+def test_qzone_routed_tool_caller_preserves_all_safe_route_attempts() -> None:
+    candidate_error = RuntimeError("private candidate response")
+    candidate_error.code = "provider_model_candidate_unavailable"
+    candidate_error.status_code = 404
+    candidate_error.retryable = True
+    request_error = RuntimeError("private request response")
+    request_error.status_code = 422
+    primary = _FakeCaller("primary", [candidate_error])
+    fallback = _FakeCaller("fallback", [request_error])
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[primary],
+        fallback_caller=fallback,
+        logger=None,
+        route_descriptors=[
+            {"name": "antigravity", "api_type": "antigravity_cli", "model": "auto-gemini-3"},
+            {"name": "backup", "api_type": "openai", "model": "backup-model"},
+        ],
+    )
+    token = llm_context.set_llm_context(
+        purpose="qzone_generation",
+        retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+    )
+    try:
+        with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+            asyncio.run(routed.chat_with_tools([], [], False))
+    finally:
+        llm_context.reset_llm_context(token)
+
+    error = caught.value
+    assert error.code == "provider_model_candidate_unavailable"
+    assert error.status_code == 404
+    assert error.retryable is True
+    assert [item["provider"] for item in error.route_attempts] == ["antigravity", "backup"]
+    assert [item["status_code"] for item in error.route_attempts] == [404, 422]
+    assert all("private" not in str(item) for item in error.route_attempts)
+
+
+def test_qzone_probe_does_not_mutate_routed_tool_result_state() -> None:
+    empty = tool_impl.ToolCallerResponse(
+        finish_reason="stop",
+        content="",
+        tool_calls=[],
+        raw={},
+    )
+    tool_response = tool_impl.ToolCallerResponse(
+        finish_reason="tool_calls",
+        content="",
+        tool_calls=[SimpleNamespace(id="probe-call")],
+        raw={},
+    )
+    primary = _FakeCaller("primary", [empty])
+    fallback = _FakeCaller("fallback", [tool_response])
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[primary],
+        fallback_caller=fallback,
+        logger=None,
+    )
+    token = llm_context.set_llm_context(
+        purpose="qzone_provider_probe",
+        retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+    )
+    try:
+        response = asyncio.run(routed.chat_with_tools([], [{"type": "function"}], False))
+    finally:
+        llm_context.reset_llm_context(token)
+
+    assert response.tool_calls[0].id == "probe-call"
+    assert routed._default_result_caller is primary
+    assert routed._tool_call_callers == {}

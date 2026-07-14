@@ -436,6 +436,45 @@ def test_qzone_generation_reads_wrapped_http_status_and_recovers_model_candidate
     assert {item.label: item.value for item in report.steps[0].details}["HTTP status"] == 404
 
 
+def test_qzone_generation_exposes_safe_provider_route_attempts() -> None:
+    calls = 0
+    report = diary_flow.QzoneGenerationReport()
+
+    async def _call(_messages, **_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            exc = RuntimeError("private provider response")
+            exc.code = "provider_model_candidate_unavailable"
+            exc.status_code = 404
+            exc.retryable = True
+            exc.route_attempts = (
+                {
+                    "provider": "antigravity",
+                    "api_type": "antigravity_cli",
+                    "model": "gemini-3.5-flash-low",
+                    "status_code": 404,
+                    "code": "provider_model_candidate_unavailable",
+                },
+            )
+            raise exc
+        return json.dumps({"content": "切到下一个 concrete model 后成功了", "image_prompt": ""}, ensure_ascii=False)
+
+    result = asyncio.run(diary_flow._generate_once(
+        "你是绪山真寻",
+        "写一条说说",
+        call_ai_api=_call,
+        report=report,
+    ))
+
+    assert json.loads(result)["content"] == "切到下一个 concrete model 后成功了"
+    details = {item.label: item.value for item in report.steps[0].details}
+    assert details["Provider route 1"].endswith(
+        "HTTP 404 · provider_model_candidate_unavailable"
+    )
+    assert "private provider response" not in str(details)
+
+
 def test_qzone_generation_fast_fails_without_caller_and_propagates_cancel() -> None:
     report = diary_flow.QzoneGenerationReport()
     result = asyncio.run(diary_flow._generate_once(

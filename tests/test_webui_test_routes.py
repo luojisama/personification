@@ -13,6 +13,8 @@ from ._loader import load_personification_module
 # 复用 smoke 的 fixture + 登录
 from .test_webui_smoke import _build_client, _login_as_admin, _runtime_context  # noqa: F401
 
+test_routes = load_personification_module("plugin.personification.webui.routes.test_routes")
+
 
 class _FakeResp:
     def __init__(self, content="ok", finish_reason="stop", raw=None):
@@ -39,6 +41,20 @@ class _RaisingCaller:
 
     async def chat_with_tools(self, messages, tools, use_builtin_search):
         raise self._exc
+
+
+class _QzoneProbeCaller:
+    def __init__(self):
+        self.messages = []
+        self.tools = []
+        self.context = {}
+
+    async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+        llm_context = load_personification_module("plugin.personification.core.llm_context")
+        self.messages = list(messages)
+        self.tools = list(tools)
+        self.context = llm_context.current_llm_context()
+        return _FakeResp(content='{"action":"skip","reason":"probe_ok"}')
 
 
 def _set_routed_caller(runtime_context, caller) -> None:
@@ -119,6 +135,124 @@ def test_chat_single_preserves_response_fields_and_adds_diagnostic(_runtime_cont
     assert body["usage"] == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     assert body["model_used"] == "m"
     assert body["diagnostic"]["code"] == "provider_test_complete"
+
+
+def test_chat_single_qzone_profile_uses_production_compatible_shape(_runtime_context) -> None:
+    caller = _QzoneProbeCaller()
+    _set_routed_caller(_runtime_context, caller)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.post(
+        "/personification/api/test/chat",
+        json={"prompt": "检查空间草稿调用", "profile": "qzone"},
+    )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["profile"] == "qzone"
+    assert body["tools_count"] == 1
+    assert body["diagnostic"]["code"] == "provider_test_qzone_compatible"
+    assert body["runtime"]["build_id"]
+    assert caller.context["purpose"] == "qzone_provider_probe"
+    assert caller.context["retry_policy"] == "single_attempt"
+    assert caller.tools[0]["function"]["name"] == "qzone_probe_context"
+    assert "无副作用" in caller.messages[0]["content"]
+    llm_context = load_personification_module("plugin.personification.core.llm_context")
+    assert llm_context.current_llm_context() == {}
+
+
+def test_chat_single_qzone_profile_rejects_non_json_output(_runtime_context) -> None:
+    _set_routed_caller(_runtime_context, _FakeCaller(content="ordinary text"))
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.post(
+        "/personification/api/test/chat",
+        json={"prompt": "检查空间草稿调用", "profile": "qzone"},
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is False
+    assert body["diagnostic"]["code"] == "provider_test_qzone_output_invalid"
+
+
+def test_chat_single_qzone_failure_exposes_safe_route_attempts(_runtime_context) -> None:
+    exc = RuntimeError("https://private.example/?token=secret raw body")
+    exc.code = "provider_model_candidate_unavailable"
+    exc.status_code = 404
+    exc.retryable = True
+    exc.route_attempts = (
+        {
+            "provider": "antigravity",
+            "api_type": "antigravity_cli",
+            "model": "gemini-3.5-flash-low",
+            "status_code": 404,
+            "code": "provider_model_candidate_unavailable",
+        },
+    )
+    _set_routed_caller(_runtime_context, _RaisingCaller(exc))
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.post(
+        "/personification/api/test/chat",
+        json={"prompt": "检查空间草稿调用", "profile": "qzone"},
+    )
+
+    assert res.status_code == 502
+    report = res.json()["detail"]
+    assert report["code"] == "provider_test_model_unavailable"
+    assert report["retryable"] is True
+    details = {item["label"]: item["value"] for item in report["details"]}
+    assert details["Provider route 1"].endswith(
+        "HTTP 404 · provider_model_candidate_unavailable"
+    )
+    assert "private.example" not in res.text
+    assert "raw body" not in res.text
+    llm_context = load_personification_module("plugin.personification.core.llm_context")
+    assert llm_context.current_llm_context() == {}
+
+
+def test_provider_failure_prefers_aggregate_route_selection_over_last_cause() -> None:
+    ai_routes = load_personification_module("plugin.personification.core.ai_routes")
+    candidate = ai_routes.RoutedToolCallerError([
+        {
+            "provider": "antigravity",
+            "status_code": 404,
+            "code": "provider_model_candidate_unavailable",
+            "retryable": True,
+        },
+        {
+            "provider": "backup",
+            "status_code": 0,
+            "code": "provider_call_failed",
+            "retryable": True,
+        },
+    ])
+    candidate.__cause__ = asyncio.TimeoutError("private timeout")
+    request_rejected = ai_routes.RoutedToolCallerError([
+        {
+            "provider": "primary",
+            "status_code": 422,
+            "code": "provider_request_rejected",
+            "retryable": False,
+        },
+        {
+            "provider": "backup",
+            "status_code": 0,
+            "code": "provider_call_failed",
+            "retryable": True,
+        },
+    ])
+    request_rejected.__cause__ = ConnectionError("private network error")
+
+    _, candidate_report = test_routes._provider_failure_report(candidate)
+    _, request_report = test_routes._provider_failure_report(request_rejected)
+
+    assert candidate_report["code"] == "provider_test_model_unavailable"
+    assert request_report["code"] == "provider_test_request_rejected"
 
 
 def test_chat_single_internal_failure_is_structured_and_redacted(_runtime_context) -> None:

@@ -1,18 +1,36 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
+from ...core.llm_context import LLM_RETRY_POLICY_SINGLE_ATTEMPT, reset_llm_context, set_llm_context
 from ...core.operation_diagnostics import detail, diagnostic, exception_diagnostic, step
+from ...core.runtime_identity import get_runtime_identity
 from ...core.sensitive_data import sanitize_text
 from ..deps import AdminIdentity, require_admin
 
 _TEST_ALL_TIMEOUT_SECONDS = 40
 _PROMPT_PREVIEW_MAX_BYTES = 256 * 1024
+_QZONE_PROBE_PROFILE = "qzone"
+_QZONE_PROBE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "qzone_probe_context",
+        "description": "Read-only protocol probe. It has no external side effects.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Optional topic to inspect."},
+            },
+            "additionalProperties": False,
+        },
+    },
+}
 _DIAGNOSTIC_FIELDS = (
     "ok",
     "code",
@@ -75,17 +93,39 @@ def _exception_status(chain: list[BaseException]) -> int:
     return 0
 
 
+def _exception_code(chain: list[BaseException]) -> str:
+    for item in chain:
+        code = str(getattr(item, "code", "") or "").strip().lower()
+        if code:
+            return code
+    return ""
+
+
 def _provider_failure_report(
     exc: BaseException,
     *,
     provider: dict[str, Any] | None = None,
+    request_profile: str = "chat",
+    tools_count: int = 0,
 ) -> tuple[int, dict[str, Any]]:
     chain = _exception_chain(exc)
     status = _exception_status(chain)
+    provider_error_code = _exception_code(chain)
     class_names = " ".join(type(item).__name__.lower() for item in chain)
     # Exception text is used only for classification. It is never copied into the response.
     internal_text = " ".join(str(item).lower() for item in chain)
-    if status in {401, 403} or any(
+    if status == 404 or provider_error_code in {
+        "provider_model_candidate_unavailable",
+        "provider_model_unavailable",
+    }:
+        response_status = 502
+        code = "provider_test_model_unavailable"
+        phase = "provider_request"
+        title = "Provider 模型候选不可用"
+        message = "Provider 未找到当前 concrete model，未取得可用模型响应。"
+        suggestion = "查看安全 route attempt，确认配置 alias 展开的 concrete model 和下一候选。"
+        retryable = provider_error_code == "provider_model_candidate_unavailable"
+    elif status in {401, 403} or provider_error_code == "provider_auth_failed" or any(
         marker in class_names
         for marker in ("authentication", "permissiondenied", "unauthorized", "forbidden")
     ) or any(
@@ -98,6 +138,14 @@ def _provider_failure_report(
         title = "Provider 认证未通过"
         message = "Provider 拒绝了本次模型测试的认证信息。"
         suggestion = "检查 API Key、OAuth/CLI 登录状态和模型访问权限后重试。"
+        retryable = False
+    elif status in {400, 422} or provider_error_code == "provider_request_rejected":
+        response_status = 502
+        code = "provider_test_request_rejected"
+        phase = "provider_request"
+        title = "Provider 拒绝了当前请求形态"
+        message = "Provider 不接受当前 API type、function schema 或请求参数。"
+        suggestion = "检查 endpoint、API type 和 function calling 兼容性后重试。"
         retryable = False
     elif any(isinstance(item, (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException)) for item in chain) or (
         "timeout" in class_names or "timed out" in internal_text
@@ -160,15 +208,47 @@ def _provider_failure_report(
     report["error"] = message
     report["details"] = [
         *(item.to_dict() for item in _provider_details(provider)),
+        detail("请求形态", request_profile).to_dict(),
+        detail("Function schemas", tools_count).to_dict(),
         detail("异常类型", type(exc).__name__, "error").to_dict(),
         *([detail("HTTP status", status, "error").to_dict()] if status else []),
+        *([detail("Provider error code", provider_error_code, "error").to_dict()] if provider_error_code else []),
     ]
+    for route_index, route in enumerate(_provider_route_attempts(chain), start=1):
+        report["details"].append(
+            detail(
+                f"Provider route {route_index}",
+                (
+                    f"{route.get('provider') or f'route-{route_index}'} · "
+                    f"{route.get('api_type') or 'unknown'} · "
+                    f"{_route_model_label(route)} · "
+                    f"HTTP {route.get('status_code') or '-'} · {route.get('code') or 'provider_call_failed'}"
+                ),
+                "error",
+            ).to_dict()
+        )
     report["steps"] = [
         step("prepare_request", "准备模型测试请求", "ok", "测试消息已完成本地校验。", details=_provider_details(provider)).to_dict(),
         step("provider_request", "调用 Provider", "error", message).to_dict(),
         step("response_parse", "解析模型响应", "skipped", "Provider 调用阶段未通过。").to_dict(),
     ]
     return response_status, report
+
+
+def _provider_route_attempts(chain: list[BaseException]) -> list[dict[str, Any]]:
+    for item in chain:
+        attempts = getattr(item, "route_attempts", None)
+        if isinstance(attempts, (list, tuple)):
+            return [dict(attempt) for attempt in attempts if isinstance(attempt, dict)]
+    return []
+
+
+def _route_model_label(route: dict[str, Any]) -> str:
+    configured = str(route.get("model") or "unknown")
+    concrete = str(route.get("concrete_model") or "")
+    if concrete and concrete != configured:
+        return f"{configured} -> {concrete}"
+    return concrete or configured
 
 
 def _log_provider_failure(runtime: Any, exc: BaseException, report: dict[str, Any]) -> None:
@@ -202,7 +282,24 @@ def _response_payload(response: Any, *, duration_ms: int) -> dict[str, Any]:
             "total_tokens": int(usage_obj.get("total_tokens", 0) or 0),
         },
         "model_used": str(getattr(response, "model_used", "") or ""),
+        "tool_call_count": len(list(getattr(response, "tool_calls", None) or [])),
     }
+
+
+def _is_qzone_probe_json(content: Any) -> bool:
+    text = str(content or "").strip()
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3:
+            text = "\n".join(lines[1:-1]).strip()
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    action = str(payload.get("action") or "").strip().lower()
+    return action == "skip" or bool(str(payload.get("content") or "").strip())
 
 
 def _provider_response_report(
@@ -210,6 +307,8 @@ def _provider_response_report(
     *,
     provider: dict[str, Any] | None,
     blocked_reason: str = "",
+    request_profile: str = "chat",
+    tools_count: int = 0,
 ) -> dict[str, Any]:
     provider_info = _provider_details(provider)
     if blocked_reason:
@@ -230,6 +329,28 @@ def _provider_response_report(
             retryable=False,
         )
     if not str(payload.get("content") or "").strip():
+        if request_profile == _QZONE_PROBE_PROFILE and int(payload.get("tool_call_count") or 0) > 0:
+            identity = get_runtime_identity()
+            return diagnostic(
+                ok=True,
+                code="provider_test_qzone_compatible",
+                phase="operation_complete",
+                title="QZone-compatible Provider probe 完成",
+                message="Provider 接受了 QZone single-attempt function schema，并返回了结构化 tool call。",
+                details=(
+                    *provider_info,
+                    detail("实际模型", str(payload.get("model_used") or "未报告"), "ok"),
+                    detail("Function schemas", tools_count, "ok"),
+                    detail("Tool calls", int(payload.get("tool_call_count") or 0), "ok"),
+                    detail("Build", identity["build_id"]),
+                    detail("Worker", identity["worker_id"]),
+                ),
+                steps=(
+                    step("prepare_request", "准备 QZone-compatible 请求", "ok", "已启用 single_attempt 和只读 function schema。"),
+                    step("provider_request", "调用 Provider", "ok", "Provider 已接受 production-like 请求形态。"),
+                    step("response_parse", "解析模型响应", "ok", "已取得结构化 tool call；probe 不执行该工具。"),
+                ),
+            )
         return diagnostic(
             ok=False,
             code="provider_test_model_empty",
@@ -246,19 +367,57 @@ def _provider_response_report(
             suggestion="检查模型 ID、finish reason、Provider quota 和 endpoint 协议。",
             retryable=True,
         )
+    identity = get_runtime_identity()
+    qzone_profile = request_profile == _QZONE_PROBE_PROFILE
+    if qzone_profile and not _is_qzone_probe_json(payload.get("content")):
+        return diagnostic(
+            ok=False,
+            code="provider_test_qzone_output_invalid",
+            phase="model_output",
+            title="QZone-compatible probe 输出无效",
+            message="Provider 接受了请求，但没有返回 QZone generation 可解析的 JSON object。",
+            details=(
+                *provider_info,
+                detail("实际模型", str(payload.get("model_used") or "未报告"), "warn"),
+                detail("Function schemas", tools_count, "ok"),
+                detail("Build", identity["build_id"]),
+                detail("Worker", identity["worker_id"]),
+            ),
+            steps=(
+                step("prepare_request", "准备 QZone-compatible 请求", "ok", "已启用 single_attempt 和只读 function schema。"),
+                step("provider_request", "调用 Provider", "ok", "Provider 已接受 production-like 请求形态。"),
+                step("response_parse", "解析模型响应", "error", "响应不是可用的 QZone JSON object。"),
+            ),
+            suggestion="检查模型的 structured output 遵循能力；这不是 QZone Cookie 或发布接口错误。",
+            retryable=True,
+        )
     return diagnostic(
         ok=True,
-        code="provider_test_complete",
+        code="provider_test_qzone_compatible" if qzone_profile else "provider_test_complete",
         phase="operation_complete",
-        title="Provider 模型测试完成",
-        message="Provider 已返回可用模型内容。",
+        title="QZone-compatible Provider probe 完成" if qzone_profile else "Provider 模型测试完成",
+        message=(
+            "Provider 接受了 QZone single-attempt function schema，并返回了可用模型内容。"
+            if qzone_profile
+            else "Provider 已返回可用模型内容。"
+        ),
         details=(
             *provider_info,
             detail("响应耗时", f"{int(payload.get('duration_ms') or 0)} ms", "ok"),
             detail("实际模型", str(payload.get("model_used") or "未报告"), "ok"),
+            *((
+                detail("Function schemas", tools_count, "ok"),
+                detail("Build", identity["build_id"]),
+                detail("Worker", identity["worker_id"]),
+            ) if qzone_profile else ()),
         ),
         steps=(
-            step("prepare_request", "准备模型测试请求", "ok", "测试消息已完成本地校验。"),
+            step(
+                "prepare_request",
+                "准备 QZone-compatible 请求" if qzone_profile else "准备模型测试请求",
+                "ok",
+                "已启用 single_attempt 和只读 function schema。" if qzone_profile else "测试消息已完成本地校验。",
+            ),
             step("provider_request", "调用 Provider", "ok", "Provider 已返回响应。"),
             step("provider_policy", "检查 Provider 拦截状态", "ok", "未发现结构化安全拦截信号。"),
             step("response_parse", "解析模型响应", "ok", "已取得非空模型文本。"),
@@ -345,6 +504,10 @@ def build_test_router(*, runtime) -> APIRouter:
             )
         system = str(body.get("system", "") or "你是测试助手，简洁回复。")
         use_builtin_search = bool(body.get("use_builtin_search", False))
+        request_profile = str(body.get("profile") or "chat").strip().lower()
+        if request_profile not in {"chat", _QZONE_PROBE_PROFILE}:
+            raise HTTPException(status_code=400, detail="unsupported test profile")
+        qzone_profile = request_profile == _QZONE_PROBE_PROFILE
         caller = _tool_caller(runtime)
         if caller is None:
             raise HTTPException(
@@ -364,18 +527,47 @@ def build_test_router(*, runtime) -> APIRouter:
                 ),
             )
         messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
+            {
+                "role": "system",
+                "content": (
+                    f"{system}\n\n这是无副作用 QZone Provider 兼容性探测。请遵循 function schema，"
+                    "不要声称已执行发布、点赞、评论或任何外部操作。"
+                    if qzone_profile
+                    else system
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"{prompt}\n\n请只返回一个 JSON object，例如 "
+                    '{"action":"skip","reason":"probe_ok"}。'
+                    if qzone_profile
+                    else prompt
+                ),
+            },
         ]
+        tools = [_QZONE_PROBE_TOOL] if qzone_profile else []
         started = time.time()
         try:
-            response = await caller.chat_with_tools(
-                messages=messages,
-                tools=[],
-                use_builtin_search=use_builtin_search,
-            )
+            token = set_llm_context(
+                purpose="qzone_provider_probe",
+                retry_policy=LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+            ) if qzone_profile else None
+            try:
+                response = await caller.chat_with_tools(
+                    messages=messages,
+                    tools=tools,
+                    use_builtin_search=use_builtin_search,
+                )
+            finally:
+                if token is not None:
+                    reset_llm_context(token)
         except Exception as exc:
-            status_code, report = _provider_failure_report(exc)
+            status_code, report = _provider_failure_report(
+                exc,
+                request_profile=request_profile,
+                tools_count=len(tools),
+            )
             _log_provider_failure(runtime, exc, report)
             raise HTTPException(status_code=status_code, detail=report) from exc
         duration_ms = int((time.time() - started) * 1000)
@@ -388,7 +580,17 @@ def build_test_router(*, runtime) -> APIRouter:
             status_code, report = _provider_failure_report(exc)
             _log_provider_failure(runtime, exc, report)
             raise HTTPException(status_code=status_code, detail=report) from exc
-        report = _provider_response_report(payload, provider=None, blocked_reason=blocked)
+        payload["profile"] = request_profile
+        payload["tools_count"] = len(tools)
+        if qzone_profile:
+            payload["runtime"] = get_runtime_identity()
+        report = _provider_response_report(
+            payload,
+            provider=None,
+            blocked_reason=blocked,
+            request_profile=request_profile,
+            tools_count=len(tools),
+        )
         if blocked:
             payload["blocked_reason"] = blocked
             payload["error"] = report["message"]
