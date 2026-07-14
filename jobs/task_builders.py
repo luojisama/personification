@@ -9,10 +9,14 @@ def build_generate_ai_diary_task(
     call_ai_api: Callable[..., Awaitable[str]],
     logger: Any,
     agent_tool_caller: Any = None,
+    get_agent_tool_caller: Callable[[], Any] | None = None,
     agent_tool_registry: Any = None,
     agent_max_steps: int = 4,
     agent_data_dir: Any = None,
 ) -> Callable[[Any], Awaitable[str]]:
+    def _current_tool_caller() -> Any:
+        return get_agent_tool_caller() if callable(get_agent_tool_caller) else agent_tool_caller
+
     async def _generate_ai_diary(bot: Any) -> str:
         return await generate_ai_diary_flow(
             bot,
@@ -20,7 +24,7 @@ def build_generate_ai_diary_task(
             call_ai_api=call_ai_api,
             logger=logger,
             plugin_config=plugin_config,
-            tool_caller=agent_tool_caller,
+            tool_caller=_current_tool_caller(),
             registry=agent_tool_registry,
             agent_max_steps=agent_max_steps,
             data_dir=agent_data_dir,
@@ -37,7 +41,7 @@ def build_generate_ai_diary_task(
             call_ai_api=call_ai_api,
             logger=logger,
             plugin_config=plugin_config,
-            tool_caller=agent_tool_caller,
+            tool_caller=_current_tool_caller(),
             registry=agent_tool_registry,
             agent_max_steps=agent_max_steps,
             data_dir=agent_data_dir,
@@ -48,7 +52,7 @@ def build_generate_ai_diary_task(
 
         schedule_diary_state_update(
             diary_text=content,
-            tool_caller=agent_tool_caller,
+            tool_caller=_current_tool_caller(),
             data_dir=agent_data_dir,
             logger=logger,
         )
@@ -176,10 +180,14 @@ def build_maybe_generate_qzone_post_task(
     call_ai_api: Callable[..., Awaitable[str]],
     logger: Any,
     agent_tool_caller: Any = None,
+    get_agent_tool_caller: Callable[[], Any] | None = None,
     agent_tool_registry: Any = None,
     agent_max_steps: int = 4,
     agent_data_dir: Any = None,
 ) -> Callable[..., Awaitable[str]]:
+    def _current_tool_caller() -> Any:
+        return get_agent_tool_caller() if callable(get_agent_tool_caller) else agent_tool_caller
+
     async def _maybe_generate_qzone_post(bot: Any, quota: Any = None) -> str:
         return await maybe_generate_proactive_qzone_post_flow(
             bot,
@@ -188,7 +196,7 @@ def build_maybe_generate_qzone_post_task(
             logger=logger,
             plugin_config=plugin_config,
             data_dir=agent_data_dir,
-            tool_caller=agent_tool_caller,
+            tool_caller=_current_tool_caller(),
             registry=agent_tool_registry,
             agent_max_steps=agent_max_steps,
             quota=quota,
@@ -199,7 +207,7 @@ def build_maybe_generate_qzone_post_task(
 
         schedule_diary_state_update(
             diary_text=content,
-            tool_caller=agent_tool_caller,
+            tool_caller=_current_tool_caller(),
             data_dir=agent_data_dir,
             logger=logger,
         )

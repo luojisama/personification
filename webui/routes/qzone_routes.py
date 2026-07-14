@@ -12,6 +12,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
 from ...core import webui_audit_log
 from ...core.operation_diagnostics import detail, diagnostic, exception_diagnostic, normalize_diagnostic, step
+from ...core.runtime_identity import get_runtime_identity
 from ...core.sensitive_data import sanitize_object, sanitize_text
 from ..deps import AdminIdentity, get_client_ip, require_admin
 
@@ -255,6 +256,7 @@ def _build_status(runtime) -> dict[str, Any]:
         "next_eligible_in_seconds": max(0, int(next_eligible_at - now_ts)) if next_eligible_at else 0,
         "recent_contents": [str(x) for x in list(state.get("recent_contents", []))][-12:],
         "server_now": int(now_ts),
+        "runtime": get_runtime_identity(),
     }
     unresolved = [
         _safe_publish_operation(item)
@@ -275,6 +277,9 @@ def _build_status(runtime) -> dict[str, Any]:
         details=(
             detail("已连接 Bot", len(bot_items), "ok" if bot_items else "warn"),
             detail("发布能力", "available" if payload["publish_available"] else "unavailable", "info"),
+            detail("Build", payload["runtime"]["build_id"], "info"),
+            detail("Worker", payload["runtime"]["worker_id"], "info"),
+            detail("Process started", payload["runtime"]["process_started_at"], "info"),
         ),
         steps=(step("status_snapshot", "生成状态快照", "ok", "持久状态和运行时状态已完成脱敏。"),),
         retryable=False,

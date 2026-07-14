@@ -332,6 +332,7 @@ class PluginRuntimeBundle:
             persona_store=self.persona_store,
             vision_caller=self.reply_processor_deps.runtime.vision_caller,
             agent_tool_caller=self.reply_processor_deps.runtime.agent_tool_caller,
+            get_agent_tool_caller=lambda: self.reply_processor_deps.runtime.agent_tool_caller,
             agent_tool_registry=self.reply_processor_deps.runtime.tool_registry,
             agent_max_steps=int(getattr(self.plugin_config, "personification_qzone_agent_max_steps", 4)),
             agent_data_dir=get_personification_data_dir(self.plugin_config),

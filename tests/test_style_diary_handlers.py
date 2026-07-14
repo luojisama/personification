@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -99,6 +101,53 @@ def test_diary_task_binds_post_success_state_callback(monkeypatch) -> None:  # n
     assert updates[0]["diary_text"] == "刚把游戏存档整理完，终于不用怕按错了"
     assert updates[0]["tool_caller"] == "caller"
     assert updates[0]["data_dir"] == "data-dir"
+
+
+def test_diary_task_resolves_current_tool_caller_for_each_run(monkeypatch) -> None:  # noqa: ANN001
+    callers = ["startup-caller", "reloaded-caller"]
+    seen: list[str] = []
+
+    async def _flow(_bot, **kwargs):  # noqa: ANN001
+        seen.append(kwargs["tool_caller"])
+        return "刚切完模型，顺手记一笔"
+
+    monkeypatch.setattr(
+        diary_flow,
+        "schedule_diary_state_update",
+        lambda **kwargs: seen.append(kwargs["tool_caller"]),
+    )
+    task = task_builders.build_generate_ai_diary_task(
+        plugin_config=object(),
+        generate_ai_diary_flow=_flow,
+        load_prompt=lambda: "persona",
+        call_ai_api=lambda *_args, **_kwargs: None,
+        logger=object(),
+        agent_tool_caller=callers[0],
+        get_agent_tool_caller=lambda: callers[-1],
+        agent_data_dir="data-dir",
+    )
+
+    assert asyncio.run(task(object())) == "刚切完模型，顺手记一笔"
+    task.mark_published("刚切完模型，顺手记一笔")
+
+    assert seen == ["reloaded-caller", "reloaded-caller"]
+
+
+def test_runtime_bundle_wires_current_caller_only_to_job_deps() -> None:
+    source_path = Path(__file__).resolve().parents[1] / "core" / "runtime_assembly.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    keywords_by_factory: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in {"FlowSetupDeps", "JobSetupDeps"}:
+            continue
+        keywords_by_factory[node.func.id] = {
+            str(keyword.arg) for keyword in node.keywords if keyword.arg
+        }
+
+    assert "get_agent_tool_caller" not in keywords_by_factory["FlowSetupDeps"]
+    assert "get_agent_tool_caller" in keywords_by_factory["JobSetupDeps"]
 
 
 def test_manual_diary_unknown_does_not_mark_published(monkeypatch) -> None:  # noqa: ANN001

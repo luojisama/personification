@@ -77,6 +77,7 @@ class JobSetupDeps:
     persona_store: Any = None
     vision_caller: Any = None
     agent_tool_caller: Any = None
+    get_agent_tool_caller: Any = None
     agent_tool_registry: Any = None
     agent_max_steps: int = 4
     agent_data_dir: Any = None
@@ -120,6 +121,7 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
         call_ai_api=deps.call_ai_api,
         logger=deps.logger,
         agent_tool_caller=deps.agent_tool_caller,
+        get_agent_tool_caller=deps.get_agent_tool_caller,
         agent_tool_registry=deps.agent_tool_registry,
         agent_max_steps=deps.agent_max_steps,
         agent_data_dir=deps.agent_data_dir,
@@ -141,6 +143,7 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                 call_ai_api=deps.call_ai_api,
                 logger=deps.logger,
                 agent_tool_caller=deps.agent_tool_caller,
+                get_agent_tool_caller=deps.get_agent_tool_caller,
                 agent_tool_registry=deps.agent_tool_registry,
                 agent_max_steps=deps.agent_max_steps,
                 agent_data_dir=deps.agent_data_dir,
@@ -185,7 +188,11 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                     persona_store=deps.persona_store,
                     vision_caller=deps.vision_caller,
                     agent_data_dir=deps.agent_data_dir,
-                    agent_tool_caller=deps.agent_tool_caller,
+                    agent_tool_caller=(
+                        deps.get_agent_tool_caller()
+                        if callable(deps.get_agent_tool_caller)
+                        else deps.agent_tool_caller
+                    ),
                     agent_tool_registry=deps.agent_tool_registry,
                     agent_max_steps=deps.agent_max_steps,
                     target_user_id=target_user_id,
@@ -221,7 +228,11 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                     logger=deps.logger,
                     persona_store=deps.persona_store,
                     agent_data_dir=deps.agent_data_dir,
-                    agent_tool_caller=deps.agent_tool_caller,
+                    agent_tool_caller=(
+                        deps.get_agent_tool_caller()
+                        if callable(deps.get_agent_tool_caller)
+                        else deps.agent_tool_caller
+                    ),
                     agent_tool_registry=deps.agent_tool_registry,
                     agent_max_steps=deps.agent_max_steps,
                 )

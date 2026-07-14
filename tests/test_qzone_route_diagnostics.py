@@ -88,6 +88,14 @@ def test_qzone_status_sanitizes_all_last_errors_and_adds_diagnostic(_runtime_con
     assert response.status_code == 200
     body = response.json()
     _assert_safe_report(body["diagnostic"], code="qzone_status_loaded", phase="status_snapshot")
+    assert body["runtime"]["build_id"]
+    assert body["runtime"]["worker_id"]
+    assert body["runtime"]["process_started_at"] > 0
+    assert {item["label"] for item in body["diagnostic"]["details"]} >= {
+        "Build",
+        "Worker",
+        "Process started",
+    }
     assert body["auth"]["last_error"] == body["social"]["last_error"] == body["inbound"]["last_error"]
     assert body["social"]["last_result"]["last_error"] == body["social"]["last_error"]
     assert body["auth"]["token"] == "***"
