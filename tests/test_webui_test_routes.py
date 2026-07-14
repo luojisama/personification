@@ -190,6 +190,8 @@ def test_chat_single_qzone_failure_exposes_safe_route_attempts(_runtime_context)
             "model": "gemini-3.5-flash-low",
             "status_code": 404,
             "code": "provider_model_candidate_unavailable",
+            "auth_mode": "bearer",
+            "request_count": 2,
         },
     )
     _set_routed_caller(_runtime_context, _RaisingCaller(exc))
@@ -209,6 +211,7 @@ def test_chat_single_qzone_failure_exposes_safe_route_attempts(_runtime_context)
     assert details["Provider route 1"].endswith(
         "HTTP 404 · provider_model_candidate_unavailable"
     )
+    assert "auth=bearer · requests=2" in details["Provider route 1"]
     assert "private.example" not in res.text
     assert "raw body" not in res.text
     llm_context = load_personification_module("plugin.personification.core.llm_context")
@@ -256,9 +259,12 @@ def test_provider_failure_prefers_aggregate_route_selection_over_last_cause() ->
 
 
 def test_chat_single_internal_failure_is_structured_and_redacted(_runtime_context) -> None:
+    internal_error = RuntimeError("https://private.example/chat?api_key=top-secret raw body")
+    internal_error.code = "opaque-secret-code"
+    internal_error.route_attempts = ({"provider": "route", "code": "opaque-secret-code"},)
     _set_routed_caller(
         _runtime_context,
-        _RaisingCaller(RuntimeError("https://private.example/chat?api_key=top-secret raw body")),
+        _RaisingCaller(internal_error),
     )
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
@@ -272,6 +278,7 @@ def test_chat_single_internal_failure_is_structured_and_redacted(_runtime_contex
     serialized = json.dumps(report)
     assert "private.example" not in serialized
     assert "top-secret" not in serialized
+    assert "opaque-secret-code" not in serialized
     assert "raw body" not in serialized
 
 
@@ -280,6 +287,9 @@ def _provider_test_exception(kind: str) -> BaseException:
     if kind == "auth":
         response = httpx.Response(401, request=request, text="token=top-secret raw body")
         return httpx.HTTPStatusError("Authorization: Bearer top-secret", request=request, response=response)
+    if kind == "permission":
+        response = httpx.Response(403, request=request, text="token=top-secret raw body")
+        return httpx.HTTPStatusError("Forbidden token=top-secret", request=request, response=response)
     if kind == "timeout":
         return asyncio.TimeoutError("token=top-secret raw body")
     if kind == "network":
@@ -293,6 +303,7 @@ def _provider_test_exception(kind: str) -> BaseException:
     ("kind", "expected_code", "retryable"),
     [
         ("auth", "provider_test_auth_failed", False),
+        ("permission", "provider_test_permission_denied", False),
         ("timeout", "provider_test_timeout", True),
         ("network", "provider_test_network_failed", True),
         ("parse", "provider_test_parse_failed", False),

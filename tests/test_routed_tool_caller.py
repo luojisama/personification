@@ -257,7 +257,126 @@ def test_qzone_routed_tool_caller_preserves_all_safe_route_attempts() -> None:
     assert error.retryable is True
     assert [item["provider"] for item in error.route_attempts] == ["antigravity", "backup"]
     assert [item["status_code"] for item in error.route_attempts] == [404, 422]
+    assert [item["request_count"] for item in error.route_attempts] == [1, 1]
     assert all("private" not in str(item) for item in error.route_attempts)
+
+
+def test_normal_routed_tool_caller_raises_structured_aggregate() -> None:
+    permission_error = RuntimeError("private permission response")
+    permission_error.status_code = 403
+    permission_error.code = "opaque-secret-code"
+    permission_error.auth_mode = "bearer"
+    permission_error.request_count = 2
+    request_error = RuntimeError("private request response")
+    request_error.status_code = 400
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[_FakeCaller("primary", [permission_error])],
+        fallback_caller=_FakeCaller("fallback", [request_error]),
+        logger=None,
+        route_descriptors=[
+            {
+                "name": "gemini-primary",
+                "api_type": "gemini",
+                "model": "gemini-test",
+                "gemini_auth_mode": "auto",
+            },
+            {"name": "openai-fallback", "api_type": "openai", "model": "gpt-test"},
+        ],
+    )
+
+    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+        asyncio.run(routed.chat_with_tools([], [], False))
+
+    error = caught.value
+    assert error.code == "provider_permission_denied"
+    assert error.status_code == 403
+    assert [item["code"] for item in error.route_attempts] == [
+        "provider_permission_denied",
+        "provider_request_rejected",
+    ]
+    assert error.route_attempts[0]["auth_mode"] == "bearer"
+    assert error.route_attempts[0]["request_count"] == 2
+    assert "opaque-secret-code" not in str(error.route_attempts)
+    assert all("private" not in str(item) for item in error.route_attempts)
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_code", "retryable"),
+    [
+        (
+            tool_impl.ToolCallerResponse("stop", "", [], {}),
+            "provider_invalid_response",
+            True,
+        ),
+        (
+            tool_impl.ToolCallerResponse(
+                "stop",
+                "请求被安全策略阻止",
+                [],
+                {"response": {"candidates": [{"finishReason": "SAFETY"}]}},
+            ),
+            "provider_safety_block",
+            False,
+        ),
+    ],
+)
+def test_routed_tool_caller_structures_non_exception_exhaustion(
+    response,
+    expected_code: str,
+    retryable: bool,
+) -> None:  # noqa: ANN001
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[_FakeCaller("primary", [response])],
+        fallback_caller=None,
+        logger=None,
+    )
+    token = llm_context.set_llm_context(
+        purpose="provider_probe",
+        retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+    )
+    try:
+        with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+            asyncio.run(routed.chat_with_tools([], [], False))
+    finally:
+        llm_context.reset_llm_context(token)
+
+    assert caught.value.code == expected_code
+    assert caught.value.retryable is retryable
+
+
+def test_routed_tool_caller_marks_timeout_retryable() -> None:
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[_FakeCaller("primary", [TimeoutError("private timeout")])],
+        fallback_caller=None,
+        logger=None,
+    )
+
+    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+        asyncio.run(routed.chat_with_tools([], [], False))
+
+    assert caught.value.code == "provider_timeout"
+    assert caught.value.retryable is True
+
+
+def test_runtime_builder_wraps_legacy_caller_when_provider_list_is_empty(monkeypatch) -> None:  # noqa: ANN001
+    raw_error = RuntimeError("private raw provider error")
+    legacy = _FakeCaller("legacy", [raw_error])
+    monkeypatch.setattr(ai_routes, "_get_primary_provider_list", lambda *_args: [])
+    monkeypatch.setattr(ai_routes, "resolve_global_fallback_provider", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ai_routes, "_build_tool_caller", lambda _config: legacy)
+    monkeypatch.setattr(
+        ai_routes,
+        "get_primary_provider_config",
+        lambda *_args: {"name": "legacy", "api_type": "openai", "model": "legacy-model"},
+    )
+
+    caller = ai_routes.build_routed_tool_caller(SimpleNamespace(), logger=None)
+
+    assert isinstance(caller, ai_routes.RoutedToolCaller)
+    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+        asyncio.run(caller.chat_with_tools([], [], False))
+    assert caught.value.code == "provider_call_failed"
+    assert "private raw provider error" not in str(caught.value.route_attempts)
 
 
 def test_qzone_probe_does_not_mutate_routed_tool_result_state() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from plugin.personification.core import provider_router
@@ -17,6 +18,9 @@ class _Logger:
         return None
 
     def warning(self, message, *_args, **_kwargs) -> None:  # noqa: ANN001
+        self.warnings.append(str(message))
+
+    def error(self, message, *_args, **_kwargs) -> None:  # noqa: ANN001
         self.warnings.append(str(message))
 
 
@@ -94,7 +98,7 @@ def test_transient_failure_retries_up_to_five_attempts(monkeypatch) -> None:  # 
     monkeypatch.setattr(provider_router.asyncio, "sleep", _sleep)
     provider_router.PROVIDER_FAILURE_STATE.clear()
 
-    response, errors, _ = asyncio.run(
+    response, errors, attempts, _ = asyncio.run(
         provider_router._try_provider_chain(
             [_provider("primary")],
             messages=[],
@@ -107,6 +111,8 @@ def test_transient_failure_retries_up_to_five_attempts(monkeypatch) -> None:  # 
     assert calls == 5
     assert delays == [1.0, 2.0, 4.0, 8.0]
     assert len(errors) == 4
+    assert len(attempts) == 4
+    assert all(item["code"] == "provider_call_failed" for item in attempts)
     assert "primary" not in provider_router.PROVIDER_FAILURE_STATE
 
 
@@ -127,7 +133,7 @@ def test_timeout_retries_instead_of_skipping_remaining_attempts(monkeypatch) -> 
     monkeypatch.setattr(provider_router, "_call_provider_once", _call)
     monkeypatch.setattr(provider_router.asyncio, "sleep", _sleep)
 
-    response, _, _ = asyncio.run(
+    response, _, attempts, _ = asyncio.run(
         provider_router._try_provider_chain(
             [_provider("slow")],
             messages=[],
@@ -139,6 +145,7 @@ def test_timeout_retries_instead_of_skipping_remaining_attempts(monkeypatch) -> 
     assert response is not None
     assert calls == 2
     assert delays == [1.0]
+    assert attempts[0]["request_count"] == 1
 
 
 def test_http_400_does_not_retry_and_switches_provider(monkeypatch) -> None:  # noqa: ANN001
@@ -159,7 +166,7 @@ def test_http_400_does_not_retry_and_switches_provider(monkeypatch) -> None:  # 
     monkeypatch.setattr(provider_router.asyncio, "sleep", _sleep)
     provider_router.PROVIDER_FAILURE_STATE.clear()
 
-    response, errors, _ = asyncio.run(
+    response, errors, attempts, _ = asyncio.run(
         provider_router._try_provider_chain(
             [_provider("bad"), _provider("backup")],
             messages=[],
@@ -172,6 +179,8 @@ def test_http_400_does_not_retry_and_switches_provider(monkeypatch) -> None:  # 
     assert calls == {"bad": 1, "backup": 1}
     assert delays == []
     assert any("status=400" in item for item in errors)
+    assert attempts[0]["code"] == "provider_request_rejected"
+    assert attempts[0]["status_code"] == 400
     assert all("secret.example" not in item for item in errors)
     assert all("secret.example" not in item for item in logger.warnings)
     assert "secret.example" not in provider_router.PROVIDER_FAILURE_STATE["bad"]["last_error"]
@@ -185,6 +194,121 @@ def test_retryable_http_statuses(status: int) -> None:
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
 def test_non_retryable_http_statuses(status: int) -> None:
     assert provider_router._is_retryable_provider_error(_HttpError(status)) is False
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [
+        (400, "provider_request_rejected"),
+        (401, "provider_auth_failed"),
+        (403, "provider_permission_denied"),
+        (404, "provider_model_unavailable"),
+        (422, "provider_request_rejected"),
+    ],
+)
+def test_call_ai_api_raises_structured_error_after_provider_exhaustion(
+    monkeypatch,
+    status: int,
+    expected_code: str,
+) -> None:  # noqa: ANN001
+    provider = {
+        **_provider("gemini", attempts=1),
+        "api_type": "gemini",
+        "gemini_auth_mode": "auto",
+    }
+    upstream_error = _HttpError(status)
+    upstream_error.code = "opaque-secret-code"
+    upstream_error.retryable = True
+    upstream_error.auth_mode = "bearer"
+    upstream_error.request_count = 2
+
+    async def _call(*_args, **_kwargs):  # noqa: ANN202
+        raise upstream_error
+
+    monkeypatch.setattr(provider_router, "get_provider_candidates", lambda *_args: [provider])
+    monkeypatch.setattr(provider_router, "_call_provider_once", _call)
+
+    with pytest.raises(provider_router.ProviderRouteError) as caught:
+        asyncio.run(provider_router.call_ai_api(
+            [],
+            plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+            logger=_Logger(),
+        ))
+
+    error = caught.value
+    assert error.code == expected_code
+    assert error.status_code == status
+    assert error.retryable is False
+    assert len(error.route_attempts) == 1
+    assert error.route_attempts[0]["auth_mode"] == "bearer"
+    assert error.route_attempts[0]["request_count"] == 2
+    assert "opaque-secret-code" not in str(error.route_attempts)
+    assert "secret.example" not in str(error.route_attempts)
+
+
+def test_call_ai_api_without_provider_is_structured(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(provider_router, "get_provider_candidates", lambda *_args: [])
+
+    with pytest.raises(provider_router.ProviderRouteError) as caught:
+        asyncio.run(provider_router.call_ai_api(
+            [],
+            plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+            logger=_Logger(),
+        ))
+
+    assert caught.value.code == "provider_caller_unavailable"
+    assert caught.value.retryable is False
+
+
+def test_network_error_type_is_retryable_without_message_matching() -> None:
+    error = httpx.ReadError("read failed")
+
+    assert provider_router._is_retryable_provider_error(error) is True
+    assert provider_router._provider_failure_code(error) == "provider_network_failed"
+
+
+def test_explicit_retryable_metadata_is_preserved() -> None:
+    error = RuntimeError("opaque failure")
+    error.retryable = True
+
+    assert provider_router._is_retryable_provider_error(error) is True
+
+
+def test_wrapped_timeout_is_canonical_and_retryable() -> None:
+    error = RuntimeError("outer failure")
+    error.__cause__ = TimeoutError("upstream timeout")
+
+    assert provider_router._is_retryable_provider_error(error) is True
+    assert provider_router._provider_failure_code(error) == "provider_timeout"
+
+
+def test_model_candidate_unavailable_remains_retryable() -> None:
+    error = _HttpError(404)
+    error.code = "provider_model_candidate_unavailable"
+    error.retryable = True
+
+    assert provider_router._is_retryable_provider_error(error) is True
+    assert provider_router._provider_failure_code(error) == "provider_model_candidate_unavailable"
+
+
+def test_mixed_vision_unavailable_preserves_visual_fallback_signal(monkeypatch) -> None:  # noqa: ANN001
+    providers = [_provider("vision", attempts=1), _provider("broken", attempts=1)]
+
+    async def _call(provider, *_args, **_kwargs):  # noqa: ANN001, ANN202
+        if provider["name"] == "vision":
+            return ToolCallerResponse("stop", "", [], {}, vision_unavailable=True)
+        raise _HttpError(503)
+
+    monkeypatch.setattr(provider_router, "get_provider_candidates", lambda *_args: providers)
+    monkeypatch.setattr(provider_router, "_call_provider_once", _call)
+
+    response = asyncio.run(provider_router.call_ai_api(
+        [{"role": "user", "content": "image"}],
+        plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+        logger=_Logger(),
+    ))
+
+    assert response.vision_unavailable is True
 
 
 def test_rate_limit_retry_after_is_capped() -> None:

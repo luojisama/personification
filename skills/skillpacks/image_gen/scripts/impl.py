@@ -518,7 +518,11 @@ async def _generate_image_gemini_http(
                 allow_negotiation=not use_single_attempt_retry_policy(),
             )
             response = auth_result.response
-            raise_for_gemini_status(response)
+            raise_for_gemini_status(
+                response,
+                auth_mode=auth_result.mode,
+                request_count=auth_result.request_count,
+            )
             data = response.json()
     except httpx.HTTPStatusError as exc:
         return {"error": _error_from_http(exc)}

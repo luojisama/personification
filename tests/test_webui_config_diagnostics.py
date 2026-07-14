@@ -106,14 +106,22 @@ def test_provider_model_probe_classifies_failures_without_raw_exception_data(
         "GET",
         "https://user:password@api.example.test/models?api_key=super-secret",
     )
+    auth_error = httpx.HTTPStatusError(
+        "auth failed at raw URL",
+        request=request,
+        response=httpx.Response(401, request=request),
+    )
+    auth_error.auth_mode = "bearer"
+    auth_error.request_count = 2
     cases = [
+        (auth_error, "provider_model_probe_auth_failed"),
         (
             httpx.HTTPStatusError(
-                "auth failed at raw URL",
+                "permission failed at raw URL",
                 request=request,
-                response=httpx.Response(401, request=request),
+                response=httpx.Response(403, request=request),
             ),
-            "provider_model_probe_auth_failed",
+            "provider_model_probe_permission_denied",
         ),
         (httpx.ReadTimeout("raw timeout URL", request=request), "provider_model_probe_timeout"),
         (httpx.ConnectError("raw network URL", request=request), "provider_model_probe_network_failed"),
@@ -154,6 +162,10 @@ def test_provider_model_probe_classifies_failures_without_raw_exception_data(
         rendered = str(diagnostic)
         assert "api.example.test" not in rendered
         assert "super-secret" not in rendered
+        if raised is auth_error:
+            details = {item["label"]: item["value"] for item in diagnostic["details"]}
+            assert details["Auth mode"] == "bearer"
+            assert details["Request count"] == 2
 
 
 def test_provider_model_probe_success_preserves_fields_and_adds_diagnostic(

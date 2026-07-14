@@ -23,6 +23,20 @@ _DEFAULT_PROVIDER_TIMEOUT_SECONDS = 200.0
 _DEFAULT_PROVIDER_MAX_ATTEMPTS = 5
 _MAX_PROVIDER_ATTEMPTS = 10
 _RETRYABLE_HTTP_STATUSES = {408, 409, 425, 429}
+_CANONICAL_PROVIDER_CODES = {
+    "provider_auth_failed",
+    "provider_call_failed",
+    "provider_caller_unavailable",
+    "provider_invalid_response",
+    "provider_model_candidate_unavailable",
+    "provider_model_unavailable",
+    "provider_network_failed",
+    "provider_permission_denied",
+    "provider_request_rejected",
+    "provider_safety_block",
+    "provider_timeout",
+    "providers_exhausted",
+}
 
 
 class _InvalidProviderResponse(RuntimeError):
@@ -30,11 +44,25 @@ class _InvalidProviderResponse(RuntimeError):
 
 
 class ProviderRouteError(RuntimeError):
-    def __init__(self, code: str, message: str, *, status_code: int = 0, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status_code: int = 0,
+        retryable: bool = False,
+        route_attempts: List[Dict[str, Any]] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = str(code or "provider_route_failed")
         self.status_code = int(status_code or 0)
         self.retryable = bool(retryable)
+        self.route_attempts = tuple(dict(item) for item in list(route_attempts or []))
+        selected = _select_provider_attempt(list(self.route_attempts)) if self.route_attempts else {}
+        self.auth_mode = str(selected.get("auth_mode") or "")[:48]
+        self.request_count = sum(
+            max(1, int(item.get("request_count") or 1)) for item in self.route_attempts
+        )
 
 
 def _tool_caller_impl() -> Any:
@@ -538,12 +566,23 @@ def _mark_provider_success(provider_name: str) -> None:
 
 
 def _error_http_status(error: Exception) -> int:
-    response = getattr(error, "response", None)
-    status = getattr(response, "status_code", None)
-    try:
-        return int(status or 0)
-    except (TypeError, ValueError):
-        return 0
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(seen) < 6:
+        seen.add(id(current))
+        values = (
+            getattr(current, "status_code", None),
+            getattr(getattr(current, "response", None), "status_code", None),
+        )
+        for value in values:
+            try:
+                status = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+            if status:
+                return status
+        current = current.__cause__ or current.__context__
+    return 0
 
 
 def _retry_after_seconds(error: Exception) -> float:
@@ -862,9 +901,143 @@ def _provider_error_kind(error: Exception) -> str:
 
 def _is_retryable_provider_error(error: Exception) -> bool:
     status = _error_http_status(error)
+    canonical_code = ""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    class_names: list[str] = []
+    explicit_retryable = False
+    while current is not None and id(current) not in seen and len(seen) < 6:
+        seen.add(id(current))
+        class_names.append(type(current).__name__.lower())
+        candidate_code = str(getattr(current, "code", "") or "").strip().lower()
+        if not canonical_code and candidate_code in _CANONICAL_PROVIDER_CODES:
+            canonical_code = candidate_code
+        explicit_retryable = explicit_retryable or getattr(current, "retryable", False) is True
+        current = current.__cause__ or current.__context__
+    if status in {400, 401, 403, 422}:
+        return False
+    if status == 404:
+        return canonical_code == "provider_model_candidate_unavailable" and explicit_retryable
+    if explicit_retryable:
+        return True
     if status in _RETRYABLE_HTTP_STATUSES or 500 <= status < 600:
         return True
+    if any("timeout" in name for name in class_names):
+        return True
+    if any(
+        marker in name
+        for name in class_names
+        for marker in ("connect", "network", "protocol", "readerror", "writeerror", "dnserror")
+    ):
+        return True
     return _provider_error_kind(error) in {"timeout", "connect", "invalid_response"}
+
+
+def _provider_failure_code(error: Exception) -> str:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    canonical_code = ""
+    class_names: list[str] = []
+    while current is not None and id(current) not in seen and len(seen) < 6:
+        seen.add(id(current))
+        class_names.append(type(current).__name__.lower())
+        code = str(getattr(current, "code", "") or "").strip().lower()
+        if not canonical_code and code in _CANONICAL_PROVIDER_CODES:
+            canonical_code = code
+        current = current.__cause__ or current.__context__
+    status = _error_http_status(error)
+    if status == 401:
+        return "provider_auth_failed"
+    if status == 403:
+        return "provider_permission_denied"
+    if status in {400, 422}:
+        return "provider_request_rejected"
+    if status == 404:
+        return (
+            "provider_model_candidate_unavailable"
+            if canonical_code == "provider_model_candidate_unavailable"
+            else "provider_model_unavailable"
+        )
+    if canonical_code:
+        return canonical_code
+    if isinstance(error, _InvalidProviderResponse):
+        return "provider_invalid_response"
+    if any("timeout" in name for name in class_names):
+        return "provider_timeout"
+    if any(
+        marker in name
+        for name in class_names
+        for marker in ("connect", "network", "protocol", "readerror", "writeerror", "dnserror")
+    ):
+        return "provider_network_failed"
+    return "provider_call_failed"
+
+
+def _provider_route_attempt(
+    provider: Dict[str, Any],
+    error: Exception,
+    *,
+    attempt: int,
+) -> Dict[str, Any]:
+    auth_mode = ""
+    request_count = 0
+    concrete_model = ""
+    next_model = ""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(seen) < 6:
+        seen.add(id(current))
+        if not auth_mode:
+            auth_mode = str(getattr(current, "auth_mode", "") or "").strip().lower()
+        if not request_count:
+            try:
+                request_count = int(getattr(current, "request_count", 0) or 0)
+            except (TypeError, ValueError):
+                request_count = 0
+        if not concrete_model:
+            concrete_model = str(getattr(current, "concrete_model", "") or "").strip()
+        if not next_model:
+            next_model = str(getattr(current, "next_model", "") or "").strip()
+        current = current.__cause__ or current.__context__
+    api_type = normalize_api_type(provider.get("api_type"))
+    return {
+        "provider": str(provider.get("name") or "provider")[:80],
+        "api_type": api_type[:48],
+        "model": str(provider.get("model") or "")[:120],
+        "concrete_model": concrete_model[:120],
+        "next_model": next_model[:120],
+        "auth_mode": (
+            auth_mode or str(provider.get("gemini_auth_mode", "") or "").strip().lower()
+            if api_type == "gemini"
+            else ""
+        )[:48],
+        "request_count": max(1, request_count),
+        "attempt": max(1, int(attempt or 1)),
+        "status_code": _error_http_status(error),
+        "code": _provider_failure_code(error),
+        "retryable": _is_retryable_provider_error(error),
+        "exception_type": type(error).__name__[:80],
+    }
+
+
+def _select_provider_attempt(attempts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    priorities = (
+        lambda item: item.get("code") == "provider_model_candidate_unavailable",
+        lambda item: item.get("code") == "provider_auth_failed" or item.get("status_code") == 401,
+        lambda item: item.get("code") == "provider_permission_denied" or item.get("status_code") == 403,
+        lambda item: item.get("code") == "provider_request_rejected" or item.get("status_code") in {400, 422},
+        lambda item: item.get("code") == "provider_model_unavailable" or item.get("status_code") == 404,
+        lambda item: bool(item.get("retryable")),
+    )
+    for predicate in priorities:
+        matched = next((item for item in attempts if predicate(item)), None)
+        if matched is not None:
+            return matched
+    return attempts[-1] if attempts else {
+        "code": "providers_exhausted",
+        "status_code": 0,
+        "retryable": True,
+    }
 
 
 def _provider_retry_delay(error: Exception, attempt: int) -> float:
@@ -897,8 +1070,9 @@ async def _try_provider_chain(
     logger: Any,
     tools: Optional[List[Dict[str, Any]]] = None,
     use_builtin_search: bool = False,
-) -> tuple[ToolCallerResponse | None, list[str], bool]:
+) -> tuple[ToolCallerResponse | None, list[str], list[Dict[str, Any]], bool]:
     errors: List[str] = []
+    route_attempts: List[Dict[str, Any]] = []
     contains_image_input = _contains_image_input(messages)
     saw_vision_unavailable = False
     text_only_messages_cache: List[Dict[str, Any]] | None = None
@@ -953,15 +1127,34 @@ async def _try_provider_chain(
                             )
                         except Exception as safety_exc:
                             errors.append(f"{provider['name']}#safety: {_error_text(safety_exc)}")
+                            route_attempts.append(
+                                _provider_route_attempt(provider, safety_exc, attempt=attempt + 2)
+                            )
                             _mark_provider_failure(provider["name"], safety_exc)
                             skip_provider = True
                             break
                         retry_issue = detect_route_safety_issue(response)
-                        if not retry_issue and not _is_invalid_route_response(response):
+                        invalid_response = _is_invalid_route_response(response)
+                        if not retry_issue and not invalid_response:
                             _mark_provider_success(provider["name"])
-                            return response, errors, saw_vision_unavailable
-                        errors.append(f"{provider['name']}#safety: safety_block:{retry_issue}")
-                        _mark_provider_failure(provider["name"], RuntimeError("provider safety block"))
+                            return response, errors, route_attempts, saw_vision_unavailable
+                        if retry_issue:
+                            errors.append(f"{provider['name']}#safety: safety_block:{retry_issue}")
+                            safety_error = RuntimeError("provider safety block")
+                            safety_error.code = "provider_safety_block"
+                        else:
+                            errors.append(f"{provider['name']}#safety: invalid_response")
+                            safety_error = _InvalidProviderResponse("empty or invalid route response")
+                        route_attempts.append(
+                            _provider_route_attempt(provider, safety_error, attempt=attempt + 2)
+                        )
+                        _mark_provider_failure(provider["name"], safety_error)
+                    elif use_single_attempt_retry_policy():
+                        safety_error = RuntimeError("provider safety block")
+                        safety_error.code = "provider_safety_block"
+                        route_attempts.append(
+                            _provider_route_attempt(provider, safety_error, attempt=attempt + 1)
+                        )
                     skip_provider = True
                     break
                 if response.vision_unavailable:
@@ -975,7 +1168,7 @@ async def _try_provider_chain(
                 if _is_invalid_route_response(response):
                     raise _InvalidProviderResponse("empty or invalid route response")
                 _mark_provider_success(provider["name"])
-                return response, errors, saw_vision_unavailable
+                return response, errors, route_attempts, saw_vision_unavailable
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -990,6 +1183,7 @@ async def _try_provider_chain(
                     break
                 error_text = _error_text(e)
                 errors.append(f"{provider['name']}#{attempt + 1}: {error_text}")
+                route_attempts.append(_provider_route_attempt(provider, e, attempt=attempt + 1))
                 retryable = _is_retryable_provider_error(e)
                 has_next_attempt = attempt + 1 < retries
                 if retryable and has_next_attempt:
@@ -1014,7 +1208,7 @@ async def _try_provider_chain(
         logger.warning(
             f"personification: switching to next provider after failure: {provider['name']}"
         )
-    return None, errors, saw_vision_unavailable
+    return None, errors, route_attempts, saw_vision_unavailable
 
 
 async def call_ai_api(
@@ -1031,10 +1225,11 @@ async def call_ai_api(
         for provider in get_provider_candidates(plugin_config, logger)
     ]
     errors: List[str] = []
+    route_attempts: List[Dict[str, Any]] = []
     saw_vision_unavailable = False
 
     if providers:
-        response, primary_errors, primary_saw_vision_unavailable = await _try_provider_chain(
+        response, primary_errors, primary_attempts, primary_saw_vision_unavailable = await _try_provider_chain(
             providers,
             messages=messages,
             plugin_config=plugin_config,
@@ -1043,6 +1238,7 @@ async def call_ai_api(
             use_builtin_search=use_builtin_search,
         )
         errors.extend(primary_errors)
+        route_attempts.extend(primary_attempts)
         saw_vision_unavailable = saw_vision_unavailable or primary_saw_vision_unavailable
         if response is not None:
             return response
@@ -1070,7 +1266,7 @@ async def call_ai_api(
                 fallback_provider["api_type"]
                 in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code", "openai", "openai_codex"},
             )
-            response, fallback_errors, fallback_saw_vision_unavailable = await _try_provider_chain(
+            response, fallback_errors, fallback_attempts, fallback_saw_vision_unavailable = await _try_provider_chain(
                 [fallback_provider],
                 messages=messages,
                 plugin_config=plugin_config,
@@ -1079,10 +1275,13 @@ async def call_ai_api(
                 use_builtin_search=use_builtin_search,
             )
             errors.extend(fallback_errors)
+            route_attempts.extend(fallback_attempts)
             saw_vision_unavailable = saw_vision_unavailable or fallback_saw_vision_unavailable
             if response is not None:
                 return response
 
+    if saw_vision_unavailable:
+        return _empty_vision_unavailable_response()
     if errors:
         if providers and len(providers) == 1 and _errors_include_rate_limit(errors):
             logger.error(
@@ -1090,39 +1289,19 @@ async def call_ai_api(
                 "configure a secondary provider or wait for the cooldown to expire"
             )
         logger.error("personification: all providers failed: " + " | ".join(errors))
-        if use_single_attempt_retry_policy():
-            statuses = {
-                status
-                for status in (400, 401, 403, 404, 422)
-                if any(f"status={status}" in item for item in errors)
-            }
-            if 401 in statuses or 403 in statuses:
-                status = 401 if 401 in statuses else 403
-                raise ProviderRouteError(
-                    "provider_auth_failed",
-                    "all configured providers rejected authentication or permission",
-                    status_code=status,
-                    retryable=False,
-                )
-            if statuses:
-                status = min(statuses)
-                raise ProviderRouteError(
-                    "provider_model_unavailable",
-                    "all configured providers failed with a deterministic request or model error",
-                    status_code=status,
-                    retryable=False,
-                )
-            raise ProviderRouteError(
-                "providers_exhausted",
-                "all configured providers failed their single attempt",
-                retryable=True,
-            )
+        selected = _select_provider_attempt(route_attempts)
+        raise ProviderRouteError(
+            str(selected.get("code") or "providers_exhausted"),
+            "all configured providers failed",
+            status_code=int(selected.get("status_code") or 0),
+            retryable=bool(selected.get("retryable", True)),
+            route_attempts=route_attempts,
+        )
     if saw_vision_unavailable:
         return _empty_vision_unavailable_response()
-    if use_single_attempt_retry_policy():
-        raise ProviderRouteError(
-            "provider_caller_unavailable",
-            "no configured provider caller is available",
-            retryable=False,
-        )
-    return _empty_response()
+    raise ProviderRouteError(
+        "provider_caller_unavailable",
+        "no configured provider caller is available",
+        retryable=False,
+        route_attempts=route_attempts,
+    )

@@ -17,6 +17,20 @@ from ..deps import AdminIdentity, require_admin
 _TEST_ALL_TIMEOUT_SECONDS = 40
 _PROMPT_PREVIEW_MAX_BYTES = 256 * 1024
 _QZONE_PROBE_PROFILE = "qzone"
+_SAFE_PROVIDER_ERROR_CODES = {
+    "provider_auth_failed",
+    "provider_call_failed",
+    "provider_caller_unavailable",
+    "provider_invalid_response",
+    "provider_model_candidate_unavailable",
+    "provider_model_unavailable",
+    "provider_network_failed",
+    "provider_permission_denied",
+    "provider_request_rejected",
+    "provider_safety_block",
+    "provider_timeout",
+    "providers_exhausted",
+}
 _QZONE_PROBE_TOOL = {
     "type": "function",
     "function": {
@@ -59,11 +73,15 @@ def _attach_diagnostic(payload: dict[str, Any], report: dict[str, Any]) -> dict[
 
 def _provider_details(provider: dict[str, Any] | None) -> tuple:
     item = provider or {}
-    return (
+    details = [
         detail("Provider", str(item.get("name") or "路由模型")),
         detail("API type", str(item.get("api_type") or "routed")),
         detail("Model", str(item.get("model") or "由路由决定")),
-    )
+    ]
+    auth_mode = str(item.get("gemini_auth_mode") or "").strip()
+    if auth_mode:
+        details.append(detail("Auth mode", auth_mode))
+    return tuple(details)
 
 
 def _exception_chain(exc: BaseException) -> list[BaseException]:
@@ -96,9 +114,17 @@ def _exception_status(chain: list[BaseException]) -> int:
 def _exception_code(chain: list[BaseException]) -> str:
     for item in chain:
         code = str(getattr(item, "code", "") or "").strip().lower()
-        if code:
+        if code in _SAFE_PROVIDER_ERROR_CODES:
             return code
     return ""
+
+
+def _exception_attr(chain: list[BaseException], name: str, default: Any = "") -> Any:
+    for item in chain:
+        value = getattr(item, name, None)
+        if value is not None and value != "" and value != 0:
+            return value
+    return default
 
 
 def _provider_failure_report(
@@ -125,12 +151,12 @@ def _provider_failure_report(
         message = "Provider 未找到当前 concrete model，未取得可用模型响应。"
         suggestion = "查看安全 route attempt，确认配置 alias 展开的 concrete model 和下一候选。"
         retryable = provider_error_code == "provider_model_candidate_unavailable"
-    elif status in {401, 403} or provider_error_code == "provider_auth_failed" or any(
+    elif status == 401 or provider_error_code == "provider_auth_failed" or any(
         marker in class_names
-        for marker in ("authentication", "permissiondenied", "unauthorized", "forbidden")
+        for marker in ("authentication", "unauthorized")
     ) or any(
         marker in internal_text
-        for marker in ("unauthorized", "forbidden", "invalid api key", "authentication failed", "credentials", "access token 为空")
+        for marker in ("unauthorized", "invalid api key", "authentication failed", "credentials", "access token 为空")
     ):
         response_status = 502
         code = "provider_test_auth_failed"
@@ -138,6 +164,16 @@ def _provider_failure_report(
         title = "Provider 认证未通过"
         message = "Provider 拒绝了本次模型测试的认证信息。"
         suggestion = "检查 API Key、OAuth/CLI 登录状态和模型访问权限后重试。"
+        retryable = False
+    elif status == 403 or provider_error_code == "provider_permission_denied" or any(
+        marker in class_names for marker in ("permissiondenied", "forbidden")
+    ) or "forbidden" in internal_text:
+        response_status = 502
+        code = "provider_test_permission_denied"
+        phase = "provider_auth"
+        title = "Provider 权限不足"
+        message = "Provider 已识别认证信息，但拒绝访问当前模型或能力。"
+        suggestion = "检查账号套餐、模型白名单、项目权限和区域限制后重试。"
         retryable = False
     elif status in {400, 422} or provider_error_code == "provider_request_rejected":
         response_status = 502
@@ -213,6 +249,12 @@ def _provider_failure_report(
         detail("异常类型", type(exc).__name__, "error").to_dict(),
         *([detail("HTTP status", status, "error").to_dict()] if status else []),
         *([detail("Provider error code", provider_error_code, "error").to_dict()] if provider_error_code else []),
+        *(
+            [detail("Auth mode", str(_exception_attr(chain, "auth_mode")), "error").to_dict()]
+            if _exception_attr(chain, "auth_mode")
+            else []
+        ),
+        detail("Request count", int(_exception_attr(chain, "request_count", 1) or 1)).to_dict(),
     ]
     for route_index, route in enumerate(_provider_route_attempts(chain), start=1):
         report["details"].append(
@@ -222,6 +264,8 @@ def _provider_failure_report(
                     f"{route.get('provider') or f'route-{route_index}'} · "
                     f"{route.get('api_type') or 'unknown'} · "
                     f"{_route_model_label(route)} · "
+                    f"auth={route.get('auth_mode') or '-'} · "
+                    f"requests={route.get('request_count') or 1} · "
                     f"HTTP {route.get('status_code') or '-'} · {route.get('code') or 'provider_call_failed'}"
                 ),
                 "error",
@@ -239,7 +283,15 @@ def _provider_route_attempts(chain: list[BaseException]) -> list[dict[str, Any]]
     for item in chain:
         attempts = getattr(item, "route_attempts", None)
         if isinstance(attempts, (list, tuple)):
-            return [dict(attempt) for attempt in attempts if isinstance(attempt, dict)]
+            safe_attempts: list[dict[str, Any]] = []
+            for attempt in attempts:
+                if not isinstance(attempt, dict):
+                    continue
+                cloned = dict(attempt)
+                code = str(cloned.get("code") or "").strip().lower()
+                cloned["code"] = code if code in _SAFE_PROVIDER_ERROR_CODES else "provider_call_failed"
+                safe_attempts.append(cloned)
+            return safe_attempts
     return []
 
 

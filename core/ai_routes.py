@@ -11,6 +11,20 @@ from .safety_filter import build_safe_reframe_messages, detect_route_safety_issu
 
 _EMITTED_ROUTE_WARNINGS: set[str] = set()
 _ROUTE_WARNING_LOCK = threading.RLock()
+_CANONICAL_PROVIDER_CODES = {
+    "provider_auth_failed",
+    "provider_call_failed",
+    "provider_caller_unavailable",
+    "provider_invalid_response",
+    "provider_model_candidate_unavailable",
+    "provider_model_unavailable",
+    "provider_network_failed",
+    "provider_permission_denied",
+    "provider_request_rejected",
+    "provider_safety_block",
+    "provider_timeout",
+    "providers_exhausted",
+}
 
 
 def _tool_caller_impl() -> Any:
@@ -47,15 +61,18 @@ class RoutedToolCallerError(RuntimeError):
         self.code = str(selected.get("code") or "providers_exhausted")
         self.status_code = int(selected.get("status_code") or 0)
         self.retryable = bool(selected.get("retryable", True))
+        self.auth_mode = str(selected.get("auth_mode") or "")[:48]
+        self.request_count = sum(max(1, int(item.get("request_count") or 1)) for item in attempts)
         super().__init__("all routed tool callers failed")
 
     @staticmethod
     def _select_attempt(attempts: list[dict[str, Any]]) -> dict[str, Any]:
         priorities = (
             lambda item: item.get("code") == "provider_model_candidate_unavailable",
-            lambda item: item.get("code") == "provider_auth_failed" or item.get("status_code") in {401, 403},
-            lambda item: item.get("status_code") in {400, 422},
-            lambda item: item.get("status_code") == 404,
+            lambda item: item.get("code") == "provider_auth_failed" or item.get("status_code") == 401,
+            lambda item: item.get("code") == "provider_permission_denied" or item.get("status_code") == 403,
+            lambda item: item.get("code") == "provider_request_rejected" or item.get("status_code") in {400, 422},
+            lambda item: item.get("code") == "provider_model_unavailable" or item.get("status_code") == 404,
             lambda item: bool(item.get("retryable")),
         )
         for predicate in priorities:
@@ -65,7 +82,7 @@ class RoutedToolCallerError(RuntimeError):
         return attempts[-1] if attempts else {"code": "providers_exhausted", "retryable": True}
 
 
-def _exception_route_metadata(exc: BaseException) -> tuple[int, str, bool, str, str]:
+def _exception_route_metadata(exc: BaseException) -> tuple[int, str, bool, str, str, str, int]:
     current: BaseException | None = exc
     seen: set[int] = set()
     status_code = 0
@@ -73,10 +90,16 @@ def _exception_route_metadata(exc: BaseException) -> tuple[int, str, bool, str, 
     retryable = False
     concrete_model = ""
     next_model = ""
+    auth_mode = ""
+    request_count = 0
+    class_names: list[str] = []
     while current is not None and id(current) not in seen and len(seen) < 6:
         seen.add(id(current))
+        class_names.append(type(current).__name__.lower())
         if not code:
-            code = str(getattr(current, "code", "") or "").strip().lower()
+            candidate_code = str(getattr(current, "code", "") or "").strip().lower()
+            if candidate_code in _CANONICAL_PROVIDER_CODES:
+                code = candidate_code
         if not status_code:
             values = (
                 getattr(current, "status_code", None),
@@ -94,17 +117,53 @@ def _exception_route_metadata(exc: BaseException) -> tuple[int, str, bool, str, 
             concrete_model = str(getattr(current, "concrete_model", "") or "").strip()
         if not next_model:
             next_model = str(getattr(current, "next_model", "") or "").strip()
+        if not auth_mode:
+            auth_mode = str(getattr(current, "auth_mode", "") or "").strip().lower()
+        if not request_count:
+            try:
+                request_count = int(getattr(current, "request_count", 0) or 0)
+            except (TypeError, ValueError):
+                request_count = 0
         current = current.__cause__ or current.__context__
-    if not code:
-        if status_code in {401, 403}:
-            code = "provider_auth_failed"
-        elif status_code in {400, 422}:
-            code = "provider_request_rejected"
-        elif status_code == 404:
-            code = "provider_model_unavailable"
-        else:
-            code = "provider_call_failed"
-    return status_code, code, retryable, concrete_model[:120], next_model[:120]
+    if status_code == 401:
+        code = "provider_auth_failed"
+    elif status_code == 403:
+        code = "provider_permission_denied"
+    elif status_code in {400, 422}:
+        code = "provider_request_rejected"
+    elif status_code == 404:
+        code = (
+            "provider_model_candidate_unavailable"
+            if code == "provider_model_candidate_unavailable"
+            else "provider_model_unavailable"
+        )
+    elif any("timeout" in name for name in class_names):
+        code = "provider_timeout"
+        retryable = True
+    elif any(
+        marker in name
+        for name in class_names
+        for marker in ("connect", "network", "protocol", "readerror", "writeerror", "dnserror")
+    ):
+        code = "provider_network_failed"
+        retryable = True
+    elif not code:
+        code = "provider_call_failed"
+    if status_code in {400, 401, 403, 422} or (
+        status_code == 404 and code != "provider_model_candidate_unavailable"
+    ):
+        retryable = False
+    elif status_code in {408, 409, 425, 429} or status_code >= 500:
+        retryable = True
+    return (
+        status_code,
+        code,
+        retryable,
+        concrete_model[:120],
+        next_model[:120],
+        auth_mode[:48],
+        max(1, request_count),
+    )
 
 
 def _normalize_api_type(api_type: str) -> str:
@@ -669,15 +728,21 @@ class RoutedToolCaller:
                 "provider": str(source.get("name") or f"route-{index + 1}")[:80],
                 "api_type": str(source.get("api_type") or "")[:48],
                 "model": str(source.get("model") or "")[:120],
+                "auth_mode": str(source.get("gemini_auth_mode") or "")[:48],
                 "caller": type(caller).__name__[:80],
             }
 
     def _route_attempt(self, caller: ToolCaller, exc: BaseException) -> dict[str, Any]:
-        status_code, code, retryable, concrete_model, next_model = _exception_route_metadata(exc)
+        status_code, code, retryable, concrete_model, next_model, auth_mode, request_count = (
+            _exception_route_metadata(exc)
+        )
+        descriptor = self._caller_route_descriptors.get(id(caller), {"caller": type(caller).__name__[:80]})
         return {
-            **self._caller_route_descriptors.get(id(caller), {"caller": type(caller).__name__[:80]}),
+            **descriptor,
             "concrete_model": concrete_model,
             "next_model": next_model,
+            "auth_mode": auth_mode or str(descriptor.get("auth_mode") or "")[:48],
+            "request_count": request_count,
             "status_code": status_code,
             "code": code,
             "retryable": retryable,
@@ -741,6 +806,9 @@ class RoutedToolCaller:
             safety_issue = detect_route_safety_issue(response)
             if safety_issue:
                 if use_single_attempt_retry_policy():
+                    last_error = RuntimeError("provider safety block")
+                    last_error.code = "provider_safety_block"
+                    route_attempts.append(self._route_attempt(caller, last_error))
                     continue
                 try:
                     response = await caller.chat_with_tools(
@@ -755,11 +823,18 @@ class RoutedToolCaller:
                     route_attempts.append(self._route_attempt(caller, exc))
                     continue
                 if detect_route_safety_issue(response):
+                    last_error = RuntimeError("provider safety block")
+                    last_error.code = "provider_safety_block"
+                    route_attempts.append(self._route_attempt(caller, last_error))
                     continue
             if response.vision_unavailable:
                 saw_vision_unavailable = True
                 continue
             if _is_invalid_tool_response(response):
+                last_error = RuntimeError("provider returned an empty or invalid response")
+                last_error.code = "provider_invalid_response"
+                last_error.retryable = True
+                route_attempts.append(self._route_attempt(caller, last_error))
                 continue
             is_qzone_probe = str(current_llm_context().get("purpose") or "") == "qzone_provider_probe"
             if not is_qzone_probe:
@@ -777,16 +852,21 @@ class RoutedToolCaller:
                 raw=None,
                 vision_unavailable=True,
             )
-        if last_error is not None:
-            if use_single_attempt_retry_policy():
-                raise RoutedToolCallerError(route_attempts) from last_error
-            raise last_error
-        return _tool_caller_response_cls()(
-            finish_reason="stop",
-            content="",
-            tool_calls=[],
-            raw=None,
-        )
+        if route_attempts:
+            raise RoutedToolCallerError(route_attempts) from last_error
+        raise RoutedToolCallerError([
+            {
+                "provider": "routed",
+                "api_type": "",
+                "model": "",
+                "auth_mode": "",
+                "request_count": 1,
+                "status_code": 0,
+                "code": "provider_caller_unavailable",
+                "retryable": False,
+                "exception_type": "",
+            }
+        ])
 
     def build_tool_result_message(
         self,
@@ -844,7 +924,13 @@ def build_routed_tool_caller(
             )
             route_descriptors.append(fallback_resolution.provider)
     if not primary_callers and fallback_caller is None:
-        return _build_tool_caller(plugin_config)
+        legacy_caller = _build_tool_caller(plugin_config)
+        return RoutedToolCaller(
+            primary_callers=[legacy_caller],
+            fallback_caller=None,
+            logger=logger,
+            route_descriptors=[get_primary_provider_config(plugin_config, logger)],
+        )
     return RoutedToolCaller(
         primary_callers=primary_callers,
         fallback_caller=fallback_caller,

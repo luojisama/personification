@@ -371,7 +371,11 @@ async def _probe_http_models(provider: dict[str, Any]) -> tuple[list[dict[str, s
                 send=_send,
             )
             response = auth_result.response
-            raise_for_gemini_status(response)
+            raise_for_gemini_status(
+                response,
+                auth_mode=auth_result.mode,
+                request_count=auth_result.request_count,
+            )
         else:
             response = await client.get(url, headers=headers, params=params)
             response.raise_for_status()
@@ -426,14 +430,28 @@ def _provider_probe_diagnostic(
 def _provider_probe_failure(exc: BaseException, *, api_type: str) -> tuple[int, dict[str, Any]]:
     status_code = 502
     status = None
+    auth_mode = str(getattr(exc, "auth_mode", "") or "").strip().lower()
+    if auth_mode not in {"x-goog-api-key", "bearer", "query_legacy"}:
+        auth_mode = ""
+    try:
+        request_count = max(1, int(getattr(exc, "request_count", 1) or 1))
+    except (TypeError, ValueError):
+        request_count = 1
     if isinstance(exc, httpx.HTTPStatusError):
         status = getattr(exc.response, "status_code", None)
-        if status in {401, 403}:
+        if status == 401:
             code = "provider_model_probe_auth_failed"
             phase = "provider_auth"
             title = "Provider 认证未通过"
             message = "Provider 拒绝了模型列表认证。"
-            suggestion = "检查 API Key、认证方式与模型列表权限后再试。"
+            suggestion = "检查 API Key 与认证方式后再试。"
+            retryable = False
+        elif status == 403:
+            code = "provider_model_probe_permission_denied"
+            phase = "provider_auth"
+            title = "Provider 模型列表权限不足"
+            message = "Provider 已识别认证信息，但拒绝访问模型列表。"
+            suggestion = "检查账号套餐、项目权限、模型白名单与区域限制后再试。"
             retryable = False
         else:
             code = "provider_model_probe_http_failed"
@@ -492,6 +510,12 @@ def _provider_probe_failure(exc: BaseException, *, api_type: str) -> tuple[int, 
         details=(
             detail("API type", api_type),
             *((detail("HTTP status", status, "error"),) if status is not None else ()),
+            *(
+                (detail("Auth mode", auth_mode, "error"),)
+                if auth_mode
+                else ()
+            ),
+            detail("Request count", request_count),
             detail("异常类型", type(exc).__name__, "error"),
         ),
         steps=(

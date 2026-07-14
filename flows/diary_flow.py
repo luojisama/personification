@@ -228,20 +228,51 @@ def _qzone_reviewer_http_status(exc: Exception) -> int:
 
 
 def _qzone_error_code(exc: Exception) -> str:
+    allowed = {
+        "invalid_model",
+        "model_deprecated",
+        "model_not_available",
+        "model_not_found",
+        "provider_auth_failed",
+        "provider_call_failed",
+        "provider_caller_unavailable",
+        "provider_model_candidate_unavailable",
+        "provider_model_unavailable",
+        "provider_network_failed",
+        "provider_permission_denied",
+        "provider_request_rejected",
+        "provider_timeout",
+        "providers_exhausted",
+        "unsupported_model",
+    }
     for item in _qzone_exception_chain(exc):
         direct = str(getattr(item, "code", "") or "").strip().lower()
-        if direct:
+        if direct in allowed:
             return direct
         body = getattr(item, "body", None)
         if isinstance(body, dict):
             payload = body.get("error") if isinstance(body.get("error"), dict) else body
             nested = str(payload.get("code") or payload.get("type") or "").strip().lower()
-            if nested:
+            if nested in allowed:
                 return nested
     return ""
 
 
 def _qzone_route_attempt_details(exc: Exception) -> list[OperationDetail]:
+    safe_codes = {
+        "provider_auth_failed",
+        "provider_call_failed",
+        "provider_caller_unavailable",
+        "provider_invalid_response",
+        "provider_model_candidate_unavailable",
+        "provider_model_unavailable",
+        "provider_network_failed",
+        "provider_permission_denied",
+        "provider_request_rejected",
+        "provider_safety_block",
+        "provider_timeout",
+        "providers_exhausted",
+    }
     for item in _qzone_exception_chain(exc):
         attempts = getattr(item, "route_attempts", None)
         if not isinstance(attempts, (list, tuple)):
@@ -260,11 +291,15 @@ def _qzone_route_attempt_details(exc: Exception) -> list[OperationDetail]:
                 else concrete_model or configured_model
             )
             status = int(attempt.get("status_code") or 0)
-            code = str(attempt.get("code") or "provider_call_failed")
+            raw_code = str(attempt.get("code") or "").strip().lower()
+            code = raw_code if raw_code in safe_codes else "provider_call_failed"
+            auth_mode = str(attempt.get("auth_mode") or "-")
+            request_count = max(1, int(attempt.get("request_count") or 1))
             result.append(
                 detail(
                     f"Provider route {index}",
-                    f"{provider} · {api_type} · {model} · HTTP {status or '-'} · {code}",
+                    f"{provider} · {api_type} · {model} · auth={auth_mode} · "
+                    f"requests={request_count} · HTTP {status or '-'} · {code}",
                     "error",
                 )
             )
@@ -310,11 +345,18 @@ def _classify_qzone_generation_error(exc: Exception) -> tuple[str, str, str, boo
             "当前 concrete model 候选不可用；下一次由 QZone generation budget 切换候选。",
             True,
         )
-    if status in {401, 403} or code == "provider_auth_failed":
+    if status == 401 or code == "provider_auth_failed":
         return (
             "qzone_generation_auth_failed",
             "草稿生成模型认证失败",
-            "LLM Provider 的认证或模型调用权限被拒绝；这不是 QQ 空间登录失败。",
+            "LLM Provider 拒绝了认证信息；这不是 QQ 空间登录失败。",
+            False,
+        )
+    if status == 403 or code == "provider_permission_denied":
+        return (
+            "qzone_generation_permission_denied",
+            "草稿生成模型权限不足",
+            "LLM Provider 已识别认证信息，但当前账号无权调用模型或能力；这不是 QQ 空间登录失败。",
             False,
         )
     if status in {400, 422}:
@@ -1230,6 +1272,7 @@ async def _review_qzone_semantics(
         except Exception as exc:
             transient = _is_transient_qzone_reviewer_error(exc)
             status_code = _qzone_reviewer_http_status(exc)
+            error_code = _qzone_error_code(exc)
             can_retry = transient and budget.remaining > 0
             if logger is not None:
                 logger.info(
@@ -1261,11 +1304,18 @@ async def _review_qzone_semantics(
                 )
                 return None
             if report is not None:
-                if status_code in {401, 403}:
+                if status_code == 401 or error_code == "provider_auth_failed":
                     code = "semantic_reviewer_auth_failed"
                     title = "语义审阅认证失败"
-                    message = "审阅模型认证或权限被拒绝，确定性失败不会重复调用。"
-                elif status_code == 404:
+                    message = "审阅模型认证被拒绝，确定性失败不会重复调用。"
+                elif status_code == 403 or error_code == "provider_permission_denied":
+                    code = "semantic_reviewer_permission_denied"
+                    title = "语义审阅权限不足"
+                    message = "认证信息已被识别，但当前账号无权调用审阅模型。"
+                elif status_code == 404 or error_code in {
+                    "provider_model_candidate_unavailable",
+                    "provider_model_unavailable",
+                }:
                     code = "semantic_reviewer_model_missing"
                     title = "语义审阅模型不可用"
                     message = "审阅模型或调用端点不存在，确定性失败不会重复调用。"

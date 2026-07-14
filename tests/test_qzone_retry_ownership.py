@@ -61,7 +61,7 @@ def test_qzone_policy_tries_each_provider_once_and_keeps_provider_fallback(monke
         retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
     )
     try:
-        response, errors, _ = asyncio.run(provider_router._try_provider_chain(
+        response, errors, attempts, _ = asyncio.run(provider_router._try_provider_chain(
             [_provider("primary"), _provider("fallback")],
             messages=[],
             plugin_config=SimpleNamespace(),
@@ -73,6 +73,7 @@ def test_qzone_policy_tries_each_provider_once_and_keeps_provider_fallback(monke
     assert response is not None and response.content == "ok"
     assert calls == {"primary": 1, "fallback": 1}
     assert len(errors) == 1
+    assert len(attempts) == 1
 
 
 class _FakeCaller:

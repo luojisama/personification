@@ -177,7 +177,12 @@ async def request_with_gemini_auth(
     )
 
 
-def raise_for_gemini_status(response: httpx.Response) -> None:
+def raise_for_gemini_status(
+    response: httpx.Response,
+    *,
+    auth_mode: str = "",
+    request_count: int = 1,
+) -> None:
     if int(getattr(response, "status_code", 0) or 0) < 300:
         return
     try:
@@ -193,11 +198,14 @@ def raise_for_gemini_status(response: httpx.Response) -> None:
             headers=safe_headers,
             request=safe_request,
         )
-        raise httpx.HTTPStatusError(
+        error = httpx.HTTPStatusError(
             f"Gemini upstream returned HTTP {exc.response.status_code} for {safe_url}",
             request=safe_request,
             response=safe_response,
-        ) from None
+        )
+        error.auth_mode = normalize_gemini_auth_mode(auth_mode)
+        error.request_count = max(1, int(request_count or 1))
+        raise error from None
 
 
 __all__ = [

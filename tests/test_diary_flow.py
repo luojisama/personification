@@ -360,7 +360,7 @@ def test_qzone_agent_exception_recovers_without_direct_provider_fallback(monkeyp
     [
         (400, "qzone_generation_request_rejected"),
         (401, "qzone_generation_auth_failed"),
-        (403, "qzone_generation_auth_failed"),
+        (403, "qzone_generation_permission_denied"),
         (404, "qzone_generation_model_unavailable"),
         (422, "qzone_generation_request_rejected"),
     ],
@@ -455,6 +455,8 @@ def test_qzone_generation_exposes_safe_provider_route_attempts() -> None:
                     "model": "gemini-3.5-flash-low",
                     "status_code": 404,
                     "code": "provider_model_candidate_unavailable",
+                    "auth_mode": "bearer",
+                    "request_count": 2,
                 },
             )
             raise exc
@@ -472,7 +474,19 @@ def test_qzone_generation_exposes_safe_provider_route_attempts() -> None:
     assert details["Provider route 1"].endswith(
         "HTTP 404 · provider_model_candidate_unavailable"
     )
+    assert "auth=bearer · requests=2" in details["Provider route 1"]
     assert "private provider response" not in str(details)
+
+
+def test_qzone_route_attempt_rejects_opaque_error_code() -> None:
+    error = RuntimeError("private provider response")
+    error.route_attempts = ({"provider": "route", "code": "opaque-secret-code"},)
+
+    details = diary_flow._qzone_route_attempt_details(error)
+
+    assert len(details) == 1
+    assert details[0].value.endswith("provider_call_failed")
+    assert "opaque-secret-code" not in details[0].value
 
 
 def test_qzone_generation_fast_fails_without_caller_and_propagates_cancel() -> None:
@@ -1222,6 +1236,26 @@ def test_qzone_semantic_reviewer_fast_fails_auth_and_propagates_cancel() -> None
     assert auth_calls == 1
     assert auth_report.code == "semantic_reviewer_auth_failed"
     assert auth_report.retryable is False
+
+    permission_report = diary_flow.QzoneGenerationReport()
+
+    async def _permission_call(_messages, **_kwargs):  # noqa: ANN001
+        error = RuntimeError("permission denied")
+        error.code = "provider_permission_denied"
+        raise error
+
+    permission_review = asyncio.run(diary_flow._review_qzone_semantics(
+        "窗边这点风刚好够吹散一点困意",
+        recent_posts=[],
+        source_context="",
+        persona_system="你是绪山真寻",
+        call_ai_api=_permission_call,
+        logger=_Logger(),
+        report=permission_report,
+    ))
+    assert permission_review is None
+    assert permission_report.code == "semantic_reviewer_permission_denied"
+    assert permission_report.retryable is False
 
     async def _cancel_call(_messages, **_kwargs):  # noqa: ANN001
         raise asyncio.CancelledError

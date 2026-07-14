@@ -184,12 +184,50 @@ def test_provider_router_reframes_blocked_context_before_retry(monkeypatch) -> N
             logger=logger,
         )
 
-    response, errors, _vision = asyncio.run(run())
+    response, errors, attempts, _vision = asyncio.run(run())
     assert response.content == "这事换个角度看就顺了"
     assert any("safety_block" in item for item in errors)
+    assert attempts == []
     assert calls[1][1]["role"] == "system"
     assert calls[1][1]["content"] == "## 用户档案\n某人资料"
     assert calls[1][-1]["role"] == "system"
+
+
+def test_provider_router_classifies_empty_safety_reframe_as_invalid_response(monkeypatch) -> None:  # noqa: ANN001
+    responses = [
+        SimpleNamespace(
+            finish_reason="stop",
+            content="请求被安全策略阻止",
+            raw={"response": {"candidates": [{"finishReason": "SAFETY"}]}},
+            tool_calls=[],
+            vision_unavailable=False,
+        ),
+        SimpleNamespace(
+            finish_reason="stop",
+            content="",
+            raw={},
+            tool_calls=[],
+            vision_unavailable=False,
+        ),
+    ]
+
+    async def _call(*_args, **_kwargs):  # noqa: ANN202
+        return responses.pop(0)
+
+    monkeypatch.setattr(provider_router, "_call_provider_once", _call)
+    monkeypatch.setattr(provider_router, "_mark_provider_failure", lambda *_args: 0.0)
+    logger = SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None)
+
+    response, _errors, attempts, _vision = asyncio.run(provider_router._try_provider_chain(
+        [{"name": "p", "api_type": "openai", "model": "m", "max_retries": 1}],
+        messages=[{"role": "user", "content": "继续"}],
+        plugin_config=object(),
+        logger=logger,
+    ))
+
+    assert response is None
+    assert attempts[-1]["code"] == "provider_invalid_response"
+    assert attempts[-1]["retryable"] is True
 
 
 def test_safe_reframe_only_demotes_explicit_untrusted_metadata() -> None:

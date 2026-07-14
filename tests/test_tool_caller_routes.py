@@ -280,7 +280,11 @@ def test_gemini_status_error_redacts_legacy_query_key() -> None:
     )
 
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
-        gemini_transport.raise_for_gemini_status(response)
+        gemini_transport.raise_for_gemini_status(
+            response,
+            auth_mode="bearer",
+            request_count=2,
+        )
 
     error = exc_info.value
     assert "legacy-secret" not in str(error)
@@ -288,6 +292,8 @@ def test_gemini_status_error_redacts_legacy_query_key() -> None:
     assert "legacy-secret" not in str(error.response.request.url)
     assert "legacy-secret" not in str(error.response.headers)
     assert "location" not in error.response.headers
+    assert error.auth_mode == "bearer"
+    assert error.request_count == 2
 
 
 def test_single_provider_caller_receives_gemini_auth_mode_and_timeout() -> None:

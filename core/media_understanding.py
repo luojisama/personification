@@ -437,7 +437,11 @@ async def _call_gemini_media(
             allow_negotiation=not use_single_attempt_retry_policy(),
         )
         response = auth_result.response
-        raise_for_gemini_status(response)
+        raise_for_gemini_status(
+            response,
+            auth_mode=auth_result.mode,
+            request_count=auth_result.request_count,
+        )
         data = dict(response.json() or {})
     candidates = list((data.get("candidates") or []))
     if not candidates:

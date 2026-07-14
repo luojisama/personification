@@ -161,6 +161,32 @@ _FALLBACK_REPLIES = [
 ]
 
 _IMAGE_B64_RE = re.compile(r"\[IMAGE_B64\]([A-Za-z0-9+/=\r\n]+)\[/IMAGE_B64\]")
+_SAFE_PROVIDER_DIAGNOSIS_CODES = {
+    "provider_auth_failed",
+    "provider_call_failed",
+    "provider_caller_unavailable",
+    "provider_invalid_response",
+    "provider_model_candidate_unavailable",
+    "provider_model_unavailable",
+    "provider_network_failed",
+    "provider_permission_denied",
+    "provider_request_rejected",
+    "provider_safety_block",
+    "provider_timeout",
+    "providers_exhausted",
+}
+
+
+def _provider_diagnosis_code(exc: BaseException) -> str:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(seen) < 6:
+        seen.add(id(current))
+        code = str(getattr(current, "code", "") or "").strip().lower()
+        if code in _SAFE_PROVIDER_DIAGNOSIS_CODES:
+            return code
+        current = current.__cause__ or current.__context__
+    return ""
 
 
 def _extract_image_b64_markers(text: str) -> tuple[str, list[str]]:
@@ -403,14 +429,24 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
         raise
     except Exception as exc:
         if trace_mod is not None and trace_id and not cancelled:
+            provider_code = _provider_diagnosis_code(exc)
+            is_provider_failure = bool(provider_code)
             trace_mod.record_stage(
                 trace_id=trace_id,
-                key="unhandled_exception",
-                label="链路异常",
+                key="provider_failure" if is_provider_failure else "unhandled_exception",
+                label="Provider 调用失败" if is_provider_failure else "链路异常",
                 status="error",
-                detail=str(exc)[:500],
+                detail=(
+                    f"code={provider_code} type={type(exc).__name__}"
+                    if is_provider_failure
+                    else str(exc)[:500]
+                ),
             )
-            trace_mod.finish_trace(trace_id=trace_id, outcome="failed", diagnosis_code="internal_exception")
+            trace_mod.finish_trace(
+                trace_id=trace_id,
+                outcome="failed",
+                diagnosis_code=provider_code if is_provider_failure else "internal_exception",
+            )
         raise
     finally:
         release_reply_commit(state)
@@ -2774,17 +2810,27 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         raise
     except Exception as e:
         record_counter("reply_processor.error_total")
-        runtime.logger.error(f"拟人插件 API 调用失败: {e}")
+        provider_code = _provider_diagnosis_code(e)
+        error_summary = (
+            f"code={provider_code} type={type(e).__name__}"
+            if provider_code
+            else str(e)[:500]
+        )
+        runtime.logger.error(f"拟人插件 API 调用失败: {error_summary}")
         try:
             from ...core import reply_turn_trace
 
             reply_turn_trace.record_stage(
-                key="reply_failed",
-                label="回复异常",
+                key="provider_failure" if provider_code else "reply_failed",
+                label="Provider 调用失败" if provider_code else "回复异常",
                 status="error",
-                detail=str(e)[:500],
+                detail=error_summary,
             )
-            reply_turn_trace.finish_trace(outcome="failed", diagnosis_code="internal_exception", detail={"error": str(e)[:500]})
+            reply_turn_trace.finish_trace(
+                outcome="failed",
+                diagnosis_code=provider_code or "internal_exception",
+                detail={"error": error_summary},
+            )
         except Exception:
             pass
         if reply_required and not bool(state.get("reply_delivery_started", False)):
@@ -2799,8 +2845,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
                     reply_turn_trace.finish_trace(
                         outcome="degraded",
-                        diagnosis_code="internal_exception",
-                        detail={"fallback_sent": True, "error": str(e)[:500]},
+                        diagnosis_code=provider_code or "internal_exception",
+                        detail={"fallback_sent": True, "error": error_summary},
                     )
                 except Exception:
                     pass
