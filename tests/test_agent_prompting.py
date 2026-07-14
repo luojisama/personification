@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
 
 
 prompting = load_personification_module("plugin.personification.agent.runtime.prompting")
+agent_bridge = load_personification_module("plugin.personification.core.agent_bridge")
+tool_registry = load_personification_module("plugin.personification.agent.tool_registry")
+
+
+async def _noop_tool(**_kwargs):  # noqa: ANN001
+    return "ok"
+
+
+def _register_tool(registry, name: str) -> None:  # noqa: ANN001
+    registry.register(
+        tool_registry.AgentTool(
+            name=name,
+            description=name,
+            parameters={"type": "object", "properties": {}},
+            handler=_noop_tool,
+        )
+    )
 
 
 def test_agent_prompting_includes_directed_exchange_behavior() -> None:
@@ -65,6 +83,66 @@ def test_qzone_surface_skips_group_chat_reply_discipline() -> None:
     assert "非聊天生成面：qzone_post" in combined
     assert "最终对用户的回复必须自然、像群聊里的活人接话" not in combined
     assert "群聊里通常多个话题并行" not in combined
+
+
+def test_qzone_text_agent_profile_keeps_only_read_only_evidence_tools() -> None:
+    registry = tool_registry.ToolRegistry()
+    for name in (
+        "web_search",
+        "weather",
+        "recall_user_memory",
+        "send_qq_face",
+        "remember_user_memory",
+        "create_user_task",
+        "custom_unknown_tool",
+    ):
+        _register_tool(registry, name)
+
+    default_names = {tool.name for tool in agent_bridge.clone_tool_registry(registry).active()}
+    qzone_names = {
+        tool.name
+        for tool in agent_bridge.clone_tool_registry(
+            registry,
+            tool_profile=agent_bridge.TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
+        ).active()
+    }
+    none_names = {
+        tool.name
+        for tool in agent_bridge.clone_tool_registry(
+            registry,
+            tool_profile=agent_bridge.TEXT_AGENT_TOOL_PROFILE_NONE,
+        ).active()
+    }
+
+    assert "send_qq_face" in default_names
+    assert qzone_names == {"web_search", "weather", "recall_user_memory"}
+    assert none_names == set()
+
+
+def test_qzone_text_agent_profile_disables_provider_builtin_search(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict = {}
+
+    async def _run_agent(**kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        return SimpleNamespace(text="测试通过")
+
+    monkeypatch.setattr(agent_bridge, "run_agent", _run_agent)
+    registry = tool_registry.ToolRegistry()
+    _register_tool(registry, "web_search")
+
+    result = asyncio.run(agent_bridge.run_text_agent(
+        messages=[{"role": "user", "content": "写一条说说"}],
+        plugin_config=SimpleNamespace(personification_agent_enabled=True),
+        logger=None,
+        tool_caller=object(),
+        registry=registry,
+        surface="qzone_post",
+        structured_output=True,
+        tool_profile=agent_bridge.TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
+    ))
+
+    assert result == "测试通过"
+    assert captured["allow_builtin_search"] is False
 
 
 def test_agent_prompting_adds_strict_technical_evidence_policy() -> None:

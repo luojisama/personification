@@ -355,6 +355,81 @@ def test_qzone_agent_exception_recovers_without_direct_provider_fallback(monkeyp
     assert direct_calls == 0
 
 
+def test_qzone_agent_request_rejection_recovers_once_without_tools(monkeypatch) -> None:  # noqa: ANN001
+    profiles: list[str] = []
+    report = diary_flow.QzoneGenerationReport()
+
+    async def _agent(**kwargs):  # noqa: ANN001
+        profiles.append(str(kwargs.get("tool_profile") or ""))
+        if len(profiles) == 1:
+            exc = RuntimeError("private tool schema rejection")
+            exc.status_code = 400
+            exc.code = "provider_request_rejected"
+            exc.route_attempts = (
+                {
+                    "provider": "zellon",
+                    "api_type": "gemini",
+                    "model": "gemini-3-flash-agent",
+                    "status_code": 400,
+                    "code": "provider_request_rejected",
+                    "tools_count": 7,
+                    "tool_names_hash": "abc123def456",
+                    "request_kind": "function_calling",
+                },
+            )
+            raise exc
+        return json.dumps({"content": "窗边这阵风总算把困意吹散了", "image_prompt": ""}, ensure_ascii=False)
+
+    monkeypatch.setattr(diary_flow, "run_text_agent", _agent)
+    result = asyncio.run(diary_flow._generate_once(
+        "你是绪山真寻",
+        "写一条说说",
+        plugin_config=SimpleNamespace(personification_agent_enabled=True),
+        call_ai_api=None,
+        tool_caller=object(),
+        registry=object(),
+        report=report,
+    ))
+
+    assert json.loads(result)["content"] == "窗边这阵风总算把困意吹散了"
+    assert profiles == [
+        diary_flow.TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
+        diary_flow.TEXT_AGENT_TOOL_PROFILE_NONE,
+    ]
+    assert report.steps[0].status == "warn"
+    first_details = {item.label: item.value for item in report.steps[0].details}
+    assert first_details["恢复策略"] == "下一次 generation attempt 关闭 Agent function tools"
+
+
+def test_qzone_agent_tool_free_request_rejection_still_fast_fails(monkeypatch) -> None:  # noqa: ANN001
+    calls = 0
+    report = diary_flow.QzoneGenerationReport()
+
+    async def _agent(**_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        exc = RuntimeError("private request rejection")
+        exc.status_code = 400
+        exc.code = "provider_request_rejected"
+        exc.tools_count = 0
+        raise exc
+
+    monkeypatch.setattr(diary_flow, "run_text_agent", _agent)
+    result = asyncio.run(diary_flow._generate_once(
+        "你是绪山真寻",
+        "写一条说说",
+        plugin_config=SimpleNamespace(personification_agent_enabled=True),
+        call_ai_api=None,
+        tool_caller=object(),
+        registry=object(),
+        report=report,
+    ))
+
+    assert result == ""
+    assert calls == 1
+    assert report.code == "qzone_generation_request_rejected"
+
+
 @pytest.mark.parametrize(
     ("status_code", "expected_code"),
     [

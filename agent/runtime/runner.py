@@ -235,6 +235,7 @@ async def run_agent(
     reply_required: bool = False,
     surface: str = "",
     finalize_quality: bool = True,
+    allow_builtin_search: bool = True,
 ) -> AgentResult:
     use_builtin_search = (
         bool(
@@ -245,6 +246,7 @@ async def run_agent(
             )
         )
         and _caller_supports_builtin_search(tool_caller)
+        and bool(allow_builtin_search)
     )
     pending_actions: List[dict] = []
     bind_actions = getattr(executor, "bind_pending_actions", None)

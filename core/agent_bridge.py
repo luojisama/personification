@@ -9,6 +9,34 @@ from ..agent.query_rewriter import QueryRewriteContext
 from .visible_output import guard_visible_text
 
 
+TEXT_AGENT_TOOL_PROFILE_DEFAULT = "default"
+TEXT_AGENT_TOOL_PROFILE_NONE = "none"
+TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY = "qzone_read_only"
+_QZONE_READ_ONLY_TOOL_NAMES = frozenset(
+    {
+        "datetime",
+        "game_info",
+        "get_ai_news",
+        "get_baike_entry",
+        "get_daily_news",
+        "get_epic_games",
+        "get_exchange_rate",
+        "get_gold_price",
+        "get_history_today",
+        "get_trending",
+        "get_user_persona",
+        "memory_recall",
+        "recall_group_memory",
+        "recall_user_memory",
+        "resolve_acg_entity",
+        "search_web",
+        "weather",
+        "web_search",
+        "wiki_lookup",
+    }
+)
+
+
 class _NullLogger:
     def debug(self, *_args: Any, **_kwargs: Any) -> None:
         return None
@@ -47,15 +75,38 @@ class TextAgentExecutor:
         return f"文本 Agent 已忽略发送动作：{action}"
 
 
-def clone_tool_registry(registry: Any) -> ToolRegistry:
+def clone_tool_registry(
+    registry: Any,
+    *,
+    tool_profile: str = TEXT_AGENT_TOOL_PROFILE_DEFAULT,
+) -> ToolRegistry:
     cloned = ToolRegistry()
     if registry is None:
         return cloned
+    profile = str(tool_profile or TEXT_AGENT_TOOL_PROFILE_DEFAULT).strip().lower()
+    if profile == TEXT_AGENT_TOOL_PROFILE_NONE:
+        return cloned
+    if profile not in {TEXT_AGENT_TOOL_PROFILE_DEFAULT, TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY}:
+        raise ValueError(f"unsupported text Agent tool profile: {profile}")
     active = getattr(registry, "active", None)
     tools = active() if callable(active) else []
     for tool in tools:
+        tool_name = str(getattr(tool, "name", "") or "")
+        if (
+            profile == TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY
+            and tool_name not in _QZONE_READ_ONLY_TOOL_NAMES
+        ):
+            continue
         cloned.register(tool)
     return cloned
+
+
+def tool_schemas_for_profile(
+    registry: Any,
+    *,
+    tool_profile: str,
+) -> list[dict]:
+    return clone_tool_registry(registry, tool_profile=tool_profile).openai_schemas()
 
 
 async def run_text_agent(
@@ -71,13 +122,14 @@ async def run_text_agent(
     chat_intent_hint: str = "",
     surface: str = "",
     structured_output: bool = False,
+    tool_profile: str = TEXT_AGENT_TOOL_PROFILE_DEFAULT,
 ) -> str:
     """Run the complete Agent loop for flows that only need a text result.
 
     This intentionally reuses ``run_agent`` instead of the lightweight loop, so
     intent inference, query rewriting, tool selection, evidence synthesis and
-    semantic fallback stay aligned with live chat. Sending-side tools are not
-    registered here; callers remain responsible for delivering the final text.
+    semantic fallback stay aligned with live chat. Callers select an explicit
+    tool profile when a non-chat surface requires a smaller capability set.
     """
 
     logger = logger or _NullLogger()
@@ -110,7 +162,7 @@ async def run_text_agent(
     executor = TextAgentExecutor(logger=logger)
     result = await run_agent(
         messages=agent_messages,
-        registry=clone_tool_registry(registry),
+        registry=clone_tool_registry(registry, tool_profile=tool_profile),
         tool_caller=tool_caller,
         executor=executor,
         plugin_config=plugin_config,
@@ -120,8 +172,20 @@ async def run_text_agent(
         is_group=False if surface else None,
         surface=surface,
         finalize_quality=not structured_output,
+        allow_builtin_search=tool_profile == TEXT_AGENT_TOOL_PROFILE_DEFAULT,
     )
     text = str(getattr(result, "text", "") or "").strip()
     if text in {"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"}:
         return ""
     return guard_visible_text(text, logger=logger, surface=surface or "agent_bridge")
+
+
+__all__ = [
+    "TEXT_AGENT_TOOL_PROFILE_DEFAULT",
+    "TEXT_AGENT_TOOL_PROFILE_NONE",
+    "TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY",
+    "TextAgentExecutor",
+    "clone_tool_registry",
+    "run_text_agent",
+    "tool_schemas_for_profile",
+]

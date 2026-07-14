@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from ..agent.inner_state import load_inner_state, update_state_from_diary
-from ..core.agent_bridge import run_text_agent
+from ..core.agent_bridge import (
+    TEXT_AGENT_TOOL_PROFILE_NONE,
+    TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
+    run_text_agent,
+)
 from ..core.context_policy import strip_response_control_markers
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_group_emotion_memory, load_emotion_state
@@ -311,6 +315,26 @@ def _qzone_route_attempt_details(exc: Exception) -> list[OperationDetail]:
             )
         return result
     return []
+
+
+def _qzone_failed_request_tools_count(exc: Exception) -> int:
+    result = 0
+    for item in _qzone_exception_chain(exc):
+        try:
+            result = max(result, int(getattr(item, "tools_count", 0) or 0))
+        except (TypeError, ValueError):
+            pass
+        attempts = getattr(item, "route_attempts", None)
+        if not isinstance(attempts, (list, tuple)):
+            continue
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            try:
+                result = max(result, int(attempt.get("tools_count") or 0))
+            except (TypeError, ValueError):
+                continue
+    return max(0, result)
 
 
 def _is_deterministic_qzone_model_error(exc: Exception) -> bool:
@@ -1014,6 +1038,7 @@ async def _rewrite_qzone_net_slang(
                     chat_intent_hint="qzone_net_slang_rewrite",
                     surface="qzone_post_rewrite",
                     structured_output=True,
+                    tool_profile=TEXT_AGENT_TOOL_PROFILE_NONE,
                 ),
             )
         response = await _run_qzone_llm_call(
@@ -1072,6 +1097,7 @@ async def _rewrite_qzone_stiff_tic(
                     chat_intent_hint="qzone_stiff_tic_rewrite",
                     surface="qzone_post_rewrite",
                     structured_output=True,
+                    tool_profile=TEXT_AGENT_TOOL_PROFILE_NONE,
                 ),
             )
         response = await _run_qzone_llm_call(
@@ -1732,6 +1758,7 @@ async def _generate_once(
             supports_builtin_search = True
 
     last_failure_code = ""
+    agent_tool_profile = TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY
     for generation_attempt in range(1, _QZONE_GENERATION_MAX_ATTEMPTS + 1):
         messages = [dict(message) for message in base_messages]
         if generation_attempt > 1:
@@ -1756,6 +1783,7 @@ async def _generate_once(
                     chat_intent_hint="qzone_diary",
                     surface="qzone_post",
                     structured_output=True,
+                    tool_profile=agent_tool_profile,
                 )
             if supports_builtin_search:
                 return await call_ai_api(messages, use_builtin_search=use_builtin_search)
@@ -1770,6 +1798,16 @@ async def _generate_once(
             http_status = _qzone_reviewer_http_status(exc)
             provider_error_code = _qzone_error_code(exc)
             route_attempt_details = _qzone_route_attempt_details(exc)
+            tools_count = _qzone_failed_request_tools_count(exc)
+            use_tool_free_recovery = bool(
+                agent_mode
+                and code == "qzone_generation_request_rejected"
+                and tools_count > 0
+                and agent_tool_profile != TEXT_AGENT_TOOL_PROFILE_NONE
+                and generation_attempt < _QZONE_GENERATION_MAX_ATTEMPTS
+            )
+            if use_tool_free_recovery:
+                retryable = True
             last_failure_code = code
             step_key = f"{attempt_key}_attempt_{generation_attempt}"
             if logger is not None:
@@ -1789,6 +1827,14 @@ async def _generate_once(
                 ]
                 if http_status:
                     attempt_details.append(detail("HTTP status", http_status, "error"))
+                if use_tool_free_recovery:
+                    attempt_details.append(
+                        detail(
+                            "恢复策略",
+                            "下一次 generation attempt 关闭 Agent function tools",
+                            "warn",
+                        )
+                    )
                 attempt_details.extend(route_attempt_details)
                 report.add_step(
                     step_key,
@@ -1823,6 +1869,8 @@ async def _generate_once(
             if generation_attempt < _QZONE_GENERATION_MAX_ATTEMPTS:
                 if report is not None:
                     report.downgrade_attempt_errors(step_key)
+                if use_tool_free_recovery:
+                    agent_tool_profile = TEXT_AGENT_TOOL_PROFILE_NONE
                 continue
             break
 
