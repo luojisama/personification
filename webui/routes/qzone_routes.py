@@ -568,6 +568,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
     ) -> dict:
         """管理员手动强制发一条说说（绕过额度/间隔/agent 决策，但仍计入月度额度）。"""
         from ...core.time_ctx import get_configured_now
+        from ...core.qzone_publish import qzone_content_preview
         from ...core.qzone_service import get_qzone_auth_status
         from ...jobs.periodic_jobs import build_qzone_quota, coordinated_qzone_publish
 
@@ -802,6 +803,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
             )
             raise _http_diagnostic(500, report) from exc
         publish_result_code = sanitize_text(published.get("result_code") or published.get("status") or "unknown", limit=64)
+        content_preview = qzone_content_preview(content, limit=200)
         raw_publish_detail = sanitize_object(published.get("publish_detail") or {})
         publish_detail = raw_publish_detail if isinstance(raw_publish_detail, dict) else {}
         image_requested = bool(publish_detail.get("image_requested"))
@@ -883,7 +885,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 code = "qzone_image_upload_failed"
                 failure_phase = "qzone_image_upload"
                 title = "QZone 配图上传失败"
-                message = "配图未取得完整 richval/pic_bo，本次尚未提交说说正文。"
+                message = "配图上传未完成，本次尚未提交说说正文。"
                 suggestion = "检查配图格式和 QZone 上传状态后，可以安全地重新发起新的发布操作。"
                 retryable = True
             else:
@@ -916,7 +918,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 title=title,
                 message=message,
                 details=(
-                    detail("候选正文", content[:200], "ok"),
+                    detail("候选正文", content_preview, "ok"),
                     detail("协调状态", publish_status, "error" if not outcome_unknown else "warn"),
                     detail("发布结果代码", publish_result_code, "warn" if outcome_unknown else "error"),
                 ),
@@ -941,7 +943,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 outcome_unknown=outcome_unknown,
                 operation_id=operation_id,
             )
-            result["content"] = content[:2000]
+            result["content"] = content_preview
             webui_audit_log.record(
                 action="qzone_post_now",
                 qq=admin.qq,
@@ -999,7 +1001,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
             title="说说已经发布",
             message="草稿通过全部检查，腾讯已明确确认发布成功。",
             details=(
-                detail("正文", content[:200], "ok"),
+                detail("正文", content_preview, "ok"),
                 detail("发布结果代码", publish_result_code, "ok"),
                 detail("本月已用额度", quota.get("used", 0), "info"),
             ),
@@ -1023,7 +1025,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
             operation_id=operation_id,
         )
         result.update({
-            "content": content[:2000],
+            "content": content_preview,
             "quota": quota,
             "duplicate": bool(published.get("duplicate")),
         })

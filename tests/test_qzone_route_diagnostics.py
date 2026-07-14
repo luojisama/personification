@@ -363,7 +363,7 @@ def test_qzone_post_hides_refresh_and_publish_service_messages(_runtime_context,
 
 def test_qzone_post_reports_image_upload_failure_before_publish(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
     async def generate(_bot):  # noqa: ANN001
-        return "配图发布正文"
+        return "配图发布正文 [IMAGE_B64]QUJDREVGRw==[/IMAGE_B64]"
 
     async def publish(_content, _bot_id):  # noqa: ANN001
         raise AssertionError("coordinator stub owns the result")
@@ -398,6 +398,9 @@ def test_qzone_post_reports_image_upload_failure_before_publish(_runtime_context
     assert body["retryable"] is True
     assert body["outcome_unknown"] is False
     assert body["steps"][-1]["key"] == "image_upload"
+    assert body["content"] == "配图发布正文 [配图]"
+    assert "IMAGE_B64" not in response.text
+    assert "QUJDREVGRw" not in response.text
     assert {item["label"] for item in body["steps"][-1]["details"]} >= {
         "结果代码",
         "配图上传",

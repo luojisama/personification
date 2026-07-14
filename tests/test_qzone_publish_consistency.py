@@ -135,6 +135,7 @@ def test_payload_hash_binds_bot_kind_content_images_and_identity_without_base64(
     assert "QUJD" not in json.dumps(operation["payload"], ensure_ascii=False)
     assert "raw_response" not in operation["payload"]["identity"]
     assert "cookie" not in operation["payload"]["identity"]
+    assert qzone_publish.qzone_content_preview(content) == "正文 [配图]"
 
     mismatch = qzone_publish.reserve_qzone_publish(
         operation_id="payload-op",

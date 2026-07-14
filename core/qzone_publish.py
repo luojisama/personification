@@ -140,10 +140,14 @@ def _save_state(conn: Any, state: dict[str, Any]) -> None:
 
 
 def _compact_content(content: str) -> str:
+    return qzone_content_preview(content, limit=200)
+
+
+def qzone_content_preview(content: Any, *, limit: int = 200) -> str:
     normalized, image_hashes = _normalize_content(content)
     if image_hashes:
         normalized = f"{normalized} [配图]".strip()
-    return normalized[:200]
+    return normalized[:max(0, int(limit))]
 
 
 def _remember_content(state: dict[str, Any], content: str, *, max_items: int = 12) -> None:
