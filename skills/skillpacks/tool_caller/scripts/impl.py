@@ -420,27 +420,125 @@ def _maybe_anthropic_thinking(thinking_mode: str) -> Optional[dict]:
     return ANTHROPIC_THINKING_MAP.get(thinking_mode)
 
 
-def _normalize_gemini_schema(schema: Any) -> Any:
-    if isinstance(schema, dict):
-        normalized: Dict[str, Any] = {}
-        for key, value in schema.items():
-            if key == "type" and isinstance(value, str):
-                normalized[key] = value.upper()
-            else:
-                normalized[key] = _normalize_gemini_schema(value)
-        return normalized
-    if isinstance(schema, list):
-        return [_normalize_gemini_schema(item) for item in schema]
-    return schema
-
-
-def _convert_openai_tool_to_gemini(tool: dict) -> dict:
-    function_def = tool.get("function", tool)
-    return {
-        "name": function_def.get("name", ""),
-        "description": function_def.get("description", ""),
-        "parameters": _normalize_gemini_schema(function_def.get("parameters", {"type": "object"})),
+# Custom Gemini gateways often lag the current JSON Schema surface. Keep
+# FunctionDeclaration.parameters on the conservative OpenAPI subset; omitted
+# annotation fields such as default do not change runtime argument validation.
+_GEMINI_FUNCTION_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_GEMINI_SCHEMA_SCALAR_KEYS = frozenset(
+    {
+        "description",
+        "enum",
+        "format",
+        "maxItems",
+        "maxLength",
+        "maxProperties",
+        "maximum",
+        "minItems",
+        "minLength",
+        "minProperties",
+        "minimum",
+        "nullable",
+        "pattern",
     }
+)
+
+
+def _normalize_gemini_schema(schema: Any) -> dict[str, Any]:
+    if not isinstance(schema, dict):
+        return {"type": "OBJECT", "properties": {}}
+
+    normalized: Dict[str, Any] = {}
+    raw_type = schema.get("type")
+    if isinstance(raw_type, str) and raw_type.strip():
+        normalized["type"] = raw_type.strip().upper()
+    elif isinstance(raw_type, list):
+        type_names = [str(item or "").strip().lower() for item in raw_type]
+        concrete_types = [item for item in type_names if item and item != "null"]
+        if concrete_types:
+            normalized["type"] = concrete_types[0].upper()
+        if "null" in type_names:
+            normalized["nullable"] = True
+
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        normalized["properties"] = {
+            str(name): _normalize_gemini_schema(value)
+            for name, value in properties.items()
+            if str(name)
+        }
+        normalized.setdefault("type", "OBJECT")
+
+    items = schema.get("items")
+    if isinstance(items, dict):
+        normalized["items"] = _normalize_gemini_schema(items)
+        normalized.setdefault("type", "ARRAY")
+
+    raw_any_of = schema.get("anyOf")
+    if not isinstance(raw_any_of, list):
+        raw_any_of = schema.get("oneOf")
+    if isinstance(raw_any_of, list):
+        any_of = [_normalize_gemini_schema(item) for item in raw_any_of if isinstance(item, dict)]
+        if any_of:
+            normalized["anyOf"] = any_of
+
+    for key in _GEMINI_SCHEMA_SCALAR_KEYS:
+        if key not in schema:
+            continue
+        value = schema.get(key)
+        if key == "enum":
+            if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                normalized[key] = list(value)
+            continue
+        if key == "nullable":
+            normalized[key] = bool(value) or bool(normalized.get("nullable", False))
+            continue
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            normalized[key] = value
+
+    required = schema.get("required")
+    if isinstance(required, list):
+        property_names = set((normalized.get("properties") or {}).keys())
+        required_names = [
+            str(name)
+            for name in required
+            if isinstance(name, str) and name and name in property_names
+        ]
+        if required_names:
+            normalized["required"] = required_names
+
+    if "type" not in normalized:
+        normalized["type"] = "OBJECT"
+    if normalized["type"] == "OBJECT":
+        normalized.setdefault("properties", {})
+    return normalized
+
+
+def _convert_openai_tool_to_gemini(tool: dict) -> dict | None:
+    function_def = tool.get("function", tool)
+    if not isinstance(function_def, dict):
+        return None
+    name = str(function_def.get("name", "") or "").strip()
+    if not _GEMINI_FUNCTION_NAME_RE.fullmatch(name):
+        return None
+    parameters = _normalize_gemini_schema(function_def.get("parameters", {"type": "object"}))
+    if parameters.get("type") != "OBJECT":
+        return None
+    return {
+        "name": name,
+        "description": str(function_def.get("description", "") or "").strip() or name,
+        "parameters": parameters,
+    }
+
+
+def _convert_openai_tools_to_gemini(tools: List[dict]) -> List[dict]:
+    converted: List[dict] = []
+    for tool in list(tools or []):
+        if not isinstance(tool, dict):
+            continue
+        declaration = _convert_openai_tool_to_gemini(tool)
+        if declaration is not None:
+            converted.append(declaration)
+    return converted
 
 
 def _convert_openai_tool_to_anthropic(tool: dict) -> dict:
@@ -1163,14 +1261,9 @@ class GeminiToolCaller(ToolCaller):
         system_instruction, contents = _convert_messages_to_gemini(messages)
         tool_payload: List[dict] = []
         if tools:
-            tool_payload.append(
-                {
-                    "function_declarations": [
-                        _convert_openai_tool_to_gemini(tool)
-                        for tool in tools
-                    ]
-                }
-            )
+            declarations = _convert_openai_tools_to_gemini(tools)
+            if declarations:
+                tool_payload.append({"function_declarations": declarations})
         if use_builtin_search:
             tool_payload.append(_gemini_builtin_search_tool(self.model))
 
@@ -3439,13 +3532,9 @@ class GeminiCliToolCaller(ToolCaller):
 
             tool_payload: List[dict] = []
             if tools:
-                tool_payload.append(
-                    {
-                        "function_declarations": [
-                            _convert_openai_tool_to_gemini(tool) for tool in tools
-                        ]
-                    }
-                )
+                declarations = _convert_openai_tools_to_gemini(tools)
+                if declarations:
+                    tool_payload.append({"function_declarations": declarations})
             if use_builtin_search:
                 tool_payload.append(_gemini_builtin_search_tool(self.model))
 
@@ -3982,13 +4071,9 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
 
             tool_payload: List[dict] = []
             if tools:
-                tool_payload.append(
-                    {
-                        "function_declarations": [
-                            _convert_openai_tool_to_gemini(tool) for tool in tools
-                        ]
-                    }
-                )
+                declarations = _convert_openai_tools_to_gemini(tools)
+                if declarations:
+                    tool_payload.append({"function_declarations": declarations})
             if use_builtin_search:
                 tool_payload.append(_gemini_builtin_search_tool(self.model))
 

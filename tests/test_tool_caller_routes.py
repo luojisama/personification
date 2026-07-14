@@ -154,6 +154,101 @@ def test_custom_gemini_endpoint_uses_google_header_and_v1beta(monkeypatch) -> No
     assert response.usage["total_tokens"] == 2
 
 
+def test_gemini_function_schema_uses_compatibility_subset(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict = {}
+
+    class _Response:
+        status_code = 200
+
+        def json(self):  # noqa: ANN201
+            return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+    class _Client:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, _url, headers=None, params=None, json=None):  # noqa: ANN001, ANN201
+            captured["json"] = json or {}
+            return _Response()
+
+    monkeypatch.setattr(caller_impl.httpx, "AsyncClient", _Client)
+    caller = caller_impl.GeminiToolCaller(
+        api_key="sk-test",
+        base_url="https://anti.zellon.me",
+        model="gemini-3-flash-agent",
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "safe_lookup",
+                "description": "",
+                "parameters": {
+                    "type": "object",
+                    "title": "legacy title",
+                    "additionalProperties": False,
+                    "properties": {
+                        "query": {
+                            "type": ["string", "null"],
+                            "description": "query text",
+                            "default": "ignored",
+                            "examples": ["private example"],
+                        },
+                        "mode": {
+                            "oneOf": [
+                                {"type": "string", "enum": ["fast", "deep"]},
+                                {"type": "integer", "minimum": 1, "maximum": 2},
+                            ]
+                        },
+                    },
+                    "required": ["query", "missing"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "invalid tool name",
+                "description": "must be skipped",
+                "parameters": {"type": "object"},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "invalid_root_schema",
+                "description": "must also be skipped",
+                "parameters": {"type": "string"},
+            },
+        },
+    ]
+
+    asyncio.run(caller.chat_with_tools([{"role": "user", "content": "hi"}], tools, False))
+
+    declarations = captured["json"]["tools"][0]["function_declarations"]
+    assert len(declarations) == 1
+    declaration = declarations[0]
+    assert declaration["name"] == "safe_lookup"
+    assert declaration["description"] == "safe_lookup"
+    parameters = declaration["parameters"]
+    assert parameters["type"] == "OBJECT"
+    assert parameters["required"] == ["query"]
+    assert "title" not in parameters
+    assert "additionalProperties" not in parameters
+    query = parameters["properties"]["query"]
+    assert query == {"type": "STRING", "nullable": True, "description": "query text"}
+    assert "anyOf" in parameters["properties"]["mode"]
+    assert "oneOf" not in parameters["properties"]["mode"]
+    assert "default" not in str(parameters)
+    assert "private example" not in str(parameters)
+
+
 def test_gemini_auth_auto_negotiates_only_on_401_and_caches() -> None:
     gemini_transport.clear_gemini_auth_cache()
     calls: list[str] = []
