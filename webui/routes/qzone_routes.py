@@ -219,11 +219,18 @@ def _build_status(runtime) -> dict[str, Any]:
             "next_run_at": job.next_run_time.timestamp() if job is not None and getattr(job, "next_run_time", None) else 0,
         }
 
-    auth = sanitize_object(get_qzone_auth_status())
-    if not isinstance(auth, dict):
-        auth = {}
-    if auth.get("last_error"):
-        auth["last_error"] = _HIDDEN_LAST_ERROR
+    def _safe_auth(bot_id: str = "") -> dict[str, Any]:
+        value = sanitize_object(get_qzone_auth_status(bot_id))
+        auth_value = value if isinstance(value, dict) else {}
+        if auth_value.get("last_error"):
+            auth_value["last_error"] = _HIDDEN_LAST_ERROR
+        return auth_value
+
+    auth_by_bot = {
+        str(getattr(bot, "self_id", key) or key): _safe_auth(str(getattr(bot, "self_id", key) or key))
+        for key, bot in bot_items
+    }
+    auth = next(iter(auth_by_bot.values()), _safe_auth())
     payload = {
         "enabled": enabled,
         "proactive_enabled": proactive_enabled,
@@ -233,6 +240,7 @@ def _build_status(runtime) -> dict[str, Any]:
         "bots": [{"bot_id": str(getattr(bot, "self_id", key) or key)} for key, bot in bot_items],
         "cookie_configured": bool(str(getattr(cfg, "personification_qzone_cookie", "") or "").strip()),
         "auth": auth,
+        "auth_by_bot": auth_by_bot,
         "scan": get_qzone_scan_status(),
         "social": {
             "last_scan_at": float(social_state.get("last_scan_at", 0) or 0),
@@ -658,17 +666,27 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 "当前 runtime 未提供 Cookie 刷新能力。",
             ))
 
-        auth_status = get_qzone_auth_status()
-        if refresh_ok is not True and auth_status.get("status") == "login_required":
+        auth_status = get_qzone_auth_status(str(getattr(bot, "self_id", "") or ""))
+        auth_preflight_status = str(auth_status.get("status") or "")
+        if refresh_ok is not True and auth_preflight_status in {"login_required", "risk_blocked"}:
+            risk_blocked = auth_preflight_status == "risk_blocked"
             result = diagnostic(
                 ok=False,
-                code="qzone_login_required",
+                code="qzone_risk_blocked" if risk_blocked else "qzone_login_required",
                 phase="qzone_auth",
-                title="QZone 登录凭证需要人工恢复",
-                message="系统已自动尝试从当前 Bot 强制刷新 Cookie，但腾讯仍要求重新登录；尚未生成草稿或提交发布。",
+                title="QZone 写操作触发安全验证" if risk_blocked else "QZone 登录凭证需要人工恢复",
+                message=(
+                    "腾讯仍要求安全验证；尚未生成草稿或提交发布。"
+                    if risk_blocked
+                    else "系统已自动尝试从当前 Bot 强制刷新 Cookie，但腾讯仍要求重新登录；尚未生成草稿或提交发布。"
+                ),
                 steps=tuple(auth_steps),
                 warnings=warnings,
-                suggestion="在上方“QZone 认证恢复”扫码一次；成功后重新发起发布。",
+                suggestion=(
+                    "暂停自动尝试并稍后人工确认 QZone 状态；不要高频刷新或发布。"
+                    if risk_blocked
+                    else "在上方“QZone 认证恢复”扫码一次；成功后重新发起发布。"
+                ),
                 retryable=False,
                 operation_id=operation_id,
             )
@@ -789,7 +807,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 "definite_failure", "reserved", "dispatching", "outcome_unknown", "unknown",
                 "quota_blocked", "interval_blocked", "payload_conflict", "unresolved_payload"
             } else "failed"
-            auth_status = get_qzone_auth_status()
+            auth_status = get_qzone_auth_status(str(getattr(bot, "self_id", "") or ""))
             auth_was_login_required = auth_status.get("status") == "login_required"
             recovery_step = None
             recovery_ok: bool | None = None

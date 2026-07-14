@@ -34,17 +34,7 @@ class _Logger:
 def _reset_qzone_auth_state():  # noqa: ANN202
     def _reset() -> None:
         with qzone_service._AUTH_STATE_LOCK:
-            qzone_service._AUTH_STATE.update(
-                {
-                    "status": "unknown",
-                    "refreshing": False,
-                    "last_refresh_at": 0.0,
-                    "last_success_at": 0.0,
-                    "last_failure_at": 0.0,
-                    "last_error": "",
-                    "cooldown_until": 0.0,
-                }
-            )
+            qzone_service._AUTH_STATES.clear()
 
     _reset()
     yield
@@ -596,6 +586,31 @@ def test_publish_network_interruption_after_post_is_unknown(monkeypatch) -> None
 
     result = asyncio.run(publish("网络中断正文", "10001"))
     assert result.status == "unknown"
+
+
+def test_qzone_write_page_classification_is_precise_and_scoped_per_bot() -> None:
+    login = qzone_service._classify_qzone_write_response(
+        SimpleNamespace(status_code=200, text="<html>login.qzone.qq.com</html>"),
+        action="发布",
+        bot_id="10001",
+    )
+    risk = qzone_service._classify_qzone_write_response(
+        SimpleNamespace(status_code=200, text="<html>安全验证 验证码</html>"),
+        action="发布",
+        bot_id="10002",
+    )
+    generic = qzone_service._classify_qzone_write_response(
+        SimpleNamespace(status_code=200, text="<html>temporary gateway page</html>"),
+        action="发布",
+        bot_id="10003",
+    )
+
+    assert login.result_code == "auth_page_2xx"
+    assert risk.result_code == "risk_page_2xx"
+    assert generic.result_code == "html_response_2xx"
+    assert qzone_service.get_qzone_auth_status("10001")["status"] == "login_required"
+    assert qzone_service.get_qzone_auth_status("10002")["status"] == "risk_blocked"
+    assert qzone_service.get_qzone_auth_status("10003")["status"] == "unknown"
 
 
 def test_reconcile_requires_unique_exact_content_hash_bot_and_time(tmp_path, monkeypatch) -> None:  # noqa: ANN001

@@ -20,6 +20,8 @@ assert.ok(persistAt >= 0 && persistAt < publishAt, "Operation ID must persist be
 assert.match(admin, /\["succeeded", "definite_failure"\]/);
 assert.match(admin, /\["reserved", "dispatching", "unknown"\]/);
 assert.match(admin, /\/qzone\/operations\/\$\{encodeURIComponent\(operationId\)\}/);
+assert.match(admin, /q\.auth_by_bot/);
+assert.match(admin, /risk_blocked/);
 
 assert.match(admin, /setTimeout\(\(\) => refreshQzoneSnapshot\(\), qzoneSnapshotNeedsFastRefresh\(\) \? 3000 : 15000\)/);
 assert.doesNotMatch(admin, /setInterval\(/);

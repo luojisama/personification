@@ -12,6 +12,15 @@ qzone_auth = load_personification_module("plugin.personification.core.qzone_auth
 qzone_service = load_personification_module("plugin.personification.core.qzone_service")
 
 
+@pytest.fixture(autouse=True)
+def _reset_qzone_auth_states():  # noqa: ANN202
+    with qzone_service._AUTH_STATE_LOCK:
+        qzone_service._AUTH_STATES.clear()
+    yield
+    with qzone_service._AUTH_STATE_LOCK:
+        qzone_service._AUTH_STATES.clear()
+
+
 class _Logger:
     def error(self, _message: str) -> None:
         return None
@@ -176,6 +185,8 @@ def test_install_qzone_cookie_validates_identity_and_persists_only_after_probe(m
     assert (ok, message) == (True, "ok")
     assert persisted == ["uin=o99999; p_uin=o99999; skey=s-key; p_skey=p-secret;"]
     assert config.personification_qzone_cookie == persisted[0]
+    assert qzone_service.get_qzone_auth_status("99999")["status"] == "healthy"
+    assert qzone_service.get_qzone_auth_status("10000")["status"] == "unknown"
 
     mismatch = asyncio.run(
         qzone_service.install_qzone_cookie(

@@ -78,7 +78,7 @@ def test_qzone_status_sanitizes_all_last_errors_and_adds_diagnostic(_runtime_con
     monkeypatch.setattr(
         qzone_service,
         "get_qzone_auth_status",
-        lambda: {"status": "refresh_failed", "last_error": secret, "token": "token-secret"},
+        lambda _bot_id="": {"status": "refresh_failed", "last_error": secret, "token": "token-secret"},
     )
     _install_runtime(_runtime_context, bundle=SimpleNamespace(qzone_publish_available=True))
     client = _admin_client(_runtime_context)
@@ -97,6 +97,7 @@ def test_qzone_status_sanitizes_all_last_errors_and_adds_diagnostic(_runtime_con
         "Process started",
     }
     assert body["auth"]["last_error"] == body["social"]["last_error"] == body["inbound"]["last_error"]
+    assert body["auth_by_bot"]["10000"]["last_error"] == body["auth"]["last_error"]
     assert body["social"]["last_result"]["last_error"] == body["social"]["last_error"]
     assert body["auth"]["token"] == "***"
     assert "raw-status-secret" not in response.text
@@ -362,7 +363,7 @@ def test_qzone_post_stops_before_generation_when_forced_refresh_still_requires_l
     async def publish(_content, _bot_id):  # noqa: ANN001
         raise AssertionError("login preflight must stop before publish")
 
-    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda: {"status": "login_required"})
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="": {"status": "login_required"})
     _install_runtime(
         _runtime_context,
         bundle=SimpleNamespace(
@@ -386,6 +387,44 @@ def test_qzone_post_stops_before_generation_when_forced_refresh_still_requires_l
     assert [item["key"] for item in body["steps"]] == ["cookie_refresh"]
     assert refresh_calls == [True]
     assert "must-not-leak" not in response.text
+
+
+def test_qzone_post_stops_before_generation_when_forced_refresh_hits_risk_challenge(
+    _runtime_context,
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    async def refresh(_bot, *, force=False):  # noqa: ANN001
+        assert force is True
+        return False, "risk-page-secret"
+
+    async def generate(_bot):  # noqa: ANN001
+        raise AssertionError("risk preflight must stop before generation")
+
+    async def publish(_content, _bot_id):  # noqa: ANN001
+        raise AssertionError("risk preflight must stop before publish")
+
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="": {"status": "risk_blocked"})
+    _install_runtime(
+        _runtime_context,
+        bundle=SimpleNamespace(
+            qzone_generate_post=generate,
+            publish_qzone_shuo=publish,
+            update_qzone_cookie=refresh,
+        ),
+    )
+    client = _admin_client(_runtime_context)
+
+    response = client.post(
+        "/personification/api/qzone/post-now",
+        json={"bot_id": "10000", "operation_id": "risk-preflight-op"},
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    _assert_safe_report(body, code="qzone_risk_blocked", phase="qzone_auth")
+    assert body["retryable"] is False
+    assert body["operation_id"] == "risk-preflight-op"
+    assert "risk-page-secret" not in response.text
 
 
 @pytest.mark.parametrize(
@@ -424,7 +463,7 @@ def test_qzone_post_recovers_login_without_automatically_replaying_write(
         auth_state["status"] = "login_required"
         return {"success": False, "status": publish_status, "message": "secret"}
 
-    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda: dict(auth_state))
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="": dict(auth_state))
     monkeypatch.setattr(periodic_jobs, "coordinated_qzone_publish", coordinated)
     _install_runtime(
         _runtime_context,

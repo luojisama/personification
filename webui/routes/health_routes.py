@@ -1319,7 +1319,7 @@ def build_health_router(*, runtime) -> APIRouter:
             ) from exc
         if not fetch_ok:
             try:
-                auth_status = get_qzone_auth_status()
+                auth_status = get_qzone_auth_status(bot_id)
             except Exception:
                 auth_status = {}
             login_required = auth_status.get("status") == "login_required"
@@ -1447,7 +1447,7 @@ def build_health_router(*, runtime) -> APIRouter:
         forward_msg = str(published.get("message") or publish_status or "")
         if not forward_ok:
             try:
-                auth_status = get_qzone_auth_status()
+                auth_status = get_qzone_auth_status(bot_id)
             except Exception:
                 auth_status = {}
             outcome_unknown = publish_status in {"outcome_unknown", "unknown"}

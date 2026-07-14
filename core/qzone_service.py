@@ -18,18 +18,35 @@ from .config_manager import _restrict_sensitive_file_permissions
 
 
 _AUTH_STATE_LOCK = threading.Lock()
-_AUTH_STATE: dict[str, Any] = {
-    "status": "unknown",
-    "refreshing": False,
-    "last_refresh_at": 0.0,
-    "last_success_at": 0.0,
-    "last_failure_at": 0.0,
-    "last_error": "",
-    "cooldown_until": 0.0,
-}
+_AUTH_STATES: dict[str, dict[str, Any]] = {}
 _AUTH_REFRESH_CACHE_SECONDS = 300
 _AUTH_FAILURE_COOLDOWN_SECONDS = 15 * 60
 _COOKIE_FILE_LOCK = threading.Lock()
+
+
+def _new_qzone_auth_state() -> dict[str, Any]:
+    return {
+        "status": "unknown",
+        "refreshing": False,
+        "last_refresh_at": 0.0,
+        "last_success_at": 0.0,
+        "last_failure_at": 0.0,
+        "last_error": "",
+        "cooldown_until": 0.0,
+    }
+
+
+def _qzone_auth_key(bot_id: Any) -> str:
+    return str(bot_id or "").strip() or "__default__"
+
+
+def _qzone_auth_state_locked(bot_id: Any) -> dict[str, Any]:
+    key = _qzone_auth_key(bot_id)
+    state = _AUTH_STATES.get(key)
+    if state is None:
+        state = _new_qzone_auth_state()
+        _AUTH_STATES[key] = state
+    return state
 
 
 @dataclass(frozen=True)
@@ -66,33 +83,60 @@ class QzoneImageUploadError(RuntimeError):
         super().__init__(self.result_code)
 
 
-def get_qzone_auth_status() -> dict[str, Any]:
+def get_qzone_auth_status(bot_id: Any = "") -> dict[str, Any]:
     with _AUTH_STATE_LOCK:
-        state = dict(_AUTH_STATE)
+        key = _qzone_auth_key(bot_id)
+        if key != "__default__":
+            state = dict(_AUTH_STATES.get(key) or _new_qzone_auth_state())
+        elif "__default__" in _AUTH_STATES:
+            state = dict(_AUTH_STATES["__default__"])
+        elif len(_AUTH_STATES) == 1:
+            state = dict(next(iter(_AUTH_STATES.values())))
+        elif _AUTH_STATES:
+            state = dict(max(
+                _AUTH_STATES.values(),
+                key=lambda item: max(
+                    float(item.get("last_refresh_at", 0) or 0),
+                    float(item.get("last_failure_at", 0) or 0),
+                ),
+            ))
+        else:
+            state = _new_qzone_auth_state()
     state["cooldown_remaining_seconds"] = max(0, int(float(state.get("cooldown_until", 0) or 0) - time.time()))
     return state
 
 
-def _set_qzone_auth_failure(message: Any, *, auth_failure: bool = False) -> None:
+def _set_qzone_auth_failure(
+    message: Any,
+    *,
+    auth_failure: bool = False,
+    bot_id: Any = "",
+    status: str = "",
+) -> None:
     now = time.time()
+    next_status = str(status or ("login_required" if auth_failure else "refresh_failed"))
     with _AUTH_STATE_LOCK:
-        _AUTH_STATE.update({
-            "status": "login_required" if auth_failure else "refresh_failed",
+        state = _qzone_auth_state_locked(bot_id)
+        state.update({
+            "status": next_status,
             "last_failure_at": now,
             "last_error": str(message or "")[:240],
-            "cooldown_until": now + _AUTH_FAILURE_COOLDOWN_SECONDS if auth_failure else 0.0,
+            "cooldown_until": (
+                now + _AUTH_FAILURE_COOLDOWN_SECONDS
+                if next_status in {"login_required", "risk_blocked"}
+                else 0.0
+            ),
         })
 
 
-def _looks_like_qzone_auth_page(raw_text: Any) -> bool:
+def _qzone_response_page_kind(raw_text: Any) -> str:
     text = str(raw_text or "").lstrip("\ufeff\r\n\t ").lower()
-    return (
-        text.startswith(("<html", "<!doctype"))
-        or "安全验证" in text
-        or "验证码" in text
-        or "login.qzone.qq.com" in text
-        or "ptlogin" in text
-    )
+    is_html = text.startswith(("<html", "<!doctype")) or "<html" in text[:500]
+    if "login.qzone.qq.com" in text or "ptlogin" in text or (is_html and "请先登录" in text):
+        return "auth"
+    if is_html and any(marker in text for marker in ("安全验证", "验证码", "captcha", "verifycode")):
+        return "risk"
+    return "html" if is_html else ""
 
 
 def _get_g_tk(p_skey: str) -> int:
@@ -195,8 +239,15 @@ async def _probe_qzone_cookie(cookie: str, qq: str, p_skey: str) -> tuple[bool, 
             response = await client.get(url, params=params, headers=_qzone_headers(ctx, referer_uin=qq))
     except Exception:
         return False, "probe_failed"
-    if response.status_code != 200 or _looks_like_qzone_auth_page(response.text):
+    if response.status_code != 200:
+        return False, "auth_blocked" if response.status_code in {401, 403} else "probe_failed"
+    page_kind = _qzone_response_page_kind(response.text)
+    if page_kind == "auth":
         return False, "auth_blocked"
+    if page_kind == "risk":
+        return False, "risk_blocked"
+    if page_kind == "html":
+        return False, "probe_failed"
     payload = _parse_qzone_jsonp(response.text)
     if not payload:
         return False, "probe_failed"
@@ -228,13 +279,19 @@ async def install_qzone_cookie(
     probe_cookie = probe or _probe_qzone_cookie
     ok, reason = await probe_cookie(normalized, qq, p_skey)
     if not ok:
-        _set_qzone_auth_failure(reason, auth_failure=reason == "auth_blocked")
+        _set_qzone_auth_failure(
+            reason,
+            auth_failure=reason == "auth_blocked",
+            bot_id=expected_bot_id,
+            status="risk_blocked" if reason == "risk_blocked" else "",
+        )
         return False, reason
     plugin_config.personification_qzone_cookie = normalized
     _persist_cookie_to_env(normalized, logger)
     now = time.time()
     with _AUTH_STATE_LOCK:
-        _AUTH_STATE.update({
+        state = _qzone_auth_state_locked(expected_bot_id)
+        state.update({
             "status": "healthy",
             "last_success_at": now,
             "last_error": "",
@@ -296,7 +353,7 @@ def _format_cookie_for_qzone(cookie: str, qq: str, p_skey: str) -> str:
 
 
 def _resolve_qzone_context(plugin_config: Any, bot_id: str) -> tuple[bool, str, dict[str, Any]]:
-    auth = get_qzone_auth_status()
+    auth = get_qzone_auth_status(bot_id)
     if auth.get("cooldown_remaining_seconds", 0) > 0:
         return False, "Qzone 认证处于冷却期，请刷新 Cookie 后重试", {}
     cookie = _get_cookie_from_config(plugin_config)
@@ -741,11 +798,23 @@ def _extract_msglist_payload(payload: dict[str, Any]) -> list[Any]:
     return []
 
 
-def _qzone_payload_success(payload: dict[str, Any], raw_text: str = "") -> tuple[bool, str]:
-    if _looks_like_qzone_auth_page(raw_text):
-        message = "Qzone 返回了登录页面或验证码，请刷新 Cookie"
-        _set_qzone_auth_failure(message, auth_failure=True)
+def _qzone_payload_success(
+    payload: dict[str, Any],
+    raw_text: str = "",
+    *,
+    bot_id: Any = "",
+) -> tuple[bool, str]:
+    page_kind = _qzone_response_page_kind(raw_text)
+    if page_kind == "auth":
+        message = "Qzone 返回了登录页面，请刷新 Cookie"
+        _set_qzone_auth_failure(message, auth_failure=True, bot_id=bot_id)
         return False, message
+    if page_kind == "risk":
+        message = "Qzone 返回了安全验证页面，请稍后人工确认认证状态"
+        _set_qzone_auth_failure(message, bot_id=bot_id, status="risk_blocked")
+        return False, message
+    if page_kind == "html":
+        return False, "Qzone 返回了非预期 HTML 页面"
     if not payload:
         return False, "Qzone 返回无法解析"
     for key in ("code", "ret", "subcode"):
@@ -805,7 +874,12 @@ def _safe_qzone_payload_message(payload: dict[str, Any], default: str) -> str:
     return message[:180]
 
 
-def _classify_qzone_write_response(response: Any, *, action: str) -> QzoneWriteResult:
+def _classify_qzone_write_response(
+    response: Any,
+    *,
+    action: str,
+    bot_id: Any = "",
+) -> QzoneWriteResult:
     status_code = int(getattr(response, "status_code", 0) or 0)
     if status_code in {408, 409, 425, 429} or status_code >= 500:
         return QzoneWriteResult(
@@ -830,14 +904,25 @@ def _classify_qzone_write_response(response: Any, *, action: str) -> QzoneWriteR
         )
     if not raw_text.strip():
         return QzoneWriteResult("unknown", f"outcome_unknown: {action}返回为空", "empty_2xx")
-    if _looks_like_qzone_auth_page(raw_text):
-        message = "Qzone 返回了登录页面或验证码，请刷新 Cookie 后核对实际结果"
-        _set_qzone_auth_failure(message, auth_failure=True)
+    page_kind = _qzone_response_page_kind(raw_text)
+    if page_kind == "auth":
+        message = "Qzone 返回了登录页面，请刷新 Cookie 后核对实际结果"
+        _set_qzone_auth_failure(message, auth_failure=True, bot_id=bot_id)
         return QzoneWriteResult("unknown", f"outcome_unknown: {message}", "auth_page_2xx")
+    if page_kind == "risk":
+        message = "Qzone 返回了安全验证页面，请核对实际结果"
+        _set_qzone_auth_failure(message, bot_id=bot_id, status="risk_blocked")
+        return QzoneWriteResult("unknown", f"outcome_unknown: {message}", "risk_page_2xx")
+    if page_kind == "html":
+        return QzoneWriteResult(
+            "unknown",
+            f"outcome_unknown: {action}返回非预期 HTML 页面",
+            "html_response_2xx",
+        )
     payload = _parse_qzone_jsonp(raw_text)
     if not payload:
         return QzoneWriteResult("unknown", f"outcome_unknown: {action}返回无法解析", "unparseable_2xx")
-    success, payload_message = _qzone_payload_success(payload, raw_text)
+    success, payload_message = _qzone_payload_success(payload, raw_text, bot_id=bot_id)
     result_code = _qzone_payload_result_code(payload)
     if not success:
         return QzoneWriteResult(
@@ -928,7 +1013,7 @@ class QzoneSocialService:
         if resp.status_code != 200:
             return False, f"读取动态失败，状态码：{resp.status_code}", []
         payload = _parse_qzone_jsonp(resp.text)
-        payload_ok, payload_msg = _qzone_payload_success(payload, resp.text)
+        payload_ok, payload_msg = _qzone_payload_success(payload, resp.text, bot_id=ctx["qq"])
         if not payload_ok:
             return False, payload_msg, []
         feeds: list[dict[str, Any]] = []
@@ -971,7 +1056,7 @@ class QzoneSocialService:
         if resp.status_code != 200:
             return False, f"点赞失败，状态码：{resp.status_code}"
         payload = _parse_qzone_jsonp(resp.text)
-        return _qzone_payload_success(payload, resp.text)
+        return _qzone_payload_success(payload, resp.text, bot_id=ctx["qq"])
 
     async def forward_feed(
         self,
@@ -1156,7 +1241,7 @@ class QzoneSocialService:
         if resp.status_code != 200:
             return False, f"子评论回复失败，状态码：{resp.status_code}"
         payload = _parse_qzone_jsonp(resp.text)
-        return _qzone_payload_success(payload, resp.text)
+        return _qzone_payload_success(payload, resp.text, bot_id=ctx["qq"])
 
     async def comment_feed(
         self,
@@ -1254,7 +1339,7 @@ class QzoneSocialService:
         if resp.status_code != 200:
             return False, f"评论失败，状态码：{resp.status_code}"
         payload = _parse_qzone_jsonp(resp.text)
-        return _qzone_payload_success(payload, resp.text)
+        return _qzone_payload_success(payload, resp.text, bot_id=ctx["qq"])
 
 
 _QZONE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
@@ -1420,9 +1505,19 @@ async def _upload_qzone_image(
             "image_upload_http_error",
             detail={"status_code": int(resp.status_code)},
         )
-    if _looks_like_qzone_auth_page(resp.text):
-        _set_qzone_auth_failure("Qzone 配图上传返回登录页面或验证码", auth_failure=True)
+    page_kind = _qzone_response_page_kind(resp.text)
+    if page_kind == "auth":
+        _set_qzone_auth_failure("Qzone 配图上传返回登录页面", auth_failure=True, bot_id=qq)
         raise QzoneImageUploadError("image_upload_auth_page")
+    if page_kind == "risk":
+        _set_qzone_auth_failure(
+            "Qzone 配图上传返回安全验证页面",
+            bot_id=qq,
+            status="risk_blocked",
+        )
+        raise QzoneImageUploadError("image_upload_risk_page")
+    if page_kind == "html":
+        raise QzoneImageUploadError("image_upload_html_response")
     payload = _parse_qzone_jsonp(resp.text)
     if not payload:
         raise QzoneImageUploadError("image_upload_invalid_response")
@@ -1476,40 +1571,42 @@ def build_qzone_services(
         """自动获取并刷新 Qzone Cookie，供定时任务或手动命令调用。"""
         if not qzone_enabled:
             return False, "Qzone 功能未启用"
+        bot_id = str(getattr(bot, "self_id", "") or "").strip()
         now = time.time()
         with _AUTH_STATE_LOCK:
-            if _AUTH_STATE["refreshing"]:
+            auth_state = _qzone_auth_state_locked(bot_id)
+            if auth_state["refreshing"]:
                 return False, "Qzone Cookie 正在刷新"
             if (
                 not force
-                and _AUTH_STATE["status"] == "healthy"
-                and _AUTH_STATE["last_success_at"]
-                and now - float(_AUTH_STATE["last_success_at"]) < _AUTH_REFRESH_CACHE_SECONDS
+                and auth_state["status"] == "healthy"
+                and auth_state["last_success_at"]
+                and now - float(auth_state["last_success_at"]) < _AUTH_REFRESH_CACHE_SECONDS
             ):
                 return True, "cached"
-            _AUTH_STATE["refreshing"] = True
-            _AUTH_STATE["last_refresh_at"] = now
+            auth_state["refreshing"] = True
+            auth_state["last_refresh_at"] = now
         try:
             cookies_resp = await bot.get_cookies(domain="qzone.qq.com")
             cookie = str(cookies_resp.get("cookies", "") or "").strip()
             if not cookie:
-                _set_qzone_auth_failure("自动获取 Cookie 失败，返回结果为空")
+                _set_qzone_auth_failure("自动获取 Cookie 失败，返回结果为空", bot_id=bot_id)
                 return False, "自动获取 Cookie 失败，返回结果为空"
             if "uin=" not in cookie:
-                cookie = f"uin=o{bot.self_id}; {cookie}"
+                cookie = f"uin=o{bot_id}; {cookie}"
             return await install_qzone_cookie(
                 cookie=cookie,
-                expected_bot_id=str(bot.self_id),
+                expected_bot_id=bot_id,
                 plugin_config=plugin_config,
                 logger=logger,
                 source="onebot",
             )
         except Exception as e:
-            _set_qzone_auth_failure(e)
+            _set_qzone_auth_failure(e, bot_id=bot_id)
             return False, str(e)
         finally:
             with _AUTH_STATE_LOCK:
-                _AUTH_STATE["refreshing"] = False
+                _qzone_auth_state_locked(bot_id)["refreshing"] = False
 
     async def publish_qzone_shuo(content: str, bot_id: str) -> QzoneWriteResult:
         if not qzone_enabled:
@@ -1625,7 +1722,7 @@ def build_qzone_services(
                     data=data,
                     headers=headers,
                 )
-            classified = _classify_qzone_write_response(resp, action="发布")
+            classified = _classify_qzone_write_response(resp, action="发布", bot_id=qq)
             publish_detail = {
                 "image_requested": bool(image_payloads),
                 "image_uploaded": image_upload is not None,

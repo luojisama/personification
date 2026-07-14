@@ -4,12 +4,23 @@ import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 proactive_flow = load_personification_module("plugin.personification.flows.proactive_flow")
 qzone_flow = load_personification_module("plugin.personification.flows.qzone_social_flow")
 qzone_service = load_personification_module("plugin.personification.core.qzone_service")
 admin_commands = load_personification_module("plugin.personification.handlers.persona_admin_commands")
+
+
+@pytest.fixture(autouse=True)
+def _reset_qzone_auth_states():  # noqa: ANN202
+    with qzone_service._AUTH_STATE_LOCK:
+        qzone_service._AUTH_STATES.clear()
+    yield
+    with qzone_service._AUTH_STATE_LOCK:
+        qzone_service._AUTH_STATES.clear()
 
 
 class _PersonaStore:
@@ -301,26 +312,14 @@ def test_qzone_forward_timeout_does_not_try_fallback_endpoint(monkeypatch) -> No
     assert len(calls) == 1
 
 
-def test_qzone_auth_page_with_success_literal_is_rejected() -> None:
-    try:
-        ok, msg = qzone_service._qzone_payload_success(
-            {"script": "value"},
-            '\ufeff<html><script>window.fake={"code":0}</script>验证码</html>',
-        )
-        assert ok is False
-        assert "验证码" in msg
-        assert qzone_service.get_qzone_auth_status()["status"] == "login_required"
-    finally:
-        with qzone_service._AUTH_STATE_LOCK:
-            qzone_service._AUTH_STATE.update({
-                "status": "unknown",
-                "refreshing": False,
-                "last_refresh_at": 0.0,
-                "last_success_at": 0.0,
-                "last_failure_at": 0.0,
-                "last_error": "",
-                "cooldown_until": 0.0,
-            })
+def test_qzone_risk_page_with_success_literal_is_rejected_without_login_misclassification() -> None:
+    ok, msg = qzone_service._qzone_payload_success(
+        {"script": "value"},
+        '\ufeff<html><script>window.fake={"code":0}</script>验证码</html>',
+    )
+    assert ok is False
+    assert "安全验证" in msg
+    assert qzone_service.get_qzone_auth_status()["status"] == "risk_blocked"
 
 
 def test_qzone_scan_busy_is_structured_skip() -> None:

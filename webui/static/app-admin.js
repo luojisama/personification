@@ -1295,8 +1295,9 @@ function renderQzoneLive() {
   const pct = limit > 0 ? Math.min(100, Math.round((confirmed + held) / limit * 100)) : 0;
   const barColor = pct >= 90 ? "var(--danger)" : (pct >= 70 ? "var(--warn)" : "var(--ok)");
   const enabledPill = (on, label) => `<span class="device-status ${on?'approved':'pending'}">${label}：${on?'开':'关'}</span>`;
-  const auth = q.auth || {}, scan = q.scan || {}, social = q.social || {}, inbound = q.inbound || {};
-  const statusText = auth.status === 'healthy' ? '认证正常' : auth.status === 'login_required' ? '需要登录' : auth.status === 'refresh_failed' ? '刷新失败' : '尚未验证';
+  const authByBot = q.auth_by_bot && typeof q.auth_by_bot === 'object' ? q.auth_by_bot : {};
+  const auth = authByBot[state.qzoneBotId] || q.auth || {}, scan = q.scan || {}, social = q.social || {}, inbound = q.inbound || {};
+  const statusText = auth.status === 'healthy' ? '认证正常' : auth.status === 'login_required' ? '需要登录' : auth.status === 'risk_blocked' ? '安全验证' : auth.status === 'refresh_failed' ? '刷新失败' : '尚未验证';
   const statusClass = auth.status === 'healthy' ? 'ok' : auth.status === 'unknown' ? 'info' : 'warn';
   const scanText = scan.running ? `${scan.owner==='social'?'好友动态扫描':'留言轮询'}运行 ${Number(scan.running_seconds||0)} 秒` : '当前空闲';
   const resultDigest = item => {
@@ -1320,7 +1321,7 @@ function renderQzoneLive() {
         <div><small>好友互动</small><strong>${social.job&&social.job.registered?'已注册':'未注册'}</strong><span>${escapeHtml(resultDigest(social))}</span></div>
         <div><small>留言轮询</small><strong>${inbound.job&&inbound.job.registered?'已注册':'未注册'}</strong><span>${escapeHtml(resultDigest(inbound))}</span></div>
       </div>
-      ${auth.cooldown_remaining_seconds>0?`<div class="alert err">检测到登录页或验证码，已暂停空间请求，冷却剩余 ${_fmtDuration(auth.cooldown_remaining_seconds)}。</div>`:''}
+      ${auth.cooldown_remaining_seconds>0?`<div class="alert err">${auth.status==='risk_blocked'?'检测到腾讯安全验证':'检测到登录失效'}，已暂停该 Bot 的空间请求，冷却剩余 ${_fmtDuration(auth.cooldown_remaining_seconds)}。</div>`:''}
       ${auth.last_error?`<p class="muted qzone-error-line">${escapeHtml(auth.last_error)}</p>`:''}
       <div class="row">
         <button class="btn small" onclick="runQzoneAction('refresh')" ${state.qzoneActionBusy?'disabled':''}>${state.qzoneActionBusy==='refresh'?'<span class="spinner"></span> 刷新中…':'从 LLOneBot 刷新'}</button>
