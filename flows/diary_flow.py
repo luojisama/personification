@@ -1562,7 +1562,7 @@ async def _build_qzone_post_with_optional_image(
             f"{attempt_key}_image",
             "配图处理",
             "ok" if image_marker else "skipped",
-            "已附加配图。" if image_marker else "本次使用纯文字发布，不影响正文。",
+            "候选已携带配图；实际上传结果将在发布阶段确认。" if image_marker else "本次使用纯文字发布，不影响正文。",
         )
     decision = assess_visible_text(f"{text}{image_marker}")
     if not decision.allowed:

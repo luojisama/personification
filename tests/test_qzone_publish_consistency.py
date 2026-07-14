@@ -309,6 +309,43 @@ def test_unknown_is_held_forever_and_same_payload_cannot_change_id(tmp_path, mon
     assert quota["confirmed"] == 0 and quota["held"] == 1 and quota["available"] == 1
 
 
+def test_coordinator_returns_only_sanitized_publish_detail(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    _init_store(tmp_path, monkeypatch, {"period": "2026-06", "count": 0})
+
+    async def _failed():
+        return qzone_service.QzoneWriteResult(
+            "definite_failure",
+            "upload failed",
+            "image_upload_missing_pic_bo",
+            detail={
+                "image_requested": True,
+                "image_uploaded": False,
+                "cookie": "p_skey=must-not-leak",
+                "nested": {"b64_json": "must-not-leak", "status_code": 200},
+            },
+        )
+
+    result = asyncio.run(qzone_publish.coordinated_qzone_publish(
+        operation_id="safe-publish-detail",
+        bot_id="10001",
+        content="安全诊断正文",
+        now=datetime(2026, 6, 10, 12, 0),
+        monthly_limit=5,
+        min_interval_hours=0,
+        kind="post",
+        publish=_failed,
+    ))
+
+    assert result["status"] == "definite_failure"
+    assert result["result_code"] == "image_upload_missing_pic_bo"
+    assert result["publish_detail"] == {
+        "image_requested": True,
+        "image_uploaded": False,
+        "nested": {"status_code": 200},
+    }
+    assert "must-not-leak" not in json.dumps(result, ensure_ascii=False)
+
+
 def test_success_transition_is_atomic_and_does_not_roll_state_period_back(tmp_path, monkeypatch) -> None:  # noqa: ANN001
     july = datetime(2026, 7, 2, 12, 0)
     june = datetime(2026, 6, 30, 23, 58)

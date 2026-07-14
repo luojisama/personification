@@ -805,13 +805,14 @@ def _normalize_write_result(result: Any) -> dict[str, Any]:
             status = "succeeded"
         else:
             status = "unknown"
+    safe_detail = _safe_value(data.get("detail") if isinstance(data.get("detail"), dict) else {})
     return {
         "status": status,
         "message": str(data.get("message") or "")[:300],
         "result_code": str(data.get("result_code") or status)[:64],
         "remote_id": str(data.get("remote_id") or "")[:160],
         "remote_time": float(data.get("remote_time") or 0),
-        "detail": data.get("detail") if isinstance(data.get("detail"), dict) else {},
+        "detail": safe_detail if isinstance(safe_detail, dict) else {},
     }
 
 
@@ -904,6 +905,7 @@ async def coordinated_qzone_publish(
         remote_time=normalized["remote_time"],
     )
     finalized["message"] = normalized["message"]
+    finalized["publish_detail"] = normalized["detail"]
     finalized["fence_token"] = fence_token
     if cancelled is not None:
         raise cancelled

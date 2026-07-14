@@ -801,6 +801,12 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 outcome="failed",
             )
             raise _http_diagnostic(500, report) from exc
+        publish_result_code = sanitize_text(published.get("result_code") or published.get("status") or "unknown", limit=64)
+        raw_publish_detail = sanitize_object(published.get("publish_detail") or {})
+        publish_detail = raw_publish_detail if isinstance(raw_publish_detail, dict) else {}
+        image_requested = bool(publish_detail.get("image_requested"))
+        image_uploaded = bool(publish_detail.get("image_uploaded"))
+        image_upload_failure = publish_result_code.startswith("image_upload_")
         if not published.get("success"):
             raw_publish_status = str(published.get("status") or "failed")
             publish_status = raw_publish_status if raw_publish_status in {
@@ -809,6 +815,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
             } else "failed"
             auth_status = get_qzone_auth_status(str(getattr(bot, "self_id", "") or ""))
             auth_was_login_required = auth_status.get("status") == "login_required"
+            auth_was_risk_blocked = auth_status.get("status") == "risk_blocked"
             recovery_step = None
             recovery_ok: bool | None = None
             if auth_was_login_required and callable(update_cookie):
@@ -834,7 +841,10 @@ def build_qzone_router(*, runtime) -> APIRouter:
                     if recovery_ok
                     else "检测到 QZone 登录失效，自动刷新仍未恢复；需要扫码登录。"
                 )
+            elif auth_was_risk_blocked:
+                warnings.append("腾讯返回安全验证页面；已暂停该 Bot 的空间请求，没有自动刷新或重发。")
             outcome_unknown = publish_status in {"outcome_unknown", "unknown"}
+            failure_phase = "qzone_publish"
             if outcome_unknown:
                 code = "qzone_publish_outcome_unknown"
                 title = "QZone 发布结果未知"
@@ -849,6 +859,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 retryable = False
             elif auth_was_login_required:
                 code = "qzone_login_required"
+                failure_phase = "qzone_auth"
                 title = "QZone 登录凭证已失效"
                 message = (
                     "腾讯要求重新登录；系统已自动刷新凭证，本次草稿没有自动重发。"
@@ -861,6 +872,20 @@ def build_qzone_router(*, runtime) -> APIRouter:
                     else "在上方“QZone 认证恢复”扫码登录，确认认证健康后再重新发布。"
                 )
                 retryable = bool(recovery_ok)
+            elif auth_was_risk_blocked:
+                code = "qzone_risk_blocked"
+                failure_phase = "qzone_auth"
+                title = "QZone 写操作触发安全验证"
+                message = "腾讯要求安全验证，本次没有继续提交说说。"
+                suggestion = "暂停自动尝试并稍后人工确认 QZone 状态；不要高频刷新或发布。"
+                retryable = False
+            elif image_upload_failure:
+                code = "qzone_image_upload_failed"
+                failure_phase = "qzone_image_upload"
+                title = "QZone 配图上传失败"
+                message = "配图未取得完整 richval/pic_bo，本次尚未提交说说正文。"
+                suggestion = "检查配图格式和 QZone 上传状态后，可以安全地重新发起新的发布操作。"
+                retryable = True
             else:
                 code = "qzone_publish_rejected"
                 title = "QZone 明确拒绝了发布"
@@ -868,18 +893,32 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 suggestion = "根据发布层返回和认证状态修复问题；只有明确失败时才可以重新发布。"
                 retryable = True
             steps = [item.to_dict() for item in auth_steps] + list(generation_diag.get("steps") or [])
-            steps.append(step("publish", "提交到 QZone", "unknown" if outcome_unknown else "error", message).to_dict())
+            publish_step_details = [detail("结果代码", publish_result_code, "warn" if outcome_unknown else "error")]
+            if image_requested:
+                publish_step_details.append(detail("配图上传", "已完成" if image_uploaded else "未完成", "ok" if image_uploaded else "error"))
+            if publish_detail.get("image_mime_type"):
+                publish_step_details.append(detail("配图格式", publish_detail.get("image_mime_type"), "info"))
+            if publish_detail.get("image_converted") is not None:
+                publish_step_details.append(detail("格式转换", "是" if publish_detail.get("image_converted") else "否", "info"))
+            steps.append(step(
+                "image_upload" if image_upload_failure else "publish",
+                "上传 QZone 配图" if image_upload_failure else "提交到 QZone",
+                "unknown" if outcome_unknown else "error",
+                message,
+                details=tuple(publish_step_details),
+            ).to_dict())
             if recovery_step is not None:
                 steps.append(recovery_step.to_dict())
             result = diagnostic(
                 ok=False,
                 code=code,
-                phase="qzone_publish",
+                phase=failure_phase,
                 title=title,
                 message=message,
                 details=(
                     detail("候选正文", content[:200], "ok"),
                     detail("协调状态", publish_status, "error" if not outcome_unknown else "warn"),
+                    detail("发布结果代码", publish_result_code, "warn" if outcome_unknown else "error"),
                 ),
                 steps=tuple(
                     step(
@@ -909,7 +948,12 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 device_id=admin.device_id,
                 target=str(getattr(bot, "self_id", "") or ""),
                 ip_hash=get_client_ip(request),
-                detail={"operation_id": operation_id, "code": code, "status": publish_status},
+                detail={
+                    "operation_id": operation_id,
+                    "code": code,
+                    "status": publish_status,
+                    "result_code": publish_result_code,
+                },
                 outcome="unknown" if outcome_unknown else "failed",
             )
             return result
@@ -936,16 +980,41 @@ def build_qzone_router(*, runtime) -> APIRouter:
             outcome="ok",
         )
         generation_steps = [item.to_dict() for item in auth_steps] + list(generation_diag.get("steps") or [])
-        generation_steps.append({"key": "publish", "label": "提交到 QZone", "status": "ok", "message": "腾讯已明确返回发布成功。", "details": []})
+        success_publish_details = [detail("结果代码", publish_result_code, "ok")]
+        if image_requested:
+            success_publish_details.append(detail("配图上传", "已完成" if image_uploaded else "未完成", "ok" if image_uploaded else "warn"))
+        if publish_detail.get("image_mime_type"):
+            success_publish_details.append(detail("配图格式", publish_detail.get("image_mime_type"), "info"))
+        generation_steps.append(step(
+            "publish",
+            "提交到 QZone",
+            "ok",
+            "腾讯已明确返回发布成功。",
+            details=tuple(success_publish_details),
+        ).to_dict())
         result = diagnostic(
             ok=True,
             code="qzone_post_published",
             phase="publish_complete",
             title="说说已经发布",
             message="草稿通过全部检查，腾讯已明确确认发布成功。",
-            details=(detail("正文", content[:200], "ok"), detail("本月已用额度", quota.get("used", 0), "info")),
+            details=(
+                detail("正文", content[:200], "ok"),
+                detail("发布结果代码", publish_result_code, "ok"),
+                detail("本月已用额度", quota.get("used", 0), "info"),
+            ),
             steps=tuple(
-                step(str(item.get("key") or "step"), str(item.get("label") or "步骤"), str(item.get("status") or "unknown"), str(item.get("message") or ""))
+                step(
+                    str(item.get("key") or "step"),
+                    str(item.get("label") or "步骤"),
+                    str(item.get("status") or "unknown"),
+                    str(item.get("message") or ""),
+                    details=tuple(
+                        detail(str(child.get("label") or "详情"), child.get("value"), str(child.get("status") or "info"))
+                        for child in item.get("details") or []
+                        if isinstance(child, dict)
+                    ),
+                )
                 for item in generation_steps
                 if isinstance(item, dict)
             ),

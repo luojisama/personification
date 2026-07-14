@@ -295,6 +295,8 @@ def test_qzone_post_duplicate_success_does_not_mark_generated_content(_runtime_c
 
 
 def test_qzone_post_hides_refresh_and_publish_service_messages(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="": {"status": "healthy"})
+
     async def generate(_bot):  # noqa: ANN001
         return "一条安全草稿"
 
@@ -332,7 +334,13 @@ def test_qzone_post_hides_refresh_and_publish_service_messages(_runtime_context,
     assert "refresh-service-secret" not in response.text
 
     async def unknown(**_kwargs):  # noqa: ANN003
-        return {"success": False, "status": "outcome_unknown", "message": "raw-timeout-secret"}
+        return {
+            "success": False,
+            "status": "outcome_unknown",
+            "message": "raw-timeout-secret",
+            "result_code": "auth_page_2xx",
+            "publish_detail": {"image_requested": False, "cookie": "must-not-leak"},
+        }
 
     monkeypatch.setattr(periodic_jobs, "coordinated_qzone_publish", unknown)
     unknown_response = client.post(
@@ -344,7 +352,57 @@ def test_qzone_post_hides_refresh_and_publish_service_messages(_runtime_context,
     assert unknown_body["code"] == "qzone_publish_outcome_unknown"
     assert unknown_body["outcome_unknown"] is True
     assert unknown_body["retryable"] is False
+    assert any(
+        item["label"] == "发布结果代码" and item["value"] == "auth_page_2xx"
+        for item in unknown_body["details"]
+    )
+    assert unknown_body["steps"][-1]["details"][0]["value"] == "auth_page_2xx"
     assert "raw-timeout-secret" not in unknown_response.text
+    assert "must-not-leak" not in unknown_response.text
+
+
+def test_qzone_post_reports_image_upload_failure_before_publish(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+    async def generate(_bot):  # noqa: ANN001
+        return "配图发布正文"
+
+    async def publish(_content, _bot_id):  # noqa: ANN001
+        raise AssertionError("coordinator stub owns the result")
+
+    async def coordinated(**_kwargs):  # noqa: ANN003
+        return {
+            "success": False,
+            "status": "definite_failure",
+            "result_code": "image_upload_missing_pic_bo",
+            "publish_detail": {
+                "image_requested": True,
+                "image_uploaded": False,
+                "image_mime_type": "image/png",
+            },
+        }
+
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="": {"status": "healthy"})
+    monkeypatch.setattr(periodic_jobs, "coordinated_qzone_publish", coordinated)
+    _install_runtime(
+        _runtime_context,
+        bundle=SimpleNamespace(qzone_generate_post=generate, publish_qzone_shuo=publish),
+    )
+    client = _admin_client(_runtime_context)
+
+    response = client.post(
+        "/personification/api/qzone/post-now",
+        json={"bot_id": "10000", "operation_id": "image-upload-failed-op"},
+    )
+
+    body = response.json()
+    _assert_safe_report(body, code="qzone_image_upload_failed", phase="qzone_image_upload")
+    assert body["retryable"] is True
+    assert body["outcome_unknown"] is False
+    assert body["steps"][-1]["key"] == "image_upload"
+    assert {item["label"] for item in body["steps"][-1]["details"]} >= {
+        "结果代码",
+        "配图上传",
+        "配图格式",
+    }
 
 
 def test_qzone_post_stops_before_generation_when_forced_refresh_still_requires_login(
@@ -428,10 +486,10 @@ def test_qzone_post_stops_before_generation_when_forced_refresh_hits_risk_challe
 
 
 @pytest.mark.parametrize(
-    ("publish_status", "expected_code", "expected_retryable", "expected_unknown"),
+    ("publish_status", "expected_code", "expected_phase", "expected_retryable", "expected_unknown"),
     [
-        ("definite_failure", "qzone_login_required", True, False),
-        ("outcome_unknown", "qzone_publish_outcome_unknown", False, True),
+        ("definite_failure", "qzone_login_required", "qzone_auth", True, False),
+        ("outcome_unknown", "qzone_publish_outcome_unknown", "qzone_publish", False, True),
     ],
 )
 def test_qzone_post_recovers_login_without_automatically_replaying_write(
@@ -439,6 +497,7 @@ def test_qzone_post_recovers_login_without_automatically_replaying_write(
     monkeypatch,
     publish_status: str,
     expected_code: str,
+    expected_phase: str,
     expected_retryable: bool,
     expected_unknown: bool,
 ) -> None:  # noqa: ANN001
@@ -482,7 +541,7 @@ def test_qzone_post_recovers_login_without_automatically_replaying_write(
 
     assert response.status_code == 200
     body = response.json()
-    _assert_safe_report(body, code=expected_code, phase="qzone_publish", outcome_unknown=expected_unknown)
+    _assert_safe_report(body, code=expected_code, phase=expected_phase, outcome_unknown=expected_unknown)
     assert body["retryable"] is expected_retryable
     assert [item["key"] for item in body["steps"]][-2:] == ["publish", "auth_recovery"]
     assert refresh_calls == [True, True]
