@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..agent.tool_registry import AgentTool, ToolRegistry
+from .source_resolver import skill_source_content_digest
 
 
 _REGISTERED_MCP_TOOLS: dict[str, dict[str, Any]] = {}
@@ -246,6 +247,8 @@ def normalize_mcp_config(
     skill_dir: Path,
     raw: Any,
     default_timeout: int = 20,
+    allowed_root: Path | None = None,
+    restrict_paths: bool = False,
 ) -> dict[str, Any] | None:
     block = raw if isinstance(raw, dict) else None
     if not block:
@@ -262,7 +265,38 @@ def normalize_mcp_config(
     env = {str(k): str(v) for k, v in env_raw.items()} if isinstance(env_raw, dict) else {}
     inherit_env = bool(block.get("inherit_env", True))
     cwd_raw = str(block.get("cwd") or "").strip()
-    cwd = str((skill_dir / cwd_raw).resolve()) if cwd_raw else str(skill_dir.resolve())
+    cwd_path = (skill_dir / cwd_raw).resolve() if cwd_raw else skill_dir.resolve()
+    approved_root = (allowed_root or skill_dir).resolve()
+
+    def _inside(candidate: Path) -> bool:
+        try:
+            return os.path.commonpath([str(approved_root), str(candidate.resolve())]) == str(approved_root)
+        except Exception:
+            return False
+
+    if restrict_paths and (not _inside(cwd_path) or cwd_path.is_symlink()):
+        return None
+    if restrict_paths and (Path(command).is_absolute() or "/" in command or "\\" in command):
+        command_path = (skill_dir / command).resolve()
+        if not _inside(command_path) or not command_path.is_file() or command_path.is_symlink():
+            return None
+        command = str(command_path)
+    if restrict_paths:
+        normalized_args: list[str] = []
+        for arg in args:
+            if arg.startswith("-"):
+                normalized_args.append(arg)
+                continue
+            looks_like_path = Path(arg).is_absolute() or "/" in arg or "\\" in arg or Path(arg).suffix in {".py", ".js", ".mjs", ".cjs"}
+            if not looks_like_path:
+                normalized_args.append(arg)
+                continue
+            arg_path = (skill_dir / arg).resolve()
+            if not _inside(arg_path) or not arg_path.is_file() or arg_path.is_symlink():
+                return None
+            normalized_args.append(str(arg_path))
+        args = normalized_args
+    cwd = str(cwd_path)
     tool_names_raw = block.get("tools")
     tool_names = [str(item).strip() for item in tool_names_raw] if isinstance(tool_names_raw, list) else []
     single_tool = str(block.get("tool") or "").strip()
@@ -292,6 +326,8 @@ def register_mcp_endpoint(
     env: dict[str, str],
     cwd: str,
     timeout: int,
+    approved_root: str = "",
+    content_digest: str = "",
 ) -> None:
     _REGISTERED_MCP_TOOLS[registered_name] = {
         "remote_name": remote_name,
@@ -300,6 +336,8 @@ def register_mcp_endpoint(
         "env": dict(env),
         "cwd": cwd,
         "timeout": max(1, int(timeout)),
+        "approved_root": str(approved_root or ""),
+        "content_digest": str(content_digest or ""),
     }
 
 
@@ -312,6 +350,15 @@ async def call_registered_mcp_tool(tool_name: str, arguments: dict[str, Any]) ->
     config = get_registered_mcp_endpoint(tool_name)
     if config is None:
         raise McpProtocolError(f"Remote MCP tool '{tool_name}' is not registered")
+    approved_root = str(config.get("approved_root") or "").strip()
+    expected_digest = str(config.get("content_digest") or "").strip().lower()
+    if approved_root and expected_digest:
+        try:
+            current_digest = skill_source_content_digest(Path(approved_root))
+        except Exception:
+            current_digest = ""
+        if current_digest != expected_digest:
+            raise McpProtocolError("MCP skill approved content digest changed")
     async with McpStdioClient(
         command=str(config["command"]),
         args=[str(item) for item in config.get("args", [])],
@@ -332,6 +379,8 @@ async def register_mcp_tools(
     skill_dir: Path,
     base_name: str,
     config: dict[str, Any],
+    approved_root: Path | None = None,
+    content_digest: str = "",
 ) -> int:
     env = os.environ.copy() if config.get("inherit_env", True) else {}
     env.update(config.get("env") or {})
@@ -341,6 +390,14 @@ async def register_mcp_tools(
     cwd = str(config.get("cwd") or "").strip() or str(skill_dir.resolve())
     name_prefix = str(config.get("name_prefix") or "").strip()
     allowed = set(str(item) for item in (config.get("tools") or []))
+    if approved_root is not None and content_digest:
+        try:
+            current_digest = skill_source_content_digest(approved_root)
+        except Exception:
+            current_digest = ""
+        if current_digest != content_digest:
+            logger.warning(f"[mcp] approved content digest changed before registration: {base_name}")
+            return 0
 
     try:
         async with McpStdioClient(
@@ -380,6 +437,8 @@ async def register_mcp_tools(
             env=env,
             cwd=cwd,
             timeout=timeout,
+            approved_root=str(approved_root or ""),
+            content_digest=content_digest,
         )
 
         async def _handler(_tool_name=registered_name, **kwargs) -> str:

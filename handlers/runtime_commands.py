@@ -9,6 +9,7 @@ from ..core.config_manager import get_env_config_load_info, get_env_config_path
 from ..core.remote_skill_review import (
     get_remote_skill_review_stats,
     list_remote_skill_reviews,
+    prepare_remote_skill_reviews,
     review_remote_skill_sources,
 )
 
@@ -17,6 +18,7 @@ from ..core.knowledge_builder import (
     maybe_start_plugin_knowledge_builder,
     stop_plugin_knowledge_builder,
 )
+from ..core.paths import get_data_dir
 from ..core.image_result_cache import clear_image_result_cache
 from ..core.metrics import format_metrics_snapshot
 from ..core.runtime_config import get_runtime_load_info
@@ -31,25 +33,6 @@ def _entry_dedupe_key(entry: dict[str, Any]) -> tuple[str, str, str]:
         str(entry.get("ref") or "").strip(),
         str(entry.get("subdir") or "").strip(),
     )
-
-
-def _find_review_item_key(
-    raw_sources: Any,
-    logger: Any,
-    entry: dict[str, Any],
-) -> str:
-    target_key = _entry_dedupe_key(entry)
-    for item in list_remote_skill_reviews(raw_sources, logger):
-        if not isinstance(item, dict):
-            continue
-        item_key = (
-            str(item.get("source") or "").strip(),
-            str(item.get("ref") or "").strip(),
-            str(item.get("subdir") or "").strip(),
-        )
-        if item_key == target_key:
-            return str(item.get("key") or "").strip()
-    return ""
 
 
 def install_remote_skill_source(
@@ -105,36 +88,24 @@ def install_remote_skill_source(
         changed = True
         exists_text = "已登记远程 skill 源。"
 
+    remote_was_enabled = bool(getattr(plugin_config, "personification_skill_remote_enabled", False))
+    review_was_required = bool(getattr(plugin_config, "personification_skill_require_admin_review", True))
     plugin_config.personification_skill_sources = current_sources
     plugin_config.personification_skill_remote_enabled = True
-    plugin_config.personification_skill_allow_unsafe_external = True
     plugin_config.personification_skill_require_admin_review = True
+    changed = changed or not remote_was_enabled or not review_was_required
     if changed:
         save_plugin_runtime_config()
 
     approval_text = (
-        "仍需执行 `远程技能审批 同意 ...`，并在下次重载或重启后才会实际加载。"
+        "仍需执行 `远程技能审批 同意 ...`，并在下次重载或重启后才会进入加载流程；"
+        "非隔离外部执行保持关闭，必须由管理员在配置中心单独开启。"
     )
     if auto_approve:
-        review_key = _find_review_item_key(
-            getattr(plugin_config, "personification_skill_sources", None),
-            logger,
-            entry_for_reply,
+        approval_text = (
+            "已登记来源，但 QQ 安装不会跳过 content digest 审核；"
+            "请执行 `远程技能审批 同意 ...`，由审批命令先下载并绑定当前内容。"
         )
-        if review_key:
-            matched_count, _matched_items = review_remote_skill_sources(
-                getattr(plugin_config, "personification_skill_sources", None),
-                logger,
-                selector=review_key,
-                status="approved",
-                operator=operator_user_id,
-            )
-            if matched_count > 0:
-                approval_text = "已自动审批通过，并会在下次重载插件或重启后实际加载。"
-            else:
-                approval_text = "自动审批未命中，请执行 `远程技能审批 同意 pending` 后再重载。"
-        else:
-            approval_text = "自动审批未找到对应记录，请执行 `远程技能审批 同意 pending` 后再重载。"
 
     logger.info(
         f"[remote_skill_install] operator={operator_user_id} "
@@ -467,11 +438,11 @@ async def _parse_natural_language_install_request(
         "你是远程技能安装请求解析器。"
         "请判断用户是否在要求安装远程 skill。"
         "只返回 JSON，不要解释。"
-        'JSON 格式: {"action":"INSTALL_REMOTE_SKILL|NO_ACTION","skill_name":"","source_url":"","source_hint":"skillhub|clawhub|github|auto","prefer_source":false,"name":"","ref":"","subdir":"","auto_approve":true}'
+        'JSON 格式: {"action":"INSTALL_REMOTE_SKILL|NO_ACTION","skill_name":"","source_url":"","source_hint":"skillhub|clawhub|github|auto","prefer_source":false,"name":"","ref":"","subdir":"","auto_approve":false}'
         "如果用户只是普通聊天、问答、抱怨、评测，action=NO_ACTION。"
         "如果用户要求从 SkillHub/ClawHub/GitHub 安装某个 skill，但没给 URL，要尽量提取 skill_name 和 source_hint，不要编造 URL。"
         "如果用户说设为优先源，prefer_source=true。"
-        "如果用户以管理员身份要求直接安装，auto_approve=true。"
+        "即使用户以管理员身份要求直接安装，auto_approve=false；content digest 审批必须单独执行。"
     )
     try:
         response = await tool_caller.chat_with_tools(
@@ -495,7 +466,7 @@ async def _parse_natural_language_install_request(
     parsed["ref"] = str(parsed.get("ref") or "").strip()
     parsed["subdir"] = str(parsed.get("subdir") or "").strip()
     parsed["prefer_source"] = _coerce_bool(parsed.get("prefer_source"), False)
-    parsed["auto_approve"] = _coerce_bool(parsed.get("auto_approve"), True)
+    parsed["auto_approve"] = False
     return parsed
 
 
@@ -668,7 +639,7 @@ async def maybe_handle_superuser_natural_language_skill_install(
         logger=logger,
         operator_user_id=operator_user_id,
         prefer_first=bool(parsed.get("prefer_source", False)),
-        auto_approve=bool(parsed.get("auto_approve", True)),
+        auto_approve=False,
         install_note=note,
     )
     return message
@@ -690,12 +661,14 @@ def _format_remote_skill_review_items(items: list[dict[str, Any]], *, limit: int
         source = str(item.get("source") or "").strip()
         ref = str(item.get("ref") or "").strip()
         key = str(item.get("key") or "").strip()
+        content_digest = str(item.get("content_digest") or "").strip().lower()
         suffix = f" @ {ref}" if ref else ""
         lines.append(f"{index}. [{status_text}] {name}{suffix}")
         if source:
             lines.append(f"   来源: {source}")
         if key:
             lines.append(f"   键值: {key}")
+        lines.append(f"   内容摘要: {content_digest[:16] if content_digest else '未准备'}")
     if len(items) > limit:
         lines.append(f"... 其余 {len(items) - limit} 项未显示")
     return "\n".join(lines)
@@ -773,14 +746,24 @@ async def handle_remote_skill_review_command(
         )
 
     effective_selector = selector or "pending"
+    review_sources = raw_sources
+    if target_status == "approved":
+        review_sources = await prepare_remote_skill_reviews(
+            raw_sources,
+            plugin_config,
+            logger,
+            data_dir=get_data_dir(plugin_config),
+        )
     matched_count, matched_items = review_remote_skill_sources(
-        raw_sources,
+        review_sources,
         logger,
         selector=effective_selector,
         status=target_status,
         operator=operator_user_id,
     )
     if matched_count <= 0:
+        if target_status == "approved":
+            await matcher.finish("没有可批准的远程 skill 内容；来源可能尚未成功下载或生成 content digest。")
         await matcher.finish("没有找到匹配的远程 skill 源。")
 
     action_text_map = {

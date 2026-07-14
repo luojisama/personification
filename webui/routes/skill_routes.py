@@ -14,6 +14,7 @@ from ...core import (
     webui_audit_log,
 )
 from ...core.operation_diagnostics import detail, diagnostic, exception_diagnostic, step
+from ...core.paths import get_data_dir
 from ...skill_runtime.source_resolver import parse_skill_sources
 from ..deps import AdminIdentity, require_admin
 
@@ -238,6 +239,8 @@ def _remote_sources_payload(runtime: Any) -> tuple[list[dict[str, Any]], dict[st
                 "status": status,
                 "last_seen_at": float(review.get("last_seen_at") or 0),
                 "reviewed_by": str(review.get("reviewed_by") or ""),
+                "content_digest": str(review.get("content_digest") or ""),
+                "approved_digest": str(review.get("approved_digest") or ""),
             }
         )
     return items, stats
@@ -657,10 +660,19 @@ def build_skill_router(*, runtime) -> APIRouter:
     ) -> dict:
         selector = str(body.get("selector") or body.get("key") or "pending").strip() or "pending"
         status = _status_label(str(body.get("status") or ""))
-        raw_sources = getattr(_plugin_config(runtime), "personification_skill_sources", None)
+        cfg = _plugin_config(runtime)
+        raw_sources = getattr(cfg, "personification_skill_sources", None)
         try:
+            review_sources = raw_sources
+            if status == "approved":
+                review_sources = await remote_skill_review.prepare_remote_skill_reviews(
+                    raw_sources,
+                    cfg,
+                    _logger(runtime),
+                    data_dir=get_data_dir(cfg),
+                )
             matched_count, matched_items = remote_skill_review.review_remote_skill_sources(
-                raw_sources,
+                review_sources,
                 _logger(runtime),
                 selector=selector,
                 status=status,
@@ -943,8 +955,14 @@ def build_skill_router(*, runtime) -> APIRouter:
         approved_count = 0
         if auto_approve:
             try:
-                reviews = remote_skill_review.list_remote_skill_reviews(
+                prepared_sources = await remote_skill_review.prepare_remote_skill_reviews(
                     getattr(cfg, "personification_skill_sources", None),
+                    cfg,
+                    logger,
+                    data_dir=get_data_dir(cfg),
+                )
+                reviews = remote_skill_review.list_remote_skill_reviews(
+                    prepared_sources,
                     logger,
                 )
                 review_key = ""
@@ -954,7 +972,7 @@ def build_skill_router(*, runtime) -> APIRouter:
                         break
                 if review_key:
                     approved_count, _items = remote_skill_review.review_remote_skill_sources(
-                        getattr(cfg, "personification_skill_sources", None),
+                        prepared_sources,
                         logger,
                         selector=review_key,
                         status="approved",

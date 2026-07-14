@@ -96,9 +96,11 @@ def _remove_module_tree(root_name: str) -> None:
 
 def _clear_skill_bytecode(skill_dir: Path) -> None:
     for cache_dir in skill_dir.rglob("__pycache__"):
-        if not cache_dir.is_dir():
+        if cache_dir.is_symlink() or not cache_dir.is_dir():
             continue
         for cache_path in cache_dir.glob("*.pyc"):
+            if cache_path.is_symlink():
+                continue
             cache_path.unlink(missing_ok=True)
 
 

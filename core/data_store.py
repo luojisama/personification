@@ -81,12 +81,42 @@ class DataStore:
         self._write(name, data)
 
     def mutate_sync(self, name: str, mutator: Callable[[Any], Any]) -> Any:
-        current = self._read(name)
-        updated = mutator(current)
-        if updated is None:
-            updated = current
-        self._write(name, updated)
-        return updated
+        with connect_sync() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT value FROM kv_store WHERE namespace=? AND key=?",
+                    (name, _ROOT_KEY),
+                ).fetchone()
+                if row is None:
+                    current = {}
+                else:
+                    try:
+                        raw = row["value"]
+                    except (KeyError, TypeError, IndexError):
+                        raw = row[0]
+                    try:
+                        current = json.loads(raw)
+                    except Exception:
+                        current = {}
+                updated = mutator(current)
+                if updated is None:
+                    updated = current
+                payload = json.dumps(updated, ensure_ascii=False)
+                conn.execute(
+                    """
+                    INSERT INTO kv_store(namespace, key, value, updated_at)
+                    VALUES (?, ?, ?, unixepoch('now'))
+                    ON CONFLICT(namespace, key)
+                    DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                    """,
+                    (name, _ROOT_KEY, payload),
+                )
+                conn.commit()
+                return updated
+            except Exception:
+                conn.rollback()
+                raise
 
     def update_sync(self, name: str, patch: dict[str, Any]) -> dict[str, Any]:
         def _mutate(current: Any) -> dict[str, Any]:

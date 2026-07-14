@@ -28,6 +28,18 @@ def _runtime_context(tmp_path: Path, monkeypatch):
         personification_use_skillpacks=False,
     )
     data_store_mod.init_data_store(cfg)
+    review_mod = load_personification_module("plugin.personification.core.remote_skill_review")
+    source_resolver = load_personification_module("plugin.personification.skill_runtime.source_resolver")
+
+    async def _prepare_reviews(raw_sources, _cfg, logger, *, data_dir):  # noqa: ANN001
+        prepared = [
+            {**source, "content_digest": f"{index + 1:064x}"}
+            for index, source in enumerate(source_resolver.parse_skill_sources(raw_sources, logger))
+        ]
+        review_mod.list_remote_skill_reviews(prepared, logger)
+        return prepared
+
+    monkeypatch.setattr(review_mod, "prepare_remote_skill_reviews", _prepare_reviews)
 
     tool_registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
     registry = tool_registry_mod.ToolRegistry()
@@ -250,6 +262,11 @@ def test_remote_skill_review_endpoint_updates_status(_runtime_context) -> None:
     listed_after = client.get("/personification/api/skills").json()
     assert listed_after["summary"]["remote_approved"] == 1
     assert listed_after["remote_sources"][0]["status"] == "approved"
+    assert len(listed_after["remote_sources"][0]["content_digest"]) == 64
+    assert (
+        listed_after["remote_sources"][0]["approved_digest"]
+        == listed_after["remote_sources"][0]["content_digest"]
+    )
 
 
 def test_add_remote_skill_source_persists_config_and_auto_approves(_runtime_context, tmp_path: Path) -> None:
@@ -278,6 +295,7 @@ def test_add_remote_skill_source_persists_config_and_auto_approves(_runtime_cont
     assert steps["auto_approve"]["status"] == "ok"
     assert steps["reload_runtime"]["status"] == "pending"
     assert _runtime_context.plugin_config.personification_skill_remote_enabled is True
+    assert _runtime_context.plugin_config.personification_skill_allow_unsafe_external is False
     assert _runtime_context.plugin_config.personification_skill_sources[0]["name"] == "demo_remote"
 
     env_json = json.loads((tmp_path / "env.json").read_text(encoding="utf-8"))
@@ -483,6 +501,7 @@ def test_skill_frontend_persists_and_renders_operation_diagnostics() -> None:
     assert "sessionStorage.setItem(_SKILL_OPERATION_RESULT_STORAGE_KEY" in source
     assert "renderOperationDiagnostic(result)" in source
     assert 'api("/skills/remote/toggle"' in source
+    assert "digest=${escapeHtml((item.content_digest" in source
 
 
 def test_model_test_chat_returns_response(_runtime_context) -> None:

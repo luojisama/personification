@@ -126,7 +126,7 @@ function renderRemoteSkillSources() {
     const selector = item.key || item.name || item.source;
     return `<tr>
       <td><strong>${escapeHtml(item.name || ("source_" + (item.index + 1)))}</strong><br><code style="font-size:11px">${escapeHtml(item.key || "")}</code></td>
-      <td style="word-break:break-all">${escapeHtml(item.source || "")}${item.ref ? `<br><span class="muted">ref=${escapeHtml(item.ref)}</span>` : ""}${item.subdir ? `<br><span class="muted">subdir=${escapeHtml(item.subdir)}</span>` : ""}</td>
+      <td style="word-break:break-all">${escapeHtml(item.source || "")}${item.ref ? `<br><span class="muted">ref=${escapeHtml(item.ref)}</span>` : ""}${item.subdir ? `<br><span class="muted">subdir=${escapeHtml(item.subdir)}</span>` : ""}<br><span class="muted">digest=${escapeHtml((item.content_digest || "未准备").slice(0,16))}</span></td>
       <td>${_remoteStatusTag(item.status)}</td>
       <td>
         <div class="row" style="gap:6px">
@@ -140,6 +140,7 @@ function renderRemoteSkillSources() {
   return `<div class="card">
     <div class="between" style="gap:12px;align-items:flex-start">
       <div><h2>远程 Skill 源</h2>
+        <p class="muted" style="margin:4px 0 8px">批准前会先下载但不执行，并绑定当前完整内容 SHA-256；内容变化会自动回到待审。</p>
         <div class="row" style="gap:6px">
           ${s.remote_enabled ? '<span class="device-status approved">远程加载已开</span>' : '<span class="device-status pending">远程加载关闭</span>'}
           ${s.require_admin_review ? '<span class="tag source-runtime_config">管理员审核</span>' : '<span class="tag required">免审核</span>'}
