@@ -60,6 +60,22 @@ def normalize_api_type(api_type: Optional[str]) -> str:
     return value
 
 
+def _provider_signature(provider: Dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    api_type = normalize_api_type(provider.get("api_type"))
+    return (
+        api_type,
+        str(provider.get("api_url", "") or "").strip(),
+        str(provider.get("api_key", "") or "").strip(),
+        str(provider.get("model", "") or "").strip(),
+        str(provider.get("auth_path", "") or "").strip(),
+        (
+            str(provider.get("gemini_auth_mode", "auto") or "auto").strip().lower()
+            if api_type == "gemini"
+            else ""
+        ),
+    )
+
+
 def provider_supports_vision(api_type: Optional[str], model: Optional[str] = None) -> bool:
     return heuristic_supports_vision(str(api_type or ""), model)
 
@@ -246,6 +262,7 @@ def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str,
             "auth_path": auth_path,
             "project": project,
             "proxy": str(item.get("proxy", "") or "").strip(),
+            "gemini_auth_mode": str(item.get("gemini_auth_mode", "auto") or "auto").strip().lower(),
             "enabled": _to_bool(item.get("enabled", True), True),
             "priority": _to_int(item.get("priority", index), index),
             "timeout": _provider_timeout({**item, "api_type": api_type}),
@@ -379,6 +396,9 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
                 ),
                 "auth_path": auth_path,
                 "project": project,
+                "gemini_auth_mode": str(
+                    getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto"
+                ).strip().lower(),
                 "enabled": True,
                 "priority": 0,
                 "timeout": _DEFAULT_PROVIDER_TIMEOUT_SECONDS,
@@ -408,6 +428,9 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
             "model": model,
             "auth_path": "",
             "project": "",
+            "gemini_auth_mode": str(
+                getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto"
+            ).strip().lower(),
             "enabled": True,
             "priority": 0,
             "timeout": _DEFAULT_PROVIDER_TIMEOUT_SECONDS,
@@ -644,6 +667,7 @@ def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
         return tool_impl.GeminiToolCaller(
             **common_kwargs,
             timeout=_provider_timeout(provider),
+            auth_mode=str(provider.get("gemini_auth_mode", "auto") or "auto"),
         )
     if provider["api_type"] == "anthropic":
         return tool_impl.AnthropicToolCaller(
@@ -1031,23 +1055,8 @@ async def call_ai_api(
     if fallback_resolution is not None:
         fallback_provider = _override_provider_model(fallback_resolution.provider, model_override)
         fallback_provider["api_type"] = normalize_api_type(fallback_provider.get("api_type"))
-        fallback_signature = (
-            normalize_api_type(fallback_provider.get("api_type")),
-            str(fallback_provider.get("api_url", "") or "").strip(),
-            str(fallback_provider.get("api_key", "") or "").strip(),
-            str(fallback_provider.get("model", "") or "").strip(),
-            str(fallback_provider.get("auth_path", "") or "").strip(),
-        )
-        primary_signatures = {
-            (
-                normalize_api_type(provider.get("api_type")),
-                str(provider.get("api_url", "") or "").strip(),
-                str(provider.get("api_key", "") or "").strip(),
-                str(provider.get("model", "") or "").strip(),
-                str(provider.get("auth_path", "") or "").strip(),
-            )
-            for provider in providers
-        }
+        fallback_signature = _provider_signature(fallback_provider)
+        primary_signatures = {_provider_signature(provider) for provider in providers}
         if fallback_signature not in primary_signatures:
             fallback_provider.setdefault("name", "configured_fallback")
             fallback_provider.setdefault("priority", 999)

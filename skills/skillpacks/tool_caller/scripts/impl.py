@@ -14,6 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from plugin.personification.core.image_refs import normalize_image_ref
+from plugin.personification.core.gemini_transport import (
+    is_google_gemini_endpoint,
+    raise_for_gemini_status,
+    request_with_gemini_auth,
+)
 from plugin.personification.core.llm_context import current_llm_context, use_single_attempt_retry_policy
 from plugin.personification.core.message_parts import extract_text_from_parts, normalize_message_parts
 from plugin.personification.core.time_ctx import build_current_time_context_block, inject_current_time_context
@@ -155,18 +160,6 @@ class ProviderModelCandidateUnavailable(httpx.HTTPStatusError):
         self.next_model = str(next_model or "")
 
 
-def _configure_genai(api_key: str, base_url: str = "") -> None:
-    import google.generativeai as genai
-
-    if base_url:
-        from google.api_core import client_options as client_options_lib
-
-        options = client_options_lib.ClientOptions(api_endpoint=base_url.rstrip("/"))
-        genai.configure(api_key=api_key, client_options=options, transport="rest")
-    else:
-        genai.configure(api_key=api_key)
-
-
 def _obj_get(value: Any, key: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(key, default)
@@ -210,9 +203,9 @@ def _strip_llm_endpoint_suffix(base_url: str) -> str:
 
 def _normalize_openai_base_url(base_url: str) -> str:
     url = _strip_llm_endpoint_suffix(base_url)
-    if "generativelanguage.googleapis.com" in url and "openai" not in url:
+    if is_google_gemini_endpoint(url) and "openai" not in url:
         return "https://generativelanguage.googleapis.com/v1beta/openai/"
-    if url and "generativelanguage.googleapis.com" not in url and not re.search(r"/v\d+(?:beta)?(?:/|$)", url):
+    if url and not is_google_gemini_endpoint(url) and not re.search(r"/v\d+(?:beta)?(?:/|$)", url):
         return url.rstrip("/") + "/v1"
     return url
 
@@ -225,10 +218,6 @@ def _normalize_gemini_base_url(base_url: str) -> str:
     if match:
         return match.group("root").rstrip("/")
     return f"{url.rstrip('/')}/v1beta"
-
-
-def _is_google_gemini_base_url(base_url: str) -> bool:
-    return "generativelanguage.googleapis.com" in str(base_url or "").lower()
 
 
 def _split_data_url(data_url: str) -> Optional[Tuple[str, str]]:
@@ -1156,12 +1145,14 @@ class GeminiToolCaller(ToolCaller):
         model: str,
         thinking_mode: str = "none",
         timeout: float = 200.0,
+        auth_mode: str = "auto",
     ) -> None:
         self.api_key = api_key
-        self.base_url = _normalize_gemini_base_url(base_url)
+        self.base_url = _normalize_gemini_base_url(base_url) or "https://generativelanguage.googleapis.com/v1beta"
         self.model = model
         self.thinking_mode = _normalize_thinking_mode(thinking_mode)
         self.timeout = max(5.0, float(timeout or 200.0))
+        self.auth_mode = str(auth_mode or "auto")
 
     async def _chat_with_custom_gemini_endpoint(
         self,
@@ -1196,24 +1187,27 @@ class GeminiToolCaller(ToolCaller):
             }
 
         url = f"{self.base_url.rstrip('/')}/models/{self.model}:generateContent"
-        headers = {"Content-Type": "application/json"}
-        params: Dict[str, str] = {}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(self.timeout, connect=min(15.0, self.timeout)),
-            follow_redirects=True,
+            follow_redirects=False,
         ) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            if (
-                response.status_code in {401, 403}
-                and self.api_key
-                and not use_single_attempt_retry_policy()
-            ):
-                headers.pop("Authorization", None)
-                params["key"] = self.api_key
-                response = await client.post(url, headers=headers, params=params, json=payload)
-            response.raise_for_status()
+            async def _send(auth):  # noqa: ANN001, ANN202
+                return await client.post(
+                    url,
+                    headers={"Content-Type": "application/json", **auth.headers},
+                    params=auth.params,
+                    json=payload,
+                )
+
+            auth_result = await request_with_gemini_auth(
+                endpoint=self.base_url,
+                api_key=self.api_key,
+                auth_mode=self.auth_mode,
+                send=_send,
+                allow_negotiation=not use_single_attempt_retry_policy(),
+            )
+            response = auth_result.response
+            raise_for_gemini_status(response)
             data = response.json()
 
         candidates = list(_obj_get(data, "candidates", []) or [])
@@ -1242,64 +1236,7 @@ class GeminiToolCaller(ToolCaller):
         messages = inject_current_time_context(messages)
         contains_image_input = _messages_contain_images(messages)
         try:
-            if self.base_url and not _is_google_gemini_base_url(self.base_url):
-                return await self._chat_with_custom_gemini_endpoint(messages, tools, use_builtin_search)
-
-            import google.generativeai as genai
-
-            _configure_genai(self.api_key, self.base_url)
-            system_instruction, contents = _convert_messages_to_gemini(messages)
-
-            tool_payload: List[dict] = []
-            if tools:
-                tool_payload.append(
-                    {
-                        "function_declarations": [
-                            _convert_openai_tool_to_gemini(tool)
-                            for tool in tools
-                        ]
-                    }
-                )
-            if use_builtin_search:
-                tool_payload.append(_gemini_builtin_search_tool(self.model))
-
-            generation_config: Dict[str, Any] = {}
-            if self.thinking_mode != "none":
-                generation_config["thinking_config"] = {
-                    "thinking_budget": GEMINI_THINKING_BUDGET_MAP[self.thinking_mode]
-                }
-            model = genai.GenerativeModel(
-                model_name=self.model,
-                system_instruction=system_instruction,
-                tools=tool_payload or None,
-            )
-            response = await asyncio.wait_for(
-                model.generate_content_async(
-                    contents,
-                    generation_config=generation_config or None,
-                ),
-                timeout=self.timeout,
-            )
-
-            candidates = list(_obj_get(response, "candidates", []) or [])
-            if not candidates:
-                return ToolCallerResponse("stop", "", [], response)
-
-            content = _obj_get(candidates[0], "content", {})
-            parts = list(_obj_get(content, "parts", []) or [])
-            tool_calls = _extract_gemini_tool_calls(parts)
-            text = _extract_gemini_text(parts)
-            finish_reason = "tool_calls" if tool_calls else "stop"
-            used_builtin = _gemini_used_builtin_search(response)
-            return ToolCallerResponse(
-                finish_reason=finish_reason,
-                content=text,
-                tool_calls=tool_calls,
-                raw=response,
-                used_builtin_search=used_builtin,
-                usage=_extract_usage(response),
-                model_used=str(self.model or ""),
-            )
+            return await self._chat_with_custom_gemini_endpoint(messages, tools, use_builtin_search)
         except Exception as exc:
             if contains_image_input and _error_indicates_vision_unavailable(exc):
                 return _vision_unavailable_response(exc)
@@ -4408,6 +4345,11 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
     api_url = str(getattr(config, "personification_api_url", "") or "").strip()
     model = str(getattr(config, "personification_model", "") or "").strip()
     proxy = str(getattr(config, "personification_proxy", "") or "").strip()
+    gemini_auth_mode = str(getattr(config, "personification_gemini_auth_mode", "auto") or "auto").strip()
+    try:
+        provider_timeout = float(getattr(config, "personification_provider_timeout", 200.0) or 200.0)
+    except (TypeError, ValueError):
+        provider_timeout = 200.0
     thinking_mode = _normalize_thinking_mode(
         getattr(config, "personification_thinking_mode", "none")
     )
@@ -4418,6 +4360,8 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
             base_url=api_url,
             model=model,
             thinking_mode=thinking_mode,
+            timeout=provider_timeout,
+            auth_mode=gemini_auth_mode,
         )
     if api_type == "gemini_cli":
         auth_path = str(getattr(config, "personification_gemini_cli_auth_path", "") or "").strip()

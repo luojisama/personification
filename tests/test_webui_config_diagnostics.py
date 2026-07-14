@@ -351,6 +351,39 @@ def test_config_api_pool_requires_secret_refresh_after_transport_change(
     assert _runtime_context.plugin_config.personification_api_pools[0]["api_key"] == "transport-bound-secret"
 
 
+def test_config_api_pool_requires_secret_refresh_after_gemini_auth_change(
+    _runtime_context  # noqa: ANN001
+) -> None:
+    _runtime_context.plugin_config.personification_api_pools = [
+        {
+            "name": "primary",
+            "api_type": "gemini",
+            "api_url": "https://gemini.example",
+            "api_key": "auth-bound-secret",
+            "gemini_auth_mode": "auto",
+            "model": "gemini-test",
+        }
+    ]
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    listed = client.get("/personification/api/config/entries").json()
+    provider = next(
+        item
+        for item in listed["entries"]
+        if item["field_name"] == "personification_api_pools"
+    )["current"][0]
+    provider["gemini_auth_mode"] = "bearer"
+
+    response = client.post(
+        "/personification/api/config/value",
+        json={"field_name": "personification_api_pools", "value": [provider]},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "config_value_invalid"
+    assert _runtime_context.plugin_config.personification_api_pools[0]["api_key"] == "auth-bound-secret"
+
+
 def test_config_provider_urls_headers_and_proxy_credentials_are_redacted(
     _runtime_context  # noqa: ANN001
 ) -> None:

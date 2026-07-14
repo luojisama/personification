@@ -313,6 +313,7 @@ function apiProviderProbeCacheKey(field, index, provider) {
     provider && provider.api_url,
     provider && provider.auth_path,
     provider && provider.project,
+    provider && provider.gemini_auth_mode,
   ];
   return parts.map(item => String(item == null ? "" : item)).join("\u001f");
 }
@@ -492,6 +493,20 @@ function renderApiProviderCard(field, provider, index) {
       ${sourceHint}
     </div>`;
   };
+  const geminiAuthFieldHtml = () => {
+    if (!["gemini", "gemini_official"].includes(String(apiType).replaceAll("-", "_"))) return "";
+    const value = provider.gemini_auth_mode || "auto";
+    const options = [
+      ["auto", "自动（x-goog 优先，401 尝试 Bearer）"],
+      ["x-goog-api-key", "x-goog-api-key"],
+      ["bearer", "Authorization Bearer"],
+      ["query_legacy", "Query key（旧兼容，不推荐）"],
+    ].map(([id, label]) => `<option value="${escapeAttr(id)}" ${value===id?'selected':''}>${escapeHtml(label)}</option>`).join("");
+    return `<div class="api-provider-field" data-provider-field="gemini_auth_mode">
+      <label>Gemini 认证</label>
+      <select>${options}</select>
+    </div>`;
+  };
   return `<div class="api-provider-card" data-provider-index="${index}" data-provider-secret-ref="${escapeAttr(provider._secret_ref || "")}">
     <div class="api-provider-head">
       <div class="api-provider-title">Provider ${index + 1}</div>
@@ -509,6 +524,7 @@ function renderApiProviderCard(field, provider, index) {
       </div>
       ${fieldHtml("api_url", "API URL")}
       ${fieldHtml("api_key", "API Key", "password")}
+      ${geminiAuthFieldHtml()}
       ${modelFieldHtml()}
       ${fieldHtml("auth_path", "Auth Path")}
       ${fieldHtml("project", "Project")}

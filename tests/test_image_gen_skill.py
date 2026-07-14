@@ -9,6 +9,7 @@ from ._loader import load_personification_module
 load_personification_module("plugin.personification.agent.tool_registry")
 image_gen_main = load_personification_module("plugin.personification.skills.skillpacks.image_gen.scripts.main")
 tool_caller_impl = load_personification_module("plugin.personification.skills.skillpacks.tool_caller.scripts.impl")
+gemini_transport = load_personification_module("plugin.personification.core.gemini_transport")
 
 PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -258,6 +259,165 @@ def test_dedicated_url_never_inherits_main_key() -> None:
     assert route["api_key"] == ""
     result = asyncio.run(image_gen_main.generate_image("poster", tool_caller=None, plugin_config=config))
     assert result == {"error": "dedicated image route requires api_type, api_url and api_key"}
+
+
+def test_gemini_image_route_uses_only_google_api_key_header(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):  # noqa: ANN201
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {
+                "candidates": [
+                    {"content": {"parts": [{"inlineData": {"data": PNG_B64, "mimeType": "image/png"}}]}}
+                ]
+            }
+
+    class _Client:
+        def __init__(self, **kwargs):  # noqa: ANN001
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def post(self, url, json=None, headers=None, params=None):  # noqa: ANN001, ANN201
+            captured.update(url=url, json=json or {}, headers=headers or {}, params=params or {})
+            return _Resp()
+
+    monkeypatch.setattr(image_gen_main.generate_image.__globals__["httpx"], "AsyncClient", _Client)
+    config = SimpleNamespace(
+        personification_image_gen_api_type="gemini",
+        personification_image_gen_api_url="https://gemini-image.example",
+        personification_image_gen_api_key="image-secret",
+        personification_gemini_auth_mode="auto",
+        personification_api_type="openai",
+        personification_api_url="",
+        personification_api_key="",
+    )
+
+    result = asyncio.run(image_gen_main.generate_image("poster", tool_caller=None, plugin_config=config))
+
+    assert result["b64_json"] == PNG_B64
+    assert captured["headers"]["x-goog-api-key"] == "image-secret"
+    assert "Authorization" not in captured["headers"]
+    assert captured["params"] == {}
+
+
+def test_gemini_image_single_attempt_does_not_negotiate_bearer(monkeypatch) -> None:  # noqa: ANN001
+    headers_seen: list[dict[str, str]] = []
+
+    class _Resp:
+        status_code = 401
+
+        def raise_for_status(self):  # noqa: ANN201
+            raise RuntimeError("unauthorized")
+
+    class _Client:
+        def __init__(self, **_kwargs):  # noqa: ANN001
+            pass
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def post(self, _url, json=None, headers=None, params=None):  # noqa: ANN001, ANN201
+            del json, params
+            headers_seen.append(dict(headers or {}))
+            return _Resp()
+
+    globals_ = image_gen_main.generate_image.__globals__
+    monkeypatch.setattr(globals_["httpx"], "AsyncClient", _Client)
+    monkeypatch.setitem(globals_, "use_single_attempt_retry_policy", lambda: True)
+    config = SimpleNamespace(
+        personification_image_gen_api_type="gemini",
+        personification_image_gen_api_url="https://gemini-image.example",
+        personification_image_gen_api_key="image-secret",
+        personification_gemini_auth_mode="auto",
+        personification_api_type="openai",
+        personification_api_url="",
+        personification_api_key="",
+    )
+
+    result = asyncio.run(image_gen_main.generate_image("poster", tool_caller=None, plugin_config=config))
+
+    assert result == {"error": "image provider request failed"}
+    assert headers_seen == [{"Content-Type": "application/json", "x-goog-api-key": "image-secret"}]
+
+
+def test_gemini_image_single_attempt_reuses_normalized_bearer_cache(monkeypatch) -> None:  # noqa: ANN001
+    gemini_transport.clear_gemini_auth_cache()
+
+    class _SeedResp:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+    seed_calls: list[str] = []
+
+    async def _seed(auth):  # noqa: ANN001, ANN202
+        seed_calls.append(auth.mode)
+        return _SeedResp(401 if len(seed_calls) == 1 else 200)
+
+    asyncio.run(gemini_transport.request_with_gemini_auth(
+        endpoint="https://gemini-image-cache.example/v1beta",
+        api_key="image-cache-secret",
+        auth_mode="auto",
+        send=_seed,
+    ))
+    headers_seen: list[dict[str, str]] = []
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):  # noqa: ANN201
+            return {
+                "candidates": [
+                    {"content": {"parts": [{"inlineData": {"data": PNG_B64, "mimeType": "image/png"}}]}}
+                ]
+            }
+
+    class _Client:
+        def __init__(self, **_kwargs):  # noqa: ANN001
+            pass
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def post(self, _url, json=None, headers=None, params=None):  # noqa: ANN001, ANN201
+            del json, params
+            headers_seen.append(dict(headers or {}))
+            return _Resp()
+
+    globals_ = image_gen_main.generate_image.__globals__
+    monkeypatch.setattr(globals_["httpx"], "AsyncClient", _Client)
+    monkeypatch.setitem(globals_, "use_single_attempt_retry_policy", lambda: True)
+    config = SimpleNamespace(
+        personification_image_gen_api_type="gemini",
+        personification_image_gen_api_url="https://gemini-image-cache.example",
+        personification_image_gen_api_key="image-cache-secret",
+        personification_gemini_auth_mode="auto",
+        personification_api_type="openai",
+        personification_api_url="",
+        personification_api_key="",
+    )
+
+    result = asyncio.run(image_gen_main.generate_image("poster", tool_caller=None, plugin_config=config))
+
+    assert result["b64_json"] == PNG_B64
+    assert headers_seen == [
+        {"Content-Type": "application/json", "Authorization": "Bearer image-cache-secret"}
+    ]
 
 
 def test_api_pool_selects_best_supported_http_route(monkeypatch) -> None:  # noqa: ANN001

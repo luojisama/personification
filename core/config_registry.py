@@ -301,7 +301,7 @@ _GROUP_RULES: tuple[tuple[Callable[[str], bool], str], ...] = (
     (lambda k: k in {"schedule_global", "group_schedule_enabled"}, "作息"),
     (lambda k: k.startswith("group_"), "群作用域"),
     (
-        lambda k: k in {"api_pools", "model_overrides", "lite_model", "antigravity_cli_proxy"}
+        lambda k: k in {"api_pools", "model_overrides", "lite_model", "antigravity_cli_proxy", "gemini_auth_mode"}
         or k.startswith("quota_")
         or k.startswith("provider_"),
         "模型路由",
@@ -594,6 +594,20 @@ def _build_entries() -> list[ConfigEntry]:
             category="config",
             help_aliases=("provider池", "api_pools", "api_pool", "模型路由池", "provider_route"),
             parser=_json_array_parser,
+        ),
+        ConfigEntry(
+            key="gemini_auth_mode",
+            field_name="personification_gemini_auth_mode",
+            display_name="Gemini 认证模式",
+            value_type="str",
+            default="auto",
+            scope=GLOBAL_SCOPE,
+            description="Gemini native API 认证：auto 默认 x-goog-api-key，仅 401 时窄协商 Bearer；也可显式固定认证方式。",
+            category="config",
+            choices=("auto", "x-goog-api-key", "bearer", "query_legacy"),
+            help_aliases=("gemini认证", "gemini_auth_mode", "x-goog-api-key", "gemini bearer"),
+            parser=_str_parser,
+            advanced=True,
         ),
         ConfigEntry(
             key="response_review_enabled",

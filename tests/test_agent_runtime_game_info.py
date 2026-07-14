@@ -33,3 +33,41 @@ def test_legacy_registry_exposes_game_info_by_default() -> None:
     )
 
     assert "game_info" in {tool.name for tool in registry.active()}
+
+
+def test_skill_runtime_exposes_configured_api_pool_reader(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _capture_runtime(*, runtime, registry) -> None:  # noqa: ANN001
+        del registry
+        captured["runtime"] = runtime
+
+    monkeypatch.setattr(agent_runtime, "load_builtin_skillpacks_sync", _capture_runtime)
+    config = SimpleNamespace(
+        personification_use_skillpacks=True,
+        personification_api_type="openai",
+        personification_api_url="",
+        personification_api_key="",
+        personification_model="",
+        personification_api_pools=[
+            {
+                "name": "gemini_pool",
+                "api_type": "gemini",
+                "api_url": "https://gemini.example/v1beta",
+                "api_key": "pool-secret",
+                "model": "gemini-test",
+                "gemini_auth_mode": "bearer",
+            }
+        ],
+    )
+
+    agent_runtime.build_agent_tool_registry(
+        plugin_config=config,
+        logger=_Logger(),
+        get_now=lambda: None,
+    )
+
+    runtime = captured["runtime"]
+    providers = runtime.get_configured_api_providers()
+    assert providers[0]["name"] == "gemini_pool"
+    assert providers[0]["gemini_auth_mode"] == "bearer"

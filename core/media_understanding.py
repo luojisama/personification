@@ -8,10 +8,13 @@ from typing import Any, Sequence
 import httpx
 
 from .ai_routes import resolve_video_fallback_provider
+from .gemini_transport import raise_for_gemini_status, request_with_gemini_auth
 from .image_input import is_image_input_unsupported_error, provider_supports_vision
+from .sensitive_data import sanitize_text
 from .media_refs import normalize_video_ref
 from .message_parts import build_user_message_content
 from .model_router import MODEL_ROLE_STICKER, get_model_override_for_role
+from .llm_context import use_single_attempt_retry_policy
 from .visual_capabilities import VISUAL_ROUTE_AGENT, error_indicates_vision_unavailable, provider_supports_video
 
 
@@ -110,6 +113,8 @@ class _ProviderConfigProxy:
             return self._provider.get("api_key", "")
         if name == "personification_model":
             return self._provider.get("model", "")
+        if name == "personification_gemini_auth_mode":
+            return self._provider.get("gemini_auth_mode", "auto")
         if name == "personification_codex_auth_path":
             return self._provider.get("auth_path", "")
         if name == "personification_gemini_cli_auth_path":
@@ -232,7 +237,10 @@ async def _try_primary_image_routes(
             )
         except Exception as exc:
             if not (is_image_input_unsupported_error(exc) or error_indicates_vision_unavailable(exc)):
-                _log_warning(runtime, f"[vision] primary image route failed provider={provider_name}: {exc}")
+                _log_warning(
+                    runtime,
+                    f"[vision] primary image route failed provider={provider_name}: {sanitize_text(exc)}",
+                )
             continue
         if bool(getattr(response, "vision_unavailable", False)):
             continue
@@ -265,12 +273,16 @@ async def _try_primary_video_routes(
                 api_key=str(provider.get("api_key", "") or ""),
                 base_url=str(provider.get("api_url", "") or ""),
                 model=model or _GEMINI_DEFAULT_MODEL,
+                auth_mode=str(provider.get("gemini_auth_mode", "auto") or "auto"),
                 prompt=prompt,
                 video_refs=refs,
             )
         except Exception as exc:
             if not error_indicates_vision_unavailable(exc):
-                _log_warning(runtime, f"[video] primary route failed provider={provider_name}: {exc}")
+                _log_warning(
+                    runtime,
+                    f"[video] primary route failed provider={provider_name}: {sanitize_text(exc)}",
+                )
             continue
         if not _invalid_media_text(result):
             return str(result or "").strip()
@@ -316,6 +328,7 @@ def _build_video_fallback_provider_config(runtime: Any) -> dict[str, str] | None
         "api_key": str(payload.get("api_key", "") or "").strip(),
         "model": str(payload.get("model", "") or "").strip() or _GEMINI_DEFAULT_MODEL,
         "auth_path": str(payload.get("auth_path", "") or "").strip(),
+        "gemini_auth_mode": str(payload.get("gemini_auth_mode", "auto") or "auto").strip(),
     }
 
 
@@ -333,12 +346,8 @@ def _gemini_endpoint(base_url: str, model: str) -> str:
     return f"{root}/models/{model}:generateContent"
 
 
-def _gemini_headers(api_key: str) -> dict[str, str]:
-    return {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-        "x-goog-api-key": api_key,
-    }
+def _gemini_headers() -> dict[str, str]:
+    return {"Content-Type": "application/json"}
 
 
 def _gemini_image_part(image_ref: str) -> dict[str, Any]:
@@ -399,6 +408,7 @@ async def _call_gemini_media(
     prompt: str,
     image_refs: Sequence[str] = (),
     video_refs: Sequence[str] = (),
+    auth_mode: str = "auto",
 ) -> str:
     parts: list[dict[str, Any]] = [{"text": str(prompt or "").strip() or "请分析这段媒体内容"}]
     for ref in image_refs:
@@ -406,13 +416,28 @@ async def _call_gemini_media(
     for ref in video_refs:
         parts.append(_gemini_video_part(str(ref or "").strip()))
     payload = {"contents": [{"role": "user", "parts": parts}]}
-    async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as client:
-        response = await client.post(
-            _gemini_endpoint(base_url, model or _GEMINI_DEFAULT_MODEL),
-            headers=_gemini_headers(api_key),
-            json=payload,
+    endpoint = _gemini_endpoint(base_url, model or _GEMINI_DEFAULT_MODEL)
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(90.0, connect=15.0),
+        follow_redirects=False,
+    ) as client:
+        async def _send(auth):  # noqa: ANN001, ANN202
+            return await client.post(
+                endpoint,
+                headers={**_gemini_headers(), **auth.headers},
+                params=auth.params,
+                json=payload,
+            )
+
+        auth_result = await request_with_gemini_auth(
+            endpoint=endpoint.rsplit("/models/", 1)[0],
+            api_key=api_key,
+            auth_mode=auth_mode,
+            send=_send,
+            allow_negotiation=not use_single_attempt_retry_policy(),
         )
-        response.raise_for_status()
+        response = auth_result.response
+        raise_for_gemini_status(response)
         data = dict(response.json() or {})
     candidates = list((data.get("candidates") or []))
     if not candidates:
@@ -457,7 +482,7 @@ async def analyze_images_with_route_or_fallback(
         try:
             output = await fallback.describe(prompt, ref)
         except Exception as exc:
-            _log_warning(runtime, f"[vision] fallback image route failed: {exc}")
+            _log_warning(runtime, f"[vision] fallback image route failed: {sanitize_text(exc)}")
             continue
         if not _invalid_media_text(output):
             outputs.append(str(output or "").strip())
@@ -499,6 +524,7 @@ async def analyze_videos_with_route_or_fallback(
             api_key=fallback["api_key"],
             base_url=fallback.get("api_url", ""),
             model=fallback.get("model", "") or _GEMINI_DEFAULT_MODEL,
+            auth_mode=fallback.get("gemini_auth_mode", "auto"),
             prompt=prompt,
             video_refs=refs,
         )

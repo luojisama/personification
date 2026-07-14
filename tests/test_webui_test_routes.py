@@ -459,6 +459,65 @@ def test_config_provider_models_probes_gemini_openai_compatible(_runtime_context
     assert [m["id"] for m in body["models"]] == ["gemini-2.5-flash", "gemini-2.5-pro"]
 
 
+def test_config_provider_models_probes_native_gemini_with_google_header(
+    _runtime_context, monkeypatch  # noqa: ANN001
+) -> None:
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):  # noqa: ANN201
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {
+                "models": [
+                    {
+                        "name": "models/gemini-test",
+                        "displayName": "Gemini Test",
+                        "supportedGenerationMethods": ["generateContent"],
+                    }
+                ]
+            }
+
+    class _Client:
+        def __init__(self, **kwargs):  # noqa: ANN001
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def get(self, url, headers=None, params=None):  # noqa: ANN001, ANN201
+            captured.update(url=url, headers=headers or {}, params=params or {})
+            return _Resp()
+
+    monkeypatch.setattr(config_routes.httpx, "AsyncClient", _Client)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    res = client.post(
+        "/personification/api/config/provider-models",
+        json={
+            "provider": {
+                "api_type": "gemini",
+                "api_url": "https://gemini-gateway.example",
+                "api_key": "gemini-secret",
+                "gemini_auth_mode": "auto",
+            }
+        },
+    )
+
+    assert res.status_code == 200, res.text
+    assert captured["url"] == "https://gemini-gateway.example/v1beta/models"
+    assert captured["headers"] == {"x-goog-api-key": "gemini-secret"}
+    assert captured["params"] == {}
+    assert captured["client_kwargs"]["follow_redirects"] is False
+
+
 def test_config_provider_models_cli_routes_return_selectable_candidates(_runtime_context) -> None:  # noqa: ANN001
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
@@ -499,7 +558,7 @@ def test_config_provider_models_endpoint_normalizes_version_paths() -> None:
         }
     )
     assert gemini_url == "https://generativelanguage.googleapis.com/v1beta/models"
-    assert gemini_params["key"] == "gk-test"
+    assert gemini_params == {}
     assert gemini_parser == "gemini"
 
     gemini_openai_url, gemini_openai_headers, gemini_openai_params, gemini_openai_parser = (  # noqa: SLF001
@@ -546,7 +605,7 @@ def test_config_provider_models_endpoint_normalizes_version_paths() -> None:
         )
     )
     assert zellon_gemini_url == "https://anti.zellon.me/v1beta/models"
-    assert zellon_gemini_headers["Authorization"] == "Bearer sk-zellon"
+    assert zellon_gemini_headers == {}
     assert zellon_gemini_params == {}
     assert zellon_gemini_parser == "gemini"
 

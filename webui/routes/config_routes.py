@@ -8,7 +8,6 @@ import json
 import os
 import re
 from typing import Any
-from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -257,7 +256,9 @@ def _normalize_gemini_models_base(raw: str) -> str:
 
 
 def _is_google_gemini_base(raw: str) -> bool:
-    return "generativelanguage.googleapis.com" in str(raw or "").lower()
+    from ...core.gemini_transport import is_google_gemini_endpoint
+
+    return is_google_gemini_endpoint(raw)
 
 
 def _has_openai_path(raw: str) -> bool:
@@ -291,11 +292,7 @@ def _models_endpoint(provider: dict[str, Any]) -> tuple[str, dict[str, str], dic
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
             return f"{base}/models", headers, {}, "gemini_openai"
         base = _normalize_gemini_models_base(raw_base)
-        if not _is_google_gemini_base(base):
-            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-            return f"{base}/models", headers, {}, "gemini"
-        params = {"key": api_key} if api_key else {}
-        return f"{base}/models", {}, params, "gemini"
+        return f"{base}/models", {}, {}, "gemini"
     base = _normalize_openai_models_base(str(provider.get("api_url", "") or ""))
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     return f"{base}/models", headers, {}, "openai"
@@ -353,12 +350,31 @@ async def _probe_http_models(provider: dict[str, Any]) -> tuple[list[dict[str, s
     url, headers, params, parser_api_type = _models_endpoint(provider)
     proxy = str(provider.get("proxy", "") or "").strip()
     timeout = httpx.Timeout(_provider_timeout(provider), connect=5.0)
-    client_kwargs: dict[str, Any] = {"timeout": timeout, "follow_redirects": True}
+    client_kwargs: dict[str, Any] = {"timeout": timeout, "follow_redirects": False}
     if proxy:
         client_kwargs["proxy"] = proxy
     async with httpx.AsyncClient(**client_kwargs) as client:
-        response = await client.get(url, headers=headers, params=params)
-        response.raise_for_status()
+        if parser_api_type == "gemini":
+            from ...core.gemini_transport import raise_for_gemini_status, request_with_gemini_auth
+
+            async def _send(auth):  # noqa: ANN001, ANN202
+                return await client.get(
+                    url,
+                    headers={**headers, **auth.headers},
+                    params={**params, **auth.params},
+                )
+
+            auth_result = await request_with_gemini_auth(
+                endpoint=_normalize_gemini_models_base(str(provider.get("api_url", "") or "")),
+                api_key=str(provider.get("api_key", "") or ""),
+                auth_mode=str(provider.get("gemini_auth_mode", "auto") or "auto"),
+                send=_send,
+            )
+            response = auth_result.response
+            raise_for_gemini_status(response)
+        else:
+            response = await client.get(url, headers=headers, params=params)
+            response.raise_for_status()
         payload = response.json()
     if not isinstance(payload, dict):
         raise ValueError("model list response must be an object")
@@ -367,7 +383,7 @@ async def _probe_http_models(provider: dict[str, Any]) -> tuple[list[dict[str, s
         raise ValueError("model list response does not contain an array")
     models = _parse_model_list(parser_api_type, payload)
     _add_configured_model(models, provider)
-    return models, url + (("?" + urlencode({"key": "***"})) if params.get("key") else "")
+    return models, url
 
 
 def _provider_probe_diagnostic(
@@ -611,9 +627,10 @@ def _provider_secret_ref(provider: dict[str, Any], index: int) -> str:
 
 
 def _provider_transport_identity(provider: dict[str, Any]) -> tuple[str, ...]:
-    return tuple(
-        str(provider.get(field) or "").strip()
-        for field in ("api_type", "api_url", "auth_path", "project", "proxy")
+    fields = ("api_type", "api_url", "auth_path", "project", "proxy")
+    return (
+        *(str(provider.get(field) or "").strip() for field in fields),
+        str(provider.get("gemini_auth_mode", "auto") or "auto").strip().lower(),
     )
 
 
@@ -679,10 +696,10 @@ def _restore_masked_config_secrets(field_name: str, value: Any, plugin_config: A
         if current is None:
             raise ValueError("masked provider secret reference is invalid")
         for field, old_value in zip(
-            ("api_type", "api_url", "auth_path", "project", "proxy"),
+            ("api_type", "api_url", "auth_path", "project", "proxy", "gemini_auth_mode"),
             _provider_transport_identity(current),
         ):
-            new_value = candidate.get(field)
+            new_value = candidate.get(field, "auto" if field == "gemini_auth_mode" else None)
             if new_value != _MASKED_CONFIG_VALUE and str(new_value or "").strip() != old_value:
                 raise ValueError("provider transport changed while secret remained masked")
         restored.append(_restore_masked_value(candidate, current))

@@ -124,14 +124,20 @@ def _normalize_api_type(api_type: str) -> str:
     return "openai"
 
 
-def _provider_signature(provider: dict[str, Any] | None) -> tuple[str, str, str, str, str]:
+def _provider_signature(provider: dict[str, Any] | None) -> tuple[str, str, str, str, str, str]:
     payload = provider or {}
+    api_type = _normalize_api_type(str(payload.get("api_type", "") or ""))
     return (
-        _normalize_api_type(str(payload.get("api_type", "") or "")),
+        api_type,
         str(payload.get("api_url", "") or "").strip(),
         str(payload.get("api_key", "") or "").strip(),
         str(payload.get("model", "") or "").strip(),
         str(payload.get("auth_path", "") or "").strip(),
+        (
+            str(payload.get("gemini_auth_mode", "auto") or "auto").strip().lower()
+            if api_type == "gemini_official"
+            else ""
+        ),
     )
 
 
@@ -280,6 +286,7 @@ def get_primary_provider_config(plugin_config: Any, logger: Any) -> dict[str, st
             "api_key": str(primary.get("api_key", "") or ""),
             "model": str(primary.get("model", "") or ""),
             "auth_path": str(primary.get("auth_path", "") or ""),
+            "gemini_auth_mode": str(primary.get("gemini_auth_mode", "auto") or "auto"),
         }
     return {
         "api_type": str(getattr(plugin_config, "personification_api_type", "") or ""),
@@ -287,6 +294,9 @@ def get_primary_provider_config(plugin_config: Any, logger: Any) -> dict[str, st
         "api_key": str(getattr(plugin_config, "personification_api_key", "") or ""),
         "model": str(getattr(plugin_config, "personification_model", "") or ""),
         "auth_path": str(getattr(plugin_config, "personification_codex_auth_path", "") or ""),
+        "gemini_auth_mode": str(
+            getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto"
+        ),
     }
 
 
@@ -301,6 +311,7 @@ def _build_provider(
     api_key: str = "",
     model: str = "",
     auth_path: str = "",
+    gemini_auth_mode: str = "",
     inherit: dict[str, str] | None = None,
 ) -> dict[str, str] | None:
     base = dict(inherit or {})
@@ -309,12 +320,16 @@ def _build_provider(
     resolved_api_key = str(api_key or base.get("api_key", "") or "").strip()
     resolved_model = str(model or base.get("model", "") or "").strip()
     resolved_auth_path = str(auth_path or base.get("auth_path", "") or "").strip()
+    resolved_gemini_auth_mode = str(
+        gemini_auth_mode or base.get("gemini_auth_mode", "auto") or "auto"
+    ).strip()
     provider = {
         "api_type": resolved_api_type,
         "api_url": resolved_api_url,
         "api_key": resolved_api_key,
         "model": resolved_model,
         "auth_path": resolved_auth_path,
+        "gemini_auth_mode": resolved_gemini_auth_mode,
     }
     return provider if _provider_is_usable(provider) else None
 
@@ -340,6 +355,9 @@ def _resolve_explicit_global_fallback(
         api_key=str(getattr(plugin_config, "personification_fallback_api_key", "") or ""),
         model=str(getattr(plugin_config, "personification_fallback_model", "") or ""),
         auth_path=str(getattr(plugin_config, "personification_fallback_auth_path", "") or ""),
+        gemini_auth_mode=str(
+            getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto"
+        ),
     )
     if provider is None:
         return None
@@ -353,6 +371,9 @@ def _collect_legacy_global_fallback_candidates(
 ) -> list[ProviderResolution]:
     del primary_provider
     candidates: list[ProviderResolution] = []
+    gemini_auth_mode = str(
+        getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto"
+    )
 
     vision_provider = str(getattr(plugin_config, "personification_vision_fallback_provider", "") or "")
     labeler_api_type = str(getattr(plugin_config, "personification_labeler_api_type", "") or "")
@@ -373,6 +394,7 @@ def _collect_legacy_global_fallback_candidates(
             api_key=labeler_api_key,
             model=vision_model or labeler_model,
             auth_path=str(getattr(plugin_config, "personification_codex_auth_path", "") or ""),
+            gemini_auth_mode=gemini_auth_mode,
         )
         if legacy_vision is not None:
             candidates.append(ProviderResolution(provider=legacy_vision, source="legacy_vision_fallback"))
@@ -387,6 +409,7 @@ def _collect_legacy_global_fallback_candidates(
             api_key=labeler_api_key,
             model=labeler_model,
             auth_path=str(getattr(plugin_config, "personification_codex_auth_path", "") or ""),
+            gemini_auth_mode=gemini_auth_mode,
         )
         if labeler is not None:
             candidates.append(ProviderResolution(provider=labeler, source="legacy_labeler"))
@@ -404,6 +427,7 @@ def _collect_legacy_global_fallback_candidates(
             api_key=str(getattr(plugin_config, "personification_style_api_key", "") or ""),
             model=str(getattr(plugin_config, "personification_style_api_model", "") or ""),
             auth_path=str(getattr(plugin_config, "personification_codex_auth_path", "") or ""),
+            gemini_auth_mode=gemini_auth_mode,
         )
         if style is not None:
             candidates.append(ProviderResolution(provider=style, source="legacy_style"))
@@ -421,6 +445,7 @@ def _collect_legacy_global_fallback_candidates(
             api_key=str(getattr(plugin_config, "personification_persona_api_key", "") or ""),
             model=str(getattr(plugin_config, "personification_persona_model", "") or ""),
             auth_path=str(getattr(plugin_config, "personification_codex_auth_path", "") or ""),
+            gemini_auth_mode=gemini_auth_mode,
         )
         if persona is not None:
             candidates.append(ProviderResolution(provider=persona, source="legacy_persona"))
@@ -438,6 +463,7 @@ def _collect_legacy_global_fallback_candidates(
             api_key=str(getattr(plugin_config, "personification_compress_api_key", "") or ""),
             model=str(getattr(plugin_config, "personification_compress_model", "") or ""),
             auth_path=str(getattr(plugin_config, "personification_codex_auth_path", "") or ""),
+            gemini_auth_mode=gemini_auth_mode,
         )
         if compress is not None:
             candidates.append(ProviderResolution(provider=compress, source="legacy_compress"))
@@ -521,6 +547,9 @@ def resolve_video_fallback_provider(
             api_key=str(getattr(plugin_config, "personification_video_fallback_api_key", "") or ""),
             model=str(getattr(plugin_config, "personification_video_fallback_model", "") or ""),
             auth_path=str(getattr(plugin_config, "personification_video_fallback_auth_path", "") or ""),
+            gemini_auth_mode=str(
+                getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto"
+            ),
             inherit=base_provider,
         )
         if provider is None:
@@ -575,6 +604,13 @@ class _ProviderConfigProxy:
             return self._provider.get("api_key", "")
         if name == "personification_proxy":
             return self._provider.get("proxy", "")
+        if name == "personification_gemini_auth_mode":
+            return self._provider.get(
+                "gemini_auth_mode",
+                getattr(self._original, "personification_gemini_auth_mode", "auto"),
+            )
+        if name == "personification_provider_timeout":
+            return self._provider.get("timeout", 200.0)
         if name == "personification_model":
             if self._model_override:
                 return self._model_override
@@ -853,6 +889,8 @@ def build_fallback_vision_caller(
                 return self._provider.get("api_key", "")
             if name == "personification_model":
                 return self._provider.get("model", "")
+            if name == "personification_gemini_auth_mode":
+                return self._provider.get("gemini_auth_mode", "auto")
             if name == "personification_codex_auth_path":
                 return self._provider.get("auth_path", "")
             if name == "personification_vision_fallback_enabled":

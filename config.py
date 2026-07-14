@@ -315,6 +315,7 @@ class Config(BaseModel):
     personification_api_type: str = "openai"
     personification_api_url: str = ""
     personification_api_key: str = ""
+    personification_gemini_auth_mode: str = "auto"
     personification_model: str = "gpt-4o-mini"
     # 轻量任务（intent 分类、回复 review、随机插话判定、图片分类）使用的模型名。
     # 留空时 fallback 到主模型，无需额外配置。

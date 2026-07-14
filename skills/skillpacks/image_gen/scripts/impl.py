@@ -11,7 +11,13 @@ from typing import Any
 from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
+from plugin.personification.core.gemini_transport import (
+    is_google_gemini_endpoint,
+    raise_for_gemini_status,
+    request_with_gemini_auth,
+)
 from plugin.personification.core.image_refs import normalize_image_refs
+from plugin.personification.core.llm_context import use_single_attempt_retry_policy
 from plugin.personification.core.safe_image_download import download_public_image
 
 
@@ -103,6 +109,7 @@ def _configured_image_route(plugin_config: Any) -> dict[str, str]:
     explicit_type = _normalize_api_type(getattr(plugin_config, "personification_image_gen_api_type", "auto"))
     explicit_url = str(getattr(plugin_config, "personification_image_gen_api_url", "") or "").strip()
     explicit_key = str(getattr(plugin_config, "personification_image_gen_api_key", "") or "").strip()
+    auth_mode = str(getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto").strip()
     main_type = _normalize_api_type(getattr(plugin_config, "personification_api_type", "openai"))
     main_url = str(getattr(plugin_config, "personification_api_url", "") or "").strip()
     main_key = str(getattr(plugin_config, "personification_api_key", "") or "").strip()
@@ -112,6 +119,7 @@ def _configured_image_route(plugin_config: Any) -> dict[str, str]:
         "main_api_type": main_type,
         "api_url": explicit_url if dedicated else main_url,
         "api_key": explicit_key if dedicated else main_key,
+        "gemini_auth_mode": auth_mode,
         "dedicated": "1" if dedicated else "",
     }
 
@@ -146,6 +154,7 @@ def _pool_image_routes(plugin_config: Any) -> list[dict[str, Any]]:
             "model": str(item.get("image_model") or item.get("model") or "").strip(),
             "priority": priority,
             "proxy": str(item.get("proxy", "") or "").strip(),
+            "gemini_auth_mode": str(item.get("gemini_auth_mode", "auto") or "auto").strip(),
         })
     if not candidates:
         return []
@@ -220,14 +229,7 @@ def _gemini_generate_endpoint(api_url: str, model: str, api_key: str) -> tuple[s
     if not re.search(r"/v\d+(?:beta)?$", cleaned, flags=re.I):
         cleaned = cleaned.rstrip("/") + "/v1beta"
     endpoint = f"{cleaned}/models/{quote(str(model or '').strip(), safe='')}:generateContent"
-    headers = {"Content-Type": "application/json"}
-    params: dict[str, str] = {}
-    if "generativelanguage.googleapis.com" in endpoint:
-        if api_key:
-            params["key"] = api_key
-    elif api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    return endpoint, headers, params
+    return endpoint, {"Content-Type": "application/json"}, {}
 
 
 def _split_data_url(data_url: str) -> tuple[str, str] | None:
@@ -467,6 +469,7 @@ async def _generate_image_gemini_http(
     image_urls: list[str] | None = None,
     proxy: str = "",
     reference_mode: str = "auto",
+    auth_mode: str = "auto",
 ) -> dict[str, str]:
     model = str(image_model or "gemini-3-pro-image-preview").strip() or "gemini-3-pro-image-preview"
     endpoint, headers, params = _gemini_generate_endpoint(api_url, model, api_key)
@@ -492,12 +495,30 @@ async def _generate_image_gemini_http(
         "generationConfig": {"responseModalities": ["IMAGE"]},
     }
     try:
-        client_kwargs: dict[str, Any] = {"timeout": httpx.Timeout(float(timeout or 180.0), connect=15.0)}
+        client_kwargs: dict[str, Any] = {
+            "timeout": httpx.Timeout(float(timeout or 180.0), connect=15.0),
+            "follow_redirects": False,
+        }
         if proxy:
             client_kwargs["proxy"] = proxy
         async with httpx.AsyncClient(**client_kwargs) as client:
-            response = await client.post(endpoint, json=payload, headers=headers, params=params)
-            response.raise_for_status()
+            async def _send(auth):  # noqa: ANN001, ANN202
+                return await client.post(
+                    endpoint,
+                    json=payload,
+                    headers={**headers, **auth.headers},
+                    params={**params, **auth.params},
+                )
+
+            auth_result = await request_with_gemini_auth(
+                endpoint=endpoint.rsplit("/models/", 1)[0],
+                api_key=api_key,
+                auth_mode=auth_mode,
+                send=_send,
+                allow_negotiation=not use_single_attempt_retry_policy(),
+            )
+            response = auth_result.response
+            raise_for_gemini_status(response)
             data = response.json()
     except httpx.HTTPStatusError as exc:
         return {"error": _error_from_http(exc)}
@@ -563,6 +584,7 @@ async def generate_image(
             images=images,
             image_urls=image_urls,
             reference_mode=reference_mode,
+            auth_mode=str(route.get("gemini_auth_mode", "auto") or "auto"),
         )
 
     caller = _first_codex_caller(tool_caller)
@@ -592,7 +614,7 @@ async def generate_image(
         for route in routes:
             guessed_type = route.get("api_type") if route.get("api_type") in {"openai", "gemini"} else route.get("main_api_type") or "openai"
             candidate_model = str(route.get("model") or image_model).strip() or image_model
-            if guessed_type == "gemini" or "generativelanguage.googleapis.com" in route.get("api_url", ""):
+            if guessed_type == "gemini" or is_google_gemini_endpoint(str(route.get("api_url", "") or "")):
                 last_result = await _generate_image_gemini_http(
                     prompt_text,
                     api_url=route.get("api_url", ""),
@@ -604,6 +626,7 @@ async def generate_image(
                     image_urls=image_urls,
                     proxy=str(route.get("proxy", "") or ""),
                     reference_mode=reference_mode,
+                    auth_mode=str(route.get("gemini_auth_mode", "auto") or "auto"),
                 )
             else:
                 last_result = await _generate_image_openai_http(
