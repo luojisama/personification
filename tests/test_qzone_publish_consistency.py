@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import sqlite3
 from datetime import datetime, timedelta
@@ -455,6 +456,119 @@ def test_publish_service_returns_structured_write_classification(monkeypatch, re
 
     assert isinstance(result, qzone_service.QzoneWriteResult)
     assert result.status == expected
+
+
+def test_qzone_gif_image_keeps_real_type_and_publishes_complete_media_fields(monkeypatch) -> None:  # noqa: ANN001
+    marker = "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+    calls: list[dict] = []
+
+    class _Response:
+        status_code = 200
+
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class _Client:
+        def __init__(self, **kwargs) -> None:  # noqa: ANN003
+            calls.append({"client": kwargs})
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args) -> None:  # noqa: ANN003
+            return None
+
+        async def post(self, url, *, params=None, data=None, headers=None):  # noqa: ANN001, ANN201
+            calls.append({"url": url, "params": params, "data": data, "headers": headers})
+            if "upload" in url:
+                return _Response(json.dumps({
+                    "ret": 0,
+                    "data": {
+                        "albumid": "album-1",
+                        "lloc": "lloc-1",
+                        "sloc": "sloc-1",
+                        "type": 1,
+                        "height": 32,
+                        "width": 32,
+                        "pre": "https://example.invalid/photo?bo=pic-bo-1",
+                    },
+                }))
+            return _Response('{"code":0,"tid":"remote-with-image"}')
+
+    monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
+    _, publish, _ = qzone_service.build_qzone_services(
+        SimpleNamespace(
+            personification_qzone_enabled=True,
+            personification_qzone_cookie="uin=o10001; p_uin=o10001; skey=sk; p_skey=ps; pt4_token=pt;",
+        ),
+        _Logger(),
+    )
+
+    result = asyncio.run(publish(f"结构化配图正文 [IMAGE_B64]{marker}[/IMAGE_B64]", "10001"))
+    requests = [item for item in calls if "url" in item]
+
+    assert result.status == "succeeded"
+    assert result.remote_id == "remote-with-image"
+    assert result.detail["image_requested"] is True
+    assert result.detail["image_uploaded"] is True
+    assert result.detail["image_mime_type"] in {"image/gif", "image/png"}
+    assert isinstance(result.detail["image_converted"], bool)
+    assert len(requests) == 2
+    upload = requests[0]
+    assert upload["data"]["base64"] == "1"
+    uploaded_bytes = base64.b64decode(upload["data"]["picfile"])
+    if result.detail["image_mime_type"] == "image/png":
+        assert upload["data"]["filename"] == "qzone.png"
+        assert uploaded_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    else:
+        assert upload["data"]["filename"] == "qzone.gif"
+        assert uploaded_bytes.startswith(b"GIF89a")
+    assert upload["headers"]["Cookie"].endswith("pt4_token=pt;")
+    posted = requests[1]
+    assert posted["params"] == {"g_tk": str(qzone_service._get_g_tk("ps")), "uin": "10001"}
+    assert posted["data"]["syn_tweet_verson"] == "1"
+    assert posted["data"]["feedversion"] == posted["data"]["ver"] == "1"
+    assert posted["data"]["to_sign"] == "0"
+    assert posted["data"]["code_version"] == "1"
+    assert posted["data"]["pic_bo"] == "pic-bo-1"
+    assert posted["data"]["richval"] == ",album-1,lloc-1,sloc-1,1,32,32,,32,32"
+
+
+def test_qzone_image_upload_failure_stops_before_publish(monkeypatch) -> None:  # noqa: ANN001
+    marker = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    request_count = 0
+
+    class _Client:
+        def __init__(self, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args) -> None:  # noqa: ANN003
+            return None
+
+        async def post(self, *_args, **_kwargs):  # noqa: ANN001, ANN003, ANN201
+            nonlocal request_count
+            request_count += 1
+            return SimpleNamespace(status_code=200, text='{"ret":-1,"message":"raw secret"}')
+
+    monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
+    _, publish, _ = qzone_service.build_qzone_services(
+        SimpleNamespace(
+            personification_qzone_enabled=True,
+            personification_qzone_cookie="uin=o10001; skey=sk; p_skey=ps;",
+        ),
+        _Logger(),
+    )
+
+    result = asyncio.run(publish(f"图片失败正文 [IMAGE_B64]{marker}[/IMAGE_B64]", "10001"))
+
+    assert result.status == "definite_failure"
+    assert result.result_code == "image_upload_rejected"
+    assert result.detail == {"image_requested": True, "image_uploaded": False}
+    assert "raw secret" not in result.message
+    assert request_count == 1
 
 
 def test_publish_network_interruption_after_post_is_unknown(monkeypatch) -> None:  # noqa: ANN001

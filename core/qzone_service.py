@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import html
+import io
 import json
 import re
 import threading
@@ -47,6 +49,21 @@ class QzoneWriteResult:
         # Existing command/tests may still unpack ``(ok, message)``.
         yield self.success
         yield self.message
+
+
+@dataclass(frozen=True)
+class QzoneImageUploadResult:
+    richval: str
+    pic_bo: str
+    mime_type: str
+    converted: bool = False
+
+
+class QzoneImageUploadError(RuntimeError):
+    def __init__(self, result_code: str, *, detail: dict[str, Any] | None = None) -> None:
+        self.result_code = str(result_code or "image_upload_failed")[:64]
+        self.detail = dict(detail or {})
+        super().__init__(self.result_code)
 
 
 def get_qzone_auth_status() -> dict[str, Any]:
@@ -1240,6 +1257,92 @@ class QzoneSocialService:
         return _qzone_payload_success(payload, resp.text)
 
 
+_QZONE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
+
+
+def _prepare_qzone_image(image_b64: str) -> dict[str, Any]:
+    try:
+        image_bytes = _decode_image_b64(image_b64)
+    except Exception as exc:
+        raise QzoneImageUploadError(
+            "image_invalid_base64",
+            detail={"exception_type": type(exc).__name__},
+        ) from exc
+    if not image_bytes:
+        raise QzoneImageUploadError("image_empty")
+    if len(image_bytes) > _QZONE_IMAGE_MAX_BYTES:
+        raise QzoneImageUploadError("image_too_large")
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        image_format, mime_type, extension = "PNG", "image/png", "png"
+    elif image_bytes.startswith(b"\xff\xd8\xff"):
+        image_format, mime_type, extension = "JPEG", "image/jpeg", "jpg"
+    elif image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        image_format, mime_type, extension = "GIF", "image/gif", "gif"
+    elif image_bytes.startswith(b"RIFF") and b"WEBP" in image_bytes[:32]:
+        image_format, mime_type, extension = "WEBP", "image/webp", "webp"
+    else:
+        raise QzoneImageUploadError("image_format_unsupported")
+    if image_format in {"PNG", "JPEG"}:
+        return {
+            "data": image_bytes,
+            "filename": f"qzone.{extension}",
+            "mime_type": mime_type,
+            "converted": False,
+        }
+    try:
+        from PIL import Image, UnidentifiedImageError
+    except ImportError:
+        return {
+            "data": image_bytes,
+            "filename": f"qzone.{extension}",
+            "mime_type": mime_type,
+            "converted": False,
+        }
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            image.load()
+            image.seek(0)
+            converted_image = image.convert("RGBA")
+            output = io.BytesIO()
+            converted_image.save(output, format="PNG", optimize=True)
+    except QzoneImageUploadError:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise QzoneImageUploadError(
+            "image_format_unsupported",
+            detail={"exception_type": type(exc).__name__},
+        ) from exc
+    converted = output.getvalue()
+    if not converted or len(converted) > _QZONE_IMAGE_MAX_BYTES:
+        raise QzoneImageUploadError("image_conversion_failed")
+    return {
+        "data": converted,
+        "filename": "qzone.png",
+        "mime_type": "image/png",
+        "converted": True,
+    }
+
+
+def _extract_qzone_pic_bo(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"(?:^|[?&])(?:bo|pic_bo|picbo)=([^&\s]+)", text)
+    return match.group(1).strip() if match else ""
+
+
+def _build_qzone_image_richval(payload: dict[str, Any]) -> str:
+    album_id = str(payload.get("albumid") or payload.get("album_id") or "").strip()
+    lloc = str(payload.get("lloc") or "").strip()
+    sloc = str(payload.get("sloc") or "").strip()
+    if not album_id or not lloc or not sloc:
+        return ""
+    image_type = str(payload.get("type") or payload.get("phototype") or "1").strip() or "1"
+    height = str(payload.get("height") or payload.get("h") or "0").strip() or "0"
+    width = str(payload.get("width") or payload.get("w") or "0").strip() or "0"
+    return ",".join(("", album_id, lloc, sloc, image_type, height, width, "", height, width))
+
+
 async def _upload_qzone_image(
     *,
     image_b64: str,
@@ -1247,28 +1350,31 @@ async def _upload_qzone_image(
     qq: str,
     p_skey: str,
     logger: Any,
-) -> str:
+) -> QzoneImageUploadResult:
     try:
-        image_bytes = _decode_image_b64(image_b64)
+        prepared = await asyncio.to_thread(_prepare_qzone_image, image_b64)
+    except QzoneImageUploadError:
+        raise
     except Exception as exc:
-        logger.warning(f"拟人插件：Qzone 配图 base64 无效: {exc}")
-        return ""
-    if not image_bytes:
-        return ""
+        raise QzoneImageUploadError(
+            "image_prepare_failed",
+            detail={"exception_type": type(exc).__name__},
+        ) from exc
 
     g_tk = _get_g_tk(p_skey)
-    formatted_cookie = f"uin=o{qq}; p_skey={p_skey};"
-    if "skey=" in cookie:
-        skey_match = re.search(r"skey=([^; ]+)", cookie)
-        if skey_match:
-            formatted_cookie += f" skey={skey_match.group(1)};"
+    cookie_values = _parse_qzone_cookie(cookie)
+    skey = str(cookie_values.get("skey") or p_skey)
 
     url = f"https://up.qzone.qq.com/cgi-bin/upload/cgi_upload_image?g_tk={g_tk}"
     data = {
+        "filename": prepared["filename"],
         "uin": qq,
         "p_uin": qq,
-        "skey": "",
+        "skey": skey,
+        "p_skey": p_skey,
+        "zzpaneluin": qq,
         "zzpanelkey": "",
+        "qzonetoken": str(cookie_values.get("qzonetoken") or cookie_values.get("g_qzonetoken") or ""),
         "uploadtype": "1",
         "albumtype": "7",
         "exttype": "0",
@@ -1277,48 +1383,88 @@ async def _upload_qzone_image(
         "charset": "utf-8",
         "output_charset": "utf-8",
         "upload_hd": "1",
-        "hd_quality": "90",
+        "hd_width": "2048",
+        "hd_height": "10000",
+        "hd_quality": "96",
+        "backUrls": (
+            "http://upbak.photo.qzone.qq.com/cgi-bin/upload/cgi_upload_image,"
+            "http://119.147.64.75/cgi-bin/upload/cgi_upload_image"
+        ),
+        "url": url,
+        "base64": "1",
+        "picfile": base64.b64encode(prepared["data"]).decode("ascii"),
+        "qzreferrer": f"https://user.qzone.qq.com/{qq}",
     }
     headers = {
-        "Cookie": formatted_cookie,
+        "Cookie": str(cookie),
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
         ),
         "Referer": f"https://user.qzone.qq.com/{qq}",
         "Origin": "https://user.qzone.qq.com",
     }
-    files = {
-        "filename": ("qzone.png", image_bytes, "image/png"),
-    }
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(url, data=data, files=files, headers=headers)
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+            resp = await client.post(url, data=data, headers=headers)
     except Exception as exc:
-        logger.warning(f"拟人插件：Qzone 配图上传失败: {exc}")
-        return ""
+        raise QzoneImageUploadError(
+            "image_upload_transport_failed",
+            detail={"exception_type": type(exc).__name__},
+        ) from exc
     if resp.status_code != 200:
-        logger.warning(f"拟人插件：Qzone 配图上传失败，状态码：{resp.status_code}")
-        return ""
+        raise QzoneImageUploadError(
+            "image_upload_http_error",
+            detail={"status_code": int(resp.status_code)},
+        )
+    if _looks_like_qzone_auth_page(resp.text):
+        _set_qzone_auth_failure("Qzone 配图上传返回登录页面或验证码", auth_failure=True)
+        raise QzoneImageUploadError("image_upload_auth_page")
     payload = _parse_qzone_jsonp(resp.text)
     if not payload:
-        logger.warning("拟人插件：Qzone 配图上传返回无法解析")
-        return ""
-    if int(payload.get("ret", payload.get("code", 0)) or 0) not in {0, 1}:
-        logger.warning(f"拟人插件：Qzone 配图上传返回异常：{str(payload)[:180]}")
-        return ""
-    for key in ("richval", "picbo", "pic_bo", "lloc", "sloc"):
-        value = str(payload.get(key, "") or "").strip()
-        if value:
-            return value
-    data_obj = payload.get("data")
-    if isinstance(data_obj, dict):
-        for key in ("richval", "picbo", "pic_bo", "lloc", "sloc"):
-            value = str(data_obj.get(key, "") or "").strip()
-            if value:
-                return value
-    logger.warning("拟人插件：Qzone 配图上传未返回 richval/picbo")
-    return ""
+        raise QzoneImageUploadError("image_upload_invalid_response")
+    result_code = payload.get("ret", payload.get("code", 0))
+    try:
+        upload_ok = int(result_code or 0) == 0
+    except (TypeError, ValueError):
+        upload_ok = False
+    if not upload_ok:
+        raise QzoneImageUploadError("image_upload_rejected")
+    upload_data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    richval = str(upload_data.get("richval") or payload.get("richval") or "").strip()
+    if not richval:
+        richval = _build_qzone_image_richval(upload_data)
+    pic_bo = str(
+        upload_data.get("pic_bo")
+        or upload_data.get("picbo")
+        or upload_data.get("bo")
+        or payload.get("pic_bo")
+        or payload.get("picbo")
+        or ""
+    ).strip()
+    if not pic_bo:
+        for key in ("url", "origin_url", "pre", "raw_url"):
+            pic_bo = _extract_qzone_pic_bo(upload_data.get(key) or payload.get(key))
+            if pic_bo:
+                break
+    if not richval:
+        raise QzoneImageUploadError("image_upload_missing_richval")
+    if not pic_bo:
+        raise QzoneImageUploadError("image_upload_missing_pic_bo")
+    log_info = getattr(logger, "info", None)
+    if callable(log_info):
+        log_info(
+            f"[qzone] image upload ready mime={prepared['mime_type']} converted={prepared['converted']}"
+        )
+    return QzoneImageUploadResult(
+        richval=richval,
+        pic_bo=pic_bo,
+        mime_type=str(prepared["mime_type"]),
+        converted=bool(prepared["converted"]),
+    )
 
 
 def build_qzone_services(
@@ -1406,58 +1552,90 @@ def build_qzone_services(
                     "preflight_account_mismatch",
                 )
 
-            formatted_cookie = f"uin=o{qq}; p_skey={p_skey};"
-            if "skey=" in cookie:
-                skey_match = re.search(r"skey=([^; ]+)", cookie)
-                if skey_match:
-                    formatted_cookie += f" skey={skey_match.group(1)};"
-
             g_tk = _get_g_tk(p_skey)
-            richval = ""
+            image_upload: QzoneImageUploadResult | None = None
             if image_payloads:
-                richval = await _upload_qzone_image(
-                    image_b64=image_payloads[0],
-                    cookie=cookie,
-                    qq=qq,
-                    p_skey=p_skey,
-                    logger=logger,
-                )
+                try:
+                    image_upload = await _upload_qzone_image(
+                        image_b64=image_payloads[0],
+                        cookie=cookie,
+                        qq=qq,
+                        p_skey=p_skey,
+                        logger=logger,
+                    )
+                except QzoneImageUploadError as exc:
+                    log_warning = getattr(logger, "warning", None)
+                    if callable(log_warning):
+                        log_warning(f"[qzone] image upload failed code={exc.result_code}")
+                    return QzoneWriteResult(
+                        "definite_failure",
+                        "Qzone 配图上传失败，尚未提交说说",
+                        exc.result_code,
+                        detail={
+                            "image_requested": True,
+                            "image_uploaded": False,
+                            **exc.detail,
+                        },
+                    )
             url = (
                 "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/"
-                f"cgi-bin/emotion_cgi_publish_v6?g_tk={g_tk}"
+                "cgi-bin/emotion_cgi_publish_v6"
             )
             data = {
-                "syn_tweet_version": 1,
-                "paramstr": 1,
-                "pic_template": "1" if richval else "",
-                "richtype": "1" if richval else "",
-                "richval": richval,
-                "special_url": "",
-                "subrichtype": "1" if richval else "",
+                "syn_tweet_verson": "1",
+                "paramstr": "1",
+                "who": "1",
                 "con": cleaned_content,
-                "feed_tpl_id": "w_v6",
-                "ugc_right": 1,
-                "who": 1,
-                "modifyflag": 0,
+                "feedversion": "1",
+                "ver": "1",
+                "ugc_right": "1",
+                "to_sign": "0",
                 "hostuin": qq,
+                "code_version": "1",
+                "issyncweibo": "0",
                 "format": "json",
                 "qzreferrer": f"https://user.qzone.qq.com/{qq}",
             }
+            if image_upload is not None:
+                data.update({
+                    "pic_template": "",
+                    "richtype": "1",
+                    "subrichtype": "1",
+                    "richval": image_upload.richval,
+                    "pic_bo": image_upload.pic_bo,
+                })
             headers = {
-                "Cookie": formatted_cookie,
-                "Content-Type": "application/x-www-form-urlencoded",
+                "Cookie": str(cookie),
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest",
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                    "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
                 ),
                 "Referer": f"https://user.qzone.qq.com/{qq}",
                 "Origin": "https://user.qzone.qq.com",
             }
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
                 post_started = True
-                resp = await client.post(url, data=data, headers=headers)
+                resp = await client.post(
+                    url,
+                    params={"g_tk": str(g_tk), "uin": qq},
+                    data=data,
+                    headers=headers,
+                )
             classified = _classify_qzone_write_response(resp, action="发布")
+            publish_detail = {
+                "image_requested": bool(image_payloads),
+                "image_uploaded": image_upload is not None,
+            }
+            if image_upload is not None:
+                publish_detail.update({
+                    "image_mime_type": image_upload.mime_type,
+                    "image_converted": image_upload.converted,
+                })
+            publish_detail.update(classified.detail)
             if classified.status == "succeeded":
                 return QzoneWriteResult(
                     "succeeded",
@@ -1465,8 +1643,14 @@ def build_qzone_services(
                     classified.result_code,
                     remote_id=classified.remote_id,
                     remote_time=classified.remote_time,
+                    detail=publish_detail,
                 )
-            return classified
+            return QzoneWriteResult(
+                classified.status,
+                classified.message,
+                classified.result_code,
+                detail=publish_detail,
+            )
         except Exception as e:
             if post_started:
                 return QzoneWriteResult(
