@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 
 from types import SimpleNamespace
 
@@ -193,3 +194,259 @@ def test_remote_provider_probe_does_not_return_full_endpoint(_runtime_context, m
     assert response.json()["source"] == "remote_models"
     assert "private.example.test" not in response.text
     assert "secret" not in response.text
+
+
+def test_config_entries_recursively_masks_provider_secrets(_runtime_context) -> None:  # noqa: ANN001
+    _runtime_context.plugin_config.personification_api_pools = [
+        {
+            "name": "primary",
+            "api_type": "openai",
+            "api_url": "https://api.example.test/v1",
+            "api_key": "nested-provider-secret",
+            "headers": {"Authorization": "Bearer nested-header-secret"},
+            "model": "gpt-test",
+        }
+    ]
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    response = client.get("/personification/api/config/entries")
+
+    assert response.status_code == 200
+    entry = next(
+        item
+        for item in response.json()["entries"]
+        if item["field_name"] == "personification_api_pools"
+    )
+    assert entry["current"][0]["api_key"] == "***"
+    assert entry["current"][0]["headers"] == "***"
+    assert entry["current"][0]["_secret_ref"]
+    assert "nested-provider-secret" not in response.text
+    assert "nested-header-secret" not in response.text
+
+
+def test_config_api_pool_mask_placeholder_preserves_existing_secret(
+    _runtime_context, monkeypatch  # noqa: ANN001
+) -> None:
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    monkeypatch.setattr(config_routes, "_schedule_diagnostics_warm", lambda _runtime: None)
+    _runtime_context.plugin_config.personification_api_pools = [
+        {
+            "name": "primary",
+            "api_type": "openai",
+            "api_key": "existing-provider-secret",
+            "model": "gpt-old",
+        }
+    ]
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    listed = client.get("/personification/api/config/entries").json()
+    provider_view = next(
+        item
+        for item in listed["entries"]
+        if item["field_name"] == "personification_api_pools"
+    )["current"][0]
+
+    response = client.post(
+        "/personification/api/config/value",
+        json={
+            "field_name": "personification_api_pools",
+            "value": [
+                {
+                    "name": "primary",
+                    "api_type": "openai",
+                    "api_key": "***",
+                    "model": "gpt-new",
+                    "_secret_ref": provider_view["_secret_ref"],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert _runtime_context.plugin_config.personification_api_pools[0]["api_key"] == "existing-provider-secret"
+    assert response.json()["new_value"][0]["api_key"] == "***"
+    assert "existing-provider-secret" not in response.text
+    serialized = json.dumps(response.json(), ensure_ascii=False)
+    assert "gpt-new" in serialized
+
+
+def test_config_api_pool_secret_refs_survive_duplicate_names_and_reorder(
+    _runtime_context, monkeypatch  # noqa: ANN001
+) -> None:
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    monkeypatch.setattr(config_routes, "_schedule_diagnostics_warm", lambda _runtime: None)
+    _runtime_context.plugin_config.personification_api_pools = [
+        {
+            "name": "duplicate",
+            "api_type": "openai",
+            "api_url": "https://a.example/v1",
+            "api_key": "secret-a",
+            "model": "model-a",
+        },
+        {
+            "name": "duplicate",
+            "api_type": "openai",
+            "api_url": "https://b.example/v1",
+            "api_key": "secret-b",
+            "model": "model-b",
+        },
+    ]
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    listed = client.get("/personification/api/config/entries").json()
+    views = next(
+        item
+        for item in listed["entries"]
+        if item["field_name"] == "personification_api_pools"
+    )["current"]
+
+    response = client.post(
+        "/personification/api/config/value",
+        json={
+            "field_name": "personification_api_pools",
+            "value": [views[1], views[0]],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    saved = _runtime_context.plugin_config.personification_api_pools
+    assert [(item["api_url"], item["api_key"]) for item in saved] == [
+        ("https://b.example/v1", "secret-b"),
+        ("https://a.example/v1", "secret-a"),
+    ]
+    assert "secret-a" not in response.text
+    assert "secret-b" not in response.text
+
+
+def test_config_api_pool_requires_secret_refresh_after_transport_change(
+    _runtime_context  # noqa: ANN001
+) -> None:
+    _runtime_context.plugin_config.personification_api_pools = [
+        {
+            "name": "primary",
+            "api_type": "openai",
+            "api_url": "https://old.example/v1",
+            "api_key": "transport-bound-secret",
+            "model": "model-a",
+        }
+    ]
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    listed = client.get("/personification/api/config/entries").json()
+    provider = next(
+        item
+        for item in listed["entries"]
+        if item["field_name"] == "personification_api_pools"
+    )["current"][0]
+    provider["api_url"] = "https://new.example/v1"
+
+    response = client.post(
+        "/personification/api/config/value",
+        json={"field_name": "personification_api_pools", "value": [provider]},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "config_value_invalid"
+    assert _runtime_context.plugin_config.personification_api_pools[0]["api_key"] == "transport-bound-secret"
+
+
+def test_config_provider_urls_headers_and_proxy_credentials_are_redacted(
+    _runtime_context  # noqa: ANN001
+) -> None:
+    _runtime_context.plugin_config.personification_api_pools = [
+        {
+            "name": "primary",
+            "api_type": "openai",
+            "api_url": (
+                "https://alice:url-password@api.example/token/"
+                "0123456789abcdef0123456789abcdef?sig=signed-secret&code=oauth-secret"
+                "&access_token=access-secret&refresh_token=refresh-secret"
+                "&client_secret=client-secret&X-Amz-Signature=amazon-signature"
+            ),
+            "api_key": "provider-secret",
+            "headers": {"X-Custom-Credential": "header-secret"},
+            "proxy": "http://bob:proxy-password@proxy.example:8080",
+            "model": "model-a",
+        }
+    ]
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    response = client.get("/personification/api/config/entries")
+
+    assert response.status_code == 200
+    for secret in (
+        "alice",
+        "url-password",
+        "query-secret",
+        "provider-secret",
+        "header-secret",
+        "bob",
+        "proxy-password",
+        "signed-secret",
+        "oauth-secret",
+        "0123456789abcdef0123456789abcdef",
+        "access-secret",
+        "refresh-secret",
+        "client-secret",
+        "amazon-signature",
+    ):
+        assert secret not in response.text
+
+
+def test_sensitive_data_redacts_short_basic_without_masking_business_sig_substrings() -> None:
+    sensitive_data = load_personification_module("plugin.personification.core.sensitive_data")
+
+    sanitized = sensitive_data.sanitize_text(
+        "https://host/cb?access_token=a1&X-Goog-Signature=s1 Basic YTpi"
+    )
+    prose = sensitive_data.sanitize_text("Basic authentication supports a basic design")
+    business = sensitive_data.sanitize_object(
+        {"design": "visible", "signal": "green", "assigned_count": 3, "code": "ok"}
+    )
+
+    assert "a1" not in sanitized
+    assert "s1" not in sanitized
+    assert "YTpi" not in sanitized
+    assert prose == "Basic authentication supports a basic design"
+    assert business == {"design": "visible", "signal": "green", "assigned_count": 3, "code": "ok"}
+
+
+def test_provider_model_probe_restores_secret_only_from_valid_ref(
+    _runtime_context, monkeypatch  # noqa: ANN001
+) -> None:
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    _runtime_context.plugin_config.personification_api_pools = [
+        {
+            "name": "primary",
+            "api_type": "openai",
+            "api_url": "https://api.example/v1",
+            "api_key": "probe-provider-secret",
+            "model": "model-a",
+        }
+    ]
+    captured: dict = {}
+
+    async def _probe(provider):  # noqa: ANN001
+        captured.update(provider)
+        return ([{"id": "model-a", "label": "model-a"}], "https://api.example/v1/models")
+
+    monkeypatch.setattr(config_routes, "_probe_http_models", _probe)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    listed = client.get("/personification/api/config/entries").json()
+    provider = next(
+        item
+        for item in listed["entries"]
+        if item["field_name"] == "personification_api_pools"
+    )["current"][0]
+
+    response = client.post(
+        "/personification/api/config/provider-models",
+        json={"provider": provider},
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["api_key"] == "probe-provider-secret"
+    assert "probe-provider-secret" not in response.text

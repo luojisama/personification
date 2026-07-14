@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import inspect
+import json
+import os
 import re
 from typing import Any
 from urllib.parse import urlencode
@@ -12,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from ...core import config_registry, env_writer, webui_audit_log
 from ...core.config_search import build_config_search_index
 from ...core.operation_diagnostics import detail, diagnostic, exception_diagnostic, step
+from ...core.sensitive_data import sanitize_object
 from ..deps import AdminIdentity, require_admin
 
 
@@ -107,6 +112,8 @@ _DIAGNOSTIC_FIELDS = (
     "operation_id",
     "trace_id",
 )
+_MASKED_CONFIG_VALUE = "***"
+_CONFIG_SECRET_REF_KEY = os.urandom(32)
 
 
 def _attach_diagnostic(payload: dict[str, Any], operation_diagnostic: dict[str, Any]) -> dict[str, Any]:
@@ -593,6 +600,95 @@ def _entry_to_view(entry: Any, *, plugin_config: Any) -> ConfigEntryView:
     )
 
 
+def _provider_secret_ref(provider: dict[str, Any], index: int) -> str:
+    payload = json.dumps(
+        {"index": index, "provider": provider},
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    ).encode("utf-8")
+    return hmac.new(_CONFIG_SECRET_REF_KEY, payload, hashlib.sha256).hexdigest()
+
+
+def _provider_transport_identity(provider: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        str(provider.get(field) or "").strip()
+        for field in ("api_type", "api_url", "auth_path", "project", "proxy")
+    )
+
+
+def _contains_masked_value(value: Any) -> bool:
+    if value == _MASKED_CONFIG_VALUE:
+        return True
+    if isinstance(value, dict):
+        return any(_contains_masked_value(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_masked_value(item) for item in value)
+    return False
+
+
+def _mask_api_pool_config(value: Any) -> Any:
+    sanitized = sanitize_object(value)
+    if not isinstance(value, list) or not isinstance(sanitized, list):
+        return sanitized
+    for index, (original, masked) in enumerate(zip(value, sanitized)):
+        if isinstance(original, dict) and isinstance(masked, dict):
+            masked["_secret_ref"] = _provider_secret_ref(original, index)
+    return sanitized
+
+
+def _restore_masked_value(value: Any, existing: Any) -> Any:
+    if value == _MASKED_CONFIG_VALUE:
+        return existing
+    if isinstance(value, dict):
+        current = existing if isinstance(existing, dict) else {}
+        return {
+            key: _restore_masked_value(item, current.get(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        current_items = existing if isinstance(existing, list) else []
+        return [
+            _restore_masked_value(item, current_items[index] if index < len(current_items) else None)
+            for index, item in enumerate(value)
+        ]
+    return value
+
+
+def _restore_masked_config_secrets(field_name: str, value: Any, plugin_config: Any) -> Any:
+    if field_name != "personification_api_pools" or not isinstance(value, list):
+        return value
+    existing = getattr(plugin_config, field_name, None)
+    existing_items = existing if isinstance(existing, list) else []
+    existing_by_ref = {
+        _provider_secret_ref(item, index): item
+        for index, item in enumerate(existing_items)
+        if isinstance(item, dict)
+    }
+    restored: list[Any] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            restored.append(item)
+            continue
+        candidate = dict(item)
+        secret_ref = str(candidate.pop("_secret_ref", "") or "").strip()
+        if not _contains_masked_value(candidate):
+            restored.append(candidate)
+            continue
+        current = existing_by_ref.get(secret_ref)
+        if current is None:
+            raise ValueError("masked provider secret reference is invalid")
+        for field, old_value in zip(
+            ("api_type", "api_url", "auth_path", "project", "proxy"),
+            _provider_transport_identity(current),
+        ):
+            new_value = candidate.get(field)
+            if new_value != _MASKED_CONFIG_VALUE and str(new_value or "").strip() != old_value:
+                raise ValueError("provider transport changed while secret remained masked")
+        restored.append(_restore_masked_value(candidate, current))
+    return restored
+
+
 def build_config_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -602,15 +698,29 @@ def build_config_router(*, runtime) -> APIRouter:
             _entry_to_view(entry, plugin_config=runtime.plugin_config)
             for entry in config_registry.get_config_entries("global")
         ]
-        # 对 secret 字段返回时遮码，前端不应看到明文
+        # Whole-field secrets and nested credentials must never reach the browser.
         for view in entries:
             if view.secret:
-                if isinstance(view.current, str) and view.current:
-                    view.current = "***"
-                if isinstance(view.sources.get("env_file"), str) and view.sources["env_file"]:
-                    view.sources["env_file"] = "***"
-                if isinstance(view.sources.get("env_json"), str) and view.sources["env_json"]:
-                    view.sources["env_json"] = "***"
+                if view.current is not None and view.current != "":
+                    view.current = _MASKED_CONFIG_VALUE
+                view.default = (
+                    _MASKED_CONFIG_VALUE
+                    if view.default is not None and view.default != ""
+                    else view.default
+                )
+                for source_name, source_value in list(view.sources.items()):
+                    if source_value is not None and source_value != "":
+                        view.sources[source_name] = _MASKED_CONFIG_VALUE
+                continue
+            raw_current = view.current
+            view.current = sanitize_object(raw_current)
+            if view.field_name == "personification_api_pools":
+                view.current = _mask_api_pool_config(raw_current)
+            view.default = sanitize_object(view.default)
+            view.sources = {
+                source_name: sanitize_object(source_value)
+                for source_name, source_value in view.sources.items()
+            }
         groups = sorted({view.group for view in entries})
         return ConfigEntriesResponse(entries=entries, groups=groups)
 
@@ -780,6 +890,11 @@ def build_config_router(*, runtime) -> APIRouter:
             )
         try:
             normalized = entry.normalize_value(payload.value)
+            normalized = _restore_masked_config_secrets(
+                field_name,
+                normalized,
+                runtime.plugin_config,
+            )
         except ValueError:
             raise HTTPException(
                 status_code=400,
@@ -896,7 +1011,13 @@ def build_config_router(*, runtime) -> APIRouter:
                 "errors": errors,
                 "dotenv_path": result.get("dotenv_path"),
                 "env_json_path": result.get("env_json_path"),
-                "new_value": normalized if not entry.secret else "***",
+                "new_value": (
+                    _MASKED_CONFIG_VALUE
+                    if entry.secret
+                    else _mask_api_pool_config(normalized)
+                    if field_name == "personification_api_pools"
+                    else sanitize_object(normalized)
+                ),
             },
             operation_diagnostic,
         )
@@ -919,6 +1040,25 @@ def build_config_router(*, runtime) -> APIRouter:
                     title="Provider 探测参数无效",
                     message="provider 必须是对象。",
                     suggestion="提交一个 Provider 配置对象后重试。",
+                    retryable=True,
+                ),
+            )
+        try:
+            provider = _restore_masked_config_secrets(
+                "personification_api_pools",
+                [provider],
+                runtime.plugin_config,
+            )[0]
+        except ValueError:
+            raise HTTPException(
+                status_code=409,
+                detail=diagnostic(
+                    ok=False,
+                    code="provider_model_probe_secret_refresh_required",
+                    phase="request_validation",
+                    title="Provider 凭据需要重新输入",
+                    message="Provider transport 已变化或 secret reference 已失效，未发起模型探测。",
+                    suggestion="重新输入该 Provider 的 API Key 后再探测模型。",
                     retryable=True,
                 ),
             )

@@ -492,7 +492,7 @@ function renderApiProviderCard(field, provider, index) {
       ${sourceHint}
     </div>`;
   };
-  return `<div class="api-provider-card" data-provider-index="${index}">
+  return `<div class="api-provider-card" data-provider-index="${index}" data-provider-secret-ref="${escapeAttr(provider._secret_ref || "")}">
     <div class="api-provider-head">
       <div class="api-provider-title">Provider ${index + 1}</div>
       <button class="btn small danger" onclick="removeApiProvider('${escapeAttr(field)}', ${index})">删除</button>
@@ -557,6 +557,7 @@ function readApiPoolEditor(field) {
   }
   return sanitizeApiProviders(Array.from(root.querySelectorAll(".api-provider-card")).map((card, index) => {
     const provider = defaultApiProvider(index);
+    if (card.dataset.providerSecretRef) provider._secret_ref = card.dataset.providerSecretRef;
     card.querySelectorAll("[data-provider-field]").forEach(wrap => {
       const name = wrap.dataset.providerField;
       const input = wrap.querySelector("input, select");
