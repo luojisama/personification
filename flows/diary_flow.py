@@ -295,10 +295,16 @@ def _qzone_route_attempt_details(exc: Exception) -> list[OperationDetail]:
             code = raw_code if raw_code in safe_codes else "provider_call_failed"
             auth_mode = str(attempt.get("auth_mode") or "-")
             request_count = max(1, int(attempt.get("request_count") or 1))
+            tools_count = max(0, int(attempt.get("tools_count") or 0))
+            tool_names_hash = str(attempt.get("tool_names_hash") or "-")[:16]
+            request_kind = str(attempt.get("request_kind") or "-")[:32]
+            builtin_search = bool(attempt.get("builtin_search", False))
             result.append(
                 detail(
                     f"Provider route {index}",
                     f"{provider} · {api_type} · {model} · auth={auth_mode} · "
+                    f"kind={request_kind} · tools={tools_count} · schema={tool_names_hash} · "
+                    f"builtin={str(builtin_search).lower()} · "
                     f"requests={request_count} · HTTP {status or '-'} · {code}",
                     "error",
                 )

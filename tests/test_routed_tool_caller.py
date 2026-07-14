@@ -358,6 +358,44 @@ def test_routed_tool_caller_marks_timeout_retryable() -> None:
     assert caught.value.retryable is True
 
 
+def test_routed_tool_caller_records_safe_request_shape() -> None:
+    error = RuntimeError("private schema response")
+    error.status_code = 400
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[_FakeCaller("primary", [error])],
+        fallback_caller=None,
+        logger=None,
+    )
+    messages = [
+        {"role": "system", "content": "system text"},
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "safe_lookup",
+                "description": "private description must not be copied",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+        asyncio.run(routed.chat_with_tools(messages, tools, True))
+
+    attempt = caught.value.route_attempts[0]
+    assert attempt["request_kind"] == "function_calling"
+    assert attempt["message_count"] == 2
+    assert attempt["prompt_chars"] == len("system texthello")
+    assert attempt["tools_count"] == 1
+    assert len(attempt["tool_names_hash"]) == 12
+    assert attempt["builtin_search"] is True
+    assert caught.value.tools_count == 1
+    assert caught.value.tool_names_hash == attempt["tool_names_hash"]
+    assert "private description" not in str(attempt)
+
+
 def test_runtime_builder_wraps_legacy_caller_when_provider_list_is_empty(monkeypatch) -> None:  # noqa: ANN001
     raw_error = RuntimeError("private raw provider error")
     legacy = _FakeCaller("legacy", [raw_error])

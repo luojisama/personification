@@ -265,6 +265,10 @@ def _provider_failure_report(
                     f"{route.get('api_type') or 'unknown'} · "
                     f"{_route_model_label(route)} · "
                     f"auth={route.get('auth_mode') or '-'} · "
+                    f"kind={route.get('request_kind') or '-'} · "
+                    f"tools={max(0, int(route.get('tools_count') or 0))} · "
+                    f"schema={str(route.get('tool_names_hash') or '-')[:16]} · "
+                    f"builtin={str(bool(route.get('builtin_search', False))).lower()} · "
                     f"requests={route.get('request_count') or 1} · "
                     f"HTTP {route.get('status_code') or '-'} · {route.get('code') or 'provider_call_failed'}"
                 ),

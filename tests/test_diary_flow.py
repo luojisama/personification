@@ -457,6 +457,10 @@ def test_qzone_generation_exposes_safe_provider_route_attempts() -> None:
                     "code": "provider_model_candidate_unavailable",
                     "auth_mode": "bearer",
                     "request_count": 2,
+                    "request_kind": "function_calling",
+                    "tools_count": 7,
+                    "tool_names_hash": "abc123def456",
+                    "builtin_search": False,
                 },
             )
             raise exc
@@ -474,7 +478,9 @@ def test_qzone_generation_exposes_safe_provider_route_attempts() -> None:
     assert details["Provider route 1"].endswith(
         "HTTP 404 · provider_model_candidate_unavailable"
     )
-    assert "auth=bearer · requests=2" in details["Provider route 1"]
+    assert "auth=bearer" in details["Provider route 1"]
+    assert "requests=2" in details["Provider route 1"]
+    assert "kind=function_calling · tools=7 · schema=abc123def456 · builtin=false" in details["Provider route 1"]
     assert "private provider response" not in str(details)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
@@ -63,6 +64,13 @@ class RoutedToolCallerError(RuntimeError):
         self.retryable = bool(selected.get("retryable", True))
         self.auth_mode = str(selected.get("auth_mode") or "")[:48]
         self.request_count = sum(max(1, int(item.get("request_count") or 1)) for item in attempts)
+        self.request_kind = str(selected.get("request_kind") or "")[:32]
+        self.request_purpose = str(selected.get("request_purpose") or "")[:64]
+        self.message_count = max(0, int(selected.get("message_count") or 0))
+        self.prompt_chars = max(0, int(selected.get("prompt_chars") or 0))
+        self.tools_count = max(0, int(selected.get("tools_count") or 0))
+        self.tool_names_hash = str(selected.get("tool_names_hash") or "")[:16]
+        self.builtin_search = bool(selected.get("builtin_search", False))
         super().__init__("all routed tool callers failed")
 
     @staticmethod
@@ -164,6 +172,53 @@ def _exception_route_metadata(exc: BaseException) -> tuple[int, str, bool, str, 
         auth_mode[:48],
         max(1, request_count),
     )
+
+
+def _request_text_chars(messages: list[dict]) -> int:
+    total = 0
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content", "")
+        if isinstance(content, str):
+            total += len(content)
+            continue
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                total += len(str(part.get("text", "") or ""))
+    return total
+
+
+def _request_tool_name(tool: Any) -> str:
+    if not isinstance(tool, dict):
+        return ""
+    function = tool.get("function", tool)
+    if not isinstance(function, dict):
+        return ""
+    return str(function.get("name", "") or "").strip()
+
+
+def _safe_request_shape(
+    messages: list[dict],
+    tools: list[dict],
+    use_builtin_search: bool,
+) -> dict[str, Any]:
+    names = sorted(name for name in (_request_tool_name(tool) for tool in list(tools or [])) if name)
+    names_hash = hashlib.sha256("\0".join(names).encode("utf-8")).hexdigest()[:12] if names else ""
+    purpose = str(current_llm_context().get("purpose") or "").strip()[:64]
+    return {
+        "request_kind": "function_calling" if tools else "text",
+        "request_purpose": purpose,
+        "message_count": len(list(messages or [])),
+        "prompt_chars": _request_text_chars(messages),
+        "tools_count": len(list(tools or [])),
+        "tool_names_hash": names_hash,
+        "builtin_search": bool(use_builtin_search),
+    }
 
 
 def _normalize_api_type(api_type: str) -> str:
@@ -732,13 +787,20 @@ class RoutedToolCaller:
                 "caller": type(caller).__name__[:80],
             }
 
-    def _route_attempt(self, caller: ToolCaller, exc: BaseException) -> dict[str, Any]:
+    def _route_attempt(
+        self,
+        caller: ToolCaller,
+        exc: BaseException,
+        *,
+        request_shape: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         status_code, code, retryable, concrete_model, next_model, auth_mode, request_count = (
             _exception_route_metadata(exc)
         )
         descriptor = self._caller_route_descriptors.get(id(caller), {"caller": type(caller).__name__[:80]})
         return {
             **descriptor,
+            **dict(request_shape or {}),
             "concrete_model": concrete_model,
             "next_model": next_model,
             "auth_mode": auth_mode or str(descriptor.get("auth_mode") or "")[:48],
@@ -782,6 +844,7 @@ class RoutedToolCaller:
     ) -> ToolCallerResponse:
         last_error: Exception | None = None
         route_attempts: list[dict[str, Any]] = []
+        request_shape = _safe_request_shape(messages, tools, use_builtin_search)
         saw_vision_unavailable = False
         pinned_caller = self._caller_from_tool_result_markers(messages)
         if pinned_caller is not None:
@@ -801,14 +864,14 @@ class RoutedToolCaller:
                 raise
             except Exception as exc:
                 last_error = exc
-                route_attempts.append(self._route_attempt(caller, exc))
+                route_attempts.append(self._route_attempt(caller, exc, request_shape=request_shape))
                 continue
             safety_issue = detect_route_safety_issue(response)
             if safety_issue:
                 if use_single_attempt_retry_policy():
                     last_error = RuntimeError("provider safety block")
                     last_error.code = "provider_safety_block"
-                    route_attempts.append(self._route_attempt(caller, last_error))
+                    route_attempts.append(self._route_attempt(caller, last_error, request_shape=request_shape))
                     continue
                 try:
                     response = await caller.chat_with_tools(
@@ -820,12 +883,12 @@ class RoutedToolCaller:
                     raise
                 except Exception as exc:
                     last_error = exc
-                    route_attempts.append(self._route_attempt(caller, exc))
+                    route_attempts.append(self._route_attempt(caller, exc, request_shape=request_shape))
                     continue
                 if detect_route_safety_issue(response):
                     last_error = RuntimeError("provider safety block")
                     last_error.code = "provider_safety_block"
-                    route_attempts.append(self._route_attempt(caller, last_error))
+                    route_attempts.append(self._route_attempt(caller, last_error, request_shape=request_shape))
                     continue
             if response.vision_unavailable:
                 saw_vision_unavailable = True
@@ -834,7 +897,7 @@ class RoutedToolCaller:
                 last_error = RuntimeError("provider returned an empty or invalid response")
                 last_error.code = "provider_invalid_response"
                 last_error.retryable = True
-                route_attempts.append(self._route_attempt(caller, last_error))
+                route_attempts.append(self._route_attempt(caller, last_error, request_shape=request_shape))
                 continue
             is_qzone_probe = str(current_llm_context().get("purpose") or "") == "qzone_provider_probe"
             if not is_qzone_probe:
@@ -856,6 +919,7 @@ class RoutedToolCaller:
             raise RoutedToolCallerError(route_attempts) from last_error
         raise RoutedToolCallerError([
             {
+                **request_shape,
                 "provider": "routed",
                 "api_type": "",
                 "model": "",

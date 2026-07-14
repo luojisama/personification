@@ -192,6 +192,10 @@ def test_chat_single_qzone_failure_exposes_safe_route_attempts(_runtime_context)
             "code": "provider_model_candidate_unavailable",
             "auth_mode": "bearer",
             "request_count": 2,
+            "request_kind": "function_calling",
+            "tools_count": 7,
+            "tool_names_hash": "abc123def456",
+            "builtin_search": False,
         },
     )
     _set_routed_caller(_runtime_context, _RaisingCaller(exc))
@@ -211,7 +215,9 @@ def test_chat_single_qzone_failure_exposes_safe_route_attempts(_runtime_context)
     assert details["Provider route 1"].endswith(
         "HTTP 404 · provider_model_candidate_unavailable"
     )
-    assert "auth=bearer · requests=2" in details["Provider route 1"]
+    assert "auth=bearer" in details["Provider route 1"]
+    assert "requests=2" in details["Provider route 1"]
+    assert "kind=function_calling · tools=7 · schema=abc123def456 · builtin=false" in details["Provider route 1"]
     assert "private.example" not in res.text
     assert "raw body" not in res.text
     llm_context = load_personification_module("plugin.personification.core.llm_context")
