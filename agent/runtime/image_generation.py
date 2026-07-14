@@ -7,14 +7,12 @@ from typing import Any, List
 
 from ..query_rewriter import ContextualQueryRewrite
 from ..tool_registry import ToolRegistry
-from ...core.error_utils import log_exception
 from ...core.send_outcome import is_likely_delivered_send_timeout
 from .executor import _execute_tool_with_retries
 from .tool_selection import _select_tool_schemas
 from .wrappers import (
     _IMAGE_B64_TOOL_RESULT_RE,
     _IMAGE_GENERATION_TOOL_NAME,
-    _format_image_generation_failure,
 )
 
 
@@ -80,18 +78,14 @@ async def _generate_image_generation_status_reply(
             ),
         }
     )
-    try:
-        response = await asyncio.wait_for(
-            tool_caller.chat_with_tools(
-                status_messages,
-                [],
-                False,
-            ),
-            timeout=_IMAGE_GENERATION_STATUS_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:
-        log_exception(logger, "[agent] image generation status reply failed", exc, level="debug")
-        return ""
+    response = await asyncio.wait_for(
+        tool_caller.chat_with_tools(
+            status_messages,
+            [],
+            False,
+        ),
+        timeout=_IMAGE_GENERATION_STATUS_TIMEOUT_SECONDS,
+    )
     if getattr(response, "tool_calls", None):
         return ""
     return _clean_image_generation_status_reply(str(getattr(response, "content", "") or ""))
@@ -133,7 +127,23 @@ async def _send_background_text(executor: Any, text: str, logger: Any) -> None:
     try:
         await executor.send_text(content)
     except Exception as exc:
-        log_exception(logger, "[agent] background image text send failed", exc, level="warning")
+        logger.warning(f"[agent] background image text send failed: type={type(exc).__name__}")
+
+
+def _record_background_image_failure(code: str, logger: Any) -> None:
+    safe_code = str(code or "background_image_failed").strip()[:80]
+    logger.warning(f"[agent] background image generation failed: code={safe_code}")
+    try:
+        from ...core import reply_turn_trace
+
+        reply_turn_trace.record_stage(
+            key="background_image_failure",
+            label="后台图片生成失败",
+            status="error",
+            detail=f"code={safe_code} silent=true",
+        )
+    except Exception:
+        pass
 
 
 async def _run_background_image_generation(
@@ -149,7 +159,7 @@ async def _run_background_image_generation(
     logger: Any,
 ) -> None:
     if registry.get(_IMAGE_GENERATION_TOOL_NAME) is None:
-        await _send_background_text(executor, "图片生成失败：工具不可用", logger)
+        _record_background_image_failure("image_tool_unavailable", logger)
         return
     background_messages = _build_background_image_generation_messages(
         messages=messages,
@@ -171,8 +181,10 @@ async def _run_background_image_generation(
                 use_builtin_search,
             )
         except Exception as exc:
-            log_exception(logger, "[agent] background image planning failed", exc, level="warning")
-            await _send_background_text(executor, f"图片生成失败：{exc}", logger)
+            _record_background_image_failure(
+                "provider_failure" if getattr(exc, "code", "") else f"planning_{type(exc).__name__}",
+                logger,
+            )
             return
         content = str(getattr(response, "content", "") or "").strip()
         tool_calls = list(getattr(response, "tool_calls", []) or [])
@@ -184,7 +196,7 @@ async def _run_background_image_generation(
             if content:
                 await _send_background_text(executor, content, logger)
             else:
-                await _send_background_text(executor, "图片生成失败：模型没有完成图片生成", logger)
+                _record_background_image_failure("planning_empty_response", logger)
             return
         background_messages.append(
             {
@@ -215,6 +227,7 @@ async def _run_background_image_generation(
                 previous_tool_result_text=last_tool_result_text,
                 logger=logger,
                 budget_deadline=None,
+                safe_failures=True,
             )
             _ = tool_args
             last_tool_name = str(tool_call.name or "").strip()
@@ -222,7 +235,7 @@ async def _run_background_image_generation(
                 last_tool_result_text = str(result).strip()
             logger.info(
                 f"[agent] background_image tool_result name={tool_call.name} "
-                f"preview={str(result).replace(chr(10), ' ')[:220]}"
+                f"result_len={len(str(result or ''))}"
             )
             if last_tool_name == _IMAGE_GENERATION_TOOL_NAME:
                 image_b64 = _extract_image_b64_tool_result(str(result or ""))
@@ -230,11 +243,14 @@ async def _run_background_image_generation(
                     try:
                         await executor.send_image_b64(image_b64)
                     except Exception as exc:
-                        log_exception(logger, "[agent] background image send failed", exc, level="warning")
-                        if not is_likely_delivered_send_timeout(exc):
-                            await _send_background_text(executor, "图片生成好了，但发送图片失败了", logger)
+                        _record_background_image_failure(
+                            "image_send_outcome_unknown"
+                            if is_likely_delivered_send_timeout(exc)
+                            else "image_send_failed",
+                            logger,
+                        )
                     return
-                await _send_background_text(executor, _format_image_generation_failure(str(result or "")), logger)
+                _record_background_image_failure("image_generation_failed", logger)
                 return
             background_messages.append(
                 tool_caller.build_tool_result_message(
@@ -244,9 +260,9 @@ async def _run_background_image_generation(
                 )
             )
     if last_tool_result_text:
-        await _send_background_text(executor, "图片生成失败：模型没有继续完成生图调用", logger)
+        _record_background_image_failure("image_generation_incomplete", logger)
         return
-    await _send_background_text(executor, "图片生成失败：模型没有开始生图调用", logger)
+    _record_background_image_failure("image_generation_not_started", logger)
 
 
 def _start_background_image_generation(
@@ -290,7 +306,7 @@ def _start_background_image_generation(
         except asyncio.InvalidStateError:
             return
         if exc is not None:
-            log_exception(logger, "[agent] background image generation task crashed", exc, level="warning")
+            _record_background_image_failure(f"task_{type(exc).__name__}", logger)
 
     task.add_done_callback(_done)
     return True

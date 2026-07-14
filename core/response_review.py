@@ -595,13 +595,10 @@ async def rewrite_agent_reply_ooc(
         }
     )
     messages.append({"role": "user", "content": str(original_text or "").strip()[:600]})
-    try:
-        response = await asyncio.wait_for(
-            tool_caller.chat_with_tools(messages, [], False),
-            timeout=timeout,
-        )
-    except Exception:
-        return ""
+    response = await asyncio.wait_for(
+        tool_caller.chat_with_tools(messages, [], False),
+        timeout=timeout,
+    )
     rewritten = normalize_visible_reply_text(getattr(response, "content", "") or "")
     if not rewritten or is_agent_reply_ooc(rewritten):
         return ""

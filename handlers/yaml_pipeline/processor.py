@@ -1380,7 +1380,9 @@ async def process_yaml_response_logic(
             async def _ack_sender(text: str, *, _phrase: str = ack_phrase) -> None:
                 await acquire_reply_commit(reply_commit_state)
                 try:
+                    mark_reply_delivery_started(reply_commit_state)
                     await bot.send(event, str(text or "").strip() or _phrase)
+                    mark_reply_delivery_confirmed(reply_commit_state)
                 finally:
                     release_reply_commit(reply_commit_state)
             ack_sender = _ack_sender
@@ -1441,6 +1443,42 @@ async def process_yaml_response_logic(
         finally:
             reset_current_image_context(image_ctx_token)
         if agent_result is not None:
+            agent_failure_code = str(getattr(agent_result, "failure_code", "") or "").strip()
+            if agent_failure_code:
+                delivery_started = bool(reply_commit_state.get("reply_delivery_started", False))
+                delivery_confirmed = bool(reply_commit_state.get("reply_delivery_confirmed", False))
+                if delivery_confirmed:
+                    delivery_state = "partial"
+                    trace_outcome = "partial"
+                    diagnosis_code = f"partial_{agent_failure_code}"
+                elif delivery_started:
+                    delivery_state = "dispatching"
+                    trace_outcome = "outcome_unknown"
+                    diagnosis_code = "send_outcome_unknown"
+                else:
+                    delivery_state = "not_started"
+                    trace_outcome = "failed"
+                    diagnosis_code = agent_failure_code
+                logger.warning(
+                    f"拟人插件 (YAML)：Agent 基础设施失败，保持静默: code={agent_failure_code} "
+                    f"delivery_state={delivery_state}"
+                )
+                _trace_stage(
+                    key="yaml_agent_operational_failure",
+                    label="YAML Agent 基础设施失败",
+                    status="warn" if delivery_confirmed else "error",
+                    detail=f"code={agent_failure_code} delivery_state={delivery_state} silent=true",
+                )
+                _trace_finish(
+                    outcome=trace_outcome,
+                    diagnosis_code=diagnosis_code,
+                    detail={
+                        "silent": True,
+                        "delivery_state": delivery_state,
+                        "failure_code": agent_failure_code,
+                    },
+                )
+                return
             reply_content = agent_result.text
             used_agent = True
             _trace_stage(
@@ -1457,7 +1495,10 @@ async def process_yaml_response_logic(
                 reply_content,
                 reply_required=reply_required,
                 pending_actions=list(getattr(agent_result, "pending_actions", []) or []),
-                direct_output=bool(getattr(agent_result, "direct_output", False)),
+                direct_output=bool(
+                    getattr(agent_result, "direct_output", False)
+                    or getattr(agent_result, "suppress_reply_recovery", False)
+                ),
             ):
                 logger.warning("拟人插件 (YAML)：强交互 Agent 返回静默，改走基础模型恢复。")
                 reply_content = ""
@@ -1562,7 +1603,13 @@ async def process_yaml_response_logic(
         reply_content,
         reply_required=reply_required,
         pending_actions=pending_actions,
-        direct_output=bool(getattr(agent_result, "direct_output", False)) if agent_result is not None else False,
+        direct_output=bool(
+            agent_result is not None
+            and (
+                getattr(agent_result, "direct_output", False)
+                or getattr(agent_result, "suppress_reply_recovery", False)
+            )
+        ),
     ):
         reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
     if used_agent and reply_content in ("[NO_REPLY]", "<NO_REPLY>"):
@@ -1618,6 +1665,13 @@ async def process_yaml_response_logic(
         if bool(reply_commit_state.get("reply_delivery_confirmed", False)):
             mark_reply_delivery_complete(reply_commit_state)
             _trace_finish(outcome="ok", diagnosis_code="ok", detail={"action_only": True})
+            return
+        if bool(getattr(agent_result, "suppress_reply_recovery", False)):
+            _trace_no_reply(
+                "background_action_pending",
+                diagnosis_code="background_action_pending",
+                detail="后台动作已启动，状态回复保持静默",
+            )
             return
         if reply_required:
             reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
@@ -1789,7 +1843,15 @@ async def process_yaml_response_logic(
         assistant_text = sanitize_history_text(review_decision.text.strip())
         parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
 
-    if has_silence_control_marker(assistant_text) and reply_required and not pending_actions:
+    suppress_reply_recovery = bool(
+        agent_result is not None and getattr(agent_result, "suppress_reply_recovery", False)
+    )
+    if (
+        has_silence_control_marker(assistant_text)
+        and reply_required
+        and not pending_actions
+        and not suppress_reply_recovery
+    ):
         assistant_text = required_reply_fallback_text(has_images=bool(tool_image_urls))
         parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
     if has_silence_control_marker(assistant_text):
@@ -1798,6 +1860,13 @@ async def process_yaml_response_logic(
         if bool(reply_commit_state.get("reply_delivery_confirmed", False)):
             mark_reply_delivery_complete(reply_commit_state)
             _trace_finish(outcome="ok", diagnosis_code="ok", detail={"action_only": True})
+            return
+        if suppress_reply_recovery:
+            _trace_no_reply(
+                "background_action_pending",
+                diagnosis_code="background_action_pending",
+                detail="后台动作已启动，最终状态回复保持静默",
+            )
             return
         if reply_required:
             assistant_text = required_reply_fallback_text(has_images=bool(tool_image_urls))
@@ -1809,6 +1878,13 @@ async def process_yaml_response_logic(
     cleaned_assistant_text = strip_response_control_markers(assistant_text)
     cleaned_assistant_text = normalize_visible_reply_text(cleaned_assistant_text)
     if not cleaned_assistant_text:
+        if suppress_reply_recovery:
+            _trace_no_reply(
+                "background_action_pending",
+                diagnosis_code="background_action_pending",
+                detail="后台动作已启动，清理后状态回复保持静默",
+            )
+            return
         if reply_required:
             cleaned_assistant_text = required_reply_fallback_text(has_images=bool(tool_image_urls))
             parsed = {

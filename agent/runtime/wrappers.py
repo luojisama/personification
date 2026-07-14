@@ -12,28 +12,6 @@ from .intent import _clean_user_query_text, _render_message_text
 
 _IMAGE_B64_TOOL_RESULT_RE = re.compile(r"\[IMAGE_B64\]([A-Za-z0-9+/=\r\n]+)\[/IMAGE_B64\]")
 _IMAGE_GENERATION_TOOL_NAME = "generate_image"
-_IMAGE_FAILURE_DIAGNOSTIC_HINTS = (
-    "empty image response",
-    "raw_keys=",
-    "output_items=",
-    "output_types=",
-    "content_types=",
-    "result_keys=",
-)
-
-
-def _looks_like_raw_tool_dump(text: str) -> bool:
-    raw = str(text or "").strip()
-    if not raw:
-        return False
-    if _parse_json_tool_result(raw) is not None:
-        return True
-    if re.search(r"https?://\S+", raw):
-        return True
-    lines = [line.strip() for line in raw.splitlines() if line.strip()]
-    if sum(1 for line in lines if re.match(r"^\d+[.)]\s+", line) or re.match(r"^[-*+]\s+", line)) >= 2:
-        return True
-    return False
 
 
 def _render_tool_result_for_user(tool_name: str, result_text: str, query: str) -> str:
@@ -78,24 +56,6 @@ def _is_direct_media_tool_result(tool_name: str, result_text: str) -> bool:
     return str(tool_name or "").strip() == _IMAGE_GENERATION_TOOL_NAME and bool(
         _IMAGE_B64_TOOL_RESULT_RE.search(str(result_text or ""))
     )
-
-
-def _format_image_generation_failure(result_text: str) -> str:
-    text = str(result_text or "").strip()
-    if not text:
-        return "图片生成失败：工具没有返回图片数据"
-    detail = text
-    if detail.startswith("图片生成失败"):
-        detail = detail.removeprefix("图片生成失败").lstrip("：: \t\r\n")
-    detail = re.sub(r"\s+", " ", detail).strip()
-    lowered = detail.lower()
-    if not detail:
-        return "图片生成失败：工具没有返回图片数据"
-    if any(hint in lowered for hint in _IMAGE_FAILURE_DIAGNOSTIC_HINTS):
-        return "图片生成失败：图片服务没有返回图片数据"
-    if len(detail) > 80:
-        detail = detail[:77].rstrip() + "..."
-    return f"图片生成失败：{detail}"
 
 
 def _extract_persona_system_prompt(messages: List[dict]) -> str:
@@ -147,34 +107,27 @@ async def _wrap_tool_result_in_persona(
             "content": f"查询：{str(user_query_text or '').strip()[:200]}\n工具结果：{fallback_text[:1000]}",
         }
     )
-    try:
-        response = await asyncio.wait_for(
-            tool_caller.chat_with_tools(
-                wrap_messages,
-                [],
-                False,
-            ),
-            timeout=10.0,
-        )
-    except Exception:
-        cleaned = normalize_visible_reply_text(fallback_text)
-        if _looks_like_raw_tool_dump(fallback_text):
-            return "这块我没拿到稳的结果，先别按我说死。"
-        return cleaned
+    response = await asyncio.wait_for(
+        tool_caller.chat_with_tools(
+            wrap_messages,
+            [],
+            False,
+        ),
+        timeout=10.0,
+    )
     wrapped_text = str(getattr(response, "content", "") or "").strip()
     if wrapped_text:
         return normalize_visible_reply_text(wrapped_text)
-    cleaned = normalize_visible_reply_text(fallback_text)
-    if _looks_like_raw_tool_dump(fallback_text):
-        return "这块我没拿到稳的结果，先别按我说死。"
-    return cleaned
+    error = RuntimeError("agent persona wrapper returned an empty response")
+    error.code = "provider_invalid_response"
+    error.retryable = True
+    raise error
 
 
 __all__ = [
     "_IMAGE_B64_TOOL_RESULT_RE",
     "_IMAGE_GENERATION_TOOL_NAME",
     "_extract_persona_system_prompt",
-    "_format_image_generation_failure",
     "_is_direct_media_tool_result",
     "_render_tool_result_for_user",
     "_wrap_tool_result_in_persona",

@@ -61,7 +61,7 @@ def test_direct_tool_result_contract_keeps_media_marker_direct() -> None:
     assert result.bypass_length_limits is True
 
 
-def test_direct_tool_result_contract_formats_image_generation_failure() -> None:
+def test_direct_tool_result_contract_marks_image_generation_failure_silent() -> None:
     result = tool_contracts.direct_tool_result_from_contract(
         registry=tool_registry.ToolRegistry(),
         tool_name="generate_image",
@@ -69,8 +69,9 @@ def test_direct_tool_result_contract_formats_image_generation_failure() -> None:
     )
 
     assert result is not None
-    assert result.text == "图片生成失败：图片服务没有返回图片数据"
+    assert result.text == "[NO_REPLY]"
     assert result.reason == "image_generation_result"
+    assert result.failure_code == "agent_image_generation_failed"
     assert result.bypass_length_limits is False
 
 

@@ -60,6 +60,9 @@ class _Bot:
 
 
 class _Logger:
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+
     def debug(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
@@ -71,6 +74,9 @@ class _Logger:
 
     def exception(self, *_args: Any, **_kwargs: Any) -> None:
         return None
+
+    def error(self, message: str, *_args: Any, **_kwargs: Any) -> None:
+        self.errors.append(str(message))
 
 
 def test_private_message_preempts_processing_batch() -> None:
@@ -262,6 +268,54 @@ def test_session_key_isolated_by_bot_id() -> None:
     assert first == "10001:456"
     assert second == "10002:456"
     assert first != second
+
+
+def test_batched_failure_stays_silent_without_replaying_delivery() -> None:
+    async def run() -> None:
+        msg_buffer: dict[str, dict[str, Any]] = {}
+        logger = _Logger()
+        calls = 0
+
+        async def process_response_logic(_bot: Any, _event: Any, state: dict[str, Any]) -> None:
+            nonlocal calls
+            calls += 1
+            state["reply_delivery_started"] = True
+            raise RuntimeError("https://private.example/?api_key=top-secret")
+
+        event = _GroupEvent(1, "hello")
+        await reply_buffer.handle_reply_event(
+            _Bot(),
+            event,
+            {},
+            poke_event_cls=type("PokeEvent", (), {}),
+            message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent,
+            process_response_logic=process_response_logic,
+            msg_buffer=msg_buffer,
+            start_buffer_timer=lambda *_args: None,
+            logger=logger,
+        )
+        key = reply_buffer._session_key(event, group_message_event_cls=_GroupEvent, bot_self_id="999")
+        await reply_buffer.run_buffer_timer(
+            key,
+            _Bot(),
+            msg_buffer=msg_buffer,
+            process_response_logic=process_response_logic,
+            message_event_cls=_PrivateEvent,
+            message_cls=_Message,
+            message_segment_cls=_MessageSegment,
+            logger=logger,
+            delay=0,
+            response_timeout_seconds=30,
+        )
+
+        assert calls == 1
+        assert logger.errors
+        assert "delivery_state=dispatching" in logger.errors[-1]
+        assert "top-secret" not in logger.errors[-1]
+        assert "private.example" not in logger.errors[-1]
+
+    asyncio.run(run())
 
 
 def test_group_mentions_each_start_an_independent_direct_turn() -> None:

@@ -57,6 +57,8 @@ def _copy_result_with_quality(
         direct_output=bool(getattr(result, "direct_output", False)),
         bypass_length_limits=bool(getattr(result, "bypass_length_limits", False)),
         quality_checks=checks,
+        failure_code=str(getattr(result, "failure_code", "") or ""),
+        suppress_reply_recovery=bool(getattr(result, "suppress_reply_recovery", False)),
     )
 
 

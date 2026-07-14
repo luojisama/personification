@@ -6,9 +6,12 @@ import time
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 runner = load_personification_module("plugin.personification.agent.runtime.runner")
+image_generation = load_personification_module("plugin.personification.agent.runtime.image_generation")
 metrics = load_personification_module("plugin.personification.core.metrics")
 tool_registry = load_personification_module("plugin.personification.agent.tool_registry")
 tool_impl = load_personification_module("plugin.personification.skills.skillpacks.tool_caller.scripts.impl")
@@ -211,6 +214,21 @@ def test_wrap_tool_result_in_persona_rewrites_search_style_output() -> None:
     assert wrapped == "这事儿现在一般还是找靠谱代购群问得快。"
     assert len(caller.calls) == 1
     assert caller.calls[0]["tools"] == []
+
+
+def test_wrap_tool_result_in_persona_propagates_provider_failure() -> None:
+    error = RuntimeError("private provider response")
+    error.code = "provider_call_failed"
+    caller = _FakeToolCaller([error])
+
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(runner._wrap_tool_result_in_persona(
+            tool_caller=caller,
+            rendered_tool_result='{"raw":"tool dump"}',
+            user_query_text="查询",
+        ))
+
+    assert caught.value is error
 
 
 def test_run_agent_returns_immediately_for_banter_stop_without_tools(monkeypatch) -> None:  # noqa: ANN001
@@ -629,7 +647,44 @@ def test_run_agent_returns_no_reply_when_time_budget_is_exhausted() -> None:
     )
 
     assert result.text == "[NO_REPLY]"
+    assert result.failure_code == "agent_time_budget_exhausted"
     assert caller.calls == []
+
+
+def test_run_agent_marks_quality_timeout_as_operational_failure(monkeypatch) -> None:  # noqa: ANN001
+    async def _timeout(*_args, **_kwargs):  # noqa: ANN001
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(runner, "finalize_agent_reply_quality", _timeout)
+    caller = _FakeToolCaller([
+        tool_impl.ToolCallerResponse(
+            finish_reason="stop",
+            content="正常生成的候选回复",
+            tool_calls=[],
+            raw={},
+        )
+    ])
+
+    result = asyncio.run(runner.run_agent(
+        messages=[{"role": "user", "content": "在吗"}],
+        registry=tool_registry.ToolRegistry(),
+        tool_caller=caller,
+        executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+        plugin_config=SimpleNamespace(
+            personification_agent_max_steps=2,
+            personification_model_builtin_search_enabled=False,
+            personification_builtin_search=False,
+        ),
+        logger=_FakeLogger(),
+        precomputed_intent=SimpleNamespace(
+            chat_intent="banter",
+            plugin_question_intent="capability",
+            ambiguity_level="low",
+        ),
+    ))
+
+    assert result.text == "[NO_REPLY]"
+    assert result.failure_code == "agent_quality_timeout"
 
 
 def test_run_agent_skips_query_rewrite_for_direct_native_image_answer(monkeypatch) -> None:  # noqa: ANN001
@@ -771,6 +826,7 @@ def test_run_agent_query_rewrite_consumes_agent_deadline(monkeypatch) -> None:  
     )
 
     assert result.text == "[NO_REPLY]"
+    assert result.failure_code == "agent_time_budget_exhausted"
     assert len(caller.calls) == 1
 
 
@@ -851,6 +907,7 @@ def test_run_agent_main_model_call_is_bounded_by_agent_deadline(monkeypatch) -> 
     )
 
     assert result.text == "[NO_REPLY]"
+    assert result.failure_code == "agent_model_timeout"
     assert len(caller.calls) == 1
 
 
@@ -1201,7 +1258,8 @@ def test_run_agent_returns_image_generation_failure_without_rewrite(monkeypatch)
         )
     )
 
-    assert result.text == "图片生成失败：图片服务没有返回图片数据"
+    assert result.text == "[NO_REPLY]"
+    assert result.failure_code == "agent_image_generation_failed"
     assert result.bypass_length_limits is False
     assert len(caller.calls) == 1
 
@@ -1267,7 +1325,8 @@ def test_run_agent_returns_image_generation_timeout_without_rewrite(monkeypatch)
     )
     elapsed = time.monotonic() - started_at
 
-    assert result.text == "图片生成失败：生成超时，请稍后重试"
+    assert result.text == "[NO_REPLY]"
+    assert result.failure_code == "agent_image_generation_failed"
     assert result.bypass_length_limits is False
     assert len(caller.calls) == 1
     assert elapsed < 0.18
@@ -1361,9 +1420,167 @@ def test_run_agent_starts_background_image_generation_for_send_capable_executor(
     result, caller = asyncio.run(_run())
 
     assert result.text == "我先按这个感觉画一版"
+    assert result.suppress_reply_recovery is True
     assert sent_texts == []
     assert sent_images == ["QUJD"]
     assert len(caller.calls) == 2
+
+
+def test_background_image_no_reply_status_suppresses_required_recovery(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(runner, "_start_background_image_generation", lambda **_kwargs: True)
+    registry = tool_registry.ToolRegistry()
+    registry.register(
+        tool_registry.AgentTool(
+            name="generate_image",
+            description="generate image",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda **_kwargs: None,
+        )
+    )
+    caller = _FakeToolCaller([
+        tool_impl.ToolCallerResponse(
+            finish_reason="stop",
+            content="[NO_REPLY]",
+            tool_calls=[],
+            raw={},
+        )
+    ])
+    executor = SimpleNamespace(
+        send_text=lambda _text: asyncio.sleep(0),
+        send_image_b64=lambda _data: asyncio.sleep(0),
+        execute=lambda *_args, **_kwargs: None,
+    )
+
+    result = asyncio.run(runner.run_agent(
+        messages=[{"role": "user", "content": "画一张图"}],
+        registry=registry,
+        tool_caller=caller,
+        executor=executor,
+        plugin_config=SimpleNamespace(
+            personification_agent_max_steps=2,
+            personification_model_builtin_search_enabled=False,
+            personification_builtin_search=False,
+            personification_image_gen_background_enabled=True,
+        ),
+        logger=_FakeLogger(),
+        precomputed_intent=SimpleNamespace(
+            chat_intent="image_generation",
+            plugin_question_intent="",
+            ambiguity_level="low",
+        ),
+        reply_required=True,
+    ))
+
+    assert result.text == "[NO_REPLY]"
+    assert result.suppress_reply_recovery is True
+
+
+def test_background_image_provider_failure_stays_silent_and_redacted() -> None:
+    sent_texts: list[str] = []
+
+    class _Executor:
+        async def send_text(self, text: str) -> None:
+            sent_texts.append(text)
+
+        async def send_image_b64(self, _image_b64: str) -> None:
+            raise AssertionError("image must not be sent")
+
+    class _FailingCaller:
+        async def chat_with_tools(self, *_args, **_kwargs):  # noqa: ANN001
+            error = RuntimeError("https://private.example/?api_key=top-secret")
+            error.code = "provider_call_failed"
+            raise error
+
+    registry = tool_registry.ToolRegistry()
+    registry.register(
+        tool_registry.AgentTool(
+            name="generate_image",
+            description="generate image",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda **_kwargs: None,
+        )
+    )
+    logger = _FakeLogger()
+
+    asyncio.run(image_generation._run_background_image_generation(
+        registry=registry,
+        executor=_Executor(),
+        tool_caller=_FailingCaller(),
+        messages=[],
+        user_request="画一张图",
+        rewritten_query=None,
+        user_images=[],
+        use_builtin_search=False,
+        logger=logger,
+    ))
+
+    assert sent_texts == []
+    assert logger.warning_messages
+    assert "provider_failure" in logger.warning_messages[-1]
+    assert "top-secret" not in logger.warning_messages[-1]
+    assert "private.example" not in logger.warning_messages[-1]
+
+
+def test_background_research_failure_does_not_reinject_raw_exception() -> None:
+    async def _failing_search(**_kwargs):  # noqa: ANN001
+        raise RuntimeError("https://private.example/?api_key=top-secret")
+
+    registry = tool_registry.ToolRegistry()
+    registry.register(
+        tool_registry.AgentTool(
+            name="search_web",
+            description="search",
+            parameters={"type": "object", "properties": {}},
+            handler=_failing_search,
+        )
+    )
+    registry.register(
+        tool_registry.AgentTool(
+            name="generate_image",
+            description="generate image",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda **_kwargs: None,
+        )
+    )
+    caller = _FakeToolCaller([
+        tool_impl.ToolCallerResponse(
+            finish_reason="tool_calls",
+            content="",
+            tool_calls=[tool_impl.ToolCall(id="search", name="search_web", arguments={})],
+            raw={},
+        ),
+        tool_impl.ToolCallerResponse(
+            finish_reason="stop",
+            content="这次先不继续画。",
+            tool_calls=[],
+            raw={},
+        ),
+    ])
+    logger = _FakeLogger()
+    sent_texts: list[str] = []
+    executor = SimpleNamespace(
+        send_text=lambda text: asyncio.sleep(0, result=sent_texts.append(text)),
+        send_image_b64=lambda _data: asyncio.sleep(0),
+    )
+
+    asyncio.run(image_generation._run_background_image_generation(
+        registry=registry,
+        executor=executor,
+        tool_caller=caller,
+        messages=[],
+        user_request="画一张图",
+        rewritten_query=None,
+        user_images=[],
+        use_builtin_search=False,
+        logger=logger,
+    ))
+
+    assert sent_texts == ["这次先不继续画。"]
+    assert len(caller.calls) == 2
+    rendered_messages = str(caller.calls[1]["messages"])
+    assert "top-secret" not in rendered_messages
+    assert "private.example" not in rendered_messages
+    assert any("type=RuntimeError" in message for message in logger.warning_messages)
 
 
 def test_background_image_generation_can_use_reference_search_before_generate(monkeypatch) -> None:  # noqa: ANN001

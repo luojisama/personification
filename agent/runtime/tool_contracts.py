@@ -7,7 +7,7 @@ from ...core.qq_expression_tools import expression_tool_result_queued
 from ..tool_registry import ToolRegistry
 from .image_generation import _IMAGE_GENERATION_TOOL_NAME
 from .tool_catalog import tool_runtime_metadata
-from .wrappers import _format_image_generation_failure, _is_direct_media_tool_result
+from .wrappers import _is_direct_media_tool_result
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,8 @@ class DirectToolResult:
     direct_output: bool = False
     bypass_length_limits: bool = False
     reason: str = ""
+    failure_code: str = ""
+    suppress_reply_recovery: bool = False
 
 
 def metadata_tags(metadata: dict[str, Any]) -> set[str]:
@@ -62,9 +64,10 @@ def direct_tool_result_from_contract(
         return DirectToolResult(text=text, bypass_length_limits=True, reason="direct_media")
     if normalized_tool_name == _IMAGE_GENERATION_TOOL_NAME:
         return DirectToolResult(
-            text=_format_image_generation_failure(text),
+            text="[NO_REPLY]",
             bypass_length_limits=False,
             reason="image_generation_result",
+            failure_code="agent_image_generation_failed",
         )
     return None
 

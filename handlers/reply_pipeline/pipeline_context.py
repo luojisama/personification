@@ -24,7 +24,12 @@ from ...core.qq_expression_tools import register_send_qq_expression_tools
 from ...core.gemini_profile import build_gemini_route_policy_prompt
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_style_policy import build_reply_style_policy_prompt
-from ..reply_commit import acquire_reply_commit, release_reply_commit
+from ..reply_commit import (
+    acquire_reply_commit,
+    mark_reply_delivery_confirmed,
+    mark_reply_delivery_started,
+    release_reply_commit,
+)
 from ...core.visual_capabilities import VISUAL_ROUTE_REPLY_PLAIN
 from ...skill_runtime.runtime_api import SkillRuntime
 from ...skills.skillpacks.friend_request_tool.scripts.main import build_friend_request_tool_for_runtime
@@ -687,13 +692,13 @@ async def run_agent_if_enabled(
     response_deadline: float | None = None,
     task_exc_logger: Callable[[str, Any], Any] | None = None,
     reply_commit_state: dict[str, Any] | None = None,
-) -> tuple[str | None, bool, bool, Any | None, list[dict[str, Any]]]:
+) -> tuple[str | None, bool, bool, Any | None, list[dict[str, Any]], str, bool]:
     if not (
         getattr(runtime.plugin_config, "personification_agent_enabled", True)
         and runtime.tool_registry
         and runtime.agent_tool_caller
     ):
-        return None, False, False, None, []
+        return None, False, False, None, [], "", False
 
     executor = ActionExecutor(bot, event, runtime.plugin_config, runtime.logger)
     runtime_registry = clone_tool_registry(runtime.tool_registry)
@@ -780,7 +785,9 @@ async def run_agent_if_enabled(
             commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
             await acquire_reply_commit(commit_state)
             try:
+                mark_reply_delivery_started(commit_state)
                 await bot.send(event, str(text or "").strip() or _phrase)
+                mark_reply_delivery_confirmed(commit_state)
             finally:
                 release_reply_commit(commit_state)
         ack_sender = _ack_sender
@@ -851,6 +858,8 @@ async def run_agent_if_enabled(
         bool(getattr(result, "bypass_length_limits", False)),
         executor,
         list(result.pending_actions),
+        str(getattr(result, "failure_code", "") or ""),
+        bool(getattr(result, "suppress_reply_recovery", False)),
     )
 
 

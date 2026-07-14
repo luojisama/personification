@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 
@@ -70,6 +72,43 @@ def test_finalize_agent_reply_quality_does_not_rewrite_local_normalization() -> 
     assert result.text == "这个事得看具体情况"
     assert caller.calls == []
     assert result.quality_checks[-1]["action"] == "normalized"
+
+
+def test_finalize_agent_reply_quality_preserves_operational_failure_code() -> None:
+    source = final_synthesis.AgentResult(
+        text="[NO_REPLY]",
+        pending_actions=[],
+        failure_code="agent_model_timeout",
+    )
+
+    result = asyncio.run(reply_quality.finalize_agent_reply_quality(
+        source,
+        tool_caller=None,
+        messages=[],
+        reason="model_timeout",
+    ))
+
+    assert result.text == "[NO_REPLY]"
+    assert result.failure_code == "agent_model_timeout"
+
+
+def test_finalize_agent_reply_quality_propagates_rewrite_provider_failure() -> None:
+    error = RuntimeError("private provider failure")
+    error.code = "provider_call_failed"
+
+    class _FailingCaller:
+        async def chat_with_tools(self, *_args, **_kwargs):  # noqa: ANN001
+            raise error
+
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(reply_quality.finalize_agent_reply_quality(
+            _agent_result("我先看看情况，等会再说"),
+            tool_caller=_FailingCaller(),
+            messages=[],
+            reason="unit",
+        ))
+
+    assert caught.value is error
 
 
 def test_finalize_agent_reply_quality_rewrites_observer_posture_once() -> None:

@@ -154,12 +154,6 @@ def _task_exc_logger(label: str, logger: Any) -> Any:
     return _cb
 
 
-_FALLBACK_REPLIES = [
-    "啊，我突然脑子有点空白...等一下再问我？",
-    "这个问题我需要想想，稍后回你",
-    "哦，刚才走神了，你刚说什么来着",
-]
-
 _IMAGE_B64_RE = re.compile(r"\[IMAGE_B64\]([A-Za-z0-9+/=\r\n]+)\[/IMAGE_B64\]")
 _SAFE_PROVIDER_DIAGNOSIS_CODES = {
     "provider_auth_failed",
@@ -439,7 +433,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                 detail=(
                     f"code={provider_code} type={type(exc).__name__}"
                     if is_provider_failure
-                    else str(exc)[:500]
+                    else f"type={type(exc).__name__}"
                 ),
             )
             trace_mod.finish_trace(
@@ -933,28 +927,26 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
     if not runtime.get_configured_api_providers():
         runtime.logger.warning("拟人插件：未配置可用的 API provider，跳过回复")
-        required_without_provider = bool(
-            state.get("reply_required", False) or is_direct_mention or not hasattr(event, "group_id")
-        )
-        if required_without_provider:
-            try:
-                await acquire_reply_commit(state)
-                mark_reply_delivery_started(state)
-                await bot.send(event, required_reply_fallback_text(has_images=bool(image_urls)))
-                mark_reply_delivery_confirmed(state)
-                mark_reply_delivery_complete(state)
-                try:
-                    from ...core import reply_turn_trace
+        try:
+            from ...core import reply_turn_trace
 
-                    reply_turn_trace.finish_trace(
-                        outcome="degraded",
-                        diagnosis_code="no_provider",
-                        detail={"fallback_sent": True},
-                    )
-                except Exception:
-                    pass
-            except Exception as exc:
-                log_exception(runtime.logger, "[reply_processor] fallback presence reply failed", exc, level="debug")
+            reply_turn_trace.record_stage(
+                key="provider_failure",
+                label="Provider 不可用",
+                status="error",
+                detail="code=provider_caller_unavailable delivery_state=not_started silent=true",
+            )
+            reply_turn_trace.finish_trace(
+                outcome="failed",
+                diagnosis_code="provider_caller_unavailable",
+                detail={
+                    "silent": True,
+                    "delivery_state": "not_started",
+                    "reply_required": bool(state.get("reply_required", False)),
+                },
+            )
+        except Exception:
+            pass
         return
 
     user_name = sender_name
@@ -1757,6 +1749,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         bypass_length_limits = False
         pending_action_executor = None
         pending_actions: list[dict[str, Any]] = []
+        agent_failure_code = ""
+        agent_suppress_reply_recovery = False
 
         async def _send_reply(payload: Any) -> Any:
             mark_reply_delivery_started(state)
@@ -1772,6 +1766,18 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     outcome="ok",
                     diagnosis_code="ok",
                     detail={"action_only": True},
+                )
+            except Exception:
+                pass
+
+        def _finish_background_pending_trace() -> None:
+            try:
+                from ...core import reply_turn_trace
+
+                reply_turn_trace.finish_trace(
+                    outcome="no_reply",
+                    diagnosis_code="background_action_pending",
+                    detail={"silent": True, "background_action": True},
                 )
             except Exception:
                 pass
@@ -1830,6 +1836,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         bypass_length_limits,
                         pending_action_executor,
                         pending_actions,
+                        agent_failure_code,
+                        agent_suppress_reply_recovery,
                     ) = await _run_agent_if_enabled(
                         bot=bot,
                         event=event,
@@ -1884,10 +1892,52 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     bypass_length_limits = False
             finally:
                 reset_current_image_context(image_ctx_token)
+        if used_agent and agent_failure_code:
+            pending_actions.clear()
+            delivery_started = bool(state.get("reply_delivery_started", False))
+            delivery_confirmed = bool(state.get("reply_delivery_confirmed", False))
+            if delivery_confirmed:
+                delivery_state = "partial"
+                trace_outcome = "partial"
+                diagnosis_code = f"partial_{agent_failure_code}"
+            elif delivery_started:
+                delivery_state = "dispatching"
+                trace_outcome = "outcome_unknown"
+                diagnosis_code = "send_outcome_unknown"
+            else:
+                delivery_state = "not_started"
+                trace_outcome = "failed"
+                diagnosis_code = agent_failure_code
+            runtime.logger.warning(
+                f"拟人插件：Agent 基础设施失败，保持静默: code={agent_failure_code} "
+                f"delivery_state={delivery_state}"
+            )
+            try:
+                from ...core import reply_turn_trace
+
+                reply_turn_trace.record_stage(
+                    key="agent_operational_failure",
+                    label="Agent 基础设施失败",
+                    status="warn" if delivery_confirmed else "error",
+                    detail=f"code={agent_failure_code} delivery_state={delivery_state} silent=true",
+                )
+                reply_turn_trace.finish_trace(
+                    outcome=trace_outcome,
+                    diagnosis_code=diagnosis_code,
+                    detail={
+                        "silent": True,
+                        "delivery_state": delivery_state,
+                        "failure_code": agent_failure_code,
+                    },
+                )
+            except Exception:
+                pass
+            return
         if used_agent and required_reply_needs_recovery(
             reply_content,
             reply_required=reply_required,
             pending_actions=pending_actions,
+            direct_output=agent_suppress_reply_recovery,
         ):
             runtime.logger.warning("拟人插件：强交互 Agent 返回静默，改走基础模型恢复。")
             reply_content = ""
@@ -2039,6 +2089,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             reply_content,
             reply_required=reply_required,
             pending_actions=pending_actions,
+            direct_output=agent_suppress_reply_recovery,
         ):
             reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
         has_block_marker = "[BLOCK]" in reply_content or "<BLOCK>" in reply_content
@@ -2054,6 +2105,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if bool(state.get("reply_delivery_confirmed", False)):
                 mark_reply_delivery_complete(state)
                 _finish_action_only_trace()
+                return
+            if agent_suppress_reply_recovery:
+                _finish_background_pending_trace()
                 return
             if reply_required:
                 reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
@@ -2277,7 +2331,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         if review_decision.action == "rewrite" and review_decision.text:
             reply_content = review_decision.text.strip()
 
-        if has_silence_control_marker(reply_content) and reply_required and not pending_actions:
+        if (
+            has_silence_control_marker(reply_content)
+            and reply_required
+            and not pending_actions
+            and not agent_suppress_reply_recovery
+        ):
             reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
         if has_silence_control_marker(reply_content):
             await _commit_pending_actions()
@@ -2289,6 +2348,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if bool(state.get("reply_delivery_confirmed", False)):
                 mark_reply_delivery_complete(state)
                 _finish_action_only_trace()
+                return
+            if agent_suppress_reply_recovery:
+                _finish_background_pending_trace()
                 return
             if reply_required:
                 reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
@@ -2311,6 +2373,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         reply_content = strip_response_control_markers(reply_content)
         reply_content = normalize_visible_reply_text(reply_content)
         if not reply_content and not _IMAGE_B64_RE.search(str(reply_content or "")):
+            if agent_suppress_reply_recovery:
+                _finish_background_pending_trace()
+                return
             if not reply_required:
                 return
             reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
@@ -2811,10 +2876,29 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     except Exception as e:
         record_counter("reply_processor.error_total")
         provider_code = _provider_diagnosis_code(e)
+        delivery_started = bool(state.get("reply_delivery_started", False))
+        delivery_confirmed = bool(state.get("reply_delivery_confirmed", False))
+        delivery_complete = bool(state.get("reply_delivery_complete", False))
+        if delivery_complete:
+            delivery_state = "complete"
+            trace_outcome = "ok"
+            diagnosis_code = "post_send_provider_failure" if provider_code else "post_send_internal_exception"
+        elif delivery_confirmed:
+            delivery_state = "partial"
+            trace_outcome = "partial"
+            diagnosis_code = "partial_provider_failure" if provider_code else "partial_internal_exception"
+        elif delivery_started:
+            delivery_state = "dispatching"
+            trace_outcome = "outcome_unknown"
+            diagnosis_code = "send_outcome_unknown"
+        else:
+            delivery_state = "not_started"
+            trace_outcome = "failed"
+            diagnosis_code = provider_code or "internal_exception"
         error_summary = (
             f"code={provider_code} type={type(e).__name__}"
             if provider_code
-            else str(e)[:500]
+            else f"type={type(e).__name__}"
         )
         runtime.logger.error(f"拟人插件 API 调用失败: {error_summary}")
         try:
@@ -2823,32 +2907,20 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             reply_turn_trace.record_stage(
                 key="provider_failure" if provider_code else "reply_failed",
                 label="Provider 调用失败" if provider_code else "回复异常",
-                status="error",
-                detail=error_summary,
+                status="warn" if delivery_confirmed else "error",
+                detail=f"{error_summary} delivery_state={delivery_state} silent=true",
             )
             reply_turn_trace.finish_trace(
-                outcome="failed",
-                diagnosis_code=provider_code or "internal_exception",
-                detail={"error": error_summary},
+                outcome=trace_outcome,
+                diagnosis_code=diagnosis_code,
+                detail={
+                    "error": error_summary,
+                    "silent": True,
+                    "delivery_state": delivery_state,
+                    "delivery_started": delivery_started,
+                    "delivery_confirmed": delivery_confirmed,
+                    "delivery_complete": delivery_complete,
+                },
             )
         except Exception:
             pass
-        if reply_required and not bool(state.get("reply_delivery_started", False)):
-            try:
-                await acquire_reply_commit(state)
-                mark_reply_delivery_started(state)
-                await bot.send(event, required_reply_fallback_text(has_images=bool(tool_image_urls)))
-                mark_reply_delivery_confirmed(state)
-                mark_reply_delivery_complete(state)
-                try:
-                    from ...core import reply_turn_trace
-
-                    reply_turn_trace.finish_trace(
-                        outcome="degraded",
-                        diagnosis_code=provider_code or "internal_exception",
-                        detail={"fallback_sent": True, "error": error_summary},
-                    )
-                except Exception:
-                    pass
-            except Exception as exc:
-                log_exception(runtime.logger, "[reply_processor] fallback direct mention send failed", exc, level="debug")

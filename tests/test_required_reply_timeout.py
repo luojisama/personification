@@ -41,7 +41,53 @@ def test_cancelled_reply_processor_does_not_finish_as_no_reply(monkeypatch) -> N
     assert finished == []
 
 
-def test_required_image_timeout_sends_fallback_and_finishes_degraded(monkeypatch) -> None:  # noqa: ANN001
+@pytest.mark.parametrize(
+    ("provider_code", "expected_key", "expected_diagnosis"),
+    [
+        ("provider_auth_failed", "provider_failure", "provider_auth_failed"),
+        ("", "unhandled_exception", "internal_exception"),
+    ],
+)
+def test_reply_processor_classifies_and_redacts_outer_failures(
+    monkeypatch,
+    provider_code: str,
+    expected_key: str,
+    expected_diagnosis: str,
+) -> None:  # noqa: ANN001
+    stages: list[dict[str, object]] = []
+    finished: list[dict[str, object]] = []
+    error = RuntimeError("https://private.example/chat?api_key=top-secret raw body")
+    if provider_code:
+        error.code = provider_code
+
+    async def _failed_impl(*_args, **_kwargs):  # noqa: ANN001
+        raise error
+
+    monkeypatch.setattr(processor, "_process_response_logic_impl", _failed_impl)
+    monkeypatch.setattr(reply_turn_trace, "current_trace_id", lambda: "")
+    monkeypatch.setattr(reply_turn_trace, "start_trace", lambda **_kwargs: "trace-failure")
+    monkeypatch.setattr(reply_turn_trace, "set_current_trace_id", lambda _trace_id: object())
+    monkeypatch.setattr(reply_turn_trace, "reset_current_trace_id", lambda _token: None)
+    monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **kwargs: stages.append(kwargs))
+    monkeypatch.setattr(reply_turn_trace, "get_trace", lambda _trace_id: {"outcome": "failed"})
+    monkeypatch.setattr(reply_turn_trace, "finish_trace", lambda **kwargs: finished.append(kwargs))
+    deps = SimpleNamespace(runtime=SimpleNamespace(plugin_config=SimpleNamespace(personification_turn_trace_enabled=True)))
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(processor.process_response_logic(
+            SimpleNamespace(),
+            SimpleNamespace(user_id=1, message_id=2),
+            {},
+            deps,
+        ))
+
+    stage = next(item for item in stages if item["key"] == expected_key)
+    assert finished[-1]["diagnosis_code"] == expected_diagnosis
+    assert "top-secret" not in str(stage)
+    assert "private.example" not in str(stage)
+
+
+def test_required_image_timeout_stays_silent_and_finishes_failed(monkeypatch) -> None:  # noqa: ANN001
     stages: list[dict[str, object]] = []
     finished: list[dict[str, object]] = []
     monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **kwargs: stages.append(kwargs))
@@ -71,12 +117,13 @@ def test_required_image_timeout_sends_fallback_and_finishes_degraded(monkeypatch
         )
     )
 
-    assert bot.sent == ["这张图我刚刚没读出来，重发一下试试。"]
+    assert bot.sent == []
     assert stages[-1]["trace_id"] == "trace-required"
     assert stages[-1]["key"] == "reply_timeout"
-    assert "fallback_sent=true" in str(stages[-1]["detail"])
-    assert finished[-1]["outcome"] == "degraded"
+    assert "delivery_state=not_started" in str(stages[-1]["detail"])
+    assert finished[-1]["outcome"] == "failed"
     assert finished[-1]["diagnosis_code"] == "reply_timeout"
+    assert finished[-1]["detail"]["silent"] is True
 
 
 def test_timeout_after_confirmed_delivery_does_not_send_fallback(monkeypatch) -> None:  # noqa: ANN001

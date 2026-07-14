@@ -4,7 +4,6 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict
 
-from ..core.response_review import required_reply_fallback_text
 from ..core.target_inference import normalize_message_target_for_review
 
 
@@ -13,19 +12,6 @@ _PRIVATE_BATCH_DELAY_SECONDS = 0.8
 _MAX_BATCH_EVENTS = 8
 _PROCESS_RESPONSE_TIMEOUT_SECONDS = 180.0
 _DIRECT_REPLY_PREEMPT_SECONDS = 8.0
-_TIMEOUT_FALLBACK_SEND_SECONDS = 10.0
-
-
-def _event_has_media(event: Any) -> bool:
-    try:
-        return any(
-            str(getattr(segment, "type", "") or "").strip().lower() in {"image", "mface", "gif"}
-            for segment in list(getattr(event, "message", []) or [])
-        )
-    except Exception:
-        return False
-
-
 async def _handle_reply_timeout(
     *,
     bot: Any,
@@ -36,46 +22,24 @@ async def _handle_reply_timeout(
     logger: Any,
     commit_lock: asyncio.Lock | None = None,
 ) -> None:
-    fallback_sent = False
-    fallback_error = ""
+    del bot, event, logger, commit_lock
     delivery_started = bool(state.get("reply_delivery_started", False))
     delivery_confirmed = bool(state.get("reply_delivery_confirmed", False))
     delivery_complete = bool(state.get("reply_delivery_complete", False))
-    if bool(state.get("reply_required", False)) and not delivery_started:
-        fallback_text = required_reply_fallback_text(has_images=_event_has_media(event))
-        try:
-            state["reply_delivery_started"] = True
-            if isinstance(commit_lock, asyncio.Lock):
-                async with commit_lock:
-                    await asyncio.wait_for(
-                        bot.send(event, fallback_text),
-                        timeout=_TIMEOUT_FALLBACK_SEND_SECONDS,
-                    )
-            else:
-                await asyncio.wait_for(
-                    bot.send(event, fallback_text),
-                    timeout=_TIMEOUT_FALLBACK_SEND_SECONDS,
-                )
-            fallback_sent = True
-            delivery_started = True
-            delivery_confirmed = True
-            delivery_complete = True
-            state["reply_delivery_confirmed"] = True
-            state["reply_delivery_complete"] = True
-        except Exception as exc:
-            delivery_started = True
-            fallback_error = type(exc).__name__
-            logger.warning(f"拟人插件：会话 {session_key} timeout fallback 发送失败: {exc}")
     if delivery_complete:
-        outcome = "degraded" if fallback_sent else "ok"
-        diagnosis_code = "reply_timeout" if fallback_sent else "post_send_timeout"
+        delivery_state = "complete"
+        outcome = "ok"
+        diagnosis_code = "post_send_timeout"
     elif delivery_confirmed:
+        delivery_state = "partial"
         outcome = "partial"
         diagnosis_code = "partial_reply_timeout"
     elif delivery_started:
+        delivery_state = "dispatching"
         outcome = "outcome_unknown"
         diagnosis_code = "send_outcome_unknown"
     else:
+        delivery_state = "not_started"
         outcome = "failed"
         diagnosis_code = "reply_timeout"
     try:
@@ -92,13 +56,9 @@ async def _handle_reply_timeout(
                 f"delivery_started={str(delivery_started).lower()} "
                 f"delivery_confirmed={str(delivery_confirmed).lower()} "
                 f"delivery_complete={str(delivery_complete).lower()} "
-                f"fallback_sent={str(fallback_sent).lower()} fallback_error={fallback_error or '-'} elapsed_ms=0"
+                f"delivery_state={delivery_state} elapsed_ms=0"
             ),
-            hint=(
-                "强交互已发送安全 fallback；检查状态锁、provider、query rewrite 与工具耗时"
-                if fallback_sent
-                else "已有发送动作时不会自动补发；检查 provider、工具耗时与发送回执"
-            ),
+            hint="基础设施故障保持静默；检查 Provider、工具耗时、状态锁与发送回执",
         )
         reply_turn_trace.finish_trace(
             trace_id=trace_id,
@@ -111,8 +71,8 @@ async def _handle_reply_timeout(
                 "delivery_started": delivery_started,
                 "delivery_confirmed": delivery_confirmed,
                 "delivery_complete": delivery_complete,
-                "fallback_sent": fallback_sent,
-                "fallback_error": fallback_error,
+                "delivery_state": delivery_state,
+                "silent": True,
             },
         )
     except Exception:
@@ -642,34 +602,19 @@ async def run_buffer_timer(
         if finished_exception_cls and isinstance(exc, finished_exception_cls):
             logger.debug("拟人插件：拼接消息处理提前结束（FinishedException）")
         else:
-            if "concatenated_message" in state:
-                retry_state = dict(state)
-                retry_state["disable_network_hooks"] = True
-                try:
-                    await process_response_logic(bot, selected_event, retry_state)
-                    logger.warning(
-                        f"拟人插件：拼接消息处理失败（{type(exc).__name__}: {exc}），"
-                        "已禁用联网/grounding 后重试同批成功"
-                    )
-                    return
-                except Exception:
-                    pass
-
-                fallback_state = dict(state)
-                fallback_state.pop("concatenated_message", None)
-                fallback_state["disable_network_hooks"] = True
-                fallback_state["batch_event_count"] = 1
-                fallback_state["batched_events"] = [serialized_items[-1]] if serialized_items else []
-                fallback_state["repeat_clusters"] = []
-                try:
-                    await process_response_logic(bot, selected_event, fallback_state)
-                    logger.warning(
-                        f"拟人插件：拼接消息处理失败（{type(exc).__name__}: {exc}），已回退单条处理成功"
-                    )
-                    return
-                except Exception:
-                    pass
-            logger.exception("拟人插件：处理拼接消息失败")
+            delivery_state = (
+                "complete"
+                if state.get("reply_delivery_complete")
+                else "partial"
+                if state.get("reply_delivery_confirmed")
+                else "dispatching"
+                if state.get("reply_delivery_started")
+                else "not_started"
+            )
+            logger.error(
+                f"拟人插件：处理拼接消息失败，保持静默: "
+                f"type={type(exc).__name__} delivery_state={delivery_state}"
+            )
     finally:
         entry["processing"] = False
         entry["active_task"] = None
@@ -849,7 +794,19 @@ async def handle_reply_event(
                 if finished_exception_cls and isinstance(exc, finished_exception_cls):
                     logger.debug("拟人插件：direct turn 提前结束（FinishedException）")
                 else:
-                    logger.exception(f"拟人插件：会话 {session_key} direct turn 处理失败")
+                    delivery_state = (
+                        "complete"
+                        if direct_state.get("reply_delivery_complete")
+                        else "partial"
+                        if direct_state.get("reply_delivery_confirmed")
+                        else "dispatching"
+                        if direct_state.get("reply_delivery_started")
+                        else "not_started"
+                    )
+                    logger.error(
+                        f"拟人插件：会话 {session_key} direct turn 处理失败，保持静默: "
+                        f"type={type(exc).__name__} delivery_state={delivery_state}"
+                    )
         return
     entry = msg_buffer.setdefault(session_key, _new_entry(delay))
     entry["delay"] = delay

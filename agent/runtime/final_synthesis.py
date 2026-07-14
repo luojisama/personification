@@ -15,6 +15,8 @@ class AgentResult:
     direct_output: bool = False
     bypass_length_limits: bool = False
     quality_checks: list[dict[str, Any]] = field(default_factory=list)
+    failure_code: str = ""
+    suppress_reply_recovery: bool = False
 
 
 def direct_tool_result_agent_result(
@@ -36,6 +38,8 @@ def direct_tool_result_agent_result(
         pending_actions=pending_actions,
         direct_output=result.direct_output,
         bypass_length_limits=result.bypass_length_limits,
+        failure_code=result.failure_code,
+        suppress_reply_recovery=result.suppress_reply_recovery,
     )
 
 

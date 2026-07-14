@@ -283,7 +283,13 @@ async def run_agent(
                 status="warn",
                 detail=f"reason={reason} elapsed_ms=0",
             )
-            return result
+            if str(getattr(result, "failure_code", "") or ""):
+                return result
+            return AgentResult(
+                text="[NO_REPLY]",
+                pending_actions=list(getattr(result, "pending_actions", []) or []),
+                failure_code="agent_quality_timeout",
+            )
 
     evidence_synthesis_rounds = 0
     last_evidence_tool_count = 0
@@ -537,7 +543,14 @@ async def run_agent(
                 budget_deadline,
             )
         except asyncio.TimeoutError:
-            status_reply = "在画了。"
+            return await _finalize_result(
+                AgentResult(
+                    text="[NO_REPLY]",
+                    pending_actions=pending_actions,
+                    failure_code="agent_image_status_timeout",
+                ),
+                reason="background_image_status_timeout",
+            )
         if _start_background_image_generation(
             registry=registry,
             executor=executor,
@@ -555,6 +568,7 @@ async def run_agent(
                     pending_actions=pending_actions,
                     direct_output=False,
                     bypass_length_limits=False,
+                    suppress_reply_recovery=True,
                 ),
                 reason="background_image_generation",
             )
@@ -655,6 +669,7 @@ async def run_agent(
                 AgentResult(
                     text="[NO_REPLY]",
                     pending_actions=pending_actions,
+                    failure_code="agent_time_budget_exhausted",
                 ),
                 reason="time_budget_empty",
             )
@@ -686,7 +701,11 @@ async def run_agent(
                 detail=f"step={_step + 1} budget_exhausted=true elapsed_ms=0",
             )
             return await _finalize_result(
-                AgentResult(text="[NO_REPLY]", pending_actions=pending_actions),
+                AgentResult(
+                    text="[NO_REPLY]",
+                    pending_actions=pending_actions,
+                    failure_code="agent_model_timeout",
+                ),
                 reason="model_timeout",
             )
         model_elapsed_ms = int((time.monotonic() - model_started_at) * 1000)
@@ -736,7 +755,11 @@ async def run_agent(
                 )
             except asyncio.TimeoutError:
                 return await _finalize_result(
-                    AgentResult(text="[NO_REPLY]", pending_actions=pending_actions),
+                    AgentResult(
+                        text="[NO_REPLY]",
+                        pending_actions=pending_actions,
+                        failure_code="agent_stop_flow_timeout",
+                    ),
                     reason="stop_flow_timeout",
                 )
             if stop_decision.action == "continue":
@@ -789,14 +812,9 @@ async def run_agent(
                 record_trace=_record_reply_trace_stage,
                 status_for_result=_tool_result_trace_status,
             )
-            tool_result_preview_limit = (
-                1000
-                if str(tool_call.name or "").strip() == _IMAGE_GENERATION_TOOL_NAME
-                else 220
-            )
             logger.info(
                 f"[agent] tool_result name={tool_call.name} "
-                f"preview={str(result).replace(chr(10), ' ')[:tool_result_preview_limit]}"
+                f"result_len={len(str(result or ''))}"
             )
             stop_state.last_tool_name = str(tool_call.name or "").strip()
             if str(result or "").strip():
@@ -867,6 +885,7 @@ async def run_agent(
         AgentResult(
             text="[NO_REPLY]",
             pending_actions=pending_actions,
+            failure_code="agent_max_steps_exhausted",
         ),
         reason="max_steps_empty",
     )

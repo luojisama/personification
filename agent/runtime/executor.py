@@ -65,7 +65,7 @@ def _remaining_time_budget_seconds(deadline: float | None) -> float | None:
 def _tool_timeout_result(tool_name: str) -> str:
     normalized_tool_name = str(tool_name or "").strip()
     if normalized_tool_name == _IMAGE_GENERATION_TOOL_NAME:
-        return "图片生成失败：生成超时，请稍后重试"
+        return "image_generation_timeout"
     return "工具调用失败：超时"
 
 
@@ -80,6 +80,7 @@ async def _execute_tool_with_retries(
     previous_tool_result_text: str = "",
     logger: Any,
     budget_deadline: float | None = None,
+    safe_failures: bool = False,
 ) -> tuple[dict[str, Any], str]:
     tool = registry.get(tool_name)
     if tool is None:
@@ -144,12 +145,22 @@ async def _execute_tool_with_retries(
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
             record_counter("agent.tool_fail_total", tool=tool_name, reason="exception")
             record_timing("agent.tool_exec_ms", elapsed_ms, tool=tool_name, status="fail")
-            last_result = f"工具调用失败：{e}"
-            log_exception(
-                logger,
-                f"[agent] tool {tool_name} error after {elapsed_ms}ms",
-                e,
-            )
+            if safe_failures or tool_name == _IMAGE_GENERATION_TOOL_NAME:
+                last_result = (
+                    "image_generation_failed"
+                    if tool_name == _IMAGE_GENERATION_TOOL_NAME
+                    else f"{str(tool_name or 'tool').strip()[:80]}_failed"
+                )
+                logger.warning(
+                    f"[agent] tool {tool_name} failed after {elapsed_ms}ms: type={type(e).__name__}"
+                )
+            else:
+                last_result = f"工具调用失败：{e}"
+                log_exception(
+                    logger,
+                    f"[agent] tool {tool_name} error after {elapsed_ms}ms",
+                    e,
+                )
             break
         elapsed_ms = int((time.monotonic() - started_at) * 1000)
         record_counter("agent.tool_ok_total", tool=tool_name)
