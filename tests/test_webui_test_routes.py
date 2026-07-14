@@ -14,6 +14,7 @@ from ._loader import load_personification_module
 from .test_webui_smoke import _build_client, _login_as_admin, _runtime_context  # noqa: F401
 
 test_routes = load_personification_module("plugin.personification.webui.routes.test_routes")
+tool_registry_module = load_personification_module("plugin.personification.agent.tool_registry")
 
 
 class _FakeResp:
@@ -48,24 +49,44 @@ class _QzoneProbeCaller:
         self.messages = []
         self.tools = []
         self.context = {}
+        self.use_builtin_search = None
 
     async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
         llm_context = load_personification_module("plugin.personification.core.llm_context")
         self.messages = list(messages)
         self.tools = list(tools)
         self.context = llm_context.current_llm_context()
+        self.use_builtin_search = use_builtin_search
         return _FakeResp(content='{"action":"skip","reason":"probe_ok"}')
 
 
-def _set_routed_caller(runtime_context, caller) -> None:
+def _set_routed_caller(runtime_context, caller, registry=None) -> None:  # noqa: ANN001
     current = runtime_context.app_module.get_runtime_context()
     runtime_context.app_module.set_runtime_context(
         plugin_config=runtime_context.plugin_config,
         superusers={"10001"},
         get_bots=current.get_bots,
         logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
-        runtime_bundle=SimpleNamespace(agent_tool_caller=caller),
+        runtime_bundle=SimpleNamespace(agent_tool_caller=caller, tool_registry=registry),
     )
+
+
+async def _noop_tool(**_kwargs):  # noqa: ANN001
+    return "ok"
+
+
+def _tool_registry(*names: str):  # noqa: ANN201
+    registry = tool_registry_module.ToolRegistry()
+    for name in names:
+        registry.register(
+            tool_registry_module.AgentTool(
+                name=name,
+                description=name,
+                parameters={"type": "object", "properties": {}},
+                handler=_noop_tool,
+            )
+        )
+    return registry
 
 
 def _patch_ai_routes(monkeypatch, providers, caller_content="hi"):
@@ -139,7 +160,11 @@ def test_chat_single_preserves_response_fields_and_adds_diagnostic(_runtime_cont
 
 def test_chat_single_qzone_profile_uses_production_compatible_shape(_runtime_context) -> None:
     caller = _QzoneProbeCaller()
-    _set_routed_caller(_runtime_context, caller)
+    _set_routed_caller(
+        _runtime_context,
+        caller,
+        _tool_registry("web_search", "weather", "send_qq_face"),
+    )
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
 
@@ -151,15 +176,44 @@ def test_chat_single_qzone_profile_uses_production_compatible_shape(_runtime_con
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["profile"] == "qzone"
-    assert body["tools_count"] == 1
+    assert body["tools_count"] == 2
+    assert body["tool_profile"] == "qzone_read_only"
+    assert len(body["tool_names_hash"]) == 12
+    assert body["probe_degraded"] is False
     assert body["diagnostic"]["code"] == "provider_test_qzone_compatible"
+    details = {item["label"]: item["value"] for item in body["diagnostic"]["details"]}
+    assert details["Tool profile"] == "qzone_read_only"
+    assert details["Schema hash"] == body["tool_names_hash"]
     assert body["runtime"]["build_id"]
     assert caller.context["purpose"] == "qzone_provider_probe"
     assert caller.context["retry_policy"] == "single_attempt"
-    assert caller.tools[0]["function"]["name"] == "qzone_probe_context"
+    assert {tool["function"]["name"] for tool in caller.tools} == {"web_search", "weather"}
+    assert caller.use_builtin_search is False
     assert "无副作用" in caller.messages[0]["content"]
     llm_context = load_personification_module("plugin.personification.core.llm_context")
     assert llm_context.current_llm_context() == {}
+
+
+def test_chat_single_qzone_profile_marks_synthetic_probe_degraded(_runtime_context) -> None:
+    caller = _QzoneProbeCaller()
+    _set_routed_caller(_runtime_context, caller)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.post(
+        "/personification/api/test/chat",
+        json={"prompt": "检查空间草稿调用", "profile": "qzone"},
+    )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["tools_count"] == 1
+    assert body["tool_profile"] == "synthetic"
+    assert body["probe_degraded"] is True
+    assert body["diagnostic"]["code"] == "provider_test_qzone_probe_degraded"
+    degraded_details = {item["label"]: item["value"] for item in body["diagnostic"]["details"]}
+    assert degraded_details["Tool profile"] == "synthetic"
+    assert caller.tools[0]["function"]["name"] == "qzone_probe_context"
 
 
 def test_chat_single_qzone_profile_rejects_non_json_output(_runtime_context) -> None:

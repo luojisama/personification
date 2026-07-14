@@ -672,7 +672,7 @@ function renderTest() {
       <button class="btn" onclick="runTestAll()">测试全部 provider</button>
       ${state.testLoading?'<span class="muted">调用中…</span>':''}
     </div>
-    <p class="muted" style="margin-top:8px;font-size:12px">“QZone 兼容测试”使用 production single_attempt、只读 function schema 和 JSON instruction，但不会执行工具或发布内容；“测试全部 provider”会向 api_pools 里每个 provider 各发一次。</p>
+    <p class="muted" style="margin-top:8px;font-size:12px">“QZone 兼容测试”使用 production single_attempt、当前 runtime 的 QZone read-only tool profile 和 JSON instruction，但不会执行工具或发布内容；runtime registry 不可用时会明确标记 degraded probe。“测试全部 provider”会向 api_pools 里每个 provider 各发一次。</p>
   </div>
   ${r ? `<div class="card"><h2>响应（路由模型）</h2>
     <div class="row muted" style="font-size:12px;margin-bottom:8px">

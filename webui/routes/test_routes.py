@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from typing import Any
@@ -8,6 +9,10 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
+from ...core.agent_bridge import (
+    TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
+    tool_schemas_for_profile,
+)
 from ...core.llm_context import LLM_RETRY_POLICY_SINGLE_ATTEMPT, reset_llm_context, set_llm_context
 from ...core.operation_diagnostics import detail, diagnostic, exception_diagnostic, step
 from ...core.runtime_identity import get_runtime_identity
@@ -133,6 +138,9 @@ def _provider_failure_report(
     provider: dict[str, Any] | None = None,
     request_profile: str = "chat",
     tools_count: int = 0,
+    tool_profile: str = "",
+    tool_names_hash: str = "",
+    probe_degraded: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     chain = _exception_chain(exc)
     status = _exception_status(chain)
@@ -246,6 +254,9 @@ def _provider_failure_report(
         *(item.to_dict() for item in _provider_details(provider)),
         detail("请求形态", request_profile).to_dict(),
         detail("Function schemas", tools_count).to_dict(),
+        *([detail("Tool profile", tool_profile).to_dict()] if tool_profile else []),
+        *([detail("Schema hash", tool_names_hash).to_dict()] if tool_names_hash else []),
+        *([detail("Probe scope", "degraded synthetic", "warn").to_dict()] if probe_degraded else []),
         detail("异常类型", type(exc).__name__, "error").to_dict(),
         *([detail("HTTP status", status, "error").to_dict()] if status else []),
         *([detail("Provider error code", provider_error_code, "error").to_dict()] if provider_error_code else []),
@@ -342,6 +353,20 @@ def _response_payload(response: Any, *, duration_ms: int) -> dict[str, Any]:
     }
 
 
+def _tool_names_hash(tools: list[dict]) -> str:
+    names: list[str] = []
+    for tool in list(tools or []):
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function", tool)
+        if not isinstance(function, dict):
+            continue
+        name = str(function.get("name", "") or "").strip()
+        if name:
+            names.append(name)
+    return hashlib.sha256("\0".join(sorted(names)).encode("utf-8")).hexdigest()[:12] if names else ""
+
+
 def _is_qzone_probe_json(content: Any) -> bool:
     text = str(content or "").strip()
     if text.startswith("```") and text.endswith("```"):
@@ -365,8 +390,31 @@ def _provider_response_report(
     blocked_reason: str = "",
     request_profile: str = "chat",
     tools_count: int = 0,
+    tool_profile: str = "",
+    tool_names_hash: str = "",
+    probe_degraded: bool = False,
 ) -> dict[str, Any]:
     provider_info = _provider_details(provider)
+    qzone_profile = request_profile == _QZONE_PROBE_PROFILE
+    qzone_success_code = (
+        "provider_test_qzone_probe_degraded"
+        if probe_degraded
+        else "provider_test_qzone_compatible"
+    )
+    qzone_success_title = (
+        "QZone-compatible probe 降级完成"
+        if probe_degraded
+        else "QZone-compatible Provider probe 完成"
+    )
+    qzone_success_message = (
+        "runtime tool registry 不可用；Provider 仅通过 synthetic schema，不能证明完整 QZone profile 兼容。"
+        if probe_degraded
+        else "Provider 接受了 QZone read-only production profile。"
+    )
+    qzone_profile_details = (
+        detail("Tool profile", tool_profile or "synthetic", "warn" if probe_degraded else "ok"),
+        detail("Schema hash", tool_names_hash or "-", "warn" if probe_degraded else "ok"),
+    )
     if blocked_reason:
         return diagnostic(
             ok=False,
@@ -385,18 +433,19 @@ def _provider_response_report(
             retryable=False,
         )
     if not str(payload.get("content") or "").strip():
-        if request_profile == _QZONE_PROBE_PROFILE and int(payload.get("tool_call_count") or 0) > 0:
+        if qzone_profile and int(payload.get("tool_call_count") or 0) > 0:
             identity = get_runtime_identity()
             return diagnostic(
                 ok=True,
-                code="provider_test_qzone_compatible",
+                code=qzone_success_code,
                 phase="operation_complete",
-                title="QZone-compatible Provider probe 完成",
-                message="Provider 接受了 QZone single-attempt function schema，并返回了结构化 tool call。",
+                title=qzone_success_title,
+                message=f"{qzone_success_message} Provider 返回了结构化 tool call。",
                 details=(
                     *provider_info,
                     detail("实际模型", str(payload.get("model_used") or "未报告"), "ok"),
                     detail("Function schemas", tools_count, "ok"),
+                    *qzone_profile_details,
                     detail("Tool calls", int(payload.get("tool_call_count") or 0), "ok"),
                     detail("Build", identity["build_id"]),
                     detail("Worker", identity["worker_id"]),
@@ -424,7 +473,6 @@ def _provider_response_report(
             retryable=True,
         )
     identity = get_runtime_identity()
-    qzone_profile = request_profile == _QZONE_PROBE_PROFILE
     if qzone_profile and not _is_qzone_probe_json(payload.get("content")):
         return diagnostic(
             ok=False,
@@ -436,6 +484,7 @@ def _provider_response_report(
                 *provider_info,
                 detail("实际模型", str(payload.get("model_used") or "未报告"), "warn"),
                 detail("Function schemas", tools_count, "ok"),
+                *qzone_profile_details,
                 detail("Build", identity["build_id"]),
                 detail("Worker", identity["worker_id"]),
             ),
@@ -449,11 +498,11 @@ def _provider_response_report(
         )
     return diagnostic(
         ok=True,
-        code="provider_test_qzone_compatible" if qzone_profile else "provider_test_complete",
+        code=qzone_success_code if qzone_profile else "provider_test_complete",
         phase="operation_complete",
-        title="QZone-compatible Provider probe 完成" if qzone_profile else "Provider 模型测试完成",
+        title=qzone_success_title if qzone_profile else "Provider 模型测试完成",
         message=(
-            "Provider 接受了 QZone single-attempt function schema，并返回了可用模型内容。"
+            f"{qzone_success_message} Provider 返回了可用模型内容。"
             if qzone_profile
             else "Provider 已返回可用模型内容。"
         ),
@@ -463,6 +512,7 @@ def _provider_response_report(
             detail("实际模型", str(payload.get("model_used") or "未报告"), "ok"),
             *((
                 detail("Function schemas", tools_count, "ok"),
+                *qzone_profile_details,
                 detail("Build", identity["build_id"]),
                 detail("Worker", identity["worker_id"]),
             ) if qzone_profile else ()),
@@ -535,6 +585,20 @@ def _tool_caller(runtime) -> Any | None:
     return getattr(bundle, "agent_tool_caller", None)
 
 
+def _tool_registry(runtime) -> Any | None:
+    bundle = getattr(runtime, "runtime_bundle", None)
+    if bundle is None:
+        return None
+    deps = getattr(bundle, "reply_processor_deps", None)
+    if deps is not None:
+        runtime_inner = getattr(deps, "runtime", None)
+        if runtime_inner is not None:
+            registry = getattr(runtime_inner, "tool_registry", None)
+            if registry is not None:
+                return registry
+    return getattr(bundle, "tool_registry", None)
+
+
 def build_test_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/test", tags=["test"])
 
@@ -564,6 +628,8 @@ def build_test_router(*, runtime) -> APIRouter:
         if request_profile not in {"chat", _QZONE_PROBE_PROFILE}:
             raise HTTPException(status_code=400, detail="unsupported test profile")
         qzone_profile = request_profile == _QZONE_PROBE_PROFILE
+        if qzone_profile:
+            use_builtin_search = False
         caller = _tool_caller(runtime)
         if caller is None:
             raise HTTPException(
@@ -602,7 +668,27 @@ def build_test_router(*, runtime) -> APIRouter:
                 ),
             },
         ]
-        tools = [_QZONE_PROBE_TOOL] if qzone_profile else []
+        tool_profile = ""
+        probe_degraded = False
+        if qzone_profile:
+            registry = _tool_registry(runtime)
+            tools = (
+                tool_schemas_for_profile(
+                    registry,
+                    tool_profile=TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
+                )
+                if registry is not None
+                else []
+            )
+            if tools:
+                tool_profile = TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY
+            else:
+                tools = [_QZONE_PROBE_TOOL]
+                tool_profile = "synthetic"
+                probe_degraded = True
+        else:
+            tools = []
+        tool_names_hash = _tool_names_hash(tools)
         started = time.time()
         try:
             token = set_llm_context(
@@ -623,6 +709,9 @@ def build_test_router(*, runtime) -> APIRouter:
                 exc,
                 request_profile=request_profile,
                 tools_count=len(tools),
+                tool_profile=tool_profile,
+                tool_names_hash=tool_names_hash,
+                probe_degraded=probe_degraded,
             )
             _log_provider_failure(runtime, exc, report)
             raise HTTPException(status_code=status_code, detail=report) from exc
@@ -638,6 +727,9 @@ def build_test_router(*, runtime) -> APIRouter:
             raise HTTPException(status_code=status_code, detail=report) from exc
         payload["profile"] = request_profile
         payload["tools_count"] = len(tools)
+        payload["tool_profile"] = tool_profile
+        payload["tool_names_hash"] = tool_names_hash
+        payload["probe_degraded"] = probe_degraded
         if qzone_profile:
             payload["runtime"] = get_runtime_identity()
         report = _provider_response_report(
@@ -646,6 +738,9 @@ def build_test_router(*, runtime) -> APIRouter:
             blocked_reason=blocked,
             request_profile=request_profile,
             tools_count=len(tools),
+            tool_profile=tool_profile,
+            tool_names_hash=tool_names_hash,
+            probe_degraded=probe_degraded,
         )
         if blocked:
             payload["blocked_reason"] = blocked
