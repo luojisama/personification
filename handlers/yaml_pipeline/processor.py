@@ -779,6 +779,7 @@ async def process_yaml_response_logic(
         group_id="" if is_private_session else group_id,
     )
 
+    turn_plan = getattr(semantic_frame, "turn_plan", None)
     if semantic_frame is None:
         planner_enabled = bool(getattr(plugin_config, "personification_turn_planner_enabled", False))
         planner_shadow_enabled = bool(getattr(plugin_config, "personification_turn_planner_shadow_enabled", False))
@@ -931,6 +932,13 @@ async def process_yaml_response_logic(
                         record_counter("turn_planner.diff_total", field="yaml_speech_act")
                     if shadow_plan.output_mode != turn_plan.output_mode:
                         record_counter("turn_planner.diff_total", field="yaml_output_mode")
+    if turn_plan is None:
+        turn_plan = turn_plan_from_semantic_frame(
+            semantic_frame,
+            has_images=bool(last_images),
+            message_target=planner_message_target,
+        )
+        attach_turn_plan_to_semantic_frame(semantic_frame, turn_plan)
     intent_decision = semantic_frame.to_intent_decision()
     if not message_intent:
         message_intent = intent_decision.chat_intent
@@ -1020,7 +1028,7 @@ async def process_yaml_response_logic(
         photo_like=photo_like,
         is_group=not is_private_session,
     )
-    turn_plan_for_prompt = getattr(semantic_frame, "turn_plan", turn_plan)
+    turn_plan_for_prompt = turn_plan
     system_prompt += "\n\n" + build_speech_act_policy_prompt(
         speech_act=str(getattr(turn_plan_for_prompt, "speech_act", getattr(semantic_frame, "speech_act", "")) or ""),
         output_mode=str(getattr(turn_plan_for_prompt, "output_mode", getattr(semantic_frame, "output_mode", "")) or ""),
@@ -1286,6 +1294,7 @@ async def process_yaml_response_logic(
         {"role": "user", "content": agent_user_content},
     ]
     used_agent = False
+    agent_result: Any = None
     reply_content = ""
     async def _call_text_model_with_retry(messages_to_use: List[Dict[str, Any]]) -> str:
         try:
@@ -1417,7 +1426,7 @@ async def process_yaml_response_logic(
                     relationship_hint=relationship_hint,
                     recent_bot_replies=recent_bot_replies,
                     precomputed_intent=intent_decision,
-                    turn_plan=getattr(semantic_frame, "turn_plan", None),
+                    turn_plan=turn_plan,
                     time_budget_seconds=_compute_agent_time_budget(
                         started_at=started_at,
                         total_timeout_seconds=float(
