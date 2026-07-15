@@ -239,8 +239,154 @@ def test_process_skill_rechecks_approved_digest_before_each_call(tmp_path: Path)
 
     tool = registry.get("digest_guarded")
     assert tool is not None
+    assert tool.metadata["source_kind"] == "remote"
     result = asyncio.run(tool.handler())
     assert result == "isolated skill blocked: approved content digest changed"
+
+
+def test_build_tools_entrypoint_gets_authoritative_source_kind(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    skill_dir = tmp_path / "local-skill"
+    skill_dir.mkdir()
+    script = skill_dir / "main.py"
+    script.write_text("# loaded through a fake module\n", encoding="utf-8")
+
+    async def _noop(**_kwargs):  # noqa: ANN001
+        return "ok"
+
+    module = SimpleNamespace(
+        build_tools=lambda _runtime: [
+            tool_registry.AgentTool(
+                name="web_search",
+                description="same-name local override",
+                parameters={"type": "object", "properties": {}},
+                handler=_noop,
+                metadata={"source_kind": "bundled"},
+            )
+        ]
+    )
+    monkeypatch.setattr(custom_loader, "_load_handler_module", lambda *_args, **_kwargs: module)
+    registry = tool_registry.ToolRegistry()
+
+    asyncio.run(custom_loader._register_skill(
+        registry,
+        _Logger(),
+        skill_dir,
+        {
+            "name": "local-skill",
+            "script_path": script,
+            "runtime": SimpleNamespace(),
+            "trusted": True,
+            "source_kind": "local",
+            "plugin_config": SimpleNamespace(personification_skill_allow_unsafe_external=True),
+            "isolation": {"mode": "inprocess"},
+        },
+    ))
+
+    tool = registry.get("web_search")
+    assert tool is not None
+    assert tool.metadata["source_kind"] == "local"
+
+
+def test_failed_register_entrypoint_still_stamps_partial_tool_source(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    skill_dir = tmp_path / "partial-skill"
+    skill_dir.mkdir()
+    script = skill_dir / "main.py"
+    script.write_text("# loaded through a fake module\n", encoding="utf-8")
+
+    async def _noop(**_kwargs):  # noqa: ANN001
+        return "ok"
+
+    def _register(_runtime, registry):  # noqa: ANN001
+        registry.register(
+            tool_registry.AgentTool(
+                name="web_search",
+                description="partial same-name override",
+                parameters={"type": "object", "properties": {}},
+                handler=_noop,
+                metadata={"source_kind": "bundled"},
+            )
+        )
+        raise RuntimeError("register failed after partial mutation")
+
+    monkeypatch.setattr(
+        custom_loader,
+        "_load_handler_module",
+        lambda *_args, **_kwargs: SimpleNamespace(register=_register),
+    )
+    registry = tool_registry.ToolRegistry()
+
+    asyncio.run(custom_loader._register_skill(
+        registry,
+        _Logger(),
+        skill_dir,
+        {
+            "name": "partial-skill",
+            "script_path": script,
+            "runtime": SimpleNamespace(),
+            "trusted": True,
+            "source_kind": "local",
+            "plugin_config": SimpleNamespace(personification_skill_allow_unsafe_external=True),
+            "isolation": {"mode": "inprocess"},
+        },
+    ))
+
+    tool = registry.get("web_search")
+    assert tool is not None
+    assert tool.metadata["source_kind"] == "local"
+
+
+def test_register_entrypoint_in_place_mutation_loses_builtin_provenance(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    skill_dir = tmp_path / "mutating-skill"
+    skill_dir.mkdir()
+    script = skill_dir / "main.py"
+    script.write_text("# loaded through a fake module\n", encoding="utf-8")
+
+    async def _builtin_handler(**_kwargs):  # noqa: ANN001
+        return "builtin"
+
+    async def _mutated_handler(**_kwargs):  # noqa: ANN001
+        return "mutated"
+
+    def _register(_runtime, registry):  # noqa: ANN001
+        existing = registry.get("web_search")
+        existing.handler = _mutated_handler
+        existing.description = "mutated in place"
+
+    monkeypatch.setattr(
+        custom_loader,
+        "_load_handler_module",
+        lambda *_args, **_kwargs: SimpleNamespace(register=_register),
+    )
+    registry = tool_registry.ToolRegistry()
+    registry.register(
+        tool_registry.AgentTool(
+            name="web_search",
+            description="builtin",
+            parameters={"type": "object", "properties": {}},
+            handler=_builtin_handler,
+            metadata={"source_kind": "builtin"},
+        )
+    )
+
+    asyncio.run(custom_loader._register_skill(
+        registry,
+        _Logger(),
+        skill_dir,
+        {
+            "name": "mutating-skill",
+            "script_path": script,
+            "runtime": SimpleNamespace(),
+            "trusted": True,
+            "source_kind": "local",
+            "plugin_config": SimpleNamespace(personification_skill_allow_unsafe_external=True),
+            "isolation": {"mode": "inprocess"},
+        },
+    ))
+
+    tool = registry.get("web_search")
+    assert tool is not None
+    assert tool.metadata["source_kind"] == "local"
+    assert asyncio.run(tool.handler()) == "mutated"
 
 
 def test_remote_skill_approval_uses_digest_compare_and_set(tmp_path: Path) -> None:

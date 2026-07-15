@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
 from ..agent.inner_state import DEFAULT_STATE, load_inner_state
-from ..core.agent_bridge import run_text_agent
+from ..core.agent_bridge import TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY, run_text_agent
 from ..core.context_policy import strip_response_control_markers
 from ..core.data_store import get_data_store
 from ..core.emotion_state import describe_user_emotion_memory, load_emotion_state
@@ -818,6 +818,7 @@ async def _decide_feed_action(
                 use_builtin_search_hint=True,
                 trigger_reason="qzone_social_feed_action",
                 chat_intent_hint="qzone_social_feed_action",
+                tool_profile=TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
             )
         except Exception as exc:
             if logger is not None:
@@ -1028,6 +1029,7 @@ async def _decide_bot_comment_reply(
                 use_builtin_search_hint=True,
                 trigger_reason="qzone_comment_reply",
                 chat_intent_hint="qzone_comment_reply",
+                tool_profile=TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
             )
         except Exception as exc:
             if logger is not None:

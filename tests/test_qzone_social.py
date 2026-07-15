@@ -911,6 +911,55 @@ def test_qzone_feed_action_can_choose_forward() -> None:
     assert "瓜条" in captured["prompt"] and "黄赌毒暴" in captured["prompt"]
 
 
+def test_qzone_social_agents_use_read_only_tool_profile(monkeypatch) -> None:  # noqa: ANN001
+    profiles: list[str] = []
+
+    async def _agent(**kwargs):  # noqa: ANN001
+        profiles.append(str(kwargs.get("tool_profile") or ""))
+        if kwargs.get("trigger_reason") == "qzone_comment_reply":
+            return '{"action":"ignore","reply":"","reason":"结束"}'
+        return '{"action":"ignore","comment":"","reason":"跳过"}'
+
+    async def _direct(_messages):  # noqa: ANN001
+        return ""
+
+    monkeypatch.setattr(qzone_flow, "run_text_agent", _agent)
+    config = SimpleNamespace(personification_agent_enabled=True)
+
+    async def _run() -> None:
+        await qzone_flow._decide_feed_action(
+            feed={"feed_key": "20001:feed1", "owner_uin": "20001", "content": "今天风挺大"},
+            candidate={"user_id": "20001", "nickname": "好友", "persona_snippet": "熟人"},
+            system_prompt="你是绪山真寻。",
+            call_ai_api=_direct,
+            image_summary="",
+            inner_state={},
+            emotion_memory="",
+            plugin_config=config,
+            agent_tool_caller=object(),
+            agent_tool_registry=object(),
+        )
+        await qzone_flow._decide_bot_comment_reply(
+            feed={"content": "今天风挺大"},
+            comment={"user_id": "20001", "content": "确实"},
+            commenter_profile={"nickname": "好友"},
+            system_prompt="你是绪山真寻。",
+            call_ai_api=_direct,
+            inner_state={},
+            emotion_memory="",
+            plugin_config=config,
+            agent_tool_caller=object(),
+            agent_tool_registry=object(),
+        )
+
+    asyncio.run(_run())
+
+    assert profiles == [
+        qzone_flow.TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
+        qzone_flow.TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
+    ]
+
+
 def test_qzone_forward_limits_can_block_monthly_quota() -> None:
     decision = qzone_flow._apply_action_limits(
         decision={"action": "forward", "forward_text": "转一下", "comment": ""},

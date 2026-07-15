@@ -24,10 +24,6 @@ _QZONE_READ_ONLY_TOOL_NAMES = frozenset(
         "get_gold_price",
         "get_history_today",
         "get_trending",
-        "get_user_persona",
-        "memory_recall",
-        "recall_group_memory",
-        "recall_user_memory",
         "resolve_acg_entity",
         "search_web",
         "weather",
@@ -35,6 +31,7 @@ _QZONE_READ_ONLY_TOOL_NAMES = frozenset(
         "wiki_lookup",
     }
 )
+_QZONE_TRUSTED_TOOL_SOURCES = frozenset({"builtin", "bundled"})
 
 
 class _NullLogger:
@@ -92,11 +89,21 @@ def clone_tool_registry(
     tools = active() if callable(active) else []
     for tool in tools:
         tool_name = str(getattr(tool, "name", "") or "")
-        if (
-            profile == TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY
-            and tool_name not in _QZONE_READ_ONLY_TOOL_NAMES
-        ):
-            continue
+        if profile == TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY:
+            metadata = dict(getattr(tool, "metadata", None) or {})
+            source_kind = str(metadata.get("source_kind", "") or "").strip().lower()
+            side_effect = str(metadata.get("side_effect", "none") or "none").strip().lower()
+            risk_level = str(metadata.get("risk_level", "low") or "low").strip().lower()
+            parameters = getattr(tool, "parameters", None)
+            root_type = str(parameters.get("type", "object") or "object").strip().lower() if isinstance(parameters, dict) else ""
+            if (
+                tool_name not in _QZONE_READ_ONLY_TOOL_NAMES
+                or side_effect != "none"
+                or risk_level in {"admin", "high"}
+                or source_kind not in _QZONE_TRUSTED_TOOL_SOURCES
+                or root_type != "object"
+            ):
+                continue
         cloned.register(tool)
     return cloned
 

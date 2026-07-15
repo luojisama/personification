@@ -135,6 +135,51 @@ def _normalize_parameters(value: Any) -> dict[str, Any]:
     return {"type": "object", "properties": {}, "required": []}
 
 
+def _stamp_tool_source(tool: AgentTool, source_kind: str) -> AgentTool:
+    metadata = dict(tool.metadata or {})
+    metadata["source_kind"] = str(source_kind or "local").strip().lower() or "local"
+    tool.metadata = metadata
+    return tool
+
+
+def _stable_fingerprint_value(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return repr(value)
+
+
+def _tool_registration_fingerprint(tool: AgentTool) -> tuple[Any, ...]:
+    return (
+        id(tool),
+        str(tool.name or ""),
+        str(tool.description or ""),
+        _stable_fingerprint_value(tool.parameters or {}),
+        id(tool.handler),
+        bool(tool.local),
+        id(tool.enabled),
+        _stable_fingerprint_value(tool.metadata or {}),
+        int(tool.per_session_quota or 0),
+    )
+
+
+def _registry_tool_fingerprints(registry: ToolRegistry) -> dict[str, tuple[Any, ...]]:
+    _, current = registry.snapshot()
+    return {name: _tool_registration_fingerprint(tool) for name, tool in current.items()}
+
+
+def _stamp_registered_tool_sources(
+    registry: ToolRegistry,
+    before: dict[str, tuple[Any, ...]],
+    source_kind: str,
+) -> None:
+    _, current = registry.snapshot()
+    for name, tool in current.items():
+        if before.get(name) == _tool_registration_fingerprint(tool):
+            continue
+        registry.register(_stamp_tool_source(tool, source_kind))
+
+
 def _build_skill_config(
     skill_dir: Path,
     frontmatter: dict[str, Any],
@@ -181,6 +226,7 @@ async def _register_skill(registry: ToolRegistry, logger: Any, skill_dir: Path, 
         getattr(plugin_config, "personification_skill_allow_unsafe_external", False)
     ) if plugin_config is not None else False
     expected_content_digest = str(config.get("content_digest") or "").strip().lower()
+    source_kind = str(config.get("source_kind") or "local").strip().lower() or "local"
 
     if not trusted and not allow_unsafe_external and (is_mcp_isolated or not is_process_isolated):
         logger.warning(
@@ -240,7 +286,7 @@ async def _register_skill(registry: ToolRegistry, logger: Any, skill_dir: Path, 
                 local=bool(config.get("local", True)),
                 metadata={
                     "category": "skillpack",
-                    "source_kind": str(config.get("source_kind") or "local"),
+                    "source_kind": source_kind,
                     "skill_dir": skill_dir.name,
                     "isolation": str(isolation.get("mode") or "process"),
                 },
@@ -264,6 +310,7 @@ async def _register_skill(registry: ToolRegistry, logger: Any, skill_dir: Path, 
 
     register_handler = getattr(module, "register", None)
     if callable(register_handler) and runtime is not None:
+        before = _registry_tool_fingerprints(registry)
         try:
             result = register_handler(runtime, registry)
             if inspect.isawaitable(result):
@@ -272,6 +319,8 @@ async def _register_skill(registry: ToolRegistry, logger: Any, skill_dir: Path, 
         except Exception as e:
             logger.warning(f"[custom skill] register failed {skill_dir.name}: {e}")
             return
+        finally:
+            _stamp_registered_tool_sources(registry, before, source_kind)
 
     build_tools_handler = getattr(module, "build_tools", None)
     if callable(build_tools_handler) and runtime is not None:
@@ -282,7 +331,7 @@ async def _register_skill(registry: ToolRegistry, logger: Any, skill_dir: Path, 
             tools = result if isinstance(result, list) else []
             for tool in tools:
                 if isinstance(tool, AgentTool):
-                    registry.register(tool)
+                    registry.register(_stamp_tool_source(tool, source_kind))
             if isinstance(result, list):
                 return
         except Exception as e:
@@ -307,7 +356,7 @@ async def _register_skill(registry: ToolRegistry, logger: Any, skill_dir: Path, 
             local=bool(config.get("local", True)),
             metadata={
                 "category": "skillpack",
-                "source_kind": str(config.get("source_kind") or "local"),
+                "source_kind": source_kind,
                 "skill_dir": skill_dir.name,
                 "isolation": str(isolation.get("mode") or "inprocess"),
             },
@@ -366,7 +415,7 @@ async def _load_standard_skill_dir(
         if compat_tools:
             for tool in compat_tools:
                 if isinstance(tool, AgentTool):
-                    registry.register(tool)
+                    registry.register(_stamp_tool_source(tool, source_kind))
             logger.info(
                 f"[custom skill] registered compatibility adapter tools for {skill_dir.name}: "
                 f"{', '.join(tool.name for tool in compat_tools)}"

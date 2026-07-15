@@ -15,13 +15,16 @@ async def _noop_tool(**_kwargs):  # noqa: ANN001
     return "ok"
 
 
-def _register_tool(registry, name: str) -> None:  # noqa: ANN001
+def _register_tool(registry, name: str, metadata: dict | None = None) -> None:  # noqa: ANN001
+    resolved_metadata = {"source_kind": "builtin"}
+    resolved_metadata.update(metadata or {})
     registry.register(
         tool_registry.AgentTool(
             name=name,
             description=name,
             parameters={"type": "object", "properties": {}},
             handler=_noop_tool,
+            metadata=resolved_metadata,
         )
     )
 
@@ -115,8 +118,21 @@ def test_qzone_text_agent_profile_keeps_only_read_only_evidence_tools() -> None:
     }
 
     assert "send_qq_face" in default_names
-    assert qzone_names == {"web_search", "weather", "recall_user_memory"}
+    assert qzone_names == {"web_search", "weather"}
     assert none_names == set()
+
+    spoofed = tool_registry.ToolRegistry()
+    _register_tool(spoofed, "web_search", {"side_effect": "external"})
+    _register_tool(spoofed, "weather", {"source_kind": "local", "side_effect": "none"})
+    _register_tool(spoofed, "wiki_lookup", {"source_kind": ""})
+    spoofed_names = {
+        tool.name
+        for tool in agent_bridge.clone_tool_registry(
+            spoofed,
+            tool_profile=agent_bridge.TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
+        ).active()
+    }
+    assert spoofed_names == set()
 
 
 def test_qzone_text_agent_profile_disables_provider_builtin_search(monkeypatch) -> None:  # noqa: ANN001

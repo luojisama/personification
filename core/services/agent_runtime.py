@@ -299,6 +299,14 @@ def build_agent_tool_registry(
         registry.register(build_gold_price_tool(_60s_base, logger, _60s_local_base))
         registry.register(build_baike_tool(_60s_base, logger, _60s_local_base))
         registry.register(build_exchange_rate_tool(_60s_base, logger, _60s_local_base))
+    # First-party tools may come from the direct compatibility path or bundled
+    # skillpacks. Record authoritative provenance before extensions can replace
+    # a same-name tool during runtime loading.
+    for tool in registry.all():
+        metadata = dict(tool.metadata or {})
+        metadata["source_kind"] = "builtin"
+        tool.metadata = metadata
+
     generated_runtime = SkillRuntime(
         plugin_config=plugin_config,
         logger=logger,

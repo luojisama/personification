@@ -33,6 +33,7 @@ def test_legacy_registry_exposes_game_info_by_default() -> None:
     )
 
     assert "game_info" in {tool.name for tool in registry.active()}
+    assert registry.get("game_info").metadata["source_kind"] == "builtin"
 
 
 def test_skill_runtime_exposes_configured_api_pool_reader(monkeypatch) -> None:
