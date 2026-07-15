@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import threading
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
@@ -25,6 +26,13 @@ _CANONICAL_PROVIDER_CODES = {
     "provider_safety_block",
     "provider_timeout",
     "providers_exhausted",
+}
+_MODEL_UNAVAILABLE_ERROR_CODES = {
+    "invalid_model",
+    "model_deprecated",
+    "model_not_available",
+    "model_not_found",
+    "unsupported_model",
 }
 
 
@@ -69,7 +77,9 @@ class RoutedToolCallerError(RuntimeError):
         self.message_count = max(0, int(selected.get("message_count") or 0))
         self.prompt_chars = max(0, int(selected.get("prompt_chars") or 0))
         self.tools_count = max(0, int(selected.get("tools_count") or 0))
+        self.wire_tools_count = max(0, int(selected.get("wire_tools_count", self.tools_count) or 0))
         self.tool_names_hash = str(selected.get("tool_names_hash") or "")[:16]
+        self.tool_schema_hash = str(selected.get("tool_schema_hash") or "")[:16]
         self.builtin_search = bool(selected.get("builtin_search", False))
         super().__init__("all routed tool callers failed")
 
@@ -79,7 +89,10 @@ class RoutedToolCallerError(RuntimeError):
             lambda item: item.get("code") == "provider_model_candidate_unavailable",
             lambda item: item.get("code") == "provider_auth_failed" or item.get("status_code") == 401,
             lambda item: item.get("code") == "provider_permission_denied" or item.get("status_code") == 403,
-            lambda item: item.get("code") == "provider_request_rejected" or item.get("status_code") in {400, 422},
+            lambda item: item.get("code") == "provider_request_rejected" or (
+                item.get("status_code") in {400, 422}
+                and item.get("code") not in {"provider_model_candidate_unavailable", "provider_model_unavailable"}
+            ),
             lambda item: item.get("code") == "provider_model_unavailable" or item.get("status_code") == 404,
             lambda item: bool(item.get("retryable")),
         )
@@ -100,14 +113,35 @@ def _exception_route_metadata(exc: BaseException) -> tuple[int, str, bool, str, 
     next_model = ""
     auth_mode = ""
     request_count = 0
+    saw_model_unavailable_text = False
     class_names: list[str] = []
     while current is not None and id(current) not in seen and len(seen) < 6:
         seen.add(id(current))
         class_names.append(type(current).__name__.lower())
-        if not code:
-            candidate_code = str(getattr(current, "code", "") or "").strip().lower()
-            if candidate_code in _CANONICAL_PROVIDER_CODES:
-                code = candidate_code
+        candidate_code = str(getattr(current, "code", "") or "").strip().lower()
+        current_text = str(current or "").strip().lower()
+        saw_model_unavailable_text = saw_model_unavailable_text or any(
+            marker in current_text
+            for marker in (
+                "model does not exist",
+                "model is invalid",
+                "model is not available",
+                "model not found",
+                "model unavailable",
+                "model was not found",
+            )
+        )
+        if (
+            candidate_code in _MODEL_UNAVAILABLE_ERROR_CODES
+            and code != "provider_model_candidate_unavailable"
+        ):
+            code = "provider_model_unavailable"
+        elif candidate_code == "provider_model_candidate_unavailable":
+            code = candidate_code
+        elif candidate_code == "provider_model_unavailable" and code != "provider_model_candidate_unavailable":
+            code = candidate_code
+        elif not code and candidate_code in _CANONICAL_PROVIDER_CODES:
+            code = candidate_code
         if not status_code:
             values = (
                 getattr(current, "status_code", None),
@@ -137,8 +171,11 @@ def _exception_route_metadata(exc: BaseException) -> tuple[int, str, bool, str, 
         code = "provider_auth_failed"
     elif status_code == 403:
         code = "provider_permission_denied"
+    elif saw_model_unavailable_text and code != "provider_model_candidate_unavailable":
+        code = "provider_model_unavailable"
     elif status_code in {400, 422}:
-        code = "provider_request_rejected"
+        if code not in {"provider_model_candidate_unavailable", "provider_model_unavailable"}:
+            code = "provider_request_rejected"
     elif status_code == 404:
         code = (
             "provider_model_candidate_unavailable"
@@ -172,6 +209,41 @@ def _exception_route_metadata(exc: BaseException) -> tuple[int, str, bool, str, 
         auth_mode[:48],
         max(1, request_count),
     )
+
+
+def _exception_wire_tools_count(exc: BaseException) -> int | None:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(seen) < 6:
+        seen.add(id(current))
+        if hasattr(current, "wire_tools_count"):
+            try:
+                return max(0, int(getattr(current, "wire_tools_count", 0) or 0))
+            except (TypeError, ValueError):
+                return 0
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _response_wire_tools_count(response: Any, fallback: int) -> int:
+    value = getattr(response, "wire_tools_count", None)
+    if value is None:
+        value = fallback
+        try:
+            response.wire_tools_count = max(0, int(value or 0))
+        except Exception:
+            pass
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return max(0, int(fallback or 0))
+
+
+def _attach_response_wire_tools_count(exc: BaseException, response: Any, fallback: int) -> None:
+    try:
+        exc.wire_tools_count = _response_wire_tools_count(response, fallback)
+    except Exception:
+        pass
 
 
 def _request_text_chars(messages: list[dict]) -> int:
@@ -209,6 +281,14 @@ def _safe_request_shape(
 ) -> dict[str, Any]:
     names = sorted(name for name in (_request_tool_name(tool) for tool in list(tools or [])) if name)
     names_hash = hashlib.sha256("\0".join(names).encode("utf-8")).hexdigest()[:12] if names else ""
+    schema_json = json.dumps(
+        list(tools or []),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    schema_hash = hashlib.sha256(schema_json.encode("utf-8")).hexdigest()[:12] if tools else ""
     purpose = str(current_llm_context().get("purpose") or "").strip()[:64]
     return {
         "request_kind": "function_calling" if tools else "text",
@@ -217,6 +297,7 @@ def _safe_request_shape(
         "prompt_chars": _request_text_chars(messages),
         "tools_count": len(list(tools or [])),
         "tool_names_hash": names_hash,
+        "tool_schema_hash": schema_hash,
         "builtin_search": bool(use_builtin_search),
     }
 
@@ -798,9 +879,14 @@ class RoutedToolCaller:
             _exception_route_metadata(exc)
         )
         descriptor = self._caller_route_descriptors.get(id(caller), {"caller": type(caller).__name__[:80]})
+        shape = dict(request_shape or {})
+        wire_tools_count = _exception_wire_tools_count(exc)
+        if wire_tools_count is None:
+            wire_tools_count = max(0, int(shape.get("tools_count") or 0))
         return {
             **descriptor,
-            **dict(request_shape or {}),
+            **shape,
+            "wire_tools_count": wire_tools_count,
             "concrete_model": concrete_model,
             "next_model": next_model,
             "auth_mode": auth_mode or str(descriptor.get("auth_mode") or "")[:48],
@@ -866,11 +952,13 @@ class RoutedToolCaller:
                 last_error = exc
                 route_attempts.append(self._route_attempt(caller, exc, request_shape=request_shape))
                 continue
+            _response_wire_tools_count(response, len(list(tools or [])))
             safety_issue = detect_route_safety_issue(response)
             if safety_issue:
                 if use_single_attempt_retry_policy():
                     last_error = RuntimeError("provider safety block")
                     last_error.code = "provider_safety_block"
+                    _attach_response_wire_tools_count(last_error, response, len(list(tools or [])))
                     route_attempts.append(self._route_attempt(caller, last_error, request_shape=request_shape))
                     continue
                 try:
@@ -885,9 +973,11 @@ class RoutedToolCaller:
                     last_error = exc
                     route_attempts.append(self._route_attempt(caller, exc, request_shape=request_shape))
                     continue
+                _response_wire_tools_count(response, len(list(tools or [])))
                 if detect_route_safety_issue(response):
                     last_error = RuntimeError("provider safety block")
                     last_error.code = "provider_safety_block"
+                    _attach_response_wire_tools_count(last_error, response, len(list(tools or [])))
                     route_attempts.append(self._route_attempt(caller, last_error, request_shape=request_shape))
                     continue
             if response.vision_unavailable:
@@ -897,6 +987,7 @@ class RoutedToolCaller:
                 last_error = RuntimeError("provider returned an empty or invalid response")
                 last_error.code = "provider_invalid_response"
                 last_error.retryable = True
+                _attach_response_wire_tools_count(last_error, response, len(list(tools or [])))
                 route_attempts.append(self._route_attempt(caller, last_error, request_shape=request_shape))
                 continue
             is_qzone_probe = str(current_llm_context().get("purpose") or "") == "qzone_provider_probe"

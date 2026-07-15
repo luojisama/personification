@@ -36,20 +36,6 @@ _SAFE_PROVIDER_ERROR_CODES = {
     "provider_timeout",
     "providers_exhausted",
 }
-_QZONE_PROBE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "qzone_probe_context",
-        "description": "Read-only protocol probe. It has no external side effects.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "topic": {"type": "string", "description": "Optional topic to inspect."},
-            },
-            "additionalProperties": False,
-        },
-    },
-}
 _DIAGNOSTIC_FIELDS = (
     "ok",
     "code",
@@ -117,11 +103,20 @@ def _exception_status(chain: list[BaseException]) -> int:
 
 
 def _exception_code(chain: list[BaseException]) -> str:
+    if chain:
+        aggregate_code = str(getattr(chain[0], "code", "") or "").strip().lower()
+        aggregate_attempts = getattr(chain[0], "route_attempts", None)
+        if aggregate_code in _SAFE_PROVIDER_ERROR_CODES and isinstance(aggregate_attempts, (list, tuple)):
+            return aggregate_code
+    observed: list[str] = []
     for item in chain:
         code = str(getattr(item, "code", "") or "").strip().lower()
         if code in _SAFE_PROVIDER_ERROR_CODES:
-            return code
-    return ""
+            observed.append(code)
+    for preferred in ("provider_model_candidate_unavailable", "provider_model_unavailable"):
+        if preferred in observed:
+            return preferred
+    return observed[0] if observed else ""
 
 
 def _exception_attr(chain: list[BaseException], name: str, default: Any = "") -> Any:
@@ -140,6 +135,7 @@ def _provider_failure_report(
     tools_count: int = 0,
     tool_profile: str = "",
     tool_names_hash: str = "",
+    tool_schema_hash: str = "",
     probe_degraded: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     chain = _exception_chain(exc)
@@ -151,7 +147,21 @@ def _provider_failure_report(
     if status == 404 or provider_error_code in {
         "provider_model_candidate_unavailable",
         "provider_model_unavailable",
-    }:
+    } or (
+        status not in {401, 403}
+        and not provider_error_code
+        and any(
+            marker in internal_text
+            for marker in (
+                "model does not exist",
+                "model is invalid",
+                "model is not available",
+                "model not found",
+                "model unavailable",
+                "model was not found",
+            )
+        )
+    ):
         response_status = 502
         code = "provider_test_model_unavailable"
         phase = "provider_request"
@@ -182,6 +192,14 @@ def _provider_failure_report(
         title = "Provider 权限不足"
         message = "Provider 已识别认证信息，但拒绝访问当前模型或能力。"
         suggestion = "检查账号套餐、模型白名单、项目权限和区域限制后重试。"
+        retryable = False
+    elif provider_error_code == "provider_safety_block":
+        response_status = 502
+        code = "provider_test_blocked"
+        phase = "provider_policy"
+        title = "Provider 响应被安全策略拦截"
+        message = "Provider 返回了结构化 safety block，本次没有可用模型内容。"
+        suggestion = "检查请求内容和 Provider safety policy；不要通过重复提交尝试绕过安全策略。"
         retryable = False
     elif status in {400, 422} or provider_error_code == "provider_request_rejected":
         response_status = 502
@@ -255,8 +273,9 @@ def _provider_failure_report(
         detail("请求形态", request_profile).to_dict(),
         detail("Function schemas", tools_count).to_dict(),
         *([detail("Tool profile", tool_profile).to_dict()] if tool_profile else []),
-        *([detail("Schema hash", tool_names_hash).to_dict()] if tool_names_hash else []),
-        *([detail("Probe scope", "degraded synthetic", "warn").to_dict()] if probe_degraded else []),
+        *([detail("Tool names hash", tool_names_hash).to_dict()] if tool_names_hash else []),
+        *([detail("Schema hash", tool_schema_hash).to_dict()] if tool_schema_hash else []),
+        *([detail("Probe scope", "production tool-free", "warn").to_dict()] if probe_degraded else []),
         detail("异常类型", type(exc).__name__, "error").to_dict(),
         *([detail("HTTP status", status, "error").to_dict()] if status else []),
         *([detail("Provider error code", provider_error_code, "error").to_dict()] if provider_error_code else []),
@@ -277,8 +296,8 @@ def _provider_failure_report(
                     f"{_route_model_label(route)} · "
                     f"auth={route.get('auth_mode') or '-'} · "
                     f"kind={route.get('request_kind') or '-'} · "
-                    f"tools={max(0, int(route.get('tools_count') or 0))} · "
-                    f"schema={str(route.get('tool_names_hash') or '-')[:16]} · "
+                    f"tools={_route_tools_label(route)} · "
+                    f"schema={str(route.get('tool_schema_hash') or route.get('tool_names_hash') or '-')[:16]} · "
                     f"builtin={str(bool(route.get('builtin_search', False))).lower()} · "
                     f"requests={route.get('request_count') or 1} · "
                     f"HTTP {route.get('status_code') or '-'} · {route.get('code') or 'provider_call_failed'}"
@@ -318,6 +337,12 @@ def _route_model_label(route: dict[str, Any]) -> str:
     return concrete or configured
 
 
+def _route_tools_label(route: dict[str, Any]) -> str:
+    profile_count = max(0, int(route.get("tools_count") or 0))
+    wire_count = max(0, int(route.get("wire_tools_count", profile_count) or 0))
+    return str(profile_count) if profile_count == wire_count else f"{wire_count}/{profile_count} wire/profile"
+
+
 def _log_provider_failure(runtime: Any, exc: BaseException, report: dict[str, Any]) -> None:
     logger = getattr(runtime, "logger", None)
     if logger is None:
@@ -350,6 +375,7 @@ def _response_payload(response: Any, *, duration_ms: int) -> dict[str, Any]:
         },
         "model_used": str(getattr(response, "model_used", "") or ""),
         "tool_call_count": len(list(getattr(response, "tool_calls", None) or [])),
+        "wire_tools_count": getattr(response, "wire_tools_count", None),
     }
 
 
@@ -365,6 +391,13 @@ def _tool_names_hash(tools: list[dict]) -> str:
         if name:
             names.append(name)
     return hashlib.sha256("\0".join(sorted(names)).encode("utf-8")).hexdigest()[:12] if names else ""
+
+
+def _tool_schema_hash(tools: list[dict]) -> str:
+    if not tools:
+        return ""
+    payload = json.dumps(tools, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
 def _is_qzone_probe_json(content: Any) -> bool:
@@ -392,28 +425,32 @@ def _provider_response_report(
     tools_count: int = 0,
     tool_profile: str = "",
     tool_names_hash: str = "",
+    tool_schema_hash: str = "",
+    wire_tools_count: int = 0,
     probe_degraded: bool = False,
 ) -> dict[str, Any]:
     provider_info = _provider_details(provider)
     qzone_profile = request_profile == _QZONE_PROBE_PROFILE
     qzone_success_code = (
-        "provider_test_qzone_probe_degraded"
+        "provider_test_qzone_tool_free"
         if probe_degraded
         else "provider_test_qzone_compatible"
     )
     qzone_success_title = (
-        "QZone-compatible probe 降级完成"
+        "QZone tool-free Provider probe 完成"
         if probe_degraded
         else "QZone-compatible Provider probe 完成"
     )
     qzone_success_message = (
-        "runtime tool registry 不可用；Provider 仅通过 synthetic schema，不能证明完整 QZone profile 兼容。"
+        "当前 runtime 的 QZone read-only profile 没有可用工具；Provider 已通过真实 production tool-free 请求形态。"
         if probe_degraded
         else "Provider 接受了 QZone read-only production profile。"
     )
     qzone_profile_details = (
-        detail("Tool profile", tool_profile or "synthetic", "warn" if probe_degraded else "ok"),
-        detail("Schema hash", tool_names_hash or "-", "warn" if probe_degraded else "ok"),
+        detail("Tool profile", tool_profile or TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY, "warn" if probe_degraded else "ok"),
+        detail("Tool names hash", tool_names_hash or "-", "warn" if probe_degraded else "ok"),
+        detail("Schema hash", tool_schema_hash or "-", "warn" if probe_degraded else "ok"),
+        detail("Wire function schemas", wire_tools_count, "warn" if wire_tools_count <= 0 else "ok"),
     )
     if blocked_reason:
         return diagnostic(
@@ -432,7 +469,68 @@ def _provider_response_report(
             suggestion="检查请求内容和 Provider safety policy；不要通过重复提交尝试绕过安全策略。",
             retryable=False,
         )
+    if qzone_profile and tools_count > 0 and wire_tools_count <= 0:
+        return diagnostic(
+            ok=False,
+            code="provider_test_qzone_schema_empty",
+            phase="provider_request",
+            title="QZone-compatible probe 未发送有效 schema",
+            message="QZone profile 在 Provider compatibility conversion 后没有可发送的 function declaration。",
+            details=(
+                *provider_info,
+                detail("Function schemas", tools_count, "warn"),
+                *qzone_profile_details,
+            ),
+            steps=(
+                step("prepare_request", "准备 QZone-compatible 请求", "warn", "Provider conversion 移除了全部 function schema。"),
+                step("provider_request", "调用 Provider", "warn", "Provider 已返回文本，但请求在线路上没有 function schema。"),
+                step("response_parse", "解析模型响应", "skipped", "没有有效 function schema。"),
+            ),
+            suggestion="检查 QZone tool profile 中的 function name 和 parameters root schema。",
+            retryable=False,
+        )
+    if qzone_profile and tools_count > 0 and wire_tools_count != tools_count:
+        return diagnostic(
+            ok=False,
+            code="provider_test_qzone_schema_partial",
+            phase="provider_request",
+            title="QZone-compatible probe schema 不完整",
+            message="Provider compatibility conversion 没有保留完整的 QZone read-only function profile。",
+            details=(
+                *provider_info,
+                detail("Function schemas", tools_count, "warn"),
+                *qzone_profile_details,
+            ),
+            steps=(
+                step("prepare_request", "准备 QZone-compatible 请求", "warn", "部分 function schema 未通过 compatibility conversion。"),
+                step("provider_request", "调用 Provider", "warn", "Provider 已返回响应，但线路 schema 与 production profile 不一致。"),
+                step("response_parse", "解析模型响应", "skipped", "先修复 schema profile 一致性。"),
+            ),
+            suggestion="检查被过滤工具的 function name、required 参数和 parameters root schema。",
+            retryable=False,
+        )
     if not str(payload.get("content") or "").strip():
+        if qzone_profile and tools_count <= 0 and int(payload.get("tool_call_count") or 0) > 0:
+            return diagnostic(
+                ok=False,
+                code="provider_test_qzone_unexpected_tool_call",
+                phase="model_output",
+                title="QZone tool-free probe 返回未声明工具调用",
+                message="Provider 在 tools=[] 请求中返回了 tool call，不能视为兼容的 QZone generation 响应。",
+                details=(
+                    *provider_info,
+                    detail("Function schemas", tools_count, "warn"),
+                    *qzone_profile_details,
+                    detail("Tool calls", int(payload.get("tool_call_count") or 0), "error"),
+                ),
+                steps=(
+                    step("prepare_request", "准备 QZone tool-free 请求", "ok", "请求未声明任何 function schema。"),
+                    step("provider_request", "调用 Provider", "ok", "Provider 已返回响应。"),
+                    step("response_parse", "解析模型响应", "error", "响应包含未声明 tool call。"),
+                ),
+                suggestion="检查 Provider 的 function calling 协议兼容性；该响应不能进入生产 Agent 工具循环。",
+                retryable=False,
+            )
         if qzone_profile and int(payload.get("tool_call_count") or 0) > 0:
             identity = get_runtime_identity()
             return diagnostic(
@@ -522,7 +620,11 @@ def _provider_response_report(
                 "prepare_request",
                 "准备 QZone-compatible 请求" if qzone_profile else "准备模型测试请求",
                 "ok",
-                "已启用 single_attempt 和只读 function schema。" if qzone_profile else "测试消息已完成本地校验。",
+                (
+                    "已启用 single_attempt 和真实 QZone read-only profile。"
+                    if tools_count > 0
+                    else "已启用 single_attempt 和真实 QZone tool-free profile。"
+                ) if qzone_profile else "测试消息已完成本地校验。",
             ),
             step("provider_request", "调用 Provider", "ok", "Provider 已返回响应。"),
             step("provider_policy", "检查 Provider 拦截状态", "ok", "未发现结构化安全拦截信号。"),
@@ -680,15 +782,17 @@ def build_test_router(*, runtime) -> APIRouter:
                 if registry is not None
                 else []
             )
-            if tools:
-                tool_profile = TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY
-            else:
-                tools = [_QZONE_PROBE_TOOL]
-                tool_profile = "synthetic"
-                probe_degraded = True
+            tool_profile = TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY
+            probe_degraded = not tools
+            if probe_degraded:
+                messages[0]["content"] = (
+                    f"{system}\n\n这是无副作用 QZone Provider 兼容性探测。当前 production profile "
+                    "没有可用 function schema，请按 tool-free 请求处理；不要声称已执行发布、点赞、评论或任何外部操作。"
+                )
         else:
             tools = []
         tool_names_hash = _tool_names_hash(tools)
+        tool_schema_hash = _tool_schema_hash(tools)
         started = time.time()
         try:
             token = set_llm_context(
@@ -711,6 +815,7 @@ def build_test_router(*, runtime) -> APIRouter:
                 tools_count=len(tools),
                 tool_profile=tool_profile,
                 tool_names_hash=tool_names_hash,
+                tool_schema_hash=tool_schema_hash,
                 probe_degraded=probe_degraded,
             )
             _log_provider_failure(runtime, exc, report)
@@ -729,6 +834,11 @@ def build_test_router(*, runtime) -> APIRouter:
         payload["tools_count"] = len(tools)
         payload["tool_profile"] = tool_profile
         payload["tool_names_hash"] = tool_names_hash
+        payload["tool_schema_hash"] = tool_schema_hash
+        wire_tools_count = payload.get("wire_tools_count")
+        if wire_tools_count is None:
+            wire_tools_count = len(tools)
+        payload["wire_tools_count"] = max(0, int(wire_tools_count or 0))
         payload["probe_degraded"] = probe_degraded
         if qzone_profile:
             payload["runtime"] = get_runtime_identity()
@@ -740,6 +850,8 @@ def build_test_router(*, runtime) -> APIRouter:
             tools_count=len(tools),
             tool_profile=tool_profile,
             tool_names_hash=tool_names_hash,
+            tool_schema_hash=tool_schema_hash,
+            wire_tools_count=payload["wire_tools_count"],
             probe_degraded=probe_degraded,
         )
         if blocked:

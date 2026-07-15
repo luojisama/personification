@@ -200,14 +200,39 @@ def test_gemini_function_schema_uses_compatibility_subset(monkeypatch) -> None: 
                             "default": "ignored",
                             "examples": ["private example"],
                         },
+                    },
+                    "required": ["query", "missing"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "optional_bad_schema",
+                "description": "must be skipped without dropping optional fields",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
                         "mode": {
                             "oneOf": [
                                 {"type": "string", "enum": ["fast", "deep"]},
                                 {"type": "integer", "minimum": 1, "maximum": 2},
                             ]
                         },
+                        "bad": {"type": "date", "description": "unsupported type"},
                     },
-                    "required": ["query", "missing"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "required_bad_schema",
+                "description": "must be skipped without weakening required args",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"bad": {"type": "date"}},
+                    "required": ["bad"],
                 },
             },
         },
@@ -229,10 +254,11 @@ def test_gemini_function_schema_uses_compatibility_subset(monkeypatch) -> None: 
         },
     ]
 
-    asyncio.run(caller.chat_with_tools([{"role": "user", "content": "hi"}], tools, False))
+    response = asyncio.run(caller.chat_with_tools([{"role": "user", "content": "hi"}], tools, False))
 
     declarations = captured["json"]["tools"][0]["function_declarations"]
     assert len(declarations) == 1
+    assert response.wire_tools_count == 1
     declaration = declarations[0]
     assert declaration["name"] == "safe_lookup"
     assert declaration["description"] == "safe_lookup"
@@ -243,8 +269,6 @@ def test_gemini_function_schema_uses_compatibility_subset(monkeypatch) -> None: 
     assert "additionalProperties" not in parameters
     query = parameters["properties"]["query"]
     assert query == {"type": "STRING", "nullable": True, "description": "query text"}
-    assert "anyOf" in parameters["properties"]["mode"]
-    assert "oneOf" not in parameters["properties"]["mode"]
     assert "default" not in str(parameters)
     assert "private example" not in str(parameters)
 

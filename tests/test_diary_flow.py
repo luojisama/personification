@@ -11,6 +11,7 @@ from ._loader import load_personification_module
 
 
 diary_flow = load_personification_module("plugin.personification.flows.diary_flow")
+ai_routes = load_personification_module("plugin.personification.core.ai_routes")
 llm_context = load_personification_module("plugin.personification.core.llm_context")
 simple_loop = load_personification_module(
     "plugin.personification.agent.runtime.simple_loop"
@@ -428,6 +429,113 @@ def test_qzone_agent_tool_free_request_rejection_still_fast_fails(monkeypatch) -
     assert result == ""
     assert calls == 1
     assert report.code == "qzone_generation_request_rejected"
+
+
+@pytest.mark.parametrize(
+    ("error_code", "wire_tools_count", "expected_code"),
+    [
+        ("invalid_model", 7, "qzone_generation_model_unavailable"),
+        ("provider_request_rejected", 0, "qzone_generation_request_rejected"),
+    ],
+)
+def test_qzone_agent_does_not_tool_fallback_model_or_wire_tool_free_errors(
+    monkeypatch,  # noqa: ANN001
+    error_code: str,
+    wire_tools_count: int,
+    expected_code: str,
+) -> None:
+    calls = 0
+    report = diary_flow.QzoneGenerationReport()
+
+    async def _agent(**_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        exc = RuntimeError("model is invalid" if error_code == "invalid_model" else "request rejected")
+        exc.status_code = 400
+        exc.code = error_code
+        exc.route_attempts = (
+            {
+                "status_code": 400,
+                "code": error_code,
+                "tools_count": 7,
+                "wire_tools_count": wire_tools_count,
+            },
+        )
+        raise exc
+
+    monkeypatch.setattr(diary_flow, "run_text_agent", _agent)
+    result = asyncio.run(diary_flow._generate_once(
+        "你是绪山真寻",
+        "写一条说说",
+        plugin_config=SimpleNamespace(personification_agent_enabled=True),
+        call_ai_api=None,
+        tool_caller=object(),
+        registry=object(),
+        report=report,
+    ))
+
+    assert result == ""
+    assert calls == 1
+    assert report.code == expected_code
+
+
+def test_qzone_tool_recovery_uses_selected_rejected_route_wire_count() -> None:
+    error = ai_routes.RoutedToolCallerError([
+        {
+            "provider": "network-first",
+            "status_code": 0,
+            "code": "provider_network_failed",
+            "retryable": True,
+            "tools_count": 7,
+            "wire_tools_count": 7,
+        },
+        {
+            "provider": "rejected",
+            "status_code": 400,
+            "code": "provider_request_rejected",
+            "retryable": False,
+            "tools_count": 7,
+            "wire_tools_count": 0,
+        },
+    ])
+
+    assert error.code == "provider_request_rejected"
+    assert error.wire_tools_count == 0
+    assert diary_flow._qzone_failed_request_tools_count(error) == 0
+
+    last_model_error = RuntimeError("model is invalid")
+    last_model_error.code = "provider_model_unavailable"
+    error.__cause__ = last_model_error
+    assert diary_flow._classify_qzone_generation_error(error)[0] == "qzone_generation_request_rejected"
+
+
+def test_qzone_generation_safety_block_fast_fails_without_retry(monkeypatch) -> None:  # noqa: ANN001
+    calls = 0
+    report = diary_flow.QzoneGenerationReport()
+
+    async def _agent(**_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        exc = RuntimeError("safe provider policy block")
+        exc.code = "provider_safety_block"
+        exc.wire_tools_count = 2
+        raise exc
+
+    monkeypatch.setattr(diary_flow, "run_text_agent", _agent)
+    result = asyncio.run(diary_flow._generate_once(
+        "你是绪山真寻",
+        "写一条说说",
+        plugin_config=SimpleNamespace(personification_agent_enabled=True),
+        call_ai_api=None,
+        tool_caller=object(),
+        registry=object(),
+        report=report,
+    ))
+
+    assert result == ""
+    assert calls == 1
+    assert report.code == "qzone_generation_safety_blocked"
+    assert report.retryable is False
 
 
 @pytest.mark.parametrize(

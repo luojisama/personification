@@ -358,9 +358,101 @@ def test_routed_tool_caller_marks_timeout_retryable() -> None:
     assert caught.value.retryable is True
 
 
+def test_routed_tool_caller_preserves_structured_model_error_on_http_400() -> None:
+    inner = RuntimeError("private invalid model detail")
+    inner.code = "invalid_model"
+    error = RuntimeError("safe outer rejection")
+    error.status_code = 400
+    error.code = "provider_request_rejected"
+    error.wire_tools_count = 3
+    error.__cause__ = inner
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[_FakeCaller("primary", [error])],
+        fallback_caller=None,
+        logger=None,
+    )
+
+    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+        asyncio.run(routed.chat_with_tools([], [{"type": "function"}] * 3, False))
+
+    assert caught.value.code == "provider_model_unavailable"
+    assert caught.value.status_code == 400
+    assert caught.value.wire_tools_count == 3
+
+
+def test_routed_tool_caller_recognizes_wrapped_model_error_text_on_http_400() -> None:
+    inner = RuntimeError("model is invalid")
+    error = RuntimeError("safe outer rejection")
+    error.status_code = 400
+    error.code = "provider_request_rejected"
+    error.wire_tools_count = 1
+    error.__cause__ = inner
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[_FakeCaller("primary", [error])],
+        fallback_caller=None,
+        logger=None,
+    )
+
+    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+        asyncio.run(routed.chat_with_tools([], [{"type": "function"}], False))
+
+    assert caught.value.code == "provider_model_unavailable"
+
+
+def test_routed_tool_caller_prefers_recoverable_schema_rejection_over_model_error() -> None:
+    error = ai_routes.RoutedToolCallerError([
+        {
+            "provider": "bad-model",
+            "status_code": 400,
+            "code": "provider_model_unavailable",
+            "retryable": False,
+            "wire_tools_count": 3,
+        },
+        {
+            "provider": "schema-gateway",
+            "status_code": 400,
+            "code": "provider_request_rejected",
+            "retryable": False,
+            "wire_tools_count": 2,
+        },
+    ])
+
+    assert error.code == "provider_request_rejected"
+    assert error.wire_tools_count == 2
+
+
+def test_routed_safety_error_keeps_actual_wire_schema_count() -> None:
+    response = tool_impl.ToolCallerResponse(
+        "stop",
+        "请求被安全策略阻止",
+        [],
+        {"response": {"candidates": [{"finishReason": "SAFETY"}]}},
+        wire_tools_count=0,
+    )
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[_FakeCaller("primary", [response])],
+        fallback_caller=None,
+        logger=None,
+    )
+    token = llm_context.set_llm_context(
+        purpose="provider_probe",
+        retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+    )
+    try:
+        with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+            asyncio.run(routed.chat_with_tools([], [{"type": "function"}], False))
+    finally:
+        llm_context.reset_llm_context(token)
+
+    assert caught.value.code == "provider_safety_block"
+    assert caught.value.tools_count == 1
+    assert caught.value.wire_tools_count == 0
+
+
 def test_routed_tool_caller_records_safe_request_shape() -> None:
     error = RuntimeError("private schema response")
     error.status_code = 400
+    error.wire_tools_count = 0
     routed = ai_routes.RoutedToolCaller(
         primary_callers=[_FakeCaller("primary", [error])],
         fallback_caller=None,
@@ -389,9 +481,12 @@ def test_routed_tool_caller_records_safe_request_shape() -> None:
     assert attempt["message_count"] == 2
     assert attempt["prompt_chars"] == len("system texthello")
     assert attempt["tools_count"] == 1
+    assert attempt["wire_tools_count"] == 0
     assert len(attempt["tool_names_hash"]) == 12
+    assert len(attempt["tool_schema_hash"]) == 12
     assert attempt["builtin_search"] is True
     assert caught.value.tools_count == 1
+    assert caught.value.wire_tools_count == 0
     assert caught.value.tool_names_hash == attempt["tool_names_hash"]
     assert "private description" not in str(attempt)
 

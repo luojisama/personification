@@ -245,21 +245,39 @@ def _qzone_error_code(exc: Exception) -> str:
         "provider_network_failed",
         "provider_permission_denied",
         "provider_request_rejected",
+        "provider_safety_block",
         "provider_timeout",
         "providers_exhausted",
         "unsupported_model",
     }
-    for item in _qzone_exception_chain(exc):
+    chain = _qzone_exception_chain(exc)
+    aggregate_code = str(getattr(chain[0], "code", "") or "").strip().lower() if chain else ""
+    aggregate_attempts = getattr(chain[0], "route_attempts", None) if chain else None
+    if aggregate_code in allowed and isinstance(aggregate_attempts, (list, tuple)):
+        return aggregate_code
+    observed: list[str] = []
+    for item in chain:
         direct = str(getattr(item, "code", "") or "").strip().lower()
         if direct in allowed:
-            return direct
+            observed.append(direct)
         body = getattr(item, "body", None)
         if isinstance(body, dict):
             payload = body.get("error") if isinstance(body.get("error"), dict) else body
             nested = str(payload.get("code") or payload.get("type") or "").strip().lower()
             if nested in allowed:
-                return nested
-    return ""
+                observed.append(nested)
+    for preferred in (
+        "provider_model_candidate_unavailable",
+        "provider_model_unavailable",
+        "invalid_model",
+        "model_deprecated",
+        "model_not_available",
+        "model_not_found",
+        "unsupported_model",
+    ):
+        if preferred in observed:
+            return preferred
+    return observed[0] if observed else ""
 
 
 def _qzone_route_attempt_details(exc: Exception) -> list[OperationDetail]:
@@ -300,14 +318,22 @@ def _qzone_route_attempt_details(exc: Exception) -> list[OperationDetail]:
             auth_mode = str(attempt.get("auth_mode") or "-")
             request_count = max(1, int(attempt.get("request_count") or 1))
             tools_count = max(0, int(attempt.get("tools_count") or 0))
-            tool_names_hash = str(attempt.get("tool_names_hash") or "-")[:16]
+            wire_tools_count = max(0, int(attempt.get("wire_tools_count", tools_count) or 0))
+            tool_schema_hash = str(
+                attempt.get("tool_schema_hash") or attempt.get("tool_names_hash") or "-"
+            )[:16]
+            tools_label = (
+                str(tools_count)
+                if wire_tools_count == tools_count
+                else f"{wire_tools_count}/{tools_count} wire/profile"
+            )
             request_kind = str(attempt.get("request_kind") or "-")[:32]
             builtin_search = bool(attempt.get("builtin_search", False))
             result.append(
                 detail(
                     f"Provider route {index}",
                     f"{provider} · {api_type} · {model} · auth={auth_mode} · "
-                    f"kind={request_kind} · tools={tools_count} · schema={tool_names_hash} · "
+                    f"kind={request_kind} · tools={tools_label} · schema={tool_schema_hash} · "
                     f"builtin={str(builtin_search).lower()} · "
                     f"requests={request_count} · HTTP {status or '-'} · {code}",
                     "error",
@@ -318,23 +344,43 @@ def _qzone_route_attempt_details(exc: Exception) -> list[OperationDetail]:
 
 
 def _qzone_failed_request_tools_count(exc: Exception) -> int:
-    result = 0
     for item in _qzone_exception_chain(exc):
-        try:
-            result = max(result, int(getattr(item, "tools_count", 0) or 0))
-        except (TypeError, ValueError):
-            pass
+        if hasattr(item, "wire_tools_count"):
+            try:
+                return max(0, int(getattr(item, "wire_tools_count", 0) or 0))
+            except (TypeError, ValueError):
+                return 0
+    for item in _qzone_exception_chain(exc):
         attempts = getattr(item, "route_attempts", None)
         if not isinstance(attempts, (list, tuple)):
             continue
-        for attempt in attempts:
-            if not isinstance(attempt, dict):
-                continue
+        selected = next(
+            (
+                attempt
+                for attempt in attempts
+                if isinstance(attempt, dict)
+                and (
+                    str(attempt.get("code") or "").strip().lower() == "provider_request_rejected"
+                    or str(attempt.get("status_code") or "").strip() in {"400", "422"}
+                )
+            ),
+            None,
+        )
+        if selected is not None:
             try:
-                result = max(result, int(attempt.get("tools_count") or 0))
+                return max(
+                    0,
+                    int(selected.get("wire_tools_count", selected.get("tools_count", 0)) or 0),
+                )
             except (TypeError, ValueError):
-                continue
-    return max(0, result)
+                return 0
+    for item in _qzone_exception_chain(exc):
+        if hasattr(item, "tools_count"):
+            try:
+                return max(0, int(getattr(item, "tools_count", 0) or 0))
+            except (TypeError, ValueError):
+                return 0
+    return 0
 
 
 def _is_deterministic_qzone_model_error(exc: Exception) -> bool:
@@ -351,7 +397,9 @@ def _is_deterministic_qzone_model_error(exc: Exception) -> bool:
         "unsupported_model",
     }:
         return True
-    text = str(exc or "").strip().lower()
+    if code == "provider_request_rejected":
+        return False
+    text = " ".join(str(item or "").strip().lower() for item in _qzone_exception_chain(exc))
     return any(
         marker in text
         for marker in (
@@ -389,11 +437,11 @@ def _classify_qzone_generation_error(exc: Exception) -> tuple[str, str, str, boo
             "LLM Provider 已识别认证信息，但当前账号无权调用模型或能力；这不是 QQ 空间登录失败。",
             False,
         )
-    if status in {400, 422}:
+    if code == "provider_safety_block":
         return (
-            "qzone_generation_request_rejected",
-            "草稿生成请求被 Provider 拒绝",
-            "LLM Provider 拒绝了当前请求形态；通常表示 API type、endpoint、Agent tool schema 或请求参数不兼容，这不是 QQ 空间登录失败。",
+            "qzone_generation_safety_blocked",
+            "草稿生成被 Provider 安全策略拦截",
+            "LLM Provider 返回了结构化 safety block；本次不自动重试，也不会进入 QQ 空间发布。",
             False,
         )
     if _is_deterministic_qzone_model_error(exc):
@@ -401,6 +449,13 @@ def _classify_qzone_generation_error(exc: Exception) -> tuple[str, str, str, boo
             "qzone_generation_model_unavailable",
             "草稿生成模型不可用",
             "LLM Provider 的模型名称、endpoint 或请求参数确定性不可用；这不是 QQ 空间登录失败。",
+            False,
+        )
+    if status in {400, 422}:
+        return (
+            "qzone_generation_request_rejected",
+            "草稿生成请求被 Provider 拒绝",
+            "LLM Provider 拒绝了当前请求形态；通常表示 API type、endpoint、Agent tool schema 或请求参数不兼容，这不是 QQ 空间登录失败。",
             False,
         )
     if code == "provider_caller_unavailable":
@@ -626,6 +681,7 @@ _QZONE_TERMINAL_GENERATION_CODES = {
     "qzone_generation_caller_unavailable",
     "qzone_generation_model_unavailable",
     "qzone_generation_request_rejected",
+    "qzone_generation_safety_blocked",
 }
 
 

@@ -18,7 +18,7 @@ tool_registry_module = load_personification_module("plugin.personification.agent
 
 
 class _FakeResp:
-    def __init__(self, content="ok", finish_reason="stop", raw=None):
+    def __init__(self, content="ok", finish_reason="stop", raw=None, wire_tools_count=None):
         self.content = content
         self.finish_reason = finish_reason
         self.raw = raw
@@ -26,6 +26,7 @@ class _FakeResp:
         self.usage = {}
         self.model_used = "m"
         self.vision_unavailable = False
+        self.wire_tools_count = wire_tools_count
 
 
 class _FakeCaller:
@@ -57,7 +58,10 @@ class _QzoneProbeCaller:
         self.tools = list(tools)
         self.context = llm_context.current_llm_context()
         self.use_builtin_search = use_builtin_search
-        return _FakeResp(content='{"action":"skip","reason":"probe_ok"}')
+        return _FakeResp(
+            content='{"action":"skip","reason":"probe_ok"}',
+            wire_tools_count=len(tools),
+        )
 
 
 def _set_routed_caller(runtime_context, caller, registry=None) -> None:  # noqa: ANN001
@@ -84,6 +88,7 @@ def _tool_registry(*names: str):  # noqa: ANN201
                 description=name,
                 parameters={"type": "object", "properties": {}},
                 handler=_noop_tool,
+                metadata={"source_kind": "builtin"},
             )
         )
     return registry
@@ -179,11 +184,14 @@ def test_chat_single_qzone_profile_uses_production_compatible_shape(_runtime_con
     assert body["tools_count"] == 2
     assert body["tool_profile"] == "qzone_read_only"
     assert len(body["tool_names_hash"]) == 12
+    assert len(body["tool_schema_hash"]) == 12
+    assert body["wire_tools_count"] == 2
     assert body["probe_degraded"] is False
     assert body["diagnostic"]["code"] == "provider_test_qzone_compatible"
     details = {item["label"]: item["value"] for item in body["diagnostic"]["details"]}
     assert details["Tool profile"] == "qzone_read_only"
-    assert details["Schema hash"] == body["tool_names_hash"]
+    assert details["Tool names hash"] == body["tool_names_hash"]
+    assert details["Schema hash"] == body["tool_schema_hash"]
     assert body["runtime"]["build_id"]
     assert caller.context["purpose"] == "qzone_provider_probe"
     assert caller.context["retry_policy"] == "single_attempt"
@@ -194,7 +202,7 @@ def test_chat_single_qzone_profile_uses_production_compatible_shape(_runtime_con
     assert llm_context.current_llm_context() == {}
 
 
-def test_chat_single_qzone_profile_marks_synthetic_probe_degraded(_runtime_context) -> None:
+def test_chat_single_qzone_profile_uses_real_tool_free_shape_when_empty(_runtime_context) -> None:
     caller = _QzoneProbeCaller()
     _set_routed_caller(_runtime_context, caller)
     client = _build_client(_runtime_context)
@@ -207,13 +215,86 @@ def test_chat_single_qzone_profile_marks_synthetic_probe_degraded(_runtime_conte
 
     assert res.status_code == 200, res.text
     body = res.json()
-    assert body["tools_count"] == 1
-    assert body["tool_profile"] == "synthetic"
+    assert body["tools_count"] == 0
+    assert body["wire_tools_count"] == 0
+    assert body["tool_profile"] == "qzone_read_only"
     assert body["probe_degraded"] is True
-    assert body["diagnostic"]["code"] == "provider_test_qzone_probe_degraded"
+    assert body["diagnostic"]["code"] == "provider_test_qzone_tool_free"
     degraded_details = {item["label"]: item["value"] for item in body["diagnostic"]["details"]}
-    assert degraded_details["Tool profile"] == "synthetic"
-    assert caller.tools[0]["function"]["name"] == "qzone_probe_context"
+    assert degraded_details["Tool profile"] == "qzone_read_only"
+    assert caller.tools == []
+
+
+def test_chat_single_qzone_tool_free_profile_rejects_unexpected_tool_call(_runtime_context) -> None:
+    class _UnexpectedToolCaller(_QzoneProbeCaller):
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            response = await super().chat_with_tools(messages, tools, use_builtin_search)
+            response.content = ""
+            response.tool_calls = [SimpleNamespace(id="unexpected", name="web_search")]
+            return response
+
+    caller = _UnexpectedToolCaller()
+    _set_routed_caller(_runtime_context, caller)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.post(
+        "/personification/api/test/chat",
+        json={"prompt": "检查空间草稿调用", "profile": "qzone"},
+    )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["diagnostic"]["code"] == "provider_test_qzone_unexpected_tool_call"
+    assert body["ok"] is False
+
+
+def test_chat_single_qzone_profile_rejects_empty_wire_schema(_runtime_context) -> None:
+    class _DroppedSchemaCaller(_QzoneProbeCaller):
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            response = await super().chat_with_tools(messages, tools, use_builtin_search)
+            response.wire_tools_count = 0
+            return response
+
+    caller = _DroppedSchemaCaller()
+    _set_routed_caller(_runtime_context, caller, _tool_registry("web_search"))
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.post(
+        "/personification/api/test/chat",
+        json={"prompt": "检查空间草稿调用", "profile": "qzone"},
+    )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["wire_tools_count"] == 0
+    assert body["diagnostic"]["code"] == "provider_test_qzone_schema_empty"
+    assert body["ok"] is False
+
+
+def test_chat_single_qzone_profile_rejects_partial_wire_schema(_runtime_context) -> None:
+    class _PartialSchemaCaller(_QzoneProbeCaller):
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            response = await super().chat_with_tools(messages, tools, use_builtin_search)
+            response.wire_tools_count = 1
+            return response
+
+    caller = _PartialSchemaCaller()
+    _set_routed_caller(_runtime_context, caller, _tool_registry("web_search", "weather"))
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.post(
+        "/personification/api/test/chat",
+        json={"prompt": "检查空间草稿调用", "profile": "qzone"},
+    )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["wire_tools_count"] == 1
+    assert body["diagnostic"]["code"] == "provider_test_qzone_schema_partial"
+    assert body["ok"] is False
 
 
 def test_chat_single_qzone_profile_rejects_non_json_output(_runtime_context) -> None:
@@ -316,6 +397,49 @@ def test_provider_failure_prefers_aggregate_route_selection_over_last_cause() ->
 
     assert candidate_report["code"] == "provider_test_model_unavailable"
     assert request_report["code"] == "provider_test_request_rejected"
+
+    mixed = ai_routes.RoutedToolCallerError([
+        {
+            "provider": "bad-model",
+            "status_code": 400,
+            "code": "provider_model_unavailable",
+            "retryable": False,
+        },
+        {
+            "provider": "schema-gateway",
+            "status_code": 400,
+            "code": "provider_request_rejected",
+            "retryable": False,
+        },
+    ])
+    mixed.__cause__ = RuntimeError("model is invalid")
+    _, mixed_report = test_routes._provider_failure_report(mixed)
+    assert mixed_report["code"] == "provider_test_request_rejected"
+
+
+def test_provider_failure_classifies_structured_safety_block() -> None:
+    blocked = RuntimeError("safe provider policy block")
+    blocked.code = "provider_safety_block"
+
+    status, report = test_routes._provider_failure_report(blocked)
+
+    assert status == 502
+    assert report["code"] == "provider_test_blocked"
+    assert report["phase"] == "provider_policy"
+    assert report["retryable"] is False
+
+
+def test_provider_failure_recognizes_wrapped_model_error_text() -> None:
+    inner = RuntimeError("model is invalid")
+    outer = RuntimeError("safe outer rejection")
+    outer.status_code = 400
+    outer.__cause__ = inner
+
+    status, report = test_routes._provider_failure_report(outer)
+
+    assert status == 502
+    assert report["code"] == "provider_test_model_unavailable"
+    assert report["retryable"] is False
 
 
 def test_chat_single_internal_failure_is_structured_and_redacted(_runtime_context) -> None:

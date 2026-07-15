@@ -125,6 +125,7 @@ class ToolCallerResponse:
     vision_unavailable: bool = False
     usage: dict = field(default_factory=dict)
     model_used: str = ""
+    wire_tools_count: int | None = None
 
 
 class ToolCaller(ABC):
@@ -424,6 +425,7 @@ def _maybe_anthropic_thinking(thinking_mode: str) -> Optional[dict]:
 # FunctionDeclaration.parameters on the conservative OpenAPI subset; omitted
 # annotation fields such as default do not change runtime argument validation.
 _GEMINI_FUNCTION_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_GEMINI_SCHEMA_TYPES = frozenset({"STRING", "NUMBER", "INTEGER", "BOOLEAN", "ARRAY", "OBJECT", "NULL"})
 _GEMINI_SCHEMA_SCALAR_KEYS = frozenset(
     {
         "description",
@@ -443,43 +445,79 @@ _GEMINI_SCHEMA_SCALAR_KEYS = frozenset(
 )
 
 
-def _normalize_gemini_schema(schema: Any) -> dict[str, Any]:
+def _normalize_gemini_schema(
+    schema: Any,
+    *,
+    allow_null: bool = False,
+) -> dict[str, Any] | None:
     if not isinstance(schema, dict):
-        return {"type": "OBJECT", "properties": {}}
+        return None
 
     normalized: Dict[str, Any] = {}
     raw_type = schema.get("type")
     if isinstance(raw_type, str) and raw_type.strip():
-        normalized["type"] = raw_type.strip().upper()
+        candidate_type = raw_type.strip().upper()
+        if candidate_type not in _GEMINI_SCHEMA_TYPES:
+            return None
+        normalized["type"] = candidate_type
     elif isinstance(raw_type, list):
-        type_names = [str(item or "").strip().lower() for item in raw_type]
-        concrete_types = [item for item in type_names if item and item != "null"]
-        if concrete_types:
-            normalized["type"] = concrete_types[0].upper()
-        if "null" in type_names:
+        type_names = [str(item or "").strip().upper() for item in raw_type]
+        if not type_names or any(item not in _GEMINI_SCHEMA_TYPES for item in type_names):
+            return None
+        concrete_types = {item for item in type_names if item != "NULL"}
+        if len(concrete_types) != 1:
+            return {"type": "NULL"} if allow_null and not concrete_types else None
+        normalized["type"] = next(iter(concrete_types))
+        if "NULL" in type_names:
             normalized["nullable"] = True
-
-    properties = schema.get("properties")
-    if isinstance(properties, dict):
-        normalized["properties"] = {
-            str(name): _normalize_gemini_schema(value)
-            for name, value in properties.items()
-            if str(name)
-        }
-        normalized.setdefault("type", "OBJECT")
-
-    items = schema.get("items")
-    if isinstance(items, dict):
-        normalized["items"] = _normalize_gemini_schema(items)
-        normalized.setdefault("type", "ARRAY")
 
     raw_any_of = schema.get("anyOf")
     if not isinstance(raw_any_of, list):
         raw_any_of = schema.get("oneOf")
     if isinstance(raw_any_of, list):
-        any_of = [_normalize_gemini_schema(item) for item in raw_any_of if isinstance(item, dict)]
-        if any_of:
-            normalized["anyOf"] = any_of
+        union_items = [
+            _normalize_gemini_schema(item, allow_null=True)
+            for item in raw_any_of
+            if isinstance(item, dict)
+        ]
+        if len(union_items) != len(raw_any_of) or any(item is None for item in union_items):
+            return None
+        concrete_items = [item for item in union_items if item and item.get("type") != "NULL"]
+        null_items = [item for item in union_items if item and item.get("type") == "NULL"]
+        # A nullable single schema can be represented without anyOf. Multi-shape
+        # unions are dropped instead of silently changing the function contract.
+        if len(concrete_items) != 1 or len(null_items) > 1:
+            return None
+        union_schema = dict(concrete_items[0])
+        explicit_type = str(normalized.get("type") or "")
+        if explicit_type and explicit_type != str(union_schema.get("type") or ""):
+            return None
+        union_schema.update({key: value for key, value in normalized.items() if key != "type"})
+        if null_items:
+            union_schema["nullable"] = True
+        normalized = union_schema
+
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        normalized_properties: Dict[str, Any] = {}
+        for name, value in properties.items():
+            property_name = str(name)
+            child = _normalize_gemini_schema(value)
+            if not property_name:
+                continue
+            if child is None:
+                return None
+            normalized_properties[property_name] = child
+        normalized["properties"] = normalized_properties
+        normalized.setdefault("type", "OBJECT")
+
+    items = schema.get("items")
+    if isinstance(items, dict):
+        normalized_items = _normalize_gemini_schema(items)
+        if normalized_items is None:
+            return None
+        normalized["items"] = normalized_items
+        normalized.setdefault("type", "ARRAY")
 
     for key in _GEMINI_SCHEMA_SCALAR_KEYS:
         if key not in schema:
@@ -495,21 +533,40 @@ def _normalize_gemini_schema(schema: Any) -> dict[str, Any]:
         if isinstance(value, (str, int, float)) and not isinstance(value, bool):
             normalized[key] = value
 
-    required = schema.get("required")
-    if isinstance(required, list):
-        property_names = set((normalized.get("properties") or {}).keys())
-        required_names = [
-            str(name)
-            for name in required
-            if isinstance(name, str) and name and name in property_names
-        ]
-        if required_names:
-            normalized["required"] = required_names
-
     if "type" not in normalized:
-        normalized["type"] = "OBJECT"
-    if normalized["type"] == "OBJECT":
+        return None
+
+    schema_type = str(normalized.get("type") or "")
+    if schema_type not in _GEMINI_SCHEMA_TYPES:
+        return None
+    if schema_type == "NULL":
+        return normalized if allow_null else None
+    if schema_type == "OBJECT":
         normalized.setdefault("properties", {})
+        required = schema.get("required")
+        if isinstance(required, list):
+            property_names = set((normalized.get("properties") or {}).keys())
+            required_names = [
+                str(name)
+                for name in required
+                if isinstance(name, str) and name and name in property_names
+            ]
+            if required_names:
+                normalized["required"] = required_names
+    else:
+        for key in ("properties", "required", "minProperties", "maxProperties"):
+            normalized.pop(key, None)
+    if schema_type != "ARRAY":
+        for key in ("items", "minItems", "maxItems"):
+            normalized.pop(key, None)
+    elif "items" not in normalized:
+        return None
+    if schema_type not in {"INTEGER", "NUMBER"}:
+        normalized.pop("minimum", None)
+        normalized.pop("maximum", None)
+    if schema_type != "STRING":
+        for key in ("enum", "format", "minLength", "maxLength", "pattern"):
+            normalized.pop(key, None)
     return normalized
 
 
@@ -521,7 +578,7 @@ def _convert_openai_tool_to_gemini(tool: dict) -> dict | None:
     if not _GEMINI_FUNCTION_NAME_RE.fullmatch(name):
         return None
     parameters = _normalize_gemini_schema(function_def.get("parameters", {"type": "object"}))
-    if parameters.get("type") != "OBJECT":
+    if parameters is None or parameters.get("type") != "OBJECT":
         return None
     return {
         "name": name,
@@ -539,6 +596,13 @@ def _convert_openai_tools_to_gemini(tools: List[dict]) -> List[dict]:
         if declaration is not None:
             converted.append(declaration)
     return converted
+
+
+def _attach_wire_tools_count(exc: BaseException, count: int) -> None:
+    try:
+        setattr(exc, "wire_tools_count", max(0, int(count or 0)))
+    except Exception:
+        pass
 
 
 def _convert_openai_tool_to_anthropic(tool: dict) -> dict:
@@ -1046,6 +1110,7 @@ class OpenAIToolCaller(ToolCaller):
         from openai import AsyncOpenAI
 
         contains_image_input = _messages_contain_images(messages)
+        wire_tools_count = 0
         try:
             connect_timeout = 10.0
             http_kwargs: dict[str, Any] = {
@@ -1084,6 +1149,7 @@ class OpenAIToolCaller(ToolCaller):
                     system_instruction, input_items = _openai_responses_input(messages)
                     response_tools = [_convert_openai_tool_to_responses(tool) for tool in filtered_tools]
                     response_tools.append({"type": "web_search"})
+                    wire_tools_count = len(filtered_tools)
                     payload: Dict[str, Any] = {
                         "model": self.model,
                         "input": input_items,
@@ -1109,6 +1175,7 @@ class OpenAIToolCaller(ToolCaller):
                             used_builtin_search=used_builtin_search,
                             usage=_extract_usage(response),
                             model_used=str(self.model or ""),
+                            wire_tools_count=wire_tools_count,
                         )
                     except TypeError as e:
                         error_msg = str(e).lower()
@@ -1128,6 +1195,7 @@ class OpenAIToolCaller(ToolCaller):
                                     used_builtin_search=used_builtin_search,
                                     usage=_extract_usage(response),
                                     model_used=str(self.model or ""),
+                                    wire_tools_count=wire_tools_count,
                                 )
                             except Exception:
                                 responses_failed = True
@@ -1170,6 +1238,7 @@ class OpenAIToolCaller(ToolCaller):
                     use_native_search=chat_supports_native_search and not responses_failed,
                     use_original_tools=(not use_builtin_search) or responses_failed,
                 )
+                wire_tools_count = len(list(payload.get("tools") or []))
 
                 try:
                     response = await client.chat.completions.create(**payload)
@@ -1181,12 +1250,14 @@ class OpenAIToolCaller(ToolCaller):
                         response = await client.chat.completions.create(**payload)
                     elif use_builtin_search and chat_supports_native_search and not responses_failed:
                         payload = _build_chat_payload(use_native_search=False, use_original_tools=True)
+                        wire_tools_count = len(list(payload.get("tools") or []))
                         response = await client.chat.completions.create(**payload)
                     else:
                         raise
                 except Exception:
                     if use_builtin_search and chat_supports_native_search and not responses_failed:
                         payload = _build_chat_payload(use_native_search=False, use_original_tools=True)
+                        wire_tools_count = len(list(payload.get("tools") or []))
                         response = await client.chat.completions.create(**payload)
                     else:
                         raise
@@ -1212,8 +1283,10 @@ class OpenAIToolCaller(ToolCaller):
                 used_builtin_search=used_builtin_search,
                 usage=_extract_usage(response),
                 model_used=str(self.model or ""),
+                wire_tools_count=wire_tools_count,
             )
         except Exception as exc:
+            _attach_wire_tools_count(exc, wire_tools_count)
             if contains_image_input and (
                 _error_indicates_vision_unavailable(exc)
                 or (is_mimo_openai and _error_indicates_mimo_message_shape_or_vision_unavailable(exc))
@@ -1260,6 +1333,7 @@ class GeminiToolCaller(ToolCaller):
     ) -> ToolCallerResponse:
         system_instruction, contents = _convert_messages_to_gemini(messages)
         tool_payload: List[dict] = []
+        declarations: List[dict] = []
         if tools:
             declarations = _convert_openai_tools_to_gemini(tools)
             if declarations:
@@ -1280,36 +1354,40 @@ class GeminiToolCaller(ToolCaller):
             }
 
         url = f"{self.base_url.rstrip('/')}/models/{self.model}:generateContent"
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(self.timeout, connect=min(15.0, self.timeout)),
-            follow_redirects=False,
-        ) as client:
-            async def _send(auth):  # noqa: ANN001, ANN202
-                return await client.post(
-                    url,
-                    headers={"Content-Type": "application/json", **auth.headers},
-                    params=auth.params,
-                    json=payload,
-                )
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(self.timeout, connect=min(15.0, self.timeout)),
+                follow_redirects=False,
+            ) as client:
+                async def _send(auth):  # noqa: ANN001, ANN202
+                    return await client.post(
+                        url,
+                        headers={"Content-Type": "application/json", **auth.headers},
+                        params=auth.params,
+                        json=payload,
+                    )
 
-            auth_result = await request_with_gemini_auth(
-                endpoint=self.base_url,
-                api_key=self.api_key,
-                auth_mode=self.auth_mode,
-                send=_send,
-                allow_negotiation=not use_single_attempt_retry_policy(),
-            )
-            response = auth_result.response
-            raise_for_gemini_status(
-                response,
-                auth_mode=auth_result.mode,
-                request_count=auth_result.request_count,
-            )
-            data = response.json()
+                auth_result = await request_with_gemini_auth(
+                    endpoint=self.base_url,
+                    api_key=self.api_key,
+                    auth_mode=self.auth_mode,
+                    send=_send,
+                    allow_negotiation=not use_single_attempt_retry_policy(),
+                )
+                response = auth_result.response
+                raise_for_gemini_status(
+                    response,
+                    auth_mode=auth_result.mode,
+                    request_count=auth_result.request_count,
+                )
+                data = response.json()
+        except Exception as exc:
+            _attach_wire_tools_count(exc, len(declarations))
+            raise
 
         candidates = list(_obj_get(data, "candidates", []) or [])
         if not candidates:
-            return ToolCallerResponse("stop", "", [], data)
+            return ToolCallerResponse("stop", "", [], data, wire_tools_count=len(declarations))
         content = _obj_get(candidates[0], "content", {})
         parts = list(_obj_get(content, "parts", []) or [])
         tool_calls = _extract_gemini_tool_calls(parts)
@@ -1322,6 +1400,7 @@ class GeminiToolCaller(ToolCaller):
             used_builtin_search=_gemini_used_builtin_search(data),
             usage=_extract_usage(data),
             model_used=str(self.model or ""),
+            wire_tools_count=len(declarations),
         )
 
     async def chat_with_tools(
@@ -1384,6 +1463,7 @@ class AnthropicToolCaller(ToolCaller):
         from anthropic import AsyncAnthropic
 
         contains_image_input = _messages_contain_images(messages)
+        wire_tools_count = 0
         try:
             system_instruction, anthropic_messages = _convert_messages_to_anthropic(messages)
             filtered_tools = [
@@ -1395,6 +1475,7 @@ class AnthropicToolCaller(ToolCaller):
                 )
             ]
             tool_payload = [_convert_openai_tool_to_anthropic(tool) for tool in filtered_tools]
+            wire_tools_count = len(filtered_tools)
             if use_builtin_search:
                 tool_payload.append(dict(ANTHROPIC_BUILTIN_SEARCH_TOOL))
 
@@ -1449,8 +1530,10 @@ class AnthropicToolCaller(ToolCaller):
                 used_builtin_search=used_builtin,
                 usage=_extract_usage(response),
                 model_used=str(self.model or ""),
+                wire_tools_count=wire_tools_count,
             )
         except Exception as exc:
+            _attach_wire_tools_count(exc, wire_tools_count)
             if contains_image_input and _error_indicates_vision_unavailable(exc):
                 return _vision_unavailable_response(exc)
             raise
@@ -3525,14 +3608,17 @@ class GeminiCliToolCaller(ToolCaller):
     ) -> ToolCallerResponse:
         messages = inject_current_time_context(messages)
         contains_image_input = _messages_contain_images(messages)
+        wire_tools_count = 0
         try:
             access_token, auth_file = await self._get_access_token()
             project = await self._resolve_project(access_token, auth_file)
             system_instruction, contents = _convert_messages_to_gemini(messages)
 
             tool_payload: List[dict] = []
+            declarations: List[dict] = []
             if tools:
                 declarations = _convert_openai_tools_to_gemini(tools)
+                wire_tools_count = len(declarations)
                 if declarations:
                     tool_payload.append({"function_declarations": declarations})
             if use_builtin_search:
@@ -3633,7 +3719,7 @@ class GeminiCliToolCaller(ToolCaller):
                 payload = data
             candidates = list(payload.get("candidates", []) or [])
             if not candidates:
-                return ToolCallerResponse("stop", "", [], data)
+                return ToolCallerResponse("stop", "", [], data, wire_tools_count=wire_tools_count)
             content = candidates[0].get("content") or {}
             parts = list(content.get("parts", []) or [])
             tool_calls = _extract_gemini_tool_calls(parts)
@@ -3650,8 +3736,10 @@ class GeminiCliToolCaller(ToolCaller):
                 used_builtin_search=bool(grounding),
                 usage=usage,
                 model_used=str(self.model or self._default_model),
+                wire_tools_count=wire_tools_count,
             )
         except Exception as exc:
+            _attach_wire_tools_count(exc, wire_tools_count)
             if contains_image_input and _error_indicates_vision_unavailable(exc):
                 return _vision_unavailable_response(exc)
             raise
@@ -4064,14 +4152,17 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
     ) -> ToolCallerResponse:
         messages = inject_current_time_context(messages)
         contains_image_input = _messages_contain_images(messages)
+        wire_tools_count = 0
         try:
             access_token, auth_file = await self._get_access_token()
             project = await self._resolve_project(access_token, auth_file)
             system_instruction, contents = _convert_messages_to_gemini(messages)
 
             tool_payload: List[dict] = []
+            declarations: List[dict] = []
             if tools:
                 declarations = _convert_openai_tools_to_gemini(tools)
+                wire_tools_count = len(declarations)
                 if declarations:
                     tool_payload.append({"function_declarations": declarations})
             if use_builtin_search:
@@ -4242,7 +4333,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                 payload = data
             candidates = list(payload.get("candidates", []) or [])
             if not candidates:
-                return ToolCallerResponse("stop", "", [], data)
+                return ToolCallerResponse("stop", "", [], data, wire_tools_count=wire_tools_count)
             content = candidates[0].get("content") or {}
             parts = list(content.get("parts", []) or [])
             tool_calls = _extract_gemini_tool_calls(parts)
@@ -4258,8 +4349,10 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                 used_builtin_search=bool(grounding),
                 usage=usage,
                 model_used=str(selected_model_name or self.model or self._default_model),
+                wire_tools_count=wire_tools_count,
             )
         except Exception as exc:
+            _attach_wire_tools_count(exc, wire_tools_count)
             if contains_image_input and _error_indicates_vision_unavailable(exc):
                 return _vision_unavailable_response(exc)
             raise
@@ -4356,6 +4449,7 @@ class ClaudeCodeToolCaller(AnthropicToolCaller):
 
         messages = inject_current_time_context(messages)
         contains_image_input = _messages_contain_images(messages)
+        wire_tools_count = 0
         try:
             access_token = self._get_access_token()
             system_instruction, anthropic_messages = _convert_messages_to_anthropic(messages)
@@ -4368,6 +4462,7 @@ class ClaudeCodeToolCaller(AnthropicToolCaller):
                 )
             ]
             tool_payload = [_convert_openai_tool_to_anthropic(tool) for tool in filtered_tools]
+            wire_tools_count = len(filtered_tools)
             if use_builtin_search:
                 tool_payload.append(dict(ANTHROPIC_BUILTIN_SEARCH_TOOL))
 
@@ -4421,8 +4516,10 @@ class ClaudeCodeToolCaller(AnthropicToolCaller):
                 used_builtin_search=used_builtin,
                 usage=_extract_usage(response),
                 model_used=str(getattr(self, "model", "") or ""),
+                wire_tools_count=wire_tools_count,
             )
         except Exception as exc:
+            _attach_wire_tools_count(exc, wire_tools_count)
             if contains_image_input and _error_indicates_vision_unavailable(exc):
                 return _vision_unavailable_response(exc)
             raise
