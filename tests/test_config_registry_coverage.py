@@ -74,6 +74,22 @@ def test_extra_entries_normalize_roundtrip() -> None:
     assert entries["favorability_decay_delta"].normalize_value("-0.1") == -0.1
 
 
+def test_favorability_registry_defaults_match_runtime_defaults() -> None:
+    config_module = load_personification_module("plugin.personification.config")
+    entries = {entry.key: entry for entry in config_registry.get_config_entries()}
+
+    assert entries["favorability_group_default_score"].default == 35.0
+    assert config_module.Config().personification_favorability_group_default_score == 35.0
+    assert (
+        entries["favorability_attitudes"].default
+        == config_module.Config().personification_favorability_attitudes
+    )
+    assert (
+        config_module.Config(personification_favorability_attitudes={}).personification_favorability_attitudes
+        == config_module.DEFAULT_FAVORABILITY_ATTITUDES
+    )
+
+
 def test_normalize_value_accepts_parsed_list_and_dict() -> None:
     # WebUI 的 API Provider 池编辑器直接提交已解析的数组（FastAPI 解析 JSON body
     # 后是 Python list），normalize_value 必须接受，不能因 str(list) 的 Python repr

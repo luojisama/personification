@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 import warnings
 
 from .core.memory_defaults import (
@@ -14,21 +14,11 @@ from .core.memory_defaults import (
     DEFAULT_PERSONA_HISTORY_MAX,
     DEFAULT_PRIVATE_HISTORY_TURNS,
 )
-from .core.favorability import DEFAULT_FAVORABILITY_EVENT_DELTAS, DEFAULT_FAVORABILITY_LEVELS
-
-
-DEFAULT_FAVORABILITY_ATTITUDES: Dict[str, str] = {
-    "初见": "保持基本礼貌，态度温和但不过于亲热。",
-    "面熟": "表现得比较客气，愿意倾听并给出简单回应。",
-    "初识": "态度随和，偶尔会分享一些有趣的小事，语气活泼。",
-    "普通": "像普通朋友一样轻松交流，会主动接话。",
-    "熟悉": "言谈举止比较随意，经常互相调侃，表现得很开心。",
-    "信赖": "非常信任对方，说话很贴心，会表达关心。",
-    "知心": "默契十足，有很多共同话题，语气变得亲近。",
-    "深厚": "关系非常深厚，会主动分享心情，给对方支持。",
-    "挚友": "无话不谈，对对方充满热情和信任。",
-    "亲密": "非常亲昵，语气温柔，充满宠溺和爱护。",
-}
+from .core.favorability import (
+    DEFAULT_FAVORABILITY_ATTITUDES,
+    DEFAULT_FAVORABILITY_EVENT_DELTAS,
+    DEFAULT_FAVORABILITY_LEVELS,
+)
 
 
 class Config(BaseModel):
@@ -377,7 +367,7 @@ class Config(BaseModel):
 
     personification_favorability_enabled: bool = True
     personification_favorability_default_score: float = 0.0
-    personification_favorability_group_default_score: float = 100.0
+    personification_favorability_group_default_score: float = 35.0
     personification_favorability_levels: Dict[str, float] = DEFAULT_FAVORABILITY_LEVELS.copy()
     personification_favorability_attitudes: Dict[str, str] = DEFAULT_FAVORABILITY_ATTITUDES.copy()
     personification_favorability_event_deltas: Dict[str, float] = DEFAULT_FAVORABILITY_EVENT_DELTAS.copy()
@@ -388,6 +378,13 @@ class Config(BaseModel):
     personification_favorability_decay_enabled: bool = False
     personification_favorability_decay_idle_days: int = 14
     personification_favorability_decay_delta: float = -0.20
+
+    @field_validator("personification_favorability_attitudes", mode="before")
+    @classmethod
+    def _fallback_favorability_attitudes(cls, value: Any) -> Any:
+        if value is None or value == {} or (isinstance(value, str) and value.strip() in {"", "{}"}):
+            return DEFAULT_FAVORABILITY_ATTITUDES.copy()
+        return value
 
     personification_history_len: int = DEFAULT_HISTORY_LEN
     # 滚动窗口：触发压缩的条数阈值（达到此数量时压缩）
