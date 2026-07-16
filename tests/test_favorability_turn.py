@@ -108,7 +108,7 @@ def test_turn_id_is_stable_and_does_not_embed_raw_identifiers() -> None:
         user_id="10001",
     )
     second = favorability_turn.build_favorability_turn_id(
-        trace_id="trace-secret",
+        trace_id="different-retry-trace",
         message_id="12345",
         group_id="20001",
         user_id="10001",
@@ -117,6 +117,19 @@ def test_turn_id_is_stable_and_does_not_embed_raw_identifiers() -> None:
     assert first == second
     assert first.startswith("reply-turn-")
     assert all(raw not in first for raw in ("trace-secret", "12345", "20001", "10001"))
+
+    poke_one = favorability_turn.build_favorability_turn_id(
+        trace_id="poke-trace-1",
+        group_id="20001",
+        user_id="10001",
+    )
+    poke_two = favorability_turn.build_favorability_turn_id(
+        trace_id="poke-trace-2",
+        group_id="20001",
+        user_id="10001",
+    )
+    assert poke_one != poke_two
+    assert favorability_turn.build_favorability_turn_id(group_id="20001", user_id="10001") == ""
 
 
 def test_context_block_keeps_relationship_policy_shared() -> None:

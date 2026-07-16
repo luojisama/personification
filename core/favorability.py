@@ -471,7 +471,9 @@ class FavorabilityService:
         if score is None or score != 100.0:
             return False
         source = str(profile.get("source", "") or "").strip()
-        if source not in {"", "personification"}:
+        # 旧版 bulk external migration 可能没有写 source；来源缺失的档案
+        # 无法证明是插件自动默认值，必须保守保留。
+        if source != "personification":
             return False
         if bool(profile.get("is_perm_blacklisted", False)):
             return False

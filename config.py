@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 import warnings
 
 from .core.memory_defaults import (
@@ -22,6 +22,15 @@ from .core.favorability import (
 
 
 class Config(BaseModel):
+    def __init__(self, **data: Any) -> None:
+        attitudes = data.get("personification_favorability_attitudes")
+        if attitudes is None or attitudes == {} or (
+            isinstance(attitudes, str) and attitudes.strip() in {"", "{}"}
+        ):
+            data = dict(data)
+            data["personification_favorability_attitudes"] = DEFAULT_FAVORABILITY_ATTITUDES.copy()
+        super().__init__(**data)
+
     personification_whitelist: List[str] = []
     personification_probability: float = 0.30
 
@@ -378,13 +387,6 @@ class Config(BaseModel):
     personification_favorability_decay_enabled: bool = False
     personification_favorability_decay_idle_days: int = 14
     personification_favorability_decay_delta: float = -0.20
-
-    @field_validator("personification_favorability_attitudes", mode="before")
-    @classmethod
-    def _fallback_favorability_attitudes(cls, value: Any) -> Any:
-        if value is None or value == {} or (isinstance(value, str) and value.strip() in {"", "{}"}):
-            return DEFAULT_FAVORABILITY_ATTITUDES.copy()
-        return value
 
     personification_history_len: int = DEFAULT_HISTORY_LEN
     # 滚动窗口：触发压缩的条数阈值（达到此数量时压缩）

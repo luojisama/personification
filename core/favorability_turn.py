@@ -92,13 +92,13 @@ def build_favorability_turn_id(
     group_id: Any = "",
     user_id: Any = "",
 ) -> str:
-    parts = [
-        str(trace_id or "").strip(),
-        str(message_id or "").strip(),
-        str(group_id or "").strip(),
-        str(user_id or "").strip(),
-    ]
-    if not any(parts):
+    stable_message_id = str(message_id or "").strip()
+    fallback_trace_id = str(trace_id or "").strip()
+    if stable_message_id:
+        parts = ["message", stable_message_id, str(group_id or "").strip(), str(user_id or "").strip()]
+    elif fallback_trace_id:
+        parts = ["trace", fallback_trace_id, str(group_id or "").strip(), str(user_id or "").strip()]
+    else:
         return ""
     digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
     return f"reply-turn-{digest[:32]}"

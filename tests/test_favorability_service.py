@@ -232,6 +232,7 @@ def test_decay_is_opt_in_and_skips_recent_profiles(monkeypatch) -> None:  # noqa
         },
         "group_9": {
             "favorability": 100.0,
+            "source": "personification",
             "created_at": int(old.timestamp()),
             "updated_at": int(old.timestamp()),
         },
@@ -266,7 +267,12 @@ def test_group_100_baseline_migration_only_changes_proven_automatic_profiles(mon
     store.payload = {
         "group_auto": {"favorability": 100, "source": "personification", "created_at": old_ts},
         "group_missing_source": {"favorability": 100, "favorability_events": [], "created_at": old_ts},
-        "group_clamped": {"favorability": 100, "favorability_events": [clamped], "created_at": old_ts},
+        "group_clamped": {
+            "favorability": 100,
+            "source": "personification",
+            "favorability_events": [clamped],
+            "created_at": old_ts,
+        },
         "group_manual": {
             "favorability": 100,
             "source": "personification",
@@ -288,13 +294,32 @@ def test_group_100_baseline_migration_only_changes_proven_automatic_profiles(mon
 
     profiles = service.load_data()
 
-    for key in ("group_auto", "group_missing_source", "group_clamped"):
+    for key in ("group_auto", "group_clamped"):
         assert profiles[key]["favorability"] == 35.0
         assert profiles[key]["favorability_events"][-1]["type"] == "baseline_migration"
         assert profiles[key]["daily_positive_count"] == 0.0
         assert profiles[key]["last_relationship_activity_at"] == old_ts
-    for key in ("group_manual", "group_external", "group_nonzero", "group_blacklisted"):
+    for key in ("group_missing_source", "group_manual", "group_external", "group_nonzero", "group_blacklisted"):
         assert profiles[key]["favorability"] == 100.0
+
+
+def test_schema_v2_source_missing_group_is_preserved_when_external_is_unavailable(monkeypatch) -> None:  # noqa: ANN001
+    store = _FakeStore()
+    monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    store.payload = {
+        "group_legacy_external": {
+            "schema_version": 2,
+            "favorability": 100,
+            "nickname": "旧 external 群档案",
+            "favorability_events": [],
+        }
+    }
+    service = favorability.FavorabilityService(plugin_config=_config())
+
+    profile = service.load_data()["group_legacy_external"]
+
+    assert profile["favorability"] == 100.0
+    assert not any(event["type"] == "baseline_migration" for event in profile["favorability_events"])
 
 
 def test_group_baseline_migration_respects_configured_target_and_external_provenance(monkeypatch) -> None:  # noqa: ANN001
