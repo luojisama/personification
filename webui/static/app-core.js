@@ -427,6 +427,7 @@ async function api(path, opts = {}) {
     if (method === "GET" && !requestOpts.signal && _viewAbortController) requestOpts.signal = _viewAbortController.signal;
     const res = await fetch(API + path, requestOpts);
     if (res.status === 401) {
+      clearInMemorySensitiveState();
       state.logged = false;
       refreshEligibleAdmins().finally(() => render());
       throw new Error("未登录");
@@ -443,6 +444,11 @@ async function api(path, opts = {}) {
     promise.finally(() => { _apiInflight.delete(dedupKey); });
   }
   return promise;
+}
+
+function clearInMemorySensitiveState() {
+  state.configDrafts = {};
+  if (typeof clearMcpSensitiveState === "function") clearMcpSensitiveState();
 }
 
 function alertFlash(kind, text) { state.alert = { kind, text }; render(); setTimeout(() => { state.alert = null; render(); }, 4000); }

@@ -776,6 +776,7 @@ async function probeApiProviderModels(field, index, btn) {
   }
   const provider = sanitizeApiProvider(providers[index]);
   if (!provider) return;
+  const requestIdentity = apiProviderProbeCacheKey(field, index, provider);
   const oldText = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "探测中…"; }
   try {
@@ -786,16 +787,28 @@ async function probeApiProviderModels(field, index, btn) {
     });
     const operation = configRememberDiagnostic(result, "Provider 模型探测未完成");
     const models = normalizeApiProviderModels(result.models);
-    providers[index] = {...provider, _model_options: models, _model_source: result.source || "", _model_probe_done: true};
-    cacheApiProviderModelProbe(field, index, providers[index]);
+    const probedProvider = {...provider, _model_options: models, _model_source: result.source || "", _model_probe_done: true};
+    cacheApiProviderModelProbe(field, index, probedProvider);
+    let latestProviders;
+    try {
+      latestProviders = readApiPoolEditor(field);
+    } catch {
+      alertFlash("info", "探测已完成；当前草稿仍在编辑，结果将在 Provider 参数恢复匹配时可用");
+      return;
+    }
+    const latestProvider = sanitizeApiProvider(latestProviders[index]);
+    if (!latestProvider || apiProviderProbeCacheKey(field, index, latestProvider) !== requestIdentity) {
+      alertFlash("info", "探测已完成；Provider 参数已变化，未覆盖当前草稿");
+      return;
+    }
+    latestProviders[index] = {...latestProviders[index], _model_options: models, _model_source: result.source || "", _model_probe_done: true};
+    cacheApiProviderModelProbe(field, index, latestProviders[index]);
     const previousDraft = apiPoolDraftState(field);
-    setApiPoolDraft(field, providers, {
-      rawText:JSON.stringify(sanitizeApiProviders(providers), null, 2),
+    setApiPoolDraft(field, latestProviders, {
+      rawText:JSON.stringify(sanitizeApiProviders(latestProviders), null, 2),
       rawVisible:Boolean(previousDraft && previousDraft.rawVisible),
     });
-    const card = btn ? btn.closest(".api-provider-card") : null;
-    updateApiProviderModelControls(card, models, result.source || "");
-    writeApiPoolEditor(field, providers);
+    writeApiPoolEditor(field, latestProviders);
     alertFlash(models.length ? "ok" : "err", operation?.title || (models.length ? `已探测 ${models.length} 个模型` : "未探测到模型，请手动填写"));
   } catch (e) {
     const operation = configRememberDiagnostic(e, "Provider 模型探测未完成");
@@ -824,13 +837,14 @@ async function commitTextField(field, btn, kind) {
 
 async function saveField(field, value, options={}) {
   if (!options.preserveDraft) setConfigValueDraft(field, value);
+  const submittedDraft = configDraft(field);
   try {
     const result = await api("/config/value", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ field_name: field, value }) });
     const operation = configRememberDiagnostic(result, "配置保存未完成");
     if (result.success) {
       const entry = state.entries.find(item => item.field_name === field);
       if (entry && Object.prototype.hasOwnProperty.call(result, "new_value")) entry.current = result.new_value;
-      clearConfigDraft(field);
+      if (configDraft(field) === submittedDraft) clearConfigDraft(field);
       alertFlash("ok", operation?.title || `已保存 ${field} 到插件 env.json`);
       await loadView(); render();
     }

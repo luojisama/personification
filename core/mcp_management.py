@@ -769,16 +769,16 @@ class McpRuntimeManager:
         self._tool_names: dict[str, set[str]] = {}
         self._lock = asyncio.Lock()
 
+    def _secret_environment(self, item: dict[str, Any]) -> dict[str, str]:
+        required = [str(name) for name in item.get("secret_names") or [] if str(name)]
+        stored = self.secrets.get(str(item.get("installation_id") or ""))
+        if any(not str(stored.get(name) or "") for name in required):
+            raise RuntimeError("required MCP Secret is unavailable")
+        return {name: str(stored[name]) for name in required}
+
     def _client(self, item: dict[str, Any]) -> McpStdioClient:
         env_values = dict(item.get("env") or {})
-        stored_secrets = self.secrets.get(item["installation_id"])
-        env_values.update(
-            {
-                name: stored_secrets[name]
-                for name in item.get("secret_names") or []
-                if name in stored_secrets
-            }
-        )
+        env_values.update(self._secret_environment(item))
         cwd = get_data_dir(self.runtime.plugin_config) / "mcp" / "runtime" / item["installation_id"][:16]
         cwd.mkdir(parents=True, exist_ok=True)
         return McpStdioClient(
@@ -802,6 +802,18 @@ class McpRuntimeManager:
 
     async def refresh_process_states(self) -> int:
         async with self._lock:
+            secret_invalid: list[str] = []
+            for installation_id in self._clients:
+                item = self.store.get_installation(installation_id)
+                try:
+                    if item is None:
+                        raise RuntimeError("managed MCP installation is unavailable")
+                    self._secret_environment(item)
+                except Exception:
+                    secret_invalid.append(installation_id)
+            for installation_id in secret_invalid:
+                await self._stop_unlocked(installation_id)
+                self.store.set_status(installation_id, "error", "Required MCP Secret is unavailable")
             exited = [
                 installation_id
                 for installation_id, client in self._clients.items()
@@ -817,7 +829,7 @@ class McpRuntimeManager:
             for installation_id in detached:
                 self.registry.remove_names(self._tool_names.pop(installation_id, set()))
                 self.store.set_status(installation_id, "error", "MCP process is not attached to current runtime")
-            return len(exited) + len(detached)
+            return len(secret_invalid) + len(exited) + len(detached)
 
     async def _call_managed_tool(
         self,
@@ -826,6 +838,15 @@ class McpRuntimeManager:
         arguments: dict[str, Any],
     ) -> str:
         async with self._lock:
+            item = self.store.get_installation(installation_id)
+            try:
+                if item is None:
+                    raise RuntimeError("managed MCP installation is unavailable")
+                self._secret_environment(item)
+            except Exception as exc:
+                await self._stop_unlocked(installation_id)
+                self.store.set_status(installation_id, "error", "Required MCP Secret is unavailable")
+                raise RuntimeError("managed MCP Secret is unavailable") from exc
             client = self._clients.get(installation_id)
             if client is None or not client.is_running:
                 await self._mark_process_exited_unlocked(installation_id)
@@ -846,7 +867,11 @@ class McpRuntimeManager:
         if not item["desired_enabled"]:
             self.store.set_status(installation_id, "stopped")
             return {"added": 0, "updated": 0, "removed": 0, "total": len(self.store.tools(installation_id))}
-        client = self._client(item)
+        try:
+            client = self._client(item)
+        except BaseException as exc:
+            self.store.set_status(installation_id, "error", type(exc).__name__)
+            raise
         try:
             await client.__aenter__()
             remote_tool_list = [tool for tool in await client.list_tools() if isinstance(tool, dict)]
@@ -996,13 +1021,20 @@ class McpRuntimeManager:
         if item is None:
             return None
         item["tools"] = self.store.tools(installation_id)
-        configured_secrets = self.secrets.get(installation_id)
+        secret_store_readable = True
+        try:
+            configured_secrets = self.secrets.get(installation_id)
+        except Exception:
+            configured_secrets = {}
+            secret_store_readable = False
         secret_names = list(item.get("secret_names") or [])
         secrets_ready = all(
             bool(configured_secrets.get(name)) for name in item.get("secret_names") or []
         )
         item["secrets_required"] = bool(secret_names)
         item["secrets_configured"] = bool(secret_names) and secrets_ready
+        item["secrets_ready"] = secrets_ready
+        item["secret_store_readable"] = secret_store_readable
         client = self._clients.get(installation_id)
         process_running = client is not None and client.is_running
         registered_names = self._tool_names.get(installation_id, set())
@@ -1015,7 +1047,13 @@ class McpRuntimeManager:
                 and registered_tool is not None
                 and str((registered_tool.metadata or {}).get("mcp_installation_id") or "") == installation_id
             )
-            effective = bool(item["desired_enabled"] and process_running and authorized and registered)
+            effective = bool(
+                item["desired_enabled"]
+                and secrets_ready
+                and process_running
+                and authorized
+                and registered
+            )
             tool["authorized"] = authorized
             tool["registered"] = registered
             tool["effective"] = effective

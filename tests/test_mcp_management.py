@@ -524,6 +524,56 @@ def test_runtime_manager_registers_only_enabled_policy(tmp_path: Path, monkeypat
     assert "called:read_demo" in asyncio.run(run())
 
 
+def test_runtime_manager_fails_closed_when_required_secret_disappears(tmp_path: Path, monkeypatch) -> None:
+    _init_store(tmp_path, monkeypatch)
+    management = load_personification_module("plugin.personification.core.mcp_management")
+    registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
+    config = SimpleNamespace(
+        personification_data_dir=str(tmp_path),
+        personification_mcp_secret_file="",
+        personification_skill_mcp_timeout=5,
+    )
+    registry = registry_mod.ToolRegistry()
+    runtime = SimpleNamespace(plugin_config=config, runtime_bundle=SimpleNamespace(tool_registry=registry))
+    manager = management.McpRuntimeManager(runtime, registry)
+    manager.store.save_installation(
+        {
+            "installation_id": "install-secret",
+            "source_id": "official",
+            "source_url": management.OFFICIAL_MCP_REGISTRY,
+            "server_name": "io.example/secret",
+            "server_title": "Secret",
+            "server_version": "1.0.0",
+            "package_type": "npm",
+            "package_identifier": "secret-server",
+            "command": sys.executable,
+            "args": [str(FAKE_SERVER)],
+            "env": {},
+            "secret_names": ["TOKEN"],
+            "name_prefix": "mcp_secret_",
+            "metadata": {},
+            "created_by": "10001",
+        },
+        [{"remote_name": "read_demo", "registered_name": "mcp_secret_read_demo", "description": "read", "parameters": {"type": "object"}, "enabled": True, "risk_level": "review", "side_effect": "unknown", "publisher_read_only": True}],
+    )
+    manager.secrets.set("install-secret", {"TOKEN": "configured"})
+
+    async def run() -> None:
+        await manager.activate("install-secret")
+        assert registry.get("mcp_secret_read_demo") is not None
+        manager.secrets.delete("install-secret")
+        assert await manager.refresh_process_states() == 1
+        assert registry.get("mcp_secret_read_demo") is None
+        current = manager.public_installation("install-secret")
+        assert current["secrets_ready"] is False
+        assert current["run_allowed"] is False
+        assert current["effective_count"] == 0
+        with pytest.raises(RuntimeError, match="Secret"):
+            await manager.toggle_installation("install-secret", True)
+
+    asyncio.run(run())
+
+
 def test_runtime_manager_resyncs_catalog_then_closes_server_without_authorized_tools(tmp_path: Path, monkeypatch) -> None:
     _init_store(tmp_path, monkeypatch)
     management = load_personification_module("plugin.personification.core.mcp_management")

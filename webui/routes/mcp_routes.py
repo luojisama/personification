@@ -182,6 +182,14 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         except Exception as exc:
             current = manager().public_installation(installation_id)
             if current is not None and current.get("desired_enabled") is enabled:
+                webui_audit_log.record(
+                    action="mcp_toggle",
+                    qq=admin.qq,
+                    device_id=admin.device_id,
+                    target=installation_id,
+                    detail={"enabled": enabled, "runtime_error_type": type(exc).__name__},
+                    outcome="partial",
+                )
                 report = diagnostic(
                     ok=False,
                     code="mcp_server_start_partial" if enabled else "mcp_server_stop_partial",
@@ -263,6 +271,19 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
                 None,
             )
             if current_policy is not None and current_policy.get("authorized") is enabled:
+                webui_audit_log.record(
+                    action="mcp_tool_toggle",
+                    qq=admin.qq,
+                    device_id=admin.device_id,
+                    target=installation_id,
+                    detail={
+                        "remote_name": remote_name,
+                        "enabled": enabled,
+                        "confirmed_side_effect": confirm_side_effect,
+                        "runtime_error_type": type(exc).__name__,
+                    },
+                    outcome="partial",
+                )
                 report = diagnostic(
                     ok=False,
                     code="mcp_tool_toggle_partial",

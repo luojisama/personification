@@ -56,3 +56,21 @@ def test_common_svg_icons_keep_a_fixed_baseline_without_active_translation() -> 
     active_rule = re.search(r"aside nav a:hover \.nav-icon,aside nav a\.active \.nav-icon\s*\{([^}]+)\}", css)
     assert active_rule is not None
     assert "translateX" not in active_rule.group(1)
+
+
+def test_sensitive_memory_and_newer_config_drafts_survive_only_their_owner_session() -> None:
+    core = (STATIC / "app-core.js").read_text(encoding="utf-8")
+    auth = (STATIC / "app-auth.js").read_text(encoding="utf-8")
+    config = (STATIC / "app-config.js").read_text(encoding="utf-8")
+    mcp = (STATIC / "app-mcp.js").read_text(encoding="utf-8")
+
+    assert "function clearInMemorySensitiveState()" in core
+    assert "state.configDrafts = {};" in core
+    assert 'if (res.status === 401) {\n      clearInMemorySensitiveState();' in core
+    assert auth.count("clearInMemorySensitiveState();") >= 4
+    assert "function clearMcpSensitiveState()" in mcp
+    assert "_mcpPendingInstall = null;" in mcp
+    assert "const submittedDraft = configDraft(field);" in config
+    assert "if (configDraft(field) === submittedDraft) clearConfigDraft(field);" in config
+    assert "requestIdentity" in config
+    assert "Provider 参数已变化，未覆盖当前草稿" in config

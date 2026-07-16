@@ -78,6 +78,11 @@ def test_registry_discovery_is_name_scoped_and_cursor_safe() -> None:
     assert "opaque next cursor 将原样发送" in source
     assert "item.supported === true" in source
     assert "item.unsupported_reason" in source
+    assert "requestSourceId" in source
+    assert "requestQuery" in source
+    assert "requestCursor" in source
+    assert 'state.mcpSourceId !== requestSourceId' in source
+    assert 'id="mcp-source-select" aria-label="Registry source" ${state.mcpBusy ? "disabled" : ""}' in source
     assert "const safe = safeHttpUrl(raw)" in source
     assert re.search(r"return safe\s*\? `<a href=", source)
 
@@ -151,6 +156,8 @@ def test_install_confirmation_is_fresh_and_does_not_invent_paths() -> None:
     assert "confirm_execution:true" in source
     assert "fresh_fetch:true" in source
     assert "package_digest:String(selected.digest" in source
+    assert "defaultIsChoice" in source
+    assert 'String(choice) === registryDefault ? "selected"' in source
 
 
 def test_mcp_events_are_single_registration_and_page_has_no_polling() -> None:

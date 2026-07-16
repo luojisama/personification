@@ -75,11 +75,13 @@ async function revokeDevice(id) {
 async function doLogout() {
   try {
     await api("/auth/logout", { method:"POST" });
+    clearInMemorySensitiveState();
     state.logged = false;
     await refreshEligibleAdmins();
     render();
   } catch (e) {
     if (!state.logged) {
+      clearInMemorySensitiveState();
       await refreshEligibleAdmins();
       render();
       return;
@@ -160,6 +162,7 @@ async function recheckDevice() {
 
 async function logoutPending() {
   try { await api("/auth/logout", { method:"POST" }); } catch {}
+  clearInMemorySensitiveState();
   state.devicePending = false; state.logged = false; render();
 }
 
@@ -185,6 +188,7 @@ async function doVerify() {
   msg.textContent = "正在验证…";
   try {
     const r = await api("/auth/verify", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq: state.pendingQq, code, device_label: label }) });
+    clearInMemorySensitiveState();
     if (r && r.pending) { state.logged = false; state.devicePending = true; state.qq = state.pendingQq; render(); return; }
     state.logged = true; state.devicePending = false; state.qq = state.pendingQq; await loadView(); render();
   } catch (e) { msg.textContent = "验证失败：" + e.message; }

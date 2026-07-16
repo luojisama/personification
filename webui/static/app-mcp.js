@@ -1,6 +1,10 @@
 const _MCP_OPERATION_RESULT_STORAGE_KEY = "personification_mcp_operation_result_v1";
 let _mcpPendingInstall = null;
 
+function clearMcpSensitiveState() {
+  _mcpPendingInstall = null;
+}
+
 function persistMcpOperationResult(input) {
   const result = input && input.diagnostic && typeof input.diagnostic === "object" ? input.diagnostic : input;
   state.mcpOperationResult = result && typeof result === "object" ? result : null;
@@ -157,8 +161,10 @@ function renderMcpDetail() {
   const packageOptions = packages.filter(item => item.supported === true).map(item => `<option value="${Number(item.index)}" ${Number(item.index) === Number(state.mcpPackageIndex) ? "selected" : ""}>${escapeHtml(item.registry_type)} · ${escapeHtml(mcpPackageIdentity(item))}</option>`).join("");
   const inputs = selected ? (selected.inputs || []).map(input => {
     const choices = Array.isArray(input.choices) ? input.choices : [];
+    const registryDefault = String(input.default == null ? "" : input.default);
+    const defaultIsChoice = choices.some(choice => String(choice) === registryDefault);
     const control = choices.length
-      ? `<select data-mcp-install-input="${escapeAttr(input.key)}" data-mcp-secret="${input.secret ? "true" : "false"}">${choices.map(choice => `<option value="${escapeAttr(choice)}">${escapeHtml(choice)}</option>`).join("")}</select>`
+      ? `<select data-mcp-install-input="${escapeAttr(input.key)}" data-mcp-secret="${input.secret ? "true" : "false"}">${registryDefault && !defaultIsChoice ? `<option value="" selected>使用 Registry default · ${escapeHtml(registryDefault)}</option>` : ""}${choices.map(choice => `<option value="${escapeAttr(choice)}" ${String(choice) === registryDefault ? "selected" : ""}>${escapeHtml(choice)}</option>`).join("")}</select>`
       : `<input data-mcp-install-input="${escapeAttr(input.key)}" data-mcp-secret="${input.secret ? "true" : "false"}" type="${input.secret ? "password" : "text"}" placeholder="${escapeAttr(input.default || "")}">`;
     return `<label class="mcp-input"><span>${escapeHtml(input.key)}${input.required ? " *" : ""}<em>${escapeHtml(input.location || "input")}${input.secret ? " / Secret" : ""}</em></span><small>${escapeHtml(input.description || "Registry 未提供说明")}</small>${control}</label>`;
   }).join("") : "";
@@ -190,7 +196,7 @@ function renderMcpRegistryDiscovery() {
       <div><span class="eyebrow">01 / REGISTRY DISCOVERY</span><h2>Registry discovery</h2><p>Official Registry 优先，也可选择 configured compatible HTTPS source。搜索语义严格限定为 Server 名称。</p></div>
       <div class="mcp-source-legend"><span>来源</span>${renderMcpSourceBadges(state.mcpSourceId)}</div>
     </div>
-    <div class="mcp-search-row"><select id="mcp-source-select" aria-label="Registry source">${options}</select><input id="mcp-search-input" type="search" placeholder="按 Server 名称搜索" value="${escapeAttr(state.mcpQuery || "")}" aria-label="按 Server 名称搜索"><button class="btn primary" data-mcp-search ${state.mcpBusy ? "disabled" : ""}>${state.mcpBusy && !state.mcpLoadingMore ? '<span class="spinner"></span>' : ''} 搜索</button></div>
+    <div class="mcp-search-row"><select id="mcp-source-select" aria-label="Registry source" ${state.mcpBusy ? "disabled" : ""}>${options}</select><input id="mcp-search-input" type="search" placeholder="按 Server 名称搜索" value="${escapeAttr(state.mcpQuery || "")}" aria-label="按 Server 名称搜索" ${state.mcpBusy ? "disabled" : ""}><button class="btn primary" data-mcp-search ${state.mcpBusy ? "disabled" : ""}>${state.mcpBusy && !state.mcpLoadingMore ? '<span class="spinner"></span>' : ''} 搜索</button></div>
     <p class="mcp-search-scope">SEARCH SCOPE / canonical Server name only · 不声称支持能力全文搜索</p>
     ${state.mcpDetail ? renderMcpDetail() : renderMcpRegistryList()}
   </section>`;
@@ -359,11 +365,15 @@ async function searchMcpRegistry({append=false}={}) {
   if (append && !state.mcpNextCursor) return;
   const params = {source_id:state.mcpSourceId, q:state.mcpQuery, limit:"30"};
   if (append) params.cursor = state.mcpNextCursor;
+  const requestSourceId = state.mcpSourceId;
+  const requestQuery = state.mcpQuery;
+  const requestCursor = append ? state.mcpNextCursor : "";
   state.mcpBusy = true;
   state.mcpLoadingMore = append;
   render();
   try {
     const data = await api("/mcp/search?" + new URLSearchParams(params).toString());
+    if (state.mcpSourceId !== requestSourceId || state.mcpQuery !== requestQuery || (append && state.mcpNextCursor !== requestCursor)) return;
     state.mcpResults = append
       ? mergeMcpRegistryResults(state.mcpResults, data.servers)
       : mergeMcpRegistryResults([], data.servers);

@@ -8,12 +8,16 @@ from fastapi.testclient import TestClient
 from ._loader import load_personification_module
 
 
-def _client(monkeypatch, manager):
+def _client(monkeypatch, manager, audit_actions=None):
     route_mod = load_personification_module("plugin.personification.webui.routes.mcp_routes")
     schemas = load_personification_module("plugin.personification.webui.schemas")
     runtime = SimpleNamespace(plugin_config=SimpleNamespace(personification_mcp_registry_sources=[]))
     monkeypatch.setattr(route_mod, "get_mcp_manager", lambda _runtime: manager)
-    monkeypatch.setattr(route_mod.webui_audit_log, "record", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        route_mod.webui_audit_log,
+        "record",
+        lambda **kwargs: audit_actions.append(kwargs) if audit_actions is not None else None,
+    )
     app = FastAPI()
     app.include_router(route_mod.build_mcp_router(runtime=runtime))
     app.dependency_overrides[route_mod.require_admin] = lambda: schemas.AdminIdentity(
@@ -144,6 +148,7 @@ def test_mcp_api_refreshes_process_state_and_returns_operation_diagnostics(monke
 
 def test_mcp_start_failure_marks_partial_without_raw_exception(monkeypatch) -> None:
     manager = _Manager()
+    audit_actions = []
 
     async def fail_after_persist(_installation_id: str, enabled: bool):
         manager.current["desired_enabled"] = enabled
@@ -151,7 +156,7 @@ def test_mcp_start_failure_marks_partial_without_raw_exception(monkeypatch) -> N
         raise RuntimeError("raw-process-secret")
 
     manager.toggle_installation = fail_after_persist
-    client = _client(monkeypatch, manager)
+    client = _client(monkeypatch, manager, audit_actions)
     response = client.post("/api/mcp/installations/install-1/toggle", json={"enabled": True})
     assert response.status_code == 500
     report = response.json()["detail"]
@@ -160,3 +165,28 @@ def test_mcp_start_failure_marks_partial_without_raw_exception(monkeypatch) -> N
     assert report["operation_id"] == "install-1"
     assert manager.current["desired_enabled"] is True
     assert "raw-process-secret" not in str(report)
+    assert audit_actions[-1]["action"] == "mcp_toggle"
+    assert audit_actions[-1]["outcome"] == "partial"
+
+
+def test_mcp_tool_partial_authorization_is_audited(monkeypatch) -> None:
+    manager = _Manager()
+    audit_actions = []
+
+    async def fail_after_persist(_installation_id: str, _remote_name: str, enabled: bool, **_kwargs):
+        manager.current["tools"][0]["authorized"] = enabled
+        raise RuntimeError("raw-tool-secret")
+
+    manager.toggle_tool = fail_after_persist
+    client = _client(monkeypatch, manager, audit_actions)
+    response = client.post(
+        "/api/mcp/installations/install-1/tools/read_demo/toggle",
+        json={"enabled": False, "confirm_side_effect": False},
+    )
+    assert response.status_code == 500
+    report = response.json()["detail"]
+    assert report["code"] == "mcp_tool_toggle_partial"
+    assert "raw-tool-secret" not in str(report)
+    assert audit_actions[-1]["action"] == "mcp_tool_toggle"
+    assert audit_actions[-1]["outcome"] == "partial"
+    assert audit_actions[-1]["detail"]["enabled"] is False
