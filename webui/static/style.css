@@ -27,9 +27,9 @@ aside nav { display:flex; flex-direction:column; padding:10px 0 24px; overflow-y
 aside nav a { padding:9px 18px; color:var(--text); border-left:3px solid transparent; transition:background .12s, border-color .12s; display:flex; align-items:center; gap:10px; }
 aside nav a:hover { background:var(--hover-bg); }
 aside nav a.active { background:var(--hover-bg); border-left-color:var(--accent); }
-.ui-icon,.nav-icon,.operation-status-icon { width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; flex:none; }
-.nav-icon { opacity:.72; transition:opacity .15s,transform .15s; }
-aside nav a:hover .nav-icon,aside nav a.active .nav-icon { opacity:1; transform:translateX(1px); }
+.ui-icon,.nav-icon,.operation-status-icon { display:block; width:17px; height:17px; aspect-ratio:1/1; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; flex:none; }
+.nav-icon { opacity:.72; transition:opacity .15s; }
+aside nav a:hover .nav-icon,aside nav a.active .nav-icon { opacity:1; }
 .icon-btn { display:inline-grid; place-items:center; min-width:30px; padding-left:7px; padding-right:7px; }
 .icon-btn .ui-icon,.mobile-nav-toggle .ui-icon { width:16px; height:16px; }
 .nav-group-label { padding:14px 18px 5px; color:var(--muted); font-size:10px; letter-spacing:.14em; text-transform:uppercase; }

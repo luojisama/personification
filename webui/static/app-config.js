@@ -114,6 +114,32 @@ function configClearDiagnostics() {
   render();
 }
 
+function configDraft(field) {
+  const drafts = state.configDrafts && typeof state.configDrafts === "object" ? state.configDrafts : {};
+  return Object.prototype.hasOwnProperty.call(drafts, field) ? drafts[field] : null;
+}
+
+function setConfigValueDraft(field, value, kind="value") {
+  if (!state.configDrafts || typeof state.configDrafts !== "object") state.configDrafts = {};
+  state.configDrafts[field] = {kind, value};
+  return state.configDrafts[field];
+}
+
+function clearConfigDraft(field) {
+  if (state.configDrafts && typeof state.configDrafts === "object") delete state.configDrafts[field];
+}
+
+function configDraftValue(entry) {
+  const draft = configDraft(entry.field_name);
+  return draft && draft.kind !== "api_pool" ? draft.value : entry.current;
+}
+
+function updateConfigDraft(field, input) {
+  if (!input) return;
+  setConfigValueDraft(field, input.value);
+  markDirty(input);
+}
+
 function renderConfig() {
   const search = normalizeConfigSearchText(state.configSearch || "");
   const searchTokens = search ? search.split(/\s+/).filter(Boolean) : [];
@@ -198,7 +224,7 @@ function renderField(e) {
 }
 
 function renderInput(e) {
-  const cur = e.current;
+  const cur = configDraftValue(e);
   if (e.field_name === "personification_api_pools") {
     return renderApiPoolEditor(e);
   }
@@ -218,22 +244,23 @@ function renderInput(e) {
   }
   if (e.kind === "json") {
     const text = cur == null ? "" : (typeof cur === "string" ? cur : JSON.stringify(cur, null, 2));
-    return `<textarea data-raw="json" oninput="markDirty(this)">${escapeHtml(text)}</textarea>
+    return `<textarea data-raw="json" oninput="updateConfigDraft('${escapeAttr(e.field_name)}',this)">${escapeHtml(text)}</textarea>
       <button class="btn small primary" onclick="commitTextField('${escapeAttr(e.field_name)}', this, 'json')">保存</button>`;
   }
   if (e.kind === "int") {
-    return `<input type="number" step="1" value="${escapeAttr(cur==null?'':cur)}" oninput="markDirty(this)">
+    return `<input type="number" step="1" value="${escapeAttr(cur==null?'':cur)}" oninput="updateConfigDraft('${escapeAttr(e.field_name)}',this)">
       <button class="btn small primary" onclick="commitTextField('${escapeAttr(e.field_name)}', this, 'int')">保存</button>`;
   }
   if (e.kind === "float") {
-    return `<input type="number" step="0.01" value="${escapeAttr(cur==null?'':cur)}" oninput="markDirty(this)">
+    return `<input type="number" step="0.01" value="${escapeAttr(cur==null?'':cur)}" oninput="updateConfigDraft('${escapeAttr(e.field_name)}',this)">
       <button class="btn small primary" onclick="commitTextField('${escapeAttr(e.field_name)}', this, 'float')">保存</button>`;
   }
   if (e.kind === "secret") {
-    return `<input type="password" placeholder="${cur ? '已设置（输入新值覆盖）' : '未设置'}" oninput="markDirty(this)">
+    const secretValue = configDraft(e.field_name) ? cur : "";
+    return `<input type="password" value="${escapeAttr(secretValue||'')}" placeholder="${e.current ? '已设置（输入新值覆盖）' : '未设置'}" oninput="updateConfigDraft('${escapeAttr(e.field_name)}',this)">
       <button class="btn small primary" onclick="commitTextField('${escapeAttr(e.field_name)}', this, 'secret')">保存</button>`;
   }
-  return `<input type="text" value="${escapeAttr(cur==null?'':cur)}" oninput="markDirty(this)">
+  return `<input type="text" value="${escapeAttr(cur==null?'':cur)}" oninput="updateConfigDraft('${escapeAttr(e.field_name)}',this)">
     <button class="btn small primary" onclick="commitTextField('${escapeAttr(e.field_name)}', this, 'text')">保存</button>`;
 }
 
@@ -247,11 +274,11 @@ function strListValue(cur) {
 }
 
 function renderStrListEditor(e) {
-  const items = strListValue(e.current);
+  const items = strListValue(configDraftValue(e));
   const field = escapeAttr(e.field_name);
-  const rows = items.map((v, i) => `<div class="strlist-row" data-strlist-row>
-      <input type="text" value="${escapeAttr(v)}" oninput="markDirty(this)">
-      <button class="btn small danger" onclick="this.closest('[data-strlist-row]').remove();markDirty(this)">删</button>
+  const rows = items.map(v => `<div class="strlist-row" data-strlist-row>
+      <input type="text" value="${escapeAttr(v)}" oninput="syncStrListDraft('${field}')">
+      <button class="btn small danger" onclick="this.closest('[data-strlist-row]').remove();syncStrListDraft('${field}')">删</button>
     </div>`).join("");
   return `<div class="strlist-editor" data-strlist-field="${field}">
     <div class="strlist-rows">${rows || '<div class="muted" style="font-size:12px">（空）</div>'}</div>
@@ -268,15 +295,23 @@ function addStrListRow(field) {
   const empty = root.querySelector(".muted"); if (empty) empty.remove();
   const div = document.createElement("div");
   div.className = "strlist-row"; div.setAttribute("data-strlist-row", "");
-  div.innerHTML = `<input type="text" value="" oninput="markDirty(this)"><button class="btn small danger" onclick="this.closest('[data-strlist-row]').remove()">删</button>`;
-  root.appendChild(div); div.querySelector("input").focus();
+  div.innerHTML = `<input type="text" value="" oninput="syncStrListDraft('${escapeAttr(field)}')"><button class="btn small danger" onclick="this.closest('[data-strlist-row]').remove();syncStrListDraft('${escapeAttr(field)}')">删</button>`;
+  root.appendChild(div);
+  syncStrListDraft(field);
+  div.querySelector("input").focus();
+}
+
+function syncStrListDraft(field) {
+  const root = document.querySelector(`[data-strlist-field="${CSS.escape(field)}"]`);
+  if (!root) return [];
+  const values = Array.from(root.querySelectorAll('[data-strlist-row] input')).map(input => input.value);
+  setConfigValueDraft(field, values, "strlist");
+  return values;
 }
 
 function saveStrList(field) {
-  const root = document.querySelector(`[data-strlist-field="${CSS.escape(field)}"]`);
-  if (!root) return;
-  const vals = Array.from(root.querySelectorAll('[data-strlist-row] input')).map(i => i.value.trim()).filter(Boolean);
-  saveField(field, vals);
+  const values = syncStrListDraft(field);
+  saveField(field, values.map(value => value.trim()).filter(Boolean), {preserveDraft:true});
 }
 
 function normalizeApiPoolValue(value) {
@@ -300,6 +335,26 @@ function sanitizeApiProvider(provider) {
 
 function sanitizeApiProviders(providers) {
   return (providers || []).map(p => sanitizeApiProvider(p));
+}
+
+function apiPoolDraftState(field) {
+  const draft = configDraft(field);
+  return draft && draft.kind === "api_pool" ? draft : null;
+}
+
+function setApiPoolDraft(field, providers, options={}) {
+  if (!state.configDrafts || typeof state.configDrafts !== "object") state.configDrafts = {};
+  const previous = apiPoolDraftState(field);
+  const cleanProviders = Array.isArray(providers) ? providers.map(provider => ({...(provider || {})})) : [];
+  state.configDrafts[field] = {
+    kind: "api_pool",
+    providers: cleanProviders,
+    rawText: options.rawText !== undefined
+      ? String(options.rawText)
+      : (previous ? previous.rawText : JSON.stringify(sanitizeApiProviders(cleanProviders), null, 2)),
+    rawVisible: options.rawVisible !== undefined ? Boolean(options.rawVisible) : Boolean(previous && previous.rawVisible),
+  };
+  return state.configDrafts[field];
 }
 
 const apiProviderModelProbeCache = new Map();
@@ -436,18 +491,22 @@ function updateApiProviderModelControls(card, models, source) {
 }
 
 function renderApiPoolEditor(e) {
-  const providers = normalizeApiPoolValue(e.current).map((provider, index) =>
+  const draft = apiPoolDraftState(e.field_name);
+  const source = draft ? draft.providers : normalizeApiPoolValue(e.current);
+  const providers = source.map((provider, index) =>
     hydrateApiProviderModelProbe(e.field_name, index, provider || {})
   );
+  const rawVisible = Boolean(draft && draft.rawVisible);
+  const rawText = draft ? draft.rawText : JSON.stringify(sanitizeApiProviders(providers), null, 2);
   const cards = providers.map((provider, index) => renderApiProviderCard(e.field_name, provider || {}, index)).join("");
   return `<div class="api-pool-editor" data-api-pool-field="${escapeAttr(e.field_name)}">
     <div class="api-provider-actions">
       <button class="btn small" onclick="addApiProvider('${escapeAttr(e.field_name)}')">+ 添加 Provider</button>
       <button class="btn small primary" onclick="saveApiPool('${escapeAttr(e.field_name)}')">保存全部</button>
-      <button class="btn small" onclick="toggleApiPoolRaw(this)">查看 JSON</button>
+      <button class="btn small" onclick="toggleApiPoolRaw(this)">${rawVisible?'隐藏 JSON':'查看 JSON'}</button>
     </div>
     <div class="api-provider-list">${cards || '<div class="api-pool-empty">暂无 provider，点击“添加 Provider”创建。</div>'}</div>
-    <textarea data-api-pool-raw style="display:none;min-height:120px" oninput="markDirty(this)">${escapeHtml(JSON.stringify(providers, null, 2))}</textarea>
+    <textarea data-api-pool-raw style="display:${rawVisible?'block':'none'};min-height:120px" oninput="syncApiPoolRawDraft(this)">${escapeHtml(rawText)}</textarea>
   </div>`;
 }
 
@@ -461,7 +520,7 @@ function renderApiProviderCard(field, provider, index) {
     const value = provider[name] == null ? "" : provider[name];
     return `<div class="api-provider-field" data-provider-field="${escapeAttr(name)}">
       <label>${escapeHtml(label)}</label>
-      <input type="${escapeAttr(type)}" value="${escapeAttr(value)}" ${extra}>
+      <input type="${escapeAttr(type)}" value="${escapeAttr(value)}" ${extra} oninput="syncApiPoolDraft('${escapeAttr(field)}')">
     </div>`;
   };
   const modelFieldHtml = () => {
@@ -504,7 +563,7 @@ function renderApiProviderCard(field, provider, index) {
     ].map(([id, label]) => `<option value="${escapeAttr(id)}" ${value===id?'selected':''}>${escapeHtml(label)}</option>`).join("");
     return `<div class="api-provider-field" data-provider-field="gemini_auth_mode">
       <label>Gemini 认证</label>
-      <select>${options}</select>
+      <select onchange="syncApiPoolDraft('${escapeAttr(field)}')">${options}</select>
     </div>`;
   };
   return `<div class="api-provider-card" data-provider-index="${index}" data-provider-secret-ref="${escapeAttr(provider._secret_ref || "")}">
@@ -516,7 +575,7 @@ function renderApiProviderCard(field, provider, index) {
       ${fieldHtml("name", "名称")}
       <div class="api-provider-field" data-provider-field="priority">
         <label>优先级</label>
-        <input type="number" step="1" value="${escapeAttr(provider.priority ?? index)}">
+        <input type="number" step="1" value="${escapeAttr(provider.priority ?? index)}" oninput="syncApiPoolDraft('${escapeAttr(field)}')">
       </div>
       <div class="api-provider-field" data-provider-field="api_type">
         <label>类型</label>
@@ -533,7 +592,7 @@ function renderApiProviderCard(field, provider, index) {
       ${fieldHtml("max_retries", "总尝试次数", "number", 'min="1" max="10" step="1" title="包含首次请求；5 表示首次加 4 次重试"')}
       <div class="api-provider-field" data-provider-field="enabled">
         <label>启用</label>
-        <select>
+        <select onchange="syncApiPoolDraft('${escapeAttr(field)}')">
           <option value="true" ${provider.enabled !== false ? 'selected' : ''}>是</option>
           <option value="false" ${provider.enabled === false ? 'selected' : ''}>否</option>
         </select>
@@ -548,6 +607,8 @@ function selectApiProviderModel(select) {
   if (!input) return;
   input.value = select.value || "";
   markDirty(input);
+  const root = select.closest("[data-api-pool-field]");
+  if (root) syncApiPoolDraft(root.dataset.apiPoolField);
 }
 
 function syncApiProviderModelSelect(input) {
@@ -557,21 +618,24 @@ function syncApiProviderModelSelect(input) {
   if (!select) return;
   const hasOption = Array.from(select.options).some(option => option.value === input.value);
   select.value = hasOption ? input.value : "";
+  const root = input.closest("[data-api-pool-field]");
+  if (root) syncApiPoolDraft(root.dataset.apiPoolField);
 }
 
 function readApiPoolEditor(field) {
   const root = document.querySelector(`[data-api-pool-field="${CSS.escape(field)}"]`);
   if (!root) return [];
   const raw = root.querySelector("[data-api-pool-raw]");
-  if (raw && raw.style.display !== "none" && raw.value.trim()) {
+  if (raw && raw.style.display !== "none") {
     try {
       const parsed = JSON.parse(raw.value);
-      return Array.isArray(parsed) ? sanitizeApiProviders(parsed) : [];
+      if (!Array.isArray(parsed)) throw new Error("API Pool JSON 必须是数组");
+      return sanitizeApiProviders(parsed);
     } catch {
       throw new Error("API Pool JSON 格式错误");
     }
   }
-  return sanitizeApiProviders(Array.from(root.querySelectorAll(".api-provider-card")).map((card, index) => {
+  return Array.from(root.querySelectorAll(".api-provider-card")).map((card, index) => {
     const provider = defaultApiProvider(index);
     if (card.dataset.providerSecretRef) provider._secret_ref = card.dataset.providerSecretRef;
     card.querySelectorAll("[data-provider-field]").forEach(wrap => {
@@ -584,8 +648,35 @@ function readApiPoolEditor(field) {
       if (value !== "" && value !== undefined) provider[name] = value;
       else delete provider[name];
     });
-    return provider;
-  }));
+    return hydrateApiProviderModelProbe(field, index, provider);
+  });
+}
+
+function syncApiPoolDraft(field) {
+  const root = document.querySelector(`[data-api-pool-field="${CSS.escape(field)}"]`);
+  if (!root) return [];
+  const raw = root.querySelector("[data-api-pool-raw]");
+  const rawVisible = Boolean(raw && raw.style.display !== "none");
+  if (rawVisible) {
+    const rawText = raw.value;
+    let providers = apiPoolDraftState(field)?.providers || [];
+    try {
+      const parsed = JSON.parse(rawText);
+      if (Array.isArray(parsed)) providers = parsed;
+    } catch {}
+    setApiPoolDraft(field, providers, {rawText, rawVisible:true});
+    return providers;
+  }
+  const providers = readApiPoolEditor(field);
+  setApiPoolDraft(field, providers, {rawText:JSON.stringify(sanitizeApiProviders(providers), null, 2), rawVisible:false});
+  return providers;
+}
+
+function syncApiPoolRawDraft(raw) {
+  const root = raw ? raw.closest("[data-api-pool-field]") : null;
+  if (!root) return;
+  syncApiPoolDraft(root.dataset.apiPoolField);
+  markDirty(raw);
 }
 
 function writeApiPoolEditor(field, providers) {
@@ -594,17 +685,28 @@ function writeApiPoolEditor(field, providers) {
   const list = root.querySelector(".api-provider-list");
   list.innerHTML = providers.map((provider, index) => renderApiProviderCard(field, provider, index)).join("") || '<div class="api-pool-empty">暂无 provider，点击“添加 Provider”创建。</div>';
   const raw = root.querySelector("[data-api-pool-raw]");
-  if (raw) raw.value = JSON.stringify(sanitizeApiProviders(providers), null, 2);
+  const draft = apiPoolDraftState(field);
+  if (raw) {
+    raw.value = draft ? draft.rawText : JSON.stringify(sanitizeApiProviders(providers), null, 2);
+    raw.style.display = draft && draft.rawVisible ? "block" : "none";
+  }
+  const toggle = root.querySelector(".api-provider-actions .btn:last-child");
+  if (toggle) toggle.textContent = draft && draft.rawVisible ? "隐藏 JSON" : "查看 JSON";
 }
 
 function refreshApiPoolEditor(field) {
-  try { writeApiPoolEditor(field, readApiPoolEditor(field)); } catch (e) { alertFlash("err", e.message); }
+  try {
+    const providers = readApiPoolEditor(field);
+    setApiPoolDraft(field, providers, {rawText:JSON.stringify(sanitizeApiProviders(providers), null, 2), rawVisible:false});
+    writeApiPoolEditor(field, providers);
+  } catch (e) { alertFlash("err", e.message); }
 }
 
 function addApiProvider(field) {
   try {
     const providers = readApiPoolEditor(field);
     providers.push(defaultApiProvider(providers.length));
+    setApiPoolDraft(field, providers, {rawText:JSON.stringify(sanitizeApiProviders(providers), null, 2), rawVisible:false});
     writeApiPoolEditor(field, providers);
   } catch (e) { alertFlash("err", e.message); }
 }
@@ -613,6 +715,7 @@ function removeApiProvider(field, index) {
   try {
     const providers = readApiPoolEditor(field);
     providers.splice(index, 1);
+    setApiPoolDraft(field, providers, {rawText:JSON.stringify(sanitizeApiProviders(providers), null, 2), rawVisible:false});
     writeApiPoolEditor(field, providers);
   } catch (e) { alertFlash("err", e.message); }
 }
@@ -621,14 +724,38 @@ function toggleApiPoolRaw(btn) {
   const root = btn.closest(".api-pool-editor");
   const raw = root.querySelector("[data-api-pool-raw]");
   const showing = raw.style.display !== "none";
-  if (!showing) raw.value = JSON.stringify(readApiPoolEditor(root.dataset.apiPoolField), null, 2);
-  raw.style.display = showing ? "none" : "block";
-  btn.textContent = showing ? "查看 JSON" : "隐藏 JSON";
+  const field = root.dataset.apiPoolField;
+  if (!showing) {
+    const providers = readApiPoolEditor(field);
+    const rawText = JSON.stringify(sanitizeApiProviders(providers), null, 2);
+    setApiPoolDraft(field, providers, {rawText, rawVisible:true});
+    raw.value = rawText;
+    raw.style.display = "block";
+    btn.textContent = "隐藏 JSON";
+    return;
+  }
+  try {
+    const parsed = JSON.parse(raw.value);
+    if (!Array.isArray(parsed)) throw new Error("API Pool JSON 必须是数组");
+    const providers = sanitizeApiProviders(parsed);
+    setApiPoolDraft(field, providers, {rawText:raw.value, rawVisible:false});
+    writeApiPoolEditor(field, providers);
+  } catch (e) {
+    setApiPoolDraft(field, apiPoolDraftState(field)?.providers || [], {rawText:raw.value, rawVisible:true});
+    alertFlash("err", e.message || "API Pool JSON 格式错误");
+  }
 }
 
 async function saveApiPool(field) {
   try {
-    await saveField(field, readApiPoolEditor(field));
+    const providers = readApiPoolEditor(field);
+    const root = document.querySelector(`[data-api-pool-field="${CSS.escape(field)}"]`);
+    const raw = root ? root.querySelector("[data-api-pool-raw]") : null;
+    setApiPoolDraft(field, providers, {
+      rawText:raw ? raw.value : JSON.stringify(sanitizeApiProviders(providers), null, 2),
+      rawVisible:Boolean(raw && raw.style.display !== "none"),
+    });
+    await saveField(field, sanitizeApiProviders(providers), {preserveDraft:true});
   } catch (e) { const operation = configRememberDiagnostic(e, "API Pool 保存未完成"); alertFlash("err", operation?.title || "API Pool 保存未完成"); }
 }
 
@@ -636,12 +763,18 @@ async function probeApiProviderModels(field, index, btn) {
   let providers;
   try {
     providers = readApiPoolEditor(field);
+    const root = document.querySelector(`[data-api-pool-field="${CSS.escape(field)}"]`);
+    const raw = root ? root.querySelector("[data-api-pool-raw]") : null;
+    setApiPoolDraft(field, providers, {
+      rawText:raw ? raw.value : JSON.stringify(sanitizeApiProviders(providers), null, 2),
+      rawVisible:Boolean(raw && raw.style.display !== "none"),
+    });
   } catch (e) {
     const operation = configRememberDiagnostic(e, "Provider 模型探测参数无效");
     alertFlash("err", operation?.title || "Provider 模型探测参数无效");
     return;
   }
-  const provider = providers[index];
+  const provider = sanitizeApiProvider(providers[index]);
   if (!provider) return;
   const oldText = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "探测中…"; }
@@ -655,6 +788,11 @@ async function probeApiProviderModels(field, index, btn) {
     const models = normalizeApiProviderModels(result.models);
     providers[index] = {...provider, _model_options: models, _model_source: result.source || "", _model_probe_done: true};
     cacheApiProviderModelProbe(field, index, providers[index]);
+    const previousDraft = apiPoolDraftState(field);
+    setApiPoolDraft(field, providers, {
+      rawText:JSON.stringify(sanitizeApiProviders(providers), null, 2),
+      rawVisible:Boolean(previousDraft && previousDraft.rawVisible),
+    });
     const card = btn ? btn.closest(".api-provider-card") : null;
     updateApiProviderModelControls(card, models, result.source || "");
     writeApiPoolEditor(field, providers);
@@ -681,14 +819,21 @@ async function commitTextField(field, btn, kind) {
   let value = raw;
   if (kind === "int") value = parseInt(raw, 10);
   else if (kind === "float") value = parseFloat(raw);
-  await saveField(field, value);
+  await saveField(field, value, {preserveDraft:true});
 }
 
-async function saveField(field, value) {
+async function saveField(field, value, options={}) {
+  if (!options.preserveDraft) setConfigValueDraft(field, value);
   try {
     const result = await api("/config/value", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ field_name: field, value }) });
     const operation = configRememberDiagnostic(result, "配置保存未完成");
-    if (result.success) { alertFlash("ok", operation?.title || `已保存 ${field} 到插件 env.json`); await loadView(); render(); }
+    if (result.success) {
+      const entry = state.entries.find(item => item.field_name === field);
+      if (entry && Object.prototype.hasOwnProperty.call(result, "new_value")) entry.current = result.new_value;
+      clearConfigDraft(field);
+      alertFlash("ok", operation?.title || `已保存 ${field} 到插件 env.json`);
+      await loadView(); render();
+    }
     else { alertFlash("err", operation?.title || "配置保存仅部分完成"); await loadView(); render(); }
   } catch (e) { const operation = configRememberDiagnostic(e, "配置保存未完成"); alertFlash("err", operation?.title || "配置保存未完成"); }
 }

@@ -75,3 +75,46 @@ def test_config_frontend_persists_and_renders_operation_diagnostics() -> None:
     assert "configRememberDiagnostic(e" in app_config_js
     assert '"模型探测失败：" + e.message' not in app_config_js
     assert '"保存失败：" + e.message' not in app_config_js
+
+
+def test_config_fields_render_from_memory_only_drafts() -> None:
+    root = Path(__file__).resolve().parents[1]
+    app_core_js = (root / "webui" / "static" / "app-core.js").read_text(encoding="utf-8")
+    app_config_js = (root / "webui" / "static" / "app-config.js").read_text(encoding="utf-8")
+
+    assert "configDrafts: {}" in app_core_js
+    assert "function configDraftValue" in app_config_js
+    assert "const cur = configDraftValue(e)" in app_config_js
+    assert "strListValue(configDraftValue(e))" in app_config_js
+    assert "updateConfigDraft(" in app_config_js
+    assert "syncStrListDraft(" in app_config_js
+    assert "if (result.success)" in app_config_js
+    success_block = app_config_js.split("if (result.success)", 1)[1].split("else {", 1)[0]
+    assert "clearConfigDraft(field)" in success_block
+    assert "sessionStorage" not in app_config_js
+    assert "localStorage" not in app_config_js
+
+
+def test_api_pool_mutations_all_update_the_draft() -> None:
+    app_config_js = (
+        Path(__file__).resolve().parents[1] / "webui" / "static" / "app-config.js"
+    ).read_text(encoding="utf-8")
+
+    for helper in (
+        "setApiPoolDraft",
+        "syncApiPoolDraft",
+        "syncApiPoolRawDraft",
+        "refreshApiPoolEditor",
+        "addApiProvider",
+        "removeApiProvider",
+        "toggleApiPoolRaw",
+        "selectApiProviderModel",
+        "syncApiProviderModelSelect",
+        "probeApiProviderModels",
+    ):
+        assert f"function {helper}" in app_config_js or f"async function {helper}" in app_config_js
+    assert 'oninput="syncApiPoolDraft(' in app_config_js
+    assert 'onchange="syncApiPoolDraft(' in app_config_js
+    assert 'oninput="syncApiPoolRawDraft(this)"' in app_config_js
+    assert "const draft = apiPoolDraftState(e.field_name)" in app_config_js
+    assert "await saveField(field, sanitizeApiProviders(providers), {preserveDraft:true})" in app_config_js

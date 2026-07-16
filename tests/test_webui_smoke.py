@@ -65,6 +65,12 @@ def test_index_serves_static_frontend(_runtime_context) -> None:
     assert re.search(r'<script src="/personification/static/app-core\.js\?v=[^"]+" defer></script>', res.text)
     assert re.search(r'<script src="/personification/static/app-auth\.js\?v=[^"]+" defer></script>', res.text)
     assert "PERSONIFICATION_ASSET_VERSIONS" in res.text
+    instance = re.search(r"PERSONIFICATION_WEBUI_INSTANCE_ID=\"([^\"]+)\"", res.text)
+    assert instance is not None
+    assert len(instance.group(1)) >= 16
+    assert "__PERSONIFICATION_WEBUI_INSTANCE_ID__" not in res.text
+    second = client.get("/personification/")
+    assert f'PERSONIFICATION_WEBUI_INSTANCE_ID="{instance.group(1)}"' in second.text
     for lazy_asset in ("app-activity.js", "app-content.js", "app-admin.js", "app-tools.js", "app-config.js", "app-operations.js"):
         assert lazy_asset in res.text
         assert f'<script src="/personification/static/{lazy_asset}' not in res.text

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,7 @@ class _RuntimeContext:
 
 
 _RUNTIME: _RuntimeContext | None = None
+_WEBUI_INSTANCE_ID = secrets.token_urlsafe(18)
 
 
 def set_runtime_context(
@@ -162,6 +164,7 @@ def _render_index_html() -> str:
         "app-operations.js",
     )
     versions = {filename: _asset_version(filename) for filename in assets}
+    html = html.replace("__PERSONIFICATION_WEBUI_INSTANCE_ID__", json.dumps(_WEBUI_INSTANCE_ID))
     html = html.replace("__PERSONIFICATION_ASSET_VERSIONS__", json.dumps(versions, ensure_ascii=False))
     for filename in assets:
         html = html.replace(

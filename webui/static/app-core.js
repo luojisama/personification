@@ -8,7 +8,7 @@ function readStoredQzoneOperationId() {
 
 let state = {
   logged: false, qq: "", view: "dashboard",
-  entries: [], groups: [], activeGroup: null, configSearch: "", configSearchComposing: false, configSearchDraft: "",
+  entries: [], groups: [], activeGroup: null, configSearch: "", configSearchComposing: false, configSearchDraft: "", configDrafts: {},
   devices: [], devicePending: false, alert: null, loading: false, loadingMessage: "",
   dashboard: null, dashboardWindow: "month", dashboardDetail: null,
   personas: [], selectedPersona: null, personaSearch: "",
@@ -55,6 +55,7 @@ let _navigationId = 0;
 const _SCROLL_STORAGE_KEY = "personification_webui_scroll_v1";
 let _scrollPersistFrame = 0;
 let _scrollPositions = {views:{}, sidebar:0};
+const _restoredScrollNodes = new WeakSet();
 try {
   const saved = JSON.parse(sessionStorage.getItem(_SCROLL_STORAGE_KEY) || "{}");
   if (saved && typeof saved === "object") _scrollPositions = {views:saved.views || {}, sidebar:Number(saved.sidebar || 0)};
@@ -76,11 +77,11 @@ function captureScrollState() {
   }
   const main = document.querySelector(".layout > main");
   const nav = document.querySelector("#console-sidebar nav");
-  if (main && main.dataset.loading !== "true") {
+  if (main && _restoredScrollNodes.has(main) && main.dataset.loading !== "true") {
     const renderedView = normalizeView(main.dataset.view);
     _scrollPositions.views[renderedView] = Math.max(0, Math.round(main.scrollTop || 0));
   }
-  if (nav) _scrollPositions.sidebar = Math.max(0, Math.round(nav.scrollTop || 0));
+  if (nav && _restoredScrollNodes.has(nav)) _scrollPositions.sidebar = Math.max(0, Math.round(nav.scrollTop || 0));
   persistScrollPositions();
 }
 
@@ -88,11 +89,19 @@ function restoreScrollState() {
   const renderedView = normalizeView(state.view);
   const mainScrollTop = Math.max(0, Number(_scrollPositions.views[renderedView] || 0));
   const sidebarScrollTop = Math.max(0, Number(_scrollPositions.sidebar || 0));
+  const main = document.querySelector(".layout > main");
+  const nav = document.querySelector("#console-sidebar nav");
+  if (main && main.dataset.view === renderedView && main.dataset.loading !== "true") {
+    main.scrollTop = mainScrollTop;
+    _restoredScrollNodes.add(main);
+  }
+  if (nav) {
+    nav.scrollTop = sidebarScrollTop;
+    _restoredScrollNodes.add(nav);
+  }
   requestAnimationFrame(() => {
-    const main = document.querySelector(".layout > main");
-    const nav = document.querySelector("#console-sidebar nav");
-    if (main && main.dataset.view === renderedView && main.dataset.loading !== "true") main.scrollTop = mainScrollTop;
-    if (nav) nav.scrollTop = sidebarScrollTop;
+    if (main && main.isConnected && main.dataset.view === renderedView && main.dataset.loading !== "true") main.scrollTop = mainScrollTop;
+    if (nav && nav.isConnected) nav.scrollTop = sidebarScrollTop;
   });
 }
 
@@ -192,6 +201,122 @@ function operationDiagnosticFingerprint(input) {
   return [d.code, d.phase, d.title, d.message, details].map(value => String(value || "")).join("|");
 }
 
+const _DETAIL_STORAGE_PREFIX = "personification_webui_details_v1:";
+const _DETAIL_INSTANCE_MARKER_KEY = "personification_webui_details_instance_v1";
+const _WEBUI_INSTANCE_ID = String(window.PERSONIFICATION_WEBUI_INSTANCE_ID || "missing-instance");
+const _DETAIL_STORAGE_KEY = `${_DETAIL_STORAGE_PREFIX}${_WEBUI_INSTANCE_ID}`;
+let _detailOpenState = {};
+
+function stableDetailHash(value) {
+  let hash = 2166136261;
+  for (const ch of String(value || "")) {
+    hash ^= ch.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function stableDetailKey(...parts) {
+  return `detail-${stableDetailHash(parts.map(part => String(part || "")).join("\u001f"))}`;
+}
+
+function initializeDetailState() {
+  try {
+    const previousInstance = sessionStorage.getItem(_DETAIL_INSTANCE_MARKER_KEY);
+    if (previousInstance !== _WEBUI_INSTANCE_ID) {
+      for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+        const key = sessionStorage.key(index);
+        if (key && key.startsWith(_DETAIL_STORAGE_PREFIX)) sessionStorage.removeItem(key);
+      }
+      sessionStorage.setItem(_DETAIL_INSTANCE_MARKER_KEY, _WEBUI_INSTANCE_ID);
+    }
+    const saved = JSON.parse(sessionStorage.getItem(_DETAIL_STORAGE_KEY) || "{}");
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) _detailOpenState = saved;
+  } catch { _detailOpenState = {}; }
+}
+
+function persistDetailState() {
+  try { sessionStorage.setItem(_DETAIL_STORAGE_KEY, JSON.stringify(_detailOpenState)); } catch {}
+}
+
+function stableDetailText(value) {
+  return String(value || "")
+    .replace(/Top-\d+/gi, "Top-#")
+    .replace(/[（(]\d+[）)]/g, "(#)")
+    .replace(/·\s*\d+\s*项/g, "· # 项")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function detailIdentityBasis(details) {
+  const main = details.closest("main[data-view]");
+  const summary = details.querySelector(":scope > summary");
+  const attributeAnchor = details.closest("[id],[data-field],[data-qzone-detail-key],[data-provider-index]");
+  const structuralAnchor = details.closest("article,.card,section");
+  const heading = structuralAnchor ? structuralAnchor.querySelector("h1,h2,h3") : null;
+  const logIdentity = structuralAnchor && structuralAnchor.matches("article")
+    ? Array.from(structuralAnchor.querySelectorAll("time,.log-entry-identity strong,.log-message")).map(item => item.textContent || "").join("|")
+    : "";
+  let summaryText = stableDetailText(summary ? summary.textContent : "");
+  if (details.getAttribute("name") === "provider-diagnostic") summaryText = summaryText.split("·", 1)[0].trim();
+  return [
+    main ? main.dataset.view : state.view,
+    details.getAttribute("name") || "",
+    details.getAttribute("data-operation-group") || "",
+    details.getAttribute("data-qzone-detail-key") || "",
+    attributeAnchor ? attributeAnchor.id || attributeAnchor.getAttribute("data-field") || attributeAnchor.getAttribute("data-provider-index") || "" : "",
+    heading ? stableDetailText(heading.textContent) : stableDetailHash(logIdentity),
+    summaryText,
+  ].join("\u001f");
+}
+
+function detailIdentity(details, ordinal) {
+  return stableDetailKey("generic", detailIdentityBasis(details), ordinal);
+}
+
+function prepareDetailState(container=document) {
+  const detailsItems = Array.from(container.querySelectorAll ? container.querySelectorAll("details") : []);
+  const identityCounts = new Map();
+  let changed = false;
+  for (const details of detailsItems) {
+    if (!details.dataset.detailKey) {
+      const base = detailIdentityBasis(details);
+      const ordinal = identityCounts.get(base) || 0;
+      identityCounts.set(base, ordinal + 1);
+      details.dataset.detailKey = detailIdentity(details, ordinal);
+    }
+    const key = details.dataset.detailKey;
+    if (Object.prototype.hasOwnProperty.call(_detailOpenState, key)) {
+      const open = _detailOpenState[key] === true;
+      if (details.open !== open) details.open = open;
+    } else {
+      _detailOpenState[key] = Boolean(details.open);
+      changed = true;
+    }
+  }
+  const openGroups = new Set();
+  for (const details of detailsItems) {
+    const group = details.getAttribute("data-operation-group");
+    if (!group || !details.open) continue;
+    if (!openGroups.has(group)) {
+      openGroups.add(group);
+      continue;
+    }
+    details.open = false;
+    _detailOpenState[details.dataset.detailKey] = false;
+    changed = true;
+  }
+  if (changed) persistDetailState();
+}
+
+initializeDetailState();
+const _detailStateRoot = document.getElementById("app");
+if (_detailStateRoot && typeof MutationObserver !== "undefined") {
+  new MutationObserver(records => {
+    if (records.some(record => record.addedNodes.length)) prepareDetailState(_detailStateRoot);
+  }).observe(_detailStateRoot, {childList:true, subtree:true});
+}
+
 let _operationAnnouncement = "";
 
 function queueOperationAnnouncement(diagnostic) {
@@ -235,13 +360,14 @@ function renderOperationDiagnostic(input, options={}) {
   const steps = Array.isArray(d.steps) ? d.steps : [];
   const warnings = Array.isArray(d.warnings) ? d.warnings : [];
   const group = String(options.group || `view-${state.view || "global"}`);
+  const detailKey = stableDetailKey("operation", group, operationDiagnosticFingerprint(d));
   const expanded = options.expanded !== false;
   const detailRows = details.map(item => `<div class="operation-detail ${escapeAttr(item.status||'info')}"><span>${escapeHtml(item.label||'详情')}</span><strong>${escapeHtml(_diagnosticValue(item.value))}</strong></div>`).join("");
   const stepRows = steps.map((item,index) => `<li class="operation-step ${escapeAttr(item.status||'unknown')}"><span class="operation-step-index">${String(index+1).padStart(2,'0')}</span><div><strong>${escapeHtml(item.label||item.key||'步骤')}</strong>${item.message?`<p>${escapeHtml(item.message)}</p>`:''}${Array.isArray(item.details)&&item.details.length?`<div class="operation-step-details">${item.details.map(child=>`<span>${escapeHtml(child.label||'详情')}：${escapeHtml(_diagnosticValue(child.value))}</span>`).join('')}</div>`:''}</div><em>${escapeHtml(item.status||'unknown')}</em></li>`).join("");
   const trace = d.trace_id ? `<button class="btn small operation-trace-button" data-operation-trace="${escapeAttr(d.trace_id)}">查看 Trace</button>` : "";
   const retryLabel = unknown ? "禁止直接重试" : (d.retryable ? "可以重试" : "不要直接重试");
   queueOperationAnnouncement(d);
-  return `<details class="operation-diagnostic ${tone}" data-operation-group="${escapeAttr(group)}" ${expanded?'open':''}>
+  return `<details class="operation-diagnostic ${tone}" data-operation-group="${escapeAttr(group)}" data-detail-key="${escapeAttr(detailKey)}" ${expanded?'open':''}>
     <summary class="operation-summary"><span class="operation-summary-mark">${renderIcon(unknown?'alert-triangle':ok?'check':'alert-circle','operation-status-icon')}</span><span class="operation-summary-copy"><span class="eyebrow">OPERATION DIAGNOSTIC</span><strong>${escapeHtml(d.title||(ok?'操作完成':'操作未完成'))}</strong><small>PHASE / ${escapeHtml(d.phase||'未标记')}</small></span><code class="operation-code">${escapeHtml(d.code||(ok?'ok':'operation_failed'))}</code><span class="operation-chevron">${renderIcon('chevron-down','ui-icon')}</span></summary>
     <div class="operation-diagnostic-body">
       <header><p>${escapeHtml(d.message||'未提供说明')}</p></header>
@@ -266,11 +392,21 @@ document.addEventListener("click", event => {
 
 document.addEventListener("toggle", event => {
   const current = event.target;
-  if (!(current instanceof HTMLDetailsElement) || !current.open || !current.matches(".operation-diagnostic[data-operation-group]")) return;
+  if (!(current instanceof HTMLDetailsElement)) return;
+  if (!current.dataset.detailKey) prepareDetailState(current.parentElement || document);
+  if (current.dataset.detailKey) {
+    _detailOpenState[current.dataset.detailKey] = Boolean(current.open);
+    persistDetailState();
+  }
+  if (!current.open || !current.matches(".operation-diagnostic[data-operation-group]")) return;
   const group = current.getAttribute("data-operation-group");
   document.querySelectorAll(".operation-diagnostic[data-operation-group]").forEach(item => {
-    if (item !== current && item.getAttribute("data-operation-group") === group) item.open = false;
+    if (item !== current && item.getAttribute("data-operation-group") === group) {
+      item.open = false;
+      if (item.dataset.detailKey) _detailOpenState[item.dataset.detailKey] = false;
+    }
   });
+  persistDetailState();
 }, true);
 
 async function api(path, opts = {}) {
@@ -611,9 +747,10 @@ function render() {
     };
   }
   root.innerHTML = renderLayout();
-  attachLayout();
-  flushOperationAnnouncement();
   restoreScrollState();
+  attachLayout();
+  prepareDetailState(root);
+  flushOperationAnnouncement();
   if (focusSnap) {
     const next = document.getElementById(focusSnap.id);
     if (next && (next.tagName === "INPUT" || next.tagName === "TEXTAREA")) {
@@ -649,7 +786,7 @@ const ICON_PATHS = {
   "plug": '<path d="M8 3v5m8-5v5M6 8h12v3a6 6 0 0 1-6 6v4m-3 0h6"/>',
   "refresh": '<path d="M20 7v5h-5M4 17v-5h5M6.1 8a7 7 0 0 1 11.4-2L20 9M4 15l2.5 3a7 7 0 0 0 11.4-2"/>',
   "search": '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
-  "settings": '<circle cx="12" cy="12" r="3"/><path d="M19 13.5v-3l-2-.7-.8-1.9.9-1.9-2.1-2.1-1.9.9-1.9-.8L10.5 2h-3l-.7 2-1.9.8-1.9-.9L.9 6l.9 1.9-.8 1.9-2 .7v3l2 .7.8 1.9-.9 1.9L3 20.1l1.9-.9 1.9.8.7 2h3l.7-2 1.9-.8 1.9.9 2.1-2.1-.9-1.9.8-1.9 2-.7Z" transform="translate(2) scale(.84)"/>',
+  "settings": '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.09a2 2 0 0 1 1 1.74v.5a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z"/><circle cx="12" cy="12" r="3"/>',
   "shield": '<path d="M12 3 20 7v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4Zm-3 9 2 2 4-5"/>',
   "sparkles": '<path d="m12 3 1.3 3.7L17 8l-3.7 1.3L12 13l-1.3-3.7L7 8l3.7-1.3L12 3ZM5 14l.8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8L5 14Zm13-1 1 2.8 3 1.2-3 1.2L18 21l-1-2.8-3-1.2 3-1.2 1-2.8Z"/>',
   "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
