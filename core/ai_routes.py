@@ -908,6 +908,18 @@ class RoutedToolCaller:
                     return caller
         return None
 
+    def _caller_from_response(self, response: ToolCallerResponse) -> ToolCaller | None:
+        route_key = str(getattr(response, "route_key", "") or "").strip()
+        if route_key:
+            caller = self._caller_by_route_key.get(route_key)
+            if caller is not None:
+                return caller
+        for tool_call in list(getattr(response, "tool_calls", []) or []):
+            caller = self._tool_call_callers.get(str(getattr(tool_call, "id", "") or "").strip())
+            if caller is not None:
+                return caller
+        return self._default_result_caller
+
     @staticmethod
     def _strip_route_markers(messages: list[dict]) -> list[dict]:
         cleaned: list[dict] = []
@@ -997,6 +1009,10 @@ class RoutedToolCaller:
                     call_id = str(getattr(tool_call, "id", "") or "").strip()
                     if call_id:
                         self._tool_call_callers[call_id] = caller
+            try:
+                response.route_key = str(self._caller_route_keys.get(id(caller), "") or "")
+            except Exception:
+                pass
             return response
         if saw_vision_unavailable:
             return _tool_caller_response_cls()(
@@ -1041,6 +1057,41 @@ class RoutedToolCaller:
                 message = dict(message)
                 message["_personification_routed_caller"] = route_key
         return message
+
+    def build_assistant_tool_calls_message(self, response: ToolCallerResponse) -> dict[str, Any]:
+        caller = self._caller_from_response(response)
+        if caller is None:
+            raise RuntimeError("no routed tool caller available")
+        builder = getattr(caller, "build_assistant_tool_calls_message", None)
+        if callable(builder):
+            return builder(response)
+        return _tool_caller_impl().build_assistant_tool_calls_message(response)
+
+    def build_tool_result_messages(
+        self,
+        response: ToolCallerResponse,
+        results: list[tuple[Any, str]],
+    ) -> list[dict[str, Any]]:
+        caller = self._caller_from_response(response)
+        if caller is None:
+            raise RuntimeError("no routed tool caller available")
+        builder = getattr(caller, "build_tool_result_messages", None)
+        if callable(builder):
+            messages = list(builder(response, results) or [])
+        else:
+            messages = _tool_caller_impl().build_tool_result_messages(caller, response, results)
+        route_key = self._caller_route_keys.get(id(caller), "")
+        routed_messages: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            cloned = dict(message)
+            if route_key:
+                cloned["_personification_routed_caller"] = route_key
+            routed_messages.append(cloned)
+        for tool_call, _result in results:
+            self._tool_call_callers.pop(str(getattr(tool_call, "id", "") or "").strip(), None)
+        return routed_messages
 
 
 def build_routed_tool_caller(

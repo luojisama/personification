@@ -81,6 +81,40 @@ def test_routed_tool_caller_routes_tool_result_back_to_originating_caller() -> N
     assert tool_result["tool_name"] == "web_search"
 
 
+def test_routed_tool_caller_response_route_survives_duplicate_call_ids() -> None:
+    first_response = tool_impl.ToolCallerResponse(
+        finish_reason="tool_calls",
+        content="",
+        tool_calls=[tool_impl.ToolCall(id="same-id", name="first_tool", arguments={})],
+        raw={},
+    )
+    second_response = tool_impl.ToolCallerResponse(
+        finish_reason="tool_calls",
+        content="",
+        tool_calls=[tool_impl.ToolCall(id="same-id", name="second_tool", arguments={})],
+        raw={},
+    )
+    route_error = RuntimeError("route unavailable")
+    primary = _FakeCaller("primary", [first_response, route_error])
+    fallback = _FakeCaller("fallback", [second_response])
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[primary],
+        fallback_caller=fallback,
+        logger=None,
+    )
+
+    first = asyncio.run(routed.chat_with_tools([], [], False))
+    second = asyncio.run(routed.chat_with_tools([], [], False))
+    first_results = routed.build_tool_result_messages(first, [(first.tool_calls[0], "one")])
+    second_results = routed.build_tool_result_messages(second, [(second.tool_calls[0], "two")])
+
+    assert first_results[0]["caller"] == "primary"
+    assert second_results[0]["caller"] == "fallback"
+    assert first_results[0]["_personification_routed_caller"] != second_results[0][
+        "_personification_routed_caller"
+    ]
+
+
 def test_routed_tool_caller_pins_synthetic_tool_result_to_same_caller() -> None:
     empty = tool_impl.ToolCallerResponse(
         finish_reason="stop",

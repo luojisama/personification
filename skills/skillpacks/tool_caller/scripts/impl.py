@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import re
 import time
+import uuid
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -113,6 +115,7 @@ class ToolCall:
     id: str
     name: str
     arguments: dict
+    provider_call_id: str = ""
 
 
 @dataclass
@@ -126,6 +129,38 @@ class ToolCallerResponse:
     usage: dict = field(default_factory=dict)
     model_used: str = ""
     wire_tools_count: int | None = None
+    provider_history: dict[str, Any] | None = field(default=None, repr=False)
+    route_key: str = field(default="", repr=False)
+
+
+def build_assistant_tool_calls_message(response: ToolCallerResponse) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": response.content if response.content else "",
+        "tool_calls": [
+            {
+                "id": tool_call.id,
+                "type": "function",
+                "function": {
+                    "name": tool_call.name,
+                    "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                },
+            }
+            for tool_call in list(response.tool_calls or [])
+        ],
+    }
+
+
+def build_tool_result_messages(
+    caller: Any,
+    response: ToolCallerResponse,
+    results: List[Tuple[ToolCall, str]],
+) -> List[dict[str, Any]]:
+    del response
+    return [
+        caller.build_tool_result_message(tool_call.id, tool_call.name, result)
+        for tool_call, result in results
+    ]
 
 
 class ToolCaller(ABC):
@@ -146,6 +181,16 @@ class ToolCaller(ABC):
         result: str,
     ) -> dict | ToolCallerResponse:
         raise NotImplementedError
+
+    def build_assistant_tool_calls_message(self, response: ToolCallerResponse) -> dict[str, Any]:
+        return build_assistant_tool_calls_message(response)
+
+    def build_tool_result_messages(
+        self,
+        response: ToolCallerResponse,
+        results: List[Tuple[ToolCall, str]],
+    ) -> List[dict[str, Any]]:
+        return build_tool_result_messages(self, response, results)
 
 
 class ProviderModelCandidateUnavailable(httpx.HTTPStatusError):
@@ -625,17 +670,18 @@ def _convert_openai_tool_to_responses(tool: dict) -> dict:
 
 
 def _gemini_part_from_dict(item: dict) -> dict:
+    part: dict[str, Any]
     if "function_call" in item:
-        return {"function_call": item["function_call"]}
-    if "functionCall" in item:
-        return {"function_call": item["functionCall"]}
-    if "function_response" in item:
-        return {"function_response": item["function_response"]}
-    if "functionResponse" in item:
-        return {"function_response": item["functionResponse"]}
-    if item.get("type") == "text":
-        return {"text": str(item.get("text", ""))}
-    if item.get("type") == "image_url":
+        part = {"functionCall": copy.deepcopy(item["function_call"])}
+    elif "functionCall" in item:
+        part = {"functionCall": copy.deepcopy(item["functionCall"])}
+    elif "function_response" in item:
+        part = {"functionResponse": copy.deepcopy(item["function_response"])}
+    elif "functionResponse" in item:
+        part = {"functionResponse": copy.deepcopy(item["functionResponse"])}
+    elif item.get("type") == "text":
+        part = {"text": str(item.get("text", ""))}
+    elif item.get("type") == "image_url":
         raw_image_url = str(_obj_get(item.get("image_url", {}), "url", ""))
         image_url, _ = normalize_image_ref(raw_image_url)
         if not image_url:
@@ -643,11 +689,17 @@ def _gemini_part_from_dict(item: dict) -> dict:
         parsed = _split_data_url(image_url)
         if parsed:
             mime_type, base64_data = parsed
-            return {"inline_data": {"mime_type": mime_type, "data": base64_data}}
-        return {"file_data": {"mime_type": "image/*", "file_uri": image_url}}
-    if "text" in item:
-        return {"text": str(item["text"])}
-    return {"text": json.dumps(item, ensure_ascii=False)}
+            part = {"inlineData": {"mimeType": mime_type, "data": base64_data}}
+        else:
+            part = {"fileData": {"mimeType": "image/*", "fileUri": image_url}}
+    elif "text" in item:
+        part = {"text": str(item["text"])}
+    else:
+        part = {"text": json.dumps(item, ensure_ascii=False)}
+    signature = item.get("thoughtSignature", item.get("thought_signature"))
+    if signature is not None:
+        part["thoughtSignature"] = copy.deepcopy(signature)
+    return part
 
 
 def _parse_tool_arguments(arguments: Any) -> dict[str, Any]:
@@ -678,16 +730,16 @@ def _gemini_tool_call_parts(tool_calls: Any) -> List[dict]:
             continue
         arguments = _parse_tool_arguments(function_part.get("arguments", {}))
         part: dict[str, Any] = {
-            "function_call": {
+            "functionCall": {
                 "name": name,
                 "args": arguments,
             }
         }
         call_id = str(raw_tool_call.get("id") or raw_tool_call.get("call_id") or "").strip()
         if call_id:
-            part["function_call"]["id"] = call_id
+            part["functionCall"]["id"] = call_id
         else:
-            part["function_call"]["id"] = f"gemini-call-{index}"
+            part["functionCall"]["id"] = f"gemini-call-{index}"
         parts.append(part)
     return parts
 
@@ -704,6 +756,10 @@ def _convert_messages_to_gemini(messages: List[dict]) -> Tuple[Optional[str], Li
     system_instruction, rest_messages = _extract_system_message(messages)
     contents: List[dict] = []
     for message in rest_messages:
+        native_content = message.get("_personification_provider_history")
+        if isinstance(native_content, dict):
+            contents.append(copy.deepcopy(native_content))
+            continue
         parts = _gemini_parts_from_content(message.get("parts", message.get("content", "")))
         parts.extend(_gemini_tool_call_parts(message.get("tool_calls", [])))
         contents.append(
@@ -727,7 +783,7 @@ def _extract_gemini_text(parts: List[Any]) -> str:
 
 def _extract_gemini_tool_calls(parts: List[Any]) -> List[ToolCall]:
     tool_calls: List[ToolCall] = []
-    for index, part in enumerate(parts):
+    for part in parts:
         function_call = _obj_get(part, "function_call")
         if function_call is None:
             function_call = _obj_get(part, "functionCall")
@@ -735,11 +791,13 @@ def _extract_gemini_tool_calls(parts: List[Any]) -> List[ToolCall]:
             continue
         name = str(_obj_get(function_call, "name", ""))
         args = _parse_tool_arguments(_obj_get(function_call, "args", {}) or {})
+        provider_call_id = str(_obj_get(function_call, "id", "") or "").strip()
         tool_calls.append(
             ToolCall(
-                id=str(_obj_get(function_call, "id", f"gemini-call-{index}")),
+                id=provider_call_id or f"gemini-{uuid.uuid4().hex}",
                 name=name,
                 arguments=args,
+                provider_call_id=provider_call_id,
             )
         )
     return tool_calls
@@ -1337,7 +1395,7 @@ class GeminiToolCaller(ToolCaller):
         if tools:
             declarations = _convert_openai_tools_to_gemini(tools)
             if declarations:
-                tool_payload.append({"function_declarations": declarations})
+                tool_payload.append({"functionDeclarations": declarations})
         if use_builtin_search:
             tool_payload.append(_gemini_builtin_search_tool(self.model))
 
@@ -1401,7 +1459,33 @@ class GeminiToolCaller(ToolCaller):
             usage=_extract_usage(data),
             model_used=str(self.model or ""),
             wire_tools_count=len(declarations),
+            provider_history=copy.deepcopy(content) if tool_calls and isinstance(content, dict) else None,
         )
+
+    def build_assistant_tool_calls_message(self, response: ToolCallerResponse) -> dict[str, Any]:
+        if isinstance(response.provider_history, dict):
+            return {
+                "role": "assistant",
+                "_personification_provider_history": copy.deepcopy(response.provider_history),
+            }
+        return super().build_assistant_tool_calls_message(response)
+
+    def build_tool_result_messages(
+        self,
+        response: ToolCallerResponse,
+        results: List[Tuple[ToolCall, str]],
+    ) -> List[dict[str, Any]]:
+        del response
+        parts: List[dict[str, Any]] = []
+        for tool_call, result in results:
+            function_response: dict[str, Any] = {
+                "name": tool_call.name,
+                "response": {"result": result},
+            }
+            if tool_call.provider_call_id:
+                function_response["id"] = tool_call.provider_call_id
+            parts.append({"functionResponse": function_response})
+        return [{"role": "user", "parts": parts}] if parts else []
 
     async def chat_with_tools(
         self,
@@ -1428,7 +1512,8 @@ class GeminiToolCaller(ToolCaller):
             "role": "user",
             "parts": [
                 {
-                    "function_response": {
+                    "functionResponse": {
+                        "id": tool_call_id,
                         "name": tool_name,
                         "response": {"result": result},
                     }
@@ -3620,7 +3705,7 @@ class GeminiCliToolCaller(ToolCaller):
                 declarations = _convert_openai_tools_to_gemini(tools)
                 wire_tools_count = len(declarations)
                 if declarations:
-                    tool_payload.append({"function_declarations": declarations})
+                    tool_payload.append({"functionDeclarations": declarations})
             if use_builtin_search:
                 tool_payload.append(_gemini_builtin_search_tool(self.model))
 
@@ -3737,12 +3822,38 @@ class GeminiCliToolCaller(ToolCaller):
                 usage=usage,
                 model_used=str(self.model or self._default_model),
                 wire_tools_count=wire_tools_count,
+                provider_history=copy.deepcopy(content) if tool_calls and isinstance(content, dict) else None,
             )
         except Exception as exc:
             _attach_wire_tools_count(exc, wire_tools_count)
             if contains_image_input and _error_indicates_vision_unavailable(exc):
                 return _vision_unavailable_response(exc)
             raise
+
+    def build_assistant_tool_calls_message(self, response: ToolCallerResponse) -> dict[str, Any]:
+        if isinstance(response.provider_history, dict):
+            return {
+                "role": "assistant",
+                "_personification_provider_history": copy.deepcopy(response.provider_history),
+            }
+        return super().build_assistant_tool_calls_message(response)
+
+    def build_tool_result_messages(
+        self,
+        response: ToolCallerResponse,
+        results: List[Tuple[ToolCall, str]],
+    ) -> List[dict[str, Any]]:
+        del response
+        parts: List[dict[str, Any]] = []
+        for tool_call, result in results:
+            function_response: dict[str, Any] = {
+                "name": tool_call.name,
+                "response": {"result": result},
+            }
+            if tool_call.provider_call_id:
+                function_response["id"] = tool_call.provider_call_id
+            parts.append({"functionResponse": function_response})
+        return [{"role": "user", "parts": parts}] if parts else []
 
     def build_tool_result_message(
         self,
@@ -3754,7 +3865,8 @@ class GeminiCliToolCaller(ToolCaller):
             "role": "user",
             "parts": [
                 {
-                    "function_response": {
+                    "functionResponse": {
+                        "id": tool_call_id,
                         "name": tool_name,
                         "response": {"result": result},
                     }
@@ -4164,7 +4276,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                 declarations = _convert_openai_tools_to_gemini(tools)
                 wire_tools_count = len(declarations)
                 if declarations:
-                    tool_payload.append({"function_declarations": declarations})
+                    tool_payload.append({"functionDeclarations": declarations})
             if use_builtin_search:
                 tool_payload.append(_gemini_builtin_search_tool(self.model))
 
@@ -4350,6 +4462,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                 usage=usage,
                 model_used=str(selected_model_name or self.model or self._default_model),
                 wire_tools_count=wire_tools_count,
+                provider_history=copy.deepcopy(content) if tool_calls and isinstance(content, dict) else None,
             )
         except Exception as exc:
             _attach_wire_tools_count(exc, wire_tools_count)

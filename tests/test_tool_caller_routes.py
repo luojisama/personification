@@ -256,7 +256,7 @@ def test_gemini_function_schema_uses_compatibility_subset(monkeypatch) -> None: 
 
     response = asyncio.run(caller.chat_with_tools([{"role": "user", "content": "hi"}], tools, False))
 
-    declarations = captured["json"]["tools"][0]["function_declarations"]
+    declarations = captured["json"]["tools"][0]["functionDeclarations"]
     assert len(declarations) == 1
     assert response.wire_tools_count == 1
     declaration = declarations[0]
