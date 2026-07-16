@@ -378,25 +378,23 @@ class GeminiVisionCaller(VisionCaller):
             )
             if not callable(tool_handler):
                 return latest_text
+            response_parts: List[dict[str, Any]] = []
             for call in tool_calls:
                 tool_result = ""
                 try:
                     tool_result = await tool_handler(call.name, dict(call.arguments or {}))
                 except Exception:
                     tool_result = ""
-                contents.append(
-                    {
-                        "role": "user",
-                        "parts": [
-                            {
-                                "functionResponse": {
-                                    "name": call.name,
-                                    "response": {"result": str(tool_result or "")},
-                                }
-                            }
-                        ],
-                    }
-                )
+                function_response: dict[str, Any] = {
+                    "name": call.name,
+                    "response": {"result": str(tool_result or "")},
+                }
+                provider_call_id = str(getattr(call, "provider_call_id", "") or "").strip()
+                if provider_call_id:
+                    function_response["id"] = provider_call_id
+                response_parts.append({"functionResponse": function_response})
+            if response_parts:
+                contents.append({"role": "user", "parts": response_parts})
         return latest_text
 
 

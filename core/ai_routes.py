@@ -849,8 +849,6 @@ class RoutedToolCaller:
         self._primary_callers = list(primary_callers)
         self._fallback_caller = fallback_caller
         self._logger = logger
-        self._tool_call_callers: dict[str, ToolCaller] = {}
-        self._default_result_caller: ToolCaller | None = primary_callers[0] if primary_callers else fallback_caller
         self._caller_route_keys: dict[int, str] = {}
         self._caller_by_route_key: dict[str, ToolCaller] = {}
         self._caller_route_descriptors: dict[int, dict[str, Any]] = {}
@@ -914,20 +912,20 @@ class RoutedToolCaller:
             caller = self._caller_by_route_key.get(route_key)
             if caller is not None:
                 return caller
-        for tool_call in list(getattr(response, "tool_calls", []) or []):
-            caller = self._tool_call_callers.get(str(getattr(tool_call, "id", "") or "").strip())
-            if caller is not None:
-                return caller
-        return self._default_result_caller
+        return None
 
     @staticmethod
     def _strip_route_markers(messages: list[dict]) -> list[dict]:
         cleaned: list[dict] = []
         changed = False
         for message in list(messages or []):
-            if isinstance(message, dict) and "_personification_routed_caller" in message:
+            if isinstance(message, dict) and (
+                "_personification_routed_caller" in message
+                or "_personification_untrusted" in message
+            ):
                 cloned = dict(message)
                 cloned.pop("_personification_routed_caller", None)
+                cloned.pop("_personification_untrusted", None)
                 cleaned.append(cloned)
                 changed = True
             else:
@@ -975,7 +973,7 @@ class RoutedToolCaller:
                     continue
                 try:
                     response = await caller.chat_with_tools(
-                        build_safe_reframe_messages(self._strip_route_markers(messages)),
+                        self._strip_route_markers(build_safe_reframe_messages(messages)),
                         tools,
                         use_builtin_search,
                     )
@@ -1002,13 +1000,6 @@ class RoutedToolCaller:
                 _attach_response_wire_tools_count(last_error, response, len(list(tools or [])))
                 route_attempts.append(self._route_attempt(caller, last_error, request_shape=request_shape))
                 continue
-            is_qzone_probe = str(current_llm_context().get("purpose") or "") == "qzone_provider_probe"
-            if not is_qzone_probe:
-                self._default_result_caller = caller
-                for tool_call in list(response.tool_calls or []):
-                    call_id = str(getattr(tool_call, "id", "") or "").strip()
-                    if call_id:
-                        self._tool_call_callers[call_id] = caller
             try:
                 response.route_key = str(self._caller_route_keys.get(id(caller), "") or "")
             except Exception:
@@ -1045,18 +1036,8 @@ class RoutedToolCaller:
         tool_name: str,
         result: str,
     ) -> dict:
-        caller = self._tool_call_callers.pop(str(tool_call_id or "").strip(), None)
-        if caller is None:
-            caller = self._default_result_caller
-        if caller is None:
-            raise RuntimeError("no routed tool caller available")
-        message = caller.build_tool_result_message(tool_call_id, tool_name, result)
-        if isinstance(message, dict):
-            route_key = self._caller_route_keys.get(id(caller))
-            if route_key:
-                message = dict(message)
-                message["_personification_routed_caller"] = route_key
-        return message
+        del tool_call_id, tool_name, result
+        raise RuntimeError("routed tool results require the originating response")
 
     def build_assistant_tool_calls_message(self, response: ToolCallerResponse) -> dict[str, Any]:
         caller = self._caller_from_response(response)
@@ -1089,9 +1070,24 @@ class RoutedToolCaller:
             if route_key:
                 cloned["_personification_routed_caller"] = route_key
             routed_messages.append(cloned)
-        for tool_call, _result in results:
-            self._tool_call_callers.pop(str(getattr(tool_call, "id", "") or "").strip(), None)
         return routed_messages
+
+    def build_synthetic_tool_evidence_message(
+        self,
+        response: ToolCallerResponse | None,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        result: str,
+    ) -> dict[str, Any]:
+        message = _tool_caller_impl().build_synthetic_tool_evidence_message(
+            tool_name,
+            tool_args,
+            result,
+        )
+        route_key = str(getattr(response, "route_key", "") or "").strip() if response is not None else ""
+        if route_key and route_key in self._caller_by_route_key:
+            message["_personification_routed_caller"] = route_key
+        return message
 
 
 def build_routed_tool_caller(

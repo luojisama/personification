@@ -14,7 +14,6 @@ from .fallbacks import (
 )
 from .final_synthesis import AgentResult
 from .loop_utils import _RETRYABLE_LOOKUP_TOOLS, tool_signature
-from .tool_loop import append_single_tool_call_exchange
 from .tool_selection import _schema_tool_name
 
 
@@ -71,6 +70,7 @@ async def _try_inject_vision_fallback(
     state: StopFlowState,
     messages: list[dict],
     tool_caller: Any,
+    origin_response: Any,
     registry: Any,
     plugin_config: Any,
     logger: Any,
@@ -101,6 +101,7 @@ async def _try_inject_vision_fallback(
     await _inject_background_tool_result(
         messages=messages,
         tool_caller=tool_caller,
+        response=origin_response,
         tool_name=bg_name,
         tool_args=bg_args,
         result=bg_result,
@@ -266,6 +267,7 @@ async def _run_stop_fallback_tool(
     budget_deadline: float | None,
     messages: list[dict],
     tool_caller: Any,
+    origin_response: Any,
     record_trace: Callable[..., None],
     append_evidence_guidance: Callable[..., Awaitable[Any]],
 ) -> bool:
@@ -291,14 +293,14 @@ async def _run_stop_fallback_tool(
         status="ok" if str(fallback_result or "").strip() else "warn",
         detail=f"tool={fallback_name} elapsed_ms={int((time.monotonic() - fallback_tool_started_at) * 1000)}",
     )
-    fallback_id = f"fallback-{fallback_name}-{step}"
-    append_single_tool_call_exchange(
+    await _inject_background_tool_result(
         messages=messages,
         tool_caller=tool_caller,
-        call_id=fallback_id,
+        response=origin_response,
         tool_name=fallback_name,
         tool_args=fallback_args,
         result=fallback_result,
+        step=step,
     )
     state.last_tool_name = str(fallback_name or "").strip()
     if str(fallback_result or "").strip():
@@ -377,6 +379,7 @@ async def handle_model_stop(
             state=state,
             messages=messages,
             tool_caller=tool_caller,
+            origin_response=response,
             registry=registry,
             plugin_config=plugin_config,
             logger=logger,
@@ -419,6 +422,7 @@ async def handle_model_stop(
             budget_deadline=budget_deadline,
             messages=messages,
             tool_caller=tool_caller,
+            origin_response=response,
             record_trace=record_trace,
             append_evidence_guidance=append_evidence_guidance,
         )
@@ -443,6 +447,7 @@ async def handle_model_stop(
             state=state,
             messages=messages,
             tool_caller=tool_caller,
+            origin_response=response,
             registry=registry,
             plugin_config=plugin_config,
             logger=logger,

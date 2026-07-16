@@ -64,7 +64,7 @@ def test_routed_tool_caller_routes_tool_result_back_to_originating_caller() -> N
     response = tool_impl.ToolCallerResponse(
         finish_reason="tool_calls",
         content="",
-        tool_calls=[SimpleNamespace(id="call-1")],
+        tool_calls=[tool_impl.ToolCall(id="call-1", name="web_search", arguments={})],
         raw={},
     )
     primary = _FakeCaller("primary", [response])
@@ -74,8 +74,8 @@ def test_routed_tool_caller_routes_tool_result_back_to_originating_caller() -> N
         logger=None,
     )
 
-    asyncio.run(routed.chat_with_tools([], [], False))
-    tool_result = routed.build_tool_result_message("call-1", "web_search", "done")
+    actual = asyncio.run(routed.chat_with_tools([], [], False))
+    tool_result = routed.build_tool_result_messages(actual, [(actual.tool_calls[0], "done")])[0]
 
     assert tool_result["caller"] == "primary"
     assert tool_result["tool_name"] == "web_search"
@@ -145,25 +145,17 @@ def test_routed_tool_caller_pins_synthetic_tool_result_to_same_caller() -> None:
     response = asyncio.run(routed.chat_with_tools([], [], False))
     assert response.content == "需要补查"
 
-    tool_result = routed.build_tool_result_message("fallback-wiki_lookup-1", "wiki_lookup", "查到了")
-    messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "fallback-wiki_lookup-1",
-                    "type": "function",
-                    "function": {"name": "wiki_lookup", "arguments": "{}"},
-                }
-            ],
-        },
-        tool_result,
-    ]
+    tool_result = routed.build_synthetic_tool_evidence_message(
+        response,
+        "wiki_lookup",
+        {},
+        "查到了",
+    )
+    messages = [tool_result]
     response = asyncio.run(routed.chat_with_tools(messages, [], False))
 
-    assert tool_result["caller"] == "fallback"
     assert "_personification_routed_caller" in tool_result
+    assert tool_result["_personification_untrusted"] is True
     assert all("_personification_routed_caller" not in msg for msg in fallback.messages_seen[-1])
     assert response.content == "最终结果"
 
@@ -247,9 +239,9 @@ def test_routed_tool_caller_keeps_safety_retry_pinned() -> None:
     routed = ai_routes.RoutedToolCaller(
         primary_callers=[primary], fallback_caller=fallback, logger=None
     )
-    asyncio.run(routed.chat_with_tools([], [], False))
+    initial = asyncio.run(routed.chat_with_tools([], [], False))
     primary_calls_before_pinned_turn = len(primary.calls_seen)
-    tool_result = routed.build_tool_result_message("fallback-search-1", "search", "done")
+    tool_result = routed.build_synthetic_tool_evidence_message(initial, "search", {}, "done")
 
     response = asyncio.run(routed.chat_with_tools([tool_result], [], False))
 
@@ -546,7 +538,7 @@ def test_runtime_builder_wraps_legacy_caller_when_provider_list_is_empty(monkeyp
     assert "private raw provider error" not in str(caught.value.route_attempts)
 
 
-def test_qzone_probe_does_not_mutate_routed_tool_result_state() -> None:
+def test_qzone_probe_uses_response_scoped_route_state() -> None:
     empty = tool_impl.ToolCallerResponse(
         finish_reason="stop",
         content="",
@@ -576,5 +568,6 @@ def test_qzone_probe_does_not_mutate_routed_tool_result_state() -> None:
         llm_context.reset_llm_context(token)
 
     assert response.tool_calls[0].id == "probe-call"
-    assert routed._default_result_caller is primary
-    assert routed._tool_call_callers == {}
+    assert response.route_key == routed._caller_route_keys[id(fallback)]
+    assert not hasattr(routed, "_default_result_caller")
+    assert not hasattr(routed, "_tool_call_callers")

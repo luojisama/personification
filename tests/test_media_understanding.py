@@ -209,6 +209,77 @@ def test_gemini_vision_uses_only_google_api_key_header(monkeypatch) -> None:  # 
     assert captured["params"] == {}
 
 
+def test_gemini_vision_batches_function_responses_and_preserves_signature(monkeypatch) -> None:  # noqa: ANN001
+    captured: list[dict] = []
+    native_parts = [
+        {
+            "functionCall": {"id": "call-1", "name": "first", "args": {}},
+            "thoughtSignature": "opaque-signature",
+        },
+        {"functionCall": {"id": "call-2", "name": "second", "args": {}}},
+    ]
+    responses = [
+        {"candidates": [{"content": {"role": "model", "parts": native_parts}}]},
+        {"candidates": [{"content": {"role": "model", "parts": [{"text": "done"}]}}]},
+    ]
+    caller = vision_caller.GeminiVisionCaller(
+        api_key="vision-secret",
+        base_url="https://gemini-vision.example",
+        model="gemini-3-flash-agent",
+    )
+
+    async def _generate(payload):  # noqa: ANN001, ANN202
+        captured.append(payload)
+        return responses.pop(0)
+
+    async def _handler(name, _args):  # noqa: ANN001, ANN202
+        return f"result-{name}"
+
+    monkeypatch.setattr(caller, "_generate_content", _generate)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": name,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in ("first", "second")
+    ]
+
+    result = asyncio.run(
+        caller.describe_with_tools(
+            "inspect",
+            "data:image/png;base64,AA==",
+            tools,
+            tool_handler=_handler,
+        )
+    )
+
+    assert result == "done"
+    assert captured[1]["contents"][-2]["parts"] == native_parts
+    assert captured[1]["contents"][-1] == {
+        "role": "user",
+        "parts": [
+            {
+                "functionResponse": {
+                    "id": "call-1",
+                    "name": "first",
+                    "response": {"result": "result-first"},
+                }
+            },
+            {
+                "functionResponse": {
+                    "id": "call-2",
+                    "name": "second",
+                    "response": {"result": "result-second"},
+                }
+            },
+        ],
+    }
+
+
 def test_vision_builder_passes_gemini_auth_mode_without_breaking_anthropic() -> None:
     gemini = vision_caller.build_vision_caller(SimpleNamespace(
         personification_api_type="gemini",

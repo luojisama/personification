@@ -1002,6 +1002,84 @@ def test_run_agent_uses_tool_metadata_contract_for_queued_action_silence() -> No
     assert len(caller.calls) == 1
 
 
+def test_run_agent_uses_response_aware_turn_builders() -> None:
+    async def _handler(**_kwargs):  # noqa: ANN001
+        return "tool evidence"
+
+    class _TurnAwareCaller(_FakeToolCaller):
+        def __init__(self, responses):  # noqa: ANN001
+            super().__init__(responses)
+            self.assistant_builds = 0
+            self.result_builds = 0
+
+        def build_assistant_tool_calls_message(self, _response):  # noqa: ANN001, ANN201
+            self.assistant_builds += 1
+            return {"role": "assistant", "content": "native tool turn"}
+
+        def build_tool_result_messages(self, _response, results):  # noqa: ANN001, ANN201
+            self.result_builds += 1
+            return [
+                {
+                    "role": "user",
+                    "content": f"native result turn: {results[0][1]}",
+                }
+            ]
+
+    registry = _register_query_tool(_handler)
+    caller = _TurnAwareCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-search",
+                        name="search_web",
+                        arguments={"query": "AI 新闻"},
+                    )
+                ],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="自然回复",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "聊聊 AI 新闻"}],
+            registry=registry,
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=2,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+        )
+    )
+
+    assert result.text == "自然回复"
+    assert caller.assistant_builds == 1
+    assert caller.result_builds == 1
+    assert len(caller.calls) == 2
+    second_messages = caller.calls[1]["messages"]
+    assert second_messages[-2]["content"] == "native tool turn"
+    assert second_messages[-1]["content"] == "native result turn: tool evidence"
+
+
 def test_run_agent_avatar_pair_result_stops_before_model_can_rewrite_relation() -> None:
     async def _handler(**_kwargs):  # noqa: ANN001
         return json.dumps(

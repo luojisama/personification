@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from typing import Any, List
 
@@ -9,6 +8,7 @@ from ..query_rewriter import ContextualQueryRewrite
 from ..tool_registry import ToolRegistry
 from ...core.send_outcome import is_likely_delivered_send_timeout
 from .executor import _execute_tool_with_retries
+from .tool_loop import append_assistant_tool_calls_message, append_tool_result_messages
 from .tool_selection import _select_tool_schemas
 from .wrappers import (
     _IMAGE_B64_TOOL_RESULT_RE,
@@ -198,23 +198,12 @@ async def _run_background_image_generation(
             else:
                 _record_background_image_failure("planning_empty_response", logger)
             return
-        background_messages.append(
-            {
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_call.name,
-                            "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
-                        },
-                    }
-                    for tool_call in tool_calls
-                ],
-            }
+        append_assistant_tool_calls_message(
+            messages=background_messages,
+            response=response,
+            tool_caller=tool_caller,
         )
+        turn_results: list[tuple[Any, str]] = []
         for tool_call in tool_calls:
             logger.info(f"[agent] background_image tool_call name={tool_call.name}")
             tool_args, result = await _execute_tool_with_retries(
@@ -252,13 +241,13 @@ async def _run_background_image_generation(
                     return
                 _record_background_image_failure("image_generation_failed", logger)
                 return
-            background_messages.append(
-                tool_caller.build_tool_result_message(
-                    tool_call.id,
-                    tool_call.name,
-                    result,
-                )
-            )
+            turn_results.append((tool_call, str(result or "")))
+        append_tool_result_messages(
+            messages=background_messages,
+            tool_caller=tool_caller,
+            response=response,
+            results=turn_results,
+        )
     if last_tool_result_text:
         _record_background_image_failure("image_generation_incomplete", logger)
         return

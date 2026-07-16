@@ -127,7 +127,7 @@ def build_generated_tool(
     async def _handler(**kwargs: Any) -> str:
         from ..agent.runtime.tool_loop import (
             append_assistant_tool_calls_message,
-            append_tool_result_message,
+            append_tool_result_messages,
         )
 
         caller = runtime.tool_caller
@@ -166,7 +166,12 @@ def build_generated_tool(
             content = str(getattr(response, "content", "") or "").strip()
             if not calls:
                 return content[: execution["max_result_chars"]]
-            append_assistant_tool_calls_message(messages=messages, response=response)
+            append_assistant_tool_calls_message(
+                messages=messages,
+                response=response,
+                tool_caller=caller,
+            )
+            turn_results: list[tuple[Any, str]] = []
             for call in calls:
                 name, arguments, call_id = _tool_call_parts(call)
                 tool = allowed_by_name.get(name)
@@ -177,12 +182,13 @@ def build_generated_tool(
                     if inspect.isawaitable(value):
                         value = await value
                     result = str(value)
-                append_tool_result_message(
-                    messages=messages,
-                    tool_caller=caller,
-                    tool_call=call,
-                    result=result[:12000],
-                )
+                turn_results.append((call, result[:12000]))
+            append_tool_result_messages(
+                messages=messages,
+                tool_caller=caller,
+                response=response,
+                results=turn_results,
+            )
         return "工具执行达到步骤上限，未得到可靠结果。"
 
     return AgentTool(

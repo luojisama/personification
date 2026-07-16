@@ -69,7 +69,7 @@ from .stop_flow import (
 )
 from .tool_loop import (
     append_assistant_tool_calls_message,
-    append_tool_result_message,
+    append_tool_result_messages,
     observe_model_step,
     selected_tool_names,
     trace_tool_call,
@@ -781,8 +781,13 @@ async def run_agent(
                     )
                 except asyncio.TimeoutError:
                     pass
-            append_assistant_tool_calls_message(messages=messages, response=response)
+            append_assistant_tool_calls_message(
+                messages=messages,
+                response=response,
+                tool_caller=tool_caller,
+            )
 
+        turn_tool_results: list[tuple[Any, str]] = []
         for tool_call in response.tool_calls:
             stop_state.has_tool_call = True
             logger.info(f"[agent] tool_call name={tool_call.name}")
@@ -851,11 +856,14 @@ async def run_agent(
                 )
                 return await _finalize_result(direct_result, reason="direct_tool_result")
 
-            append_tool_result_message(
+            turn_tool_results.append((tool_call, str(result or "")))
+
+        if turn_tool_results:
+            append_tool_result_messages(
                 messages=messages,
                 tool_caller=tool_caller,
-                tool_call=tool_call,
-                result=result,
+                response=response,
+                results=turn_tool_results,
             )
             await _append_evidence_guidance_if_needed()
 
