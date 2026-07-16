@@ -85,6 +85,15 @@ from ...core.sticker_feedback import (
 )
 from ...core.target_inference import TARGET_OTHERS
 from ...core.tts_service import extract_persona_tts_config
+from ...core.turn_media import (
+    attach_safe_visual_summary,
+    coerce_turn_media,
+    extract_media_from_message,
+    extract_turn_media_from_event,
+    media_summary_timeout_seconds,
+    normalize_safe_visual_summary,
+    render_turn_media_grounding,
+)
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_YAML
 from ...skill_runtime.runtime_api import SkillRuntime
 
@@ -508,6 +517,9 @@ async def process_yaml_response_logic(
     response_deadline: float | None = None,
     prepared_inner_state: dict[str, Any] | None = None,
     prepared_emotion_state: dict[str, Any] | None = None,
+    turn_media_context: List[Dict[str, Any]] | None = None,
+    media_grounding: str = "",
+    precomputed_image_summary_suffix: str = "",
 ) -> None:
     """处理基于 YAML 模板的新版响应逻辑。"""
     reply_commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
@@ -517,6 +529,9 @@ async def process_yaml_response_logic(
     review_call_ai_api = review_call_ai_api or lite_call_ai_api or call_ai_api
     planner_message_target = normalize_message_target_for_plan(message_target)
     review_message_target = normalize_message_target_for_review(message_target)
+    turn_media_refs = coerce_turn_media(turn_media_context or [])
+    if not turn_media_refs:
+        turn_media_refs = extract_turn_media_from_event(event, current_origin="current")
 
     def _has_newer_batch_now() -> bool:
         return bool(has_newer_batch or _batch_ref_has_newer_messages(batch_runtime_ref))
@@ -725,6 +740,53 @@ async def process_yaml_response_logic(
                         last_images.append(url)
                 elif isinstance(img_url_obj, str) and img_url_obj not in last_images:
                     last_images.append(img_url_obj)
+    if not turn_media_refs and last_images:
+        turn_media_refs = extract_media_from_message(
+            [
+                {"type": "image", "data": {"url": image_ref}}
+                for image_ref in last_images
+            ],
+            origin="current",
+            owner_user_id=user_id,
+            message_id=str(getattr(event, "message_id", "") or ""),
+        )
+    image_input_mode = normalize_image_input_mode(
+        getattr(plugin_config, "personification_image_input_mode", "auto")
+    )
+    image_summary_suffix = str(precomputed_image_summary_suffix or "").strip()
+    if not image_summary_suffix and last_images and image_input_mode != "disabled":
+        summary_timeout = media_summary_timeout_seconds(
+            response_deadline if isinstance(response_deadline, (int, float)) else None,
+            now=time.monotonic(),
+        )
+        if summary_timeout > 0.05:
+            try:
+                image_summary_suffix = await asyncio.wait_for(
+                    _build_image_summary_suffix(
+                        plugin_config=plugin_config,
+                        agent_tool_caller=agent_tool_caller,
+                        get_configured_api_providers=get_configured_api_providers,
+                        vision_caller=vision_caller,
+                        image_urls=last_images,
+                        sticker_like=False,
+                        logger=logger,
+                    ),
+                    timeout=summary_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"拟人插件 (YAML)：视觉摘要超过本轮前置预算 {summary_timeout:.1f}s，继续使用 provenance 进入语义判断。"
+                )
+    safe_visual_summary = normalize_safe_visual_summary(image_summary_suffix)
+    turn_media_refs = attach_safe_visual_summary(
+        turn_media_refs,
+        safe_visual_summary,
+        confidence=0.65,
+    )
+    media_grounding = render_turn_media_grounding(
+        turn_media_refs,
+        summary=safe_visual_summary,
+    ) or str(media_grounding or "").strip()
     photo_like = "[图片·照片]" in (history_last_text or raw_message_text or trigger_reason)
 
     if not is_private_session and not recent_context_hint:
@@ -807,6 +869,7 @@ async def process_yaml_response_logic(
                 current_inner_state=render_inner_state_hint(inner_state),
                 current_emotion_state=emotion_memory_hint,
                 available_tools=planner_available_tools,
+                media_grounding=media_grounding,
                 logger=logger,
                 metric_mode="yaml_enabled",
             )
@@ -851,6 +914,7 @@ async def process_yaml_response_logic(
                     repeat_clusters=repeat_clusters,
                     current_inner_state=render_inner_state_hint(inner_state),
                     current_emotion_state=emotion_memory_hint,
+                    media_grounding=media_grounding,
                     logger=logger,
                     metric_scene="yaml_private" if is_private_session else "yaml_group",
                 )
@@ -901,6 +965,7 @@ async def process_yaml_response_logic(
                     current_inner_state=render_inner_state_hint(inner_state),
                     current_emotion_state=emotion_memory_hint,
                     available_tools=planner_available_tools,
+                    media_grounding=media_grounding,
                     logger=logger,
                     metric_mode="yaml_shadow",
                 )
@@ -1021,6 +1086,8 @@ async def process_yaml_response_logic(
         "- 表情包/梗图/GIF 只当作语气线索；真实照片也只用于判断情绪、关系和意图，最终回复接人和话题，不写成图片说明。如果只看到图片占位或没有视觉摘要，不要假装看懂，也不要泛泛问对方看到什么。\n"
         "- 有人让你“写一段/来一段/AI 一段/帮我写”对白、剧本、小作文、段子、歌词或角色扮演内容时，不要切换成写作工具去交付任务：不写前言铺垫、不写“角色：台词”式多角色剧本、不写结尾点评总结、不堆营业腔和网络黑话。可以用人设口吻即兴接两三句、玩梗式带过，但绝不展开成长篇命题作文，也不要为此出戏或扮演成别的角色。"
     )
+    if media_grounding:
+        system_prompt += f"\n\n{media_grounding}"
     if qq_expression_enabled(plugin_config):
         system_prompt += "\n\n" + build_qq_expression_prompt()
     system_prompt += "\n\n" + build_reply_style_policy_prompt(
@@ -1187,9 +1254,6 @@ async def process_yaml_response_logic(
 
     user_content: Any = input_text
     tool_image_urls = list(last_images)
-    image_input_mode = normalize_image_input_mode(
-        getattr(plugin_config, "personification_image_input_mode", "auto")
-    )
     image_detail = normalize_image_detail(
         getattr(plugin_config, "personification_image_detail", "auto")
     )
@@ -1221,7 +1285,6 @@ async def process_yaml_response_logic(
             route_name=VISUAL_ROUTE_AGENT,
         )
     )
-    image_summary_suffix = ""
     text_model_images = list(last_images)
     if last_images:
         _trace_stage(
@@ -1237,16 +1300,6 @@ async def process_yaml_response_logic(
         if image_input_mode == "disabled":
             text_model_images = []
         else:
-            if image_input_mode in {"auto", "summary"} and (not direct_image_input or not agent_direct_image_input):
-                image_summary_suffix = await _build_image_summary_suffix(
-                    plugin_config=plugin_config,
-                    agent_tool_caller=agent_tool_caller,
-                    get_configured_api_providers=get_configured_api_providers,
-                    vision_caller=vision_caller,
-                    image_urls=tool_image_urls,
-                    sticker_like=sticker_like,
-                    logger=logger,
-                )
             if not direct_image_input:
                 text_model_images = []
 
@@ -1438,6 +1491,7 @@ async def process_yaml_response_logic(
                     is_group=not is_private_session,
                     is_direct_mention=is_direct_mention,
                     reply_required=reply_required,
+                    turn_media_context=turn_media_refs,
                 )
             except Exception as exc:
                 if not (
@@ -1817,13 +1871,18 @@ async def process_yaml_response_logic(
         getattr(semantic_frame, "requires_emotional_care", False)
         or getattr(getattr(semantic_frame, "emotional_support", None), "needed", False)
     )
-    should_review_agent_reply = bool(used_agent and tool_image_urls and not _IMAGE_B64_RE.search(assistant_text or ""))
+    should_review_visual_reply = bool(turn_media_refs and not _IMAGE_B64_RE.search(assistant_text or ""))
+    should_review_agent_reply = bool(used_agent and should_review_visual_reply)
     if used_agent and not should_review_agent_reply and not care_review_required:
         review_decision = make_passthrough_review_decision(
             assistant_text,
             reason="agent_passthrough",
         )
-    elif not care_review_required and not bool(getattr(plugin_config, "personification_response_review_enabled", False)):
+    elif (
+        not care_review_required
+        and not should_review_visual_reply
+        and not bool(getattr(plugin_config, "personification_response_review_enabled", False))
+    ):
         review_decision = make_passthrough_review_decision(
             assistant_text,
             reason="review_disabled",
@@ -1843,6 +1902,7 @@ async def process_yaml_response_logic(
             is_direct_mention=is_direct_mention,
             reply_required=reply_required,
             semantic_frame=semantic_frame,
+            turn_media_context=turn_media_refs,
         )
     if review_decision.action == "no_reply":
         logger.info(f"拟人插件 (YAML)：回复审阅后选择沉默，group={group_id} user={user_id}")
@@ -2467,6 +2527,11 @@ def build_yaml_response_processor(
             response_deadline=runtime_overrides.get("response_deadline"),
             prepared_inner_state=runtime_overrides.get("prepared_inner_state"),
             prepared_emotion_state=runtime_overrides.get("prepared_emotion_state"),
+            turn_media_context=list(runtime_overrides.get("turn_media_context") or []),
+            media_grounding=str(runtime_overrides.get("media_grounding", "") or ""),
+            precomputed_image_summary_suffix=str(
+                runtime_overrides.get("precomputed_image_summary_suffix", "") or ""
+            ),
         )
 
     return _processor

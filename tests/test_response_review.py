@@ -236,3 +236,45 @@ def test_care_rewrite_is_safety_revalidated() -> None:
     assert decision.action == "rewrite"
     assert "当地急救或警方" in decision.text
     assert decision.reason == "care_rewrite_unverified"
+
+
+def test_review_consumes_safe_visual_evidence_for_social_attribution() -> None:
+    async def _fake_call(messages):  # noqa: ANN001
+        system_prompt = messages[0]["content"]
+        user_prompt = messages[1]["content"]
+        assert "现实社交归因是否有" in system_prompt
+        assert "unsupported_visual_social_attribution" in system_prompt
+        assert "画中主体只是媒体内容，不是聊天参与者" in user_prompt
+        assert "owner_user_id=user_a" in user_prompt
+        assert "动漫插画中有多人看向画面中央" in user_prompt
+        return (
+            '{"action":"rewrite","text":"这只是图里的构图，先别往现实群友身上套。",'
+            '"reason":"视觉证据不支持现实归因","flags":["unsupported_visual_social_attribution"]}'
+        )
+
+    media_context = [
+        {
+            "media_id": "media-anime",
+            "ref": "",
+            "origin": "current",
+            "owner_user_id": "user_a",
+            "message_id": "message_a",
+            "kind": "image",
+            "content_hash": "abc123",
+            "file_id": "file-a",
+            "safe_summary": "动漫插画中有多人看向画面中央",
+            "confidence": 0.65,
+            "summary_scope": "single_media",
+        }
+    ]
+    decision = asyncio.run(
+        response_review.review_response_text(
+            _fake_call,
+            candidate_text="群友都在围观你，压力拉满了",
+            raw_message_text="[图片]",
+            turn_media_context=media_context,
+        )
+    )
+
+    assert decision.action == "rewrite"
+    assert decision.flags == ("unsupported_visual_social_attribution",)

@@ -362,6 +362,7 @@ async def plan_turn_with_llm(
     current_emotion_state: str = "",
     available_tools: list[dict[str, Any]] | None = None,
     group_knowledge_hint: str = "",
+    media_grounding: str = "",
 ) -> TurnPlan:
     fallback = metadata_fallback_turn_plan(
         is_group=is_group,
@@ -438,6 +439,7 @@ async def plan_turn_with_llm(
         f"互动关系：{str(relationship_hint or '').strip()[:600] or '无'}\n"
         f"全局内心状态：{str(current_inner_state or '').strip()[:260] or '无'}\n"
         f"近期情绪记忆：{str(current_emotion_state or '').strip()[:260] or '无'}\n"
+        f"媒体 provenance / 视觉 grounding：\n{str(media_grounding or '').strip()[:1800] or '无'}\n"
         f"复读线索：{'; '.join(repeat_lines) if repeat_lines else '无'}\n"
         f"可用工具元数据：\n{_render_tool_metadata(available_tools)}\n"
         "metadata fallback："

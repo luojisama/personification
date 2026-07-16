@@ -236,6 +236,7 @@ async def run_agent(
     surface: str = "",
     finalize_quality: bool = True,
     allow_builtin_search: bool = True,
+    turn_media_context: list[Any] | None = None,
 ) -> AgentResult:
     use_builtin_search = (
         bool(
@@ -587,6 +588,7 @@ async def run_agent(
         is_direct_mention=is_direct_mention,
         reply_required=reply_required,
         surface=surface,
+        turn_media_context=turn_media_context,
     )
 
     async def _append_evidence_guidance_if_needed(*, draft_answer_text: str = "") -> EvidenceSynthesis | None:

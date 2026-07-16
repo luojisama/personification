@@ -9,6 +9,7 @@ from ...core.reply_style_policy import (
     build_media_understanding_output_policy_prompt,
     build_speech_act_policy_prompt,
 )
+from ...core.turn_media import render_turn_media_grounding
 from .tool_selection import _semantic_tool_guidance
 
 
@@ -26,6 +27,7 @@ def append_agent_system_prompts(
     is_direct_mention: bool = False,
     reply_required: bool = False,
     surface: str = "",
+    turn_media_context: list[Any] | None = None,
 ) -> None:
     group_context = bool(is_group) if is_group is not None else any(
         isinstance(message, dict)
@@ -208,6 +210,9 @@ def append_agent_system_prompts(
             "content": build_media_understanding_output_policy_prompt(),
         }
     )
+    media_grounding = render_turn_media_grounding(turn_media_context)
+    if media_grounding:
+        messages.append({"role": "system", "content": media_grounding})
     if getattr(intent_decision, "ambiguity_level", "") == "high":
         messages.append(
             {

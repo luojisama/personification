@@ -15,6 +15,7 @@ from ...agent.tool_registry import ToolRegistry
 from ...core.context_policy import build_prompt_injection_guard
 from ...core.error_utils import log_exception
 from ...core.image_input import provider_supports_vision
+from ...core.image_result_cache import image_fingerprint
 from ...core.memory_defaults import DEFAULT_PRIVATE_HISTORY_TURNS, MAX_PRIVATE_HISTORY_TURNS
 from ...core.message_parts import build_user_message_content
 from ...core.message_relations import build_event_relation_metadata
@@ -48,7 +49,7 @@ _AGENT_TIME_BUDGET_RESERVE_SECONDS = 30.0
 
 @dataclass(frozen=True)
 class IncomingImageClassification:
-    kind: str = "sticker"
+    kind: str = "unknown"
     confidence: float = 0.0
     reason: str = ""
     source: str = "fallback"
@@ -59,7 +60,11 @@ class IncomingImageClassification:
 
     @property
     def text_label(self) -> str:
-        return "[图片·表情包]" if self.is_sticker_like else "[图片·照片]"
+        if self.kind == "photo":
+            return "[图片·照片]"
+        if self.kind == "sticker":
+            return "[图片·表情包]"
+        return "[图片]"
 
 
 def _parse_image_classifier_payload(raw: Any) -> IncomingImageClassification | None:
@@ -275,21 +280,17 @@ async def classify_incoming_image(
             reason="gif_short_circuit",
             source="rule",
         )
-    if image_width == 0 and image_height == 0:
-        return IncomingImageClassification(
-            kind="sticker",
-            confidence=1.0,
-            reason="missing_size_short_circuit",
-            source="rule",
-        )
-
-    cache_key = str(file_id or "").strip() or f"{image_width}x{image_height}"
+    normalized_file_id = str(file_id or "").strip()
+    ref_fingerprint = image_fingerprint(str(image_url or "")) if str(image_url or "").strip() else ""
+    cache_key = f"file:{normalized_file_id}" if normalized_file_id else (
+        f"ref:{ref_fingerprint}" if ref_fingerprint else ""
+    )
     cached = _get_cached_image_classification(cache_key)
     if cached is not None:
         return cached
 
     conservative_fallback = IncomingImageClassification(
-        kind="sticker",
+        kind="unknown",
         confidence=0.0,
         reason="classifier_fallback",
         source="fallback",
@@ -347,6 +348,17 @@ async def classify_incoming_image(
 
     if attempted_vision_classify:
         return _remember_image_classification(cache_key, conservative_fallback)
+
+    if image_width == 0 and image_height == 0:
+        return _remember_image_classification(
+            cache_key,
+            IncomingImageClassification(
+                kind="unknown",
+                confidence=0.0,
+                reason="missing_size_fallback",
+                source="fallback",
+            ),
+        )
 
     size_based_kind = "sticker" if max(image_width, image_height) <= 1280 else "photo"
     return _remember_image_classification(
@@ -692,6 +704,7 @@ async def run_agent_if_enabled(
     response_deadline: float | None = None,
     task_exc_logger: Callable[[str, Any], Any] | None = None,
     reply_commit_state: dict[str, Any] | None = None,
+    turn_media_context: list[Any] | None = None,
 ) -> tuple[str | None, bool, bool, Any | None, list[dict[str, Any]], str, bool]:
     if not (
         getattr(runtime.plugin_config, "personification_agent_enabled", True)
@@ -851,6 +864,7 @@ async def run_agent_if_enabled(
         is_group=hasattr(event, "group_id") and not str(getattr(event, "group_id", "")).startswith("private_"),
         is_direct_mention=is_direct_mention,
         reply_required=reply_required,
+        turn_media_context=turn_media_context,
     )
     return (
         result.text,

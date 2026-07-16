@@ -201,3 +201,44 @@ def test_agent_prompting_allows_game_tools_and_natural_meme_use() -> None:
     assert "wiki_lookup" in combined
     assert "web_search" in combined
     assert "自然用一个梗" in combined
+
+
+def test_agent_prompting_includes_typed_media_provenance_grounding() -> None:
+    messages: list[dict] = []
+    prompting.append_agent_system_prompts(
+        messages=messages,
+        runtime_chat_intent="banter",
+        plugin_query_intent="",
+        intent_decision=SimpleNamespace(ambiguity_level="low"),
+        rewritten_query=SimpleNamespace(primary_query="", query_candidates=[], context_clues=[], search_plan=[]),
+        turn_plan=SimpleNamespace(
+            speech_act="participate",
+            output_mode="chat_short",
+            session_goal="理解当前图文",
+            domain_focus="social",
+            evidence_policy="none",
+            emotional_support=None,
+        ),
+        user_images=["https://img.example/anime.png"],
+        direct_image_input=True,
+        is_group=True,
+        turn_media_context=[
+            {
+                "media_id": "media-a",
+                "ref": "https://img.example/anime.png",
+                "origin": "quoted",
+                "owner_user_id": "user_a",
+                "message_id": "message_a",
+                "kind": "image",
+                "file_id": "file-a",
+                "content_hash": "hash-a",
+                "safe_summary": "动漫图里有多人和交错视线",
+                "confidence": 0.65,
+            }
+        ],
+    )
+
+    combined = "\n".join(str(item.get("content", "")) for item in messages)
+    assert "origin=quoted" in combined
+    assert "owner_user_id=user_a" in combined
+    assert "画中主体只是媒体内容，不是聊天参与者" in combined

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict
 
 from ..core.target_inference import normalize_message_target_for_review
+from ..core.turn_media import extract_turn_media_from_event, media_from_batched_events, serialize_turn_media
 
 
 _GROUP_BATCH_DELAY_SECONDS = 1.2
@@ -248,8 +249,13 @@ def _select_merged_event(events: list[Any]) -> Any:
     return events[-1]
 
 
-def _serialize_batched_event(item: dict[str, Any]) -> dict[str, Any]:
+def _serialize_batched_event(
+    item: dict[str, Any],
+    *,
+    selected_event: Any = None,
+) -> dict[str, Any]:
     event = item.get("event")
+    current_origin = "current" if event is selected_event else "batch"
     return {
         "message_id": str(getattr(event, "message_id", "") or "").strip(),
         "user_id": str(getattr(event, "user_id", "") or "").strip(),
@@ -259,6 +265,12 @@ def _serialize_batched_event(item: dict[str, Any]) -> dict[str, Any]:
         "is_direct_mention": bool(item.get("is_direct_mention")),
         "is_reply_to_bot": bool(item.get("is_reply_to_bot")),
         "has_reply_semantics": _has_reply_semantics(event),
+        "media": serialize_turn_media(
+            extract_turn_media_from_event(
+                event,
+                current_origin=current_origin,
+            )
+        ),
     }
 
 
@@ -536,7 +548,10 @@ async def run_buffer_timer(
     except Exception as exc:
         logger.warning(f"拟人插件：拼接消息构建失败，回退单条处理: {exc}")
 
-    serialized_items = [_serialize_batched_event(item) for item in items]
+    serialized_items = [
+        _serialize_batched_event(item, selected_event=selected_event)
+        for item in items
+    ]
     repeat_clusters = _build_repeat_clusters(items)
     if combined_message is not None:
         state["concatenated_message"] = combined_message
@@ -545,6 +560,7 @@ async def run_buffer_timer(
         "selected_event_index": max(0, events.index(selected_event)),
     }
     state["batched_events"] = serialized_items
+    state["turn_media_context"] = serialize_turn_media(media_from_batched_events(serialized_items))
     state["batch_trigger"] = {
         "type": trigger_type,
         "message_id": str(getattr(selected_event, "message_id", "") or "").strip(),
@@ -766,6 +782,9 @@ async def handle_reply_event(
         direct_state["batch_session_key"] = session_key
         direct_state["batch_event_count"] = 1
         direct_state["batched_events"] = []
+        direct_state["turn_media_context"] = serialize_turn_media(
+            extract_turn_media_from_event(event, current_origin="current")
+        )
         timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
         direct_state["response_deadline"] = time.monotonic() + timeout_seconds
         async with concurrency_controller.direct_turn(session_key) as commit_lock:

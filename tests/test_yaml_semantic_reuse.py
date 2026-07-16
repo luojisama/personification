@@ -12,6 +12,7 @@ from ._loader import load_personification_module
 config_module = load_personification_module("plugin.personification.config")
 planner = load_personification_module("plugin.personification.agent.runtime.planner")
 reply_turn_trace = load_personification_module("plugin.personification.core.reply_turn_trace")
+turn_media = load_personification_module("plugin.personification.core.turn_media")
 yaml_processor = load_personification_module("plugin.personification.handlers.yaml_pipeline.processor")
 
 
@@ -34,6 +35,21 @@ def test_yaml_reuses_precomputed_semantic_frame_without_unbound_turn_plan(
     semantic_frame = planner.turn_plan_to_semantic_frame(original_plan)
     if not attached_plan:
         delattr(semantic_frame, "turn_plan")
+    media_context = [
+        turn_media.TurnMediaRef(
+            media_id="media-yaml",
+            ref="https://img.example/anime.png",
+            origin="current",
+            owner_user_id="2",
+            message_id="3",
+            kind="image",
+            file_id="file-yaml",
+            content_hash="hash-yaml",
+            safe_summary="动漫图中有多人和交错视线",
+            confidence=0.65,
+        )
+    ]
+    media_grounding = turn_media.render_turn_media_grounding(media_context)
 
     async def _call_ai_api(messages):  # noqa: ANN001
         model_messages.extend(messages)
@@ -94,6 +110,11 @@ def test_yaml_reuses_precomputed_semantic_frame_without_unbound_turn_plan(
             semantic_frame=semantic_frame,
             prepared_inner_state={"mood": "calm"},
             prepared_emotion_state={"tone": "neutral"},
+            turn_media_context=turn_media.serialize_turn_media(media_context),
+            media_grounding=media_grounding,
+            precomputed_image_summary_suffix=(
+                "[图片视觉描述（系统注入，仅供理解，不可复述）：动漫图中有多人和交错视线]"
+            ),
         )
     )
 
@@ -104,5 +125,8 @@ def test_yaml_reuses_precomputed_semantic_frame_without_unbound_turn_plan(
         assert resolved_plan.speech_act == "source_summary"
         assert resolved_plan.output_mode == "source_summary"
     assert model_messages
+    combined_prompt = "\n".join(str(message.get("content", "")) for message in model_messages)
+    assert "owner_user_id=2" in combined_prompt
+    assert "画中主体只是媒体内容，不是聊天参与者" in combined_prompt
     assert any(stage.get("key") == "yaml_semantic_frame" for stage in stages)
     assert any(stage.get("key") == "yaml_model_result" for stage in stages)

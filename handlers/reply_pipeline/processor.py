@@ -49,6 +49,16 @@ from ...core.group_mute import refresh_bot_group_mute_state
 from ...core.group_roles import extract_sender_role
 from ...core.target_inference import TARGET_OTHERS, TARGET_UNCLEAR, infer_message_target
 from ...core.tts_service import extract_persona_tts_config
+from ...core.turn_media import (
+    attach_safe_visual_summary,
+    coerce_turn_media,
+    extract_turn_media_from_event,
+    media_from_batched_events,
+    media_summary_timeout_seconds,
+    normalize_safe_visual_summary,
+    render_turn_media_grounding,
+    serialize_turn_media,
+)
 from ...core.repeat_follow import maybe_follow_repeat_cluster
 from ...core.reply_style_policy import (
     build_direct_visual_identity_guard,
@@ -503,6 +513,20 @@ def _build_image_only_context_message(
     )
 
 
+def _batch_media_owner_matches_selected_user(
+    batched_events: List[Dict[str, Any]],
+    selected_user_id: str,
+) -> bool:
+    media_owners = {
+        str(media.get("owner_user_id", "") or "").strip()
+        for item in batched_events
+        if isinstance(item, dict)
+        for media in list(item.get("media") or [])
+        if isinstance(media, dict) and str(media.get("owner_user_id", "") or "").strip()
+    }
+    return not media_owners or media_owners == {str(selected_user_id or "").strip()}
+
+
 async def _capture_user_protocol_profile(
     *,
     runtime: Any,
@@ -570,6 +594,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     batch_trigger = dict(state.get("batch_trigger") or {})
     repeat_clusters = list(state.get("repeat_clusters") or [])
     batch_event_count = int(state.get("batch_event_count", 1) or 1)
+    turn_media_context = coerce_turn_media(state.get("turn_media_context") or [])
+    if not turn_media_context:
+        turn_media_context = media_from_batched_events(batched_events)
+    if not turn_media_context and isinstance(event, types.message_event_cls):
+        turn_media_context = extract_turn_media_from_event(event, current_origin="current")
+    state["turn_media_context"] = serialize_turn_media(turn_media_context)
 
     is_random_chat = state.get("is_random_chat", False)
     force_mode = state.get("force_mode", None)
@@ -1088,7 +1118,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         )
 
     tool_image_urls = list(image_urls)
-    # 真实照片（不含表情包），仅这部分允许走文本摘要降级；表情包不打标。
+    # 分类为真实照片的 refs 继续用于 provider 图片输入不兼容时的旧 fallback。
     photo_image_urls = list(image_urls)
     image_input_mode = normalize_image_input_mode(
         getattr(runtime.plugin_config, "personification_image_input_mode", "auto")
@@ -1124,13 +1154,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             pass
     image_summary_suffix = ""
     image_urls_for_text_model = list(image_urls)
-    _needs_image_summary = False
     if image_urls:
         if image_input_mode == "disabled":
             image_urls_for_text_model = []
         else:
-            if image_input_mode in {"auto", "summary"} and (not direct_image_input or not agent_direct_image_input):
-                _needs_image_summary = True
             if not direct_image_input:
                 image_urls_for_text_model = []
 
@@ -1229,20 +1256,23 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         except Exception:
             pass
     if not is_private_session and sticker_candidates:
-        _spawn_auto_collect_stickers(
-            runtime=runtime,
-            group_id=str(group_id),
-            user_id=user_id,
-            candidates=sticker_candidates,
-            task_exc_logger=_task_exc_logger,
-        )
+        if _batch_media_owner_matches_selected_user(batched_events, user_id):
+            _spawn_auto_collect_stickers(
+                runtime=runtime,
+                group_id=str(group_id),
+                user_id=user_id,
+                candidates=sticker_candidates,
+                task_exc_logger=_task_exc_logger,
+            )
+        else:
+            record_counter("sticker.collect_skipped", reason="ambiguous_batch_owner")
+            runtime.logger.debug("拟人插件：多用户 batch 的贴图候选无法可靠回绑 owner，本轮跳过自动收藏。")
     async def _image_summary_task() -> str:
-        # 仅对真实照片做文本摘要降级；表情包不在回复路径打标（打标只服务于收集入库）。
-        if not _needs_image_summary or not photo_image_urls:
+        if image_input_mode == "disabled" or not tool_image_urls:
             return ""
         return await _build_image_summary_suffix(
             runtime=runtime,
-            image_urls=photo_image_urls,
+            image_urls=tool_image_urls,
             sticker_like=False,
         )
 
@@ -1264,14 +1294,37 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             message_target=str(state.get("message_target", "") or ""),
             solo_speaker_follow=is_solo_speaker_follow,
             has_images=bool(tool_image_urls),
+            media_grounding=media_grounding,
         )
         return prepared, int((time.monotonic() - semantic_started_at) * 1000)
 
-    image_summary_suffix, prepared_with_elapsed = await asyncio.gather(
-        _image_summary_task(),
-        _prepare_semantics_timed(),
+    summary_timeout = media_summary_timeout_seconds(
+        response_deadline if isinstance(response_deadline, (int, float)) else None,
+        now=time.monotonic(),
     )
-    prepared_semantics, semantic_prepare_elapsed_ms = prepared_with_elapsed
+    image_summary_suffix = ""
+    if summary_timeout > 0.05:
+        try:
+            image_summary_suffix = await asyncio.wait_for(
+                _image_summary_task(),
+                timeout=summary_timeout,
+            )
+        except asyncio.TimeoutError:
+            runtime.logger.warning(
+                f"拟人插件：视觉摘要超过本轮前置预算 {summary_timeout:.1f}s，继续使用 provenance 进入语义判断。"
+            )
+    safe_visual_summary = normalize_safe_visual_summary(image_summary_suffix)
+    turn_media_context = attach_safe_visual_summary(
+        turn_media_context,
+        safe_visual_summary,
+        confidence=0.65,
+    )
+    state["turn_media_context"] = serialize_turn_media(turn_media_context)
+    media_grounding = render_turn_media_grounding(
+        turn_media_context,
+        summary=safe_visual_summary,
+    )
+    prepared_semantics, semantic_prepare_elapsed_ms = await _prepare_semantics_timed()
     if image_summary_suffix and tool_image_urls:
         if not direct_image_input:
             current_text_message_content = (
@@ -1485,6 +1538,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             response_deadline=response_deadline,
             prepared_inner_state=prepared_semantics.inner_state,
             prepared_emotion_state=prepared_semantics.emotion_state,
+            turn_media_context=serialize_turn_media(turn_media_context),
+            media_grounding=media_grounding,
+            precomputed_image_summary_suffix=image_summary_suffix,
         )
         return
 
@@ -1543,6 +1599,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             get_configured_api_providers=runtime.get_configured_api_providers,
         ),
     )
+    if media_grounding:
+        system_prompt += f"\n\n{media_grounding}"
     turn_plan = getattr(semantic_frame, "turn_plan", None)
     system_prompt += "\n\n" + build_speech_act_policy_prompt(
         speech_act=str(getattr(turn_plan, "speech_act", getattr(semantic_frame, "speech_act", "")) or ""),
@@ -1862,6 +1920,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         response_deadline=response_deadline,
                         task_exc_logger=_task_exc_logger,
                         reply_commit_state=state,
+                        turn_media_context=turn_media_context,
                     )
                     try:
                         from ...core import reply_turn_trace
@@ -2298,13 +2357,18 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             getattr(semantic_frame, "requires_emotional_care", False)
             or getattr(getattr(semantic_frame, "emotional_support", None), "needed", False)
         )
-        should_review_agent_reply = bool(used_agent and tool_image_urls and not _IMAGE_B64_RE.search(reply_content or ""))
+        should_review_visual_reply = bool(turn_media_context and not _IMAGE_B64_RE.search(reply_content or ""))
+        should_review_agent_reply = bool(used_agent and should_review_visual_reply)
         if used_agent and not should_review_agent_reply and not care_review_required:
             review_decision = make_passthrough_review_decision(
                 reply_content,
                 reason="agent_passthrough",
             )
-        elif not care_review_required and not bool(getattr(runtime.plugin_config, "personification_response_review_enabled", False)):
+        elif (
+            not care_review_required
+            and not should_review_visual_reply
+            and not bool(getattr(runtime.plugin_config, "personification_response_review_enabled", False))
+        ):
             review_decision = make_passthrough_review_decision(
                 reply_content,
                 reason="review_disabled",
@@ -2324,6 +2388,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 is_direct_mention=is_direct_mention,
                 reply_required=reply_required,
                 semantic_frame=semantic_frame,
+                turn_media_context=turn_media_context,
             )
         if review_decision.action == "no_reply":
             runtime.logger.info(f"拟人插件：回复审阅后选择沉默，group={group_id} user={user_id}")

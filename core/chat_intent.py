@@ -316,6 +316,7 @@ async def infer_turn_semantic_frame_with_llm(
     repeat_clusters: list[dict[str, Any]] | None = None,
     current_inner_state: str = "",
     current_emotion_state: str = "",
+    media_grounding: str = "",
 ) -> TurnSemanticFrame:
     fallback = _metadata_fallback_turn_semantic_frame(
         is_group=is_group,
@@ -419,6 +420,7 @@ async def infer_turn_semantic_frame_with_llm(
         f"互动关系：{str(relationship_hint or '').strip()[:500] or '无'}\n"
         f"全局内心状态：{str(current_inner_state or '').strip()[:260] or '无'}\n"
         f"近期情绪记忆：{str(current_emotion_state or '').strip()[:260] or '无'}\n"
+        f"媒体 provenance / 视觉 grounding：\n{str(media_grounding or '').strip()[:1800] or '无'}\n"
         f"复读线索：{'; '.join(repeat_lines) if repeat_lines else '无'}\n"
         "场景 fallback："
         f"intent={fallback.chat_intent}, plugin={fallback.plugin_question_intent}, "

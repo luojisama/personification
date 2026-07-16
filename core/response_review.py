@@ -14,6 +14,7 @@ from .reply_text_policy import (
     looks_like_visible_reasoning_trace,
     normalize_visible_reply_text,
 )
+from .turn_media import render_turn_media_grounding
 
 
 @dataclass(frozen=True)
@@ -444,6 +445,7 @@ async def review_response_text(
     is_direct_mention: bool = False,
     reply_required: bool = False,
     semantic_frame: Any = None,
+    turn_media_context: list[Any] | None = None,
 ) -> ResponseReviewDecision:
     must_reply = bool(reply_required or is_direct_mention)
     candidate = str(candidate_text or "").strip()
@@ -466,6 +468,15 @@ async def review_response_text(
         or getattr(getattr(semantic_frame, "emotional_support", None), "needed", False)
     )
     care_risk = str(getattr(getattr(semantic_frame, "emotional_support", None), "risk_level", "none") or "none")
+    visual_evidence = render_turn_media_grounding(turn_media_context)
+    visual_review_instruction = (
+        "\n视觉 evidence 只证明媒体中出现了什么，不证明聊天参与者现实在场。"
+        "请由你判断候选里的现实社交归因是否有聊天文字、协议 provenance 或其它明确 evidence 支持；"
+        "如果只是把画中主体、多人构图、视线或姿态归因为群友围观、现实压力或现实关系，"
+        "必须 rewrite 或 no_reply，并可返回 unsupported_visual_social_attribution flag。"
+        if visual_evidence
+        else ""
+    )
     review_messages = [
         {
             "role": "system",
@@ -482,6 +493,7 @@ async def review_response_text(
                 "只输出 JSON，不要解释。"
                 "情绪支持轮次还要检查并在 flags 返回：dismissive/invalidating/unsolicited_advice/medicalizing/diagnosis/overpromise/dependency_encouragement/risk_mishandled。"
                 "候选若忽视倾听/确认、未经允许给建议、医疗化诊断、过度承诺、诱导依赖或错误处理风险，必须 rewrite 或 no_reply，不能 accept。"
+                f"{visual_review_instruction}"
                 "\n## 必须 rewrite 的 AI 味回复模式（重点检查）\n1. 「回声评论」：把用户说的话原样重复后加“太真实了/太直球了/太 X 了吧/真的假的”等感叹——必须改写为不重复原话的短句接话。\n2. 候选回复中超过 3 个连续字与用户原话重叠，且没有新增信息或立场——必须 rewrite。\n3. 候选只是在用感叹词复述用户语义，没有新事实、延续话题、转向或明确态度——必须 rewrite。\n4. 「安抚式客服腔」：以“别这么说/已经很够用了/不要这样想/你很棒的”开头——改写为自然接话。\n5. 「旁白式观察」：类似“真去做了啊/真的行动了/居然真的 XX 了”的旁白——改写为参与式短句。\n6. 「梗分析腔」：用“像是把 X 玩成 Y 了/意思就是/可以理解成”解释梗结构——改写为直接接梗。\n7. 「营业感叹腔」：用“(也)太……了吧/……爆了/绝了/谁懂啊/笑死/绷不住了/yyds”这类口号式感叹收尾或起势——改写成平铺直叙的接话，去掉感叹营业腔和网络流行语，不喊口号。\n8. 「固定起手口癖」：用“等下，/等一下，”开头，或反复用“这也/这也太/你这也/这听着也”评价用户、图片、表情、剧情——必须换一种自然说法，不要保留这个开头或句式。\n改写原则：去掉对用户发言的复述和分析，按 output_mode 的长度要求输出；改写后不得引入新的回声模式、营业感叹腔或固定起手口癖。"
                 "\n9. 出现 markdown 格式、标题、项目符号列表、编号列表、代码块、链接列表时，必须改成纯文本短句。"
                 "\n10. 出现 Step 1/Step 2、步骤 1/步骤 2 这类内部推理、审查清单或草稿过程时，必须 rewrite，只保留最终要对用户说的一句。"
@@ -502,6 +514,7 @@ async def review_response_text(
                 f"最近上下文：{str(recent_context or '').strip()[:500] or '[EMPTY]'}\n"
                 f"互动关系：{str(relationship_hint or '').strip()[:320] or '[EMPTY]'}\n"
                 f"语义情绪帧：{semantic_hint or '[EMPTY]'}\n"
+                f"安全视觉 evidence：{visual_evidence or '[EMPTY]'}\n"
                 f"输出模式：{output_mode_hint}\n"
                 f"复读线索：{json.dumps(list(repeat_clusters or [])[:3], ensure_ascii=False)}\n"
                 f"最近 bot 发言：{json.dumps(_to_text_list(recent_bot_replies or []), ensure_ascii=False)}\n"

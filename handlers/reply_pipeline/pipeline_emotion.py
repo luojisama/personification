@@ -202,6 +202,7 @@ async def infer_turn_semantic_frame_with_timeout(
     fallback_tool_caller: Any = None,
     logger: Any = None,
     metric_scene: str = "group",
+    media_grounding: str = "",
 ) -> tuple[Any, float, str, float, str]:
     timeout_s = semantic_frame_timeout_seconds(plugin_config)
     started_at = time.monotonic()
@@ -228,6 +229,7 @@ async def infer_turn_semantic_frame_with_timeout(
                     repeat_clusters=repeat_clusters,
                     current_inner_state=current_inner_state,
                     current_emotion_state=current_emotion_state,
+                    media_grounding=media_grounding,
                 ),
                 timeout=max(0.1, timeout),
             )
@@ -287,6 +289,7 @@ async def plan_turn_with_timeout(
     fallback_tool_caller: Any = None,
     logger: Any = None,
     metric_mode: str = "enabled",
+    media_grounding: str = "",
 ) -> tuple[Any, float, str, float, str]:
     timeout_s = semantic_frame_timeout_seconds(plugin_config)
     started_at = time.monotonic()
@@ -323,6 +326,7 @@ async def plan_turn_with_timeout(
                     current_emotion_state=current_emotion_state,
                     available_tools=available_tools,
                     group_knowledge_hint=group_knowledge_hint,
+                    media_grounding=media_grounding,
                 ),
                 timeout=max(0.1, timeout),
             )
@@ -419,6 +423,7 @@ async def prepare_reply_semantics(
     message_target: str,
     solo_speaker_follow: bool,
     has_images: bool = False,
+    media_grounding: str = "",
 ) -> PreparedReplySemantics:
     recent_bot_replies = extract_recent_bot_reply_texts(recent_window if not is_private_session else [])
     data_dir = get_personification_data_dir(runtime.plugin_config)
@@ -475,6 +480,7 @@ async def prepare_reply_semantics(
             current_emotion_state=emotion_memory_hint,
             available_tools=planner_available_tools,
             group_knowledge_hint=group_knowledge_hint,
+            media_grounding=media_grounding,
             logger=runtime.logger,
             metric_mode="enabled",
         )
@@ -532,6 +538,7 @@ async def prepare_reply_semantics(
                 repeat_clusters=repeat_clusters,
                 current_inner_state=render_inner_state_hint(inner_state),
                 current_emotion_state=emotion_memory_hint,
+                media_grounding=media_grounding,
                 logger=runtime.logger,
                 metric_scene="private" if is_private_session else "group",
             )
@@ -598,6 +605,7 @@ async def prepare_reply_semantics(
                 current_emotion_state=emotion_memory_hint,
                 available_tools=planner_available_tools,
                 group_knowledge_hint=group_knowledge_hint,
+                media_grounding=media_grounding,
                 logger=runtime.logger,
                 metric_mode="shadow",
             )
