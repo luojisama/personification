@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,12 +35,96 @@ def test_stdio_client_uses_json_lines_and_paginates() -> None:
         ) as client:
             tools = await client.list_tools()
             result = await client.call_tool("read_demo", {"query": "hello"})
-            return client.protocol_version, tools, result
+            return client.protocol_version, client.server_info, client.capabilities, tools, result
 
-    version, tools, result = asyncio.run(run())
-    assert version == "2025-06-18"
+    version, server_info, capabilities, tools, result = asyncio.run(run())
+    assert version == "2025-11-25"
+    assert server_info["name"] == "fake-mcp"
+    assert capabilities["tools"]["listChanged"] is True
     assert [tool["name"] for tool in tools] == ["read_demo", "write_demo"]
+    assert tools[0]["title"] == "Read Demo"
+    assert tools[0]["outputSchema"]["type"] == "object"
     assert "called:read_demo" in result
+
+
+def test_stdio_client_accepts_explicit_2025_06_18_compatibility() -> None:
+    compat = load_personification_module("plugin.personification.skill_runtime.mcp_compat")
+
+    async def run() -> str:
+        async with compat.McpStdioClient(
+            command=sys.executable,
+            args=[str(FAKE_SERVER)],
+            env={"FAKE_MCP_PROTOCOL": "2025-06-18"},
+            cwd=str(FAKE_SERVER.parent),
+            timeout=5,
+        ) as client:
+            return client.protocol_version
+
+    assert asyncio.run(run()) == "2025-06-18"
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}},
+        {"protocolVersion": "2025-11-25", "capabilities": {}},
+    ],
+)
+def test_stdio_client_rejects_unsupported_negotiation_or_missing_tools(result: dict) -> None:
+    compat = load_personification_module("plugin.personification.skill_runtime.mcp_compat")
+    client = compat.McpStdioClient(command="unused", args=[], env={}, cwd=None, timeout=1)
+
+    async def fake_request(_method, _params):
+        return result
+
+    async def fake_notify(_method, _params):
+        return None
+
+    client.request = fake_request
+    client.notify = fake_notify
+    with pytest.raises(compat.McpProtocolError):
+        asyncio.run(client.initialize())
+
+
+def test_stdio_tools_list_preserves_opaque_cursor_and_rejects_unterminated_pages(monkeypatch) -> None:
+    compat = load_personification_module("plugin.personification.skill_runtime.mcp_compat")
+    client = compat.McpStdioClient(command="unused", args=[], env={}, cwd=None, timeout=1)
+    cursors: list[dict] = []
+
+    async def opaque_request(_method, params):
+        cursors.append(dict(params))
+        if not params:
+            return {"tools": [], "nextCursor": " opaque+/= cursor "}
+        return {"tools": []}
+
+    client.request = opaque_request
+    assert asyncio.run(client.list_tools()) == []
+    assert cursors == [{}, {"cursor": " opaque+/= cursor "}]
+
+    monkeypatch.setattr(compat, "MAX_TOOLS_LIST_PAGES", 2)
+    calls = 0
+
+    async def endless_request(_method, _params):
+        nonlocal calls
+        calls += 1
+        return {"tools": [], "nextCursor": f"page-{calls}"}
+
+    client.request = endless_request
+    with pytest.raises(compat.McpProtocolError, match="page limit"):
+        asyncio.run(client.list_tools())
+
+
+def test_stdio_tools_list_rejects_tool_limit(monkeypatch) -> None:
+    compat = load_personification_module("plugin.personification.skill_runtime.mcp_compat")
+    client = compat.McpStdioClient(command="unused", args=[], env={}, cwd=None, timeout=1)
+    monkeypatch.setattr(compat, "MAX_TOOLS", 1)
+
+    async def fake_request(_method, _params):
+        return {"tools": [{"name": "one"}, {"name": "two"}]}
+
+    client.request = fake_request
+    with pytest.raises(compat.McpProtocolError, match="too many tools"):
+        asyncio.run(client.list_tools())
 
 
 def test_build_launch_plan_pins_npm_and_separates_secret(monkeypatch) -> None:
@@ -92,9 +177,35 @@ def test_build_launch_plan_rejects_secret_argv_and_unsafe_package_metadata() -> 
         {"registryBaseUrl": "https://packages.example.com"},
         {"runtimeArguments": [{"type": "positional", "value": "--inspect"}]},
         {"version": "1.x"},
+        {"version": "1.2"},
+        {"version": "^1.2.3"},
+        {"version": "next"},
+        {"version": "01.2.3"},
     ):
         with pytest.raises(ValueError):
             management.build_launch_plan({**base, **override}, {})
+
+
+def test_build_launch_plan_requires_exact_pep440_and_fails_closed_on_file_hash(monkeypatch) -> None:
+    management = load_personification_module("plugin.personification.core.mcp_management")
+    monkeypatch.setattr(management.shutil, "which", lambda name: "/bin/uvx" if name == "uvx" else None)
+    base = {
+        "registryType": "pypi",
+        "identifier": "demo-server",
+        "transport": {"type": "stdio"},
+    }
+    plan = management.build_launch_plan({**base, "version": "1.2.3rc1.post2"}, {})
+    assert plan["args"] == ["--from", "demo-server==1.2.3rc1.post2", "demo-server"]
+
+    for version in ("1", "1.2", "latest", ">=1.2.3", "stable", "v1.2.3"):
+        with pytest.raises(ValueError):
+            management.build_launch_plan({**base, "version": version}, {})
+
+    with pytest.raises(ValueError, match="fileSha256"):
+        management.build_launch_plan(
+            {**base, "version": "1.2.3", "fileSha256": "a" * 64},
+            {},
+        )
 
 
 def test_publisher_read_only_annotation_never_auto_enables_tool() -> None:
@@ -104,12 +215,17 @@ def test_publisher_read_only_annotation_never_auto_enables_tool() -> None:
         "mcp_demo_",
         {
             "name": "read_demo",
+            "title": "Read Demo",
             "description": "read",
             "inputSchema": {"type": "object", "properties": {}},
+            "outputSchema": {"type": "object", "properties": {"value": {"type": "string"}}},
             "annotations": {"readOnlyHint": True},
         },
     )
     assert policy["publisher_read_only"] is True
+    assert policy["title"] == "Read Demo"
+    assert policy["output_schema"]["properties"]["value"]["type"] == "string"
+    assert policy["annotations"] == {"readOnlyHint": True}
     assert policy["enabled"] is False
     assert policy["side_effect"] == "unknown"
     assert policy["risk_level"] == "review"
@@ -135,6 +251,93 @@ def test_secret_store_fails_closed_on_corruption(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="unreadable"):
         store.set("install-1", {"TOKEN": "must-not-overwrite"})
     assert store.path.read_text(encoding="utf-8") == "not-json"
+
+
+def test_mcp_tool_schema_migrates_old_database_without_losing_authorization(tmp_path: Path) -> None:
+    db = load_personification_module("plugin.personification.core.db")
+    db_path = tmp_path / db.DB_FILENAME
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """CREATE TABLE mcp_tool_policies (
+                installation_id TEXT NOT NULL,
+                remote_name TEXT NOT NULL,
+                registered_name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                parameters_json TEXT NOT NULL DEFAULT '{}',
+                enabled INTEGER NOT NULL DEFAULT 0,
+                risk_level TEXT NOT NULL DEFAULT 'admin',
+                side_effect TEXT NOT NULL DEFAULT 'unknown',
+                publisher_read_only INTEGER NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (installation_id, remote_name)
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO mcp_tool_policies(
+                installation_id,remote_name,registered_name,description,parameters_json,
+                enabled,risk_level,side_effect,publisher_read_only,updated_at
+            ) VALUES('old-install','read_demo','mcp_old_read','old','{}',1,'high','external',1,1)"""
+        )
+        conn.commit()
+
+    db.init_db_sync(tmp_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(mcp_tool_policies)")}
+        row = conn.execute("SELECT * FROM mcp_tool_policies WHERE installation_id='old-install'").fetchone()
+    assert {"title", "output_schema_json", "annotations_json"} <= columns
+    assert row is not None
+    assert row["enabled"] == 1
+    assert row["title"] == ""
+    assert json.loads(row["output_schema_json"]) == {}
+
+
+def test_store_catalog_sync_preserves_authorization_and_removes_deleted_tools(tmp_path: Path, monkeypatch) -> None:
+    _init_store(tmp_path, monkeypatch)
+    management = load_personification_module("plugin.personification.core.mcp_management")
+    store = management.McpStore()
+    item = {
+        "installation_id": "install-sync",
+        "source_id": "official",
+        "source_url": management.OFFICIAL_MCP_REGISTRY,
+        "server_name": "io.example/sync",
+        "server_title": "Sync",
+        "server_version": "1.0.0",
+        "package_type": "npm",
+        "package_identifier": "sync-server",
+        "command": "npx",
+        "args": ["--yes", "sync-server@1.0.0"],
+        "env": {},
+        "secret_names": [],
+        "name_prefix": "mcp_sync_",
+        "metadata": {},
+        "created_by": "10001",
+    }
+    store.save_installation(
+        item,
+        [
+            {"remote_name": "read_demo", "registered_name": "mcp_sync_read_demo", "description": "old", "parameters": {"type": "object"}, "enabled": True, "risk_level": "high", "side_effect": "external", "publisher_read_only": True},
+            {"remote_name": "deleted_demo", "registered_name": "mcp_sync_deleted_demo", "description": "deleted", "parameters": {"type": "object"}, "enabled": True, "risk_level": "high", "side_effect": "external", "publisher_read_only": False},
+        ],
+    )
+    result = store.sync_tools(
+        "install-sync",
+        "mcp_sync_",
+        [
+            {"name": "read_demo", "title": "Read", "description": "new", "inputSchema": {"type": "object"}, "outputSchema": {"type": "object"}, "annotations": {"readOnlyHint": True}},
+            {"name": "new_demo", "title": "New", "description": "new tool", "inputSchema": {"type": "object"}, "annotations": {}},
+        ],
+    )
+    assert result == {"added": 1, "updated": 1, "removed": 1, "total": 2}
+    policies = {tool["remote_name"]: tool for tool in store.tools("install-sync")}
+    assert set(policies) == {"read_demo", "new_demo"}
+    assert policies["read_demo"]["enabled"] is True
+    assert policies["read_demo"]["risk_level"] == "high"
+    assert policies["read_demo"]["title"] == "Read"
+    assert policies["read_demo"]["output_schema"] == {"type": "object"}
+    assert policies["read_demo"]["outputSchema"] == {"type": "object"}
+    assert policies["read_demo"]["inputSchema"] == {"type": "object"}
+    assert policies["new_demo"]["enabled"] is False
 
 
 def test_stdio_request_timeout_is_absolute_during_notifications() -> None:
@@ -167,6 +370,83 @@ def test_package_digest_binds_full_registry_metadata() -> None:
     original = management._package_digest(package)
     changed = management._package_digest({**package, "packageArguments": [{"type": "named", "name": "--mode", "default": "unsafe"}]})
     assert original != changed
+
+
+def test_registry_search_preserves_cursor_and_returns_current_metadata() -> None:
+    management = load_personification_module("plugin.personification.core.mcp_management")
+    client = management.McpRegistryClient(SimpleNamespace(personification_mcp_registry_timeout=5))
+    cursor = " opaque+/= cursor value " * 100
+    captured: dict = {}
+
+    async def fake_get(url, params=None, *, fresh=False):
+        captured.update({"url": url, "params": params, "fresh": fresh})
+        return {
+            "servers": [{
+                "server": {
+                    "$schema": "https://example.test/server.schema.json",
+                    "name": "io.example/demo",
+                    "title": "Demo",
+                    "description": "Demo server",
+                    "version": "1.2.3",
+                    "websiteUrl": "https://example.test/demo",
+                    "repository": {"source": "github", "url": "https://github.com/example/demo"},
+                    "packages": [{"registryType": "npm", "transport": {"type": "stdio"}}],
+                },
+                "_meta": {"io.modelcontextprotocol.registry/official": {"status": "deprecated", "statusMessage": "use v2"}},
+            }],
+            "metadata": {"nextCursor": "next+/="},
+        }
+
+    client._get = fake_get
+    result = asyncio.run(client.search({"id": "official", "url": management.OFFICIAL_MCP_REGISTRY}, "demo", cursor=cursor))
+    assert captured["params"]["cursor"] == cursor
+    assert result["next_cursor"] == "next+/="
+    server = result["servers"][0]
+    assert server["status"] == "deprecated"
+    assert server["repository"]["source"] == "github"
+    assert server["website"] == "https://example.test/demo"
+    assert server["schema"].endswith("server.schema.json")
+
+    with pytest.raises(ValueError, match="cursor is too large"):
+        asyncio.run(client.search({"id": "official", "url": management.OFFICIAL_MCP_REGISTRY}, "", cursor="x" * 16385))
+
+
+def test_registry_detail_can_bypass_cache_and_exposes_file_hash() -> None:
+    management = load_personification_module("plugin.personification.core.mcp_management")
+    client = management.McpRegistryClient(SimpleNamespace(personification_mcp_registry_timeout=5))
+    fresh_values: list[bool] = []
+
+    async def fake_get(_url, _params=None, *, fresh=False):
+        fresh_values.append(fresh)
+        return {
+            "server": {
+                "$schema": "https://example.test/schema.json",
+                "name": "io.example/demo",
+                "description": "Demo",
+                "version": "1.2.3",
+                "websiteUrl": "https://example.test",
+                "repository": {"source": "github", "url": "https://github.com/example/demo"},
+                "packages": [{
+                    "registryType": "npm",
+                    "identifier": "demo-server",
+                    "version": "1.2.3",
+                    "transport": {"type": "stdio"},
+                    "fileSha256": "b" * 64,
+                }],
+            },
+            "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active"}},
+        }
+
+    client._get = fake_get
+    detail_result = asyncio.run(
+        client.detail({"id": "official", "url": management.OFFICIAL_MCP_REGISTRY}, "io.example/demo", fresh=True)
+    )
+    assert fresh_values == [True]
+    assert detail_result["server"]["status"] == "active"
+    assert detail_result["server"]["website"] == "https://example.test"
+    assert detail_result["packages"][0]["fileSha256"] == "b" * 64
+    assert detail_result["packages"][0]["supported"] is False
+    assert "fails closed" in detail_result["packages"][0]["unsupported_reason"]
 
 
 def test_runtime_manager_registers_only_enabled_policy(tmp_path: Path, monkeypatch) -> None:
@@ -204,22 +484,45 @@ def test_runtime_manager_registers_only_enabled_policy(tmp_path: Path, monkeypat
     tools = [
         {"remote_name": "read_demo", "registered_name": "mcp_demo_read_demo", "description": "read", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}, "enabled": True, "risk_level": "low", "side_effect": "none", "publisher_read_only": True},
         {"remote_name": "write_demo", "registered_name": "mcp_demo_write_demo", "description": "write", "parameters": {"type": "object", "properties": {}}, "enabled": False, "risk_level": "admin", "side_effect": "unknown", "publisher_read_only": False},
+        {"remote_name": "deleted_demo", "registered_name": "mcp_demo_deleted_demo", "description": "deleted", "parameters": {"type": "object", "properties": {}}, "enabled": True, "risk_level": "high", "side_effect": "external", "publisher_read_only": False},
     ]
     manager.store.save_installation(item, tools)
+
+    async def stale_handler(**_kwargs):
+        return "stale"
+
+    registry.register(registry_mod.AgentTool(name="mcp_demo_deleted_demo", description="stale", parameters={}, handler=stale_handler, metadata={"mcp_installation_id": "install-1"}))
+    manager._tool_names["install-1"] = {"mcp_demo_deleted_demo"}
 
     async def run():
         await manager.activate("install-1")
         read_tool = registry.get("mcp_demo_read_demo")
         assert read_tool is not None
         assert registry.get("mcp_demo_write_demo") is None
+        assert registry.get("mcp_demo_deleted_demo") is None
+        assert {tool["remote_name"] for tool in manager.store.tools("install-1")} == {"read_demo", "write_demo"}
+        running = manager.public_installation("install-1")
+        assert running["run_allowed"] is True
+        assert running["process_state"] == "running"
+        assert running["authorized_count"] == 1
+        assert running["registered_count"] == 1
+        assert running["effective_count"] == 1
+        assert running["tools"][0]["authorized"] is True
+        assert running["tools"][0]["registered"] is True
+        assert running["tools"][0]["effective"] is True
         result = await read_tool.handler(query="hello")
+        stopped = await manager.toggle_installation("install-1", False)
+        assert stopped["authorized_count"] == 1
+        assert stopped["registered_count"] == 0
+        assert stopped["effective_count"] == 0
+        assert stopped["tools"][0]["authorized"] is True
         await manager.shutdown()
         return result
 
     assert "called:read_demo" in asyncio.run(run())
 
 
-def test_runtime_manager_does_not_start_server_without_approved_tools(tmp_path: Path, monkeypatch) -> None:
+def test_runtime_manager_resyncs_catalog_then_closes_server_without_authorized_tools(tmp_path: Path, monkeypatch) -> None:
     _init_store(tmp_path, monkeypatch)
     management = load_personification_module("plugin.personification.core.mcp_management")
     registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
@@ -236,8 +539,8 @@ def test_runtime_manager_does_not_start_server_without_approved_tools(tmp_path: 
         "server_version": "1.0.0",
         "package_type": "npm",
         "package_identifier": "ready-server",
-        "command": "must-not-run",
-        "args": [],
+        "command": sys.executable,
+        "args": [str(FAKE_SERVER)],
         "env": {},
         "secret_names": [],
         "name_prefix": "mcp_ready_",
@@ -257,10 +560,79 @@ def test_runtime_manager_does_not_start_server_without_approved_tools(tmp_path: 
             "publisher_read_only": True,
         }],
     )
-    monkeypatch.setattr(manager, "_client", lambda _item: (_ for _ in ()).throw(AssertionError("process started")))
     asyncio.run(manager.activate("install-ready"))
     assert manager.store.get_installation("install-ready")["observed_status"] == "ready"
     assert manager._clients == {}
+    policies = {tool["remote_name"]: tool for tool in manager.store.tools("install-ready")}
+    assert set(policies) == {"read_demo", "write_demo"}
+    assert policies["read_demo"]["title"] == "Read Demo"
+    assert policies["read_demo"]["enabled"] is False
+    assert policies["write_demo"]["enabled"] is False
+    metadata = manager.store.get_installation("install-ready")["metadata"]
+    assert metadata["protocol_version"] == "2025-11-25"
+    assert metadata["server_info"]["name"] == "fake-mcp"
+
+
+def test_runtime_manager_withdraws_tools_before_call_when_process_exited(tmp_path: Path, monkeypatch) -> None:
+    _init_store(tmp_path, monkeypatch)
+    management = load_personification_module("plugin.personification.core.mcp_management")
+    registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
+    monkeypatch.setattr(management, "get_data_dir", lambda _cfg=None: tmp_path)
+    config = SimpleNamespace(
+        personification_data_dir=str(tmp_path),
+        personification_mcp_secret_file="",
+        personification_skill_mcp_timeout=5,
+    )
+    registry = registry_mod.ToolRegistry()
+    runtime = SimpleNamespace(plugin_config=config, runtime_bundle=SimpleNamespace(tool_registry=registry))
+    manager = management.McpRuntimeManager(runtime, registry)
+    manager.store.save_installation(
+        {
+            "installation_id": "install-exit",
+            "source_id": "official",
+            "source_url": management.OFFICIAL_MCP_REGISTRY,
+            "server_name": "io.example/exit",
+            "server_title": "Exit",
+            "server_version": "1.0.0",
+            "package_type": "pypi",
+            "package_identifier": "exit-server",
+            "command": sys.executable,
+            "args": [str(FAKE_SERVER)],
+            "env": {},
+            "secret_names": [],
+            "name_prefix": "mcp_exit_",
+            "metadata": {},
+            "created_by": "10001",
+        },
+        [{"remote_name": "read_demo", "registered_name": "mcp_exit_read_demo", "description": "read", "parameters": {"type": "object"}, "enabled": True, "risk_level": "high", "side_effect": "external", "publisher_read_only": True}],
+    )
+
+    async def run():
+        await manager.activate("install-exit")
+        tool = registry.get("mcp_exit_read_demo")
+        assert tool is not None
+        manager._clients["install-exit"]._transport_failed = True
+        with pytest.raises(RuntimeError, match="unavailable"):
+            await tool.handler()
+        return tool
+
+    tool = asyncio.run(run())
+    assert registry.get("mcp_exit_read_demo") is None
+    public = manager.public_installation("install-exit")
+    assert public["process_state"] == "error"
+    assert public["authorized_count"] == 1
+    assert public["registered_count"] == 0
+    assert public["effective_count"] == 0
+    assert public["last_error"] == "MCP process exited unexpectedly"
+
+    manager.store.set_status("install-exit", "running")
+    registry.register(tool)
+    manager._tool_names["install-exit"] = {"mcp_exit_read_demo"}
+    assert asyncio.run(manager.refresh_process_states()) == 1
+    assert registry.get("mcp_exit_read_demo") is None
+    detached = manager.public_installation("install-exit")
+    assert detached["process_state"] == "error"
+    assert detached["last_error"] == "MCP process is not attached to current runtime"
 
 
 def test_registry_sources_include_official_and_https_custom() -> None:

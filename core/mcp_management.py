@@ -28,7 +28,31 @@ OFFICIAL_MCP_REGISTRY = "https://registry.modelcontextprotocol.io"
 _SAFE_PREFIX = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 _SAFE_NPM_PACKAGE = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]{0,99}/)?[a-z0-9][a-z0-9._-]{0,99}$")
 _SAFE_PYPI_PACKAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
-_SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,79}$")
+_EXACT_SEMVER = re.compile(
+    r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-(?:(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+_EXACT_PEP440 = re.compile(
+    r"""
+    (?:(?P<epoch>[0-9]+)!)?
+    (?P<release>[0-9]+(?:\.[0-9]+)*)
+    (?P<pre>
+        [-_.]?(?P<pre_label>alpha|a|beta|b|preview|pre|c|rc)[-_.]?(?P<pre_number>[0-9]+)?
+    )?
+    (?P<post>
+        (?:-(?P<post_number1>[0-9]+))
+        |(?:[-_.]?(?P<post_label>post|rev|r)[-_.]?(?P<post_number2>[0-9]+)?)
+    )?
+    (?P<dev>[-_.]?dev[-_.]?(?P<dev_number>[0-9]+)?)?
+    (?:\+(?P<local>[a-z0-9]+(?:[-_.][a-z0-9]+)*))?
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_MAX_REGISTRY_QUERY_CHARS = 1000
+_MAX_REGISTRY_CURSOR_CHARS = 16384
+_MAX_REGISTRY_INPUT_CHARS = 18000
 _SECRET_LOCK = threading.RLock()
 
 
@@ -52,12 +76,18 @@ def _package_support_error(package: dict[str, Any]) -> str:
     if not identifier_pattern.fullmatch(identifier):
         return "Package identifier is invalid or could be interpreted as a launcher option."
     version = str(package.get("version") or "").strip()
-    if (
-        not _SAFE_VERSION.fullmatch(version)
-        or version.lower() == "latest"
-        or re.search(r"(?:^|[._-])[xX](?:$|[._-])", version)
-    ):
-        return "Package must use a safe exact version."
+    if len(version) > 255:
+        return "Package version is too long."
+    if package_type == "npm":
+        if not _EXACT_SEMVER.fullmatch(version):
+            return "npm package must use an exact three-part SemVer version."
+    elif not _is_exact_pep440_version(version):
+        return "PyPI package must use an exact PEP 440 version with at least three release segments."
+    file_sha256 = str(package.get("fileSha256") or "").strip()
+    if file_sha256:
+        if not re.fullmatch(r"[a-f0-9]{64}", file_sha256):
+            return "Package fileSha256 metadata is invalid."
+        return "fileSha256 cannot be proven for the artifact executed by npx/uvx; quick install fails closed."
     registry_base = str(package.get("registryBaseUrl") or "").strip().rstrip("/").lower()
     allowed_bases = {
         "npm": {"", "https://registry.npmjs.org"},
@@ -96,6 +126,14 @@ def _package_support_error(package: dict[str, Any]) -> str:
     if len(configurable_keys) != len(set(configurable_keys)):
         return "Package contains duplicate configurable input names."
     return ""
+
+
+def _is_exact_pep440_version(value: str) -> bool:
+    text = str(value or "")
+    if not text or text != text.strip() or any(character.isspace() for character in text):
+        return False
+    match = _EXACT_PEP440.fullmatch(text)
+    return match is not None and len(match.group("release").split(".")) >= 3
 
 
 def _package_digest(package: dict[str, Any]) -> str:
@@ -159,10 +197,16 @@ class McpRegistryClient:
         self.timeout = max(3, min(int(getattr(plugin_config, "personification_mcp_registry_timeout", 20) or 20), 60))
         self._cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
-    async def _get(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def _get(
+        self,
+        url: str,
+        params: dict[str, Any] | None = None,
+        *,
+        fresh: bool = False,
+    ) -> dict[str, Any]:
         cache_key = url + "?" + json.dumps(params or {}, sort_keys=True)
         cached = self._cache.get(cache_key)
-        if cached and time.time() - cached[0] < 300:
+        if not fresh and cached and time.time() - cached[0] < 300:
             return cached[1]
         try:
             original_url, approved_ip = await resolve_public_url(url)
@@ -200,26 +244,43 @@ class McpRegistryClient:
         return payload
 
     async def search(self, source: dict[str, str], query: str, *, limit: int = 20, cursor: str = "") -> dict[str, Any]:
+        query_value = str(query or "").strip()
+        cursor_value = str(cursor or "")
+        if len(query_value) > _MAX_REGISTRY_QUERY_CHARS:
+            raise ValueError("MCP Registry search query is too large")
+        if len(cursor_value) > _MAX_REGISTRY_CURSOR_CHARS:
+            raise ValueError("MCP Registry cursor is too large")
+        if len(query_value) + len(cursor_value) > _MAX_REGISTRY_INPUT_CHARS:
+            raise ValueError("MCP Registry search input is too large")
         params: dict[str, Any] = {"version": "latest", "limit": max(1, min(int(limit or 20), 50))}
-        if str(query or "").strip():
-            params["search"] = str(query).strip()[:200]
-        if cursor:
-            params["cursor"] = str(cursor)[:500]
+        if query_value:
+            params["search"] = query_value
+        if cursor_value:
+            params["cursor"] = cursor_value
         payload = await self._get(source["url"] + "/v0.1/servers", params)
         results = []
         for item in list(payload.get("servers") or []):
-            if not isinstance(item, dict) or not isinstance(item.get("server"), dict):
+            if not isinstance(item, dict):
                 continue
-            server = item["server"]
-            official = (item.get("_meta") or {}).get("io.modelcontextprotocol.registry/official") or {}
+            server = item.get("server") if isinstance(item.get("server"), dict) else item
+            if not isinstance(server, dict):
+                continue
+            response_meta = item.get("_meta") if isinstance(item.get("_meta"), dict) else {}
+            official = response_meta.get("io.modelcontextprotocol.registry/official") or {}
+            if not isinstance(official, dict):
+                official = {}
             results.append(
                 {
                     "name": str(server.get("name") or ""),
                     "title": str(server.get("title") or server.get("name") or ""),
                     "description": str(server.get("description") or ""),
                     "version": str(server.get("version") or ""),
-                    "status": str(official.get("status") or "active"),
+                    "status": str(official.get("status") or "unknown"),
+                    "status_message": str(official.get("statusMessage") or ""),
                     "repository": server.get("repository") if isinstance(server.get("repository"), dict) else {},
+                    "website": str(server.get("websiteUrl") or ""),
+                    "website_url": str(server.get("websiteUrl") or ""),
+                    "schema": str(server.get("$schema") or ""),
                     "stdio_packages": sum(
                         1 for package in list(server.get("packages") or [])
                         if isinstance(package, dict) and (package.get("transport") or {}).get("type") == "stdio" and package.get("registryType") in {"npm", "pypi"}
@@ -229,16 +290,26 @@ class McpRegistryClient:
                 }
             )
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-        return {"servers": results, "next_cursor": str(metadata.get("nextCursor") or ""), "source": source}
+        next_cursor = metadata.get("nextCursor")
+        if next_cursor is not None and not isinstance(next_cursor, str):
+            raise ValueError("MCP Registry returned an invalid cursor")
+        return {"servers": results, "next_cursor": next_cursor or "", "source": source}
 
-    async def detail(self, source: dict[str, str], server_name: str) -> dict[str, Any]:
+    async def detail(self, source: dict[str, str], server_name: str, *, fresh: bool = False) -> dict[str, Any]:
         name = str(server_name or "").strip()
         if not name or len(name) > 240:
             raise ValueError("invalid MCP server name")
-        payload = await self._get(source["url"] + f"/v0.1/servers/{quote(name, safe='')}/versions/latest")
+        payload = await self._get(
+            source["url"] + f"/v0.1/servers/{quote(name, safe='')}/versions/latest",
+            fresh=fresh,
+        )
         server = payload.get("server") if isinstance(payload.get("server"), dict) else payload
         if not isinstance(server, dict) or str(server.get("name") or "") != name:
             raise ValueError("MCP server detail does not match request")
+        response_meta = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}
+        official = response_meta.get("io.modelcontextprotocol.registry/official") or {}
+        if not isinstance(official, dict):
+            official = {}
         packages = []
         for index, package in enumerate(list(server.get("packages") or [])):
             if not isinstance(package, dict):
@@ -277,6 +348,7 @@ class McpRegistryClient:
                 "identifier": str(package.get("identifier") or ""),
                 "version": str(package.get("version") or server.get("version") or ""),
                 "transport": str(transport.get("type") or ""),
+                "fileSha256": str(package.get("fileSha256") or ""),
                 "supported": not support_error,
                 "unsupported_reason": support_error,
                 "inputs": inputs,
@@ -287,8 +359,12 @@ class McpRegistryClient:
                 "title": str(server.get("title") or name),
                 "description": str(server.get("description") or ""),
                 "version": str(server.get("version") or ""),
+                "status": str(official.get("status") or "unknown"),
+                "status_message": str(official.get("statusMessage") or ""),
                 "repository": server.get("repository") if isinstance(server.get("repository"), dict) else {},
+                "website": str(server.get("websiteUrl") or ""),
                 "website_url": str(server.get("websiteUrl") or ""),
+                "schema": str(server.get("$schema") or ""),
             },
             "packages": packages,
             "raw": server,
@@ -371,6 +447,10 @@ class McpStore:
         for row in rows:
             item = dict(row)
             item["parameters"] = _loads(item.pop("parameters_json", "{}"), {})
+            item["output_schema"] = _loads(item.pop("output_schema_json", "{}"), {})
+            item["annotations"] = _loads(item.pop("annotations_json", "{}"), {})
+            item["inputSchema"] = item["parameters"]
+            item["outputSchema"] = item["output_schema"]
             item["enabled"] = bool(item.get("enabled"))
             item["publisher_read_only"] = bool(item.get("publisher_read_only"))
             result.append(item)
@@ -396,15 +476,115 @@ class McpStore:
             for tool in tools:
                 conn.execute(
                     """INSERT INTO mcp_tool_policies(
-                        installation_id,remote_name,registered_name,description,parameters_json,enabled,risk_level,
-                        side_effect,publisher_read_only,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        installation_id,remote_name,registered_name,title,description,parameters_json,
+                        output_schema_json,annotations_json,enabled,risk_level,side_effect,publisher_read_only,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        item["installation_id"], tool["remote_name"], tool["registered_name"], tool["description"],
-                        json.dumps(tool["parameters"], ensure_ascii=False), int(tool["enabled"]), tool["risk_level"],
-                        tool["side_effect"], int(tool["publisher_read_only"]), now,
+                        item["installation_id"], tool["remote_name"], tool["registered_name"], tool.get("title", ""),
+                        tool["description"], json.dumps(tool["parameters"], ensure_ascii=False),
+                        json.dumps(tool.get("output_schema") or {}, ensure_ascii=False),
+                        json.dumps(tool.get("annotations") or {}, ensure_ascii=False), int(tool["enabled"]),
+                        tool["risk_level"], tool["side_effect"], int(tool["publisher_read_only"]), now,
                     ),
                 )
+            conn.commit()
+
+    def sync_tools(
+        self,
+        installation_id: str,
+        prefix: str,
+        remote_tools: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        incoming = [_tool_policy(installation_id, prefix, item) for item in remote_tools]
+        remote_names = [item["remote_name"] for item in incoming]
+        registered_names = [item["registered_name"] for item in incoming]
+        if len(remote_names) != len(set(remote_names)):
+            raise ValueError("MCP server exposed duplicate tool names")
+        if len(registered_names) != len(set(registered_names)):
+            raise ValueError("MCP tool names collide after normalization")
+
+        now = time.time()
+        with connect_sync() as conn:
+            rows = conn.execute(
+                "SELECT * FROM mcp_tool_policies WHERE installation_id=?",
+                (installation_id,),
+            ).fetchall()
+            existing = {str(row["remote_name"]): dict(row) for row in rows}
+            added = updated = 0
+            for policy in incoming:
+                old = existing.get(policy["remote_name"])
+                parameters_json = json.dumps(policy["parameters"], ensure_ascii=False)
+                output_schema_json = json.dumps(policy["output_schema"], ensure_ascii=False)
+                annotations_json = json.dumps(policy["annotations"], ensure_ascii=False)
+                if old is None:
+                    conn.execute(
+                        """INSERT INTO mcp_tool_policies(
+                            installation_id,remote_name,registered_name,title,description,parameters_json,
+                            output_schema_json,annotations_json,enabled,risk_level,side_effect,
+                            publisher_read_only,updated_at
+                        ) VALUES(?,?,?,?,?,?,?,?,0,'review','unknown',?,?)""",
+                        (
+                            installation_id, policy["remote_name"], policy["registered_name"], policy["title"],
+                            policy["description"], parameters_json, output_schema_json, annotations_json,
+                            int(policy["publisher_read_only"]), now,
+                        ),
+                    )
+                    added += 1
+                    continue
+                changed = any(
+                    (
+                        str(old.get("title") or "") != policy["title"],
+                        str(old.get("description") or "") != policy["description"],
+                        _loads(old.get("parameters_json"), {}) != policy["parameters"],
+                        _loads(old.get("output_schema_json"), {}) != policy["output_schema"],
+                        _loads(old.get("annotations_json"), {}) != policy["annotations"],
+                        bool(old.get("publisher_read_only")) != policy["publisher_read_only"],
+                    )
+                )
+                conn.execute(
+                    """UPDATE mcp_tool_policies SET
+                        title=?,description=?,parameters_json=?,output_schema_json=?,annotations_json=?,
+                        publisher_read_only=?,updated_at=?
+                    WHERE installation_id=? AND remote_name=?""",
+                    (
+                        policy["title"], policy["description"], parameters_json, output_schema_json,
+                        annotations_json, int(policy["publisher_read_only"]), now,
+                        installation_id, policy["remote_name"],
+                    ),
+                )
+                updated += int(changed)
+            removed_names = set(existing) - set(remote_names)
+            if removed_names:
+                conn.executemany(
+                    "DELETE FROM mcp_tool_policies WHERE installation_id=? AND remote_name=?",
+                    [(installation_id, name) for name in removed_names],
+                )
+            conn.commit()
+        return {"added": added, "updated": updated, "removed": len(removed_names), "total": len(incoming)}
+
+    def set_protocol_metadata(
+        self,
+        installation_id: str,
+        *,
+        protocol_version: str,
+        server_info: dict[str, Any],
+        capabilities: dict[str, Any],
+    ) -> None:
+        with connect_sync() as conn:
+            row = conn.execute(
+                "SELECT metadata_json FROM mcp_installations WHERE installation_id=?",
+                (installation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(installation_id)
+            metadata = _loads(row["metadata_json"], {})
+            metadata["protocol_version"] = str(protocol_version)
+            metadata["server_info"] = dict(server_info)
+            metadata["capabilities"] = dict(capabilities)
+            conn.execute(
+                "UPDATE mcp_installations SET metadata_json=?,updated_at=? WHERE installation_id=?",
+                (json.dumps(metadata, ensure_ascii=False), time.time(), installation_id),
+            )
             conn.commit()
 
     def set_installation_enabled(self, installation_id: str, enabled: bool) -> None:
@@ -502,8 +682,6 @@ def build_launch_plan(package: dict[str, Any], inputs: dict[str, Any]) -> dict[s
     support_error = _package_support_error(package)
     if support_error:
         raise ValueError(support_error)
-    if not _SAFE_VERSION.fullmatch(version) or version == "latest":
-        raise ValueError("MCP package must use a safe identifier and exact version")
     env: dict[str, str] = {}
     secrets: dict[str, str] = {}
     secret_names: list[str] = []
@@ -545,17 +723,34 @@ def _tool_policy(installation_id: str, prefix: str, item: dict[str, Any]) -> dic
         raise ValueError("MCP tool name is missing or too long")
     safe_remote = re.sub(r"[^A-Za-z0-9_-]+", "_", remote_name).strip("_")[:40] or "tool"
     registered_name = (prefix + safe_remote)[:64]
-    annotations = item.get("annotations") if isinstance(item.get("annotations"), dict) else {}
+    raw_annotations = item.get("annotations")
+    if raw_annotations is not None and not isinstance(raw_annotations, dict):
+        raise ValueError(f"MCP tool has invalid annotations: {remote_name}")
+    annotations = dict(raw_annotations or {})
+    if len(json.dumps(annotations, ensure_ascii=False)) > 64 * 1024:
+        raise ValueError(f"MCP tool has oversized annotations: {remote_name}")
     publisher_read_only = annotations.get("readOnlyHint") is True and annotations.get("destructiveHint") is not True
     parameters = item.get("inputSchema") if isinstance(item.get("inputSchema"), dict) else {}
     if parameters.get("type") != "object" or len(json.dumps(parameters, ensure_ascii=False)) > 256 * 1024:
         raise ValueError(f"MCP tool has an invalid or oversized input schema: {remote_name}")
+    raw_output_schema = item.get("outputSchema")
+    if raw_output_schema is not None and not isinstance(raw_output_schema, dict):
+        raise ValueError(f"MCP tool has an invalid output schema: {remote_name}")
+    output_schema = dict(raw_output_schema or {})
+    if len(json.dumps(output_schema, ensure_ascii=False)) > 256 * 1024:
+        raise ValueError(f"MCP tool has an oversized output schema: {remote_name}")
+    title = str(item.get("title") or annotations.get("title") or "").strip()
+    if len(title) > 500:
+        raise ValueError(f"MCP tool title is too long: {remote_name}")
     return {
         "installation_id": installation_id,
         "remote_name": remote_name,
         "registered_name": registered_name,
+        "title": title,
         "description": str(item.get("description") or f"MCP tool {remote_name}")[:1200],
         "parameters": parameters,
+        "output_schema": output_schema,
+        "annotations": annotations,
         "enabled": False,
         "risk_level": "review",
         "side_effect": "unknown",
@@ -601,31 +796,74 @@ class McpRuntimeManager:
         if client is not None:
             await client.__aexit__(None, None, None)
 
-    async def _activate_unlocked(self, installation_id: str) -> None:
+    async def _mark_process_exited_unlocked(self, installation_id: str) -> None:
+        await self._stop_unlocked(installation_id)
+        self.store.set_status(installation_id, "error", "MCP process exited unexpectedly")
+
+    async def refresh_process_states(self) -> int:
+        async with self._lock:
+            exited = [
+                installation_id
+                for installation_id, client in self._clients.items()
+                if not client.is_running
+            ]
+            for installation_id in exited:
+                await self._mark_process_exited_unlocked(installation_id)
+            detached = [
+                item["installation_id"]
+                for item in self.store.list_installations()
+                if item.get("observed_status") == "running" and item["installation_id"] not in self._clients
+            ]
+            for installation_id in detached:
+                self.registry.remove_names(self._tool_names.pop(installation_id, set()))
+                self.store.set_status(installation_id, "error", "MCP process is not attached to current runtime")
+            return len(exited) + len(detached)
+
+    async def _call_managed_tool(
+        self,
+        installation_id: str,
+        remote_name: str,
+        arguments: dict[str, Any],
+    ) -> str:
+        async with self._lock:
+            client = self._clients.get(installation_id)
+            if client is None or not client.is_running:
+                await self._mark_process_exited_unlocked(installation_id)
+                raise RuntimeError("managed MCP process is unavailable")
+        try:
+            return await client.call_tool(remote_name, arguments)
+        except BaseException:
+            async with self._lock:
+                if self._clients.get(installation_id) is client and not client.is_running:
+                    await self._mark_process_exited_unlocked(installation_id)
+            raise
+
+    async def _activate_unlocked(self, installation_id: str) -> dict[str, int]:
         item = self.store.get_installation(installation_id)
         if item is None:
             raise KeyError(installation_id)
         await self._stop_unlocked(installation_id)
         if not item["desired_enabled"]:
             self.store.set_status(installation_id, "stopped")
-            return
-        policies = self.store.tools(installation_id)
-        if not any(policy["enabled"] for policy in policies):
-            self.store.set_status(installation_id, "ready")
-            return
+            return {"added": 0, "updated": 0, "removed": 0, "total": len(self.store.tools(installation_id))}
         client = self._client(item)
         try:
             await client.__aenter__()
             remote_tool_list = [tool for tool in await client.list_tools() if isinstance(tool, dict)]
-            remote_names = [str(tool.get("name") or "") for tool in remote_tool_list]
-            if len(set(remote_names)) != len(remote_names):
-                raise ValueError("MCP server exposed duplicate tool names")
-            remote_tools = dict(zip(remote_names, remote_tool_list))
-            names: set[str] = set()
+            catalog = self.store.sync_tools(installation_id, item["name_prefix"], remote_tool_list)
+            self.store.set_protocol_metadata(
+                installation_id,
+                protocol_version=client.protocol_version,
+                server_info=client.server_info,
+                capabilities=client.capabilities,
+            )
+            policies = self.store.tools(installation_id)
             enabled_policies = [policy for policy in policies if policy["enabled"]]
-            missing = [policy["remote_name"] for policy in enabled_policies if policy["remote_name"] not in remote_tools]
-            if missing:
-                raise ValueError("enabled MCP tools are missing from tools/list")
+            if not enabled_policies:
+                await client.__aexit__(None, None, None)
+                self.store.set_status(installation_id, "ready")
+                return catalog
+            names: set[str] = set()
             registry_version, registry_snapshot = self.registry.snapshot()
             staged_tools: list[AgentTool] = []
             for policy in enabled_policies:
@@ -634,8 +872,8 @@ class McpRuntimeManager:
                 if existing is not None and str((existing.metadata or {}).get("mcp_installation_id") or "") != installation_id:
                     raise ValueError(f"MCP tool name conflicts with existing tool: {registered_name}")
 
-                async def _handler(_remote_name=policy["remote_name"], _client=client, **kwargs: Any) -> str:
-                    return await _client.call_tool(_remote_name, kwargs)
+                async def _handler(_remote_name=policy["remote_name"], **kwargs: Any) -> str:
+                    return await self._call_managed_tool(installation_id, _remote_name, kwargs)
 
                 staged_tools.append(
                     AgentTool(
@@ -649,6 +887,9 @@ class McpRuntimeManager:
                             "source_kind": "mcp_managed",
                             "mcp_installation_id": installation_id,
                             "remote_name": policy["remote_name"],
+                            "title": policy["title"],
+                            "output_schema": policy["output_schema"],
+                            "annotations": policy["annotations"],
                             "transport": "stdio",
                             "risk_level": policy["risk_level"],
                             "side_effect": policy["side_effect"],
@@ -662,6 +903,7 @@ class McpRuntimeManager:
             self._clients[installation_id] = client
             self._tool_names[installation_id] = names
             self.store.set_status(installation_id, "running")
+            return catalog
         except BaseException as exc:
             try:
                 await client.__aexit__(None, None, None)
@@ -714,7 +956,15 @@ class McpRuntimeManager:
                 "env": plan["env"],
                 "secret_names": plan["secret_names"],
                 "name_prefix": normalized_prefix,
-                "metadata": {"repository": detail["server"].get("repository", {}), "warning": detail.get("warning", "")},
+                "metadata": {
+                    "repository": detail["server"].get("repository", {}),
+                    "website": detail["server"].get("website", ""),
+                    "schema": detail["server"].get("schema", ""),
+                    "status": detail["server"].get("status", "unknown"),
+                    "fileSha256": str(package.get("fileSha256") or ""),
+                    "package_digest": package_digest,
+                    "warning": detail.get("warning", ""),
+                },
                 "created_by": creator,
             }
             try:
@@ -722,6 +972,11 @@ class McpRuntimeManager:
                 try:
                     await client.__aenter__()
                     remote_tools = await client.list_tools()
+                    protocol_metadata = {
+                        "protocol_version": client.protocol_version,
+                        "server_info": client.server_info,
+                        "capabilities": client.capabilities,
+                    }
                 finally:
                     await client.__aexit__(None, None, None)
                 tools = [_tool_policy(installation_id, normalized_prefix, tool) for tool in remote_tools]
@@ -729,14 +984,10 @@ class McpRuntimeManager:
                     raise ValueError("MCP server exposed no tools")
                 if len({tool["registered_name"] for tool in tools}) != len(tools):
                     raise ValueError("MCP tool names collide after normalization")
+                item["metadata"].update(protocol_metadata)
                 self.store.save_installation(item, tools)
             except Exception:
                 self.secrets.delete(installation_id)
-                raise
-            try:
-                await self._activate_unlocked(installation_id)
-            except Exception:
-                self.store.set_installation_enabled(installation_id, False)
                 raise
             return self.public_installation(installation_id) or {}
 
@@ -746,9 +997,38 @@ class McpRuntimeManager:
             return None
         item["tools"] = self.store.tools(installation_id)
         configured_secrets = self.secrets.get(installation_id)
-        item["secrets_configured"] = bool(item.get("secret_names")) and all(
+        secret_names = list(item.get("secret_names") or [])
+        secrets_ready = all(
             bool(configured_secrets.get(name)) for name in item.get("secret_names") or []
         )
+        item["secrets_required"] = bool(secret_names)
+        item["secrets_configured"] = bool(secret_names) and secrets_ready
+        client = self._clients.get(installation_id)
+        process_running = client is not None and client.is_running
+        registered_names = self._tool_names.get(installation_id, set())
+        authorized_count = registered_count = effective_count = 0
+        for tool in item["tools"]:
+            authorized = bool(tool.get("enabled"))
+            registered_tool = self.registry.get(str(tool.get("registered_name") or ""))
+            registered = (
+                str(tool.get("registered_name") or "") in registered_names
+                and registered_tool is not None
+                and str((registered_tool.metadata or {}).get("mcp_installation_id") or "") == installation_id
+            )
+            effective = bool(item["desired_enabled"] and process_running and authorized and registered)
+            tool["authorized"] = authorized
+            tool["registered"] = registered
+            tool["effective"] = effective
+            authorized_count += int(authorized)
+            registered_count += int(registered)
+            effective_count += int(effective)
+        observed_status = str(item.get("observed_status") or "stopped")
+        item["process_state"] = "exited" if client is not None and not process_running else observed_status
+        item["run_allowed"] = bool(item["desired_enabled"] and secrets_ready and authorized_count > 0)
+        item["authorized_count"] = authorized_count
+        item["registered_count"] = registered_count
+        item["effective_count"] = effective_count
+        item["tool_count"] = len(item["tools"])
         item.pop("env", None)
         item.pop("args", None)
         return item
@@ -766,18 +1046,29 @@ class McpRuntimeManager:
             for installation_id in list(self._clients):
                 await self._stop_unlocked(installation_id)
             running = ready = failed = 0
+            catalog_added = catalog_updated = catalog_removed = 0
             for item in self.store.list_installations():
                 if not item["desired_enabled"]:
                     continue
                 try:
-                    await self._activate_unlocked(item["installation_id"])
+                    catalog = await self._activate_unlocked(item["installation_id"])
+                    catalog_added += int(catalog.get("added") or 0)
+                    catalog_updated += int(catalog.get("updated") or 0)
+                    catalog_removed += int(catalog.get("removed") or 0)
                     if item["installation_id"] in self._clients:
                         running += 1
                     else:
                         ready += 1
                 except Exception:
                     failed += 1
-            return {"running": running, "ready": ready, "failed": failed}
+            return {
+                "running": running,
+                "ready": ready,
+                "failed": failed,
+                "catalog_added": catalog_added,
+                "catalog_updated": catalog_updated,
+                "catalog_removed": catalog_removed,
+            }
 
     async def toggle_installation(self, installation_id: str, enabled: bool) -> dict[str, Any]:
         async with self._lock:
@@ -813,6 +1104,7 @@ class McpRuntimeManager:
         async with self._lock:
             for installation_id in list(self._clients):
                 await self._stop_unlocked(installation_id)
+                self.store.set_status(installation_id, "stopped")
 
 
 _MANAGERS: dict[int, McpRuntimeManager] = {}

@@ -472,8 +472,11 @@ DDL_STATEMENTS = (
         installation_id TEXT NOT NULL,
         remote_name TEXT NOT NULL,
         registered_name TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
         description TEXT NOT NULL DEFAULT '',
         parameters_json TEXT NOT NULL DEFAULT '{}',
+        output_schema_json TEXT NOT NULL DEFAULT '{}',
+        annotations_json TEXT NOT NULL DEFAULT '{}',
         enabled INTEGER NOT NULL DEFAULT 0,
         risk_level TEXT NOT NULL DEFAULT 'admin',
         side_effect TEXT NOT NULL DEFAULT 'unknown',
@@ -540,6 +543,20 @@ def _ensure_group_message_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE group_messages ADD COLUMN sender_role TEXT NOT NULL DEFAULT ''")
     if "thread_id" not in columns:
         conn.execute("ALTER TABLE group_messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''")
+
+
+def _ensure_mcp_tool_policy_schema(conn: sqlite3.Connection) -> None:
+    columns = _table_columns(conn, "mcp_tool_policies")
+    if not columns:
+        return
+    additions = {
+        "title": "TEXT NOT NULL DEFAULT ''",
+        "output_schema_json": "TEXT NOT NULL DEFAULT '{}'",
+        "annotations_json": "TEXT NOT NULL DEFAULT '{}'",
+    }
+    for name, declaration in additions.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE mcp_tool_policies ADD COLUMN {name} {declaration}")
 
 
 def _ensure_group_style_schema(conn: sqlite3.Connection) -> None:
@@ -710,6 +727,7 @@ def init_db_sync(data_dir: str | Path) -> Path:
         _ensure_group_style_schema(conn)
         _ensure_group_message_schema(conn)
         _ensure_qzone_publish_schema(conn)
+        _ensure_mcp_tool_policy_schema(conn)
         conn.commit()  # 让迁移立即可见，下面的 DDL CREATE INDEX 才能引用新列
         for ddl in DDL_STATEMENTS:
             conn.execute(ddl)

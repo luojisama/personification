@@ -45,6 +45,7 @@ def test_management_surfaces_keep_stable_operation_codes() -> None:
         "auth_routes.py": ("device_approved", "device_revoked"),
         "log_routes.py": ("plugin_logs_cleared",),
         "persona_routes.py": ("persona_correction_saved",),
+        "mcp_routes.py": ("mcp_installed", "mcp_server_toggled", "mcp_tool_toggled", "mcp_reload_complete", "mcp_reload_partial"),
     }
     missing: list[str] = []
     for filename, codes in expected.items():

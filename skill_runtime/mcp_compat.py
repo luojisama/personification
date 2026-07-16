@@ -13,6 +13,11 @@ from .source_resolver import skill_source_content_digest
 
 
 _REGISTERED_MCP_TOOLS: dict[str, dict[str, Any]] = {}
+PREFERRED_PROTOCOL_VERSION = "2025-11-25"
+SUPPORTED_PROTOCOL_VERSIONS = frozenset({PREFERRED_PROTOCOL_VERSION, "2025-06-18"})
+MAX_TOOLS_LIST_PAGES = 20
+MAX_TOOLS = 1000
+MAX_CURSOR_CHARS = 65536
 
 
 class McpProtocolError(RuntimeError):
@@ -45,10 +50,14 @@ class McpStdioClient:
         self._proc: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task[Any] | None = None
         self._request_lock = asyncio.Lock()
-        self.protocol_version = "2025-06-18"
+        self.protocol_version = PREFERRED_PROTOCOL_VERSION
+        self.server_info: dict[str, Any] = {}
+        self.capabilities: dict[str, Any] = {}
+        self._transport_failed = False
 
     async def __aenter__(self) -> "McpStdioClient":
         try:
+            self._transport_failed = False
             self._proc = await asyncio.create_subprocess_exec(
                 self.command,
                 *self.args,
@@ -68,6 +77,16 @@ class McpStdioClient:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self._close()
+
+    @property
+    def is_running(self) -> bool:
+        process = self._proc
+        return process is not None and process.returncode is None and not self._transport_failed
+
+    @property
+    def returncode(self) -> int | None:
+        process = self._proc
+        return process.returncode if process is not None else None
 
     async def _close(self) -> None:
         process = self._proc
@@ -107,8 +126,12 @@ class McpStdioClient:
         if self._proc is None or self._proc.stdin is None:
             raise McpProtocolError("MCP process is not ready")
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        self._proc.stdin.write(body + b"\n")
-        await self._proc.stdin.drain()
+        try:
+            self._proc.stdin.write(body + b"\n")
+            await self._proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            self._transport_failed = True
+            raise McpProtocolError("MCP server closed stdin") from exc
 
     async def _read_message(self) -> dict[str, Any]:
         if self._proc is None or self._proc.stdout is None:
@@ -117,6 +140,7 @@ class McpStdioClient:
         while True:
             line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=self.timeout)
             if not line:
+                self._transport_failed = True
                 raise McpProtocolError("MCP server closed stdout")
             decoded = line.decode("utf-8", errors="replace").strip()
             if not decoded:
@@ -161,7 +185,9 @@ class McpStdioClient:
             if "error" in message:
                 raise McpProtocolError("MCP server returned a JSON-RPC error")
             result = message.get("result")
-            return result if isinstance(result, dict) else {}
+            if not isinstance(result, dict):
+                raise McpProtocolError("MCP response result must be an object")
+            return result
 
     async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         await self._write_message(
@@ -176,7 +202,7 @@ class McpStdioClient:
         result = await self.request(
             "initialize",
             {
-                "protocolVersion": self.protocol_version,
+                "protocolVersion": PREFERRED_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {
                     "name": "personification-skill-loader",
@@ -185,8 +211,17 @@ class McpStdioClient:
             },
         )
         negotiated = str(result.get("protocolVersion") or "").strip()
-        if negotiated:
-            self.protocol_version = negotiated
+        if negotiated not in SUPPORTED_PROTOCOL_VERSIONS:
+            raise McpProtocolError("MCP server negotiated an unsupported protocol version")
+        capabilities = result.get("capabilities")
+        if not isinstance(capabilities, dict) or not isinstance(capabilities.get("tools"), dict):
+            raise McpProtocolError("MCP server did not declare the tools capability")
+        server_info = result.get("serverInfo")
+        if server_info is not None and not isinstance(server_info, dict):
+            raise McpProtocolError("MCP serverInfo must be an object")
+        self.protocol_version = negotiated
+        self.capabilities = dict(capabilities)
+        self.server_info = dict(server_info or {})
         await self.notify("notifications/initialized", {})
 
     async def list_tools(self) -> list[dict[str, Any]]:
@@ -196,21 +231,29 @@ class McpStdioClient:
         tools: list[dict[str, Any]] = []
         cursor = ""
         seen_cursors: set[str] = set()
-        for _ in range(20):
+        for page_number in range(MAX_TOOLS_LIST_PAGES):
             params = {"cursor": cursor} if cursor else {}
             result = await self.request("tools/list", params)
             page = result.get("tools")
-            if isinstance(page, list):
-                tools.extend(item for item in page if isinstance(item, dict))
-            cursor = str(result.get("nextCursor") or "").strip()
-            if not cursor:
-                break
-            if cursor in seen_cursors:
-                raise McpProtocolError("MCP tools/list returned a repeated cursor")
-            seen_cursors.add(cursor)
-            if len(tools) > 1000:
+            if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+                raise McpProtocolError("MCP tools/list returned an invalid tools page")
+            tools.extend(page)
+            if len(tools) > MAX_TOOLS:
                 raise McpProtocolError("MCP server exposed too many tools")
-        return tools
+            next_cursor = result.get("nextCursor")
+            if next_cursor is None or next_cursor == "":
+                return tools
+            if not isinstance(next_cursor, str):
+                raise McpProtocolError("MCP tools/list returned a non-string cursor")
+            if len(next_cursor) > MAX_CURSOR_CHARS:
+                raise McpProtocolError("MCP tools/list returned an oversized cursor")
+            if next_cursor in seen_cursors:
+                raise McpProtocolError("MCP tools/list returned a repeated cursor")
+            if page_number + 1 >= MAX_TOOLS_LIST_PAGES:
+                raise McpProtocolError("MCP tools/list did not terminate within the page limit")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        raise McpProtocolError("MCP tools/list did not terminate")
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         result = await self.request(
@@ -428,6 +471,9 @@ async def register_mcp_tools(
             "properties": {},
             "required": [],
         }
+        annotations = item.get("annotations") if isinstance(item.get("annotations"), dict) else {}
+        output_schema = item.get("outputSchema") if isinstance(item.get("outputSchema"), dict) else {}
+        title = str(item.get("title") or annotations.get("title") or "")
 
         register_mcp_endpoint(
             registered_name=registered_name,
@@ -456,6 +502,9 @@ async def register_mcp_tools(
                     "source_kind": "mcp",
                     "mcp_base": base_name,
                     "remote_name": remote_name,
+                    "title": title,
+                    "output_schema": output_schema,
+                    "annotations": annotations,
                     "transport": "stdio",
                 },
             )

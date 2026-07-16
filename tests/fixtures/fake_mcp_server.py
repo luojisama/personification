@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 
@@ -19,11 +20,14 @@ for raw in sys.stdin:
     if request_id is None:
         continue
     if method == "initialize":
-        send({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}}})
+        requested = str((message.get("params") or {}).get("protocolVersion") or "")
+        negotiated = os.environ.get("FAKE_MCP_PROTOCOL", requested)
+        capabilities = {} if os.environ.get("FAKE_MCP_NO_TOOLS") == "1" else {"tools": {"listChanged": True}}
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": negotiated, "capabilities": capabilities, "serverInfo": {"name": "fake-mcp", "title": "Fake MCP", "version": "1.0.0"}}})
     elif method == "tools/list":
         cursor = str((message.get("params") or {}).get("cursor") or "")
         if not cursor:
-            send({"jsonrpc": "2.0", "id": request_id, "result": {"tools": [{"name": "read_demo", "description": "Read demo data", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}, "annotations": {"readOnlyHint": True}}], "nextCursor": "page-2"}})
+            send({"jsonrpc": "2.0", "id": request_id, "result": {"tools": [{"name": "read_demo", "title": "Read Demo", "description": "Read demo data", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}, "outputSchema": {"type": "object", "properties": {"value": {"type": "string"}}}, "annotations": {"readOnlyHint": True}}], "nextCursor": "page-2"}})
         else:
             send({"jsonrpc": "2.0", "id": request_id, "result": {"tools": [{"name": "write_demo", "description": "Write demo data", "inputSchema": {"type": "object", "properties": {}}, "annotations": {"destructiveHint": True}}]}})
     elif method == "tools/call":
