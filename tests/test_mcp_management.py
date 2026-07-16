@@ -18,7 +18,9 @@ FAKE_SERVER = Path(__file__).resolve().parent / "fixtures" / "fake_mcp_server.py
 def _init_store(tmp_path: Path, monkeypatch) -> None:
     paths = load_personification_module("plugin.personification.core.paths")
     data_store = load_personification_module("plugin.personification.core.data_store")
+    management = load_personification_module("plugin.personification.core.mcp_management")
     monkeypatch.setattr(paths, "get_data_dir", lambda _cfg=None: tmp_path)
+    monkeypatch.setattr(management, "get_data_dir", lambda _cfg=None: tmp_path)
     data_store.init_data_store(SimpleNamespace(personification_data_dir=str(tmp_path)))
 
 
