@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Iterable
 
@@ -326,6 +327,14 @@ def build_ai_news_tool(
     logger: Any,
     local_base_url: str | None = None,
 ) -> AgentTool:
+    def _failure(error: str) -> str:
+        return json.dumps(
+            {"ok": False, "error": error},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
     async def _handler() -> str:
         try:
             data = await _fetch_v2_data(
@@ -350,10 +359,10 @@ def build_ai_news_tool(
                 lines.append(line)
                 if detail:
                     lines.append(detail[:80])
-            return "\n".join(lines) if len(lines) > 1 else "AI 资讯暂时获取失败，稍后再试。"
-        except Exception as e:
-            logger.warning(f"[news] get_ai_news 失败: {e}")
-            return "AI 资讯暂时获取失败，稍后再试。"
+            return "\n".join(lines) if len(lines) > 1 else _failure("no_results")
+        except Exception:
+            logger.warning("[news] get_ai_news 失败")
+            return _failure("fetch_failed")
 
     return AgentTool(
         name="get_ai_news",

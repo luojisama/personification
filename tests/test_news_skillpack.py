@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
+
+import pytest
 
 from ._loader import load_personification_module
 
@@ -15,6 +18,13 @@ class _FakeLogger:
 
     def warning(self, message: str) -> None:
         self.warning_messages.append(message)
+
+
+def _assert_canonical_failure(result: str, error: str) -> None:
+    payload = json.loads(result)
+    assert payload["ok"] is False
+    assert payload["error"] == error
+    assert result == json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def test_build_trending_tool_supports_list_payload_and_bili_endpoint(monkeypatch) -> None:  # noqa: ANN001
@@ -60,6 +70,73 @@ def test_build_ai_news_tool_reads_ai_news_payload(monkeypatch) -> None:  # noqa:
     assert "【AI 资讯 2026-04-23】" in result
     assert "1. 新模型发布 [OpenAI]" in result
     assert "推理成本继续下降" in result
+
+
+@pytest.mark.parametrize("items_key", ["news", "items", "list"])
+def test_build_ai_news_tool_returns_no_results_for_empty_items(monkeypatch, items_key) -> None:  # noqa: ANN001
+    async def _fake_fetch(_remote_base_url, _path, *, local_base_url=None, params=None):  # noqa: ANN001
+        del local_base_url, params
+        return {"date": "2026-04-23", items_key: []}
+
+    monkeypatch.setattr(news_impl, "_fetch_v2_data", _fake_fetch)
+
+    tool = news_impl.build_ai_news_tool("https://60s.viki.moe", _FakeLogger(), "http://127.0.0.1:4399")
+    result = asyncio.run(tool.handler())
+
+    _assert_canonical_failure(result, "no_results")
+    assert "http://" not in result
+    assert "https://" not in result
+
+
+def test_build_ai_news_tool_returns_no_results_without_valid_title(monkeypatch) -> None:  # noqa: ANN001
+    leaked_url = "https://upstream.example/private?token=secret"
+
+    async def _fake_fetch(_remote_base_url, _path, *, local_base_url=None, params=None):  # noqa: ANN001
+        del local_base_url, params
+        return {
+            "date": "2026-04-23",
+            "news": [
+                {"title": "", "url": leaked_url},
+                {"title": "   ", "summary": "raw upstream detail"},
+                {"summary": leaked_url},
+                "invalid item",
+            ],
+        }
+
+    monkeypatch.setattr(news_impl, "_fetch_v2_data", _fake_fetch)
+
+    tool = news_impl.build_ai_news_tool("https://60s.viki.moe", _FakeLogger(), "http://127.0.0.1:4399")
+    result = asyncio.run(tool.handler())
+
+    _assert_canonical_failure(result, "no_results")
+    assert leaked_url not in result
+    assert "raw upstream detail" not in result
+
+
+@pytest.mark.parametrize("failure_mode", ["fetch", "parse"])
+def test_build_ai_news_tool_returns_safe_fetch_failed_for_exceptions(monkeypatch, failure_mode) -> None:  # noqa: ANN001
+    leaked_exception = "upstream exploded at https://secret.example/api?token=raw-secret"
+
+    class _InvalidPayload(dict):
+        def get(self, key, default=None):  # noqa: ANN001
+            del key, default
+            raise ValueError(leaked_exception)
+
+    async def _fake_fetch(_remote_base_url, _path, *, local_base_url=None, params=None):  # noqa: ANN001
+        del local_base_url, params
+        if failure_mode == "fetch":
+            raise RuntimeError(leaked_exception)
+        return _InvalidPayload()
+
+    monkeypatch.setattr(news_impl, "_fetch_v2_data", _fake_fetch)
+    logger = _FakeLogger()
+
+    tool = news_impl.build_ai_news_tool("https://60s.viki.moe", logger, "http://127.0.0.1:4399")
+    result = asyncio.run(tool.handler())
+
+    _assert_canonical_failure(result, "fetch_failed")
+    assert leaked_exception not in result
+    assert all(leaked_exception not in message for message in logger.warning_messages)
 
 
 def test_build_joke_tool_reads_duanzi_field(monkeypatch) -> None:  # noqa: ANN001
