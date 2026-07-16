@@ -116,11 +116,11 @@ function openStickerEdit(name) {
 function renderStickerEdit() {
   const s = state.selectedSticker;
   return `<div class="card" style="margin-top:14px">
-    <div class="between"><h2 style="margin:0">编辑 ${escapeHtml(s.filename)}</h2>
+    <div class="between sticker-edit-head"><h2 style="margin:0">编辑 ${escapeHtml(s.filename)}</h2>
       <button class="btn small" onclick="state.selectedSticker=null;render()">关闭</button></div>
-    <div style="display:flex;gap:20px;margin-top:14px;flex-wrap:wrap">
+    <div class="sticker-edit-layout">
       <img src="${escapeAttr(s.thumbnail_url)}" style="max-width:200px;max-height:200px;border-radius:6px;object-fit:contain;background:#0b0d12">
-      <div style="flex:1;min-width:280px">
+      <div class="sticker-edit-form">
         <label class="muted">描述</label>
         <textarea oninput="state.selectedSticker.description=this.value" style="width:100%;min-height:50px;margin:4px 0 10px">${escapeHtml(s.description)}</textarea>
         <label class="muted">心情标签（逗号分隔）</label>

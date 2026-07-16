@@ -66,7 +66,7 @@ def test_every_static_table_uses_a_named_focusable_scroll_region() -> None:
     assert table_count == 41
     assert len(regions) == table_count
     assert len(re.findall(r'<table\b[^>]*class="[^"]*\bdata-table\b', sources)) == table_count
-    assert re.findall(r'<th\b(?![^>]*\bscope="col")', sources) == []
+    assert re.findall(r'<th\b(?![^>]*\bscope="(?:col|row)")', sources) == []
 
 
 def test_priority_renderers_keep_field_semantics() -> None:
@@ -134,10 +134,16 @@ def test_long_technical_values_and_dynamic_buttons_keep_mobile_contracts() -> No
     assert "mcp-installation-id u-ellipsis" in mcp
     assert "mcp-command-plan" in mcp and "plan.tokens.map" in mcp
     assert ".mcp-command-plan>div" in css and "overflow-x:auto" in css
+    command_rule = re.search(r"\.mcp-command-plan code\s*\{([^}]+)\}", css)
+    assert command_rule is not None
+    assert "white-space:pre" in command_rule.group(1)
+    assert "text-overflow:ellipsis" not in command_rule.group(1)
     assert ".mcp-record-title h3,.mcp-record-title code" in css
     assert ".mcp-record-title h3,.mcp-record-title code { width:100%; white-space:normal" not in css
     assert ".mcp-tool-card header code { max-width:100%; white-space:normal" not in css
     assert 'class="btn btn--wrap small"' in creator
+    assert ".sticker-edit-form { flex:1 1 280px; min-width:0" in css
+    assert 'class="sticker-edit-form"' in _source("app-content.js")
 
 
 def test_operation_summary_accessibility_contract_stays_intact() -> None:

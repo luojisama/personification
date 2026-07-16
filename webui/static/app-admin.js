@@ -610,7 +610,7 @@ function renderInteractionResult(ir) {
   return `<div style="margin-top:10px">
     <div class="alert ${alertCls}" style="white-space:pre-wrap">${escapeHtml(ir.detail || "")}${escapeHtml(reply)}</div>
     <div class="row" style="margin:6px 0 10px">
-      ${meta.map(x => `<span class="tag">${escapeHtml(x)}</span>`).join("")}
+      ${meta.map(x => `<span class="tag tag--ellipsis" title="${escapeAttr(x)}">${escapeHtml(x)}</span>`).join("")}
       ${traceBtn}
     </div>
     ${traceSummary}
@@ -635,8 +635,8 @@ function renderQzoneForwardResult(result) {
     <div class="alert ${ok?'ok':'err'}" style="white-space:pre-wrap">${escapeHtml(detail + feedText)}</div>
     <div class="row" style="margin-top:8px">
       ${result.stage ? `<span class="tag">阶段：${escapeHtml(result.stage)}</span>` : ""}
-      ${feed.owner_uin ? `<span class="tag">owner=${escapeHtml(feed.owner_uin)}</span>` : ""}
-      ${feed.feed_id ? `<span class="tag">feed=${escapeHtml(feed.feed_id)}</span>` : ""}
+      ${feed.owner_uin ? `<span class="tag tag--status u-tabular">owner=${escapeHtml(feed.owner_uin)}</span>` : ""}
+      ${feed.feed_id ? `<span class="tag tag--ellipsis" title="feed=${escapeAttr(feed.feed_id)}">feed=${escapeHtml(feed.feed_id)}</span>` : ""}
       ${quotaLine ? `<span class="tag">${escapeHtml(quotaLine)}</span>` : ""}
     </div>
   </div>`;
@@ -1507,7 +1507,7 @@ function renderPersonas() {
 
 function favorabilityScoreText(fav) {
   if (!fav || fav.available === false) return "不可用";
-  if (fav.enabled === false) return "已关闭";
+  if (fav.enabled === false) return fav.exists === false ? "已关闭 · 默认未建档" : "已关闭";
   const score = Number(fav.score || 0);
   return `${score.toFixed(2)}${fav.level ? " · " + fav.level : ""}${fav.exists === false ? " · 默认" : ""}`;
 }
@@ -1521,7 +1521,7 @@ function renderFavorabilityBadge(fav) {
   else if (score < 20) style = 'background:rgba(245,158,11,0.16);color:var(--warn)';
   if (fav.is_perm_blacklisted) style = 'background:rgba(248,113,113,0.16);color:var(--danger)';
   const text = favorabilityScoreText(fav);
-  const stateHint = fav.enabled === false ? "功能已关闭" : (fav.exists === false ? "虚拟默认值，尚未创建档案" : "已持久化档案");
+  const stateHint = fav.exists === false ? "虚拟默认值，尚未创建档案" : (fav.enabled === false ? "功能已关闭" : "已持久化档案");
   return `<span class="tag favorability-badge u-tabular" style="${style}" title="好感度 ${escapeAttr(text)}；${escapeAttr(stateHint)}">${escapeHtml(text)}</span>`;
 }
 
@@ -1552,9 +1552,9 @@ function renderFavorabilityCard(fav, title) {
       <h2 style="margin:0">${escapeHtml(title)}</h2>
       ${renderFavorabilityBadge(fav)}
     </div>
-    ${fav.enabled === false ? '<p class="muted">好感度功能当前已关闭，不会记录新的关系事件。</p>' : (fav.exists === false ? '<p class="muted">当前展示配置中的虚拟默认值；浏览此页面不会创建好感度档案。</p>' : '')}
+    ${fav.exists === false ? `<p class="muted">${fav.enabled === false ? '好感度功能当前已关闭；' : ''}下方展示配置中的虚拟默认值，尚未持久化；浏览此页面不会创建好感度档案。</p>` : (fav.enabled === false ? '<p class="muted">好感度功能当前已关闭，不会记录新的关系事件。</p>' : '')}
     <div class="row" style="gap:24px;margin-top:12px">
-      <div><div class="muted">当前分值</div><div class="u-atomic u-tabular" style="font-size:22px;font-weight:700">${Number(fav.score || 0).toFixed(2)}</div></div>
+      <div><div class="muted">${fav.exists === false ? '默认分值（未建档）' : '当前分值'}</div><div class="u-atomic u-tabular" style="font-size:22px;font-weight:700">${Number(fav.score || 0).toFixed(2)}</div></div>
       <div><div class="muted">等级</div><div class="u-atomic" style="font-size:18px">${escapeHtml(fav.level || "—")}</div></div>
       <div><div class="muted">今日加分</div><div class="u-atomic u-tabular">${Number(fav.daily_positive_count || 0).toFixed(2)}</div></div>
       <div><div class="muted">今日扣分</div><div class="u-atomic u-tabular">${Number(fav.daily_negative_count || 0).toFixed(2)}</div></div>
@@ -1594,7 +1594,7 @@ function renderQqProfileCard(core, userId) {
     ["专属头衔", meta.title],
     ["个性签名", meta.signature],
   ].filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== "")
-   .map(([k, v]) => `<tr><td class="muted u-atomic">${escapeHtml(k)}</td><td class="col-description"><span class="${atomicFields.has(k) ? "u-atomic" : "u-wrap"}" title="${escapeAttr(String(v))}">${escapeHtml(String(v))}</span></td></tr>`).join("");
+   .map(([k, v]) => `<tr><th scope="row" class="muted u-atomic">${escapeHtml(k)}</th><td class="col-description"><span class="${atomicFields.has(k) ? "u-atomic" : "u-wrap"}" title="${escapeAttr(String(v))}">${escapeHtml(String(v))}</span></td></tr>`).join("");
   return `<div class="card">
     <h2>QQ 资料快照</h2>
     <div class="qq-profile-card">
@@ -1632,7 +1632,7 @@ function renderAvatarInsightCard(core, userId) {
     ["包含文字", insight.contains_text === true ? "是" : (insight.contains_text === false ? "否" : "")],
     ["置信度", insight.confidence === undefined ? "" : Number(insight.confidence).toFixed(2)],
   ].filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== "")
-   .map(([key, value]) => `<tr><td class="muted u-atomic">${escapeHtml(key)}</td><td class="col-description"><span class="${atomicFields.has(key) ? "u-ellipsis" : "u-wrap"}" title="${escapeAttr(String(value))}">${escapeHtml(String(value))}</span></td></tr>`).join("");
+   .map(([key, value]) => `<tr><th scope="row" class="muted u-atomic">${escapeHtml(key)}</th><td class="col-description"><span class="${atomicFields.has(key) ? "u-ellipsis" : "u-wrap"}" title="${escapeAttr(String(value))}">${escapeHtml(String(value))}</span></td></tr>`).join("");
   const busy = String(state.avatarAnalysisBusy || "").endsWith(`:${userId}`);
   return `<div class="card">
     <div class="between" style="gap:12px;flex-wrap:wrap">
@@ -1658,7 +1658,7 @@ function renderPersonaDetail() {
   const corr = (core && core.user_corrections) || {};
   const SKEY = {gender:"性别",age_group:"年龄段",occupation:"职业",portrait:"人物描述",interests:"兴趣",routine:"作息",communication_style:"沟通风格",emotion_baseline:"情绪基线",social_mode:"社交模式",knowledge:"知识结构",relationship:"关系",taboos:"雷区",memory_anchors:"记忆锚点",recent_focus:"近期关注",content_pref:"内容偏好",nickname_pref:"称呼偏好",interaction_advice:"互动建议"};
   const structRows = Object.keys(structured).map(k => `<tr>
-      <td class="u-atomic">${escapeHtml(SKEY[k]||k)}${corr[SKEY[k]]||corr[k]?' <span class="device-status approved">已更正</span>':''}</td>
+      <th scope="row" class="u-atomic">${escapeHtml(SKEY[k]||k)}${corr[SKEY[k]]||corr[k]?' <span class="device-status approved">已更正</span>':''}</th>
       <td class="col-description u-wrap">${escapeHtml(String(structured[k]))}</td>
     </tr>`).join("");
   const structCard = `<div class="card"><h2>结构化字段（持久保存）</h2>

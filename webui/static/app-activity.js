@@ -168,7 +168,7 @@ function renderTraceSignalTags(signals) {
   if (!entries.length) return "";
   return `<div class="trace-step-signals">${
     entries.map(([key, value]) =>
-      `<span class="tag" title="${escapeAttr(key)}">${escapeHtml(traceSignalLabel(key))}: ${escapeHtml(String(value))}</span>`
+      `<span class="tag tag--ellipsis" title="${escapeAttr(key)}: ${escapeAttr(String(value))}">${escapeHtml(traceSignalLabel(key))}: ${escapeHtml(String(value))}</span>`
     ).join("")
   }</div>`;
 }
