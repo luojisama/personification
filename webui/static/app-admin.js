@@ -1571,7 +1571,8 @@ async function openPersona(uid) {
 
 function renderQqProfileCard(core, userId) {
   const meta = (core && core.qq_profile) || {};
-  const avatar = safeHttpUrl(meta.avatar_url) || `https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(userId)}&spec=640`;
+  const safeAvatar = safeHttpUrl(meta.avatar_url);
+  const avatar = safeAvatar || `https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(userId)}&spec=640`;
   const homepage = safeHttpUrl(meta.homepage_url);
   const rows = [
     ["昵称", meta.nickname],
@@ -1595,11 +1596,47 @@ function renderQqProfileCard(core, userId) {
       <div class="qq-profile-body">
         ${rows ? `<table><tbody>${rows}</tbody></table>` : '<p class="muted">暂无协议资料字段。</p>'}
         <div class="qq-profile-links">
-          ${meta.avatar_url ? `<a class="btn small" href="${escapeAttr(meta.avatar_url)}" target="_blank" rel="noreferrer">查看头像</a>` : ''}
+          ${safeAvatar ? `<a class="btn small" href="${escapeAttr(safeAvatar)}" target="_blank" rel="noopener noreferrer">查看头像</a>` : ''}
           ${homepage ? `<a class="btn small" href="${escapeAttr(homepage)}" target="_blank" rel="noreferrer">打开主页</a>` : ''}
         </div>
       </div>
     </div>
+  </div>`;
+}
+
+function renderAvatarInsightCard(core, userId) {
+  const analysis = (core && core.avatar_analysis) || {};
+  const insight = (core && core.avatar_insight) || {};
+  const status = String(analysis.status || "");
+  const statusMap = {success:"分析成功", unchanged:"头像未变化", failed:"分析失败"};
+  const kindMap = {real_person:"真人头像", illustration:"插画", acg_character:"ACG 角色", logo:"Logo", other:"其他", unknown:"无法判断"};
+  const analyzedAt = Number(analysis.analyzed_at || 0);
+  const checkedAt = Number(analysis.checked_at || 0);
+  const rows = [
+    ["状态", statusMap[status] || "尚未分析"],
+    ["内容 hash", analysis.content_hash_short || "—"],
+    ["最近检查", checkedAt ? new Date(checkedAt * 1000).toLocaleString() : "—"],
+    ["最近成功分析", analyzedAt ? new Date(analyzedAt * 1000).toLocaleString() : "—"],
+    ["视觉 route", analysis.route || "—"],
+    ["头像类型", kindMap[insight.asset_kind] || insight.asset_kind || "—"],
+    ["主体数", insight.subject_count],
+    ["中性摘要", insight.neutral_summary],
+    ["ACG 候选", Array.isArray(insight.acg_candidates) ? insight.acg_candidates.join("、") : ""],
+    ["包含文字", insight.contains_text === true ? "是" : (insight.contains_text === false ? "否" : "")],
+    ["置信度", insight.confidence === undefined ? "" : Number(insight.confidence).toFixed(2)],
+  ].filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== "")
+   .map(([key, value]) => `<tr><td class="muted" style="white-space:nowrap">${escapeHtml(key)}</td><td>${escapeHtml(String(value))}</td></tr>`).join("");
+  const busy = String(state.avatarAnalysisBusy || "").endsWith(`:${userId}`);
+  return `<div class="card">
+    <div class="between" style="gap:12px;flex-wrap:wrap">
+      <h2 style="margin:0">头像长期画像</h2>
+      <div class="row" style="gap:8px">
+        <button class="btn small primary" onclick="refreshAvatarAnalysis('${escapeAttr(userId)}')" ${busy?'disabled':''}>${state.avatarAnalysisBusy===`refresh:${userId}`?'<span class="spinner"></span> 排队中…':'重新分析'}</button>
+        <button class="btn small danger" onclick="clearAvatarAnalysis('${escapeAttr(userId)}')" ${busy?'disabled':''}>${state.avatarAnalysisBusy===`clear:${userId}`?'<span class="spinner"></span> 删除中…':'删除分析'}</button>
+      </div>
+    </div>
+    ${rows ? `<table style="margin-top:12px"><tbody>${rows}</tbody></table>` : '<p class="muted">暂无持久化头像分析。</p>'}
+    <p class="muted" style="font-size:11px;margin-top:8px">真人头像只保留“真人头像”类型；不会保存头像 bytes、data URL 或模型 raw response。</p>
   </div>`;
 }
 
@@ -1627,9 +1664,10 @@ function renderPersonaDetail() {
     <p class="muted" style="font-size:11px;margin-top:6px">用户确认的画像事实会保留到后续重生成，但只作为背景数据，不构成模型指令。</p>
   </div>`;
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedPersona=null;render()">返回列表</button><span class="muted">用户 ${escapeHtml(p.user_id)}</span></div>
-    ${renderAdminOperations("persona","画像更正诊断")}
+    ${renderAdminOperations("persona","画像操作诊断")}
     ${renderFavorabilityCard(p.favorability, "用户好感度")}
     ${renderQqProfileCard(core, p.user_id)}
+    ${renderAvatarInsightCard(core, p.user_id)}
     <div class="card"><h2>全局印象</h2>${core && core.profile_text ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(core.profile_text || '')}</pre>` : '<p class="muted">无全局画像</p>'}</div>
     ${structCard}
     <h3 style="margin-bottom:10px">各群印象（${(p.local_profiles||[]).length}）</h3>
@@ -1992,6 +2030,42 @@ async function submitCorrection(uid) {
     state.selectedPersona = await api("/personas/"+encodeURIComponent(uid));
     render();
   } catch (e) { const diagnostic=rememberAdminOperation("persona",e,"画像更正未完成");alertFlash("err",diagnostic?.title||"画像更正未完成");render(); }
+}
+
+async function refreshAvatarAnalysis(uid) {
+  if (!confirm("重新下载并分析该用户当前 QQ 头像？这会调用一次可用的 vision route。")) return;
+  state.avatarAnalysisBusy = `refresh:${uid}`;
+  render();
+  try {
+    const result = await api(`/personas/${encodeURIComponent(uid)}/avatar-analysis/refresh`, {method:"POST"});
+    const diagnostic = rememberAdminOperation("persona", result, "头像重新分析未排队");
+    alertFlash("ok", diagnostic?.title || "头像重新分析已排队");
+    state.selectedPersona = await api(`/personas/${encodeURIComponent(uid)}`);
+  } catch (e) {
+    const diagnostic = rememberAdminOperation("persona", e, "头像重新分析未排队");
+    alertFlash("err", diagnostic?.title || "头像重新分析未排队");
+  } finally {
+    state.avatarAnalysisBusy = "";
+    render();
+  }
+}
+
+async function clearAvatarAnalysis(uid) {
+  if (!confirm("删除该用户已持久化的头像分析与安全摘要？")) return;
+  state.avatarAnalysisBusy = `clear:${uid}`;
+  render();
+  try {
+    const result = await api(`/personas/${encodeURIComponent(uid)}/avatar-analysis`, {method:"DELETE"});
+    const diagnostic = rememberAdminOperation("persona", result, "头像分析删除未完成");
+    alertFlash(diagnostic?.partial ? "info" : "ok", diagnostic?.title || "头像分析已删除");
+    state.selectedPersona = await api(`/personas/${encodeURIComponent(uid)}`);
+  } catch (e) {
+    const diagnostic = rememberAdminOperation("persona", e, "头像分析删除未完成");
+    alertFlash("err", diagnostic?.title || "头像分析删除未完成");
+  } finally {
+    state.avatarAnalysisBusy = "";
+    render();
+  }
 }
 
 function renderGroupSwitch() {

@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .embedding_index import EMBED_MODEL_VERSION, cosine_similarity, embed_text, normalize_text, tokenize
 from .entity_index import extract_entities
@@ -338,21 +338,84 @@ class MemoryStore:
         profile_json: dict[str, Any] | None = None,
         source: str = "persona_service",
     ) -> None:
-        payload = json.dumps(profile_json or {}, ensure_ascii=False)
-        with _connect(self.shared_dir / "core_user_profiles.db") as conn:
-            conn.execute(
-                """
-                INSERT INTO profiles(user_id, profile_text, profile_json, source, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    profile_text=excluded.profile_text,
-                    profile_json=excluded.profile_json,
-                    source=excluded.source,
-                    updated_at=excluded.updated_at
-                """,
-                (str(user_id or ""), str(profile_text or ""), payload, str(source or ""), time.time()),
-            )
-            conn.commit()
+        with self.maintenance_lock:
+            payload = json.dumps(profile_json or {}, ensure_ascii=False)
+            with _connect(self.shared_dir / "core_user_profiles.db") as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    """
+                    INSERT INTO profiles(user_id, profile_text, profile_json, source, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        profile_text=excluded.profile_text,
+                        profile_json=excluded.profile_json,
+                        source=excluded.source,
+                        updated_at=excluded.updated_at
+                    """,
+                    (str(user_id or ""), str(profile_text or ""), payload, str(source or ""), time.time()),
+                )
+                conn.commit()
+
+    def atomic_patch_core_profile(
+        self,
+        *,
+        user_id: str,
+        patcher: Callable[[dict[str, Any]], dict[str, Any]],
+        profile_text: str | None = None,
+        source: str = "",
+        source_if_missing: str = "profile_patch",
+    ) -> dict[str, Any]:
+        """Patch one core profile without overwriting concurrent JSON fields."""
+        uid = str(user_id or "").strip()
+        if not uid:
+            raise ValueError("user_id is required")
+        with self.maintenance_lock:
+            with _connect(self.shared_dir / "core_user_profiles.db") as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT profile_text, profile_json, source FROM profiles WHERE user_id=?",
+                    (uid,),
+                ).fetchone()
+                current_json = _json_loads(row["profile_json"] if row else "{}", {})
+                if not isinstance(current_json, dict):
+                    current_json = {}
+                patched_json = patcher(dict(current_json))
+                if not isinstance(patched_json, dict):
+                    conn.rollback()
+                    raise TypeError("profile patcher must return a dict")
+                next_text = str(profile_text) if profile_text is not None else str(row["profile_text"] or "") if row else ""
+                existing_source = str(row["source"] or "") if row else ""
+                next_source = (
+                    str(source or "").strip()
+                    or existing_source
+                    or str(source_if_missing or "profile_patch")
+                )
+                updated_at = time.time()
+                conn.execute(
+                    """
+                    INSERT INTO profiles(user_id, profile_text, profile_json, source, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        profile_text=excluded.profile_text,
+                        profile_json=excluded.profile_json,
+                        source=excluded.source,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        uid,
+                        next_text,
+                        json.dumps(patched_json, ensure_ascii=False),
+                        next_source,
+                        updated_at,
+                    ),
+                )
+                conn.commit()
+        return {
+            "profile_text": next_text,
+            "profile_json": patched_json,
+            "source": next_source,
+            "updated_at": updated_at,
+        }
 
     def get_core_profile(self, user_id: str) -> dict[str, Any] | None:
         with _connect(self.shared_dir / "core_user_profiles.db") as conn:

@@ -35,6 +35,7 @@ _LIGHTWEIGHT_LOOKUP_TOOL_NAMES = frozenset(
         "recall_user_memory",
         "recall_group_memory",
         "get_user_persona",
+        "inspect_current_user_avatar",
     }
 )
 _IMAGE_GENERATION_CONTEXT_TOOL_NAMES = frozenset(

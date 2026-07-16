@@ -95,6 +95,7 @@ from ...core.turn_media import (
     render_turn_media_grounding,
 )
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_YAML
+from ...core.user_avatar_insight import register_current_user_avatar_tool
 from ...skill_runtime.runtime_api import SkillRuntime
 
 from ...agent.action_executor import ActionExecutor
@@ -520,6 +521,8 @@ async def process_yaml_response_logic(
     turn_media_context: List[Dict[str, Any]] | None = None,
     media_grounding: str = "",
     precomputed_image_summary_suffix: str = "",
+    user_profile_block: str = "",
+    profile_service: Any = None,
 ) -> None:
     """处理基于 YAML 模板的新版响应逻辑。"""
     reply_commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
@@ -1049,6 +1052,8 @@ async def process_yaml_response_logic(
         return
 
     system_prompt = prompt_config.get("system", "")
+    if user_profile_block:
+        system_prompt += f"\n\n{user_profile_block}"
     if is_private_session:
         system_prompt += (
             "\n\n## 私聊称呼规则（高优先级）\n"
@@ -1398,6 +1403,7 @@ async def process_yaml_response_logic(
     ):
         executor = ActionExecutor(bot, event, plugin_config, logger)
         agent_tool_registry = _clone_tool_registry(tool_registry)
+        register_current_user_avatar_tool(agent_tool_registry, profile_service, user_id)
         register_send_qq_expression_tools(
             agent_tool_registry,
             executor=executor,
@@ -2532,6 +2538,8 @@ def build_yaml_response_processor(
             precomputed_image_summary_suffix=str(
                 runtime_overrides.get("precomputed_image_summary_suffix", "") or ""
             ),
+            user_profile_block=str(runtime_overrides.get("user_profile_block", "") or ""),
+            profile_service=runtime_overrides.get("profile_service"),
         )
 
     return _processor

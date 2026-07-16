@@ -144,6 +144,8 @@ async def _schedule_hook(ctx: HookContext) -> Optional[str]:
 
 
 async def _user_persona_hook(ctx: HookContext) -> Optional[str]:
+    if str(getattr(ctx, "user_profile_block", "") or "").strip():
+        return None
     persona_store = getattr(ctx.runtime, "persona_store", None)
     if not persona_store:
         return None

@@ -32,6 +32,7 @@ from ..reply_commit import (
     release_reply_commit,
 )
 from ...core.visual_capabilities import VISUAL_ROUTE_REPLY_PLAIN
+from ...core.user_avatar_insight import register_current_user_avatar_tool
 from ...skill_runtime.runtime_api import SkillRuntime
 from ...skills.skillpacks.friend_request_tool.scripts.main import build_friend_request_tool_for_runtime
 from ...skills.skillpacks.group_info_tool.scripts.main import build_group_info_tool_for_runtime
@@ -715,6 +716,11 @@ async def run_agent_if_enabled(
 
     executor = ActionExecutor(bot, event, runtime.plugin_config, runtime.logger)
     runtime_registry = clone_tool_registry(runtime.tool_registry)
+    register_current_user_avatar_tool(
+        runtime_registry,
+        getattr(runtime, "profile_service", None),
+        str(getattr(event, "user_id", "") or ""),
+    )
     register_send_qq_expression_tools(
         runtime_registry,
         executor=executor,
@@ -810,17 +816,6 @@ async def run_agent_if_enabled(
         messages=messages,
         turn_plan=turn_plan,
     )
-    try:
-        profile_service = getattr(runtime, "profile_service", None)
-        if profile_service is not None:
-            _gid = str(getattr(event, "group_id", "") or "")
-            _uid = str(getattr(event, "user_id", "") or "")
-            if _uid:
-                _block = profile_service.build_prompt_block(user_id=_uid, group_id=_gid)
-                if _block:
-                    messages.append({"role": "system", "content": _block})
-    except Exception:
-        pass
     # 注入群风格摘要（最近一次 group_style_autobuild 产出）
     try:
         _gid = str(getattr(event, "group_id", "") or "")

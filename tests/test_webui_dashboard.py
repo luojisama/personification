@@ -399,7 +399,7 @@ def test_profile_service_prompt_block(_runtime_with_data) -> None:
     svc.upsert_core_profile(user_id="u_alpha", profile_text="全局画像 Alpha", profile_json=profile_json)
     block = svc.build_prompt_block(user_id="u_alpha", group_id="g1")
     assert "## 用户档案" in block
-    assert "[头像URL]" in block
+    assert "[头像URL]" not in block
     assert "[主页] https://user.qzone.qq.com/u_alpha" in block
     assert "[个性签名] 这里是 Alpha 的签名" in block
     assert "[人物轮廓] Alpha 是群里的常驻成员" in block

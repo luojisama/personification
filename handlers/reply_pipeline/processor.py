@@ -59,6 +59,7 @@ from ...core.turn_media import (
     render_turn_media_grounding,
     serialize_turn_media,
 )
+from ...core.user_avatar_insight import schedule_user_avatar_analysis
 from ...core.repeat_follow import maybe_follow_repeat_cluster
 from ...core.reply_style_policy import (
     build_direct_visual_identity_guard,
@@ -550,11 +551,13 @@ async def _capture_user_protocol_profile(
             source=source,
         )
         if meta:
-            profile_service.upsert_user_profile_meta(
+            saved = profile_service.upsert_user_profile_meta(
                 user_id=str(user_id),
                 meta=meta,
                 source=source,
             )
+            if saved is not None:
+                schedule_user_avatar_analysis(runtime, str(user_id))
     except Exception as exc:
         logger = getattr(runtime, "logger", None)
         if logger is not None:
@@ -1117,6 +1120,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             source="reply_pipeline",
         )
 
+    user_profile_block = ""
+    try:
+        profile_service = getattr(runtime, "profile_service", None)
+        if profile_service is not None:
+            user_profile_block = profile_service.build_prompt_block(
+                user_id=user_id,
+                group_id=str(group_id),
+            )
+    except Exception:
+        user_profile_block = ""
+
     tool_image_urls = list(image_urls)
     # 分类为真实照片的 refs 继续用于 provider 图片输入不兼容时的旧 fallback。
     photo_image_urls = list(image_urls)
@@ -1214,6 +1228,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         runtime=runtime,
         bot=bot,
         event=event,
+        user_profile_block=user_profile_block,
     )
     await get_hook_registry().run_all(hook_ctx, phase="preprocess")
     message_content = hook_ctx.message_content
@@ -1541,6 +1556,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             turn_media_context=serialize_turn_media(turn_media_context),
             media_grounding=media_grounding,
             precomputed_image_summary_suffix=image_summary_suffix,
+            user_profile_block=user_profile_block,
+            profile_service=getattr(runtime, "profile_service", None),
         )
         return
 
@@ -1599,6 +1616,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             get_configured_api_providers=runtime.get_configured_api_providers,
         ),
     )
+    if user_profile_block:
+        system_prompt += f"\n\n{user_profile_block}"
     if media_grounding:
         system_prompt += f"\n\n{media_grounding}"
     turn_plan = getattr(semantic_frame, "turn_plan", None)

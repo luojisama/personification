@@ -59,6 +59,8 @@ PERSONA_PROMPT_NEW = """\
 
 {field_guide}
 
+{avatar_context_block}
+
 该用户本人的聊天记录（共 {message_count} 条，越靠后越近期）：
 {messages_block}"""
 
@@ -77,6 +79,8 @@ PERSONA_PROMPT_UPDATE = """\
    除非新记录明确推翻，否则必须原样保留。
 
 {field_guide}
+
+{avatar_context_block}
 
 旧画像：
 {previous_persona}
@@ -117,20 +121,36 @@ def _format_persona_prompt(template: str, **kwargs: str) -> str:
     return template.format(field_guide=_PERSONA_FIELD_GUIDE, task_frame=_PERSONA_TASK_FRAME, **kwargs)
 
 
-def build_persona_prompt(messages: list[str], previous: str | None) -> str:
+def build_persona_prompt(
+    messages: list[str],
+    previous: str | None,
+    avatar_context: str = "",
+) -> str:
     # 取最近 N 条本人发言作为判断依据（越靠后越近期）
     recent = list(messages)[-_PERSONA_CONTEXT_LIMIT:]
     messages_block = "\n".join(f"- {message}" for message in recent)
     message_count = str(len(recent))
+    avatar_context_block = ""
+    if str(avatar_context or "").strip():
+        avatar_context_block = (
+            "头像长期弱证据（仅作低权重辅助）：\n"
+            f"{str(avatar_context).strip()}\n"
+            "只能辅助理解头像审美或 ACG 偏好候选；不得替代聊天证据推断真实身份、性别、年龄、"
+            "外貌细节、性格、精神或情绪状态、职业及现实人际关系。"
+        )
     if previous:
         return _format_persona_prompt(
             PERSONA_PROMPT_UPDATE,
             previous_persona=str(previous or ""),
             messages_block=messages_block,
             message_count=message_count,
+            avatar_context_block=avatar_context_block,
         )
     return _format_persona_prompt(
-        PERSONA_PROMPT_NEW, messages_block=messages_block, message_count=message_count
+        PERSONA_PROMPT_NEW,
+        messages_block=messages_block,
+        message_count=message_count,
+        avatar_context_block=avatar_context_block,
     )
 
 
@@ -305,30 +325,24 @@ class PersonaStore:
     ) -> None:
         if self._profile_service is not None:
             structured = parse_persona_structured(entry.data)
-            existing = None
-            try:
-                existing = self._profile_service.get_core_profile(str(user_id))
-            except Exception:
-                existing = None
-            # 保留历史用户更正（除非本次显式覆盖）
-            prior_corrections: dict = {}
-            prior_profile_meta: dict = {}
-            if existing is not None and isinstance(getattr(existing, "profile_json", None), dict):
-                prior_corrections = dict(existing.profile_json.get("user_corrections", {}) or {})
-                prior_profile_meta = dict(existing.profile_json.get("qq_profile", {}) or {})
-            if corrections:
-                prior_corrections.update(corrections)
-            profile_json = {
-                "updated_by": "persona_service",
-                "structured": structured,
-                "user_corrections": prior_corrections,
-            }
-            if prior_profile_meta:
-                profile_json["qq_profile"] = prior_profile_meta
-            self._profile_service.upsert_core_profile(
+            def _patch_profile_json(current: dict[str, Any]) -> dict[str, Any]:
+                patched = dict(current or {})
+                prior_corrections = dict(patched.get("user_corrections", {}) or {})
+                if corrections:
+                    prior_corrections.update(corrections)
+                patched.update(
+                    {
+                        "updated_by": "persona_service",
+                        "structured": structured,
+                        "user_corrections": prior_corrections,
+                    }
+                )
+                return patched
+
+            self._profile_service.patch_core_profile(
                 user_id=str(user_id),
                 profile_text=entry.data,
-                profile_json=profile_json,
+                patcher=_patch_profile_json,
                 source="persona_service",
             )
         with connect_sync() as conn:
@@ -351,7 +365,17 @@ class PersonaStore:
         *,
         user_id: str = "",
     ) -> str | None:
-        prompt = build_persona_prompt(messages, previous.data if previous else None)
+        avatar_context = ""
+        if self._profile_service is not None:
+            try:
+                avatar_context = self._profile_service.build_avatar_persona_context(str(user_id or ""))
+            except Exception:
+                avatar_context = ""
+        prompt = build_persona_prompt(
+            messages,
+            previous.data if previous else None,
+            avatar_context=avatar_context,
+        )
         retry_prompt = (
             prompt
             + "\n\n（提醒：请只基于上述聊天记录客观提炼字段，不要给出'抱歉'、"

@@ -9,6 +9,11 @@ from ...core.onebot_cache import get_user_nickname, get_user_profile
 from ...core.operation_diagnostics import detail as operation_detail
 from ...core.operation_diagnostics import diagnostic, exception_diagnostic, step
 from ...core.user_profile_meta import compact_user_profile_meta_summary
+from ...core.user_avatar_insight import (
+    clear_user_avatar_analysis,
+    force_user_avatar_analysis,
+    get_user_avatar_state,
+)
 from ..deps import AdminIdentity, require_admin
 from .favorability_view import serialize_favorability
 
@@ -39,6 +44,21 @@ def _get_first_bot(runtime) -> Any | None:
     except Exception:
         return None
     return next(iter(bots.values()), None) if bots else None
+
+
+def _runtime_bundle(runtime) -> Any | None:
+    return getattr(runtime, "runtime_bundle", None)
+
+
+def _record_avatar_audit(runtime: Any, **payload: Any) -> bool:
+    try:
+        webui_audit_log.record(**payload)
+        return True
+    except Exception as exc:
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.warning(f"[avatar analysis operation] audit_failed type={type(exc).__name__}")
+        return False
 
 
 def _merge_display_profile(stored: dict[str, Any], live: dict[str, Any]) -> dict[str, Any]:
@@ -112,6 +132,7 @@ def build_persona_router(*, runtime) -> APIRouter:
         stored_qq_profile = core_json.get("qq_profile", {}) if isinstance(core_json.get("qq_profile", {}), dict) else {}
         live_qq_profile = await get_user_profile(_get_first_bot(runtime), user_id)
         qq_profile = _merge_display_profile(stored_qq_profile, live_qq_profile)
+        avatar_state = get_user_avatar_state(svc, user_id, include_hash=False)
         structured = core_json.get("structured") or {}
         if not structured and core:
             # 旧画像没有结构化字段时，即时解析一次（不写库）
@@ -135,6 +156,8 @@ def build_persona_router(*, runtime) -> APIRouter:
                 "structured": structured,
                 "qq_profile": qq_profile,
                 "user_corrections": core_json.get("user_corrections", {}),
+                "avatar_analysis": avatar_state.get("analysis", {}),
+                "avatar_insight": avatar_state.get("insight", {}),
                 "updated_at": core.updated_at if core else 0,
             } if core else {
                 "profile_text": "",
@@ -142,6 +165,8 @@ def build_persona_router(*, runtime) -> APIRouter:
                 "structured": {},
                 "qq_profile": qq_profile,
                 "user_corrections": {},
+                "avatar_analysis": avatar_state.get("analysis", {}),
+                "avatar_insight": avatar_state.get("insight", {}),
                 "updated_at": 0,
             },
             "local_profiles": local_profiles,
@@ -272,5 +297,193 @@ def build_persona_router(*, runtime) -> APIRouter:
             outcome_unknown=False,
         )
         return {"success": True, "profile_text": entry.data, **report}
+
+    @router.post("/{user_id}/avatar-analysis/refresh")
+    async def refresh_avatar_analysis(
+        user_id: str,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        svc = _profile_service(runtime)
+        bundle = _runtime_bundle(runtime)
+        if svc is None or bundle is None:
+            report = diagnostic(
+                ok=False,
+                code="avatar_analysis_unavailable",
+                phase="precondition",
+                title="头像分析暂不可用",
+                message="画像运行时尚未就绪，未排队任何后台任务。",
+                details=(operation_detail("目标用户", user_id),),
+                steps=(
+                    step("precondition", "检查画像服务", "error", "画像运行时未就绪。"),
+                    step("schedule", "排队头像分析", "skipped", "未创建后台任务。"),
+                    step("audit", "记录管理员操作", "skipped", "操作未进入执行阶段。"),
+                ),
+                suggestion="等待插件运行时完成初始化后重试。",
+                retryable=True,
+                partial=False,
+                outcome_unknown=False,
+            )
+            raise HTTPException(status_code=503, detail=report)
+        snapshot = svc.get_core_profile(str(user_id))
+        profile_json = snapshot.profile_json if snapshot is not None else {}
+        qq_profile = profile_json.get("qq_profile", {}) if isinstance(profile_json, dict) else {}
+        if not isinstance(qq_profile, dict) or not str(qq_profile.get("avatar_url", "") or "").strip():
+            report = diagnostic(
+                ok=False,
+                code="avatar_analysis_profile_missing",
+                phase="precondition",
+                title="头像分析未排队",
+                message="该用户尚无可供后台任务读取的 QQ 头像资料。",
+                details=(operation_detail("目标用户", user_id),),
+                steps=(
+                    step("precondition", "检查 QQ 资料", "error", "未找到已持久化头像资料。"),
+                    step("schedule", "排队头像分析", "skipped", "未创建后台任务。"),
+                    step("audit", "记录管理员操作", "skipped", "操作未进入执行阶段。"),
+                ),
+                suggestion="让该用户先与 bot 产生一次消息交互，保存协议资料后重试。",
+                retryable=True,
+                partial=False,
+                outcome_unknown=False,
+            )
+            raise HTTPException(status_code=409, detail=report)
+        try:
+            task = force_user_avatar_analysis(bundle, str(user_id))
+        except Exception as exc:
+            report = exception_diagnostic(
+                exc,
+                phase="schedule",
+                title="头像分析未排队",
+                message="服务器未能创建头像分析后台任务。",
+                suggestion="稍后重试；若持续失败，请根据 Trace ID 查看脱敏日志。",
+                retryable=True,
+            )
+            report["code"] = "avatar_analysis_schedule_failed"
+            report["details"] = [operation_detail("目标用户", user_id).to_dict(), *report.get("details", [])]
+            report["steps"] = [
+                step("precondition", "检查 QQ 资料", "ok", "已找到头像资料。").to_dict(),
+                step("schedule", "排队头像分析", "error", "后台任务创建失败。").to_dict(),
+                step("audit", "记录管理员操作", "skipped", "任务未排队。").to_dict(),
+            ]
+            raise HTTPException(status_code=500, detail=report) from exc
+        if task is None:
+            report = diagnostic(
+                ok=False,
+                code="avatar_analysis_schedule_unconfirmed",
+                phase="schedule",
+                title="头像分析未排队",
+                message="画像服务没有返回可确认的后台任务。",
+                details=(operation_detail("目标用户", user_id),),
+                steps=(
+                    step("precondition", "检查 QQ 资料", "ok", "已找到头像资料。"),
+                    step("schedule", "排队头像分析", "error", "未取得后台任务。"),
+                    step("audit", "记录管理员操作", "skipped", "任务未排队。"),
+                ),
+                suggestion="等待插件运行时稳定后重试。",
+                retryable=True,
+                partial=False,
+                outcome_unknown=False,
+            )
+            raise HTTPException(status_code=503, detail=report)
+        audit_ok = _record_avatar_audit(
+            runtime,
+            action="avatar_analysis_refresh",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=str(user_id),
+            detail={"force": True},
+            outcome="ok",
+        )
+        report = diagnostic(
+            ok=True,
+            code="avatar_analysis_scheduled",
+            phase="operation_complete",
+            title="头像重新分析已排队",
+            message="后台任务会安全下载当前头像并重新分析，不会阻塞聊天回复。",
+            details=(operation_detail("目标用户", user_id), operation_detail("执行方式", "后台 force", "ok")),
+            steps=(
+                step("precondition", "检查 QQ 资料", "ok", "已找到头像资料。"),
+                step("schedule", "排队头像分析", "ok", "后台任务已创建或已由同用户任务承接。"),
+                step("audit", "记录管理员操作", "ok" if audit_ok else "warn", "管理员操作已记录。" if audit_ok else "任务已排队，但审计写入失败。"),
+            ),
+            warnings=() if audit_ok else ("头像分析已排队，但本次管理员审计记录未能写入。",),
+            retryable=False,
+            partial=not audit_ok,
+            outcome_unknown=False,
+        )
+        return {"success": True, "scheduled": True, **report}
+
+    @router.delete("/{user_id}/avatar-analysis")
+    async def clear_avatar_analysis(
+        user_id: str,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        svc = _profile_service(runtime)
+        if svc is None:
+            report = diagnostic(
+                ok=False,
+                code="avatar_analysis_unavailable",
+                phase="precondition",
+                title="头像分析删除暂不可用",
+                message="画像运行时尚未就绪，未执行删除。",
+                details=(operation_detail("目标用户", user_id),),
+                steps=(
+                    step("precondition", "检查画像服务", "error", "画像服务未就绪。"),
+                    step("persist", "删除头像分析", "skipped", "未执行写入。"),
+                    step("audit", "记录管理员操作", "skipped", "未执行删除。"),
+                ),
+                suggestion="等待插件运行时完成初始化后重试。",
+                retryable=True,
+                partial=False,
+                outcome_unknown=False,
+            )
+            raise HTTPException(status_code=503, detail=report)
+        try:
+            deleted = clear_user_avatar_analysis(svc, str(user_id))
+        except Exception as exc:
+            report = exception_diagnostic(
+                exc,
+                phase="persistence",
+                title="头像分析删除未完成",
+                message="服务器未能确认头像分析字段已删除。",
+                suggestion="刷新画像详情确认当前状态；仍存在时再重试。",
+                retryable=False,
+            )
+            report["code"] = "avatar_analysis_clear_failed"
+            report["details"] = [operation_detail("目标用户", user_id).to_dict(), *report.get("details", [])]
+            report["steps"] = [
+                step("precondition", "检查画像服务", "ok", "画像服务已就绪。").to_dict(),
+                step("persist", "删除头像分析", "unknown", "写入异常，最终状态需要重新读取。").to_dict(),
+                step("audit", "记录管理员操作", "skipped", "删除结果未知。").to_dict(),
+            ]
+            report["partial"] = True
+            report["outcome_unknown"] = True
+            raise HTTPException(status_code=500, detail=report) from exc
+        audit_ok = _record_avatar_audit(
+            runtime,
+            action="avatar_analysis_clear",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=str(user_id),
+            detail={"deleted": bool(deleted)},
+            outcome="ok",
+        )
+        report = diagnostic(
+            ok=True,
+            code="avatar_analysis_cleared" if deleted else "avatar_analysis_already_clear",
+            phase="operation_complete",
+            title="头像分析已删除" if deleted else "头像分析原本为空",
+            message="已删除持久化的头像分析与安全摘要。" if deleted else "没有找到需要删除的头像分析字段。",
+            details=(operation_detail("目标用户", user_id), operation_detail("已删除", bool(deleted), "ok")),
+            steps=(
+                step("precondition", "检查画像服务", "ok", "画像服务已就绪。"),
+                step("persist", "删除头像分析", "ok", "持久化状态已确认。"),
+                step("audit", "记录管理员操作", "ok" if audit_ok else "warn", "管理员操作已记录。" if audit_ok else "分析已删除，但审计写入失败。"),
+            ),
+            warnings=() if audit_ok else ("头像分析已删除，但本次管理员审计记录未能写入。",),
+            retryable=False,
+            partial=not audit_ok,
+            outcome_unknown=False,
+        )
+        return {"success": True, "deleted": bool(deleted), **report}
 
     return router

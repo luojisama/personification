@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .memory_store import MemoryStore
 from .user_profile_meta import (
@@ -69,17 +69,48 @@ class ProfileService:
         uid = str(user_id or "").strip()
         if not uid or not isinstance(meta, dict):
             return self.get_core_profile(uid)
-        current = self.get_core_profile(uid)
-        profile_text = current.profile_text if current is not None else ""
-        profile_json = dict(current.profile_json if current is not None else {})
-        merged_json = merge_profile_json_with_meta(profile_json, {**meta, "source": source})
-        self.upsert_core_profile(
+        result = self.memory_store.atomic_patch_core_profile(
             user_id=uid,
-            profile_text=profile_text,
-            profile_json=merged_json,
-            source=(current.source if current is not None and current.source else source),
+            patcher=lambda profile_json: merge_profile_json_with_meta(
+                profile_json,
+                {**meta, "source": source},
+            ),
+            source="",
+            source_if_missing=source,
         )
-        return self.get_core_profile(uid)
+        return ProfileSnapshot(
+            profile_text=str(result.get("profile_text", "") or ""),
+            profile_json=dict(result.get("profile_json", {}) or {}),
+            updated_at=float(result.get("updated_at", 0) or 0),
+            source=str(result.get("source", "") or ""),
+        )
+
+    def patch_core_profile(
+        self,
+        *,
+        user_id: str,
+        patcher: Callable[[dict[str, Any]], dict[str, Any]],
+        profile_text: str | None = None,
+        source: str = "",
+    ) -> ProfileSnapshot:
+        result = self.memory_store.atomic_patch_core_profile(
+            user_id=user_id,
+            patcher=patcher,
+            profile_text=profile_text,
+            source=source,
+        )
+        return ProfileSnapshot(
+            profile_text=str(result.get("profile_text", "") or ""),
+            profile_json=dict(result.get("profile_json", {}) or {}),
+            updated_at=float(result.get("updated_at", 0) or 0),
+            source=str(result.get("source", "") or ""),
+        )
+
+    def build_avatar_persona_context(self, user_id: str) -> str:
+        from .user_avatar_insight import render_avatar_persona_context
+
+        snapshot = self.get_core_profile(str(user_id or ""))
+        return render_avatar_persona_context(snapshot.profile_json if snapshot is not None else {})
 
     def get_local_profile(self, *, group_id: str, user_id: str) -> ProfileSnapshot | None:
         data = self.memory_store.get_local_profile(group_id=group_id, user_id=user_id)
