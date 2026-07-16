@@ -7,7 +7,10 @@ from ...core.qq_expression_tools import expression_tool_result_queued
 from ..tool_registry import ToolRegistry
 from .image_generation import _IMAGE_GENERATION_TOOL_NAME
 from .tool_catalog import tool_runtime_metadata
-from .wrappers import _is_direct_media_tool_result
+from .wrappers import _is_direct_media_tool_result, render_avatar_pair_safe_result
+
+
+_AVATAR_PAIR_TOOL_NAME = "inspect_group_user_avatar_pair"
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,17 @@ def direct_tool_result_from_contract(
         and expression_tool_result_queued(text)
     ):
         return DirectToolResult(text="[SILENCE]", reason="queued_send_message")
+    if (
+        normalized_tool_name == _AVATAR_PAIR_TOOL_NAME
+        and side_effect == "none"
+        and final_behavior == "safe_direct_output"
+    ):
+        return DirectToolResult(
+            text=render_avatar_pair_safe_result(text),
+            direct_output=True,
+            bypass_length_limits=True,
+            reason="safe_direct_output",
+        )
     if _is_direct_media_tool_result(normalized_tool_name, text):
         return DirectToolResult(text=text, bypass_length_limits=True, reason="direct_media")
     if normalized_tool_name == _IMAGE_GENERATION_TOOL_NAME:

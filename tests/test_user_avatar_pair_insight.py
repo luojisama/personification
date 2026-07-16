@@ -109,6 +109,7 @@ def test_tool_build_scope_enum_handler_validation_and_metadata(monkeypatch) -> N
     assert tool.metadata["side_effect"] == "none"
     assert tool.metadata["retryable"] is True
     assert tool.metadata["requires_network"] is True
+    assert tool.metadata["final_behavior"] == "safe_direct_output"
 
     calls = 0
 
@@ -289,6 +290,7 @@ def test_exact_sanitized_bytes_skip_vision_and_use_only_deterministic_avatar_url
     assert all(item[1]["allowed_mimes"] == {"image/jpeg", "image/png", "image/webp"} for item in download_calls)
     assert len(sanitize_calls) == 2
     assert set(result) == {"ok", "available", "safe_summary", "display_label", "limitations"}
+    assert result["display_label"] == "两位候选成员的头像"
     serialized = json.dumps(result, ensure_ascii=False)
     for forbidden in ("10001", "10002", "q.qlogo.cn", "sha256", "raw", "relation"):
         assert forbidden not in serialized
@@ -352,6 +354,8 @@ def test_normal_and_yaml_agent_paths_register_pair_tool_per_turn() -> None:
 
     assert "register_group_user_avatar_pair_insight_tool(" in normal
     assert "avatar_pair_candidates=avatar_pair_candidates" in processor
+    assert "agent_direct_output" in processor
+    assert 'reason="safe_direct_output"' in processor
     assert "register_group_user_avatar_pair_insight_tool(" in yaml
     assert "resolved_avatar_pair_candidates" in yaml
 

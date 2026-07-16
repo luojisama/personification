@@ -18,7 +18,6 @@ _AVATAR_PAIR_SAFE_RESULT_PREFIX = "[AVATAR_PAIR_SAFE_RESULT]"
 
 def _safe_avatar_pair_wrapper_text(value: Any) -> str:
     payload = value if isinstance(value, dict) else {}
-    display_label = " ".join(str(payload.get("display_label", "") or "").split())[:120]
     safe_summary = " ".join(str(payload.get("safe_summary", "") or "").split())[:240]
     raw_limitations = payload.get("limitations")
     limitations: list[str] = []
@@ -29,10 +28,19 @@ def _safe_avatar_pair_wrapper_text(value: Any) -> str:
                 limitations.append(text)
     if not safe_summary:
         safe_summary = "当前无法完成两张头像的联合视觉比较。"
-    visible = f"{display_label}：{safe_summary}" if display_label else safe_summary
+    visible = f"两位候选成员的头像：{safe_summary}"
     if limitations:
         visible += " " + "；".join(limitations)
     return normalize_visible_reply_text(visible)
+
+
+def render_avatar_pair_safe_result(result_text: str) -> str:
+    payload = _parse_json_tool_result(str(result_text or ""))
+    safe_payload = {
+        "safe_summary": payload.get("safe_summary", "") if isinstance(payload, dict) else "",
+        "limitations": payload.get("limitations", []) if isinstance(payload, dict) else [],
+    }
+    return _safe_avatar_pair_wrapper_text(safe_payload)
 
 
 def _render_tool_result_for_user(tool_name: str, result_text: str, query: str) -> str:
@@ -40,7 +48,6 @@ def _render_tool_result_for_user(tool_name: str, result_text: str, query: str) -
     if str(tool_name or "").strip() == _AVATAR_PAIR_TOOL_NAME:
         payload = _parse_json_tool_result(raw)
         safe_payload = {
-            "display_label": payload.get("display_label", "") if isinstance(payload, dict) else "",
             "safe_summary": payload.get("safe_summary", "") if isinstance(payload, dict) else "",
             "limitations": payload.get("limitations", []) if isinstance(payload, dict) else [],
         }
@@ -168,4 +175,5 @@ __all__ = [
     "_is_direct_media_tool_result",
     "_render_tool_result_for_user",
     "_wrap_tool_result_in_persona",
+    "render_avatar_pair_safe_result",
 ]

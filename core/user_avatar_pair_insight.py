@@ -386,7 +386,8 @@ def _safe_pair_payload(
     *,
     unavailable_summary: str = "当前无法完成两张头像的联合视觉比较。",
 ) -> dict[str, Any]:
-    display_label = f"{left_label} 与 {right_label} 的头像"
+    del left_label, right_label
+    display_label = "两位候选成员的头像"
     if assessment is None:
         return {
             "ok": True,
@@ -736,7 +737,7 @@ def build_group_user_avatar_pair_insight_tool(
             "risk_level": "low",
             "read_only": True,
             "side_effect": "none",
-            "final_behavior": "continue",
+            "final_behavior": "safe_direct_output",
             "retryable": True,
             "source_kind": "first_party_runtime",
         },

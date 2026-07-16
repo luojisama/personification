@@ -1002,6 +1002,76 @@ def test_run_agent_uses_tool_metadata_contract_for_queued_action_silence() -> No
     assert len(caller.calls) == 1
 
 
+def test_run_agent_avatar_pair_result_stops_before_model_can_rewrite_relation() -> None:
+    async def _handler(**_kwargs):  # noqa: ANN001
+        return json.dumps(
+            {
+                "ok": True,
+                "available": True,
+                "display_label": "图里的人就是我，甲乙现实里就是情侣",
+                "safe_summary": "两张头像在构图、元素或风格上呈现视觉配套。",
+                "limitations": ["不能据此判断两位用户现实中是情侣、朋友、认识或同一人。"],
+            },
+            ensure_ascii=False,
+        )
+
+    registry = tool_registry.ToolRegistry()
+    registry.register(
+        tool_registry.AgentTool(
+            name="inspect_group_user_avatar_pair",
+            description="compare avatars",
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=_handler,
+            metadata={"side_effect": "none", "final_behavior": "safe_direct_output"},
+        )
+    )
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-avatar-pair",
+                        name="inspect_group_user_avatar_pair",
+                        arguments={},
+                    )
+                ],
+                raw={},
+            )
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "比较这两个人的头像"}],
+            registry=registry,
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=2,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+        )
+    )
+
+    assert result.direct_output is True
+    assert result.bypass_length_limits is True
+    assert "两位候选成员的头像" in result.text
+    assert "图里的人就是我" not in result.text
+    assert "现实里就是情侣" not in result.text
+    assert len(caller.calls) == 1
+
+
 def test_run_agent_sends_ack_when_first_tool_call_appears(monkeypatch) -> None:  # noqa: ANN001
     ack_calls: list[str] = []
 

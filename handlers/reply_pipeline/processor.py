@@ -1856,6 +1856,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         pending_actions: list[dict[str, Any]] = []
         agent_failure_code = ""
         agent_suppress_reply_recovery = False
+        agent_direct_output = False
         favorability_committed = False
 
         def _commit_favorability_if_confirmed() -> None:
@@ -1969,6 +1970,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         pending_actions,
                         agent_failure_code,
                         agent_suppress_reply_recovery,
+                        agent_direct_output,
                     ) = await _run_agent_if_enabled(
                         bot=bot,
                         event=event,
@@ -2070,7 +2072,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             reply_content,
             reply_required=reply_required,
             pending_actions=pending_actions,
-            direct_output=agent_suppress_reply_recovery,
+            direct_output=bool(agent_direct_output or agent_suppress_reply_recovery),
         ):
             runtime.logger.warning("拟人插件：强交互 Agent 返回静默，改走基础模型恢复。")
             reply_content = ""
@@ -2140,7 +2142,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     except Exception:
                         pass
                     return
-        elif is_agent_reply_ooc(reply_content):
+        elif not agent_direct_output and is_agent_reply_ooc(reply_content):
             rewritten_ooc = await rewrite_agent_reply_ooc(
                 tool_caller=runtime.lite_tool_caller or runtime.agent_tool_caller,
                 original_text=reply_content,
@@ -2222,7 +2224,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             reply_content,
             reply_required=reply_required,
             pending_actions=pending_actions,
-            direct_output=agent_suppress_reply_recovery,
+            direct_output=bool(agent_direct_output or agent_suppress_reply_recovery),
         ):
             reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
         reply_content, legacy_favorability_signals = extract_legacy_favorability_markers(reply_content)
@@ -2296,7 +2298,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             await _maybe_silence_reaction()
             return
 
-        if not is_private_session and message_intent == "banter":
+        if not agent_direct_output and not is_private_session and message_intent == "banter":
             async def _rewrite_for_repeat(cluster_text: str, original_reply: str) -> str:
                 rewrite_messages = list(messages) + [
                     {
@@ -2338,7 +2340,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         )
         should_review_visual_reply = bool(turn_media_context and not _IMAGE_B64_RE.search(reply_content or ""))
         should_review_agent_reply = bool(used_agent and should_review_visual_reply)
-        if used_agent and not should_review_agent_reply and not care_review_required:
+        if agent_direct_output:
+            review_decision = make_passthrough_review_decision(
+                reply_content,
+                reason="safe_direct_output",
+            )
+        elif used_agent and not should_review_agent_reply and not care_review_required:
             review_decision = make_passthrough_review_decision(
                 reply_content,
                 reason="agent_passthrough",
