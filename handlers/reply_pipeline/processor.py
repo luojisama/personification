@@ -12,6 +12,13 @@ from nonebot.exception import FinishedException
 
 from ...core.chat_intent import looks_like_explanatory_output
 from ...core.error_utils import log_exception
+from ...core.favorability_turn import (
+    build_favorability_context_block,
+    build_favorability_turn_id,
+    commit_favorability_turn,
+    extract_legacy_favorability_markers,
+    signals_from_semantic_frame,
+)
 from ...core.image_input import (
     is_image_input_unsupported_error,
     normalize_image_detail,
@@ -1068,18 +1075,30 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
     if persona.sign_in_available:
         try:
+            current_attitudes = getattr(
+                runtime.plugin_config,
+                "personification_favorability_attitudes",
+                None,
+            ) or persona.favorability_attitudes
             user_data = persona.get_user_data(user_id)
             favorability = user_data.get("favorability", 0.0)
             level_name = persona.get_level_name(favorability)
-            attitude_desc = persona.favorability_attitudes.get(level_name, attitude_desc)
+            attitude_desc = current_attitudes.get(level_name, attitude_desc)
 
             group_key = f"group_{group_id}"
             group_data = persona.get_user_data(group_key)
-            group_favorability = group_data.get("favorability", 100.0)
+            group_favorability = group_data.get("favorability", 35.0)
             group_level = persona.get_level_name(group_favorability)
-            group_attitude = persona.favorability_attitudes.get(group_level, "")
+            group_attitude = current_attitudes.get(group_level, "")
         except Exception as e:
             runtime.logger.error(f"获取好感度数据失败: {e}")
+
+    favorability_context_block = build_favorability_context_block(
+        user_level=level_name,
+        user_attitude=attitude_desc,
+        group_attitude=group_attitude,
+        is_private=is_private_session,
+    )
 
     now = runtime.get_current_time()
     week_days = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -1358,6 +1377,16 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     inner_state = prepared_semantics.inner_state
     emotion_state = prepared_semantics.emotion_state
     semantic_frame = prepared_semantics.semantic_frame
+    favorability_signals = signals_from_semantic_frame(
+        semantic_frame,
+        is_private=is_private_session,
+    )
+    favorability_turn_id = build_favorability_turn_id(
+        trace_id=state.get("reply_trace_id", ""),
+        message_id=getattr(event, "message_id", ""),
+        group_id=group_id,
+        user_id=user_id,
+    )
     intent_decision = prepared_semantics.intent_decision
     message_intent = prepared_semantics.message_intent
     arbitration = prepared_semantics.arbitration
@@ -1558,24 +1587,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             precomputed_image_summary_suffix=image_summary_suffix,
             user_profile_block=user_profile_block,
             profile_service=getattr(runtime, "profile_service", None),
+            favorability_context_block=favorability_context_block,
+            favorability_turn_id=favorability_turn_id,
         )
         return
 
-    attitude_desc = attitude_desc or "态度普通，像平常一样交流。"
-    relation_style = "用自然平衡语气回应。"
-    preferred_length = "默认回复 1-2 句。"
-    if level_name in {"挚友", "亲密"}:
-        relation_style = "适度使用更亲近的称呼或语气词，体现熟悉感。"
-        preferred_length = "可以扩展到 2-4 句，增加情感反馈。"
-    elif level_name in {"陌生", "路人"}:
-        relation_style = "保持礼貌和边界感，避免过度亲昵。"
-        preferred_length = "优先 1-2 句，直接回答重点。"
-    if is_private_session:
-        relation_style += " 私聊场景可更自然连续，不必强调围观感。"
-
-    combined_attitude = f"你对该用户的个人态度是：{attitude_desc}\n关系表达策略：{relation_style}\n长度偏好：{preferred_length}"
-    if group_attitude:
-        combined_attitude += f"\n当前群聊整体氛围带给你的感受是：{group_attitude}"
+    combined_attitude = favorability_context_block
     emotion_block = prepared_semantics.emotion_block
 
     hook_ctx.session_messages = session_messages_for_model
@@ -1828,11 +1845,36 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         pending_actions: list[dict[str, Any]] = []
         agent_failure_code = ""
         agent_suppress_reply_recovery = False
+        favorability_committed = False
+
+        def _commit_favorability_if_confirmed() -> None:
+            nonlocal favorability_committed
+            if favorability_committed or not bool(state.get("reply_delivery_confirmed", False)):
+                return
+            favorability_committed = True
+            try:
+                commit_favorability_turn(
+                    service=getattr(persona, "favorability_service", None),
+                    user_id=user_id,
+                    group_id=str(group_id),
+                    is_private=is_private_session,
+                    is_direct=bool(is_direct_mention or not is_random_chat or is_active_followup),
+                    is_random_chat=bool(is_random_chat),
+                    signals=favorability_signals,
+                    turn_id=favorability_turn_id,
+                    now=runtime.get_current_time(),
+                )
+            except Exception as exc:
+                runtime.logger.debug(f"拟人插件：提交回复好感事件失败: {exc}")
+
+        def _confirm_reply_delivery() -> None:
+            mark_reply_delivery_confirmed(state)
+            _commit_favorability_if_confirmed()
 
         async def _send_reply(payload: Any) -> Any:
             mark_reply_delivery_started(state)
             result = await bot.send(event, payload)
-            mark_reply_delivery_confirmed(state)
+            _confirm_reply_delivery()
             return result
 
         def _finish_action_only_trace() -> None:
@@ -1873,6 +1915,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 pending_actions,
                 state=state,
             )
+            _commit_favorability_if_confirmed()
             if history_parts:
                 setattr(
                     event,
@@ -2170,6 +2213,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             direct_output=agent_suppress_reply_recovery,
         ):
             reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+        reply_content, legacy_favorability_signals = extract_legacy_favorability_markers(reply_content)
+        favorability_signals.merge(legacy_favorability_signals)
         has_block_marker = "[BLOCK]" in reply_content or "<BLOCK>" in reply_content
         if has_block_marker:
             reply_content = reply_content.replace("[BLOCK]", "").replace("<BLOCK>", "").strip()
@@ -2238,103 +2283,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             )
             await _maybe_silence_reaction()
             return
-
-        has_good_atmosphere = "[氛围好]" in reply_content or "<氛围好>" in reply_content
-        if has_good_atmosphere:
-            reply_content = reply_content.replace("[氛围好]", "").replace("<氛围好>", "").strip()
-            if persona.sign_in_available:
-                try:
-                    is_private_context = str(group_id).startswith("private_")
-                    if not is_private_context:
-                        service = getattr(persona, "favorability_service", None)
-                        if service is not None and hasattr(service, "apply_group_good_atmosphere"):
-                            result = service.apply_group_good_atmosphere(
-                                str(group_id),
-                                now=runtime.get_current_time(),
-                            )
-                            delta = float(result.get("delta", 0.0) or 0.0)
-                            if delta > 0:
-                                runtime.logger.info(
-                                    f"AI 觉得群 {group_id} 氛围良好，好感度 +{delta:.2f} "
-                                    f"(今日已加: {float(result.get('daily_used', 0.0) or 0.0):.2f}/"
-                                    f"{float(result.get('daily_cap', 0.0) or 0.0):.2f})"
-                                )
-                        else:
-                            group_key = f"group_{group_id}"
-                            group_data = persona.get_user_data(group_key)
-
-                            today = runtime.get_current_time().strftime("%Y-%m-%d")
-                            last_update = group_data.get("last_update", "")
-                            daily_count = group_data.get("daily_fav_count", 0.0)
-
-                            if last_update != today:
-                                daily_count = 0.0
-
-                            if daily_count < 10.0:
-                                g_current_fav = float(group_data.get("favorability", 100.0))
-                                g_new_fav = round(g_current_fav + 0.1, 2)
-                                daily_count = round(float(daily_count) + 0.1, 2)
-                                persona.update_user_data(
-                                    group_key,
-                                    favorability=g_new_fav,
-                                    daily_fav_count=daily_count,
-                                    last_update=today,
-                                )
-                                runtime.logger.info(
-                                    f"AI 觉得群 {group_id} 氛围良好，好感度 +0.10 "
-                                    f"(今日已加: {daily_count:.2f}/10.00)"
-                                )
-                except Exception as e:
-                    runtime.logger.error(f"增加群聊好感度失败: {e}")
-
-        has_interesting = "[有趣]" in reply_content
-        if has_interesting:
-            reply_content = reply_content.replace("[有趣]", "").strip()
-            if persona.sign_in_available:
-                try:
-                    service = getattr(persona, "favorability_service", None)
-                    if service is not None and hasattr(service, "apply_user_interesting_chat"):
-                        result = service.apply_user_interesting_chat(
-                            user_id,
-                            now=runtime.get_current_time(),
-                            group_id="" if is_private_session else str(group_id),
-                        )
-                        delta = float(result.get("delta", 0.0) or 0.0)
-                        if delta > 0:
-                            runtime.logger.info(
-                                f"AI 觉得与 {user_name}({user_id}) 聊天有趣，"
-                                f"好感度 +{delta:.2f} "
-                                f"(今日已加: {float(result.get('daily_used', 0.0) or 0.0):.2f}/"
-                                f"{float(result.get('daily_cap', 0.0) or 0.0):.1f})"
-                            )
-                    else:
-                        user_data = persona.get_user_data(user_id)
-                        today = runtime.get_current_time().strftime("%Y-%m-%d")
-
-                        last_fav_date = user_data.get("last_interesting_date", "")
-                        daily_interesting_count = float(user_data.get("daily_interesting_count", 0.0))
-                        if last_fav_date != today:
-                            daily_interesting_count = 0.0
-
-                        DAILY_LIMIT = 5.0
-                        INCREMENT = 0.05
-
-                        if daily_interesting_count < DAILY_LIMIT:
-                            current_fav = float(user_data.get("favorability", 0.0))
-                            new_fav = round(current_fav + INCREMENT, 2)
-                            daily_interesting_count = round(daily_interesting_count + INCREMENT, 2)
-                            persona.update_user_data(
-                                user_id,
-                                favorability=new_fav,
-                                daily_interesting_count=daily_interesting_count,
-                                last_interesting_date=today,
-                            )
-                            runtime.logger.info(
-                                f"AI 觉得与 {user_name}({user_id}) 聊天有趣，"
-                                f"好感度 +{INCREMENT} (今日已加: {daily_interesting_count:.2f}/{DAILY_LIMIT:.1f})"
-                            )
-                except Exception as e:
-                    runtime.logger.error(f"增加用户好感度失败: {e}")
 
         if not is_private_session and message_intent == "banter":
             async def _rewrite_for_repeat(cluster_text: str, original_reply: str) -> str:
@@ -2414,6 +2362,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             return
         if review_decision.action == "rewrite" and review_decision.text:
             reply_content = review_decision.text.strip()
+
+        reply_content, reviewed_favorability_signals = extract_legacy_favorability_markers(reply_content)
+        favorability_signals.merge(reviewed_favorability_signals)
 
         if (
             has_silence_control_marker(reply_content)
@@ -2586,7 +2537,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         persona_tts=persona_tts,
                         pause_range=(1.2, 2.0),
                         on_delivery_started=lambda: mark_reply_delivery_started(state),
-                        on_delivery_confirmed=lambda: mark_reply_delivery_confirmed(state),
+                        on_delivery_confirmed=_confirm_reply_delivery,
                     )
             except Exception as e:
                 likely_delivered = is_likely_delivered_send_timeout(e)
@@ -2797,25 +2748,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             assistant_text=final_visible_reply_text,
             is_private=is_private_session,
         )
-        try:
-            service = getattr(persona, "favorability_service", None)
-            if service is not None and hasattr(service, "apply_user_reply_interaction"):
-                result = service.apply_user_reply_interaction(
-                    user_id,
-                    now=runtime.get_current_time(),
-                    group_id="" if is_private_session else str(group_id),
-                    is_direct=bool(is_direct_mention or not is_random_chat or is_active_followup),
-                    is_random_chat=bool(is_random_chat),
-                )
-                delta = float(result.get("delta", 0.0) or 0.0)
-                if delta > 0:
-                    runtime.logger.debug(
-                        f"拟人插件：记录与 {user_name}({user_id}) 的成功回复互动，好感度 +{delta:.2f} "
-                        f"(今日已加: {float(result.get('daily_used', 0.0) or 0.0):.2f}/"
-                        f"{float(result.get('daily_cap', 0.0) or 0.0):.2f})"
-                    )
-        except Exception as exc:
-            runtime.logger.debug(f"拟人插件：记录成功回复互动好感事件失败: {exc}")
         schedule_inner_state_update_after_reply(
             runtime=runtime,
             user_text=raw_message_text or message_text or message_content,

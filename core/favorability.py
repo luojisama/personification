@@ -1228,6 +1228,7 @@ class FavorabilityService:
         *,
         now: Any = None,
         reason: str = "模型输出氛围好控制标记",
+        event_id: str = "",
     ) -> dict[str, Any]:
         gid = str(group_id or "").strip()
         return self.apply_event(
@@ -1236,6 +1237,7 @@ class FavorabilityService:
             reason=reason,
             group_id=gid,
             now=now,
+            event_id=event_id,
         )
 
     def apply_user_interesting_chat(
@@ -1245,6 +1247,7 @@ class FavorabilityService:
         now: Any = None,
         group_id: str = "",
         reason: str = "模型输出有趣控制标记",
+        event_id: str = "",
     ) -> dict[str, Any]:
         return self.apply_event(
             str(user_id or "").strip(),
@@ -1252,6 +1255,7 @@ class FavorabilityService:
             reason=reason,
             group_id=str(group_id or "").strip(),
             now=now,
+            event_id=event_id,
         )
 
     def apply_user_reply_interaction(
@@ -1263,6 +1267,7 @@ class FavorabilityService:
         is_direct: bool = False,
         is_random_chat: bool = False,
         reason: str = "成功完成一轮可见回复互动",
+        event_id: str = "",
     ) -> dict[str, Any]:
         return self.apply_event(
             str(user_id or "").strip(),
@@ -1274,6 +1279,7 @@ class FavorabilityService:
                 "is_direct": bool(is_direct),
                 "is_random_chat": bool(is_random_chat),
             },
+            event_id=event_id,
         )
 
     def apply_perm_blacklist(

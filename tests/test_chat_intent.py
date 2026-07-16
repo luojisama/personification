@@ -47,6 +47,8 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
             "expression_style": "直接一点",
             "tts_style_hint": "自然",
             "sticker_mood_hint": "淡定|表达疑惑",
+            "group_atmosphere_positive": True,
+            "interaction_interesting": True,
             "confidence": 0.8,
             "reason": "test",
         }
@@ -62,6 +64,8 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
     assert valid.sticker_appropriate is False
     assert valid.evidence_policy == "strict"
     assert valid.emotional_support.risk_level == "concern"
+    assert valid.group_atmosphere_positive is True
+    assert valid.interaction_interesting is True
     assert invalid is None
 
 
@@ -162,6 +166,39 @@ def test_semantic_frame_prompt_treats_direct_mention_as_turn_cue_not_formal_qa()
     assert "是否明确 @/直呼 bot：是" in user_prompt
     assert frame.chat_intent == "banter"
     assert frame.recommend_silence is False
+
+
+def test_semantic_frame_prompt_uses_structured_favorability_signals() -> None:
+    captured: dict[str, object] = {}
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            captured["messages"] = messages
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"chat_intent":"banter","group_atmosphere_positive":true,'
+                        '"interaction_interesting":true,"confidence":0.9}'
+                    )
+                },
+            )()
+
+    frame = asyncio.run(
+        chat_intent.infer_turn_semantic_frame_with_llm(
+            "今天聊得真不错",
+            is_group=True,
+            tool_caller=_Caller(),
+        )
+    )
+    prompt = captured["messages"][0]["content"]  # type: ignore[index]
+
+    assert '"group_atmosphere_positive":false' in prompt
+    assert "普通无冲突聊天不能机械设为 true" in prompt
+    assert "成功回复本身不等于有趣" in prompt
+    assert frame.group_atmosphere_positive is True
+    assert frame.interaction_interesting is True
 
 
 def test_parse_address_mode_field() -> None:

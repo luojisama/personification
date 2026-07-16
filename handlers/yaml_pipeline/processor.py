@@ -20,6 +20,12 @@ from ...core.emotion_state import (
     render_inner_state_hint,
     update_emotion_state_after_turn,
 )
+from ...core.favorability_turn import (
+    build_favorability_turn_id,
+    commit_favorability_turn,
+    extract_legacy_favorability_markers,
+    signals_from_semantic_frame,
+)
 from ...core.group_context import (
     build_group_conversation_context,
     render_group_conversation_context,
@@ -523,6 +529,8 @@ async def process_yaml_response_logic(
     precomputed_image_summary_suffix: str = "",
     user_profile_block: str = "",
     profile_service: Any = None,
+    favorability_context_block: str = "",
+    favorability_turn_id: str = "",
 ) -> None:
     """处理基于 YAML 模板的新版响应逻辑。"""
     reply_commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
@@ -601,6 +609,15 @@ async def process_yaml_response_logic(
     )
 
     is_private_session = str(group_id).startswith(private_session_prefix)
+    favorability_signals = signals_from_semantic_frame(
+        semantic_frame,
+        is_private=is_private_session,
+    )
+    resolved_favorability_turn_id = str(favorability_turn_id or "").strip() or build_favorability_turn_id(
+        message_id=getattr(event, "message_id", ""),
+        group_id=group_id,
+        user_id=user_id,
+    )
     record_counter(
         "yaml_reply.requests_total",
         scene="private" if is_private_session else "group",
@@ -618,11 +635,36 @@ async def process_yaml_response_logic(
     is_direct_mention = _event_mentions_bot(event, bot)
     pending_action_executor: Any = None
     pending_actions: list[dict[str, Any]] = []
+    favorability_committed = False
+
+    def _commit_favorability_if_confirmed() -> None:
+        nonlocal favorability_committed
+        if favorability_committed or not bool(reply_commit_state.get("reply_delivery_confirmed", False)):
+            return
+        favorability_committed = True
+        try:
+            commit_favorability_turn(
+                service=favorability_service,
+                user_id=user_id,
+                group_id=group_id,
+                is_private=is_private_session,
+                is_direct=bool(is_direct_mention or not is_random_chat),
+                is_random_chat=bool(is_random_chat),
+                signals=favorability_signals,
+                turn_id=resolved_favorability_turn_id,
+                now=get_current_time(),
+            )
+        except Exception as exc:
+            logger.debug(f"拟人插件 (YAML)：提交回复好感事件失败: {exc}")
+
+    def _confirm_reply_delivery() -> None:
+        mark_reply_delivery_confirmed(reply_commit_state)
+        _commit_favorability_if_confirmed()
 
     async def _send_reply(payload: Any) -> Any:
         mark_reply_delivery_started(reply_commit_state)
         result = await bot.send(event, payload)
-        mark_reply_delivery_confirmed(reply_commit_state)
+        _confirm_reply_delivery()
         return result
 
     async def _commit_pending_actions() -> None:
@@ -637,6 +679,7 @@ async def process_yaml_response_logic(
             pending_actions,
             state=reply_commit_state,
         )
+        _commit_favorability_if_confirmed()
         if history_parts:
             setattr(
                 event,
@@ -1014,6 +1057,12 @@ async def process_yaml_response_logic(
         intent_ambiguity_level = intent_decision.ambiguity_level
     if intent_recommend_silence is None:
         intent_recommend_silence = intent_decision.recommend_silence
+    favorability_signals.merge(
+        signals_from_semantic_frame(
+            semantic_frame,
+            is_private=is_private_session,
+        )
+    )
     _trace_stage(
         key="yaml_semantic_frame",
         label="YAML 语义帧",
@@ -1054,6 +1103,8 @@ async def process_yaml_response_logic(
     system_prompt = prompt_config.get("system", "")
     if user_profile_block:
         system_prompt += f"\n\n{user_profile_block}"
+    if favorability_context_block:
+        system_prompt += f"\n\n{favorability_context_block}"
     if is_private_session:
         system_prompt += (
             "\n\n## 私聊称呼规则（高优先级）\n"
@@ -1574,6 +1625,8 @@ async def process_yaml_response_logic(
                 used_agent = False
                 agent_result = None
         if agent_result is not None:
+            reply_content, legacy_favorability_signals = extract_legacy_favorability_markers(reply_content)
+            favorability_signals.merge(legacy_favorability_signals)
             if not agent_result.direct_output and is_agent_reply_ooc(reply_content):
                 rewritten_ooc = await rewrite_agent_reply_ooc(
                     tool_caller=lite_tool_caller or agent_tool_caller,
@@ -1608,7 +1661,7 @@ async def process_yaml_response_logic(
                     try:
                         mark_reply_delivery_started(reply_commit_state)
                         if await _send_translation_forward(bot, event, raw_direct_output):
-                            mark_reply_delivery_confirmed(reply_commit_state)
+                            _confirm_reply_delivery()
                             mark_reply_delivery_complete(reply_commit_state)
                             _trace_stage(
                                 key="yaml_direct_output_success",
@@ -1686,6 +1739,8 @@ async def process_yaml_response_logic(
         _trace_no_reply("agent_no_reply", detail="Agent 返回 NO_REPLY")
         return
 
+    reply_content, legacy_favorability_signals = extract_legacy_favorability_markers(reply_content)
+    favorability_signals.merge(legacy_favorability_signals)
     parsed = parse_yaml_response(reply_content)
     has_block_marker = "[BLOCK]" in reply_content or "<BLOCK>" in reply_content
     frame_domain_focus = str(getattr(semantic_frame, "domain_focus", "") or "").strip().lower()
@@ -1918,6 +1973,9 @@ async def process_yaml_response_logic(
         assistant_text = sanitize_history_text(review_decision.text.strip())
         parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
 
+    assistant_text, reviewed_favorability_signals = extract_legacy_favorability_markers(assistant_text)
+    favorability_signals.merge(reviewed_favorability_signals)
+
     suppress_reply_recovery = bool(
         agent_result is not None and getattr(agent_result, "suppress_reply_recovery", False)
     )
@@ -2127,7 +2185,7 @@ async def process_yaml_response_logic(
                     persona_tts=persona_tts,
                     pause_range=(0.8, 1.5),
                     on_delivery_started=lambda: mark_reply_delivery_started(reply_commit_state),
-                    on_delivery_confirmed=lambda: mark_reply_delivery_confirmed(reply_commit_state),
+                    on_delivery_confirmed=_confirm_reply_delivery,
                 )
         except Exception as e:
             likely_delivered = is_likely_delivered_send_timeout(e)
@@ -2306,24 +2364,6 @@ async def process_yaml_response_logic(
         )
     except Exception as e:
         logger.debug(f"[emotion] YAML update after reply failed: {e}")
-    try:
-        if favorability_service is not None and hasattr(favorability_service, "apply_user_reply_interaction"):
-            result = favorability_service.apply_user_reply_interaction(
-                user_id,
-                now=get_current_time(),
-                group_id="" if is_private_session else group_id,
-                is_direct=bool(is_direct_mention or not is_random_chat),
-                is_random_chat=bool(is_random_chat),
-            )
-            delta = float(result.get("delta", 0.0) or 0.0)
-            if delta > 0:
-                logger.debug(
-                    f"拟人插件 (YAML)：记录与 {user_name}({user_id}) 的成功回复互动，好感度 +{delta:.2f} "
-                    f"(今日已加: {float(result.get('daily_used', 0.0) or 0.0):.2f}/"
-                    f"{float(result.get('daily_cap', 0.0) or 0.0):.2f})"
-                )
-    except Exception as exc:
-        logger.debug(f"拟人插件 (YAML)：记录成功回复互动好感事件失败: {exc}")
     schedule_inner_state_update_after_reply(
         inner_state_updater=inner_state_updater,
         logger=logger,
@@ -2540,6 +2580,10 @@ def build_yaml_response_processor(
             ),
             user_profile_block=str(runtime_overrides.get("user_profile_block", "") or ""),
             profile_service=runtime_overrides.get("profile_service"),
+            favorability_context_block=str(
+                runtime_overrides.get("favorability_context_block", "") or ""
+            ),
+            favorability_turn_id=str(runtime_overrides.get("favorability_turn_id", "") or ""),
         )
 
     return _processor

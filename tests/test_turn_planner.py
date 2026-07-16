@@ -51,6 +51,8 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
             "bot_emotion": "关切",
             "emotion_intensity": "high",
             "expression_style": "先听再回应",
+            "group_atmosphere_positive": True,
+            "interaction_interesting": True,
             "confidence": 1.8,
             "reason": "test",
         }
@@ -67,6 +69,8 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
     assert plan.domain_focus == "technology"
     assert plan.evidence_policy == "strict"
     assert plan.emotional_support.advice_permission == "ask_first"
+    assert plan.group_atmosphere_positive is True
+    assert plan.interaction_interesting is True
 
 
 def test_turn_plan_to_semantic_frame_maps_lookup_plugin() -> None:
@@ -105,6 +109,8 @@ def test_turn_plan_semantic_frame_round_trip_preserves_care_and_emotion() -> Non
         bot_emotion="认真关切",
         emotion_intensity="high",
         expression_style="先倾听确认",
+        group_atmosphere_positive=True,
+        interaction_interesting=True,
     )
 
     frame = planner.turn_plan_to_semantic_frame(plan)
@@ -116,6 +122,9 @@ def test_turn_plan_semantic_frame_round_trip_preserves_care_and_emotion() -> Non
     assert restored.emotional_support == plan.emotional_support
     assert restored.user_attitude == "脆弱地求助"
     assert restored.bot_emotion == "认真关切"
+    assert frame.group_atmosphere_positive is True
+    assert restored.group_atmosphere_positive is True
+    assert restored.interaction_interesting is True
 
 
 def test_legacy_turn_plan_derives_plugin_and_realtime_domains_when_new_field_missing() -> None:
