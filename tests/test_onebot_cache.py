@@ -28,6 +28,7 @@ class _FakeBot:
         self.stranger_calls = 0
         self.group_calls = 0
         self.group_list_calls = 0
+        self.group_member_calls = 0
 
     async def get_stranger_info(self, *, user_id: int) -> dict:
         self.stranger_calls += 1
@@ -46,6 +47,12 @@ class _FakeBot:
         if self.fail:
             raise RuntimeError("bot offline")
         return self.group_list
+
+    async def get_group_member_info(self, *, group_id: int, user_id: int) -> dict:
+        self.group_member_calls += 1
+        if self.fail:
+            raise RuntimeError("bot offline")
+        return {"group_id": group_id, "user_id": user_id, "nickname": self.nickname}
 
 
 @pytest.fixture(autouse=True)
@@ -219,3 +226,58 @@ def test_failure_cache_uses_short_ttl(monkeypatch) -> None:
     now += onebot_cache._FAILURE_TTL_SECONDS + 1
     assert asyncio.run(onebot_cache.get_group_name(bot, "98765")) == ""
     assert bot.group_calls == 2
+
+
+def test_group_member_proof_is_bot_group_user_scoped_and_cached_for_five_minutes(monkeypatch) -> None:  # noqa: ANN001
+    now = 1000.0
+    monkeypatch.setattr(onebot_cache.time, "time", lambda: now)
+    bot = _FakeBot(nickname="成员")
+    bot.self_id = "90001"
+    first = asyncio.run(onebot_cache.get_group_member_info(bot, "20001", "10001"))
+    second = asyncio.run(onebot_cache.get_group_member_info(bot, "20001", "10001"))
+    other_group = asyncio.run(onebot_cache.get_group_member_info(bot, "20002", "10001"))
+    other_user = asyncio.run(onebot_cache.get_group_member_info(bot, "20001", "10002"))
+    assert first == second == {"group_id": 20001, "user_id": 10001, "nickname": "成员"}
+    assert other_group and other_user
+    assert bot.group_member_calls == 3
+
+    now += onebot_cache._GROUP_MEMBER_SUCCESS_TTL_SECONDS + 1
+    assert asyncio.run(onebot_cache.get_group_member_info(bot, "20001", "10001"))
+    assert bot.group_member_calls == 4
+
+
+def test_group_member_proof_failure_is_cached_for_fifteen_seconds(monkeypatch) -> None:  # noqa: ANN001
+    now = 1000.0
+    monkeypatch.setattr(onebot_cache.time, "time", lambda: now)
+    bot = _FakeBot(fail=True)
+    assert asyncio.run(onebot_cache.get_group_member_info(bot, "20001", "10001")) is None
+    assert asyncio.run(onebot_cache.get_group_member_info(bot, "20001", "10001")) is None
+    assert bot.group_member_calls == 1
+    now += onebot_cache._FAILURE_TTL_SECONDS + 1
+    assert asyncio.run(onebot_cache.get_group_member_info(bot, "20001", "10001")) is None
+    assert bot.group_member_calls == 2
+
+
+def test_group_member_proof_uses_call_api_fallback_and_deduplicates_inflight() -> None:
+    class _CallApiBot:
+        self_id = "90001"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_api(self, api: str, **kwargs) -> dict:
+            assert api == "get_group_member_info"
+            self.calls += 1
+            await asyncio.sleep(0)
+            return {"group_id": kwargs["group_id"], "user_id": kwargs["user_id"]}
+
+    bot = _CallApiBot()
+
+    async def _run() -> list[dict | None]:
+        return await asyncio.gather(
+            *(onebot_cache.get_group_member_info(bot, "20001", "10001") for _index in range(8))
+        )
+
+    results = asyncio.run(_run())
+    assert all(item == {"group_id": 20001, "user_id": 10001} for item in results)
+    assert bot.calls == 1

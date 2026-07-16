@@ -3,6 +3,7 @@ import random
 import re
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List
 
 from ...agent.inner_state import get_personification_data_dir
@@ -102,6 +103,10 @@ from ...core.turn_media import (
 )
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_YAML
 from ...core.user_avatar_insight import register_current_user_avatar_tool
+from ...core.user_avatar_pair_insight import (
+    build_avatar_pair_candidates,
+    register_group_user_avatar_pair_insight_tool,
+)
 from ...skill_runtime.runtime_api import SkillRuntime
 
 from ...agent.action_executor import ActionExecutor
@@ -531,6 +536,8 @@ async def process_yaml_response_logic(
     profile_service: Any = None,
     favorability_context_block: str = "",
     favorability_turn_id: str = "",
+    avatar_pair_candidates: List[Dict[str, str]] | None = None,
+    avatar_pair_runtime: Any = None,
 ) -> None:
     """处理基于 YAML 模板的新版响应逻辑。"""
     reply_commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
@@ -861,8 +868,21 @@ async def process_yaml_response_logic(
             )
     else:
         recent_window = []
-    recent_bot_replies = extract_recent_bot_reply_texts(
-        recent_window if recent_window else get_recent_group_msgs(group_id, limit=8, expire_hours=0) if not is_private_session else []
+    avatar_pair_recent_messages = (
+        recent_window
+        if recent_window
+        else get_recent_group_msgs(group_id, limit=8, expire_hours=0)
+        if not is_private_session
+        else []
+    )
+    recent_bot_replies = extract_recent_bot_reply_texts(avatar_pair_recent_messages)
+    resolved_avatar_pair_candidates = list(avatar_pair_candidates or []) or build_avatar_pair_candidates(
+        event=event,
+        current_user_id=user_id,
+        current_user_label=user_name,
+        bot_self_id=getattr(bot, "self_id", ""),
+        batched_events=list(batched_events or []),
+        recent_messages=avatar_pair_recent_messages,
     )
     data_dir = get_personification_data_dir(plugin_config)
     if isinstance(prepared_inner_state, dict) and isinstance(prepared_emotion_state, dict):
@@ -1455,6 +1475,17 @@ async def process_yaml_response_logic(
         executor = ActionExecutor(bot, event, plugin_config, logger)
         agent_tool_registry = _clone_tool_registry(tool_registry)
         register_current_user_avatar_tool(agent_tool_registry, profile_service, user_id)
+        register_group_user_avatar_pair_insight_tool(
+            agent_tool_registry,
+            runtime=avatar_pair_runtime
+            or SimpleNamespace(
+                plugin_config=plugin_config,
+                get_configured_api_providers=get_configured_api_providers,
+            ),
+            bot=bot,
+            event=event,
+            candidates=resolved_avatar_pair_candidates,
+        )
         register_send_qq_expression_tools(
             agent_tool_registry,
             executor=executor,
@@ -2584,6 +2615,8 @@ def build_yaml_response_processor(
                 runtime_overrides.get("favorability_context_block", "") or ""
             ),
             favorability_turn_id=str(runtime_overrides.get("favorability_turn_id", "") or ""),
+            avatar_pair_candidates=list(runtime_overrides.get("avatar_pair_candidates") or []),
+            avatar_pair_runtime=runtime_overrides.get("avatar_pair_runtime"),
         )
 
     return _processor

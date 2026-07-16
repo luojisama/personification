@@ -451,6 +451,12 @@ def force_user_avatar_analysis(runtime: Any, user_id: str) -> asyncio.Task[dict[
 
 def clear_user_avatar_analysis(profile_service: Any, user_id: str) -> bool:
     uid = str(user_id or "").strip()
+    try:
+        from .user_avatar_pair_insight import clear_user_avatar_pair_analysis
+
+        clear_user_avatar_pair_analysis(uid)
+    except Exception:
+        pass
     generation_key = _profile_generation_key(profile_service, uid)
     _PROFILE_GENERATIONS[generation_key] = _PROFILE_GENERATIONS.get(generation_key, 0) + 1
     for key, task in list(_IN_FLIGHT.items()):
@@ -488,6 +494,7 @@ def build_inspect_current_user_avatar_tool(profile_service: Any, user_id: str) -
     async def _handler() -> str:
         state = get_user_avatar_state(profile_service, uid, include_hash=False)
         payload = {
+            "ok": True,
             "available": bool(state.get("insight")),
             "analysis": state.get("analysis", {}),
             "insight": state.get("insight", {}),

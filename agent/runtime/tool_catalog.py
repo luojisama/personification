@@ -36,6 +36,7 @@ _LIGHTWEIGHT_LOOKUP_TOOL_NAMES = frozenset(
         "recall_group_memory",
         "get_user_persona",
         "inspect_current_user_avatar",
+        "inspect_group_user_avatar_pair",
     }
 )
 _IMAGE_GENERATION_CONTEXT_TOOL_NAMES = frozenset(
@@ -89,6 +90,7 @@ _NETWORK_TOOL_NAMES = frozenset(
         "get_gold_price",
         "get_exchange_rate",
         "weather",
+        "inspect_group_user_avatar_pair",
     }
 )
 _ADMIN_TOOL_NAMES = frozenset(
@@ -400,6 +402,8 @@ def semantic_tool_guidance() -> str:
         "用户明确要求生成图片时，必须调用 generate_image，不要只给提示词。"
         "用户明确要求联网搜已有图片或壁纸并发出来时，优先调用 search_and_send_images，不要把搜索链接当最终回复。"
         "涉及本地天气、出行、城市或附近状态时，如果用户没明说地点，先看已注入的用户档案；仍不确定可调用记忆工具确认，不能猜城市。"
+        "当当前群聊确实需要比较候选成员头像时，可调用 inspect_group_user_avatar_pair；它只判断两张头像图像是否近重复、视觉配套、"
+        "可能是同一虚构角色或同一系列。视觉配套绝不表示两位用户现实中是情侣、朋友、认识或同一人，真人头像也不能用于身份或 same-person 推断。"
         "最终回复只输出纯文本，不要 markdown、项目符号列表、编号列表，也不要说正在查询、根据搜索结果或我需要确认一下。"
         "群聊接梗场景优先像群友接话，不要为了显得聪明而滥用工具。"
     )

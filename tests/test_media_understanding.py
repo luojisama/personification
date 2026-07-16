@@ -70,6 +70,65 @@ def test_analyze_images_tries_primary_routes_before_fallback(monkeypatch) -> Non
     assert calls == ["text-only", "vision-ok"]
 
 
+def test_joint_only_analysis_sends_both_images_in_one_primary_request(monkeypatch) -> None:  # noqa: ANN001
+    requests: list[list[dict]] = []
+
+    class _FakeCaller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            del tools, use_builtin_search
+            requests.append(messages)
+            return SimpleNamespace(content="joint result", vision_unavailable=False)
+
+    monkeypatch.setattr(media_understanding, "build_tool_caller", lambda _config: _FakeCaller())
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(personification_thinking_mode="none", personification_model_overrides={}),
+        get_configured_api_providers=lambda: [
+            {"name": "vision", "api_type": "openai", "api_key": "key", "model": "vision-model"}
+        ],
+    )
+    refs = ["data:image/png;base64,AA==", "data:image/png;base64,AQ=="]
+    result, route = asyncio.run(
+        media_understanding.analyze_images_with_primary_route_joint_only(
+            runtime=runtime,
+            prompt="compare",
+            image_refs=refs,
+        )
+    )
+    assert (result, route) == ("joint result", "route_direct")
+    assert len(requests) == 1
+    content = requests[0][0]["content"]
+    image_parts = [item for item in content if item.get("type") == "image_url"]
+    assert [item["image_url"]["url"] for item in image_parts] == refs
+
+
+def test_joint_only_primary_failure_never_uses_single_image_fallback(monkeypatch) -> None:  # noqa: ANN001
+    class _FakeCaller:
+        async def chat_with_tools(self, *_args, **_kwargs):  # noqa: ANN001
+            return SimpleNamespace(content="", vision_unavailable=True)
+
+    class _ForbiddenFallback:
+        async def describe(self, *_args, **_kwargs):  # noqa: ANN001
+            raise AssertionError("joint-only API must not use per-image fallback")
+
+    monkeypatch.setattr(media_understanding, "build_tool_caller", lambda _config: _FakeCaller())
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(personification_thinking_mode="none", personification_model_overrides={}),
+        vision_caller=_ForbiddenFallback(),
+        get_configured_api_providers=lambda: [
+            {"name": "vision", "api_type": "openai", "api_key": "key", "model": "vision-model"}
+        ],
+    )
+    result, route = asyncio.run(
+        media_understanding.analyze_images_with_primary_route_joint_only(
+            runtime=runtime,
+            prompt="compare",
+            image_refs=["data:image/png;base64,AA==", "data:image/png;base64,AQ=="],
+        )
+    )
+    assert result == ""
+    assert route == "joint_vision_unavailable"
+
+
 def test_gemini_media_uses_only_google_api_key_header(monkeypatch) -> None:  # noqa: ANN001
     captured: dict[str, object] = {}
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import mimetypes
 from pathlib import Path
 from typing import Any, Sequence
@@ -311,6 +313,34 @@ def get_primary_provider_signature(runtime: Any) -> tuple[str, str]:
     return primary["api_type"], primary["model"]
 
 
+def get_primary_image_route_fingerprint(
+    runtime: Any,
+    *,
+    route_name: str = VISUAL_ROUTE_AGENT,
+) -> str:
+    routes: list[dict[str, str]] = []
+    for provider in _primary_provider_candidates(runtime):
+        api_key = str(provider.get("api_key", "") or "")
+        auth_path = str(provider.get("auth_path", "") or "")
+        routes.append(
+            {
+                "name": str(provider.get("name", "") or ""),
+                "api_type": _normalize_media_api_type(str(provider.get("api_type", "") or "")),
+                "api_url": str(provider.get("api_url", "") or "").strip().rstrip("/"),
+                "model": str(provider.get("model", "") or "").strip(),
+                "auth": hashlib.sha256(f"{api_key}\0{auth_path}".encode("utf-8")).hexdigest(),
+                "project": str(provider.get("project", "") or "").strip(),
+            }
+        )
+    payload = json.dumps(
+        {"route_name": str(route_name or ""), "routes": routes},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _build_video_fallback_provider_config(runtime: Any) -> dict[str, str] | None:
     plugin_config = getattr(runtime, "plugin_config", None)
     if plugin_config is None:
@@ -494,6 +524,34 @@ async def analyze_images_with_route_or_fallback(
     return (result, "vision_fallback" if result else "vision_unavailable")
 
 
+async def analyze_images_with_primary_route_joint_only(
+    *,
+    runtime: Any,
+    prompt: str,
+    image_refs: Sequence[str],
+    route_name: str = VISUAL_ROUTE_AGENT,
+    image_detail: str = "low",
+) -> tuple[str, str]:
+    """Analyze exactly two images in one primary-route request.
+
+    This API deliberately has no per-image fallback. A joint comparison loses
+    its meaning if either image is analyzed in a separate request.
+    """
+    refs = [str(item or "").strip() for item in image_refs if str(item or "").strip()]
+    if len(refs) != 2:
+        return "", "missing_joint_images"
+    primary_result = await _try_primary_image_routes(
+        runtime=runtime,
+        prompt=prompt,
+        refs=refs,
+        route_name=route_name,
+        image_detail=image_detail,
+    )
+    if primary_result:
+        return primary_result, "route_direct"
+    return "", "joint_vision_unavailable"
+
+
 async def analyze_videos_with_route_or_fallback(
     *,
     runtime: Any,
@@ -541,8 +599,10 @@ async def analyze_videos_with_route_or_fallback(
 
 
 __all__ = [
+    "analyze_images_with_primary_route_joint_only",
     "analyze_images_with_route_or_fallback",
     "analyze_videos_with_route_or_fallback",
+    "get_primary_image_route_fingerprint",
     "get_primary_provider_config",
     "get_primary_provider_signature",
     "primary_route_supports_native_video",

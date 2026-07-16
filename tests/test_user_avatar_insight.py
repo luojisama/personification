@@ -12,6 +12,7 @@ from ._loader import load_personification_module
 
 
 avatar = load_personification_module("plugin.personification.core.user_avatar_insight")
+avatar_pair = load_personification_module("plugin.personification.core.user_avatar_pair_insight")
 memory_store_mod = load_personification_module("plugin.personification.core.memory_store")
 persona_routes = load_personification_module("plugin.personification.webui.routes.persona_routes")
 persona_service = load_personification_module("plugin.personification.core.persona_service")
@@ -446,6 +447,7 @@ def test_agent_tool_returns_only_current_safe_summary_without_url(tmp_path: Path
     tool = avatar.build_inspect_current_user_avatar_tool(service, "10001")
     result = asyncio.run(tool.handler())
     payload = json.loads(result)
+    assert payload["ok"] is True
     assert payload["available"] is True
     assert payload["insight"]["asset_kind"] == "acg_character"
     assert "http" not in result.lower()
@@ -454,6 +456,18 @@ def test_agent_tool_returns_only_current_safe_summary_without_url(tmp_path: Path
     assert tool.metadata["side_effect"] == "none"
     assert tool.metadata["retryable"] is True
     assert "仅当当前对话确实涉及" in tool.description
+
+
+def test_clear_current_avatar_analysis_also_invalidates_pair_state(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    service, _runtime = _service(tmp_path)
+    invalidated: list[str] = []
+    monkeypatch.setattr(
+        avatar_pair,
+        "clear_user_avatar_pair_analysis",
+        lambda user_id: invalidated.append(str(user_id)) or 0,
+    )
+    assert avatar.clear_user_avatar_analysis(service, "10001") is False
+    assert invalidated == ["10001"]
 
 
 def _admin():  # noqa: ANN202

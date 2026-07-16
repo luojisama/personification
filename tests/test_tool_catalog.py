@@ -171,6 +171,7 @@ def test_select_tool_schemas_banter_exposes_lightweight_lookup_tools() -> None:
         "recall_group_memory",
         "memory_recall",
         "get_user_persona",
+        "inspect_group_user_avatar_pair",
         "vision_analyze",
         "sticker_labeler",
     ):
@@ -200,6 +201,7 @@ def test_select_tool_schemas_banter_exposes_lightweight_lookup_tools() -> None:
         for s in tool_catalog.select_tool_schemas(registry, has_images=True, chat_intent="banter")
     }
     assert "web_search" in names_img and "vision_analyze" in names_img
+    assert "inspect_group_user_avatar_pair" in names_noimg
 
 
 def test_semantic_tool_guidance_requires_lookup_for_unknown_entities() -> None:
@@ -210,3 +212,5 @@ def test_semantic_tool_guidance_requires_lookup_for_unknown_entities() -> None:
     assert "不要直接在群里问" in guidance
     assert "专有名词" in guidance
     assert "resolve_acg_entity" in guidance
+    assert "inspect_group_user_avatar_pair" in guidance
+    assert "绝不表示两位用户现实中是情侣、朋友、认识或同一人" in guidance

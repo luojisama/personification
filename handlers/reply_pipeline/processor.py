@@ -67,6 +67,7 @@ from ...core.turn_media import (
     serialize_turn_media,
 )
 from ...core.user_avatar_insight import schedule_user_avatar_analysis
+from ...core.user_avatar_pair_insight import build_avatar_pair_candidates
 from ...core.repeat_follow import maybe_follow_repeat_cluster
 from ...core.reply_style_policy import (
     build_direct_visual_identity_guard,
@@ -1289,6 +1290,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 )
         except Exception:
             pass
+    avatar_pair_candidates = build_avatar_pair_candidates(
+        event=event,
+        current_user_id=user_id,
+        current_user_label=user_name,
+        bot_self_id=bot_self_id,
+        batched_events=batched_events,
+        recent_messages=recent_window,
+    )
     if not is_private_session and sticker_candidates:
         if _batch_media_owner_matches_selected_user(batched_events, user_id):
             _spawn_auto_collect_stickers(
@@ -1589,6 +1598,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             profile_service=getattr(runtime, "profile_service", None),
             favorability_context_block=favorability_context_block,
             favorability_turn_id=favorability_turn_id,
+            avatar_pair_candidates=avatar_pair_candidates,
+            avatar_pair_runtime=runtime,
         )
         return
 
@@ -1983,6 +1994,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         task_exc_logger=_task_exc_logger,
                         reply_commit_state=state,
                         turn_media_context=turn_media_context,
+                        avatar_pair_candidates=avatar_pair_candidates,
                     )
                     try:
                         from ...core import reply_turn_trace

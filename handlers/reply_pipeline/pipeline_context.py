@@ -33,6 +33,7 @@ from ..reply_commit import (
 )
 from ...core.visual_capabilities import VISUAL_ROUTE_REPLY_PLAIN
 from ...core.user_avatar_insight import register_current_user_avatar_tool
+from ...core.user_avatar_pair_insight import register_group_user_avatar_pair_insight_tool
 from ...skill_runtime.runtime_api import SkillRuntime
 from ...skills.skillpacks.friend_request_tool.scripts.main import build_friend_request_tool_for_runtime
 from ...skills.skillpacks.group_info_tool.scripts.main import build_group_info_tool_for_runtime
@@ -706,6 +707,7 @@ async def run_agent_if_enabled(
     task_exc_logger: Callable[[str, Any], Any] | None = None,
     reply_commit_state: dict[str, Any] | None = None,
     turn_media_context: list[Any] | None = None,
+    avatar_pair_candidates: list[dict[str, str]] | None = None,
 ) -> tuple[str | None, bool, bool, Any | None, list[dict[str, Any]], str, bool]:
     if not (
         getattr(runtime.plugin_config, "personification_agent_enabled", True)
@@ -720,6 +722,13 @@ async def run_agent_if_enabled(
         runtime_registry,
         getattr(runtime, "profile_service", None),
         str(getattr(event, "user_id", "") or ""),
+    )
+    register_group_user_avatar_pair_insight_tool(
+        runtime_registry,
+        runtime=runtime,
+        bot=bot,
+        event=event,
+        candidates=list(avatar_pair_candidates or []),
     )
     register_send_qq_expression_tools(
         runtime_registry,

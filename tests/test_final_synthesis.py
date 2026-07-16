@@ -111,3 +111,28 @@ def test_synthesize_max_steps_result_wraps_last_tool_result_with_persona() -> No
     sent_messages = caller.calls[0]["messages"]
     assert sent_messages[0]["role"] == "system"
     assert "你是群友" in sent_messages[0]["content"]
+
+
+def test_synthesize_max_steps_renders_avatar_pair_without_provider_relation_rewrite() -> None:
+    caller = _WrapCaller("他们现实里就是一对")
+    payload = {
+        "ok": True,
+        "available": True,
+        "safe_summary": "两张头像在构图、元素或风格上呈现视觉配套。",
+        "display_label": "甲 与 乙 的头像",
+        "limitations": ["不能据此判断两位用户现实中是情侣、朋友、认识或同一人。"],
+    }
+    result = asyncio.run(
+        final_synthesis.synthesize_max_steps_result(
+            registry=tool_registry.ToolRegistry(),
+            tool_name="inspect_group_user_avatar_pair",
+            result_text=json.dumps(payload, ensure_ascii=False),
+            user_query_text="他们头像配吗",
+            messages=[],
+            pending_actions=[],
+            tool_caller=caller,
+        )
+    )
+    assert "呈现视觉配套" in result.text
+    assert "现实里就是一对" not in result.text
+    assert caller.calls == []
