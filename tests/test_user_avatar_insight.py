@@ -381,6 +381,31 @@ def test_clear_generation_guard_prevents_late_background_write(tmp_path: Path) -
     assert avatar.get_user_avatar_state(service, "10001")["insight"] == {}
 
 
+def test_clear_cancels_queued_force_without_starting_a_new_analysis(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    service, runtime = _service(tmp_path)
+    ordinary_started = asyncio.Event()
+    calls: list[bool] = []
+
+    async def _blocked(_runtime, _uid, *, force=False):  # noqa: ANN001, ANN202
+        calls.append(bool(force))
+        ordinary_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(avatar, "analyze_user_avatar", _blocked)
+
+    async def _run() -> None:
+        ordinary = avatar.schedule_user_avatar_analysis(runtime, "10001")
+        await ordinary_started.wait()
+        forced = avatar.force_user_avatar_analysis(runtime, "10001")
+        avatar.clear_user_avatar_analysis(service, "10001")
+        with pytest.raises(asyncio.CancelledError):
+            await forced
+        assert ordinary.cancelled()
+
+    asyncio.run(_run())
+    assert calls == [False]
+
+
 def test_bundle_is_normalized_to_reply_runtime_for_vision(tmp_path: Path) -> None:
     _service_obj, inner = _service(tmp_path)
     bundle = SimpleNamespace(reply_processor_deps=SimpleNamespace(runtime=inner))
@@ -446,6 +471,22 @@ def _route(runtime, path: str, method: str):  # noqa: ANN202
 def test_avatar_admin_routes_require_permission_keep_diagnostics_and_audit(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     service, bundle = _service(tmp_path)
     runtime = SimpleNamespace(runtime_bundle=bundle, logger=bundle.logger)
+    service.patch_core_profile(
+        user_id="10001",
+        patcher=lambda current: {
+            **current,
+            "qq_profile": {
+                **current["qq_profile"],
+                "email": "private@example.invalid",
+                "avatar_analysis": {
+                    "status": "success",
+                    "content_hash": "c" * 64,
+                    "schema_version": 1,
+                },
+                "avatar_insight": json.loads(_vision_json()),
+            },
+        },
+    )
     audit_actions: list[str] = []
     monkeypatch.setattr(
         persona_routes.webui_audit_log,
@@ -459,6 +500,16 @@ def test_avatar_admin_routes_require_permission_keep_diagnostics_and_audit(tmp_p
     clear_route = _route(runtime, "/api/personas/{user_id}/avatar-analysis", "DELETE")
     assert any(dep.call is persona_routes.require_admin for dep in refresh_route.dependant.dependencies)
     assert any(dep.call is persona_routes.require_admin for dep in clear_route.dependant.dependencies)
+
+    detail_route = _route(runtime, "/api/personas/{user_id}", "GET")
+    persona_detail = asyncio.run(detail_route.endpoint("10001", _admin()))
+    public_core = persona_detail["core_profile"]
+    assert public_core["avatar_analysis"]["content_hash_short"] == "c" * 12
+    assert "content_hash" not in public_core["avatar_analysis"]
+    assert "avatar_analysis" not in public_core["qq_profile"]
+    assert "avatar_insight" not in public_core["qq_profile"]
+    assert "email" not in public_core["qq_profile"]
+    assert "avatar_analysis" not in public_core["profile_json"]["qq_profile"]
 
     refreshed = asyncio.run(refresh_route.endpoint("10001", _admin()))
     cleared = asyncio.run(clear_route.endpoint("10001", _admin()))

@@ -18,6 +18,33 @@ from ..deps import AdminIdentity, require_admin
 from .favorability_view import serialize_favorability
 
 
+_PUBLIC_QQ_PROFILE_FIELDS = frozenset(
+    {
+        "user_id",
+        "avatar_url",
+        "homepage_url",
+        "updated_at",
+        "source",
+        "nickname",
+        "remark",
+        "card",
+        "sex",
+        "age",
+        "qid",
+        "level",
+        "login_days",
+        "signature",
+        "area",
+        "role",
+        "title",
+        "title_expire_time",
+        "vip_level",
+        "qq_level",
+        "constellation",
+    }
+)
+
+
 def _profile_service(runtime) -> Any | None:
     bundle = getattr(runtime, "runtime_bundle", None)
     if bundle is None:
@@ -61,6 +88,21 @@ def _record_avatar_audit(runtime: Any, **payload: Any) -> bool:
         return False
 
 
+def _public_profile_json(profile_json: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    public_json = dict(profile_json if isinstance(profile_json, dict) else {})
+    raw_qq_profile = public_json.get("qq_profile")
+    if not isinstance(raw_qq_profile, dict):
+        public_json.pop("qq_profile", None)
+        return public_json, {}
+    public_qq_profile = {
+        key: value
+        for key, value in raw_qq_profile.items()
+        if key in _PUBLIC_QQ_PROFILE_FIELDS
+    }
+    public_json["qq_profile"] = public_qq_profile
+    return public_json, public_qq_profile
+
+
 def _merge_display_profile(stored: dict[str, Any], live: dict[str, Any]) -> dict[str, Any]:
     merged = dict(stored or {})
     for key, value in (live or {}).items():
@@ -85,7 +127,9 @@ def build_persona_router(*, runtime) -> APIRouter:
             profile_json = p.get("profile_json", {}) if isinstance(p.get("profile_json", {}), dict) else {}
             stored_qq_profile = profile_json.get("qq_profile", {}) if isinstance(profile_json.get("qq_profile", {}), dict) else {}
             live_qq_profile = await get_user_profile(bot, uid)
-            qq_profile = _merge_display_profile(stored_qq_profile, live_qq_profile)
+            _public_json, qq_profile = _public_profile_json(
+                {"qq_profile": _merge_display_profile(stored_qq_profile, live_qq_profile)}
+            )
             nickname = str(qq_profile.get("nickname", "") or "") or await get_user_nickname(bot, uid)
             snippet = (p["profile_text"] or "")[:140] or compact_user_profile_meta_summary(qq_profile)
             items.append(
@@ -132,6 +176,7 @@ def build_persona_router(*, runtime) -> APIRouter:
         stored_qq_profile = core_json.get("qq_profile", {}) if isinstance(core_json.get("qq_profile", {}), dict) else {}
         live_qq_profile = await get_user_profile(_get_first_bot(runtime), user_id)
         qq_profile = _merge_display_profile(stored_qq_profile, live_qq_profile)
+        public_core_json, qq_profile = _public_profile_json({**core_json, "qq_profile": qq_profile})
         avatar_state = get_user_avatar_state(svc, user_id, include_hash=False)
         structured = core_json.get("structured") or {}
         if not structured and core:
@@ -152,7 +197,7 @@ def build_persona_router(*, runtime) -> APIRouter:
             ),
             "core_profile": {
                 "profile_text": core.profile_text if core else "",
-                "profile_json": core_json,
+                "profile_json": public_core_json,
                 "structured": structured,
                 "qq_profile": qq_profile,
                 "user_corrections": core_json.get("user_corrections", {}),

@@ -48,6 +48,7 @@ _AVATAR_PROMPT = """\
 
 _IN_FLIGHT: dict[tuple[int, str], asyncio.Task[dict[str, Any]]] = {}
 _IN_FLIGHT_FORCE: dict[tuple[int, str], bool] = {}
+_IN_FLIGHT_PREDECESSORS: dict[tuple[int, str], asyncio.Task[dict[str, Any]]] = {}
 _IN_FLIGHT_PROFILE_SERVICES: dict[tuple[int, str], Any] = {}
 _PROFILE_GENERATIONS: dict[tuple[int, str], int] = {}
 _URL_TEXT_RE = re.compile(r"\b(?:https?://|www\.)\S+|data:\S+", re.IGNORECASE)
@@ -407,11 +408,12 @@ def schedule_user_avatar_analysis(runtime: Any, user_id: str, *, force: bool = F
         async def _force_after_current() -> dict[str, Any]:
             try:
                 await current
-            except (asyncio.CancelledError, Exception):
+            except Exception:
                 pass
             return await analyze_user_avatar(runtime, uid, force=True)
 
         task = asyncio.create_task(_force_after_current())
+        _IN_FLIGHT_PREDECESSORS[key] = current
     else:
         if not force:
             snapshot = profile_service.get_core_profile(uid)
@@ -428,6 +430,7 @@ def schedule_user_avatar_analysis(runtime: Any, user_id: str, *, force: bool = F
         if _IN_FLIGHT.get(key) is completed:
             _IN_FLIGHT.pop(key, None)
             _IN_FLIGHT_FORCE.pop(key, None)
+            _IN_FLIGHT_PREDECESSORS.pop(key, None)
             _IN_FLIGHT_PROFILE_SERVICES.pop(key, None)
         try:
             completed.result()
@@ -451,7 +454,12 @@ def clear_user_avatar_analysis(profile_service: Any, user_id: str) -> bool:
     generation_key = _profile_generation_key(profile_service, uid)
     _PROFILE_GENERATIONS[generation_key] = _PROFILE_GENERATIONS.get(generation_key, 0) + 1
     for key, task in list(_IN_FLIGHT.items()):
-        if key[1] == uid and _IN_FLIGHT_PROFILE_SERVICES.get(key) is profile_service and not task.done():
+        if key[1] != uid or _IN_FLIGHT_PROFILE_SERVICES.get(key) is not profile_service:
+            continue
+        predecessor = _IN_FLIGHT_PREDECESSORS.pop(key, None)
+        if predecessor is not None and not predecessor.done():
+            predecessor.cancel()
+        if not task.done():
             task.cancel()
     snapshot = profile_service.get_core_profile(uid) if profile_service is not None and uid else None
     if snapshot is None:
