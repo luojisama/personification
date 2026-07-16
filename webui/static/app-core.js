@@ -18,7 +18,7 @@ let state = {
   skills: [], skillFilter: "", skillSummary: null, skillRemoteSources: [], skillMcpTools: [],
   skillSourceForm: { source: "", name: "", ref: "", subdir: "", kind: "auto", preferFirst: false, autoApprove: false },
   toolCreatorTasks: [], toolCreatorSelectedId: "", toolCreatorDetail: null, toolCreatorRequest: "", toolCreatorSuggestedName: "", toolCreatorAnswer: "", toolCreatorBusy: false, toolCreatorDiagnostic: null,
-  mcpSources: [], mcpSourceId: "official", mcpQuery: "", mcpResults: [], mcpNextCursor: "", mcpDetail: null, mcpPackageIndex: 0, mcpPrefix: "", mcpInstallations: [], mcpBusy: false,
+  mcpSources: [], mcpSourceId: "official", mcpQuery: "", mcpResults: [], mcpNextCursor: "", mcpSearchLoaded: false, mcpDetail: null, mcpPackageIndex: 0, mcpPrefix: "", mcpInstallations: [], mcpBusy: false, mcpLoadingMore: false,
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
   personaTemplateForm: { mode: "source", work_title: "", character_name: "", persona_name: "", gender: "", personality: "", traits: "", hobbies: "", description: "" }, personaTemplateResult: null, personaTemplateBusy: false, personaTemplateTask: null, personaTemplateHistory: [],
   personaAvatarCandidateId: "", personaSignatureCandidateId: "", personaProfileBotId: "",
@@ -44,7 +44,7 @@ let state = {
 const VIEW_ASSETS = {
   dashboard:"app-admin.js",health:"app-admin.js",qzone:"app-admin.js",personas:"app-admin.js",groups:"app-admin.js",group_switch:"app-admin.js",persona_prompt:"app-admin.js",persona_builder:"app-admin.js",qq:"app-admin.js",
   config:"app-config.js",memory:"app-content.js",memory_graph:"app-content.js",stickers:"app-content.js",
-  skills:"app-tools.js",tool_creator:"app-tool-creator.js",plugin_knowledge:"app-tools.js",plugin_manager:"app-tools.js",test:"app-tools.js",
+  skills:"app-tools.js",mcp:"app-mcp.js",tool_creator:"app-tool-creator.js",plugin_knowledge:"app-tools.js",plugin_manager:"app-tools.js",test:"app-tools.js",
   proactive:"app-activity.js",audit:"app-activity.js",logs:"app-activity.js",traces:"app-activity.js",trace_detail:"app-activity.js",
   agent_status:"app-operations.js",data_transfer:"app-operations.js",
 };
@@ -533,7 +533,8 @@ function loadingMessageForView(view) {
     memory: "正在打开记忆宫殿...",
     memory_graph: "正在绘制记忆关系...",
     stickers: "正在加载表情包库...",
-    skills: "正在扫描 Skill 和 MCP 工具...",
+    skills: "正在扫描 Skill 与远程来源...",
+    mcp: "正在读取 MCP Registry 与运行状态...",
     tool_creator: "正在恢复工具创建任务...",
     plugin_knowledge: "正在读取插件知识库...",
     plugin_manager: "正在检查插件更新...",
@@ -578,17 +579,21 @@ async function loadView() {
       const data = await api("/groups/whitelist");
       state.groupSwitches = data.groups;
     } else if (view === "skills") {
-      const [data, sourceData, installationData] = await Promise.all([
-        api("/skills"),
-        api("/mcp/sources").catch(() => ({sources:[]})),
-        api("/mcp/installations").catch(() => ({installations:[]})),
-      ]);
+      const data = await api("/skills");
       state.skills = data.skills; state.skillsAvailable = data.available;
       state.skillSummary = data.summary || null;
       state.skillRemoteSources = data.remote_sources || [];
       state.skillMcpTools = data.mcp_tools || [];
+    } else if (view === "mcp") {
+      const [sourceData, installationData] = await Promise.all([
+        api("/mcp/sources"),
+        api("/mcp/installations"),
+      ]);
       state.mcpSources = sourceData.sources || [];
       state.mcpInstallations = installationData.installations || [];
+      if (!state.mcpSources.some(source => source.id === state.mcpSourceId)) {
+        state.mcpSourceId = state.mcpSources[0]?.id || "official";
+      }
     } else if (view === "tool_creator") {
       const data = await api("/tool-creator/tasks?limit=40");
       state.toolCreatorTasks = data.tasks || [];
@@ -713,7 +718,7 @@ async function loadView() {
 }
 
 function viewTitle() {
-  return ({agent_status:"Agent 状态",data_transfer:"数据迁移",dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",tool_creator:"创建工具",plugin_knowledge:"插件知识库",plugin_manager:"插件管理",test:"模型测试",persona_prompt:"人设预览",persona_builder:"人设构建",audit:"审计日志",logs:"插件日志",traces:"消息 Trace",trace_detail:"Trace 详情",proactive:"主动诊断",health:"功能体检",qzone:"QQ 空间",qq:"QQ 管理",devices:"设备管理"})[state.view] || state.view;
+  return ({agent_status:"Agent 状态",data_transfer:"数据迁移",dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",mcp:"MCP 管理",tool_creator:"创建工具",plugin_knowledge:"插件知识库",plugin_manager:"插件管理",test:"模型测试",persona_prompt:"人设预览",persona_builder:"人设构建",audit:"审计日志",logs:"插件日志",traces:"消息 Trace",trace_detail:"Trace 详情",proactive:"主动诊断",health:"功能体检",qzone:"QQ 空间",qq:"QQ 管理",devices:"设备管理"})[state.view] || state.view;
 }
 
 async function navigateToView(view,{fromHistory=false}={}) {
@@ -722,6 +727,7 @@ async function navigateToView(view,{fromHistory=false}={}) {
   if(!fromHistory&&location.hash!==`#${nextView}`)history.pushState({view:nextView},"",`#${nextView}`);
   if(state.view==="qzone"&&nextView!=="qzone"&&typeof stopQzoneViewLifecycle==="function")stopQzoneViewLifecycle();
   if(state.view==="tool_creator"&&nextView!=="tool_creator"&&typeof stopToolCreatorPolling==="function")stopToolCreatorPolling();
+  if(state.view==="mcp"&&nextView!=="mcp"&&typeof stopMcpViewLifecycle==="function")stopMcpViewLifecycle();
   state.view=nextView;
   if(state.mobileNavOpen)state.mobileNavOpen=false;
   try{await loadView();render();}catch(e){alertFlash("err",e.message);}
@@ -733,6 +739,7 @@ function render() {
   if (state.devicePending) { root.innerHTML = renderDevicePending(); return; }
   if (!state.logged) {
     if (state.view === "qzone" && typeof stopQzoneViewLifecycle === "function") stopQzoneViewLifecycle();
+    if (state.view === "mcp" && typeof stopMcpViewLifecycle === "function") stopMcpViewLifecycle();
     root.innerHTML = renderLogin(); attachLogin(); return;
   }
   // 全量 innerHTML 重绘会让正在输入的搜索框失焦；记下焦点 + 光标位置，重绘后还原。
@@ -786,6 +793,7 @@ const ICON_PATHS = {
   "plug": '<path d="M8 3v5m8-5v5M6 8h12v3a6 6 0 0 1-6 6v4m-3 0h6"/>',
   "refresh": '<path d="M20 7v5h-5M4 17v-5h5M6.1 8a7 7 0 0 1 11.4-2L20 9M4 15l2.5 3a7 7 0 0 0 11.4-2"/>',
   "search": '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+  "server": '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M11 6.5h6M11 17.5h6"/>',
   "settings": '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.09a2 2 0 0 1 1 1.74v.5a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z"/><circle cx="12" cy="12" r="3"/>',
   "shield": '<path d="M12 3 20 7v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4Zm-3 9 2 2 4-5"/>',
   "sparkles": '<path d="m12 3 1.3 3.7L17 8l-3.7 1.3L12 13l-1.3-3.7L7 8l3.7-1.3L12 3ZM5 14l.8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8L5 14Zm13-1 1 2.8 3 1.2-3 1.2L18 21l-1-2.8-3-1.2 3-1.2 1-2.8Z"/>',
@@ -832,6 +840,7 @@ function renderLayout() {
         ${navItem('stickers','表情包','image')}
         <div class="nav-group-label">能力</div>
         ${navItem('skills','Skill 管理','plug')}
+        ${navItem('mcp','MCP 管理','server')}
         ${navItem('tool_creator','创建工具','wand')}
         ${navItem('plugin_knowledge','插件知识库','book')}
         ${navItem('plugin_manager','插件管理','wrench')}
@@ -878,6 +887,7 @@ function renderView() {
   if (state.view === "groups") return renderGroups();
   if (state.view === "group_switch") return renderGroupSwitch();
   if (state.view === "skills") return renderSkills();
+  if (state.view === "mcp") return renderMcp();
   if (state.view === "tool_creator") return renderToolCreator();
   if (state.view === "plugin_knowledge") return renderPluginKnowledge();
   if (state.view === "plugin_manager") return renderPluginManager();

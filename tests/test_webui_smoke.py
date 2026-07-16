@@ -71,7 +71,7 @@ def test_index_serves_static_frontend(_runtime_context) -> None:
     assert "__PERSONIFICATION_WEBUI_INSTANCE_ID__" not in res.text
     second = client.get("/personification/")
     assert f'PERSONIFICATION_WEBUI_INSTANCE_ID="{instance.group(1)}"' in second.text
-    for lazy_asset in ("app-activity.js", "app-content.js", "app-admin.js", "app-tools.js", "app-config.js", "app-operations.js"):
+    for lazy_asset in ("app-activity.js", "app-content.js", "app-admin.js", "app-tools.js", "app-mcp.js", "app-config.js", "app-operations.js"):
         assert lazy_asset in res.text
         assert f'<script src="/personification/static/{lazy_asset}' not in res.text
     assert "no-store" in res.headers.get("cache-control", "")
@@ -114,6 +114,11 @@ def test_static_frontend_assets_are_served(_runtime_context) -> None:
     tools_js = client.get("/personification/static/app-tools.js")
     assert tools_js.status_code == 200
     assert "renderPluginManager" in tools_js.text
+
+    mcp_js = client.get("/personification/static/app-mcp.js")
+    assert mcp_js.status_code == 200
+    assert "renderMcp" in mcp_js.text
+    assert "Registry discovery" in mcp_js.text
 
     css = client.get("/personification/static/style.css")
     assert css.status_code == 200

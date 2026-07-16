@@ -57,7 +57,7 @@ def test_management_surfaces_keep_stable_operation_codes() -> None:
 def test_management_frontend_does_not_collapse_known_failures_to_message_only() -> None:
     sources = "\n".join(
         (STATIC / filename).read_text(encoding="utf-8")
-        for filename in ("app-admin.js", "app-config.js", "app-content.js", "app-tools.js", "app-auth.js", "app-activity.js", "app-operations.js")
+        for filename in ("app-admin.js", "app-config.js", "app-content.js", "app-tools.js", "app-mcp.js", "app-auth.js", "app-activity.js", "app-operations.js")
     )
     legacy_patterns = (
         r"(?:切换失败|保存失败|添加失败|审核失败|重载失败|检查失败|更新失败)[：:]?\s*[\"']?\s*\+\s*e\.message",
