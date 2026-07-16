@@ -37,18 +37,18 @@ function renderDevices() {
   const rows = state.devices.map(d => {
     const isCurrent = d.id === state.currentDeviceId;
     return `<tr>
-      <td>${escapeHtml(d.label)} ${isCurrent ? '<span class="tag">当前</span>' : ''}</td>
-      <td class="muted">${escapeHtml(d.ua.slice(0, 60))}</td>
-      <td>${new Date(d.last_seen * 1000).toLocaleString()}</td>
-      <td>
-        ${isCurrent ? '' : `<button class="btn small danger" onclick="revokeDevice('${escapeAttr(d.id)}')">撤销</button>`}
+      <td class="col-model"><span class="u-clamp-2" title="${escapeAttr(d.label)} · device ${escapeAttr(d.id)}">${escapeHtml(d.label)}</span> ${isCurrent ? '<span class="tag tag--status">当前</span>' : ''}</td>
+      <td class="col-description muted u-wrap" title="${escapeAttr(d.ua)}">${escapeHtml(d.ua.slice(0, 60))}</td>
+      <td class="col-time u-atomic u-tabular">${new Date(d.last_seen * 1000).toLocaleString()}</td>
+      <td class="col-actions">
+        ${isCurrent ? '' : `<button class="btn small danger" aria-label="撤销设备 ${escapeAttr(d.label)}" onclick="revokeDevice('${escapeAttr(d.id)}')">撤销</button>`}
       </td>
     </tr>`;
   }).join("");
   return `${renderSmallOperations("device", "设备操作诊断")}<div class="card">
     <h2>已登录设备</h2>
     <p class="muted">有效 session cookie 会保持登录；退出、撤销或过期后需重新接收管理员验证码。</p>
-    <table><thead><tr><th>设备</th><th>UA</th><th>最后活跃</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="已登录设备列表"><table class="data-table wide"><thead><tr><th scope="col" class="col-model">设备</th><th scope="col" class="col-description">UA</th><th scope="col" class="col-time">最后活跃</th><th scope="col" class="col-actions"><span class="sr-only">操作</span></th></tr></thead><tbody>${rows}</tbody></table></div>
   </div>`;
 }
 

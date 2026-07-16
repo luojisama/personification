@@ -9,7 +9,7 @@ function toolCreatorStatusLabel(status) {
 function toolCreatorStatusTag(task) {
   const status=String(task&&task.status||"");
   const cls=status==="completed"?"approved":status==="failed"?"rejected":status==="awaiting_admin"||status==="ready_for_approval"?"pending":"";
-  return `<span class="device-status ${escapeAttr(cls)}">${escapeHtml(toolCreatorStatusLabel(status))}</span>`;
+  return `<span class="device-status tag--status ${escapeAttr(cls)}">${escapeHtml(toolCreatorStatusLabel(status))}</span>`;
 }
 
 function renderToolCreatorTaskList() {
@@ -28,7 +28,7 @@ function renderToolCreatorEvents(events) {
 function renderToolCreatorQuestion(task) {
   const q=task.question||{};
   if(task.status!=="awaiting_admin"||!q.question_id)return "";
-  const options=(q.options||[]).map(option=>`<button class="btn small" data-tool-creator-answer-option="${escapeAttr(option)}">${escapeHtml(option)}</button>`).join("");
+  const options=(q.options||[]).map(option=>`<button class="btn btn--wrap small" data-tool-creator-answer-option="${escapeAttr(option)}">${escapeHtml(option)}</button>`).join("");
   const creator=String(task.created_by||"")===String(state.qq||"");
   return `<section class="tool-creator-question"><span class="eyebrow">ADMIN DECISION REQUIRED</span><h3>${escapeHtml(q.prompt||"需要补充信息")}</h3><p>${escapeHtml(q.reason||"")}</p>${options?`<div class="row">${options}</div>`:""}<textarea id="tool-creator-answer" placeholder="输入你的决定；提交后 LLM 会从当前任务继续" oninput="state.toolCreatorAnswer=this.value" ${creator?'':'disabled'}>${escapeHtml(state.toolCreatorAnswer||"")}</textarea><button class="btn primary" data-tool-creator-answer ${creator?'':'disabled'}>提交回答</button>${creator?'':'<small class="muted">只有任务创建者可以回答。</small>'}</section>`;
 }
@@ -37,8 +37,8 @@ function renderToolCreatorArtifact(task) {
   const context=task.context||{};
   const manifest=context.manifest;
   if(!manifest)return "";
-  const files=(context.artifact_files||[]).map(item=>`<tr><td><code>${escapeHtml(item.path||"")}</code></td><td>${Number(item.size||0).toLocaleString()} B</td></tr>`).join("");
-  return `<section class="tool-creator-artifact"><div class="between"><div><span class="eyebrow">REUSABLE SKILL</span><h3>${escapeHtml(manifest.name||"")}</h3></div><code>${escapeHtml(String(task.artifact_digest||"").slice(0,16))}</code></div><p>${escapeHtml(manifest.description||"")}</p><div class="row">${(manifest.execution&&manifest.execution.allowed_tools||[]).map(name=>`<span class="tag">${escapeHtml(name)}</span>`).join("")}</div><details><summary>查看 manifest</summary><pre>${escapeHtml(JSON.stringify(manifest,null,2))}</pre></details><div class="table-wrap"><table><thead><tr><th>产物</th><th>大小</th></tr></thead><tbody>${files}</tbody></table></div></section>`;
+  const files=(context.artifact_files||[]).map(item=>`<tr><td class="col-description"><code class="u-wrap">${escapeHtml(item.path||"")}</code></td><td class="col-number u-atomic u-tabular">${Number(item.size||0).toLocaleString()} B</td></tr>`).join("");
+  return `<section class="tool-creator-artifact"><div class="between"><div><span class="eyebrow">REUSABLE SKILL</span><h3 class="u-ellipsis" title="${escapeAttr(manifest.name || "")}">${escapeHtml(manifest.name||"")}</h3></div><code class="u-atomic" title="${escapeAttr(task.artifact_digest || "")}">${escapeHtml(String(task.artifact_digest||"").slice(0,16))}</code></div><p class="u-wrap">${escapeHtml(manifest.description||"")}</p><div class="row">${(manifest.execution&&manifest.execution.allowed_tools||[]).map(name=>`<span class="tag tag--ellipsis" title="${escapeAttr(name)}">${escapeHtml(name)}</span>`).join("")}</div><details><summary>查看 manifest</summary><pre class="u-pre-wrap code-scroll">${escapeHtml(JSON.stringify(manifest,null,2))}</pre></details><div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="工具创建产物列表"><table class="data-table compact"><thead><tr><th scope="col" class="col-description">产物</th><th scope="col" class="col-number">大小</th></tr></thead><tbody>${files}</tbody></table></div></section>`;
 }
 
 function renderToolCreatorDetail() {

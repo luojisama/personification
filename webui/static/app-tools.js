@@ -50,26 +50,26 @@ function renderSkills() {
       ? `<div class="muted" style="font-size:11.5px;margin-top:4px">巡检 ${escapeHtml(healthTime)} · ${Number(health.latency_ms || 0)}ms${health.last_error ? ` · ${escapeHtml(String(health.last_error).slice(0,120))}` : ""}</div>`
       : "";
     const tags = [
-      s.category ? `<span class="tag">${escapeHtml(s.category)}</span>` : "",
-      s.source_kind ? `<span class="tag">${escapeHtml(s.source_kind)}</span>` : "",
+      s.category ? `<span class="tag tag--ellipsis" title="${escapeAttr(s.category)}">${escapeHtml(s.category)}</span>` : "",
+      s.source_kind ? `<span class="tag tag--ellipsis" title="${escapeAttr(s.source_kind)}">${escapeHtml(s.source_kind)}</span>` : "",
       s.mcp ? '<span class="tag source-runtime_config">MCP</span>' : "",
       s.local === false && !s.mcp ? '<span class="tag">remote</span>' : "",
       s.health_disabled ? '<span class="tag required">巡检屏蔽</span>' : "",
       healthChecked && !s.health_disabled ? '<span class="tag">巡检可用</span>' : "",
     ].filter(Boolean).join("");
     const status = active
-      ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">启用</span>'
+      ? '<span class="tag tag--status" style="background:rgba(52,211,153,0.18);color:var(--ok)">启用</span>'
       : s.health_disabled
         ? '<span class="tag required">临时屏蔽</span>'
-        : '<span class="tag" style="background:rgba(248,113,113,0.18);color:var(--danger)">禁用</span>';
+        : '<span class="tag tag--status" style="background:rgba(248,113,113,0.18);color:var(--danger)">禁用</span>';
     return `<tr>
-      <td><strong>${escapeHtml(s.name)}</strong><div style="margin-top:4px">${tags}</div></td>
-      <td class="muted" style="font-size:12.5px">${escapeHtml((s.description||"").slice(0,140))}${healthDetail}</td>
-      <td>${status}</td>
-      <td>
+      <td class="col-id"><strong class="u-ellipsis" title="${escapeAttr(s.name)}">${escapeHtml(s.name)}</strong><div style="margin-top:4px">${tags}</div></td>
+      <td class="col-description muted u-wrap" style="font-size:12.5px">${escapeHtml((s.description||"").slice(0,140))}${healthDetail}</td>
+      <td class="col-status">${status}</td>
+      <td class="col-actions">
         <div class="toggle">
-          <button class="${!s.user_disabled?'on':''}" onclick="toggleSkill('${escapeAttr(s.name)}', false)">开</button>
-          <button class="${s.user_disabled?'on':''}" onclick="toggleSkill('${escapeAttr(s.name)}', true)">关</button>
+          <button class="${!s.user_disabled?'on':''}" aria-label="启用 Skill ${escapeAttr(s.name)}" onclick="toggleSkill('${escapeAttr(s.name)}', false)">开</button>
+          <button class="${s.user_disabled?'on':''}" aria-label="禁用 Skill ${escapeAttr(s.name)}" onclick="toggleSkill('${escapeAttr(s.name)}', true)">关</button>
         </div>
       </td>
     </tr>`;
@@ -83,7 +83,7 @@ function renderSkills() {
     ${renderRemoteSkillSources()}
     ${renderLegacyMcpTools()}
     <div class="card"><h2>Skill 启停</h2>
-      <div class="table-wrap"><table><thead><tr><th>名称</th><th>说明</th><th>状态</th><th>开关</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">无 skill</td></tr>'}</tbody></table></div>
+      <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="Skill 启停列表"><table class="data-table wide"><thead><tr><th scope="col" class="col-id">名称</th><th scope="col" class="col-description">说明</th><th scope="col" class="col-status">状态</th><th scope="col" class="col-actions">开关</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">无 skill</td></tr>'}</tbody></table></div>
     </div>`;
 }
 
@@ -123,14 +123,14 @@ function renderRemoteSkillSources() {
   const rows = sources.map(item => {
     const selector = item.key || item.name || item.source;
     return `<tr>
-      <td><strong>${escapeHtml(item.name || ("source_" + (item.index + 1)))}</strong><br><code style="font-size:11px">${escapeHtml(item.key || "")}</code></td>
-      <td style="word-break:break-all">${escapeHtml(item.source || "")}${item.ref ? `<br><span class="muted">ref=${escapeHtml(item.ref)}</span>` : ""}${item.subdir ? `<br><span class="muted">subdir=${escapeHtml(item.subdir)}</span>` : ""}<br><span class="muted">digest=${escapeHtml((item.content_digest || "未准备").slice(0,16))}</span></td>
-      <td>${_remoteStatusTag(item.status)}</td>
-      <td>
+      <td class="col-id"><strong class="u-ellipsis" title="${escapeAttr(item.name || ("source_" + (item.index + 1)))}">${escapeHtml(item.name || ("source_" + (item.index + 1)))}</strong><code class="u-ellipsis" title="${escapeAttr(item.key || "")}" style="font-size:11px">${escapeHtml(item.key || "")}</code></td>
+      <td class="col-description u-wrap">${escapeHtml(item.source || "")}${item.ref ? `<br><span class="muted u-wrap">ref=${escapeHtml(item.ref)}</span>` : ""}${item.subdir ? `<br><span class="muted u-wrap">subdir=${escapeHtml(item.subdir)}</span>` : ""}<br><span class="muted u-atomic">digest=${escapeHtml((item.content_digest || "未准备").slice(0,16))}</span></td>
+      <td class="col-status">${_remoteStatusTag(item.status)}</td>
+      <td class="col-actions">
         <div class="row" style="gap:6px">
-          <button class="btn small primary" onclick="reviewRemoteSkill('${escapeAttr(selector)}','approved')" ${item.status==="approved"?"disabled":""}>批准</button>
-          <button class="btn small" onclick="reviewRemoteSkill('${escapeAttr(selector)}','pending')">待审</button>
-          <button class="btn small danger" onclick="reviewRemoteSkill('${escapeAttr(selector)}','rejected')">拒绝</button>
+          <button class="btn small primary" aria-label="批准远程 Skill ${escapeAttr(item.name || selector)}" onclick="reviewRemoteSkill('${escapeAttr(selector)}','approved')" ${item.status==="approved"?"disabled":""}>批准</button>
+          <button class="btn small" aria-label="将远程 Skill ${escapeAttr(item.name || selector)} 标为待审" onclick="reviewRemoteSkill('${escapeAttr(selector)}','pending')">待审</button>
+          <button class="btn small danger" aria-label="拒绝远程 Skill ${escapeAttr(item.name || selector)}" onclick="reviewRemoteSkill('${escapeAttr(selector)}','rejected')">拒绝</button>
         </div>
       </td>
     </tr>`;
@@ -156,22 +156,22 @@ function renderRemoteSkillSources() {
       <label><input type="checkbox" ${state.skillSourceForm.autoApprove ? "checked" : ""} onchange="state.skillSourceForm.autoApprove=this.checked"> 添加后批准</label>
       <button class="btn primary" onclick="addRemoteSkillSource()">添加源</button>
     </div>
-    <div class="table-wrap"><table><thead><tr><th>名称</th><th>来源</th><th>审核</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">暂无远程源</td></tr>'}</tbody></table></div>
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="远程 Skill 来源列表"><table class="data-table wide"><thead><tr><th scope="col" class="col-id">名称</th><th scope="col" class="col-description">来源</th><th scope="col" class="col-status">审核</th><th scope="col" class="col-actions">操作</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">暂无远程源</td></tr>'}</tbody></table></div>
   </div>`;
 }
 
 function renderLegacyMcpTools() {
   const tools = state.skillMcpTools || [];
   const rows = tools.map(t => `<tr>
-    <td><strong>${escapeHtml(t.name)}</strong><br><span class="muted">remote=${escapeHtml(t.remote_name || "-")}</span></td>
-    <td><code>${escapeHtml(t.command || "-")}</code></td>
-    <td class="muted">${escapeHtml(t.cwd || "-")}</td>
-    <td>${Number(t.timeout || 0)}s</td>
-    <td>${Number(t.args_count || 0)} / ${Number(t.env_count || 0)}</td>
+    <td class="col-id"><strong class="u-ellipsis" title="${escapeAttr(t.name)}">${escapeHtml(t.name)}</strong><span class="muted u-ellipsis" title="${escapeAttr(t.remote_name || "-")}">remote=${escapeHtml(t.remote_name || "-")}</span></td>
+    <td class="col-description"><code class="u-wrap">${escapeHtml(t.command || "-")}</code></td>
+    <td class="col-description muted u-wrap">${escapeHtml(t.cwd || "-")}</td>
+    <td class="col-number u-atomic u-tabular">${Number(t.timeout || 0)}s</td>
+    <td class="col-number u-atomic u-tabular">${Number(t.args_count || 0)} / ${Number(t.env_count || 0)}</td>
   </tr>`).join("");
   return `<div class="card">
     <h2>Legacy Skill MCP 工具</h2>
-    <div class="table-wrap"><table><thead><tr><th>工具</th><th>命令</th><th>cwd</th><th>超时</th><th>args/env</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">当前未注册 MCP stdio 工具</td></tr>'}</tbody></table></div>
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="Legacy Skill MCP 工具列表"><table class="data-table wide"><thead><tr><th scope="col" class="col-id">工具</th><th scope="col" class="col-description">命令</th><th scope="col" class="col-description">cwd</th><th scope="col" class="col-number">超时</th><th scope="col" class="col-number">args/env</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">当前未注册 MCP stdio 工具</td></tr>'}</tbody></table></div>
   </div>`;
 }
 
@@ -275,7 +275,7 @@ function pluginKnowledgeCoverageText(c) {
 }
 
 function renderPluginKnowledgeCoverage(c) {
-  const full = c.full_input ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">全量输入</span>' : '<span class="tag required">覆盖未确认</span>';
+  const full = c.full_input ? '<span class="tag tag--status" style="background:rgba(52,211,153,0.18);color:var(--ok)">全量输入</span>' : '<span class="tag tag--status required">覆盖未确认</span>';
   const trunc = c.source_truncated ? '<span class="tag required">存在截断</span>' : '<span class="tag">未截断</span>';
   const complete = c.source_complete === false ? '<span class="tag required">快照不完整</span>' : '<span class="tag">完整快照</span>';
   return `<div style="margin:10px 0 12px">
@@ -317,14 +317,14 @@ function renderPluginKnowledgeSourceFiles(snapshot) {
   const files = snapshot && Array.isArray(snapshot.files) ? snapshot.files : [];
   if (!files.length) return "";
   const rows = files.slice(0, 120).map(f => `<tr>
-    <td><code>${escapeHtml(f.path || "")}</code></td>
-    <td class="muted">${Number(f.line_count || 0)}</td>
-    <td class="muted">${Number(f.size || 0).toLocaleString()}</td>
-    <td class="muted">${escapeHtml((f.symbols || []).slice(0, 8).join(", "))}</td>
+    <td class="col-description"><code class="u-wrap">${escapeHtml(f.path || "")}</code></td>
+    <td class="col-number muted u-atomic u-tabular">${Number(f.line_count || 0)}</td>
+    <td class="col-number muted u-atomic u-tabular">${Number(f.size || 0).toLocaleString()}</td>
+    <td class="col-description muted u-wrap">${escapeHtml((f.symbols || []).slice(0, 8).join(", "))}</td>
   </tr>`).join("");
   const more = files.length > 120 ? `<div class="muted" style="margin-top:6px">还有 ${files.length - 120} 个源码文件未在表格中展开，完整数据见 JSON。</div>` : "";
   return `<h3>源码文件</h3>
-    <div class="table-wrap"><table><thead><tr><th>文件</th><th>行数</th><th>字符</th><th>符号</th></tr></thead><tbody>${rows}</tbody></table></div>${more}`;
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="插件知识源码文件"><table class="data-table wide"><thead><tr><th scope="col" class="col-description">文件</th><th scope="col" class="col-number">行数</th><th scope="col" class="col-number">字符</th><th scope="col" class="col-description">符号</th></tr></thead><tbody>${rows}</tbody></table></div>${more}`;
 }
 
 function renderPluginKnowledge() {
@@ -338,17 +338,17 @@ function renderPluginKnowledge() {
   const rows = displayList.map(p => {
     const coverage = pluginKnowledgeCoverage(p);
     return `<tr>
-    <td><strong>${escapeHtml(p.display_name || p.plugin_name)}</strong>${p.category ? ` <span class="tag">${escapeHtml(p.category)}</span>` : ''}</td>
-    <td><code>${escapeHtml(p.plugin_name)}</code></td>
-    <td>${escapeHtml(p.summary || '')}</td>
-    <td class="muted" style="font-size:12px">
+    <td class="col-model"><strong class="u-clamp-2" title="${escapeAttr(p.display_name || p.plugin_name)}">${escapeHtml(p.display_name || p.plugin_name)}</strong>${p.category ? ` <span class="tag tag--ellipsis" title="${escapeAttr(p.category)}">${escapeHtml(p.category)}</span>` : ''}</td>
+    <td class="col-id"><code class="u-ellipsis" title="${escapeAttr(p.plugin_name)}">${escapeHtml(p.plugin_name)}</code></td>
+    <td class="col-summary u-wrap">${escapeHtml(p.summary || '')}</td>
+    <td class="col-description muted" style="font-size:12px">
       ${p.has_runtime_data ? '<span class="tag">runtime</span>' : ''}
       ${p.has_source_data ? `<span class="tag">source(${p.source_file_count}f/${p.source_chunk_count}c)</span>` : ''}
-      ${coverage.full_input ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">全量</span>' : ''}
+      ${coverage.full_input ? '<span class="tag tag--status" style="background:rgba(52,211,153,0.18);color:var(--ok)">全量</span>' : ''}
       ${(p.analysis_mode || p.analysis_strategy) ? `<span class="tag">${escapeHtml(pluginKnowledgeStrategyLabel(p.analysis_mode || p.analysis_strategy))}</span>` : ''}
       ${p.source_chars ? `<span class="tag">${Number(p.source_chars || 0).toLocaleString()} chars</span>` : ''}
     </td>
-    <td><button class="btn small" onclick="openPluginKnowledge('${escapeAttr(p.plugin_name)}')">详情</button></td>
+    <td class="col-actions"><button class="btn small" aria-label="查看插件 ${escapeAttr(p.display_name || p.plugin_name)} 的知识详情" onclick="openPluginKnowledge('${escapeAttr(p.plugin_name)}')">详情</button></td>
   </tr>`;
   }).join("");
   const searchInfo = matchedSet ? `<div class="muted" style="margin-bottom:8px">搜索 "${escapeHtml(state.pluginKnowledgeSearchQ || '')}" 命中 ${matchedSet.size} 条 <button class="btn small" onclick="clearPluginKnowledgeSearch()">清除</button></div>` : '';
@@ -360,7 +360,7 @@ function renderPluginKnowledge() {
     <div class="muted" style="margin-bottom:10px;font-size:12.5px">构建说明：插件知识库读取每个插件根目录下完整可读 Python 源码。小插件可一次传入模型；大插件会按模块或 chunk 拆成多次分析，所有 chunk 都会参与，不做抽样。skeleton 预览可能截断，但源码快照与分析输入不截断。</div>
     ${searchInfo}
     <h2>插件知识库（${displayList.length} / ${list.length}）</h2>
-    <table><thead><tr><th>名称</th><th>plugin_name</th><th>摘要</th><th>数据</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">暂无插件知识，等待自动构建或手动触发。</td></tr>'}</tbody></table>
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="插件知识库列表"><table class="data-table xwide"><thead><tr><th scope="col" class="col-model">名称</th><th scope="col" class="col-id">plugin_name</th><th scope="col" class="col-summary">摘要</th><th scope="col" class="col-description">数据</th><th scope="col" class="col-actions"><span class="sr-only">操作</span></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">暂无插件知识，等待自动构建或手动触发。</td></tr>'}</tbody></table></div>
   </div>`;
 }
 
@@ -399,7 +399,7 @@ function renderPluginKnowledgeDetail() {
     const name = f.title || f.name || f.feature || f.key || "";
     const desc = f.summary || f.description || f.desc || f.detail || "";
     const meta = [
-      f.key ? `<code>${escapeHtml(f.key)}</code>` : "",
+      f.key ? `<code class="u-ellipsis" title="${escapeAttr(f.key)}">${escapeHtml(f.key)}</code>` : "",
       f.files && f.files.length ? `<span class="muted">${escapeHtml(f.files.slice(0, 4).join(", "))}</span>` : "",
     ].filter(Boolean).join(" ");
     return `<li><strong>${escapeHtml(name)}</strong>${desc ? `：${escapeHtml(desc)}` : ''}${meta ? `<div style="font-size:12px;margin-top:3px">${meta}</div>` : ''}</li>`;
@@ -410,10 +410,10 @@ function renderPluginKnowledgeDetail() {
       ${e.summary ? `<p>${escapeHtml(e.summary)}</p>` : ''}
       ${renderPluginKnowledgeCoverage(coverage)}
       ${(e.keywords && e.keywords.length) ? `<div style="margin:6px 0">${e.keywords.map(k => `<span class="tag">${escapeHtml(k)}</span>`).join("")}</div>` : ''}
-      ${e.architecture_summary ? `<h3>架构摘要</h3><pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(e.architecture_summary)}</pre>` : ''}
+      ${e.architecture_summary ? `<h3>架构摘要</h3><pre class="u-pre-wrap code-scroll" style="margin:0;font-family:inherit">${escapeHtml(e.architecture_summary)}</pre>` : ''}
       ${features.length ? `<h3>功能列表</h3><ul>${featureRows}</ul>` : ''}
       ${renderPluginKnowledgeSourceFiles(d.source_snapshot)}
-      <details style="margin-top:12px"><summary class="muted">完整 JSON</summary><pre style="white-space:pre-wrap;font-size:12px;background:#0b0d12;padding:10px;border-radius:6px;overflow-x:auto">${escapeHtml(JSON.stringify(e, null, 2))}</pre></details>
+      <details style="margin-top:12px"><summary class="muted">完整 JSON</summary><pre class="u-pre-wrap code-scroll" style="font-size:12px;background:#0b0d12;padding:10px;border-radius:6px">${escapeHtml(JSON.stringify(e, null, 2))}</pre></details>
     </div>`;
 }
 
@@ -422,14 +422,14 @@ function pluginCommitRows(items, emptyText) {
     const ts = Number(item.timestamp || 0);
     const time = ts ? new Date(ts * 1000).toLocaleString() : "-";
     return `<tr>
-      <td><code>${escapeHtml(item.short_hash || "")}</code></td>
-      <td>${escapeHtml(item.subject || "")}</td>
-      <td class="muted">${escapeHtml(item.author || "")}</td>
-      <td class="muted">${escapeHtml(time)}</td>
+      <td class="col-id"><code class="u-atomic" title="${escapeAttr(item.short_hash || "")}">${escapeHtml(item.short_hash || "")}</code></td>
+      <td class="col-summary u-wrap">${escapeHtml(item.subject || "")}</td>
+      <td class="col-model muted"><span class="u-ellipsis" title="${escapeAttr(item.author || "")}">${escapeHtml(item.author || "")}</span></td>
+      <td class="col-time muted u-atomic u-tabular">${escapeHtml(time)}</td>
     </tr>`;
   }).join("");
-  return `<table><thead><tr><th>版本</th><th>内容</th><th>作者</th><th>时间</th></tr></thead>
-    <tbody>${rows || `<tr><td colspan="4" class="muted">${escapeHtml(emptyText || "暂无记录")}</td></tr>`}</tbody></table>`;
+  return `<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="插件版本提交记录"><table class="data-table wide"><thead><tr><th scope="col" class="col-id">版本</th><th scope="col" class="col-summary">内容</th><th scope="col" class="col-model">作者</th><th scope="col" class="col-time">时间</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="4" class="muted">${escapeHtml(emptyText || "暂无记录")}</td></tr>`}</tbody></table></div>`;
 }
 
 const _PLUGIN_UPDATE_RESULT_STORAGE_KEY = "personification_plugin_update_result_v1";
@@ -466,13 +466,13 @@ function renderPluginManager() {
   const statusTag = st.update_supported === false
     ? '<span class="tag required">不支持自动更新</span>'
     : updateAvailable
-      ? '<span class="tag" style="background:rgba(245,158,11,0.18);color:var(--warn)">有更新</span>'
-      : '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">已是最新</span>';
+      ? '<span class="tag tag--status" style="background:rgba(245,158,11,0.18);color:var(--warn)">有更新</span>'
+      : '<span class="tag tag--status" style="background:rgba(52,211,153,0.18);color:var(--ok)">已是最新</span>';
   const fetchAlert = fetch && fetch.ok === false
     ? `<div class="alert err" style="margin-top:10px">远端检查失败：${escapeHtml(fetch.error || "未知错误")}</div>`
     : "";
   const dirtyAlert = st.dirty
-    ? `<div class="alert err" style="margin-top:10px">本地有 ${Number(st.dirty_count || 0)} 项未提交改动，自动更新已禁用。<pre style="white-space:pre-wrap;margin:8px 0 0">${escapeHtml((st.dirty_preview || []).join("\n"))}</pre></div>`
+    ? `<div class="alert err" style="margin-top:10px">本地有 ${Number(st.dirty_count || 0)} 项未提交改动，自动更新已禁用。<pre class="u-pre-wrap code-scroll" style="margin:8px 0 0">${escapeHtml((st.dirty_preview || []).join("\n"))}</pre></div>`
     : "";
   const result = state.pluginUpdateResult;
   const resultDiagnostic = result ? `<div style="margin-top:12px">${renderOperationDiagnostic(result)}</div>` : "";
@@ -489,17 +489,17 @@ function renderPluginManager() {
     </div>
     <div class="health-summary" style="margin-top:14px">
       <div class="health-pill"><div><div class="muted" style="font-size:12px">安装源</div><div>${escapeHtml(sourceType)}</div></div></div>
-      <div class="health-pill"><div><div class="muted" style="font-size:12px">本地版本</div><div><code>${escapeHtml(local.short_hash || "-")}</code></div></div></div>
-      <div class="health-pill"><div><div class="muted" style="font-size:12px">远端版本</div><div><code>${escapeHtml(remote.short_hash || "-")}</code></div></div></div>
+      <div class="health-pill"><div><div class="muted" style="font-size:12px">本地版本</div><div><code class="u-atomic" title="${escapeAttr(local.short_hash || "-")}">${escapeHtml(local.short_hash || "-")}</code></div></div></div>
+      <div class="health-pill"><div><div class="muted" style="font-size:12px">远端版本</div><div><code class="u-atomic" title="${escapeAttr(remote.short_hash || "-")}">${escapeHtml(remote.short_hash || "-")}</code></div></div></div>
       <div class="health-pill"><div><div class="muted" style="font-size:12px">差异</div><div>领先 ${Number(st.ahead || 0)} / 落后 ${Number(st.behind || 0)}</div></div></div>
     </div>
-    <table style="margin-top:10px"><tbody>
-      <tr><td class="muted" style="width:120px">仓库根目录</td><td><code>${escapeHtml(st.repo_root || st.plugin_root || "-")}</code></td></tr>
-      <tr><td class="muted">插件目录</td><td><code>${escapeHtml(st.plugin_subdir || ".")}</code></td></tr>
-      <tr><td class="muted">分支</td><td>${escapeHtml(source.branch || local.branch || "-")} ${source.upstream ? `<span class="muted">→ ${escapeHtml(source.upstream)}</span>` : ""}</td></tr>
-      <tr><td class="muted">远端</td><td>${source.remote_url ? `<code>${escapeHtml(source.remote_url)}</code>` : '<span class="muted">未配置</span>'}</td></tr>
-      <tr><td class="muted">状态</td><td>${escapeHtml(st.message || "-")}</td></tr>
-    </tbody></table>
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="插件安装源详情"><table class="data-table compact" style="margin-top:10px"><tbody>
+      <tr><td class="muted u-atomic" style="width:120px">仓库根目录</td><td class="col-description"><code class="u-wrap">${escapeHtml(st.repo_root || st.plugin_root || "-")}</code></td></tr>
+      <tr><td class="muted u-atomic">插件目录</td><td class="col-description"><code class="u-wrap">${escapeHtml(st.plugin_subdir || ".")}</code></td></tr>
+      <tr><td class="muted u-atomic">分支</td><td class="col-description u-wrap">${escapeHtml(source.branch || local.branch || "-")} ${source.upstream ? `<span class="muted">→ ${escapeHtml(source.upstream)}</span>` : ""}</td></tr>
+      <tr><td class="muted u-atomic">远端</td><td class="col-description">${source.remote_url ? `<code class="u-wrap">${escapeHtml(source.remote_url)}</code>` : '<span class="muted">未配置</span>'}</td></tr>
+      <tr><td class="muted u-atomic">状态</td><td class="col-description u-wrap">${escapeHtml(st.message || "-")}</td></tr>
+    </tbody></table></div>
     ${fetchAlert}${dirtyAlert}${resultDiagnostic}
     <div class="row" style="margin-top:14px">
       <button class="btn primary" onclick="checkPluginUpdates()" ${state.pluginUpdateChecking?'disabled':''}>${state.pluginUpdateChecking?'<span class="spinner"></span> 检查中…':'检查更新'}</button>
@@ -642,13 +642,13 @@ function renderTest() {
   </div>
   ${r ? `<div class="card"><h2>响应（路由模型）</h2>
     <div class="row muted" style="font-size:12px;margin-bottom:8px">
-      <span>模型 <code>${escapeHtml(r.model_used||'未知')}</code></span>
+      <span class="u-ellipsis" title="${escapeAttr(r.model_used || '未知')}">模型 <code>${escapeHtml(r.model_used||'未知')}</code></span>
       ${r.profile==='qzone'?'<span>QZone-compatible</span>':''}
       <span>finish=${escapeHtml(r.finish_reason||'')}</span>
       <span>${r.duration_ms}ms</span>
       <span>tokens prompt=${r.usage?.prompt_tokens||0} completion=${r.usage?.completion_tokens||0}</span>
     </div>
-    <pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(r.content||'(无内容)')}</pre>
+    <pre class="u-pre-wrap code-scroll" style="margin:0;font-family:inherit">${escapeHtml(r.content||'(无内容)')}</pre>
   </div>` : ''}
   ${renderTestAll()}`;
 }
@@ -666,16 +666,16 @@ function renderTestAll() {
     const failureText = [diagnostic.title, diagnostic.message].filter(Boolean).join("：");
     const detail = ok ? (escapeHtml((x.content||'').slice(0,200)) || '(空)') : escapeHtml(failureText || x.error || x.blocked_reason || '未知错误');
     return `<tr>
-      <td>${escapeHtml(x.name||'')}</td>
-      <td class="muted">${escapeHtml(x.api_type||'')} / ${escapeHtml(x.model||'')}</td>
-      <td>${status}</td>
-      <td>${x.duration_ms!=null?x.duration_ms+'ms':'-'}</td>
-      <td style="max-width:380px;white-space:pre-wrap;word-break:break-word">${detail}</td>
+      <td class="col-model"><span class="u-ellipsis" title="${escapeAttr(x.name || '')}">${escapeHtml(x.name||'')}</span></td>
+      <td class="col-model muted"><span class="u-ellipsis" title="${escapeAttr((x.api_type || '') + ' / ' + (x.model || ''))}">${escapeHtml(x.api_type||'')} / ${escapeHtml(x.model||'')}</span></td>
+      <td class="col-status">${status}</td>
+      <td class="col-number u-atomic u-tabular">${x.duration_ms!=null?x.duration_ms+'ms':'-'}</td>
+      <td class="col-description u-pre-wrap">${detail}</td>
     </tr>`;
   }).join("");
   return `<div class="card"><h2>全部 provider 测试（${ra.count||0}）</h2>
-    <table><thead><tr><th>名称</th><th>类型 / 模型</th><th>状态</th><th>延迟</th><th>内容 / 错误</th></tr></thead>
-    <tbody>${rows||'<tr><td colspan="5" class="muted">无</td></tr>'}</tbody></table>
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="Provider 测试结果"><table class="data-table wide"><thead><tr><th scope="col" class="col-model">名称</th><th scope="col" class="col-model">类型 / 模型</th><th scope="col" class="col-status">状态</th><th scope="col" class="col-number">延迟</th><th scope="col" class="col-description">内容 / 错误</th></tr></thead>
+    <tbody>${rows||'<tr><td colspan="5" class="muted">无</td></tr>'}</tbody></table></div>
   </div>`;
 }
 
@@ -712,11 +712,11 @@ function renderPersonaPrompt() {
   if (p && p.diagnostic) persistTestOperationResult(p);
   const meta = p ? `<div class="row muted" style="font-size:12px;margin-bottom:8px;gap:14px">
       <span>来源：${escapeHtml(p.source||'-')}</span>
-      ${p.resolved_path ? `<span>路径：<code>${escapeHtml(p.resolved_path)}</code></span>` : ''}
+      ${p.resolved_path ? `<span class="u-wrap">路径：<code class="u-wrap">${escapeHtml(p.resolved_path)}</code></span>` : ''}
       <span>${p.exists ? (p.is_file ? (p.size+' 字节') : '内联文本') : '<span style="color:var(--danger)">文件不存在</span>'}</span>
     </div>` : '';
   const body = p && (p.content || p.content === '')
-    ? `<pre style="white-space:pre-wrap;margin:0;font-family:ui-monospace,Consolas,monospace;max-height:60vh;overflow:auto">${escapeHtml(p.content || '(空)')}</pre>`
+    ? `<pre class="u-pre-wrap code-scroll" style="margin:0;font-family:ui-monospace,Consolas,monospace;max-height:60vh">${escapeHtml(p.content || '(空)')}</pre>`
     : (p && p.diagnostic ? '' : '<p class="muted">加载中…</p>');
   return `<div class="card">
     <h2>人设预览</h2>

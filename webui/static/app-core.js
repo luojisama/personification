@@ -364,7 +364,7 @@ function renderOperationDiagnostic(input, options={}) {
   const expanded = options.expanded !== false;
   const detailRows = details.map(item => `<div class="operation-detail ${escapeAttr(item.status||'info')}"><span>${escapeHtml(item.label||'详情')}</span><strong>${escapeHtml(_diagnosticValue(item.value))}</strong></div>`).join("");
   const stepRows = steps.map((item,index) => `<li class="operation-step ${escapeAttr(item.status||'unknown')}"><span class="operation-step-index">${String(index+1).padStart(2,'0')}</span><div><strong>${escapeHtml(item.label||item.key||'步骤')}</strong>${item.message?`<p>${escapeHtml(item.message)}</p>`:''}${Array.isArray(item.details)&&item.details.length?`<div class="operation-step-details">${item.details.map(child=>`<span>${escapeHtml(child.label||'详情')}：${escapeHtml(_diagnosticValue(child.value))}</span>`).join('')}</div>`:''}</div><em>${escapeHtml(item.status||'unknown')}</em></li>`).join("");
-  const trace = d.trace_id ? `<button class="btn small operation-trace-button" data-operation-trace="${escapeAttr(d.trace_id)}">查看 Trace</button>` : "";
+  const trace = d.trace_id ? `<button class="btn small operation-trace-button" aria-label="查看 Trace ${escapeAttr(d.trace_id)}" data-operation-trace="${escapeAttr(d.trace_id)}">查看 Trace</button>` : "";
   const retryLabel = unknown ? "禁止直接重试" : (d.retryable ? "可以重试" : "不要直接重试");
   queueOperationAnnouncement(d);
   return `<details class="operation-diagnostic ${tone}" data-operation-group="${escapeAttr(group)}" data-detail-key="${escapeAttr(detailKey)}" ${expanded?'open':''}>
@@ -376,7 +376,7 @@ function renderOperationDiagnostic(input, options={}) {
       ${stepRows?`<ol class="operation-steps">${stepRows}</ol>`:''}
       ${warnings.length?`<div class="operation-warnings"><strong>降级与警告</strong>${warnings.map(item=>`<p>${escapeHtml(item)}</p>`).join('')}</div>`:''}
       ${d.suggestion?`<div class="operation-suggestion"><strong>建议处理</strong><p>${escapeHtml(d.suggestion)}</p></div>`:''}
-      ${(d.operation_id||d.trace_id)?`<footer>${d.operation_id?`<code>operation ${escapeHtml(d.operation_id)}</code>`:''}${d.trace_id?`<code>trace ${escapeHtml(d.trace_id)}</code>`:''}${trace}</footer>`:''}
+      ${(d.operation_id||d.trace_id)?`<footer>${d.operation_id?`<code class="u-ellipsis" title="operation ${escapeAttr(d.operation_id)}">operation ${escapeHtml(d.operation_id)}</code>`:''}${d.trace_id?`<code class="u-ellipsis" title="trace ${escapeAttr(d.trace_id)}">trace ${escapeHtml(d.trace_id)}</code>`:''}${trace}</footer>`:''}
     </div>
   </details>`;
 }

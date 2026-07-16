@@ -83,7 +83,7 @@ function renderMcpRegistryServer(server) {
     ["repository", repository.url || repository.source || "未声明"],
     ["website", server.website || server.website_url || "未声明"],
     ["schema", server.schema || "未声明"],
-  ].map(([label, value]) => `<span><b>${label}</b><code>${escapeHtml(value)}</code></span>`).join("");
+  ].map(([label, value]) => `<span><b>${label}</b><code title="${escapeAttr(value)}">${escapeHtml(value)}</code></span>`).join("");
   const status = String(server.status || "unknown");
   return `<article class="mcp-registry-record">
     <header>
@@ -91,7 +91,7 @@ function renderMcpRegistryServer(server) {
       <span class="mcp-state ${mcpStatusTone(status)}"><i></i>${escapeHtml(status)}</span>
     </header>
     <div class="mcp-record-body">
-      <div class="mcp-record-title"><h3>${escapeHtml(server.title || server.name || "Untitled Server")}</h3><code>${escapeHtml(server.name || "")}</code></div>
+      <div class="mcp-record-title"><h3 title="${escapeAttr(server.title || server.name || "Untitled Server")}">${escapeHtml(server.title || server.name || "Untitled Server")}</h3><code title="${escapeAttr(server.name || "")}">${escapeHtml(server.name || "")}</code></div>
       <p>${escapeHtml(server.description || "未提供 description")}</p>
       ${server.status_message ? `<div class="mcp-status-message">${escapeHtml(server.status_message)}</div>` : ""}
       <div class="mcp-resource-facts">${resources}</div>
@@ -99,7 +99,7 @@ function renderMcpRegistryServer(server) {
     <footer>
       <div class="mcp-transport-counts"><span><strong>${Number(server.stdio_packages || 0)}</strong> stdio</span><span><strong>${Number(server.remote_count || 0)}</strong> remote</span><span><strong>${escapeHtml(server.version || "-")}</strong> version</span></div>
       <div class="mcp-record-links">${links}</div>
-      <button class="btn small" data-mcp-detail="${escapeAttr(server.name || "")}" data-mcp-source="${escapeAttr(sourceId)}">查看详情</button>
+      <button class="btn small" aria-label="查看 MCP Server ${escapeAttr(server.name || "")}" data-mcp-detail="${escapeAttr(server.name || "")}" data-mcp-source="${escapeAttr(sourceId)}">查看详情</button>
     </footer>
   </article>`;
 }
@@ -128,9 +128,9 @@ function renderMcpPackageMatrix(packages) {
   return `<div class="mcp-package-matrix">${packages.map(item => {
     const supported = item.supported === true;
     return `<article class="mcp-package-row ${supported ? "supported" : "unsupported"}">
-      <div><span>${escapeHtml(item.registry_type || "unknown")} / ${escapeHtml(item.transport || "unknown")}</span><code>${escapeHtml(mcpPackageIdentity(item))}</code></div>
+      <div><span>${escapeHtml(item.registry_type || "unknown")} / ${escapeHtml(item.transport || "unknown")}</span><code title="${escapeAttr(mcpPackageIdentity(item))}">${escapeHtml(mcpPackageIdentity(item))}</code></div>
       <span class="mcp-state ${supported ? "ok" : "error"}"><i></i>${supported ? "supported" : "unsupported"}</span>
-      ${item.fileSha256 ? `<small>fileSha256 ${escapeHtml(item.fileSha256)}</small>` : ""}
+      ${item.fileSha256 ? `<small class="u-ellipsis" title="fileSha256 ${escapeAttr(item.fileSha256)}">fileSha256 ${escapeHtml(item.fileSha256)}</small>` : ""}
       ${!supported ? `<p>${escapeHtml(item.unsupported_reason || "该 package 不支持快捷安装。")}</p>` : ""}
     </article>`;
   }).join("") || '<div class="mcp-empty"><strong>没有 package metadata</strong><span>该 Server 当前没有可展示的安装包。</span></div>'}</div>`;
@@ -171,10 +171,10 @@ function renderMcpDetail() {
   const status = String(server.status || "unknown");
   return `<div class="mcp-detail">
     <div class="mcp-detail-nav"><button class="btn small" data-mcp-detail-close>返回 Registry 结果</button><div>${renderMcpSourceBadges(source.id || state.mcpSourceId)}</div></div>
-    <header class="mcp-detail-head"><div><span class="eyebrow">CANONICAL SERVER</span><h3>${escapeHtml(server.title || server.name || "")}</h3><code>${escapeHtml(server.name || "")}</code></div><span class="mcp-state ${mcpStatusTone(status)}"><i></i>${escapeHtml(status)}</span></header>
+    <header class="mcp-detail-head"><div><span class="eyebrow">CANONICAL SERVER</span><h3 title="${escapeAttr(server.title || server.name || "")}">${escapeHtml(server.title || server.name || "")}</h3><code title="${escapeAttr(server.name || "")}">${escapeHtml(server.name || "")}</code></div><span class="mcp-state ${mcpStatusTone(status)}"><i></i>${escapeHtml(status)}</span></header>
     <p class="mcp-detail-description">${escapeHtml(server.description || "未提供 description")}</p>
     ${server.status_message ? `<div class="mcp-status-message">${escapeHtml(server.status_message)}</div>` : ""}
-    <div class="mcp-detail-meta"><span>version<strong>${escapeHtml(server.version || "-")}</strong></span><span>schema<strong>${escapeHtml(server.schema || "未声明")}</strong></span></div>
+    <div class="mcp-detail-meta"><span>version<strong title="${escapeAttr(server.version || "-")}">${escapeHtml(server.version || "-")}</strong></span><span>schema<strong title="${escapeAttr(server.schema || "未声明")}">${escapeHtml(server.schema || "未声明")}</strong></span></div>
     ${externalLinks ? `<div class="mcp-record-links">${externalLinks}</div>` : ""}
     <div><span class="eyebrow">PACKAGE SUPPORT</span>${renderMcpPackageMatrix(packages)}</div>
     ${selected ? `<div class="mcp-install-preflight">
@@ -213,7 +213,7 @@ function renderMcpInputSchema(schema) {
   const value = schema && typeof schema === "object" ? schema : {};
   const properties = value.properties && typeof value.properties === "object" ? value.properties : {};
   const required = new Set(Array.isArray(value.required) ? value.required.map(String) : []);
-  const rows = Object.entries(properties).map(([name, spec]) => `<li><code>${escapeHtml(name)}</code><span>${escapeHtml(mcpSchemaType(spec))}${required.has(name) ? ' <b>required</b>' : ""}</span><small>${escapeHtml(spec && spec.description || "未提供参数说明")}</small></li>`).join("");
+  const rows = Object.entries(properties).map(([name, spec]) => `<li><code title="${escapeAttr(name)}">${escapeHtml(name)}</code><span>${escapeHtml(mcpSchemaType(spec))}${required.has(name) ? ' <b>required</b>' : ""}</span><small>${escapeHtml(spec && spec.description || "未提供参数说明")}</small></li>`).join("");
   return `<div class="mcp-schema-summary"><div class="mcp-schema-head"><span>Input schema</span><strong>${Object.keys(properties).length} parameters / ${required.size} required</strong></div><ul>${rows || '<li class="empty">未声明 input parameters</li>'}</ul></div>`;
 }
 
@@ -240,7 +240,7 @@ function renderManagedMcpTool(tool, installation) {
         : "未授权，当前不可调用";
   const annotations = tool.annotations && typeof tool.annotations === "object" ? tool.annotations : {};
   return `<article class="mcp-tool-card ${effective ? "effective" : ""}">
-    <header><div><span class="eyebrow">${escapeHtml(tool.title || "MCP TOOL")}</span><h4>${escapeHtml(tool.remote_name || "")}</h4><code>${escapeHtml(tool.registered_name || "")}</code></div><button class="btn small ${authorized ? "danger" : "primary"}" data-mcp-tool-toggle="${escapeAttr(tool.remote_name || "")}" data-mcp-installation="${escapeAttr(installation.installation_id || "")}" data-mcp-enabled="${authorized ? "false" : "true"}" data-mcp-risk="${tool.publisher_read_only ? "read" : "unknown"}" ${state.mcpBusy ? "disabled" : ""}>${authorized ? "撤销授权" : "授权"}</button></header>
+    <header><div><span class="eyebrow u-ellipsis" title="${escapeAttr(tool.title || "MCP TOOL")}">${escapeHtml(tool.title || "MCP TOOL")}</span><h4 title="${escapeAttr(tool.remote_name || "")}">${escapeHtml(tool.remote_name || "")}</h4><code title="${escapeAttr(tool.registered_name || "")}">${escapeHtml(tool.registered_name || "")}</code></div><button class="btn small ${authorized ? "danger" : "primary"}" aria-label="${authorized ? "撤销授权" : "授权"} MCP tool ${escapeAttr(tool.remote_name || "")}" data-mcp-tool-toggle="${escapeAttr(tool.remote_name || "")}" data-mcp-installation="${escapeAttr(installation.installation_id || "")}" data-mcp-enabled="${authorized ? "false" : "true"}" data-mcp-risk="${tool.publisher_read_only ? "read" : "unknown"}" ${state.mcpBusy ? "disabled" : ""}>${authorized ? "撤销授权" : "授权"}</button></header>
     <p>${escapeHtml(tool.description || "未提供 description")}</p>
     <div class="mcp-state-strip"><span class="${authorized ? "on" : "off"}">authorized / ${authorized ? "yes" : "no"}</span><span class="${registered ? "on" : "off"}">registered / ${registered ? "yes" : "no"}</span><span class="${effective ? "on" : "off"}">effective / ${effective ? "yes" : "no"}</span></div>
     <div class="mcp-availability ${effective ? "ok" : "muted"}">${escapeHtml(availability)}</div>
@@ -260,10 +260,10 @@ function renderMcpInstallation(item) {
   const links = [renderMcpExternalLink(repository.url, "Repository"), renderMcpExternalLink(metadata.website, "Website")].filter(Boolean).join("");
   return `<article class="mcp-runtime-card">
     <header class="mcp-runtime-head">
-      <div><div class="mcp-record-source">${sourceBadges}</div><span class="eyebrow">RUNTIME INSTALLATION</span><h3>${escapeHtml(item.server_title || item.server_name || "")}</h3><code>${escapeHtml(item.server_name || "")}@${escapeHtml(item.server_version || "")}</code></div>
-      <div class="mcp-runtime-actions"><span class="mcp-state ${mcpStatusTone(processState)}"><i></i>${escapeHtml(processState)}</span><button class="btn small" data-mcp-installation-toggle="${escapeAttr(item.installation_id || "")}" data-mcp-enabled="${desired ? "false" : "true"}" ${state.mcpBusy ? "disabled" : ""}>${desired ? "停止运行" : "允许启动"}</button><button class="btn small danger" data-mcp-delete="${escapeAttr(item.installation_id || "")}" ${state.mcpBusy ? "disabled" : ""}>删除</button></div>
+      <div><div class="mcp-record-source">${sourceBadges}</div><span class="eyebrow">RUNTIME INSTALLATION</span><h3 title="${escapeAttr(item.server_title || item.server_name || "")}">${escapeHtml(item.server_title || item.server_name || "")}</h3><code title="${escapeAttr((item.server_name || "") + "@" + (item.server_version || ""))}">${escapeHtml(item.server_name || "")}@${escapeHtml(item.server_version || "")}</code><small class="mcp-installation-id u-ellipsis" title="installation ${escapeAttr(item.installation_id || "")}">installation ${escapeHtml(item.installation_id || "")}</small></div>
+      <div class="mcp-runtime-actions"><span class="mcp-state ${mcpStatusTone(processState)}"><i></i>${escapeHtml(processState)}</span><button class="btn small" aria-label="${desired ? "停止" : "启动"} MCP Server ${escapeAttr(item.server_name || "")}" data-mcp-installation-toggle="${escapeAttr(item.installation_id || "")}" data-mcp-enabled="${desired ? "false" : "true"}" ${state.mcpBusy ? "disabled" : ""}>${desired ? "停止运行" : "允许启动"}</button><button class="btn small danger" aria-label="删除 MCP installation ${escapeAttr(item.installation_id || "")}" data-mcp-delete="${escapeAttr(item.installation_id || "")}" ${state.mcpBusy ? "disabled" : ""}>删除</button></div>
     </header>
-    <div class="mcp-runtime-identity"><span>package<strong>${escapeHtml(item.package_type || "")} / ${escapeHtml(item.package_identifier || "")}</strong></span><span>prefix<strong>${escapeHtml(item.name_prefix || "-")}</strong></span><span>protocol<strong>${escapeHtml(metadata.protocol_version || "未记录")}</strong></span><span>Secret<strong>${item.secrets_required ? (item.secrets_configured ? "已配置" : "缺失") : "无需"}</strong></span></div>
+    <div class="mcp-runtime-identity"><span>package<strong title="${escapeAttr((item.package_type || "") + " / " + (item.package_identifier || ""))}">${escapeHtml(item.package_type || "")} / ${escapeHtml(item.package_identifier || "")}</strong></span><span>prefix<strong title="${escapeAttr(item.name_prefix || "-")}">${escapeHtml(item.name_prefix || "-")}</strong></span><span>protocol<strong title="${escapeAttr(metadata.protocol_version || "未记录")}">${escapeHtml(metadata.protocol_version || "未记录")}</strong></span><span>Secret<strong>${item.secrets_required ? (item.secrets_configured ? "已配置" : "缺失") : "无需"}</strong></span></div>
     <div class="mcp-runtime-state-grid"><div><span>PROCESS ALLOW</span><strong>${desired ? "允许启动" : "停止运行"}</strong><small>desired_enabled=${desired ? "true" : "false"}</small></div><div><span>RUN ALLOWED</span><strong>${item.run_allowed ? "启动条件满足" : "启动条件未满足"}</strong><small>run_allowed=${item.run_allowed ? "true" : "false"}</small></div><div><span>PROCESS STATE</span><strong>${escapeHtml(processState)}</strong><small>授权与 process 生命周期分离</small></div><div><span>TOOL CATALOG</span><strong>${Number(item.tool_count || tools.length)}</strong><small>preflight / reload catalog</small></div></div>
     <div class="mcp-runtime-counts"><span>authorized<strong>${Number(item.authorized_count || 0)}</strong></span><span>registered<strong>${Number(item.registered_count || 0)}</strong></span><span>effective<strong>${Number(item.effective_count || 0)}</strong></span><span>total<strong>${Number(item.tool_count || tools.length)}</strong></span></div>
     <p class="mcp-runtime-note">Server 停止只终止 process 并撤下注册，不会清除 tool 授权；再次允许启动后按 catalog 恢复。</p>
@@ -303,10 +303,10 @@ function renderMcpInstallConfirmation() {
   const pending = _mcpPendingInstall;
   if (!pending) return "";
   const plan = pending.plan;
-  const inputs = pending.inputSummary.map(item => `<li><span>${escapeHtml(item.location)} / <code>${escapeHtml(item.key)}</code></span><strong>${item.secret ? (item.provided ? "已提供，值不显示" : "未提供") : (item.provided ? "已提供" : "使用 Registry default / 空值")}</strong></li>`).join("");
+  const inputs = pending.inputSummary.map(item => `<li><span>${escapeHtml(item.location)} / <code class="u-atomic" title="${escapeAttr(item.key)}">${escapeHtml(item.key)}</code></span><strong>${item.secret ? (item.provided ? "已提供，值不显示" : "未提供") : (item.provided ? "已提供" : "使用 Registry default / 空值")}</strong></li>`).join("");
   return `<div class="mcp-confirm-backdrop" role="presentation"><section class="mcp-confirm-panel" role="dialog" aria-modal="true" aria-labelledby="mcp-confirm-title">
     <div class="mcp-section-heading"><div><span class="eyebrow">EXECUTION CONFIRMATION</span><h2 id="mcp-confirm-title">确认第三方 package 执行计划</h2><p>后端 detail 当前不返回解析后的绝对 command path；这里展示精确 package identity 与将由 launcher 执行的安全摘要，不伪造本机路径。</p></div><button class="btn small" data-mcp-install-cancel>取消</button></div>
-    <div class="mcp-command-plan"><span>launcher</span><strong>${escapeHtml(plan.launcher)}</strong><span>exact package identity</span><code>${escapeHtml(plan.identity)}</code><span>command token plan</span><div>${plan.tokens.map(token => `<code>${escapeHtml(token)}</code>`).join('<b aria-hidden="true">→</b>')}</div><span>metadata guard</span><code>fresh_fetch=true · digest=${escapeHtml(pending.package.digest || "")}</code></div>
+    <div class="mcp-command-plan"><span>launcher</span><strong class="u-atomic">${escapeHtml(plan.launcher)}</strong><span>exact package identity</span><code title="${escapeAttr(plan.identity)}">${escapeHtml(plan.identity)}</code><span>command token plan</span><div>${plan.tokens.map(token => `<code title="${escapeAttr(token)}">${escapeHtml(token)}</code>`).join('<b aria-hidden="true">→</b>')}</div><span>metadata guard</span><code title="fresh_fetch=true · digest=${escapeAttr(pending.package.digest || "")}">fresh_fetch=true · digest=${escapeHtml(pending.package.digest || "")}</code></div>
     <ul class="mcp-confirm-inputs">${inputs || '<li><span>inputs</span><strong>无额外参数</strong></li>'}</ul>
     <div class="alert err">Registry publisher metadata、description 与 annotations 均视为 untrusted。确认后会以 Bot 系统用户权限执行 package 并调用 initialize / tools/list 预检。</div>
     <div class="mcp-confirm-actions"><button class="btn" data-mcp-install-cancel>返回修改</button><button class="btn primary" data-mcp-install-confirm ${state.mcpBusy ? "disabled" : ""}>${state.mcpBusy ? '<span class="spinner"></span> 正在预检' : '确认执行、预检并安装'}</button></div>

@@ -258,8 +258,8 @@ function renderDashboardModelUsage(rows) {
   const body = data.map(row => {
     const width = Math.max(1.5, Math.min(100, Number(row.relative_width || 0) * 100));
     return `<tr>
-      <td class="dashboard-model-cell" title="${escapeAttr(row.model || "unknown")}">${escapeHtml(row.model || "unknown")}</td>
-      <td>${Number(row.call_count || 0).toLocaleString()}</td>
+      <td class="dashboard-model-cell col-model" title="${escapeAttr(row.model || "unknown")}">${escapeHtml(row.model || "unknown")}</td>
+      <td class="col-number u-atomic u-tabular">${Number(row.call_count || 0).toLocaleString()}</td>
       <td>
         <div class="dashboard-token-bar">
           <div style="width:${width.toFixed(1)}%"></div>
@@ -270,10 +270,10 @@ function renderDashboardModelUsage(rows) {
   }).join("");
   return `<div class="card dashboard-panel">
     <h2>模型用量（总计）</h2>
-    <table class="dashboard-model-table">
-      <thead><tr><th>模型名</th><th>请求次数</th><th>令牌消耗</th></tr></thead>
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="模型用量"><table class="dashboard-model-table data-table compact">
+      <thead><tr><th scope="col" class="col-model">模型名</th><th scope="col" class="col-number">请求次数</th><th scope="col" class="col-number">令牌消耗</th></tr></thead>
       <tbody>${body || '<tr><td colspan="3" class="muted">暂无模型用量。</td></tr>'}</tbody>
-    </table>
+    </table></div>
   </div>`;
 }
 
@@ -284,8 +284,8 @@ function renderDashboardPurposeUsage(rows) {
     const label = row.purpose_label || row.purpose || "unknown";
     const title = row.purpose || label;
     return `<tr>
-      <td class="dashboard-model-cell" title="${escapeAttr(title)}">${escapeHtml(label)}</td>
-      <td>${Number(row.call_count || 0).toLocaleString()}</td>
+      <td class="dashboard-model-cell col-model" title="${escapeAttr(title)}">${escapeHtml(label)}</td>
+      <td class="col-number u-atomic u-tabular">${Number(row.call_count || 0).toLocaleString()}</td>
       <td>
         <div class="dashboard-token-bar">
           <div style="width:${width.toFixed(1)}%"></div>
@@ -296,10 +296,10 @@ function renderDashboardPurposeUsage(rows) {
   }).join("");
   return `<div class="card dashboard-panel">
     <h2>功能用量（总计）</h2>
-    <table class="dashboard-model-table">
-      <thead><tr><th>功能</th><th>请求次数</th><th>令牌消耗</th></tr></thead>
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="功能用量"><table class="dashboard-model-table data-table compact">
+      <thead><tr><th scope="col" class="col-model">功能</th><th scope="col" class="col-number">请求次数</th><th scope="col" class="col-number">令牌消耗</th></tr></thead>
       <tbody>${body || '<tr><td colspan="3" class="muted">暂无功能用量。</td></tr>'}</tbody>
-    </table>
+    </table></div>
   </div>`;
 }
 
@@ -455,18 +455,18 @@ function dashboardLineDetailTable(rows, valueKey) {
   const body = (rows || []).map(row => {
     const bucket = row.bucket || row.bucket_hour || row.bucket_day || "";
     return `<tr>
-      <td>${escapeHtml(bucket)}</td>
-      <td>${escapeHtml(row.label || "")}</td>
-      <td>${dashboardFullNumber(row.call_count || 0)}</td>
-      <td>${dashboardFullNumber(row.prompt_tokens || 0)}</td>
-      <td>${dashboardFullNumber(row.completion_tokens || 0)}</td>
-      <td>${dashboardFullNumber(row.total_tokens || 0)}</td>
-      ${valueKey !== "total_tokens" ? `<td>${dashboardFullNumber(row[valueKey] || 0)}</td>` : ""}
+      <td class="col-time u-atomic u-tabular">${escapeHtml(bucket)}</td>
+      <td class="col-time u-atomic">${escapeHtml(row.label || "")}</td>
+      <td class="col-number u-atomic u-tabular">${dashboardFullNumber(row.call_count || 0)}</td>
+      <td class="col-number u-atomic u-tabular">${dashboardFullNumber(row.prompt_tokens || 0)}</td>
+      <td class="col-number u-atomic u-tabular">${dashboardFullNumber(row.completion_tokens || 0)}</td>
+      <td class="col-number u-atomic u-tabular">${dashboardFullNumber(row.total_tokens || 0)}</td>
+      ${valueKey !== "total_tokens" ? `<td class="col-number u-atomic u-tabular">${dashboardFullNumber(row[valueKey] || 0)}</td>` : ""}
     </tr>`;
   }).join("");
-  return `<div class="table-wrap dashboard-detail-table">
-    <table>
-      <thead><tr><th>时间桶</th><th>标签</th><th>请求</th><th>提示词</th><th>回复</th><th>总计</th>${valueKey !== "total_tokens" ? "<th>曲线值</th>" : ""}</tr></thead>
+  return `<div class="table-wrap table-scroll dashboard-detail-table" tabindex="0" role="region" aria-label="令牌曲线明细">
+    <table class="data-table wide">
+      <thead><tr><th scope="col" class="col-time">时间桶</th><th scope="col" class="col-time">标签</th><th scope="col" class="col-number">请求</th><th scope="col" class="col-number">提示词</th><th scope="col" class="col-number">回复</th><th scope="col" class="col-number">总计</th>${valueKey !== "total_tokens" ? '<th scope="col" class="col-number">曲线值</th>' : ""}</tr></thead>
       <tbody>${body || `<tr><td colspan="${colspan}" class="muted">暂无明细。</td></tr>`}</tbody>
     </table>
   </div>`;
@@ -479,18 +479,18 @@ function dashboardPieDetailTable(rows) {
     const groupId = row.group_id ? String(row.group_id) : "";
     const pct = total > 0 ? Number(row.total_tokens || 0) / total * 100 : 0;
     return `<tr title="${escapeAttr(dashboardPieRowTitle(row, total))}">
-      <td>${escapeHtml(dashboardGroupLabel(row))}</td>
-      <td>${escapeHtml(groupId || "-")}</td>
-      <td>${escapeHtml(dashboardPercent(pct))}</td>
-      <td>${dashboardFullNumber(row.call_count || 0)}</td>
-      <td>${dashboardFullNumber(row.prompt_tokens || 0)}</td>
-      <td>${dashboardFullNumber(row.completion_tokens || 0)}</td>
-      <td>${dashboardFullNumber(row.total_tokens || 0)}</td>
+      <td class="col-model"><span class="u-ellipsis" title="${escapeAttr(dashboardGroupLabel(row))}">${escapeHtml(dashboardGroupLabel(row))}</span></td>
+      <td class="col-id u-atomic u-tabular">${escapeHtml(groupId || "-")}</td>
+      <td class="col-number u-atomic u-tabular">${escapeHtml(dashboardPercent(pct))}</td>
+      <td class="col-number u-atomic u-tabular">${dashboardFullNumber(row.call_count || 0)}</td>
+      <td class="col-number u-atomic u-tabular">${dashboardFullNumber(row.prompt_tokens || 0)}</td>
+      <td class="col-number u-atomic u-tabular">${dashboardFullNumber(row.completion_tokens || 0)}</td>
+      <td class="col-number u-atomic u-tabular">${dashboardFullNumber(row.total_tokens || 0)}</td>
     </tr>`;
   }).join("");
-  return `<div class="table-wrap dashboard-detail-table">
-    <table>
-      <thead><tr><th>群</th><th>群号</th><th>占比</th><th>请求</th><th>提示词</th><th>回复</th><th>总计</th></tr></thead>
+  return `<div class="table-wrap table-scroll dashboard-detail-table" tabindex="0" role="region" aria-label="群令牌消耗明细">
+    <table class="data-table wide">
+      <thead><tr><th scope="col" class="col-model">群</th><th scope="col" class="col-id">群号</th><th scope="col" class="col-number">占比</th><th scope="col" class="col-number">请求</th><th scope="col" class="col-number">提示词</th><th scope="col" class="col-number">回复</th><th scope="col" class="col-number">总计</th></tr></thead>
       <tbody>${body || '<tr><td colspan="7" class="muted">暂无群用量。</td></tr>'}</tbody>
     </table>
   </div>`;
@@ -597,10 +597,10 @@ function renderInteractionResult(ir) {
   const stages = (ir.stages || []).map(st => {
     const status = HEALTH_STATUS[st.status] || HEALTH_STATUS.info;
     return `<tr>
-      <td><span class="dot ${status.cls}" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px"></span>${escapeHtml(st.label || st.key || "-")}</td>
-      <td><code style="font-size:11px">${escapeHtml(st.status || "info")}</code></td>
-      <td style="white-space:pre-wrap">${escapeHtml(st.detail || "")}</td>
-      <td style="white-space:pre-wrap">${escapeHtml(st.hint || "")}</td>
+      <td class="col-model"><span class="dot ${status.cls}" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px"></span><span class="u-clamp-2">${escapeHtml(st.label || st.key || "-")}</span></td>
+      <td class="col-status"><code class="u-atomic" style="font-size:11px">${escapeHtml(st.status || "info")}</code></td>
+      <td class="col-description u-pre-wrap">${escapeHtml(st.detail || "")}</td>
+      <td class="col-description u-pre-wrap">${escapeHtml(st.hint || "")}</td>
     </tr>`;
   }).join("");
   const last = ir.last_trace || {};
@@ -614,8 +614,8 @@ function renderInteractionResult(ir) {
       ${traceBtn}
     </div>
     ${traceSummary}
-    <table style="margin-top:10px"><thead><tr><th>阶段</th><th>状态</th><th>详情</th><th>建议</th></tr></thead>
-      <tbody>${stages || '<tr><td colspan="4" class="muted">无分层诊断信息</td></tr>'}</tbody></table>
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="实际交互测试阶段"><table class="data-table wide" style="margin-top:10px"><thead><tr><th scope="col" class="col-model">阶段</th><th scope="col" class="col-status">状态</th><th scope="col" class="col-description">详情</th><th scope="col" class="col-description">建议</th></tr></thead>
+      <tbody>${stages || '<tr><td colspan="4" class="muted">无分层诊断信息</td></tr>'}</tbody></table></div>
   </div>`;
 }
 
@@ -748,8 +748,8 @@ function renderQQ() {
     ? `<div class="card"><div class="alert err">获取账号信息失败：${escapeHtml(info.error)}</div></div>`
     : `<div class="card">
         <h2>当前账号</h2>
-        <div class="row"><span class="muted">QQ</span> <code>${escapeHtml(info.user_id||'')}</code>
-          <span class="muted">昵称</span> <b>${escapeHtml(info.nickname||'')}</b></div>
+        <div class="row"><span class="muted">QQ</span> <code class="u-atomic u-tabular">${escapeHtml(info.user_id||'')}</code>
+          <span class="muted">昵称</span> <b class="u-clamp-2" title="${escapeAttr(info.nickname || '')}">${escapeHtml(info.nickname||'')}</b></div>
         <label class="field-input" style="margin-top:12px"><span>目标 Bot</span><select id="qq-bot-id" onchange="state.qqBotId=this.value;render()">${botOptions}</select></label>
         <div class="field-input" style="margin-top:12px">
           <input id="qq-nick" type="text" placeholder="新昵称" value="${escapeAttr(info.nickname||'')}">
@@ -769,24 +769,24 @@ function renderQQ() {
     const memberships = Array.isArray(g.bot_self_ids) ? g.bot_self_ids.map(String) : [];
     const canLeave = Boolean(selectedBotId) && memberships.includes(selectedBotId);
     return `<tr>
-      <td>${escapeHtml(g.group_name||'')} <code>${escapeHtml(g.group_id)}</code></td>
-      <td>${g.member_count}/${g.max_member_count||'-'}</td>
-      <td><button class="btn small danger qq-leave-group" data-group-id="${escapeAttr(g.group_id)}" data-group-name="${escapeAttr(g.group_name||'')}" ${canLeave?'':'disabled title="所选 Bot 不在该群的已确认 membership 中"'}>退群</button></td>
+      <td class="col-model"><span class="u-clamp-2" title="${escapeAttr(g.group_name || '')}">${escapeHtml(g.group_name||'')}</span><code class="u-atomic u-tabular">${escapeHtml(g.group_id)}</code></td>
+      <td class="col-number u-atomic u-tabular">${g.member_count}/${g.max_member_count||'-'}</td>
+      <td class="col-actions"><button class="btn small danger qq-leave-group" aria-label="退出群 ${escapeAttr(g.group_name || g.group_id)}" data-group-id="${escapeAttr(g.group_id)}" data-group-name="${escapeAttr(g.group_name||'')}" ${canLeave?'':'disabled title="所选 Bot 不在该群的已确认 membership 中"'}>退群</button></td>
     </tr>`;
   }).join("");
   const friendRows = friends.map(f => `<tr>
-      <td>${escapeHtml(f.remark||f.nickname||'')} <code>${escapeHtml(f.user_id)}</code></td>
-      <td><button class="btn small danger" onclick="qqDeleteFriend('${escapeAttr(f.user_id)}','${escapeAttr(f.remark||f.nickname||'')}')">删好友</button></td>
+      <td class="col-model"><span class="u-clamp-2" title="${escapeAttr(f.remark || f.nickname || '')}">${escapeHtml(f.remark||f.nickname||'')}</span><code class="u-atomic u-tabular">${escapeHtml(f.user_id)}</code></td>
+      <td class="col-actions"><button class="btn small danger" aria-label="删除好友 ${escapeAttr(f.remark || f.nickname || f.user_id)}" onclick="qqDeleteFriend('${escapeAttr(f.user_id)}','${escapeAttr(f.remark||f.nickname||'')}')">删好友</button></td>
     </tr>`).join("");
   const diagnostics = renderOperationHistory(Array.isArray(state.qqDiagnostics) ? state.qqDiagnostics : [], {group:`view-${state.view}`});
   const diagnosticCard = diagnostics ? `<div class="card"><div class="between"><h2>QQ 操作诊断</h2><button class="btn small" onclick="qqClearDiagnostics()">清空</button></div>${diagnostics}</div>` : "";
   return `${infoCard}
     ${diagnosticCard}
     <div class="card"><h2>群列表（${groups.length}）</h2>
-      <table><thead><tr><th>群</th><th>人数</th><th></th></tr></thead><tbody>${groupRows||'<tr><td colspan="3" class="muted">无</td></tr>'}</tbody></table>
+      <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="QQ 群列表"><table class="data-table compact"><thead><tr><th scope="col" class="col-model">群</th><th scope="col" class="col-number">人数</th><th scope="col" class="col-actions"><span class="sr-only">操作</span></th></tr></thead><tbody>${groupRows||'<tr><td colspan="3" class="muted">无</td></tr>'}</tbody></table></div>
     </div>
     <div class="card"><h2>好友列表（${friends.length}）</h2>
-      <table><thead><tr><th>好友</th><th></th></tr></thead><tbody>${friendRows||'<tr><td colspan="2" class="muted">无</td></tr>'}</tbody></table>
+      <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="QQ 好友列表"><table class="data-table compact"><thead><tr><th scope="col" class="col-model">好友</th><th scope="col" class="col-actions"><span class="sr-only">操作</span></th></tr></thead><tbody>${friendRows||'<tr><td colspan="2" class="muted">无</td></tr>'}</tbody></table></div>
     </div>`;
 }
 
@@ -1241,12 +1241,12 @@ function renderQzoneReconciliation(q) {
     const content = String(item.content || "").trim();
     const busy = String(state.qzoneReconcileBusy || "").startsWith(`${id}:`);
     const actions = status === "unknown" ? `<div class="qzone-operation-actions">
-      <button class="btn small" data-qzone-operation-action="reconcile" data-operation-id="${escapeAttr(id)}" data-bot-id="${escapeAttr(botId)}" ${busy?'disabled':''}>${state.qzoneReconcileBusy===`${id}:reconcile`?'<span class="spinner"></span> 检查中…':'检查远端'}</button>
-      <button class="btn small danger" data-qzone-operation-action="absent" data-operation-id="${escapeAttr(id)}" data-bot-id="${escapeAttr(botId)}" ${busy?'disabled':''}>${state.qzoneReconcileBusy===`${id}:absent`?'<span class="spinner"></span> 确认中…':'确认未发布'}</button>
+      <button class="btn small" aria-label="检查 operation ${escapeAttr(id)} 的远端结果" data-qzone-operation-action="reconcile" data-operation-id="${escapeAttr(id)}" data-bot-id="${escapeAttr(botId)}" ${busy?'disabled':''}>${state.qzoneReconcileBusy===`${id}:reconcile`?'<span class="spinner"></span> 检查中…':'检查远端'}</button>
+      <button class="btn small danger" aria-label="确认 operation ${escapeAttr(id)} 未发布" data-qzone-operation-action="absent" data-operation-id="${escapeAttr(id)}" data-bot-id="${escapeAttr(botId)}" ${busy?'disabled':''}>${state.qzoneReconcileBusy===`${id}:absent`?'<span class="spinner"></span> 确认中…':'确认未发布'}</button>
     </div>` : '<span class="muted qzone-operation-wait">系统将继续刷新状态，请勿重复发布。</span>';
     return `<article class="qzone-operation-item ${status === 'unknown'?'unknown':'active'}">
-      <header><span class="ops-status ${status === 'unknown'?'warn':'info'}"><span></span>${escapeHtml(statusLabel)}</span><code>${escapeHtml(id)}</code></header>
-      <div class="qzone-operation-meta"><span>Bot <strong>${escapeHtml(botId || '—')}</strong></span><span>创建 <strong>${escapeHtml(created)}</strong></span><span>发送 <strong>${escapeHtml(dispatched)}</strong></span><span>结果 <strong>${escapeHtml(item.result_code || '—')}</strong></span></div>
+      <header><span class="ops-status ${status === 'unknown'?'warn':'info'}"><span></span>${escapeHtml(statusLabel)}</span><code title="${escapeAttr(id)}">${escapeHtml(id)}</code></header>
+      <div class="qzone-operation-meta"><span>Bot <strong class="u-tabular" title="${escapeAttr(botId || '—')}">${escapeHtml(botId || '—')}</strong></span><span>创建 <strong class="u-tabular" title="${escapeAttr(created)}">${escapeHtml(created)}</strong></span><span>发送 <strong class="u-tabular" title="${escapeAttr(dispatched)}">${escapeHtml(dispatched)}</strong></span><span>结果 <strong title="${escapeAttr(item.result_code || '—')}">${escapeHtml(item.result_code || '—')}</strong></span></div>
       <p class="qzone-operation-content">${content?escapeHtml(content.slice(0,180)):'<span class="muted">正文仍在生成或快照中未保留摘要</span>'}</p>
       ${actions}
     </article>`;
@@ -1264,9 +1264,9 @@ function renderQzoneHistoryReconciliation() {
     const feedId = String(item.feed_id || "");
     const busy = state.qzoneHistoryBusy === feedId;
     return `<article class="qzone-candidate-item">
-      <div><time>${escapeHtml(_fmtTs(item.created_at))}</time><code>${escapeHtml(feedId)}</code></div>
+      <div><time>${escapeHtml(_fmtTs(item.created_at))}</time><code title="${escapeAttr(feedId)}">${escapeHtml(feedId)}</code></div>
       <p>${escapeHtml(String(item.content || "").slice(0,200))}</p>
-      <button class="btn small" data-qzone-history-feed="${escapeAttr(feedId)}" ${state.qzoneHistoryBusy?'disabled':''}>${busy?'<span class="spinner"></span> 补记中…':'确认并补记'}</button>
+      <button class="btn small" aria-label="确认并补记 feed ${escapeAttr(feedId)}" data-qzone-history-feed="${escapeAttr(feedId)}" ${state.qzoneHistoryBusy?'disabled':''}>${busy?'<span class="spinner"></span> 补记中…':'确认并补记'}</button>
     </article>`;
   }).join("") : "";
   return `<div class="card qzone-history-card">
@@ -1493,32 +1493,36 @@ function renderPersonas() {
   if (state.personasAvailable === false) return `<div class="card muted">profile_service 未就绪</div>`;
   if (state.selectedPersona) return renderPersonaDetail();
   const rows = state.personas.map(p => `<tr>
-    <td><img class="avatar" src="${escapeAttr(p.avatar_url || `https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100`)}" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
-    <td><code>${escapeHtml(p.user_id)}</code></td>
-    <td>${escapeHtml(p.nickname || '')}</td>
-    <td>${renderFavorabilityBadge(p.favorability)}</td>
-    <td>${escapeHtml(p.snippet)}</td>
-    <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
-    <td><button class="btn small" onclick="openPersona('${escapeAttr(p.user_id)}')">详情</button></td>
+    <td class="col-avatar"><img class="avatar" src="${escapeAttr(p.avatar_url || `https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100`)}" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
+    <td class="col-id"><code class="u-atomic u-tabular">${escapeHtml(p.user_id)}</code></td>
+    <td class="col-model"><span class="u-clamp-2" title="${escapeAttr(p.nickname || '')}">${escapeHtml(p.nickname || '')}</span></td>
+    <td class="col-status">${renderFavorabilityBadge(p.favorability)}</td>
+    <td class="col-summary u-wrap">${escapeHtml(p.snippet)}</td>
+    <td class="col-date u-atomic u-tabular">${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
+    <td class="col-actions"><button class="btn small" aria-label="查看 QQ ${escapeAttr(p.user_id)} 的用户画像" onclick="openPersona('${escapeAttr(p.user_id)}')">详情</button></td>
   </tr>`).join("");
   return `<div class="card"><h2>用户画像（${state.personas.length}）</h2>
-    <table><thead><tr><th style="width:40px"></th><th>QQ</th><th>昵称</th><th>好感度</th><th>摘要</th><th>更新</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">暂无画像</td></tr>'}</tbody></table></div>`;
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="用户画像列表"><table class="data-table xwide"><thead><tr><th scope="col" class="col-avatar"><span class="sr-only">头像</span></th><th scope="col" class="col-id">QQ</th><th scope="col" class="col-model">昵称</th><th scope="col" class="col-status">好感度</th><th scope="col" class="col-summary">摘要</th><th scope="col" class="col-date">更新</th><th scope="col" class="col-actions"><span class="sr-only">操作</span></th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">暂无画像</td></tr>'}</tbody></table></div></div>`;
 }
 
 function favorabilityScoreText(fav) {
   if (!fav || fav.available === false) return "不可用";
+  if (fav.enabled === false) return "已关闭";
   const score = Number(fav.score || 0);
-  return `${score.toFixed(2)}${fav.level ? " · " + fav.level : ""}`;
+  return `${score.toFixed(2)}${fav.level ? " · " + fav.level : ""}${fav.exists === false ? " · 默认" : ""}`;
 }
 
 function renderFavorabilityBadge(fav) {
   if (!fav || fav.available === false) return '<span class="muted">—</span>';
   const score = Number(fav.score || 0);
   let style = 'background:rgba(106,168,255,0.18);color:var(--accent)';
-  if (score >= 85) style = 'background:rgba(52,211,153,0.18);color:var(--ok)';
+  if (fav.enabled === false) style = 'background:var(--tag-bg);color:var(--muted)';
+  else if (score >= 85) style = 'background:rgba(52,211,153,0.18);color:var(--ok)';
   else if (score < 20) style = 'background:rgba(245,158,11,0.16);color:var(--warn)';
   if (fav.is_perm_blacklisted) style = 'background:rgba(248,113,113,0.16);color:var(--danger)';
-  return `<span class="tag" style="${style}">${escapeHtml(favorabilityScoreText(fav))}</span>`;
+  const text = favorabilityScoreText(fav);
+  const stateHint = fav.enabled === false ? "功能已关闭" : (fav.exists === false ? "虚拟默认值，尚未创建档案" : "已持久化档案");
+  return `<span class="tag favorability-badge u-tabular" style="${style}" title="好感度 ${escapeAttr(text)}；${escapeAttr(stateHint)}">${escapeHtml(text)}</span>`;
 }
 
 function renderFavorabilityCard(fav, title) {
@@ -1532,11 +1536,11 @@ function renderFavorabilityCard(fav, title) {
     const color = delta > 0 ? "var(--ok)" : (delta < 0 ? "var(--danger)" : "var(--muted)");
     const when = e.timestamp ? new Date(e.timestamp*1000).toLocaleString() : (e.date || "-");
     return `<tr>
-      <td>${escapeHtml(when)}</td>
-      <td>${escapeHtml(e.label || "其他好感事件")}</td>
-      <td style="color:${color};font-weight:600">${escapeHtml(deltaText)}</td>
-      <td>${escapeHtml(e.status_label || "")}</td>
-      <td>${escapeHtml(e.reason || "")}</td>
+      <td class="col-time u-atomic u-tabular">${escapeHtml(when)}</td>
+      <td class="col-summary u-wrap">${escapeHtml(e.label || "其他好感事件")}</td>
+      <td class="col-number u-atomic u-tabular" style="color:${color};font-weight:600">${escapeHtml(deltaText)}</td>
+      <td class="col-status"><span class="tag tag--status">${escapeHtml(e.status_label || "")}</span></td>
+      <td class="col-description u-wrap">${escapeHtml(e.reason || "")}</td>
     </tr>`;
   }).join("");
   const last = fav.latest_event;
@@ -1548,16 +1552,17 @@ function renderFavorabilityCard(fav, title) {
       <h2 style="margin:0">${escapeHtml(title)}</h2>
       ${renderFavorabilityBadge(fav)}
     </div>
+    ${fav.enabled === false ? '<p class="muted">好感度功能当前已关闭，不会记录新的关系事件。</p>' : (fav.exists === false ? '<p class="muted">当前展示配置中的虚拟默认值；浏览此页面不会创建好感度档案。</p>' : '')}
     <div class="row" style="gap:24px;margin-top:12px">
-      <div><div class="muted">当前分值</div><div style="font-size:22px;font-weight:700">${Number(fav.score || 0).toFixed(2)}</div></div>
-      <div><div class="muted">等级</div><div style="font-size:18px">${escapeHtml(fav.level || "—")}</div></div>
-      <div><div class="muted">今日加分</div><div>${Number(fav.daily_positive_count || 0).toFixed(2)}</div></div>
-      <div><div class="muted">今日扣分</div><div>${Number(fav.daily_negative_count || 0).toFixed(2)}</div></div>
+      <div><div class="muted">当前分值</div><div class="u-atomic u-tabular" style="font-size:22px;font-weight:700">${Number(fav.score || 0).toFixed(2)}</div></div>
+      <div><div class="muted">等级</div><div class="u-atomic" style="font-size:18px">${escapeHtml(fav.level || "—")}</div></div>
+      <div><div class="muted">今日加分</div><div class="u-atomic u-tabular">${Number(fav.daily_positive_count || 0).toFixed(2)}</div></div>
+      <div><div class="muted">今日扣分</div><div class="u-atomic u-tabular">${Number(fav.daily_negative_count || 0).toFixed(2)}</div></div>
       <div><div class="muted">最近事件</div><div>${escapeHtml(lastLine)}</div></div>
       ${fav.is_perm_blacklisted ? '<div><div class="muted">黑名单</div><div style="color:var(--danger)">永久黑名单</div></div>' : ''}
     </div>
     ${events.length ? `<details style="margin-top:12px"><summary class="muted" style="cursor:pointer">最近好感事件</summary>
-      <table style="margin-top:8px"><thead><tr><th>时间</th><th>事件</th><th>变化</th><th>状态</th><th>原因</th></tr></thead><tbody>${eventRows}</tbody></table>
+      <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="最近好感事件"><table class="data-table wide" style="margin-top:8px"><thead><tr><th scope="col" class="col-time">时间</th><th scope="col" class="col-summary">事件</th><th scope="col" class="col-number">变化</th><th scope="col" class="col-status">状态</th><th scope="col" class="col-description">原因</th></tr></thead><tbody>${eventRows}</tbody></table></div>
     </details>` : ''}
   </div>`;
 }
@@ -1574,6 +1579,7 @@ function renderQqProfileCard(core, userId) {
   const safeAvatar = safeHttpUrl(meta.avatar_url);
   const avatar = safeAvatar || `https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(userId)}&spec=640`;
   const homepage = safeHttpUrl(meta.homepage_url);
+  const atomicFields = new Set(["性别", "年龄", "QID", "等级", "登录天数", "群角色", "专属头衔"]);
   const rows = [
     ["昵称", meta.nickname],
     ["群名片", meta.card],
@@ -1588,13 +1594,13 @@ function renderQqProfileCard(core, userId) {
     ["专属头衔", meta.title],
     ["个性签名", meta.signature],
   ].filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== "")
-   .map(([k, v]) => `<tr><td class="muted" style="white-space:nowrap">${escapeHtml(k)}</td><td>${escapeHtml(String(v))}</td></tr>`).join("");
+   .map(([k, v]) => `<tr><td class="muted u-atomic">${escapeHtml(k)}</td><td class="col-description"><span class="${atomicFields.has(k) ? "u-atomic" : "u-wrap"}" title="${escapeAttr(String(v))}">${escapeHtml(String(v))}</span></td></tr>`).join("");
   return `<div class="card">
     <h2>QQ 资料快照</h2>
     <div class="qq-profile-card">
       <img class="qq-profile-avatar" src="${escapeAttr(avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer">
       <div class="qq-profile-body">
-        ${rows ? `<table><tbody>${rows}</tbody></table>` : '<p class="muted">暂无协议资料字段。</p>'}
+        ${rows ? `<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="QQ 资料快照"><table class="data-table compact"><tbody>${rows}</tbody></table></div>` : '<p class="muted">暂无协议资料字段。</p>'}
         <div class="qq-profile-links">
           ${safeAvatar ? `<a class="btn small" href="${escapeAttr(safeAvatar)}" target="_blank" rel="noopener noreferrer">查看头像</a>` : ''}
           ${homepage ? `<a class="btn small" href="${escapeAttr(homepage)}" target="_blank" rel="noreferrer">打开主页</a>` : ''}
@@ -1612,6 +1618,7 @@ function renderAvatarInsightCard(core, userId) {
   const kindMap = {real_person:"真人头像", illustration:"插画", acg_character:"ACG 角色", logo:"Logo", other:"其他", unknown:"无法判断"};
   const analyzedAt = Number(analysis.analyzed_at || 0);
   const checkedAt = Number(analysis.checked_at || 0);
+  const atomicFields = new Set(["状态", "内容 hash", "最近检查", "最近成功分析", "视觉 route", "头像类型", "主体数", "包含文字", "置信度"]);
   const rows = [
     ["状态", statusMap[status] || "尚未分析"],
     ["内容 hash", analysis.content_hash_short || "—"],
@@ -1625,7 +1632,7 @@ function renderAvatarInsightCard(core, userId) {
     ["包含文字", insight.contains_text === true ? "是" : (insight.contains_text === false ? "否" : "")],
     ["置信度", insight.confidence === undefined ? "" : Number(insight.confidence).toFixed(2)],
   ].filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== "")
-   .map(([key, value]) => `<tr><td class="muted" style="white-space:nowrap">${escapeHtml(key)}</td><td>${escapeHtml(String(value))}</td></tr>`).join("");
+   .map(([key, value]) => `<tr><td class="muted u-atomic">${escapeHtml(key)}</td><td class="col-description"><span class="${atomicFields.has(key) ? "u-ellipsis" : "u-wrap"}" title="${escapeAttr(String(value))}">${escapeHtml(String(value))}</span></td></tr>`).join("");
   const busy = String(state.avatarAnalysisBusy || "").endsWith(`:${userId}`);
   return `<div class="card">
     <div class="between" style="gap:12px;flex-wrap:wrap">
@@ -1635,7 +1642,7 @@ function renderAvatarInsightCard(core, userId) {
         <button class="btn small danger" onclick="clearAvatarAnalysis('${escapeAttr(userId)}')" ${busy?'disabled':''}>${state.avatarAnalysisBusy===`clear:${userId}`?'<span class="spinner"></span> 删除中…':'删除分析'}</button>
       </div>
     </div>
-    ${rows ? `<table style="margin-top:12px"><tbody>${rows}</tbody></table>` : '<p class="muted">暂无持久化头像分析。</p>'}
+    ${rows ? `<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="头像长期画像"><table class="data-table compact" style="margin-top:12px"><tbody>${rows}</tbody></table></div>` : '<p class="muted">暂无持久化头像分析。</p>'}
     <p class="muted" style="font-size:11px;margin-top:8px">真人头像只保留“真人头像”类型；不会保存头像 bytes、data URL 或模型 raw response。</p>
   </div>`;
 }
@@ -1645,17 +1652,17 @@ function renderPersonaDetail() {
   const core = p.core_profile;
   const locals = (p.local_profiles || []).map(lp => `<div class="card" style="background:#0e1117">
     <div class="between"><strong>群 ${escapeHtml(lp.group_id)}</strong><span class="muted" style="font-size:12px">${new Date(lp.updated_at*1000).toLocaleString()}</span></div>
-    <pre style="white-space:pre-wrap;margin:6px 0 0;font-family:inherit">${escapeHtml(lp.profile_text)}</pre>
+    <pre class="u-pre-wrap code-scroll" style="margin:6px 0 0;font-family:inherit">${escapeHtml(lp.profile_text)}</pre>
   </div>`).join("");
   const structured = (core && core.structured) || {};
   const corr = (core && core.user_corrections) || {};
   const SKEY = {gender:"性别",age_group:"年龄段",occupation:"职业",portrait:"人物描述",interests:"兴趣",routine:"作息",communication_style:"沟通风格",emotion_baseline:"情绪基线",social_mode:"社交模式",knowledge:"知识结构",relationship:"关系",taboos:"雷区",memory_anchors:"记忆锚点",recent_focus:"近期关注",content_pref:"内容偏好",nickname_pref:"称呼偏好",interaction_advice:"互动建议"};
   const structRows = Object.keys(structured).map(k => `<tr>
-      <td style="white-space:nowrap">${escapeHtml(SKEY[k]||k)}${corr[SKEY[k]]||corr[k]?' <span class="device-status approved">已更正</span>':''}</td>
-      <td>${escapeHtml(String(structured[k]))}</td>
+      <td class="u-atomic">${escapeHtml(SKEY[k]||k)}${corr[SKEY[k]]||corr[k]?' <span class="device-status approved">已更正</span>':''}</td>
+      <td class="col-description u-wrap">${escapeHtml(String(structured[k]))}</td>
     </tr>`).join("");
   const structCard = `<div class="card"><h2>结构化字段（持久保存）</h2>
-    ${structRows?`<table><tbody>${structRows}</tbody></table>`:'<p class="muted">暂无结构化字段</p>'}
+    ${structRows?`<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="用户画像结构化字段"><table class="data-table compact"><tbody>${structRows}</tbody></table></div>`:'<p class="muted">暂无结构化字段</p>'}
     <div class="field-input" style="margin-top:12px">
       <input id="corr-field" type="text" placeholder="字段（如 性别/职业）" style="max-width:160px">
       <input id="corr-value" type="text" placeholder="更正为…" style="max-width:220px">
@@ -1668,7 +1675,7 @@ function renderPersonaDetail() {
     ${renderFavorabilityCard(p.favorability, "用户好感度")}
     ${renderQqProfileCard(core, p.user_id)}
     ${renderAvatarInsightCard(core, p.user_id)}
-    <div class="card"><h2>全局印象</h2>${core && core.profile_text ? `<pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(core.profile_text || '')}</pre>` : '<p class="muted">无全局画像</p>'}</div>
+    <div class="card"><h2>全局印象</h2>${core && core.profile_text ? `<pre class="u-pre-wrap code-scroll" style="margin:0;font-family:inherit">${escapeHtml(core.profile_text || '')}</pre>` : '<p class="muted">无全局画像</p>'}</div>
     ${structCard}
     <h3 style="margin-bottom:10px">各群印象（${(p.local_profiles||[]).length}）</h3>
     ${locals || '<p class="muted">无各群画像</p>'}`;
@@ -1716,7 +1723,7 @@ function renderPersonaBuilder() {
     <div class="between" style="gap:8px"><span class="tag">S${i + 1}</span><span class="muted">${escapeHtml(s.source || s.kind || "资料")}</span></div>
     <strong>${safeHttpUrl(s.url) ? `<a href="${escapeAttr(safeHttpUrl(s.url))}" target="_blank" rel="noreferrer">${escapeHtml(s.title || s.query || s.url)}</a>` : escapeHtml(s.title || s.query || "")}</strong>
     <p>${escapeHtml((s.summary || "").slice(0, 260))}</p>
-    ${s.url ? `<code>${escapeHtml(s.url)}</code>` : ""}
+    ${s.url ? `<code class="u-wrap">${escapeHtml(s.url)}</code>` : ""}
   </div>`).join("");
   const listBlock = (items) => (items || []).filter(Boolean).slice(0, 8).map(x => `<li>${escapeHtml(x)}</li>`).join("");
   const agentBlocks = subagents.map(a => {
@@ -1835,7 +1842,7 @@ function renderPersonaBuilder() {
       <div>${validationTag}<span class="tag">主模型</span><span class="muted">${Number(r.duration_ms || 0)} ms</span></div>
     </div>
     <div class="row" style="margin-top:10px">
-      ${ref.path ? `<span class="muted">参考模板：<code>${escapeHtml(ref.path)}</code></span>` : '<span class="muted">未读取到当前模板参考</span>'}
+      ${ref.path ? `<span class="muted u-wrap">参考模板：<code class="u-wrap">${escapeHtml(ref.path)}</code></span>` : '<span class="muted">未读取到当前模板参考</span>'}
       ${(r.template_keys || []).map(k => `<span class="tag">${escapeHtml(k)}</span>`).join("")}
     </div>
     ${validationList ? `<div class="alert ${valid?'info':'err'}" style="margin-top:12px"><ul class="validation-list">${validationList}</ul></div>` : ""}
@@ -2073,8 +2080,8 @@ function renderGroupSwitch() {
   const sourceLabel = {config_file:"配置文件", dynamic:"动态", group_config:"群配置", none:""};
   const rows = list.map(g => {
     const statusBadge = g.enabled
-      ? `<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">启用</span>`
-      : `<span class="tag" style="background:rgba(248,113,113,0.12);color:var(--danger)">禁用</span>`;
+      ? `<span class="tag tag--status" style="background:rgba(52,211,153,0.18);color:var(--ok)">启用</span>`
+      : `<span class="tag tag--status" style="background:rgba(248,113,113,0.12);color:var(--danger)">禁用</span>`;
     const srcTag = sourceLabel[g.source]
       ? `<span class="tag">${escapeHtml(sourceLabel[g.source])}</span>`
       : '';
@@ -2082,16 +2089,16 @@ function renderGroupSwitch() {
     if (g.readonly) {
       actionBtn = `<button class="btn small" disabled title="由配置文件固定，无法在此修改">固定启用</button>`;
     } else if (g.enabled) {
-      actionBtn = `<button class="btn small danger" onclick="disableGroup('${escapeAttr(g.group_id)}')">禁用</button>`;
+      actionBtn = `<button class="btn small danger" aria-label="禁用群 ${escapeAttr(g.group_name || g.group_id)}" onclick="disableGroup('${escapeAttr(g.group_id)}')">禁用</button>`;
     } else {
-      actionBtn = `<button class="btn small primary" onclick="enableGroup('${escapeAttr(g.group_id)}')">启用</button>`;
+      actionBtn = `<button class="btn small primary" aria-label="启用群 ${escapeAttr(g.group_name || g.group_id)}" onclick="enableGroup('${escapeAttr(g.group_id)}')">启用</button>`;
     }
     return `<tr>
-      <td><img class="avatar" src="https://p.qlogo.cn/gh/${encodeURIComponent(g.group_id)}/${encodeURIComponent(g.group_id)}/100/" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
-      <td><code>${escapeHtml(g.group_id)}</code></td>
-      <td>${escapeHtml(g.group_name || '')}</td>
-      <td>${statusBadge}${srcTag}</td>
-      <td>${actionBtn}</td>
+      <td class="col-avatar"><img class="avatar" src="https://p.qlogo.cn/gh/${encodeURIComponent(g.group_id)}/${encodeURIComponent(g.group_id)}/100/" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
+      <td class="col-id"><code class="u-atomic u-tabular">${escapeHtml(g.group_id)}</code></td>
+      <td class="col-model"><span class="u-clamp-2" title="${escapeAttr(g.group_name || '')}">${escapeHtml(g.group_name || '')}</span></td>
+      <td class="col-status">${statusBadge}${srcTag}</td>
+      <td class="col-actions">${actionBtn}</td>
     </tr>`;
   }).join("");
   const enabledCount = list.filter(g => g.enabled).length;
@@ -2099,8 +2106,8 @@ function renderGroupSwitch() {
     <div class="between" style="margin-bottom:14px">
       <h2 style="margin:0">群开关（${enabledCount} / ${list.length} 启用）</h2>
     </div>
-    <table><thead><tr><th style="width:40px"></th><th>群号</th><th>群名</th><th>状态</th><th></th></tr></thead>
-    <tbody>${rows || '<tr><td colspan="5" class="muted">暂无群数据</td></tr>'}</tbody></table>
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="群开关列表"><table class="data-table wide"><thead><tr><th scope="col" class="col-avatar"><span class="sr-only">群头像</span></th><th scope="col" class="col-id">群号</th><th scope="col" class="col-model">群名</th><th scope="col" class="col-status">状态</th><th scope="col" class="col-actions"><span class="sr-only">操作</span></th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="5" class="muted">暂无群数据</td></tr>'}</tbody></table></div>
   </div>
   <div class="card">
     <h2>手动添加群到白名单</h2>
@@ -2149,19 +2156,19 @@ function renderGroups() {
       ? `<span class="tag" style="font-size:11px">${escapeHtml(sourceLabel[srcKey])}</span>`
       : '';
     const memTag = g.has_memory === false
-      ? `<span class="tag" style="background:rgba(245,158,11,0.12);color:var(--warn);font-size:11px">无数据</span>`
+      ? `<span class="tag tag--status" style="background:rgba(245,158,11,0.12);color:var(--warn);font-size:11px">无数据</span>`
       : '';
     return `<tr>
-      <td><img class="avatar" src="https://p.qlogo.cn/gh/${encodeURIComponent(g.group_id)}/${encodeURIComponent(g.group_id)}/100/" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
-      <td><code>${escapeHtml(g.group_id)}</code></td>
-      <td>${escapeHtml(g.group_name || '')} ${srcTag} ${memTag}</td>
-      <td>${renderFavorabilityBadge(g.favorability)}</td>
-      <td><button class="btn small" onclick="openGroup('${escapeAttr(g.group_id)}')">查看</button></td>
+      <td class="col-avatar"><img class="avatar" src="https://p.qlogo.cn/gh/${encodeURIComponent(g.group_id)}/${encodeURIComponent(g.group_id)}/100/" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
+      <td class="col-id"><code class="u-atomic u-tabular">${escapeHtml(g.group_id)}</code></td>
+      <td class="col-model"><span class="u-clamp-2" title="${escapeAttr(g.group_name || '')}">${escapeHtml(g.group_name || '')}</span> ${srcTag} ${memTag}</td>
+      <td class="col-status">${renderFavorabilityBadge(g.favorability)}</td>
+      <td class="col-actions"><button class="btn small" aria-label="查看群 ${escapeAttr(g.group_name || g.group_id)}" onclick="openGroup('${escapeAttr(g.group_id)}')">查看</button></td>
     </tr>`;
   }).join("");
   return `<div class="card"><h2>群列表（${state.groupList.length}）</h2>
     <p class="muted" style="font-size:12px;margin-top:0">同时显示已建立记忆的群和白名单中的群（包括关闭搜索可找到的群）。</p>
-    <table><thead><tr><th style="width:40px"></th><th>群号</th><th>群名</th><th>群好感</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">暂无群数据</td></tr>'}</tbody></table></div>`;
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="群列表"><table class="data-table wide"><thead><tr><th scope="col" class="col-avatar"><span class="sr-only">群头像</span></th><th scope="col" class="col-id">群号</th><th scope="col" class="col-model">群名</th><th scope="col" class="col-status">群好感</th><th scope="col" class="col-actions"><span class="sr-only">操作</span></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">暂无群数据</td></tr>'}</tbody></table></div></div>`;
 }
 
 async function openGroup(gid) {
@@ -2342,28 +2349,28 @@ function renderGroupAgentState() {
   const emoSummary = emo.summary || '（暂无群情绪记忆）';
   const inner = emo.global_inner_state || '';
   const memBlock = memories.length
-    ? `<table style="font-size:12.5px"><thead><tr><th>类型</th><th>摘要</th><th>显著度</th><th>更新</th></tr></thead><tbody>${
+    ? `<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="Agent 显著记忆"><table class="data-table wide" style="font-size:12.5px"><thead><tr><th scope="col" class="col-status">类型</th><th scope="col" class="col-summary">摘要</th><th scope="col" class="col-number">显著度</th><th scope="col" class="col-date">更新</th></tr></thead><tbody>${
         memories.map(m => `<tr>
-          <td><span class="tag">${escapeHtml(m.memory_type || '')}</span></td>
-          <td>${escapeHtml(m.summary || '')}</td>
-          <td class="muted">${Number(m.salience||0).toFixed(2)}</td>
-          <td class="muted">${m.updated_at ? new Date(m.updated_at*1000).toLocaleDateString() : '-'}</td>
+          <td class="col-status"><span class="tag tag--ellipsis" title="${escapeAttr(m.memory_type || '')}">${escapeHtml(m.memory_type || '')}</span></td>
+          <td class="col-summary u-wrap">${escapeHtml(m.summary || '')}</td>
+          <td class="col-number muted u-atomic u-tabular">${Number(m.salience||0).toFixed(2)}</td>
+          <td class="col-date muted u-atomic u-tabular">${m.updated_at ? new Date(m.updated_at*1000).toLocaleDateString() : '-'}</td>
         </tr>`).join('')
-      }</tbody></table>`
+      }</tbody></table></div>`
     : '<p class="muted" style="margin:6px 0 0">暂无显著记忆条目</p>';
   const edgeBlock = edges.length
-    ? `<table style="font-size:12.5px"><thead><tr><th>关系</th><th>类型</th><th>权重</th><th>最近</th></tr></thead><tbody>${
+    ? `<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="Agent 群内关系"><table class="data-table wide" style="font-size:12.5px"><thead><tr><th scope="col" class="col-summary">关系</th><th scope="col" class="col-status">类型</th><th scope="col" class="col-number">权重</th><th scope="col" class="col-date">最近</th></tr></thead><tbody>${
         edges.map(e => `<tr>
-          <td>
-            <code>${escapeHtml(e.src)}</code>${e.src_label && e.src_label !== e.src ? ` <span class="muted">${escapeHtml(e.src_label)}</span>` : ''}
+          <td class="col-summary">
+            <code class="u-atomic u-tabular">${escapeHtml(e.src)}</code>${e.src_label && e.src_label !== e.src ? ` <span class="muted u-clamp-2">${escapeHtml(e.src_label)}</span>` : ''}
             →
-            <code>${escapeHtml(e.dst)}</code>${e.dst_label && e.dst_label !== e.dst ? ` <span class="muted">${escapeHtml(e.dst_label)}</span>` : ''}
+            <code class="u-atomic u-tabular">${escapeHtml(e.dst)}</code>${e.dst_label && e.dst_label !== e.dst ? ` <span class="muted u-clamp-2">${escapeHtml(e.dst_label)}</span>` : ''}
           </td>
-          <td><span class="tag">${escapeHtml(e.kind)}</span></td>
-          <td>${Number(e.weight||0).toFixed(2)}</td>
-          <td class="muted">${e.last_seen_at ? new Date(e.last_seen_at*1000).toLocaleDateString() : '-'}</td>
+          <td class="col-status"><span class="tag tag--ellipsis" title="${escapeAttr(e.kind)}">${escapeHtml(e.kind)}</span></td>
+          <td class="col-number u-atomic u-tabular">${Number(e.weight||0).toFixed(2)}</td>
+          <td class="col-date muted u-atomic u-tabular">${e.last_seen_at ? new Date(e.last_seen_at*1000).toLocaleDateString() : '-'}</td>
         </tr>`).join('')
-      }</tbody></table>`
+      }</tbody></table></div>`
     : '<p class="muted" style="margin:6px 0 0">暂无显著关系边</p>';
   return `<div class="card"><h2>Agent 状态</h2>
     <div class="row" style="gap:14px;flex-wrap:wrap;margin-bottom:12px">
@@ -2384,10 +2391,10 @@ function renderGroupKnowledgeCard() {
   const auto = state.groupKnowledgeAutobuild || null;
   const rebuilding = state.groupKnowledgeRebuilding;
   const knowledgeRows = knowledge.map(k => `<tr>
-    <td><strong>${escapeHtml(k.term)}</strong></td>
-    <td>${escapeHtml(k.definition)}</td>
-    <td><span class="tag">${escapeHtml(k.memory_type || k.source_kind || '')}</span></td>
-    <td class="muted" style="font-size:12px">${k.updated_at ? new Date(k.updated_at*1000).toLocaleDateString() : '-'}</td>
+    <td class="col-model"><strong class="u-clamp-2" title="${escapeAttr(k.term)}">${escapeHtml(k.term)}</strong></td>
+    <td class="col-description u-wrap">${escapeHtml(k.definition)}</td>
+    <td class="col-status"><span class="tag tag--ellipsis" title="${escapeAttr(k.memory_type || k.source_kind || '')}">${escapeHtml(k.memory_type || k.source_kind || '')}</span></td>
+    <td class="col-date muted u-atomic u-tabular" style="font-size:12px">${k.updated_at ? new Date(k.updated_at*1000).toLocaleDateString() : '-'}</td>
   </tr>`).join("");
   let autoLine = '';
   if (auto) {
@@ -2395,7 +2402,7 @@ function renderGroupKnowledgeCard() {
     const flag = auto.enabled ? '已启用' : '已禁用';
     autoLine = `<p class="muted" style="font-size:12px;margin:4px 0 10px">
       自动构建：${flag} · 上次运行 ${escapeHtml(lastRun)} · 今日 ${auto.daily_count||0}/${auto.daily_limit||0} 次 · 每 ${auto.interval_hours||0}h · 阈值 ${auto.min_messages_threshold||0} 条
-      ${auto.daily_limit_hit ? '<span class="tag" style="background:rgba(245,158,11,0.18);color:var(--warn)">今日已满</span>' : ''}
+      ${auto.daily_limit_hit ? '<span class="tag tag--status" style="background:rgba(245,158,11,0.18);color:var(--warn)">今日已满</span>' : ''}
     </p>`;
   }
   return `<div class="card">
@@ -2403,7 +2410,7 @@ function renderGroupKnowledgeCard() {
       <button class="btn small ${rebuilding?'':'primary'}" onclick="rebuildGroupKnowledge()" ${rebuilding?'disabled':''}>${rebuilding?'重建中…':'立即重建'}</button>
     </div>
     ${autoLine}
-    ${knowledgeRows ? `<table><thead><tr><th>术语</th><th>解释</th><th>类型</th><th>更新</th></tr></thead><tbody>${knowledgeRows}</tbody></table>` : '<p class="muted">暂无群知识。可点击「立即重建」手动触发分析，或开启「群知识库自动构建」后等待定时扫描。</p>'}
+    ${knowledgeRows ? `<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="群知识库"><table class="data-table wide"><thead><tr><th scope="col" class="col-model">术语</th><th scope="col" class="col-description">解释</th><th scope="col" class="col-status">类型</th><th scope="col" class="col-date">更新</th></tr></thead><tbody>${knowledgeRows}</tbody></table></div>` : '<p class="muted">暂无群知识。可点击「立即重建」手动触发分析，或开启「群知识库自动构建」后等待定时扫描。</p>'}
   </div>`;
 }
 
@@ -2474,13 +2481,13 @@ function renderMemberAliasEditor(p) {
     : '<div class="muted" style="font-size:12px">暂无称呼候选</div>';
   const hasSaved = (p.aliases || []).length || p.alias_note;
   return `<div class="member-alias-editor">
-    <div class="member-alias-title">${escapeHtml(p.nickname || names[0] || "") || '<span class="muted">无昵称</span>'}</div>
+    <div class="member-alias-title" title="${escapeAttr(p.nickname || names[0] || "")}">${escapeHtml(p.nickname || names[0] || "") || '<span class="muted">无昵称</span>'}</div>
     ${nameTags}
     <input type="text" placeholder="外号，如：老王、车神" value="${escapeAttr(draft.aliasesText || "")}" oninput="setGroupAliasDraft('${escapeAttr(p.user_id)}','aliasesText',this.value)">
     <input type="text" placeholder="备注（可选）" value="${escapeAttr(draft.note || "")}" oninput="setGroupAliasDraft('${escapeAttr(p.user_id)}','note',this.value)">
     <div class="member-alias-actions">
-      <button class="btn small primary" onclick="saveGroupMemberAliases('${escapeAttr(p.user_id)}')">保存</button>
-      ${hasSaved ? `<button class="btn small" onclick="clearGroupMemberAliases('${escapeAttr(p.user_id)}')">清空</button>` : ''}
+      <button class="btn small primary" aria-label="保存 QQ ${escapeAttr(p.user_id)} 的群称呼" onclick="saveGroupMemberAliases('${escapeAttr(p.user_id)}')">保存</button>
+      ${hasSaved ? `<button class="btn small" aria-label="清空 QQ ${escapeAttr(p.user_id)} 的群称呼" onclick="clearGroupMemberAliases('${escapeAttr(p.user_id)}')">清空</button>` : ''}
     </div>
   </div>`;
 }
@@ -2509,21 +2516,21 @@ function renderGroupDetail() {
         </div>`
       : '<span class="muted">—</span>';
     return `<tr>
-      <td><img class="avatar" src="https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
-      <td><code>${escapeHtml(p.user_id)}</code></td>
+      <td class="col-avatar"><img class="avatar" src="https://q.qlogo.cn/headimg_dl?dst_uin=${encodeURIComponent(p.user_id)}&spec=100" alt="" loading="lazy" referrerpolicy="no-referrer"></td>
+      <td class="col-id"><code class="u-atomic u-tabular">${escapeHtml(p.user_id)}</code></td>
       <td>${renderMemberAliasEditor(p)}</td>
-      <td>${renderFavorabilityBadge(p.favorability)}</td>
-      <td>${renderMemberRelationDigest(p)}</td>
-      <td>${emoCol}</td>
-      <td>${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
+      <td class="col-status">${renderFavorabilityBadge(p.favorability)}</td>
+      <td class="col-description">${renderMemberRelationDigest(p)}</td>
+      <td class="col-summary u-wrap">${emoCol}</td>
+      <td class="col-date u-atomic u-tabular">${p.updated_at ? new Date(p.updated_at*1000).toLocaleDateString() : '-'}</td>
     </tr>`;
   }).join("");
   const style = state.groupStyle || {};
   const memeRows = (state.groupMemes || []).map(m => `<tr>
-    <td><strong>${escapeHtml(m.term)}</strong></td>
-    <td>${escapeHtml(m.meaning)}</td>
-    <td>${escapeHtml((m.aliases||[]).join("、"))}</td>
-    <td class="muted" style="font-size:12px">${escapeHtml(m.scope || '')}/${escapeHtml(m.risk_level || '')}/${Number(m.confidence||0).toFixed(2)}</td>
+    <td class="col-model"><strong class="u-clamp-2" title="${escapeAttr(m.term)}">${escapeHtml(m.term)}</strong></td>
+    <td class="col-description u-wrap">${escapeHtml(m.meaning)}</td>
+    <td class="col-summary u-wrap">${escapeHtml((m.aliases||[]).join("、"))}</td>
+    <td class="col-status muted u-atomic u-tabular" style="font-size:12px">${escapeHtml(m.scope || '')}/${escapeHtml(m.risk_level || '')}/${Number(m.confidence||0).toFixed(2)}</td>
   </tr>`).join("");
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedGroup=null;state.groupRawChat=null;state.groupFavorability=null;state.groupStyleSnapIdx=0;state.groupAliasDrafts={};render()">返回列表</button><span class="muted">群 ${escapeHtml(gid)}</span></div>
     ${renderAdminOperations("group","群管理操作诊断")}
@@ -2534,9 +2541,9 @@ function renderGroupDetail() {
     ${renderGroupKnowledgeCard()}
     <div class="card"><h2>梗词典 / 概念锚点（${(state.groupMemes||[]).length}）</h2>
       <p class="muted" style="font-size:12px;margin-top:0">词条会持久保留；列表只是当前读取视图，不会因为数量变多自动清理旧梗。</p>
-      ${memeRows ? `<table><thead><tr><th>词条</th><th>含义</th><th>别名</th><th>范围/风险/置信度</th></tr></thead><tbody>${memeRows}</tbody></table>` : '<p class="muted">暂无匹配词条，公共热梗种子会在首次查询后自动初始化。</p>'}</div>
+      ${memeRows ? `<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="群梗词典"><table class="data-table wide"><thead><tr><th scope="col" class="col-model">词条</th><th scope="col" class="col-description">含义</th><th scope="col" class="col-summary">别名</th><th scope="col" class="col-status">范围/风险/置信度</th></tr></thead><tbody>${memeRows}</tbody></table></div>` : '<p class="muted">暂无匹配词条，公共热梗种子会在首次查询后自动初始化。</p>'}</div>
     <div class="card"><h2>群内成员理解（${state.groupPersonas.length}）</h2>
-      <table class="group-member-understanding"><thead><tr><th style="width:40px"></th><th>QQ</th><th>称呼 / 外号</th><th>好感度</th><th>关系与画像</th><th>近期情绪</th><th>更新</th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">无</td></tr>'}</tbody></table></div>
+      <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="群内成员理解"><table class="group-member-understanding data-table xwide"><thead><tr><th scope="col" class="col-avatar"><span class="sr-only">头像</span></th><th scope="col" class="col-id">QQ</th><th scope="col" class="col-summary">称呼 / 外号</th><th scope="col" class="col-status">好感度</th><th scope="col" class="col-description">关系与画像</th><th scope="col" class="col-summary">近期情绪</th><th scope="col" class="col-date">更新</th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">无</td></tr>'}</tbody></table></div></div>
     ${renderGroupRawChat()}`;
 }
 
@@ -2560,14 +2567,14 @@ function renderGroupStyle(style) {
     let value = styleJson[k];
     if (Array.isArray(value)) value = value.join("、") || "—";
     if (!value) value = "—";
-    return `<tr><td class="muted" style="width:80px">${escapeHtml(label)}</td><td>${escapeHtml(String(value))}</td></tr>`;
+    return `<tr><td class="muted u-atomic" style="width:80px">${escapeHtml(label)}</td><td class="col-description u-wrap">${escapeHtml(String(value))}</td></tr>`;
   }).join("");
   return `<div class="card"><div class="between"><h2 style="margin:0">群风格（${snapshots.length} 个快照）</h2>
     <button class="btn small ${rebuilding?'':'primary'}" onclick="rebuildGroupStyle()" ${rebuilding?'disabled':''}>${rebuilding?'分析中…':'立即重新分析'}</button></div>
     <div class="group-bar" style="margin-top:10px">${tabs}</div>
-    <table style="margin-top:8px"><tbody>${detailRows}</tbody></table>
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="群风格结构化字段"><table class="data-table compact" style="margin-top:8px"><tbody>${detailRows}</tbody></table></div>
     ${active.style_text ? `<details style="margin-top:8px"><summary class="muted" style="cursor:pointer;font-size:12px">展示原始 prompt 段</summary>
-      <pre style="white-space:pre-wrap;margin:8px 0 0;font-family:inherit;font-size:12.5px">${escapeHtml(active.style_text)}</pre></details>` : ''}
+      <pre class="u-pre-wrap code-scroll" style="margin:8px 0 0;font-family:inherit;font-size:12.5px">${escapeHtml(active.style_text)}</pre></details>` : ''}
   </div>`;
 }
 
@@ -2602,18 +2609,18 @@ function renderGroupRawChat() {
   const ordered = [...chat.messages].reverse();
   const rows = ordered.map(m => {
     const isBot = m.role === "assistant";
-    const tag = isBot ? '<span class="tag" style="background:rgba(106,168,255,0.18);color:var(--accent)">bot</span>' : '<span class="tag">user</span>';
+    const tag = isBot ? '<span class="tag tag--status" style="background:rgba(106,168,255,0.18);color:var(--accent)">bot</span>' : '<span class="tag tag--status">user</span>';
     const sender = m.sender_name || m.user_id || '匿名';
     const time = m.created_at ? new Date(m.created_at*1000).toLocaleString() : '-';
-    return `<tr><td style="white-space:nowrap">${tag}</td>
-      <td class="muted" style="font-size:12px;white-space:nowrap">${escapeHtml(sender)}</td>
-      <td>${escapeHtml(m.text)}</td>
-      <td class="muted" style="font-size:11px;white-space:nowrap">${escapeHtml(time)}</td></tr>`;
+    return `<tr><td class="col-status">${tag}</td>
+      <td class="col-model muted"><span class="u-clamp-2" title="${escapeAttr(sender)}" style="font-size:12px">${escapeHtml(sender)}</span></td>
+      <td class="col-description u-pre-wrap">${escapeHtml(m.text)}</td>
+      <td class="col-time muted u-atomic u-tabular" style="font-size:11px">${escapeHtml(time)}</td></tr>`;
   }).join("");
   return `<div class="card"><h2>对话原文（${chat.messages.length}）</h2>
     <p class="muted" style="font-size:12px;margin:-6px 0 10px">按时间正序显示；不参与 LLM 上下文，仅供管理员查看。</p>
-    <table><thead><tr><th></th><th>发送者</th><th>内容</th><th>时间</th></tr></thead>
-    <tbody>${rows}</tbody></table>
+    <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="群对话原文"><table class="data-table wide"><thead><tr><th scope="col" class="col-status">角色</th><th scope="col" class="col-model">发送者</th><th scope="col" class="col-description">内容</th><th scope="col" class="col-time">时间</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
     <div style="margin-top:10px">
       <button class="btn small" onclick="state.groupRawChat=null;render()">收起</button>
       <button class="btn small" onclick="loadGroupRawChat()">刷新</button>

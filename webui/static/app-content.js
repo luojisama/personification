@@ -43,8 +43,8 @@ function renderStickers() {
   const grid = filtered.map(s => {
     const tags = [...(s.mood_tags||[]), ...(s.scene_tags||[])].slice(0, 5).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("");
     const labelTag = s.labeled
-      ? '<span class="tag" style="background:rgba(52,211,153,0.18);color:var(--ok)">已标</span>'
-      : '<span class="tag" style="background:rgba(245,158,11,0.18);color:var(--warn)">待标</span>';
+      ? '<span class="tag tag--status" style="background:rgba(52,211,153,0.18);color:var(--ok)">已标</span>'
+      : '<span class="tag tag--status" style="background:rgba(245,158,11,0.18);color:var(--warn)">待标</span>';
     return `<div class="sticker-card" onclick="openStickerEdit('${escapeAttr(s.filename)}')">
       <button class="sticker-delete-btn" title="移到回收" aria-label="将 ${escapeAttr(s.filename)} 移到回收" onclick="event.stopPropagation();deleteStickerByName('${escapeAttr(s.filename)}')">${renderIcon('archive')}</button>
       <img src="${escapeAttr(s.thumbnail_url)}" loading="lazy" alt="${escapeAttr(s.filename)}">
@@ -67,7 +67,7 @@ function renderStickers() {
       <button class="btn" onclick="rescanStickers('missing_only')">扫描未打标</button>
       <button class="btn" onclick="rescanStickers('force_all')" style="color:var(--warn)">全部重打标</button>
     </div>
-    <p class="muted" style="font-size:12px;margin:0 0 12px">表情包目录：<code>${escapeHtml(data.sticker_dir)}</code>。删除会移到 trash/YYYYMMDD/ 子目录，可手动恢复。</p>
+    <p class="muted u-wrap" style="font-size:12px;margin:0 0 12px">表情包目录：<code class="u-wrap">${escapeHtml(data.sticker_dir)}</code>。删除会移到 trash/YYYYMMDD/ 子目录，可手动恢复。</p>
     ${diagnosticCard}
     <div class="sticker-grid">${grid || '<p class="muted">暂无表情包</p>'}</div>
     ${state.selectedSticker ? renderStickerEdit() : ''}`;
@@ -304,12 +304,12 @@ function renderMemory() {
     (state.memoryPalaceZones || []).map(z => `<option value="${escapeAttr(z)}" ${state.memoryPalaceZone===z?'selected':''}>${escapeHtml(z)}</option>`)
   ).join("");
   const rows = (mem.items || []).map(it => `<tr>
-    <td><span class="tag">${escapeHtml(memoryTypeLabel(it))}</span>${it.tier ? `<br><span class="muted" style="font-size:11px">${escapeHtml(memoryTierLabel(it))}</span>` : ''}</td>
-    <td><code style="font-size:11px">${escapeHtml(it.group_id||'')}${it.user_id ? '/'+escapeHtml(it.user_id) : ''}</code></td>
-    <td>${escapeHtml(it.summary)}</td>
-    <td class="muted" style="font-size:12px">置信 ${it.confidence.toFixed(2)}<br>显著 ${it.salience.toFixed(2)}</td>
-    <td class="muted" style="font-size:12px">${it.updated_at?new Date(it.updated_at*1000).toLocaleString():'-'}</td>
-    <td><button class="btn small" onclick="openMemoryDetail('${escapeAttr(it.memory_id)}')">详情</button></td>
+    <td class="col-status"><span class="tag tag--ellipsis" title="${escapeAttr(memoryTypeLabel(it))}">${escapeHtml(memoryTypeLabel(it))}</span>${it.tier ? `<br><span class="muted" style="font-size:11px">${escapeHtml(memoryTierLabel(it))}</span>` : ''}</td>
+    <td class="col-id"><code class="u-ellipsis u-tabular" title="${escapeAttr((it.group_id || '') + (it.user_id ? '/' + it.user_id : ''))}" style="font-size:11px">${escapeHtml(it.group_id||'')}${it.user_id ? '/'+escapeHtml(it.user_id) : ''}</code></td>
+    <td class="col-summary u-wrap">${escapeHtml(it.summary)}</td>
+    <td class="col-number muted u-atomic u-tabular" style="font-size:12px">置信 ${it.confidence.toFixed(2)}<br>显著 ${it.salience.toFixed(2)}</td>
+    <td class="col-time muted u-atomic u-tabular" style="font-size:12px">${it.updated_at?new Date(it.updated_at*1000).toLocaleString():'-'}</td>
+    <td class="col-actions"><button class="btn small" aria-label="查看记忆 ${escapeAttr(it.memory_id)}" onclick="openMemoryDetail('${escapeAttr(it.memory_id)}')">详情</button></td>
   </tr>`).join("");
   const hiddenNote = mem.hidden_self_count
     ? `<span class="muted" style="font-size:12px;margin-left:10px">已默认隐藏 ${mem.hidden_self_count} 条 bot 自言条目</span>`
@@ -318,14 +318,14 @@ function renderMemory() {
   if (inner && inner.available) {
     const s = inner.state || {};
     const warm = s.relation_warmth || {};
-    const warmRows = Object.keys(warm).slice(0,12).map(k => `<tr><td><code>${escapeHtml(k)}</code></td><td>${typeof warm[k]==='number'?warm[k].toFixed(2):escapeHtml(String(warm[k]))}</td></tr>`).join("");
+    const warmRows = Object.keys(warm).slice(0,12).map(k => `<tr><td class="col-id"><code class="u-ellipsis u-tabular" title="${escapeAttr(k)}">${escapeHtml(k)}</code></td><td class="col-number u-atomic u-tabular">${typeof warm[k]==='number'?warm[k].toFixed(2):escapeHtml(String(warm[k]))}</td></tr>`).join("");
     innerBlock = `<div class="card"><h2>Inner State（情绪/能量/关系）</h2>
       <div class="row" style="gap:30px;flex-wrap:wrap">
         <div><div class="muted">mood</div><div style="font-size:18px;margin-top:4px">${escapeHtml(String(s.mood||'-'))}</div></div>
         <div><div class="muted">energy</div><div style="font-size:18px;margin-top:4px">${escapeHtml(String(s.energy||'-'))}</div></div>
         <div><div class="muted">pending</div><div style="font-size:13px;margin-top:4px">${escapeHtml(formatInnerPendingThoughts(s.pending_thoughts)).slice(0,120)||'-'}</div></div>
       </div>
-      ${warmRows ? `<h3 style="margin-top:14px;margin-bottom:6px;font-size:13px">用户好感度</h3><table style="max-width:420px"><thead><tr><th>用户</th><th>好感</th></tr></thead><tbody>${warmRows}</tbody></table>`:''}</div>`;
+      ${warmRows ? `<h3 style="margin-top:14px;margin-bottom:6px;font-size:13px">用户好感度</h3><div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="Inner State 用户好感度"><table class="data-table compact" style="max-width:420px"><thead><tr><th scope="col" class="col-id">用户</th><th scope="col" class="col-number">好感</th></tr></thead><tbody>${warmRows}</tbody></table></div>`:''}</div>`;
   }
   const vectorPanel = renderMemoryVectorPanel();
   return `${diagnosticCard}${innerBlock}
@@ -355,8 +355,8 @@ function renderMemory() {
         ${state.memoryIncludeSelf ? '当前显示 bot 自言条目。' : 'bot 自己的发言默认隐藏，勾选上方复选框可显示。'}
         要看群里的原始对话历史，请进入「群信息」→ 选择群 → 切「对话原文」tab。
       </p>
-      <table><thead><tr><th>类型</th><th>作用域</th><th>摘要</th><th>分数</th><th>更新</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="6" class="muted">暂无记忆条目</td></tr>'}</tbody></table>
+      <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="长期记忆列表"><table class="data-table xwide"><thead><tr><th scope="col" class="col-status">类型</th><th scope="col" class="col-id">作用域</th><th scope="col" class="col-summary">摘要</th><th scope="col" class="col-number">分数</th><th scope="col" class="col-time">更新</th><th scope="col" class="col-actions"><span class="sr-only">操作</span></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" class="muted">暂无记忆条目</td></tr>'}</tbody></table></div>
     </div>`;
 }
 
@@ -367,17 +367,17 @@ function renderMemoryVectorPanel() {
     ? `<span class="tag ${idx.enabled ? 'source-env_json' : ''}">${idx.enabled ? '已启用' : '未启用'}</span>`
     : `<span class="tag required">不可用</span>`;
   const searchRows = ((state.memorySearchResult || {}).items || []).map(it => `<tr>
-    <td><code style="font-size:11px">${escapeHtml(it.memory_id || '')}</code><br><span class="tag">${escapeHtml(it.search_source_label || '检索结果')}</span></td>
-    <td>${escapeHtml(it.summary || '')}</td>
-    <td class="muted" style="font-size:12px">${escapeHtml(it.why_relevant || '')}</td>
-    <td>${Number(it.score || 0).toFixed(3)}</td>
+    <td class="col-id"><code class="u-ellipsis" title="${escapeAttr(it.memory_id || '')}" style="font-size:11px">${escapeHtml(it.memory_id || '')}</code><span class="tag tag--ellipsis" title="${escapeAttr(it.search_source_label || '检索结果')}">${escapeHtml(it.search_source_label || '检索结果')}</span></td>
+    <td class="col-summary u-wrap">${escapeHtml(it.summary || '')}</td>
+    <td class="col-description muted u-wrap" style="font-size:12px">${escapeHtml(it.why_relevant || '')}</td>
+    <td class="col-number u-atomic u-tabular">${Number(it.score || 0).toFixed(3)}</td>
   </tr>`).join("");
   return `<div class="card">
     <div class="row" style="justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
       <h2 style="margin:0">RAG 索引</h2>
       <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
         ${statusTag}
-        <span class="muted" style="font-size:12px">backend=${escapeHtml(idx.backend || '-')} model=${escapeHtml(idx.model_version || '-')}</span>
+        <span class="muted u-ellipsis" title="backend=${escapeAttr(idx.backend || '-')} model=${escapeAttr(idx.model_version || '-')}" style="font-size:12px">backend=${escapeHtml(idx.backend || '-')} model=${escapeHtml(idx.model_version || '-')}</span>
         <button class="btn small" onclick="rebuildMemoryVectorIndex()" ${state.memoryVectorBusy?'disabled':''}>重建索引</button>
       </div>
     </div>
@@ -390,7 +390,7 @@ function renderMemoryVectorPanel() {
       <input id="memory-search-query" placeholder="测试长期记忆召回" value="${escapeAttr(state.memorySearchQuery || '')}" onkeydown="if(event.key==='Enter')testMemoryRecall()" style="min-width:260px;flex:1">
       <button class="btn small primary" onclick="testMemoryRecall()">测试召回</button>
     </div>
-    ${state.memorySearchResult ? `<table style="margin-top:10px"><thead><tr><th>记忆</th><th>摘要</th><th>相关性</th><th>分数</th></tr></thead><tbody>${searchRows || '<tr><td colspan="4" class="muted">无召回结果</td></tr>'}</tbody></table>` : ''}
+    ${state.memorySearchResult ? `<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="RAG 召回测试结果"><table class="data-table wide" style="margin-top:10px"><thead><tr><th scope="col" class="col-id">记忆</th><th scope="col" class="col-summary">摘要</th><th scope="col" class="col-description">相关性</th><th scope="col" class="col-number">分数</th></tr></thead><tbody>${searchRows || '<tr><td colspan="4" class="muted">无召回结果</td></tr>'}</tbody></table></div>` : ''}
   </div>`;
 }
 
@@ -478,31 +478,31 @@ function renderMemoryDetail() {
   const related = d.related || [];
   const tagLine = (label, arr) => arr && arr.length ? `<div style="margin:4px 0"><span class="muted" style="font-size:12px">${escapeHtml(label)}：</span>${arr.map(v => `<span class="tag">${escapeHtml(String(v))}</span>`).join("")}</div>` : '';
   const relatedRows = related.map(r => `<tr>
-    <td><span class="tag">${escapeHtml(memoryTypeLabel(r))}</span></td>
-    <td>${escapeHtml((r.summary||'').slice(0,120))}</td>
-    <td><button class="btn small" onclick="openMemoryDetail('${escapeAttr(r.memory_id||'')}')">查看</button></td>
+    <td class="col-status"><span class="tag tag--ellipsis" title="${escapeAttr(memoryTypeLabel(r))}">${escapeHtml(memoryTypeLabel(r))}</span></td>
+    <td class="col-summary u-wrap">${escapeHtml((r.summary||'').slice(0,120))}</td>
+    <td class="col-actions"><button class="btn small" aria-label="查看关联记忆 ${escapeAttr(r.memory_id || '')}" onclick="openMemoryDetail('${escapeAttr(r.memory_id||'')}')">查看</button></td>
   </tr>`).join("");
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedMemory=null;render()">返回列表</button><span class="muted">记忆 ${escapeHtml(d.memory_id)}</span></div>
     <div class="card">
-      <h2>${escapeHtml(memoryTypeLabel(it))} <code style="font-size:13px;color:var(--muted)">${escapeHtml(d.memory_id)}</code></h2>
+      <h2>${escapeHtml(memoryTypeLabel(it))} <code class="u-ellipsis" title="${escapeAttr(d.memory_id)}" style="font-size:13px;color:var(--muted)">${escapeHtml(d.memory_id)}</code></h2>
       <div class="row" style="gap:20px;flex-wrap:wrap;font-size:13px">
         ${it.palace_zone ? `<div><span class="muted">记忆分区：</span><strong>${escapeHtml(it.palace_zone_label || it.palace_zone)}</strong></div>` : ''}
-        ${it.group_id ? `<div><span class="muted">群：</span><code>${escapeHtml(it.group_id)}</code></div>` : ''}
-        ${it.user_id ? `<div><span class="muted">用户：</span><code>${escapeHtml(it.user_id)}</code></div>` : ''}
+        ${it.group_id ? `<div class="u-atomic"><span class="muted">群：</span><code class="u-tabular">${escapeHtml(it.group_id)}</code></div>` : ''}
+        ${it.user_id ? `<div class="u-atomic"><span class="muted">用户：</span><code class="u-tabular">${escapeHtml(it.user_id)}</code></div>` : ''}
         <div><span class="muted">置信度：</span>${(it.confidence||0).toFixed(2)}</div>
         <div><span class="muted">显著度：</span>${(it.salience||0).toFixed(2)}</div>
         ${typeof it.stability === 'number' ? `<div><span class="muted">稳定度：</span>${it.stability.toFixed(2)}</div>` : ''}
       </div>
       <h3 style="margin-top:14px">摘要</h3>
-      <pre style="white-space:pre-wrap;margin:0;font-family:inherit">${escapeHtml(it.summary || '')}</pre>
+      <pre class="u-pre-wrap code-scroll" style="margin:0;font-family:inherit">${escapeHtml(it.summary || '')}</pre>
       ${tagLine('主题标签', it.topic_tags)}
       ${tagLine('实体标签', it.entity_tags)}
       ${tagLine('别名', it.aliases)}
       ${it.why_relevant ? `<h3>关联说明</h3><p>${escapeHtml(it.why_relevant)}</p>` : ''}
       ${it.time_hint ? `<p class="muted" style="font-size:12px">时间提示：${escapeHtml(it.time_hint)}</p>` : ''}
-      <details style="margin-top:12px"><summary class="muted">完整数据</summary><pre style="white-space:pre-wrap;font-size:12px;background:#0b0d12;padding:10px;border-radius:6px;overflow-x:auto">${escapeHtml(JSON.stringify(it, null, 2))}</pre></details>
+      <details style="margin-top:12px"><summary class="muted">完整数据</summary><pre class="u-pre-wrap code-scroll" style="font-size:12px;background:#0b0d12;padding:10px;border-radius:6px">${escapeHtml(JSON.stringify(it, null, 2))}</pre></details>
     </div>
-    ${related.length ? `<div class="card"><h3>关联记忆（${related.length}）</h3><table><tbody>${relatedRows}</tbody></table></div>` : ''}`;
+    ${related.length ? `<div class="card"><h3>关联记忆（${related.length}）</h3><div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="关联记忆"><table class="data-table compact"><tbody>${relatedRows}</tbody></table></div></div>` : ''}`;
 }
 
 // ---------------------------------------------------------------------------
