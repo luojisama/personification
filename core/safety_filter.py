@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any, Awaitable, Callable
 
@@ -187,6 +188,18 @@ def build_safe_reframe_messages(messages: list[dict[str, Any]]) -> list[dict[str
             for key, value in message.items()
             if not str(key).startswith("_personification_")
         }
+        if (
+            message.get("role") == "assistant"
+            and message.get("_personification_untrusted") is not True
+            and "_personification_provider_history" in message
+        ):
+            cloned["_personification_provider_history"] = copy.deepcopy(
+                message["_personification_provider_history"]
+            )
+            if "_personification_provider_model" in message:
+                cloned["_personification_provider_model"] = str(
+                    message.get("_personification_provider_model", "") or ""
+                )
         if message.get("_personification_untrusted") is True:
             text = str(cloned.get("content", "") or "")
             cloned["role"] = "user"

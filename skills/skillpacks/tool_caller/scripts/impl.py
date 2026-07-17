@@ -129,8 +129,24 @@ class ToolCallerResponse:
     usage: dict = field(default_factory=dict)
     model_used: str = ""
     wire_tools_count: int | None = None
-    provider_history: dict[str, Any] | None = field(default=None, repr=False)
+    provider_history: Any | None = field(default=None, repr=False)
     route_key: str = field(default="", repr=False)
+
+
+_PROVIDER_HISTORY_KEY = "_personification_provider_history"
+_PROVIDER_MODEL_KEY = "_personification_provider_model"
+
+
+def _provider_continuation_model(messages: List[dict]) -> str:
+    for message in reversed(list(messages or [])):
+        if (
+            not isinstance(message, dict)
+            or message.get("role") != "assistant"
+            or _PROVIDER_HISTORY_KEY not in message
+        ):
+            continue
+        return str(message.get(_PROVIDER_MODEL_KEY, "") or "").strip()
+    return ""
 
 
 def build_assistant_tool_calls_message(response: ToolCallerResponse) -> dict[str, Any]:
@@ -791,7 +807,7 @@ def _convert_messages_to_gemini(messages: List[dict]) -> Tuple[Optional[str], Li
     system_instruction, rest_messages = _extract_system_message(messages)
     contents: List[dict] = []
     for message in rest_messages:
-        native_content = message.get("_personification_provider_history")
+        native_content = message.get(_PROVIDER_HISTORY_KEY) if message.get("role") == "assistant" else None
         if isinstance(native_content, dict):
             contents.append(copy.deepcopy(native_content))
             continue
@@ -957,6 +973,10 @@ def _openai_responses_input(messages: List[dict]) -> tuple[str | None, List[dict
     system_instruction, rest_messages = _extract_system_message(messages)
     input_items: List[dict] = []
     for message in rest_messages:
+        native_items = message.get(_PROVIDER_HISTORY_KEY) if message.get("role") == "assistant" else None
+        if isinstance(native_items, list):
+            input_items.extend(copy.deepcopy(native_items))
+            continue
         role = str(message.get("role", "user") or "user")
         content = message.get("parts", message.get("content", ""))
         if role in {"user", "assistant"}:
@@ -1151,6 +1171,10 @@ def _convert_messages_to_anthropic(messages: List[dict]) -> Tuple[str, List[dict
     system_instruction, rest_messages = _extract_system_message(messages)
     converted: List[dict] = []
     for message in rest_messages:
+        native_content = message.get(_PROVIDER_HISTORY_KEY) if message.get("role") == "assistant" else None
+        if isinstance(native_content, list):
+            converted.append({"role": "assistant", "content": copy.deepcopy(native_content)})
+            continue
         content_blocks = _anthropic_content_blocks(message.get("content", ""))
         content_blocks.extend(_anthropic_tool_use_blocks(message.get("tool_calls", [])))
         converted.append(
@@ -1257,9 +1281,8 @@ class OpenAIToolCaller(ToolCaller):
 
                     try:
                         response = await client.responses.create(**payload)
-                        content, tool_calls, used_builtin_search = _parse_openai_responses_output(
-                            _response_to_dict(response)
-                        )
+                        response_data = _response_to_dict(response)
+                        content, tool_calls, used_builtin_search = _parse_openai_responses_output(response_data)
                         return ToolCallerResponse(
                             finish_reason="tool_calls" if tool_calls else "stop",
                             content=content,
@@ -1269,6 +1292,11 @@ class OpenAIToolCaller(ToolCaller):
                             usage=_extract_usage(response),
                             model_used=str(self.model or ""),
                             wire_tools_count=wire_tools_count,
+                            provider_history=(
+                                copy.deepcopy(list(response_data.get("output", []) or []))
+                                if tool_calls
+                                else None
+                            ),
                         )
                     except TypeError as e:
                         error_msg = str(e).lower()
@@ -1277,9 +1305,8 @@ class OpenAIToolCaller(ToolCaller):
                             self._supports_reasoning = False
                             try:
                                 response = await client.responses.create(**payload)
-                                content, tool_calls, used_builtin_search = _parse_openai_responses_output(
-                                    _response_to_dict(response)
-                                )
+                                response_data = _response_to_dict(response)
+                                content, tool_calls, used_builtin_search = _parse_openai_responses_output(response_data)
                                 return ToolCallerResponse(
                                     finish_reason="tool_calls" if tool_calls else "stop",
                                     content=content,
@@ -1289,6 +1316,11 @@ class OpenAIToolCaller(ToolCaller):
                                     usage=_extract_usage(response),
                                     model_used=str(self.model or ""),
                                     wire_tools_count=wire_tools_count,
+                                    provider_history=(
+                                        copy.deepcopy(list(response_data.get("output", []) or []))
+                                        if tool_calls
+                                        else None
+                                    ),
                                 )
                             except Exception:
                                 responses_failed = True
@@ -1306,6 +1338,12 @@ class OpenAIToolCaller(ToolCaller):
                     if not isinstance(_m, dict):
                         normalized_messages.append(_m)
                         continue
+                    if _PROVIDER_HISTORY_KEY in _m or _PROVIDER_MODEL_KEY in _m:
+                        _m = {
+                            key: value
+                            for key, value in _m.items()
+                            if key not in {_PROVIDER_HISTORY_KEY, _PROVIDER_MODEL_KEY}
+                        }
                     _role = _m.get("role")
                     if _role in {"assistant", "system", "user"} and _m.get("content") is None:
                         _m = {**_m, "content": ""}
@@ -1386,6 +1424,12 @@ class OpenAIToolCaller(ToolCaller):
             ):
                 return _vision_unavailable_response(exc)
             raise
+
+    def build_assistant_tool_calls_message(self, response: ToolCallerResponse) -> dict[str, Any]:
+        message = super().build_assistant_tool_calls_message(response)
+        if isinstance(response.provider_history, list):
+            message[_PROVIDER_HISTORY_KEY] = copy.deepcopy(response.provider_history)
+        return message
 
     def build_tool_result_message(
         self,
@@ -1501,7 +1545,7 @@ class GeminiToolCaller(ToolCaller):
         if isinstance(response.provider_history, dict):
             return {
                 "role": "assistant",
-                "_personification_provider_history": copy.deepcopy(response.provider_history),
+                _PROVIDER_HISTORY_KEY: copy.deepcopy(response.provider_history),
             }
         return super().build_assistant_tool_calls_message(response)
 
@@ -1625,6 +1669,7 @@ class AnthropicToolCaller(ToolCaller):
             response = await client.messages.create(**payload)
 
             content_blocks = list(_obj_get(response, "content", []) or [])
+            response_data = _response_to_dict(response)
             text_parts: List[str] = []
             tool_calls: List[ToolCall] = []
             for block in content_blocks:
@@ -1651,12 +1696,23 @@ class AnthropicToolCaller(ToolCaller):
                 usage=_extract_usage(response),
                 model_used=str(self.model or ""),
                 wire_tools_count=wire_tools_count,
+                provider_history=(
+                    copy.deepcopy(list(response_data.get("content", []) or []))
+                    if tool_calls
+                    else None
+                ),
             )
         except Exception as exc:
             _attach_wire_tools_count(exc, wire_tools_count)
             if contains_image_input and _error_indicates_vision_unavailable(exc):
                 return _vision_unavailable_response(exc)
             raise
+
+    def build_assistant_tool_calls_message(self, response: ToolCallerResponse) -> dict[str, Any]:
+        message = super().build_assistant_tool_calls_message(response)
+        if isinstance(response.provider_history, list):
+            message[_PROVIDER_HISTORY_KEY] = copy.deepcopy(response.provider_history)
+        return message
 
     def build_tool_result_message(
         self,
@@ -1919,6 +1975,10 @@ class OpenAICodexToolCaller(ToolCaller):
         input_items: List[dict] = []
 
         for message in messages:
+            native_items = message.get(_PROVIDER_HISTORY_KEY) if message.get("role") == "assistant" else None
+            if isinstance(native_items, list):
+                input_items.extend(copy.deepcopy(native_items))
+                continue
             role = message.get("role", "user")
             content = message.get("content", "")
 
@@ -2076,7 +2136,14 @@ class OpenAICodexToolCaller(ToolCaller):
             used_builtin_search=web_search_used,
             usage=_extract_usage(data),
             model_used=str(getattr(self, "model", "") or ""),
+            provider_history=copy.deepcopy(list(output or [])) if tool_calls else None,
         )
+
+    def build_assistant_tool_calls_message(self, response: ToolCallerResponse) -> dict[str, Any]:
+        message = super().build_assistant_tool_calls_message(response)
+        if isinstance(response.provider_history, list):
+            message[_PROVIDER_HISTORY_KEY] = copy.deepcopy(response.provider_history)
+        return message
 
     def _parse_sse_response(self, raw_text: str) -> dict:
         events: List[dict] = []
@@ -2273,6 +2340,7 @@ class OpenAICodexToolCaller(ToolCaller):
             "model": self.model,
             "store": False,  # Codex 后端要求无状态
             "stream": True,
+            "include": ["reasoning.encrypted_content"],
             "instructions": self._build_instructions(messages),
             "input": self._build_input(messages),
         }
@@ -3757,11 +3825,17 @@ class GeminiCliToolCaller(ToolCaller):
             if tool_payload:
                 request_obj["tools"] = tool_payload
 
-            model_candidates = _gemini_cli_model_candidates(self.model)
+            continuation_model = _provider_continuation_model(messages)
+            model_candidates = (
+                [continuation_model]
+                if continuation_model
+                else _gemini_cli_model_candidates(self.model)
+            )
             if use_single_attempt_retry_policy():
                 model_candidates = model_candidates[:1]
             last_exc: Exception | None = None
             auth_refreshed_for_401 = False
+            selected_model_name = ""
             client_kwargs = self._http_client_kwargs(connect_timeout=15.0)
             client = await _get_pooled_http_client(
                 _http_client_pool_key(
@@ -3795,6 +3869,7 @@ class GeminiCliToolCaller(ToolCaller):
                 for model_index, model_name in enumerate(model_candidates):
                     try:
                         data = await _post_once(model_name, access_token, project)
+                        selected_model_name = model_name
                         last_exc = None
                         break
                     except httpx.HTTPStatusError as exc:
@@ -3811,6 +3886,7 @@ class GeminiCliToolCaller(ToolCaller):
                                 access_token, _ = await self._get_access_token(force_refresh=True)
                                 project = await self._resolve_project(access_token, auth_file)
                                 data = await _post_once(model_name, access_token, project)
+                                selected_model_name = model_name
                                 last_exc = None
                                 break
                             except Exception as exc2:
@@ -3855,7 +3931,7 @@ class GeminiCliToolCaller(ToolCaller):
                 raw=data,
                 used_builtin_search=bool(grounding),
                 usage=usage,
-                model_used=str(self.model or self._default_model),
+                model_used=str(selected_model_name or continuation_model or self.model or self._default_model),
                 wire_tools_count=wire_tools_count,
                 provider_history=copy.deepcopy(content) if tool_calls and isinstance(content, dict) else None,
             )
@@ -3869,7 +3945,8 @@ class GeminiCliToolCaller(ToolCaller):
         if isinstance(response.provider_history, dict):
             return {
                 "role": "assistant",
-                "_personification_provider_history": copy.deepcopy(response.provider_history),
+                _PROVIDER_HISTORY_KEY: copy.deepcopy(response.provider_history),
+                _PROVIDER_MODEL_KEY: str(response.model_used or ""),
             }
         return super().build_assistant_tool_calls_message(response)
 
@@ -4328,17 +4405,24 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
             if tool_payload:
                 request_obj["tools"] = tool_payload
 
-            model_candidates = _antigravity_cli_model_candidates(self.model)
+            continuation_model = _provider_continuation_model(messages)
+            model_candidates = (
+                [continuation_model]
+                if continuation_model
+                else _antigravity_cli_model_candidates(self.model)
+            )
             single_attempt = use_single_attempt_retry_policy()
             state_neutral_probe = str(current_llm_context().get("purpose") or "") == "qzone_provider_probe"
             next_single_attempt_model = ""
-            if single_attempt:
+            if single_attempt and not continuation_model:
                 preferred_model = str(getattr(self, "_preferred_concrete_model", "") or "").strip()
                 if preferred_model in model_candidates:
                     preferred_index = model_candidates.index(preferred_model)
                     model_candidates = model_candidates[preferred_index:] + model_candidates[:preferred_index]
                 if len(model_candidates) > 1:
                     next_single_attempt_model = model_candidates[1]
+                model_candidates = model_candidates[:1]
+            elif single_attempt:
                 model_candidates = model_candidates[:1]
             last_exc: Exception | None = None
             auth_refreshed_for_401 = False
@@ -4639,6 +4723,7 @@ class ClaudeCodeToolCaller(AnthropicToolCaller):
             response = await client.messages.create(**payload)
 
             content_blocks = list(_obj_get(response, "content", []) or [])
+            response_data = _response_to_dict(response)
             text_parts: List[str] = []
             tool_calls: List[ToolCall] = []
             for block in content_blocks:
@@ -4665,6 +4750,11 @@ class ClaudeCodeToolCaller(AnthropicToolCaller):
                 usage=_extract_usage(response),
                 model_used=str(getattr(self, "model", "") or ""),
                 wire_tools_count=wire_tools_count,
+                provider_history=(
+                    copy.deepcopy(list(response_data.get("content", []) or []))
+                    if tool_calls
+                    else None
+                ),
             )
         except Exception as exc:
             _attach_wire_tools_count(exc, wire_tools_count)

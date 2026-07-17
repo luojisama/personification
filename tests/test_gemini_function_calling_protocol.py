@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json as json_module
 
 from plugin.personification.skills.skillpacks.tool_caller.scripts import impl
 
@@ -143,3 +144,131 @@ def test_gemini_converter_uses_canonical_part_names() -> None:
 
     assert "functionCall" in contents[0]["parts"][1]
     assert "functionResponse" in contents[1]["parts"][0]
+
+
+def test_gemini_cli_continuation_stays_on_originating_concrete_model(monkeypatch) -> None:  # noqa: ANN001
+    caller = impl.GeminiCliToolCaller(
+        model="auto-gemini-3",
+        project="project",
+        thinking_mode="none",
+    )
+    model_a, model_b = impl._gemini_cli_model_candidates("auto-gemini-3")[:2]
+    requested_models: list[str] = []
+    model_b_calls = 0
+
+    class _Client:
+        async def post(self, url, *, json, headers):  # noqa: ANN001, ANN202
+            nonlocal model_b_calls
+            del headers
+            model = json["model"]
+            requested_models.append(model)
+            request = impl.httpx.Request("POST", url)
+            if model == model_a:
+                return impl.httpx.Response(404, request=request, json={"error": "not found"})
+            model_b_calls += 1
+            if model_b_calls == 1:
+                content = {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "functionCall": {"id": "call-1", "name": "get_ai_news", "args": {}},
+                            "thoughtSignature": "opaque-signature",
+                        }
+                    ],
+                }
+            else:
+                content = {"role": "model", "parts": [{"text": "final"}]}
+            return impl.httpx.Response(
+                200,
+                request=request,
+                json={"response": {"candidates": [{"content": content}]}},
+            )
+
+    async def _get_access_token(*, force_refresh=False):  # noqa: ANN001
+        del force_refresh
+        return "token", None
+
+    async def _resolve_project(_token, _auth_file=None):  # noqa: ANN001
+        return "project"
+
+    async def _get_client(*_args, **_kwargs):  # noqa: ANN001, ANN202
+        return _Client()
+
+    monkeypatch.setattr(caller, "_get_access_token", _get_access_token)
+    monkeypatch.setattr(caller, "_resolve_project", _resolve_project)
+    monkeypatch.setattr(impl, "_get_pooled_http_client", _get_client)
+
+    messages = [{"role": "user", "content": "news"}]
+    first = asyncio.run(caller.chat_with_tools(messages, [_tool_schema()], False))
+    assert first.model_used == model_b
+    messages.append(caller.build_assistant_tool_calls_message(first))
+    messages.extend(caller.build_tool_result_messages(first, [(first.tool_calls[0], "no results")]))
+    second = asyncio.run(caller.chat_with_tools(messages, [_tool_schema()], False))
+
+    assert second.content == "final"
+    assert requested_models == [model_a, model_b, model_b]
+
+
+def test_antigravity_continuation_ignores_shared_preferred_model(monkeypatch) -> None:  # noqa: ANN001
+    caller = impl.AntigravityCliToolCaller(
+        model="auto-gemini-3",
+        project="project",
+        thinking_mode="none",
+    )
+    model_a, model_b = impl._antigravity_cli_model_candidates("auto-gemini-3")[:2]
+    requested_models: list[str] = []
+    model_b_calls = 0
+
+    class _Client:
+        async def post(self, url, *, json, headers):  # noqa: ANN001, ANN202
+            nonlocal model_b_calls
+            del headers
+            model = json["model"]
+            requested_models.append(model)
+            request = impl.httpx.Request("POST", url)
+            if model == model_a:
+                return impl.httpx.Response(404, request=request, text="not found")
+            model_b_calls += 1
+            if model_b_calls == 1:
+                content = {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "functionCall": {"id": "call-1", "name": "get_ai_news", "args": {}},
+                            "thoughtSignature": "opaque-signature",
+                        }
+                    ],
+                }
+            else:
+                content = {"role": "model", "parts": [{"text": "final"}]}
+            payload = {"response": {"candidates": [{"content": content}]}}
+            return impl.httpx.Response(
+                200,
+                request=request,
+                text=f"data: {json_module.dumps(payload)}\n\n",
+            )
+
+    async def _get_access_token(*, force_refresh=False):  # noqa: ANN001
+        del force_refresh
+        return "token", None
+
+    async def _resolve_project(_token, _auth_file=None):  # noqa: ANN001
+        return "project"
+
+    async def _get_client(*_args, **_kwargs):  # noqa: ANN001, ANN202
+        return _Client()
+
+    monkeypatch.setattr(caller, "_get_access_token", _get_access_token)
+    monkeypatch.setattr(caller, "_resolve_project", _resolve_project)
+    monkeypatch.setattr(impl, "_get_pooled_http_client", _get_client)
+
+    messages = [{"role": "user", "content": "news"}]
+    first = asyncio.run(caller.chat_with_tools(messages, [_tool_schema()], False))
+    assert first.model_used == model_b
+    messages.append(caller.build_assistant_tool_calls_message(first))
+    messages.extend(caller.build_tool_result_messages(first, [(first.tool_calls[0], "no results")]))
+    caller._preferred_concrete_model = model_a
+    second = asyncio.run(caller.chat_with_tools(messages, [_tool_schema()], False))
+
+    assert second.content == "final"
+    assert requested_models == [model_a, model_b, model_b]

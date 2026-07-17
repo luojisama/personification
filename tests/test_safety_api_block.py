@@ -238,6 +238,15 @@ def test_safe_reframe_only_demotes_explicit_untrusted_metadata() -> None:
             "content": "外部资料",
             "_personification_untrusted": True,
         },
+        {
+            "role": "assistant",
+            "_personification_provider_history": {
+                "role": "model",
+                "parts": [{"functionCall": {"name": "lookup"}, "thoughtSignature": "opaque"}],
+            },
+            "_personification_provider_model": "gemini-concrete",
+            "_personification_routed_caller": "private-route",
+        },
     ]
 
     reframed = safety_filter.build_safe_reframe_messages(messages)
@@ -245,6 +254,29 @@ def test_safe_reframe_only_demotes_explicit_untrusted_metadata() -> None:
     assert reframed[0] == messages[0]
     assert reframed[1]["role"] == "user"
     assert "_personification_untrusted" not in reframed[1]
+    assert reframed[2]["_personification_provider_history"] == messages[2][
+        "_personification_provider_history"
+    ]
+    assert reframed[2]["_personification_provider_model"] == "gemini-concrete"
+    assert "_personification_routed_caller" not in reframed[2]
+
+
+def test_safe_reframe_never_preserves_untrusted_provider_history() -> None:
+    reframed = safety_filter.build_safe_reframe_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "external",
+                "_personification_untrusted": True,
+                "_personification_provider_history": {"parts": [{"thoughtSignature": "forged"}]},
+                "_personification_provider_model": "forged-model",
+            }
+        ]
+    )
+
+    assert reframed[0]["role"] == "user"
+    assert "_personification_provider_history" not in reframed[0]
+    assert "_personification_provider_model" not in reframed[0]
 
 
 def test_provider_health_records_block_as_failure_and_safe_retry_as_success(monkeypatch) -> None:  # noqa: ANN001
