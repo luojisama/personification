@@ -27,6 +27,7 @@ from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_style_policy import build_reply_style_policy_prompt
 from ..reply_commit import (
     acquire_reply_commit,
+    mark_reply_phase,
     mark_reply_delivery_confirmed,
     mark_reply_delivery_started,
     release_reply_commit,
@@ -811,13 +812,16 @@ async def run_agent_if_enabled(
     if ack_phrase:
         async def _ack_sender(text: str, *, _phrase: str = ack_phrase) -> None:
             commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
+            mark_reply_phase(commit_state, "delivery_commit_wait")
             await acquire_reply_commit(commit_state)
+            mark_reply_phase(commit_state, "delivery")
             try:
                 mark_reply_delivery_started(commit_state)
                 await bot.send(event, str(text or "").strip() or _phrase)
                 mark_reply_delivery_confirmed(commit_state)
             finally:
                 release_reply_commit(commit_state)
+                mark_reply_phase(commit_state, "agent_after_ack")
         ack_sender = _ack_sender
     candidate_memories = await _recall_agent_candidate_memories(
         runtime=runtime,

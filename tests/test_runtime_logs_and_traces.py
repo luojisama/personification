@@ -319,3 +319,33 @@ def test_process_view_does_not_attribute_wait_time_to_zero_duration_markers() ->
     assert view["items"][0]["duration_ms"] == 0
     assert view["items"][1]["duration_ms"] == 7290
     assert [item["key"] for item in view["summary"]["slow_stages"]] == ["semantic_frame_llm"]
+
+
+def test_process_view_uses_explicit_stage_elapsed_without_changing_visible_detail() -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    view = traces.build_process_view(
+        {
+            "trace_id": "trace-explicit-duration",
+            "stages": [
+                {
+                    "ts": 100.0,
+                    "key": "outgoing_message",
+                    "label": "发送消息",
+                    "status": "ok",
+                    "detail": "实际可见回复",
+                    "elapsed_ms": 0,
+                },
+                {
+                    "ts": 102.5,
+                    "key": "post_send_bookkeeping",
+                    "label": "发送后状态写入",
+                    "status": "ok",
+                    "detail": "elapsed_ms=2500",
+                },
+            ],
+        }
+    )
+
+    assert view["items"][0]["detail"] == "实际可见回复"
+    assert view["items"][0]["duration_ms"] == 0
+    assert view["items"][1]["duration_ms"] == 2500

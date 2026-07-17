@@ -1937,7 +1937,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         async def _commit_pending_actions() -> None:
             if not pending_actions:
                 return
+            mark_reply_phase(state, "delivery_commit_wait")
             await acquire_reply_commit(state)
+            mark_reply_phase(state, "delivery")
             stale_reason = _stale_reply_abort_reason(state)
             if stale_reason:
                 runtime.logger.info(f"拟人插件：{stale_reason}")
@@ -2263,6 +2265,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             runtime.logger.info(f"AI 决定结束与群 {group_id} 中 {user_name}({user_id}) 的对话 (SILENCE)")
             if bool(state.get("reply_delivery_confirmed", False)):
                 mark_reply_delivery_complete(state)
+                release_reply_commit(state)
+                mark_reply_phase(state, "reply_complete")
                 _finish_action_only_trace()
                 return
             if agent_suppress_reply_recovery:
@@ -2423,6 +2427,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             )
             if bool(state.get("reply_delivery_confirmed", False)):
                 mark_reply_delivery_complete(state)
+                release_reply_commit(state)
+                mark_reply_phase(state, "reply_complete")
                 _finish_action_only_trace()
                 return
             if agent_suppress_reply_recovery:
@@ -2774,6 +2780,44 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
         if not delivery_partial and not delivery_unknown:
             mark_reply_delivery_complete(state)
+        mark_reply_phase(state, "delivery_history_commit")
+        assistant_metadata = {
+            "scene": "reply",
+            "sticker_sent": sticker_name if sticker_name else None,
+            "speaker": bot_nickname,
+            "user_id": bot_self_id or None,
+            "source_kind": "bot_reply",
+        }
+        if isinstance(event, types.group_message_event_cls):
+            assistant_metadata.update(
+                {
+                    "group_id": str(event.group_id),
+                    "message_id": sent_message_id or None,
+                    "reply_to_msg_id": incoming_relation_metadata.get("message_id"),
+                    "reply_to_user_id": user_id,
+                    "mentioned_ids": [str(at_target)] if at_target else [],
+                    "is_at_bot": False,
+                }
+            )
+        session.append_session_message(
+            session_id,
+            "assistant",
+            final_visible_reply_text,
+            legacy_session_id=legacy_session_id,
+            **assistant_metadata,
+        )
+        if isinstance(event, types.group_message_event_cls):
+            runtime.record_group_msg(
+                str(event.group_id),
+                bot_nickname,
+                final_visible_reply_text,
+                is_bot=True,
+                user_id=bot_self_id,
+                message_id=sent_message_id or None,
+                reply_to_msg_id=incoming_relation_metadata.get("message_id"),
+                reply_to_user_id=user_id,
+                source_kind="bot_reply",
+            )
         release_reply_commit(state)
         delivery_elapsed_ms = int((time.monotonic() - delivery_started_at) * 1000)
         mark_reply_phase(state, "post_send_bookkeeping")
@@ -2796,17 +2840,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 label="发送消息",
                 status="ok",
                 detail=str(final_visible_reply_text or "")[:500],
+                elapsed_ms=0,
             )
         except Exception:
             pass
-
-        assistant_metadata = {
-            "scene": "reply",
-            "sticker_sent": sticker_name if sticker_name else None,
-            "speaker": bot_nickname,
-            "user_id": bot_self_id or None,
-            "source_kind": "bot_reply",
-        }
         if sticker_name:
             await record_sticker_sent(sticker_name)
         await persist_reply_emotion_state(
@@ -2853,24 +2890,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     pass
             asyncio.create_task(_spawn_relation_evolution())
 
-        if isinstance(event, types.group_message_event_cls):
-            assistant_metadata.update(
-                {
-                    "group_id": str(event.group_id),
-                    "message_id": sent_message_id or None,
-                    "reply_to_msg_id": incoming_relation_metadata.get("message_id"),
-                    "reply_to_user_id": user_id,
-                    "mentioned_ids": [str(at_target)] if at_target else [],
-                    "is_at_bot": False,
-                }
-            )
-        session.append_session_message(
-            session_id,
-            "assistant",
-            final_visible_reply_text,
-            legacy_session_id=legacy_session_id,
-            **assistant_metadata,
-        )
         if getattr(runtime, "memory_curator", None) is not None:
             memory_group_id = "" if is_private_session else str(group_id)
             if hasattr(runtime.memory_curator, "schedule_turn_capture"):
@@ -2892,17 +2911,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 )
 
         if isinstance(event, types.group_message_event_cls):
-            runtime.record_group_msg(
-                str(event.group_id),
-                bot_nickname,
-                final_visible_reply_text,
-                is_bot=True,
-                user_id=bot_self_id,
-                message_id=sent_message_id or None,
-                reply_to_msg_id=incoming_relation_metadata.get("message_id"),
-                reply_to_user_id=user_id,
-                source_kind="bot_reply",
-            )
             try:
                 update_group_chat_active(
                     str(event.group_id),

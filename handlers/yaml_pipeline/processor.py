@@ -566,6 +566,7 @@ async def process_yaml_response_logic(
         status: str,
         detail: str = "",
         hint: str = "",
+        elapsed_ms: int | None = None,
     ) -> None:
         try:
             from ...core import reply_turn_trace
@@ -576,6 +577,7 @@ async def process_yaml_response_logic(
                 status=status,
                 detail=detail,
                 hint=hint,
+                elapsed_ms=elapsed_ms,
             )
         except Exception:
             pass
@@ -683,7 +685,9 @@ async def process_yaml_response_logic(
     async def _commit_pending_actions() -> None:
         if not pending_actions:
             return
+        mark_reply_phase(reply_commit_state, "delivery_commit_wait")
         await acquire_reply_commit(reply_commit_state)
+        mark_reply_phase(reply_commit_state, "delivery")
         if _has_newer_batch_now():
             pending_actions.clear()
             return
@@ -1554,13 +1558,16 @@ async def process_yaml_response_logic(
         ack_sender = None
         if ack_phrase:
             async def _ack_sender(text: str, *, _phrase: str = ack_phrase) -> None:
+                mark_reply_phase(reply_commit_state, "delivery_commit_wait")
                 await acquire_reply_commit(reply_commit_state)
+                mark_reply_phase(reply_commit_state, "delivery")
                 try:
                     mark_reply_delivery_started(reply_commit_state)
                     await bot.send(event, str(text or "").strip() or _phrase)
                     mark_reply_delivery_confirmed(reply_commit_state)
                 finally:
                     release_reply_commit(reply_commit_state)
+                    mark_reply_phase(reply_commit_state, "yaml_agent_after_ack")
             ack_sender = _ack_sender
         _trace_stage(
             key="yaml_agent_start",
@@ -2401,6 +2408,40 @@ async def process_yaml_response_logic(
 
     if not delivery_partial and not delivery_unknown:
         mark_reply_delivery_complete(reply_commit_state)
+    mark_reply_phase(reply_commit_state, "delivery_history_commit")
+    session_id = build_private_session_id(user_id) if is_private_session else build_group_session_id(group_id)
+    legacy_session_id = None if is_private_session else group_id
+    # 可见发送与有序历史投影共用同一个提交门，避免并发直达轮次写回顺序反转。
+    append_session_message(
+        session_id,
+        "assistant",
+        assistant_history_text,
+        legacy_session_id=legacy_session_id,
+        scene="reply",
+        sticker_sent=", ".join(stickers_sent) if stickers_sent else None,
+        speaker=str(getattr(bot, "self_id", "") or "bot"),
+        user_id=str(getattr(bot, "self_id", "") or "") or None,
+        source_kind="bot_reply",
+        group_id=None if is_private_session else group_id,
+        message_id=sent_message_id or None,
+        reply_to_msg_id=str(getattr(event, "message_id", "") or "") or None,
+        reply_to_user_id=None if is_private_session else user_id,
+        mentioned_ids=[str(at_target)] if at_target else [],
+        is_at_bot=False,
+    )
+    if not is_private_session and record_group_msg is not None:
+        record_group_msg(
+            group_id,
+            str(getattr(bot, "self_id", "") or "bot"),
+            assistant_history_text,
+            is_bot=True,
+            user_id=str(getattr(bot, "self_id", "") or ""),
+            message_id=sent_message_id or None,
+            reply_to_msg_id=str(getattr(event, "message_id", "") or "") or None,
+            reply_to_user_id=user_id,
+            mentioned_ids=[str(at_target)] if at_target else [],
+            source_kind="bot_reply",
+        )
     release_reply_commit(reply_commit_state)
     delivery_elapsed_ms = int((time.monotonic() - delivery_started_at) * 1000)
     mark_reply_phase(reply_commit_state, "post_send_bookkeeping")
@@ -2420,26 +2461,7 @@ async def process_yaml_response_logic(
         label="发送消息",
         status="ok",
         detail=str(assistant_history_text or "")[:500],
-    )
-    session_id = build_private_session_id(user_id) if is_private_session else build_group_session_id(group_id)
-    legacy_session_id = None if is_private_session else group_id
-    # YAML 模式同样只写回最终用户可见文本，避免 session 中保留未发送的原始模板输出。
-    append_session_message(
-        session_id,
-        "assistant",
-        assistant_history_text,
-        legacy_session_id=legacy_session_id,
-        scene="reply",
-        sticker_sent=", ".join(stickers_sent) if stickers_sent else None,
-        speaker=str(getattr(bot, "self_id", "") or "bot"),
-        user_id=str(getattr(bot, "self_id", "") or "") or None,
-        source_kind="bot_reply",
-        group_id=None if is_private_session else group_id,
-        message_id=sent_message_id or None,
-        reply_to_msg_id=str(getattr(event, "message_id", "") or "") or None,
-        reply_to_user_id=None if is_private_session else user_id,
-        mentioned_ids=[str(at_target)] if at_target else [],
-        is_at_bot=False,
+        elapsed_ms=0,
     )
     for sticker_name in delivered_sticker_names:
         try:
@@ -2486,19 +2508,6 @@ async def process_yaml_response_logic(
                 group_id=memory_group_id,
                 topic_tags=[group_id] if not is_private_session else [],
             )
-    if not is_private_session and record_group_msg is not None:
-        record_group_msg(
-            group_id,
-            str(getattr(bot, "self_id", "") or "bot"),
-            assistant_history_text,
-            is_bot=True,
-            user_id=str(getattr(bot, "self_id", "") or ""),
-            message_id=sent_message_id or None,
-            reply_to_msg_id=str(getattr(event, "message_id", "") or "") or None,
-            reply_to_user_id=user_id,
-            mentioned_ids=[str(at_target)] if at_target else [],
-            source_kind="bot_reply",
-        )
     record_counter(
         "yaml_reply.success_total",
         scene="private" if is_private_session else "group",
