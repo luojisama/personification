@@ -1587,7 +1587,15 @@ def build_qzone_services(
             auth_state["refreshing"] = True
             auth_state["last_refresh_at"] = now
         try:
-            cookies_resp = await bot.get_cookies(domain="qzone.qq.com")
+            from .protocol_adapter import get_protocol_adapter
+
+            cookie_result = await get_protocol_adapter(bot, plugin_config, logger).export_cookies(
+                domain="qzone.qq.com"
+            )
+            if not cookie_result.ok:
+                _set_qzone_auth_failure(cookie_result.code, bot_id=bot_id)
+                return False, cookie_result.code
+            cookies_resp = cookie_result.data if isinstance(cookie_result.data, dict) else {}
             cookie = str(cookies_resp.get("cookies", "") or "").strip()
             if not cookie:
                 _set_qzone_auth_failure("自动获取 Cookie 失败，返回结果为空", bot_id=bot_id)
