@@ -32,6 +32,7 @@ from ...core.response_review import (
     extract_recent_bot_reply_texts,
 )
 from ...core.target_inference import normalize_message_target_for_plan, normalize_message_target_for_review
+from ...core.user_avatar_insight import add_current_user_avatar_planner_metadata
 from .pipeline_context import batch_has_newer_messages
 
 _EMOTIONAL_SUPPORT_HINT = load_prompt("emotional_support_hint")
@@ -444,6 +445,11 @@ async def prepare_reply_semantics(
     if planner_enabled or planner_shadow_enabled:
         try:
             planner_available_tools = registry_planner_metadata(runtime.tool_registry)
+            planner_available_tools = add_current_user_avatar_planner_metadata(
+                planner_available_tools,
+                getattr(runtime, "profile_service", None),
+                user_id,
+            )
         except Exception:
             planner_available_tools = []
 

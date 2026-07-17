@@ -441,6 +441,8 @@ async def run_agent(
     skip_rewrite_reason = ""
     if runtime_chat_intent in {"banter", "image_generation", "expression"}:
         skip_rewrite_reason = f"intent_{runtime_chat_intent or 'unknown'}"
+    elif runtime_chat_intent == "plugin_question" and plugin_query_intent == "runtime_capability":
+        skip_rewrite_reason = "intent_runtime_capability"
     elif direct_native_image_answer:
         skip_rewrite_reason = "direct_native_image"
     if skip_rewrite_reason:

@@ -88,6 +88,27 @@ def test_qzone_surface_skips_group_chat_reply_discipline() -> None:
     assert "群聊里通常多个话题并行" not in combined
 
 
+def test_plugin_capability_prompt_prefers_runtime_evidence_over_static_plugin_docs() -> None:
+    messages: list[dict] = []
+
+    prompting.append_agent_system_prompts(
+        messages=messages,
+        runtime_chat_intent="plugin_question",
+        plugin_query_intent="runtime_capability",
+        intent_decision=SimpleNamespace(ambiguity_level="low"),
+        rewritten_query=SimpleNamespace(primary_query="", query_candidates=[], context_clues=[], search_plan=[]),
+        turn_plan=None,
+        user_images=[],
+        direct_image_input=False,
+    )
+
+    combined = "\n".join(str(item.get("content", "")) for item in messages)
+    assert "运行时能力" in combined
+    assert "inspect_current_user_avatar" in combined
+    assert "不要调用插件清单、插件知识或源码工具猜测" in combined
+    assert "available=false" in combined
+
+
 def test_qzone_text_agent_profile_keeps_only_read_only_evidence_tools() -> None:
     registry = tool_registry.ToolRegistry()
     for name in (

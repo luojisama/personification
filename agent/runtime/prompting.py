@@ -183,21 +183,30 @@ def append_agent_system_prompts(
             }
         )
     elif runtime_chat_intent == "plugin_question":
-        plugin_hint = (
-            "当前更像在问插件能力、命令、实现或配置。"
-            "如果需要工具，优先使用本地插件知识和源码工具，不要先联网。"
-            "优先考虑：search_plugin_source、search_plugin_knowledge、list_plugin_features、get_feature_detail、list_plugins。"
-        )
+        if plugin_query_intent == "runtime_capability":
+            plugin_hint = (
+                "当前是在问你能否读取当前发送者或当前会话信息的运行时能力。"
+                "必须调用本轮可用的第一方只读 runtime capability 工具核实，不要调用插件清单、插件知识或源码工具猜测。"
+                "inspect_current_user_avatar 只能说明是否已有安全头像摘要，不能声称直接看到了 raw 头像；"
+                "available=false 时如实说明当前没有可用摘要。"
+            )
+        else:
+            plugin_hint = (
+                "当前更像在问插件静态能力、命令、实现或配置。"
+                "如果需要工具，优先使用本地插件知识和源码工具，不要先联网。"
+                "优先考虑：search_plugin_source、search_plugin_knowledge、list_plugin_features、get_feature_detail、list_plugins。"
+            )
         if plugin_query_intent == "latest":
             plugin_hint += (
                 "如果对方明确问官网、仓库、最新文档或版本，再考虑 web_search、search_official_site、search_github_repos。"
             )
-        plugin_hint += (
-            "如果对方不是在问插件原理，而是想直接用某个插件功能（查天气、签到、点歌、查询等），"
-            "先用 search_plugin_knowledge / list_plugin_features 定位插件和它的命令触发方式，"
-            "确认后用 invoke_plugin 传入完整命令文本（如 /天气 北京）代为执行，再用你自己的语气转述结果，"
-            "不要让用户自己去发命令。"
-        )
+        if plugin_query_intent != "runtime_capability":
+            plugin_hint += (
+                "如果对方不是在问插件原理，而是想直接用某个插件功能（查天气、签到、点歌、查询等），"
+                "先用 search_plugin_knowledge / list_plugin_features 定位插件和它的命令触发方式，"
+                "确认后用 invoke_plugin 传入完整命令文本（如 /天气 北京）代为执行，再用你自己的语气转述结果，"
+                "不要让用户自己去发命令。"
+            )
         messages.append(
             {
                 "role": "system",

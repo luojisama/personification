@@ -1175,6 +1175,90 @@ def test_run_agent_uses_tool_metadata_contract_for_queued_action_silence() -> No
     assert len(caller.calls) == 1
 
 
+def test_run_agent_routes_avatar_capability_to_current_user_tool() -> None:
+    calls: list[str] = []
+
+    async def _avatar_handler(**_kwargs):  # noqa: ANN001
+        calls.append("inspect_current_user_avatar")
+        return json.dumps(
+            {"ok": True, "available": True, "analysis": {"status": "success"}, "insight": {"neutral_summary": "蓝发动画角色"}},
+            ensure_ascii=False,
+        )
+
+    registry = tool_registry.ToolRegistry()
+    registry.register(
+        tool_registry.AgentTool(
+            name="inspect_current_user_avatar",
+            description="只读确认当前发送者安全头像摘要是否可用",
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=_avatar_handler,
+            metadata={
+                "intent_tags": ["runtime_capability", "current_user"],
+                "source_kind": "first_party_runtime",
+                "risk_level": "low",
+                "side_effect": "none",
+            },
+        )
+    )
+    registry.register(
+        tool_registry.AgentTool(
+            name="list_plugins",
+            description="列出插件",
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=lambda **_kwargs: asyncio.sleep(0, result="[]"),
+        )
+    )
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(id="call-avatar", name="inspect_current_user_avatar", arguments={})
+                ],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="能看到你现在这张头像的安全摘要，是蓝发动画角色。",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "你能看见我头像吗"}],
+            registry=registry,
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=2,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="plugin_question",
+                plugin_question_intent="runtime_capability",
+                ambiguity_level="low",
+            ),
+        )
+    )
+
+    first_tool_names = {
+        schema["function"]["name"]
+        for schema in caller.calls[0]["tools"]
+    }
+    assert first_tool_names == {"inspect_current_user_avatar"}
+    assert len(caller.calls) == 2
+    assert calls == ["inspect_current_user_avatar"]
+    assert "蓝发动画角色" in result.text
+
+
 def test_run_agent_uses_response_aware_turn_builders() -> None:
     async def _handler(**_kwargs):  # noqa: ANN001
         return "tool evidence"

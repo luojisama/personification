@@ -109,6 +109,80 @@ def test_select_tool_schemas_uses_metadata_for_new_lookup_tools() -> None:
     assert "new_admin_tool" not in names
 
 
+def test_runtime_capability_exposes_only_safe_first_party_runtime_tools() -> None:
+    registry = tool_registry.ToolRegistry()
+    _register(registry, "list_plugins")
+    _register(
+        registry,
+        "inspect_current_user_avatar",
+        {
+            "intent_tags": ["runtime_capability", "current_user"],
+            "source_kind": "first_party_runtime",
+            "risk_level": "low",
+            "side_effect": "none",
+        },
+    )
+    _register(
+        registry,
+        "untrusted_runtime_probe",
+        {
+            "intent_tags": ["runtime_capability"],
+            "source_kind": "remote_mcp",
+            "side_effect": "none",
+        },
+    )
+    _register(
+        registry,
+        "runtime_write_probe",
+        {
+            "intent_tags": ["runtime_capability"],
+            "source_kind": "first_party_runtime",
+            "side_effect": "external",
+        },
+    )
+    _register(
+        registry,
+        "external_image_probe",
+        {
+            "requires_image": True,
+            "source_kind": "remote_mcp",
+            "side_effect": "external",
+        },
+    )
+
+    runtime_names = {
+        tool_catalog.schema_tool_name(schema)
+        for schema in tool_catalog.select_tool_schemas(
+            registry,
+            has_images=False,
+            chat_intent="plugin_question",
+            plugin_question_intent="runtime_capability",
+        )
+    }
+    static_capability_names = {
+        tool_catalog.schema_tool_name(schema)
+        for schema in tool_catalog.select_tool_schemas(
+            registry,
+            has_images=False,
+            chat_intent="plugin_question",
+            plugin_question_intent="capability",
+        )
+    }
+    runtime_names_with_images = {
+        tool_catalog.schema_tool_name(schema)
+        for schema in tool_catalog.select_tool_schemas(
+            registry,
+            has_images=True,
+            chat_intent="plugin_question",
+            plugin_question_intent="runtime_capability",
+        )
+    }
+
+    assert runtime_names == {"inspect_current_user_avatar"}
+    assert runtime_names_with_images == {"inspect_current_user_avatar"}
+    assert static_capability_names == {"list_plugins"}
+
+
 def test_registry_planner_metadata_applies_name_defaults() -> None:
     registry = tool_registry.ToolRegistry()
     _register(registry, "parallel_research")
@@ -213,4 +287,5 @@ def test_semantic_tool_guidance_requires_lookup_for_unknown_entities() -> None:
     assert "专有名词" in guidance
     assert "resolve_acg_entity" in guidance
     assert "inspect_group_user_avatar_pair" in guidance
+    assert "runtime_capability" in guidance
     assert "绝不表示两位用户现实中是情侣、朋友、认识或同一人" in guidance

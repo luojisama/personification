@@ -24,7 +24,9 @@ MemoryNeed = Literal["none", "light", "deep"]
 ResearchNeed = Literal["none", "low", "medium", "high"]
 VisionNeed = Literal["none", "summary", "native"]
 OutputMode = Literal["chat_short", "chat_answer", "structured_help", "source_summary", "qzone_reply"]
-ToolIntent = Literal["lookup_web", "lookup_plugin", "vision", "image_gen", "memory", "expression", "none"]
+ToolIntent = Literal[
+    "lookup_web", "lookup_plugin", "runtime_capability", "vision", "image_gen", "memory", "expression", "none"
+]
 AmbiguityLevel = Literal["low", "medium", "high"]
 MessageTarget = Literal["bot", "someone_else", "broadcast", "uncertain"]
 DomainFocus = Literal["general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"]
@@ -46,7 +48,9 @@ ALLOWED_MEMORY_NEEDS = {"none", "light", "deep"}
 ALLOWED_RESEARCH_NEEDS = {"none", "low", "medium", "high"}
 ALLOWED_VISION_NEEDS = {"none", "summary", "native"}
 ALLOWED_OUTPUT_MODES = {"chat_short", "chat_answer", "structured_help", "source_summary", "qzone_reply"}
-ALLOWED_TOOL_INTENTS = {"lookup_web", "lookup_plugin", "vision", "image_gen", "memory", "expression", "none"}
+ALLOWED_TOOL_INTENTS = {
+    "lookup_web", "lookup_plugin", "runtime_capability", "vision", "image_gen", "memory", "expression", "none"
+}
 ALLOWED_AMBIGUITY_LEVELS = {"low", "medium", "high"}
 ALLOWED_MESSAGE_TARGETS = {"bot", "someone_else", "broadcast", "uncertain"}
 ALLOWED_DOMAIN_FOCUS = {"general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"}
@@ -398,7 +402,7 @@ async def plan_turn_with_llm(
         '"vision_need":"none|summary|native",'
         '"qzone_continue":false,'
         '"output_mode":"chat_short|chat_answer|structured_help|source_summary|qzone_reply",'
-        '"tool_intent":["lookup_web|lookup_plugin|vision|image_gen|memory|expression|none"],'
+        '"tool_intent":["lookup_web|lookup_plugin|runtime_capability|vision|image_gen|memory|expression|none"],'
         '"ambiguity_level":"low|medium|high",'
         '"message_target":"bot|someone_else|broadcast|uncertain",'
         '"session_goal":"一句短中文目标",'
@@ -421,6 +425,9 @@ async def plan_turn_with_llm(
         "4b. group_atmosphere_positive 只在群聊整体互动明确友好融洽时为 true，私聊必须 false；"
         "interaction_interesting 只在 bot 与当前用户确实出现明显趣味、默契或高质量互动时为 true，普通成功回复不能机械加分。\n"
         "5. 工具意图只给候选方向，不要因为工具存在就强行使用。\n"
+        "5a. 可用工具 metadata 中的 runtime_capability 表示当前用户/会话的第一方只读能力。"
+        "当对方询问 bot 当前是否能读取这类信息时，tool_intent 必须包含 runtime_capability，"
+        "规划为调用该工具核实后回答，不能用插件静态说明代替运行时证据。\n"
         "5b. 用户明确要求发送 QQ 表情、小黄脸、收藏表情、推荐表情，或这轮只适合发 QQ 表情时，tool_intent 包含 expression，speech_act 通常是 execute_action。\n"
         "5c. 最新消息如果用“这个动画/这段动画/这个角色/这张图/这场面”等指代最近出现的 ACG 角色、作品、抽卡卡面、图片或视频，"
         "不要规划成空泛闲聊；research_need 至少 low，tool_intent 应包含 lookup_web，speech_act 优先 source_summary 或 participate，"
@@ -487,9 +494,13 @@ def turn_plan_from_semantic_frame(frame: Any, *, has_images: bool = False, messa
         research_need = "medium"
         tool_intent = ["lookup_web"]
     elif chat_intent == "plugin_question":
-        output_mode = "structured_help"
-        research_need = "low" if plugin_intent == "latest" else "none"
-        tool_intent = ["lookup_plugin"] if plugin_intent != "latest" else ["lookup_plugin", "lookup_web"]
+        if plugin_intent == "runtime_capability":
+            output_mode = "chat_answer"
+            tool_intent = ["runtime_capability"]
+        else:
+            output_mode = "structured_help"
+            research_need = "low" if plugin_intent == "latest" else "none"
+            tool_intent = ["lookup_plugin"] if plugin_intent != "latest" else ["lookup_plugin", "lookup_web"]
     elif chat_intent == "image_generation":
         output_mode = "chat_answer"
         tool_intent = ["image_gen"]
@@ -550,6 +561,9 @@ def turn_plan_to_semantic_frame(plan: TurnPlan) -> Any:
         chat_intent = "image_generation"
     elif "expression" in tool_intents:
         chat_intent = "expression"
+    elif "runtime_capability" in tool_intents:
+        chat_intent = "plugin_question"
+        plugin_intent = "runtime_capability"
     elif "lookup_plugin" in tool_intents:
         chat_intent = "plugin_question"
         plugin_intent = "latest" if "lookup_web" in tool_intents or plan.research_need != "none" else "capability"

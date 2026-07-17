@@ -182,7 +182,7 @@ def test_normalization_removes_urls_from_persistable_text() -> None:
         {
             "asset_kind": "acg_character",
             "subject_count": 1,
-            "neutral_summary": "候选来源 https://private.invalid/avatar",
+            "neutral_summary": "候选来源https://private.invalid/avatar",
             "acg_candidates": ["角色甲", "data:image/png;base64,SECRET", "www.invalid/path"],
             "contains_text": False,
             "confidence": 0.6,
@@ -453,9 +453,46 @@ def test_agent_tool_returns_only_current_safe_summary_without_url(tmp_path: Path
     assert "http" not in result.lower()
     assert "avatar_url" not in result
     assert "b" * 64 not in result
+    assert "content_hash_short" not in result
     assert tool.metadata["side_effect"] == "none"
     assert tool.metadata["retryable"] is True
-    assert "仅当当前对话确实涉及" in tool.description
+    assert "能否看到或理解自己的头像" in tool.description
+    assert "runtime_capability" in tool.metadata["intent_tags"]
+    assert tool.metadata["source_kind"] == "first_party_runtime"
+
+    planner_tools = avatar.add_current_user_avatar_planner_metadata([], service, "10001")
+    assert planner_tools[0]["name"] == "inspect_current_user_avatar"
+    assert "runtime_capability" in planner_tools[0]["intent_tags"]
+
+
+def test_agent_avatar_unavailable_payload_has_no_hash_or_raw_reference(tmp_path: Path) -> None:
+    service, _runtime = _service(tmp_path)
+    service.patch_core_profile(
+        user_id="10001",
+        patcher=lambda current: {
+            **current,
+            "qq_profile": {
+                **current["qq_profile"],
+                "avatar_analysis": {
+                    "checked_at": 1,
+                    "content_hash": "c" * 64,
+                    "analyzed_at": 0,
+                    "status": "failed",
+                    "schema_version": 1,
+                    "route": "vision_fallback",
+                },
+            },
+        },
+    )
+
+    tool = avatar.build_inspect_current_user_avatar_tool(service, "10001")
+    result = asyncio.run(tool.handler())
+    payload = json.loads(result)
+
+    assert payload["available"] is False
+    assert "content_hash" not in result
+    assert "avatar_url" not in result
+    assert "data:image" not in result
 
 
 def test_clear_current_avatar_analysis_also_invalidates_pair_state(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
@@ -579,6 +616,7 @@ def test_profile_block_and_avatar_tool_have_normal_yaml_agent_parity() -> None:
     root = Path(__file__).resolve().parents[1]
     normal = (root / "handlers" / "reply_pipeline" / "processor.py").read_text(encoding="utf-8")
     pipeline = (root / "handlers" / "reply_pipeline" / "pipeline_context.py").read_text(encoding="utf-8")
+    emotion = (root / "handlers" / "reply_pipeline" / "pipeline_emotion.py").read_text(encoding="utf-8")
     yaml = (root / "handlers" / "yaml_pipeline" / "processor.py").read_text(encoding="utf-8")
 
     assert normal.count("profile_service.build_prompt_block(") == 1
@@ -589,6 +627,8 @@ def test_profile_block_and_avatar_tool_have_normal_yaml_agent_parity() -> None:
     assert "agent_system_prompt = system_prompt" in yaml
     assert "register_current_user_avatar_tool(" in pipeline
     assert "register_current_user_avatar_tool(agent_tool_registry, profile_service, user_id)" in yaml
+    assert "add_current_user_avatar_planner_metadata(" in emotion
+    assert "add_current_user_avatar_planner_metadata(" in yaml
 
 
 def test_profile_prompt_uses_safe_avatar_insight_without_raw_url(tmp_path: Path) -> None:

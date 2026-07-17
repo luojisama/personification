@@ -337,6 +337,16 @@ def _tool_requires_image(registry: ToolRegistry, name: str) -> bool:
     return bool(metadata.get("requires_image", False)) or name in _IMAGE_REQUIRED_TOOL_NAMES
 
 
+def _tool_is_safe_runtime_capability(registry: ToolRegistry, name: str) -> bool:
+    metadata = _tool_metadata_for_name(registry, name)
+    return bool(
+        "runtime_capability" in _coerce_tags(metadata.get("intent_tags"))
+        and str(metadata.get("source_kind", "") or "").strip() == "first_party_runtime"
+        and str(metadata.get("risk_level", "low") or "low").strip() == "low"
+        and str(metadata.get("side_effect", "none") or "none").strip() == "none"
+    )
+
+
 def select_tool_schemas(
     registry: ToolRegistry,
     *,
@@ -383,25 +393,34 @@ def select_tool_schemas(
             )
         ]
     elif effective_chat_intent == "plugin_question":
-        include_latest = str(plugin_question_intent or "").strip() == "latest"
-        if has_images:
-            include_latest = True
-        result_schemas = [
-            schema
-            for schema in schemas
-            if (
-                "plugin_local" in _tool_tags(registry, schema_tool_name(schema))
-                or schema_tool_name(schema) in _PLUGIN_LOCAL_TOOL_NAMES
-                or (
-                    include_latest
-                    and (
-                        "plugin_latest" in _tool_tags(registry, schema_tool_name(schema))
-                        or schema_tool_name(schema) in _PLUGIN_WEB_TOOL_NAMES
+        effective_plugin_intent = str(plugin_question_intent or "").strip()
+        include_latest = effective_plugin_intent == "latest"
+        include_runtime_capabilities = effective_plugin_intent == "runtime_capability"
+        if include_runtime_capabilities:
+            result_schemas = [
+                schema
+                for schema in schemas
+                if _tool_is_safe_runtime_capability(registry, schema_tool_name(schema))
+            ]
+        else:
+            if has_images:
+                include_latest = True
+            result_schemas = [
+                schema
+                for schema in schemas
+                if (
+                    "plugin_local" in _tool_tags(registry, schema_tool_name(schema))
+                    or schema_tool_name(schema) in _PLUGIN_LOCAL_TOOL_NAMES
+                    or (
+                        include_latest
+                        and (
+                            "plugin_latest" in _tool_tags(registry, schema_tool_name(schema))
+                            or schema_tool_name(schema) in _PLUGIN_WEB_TOOL_NAMES
+                        )
                     )
+                    or (has_images and _tool_requires_image(registry, schema_tool_name(schema)))
                 )
-                or (has_images and _tool_requires_image(registry, schema_tool_name(schema)))
-            )
-        ]
+            ]
     elif has_images:
         result_schemas = list(schemas)
     else:
@@ -427,6 +446,8 @@ def semantic_tool_guidance() -> str:
         "当用户用“这个/这段/这角色/这动画/这张图”承接最近 ACG 角色、作品、抽卡卡面、图片或视频时，也按指代消解处理，"
         "先结合上下文查角色/作品/剧情锚点，再短句参与讨论。"
         "插件技术问题优先本地插件知识和源码工具。"
+        "如果对方询问你当前是否能读取当前用户或当前会话的信息，优先调用可用的第一方只读 runtime_capability 工具核实，"
+        "不要用插件清单或静态源码推测当前运行时是否已经有数据。"
         "用户明确要求生成图片时，必须调用 generate_image，不要只给提示词。"
         "用户明确要求联网搜已有图片或壁纸并发出来时，优先调用 search_and_send_images，不要把搜索链接当最终回复。"
         "涉及本地天气、出行、城市或附近状态时，如果用户没明说地点，先看已注入的用户档案；仍不确定可调用记忆工具确认，不能猜城市。"

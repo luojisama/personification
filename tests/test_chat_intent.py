@@ -168,6 +168,38 @@ def test_semantic_frame_prompt_treats_direct_mention_as_turn_cue_not_formal_qa()
     assert frame.recommend_silence is False
 
 
+def test_semantic_frame_treats_avatar_visibility_as_runtime_capability() -> None:
+    captured: dict[str, object] = {}
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            captured["messages"] = messages
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"chat_intent":"plugin_question","plugin_question_intent":"runtime_capability",'
+                        '"ambiguity_level":"low","recommend_silence":false,"confidence":0.95}'
+                    )
+                },
+            )()
+
+    frame = asyncio.run(
+        chat_intent.infer_turn_semantic_frame_with_llm(
+            "你能看见我头像吗",
+            is_group=False,
+            tool_caller=_Caller(),
+        )
+    )
+
+    system_prompt = captured["messages"][0]["content"]  # type: ignore[index]
+    assert "运行时能力问题" in system_prompt
+    assert "第一方只读工具核实" in system_prompt
+    assert frame.chat_intent == "plugin_question"
+    assert frame.plugin_question_intent == "runtime_capability"
+
+
 def test_semantic_frame_prompt_uses_structured_favorability_signals() -> None:
     captured: dict[str, object] = {}
 

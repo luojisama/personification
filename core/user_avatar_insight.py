@@ -51,7 +51,7 @@ _IN_FLIGHT_FORCE: dict[tuple[int, str], bool] = {}
 _IN_FLIGHT_PREDECESSORS: dict[tuple[int, str], asyncio.Task[dict[str, Any]]] = {}
 _IN_FLIGHT_PROFILE_SERVICES: dict[tuple[int, str], Any] = {}
 _PROFILE_GENERATIONS: dict[tuple[int, str], int] = {}
-_URL_TEXT_RE = re.compile(r"\b(?:https?://|www\.)\S+|data:\S+", re.IGNORECASE)
+_URL_TEXT_RE = re.compile(r"(?:https?://|www\.|data:)\S+", re.IGNORECASE)
 
 
 def _reply_runtime(runtime: Any) -> Any:
@@ -184,7 +184,12 @@ def _analysis_payload(
     }
 
 
-def serialize_avatar_state(profile_json: dict[str, Any] | None, *, include_hash: bool = False) -> dict[str, Any]:
+def serialize_avatar_state(
+    profile_json: dict[str, Any] | None,
+    *,
+    include_hash: bool = False,
+    include_hash_short: bool = True,
+) -> dict[str, Any]:
     analysis, insight = _avatar_state(profile_json)
     safe_analysis = {
         "checked_at": float(analysis.get("checked_at", 0) or 0),
@@ -196,7 +201,8 @@ def serialize_avatar_state(profile_json: dict[str, Any] | None, *, include_hash:
     content_hash = str(analysis.get("content_hash", "") or "")
     if include_hash:
         safe_analysis["content_hash"] = content_hash
-    safe_analysis["content_hash_short"] = content_hash[:12]
+    if include_hash_short:
+        safe_analysis["content_hash_short"] = content_hash[:12]
     try:
         safe_insight = normalize_avatar_insight(insight) if insight else {}
     except (TypeError, ValueError):
@@ -220,9 +226,19 @@ def render_avatar_persona_context(profile_json: dict[str, Any] | None) -> str:
     return "；".join(parts)
 
 
-def get_user_avatar_state(profile_service: Any, user_id: str, *, include_hash: bool = False) -> dict[str, Any]:
+def get_user_avatar_state(
+    profile_service: Any,
+    user_id: str,
+    *,
+    include_hash: bool = False,
+    include_hash_short: bool = True,
+) -> dict[str, Any]:
     snapshot = profile_service.get_core_profile(str(user_id or "")) if profile_service is not None else None
-    return serialize_avatar_state(snapshot.profile_json if snapshot is not None else {}, include_hash=include_hash)
+    return serialize_avatar_state(
+        snapshot.profile_json if snapshot is not None else {},
+        include_hash=include_hash,
+        include_hash_short=include_hash_short,
+    )
 
 
 def _cooldown_reason(analysis: dict[str, Any], now_ts: float, force: bool) -> str:
@@ -492,7 +508,12 @@ def build_inspect_current_user_avatar_tool(profile_service: Any, user_id: str) -
     uid = str(user_id or "").strip()
 
     async def _handler() -> str:
-        state = get_user_avatar_state(profile_service, uid, include_hash=False)
+        state = get_user_avatar_state(
+            profile_service,
+            uid,
+            include_hash=False,
+            include_hash_short=False,
+        )
         payload = {
             "ok": True,
             "available": bool(state.get("insight")),
@@ -504,15 +525,16 @@ def build_inspect_current_user_avatar_tool(profile_service: Any, user_id: str) -
     return AgentTool(
         name="inspect_current_user_avatar",
         description=(
-            "只读查看当前发送者已经持久化的安全头像摘要。"
-            "仅当当前对话确实涉及其头像类型、头像审美或 ACG 角色/作品候选时调用；"
+            "只读确认 bot 当前是否已有当前发送者的安全头像摘要，并在可用时查看该摘要。"
+            "当对方询问 bot 能否看到或理解自己的头像，或当前对话确实涉及其头像类型、头像审美、"
+            "ACG 角色/作品候选时调用；"
             "普通闲聊、身份或性格判断不要调用。结果不提供 URL、图片或真人身份信息。"
         ),
         parameters={"type": "object", "properties": {}, "required": []},
         handler=_handler,
         local=True,
         metadata={
-            "intent_tags": ["avatar", "lookup", "memory"],
+            "intent_tags": ["avatar", "lookup", "memory", "runtime_capability", "current_user"],
             "evidence_kind": "profile",
             "latency_class": "fast",
             "risk_level": "low",
@@ -522,6 +544,21 @@ def build_inspect_current_user_avatar_tool(profile_service: Any, user_id: str) -
             "source_kind": "first_party_runtime",
         },
     )
+
+
+def add_current_user_avatar_planner_metadata(
+    available_tools: list[dict[str, Any]],
+    profile_service: Any,
+    user_id: str,
+) -> list[dict[str, Any]]:
+    uid = str(user_id or "").strip()
+    items = [dict(item) for item in list(available_tools or []) if isinstance(item, dict)]
+    if profile_service is None or not uid:
+        return items
+    from ..agent.runtime.tool_catalog import tool_planner_metadata
+
+    metadata = tool_planner_metadata(build_inspect_current_user_avatar_tool(profile_service, uid))
+    return [item for item in items if str(item.get("name", "") or "") != metadata["name"]] + [metadata]
 
 
 def register_current_user_avatar_tool(registry: Any, profile_service: Any, user_id: str) -> None:
@@ -538,6 +575,7 @@ __all__ = [
     "AVATAR_SUCCESS_CHECK_INTERVAL_SECONDS",
     "AVATAR_VISION_TIMEOUT_SECONDS",
     "analyze_user_avatar",
+    "add_current_user_avatar_planner_metadata",
     "build_inspect_current_user_avatar_tool",
     "clear_user_avatar_analysis",
     "force_user_avatar_analysis",

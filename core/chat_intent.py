@@ -15,7 +15,7 @@ from .sticker_semantics import (
 
 
 ChatIntent = Literal["banter", "explanation", "lookup", "plugin_question", "image_generation", "expression"]
-PluginQuestionIntent = Literal["capability", "implementation", "latest"]
+PluginQuestionIntent = Literal["capability", "runtime_capability", "implementation", "latest"]
 AmbiguityLevel = Literal["low", "medium", "high"]
 EmotionIntensity = Literal["low", "medium", "high"]
 DomainFocus = Literal["general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"]
@@ -221,7 +221,7 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
     if chat_intent not in {"banter", "explanation", "lookup", "plugin_question", "image_generation", "expression"}:
         return None
     plugin_question_intent = str(payload.get("plugin_question_intent", "capability") or "capability").strip()
-    if plugin_question_intent not in {"capability", "implementation", "latest"}:
+    if plugin_question_intent not in {"capability", "runtime_capability", "implementation", "latest"}:
         plugin_question_intent = "capability"
     ambiguity_level = str(payload.get("ambiguity_level", "low") or "low").strip()
     if ambiguity_level not in {"low", "medium", "high"}:
@@ -342,7 +342,7 @@ async def infer_turn_semantic_frame_with_llm(
         "请根据最新一句和上下文，输出严格 JSON，不要输出 markdown 或解释。\n"
         "JSON 结构："
         '{"chat_intent":"banter|explanation|lookup|plugin_question|image_generation|expression",'
-        '"plugin_question_intent":"capability|implementation|latest",'
+        '"plugin_question_intent":"capability|runtime_capability|implementation|latest",'
         '"ambiguity_level":"low|medium|high",'
         '"recommend_silence":false,'
         '"requires_emotional_care":false,'
@@ -376,6 +376,8 @@ async def infer_turn_semantic_frame_with_llm(
         "要把它当成在评价那个具体对象；优先 chat_intent=lookup、domain_focus=game_anime，查清角色/作品/剧情或动画出处后再参与讨论。"
         "不要只回“确实挺强/有那味了”这类空泛附和。\n"
         "2. plugin_question 只在对方确实在问 bot/插件/本地实现/配置/能力时使用。"
+        "对方询问 bot 当前能否读取当前发送者或当前会话的信息时，使用 plugin_question/runtime_capability；"
+        "这是运行时能力问题，后续必须交给可用的第一方只读工具核实，不能根据插件静态说明猜测。"
         "用户让 bot 直接生成、绘制、制作图片/海报/头像/梗图时，chat_intent=image_generation，不要标成 plugin_question；"
         "用户让 bot 联网搜已有图片、壁纸、插画、图包或参考图时，chat_intent=lookup，不要误判成生成图片。\n"
         "2b. 用户让 bot 发送 QQ 小黄脸、系统表情、收藏表情、推荐表情，或这轮明确只需要发一个 QQ 表情回应时，"

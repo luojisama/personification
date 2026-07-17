@@ -102,7 +102,10 @@ from ...core.turn_media import (
     render_turn_media_grounding,
 )
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_YAML
-from ...core.user_avatar_insight import register_current_user_avatar_tool
+from ...core.user_avatar_insight import (
+    add_current_user_avatar_planner_metadata,
+    register_current_user_avatar_tool,
+)
 from ...core.user_avatar_pair_insight import (
     build_avatar_pair_candidates,
     register_group_user_avatar_pair_insight_tool,
@@ -918,6 +921,11 @@ async def process_yaml_response_logic(
         if planner_enabled or planner_shadow_enabled:
             try:
                 planner_available_tools = registry_planner_metadata(tool_registry)
+                planner_available_tools = add_current_user_avatar_planner_metadata(
+                    planner_available_tools,
+                    profile_service,
+                    user_id,
+                )
             except Exception:
                 planner_available_tools = []
         plan_source_text = raw_message_text or history_last_text or trigger_reason

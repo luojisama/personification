@@ -94,6 +94,24 @@ def test_turn_plan_to_semantic_frame_maps_lookup_plugin() -> None:
     assert frame.speech_act == "answer"
 
 
+def test_runtime_capability_round_trip_preserves_dedicated_tool_intent() -> None:
+    frame = SimpleNamespace(
+        chat_intent="plugin_question",
+        plugin_question_intent="runtime_capability",
+        recommend_silence=False,
+        ambiguity_level="low",
+        confidence=0.9,
+    )
+
+    plan = planner.turn_plan_from_semantic_frame(frame)
+    restored = planner.turn_plan_to_semantic_frame(plan)
+
+    assert plan.tool_intent == ["runtime_capability"]
+    assert plan.output_mode == "chat_answer"
+    assert restored.chat_intent == "plugin_question"
+    assert restored.plugin_question_intent == "runtime_capability"
+
+
 def test_turn_plan_semantic_frame_round_trip_preserves_care_and_emotion() -> None:
     plan = planner.TurnPlan(
         domain_focus="emotion",
@@ -199,6 +217,51 @@ def test_turn_planner_prompt_includes_media_context_discipline() -> None:
     assert "不要因为出现 @ 就把 chat_short 强行升级成长回答" in system_prompt
     assert plan.reply_action == "silence"
     assert plan.speech_act == "silence"
+
+
+def test_turn_planner_understands_runtime_capability_metadata() -> None:
+    captured: dict[str, object] = {}
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            captured["messages"] = messages
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"reply_action":"reply","speech_act":"answer","memory_need":"light",'
+                        '"research_need":"none","vision_need":"none","qzone_continue":false,'
+                        '"output_mode":"chat_answer","tool_intent":["runtime_capability"],"ambiguity_level":"low",'
+                        '"message_target":"bot","session_goal":"核实当前头像摘要后回答","confidence":0.9}'
+                    )
+                },
+            )()
+
+    plan = asyncio.run(
+        planner.plan_turn_with_llm(
+            "你能看见我头像吗",
+            tool_caller=_Caller(),
+            available_tools=[
+                {
+                    "name": "inspect_current_user_avatar",
+                    "intent_tags": ["current_user", "runtime_capability"],
+                    "evidence_kind": "profile",
+                    "latency_class": "fast",
+                }
+            ],
+        )
+    )
+
+    system_prompt = captured["messages"][0]["content"]  # type: ignore[index]
+    user_prompt = captured["messages"][1]["content"]  # type: ignore[index]
+    assert "runtime_capability" in system_prompt
+    assert "inspect_current_user_avatar" in user_prompt
+    assert "runtime_capability" in user_prompt
+    assert plan.tool_intent == ["runtime_capability"]
+    frame = planner.turn_plan_to_semantic_frame(plan)
+    assert frame.chat_intent == "plugin_question"
+    assert frame.plugin_question_intent == "runtime_capability"
 
 
 def test_group_turn_plan_converts_clarify_to_statement_policy() -> None:
