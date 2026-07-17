@@ -126,6 +126,67 @@ DDL_STATEMENTS = (
         ON persona_histories(user_id, created_at)
     """,
     """
+    CREATE TABLE IF NOT EXISTS user_policy_state (
+        user_id TEXT PRIMARY KEY,
+        auto_stage INTEGER NOT NULL DEFAULT 0,
+        auto_tier TEXT NOT NULL DEFAULT 'allow',
+        auto_expires_at REAL NOT NULL DEFAULT 0,
+        violation_count INTEGER NOT NULL DEFAULT 0,
+        last_violation_at REAL NOT NULL DEFAULT 0,
+        manual_mode TEXT NOT NULL DEFAULT 'inherit',
+        manual_expires_at REAL NOT NULL DEFAULT 0,
+        reason_code TEXT NOT NULL DEFAULT '',
+        revision INTEGER NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        updated_by TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_user_policy_state_active
+        ON user_policy_state(auto_tier, auto_expires_at, manual_mode, manual_expires_at)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS user_policy_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        user_id TEXT NOT NULL,
+        event_kind TEXT NOT NULL,
+        surface TEXT NOT NULL DEFAULT '',
+        verdict TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT '',
+        intent TEXT NOT NULL DEFAULT '',
+        severity TEXT NOT NULL DEFAULT '',
+        confidence REAL NOT NULL DEFAULT 0,
+        reason_code TEXT NOT NULL DEFAULT '',
+        counts_violation INTEGER NOT NULL DEFAULT 0,
+        resulting_tier TEXT NOT NULL DEFAULT 'allow',
+        resulting_expires_at REAL NOT NULL DEFAULT 0,
+        content_hash TEXT NOT NULL DEFAULT '',
+        classifier_version TEXT NOT NULL DEFAULT '',
+        actor TEXT NOT NULL DEFAULT '',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at REAL NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_user_policy_events_user
+        ON user_policy_events(user_id, created_at DESC, id DESC)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS user_policy_evidence (
+        idempotency_key TEXT PRIMARY KEY,
+        ciphertext TEXT NOT NULL,
+        key_version INTEGER NOT NULL DEFAULT 1,
+        expires_at REAL NOT NULL,
+        created_at REAL NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_user_policy_evidence_expiry
+        ON user_policy_evidence(expires_at)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS user_tasks (
         task_id    TEXT    NOT NULL,
         user_id    TEXT    NOT NULL,

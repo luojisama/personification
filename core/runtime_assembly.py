@@ -147,6 +147,7 @@ class PluginRuntimeBundle:
     memory_curator: Any = None
     memory_decay_scheduler: Any = None
     background_intelligence: Any = None
+    user_policy_service: Any = None
     qzone_social_scan: Any = None
     qzone_inbound_poll: Any = None
     qzone_generate_post: Any = None

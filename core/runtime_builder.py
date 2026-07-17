@@ -129,6 +129,7 @@ from .plugin_runtime_logs import maybe_prune as maybe_prune_plugin_logs
 from .plugin_runtime_logs import wrap_logger as wrap_plugin_logger
 from .proactive_store import load_proactive_state, save_proactive_state, update_private_interaction_time
 from .profile_service import ProfileService
+from .policy_classifier import PolicyClassifier
 from .qzone_service import build_qzone_services, build_qzone_social_service
 from .runtime_assembly import PluginRuntimeBundle
 from .memory_defaults import DEFAULT_PERSONA_HISTORY_MAX
@@ -162,6 +163,7 @@ from .service_factory import (
     build_web_search_executor,
 )
 from .tts_service import TtsService
+from .user_policy import UserPolicyService, load_or_create_policy_evidence_key
 from ..agent.inner_state import get_personification_data_dir
 from .persona_service import PersonaStore
 from .session_store import (
@@ -406,6 +408,19 @@ def build_plugin_runtime(
         memory_curator=memory_curator,
         background_intelligence=background_intelligence,
     )
+    policy_classifier = PolicyClassifier(
+        lite_tool_caller or agent_tool_caller,
+        logger=logger,
+    )
+    user_policy_service = UserPolicyService(
+        evidence_key=load_or_create_policy_evidence_key(data_dir),
+        classifier=policy_classifier,
+        logger=logger,
+    )
+    if not user_policy_service.evidence_cipher.available:
+        logger.warning(
+            "personification: user policy evidence encryption unavailable; excerpts will not be persisted"
+        )
     tts_service = TtsService(
         plugin_config=plugin_config,
         logger=logger,
@@ -704,6 +719,7 @@ def build_plugin_runtime(
         reply_processor_deps.runtime.lite_tool_caller = new_lite_tool_caller
         reply_processor_deps.runtime.vision_caller = new_vision_caller
         reply_processor_deps.runtime.review_call_ai_api = response_review_call_ai_api
+        policy_classifier.caller = new_lite_tool_caller or new_agent_tool_caller
         if persona_store is not None:
             try:
                 persona_store.tool_caller = build_routed_tool_caller(
@@ -765,4 +781,5 @@ def build_plugin_runtime(
         memory_curator=memory_curator,
         memory_decay_scheduler=memory_decay_scheduler,
         background_intelligence=background_intelligence,
+        user_policy_service=user_policy_service,
     )
