@@ -124,7 +124,9 @@ from ..reply_pipeline.pipeline_emotion import (
 from ..reply_pipeline import humanize as _humanize
 from ..reply_commit import (
     acquire_reply_commit,
+    begin_reply_lifecycle,
     execute_pending_actions,
+    mark_reply_phase,
     mark_reply_delivery_complete,
     mark_reply_delivery_confirmed,
     mark_reply_delivery_started,
@@ -542,6 +544,7 @@ async def process_yaml_response_logic(
     """处理基于 YAML 模板的新版响应逻辑。"""
     reply_commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
     started_at = time.monotonic()
+    begin_reply_lifecycle(reply_commit_state, "yaml_pipeline")
     lite_tool_caller = lite_tool_caller or agent_tool_caller
     lite_call_ai_api = lite_call_ai_api or call_ai_api
     review_call_ai_api = review_call_ai_api or lite_call_ai_api or call_ai_api
@@ -1696,7 +1699,9 @@ async def process_yaml_response_logic(
             pending_action_executor = executor
             pending_actions = list(agent_result.pending_actions)
             if agent_result.direct_output:
+                mark_reply_phase(reply_commit_state, "delivery_commit_wait")
                 await acquire_reply_commit(reply_commit_state)
+                mark_reply_phase(reply_commit_state, "delivery")
                 if _has_newer_batch_now():
                     logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                     _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="直出消息提交前出现更新批次")
@@ -1709,6 +1714,8 @@ async def process_yaml_response_logic(
                         if await _send_translation_forward(bot, event, raw_direct_output):
                             _confirm_reply_delivery()
                             mark_reply_delivery_complete(reply_commit_state)
+                            release_reply_commit(reply_commit_state)
+                            mark_reply_phase(reply_commit_state, "reply_complete")
                             _trace_stage(
                                 key="yaml_direct_output_success",
                                 label="YAML 直出完成",
@@ -1742,6 +1749,8 @@ async def process_yaml_response_logic(
                     detail=f"segments={direct_segments_sent}",
                 )
                 mark_reply_delivery_complete(reply_commit_state)
+                release_reply_commit(reply_commit_state)
+                mark_reply_phase(reply_commit_state, "reply_complete")
                 _trace_finish(
                     outcome="ok",
                     diagnosis_code="ok",
@@ -1834,6 +1843,8 @@ async def process_yaml_response_logic(
         logger.info("AI (YAML) 决定保持沉默 (SILENCE)")
         if bool(reply_commit_state.get("reply_delivery_confirmed", False)):
             mark_reply_delivery_complete(reply_commit_state)
+            release_reply_commit(reply_commit_state)
+            mark_reply_phase(reply_commit_state, "reply_complete")
             _trace_finish(outcome="ok", diagnosis_code="ok", detail={"action_only": True})
             return
         if bool(getattr(agent_result, "suppress_reply_recovery", False)):
@@ -2037,6 +2048,8 @@ async def process_yaml_response_logic(
         await _commit_pending_actions()
         if bool(reply_commit_state.get("reply_delivery_confirmed", False)):
             mark_reply_delivery_complete(reply_commit_state)
+            release_reply_commit(reply_commit_state)
+            mark_reply_phase(reply_commit_state, "reply_complete")
             _trace_finish(outcome="ok", diagnosis_code="ok", detail={"action_only": True})
             return
         if suppress_reply_recovery:
@@ -2152,12 +2165,16 @@ async def process_yaml_response_logic(
         stickers_sent = [path.stem for path in chosen_sticker_paths if path is not None]
     elif parsed["messages"]:
         chosen_sticker_paths = [None for _ in parsed["messages"]]
+    delivered_sticker_names: list[str] = []
 
     if _has_newer_batch_now():
         logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
         _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="发送前出现更新批次")
         return
+    mark_reply_phase(reply_commit_state, "delivery_commit_wait")
     await acquire_reply_commit(reply_commit_state)
+    delivery_started_at = time.monotonic()
+    mark_reply_phase(reply_commit_state, "delivery")
     if _has_newer_batch_now():
         logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
         _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="获得提交锁后出现更新批次")
@@ -2190,7 +2207,7 @@ async def process_yaml_response_logic(
             f"address_mode={address_plan.get('mode') or 'none'} "
             f"source={address_plan.get('source') or '-'} "
             f"quote={bool(quote_message_id)} at={bool(at_target)} "
-            f"target={str(at_target or '-')}"
+            f"target={str(at_target or '-')} elapsed_ms=0"
         ),
     )
     if (
@@ -2319,7 +2336,7 @@ async def process_yaml_response_logic(
                         )
                         if not sent_message_id:
                             sent_message_id = extract_send_message_id(send_result)
-                        await record_sticker_sent(chosen_sticker_path.stem)
+                        delivered_sticker_names.append(chosen_sticker_path.stem)
                         mark_pending_sticker_reaction(
                             build_sticker_feedback_scene_key(
                                 group_id=group_id,
@@ -2376,6 +2393,26 @@ async def process_yaml_response_logic(
 
     if not delivery_partial and not delivery_unknown:
         mark_reply_delivery_complete(reply_commit_state)
+    release_reply_commit(reply_commit_state)
+    delivery_elapsed_ms = int((time.monotonic() - delivery_started_at) * 1000)
+    mark_reply_phase(reply_commit_state, "post_send_bookkeeping")
+    bookkeeping_started_at = time.monotonic()
+    _trace_stage(
+        key="delivery_complete",
+        label="交付完成",
+        status="warn" if delivery_partial or delivery_unknown else "ok",
+        detail=(
+            f"elapsed_ms={delivery_elapsed_ms} "
+            f"confirmed={bool(reply_commit_state.get('reply_delivery_confirmed', False))} "
+            f"complete={bool(reply_commit_state.get('reply_delivery_complete', False))}"
+        ),
+    )
+    _trace_stage(
+        key="outgoing_message",
+        label="发送消息",
+        status="ok",
+        detail=str(assistant_history_text or "")[:500],
+    )
     session_id = build_private_session_id(user_id) if is_private_session else build_group_session_id(group_id)
     legacy_session_id = None if is_private_session else group_id
     # YAML 模式同样只写回最终用户可见文本，避免 session 中保留未发送的原始模板输出。
@@ -2396,6 +2433,11 @@ async def process_yaml_response_logic(
         mentioned_ids=[str(at_target)] if at_target else [],
         is_at_bot=False,
     )
+    for sticker_name in delivered_sticker_names:
+        try:
+            await record_sticker_sent(sticker_name)
+        except Exception as e:
+            logger.debug(f"[sticker] YAML sent feedback update failed: {e}")
     try:
         await update_emotion_state_after_turn(
             data_dir,
@@ -2455,16 +2497,18 @@ async def process_yaml_response_logic(
         via="tts" if sent_as_tts else "text",
         sticker=bool(stickers_sent),
     )
+    bookkeeping_elapsed_ms = int((time.monotonic() - bookkeeping_started_at) * 1000)
+    mark_reply_phase(reply_commit_state, "reply_complete")
     record_timing(
         "yaml_reply.total_ms",
         (time.monotonic() - started_at) * 1000.0,
         scene="private" if is_private_session else "group",
     )
     _trace_stage(
-        key="outgoing_message",
-        label="发送消息",
+        key="post_send_bookkeeping",
+        label="发送后状态写入",
         status="ok",
-        detail=str(assistant_history_text or "")[:500],
+        detail=f"elapsed_ms={bookkeeping_elapsed_ms}",
     )
     _trace_stage(
         key="yaml_reply_success",

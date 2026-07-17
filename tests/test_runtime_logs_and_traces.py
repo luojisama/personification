@@ -274,7 +274,7 @@ def test_reply_turn_trace_builds_agent_inspection_summary(_db_tmp) -> None:
             key="addressing_plan",
             label="发送指向",
             status="info",
-            detail="address_mode=quote source=semantic_frame quote=true at=false target=-",
+            detail="address_mode=quote source=semantic_frame quote=true at=false target=- elapsed_ms=0",
         )
         traces.finish_trace(outcome="ok", diagnosis_code="ok")
     finally:
@@ -285,6 +285,7 @@ def test_reply_turn_trace_builds_agent_inspection_summary(_db_tmp) -> None:
 
     assert inspection["understanding"]["intent"] == "lookup"
     assert inspection["addressing"]["address_mode"] == "quote"
+    assert next(item for item in view["items"] if item["key"] == "addressing_plan")["duration_ms"] == 0
     assert inspection["tools"][0]["tool"] == "resolve_acg_entity"
     assert inspection["questions"][0] == "大鸟居明日香_动画_剧情"
 

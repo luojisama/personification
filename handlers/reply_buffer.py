@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict
 
 from ..core.target_inference import normalize_message_target_for_review
 from ..core.turn_media import extract_turn_media_from_event, media_from_batched_events, serialize_turn_media
+from .reply_commit import reply_lifecycle_snapshot
 
 
 _GROUP_BATCH_DELAY_SECONDS = 1.2
@@ -27,6 +28,7 @@ async def _handle_reply_timeout(
     delivery_started = bool(state.get("reply_delivery_started", False))
     delivery_confirmed = bool(state.get("reply_delivery_confirmed", False))
     delivery_complete = bool(state.get("reply_delivery_complete", False))
+    lifecycle = reply_lifecycle_snapshot(state)
     if delivery_complete:
         delivery_state = "complete"
         outcome = "ok"
@@ -57,7 +59,10 @@ async def _handle_reply_timeout(
                 f"delivery_started={str(delivery_started).lower()} "
                 f"delivery_confirmed={str(delivery_confirmed).lower()} "
                 f"delivery_complete={str(delivery_complete).lower()} "
-                f"delivery_state={delivery_state} elapsed_ms=0"
+                f"delivery_state={delivery_state} "
+                f"last_phase={lifecycle['last_phase']} "
+                f"phase_age_ms={lifecycle['phase_age_ms']} "
+                f"elapsed_ms={lifecycle['elapsed_ms']}"
             ),
             hint="基础设施故障保持静默；检查 Provider、工具耗时、状态锁与发送回执",
         )
@@ -73,6 +78,9 @@ async def _handle_reply_timeout(
                 "delivery_confirmed": delivery_confirmed,
                 "delivery_complete": delivery_complete,
                 "delivery_state": delivery_state,
+                "last_phase": lifecycle["last_phase"],
+                "phase_age_ms": lifecycle["phase_age_ms"],
+                "elapsed_ms": lifecycle["elapsed_ms"],
                 "silent": True,
             },
         )

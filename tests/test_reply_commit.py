@@ -32,6 +32,18 @@ def test_commit_gate_is_reentrant_for_same_turn_and_released() -> None:
     asyncio.run(run())
 
 
+def test_reply_lifecycle_snapshot_tracks_post_send_phase() -> None:
+    state: dict[str, Any] = {}
+
+    reply_commit.begin_reply_lifecycle(state)
+    reply_commit.mark_reply_phase(state, "post_send_bookkeeping")
+    snapshot = reply_commit.reply_lifecycle_snapshot(state)
+
+    assert snapshot["last_phase"] == "post_send_bookkeeping"
+    assert snapshot["elapsed_ms"] >= 0
+    assert snapshot["phase_age_ms"] >= 0
+
+
 def test_pending_actions_execute_once_and_are_consumed(monkeypatch) -> None:  # noqa: ANN001
     async def run() -> None:
         executor = _Executor()

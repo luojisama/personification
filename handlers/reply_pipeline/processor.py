@@ -116,7 +116,9 @@ from ..event_rules import (
 )
 from ..reply_commit import (
     acquire_reply_commit,
+    begin_reply_lifecycle,
     execute_pending_actions,
+    mark_reply_phase,
     mark_reply_delivery_complete,
     mark_reply_delivery_confirmed,
     mark_reply_delivery_started,
@@ -386,6 +388,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
     # 这里直接短路，确保合成事件永远不会再次进入拟人回复/Agent 流程（防递归）。
     if getattr(event, "_personification_synthetic", False):
         return
+    begin_reply_lifecycle(state)
 
     token = None
     reset_llm_context = None
@@ -2529,7 +2532,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         if stale_reason:
             runtime.logger.info(f"拟人插件：{stale_reason}")
             return
+        mark_reply_phase(state, "delivery_commit_wait")
         await acquire_reply_commit(state)
+        delivery_started_at = time.monotonic()
+        mark_reply_phase(state, "delivery")
         stale_reason = _stale_reply_abort_reason(state)
         if stale_reason:
             runtime.logger.info(f"拟人插件：{stale_reason}")
@@ -2633,7 +2639,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             f"address_mode={address_plan.get('mode') or 'none'} "
                             f"source={address_plan.get('source') or '-'} "
                             f"quote={bool(quote_message_id)} at={bool(at_target)} "
-                            f"target={str(at_target or '-')}"
+                            f"target={str(at_target or '-')} elapsed_ms=0"
                         ),
                     )
                 except Exception:
@@ -2757,7 +2763,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if not sent_message_id:
                 sent_message_id = extract_send_message_id(send_result)
             if sticker_name:
-                await record_sticker_sent(sticker_name)
                 mark_pending_sticker_reaction(
                     build_sticker_feedback_scene_key(
                         group_id=str(group_id),
@@ -2769,6 +2774,31 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
         if not delivery_partial and not delivery_unknown:
             mark_reply_delivery_complete(state)
+        release_reply_commit(state)
+        delivery_elapsed_ms = int((time.monotonic() - delivery_started_at) * 1000)
+        mark_reply_phase(state, "post_send_bookkeeping")
+        bookkeeping_started_at = time.monotonic()
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.record_stage(
+                key="delivery_complete",
+                label="交付完成",
+                status="warn" if delivery_partial or delivery_unknown else "ok",
+                detail=(
+                    f"elapsed_ms={delivery_elapsed_ms} "
+                    f"confirmed={bool(state.get('reply_delivery_confirmed', False))} "
+                    f"complete={bool(state.get('reply_delivery_complete', False))}"
+                ),
+            )
+            reply_turn_trace.record_stage(
+                key="outgoing_message",
+                label="发送消息",
+                status="ok",
+                detail=str(final_visible_reply_text or "")[:500],
+            )
+        except Exception:
+            pass
 
         assistant_metadata = {
             "scene": "reply",
@@ -2777,6 +2807,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             "user_id": bot_self_id or None,
             "source_kind": "bot_reply",
         }
+        if sticker_name:
+            await record_sticker_sent(sticker_name)
         await persist_reply_emotion_state(
             runtime=runtime,
             data_dir=data_dir,
@@ -2888,6 +2920,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             via="tts" if sent_as_tts else "text",
             sticker=bool(sticker_name),
         )
+        bookkeeping_elapsed_ms = int((time.monotonic() - bookkeeping_started_at) * 1000)
+        mark_reply_phase(state, "reply_complete")
         record_timing(
             "reply_processor.total_ms",
             (time.monotonic() - started_at) * 1000.0,
@@ -2897,10 +2931,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             from ...core import reply_turn_trace
 
             reply_turn_trace.record_stage(
-                key="outgoing_message",
-                label="发送消息",
+                key="post_send_bookkeeping",
+                label="发送后状态写入",
                 status="ok",
-                detail=str(final_visible_reply_text or "")[:500],
+                detail=f"elapsed_ms={bookkeeping_elapsed_ms}",
             )
             reply_turn_trace.record_stage(
                 key="reply_success",

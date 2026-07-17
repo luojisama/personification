@@ -10,6 +10,7 @@ from ._loader import load_personification_module
 
 processor = load_personification_module("plugin.personification.handlers.reply_pipeline.processor")
 reply_buffer = load_personification_module("plugin.personification.handlers.reply_buffer")
+reply_commit = load_personification_module("plugin.personification.handlers.reply_commit")
 reply_turn_trace = load_personification_module("plugin.personification.core.reply_turn_trace")
 yaml_processor = load_personification_module("plugin.personification.handlers.yaml_pipeline.processor")
 yaml_handler = load_personification_module("plugin.personification.handlers.yaml_response_handler")
@@ -146,24 +147,29 @@ def test_required_image_timeout_stays_silent_and_finishes_failed(monkeypatch) ->
 
 def test_timeout_after_confirmed_delivery_does_not_send_fallback(monkeypatch) -> None:  # noqa: ANN001
     finished: list[dict[str, object]] = []
-    monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **_kwargs: None)
+    stages: list[dict[str, object]] = []
+    monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **kwargs: stages.append(kwargs))
     monkeypatch.setattr(reply_turn_trace, "finish_trace", lambda **kwargs: finished.append(kwargs))
 
     class _Bot:
         async def send(self, _event, _message):  # noqa: ANN001
             raise AssertionError("confirmed delivery must not trigger fallback")
 
+    state = {
+        "reply_required": True,
+        "reply_trace_id": "trace-confirmed",
+        "reply_delivery_started": True,
+        "reply_delivery_confirmed": True,
+        "reply_delivery_complete": True,
+    }
+    reply_commit.begin_reply_lifecycle(state)
+    reply_commit.mark_reply_phase(state, "post_send_bookkeeping")
+
     asyncio.run(
         reply_buffer._handle_reply_timeout(
             bot=_Bot(),
             event=SimpleNamespace(message=[]),
-            state={
-                "reply_required": True,
-                "reply_trace_id": "trace-confirmed",
-                "reply_delivery_started": True,
-                "reply_delivery_confirmed": True,
-                "reply_delivery_complete": True,
-            },
+            state=state,
             session_key="bot:private_1",
             timeout_seconds=180.0,
             logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
@@ -172,6 +178,9 @@ def test_timeout_after_confirmed_delivery_does_not_send_fallback(monkeypatch) ->
 
     assert finished[-1]["outcome"] == "ok"
     assert finished[-1]["diagnosis_code"] == "post_send_timeout"
+    assert "last_phase=post_send_bookkeeping" in str(stages[-1]["detail"])
+    assert finished[-1]["detail"]["last_phase"] == "post_send_bookkeeping"
+    assert isinstance(finished[-1]["detail"]["elapsed_ms"], int)
 
 
 def test_timeout_after_first_segment_is_partial_not_ok(monkeypatch) -> None:  # noqa: ANN001
