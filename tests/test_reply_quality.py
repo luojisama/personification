@@ -28,12 +28,18 @@ class _RewriteCaller:
         return SimpleNamespace(content=self.content)
 
 
-def _agent_result(text: str, *, direct_output: bool = False) -> object:
+def _agent_result(
+    text: str,
+    *,
+    direct_output: bool = False,
+    quality_context: str = "",
+) -> object:
     return final_synthesis.AgentResult(
         text=text,
         pending_actions=[],
         direct_output=direct_output,
         bypass_length_limits=False,
+        quality_context=quality_context,
     )
 
 
@@ -205,6 +211,46 @@ def test_finalize_agent_reply_quality_silences_when_revision_still_ooc() -> None
     assert result.text == "[SILENCE]"
     assert result.quality_checks[-1]["action"] == "silenced"
     assert result.quality_checks[-1]["revision_attempted"] is True
+
+
+def test_finalize_agent_reply_quality_rewrites_structural_empty_evidence_with_full_persona() -> None:
+    caller = _RewriteCaller("今天这块先空着，没什么新鲜的。")
+    persona = "你是群里的普通成员。" + ("保持角色细节。" * 200) + "PERSONA_TAIL_SENTINEL"
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result(
+                "我没查到这方面的信息，最近的 AI 新闻我不想乱编。",
+                quality_context="evidence_unavailable",
+            ),
+            tool_caller=caller,
+            messages=[{"role": "system", "content": persona}],
+            reason="model_stop",
+        )
+    )
+
+    assert result.text == "今天这块先空着，没什么新鲜的。"
+    assert result.quality_checks[-1]["action"] == "rewritten"
+    assert "evidence_unavailable" in result.quality_checks[-1]["flags"]
+    assert caller.calls[0]["messages"][0]["content"].endswith("PERSONA_TAIL_SENTINEL")
+    assert "当前没有足够可用证据" in caller.calls[0]["messages"][1]["content"]
+
+
+def test_finalize_agent_reply_quality_silences_when_empty_evidence_rewrite_fails() -> None:
+    caller = _RewriteCaller("")
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result("通用助手式失败说明", quality_context="evidence_unavailable"),
+            tool_caller=caller,
+            messages=[{"role": "system", "content": "你是群友。"}],
+            reason="model_stop",
+        )
+    )
+
+    assert result.text == "[SILENCE]"
+    assert result.suppress_reply_recovery is True
+    assert result.quality_checks[-1]["action"] == "silenced"
 
 
 def test_finalize_agent_reply_quality_skips_direct_and_control_outputs() -> None:

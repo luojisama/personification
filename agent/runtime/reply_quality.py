@@ -17,7 +17,9 @@ from .final_synthesis import AgentResult
 
 
 _CONTROL_REPLIES = frozenset({"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"})
-_REVISION_FLAGS = frozenset({"formulaic_tic", "style_risk", "group_visible_question"})
+_REVISION_FLAGS = frozenset(
+    {"formulaic_tic", "style_risk", "group_visible_question", "evidence_unavailable"}
+)
 
 
 def _is_control_reply(text: str) -> bool:
@@ -39,7 +41,7 @@ def _persona_system_from_messages(messages: list[dict[str, Any]]) -> str:
             continue
         content = str(message.get("content", "") or "").strip()
         if content:
-            return content[:1200]
+            return content
     return ""
 
 
@@ -51,6 +53,10 @@ def _copy_result_with_quality(
 ) -> AgentResult:
     checks = list(getattr(result, "quality_checks", []) or [])
     checks.append(check)
+    quality_context = str(getattr(result, "quality_context", "") or "")
+    suppress_reply_recovery = bool(getattr(result, "suppress_reply_recovery", False))
+    if quality_context == "evidence_unavailable" and _is_control_reply(text):
+        suppress_reply_recovery = True
     return AgentResult(
         text=text,
         pending_actions=list(getattr(result, "pending_actions", []) or []),
@@ -58,7 +64,8 @@ def _copy_result_with_quality(
         bypass_length_limits=bool(getattr(result, "bypass_length_limits", False)),
         quality_checks=checks,
         failure_code=str(getattr(result, "failure_code", "") or ""),
-        suppress_reply_recovery=bool(getattr(result, "suppress_reply_recovery", False)),
+        suppress_reply_recovery=suppress_reply_recovery,
+        quality_context=quality_context,
     )
 
 
@@ -121,6 +128,7 @@ async def finalize_agent_reply_quality(
 
     started_at = time.monotonic()
     raw_text = str(getattr(result, "text", "") or "").strip()
+    quality_context = str(getattr(result, "quality_context", "") or "").strip()
     direct_output = bool(getattr(result, "direct_output", False))
     visibility = assess_visible_text(raw_text)
     if not visibility.allowed:
@@ -183,6 +191,8 @@ async def finalize_agent_reply_quality(
         is_group=group_context,
         allow_rhetorical_banter=allow_rhetorical_banter,
     )
+    if quality_context == "evidence_unavailable":
+        flags.append("evidence_unavailable")
     action = "accept"
     final_text = visible_text or raw_text
     revision_attempted = False
@@ -197,6 +207,7 @@ async def finalize_agent_reply_quality(
             output_mode=_turn_plan_output_mode(turn_plan),
             avoid_questions=group_context,
             allow_rhetorical_banter=allow_rhetorical_banter,
+            rewrite_reason=quality_context,
         )
         candidate = normalize_visible_reply_text(strip_response_control_markers(rewritten)) if rewritten else ""
         if candidate:
@@ -214,6 +225,9 @@ async def finalize_agent_reply_quality(
         final_text = "[SILENCE]"
         action = "silenced"
     elif group_context and "group_visible_question" in flags and action != "rewritten":
+        final_text = "[SILENCE]"
+        action = "silenced"
+    elif quality_context == "evidence_unavailable" and action != "rewritten":
         final_text = "[SILENCE]"
         action = "silenced"
     elif flags and is_agent_reply_ooc(final_text):

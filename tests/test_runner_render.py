@@ -11,6 +11,7 @@ import pytest
 from ._loader import load_personification_module
 
 runner = load_personification_module("plugin.personification.agent.runtime.runner")
+fallbacks = load_personification_module("plugin.personification.agent.runtime.fallbacks")
 image_generation = load_personification_module("plugin.personification.agent.runtime.image_generation")
 metrics = load_personification_module("plugin.personification.core.metrics")
 tool_registry = load_personification_module("plugin.personification.agent.tool_registry")
@@ -90,6 +91,47 @@ def test_render_tool_result_for_user_returns_no_result_signal_for_empty_results(
     assert payload == {"status": "no_result", "query": "天气"}
 
 
+def test_structured_memory_outcome_distinguishes_usable_and_empty() -> None:
+    usable = json.dumps({"query": "上次", "memories": [{"summary": "聊过这件事"}]}, ensure_ascii=False)
+    empty = json.dumps({"query": "上次", "memories": []}, ensure_ascii=False)
+
+    assert fallbacks.tool_result_outcome(usable) == "usable_evidence"
+    assert fallbacks.tool_result_outcome(empty) == "empty_evidence"
+
+
+def test_structured_visual_and_avatar_outcomes() -> None:
+    visual = json.dumps(
+        {"scene_summary": "一张游戏截图", "visual_evidence": [{"index": 1}]},
+        ensure_ascii=False,
+    )
+    avatar = json.dumps(
+        {"ok": True, "available": True, "analysis": {"style": "插画"}, "insight": {}},
+        ensure_ascii=False,
+    )
+    unavailable_avatar = json.dumps(
+        {"ok": True, "available": False, "analysis": {}, "insight": {}},
+        ensure_ascii=False,
+    )
+
+    assert fallbacks.tool_result_outcome(visual) == "usable_evidence"
+    assert fallbacks.tool_result_outcome(avatar) == "usable_evidence"
+    assert fallbacks.tool_result_outcome(unavailable_avatar) == "empty_evidence"
+    assert runner._render_tool_result_for_user("vision_analyze", visual, "看图") == visual
+    assert runner._render_tool_result_for_user("inspect_current_user_avatar", avatar, "头像") == avatar
+
+
+def test_render_tool_result_preserves_structured_top_candidates() -> None:
+    raw = json.dumps(
+        {
+            "top_candidates": [{"name": "候选角色", "confidence": 0.9}],
+            "recommended_interpretation": "候选角色",
+        },
+        ensure_ascii=False,
+    )
+
+    assert runner._render_tool_result_for_user("resolve_acg_entity", raw, "这个角色") == raw
+
+
 def test_maybe_inject_date_to_query_handles_time_sensitive_queries(monkeypatch) -> None:
     monkeypatch.setattr(runner, "get_configured_now", lambda: datetime(2026, 4, 22, 9, 0, 0))
 
@@ -128,6 +170,137 @@ def test_execute_tool_with_retries_records_success_metrics() -> None:
         assert "agent.tool_exec_ms{status=ok,tool=search_web}" in timing_names
     finally:
         metrics.reset_metrics()
+
+
+def test_execute_tool_with_retries_skips_failed_signatures_and_uses_new_query() -> None:
+    calls: list[str] = []
+
+    async def _handler(**kwargs):  # noqa: ANN001
+        query = kwargs["query"]
+        calls.append(query)
+        if query == "新问题":
+            return json.dumps({"results": []})
+        return json.dumps({"results": [{"title": "找到结果"}]})
+
+    unavailable = {fallbacks.tool_signature("search_web", {"query": "旧问题"})}
+    tool_args, result = asyncio.run(
+        runner._execute_tool_with_retries(
+            registry=_register_query_tool(_handler),
+            tool_name="search_web",
+            tool_args={"query": "新问题"},
+            rewritten_query=SimpleNamespace(
+                primary_query="旧问题",
+                query_candidates=["旧问题", "第三个问题"],
+            ),
+            user_images=[],
+            unavailable_tool_signatures=unavailable,
+            logger=_FakeLogger(),
+        )
+    )
+
+    assert calls == ["新问题", "第三个问题"]
+    assert tool_args == {"query": "第三个问题"}
+    assert json.loads(result)["results"]
+    assert fallbacks.tool_signature("search_web", {"query": "新问题"}) in unavailable
+
+
+def test_execute_tool_with_retries_skips_zero_arg_signature_without_invoking() -> None:
+    calls = 0
+
+    async def _handler() -> str:
+        nonlocal calls
+        calls += 1
+        return "不应执行"
+
+    registry = tool_registry.ToolRegistry()
+    registry.register(
+        tool_registry.AgentTool(
+            name="get_ai_news",
+            description="",
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=_handler,
+        )
+    )
+    signature = fallbacks.tool_signature("get_ai_news", {})
+
+    tool_args, result = asyncio.run(
+        runner._execute_tool_with_retries(
+            registry=registry,
+            tool_name="get_ai_news",
+            tool_args={},
+            rewritten_query=None,
+            user_images=[],
+            unavailable_tool_signatures={signature},
+            logger=_FakeLogger(),
+        )
+    )
+
+    assert calls == 0
+    assert tool_args == {}
+    assert json.loads(result) == {"error": "no_results", "ok": False}
+
+
+def test_run_agent_max_steps_uses_earlier_usable_result_after_empty_result() -> None:
+    async def _search_handler(**_kwargs):  # noqa: ANN001
+        return "真实检索结果"
+
+    async def _empty_news_handler() -> str:
+        return ""
+
+    registry = _register_query_tool(_search_handler)
+    registry.register(
+        tool_registry.AgentTool(
+            name="get_ai_news",
+            description="",
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=_empty_news_handler,
+        )
+    )
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(id="call-search", name="search_web", arguments={"query": "问题"}),
+                    tool_impl.ToolCall(id="call-news", name="get_ai_news", arguments={}),
+                ],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="按查到的情况看，确实是这样。",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "问题"}],
+            registry=registry,
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=1,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+        )
+    )
+
+    assert result.text == "按查到的情况看，确实是这样。"
+    assert len(caller.calls) == 2
+    assert "真实检索结果" in str(caller.calls[1]["messages"])
 
 
 def test_execute_tool_with_retries_records_failure_metrics() -> None:

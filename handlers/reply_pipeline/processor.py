@@ -1867,6 +1867,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         agent_failure_code = ""
         agent_suppress_reply_recovery = False
         agent_direct_output = False
+        agent_quality_context = ""
         favorability_committed = False
 
         def _commit_favorability_if_confirmed() -> None:
@@ -1911,10 +1912,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             except Exception:
                 pass
 
-        def _finish_background_pending_trace() -> None:
+        def _finish_suppressed_reply_trace() -> None:
             try:
                 from ...core import reply_turn_trace
 
+                if agent_quality_context == "evidence_unavailable":
+                    reply_turn_trace.finish_trace(
+                        outcome="no_reply",
+                        diagnosis_code="evidence_unavailable",
+                        detail={"silent": True, "evidence_unavailable": True},
+                    )
+                    return
                 reply_turn_trace.finish_trace(
                     outcome="no_reply",
                     diagnosis_code="background_action_pending",
@@ -1981,6 +1989,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         agent_failure_code,
                         agent_suppress_reply_recovery,
                         agent_direct_output,
+                        agent_quality_context,
                     ) = await _run_agent_if_enabled(
                         bot=bot,
                         event=event,
@@ -2254,7 +2263,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 _finish_action_only_trace()
                 return
             if agent_suppress_reply_recovery:
-                _finish_background_pending_trace()
+                _finish_suppressed_reply_trace()
                 return
             if reply_required:
                 reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
@@ -2414,7 +2423,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 _finish_action_only_trace()
                 return
             if agent_suppress_reply_recovery:
-                _finish_background_pending_trace()
+                _finish_suppressed_reply_trace()
                 return
             if reply_required:
                 reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
@@ -2438,7 +2447,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         reply_content = normalize_visible_reply_text(reply_content)
         if not reply_content and not _IMAGE_B64_RE.search(str(reply_content or "")):
             if agent_suppress_reply_recovery:
-                _finish_background_pending_trace()
+                _finish_suppressed_reply_trace()
                 return
             if not reply_required:
                 return

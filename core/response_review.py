@@ -586,6 +586,7 @@ async def rewrite_agent_reply_ooc(
     output_mode: str = "chat_short",
     avoid_questions: bool = False,
     allow_rhetorical_banter: bool = False,
+    rewrite_reason: str = "",
 ) -> str:
     if tool_caller is None:
         return ""
@@ -593,13 +594,20 @@ async def rewrite_agent_reply_ooc(
     messages: list[dict[str, Any]] = []
     persona_hint = str(persona_system or "").strip()
     if persona_hint:
-        messages.append({"role": "system", "content": persona_hint[:1200]})
+        messages.append({"role": "system", "content": persona_hint})
+    evidence_instruction = (
+        "已知事实边界是当前没有足够可用证据，必须保留不确定性且不得编造；"
+        "不要把内部查证失败翻译成客服或 AI 助手免责声明，按当前角色自然回应，没必要接话时输出 [SILENCE]。"
+        if str(rewrite_reason or "").strip() == "evidence_unavailable"
+        else ""
+    )
     messages.append(
         {
             "role": "system",
             "content": (
                 "下面这句话听起来像 AI 助手而不像普通群友。"
                 f"把它用你自己的口吻重说一次，{min_chars}-{max_chars} 字以内。"
+                f"{evidence_instruction}"
                 "去掉【搜索/查询/结果/链接/来源】类表述和 URL，也去掉“我先看看情况/等会再说/先围观/蹲一下”这类观望或延后宣告。"
                 f"{'当前是群聊，不要用追问、澄清问句或征询式结尾索要信息；改成参与讨论、闲聊推进、保守短反应，或没有可说的新东西时输出 [SILENCE]。' if avoid_questions else '改成参与讨论、闲聊推进或一个具体追问；没有可说的新东西时输出 [SILENCE]。'}"
                 f"{'如果是在被点名调侃后的反击/自辩，可以保留一句不索要信息的反问式回击，并继续给出自己的立场。' if allow_rhetorical_banter else ''}"

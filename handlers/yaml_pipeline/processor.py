@@ -1425,6 +1425,21 @@ async def process_yaml_response_logic(
     used_agent = False
     agent_result: Any = None
     reply_content = ""
+
+    def _trace_suppressed_agent_reply(background_detail: str, evidence_detail: str) -> None:
+        if str(getattr(agent_result, "quality_context", "") or "") == "evidence_unavailable":
+            _trace_no_reply(
+                "evidence_unavailable",
+                diagnosis_code="evidence_unavailable",
+                detail=evidence_detail,
+            )
+            return
+        _trace_no_reply(
+            "background_action_pending",
+            diagnosis_code="background_action_pending",
+            detail=background_detail,
+        )
+
     async def _call_text_model_with_retry(messages_to_use: List[Dict[str, Any]]) -> str:
         try:
             result = await call_ai_api(messages_to_use)
@@ -1822,10 +1837,9 @@ async def process_yaml_response_logic(
             _trace_finish(outcome="ok", diagnosis_code="ok", detail={"action_only": True})
             return
         if bool(getattr(agent_result, "suppress_reply_recovery", False)):
-            _trace_no_reply(
-                "background_action_pending",
-                diagnosis_code="background_action_pending",
-                detail="后台动作已启动，状态回复保持静默",
+            _trace_suppressed_agent_reply(
+                "后台动作已启动，状态回复保持静默",
+                "当前没有足够可用证据，状态回复保持静默",
             )
             return
         if reply_required:
@@ -2026,10 +2040,9 @@ async def process_yaml_response_logic(
             _trace_finish(outcome="ok", diagnosis_code="ok", detail={"action_only": True})
             return
         if suppress_reply_recovery:
-            _trace_no_reply(
-                "background_action_pending",
-                diagnosis_code="background_action_pending",
-                detail="后台动作已启动，最终状态回复保持静默",
+            _trace_suppressed_agent_reply(
+                "后台动作已启动，最终状态回复保持静默",
+                "当前没有足够可用证据，最终回复保持静默",
             )
             return
         if reply_required:
@@ -2043,10 +2056,9 @@ async def process_yaml_response_logic(
     cleaned_assistant_text = normalize_visible_reply_text(cleaned_assistant_text)
     if not cleaned_assistant_text:
         if suppress_reply_recovery:
-            _trace_no_reply(
-                "background_action_pending",
-                diagnosis_code="background_action_pending",
-                detail="后台动作已启动，清理后状态回复保持静默",
+            _trace_suppressed_agent_reply(
+                "后台动作已启动，清理后状态回复保持静默",
+                "当前没有足够可用证据，清理后保持静默",
             )
             return
         if reply_required:

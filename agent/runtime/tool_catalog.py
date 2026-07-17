@@ -84,6 +84,7 @@ _NETWORK_TOOL_NAMES = frozenset(
         "get_baike_entry",
         "get_daily_news",
         "get_ai_news",
+        "get_tech_news",
         "get_trending",
         "get_history_today",
         "get_epic_games",
@@ -106,6 +107,10 @@ _ADMIN_TOOL_NAMES = frozenset(
     }
 )
 _MEMORY_TOOL_NAMES = frozenset({"memory_recall", "recall_user_memory", "recall_group_memory", "get_user_persona"})
+_RETRYABLE_EVIDENCE_KINDS = frozenset(
+    {"web", "resource", "plugin_knowledge", "visual_summary"}
+)
+_EVIDENCE_KINDS = _RETRYABLE_EVIDENCE_KINDS | frozenset({"memory"})
 _SEND_MESSAGE_ACTION_TOOL_NAMES = _QQ_EXPRESSION_TOOL_NAMES | frozenset(
     {
         "send_local_sticker",
@@ -248,6 +253,29 @@ def tool_runtime_metadata(registry: ToolRegistry | None, tool_name: str) -> dict
     if tool is not None:
         metadata.update(tool.metadata or {})
     return metadata
+
+
+def is_retryable_evidence_tool(registry: ToolRegistry | None, tool_name: str) -> bool:
+    metadata = tool_runtime_metadata(registry, tool_name)
+    tags = _coerce_tags(metadata.get("intent_tags"))
+    evidence_kind = str(metadata.get("evidence_kind", "") or "").strip()
+    side_effect = str(metadata.get("side_effect", "none") or "none").strip()
+    return bool(
+        metadata.get("retryable", False)
+        and side_effect == "none"
+        and ("lookup" in tags or evidence_kind in _RETRYABLE_EVIDENCE_KINDS)
+    )
+
+
+def is_evidence_tool(registry: ToolRegistry | None, tool_name: str) -> bool:
+    metadata = tool_runtime_metadata(registry, tool_name)
+    tags = _coerce_tags(metadata.get("intent_tags"))
+    evidence_kind = str(metadata.get("evidence_kind", "") or "").strip()
+    side_effect = str(metadata.get("side_effect", "none") or "none").strip()
+    return bool(
+        side_effect == "none"
+        and ("lookup" in tags or "memory" in tags or evidence_kind in _EVIDENCE_KINDS)
+    )
 
 
 def tool_planner_metadata(tool: AgentTool) -> dict[str, Any]:
@@ -414,6 +442,8 @@ __all__ = [
     "MAX_AGENT_MAX_STEPS",
     "MIN_AGENT_MAX_STEPS",
     "apply_tool_metadata_defaults",
+    "is_evidence_tool",
+    "is_retryable_evidence_tool",
     "normalize_agent_max_steps",
     "registry_planner_metadata",
     "schema_tool_name",

@@ -53,7 +53,6 @@ from .intent import (
     _render_message_text,
 )
 from .loop_utils import (
-    _RETRYABLE_LOOKUP_TOOLS,
     caller_supports_builtin_search as _caller_supports_builtin_search,
     record_reply_trace_stage as _record_reply_trace_stage,
     safe_ack as _safe_ack,
@@ -66,6 +65,7 @@ from .stop_flow import (
     _has_lookup_schema,
     _should_review_banter_lookup_draft,
     handle_model_stop,
+    update_stop_flow_tool_result,
 )
 from .tool_loop import (
     append_assistant_tool_calls_message,
@@ -99,7 +99,6 @@ from .fallbacks import (
     _cancel_task_safely,
     _parse_json_tool_result,
     _select_semantic_fallback_tool,
-    _tool_result_indicates_empty,
 )
 
 _TIME_SENSITIVE_SEARCH_TOOLS = frozenset({"web_search", "search_web"})
@@ -809,6 +808,7 @@ async def run_agent(
                     user_images=user_images,
                     previous_tool_name=stop_state.last_tool_name,
                     previous_tool_result_text=stop_state.last_tool_result_text,
+                    unavailable_tool_signatures=stop_state.unavailable_tool_signatures,
                     logger=logger,
                     budget_deadline=budget_deadline,
                 )
@@ -825,9 +825,13 @@ async def run_agent(
                 f"[agent] tool_result name={tool_call.name} "
                 f"result_len={len(str(result or ''))}"
             )
-            stop_state.last_tool_name = str(tool_call.name or "").strip()
-            if str(result or "").strip():
-                stop_state.last_tool_result_text = str(result).strip()
+            update_stop_flow_tool_result(
+                state=stop_state,
+                registry=registry,
+                tool_name=str(tool_call.name or "").strip(),
+                tool_args=tool_args,
+                result=result,
+            )
             stop_state.tool_result_records.append(
                 _build_tool_result_record(
                     tool_name=stop_state.last_tool_name,
@@ -835,11 +839,6 @@ async def run_agent(
                     result=result,
                 )
             )
-            if stop_state.last_tool_name in _RETRYABLE_LOOKUP_TOOLS:
-                if _tool_result_indicates_empty(result):
-                    stop_state.empty_lookup_tools.add(stop_state.last_tool_name)
-                else:
-                    stop_state.empty_lookup_tools.discard(stop_state.last_tool_name)
             stop_state.semantic_fallback_attempted = False
             direct_result = direct_tool_result_agent_result(
                 registry=registry,
@@ -874,14 +873,18 @@ async def run_agent(
         status="warn",
         detail=f"max_steps={effective_max_steps} last_tool={stop_state.last_tool_name or '-'}",
     )
-    if stop_state.last_tool_result_text:
-        logger.warning("[agent] using last tool result as fallback final answer")
+    if stop_state.last_usable_tool_result_text or stop_state.last_tool_result_text:
+        fallback_tool_name = stop_state.last_usable_tool_name or stop_state.last_tool_name
+        fallback_result_text = (
+            stop_state.last_usable_tool_result_text or stop_state.last_tool_result_text
+        )
+        logger.warning(f"[agent] using fallback tool result: {fallback_tool_name}")
         try:
             synthesized = await _await_with_deadline(
                 lambda: synthesize_max_steps_result(
                     registry=registry,
-                    tool_name=stop_state.last_tool_name,
-                    result_text=stop_state.last_tool_result_text,
+                    tool_name=fallback_tool_name,
+                    result_text=fallback_result_text,
                     user_query_text=user_query_text,
                     messages=messages,
                     pending_actions=pending_actions,

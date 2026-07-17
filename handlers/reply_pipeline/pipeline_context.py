@@ -708,13 +708,13 @@ async def run_agent_if_enabled(
     reply_commit_state: dict[str, Any] | None = None,
     turn_media_context: list[Any] | None = None,
     avatar_pair_candidates: list[dict[str, str]] | None = None,
-) -> tuple[str | None, bool, bool, Any | None, list[dict[str, Any]], str, bool, bool]:
+) -> tuple[str | None, bool, bool, Any | None, list[dict[str, Any]], str, bool, bool, str]:
     if not (
         getattr(runtime.plugin_config, "personification_agent_enabled", True)
         and runtime.tool_registry
         and runtime.agent_tool_caller
     ):
-        return None, False, False, None, [], "", False, False
+        return None, False, False, None, [], "", False, False, ""
 
     executor = ActionExecutor(bot, event, runtime.plugin_config, runtime.logger)
     runtime_registry = clone_tool_registry(runtime.tool_registry)
@@ -879,6 +879,7 @@ async def run_agent_if_enabled(
         str(getattr(result, "failure_code", "") or ""),
         bool(getattr(result, "suppress_reply_recovery", False)),
         bool(getattr(result, "direct_output", False)),
+        str(getattr(result, "quality_context", "") or ""),
     )
 
 
