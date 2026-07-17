@@ -59,6 +59,20 @@ def test_reply_processor_classifies_and_redacts_outer_failures(
     error = RuntimeError("https://private.example/chat?api_key=top-secret raw body")
     if provider_code:
         error.code = provider_code
+        error.route_attempts = (
+            {
+                "provider": "zellon",
+                "api_type": "gemini",
+                "model": "gemini-3-flash-agent",
+                "status_code": 400,
+                "code": provider_code,
+                "wire_tools_count": 47,
+                "tool_schema_hash": "safehash1234",
+                "request_count": 1,
+                "api_url": "https://private.example/v1beta?key=top-secret",
+                "response_body": "raw body top-secret",
+            },
+        )
 
     async def _failed_impl(*_args, **_kwargs):  # noqa: ANN001
         raise error
@@ -85,6 +99,10 @@ def test_reply_processor_classifies_and_redacts_outer_failures(
     assert finished[-1]["diagnosis_code"] == expected_diagnosis
     assert "top-secret" not in str(stage)
     assert "private.example" not in str(stage)
+    if provider_code:
+        assert "provider:zellon" in str(stage)
+        assert "model:gemini-3-flash-agent" in str(stage)
+        assert "tools:47" in str(stage)
 
 
 def test_required_image_timeout_stays_silent_and_finishes_failed(monkeypatch) -> None:  # noqa: ANN001

@@ -326,6 +326,40 @@ def test_normal_routed_tool_caller_raises_structured_aggregate() -> None:
     assert all("private" not in str(item) for item in error.route_attempts)
 
 
+def test_provider_route_trace_summary_is_allowlisted_and_redacted() -> None:
+    error = ai_routes.RoutedToolCallerError(
+        [
+            {
+                "provider": "zellon primary",
+                "api_type": "gemini",
+                "model": "gemini-3-flash-agent",
+                "status_code": 400,
+                "code": "provider_request_rejected",
+                "wire_tools_count": 47,
+                "tool_schema_hash": "abcdef123456",
+                "request_count": 1,
+                "api_url": "https://private.example/v1beta?key=secret",
+                "prompt": "raw private prompt",
+                "response_body": "raw private response",
+            }
+        ]
+    )
+
+    summary = ai_routes.summarize_provider_route_attempts(error)
+
+    assert "provider:zellon_primary" in summary
+    assert "api:gemini" in summary
+    assert "model:gemini-3-flash-agent" in summary
+    assert "http:400" in summary
+    assert "tools:47" in summary
+    assert "schema:abcdef123456" in summary
+    assert "requests:1" in summary
+    assert "code:provider_request_rejected" in summary
+    assert "private.example" not in summary
+    assert "secret" not in summary
+    assert "raw private" not in summary
+
+
 @pytest.mark.parametrize(
     ("response", "expected_code", "retryable"),
     [

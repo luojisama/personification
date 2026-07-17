@@ -103,6 +103,58 @@ class RoutedToolCallerError(RuntimeError):
         return attempts[-1] if attempts else {"code": "providers_exhausted", "retryable": True}
 
 
+def _route_trace_atom(value: Any, *, limit: int) -> str:
+    text = "_".join(str(value or "").split())
+    text = text.replace("|", "_").replace("=", "_")
+    return text[:limit] or "-"
+
+
+def summarize_provider_route_attempts(exc: BaseException, *, limit: int = 3) -> str:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    attempts: list[dict[str, Any]] = []
+    while current is not None and id(current) not in seen and len(seen) < 6:
+        seen.add(id(current))
+        candidate = getattr(current, "route_attempts", None)
+        if isinstance(candidate, (list, tuple)):
+            attempts = [dict(item) for item in candidate if isinstance(item, dict)]
+            break
+        current = current.__cause__ or current.__context__
+    if not attempts:
+        return ""
+    rendered: list[str] = [f"route_count={len(attempts)}"]
+    for index, attempt in enumerate(attempts[: max(1, int(limit or 1))], start=1):
+        code = str(attempt.get("code") or "provider_call_failed").strip().lower()
+        if code not in _CANONICAL_PROVIDER_CODES:
+            code = "provider_call_failed"
+        try:
+            status = max(0, int(attempt.get("status_code") or 0))
+        except (TypeError, ValueError):
+            status = 0
+        try:
+            tools_count = max(0, int(attempt.get("wire_tools_count") or 0))
+        except (TypeError, ValueError):
+            tools_count = 0
+        try:
+            request_count = max(1, int(attempt.get("request_count") or 1))
+        except (TypeError, ValueError):
+            request_count = 1
+        route = "|".join(
+            (
+                f"provider:{_route_trace_atom(attempt.get('provider'), limit=48)}",
+                f"api:{_route_trace_atom(attempt.get('api_type'), limit=32)}",
+                f"model:{_route_trace_atom(attempt.get('concrete_model') or attempt.get('model'), limit=80)}",
+                f"http:{status or '-'}",
+                f"tools:{tools_count}",
+                f"schema:{_route_trace_atom(attempt.get('tool_schema_hash') or attempt.get('tool_names_hash'), limit=16)}",
+                f"requests:{request_count}",
+                f"code:{code}",
+            )
+        )
+        rendered.append(f"route_{index}={route}")
+    return " ".join(rendered)
+
+
 def _exception_route_metadata(exc: BaseException) -> tuple[int, str, bool, str, str, str, int]:
     current: BaseException | None = exc
     seen: set[int] = set()
@@ -1197,5 +1249,6 @@ __all__ = [
     "get_primary_provider_config",
     "resolve_global_fallback_provider",
     "resolve_video_fallback_provider",
+    "summarize_provider_route_attempts",
     "summarize_route_state",
 ]

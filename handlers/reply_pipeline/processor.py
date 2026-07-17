@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List
 import httpx
 from nonebot.exception import FinishedException
 
+from ...core.ai_routes import summarize_provider_route_attempts
 from ...core.chat_intent import looks_like_explanatory_output
 from ...core.error_utils import log_exception
 from ...core.favorability_turn import (
@@ -444,13 +445,22 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
         if trace_mod is not None and trace_id and not cancelled:
             provider_code = _provider_diagnosis_code(exc)
             is_provider_failure = bool(provider_code)
+            route_summary = summarize_provider_route_attempts(exc) if is_provider_failure else ""
             trace_mod.record_stage(
                 trace_id=trace_id,
                 key="provider_failure" if is_provider_failure else "unhandled_exception",
                 label="Provider 调用失败" if is_provider_failure else "链路异常",
                 status="error",
                 detail=(
-                    f"code={provider_code} type={type(exc).__name__}"
+                    " ".join(
+                        part
+                        for part in (
+                            f"code={provider_code}",
+                            f"type={type(exc).__name__}",
+                            route_summary,
+                        )
+                        if part
+                    )
                     if is_provider_failure
                     else f"type={type(exc).__name__}"
                 ),
@@ -2931,7 +2941,15 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             trace_outcome = "failed"
             diagnosis_code = provider_code or "internal_exception"
         error_summary = (
-            f"code={provider_code} type={type(e).__name__}"
+            " ".join(
+                part
+                for part in (
+                    f"code={provider_code}",
+                    f"type={type(e).__name__}",
+                    summarize_provider_route_attempts(e),
+                )
+                if part
+            )
             if provider_code
             else f"type={type(e).__name__}"
         )
