@@ -93,6 +93,7 @@ def test_qzone_text_agent_profile_keeps_only_read_only_evidence_tools() -> None:
     for name in (
         "web_search",
         "weather",
+        "get_tech_news",
         "recall_user_memory",
         "send_qq_face",
         "remember_user_memory",
@@ -118,7 +119,7 @@ def test_qzone_text_agent_profile_keeps_only_read_only_evidence_tools() -> None:
     }
 
     assert "send_qq_face" in default_names
-    assert qzone_names == {"web_search", "weather"}
+    assert qzone_names == {"web_search", "weather", "get_tech_news"}
     assert none_names == set()
 
     spoofed = tool_registry.ToolRegistry()

@@ -51,6 +51,58 @@ def test_build_trending_tool_supports_list_payload_and_bili_endpoint(monkeypatch
     assert "2. 热点二" in result
 
 
+@pytest.mark.parametrize(
+    ("platform", "endpoint"),
+    [
+        ("百度", "/v2/baidu/hot"),
+        ("头条", "/v2/toutiao"),
+        ("小红书", "/v2/rednote"),
+    ],
+)
+def test_build_trending_tool_supports_core_platforms(monkeypatch, platform, endpoint) -> None:  # noqa: ANN001
+    async def _fake_fetch(_remote_base_url, path, *, local_base_url=None, params=None):  # noqa: ANN001
+        del local_base_url, params
+        assert path == endpoint
+        return [{"title": f"{platform}热点"}]
+
+    monkeypatch.setattr(news_impl, "_fetch_v2_data", _fake_fetch)
+
+    tool = news_impl.build_trending_tool("https://60s.viki.moe", _FakeLogger(), "http://127.0.0.1:4399")
+    result = asyncio.run(tool.handler(platform=platform))
+
+    assert f"【{platform} 热搜 Top10】" in result
+    assert f"1. {platform}热点" in result
+
+
+@pytest.mark.parametrize(
+    ("source", "endpoint", "item", "expected"),
+    [
+        ("IT之家", "/v2/it-news", {"title": "科技头条", "description": "科技摘要"}, "科技摘要"),
+        ("Hacker News", "/v2/hacker-news/top", {"title": "Show HN", "score": 321}, "321 points"),
+    ],
+)
+def test_build_tech_news_tool_supports_it_and_hacker_news(
+    monkeypatch,
+    source,
+    endpoint,
+    item,
+    expected,
+) -> None:  # noqa: ANN001
+    async def _fake_fetch(_remote_base_url, path, *, local_base_url=None, params=None):  # noqa: ANN001
+        del local_base_url, params
+        assert path == endpoint
+        return [item]
+
+    monkeypatch.setattr(news_impl, "_fetch_v2_data", _fake_fetch)
+
+    tool = news_impl.build_tech_news_tool("https://60s.viki.moe", _FakeLogger(), "http://127.0.0.1:4399")
+    result = asyncio.run(tool.handler(source=source))
+
+    assert f"【{source} 科技资讯】" in result
+    assert item["title"] in result
+    assert expected in result
+
+
 def test_build_ai_news_tool_reads_ai_news_payload(monkeypatch) -> None:  # noqa: ANN001
     async def _fake_fetch(_remote_base_url, path, *, local_base_url=None, params=None):  # noqa: ANN001
         del local_base_url, params
@@ -70,6 +122,35 @@ def test_build_ai_news_tool_reads_ai_news_payload(monkeypatch) -> None:  # noqa:
     assert "【AI 资讯 2026-04-23】" in result
     assert "1. 新模型发布 [OpenAI]" in result
     assert "推理成本继续下降" in result
+
+
+def test_build_ai_news_tool_falls_back_to_latest_available_issue(monkeypatch) -> None:  # noqa: ANN001
+    seen_params: list[object] = []
+
+    async def _fake_fetch(_remote_base_url, path, *, local_base_url=None, params=None):  # noqa: ANN001
+        del local_base_url
+        assert path == "/v2/ai-news"
+        seen_params.append(params)
+        if params is None:
+            return {"date": "2026-04-24", "news": []}
+        assert params == {"all": 1}
+        return {
+            "date": "all",
+            "news": [
+                {"title": "最近一期", "detail": "最新内容", "date": "2026-04-23"},
+                {"title": "更早一期", "detail": "旧内容", "date": "2026-04-22"},
+            ],
+        }
+
+    monkeypatch.setattr(news_impl, "_fetch_v2_data", _fake_fetch)
+
+    tool = news_impl.build_ai_news_tool("https://60s.viki.moe", _FakeLogger(), "http://127.0.0.1:4399")
+    result = asyncio.run(tool.handler())
+
+    assert seen_params == [None, {"all": 1}]
+    assert "【AI 资讯 2026-04-23】" in result
+    assert "最近一期" in result
+    assert "更早一期" not in result
 
 
 @pytest.mark.parametrize("items_key", ["news", "items", "list"])
@@ -174,6 +255,32 @@ def test_build_history_today_tool_reads_items_field(monkeypatch) -> None:  # noq
     assert "1743年：拉瓦锡出生" in result
 
 
+def test_legacy_news_tools_use_canonical_empty_and_failure_results(monkeypatch) -> None:  # noqa: ANN001
+    async def _empty_fetch(_remote_base_url, path, *, local_base_url=None, params=None):  # noqa: ANN001
+        del local_base_url, params
+        assert path == "/v2/today-in-history"
+        return {"items": []}
+
+    monkeypatch.setattr(news_impl, "_fetch_v2_data", _empty_fetch)
+    history_tool = news_impl.build_history_today_tool(
+        "https://60s.viki.moe",
+        _FakeLogger(),
+        "http://127.0.0.1:4399",
+    )
+    _assert_canonical_failure(asyncio.run(history_tool.handler()), "no_results")
+
+    async def _failed_fetch(*_args, **_kwargs):  # noqa: ANN001
+        raise RuntimeError("private upstream detail")
+
+    monkeypatch.setattr(news_impl, "_fetch_v2_data", _failed_fetch)
+    daily_tool = news_impl.build_daily_news_tool(
+        "https://60s.viki.moe",
+        _FakeLogger(),
+        "http://127.0.0.1:4399",
+    )
+    _assert_canonical_failure(asyncio.run(daily_tool.handler()), "fetch_failed")
+
+
 def test_build_epic_games_tool_supports_list_payload_with_free_end(monkeypatch) -> None:  # noqa: ANN001
     async def _fake_fetch(_remote_base_url, path, *, local_base_url=None, params=None):  # noqa: ANN001
         del local_base_url, params
@@ -271,3 +378,32 @@ def test_main_joke_and_history_follow_updated_v2_paths(monkeypatch) -> None:  # 
     assert joke == "笑话内容"
     assert "2008年：一件大事" in history
     assert seen_paths == ["/v2/duanzi", "/v2/today-in-history"]
+
+
+def test_main_routes_tech_news_source(monkeypatch) -> None:  # noqa: ANN001
+    async def _fake_fetch(_remote_base_url, path, *, local_base_url=None, params=None):  # noqa: ANN001
+        del local_base_url, params
+        assert path == "/v2/hacker-news/top"
+        return [{"title": "Open source release", "score": 42}]
+
+    monkeypatch.setattr(news_impl, "_fetch_v2_data", _fake_fetch)
+
+    result = asyncio.run(news_main.run(topic="tech_news", source="Hacker News"))
+
+    assert "【Hacker News 科技资讯】" in result
+    assert "42 points" in result
+
+
+def test_build_tools_registers_core_news_package() -> None:
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_60s_enabled=True,
+            personification_60s_api_base="https://60s.viki.moe",
+            personification_60s_local_api_base="http://127.0.0.1:4399",
+        ),
+        logger=_FakeLogger(),
+    )
+
+    names = {tool.name for tool in news_main.build_tools(runtime)}
+
+    assert {"get_ai_news", "get_tech_news", "get_trending"} <= names

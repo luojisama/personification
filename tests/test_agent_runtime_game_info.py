@@ -36,6 +36,27 @@ def test_legacy_registry_exposes_game_info_by_default() -> None:
     assert registry.get("game_info").metadata["source_kind"] == "builtin"
 
 
+def test_legacy_registry_exposes_tech_news_by_default() -> None:
+    config = SimpleNamespace(
+        personification_use_skillpacks=False,
+        personification_game_info_enabled=False,
+        personification_memory_enabled=False,
+        personification_tool_web_fetch_enabled=False,
+        personification_60s_enabled=True,
+        personification_timezone="Asia/Shanghai",
+        personification_sticker_path="__missing_stickers__",
+    )
+
+    registry = agent_runtime.build_agent_tool_registry(
+        plugin_config=config,
+        logger=_Logger(),
+        get_now=lambda: None,
+    )
+
+    assert registry.get("get_tech_news") is not None
+    assert registry.get("get_tech_news").metadata["source_kind"] == "builtin"
+
+
 def test_skill_runtime_exposes_configured_api_pool_reader(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

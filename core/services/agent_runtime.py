@@ -281,6 +281,7 @@ def build_agent_tool_registry(
             build_gold_price_tool,
             build_history_today_tool,
             build_joke_tool,
+            build_tech_news_tool,
             build_trending_tool,
         )
 
@@ -292,6 +293,7 @@ def build_agent_tool_registry(
         ).strip().rstrip("/") or "http://127.0.0.1:4399"
         registry.register(build_daily_news_tool(_60s_base, logger, _60s_local_base))
         registry.register(build_ai_news_tool(_60s_base, logger, _60s_local_base))
+        registry.register(build_tech_news_tool(_60s_base, logger, _60s_local_base))
         registry.register(build_trending_tool(_60s_base, logger, _60s_local_base))
         registry.register(build_joke_tool(_60s_base, logger, _60s_local_base))
         registry.register(build_history_today_tool(_60s_base, logger, _60s_local_base))

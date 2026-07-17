@@ -23,6 +23,7 @@ _QZONE_READ_ONLY_TOOL_NAMES = frozenset(
         "get_exchange_rate",
         "get_gold_price",
         "get_history_today",
+        "get_tech_news",
         "get_trending",
         "resolve_acg_entity",
         "search_web",
