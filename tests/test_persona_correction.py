@@ -34,7 +34,7 @@ def _make_store(prev_text: str, captured: list):
         profile_service=_FakeProfileSvc(),
     )
     # 避免真实落库：捕获保存
-    def _capture(uid, entry, clear, *, corrections=None):
+    def _capture(uid, entry, clear, *, corrections=None, **_kwargs):
         captured.append((uid, entry.data, corrections))
     store._save_persona_sync = _capture  # type: ignore[assignment]
     return store

@@ -31,6 +31,7 @@ def register_chat_matchers(
     message_segment_cls: Any,
     handle_reply: Callable[[Bot, MessageEvent, T_State], Any],
     user_policy_gate: Any = None,
+    create_scoped_profile_task: Callable[[str, str], None] | None = None,
 ) -> Dict[str, Any]:
     record_msg_matcher = on_message(rule=Rule(record_msg_rule), priority=999, block=False)
 
@@ -46,6 +47,7 @@ def register_chat_matchers(
             create_background_task=create_background_task,
             create_summary_task=create_summary_task,
             user_policy_gate=user_policy_gate,
+            create_scoped_profile_task=create_scoped_profile_task,
         )
 
     sticker_chat_matcher = on_message(rule=Rule(sticker_chat_rule), priority=101, block=True)

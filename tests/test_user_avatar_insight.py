@@ -58,6 +58,119 @@ def _vision_json(*, kind: str = "acg_character", summary: str = "蓝发动画角
     )
 
 
+def test_avatar_analysis_cannot_recreate_profile_after_global_clear(tmp_path: Path) -> None:
+    service, runtime = _service(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _download(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        return safe_image_download.DownloadedImage(
+            b"avatar",
+            "image/png",
+            "https://cdn.invalid/final",
+        )
+
+    async def _analyze(**_kwargs):  # noqa: ANN003, ANN202
+        started.set()
+        await release.wait()
+        return _vision_json(), "route_direct"
+
+    async def _run():  # noqa: ANN202
+        task = asyncio.create_task(
+            avatar.analyze_user_avatar(
+                runtime,
+                "10001",
+                now_ts=100,
+                downloader=_download,
+                analyzer=_analyze,
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await asyncio.to_thread(service.memory_store.clear_all_profiles)
+        release.set()
+        return await task
+
+    result = asyncio.run(_run())
+
+    assert result == {
+        "status": "cancelled",
+        "reason": "profile_generation_changed",
+        "skipped": True,
+    }
+    assert service.get_core_profile("10001") is None
+
+
+def test_avatar_analysis_started_before_hot_disable_does_not_commit(tmp_path: Path) -> None:
+    service, runtime = _service(tmp_path)
+    runtime.plugin_config = SimpleNamespace(personification_persona_enabled=True)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _download(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        return safe_image_download.DownloadedImage(
+            b"avatar",
+            "image/png",
+            "https://cdn.invalid/final",
+        )
+
+    async def _analyze(**_kwargs):  # noqa: ANN003, ANN202
+        started.set()
+        await release.wait()
+        return _vision_json(), "route_direct"
+
+    async def _run():  # noqa: ANN202
+        task = asyncio.create_task(
+            avatar.analyze_user_avatar(
+                runtime,
+                "10001",
+                now_ts=100,
+                downloader=_download,
+                analyzer=_analyze,
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        runtime.plugin_config.personification_persona_enabled = False
+        release.set()
+        return await task
+
+    result = asyncio.run(_run())
+
+    assert result == {
+        "status": "cancelled",
+        "reason": "profile_generation_changed",
+        "skipped": True,
+    }
+    snapshot = service.get_core_profile("10001")
+    assert snapshot is not None
+    assert "avatar_analysis" not in snapshot.profile_json.get("qq_profile", {})
+
+
+def test_avatar_delete_cannot_recreate_profile_after_concurrent_clear(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    service, _runtime = _service(tmp_path)
+    service.patch_core_profile(
+        user_id="10001",
+        patcher=lambda current: {
+            **current,
+            "qq_profile": {
+                **current["qq_profile"],
+                "avatar_analysis": {"status": "success"},
+                "avatar_insight": json.loads(_vision_json()),
+            },
+        },
+    )
+    original_get = service.get_core_profile
+
+    def _get_then_clear(user_id: str):  # noqa: ANN202
+        snapshot = original_get(user_id)
+        service.memory_store.clear_all_profiles()
+        return snapshot
+
+    monkeypatch.setattr(service, "get_core_profile", _get_then_clear)
+
+    assert avatar.clear_user_avatar_analysis(service, "10001") is False
+    assert original_get("10001") is None
+
+
 def test_hash_unchanged_skips_second_vision_after_check_interval(tmp_path: Path) -> None:
     service, runtime = _service(tmp_path)
     download_calls: list[str] = []
@@ -465,6 +578,25 @@ def test_agent_tool_returns_only_current_safe_summary_without_url(tmp_path: Path
     assert "runtime_capability" in planner_tools[0]["intent_tags"]
 
 
+def test_avatar_tool_is_dynamically_disabled_with_persona_profiles(tmp_path: Path) -> None:
+    service, _runtime = _service(tmp_path)
+    state = {"enabled": True}
+    service._enabled_getter = lambda: state["enabled"]  # noqa: SLF001
+    tool = avatar.build_inspect_current_user_avatar_tool(service, "10001")
+
+    assert tool.enabled() is True
+    state["enabled"] = False
+    assert tool.enabled() is False
+    payload = json.loads(asyncio.run(tool.handler()))
+    assert payload == {"ok": True, "available": False, "analysis": {}, "insight": {}}
+    metadata = avatar.add_current_user_avatar_planner_metadata(
+        [{"name": "other"}],
+        service,
+        "10001",
+    )
+    assert metadata == [{"name": "other"}]
+
+
 def test_agent_avatar_unavailable_payload_has_no_hash_or_raw_reference(tmp_path: Path) -> None:
     service, _runtime = _service(tmp_path)
     service.patch_core_profile(
@@ -602,6 +734,101 @@ def test_avatar_admin_routes_require_permission_keep_diagnostics_and_audit(tmp_p
     assert partial["warnings"]
 
 
+def test_group_refresh_requires_explicit_bot_and_full_membership_tuple(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    service, bundle = _service(tmp_path)
+    refresh_calls: list[tuple[str, str]] = []
+    audit_outcomes: list[str] = []
+
+    class _ScopedService:
+        async def refresh_group_profile(self, *, group_id: str, user_id: str, force: bool):  # noqa: ANN202
+            assert force is True
+            refresh_calls.append((group_id, user_id))
+            return SimpleNamespace(
+                status="succeeded",
+                code="ok",
+                group_id=group_id,
+                user_id=user_id,
+                revision=1,
+                claim_count=1,
+                anchor_count=1,
+            )
+
+    class _Bot:
+        self_id = "30001"
+
+        def __init__(self) -> None:
+            self.groups: list[dict] = []
+            self.member_group_id = "20001"
+
+        async def get_group_list(self):  # noqa: ANN202
+            return self.groups
+
+        async def get_group_member_info(self, **kwargs):  # noqa: ANN003, ANN202
+            assert kwargs["no_cache"] is True
+            return {"group_id": self.member_group_id, "user_id": kwargs["user_id"]}
+
+    bot = _Bot()
+    runtime = SimpleNamespace(
+        runtime_bundle=SimpleNamespace(
+            profile_service=service,
+            scoped_profile_service=_ScopedService(),
+            get_bots=lambda: {"unexpected-key": bot},
+        ),
+        logger=bundle.logger,
+    )
+    monkeypatch.setattr(
+        persona_routes.webui_audit_log,
+        "record",
+        lambda **kwargs: audit_outcomes.append(str(kwargs.get("outcome", ""))),
+    )
+    endpoint = _route(
+        runtime,
+        "/api/personas/{user_id}/group-refresh",
+        "POST",
+    ).endpoint
+
+    with pytest.raises(HTTPException) as missing_bot:
+        asyncio.run(endpoint("10001", {"group_id": "20001"}, _admin()))
+    assert missing_bot.value.status_code == 400
+
+    with pytest.raises(HTTPException) as bot_not_member:
+        asyncio.run(
+            endpoint(
+                "10001",
+                {"group_id": "20001", "bot_id": "30001"},
+                _admin(),
+            )
+        )
+    assert bot_not_member.value.status_code == 403
+    assert refresh_calls == []
+
+    bot.groups = [{"group_id": 20001}]
+    bot.member_group_id = "20002"
+    with pytest.raises(HTTPException) as stale_member:
+        asyncio.run(
+            endpoint(
+                "10001",
+                {"group_id": "20001", "bot_id": "30001"},
+                _admin(),
+            )
+        )
+    assert stale_member.value.status_code == 403
+    assert refresh_calls == []
+
+    bot.member_group_id = "20001"
+    result = asyncio.run(
+        endpoint(
+            "10001",
+            {"group_id": "20001", "bot_id": "30001"},
+            _admin(),
+        )
+    )
+    assert result["status"] == "succeeded"
+    assert result["bot_id"] == "30001"
+    assert refresh_calls == [("20001", "10001")]
+    assert audit_outcomes == ["denied", "denied", "denied", "ok"]
+
+
 def test_webui_renders_avatar_state_buttons_and_persistent_diagnostics() -> None:
     source = (Path(__file__).resolve().parents[1] / "webui" / "static" / "app-admin.js").read_text(encoding="utf-8")
     assert "头像长期画像" in source
@@ -610,6 +837,18 @@ def test_webui_renders_avatar_state_buttons_and_persistent_diagnostics() -> None
     assert "content_hash_short" in source
     assert 'rememberAdminOperation("persona", result' in source
     assert 'renderAdminOperations("persona","画像操作诊断")' in source
+
+
+def test_webui_persona_detail_connects_scoped_profile_controls() -> None:
+    root = Path(__file__).resolve().parents[1]
+    admin_source = (root / "webui" / "static" / "app-admin.js").read_text(encoding="utf-8")
+    core_source = (root / "webui" / "static" / "app-core.js").read_text(encoding="utf-8")
+
+    assert "/group-refresh" in admin_source
+    assert "effective_claims" in admin_source
+    assert "personaScopeBotId" in admin_source
+    assert "personaScopeGroupId" in admin_source
+    assert 'api("/qq/groups")' in core_source
 
 
 def test_profile_block_and_avatar_tool_have_normal_yaml_agent_parity() -> None:

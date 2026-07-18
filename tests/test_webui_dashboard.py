@@ -402,10 +402,10 @@ def test_profile_service_prompt_block(_runtime_with_data) -> None:
     assert "[头像URL]" not in block
     assert "[主页] https://user.qzone.qq.com/u_alpha" in block
     assert "[个性签名] 这里是 Alpha 的签名" in block
-    assert "[人物轮廓] Alpha 是群里的常驻成员" in block
+    assert "人物轮廓: Alpha 是群里的常驻成员" in block
     assert "称呼偏好: 可以叫阿尔法" in block
     assert "互动建议: 像熟人一样自然插话" in block
-    assert "全局画像 Alpha" in block
+    assert "全局画像 Alpha" not in block
     assert "g1 中是常驻成员" in block
 
     block2 = svc.build_prompt_block(user_id="u_missing")

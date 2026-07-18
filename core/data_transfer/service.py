@@ -172,8 +172,30 @@ class DataTransferService:
         return state
 
     @staticmethod
-    def _safe_profile_json(value: Any) -> dict[str, Any]:
+    def _safe_profile_json(value: Any, *, expected_group_id: str = "") -> dict[str, Any]:
         payload = dict(value) if isinstance(value, dict) else {}
+        scoped_markers = {
+            "schema_version",
+            "scope",
+            "claims",
+            "base",
+            "evidence_windows",
+            "generation",
+        }
+        if set(payload) & scoped_markers:
+            schema_version = payload.get("schema_version")
+            if isinstance(schema_version, bool) or schema_version != 2:
+                raise ValueError("unsupported local scoped profile schema")
+            from ..scoped_profile import normalize_profile_document
+
+            normalized = normalize_profile_document(payload)
+            scope = normalized.get("scope", {})
+            if scope.get("kind") != "group":
+                raise ValueError("local scoped profile must have group scope")
+            expected = str(expected_group_id or "").strip()
+            if expected and str(scope.get("group_id", "") or "") != expected:
+                raise ValueError("local scoped profile group mismatch")
+            return normalized
         qq_profile = payload.get("qq_profile")
         if isinstance(qq_profile, dict):
             allowed = {"user_id", "nickname", "card", "avatar_url", "homepage_url", "role", "title"}
@@ -189,7 +211,10 @@ class DataTransferService:
             {
                 "user_id": str(row.get("user_id", "") or ""),
                 "profile_text": str(row.get("profile_text", "") or ""),
-                "profile_json": self._safe_profile_json(row.get("profile_json")),
+                "profile_json": self._safe_profile_json(
+                    row.get("profile_json"),
+                    expected_group_id=group_id,
+                ),
                 "updated_at": float(row.get("updated_at", 0) or 0),
             }
             for row in rows if isinstance(row, dict) and str(row.get("user_id", "") or "")
@@ -403,6 +428,13 @@ class DataTransferService:
                         raise DataTransferError("invalid local profile")
                     if not str(row.get("user_id", "")) or not isinstance(row.get("profile_json"), dict):
                         raise DataTransferError("invalid local profile identity")
+                    try:
+                        self._safe_profile_json(
+                            row.get("profile_json"),
+                            expected_group_id=group_id,
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise DataTransferError("invalid or cross-group local profile") from exc
                 continue
             if name == "group_memories":
                 if not isinstance(data, list):
@@ -488,6 +520,7 @@ class DataTransferService:
         try:
             maintenance_lock = getattr(self.memory_store, "maintenance_lock", None)
             with maintenance_lock if maintenance_lock is not None else nullcontext():
+                self._advance_profile_generation_for_values(values)
                 self._check_memory_conflicts(target_group_id, values.get("group_memories", []))
                 with self._conn() as conn:
                     conn.execute("BEGIN IMMEDIATE")
@@ -657,7 +690,10 @@ class DataTransferService:
                     group_id=group_id,
                     user_id=str(row["user_id"]),
                     profile_text=str(row["profile_text"]),
-                    profile_json=self._safe_profile_json(row["profile_json"]),
+                    profile_json=self._safe_profile_json(
+                        row["profile_json"],
+                        expected_group_id=group_id,
+                    ),
                 )
         if memories is not None:
             palace_path, _local = self._memory_paths(group_id)
@@ -708,6 +744,7 @@ class DataTransferService:
         snapshot = json.loads(path.read_text(encoding="utf-8"))
         self._journal(journal_id, "rollback_started", json.loads(row["detail"] or "{}"))
         group_id = str(row["group_id"])
+        self._advance_profile_generation_for_snapshot(snapshot)
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             for name, keys in snapshot.get("incoming_keys", {}).items():
@@ -758,7 +795,15 @@ class DataTransferService:
                 conn.executemany("DELETE FROM profiles WHERE user_id=?", ((value,) for value in profile_users))
                 conn.commit()
         for profile in snapshot.get("profiles", []):
-            store.upsert_local_profile(group_id=group_id, user_id=str(profile["user_id"]), profile_text=str(profile["profile_text"]), profile_json=self._safe_profile_json(profile["profile_json"]))
+            store.upsert_local_profile(
+                group_id=group_id,
+                user_id=str(profile["user_id"]),
+                profile_text=str(profile["profile_text"]),
+                profile_json=self._safe_profile_json(
+                    profile["profile_json"],
+                    expected_group_id=group_id,
+                ),
+            )
         palace, _local = self._memory_paths(group_id)
         memory_ids = [str(value) for value in snapshot.get("memory_ids", [])]
         if palace is not None and palace.is_file() and memory_ids:
@@ -781,3 +826,17 @@ class DataTransferService:
                     else:
                         conn.execute("DELETE FROM memory_clusters WHERE cluster_id=?", (cluster_id,))
                 conn.commit()
+
+    def _advance_profile_generation_for_values(self, values: dict[str, Any]) -> None:
+        if self.memory_store is not None and {
+            "group_messages",
+            "local_user_profiles",
+        } & set(values):
+            self.memory_store.advance_profile_generation()
+
+    def _advance_profile_generation_for_snapshot(self, snapshot: dict[str, Any]) -> None:
+        incoming_keys = snapshot.get("incoming_keys", {})
+        if self.memory_store is not None and (
+            "group_messages" in incoming_keys or "profile_users" in snapshot
+        ):
+            self.memory_store.advance_profile_generation()

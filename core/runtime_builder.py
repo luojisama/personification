@@ -129,6 +129,7 @@ from .plugin_runtime_logs import maybe_prune as maybe_prune_plugin_logs
 from .plugin_runtime_logs import wrap_logger as wrap_plugin_logger
 from .proactive_store import load_proactive_state, save_proactive_state, update_private_interaction_time
 from .profile_service import ProfileService
+from .scoped_profile_service import ScopedProfileService
 from .policy_classifier import PolicyClassifier
 from .qzone_service import build_qzone_services, build_qzone_social_service
 from .qq_user_policy import QQUserPolicyGate
@@ -252,7 +253,13 @@ def build_plugin_runtime(
     msg_buffer: Dict[str, Dict[str, Any]] = {}
     persona_store = None
     memory_store = init_memory_store(plugin_config, logger=logger)
-    profile_service = ProfileService(memory_store)
+    profile_service = ProfileService(
+        memory_store,
+        enabled_getter=lambda: bool(
+            getattr(plugin_config, "personification_persona_enabled", True)
+        ),
+    )
+    scoped_profile_service = None
     memory_decay_scheduler = MemoryDecayScheduler(memory_store, logger=logger)
     scheduler = get_scheduler()
     background_intelligence = BackgroundIntelligence(
@@ -385,29 +392,53 @@ def build_plugin_runtime(
         f"video_fallback={route_state['video_fallback']} "
         f"video_fallback_source={route_state['video_fallback_source'] or 'none'}"
     )
-    if getattr(plugin_config, "personification_persona_enabled", True):
-        persona_tool_caller = build_routed_tool_caller(
-            plugin_config=plugin_config,
-            logger=logger,
-        )
-        persona_data_path_raw = str(
-            getattr(plugin_config, "personification_persona_data_path", "") or ""
-        ).strip()
-        persona_data_file = (
-            Path(persona_data_path_raw)
-            if persona_data_path_raw
-            else get_personification_data_dir(plugin_config) / "user_personas.json"
-        )
-        persona_store = PersonaStore(
-            data_dir=persona_data_file.parent,
-            data_file=persona_data_file,
-            tool_caller=persona_tool_caller,
-            history_max=int(
-                getattr(plugin_config, "personification_persona_history_max", DEFAULT_PERSONA_HISTORY_MAX)
+    persona_tool_caller = build_routed_tool_caller(
+        plugin_config=plugin_config,
+        logger=logger,
+    )
+    persona_data_path_raw = str(
+        getattr(plugin_config, "personification_persona_data_path", "") or ""
+    ).strip()
+    persona_data_file = (
+        Path(persona_data_path_raw)
+        if persona_data_path_raw
+        else get_personification_data_dir(plugin_config) / "user_personas.json"
+    )
+    persona_enabled = lambda: bool(
+        getattr(plugin_config, "personification_persona_enabled", True)
+    )
+    persona_store = PersonaStore(
+        data_dir=persona_data_file.parent,
+        data_file=persona_data_file,
+        tool_caller=persona_tool_caller,
+        history_max=int(
+            getattr(plugin_config, "personification_persona_history_max", DEFAULT_PERSONA_HISTORY_MAX)
+        ),
+        logger=logger,
+        profile_service=profile_service,
+        enabled_getter=persona_enabled,
+    )
+    scoped_profile_service = ScopedProfileService(
+        profile_service=profile_service,
+        tool_caller=persona_tool_caller,
+        logger=logger,
+        enabled=persona_enabled,
+        auto_threshold=max(
+            2,
+            min(
+                8,
+                int(
+                    getattr(
+                        plugin_config,
+                        "personification_persona_history_max",
+                        DEFAULT_PERSONA_HISTORY_MAX,
+                    )
+                    or DEFAULT_PERSONA_HISTORY_MAX
+                )
+                // 3,
             ),
-            logger=logger,
-            profile_service=profile_service,
-        )
+        ),
+    )
     tool_registry, inner_state_updater, agent_tool_caller, lite_tool_caller = build_agent_runtime_deps(
         plugin_config=plugin_config,
         logger=logger,
@@ -761,10 +792,13 @@ def build_plugin_runtime(
         policy_classifier.caller = new_lite_tool_caller or new_agent_tool_caller
         if persona_store is not None:
             try:
-                persona_store.tool_caller = build_routed_tool_caller(
+                refreshed_persona_caller = build_routed_tool_caller(
                     plugin_config=plugin_config,
                     logger=logger,
                 )
+                persona_store.tool_caller = refreshed_persona_caller
+                if scoped_profile_service is not None:
+                    scoped_profile_service.tool_caller = refreshed_persona_caller
             except Exception as exc:
                 logger.warning(f"personification: rebuild persona tool caller failed: {exc}")
         logger.info("personification: runtime services reloaded from current config")
@@ -817,6 +851,7 @@ def build_plugin_runtime(
         persona_store=persona_store,
         memory_store=memory_store,
         profile_service=profile_service,
+        scoped_profile_service=scoped_profile_service,
         memory_curator=memory_curator,
         memory_decay_scheduler=memory_decay_scheduler,
         background_intelligence=background_intelligence,

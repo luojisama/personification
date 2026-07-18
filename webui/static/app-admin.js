@@ -1567,11 +1567,52 @@ function renderFavorabilityCard(fav, title) {
   </div>`;
 }
 
-async function openPersona(uid) {
+function personaDetailPath(uid) {
+  const groupId=String(state.personaScopeGroupId||"").trim();
+  const suffix=groupId?`?group_id=${encodeURIComponent(groupId)}`:"";
+  return "/personas/"+encodeURIComponent(uid)+suffix;
+}
+
+async function loadPersonaDetail(uid) {
+  const requestId=++state.personaScopeRequestId;
+  const requestedGroup=String(state.personaScopeGroupId||"");
+  const result=await api(personaDetailPath(uid));
+  if(requestId!==state.personaScopeRequestId||requestedGroup!==String(state.personaScopeGroupId||""))return false;
+  state.selectedPersona=result;
+  return true;
+}
+
+async function openPersona(uid, preserveScope=false) {
   try {
-    state.selectedPersona = await api("/personas/" + encodeURIComponent(uid));
-    render();
+    if(!preserveScope)state.personaScopeGroupId="";
+    if(await loadPersonaDetail(uid))render();
   } catch (e) { alertFlash("err", e.message); }
+}
+
+function selectPersonaScopeBot(botId) {
+  state.personaScopeRequestId+=1;
+  state.personaScopeBotId=String(botId||"");
+  state.personaScopeGroupId="";
+  render();
+}
+
+async function selectPersonaScopeGroup(uid, groupId) {
+  state.personaScopeGroupId=String(groupId||"");
+  await openPersona(uid,true);
+}
+
+async function refreshScopedProfile(uid) {
+  const botId=String(state.personaScopeBotId||"").trim();
+  const groupId=String(state.personaScopeGroupId||"").trim();
+  if(!botId||!groupId){alertFlash("err","请先选择在线 Bot 和目标群");return;}
+  if(!confirm(`重新分析用户 ${uid} 在群 ${groupId} 的差异画像？`))return;
+  state.scopedProfileBusy=true;render();
+  try{
+    const result=await api(`/personas/${encodeURIComponent(uid)}/group-refresh`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({bot_id:botId,group_id:groupId})});
+    alertFlash(result.partial?"info":(result.status==="succeeded"?"ok":"info"),result.status==="succeeded"?"群内画像已刷新":`群内画像未更新：${result.code||result.status}`);
+    await loadPersonaDetail(uid);
+  }catch(e){alertFlash("err",e.message||"群内画像刷新失败");}
+  finally{state.scopedProfileBusy=false;render();}
 }
 
 function renderQqProfileCard(core, userId) {
@@ -1650,15 +1691,16 @@ function renderAvatarInsightCard(core, userId) {
 function renderPersonaDetail() {
   const p = state.selectedPersona;
   const core = p.core_profile;
-  const locals = (p.local_profiles || []).map(lp => `<div class="card" style="background:#0e1117">
+  const claimLabels={gender:"性别",age_group:"年龄段",occupation:"职业",portrait:"人物描述",interests:"兴趣",routine:"作息",communication_style:"沟通风格",emotion_baseline:"情绪基线",social_mode:"社交模式",knowledge:"知识结构",relationship:"关系",taboos:"雷区",memory_anchors:"记忆锚点",recent_focus:"近期关注",content_pref:"内容偏好",nickname_pref:"称呼偏好",interaction_advice:"互动建议",group_role:"本群角色"};
+  const renderClaims=claims=>(claims||[]).map(claim=>`<tr><th scope="row" class="u-atomic">${escapeHtml(claimLabels[claim.key]||claim.key||"")}</th><td class="col-description u-wrap">${escapeHtml(claim.value||"")}</td><td class="col-status u-atomic">${escapeHtml(claim.source||"")}</td><td class="col-number u-atomic u-tabular">${Number(claim.confidence||0).toFixed(2)}</td></tr>`).join("");
+  const locals = (p.local_profiles || []).map(lp => {const claimRows=renderClaims(lp.effective_claims);return `<div class="card" style="background:#0e1117">
     <div class="between"><strong>群 ${escapeHtml(lp.group_id)}</strong><span class="muted" style="font-size:12px">${new Date(lp.updated_at*1000).toLocaleString()}</span></div>
-    <pre class="u-pre-wrap code-scroll" style="margin:6px 0 0;font-family:inherit">${escapeHtml(lp.profile_text)}</pre>
-  </div>`).join("");
+    ${claimRows?`<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="群内 effective claims"><table class="data-table compact" style="margin-top:8px"><thead><tr><th scope="col">字段</th><th scope="col">值</th><th scope="col">来源</th><th scope="col">置信度</th></tr></thead><tbody>${claimRows}</tbody></table></div>`:`<pre class="u-pre-wrap code-scroll" style="margin:6px 0 0;font-family:inherit">${escapeHtml(lp.profile_text||"")}</pre>`}
+  </div>`;}).join("");
   const structured = (core && core.structured) || {};
   const corr = (core && core.user_corrections) || {};
-  const SKEY = {gender:"性别",age_group:"年龄段",occupation:"职业",portrait:"人物描述",interests:"兴趣",routine:"作息",communication_style:"沟通风格",emotion_baseline:"情绪基线",social_mode:"社交模式",knowledge:"知识结构",relationship:"关系",taboos:"雷区",memory_anchors:"记忆锚点",recent_focus:"近期关注",content_pref:"内容偏好",nickname_pref:"称呼偏好",interaction_advice:"互动建议"};
   const structRows = Object.keys(structured).map(k => `<tr>
-      <th scope="row" class="u-atomic">${escapeHtml(SKEY[k]||k)}${corr[SKEY[k]]||corr[k]?' <span class="device-status approved">已更正</span>':''}</th>
+      <th scope="row" class="u-atomic">${escapeHtml(claimLabels[k]||k)}${corr[claimLabels[k]]||corr[k]?' <span class="device-status approved">已更正</span>':''}</th>
       <td class="col-description u-wrap">${escapeHtml(String(structured[k]))}</td>
     </tr>`).join("");
   const structCard = `<div class="card"><h2>结构化字段（持久保存）</h2>
@@ -1670,6 +1712,14 @@ function renderPersonaDetail() {
     </div>
     <p class="muted" style="font-size:11px;margin-top:6px">用户确认的画像事实会保留到后续重生成，但只作为背景数据，不构成模型指令。</p>
   </div>`;
+  const bots=(state.qqInfo&&state.qqInfo.bots)||[];
+  const botOptions=bots.map(item=>{const id=String(item.bot_id||"");return `<option value="${escapeAttr(id)}" ${id===state.personaScopeBotId?"selected":""}>QQ ${escapeHtml(id)}</option>`}).join("");
+  const scopedGroups=(state.qqGroups||[]).filter(item=>(item.bot_self_ids||[]).map(String).includes(String(state.personaScopeBotId||"")));
+  const groupOptions=scopedGroups.map(item=>{const id=String(item.group_id||"");const label=item.group_name?`${item.group_name} (${id})`:id;return `<option value="${escapeAttr(id)}" ${id===state.personaScopeGroupId?"selected":""}>${escapeHtml(label)}</option>`}).join("");
+  const effectiveRows=state.personaScopeGroupId?renderClaims(p.effective_claims):"";
+  const scopedCard=`<div class="card"><div class="between" style="gap:12px;flex-wrap:wrap"><h2 style="margin:0">当前群差异画像</h2><button class="btn small primary" onclick="refreshScopedProfile('${escapeAttr(p.user_id)}')" ${!state.personaScopeBotId||!state.personaScopeGroupId||state.scopedProfileBusy?"disabled":""}>${state.scopedProfileBusy?'<span class="spinner"></span> 刷新中…':'重新分析'}</button></div>
+    <div class="field-input" style="margin-top:12px"><label>Bot <select onchange="selectPersonaScopeBot(this.value)">${botOptions||'<option value="">无在线 Bot</option>'}</select></label><label>群 <select onchange="selectPersonaScopeGroup('${escapeAttr(p.user_id)}',this.value)"><option value="">选择目标群</option>${groupOptions}</select></label></div>
+    ${state.personaScopeGroupId?(effectiveRows?`<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="当前群 effective claims"><table class="data-table compact" style="margin-top:12px"><thead><tr><th scope="col">字段</th><th scope="col">值</th><th scope="col">来源</th><th scope="col">置信度</th></tr></thead><tbody>${effectiveRows}</tbody></table></div>`:'<p class="muted">当前群暂无差异画像，可手动重新分析。</p>'):'<p class="muted">选择明确的在线 Bot 与目标群后，可查看 effective claims 或触发安全刷新。</p>'}</div>`;
   return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedPersona=null;render()">返回列表</button><span class="muted">用户 ${escapeHtml(p.user_id)}</span></div>
     ${renderAdminOperations("persona","画像操作诊断")}
     ${renderFavorabilityCard(p.favorability, "用户好感度")}
@@ -1677,6 +1727,7 @@ function renderPersonaDetail() {
     ${renderAvatarInsightCard(core, p.user_id)}
     <div class="card"><h2>全局印象</h2>${core && core.profile_text ? `<pre class="u-pre-wrap code-scroll" style="margin:0;font-family:inherit">${escapeHtml(core.profile_text || '')}</pre>` : '<p class="muted">无全局画像</p>'}</div>
     ${structCard}
+    ${scopedCard}
     <h3 style="margin-bottom:10px">各群印象（${(p.local_profiles||[]).length}）</h3>
     ${locals || '<p class="muted">无各群画像</p>'}`;
 }
@@ -2034,7 +2085,7 @@ async function submitCorrection(uid) {
   try {
     const result=await api("/personas/"+encodeURIComponent(uid)+"/correction", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({corrections:{[field]:value}})});
     const diagnostic=rememberAdminOperation("persona",result,"画像更正未完成");alertFlash(diagnostic?.partial?"info":"ok",diagnostic?.title||"已提交更正");
-    state.selectedPersona = await api("/personas/"+encodeURIComponent(uid));
+    await loadPersonaDetail(uid);
     render();
   } catch (e) { const diagnostic=rememberAdminOperation("persona",e,"画像更正未完成");alertFlash("err",diagnostic?.title||"画像更正未完成");render(); }
 }
@@ -2047,7 +2098,7 @@ async function refreshAvatarAnalysis(uid) {
     const result = await api(`/personas/${encodeURIComponent(uid)}/avatar-analysis/refresh`, {method:"POST"});
     const diagnostic = rememberAdminOperation("persona", result, "头像重新分析未排队");
     alertFlash("ok", diagnostic?.title || "头像重新分析已排队");
-    state.selectedPersona = await api(`/personas/${encodeURIComponent(uid)}`);
+    await loadPersonaDetail(uid);
   } catch (e) {
     const diagnostic = rememberAdminOperation("persona", e, "头像重新分析未排队");
     alertFlash("err", diagnostic?.title || "头像重新分析未排队");
@@ -2065,7 +2116,7 @@ async function clearAvatarAnalysis(uid) {
     const result = await api(`/personas/${encodeURIComponent(uid)}/avatar-analysis`, {method:"DELETE"});
     const diagnostic = rememberAdminOperation("persona", result, "头像分析删除未完成");
     alertFlash(diagnostic?.partial ? "info" : "ok", diagnostic?.title || "头像分析已删除");
-    state.selectedPersona = await api(`/personas/${encodeURIComponent(uid)}`);
+    await loadPersonaDetail(uid);
   } catch (e) {
     const diagnostic = rememberAdminOperation("persona", e, "头像分析删除未完成");
     alertFlash("err", diagnostic?.title || "头像分析删除未完成");

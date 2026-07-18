@@ -69,6 +69,11 @@ def _profile_service(runtime: Any) -> Any:
     return getattr(_reply_runtime(runtime), "profile_service", None)
 
 
+def _persona_enabled(runtime: Any) -> bool:
+    config = getattr(_reply_runtime(runtime), "plugin_config", None)
+    return bool(getattr(config, "personification_persona_enabled", True))
+
+
 def _profile_generation_key(profile_service: Any, user_id: str) -> tuple[int, str]:
     return id(profile_service), str(user_id or "").strip()
 
@@ -268,8 +273,11 @@ async def analyze_user_avatar(
     runtime = _reply_runtime(runtime)
     profile_service = _profile_service(runtime)
     uid = str(user_id or "").strip()
-    if profile_service is None or not uid:
+    if profile_service is None or not uid or not _persona_enabled(runtime):
         return {"status": "unavailable", "reason": "profile_service_unavailable"}
+    memory_store = getattr(profile_service, "memory_store", None)
+    generation_getter = getattr(memory_store, "get_profile_generation", None)
+    profile_generation = int(generation_getter()) if callable(generation_getter) else None
     snapshot = profile_service.get_core_profile(uid)
     if snapshot is None:
         return {"status": "unavailable", "reason": "profile_missing"}
@@ -282,9 +290,21 @@ async def analyze_user_avatar(
     generation = _profile_generation(profile_service, uid)
 
     def _patch_if_current(patcher: Callable[[dict[str, Any]], dict[str, Any]]) -> bool:
-        if _profile_generation(profile_service, uid) != generation:
+        if (
+            not _persona_enabled(runtime)
+            or _profile_generation(profile_service, uid) != generation
+        ):
             return False
-        profile_service.patch_core_profile(user_id=uid, patcher=patcher)
+        try:
+            profile_service.patch_core_profile(
+                user_id=uid,
+                patcher=patcher,
+                expected_generation=profile_generation,
+            )
+        except Exception as exc:
+            if getattr(exc, "code", "") == "profile_generation_changed":
+                return False
+            raise
         return True
 
     checked_at = float(now_ts if now_ts is not None else time.time())
@@ -345,6 +365,9 @@ async def analyze_user_avatar(
         if not persisted:
             return {"status": "cancelled", "reason": "profile_generation_changed", "skipped": True}
         return {"status": "unchanged", "reason": "content_hash_unchanged", "skipped": True}
+
+    if not _persona_enabled(runtime):
+        return {"status": "cancelled", "reason": "persona_disabled", "skipped": True}
 
     data_url = f"data:{downloaded.content_type};base64,{base64.b64encode(content).decode('ascii')}"
     route = "vision_unavailable"
@@ -483,6 +506,9 @@ def clear_user_avatar_analysis(profile_service: Any, user_id: str) -> bool:
             predecessor.cancel()
         if not task.done():
             task.cancel()
+    memory_store = getattr(profile_service, "memory_store", None)
+    generation_getter = getattr(memory_store, "get_profile_generation", None)
+    profile_generation = int(generation_getter()) if callable(generation_getter) else None
     snapshot = profile_service.get_core_profile(uid) if profile_service is not None and uid else None
     if snapshot is None:
         return False
@@ -490,15 +516,21 @@ def clear_user_avatar_analysis(profile_service: Any, user_id: str) -> bool:
     existed = bool(analysis or insight)
     if not existed:
         return False
-    profile_service.patch_core_profile(
-        user_id=uid,
-        patcher=lambda current: _patch_avatar_state(
-            current,
-            analysis=None,
-            insight=None,
-            remove=True,
-        ),
-    )
+    try:
+        profile_service.patch_core_profile(
+            user_id=uid,
+            patcher=lambda current: _patch_avatar_state(
+                current,
+                analysis=None,
+                insight=None,
+                remove=True,
+            ),
+            expected_generation=profile_generation,
+        )
+    except Exception as exc:
+        if getattr(exc, "code", "") == "profile_generation_changed":
+            return False
+        raise
     return True
 
 
@@ -508,6 +540,16 @@ def build_inspect_current_user_avatar_tool(profile_service: Any, user_id: str) -
     uid = str(user_id or "").strip()
 
     async def _handler() -> str:
+        if not bool(
+            profile_service.is_enabled()
+            if callable(getattr(profile_service, "is_enabled", None))
+            else True
+        ):
+            return json.dumps(
+                {"ok": True, "available": False, "analysis": {}, "insight": {}},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         state = get_user_avatar_state(
             profile_service,
             uid,
@@ -533,6 +575,11 @@ def build_inspect_current_user_avatar_tool(profile_service: Any, user_id: str) -
         parameters={"type": "object", "properties": {}, "required": []},
         handler=_handler,
         local=True,
+        enabled=lambda: bool(
+            profile_service.is_enabled()
+            if callable(getattr(profile_service, "is_enabled", None))
+            else True
+        ),
         metadata={
             "intent_tags": ["avatar", "lookup", "memory", "runtime_capability", "current_user"],
             "evidence_kind": "profile",
@@ -553,7 +600,14 @@ def add_current_user_avatar_planner_metadata(
 ) -> list[dict[str, Any]]:
     uid = str(user_id or "").strip()
     items = [dict(item) for item in list(available_tools or []) if isinstance(item, dict)]
-    if profile_service is None or not uid:
+    if (
+        profile_service is None
+        or not uid
+        or (
+            callable(getattr(profile_service, "is_enabled", None))
+            and not profile_service.is_enabled()
+        )
+    ):
         return items
     from ..agent.runtime.tool_catalog import tool_planner_metadata
 

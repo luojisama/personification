@@ -58,9 +58,35 @@ def test_record_handler_rechecks_policy_before_any_write() -> None:
             logger=SimpleNamespace(info=lambda *_args, **_kwargs: None),
             create_background_task=lambda _group_id: touched.append("style"),
             create_summary_task=lambda _group_id: touched.append("summary"),
+            create_scoped_profile_task=lambda _group_id, _user_id: touched.append("scoped"),
             user_policy_gate=gate,
         )
     )
 
     assert touched == []
     assert gate.calls == 1
+
+
+def test_record_handler_schedules_scoped_profile_after_allowed_group_write() -> None:
+    gate = _Gate(True)
+    touched: list[object] = []
+
+    asyncio.run(
+        record_handler.handle_record_message_event(
+            SimpleNamespace(user_id="10001"),
+            resolve_record_message=lambda *_args, **_kwargs: ("20001", False),
+            record_group_msg=lambda *_args, **_kwargs: None,
+            logger=SimpleNamespace(info=lambda *_args, **_kwargs: None),
+            create_background_task=lambda _group_id: touched.append("style"),
+            create_summary_task=lambda group_id: touched.append(("summary", group_id)),
+            create_scoped_profile_task=lambda group_id, user_id: touched.append(
+                ("scoped", group_id, user_id)
+            ),
+            user_policy_gate=gate,
+        )
+    )
+
+    assert touched == [
+        ("summary", "20001"),
+        ("scoped", "20001", "10001"),
+    ]

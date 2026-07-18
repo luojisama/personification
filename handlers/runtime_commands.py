@@ -849,17 +849,20 @@ async def handle_full_reset_memory_command(
         "history_messages": 0,
         "cancelled_tasks": 0,
     }
+    clear_failures: list[str] = []
     if persona_store is not None:
         try:
             persona_stats = await persona_store.clear_all()
         except Exception as e:
             logger.warning(f"[full_reset_memory] clear persona store failed: {e}")
+            clear_failures.append("用户画像")
 
     image_cache_count = 0
     try:
         image_cache_count = await clear_image_result_cache()
     except Exception as e:
         logger.warning(f"[full_reset_memory] clear image cache failed: {e}")
+        clear_failures.append("图片缓存")
 
     driver = get_driver()
     driver_cache_count = 0
@@ -875,16 +878,21 @@ async def handle_full_reset_memory_command(
     await store.save("inner_state", {})
     await store.save("proactive_state", {})
 
+    result_prefix = "拟人插件记忆仅部分清除：" if clear_failures else "已完全清除拟人插件记忆："
+    failure_suffix = (
+        f"未能确认清除：{'、'.join(clear_failures)}。"
+        if clear_failures
+        else ""
+    )
     await matcher.finish(
-        "已完全清除拟人插件记忆："
-        f"会话 {session_count} 个，"
+        result_prefix + f"会话 {session_count} 个，"
         f"消息缓冲 {buffer_count} 个，"
         f"用户画像 {persona_stats['personas']} 份，"
         f"画像暂存 {persona_stats['history_users']} 人/{persona_stats['history_messages']} 条，"
         f"取消画像任务 {persona_stats['cancelled_tasks']} 个，"
         f"图片缓存 {image_cache_count} 条，"
         f"驱动缓存 {driver_cache_count} 条。"
-        "已保留所有提示词与群配置。"
+        f"{failure_suffix}已保留所有提示词与群配置。"
     )
 
 

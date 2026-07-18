@@ -59,6 +59,13 @@ def _persona_store(runtime) -> Any | None:
     return getattr(bundle, "persona_store", None)
 
 
+def _scoped_profile_service(runtime) -> Any | None:
+    bundle = getattr(runtime, "runtime_bundle", None)
+    if bundle is None:
+        return None
+    return getattr(bundle, "scoped_profile_service", None)
+
+
 def _get_first_bot(runtime) -> Any | None:
     bundle = getattr(runtime, "runtime_bundle", None)
     if bundle is None:
@@ -71,6 +78,26 @@ def _get_first_bot(runtime) -> Any | None:
     except Exception:
         return None
     return next(iter(bots.values()), None) if bots else None
+
+
+def _get_bot_by_id(runtime: Any, bot_id: str) -> Any | None:
+    bundle = getattr(runtime, "runtime_bundle", None)
+    get_bots = getattr(bundle, "get_bots", None) if bundle is not None else None
+    if not callable(get_bots):
+        return None
+    try:
+        bots = get_bots() or {}
+    except Exception:
+        return None
+    values = bots.values() if isinstance(bots, dict) else []
+    return next(
+        (
+            bot
+            for bot in values
+            if str(getattr(bot, "self_id", "") or "").strip() == str(bot_id)
+        ),
+        None,
+    )
 
 
 def _runtime_bundle(runtime) -> Any | None:
@@ -153,10 +180,17 @@ def build_persona_router(*, runtime) -> APIRouter:
         return {"profiles": items, "available": True}
 
     @router.get("/{user_id}")
-    async def detail(user_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
+    async def detail(
+        user_id: str,
+        _: AdminIdentity = Depends(require_admin),
+        group_id: str = "",
+    ) -> dict:
         svc = _profile_service(runtime)
         if svc is None:
             raise HTTPException(status_code=503, detail="profile_service 未就绪")
+        group_id = str(group_id or "").strip()
+        if group_id and (not group_id.isdigit() or int(group_id) <= 0):
+            raise HTTPException(status_code=400, detail="group_id 无效")
         core = svc.get_core_profile(user_id)
         groups = svc.list_groups()
         local_profiles: list[dict[str, Any]] = []
@@ -170,6 +204,17 @@ def build_persona_router(*, runtime) -> APIRouter:
                     "profile_text": entry.profile_text,
                     "profile_json": entry.profile_json,
                     "updated_at": entry.updated_at,
+                    "effective_claims": svc.get_effective_claims(
+                        user_id=user_id,
+                        group_id=gid,
+                    ),
+                    "effective_source": (
+                        "group_delta"
+                        if isinstance(entry.profile_json, dict)
+                        and entry.profile_json.get("schema_version") == 2
+                        and bool(entry.profile_json.get("claims"))
+                        else "legacy_local"
+                    ),
                 }
             )
         core_json = (core.profile_json if core and isinstance(core.profile_json, dict) else {}) or {}
@@ -215,7 +260,133 @@ def build_persona_router(*, runtime) -> APIRouter:
                 "updated_at": 0,
             },
             "local_profiles": local_profiles,
-            "prompt_block": svc.build_prompt_block(user_id=user_id, group_id=""),
+            "effective_claims": svc.get_effective_claims(
+                user_id=user_id,
+                group_id=group_id,
+            ),
+            "effective_scope": (
+                {"kind": "group", "group_id": group_id}
+                if str(group_id or "").strip()
+                else {"kind": "global"}
+            ),
+            "prompt_block": svc.build_prompt_block(
+                user_id=user_id,
+                group_id=group_id,
+            ),
+        }
+
+    @router.post("/{user_id}/group-refresh")
+    async def refresh_group_profile(
+        user_id: str,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        group_id = str(body.get("group_id", "") or "").strip()
+        bot_id = str(body.get("bot_id", "") or "").strip()
+
+        def _audit(outcome: str, code: str, detail: dict[str, Any] | None = None) -> bool:
+            try:
+                webui_audit_log.record(
+                    action="persona_group_refresh",
+                    qq=admin.qq,
+                    device_id=admin.device_id,
+                    target=f"{bot_id or 'unspecified'}:{group_id or 'invalid'}:{user_id}",
+                    detail={"bot_id": bot_id, "code": code, **(detail or {})},
+                    outcome=outcome,
+                )
+                return True
+            except Exception as exc:
+                logger = getattr(runtime, "logger", None)
+                if logger is not None:
+                    logger.warning(
+                        f"[persona group refresh] audit_failed type={type(exc).__name__}"
+                    )
+                return False
+
+        service = _scoped_profile_service(runtime)
+        if service is None:
+            _audit("error", "service_unavailable")
+            raise HTTPException(status_code=503, detail="scoped profile service 未就绪")
+        if not group_id.isdigit() or int(group_id) <= 0:
+            _audit("denied", "invalid_group_id")
+            raise HTTPException(status_code=400, detail="group_id 无效")
+        if not str(user_id or "").isdigit() or int(user_id) <= 0:
+            _audit("denied", "invalid_user_id")
+            raise HTTPException(status_code=400, detail="user_id 无效")
+        if not bot_id:
+            _audit("denied", "bot_id_required")
+            raise HTTPException(status_code=400, detail="必须显式提供 bot_id")
+        bot = _get_bot_by_id(runtime, bot_id)
+        if bot is None:
+            _audit("denied", "bot_offline")
+            raise HTTPException(status_code=404, detail="指定 Bot 当前不在线")
+        if not callable(getattr(bot, "get_group_list", None)):
+            _audit("denied", "membership_unavailable")
+            raise HTTPException(status_code=403, detail="无法确认指定 Bot 的群 membership")
+        try:
+            groups = await bot.get_group_list()
+        except Exception as exc:
+            _audit("denied", "bot_group_membership_failed")
+            raise HTTPException(status_code=403, detail="指定 Bot 群 membership 检查失败") from exc
+        if not any(
+            str(item.get("group_id", "") or "") == group_id
+            for item in (groups or [])
+            if isinstance(item, dict)
+        ):
+            _audit("denied", "bot_not_in_group")
+            raise HTTPException(status_code=403, detail="指定 Bot 不在目标群")
+        try:
+            member = await bot.get_group_member_info(
+                group_id=int(group_id),
+                user_id=int(user_id),
+                no_cache=True,
+            )
+        except Exception as exc:
+            _audit("denied", "user_membership_failed")
+            raise HTTPException(
+                status_code=403,
+                detail="无法确认目标用户属于该群，已拒绝 scoped refresh",
+            ) from exc
+        if (
+            not isinstance(member, dict)
+            or str(member.get("user_id", "") or "") != str(user_id)
+            or str(member.get("group_id", "") or "") != group_id
+            or str(getattr(bot, "self_id", "") or "") != bot_id
+        ):
+            _audit("denied", "membership_tuple_mismatch")
+            raise HTTPException(
+                status_code=403,
+                detail="目标用户群成员身份未得到协议确认",
+            )
+        try:
+            result = await service.refresh_group_profile(
+                group_id=group_id,
+                user_id=user_id,
+                force=True,
+            )
+        except Exception as exc:
+            _audit("error", "refresh_failed", {"error_type": type(exc).__name__})
+            raise HTTPException(status_code=500, detail="scoped profile 刷新失败") from exc
+        audit_ok = _audit(
+            "ok" if result.status == "succeeded" else result.status,
+            result.code,
+            {"status": result.status},
+        )
+        return {
+            "status": result.status,
+            "code": result.code,
+            "bot_id": bot_id,
+            "group_id": result.group_id,
+            "user_id": result.user_id,
+            "revision": result.revision,
+            "claim_count": result.claim_count,
+            "anchor_count": result.anchor_count,
+            "partial": not audit_ok,
+            "warnings": (
+                []
+                if audit_ok
+                else ["scoped profile 刷新结果已产生，但管理员审计记录写入失败。"]
+            ),
         }
 
     @router.post("/{user_id}/correction")

@@ -144,6 +144,7 @@ class PluginRuntimeBundle:
     persona_store: Any = None
     memory_store: Any = None
     profile_service: Any = None
+    scoped_profile_service: Any = None
     memory_curator: Any = None
     memory_decay_scheduler: Any = None
     background_intelligence: Any = None

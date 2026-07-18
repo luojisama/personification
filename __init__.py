@@ -781,6 +781,13 @@ async def _setup_social_intelligence() -> None:
 @get_driver().on_shutdown
 async def _close_personification_runtime() -> None:
     global _sticker_labeler_observer, _knowledge_build_task, _visual_probe_task, _qzone_cookie_refresh_task, runtime_bundle
+    if runtime_bundle is not None:
+        scoped_profile_service = getattr(runtime_bundle, "scoped_profile_service", None)
+        if scoped_profile_service is not None:
+            try:
+                await scoped_profile_service.close()
+            except Exception as exc:
+                logger.debug(f"[scoped_profile] shutdown cleanup failed: {exc}")
     if _sticker_labeler_observer is not None:
         _sticker_labeler_observer.stop()
         _sticker_labeler_observer.join()

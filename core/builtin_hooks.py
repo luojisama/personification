@@ -147,6 +147,8 @@ async def _schedule_hook(ctx: HookContext) -> Optional[str]:
 
 
 async def _user_persona_hook(ctx: HookContext) -> Optional[str]:
+    if not bool(getattr(ctx.plugin_config, "personification_persona_enabled", True)):
+        return None
     if str(getattr(ctx, "user_profile_block", "") or "").strip():
         return None
     persona_store = getattr(ctx.runtime, "persona_store", None)

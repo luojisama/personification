@@ -11,7 +11,7 @@ let state = {
   entries: [], groups: [], activeGroup: null, configSearch: "", configSearchComposing: false, configSearchDraft: "", configDrafts: {},
   devices: [], devicePending: false, alert: null, loading: false, loadingMessage: "",
   dashboard: null, dashboardWindow: "month", dashboardDetail: null,
-  personas: [], selectedPersona: null, personaSearch: "",
+  personas: [], selectedPersona: null, personaSearch: "", personaScopeBotId: "", personaScopeGroupId: "", personaScopeRequestId: 0, scopedProfileBusy: false,
   groupList: [], selectedGroup: null, groupPersonas: [], groupStyle: null, groupKnowledge: [], groupAliasDrafts: {}, groupSchedule: null, groupScheduleGenerating: false,
   groupFavorability: null,
   groupSwitches: [], newGroupId: "",
@@ -576,8 +576,15 @@ async function loadView() {
     } else if (view === "dashboard") {
       state.dashboard = await api("/metrics/summary?window=" + encodeURIComponent(state.dashboardWindow));
     } else if (view === "personas") {
-      const data = await api("/personas");
+      const [data, botInfo, groupInfo] = await Promise.all([
+        api("/personas"),
+        api("/qq/info").catch(() => ({bots: []})),
+        api("/qq/groups").catch(() => ({groups: []})),
+      ]);
       state.personas = data.profiles; state.personasAvailable = data.available;
+      state.qqInfo = botInfo; state.qqGroups = groupInfo.groups || [];
+      const personaBotIds=(botInfo.bots||[]).map(item=>String(item.bot_id||"")).filter(Boolean);
+      if(!personaBotIds.includes(state.personaScopeBotId))state.personaScopeBotId=personaBotIds[0]||"";
     } else if (view === "groups") {
       const data = await api("/groups");
       state.groupList = data.groups; state.groupsAvailable = data.available;

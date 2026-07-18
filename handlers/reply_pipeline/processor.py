@@ -569,8 +569,22 @@ async def _capture_user_protocol_profile(
     source: str,
 ) -> None:
     profile_service = getattr(runtime, "profile_service", None)
-    if profile_service is None or not str(user_id or "").strip():
+    persona_enabled = lambda: bool(
+        getattr(
+            getattr(runtime, "plugin_config", None),
+            "personification_persona_enabled",
+            True,
+        )
+    )
+    if (
+        profile_service is None
+        or not str(user_id or "").strip()
+        or not persona_enabled()
+    ):
         return
+    memory_store = getattr(profile_service, "memory_store", None)
+    generation_getter = getattr(memory_store, "get_profile_generation", None)
+    profile_generation = int(generation_getter()) if callable(generation_getter) else None
     try:
         from ...core.onebot_cache import get_user_profile
         from ...core.user_profile_meta import build_user_profile_meta
@@ -582,11 +596,12 @@ async def _capture_user_protocol_profile(
             stranger_info=protocol_profile,
             source=source,
         )
-        if meta:
+        if meta and persona_enabled():
             saved = profile_service.upsert_user_profile_meta(
                 user_id=str(user_id),
                 meta=meta,
                 source=source,
+                expected_generation=profile_generation,
             )
             if saved is not None:
                 schedule_user_avatar_analysis(runtime, str(user_id))
@@ -1181,7 +1196,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         if profile_service is not None:
             user_profile_block = profile_service.build_prompt_block(
                 user_id=user_id,
-                group_id=str(group_id),
+                group_id="" if is_private_session else str(group_id),
             )
     except Exception:
         user_profile_block = ""

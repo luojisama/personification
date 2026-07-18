@@ -398,6 +398,11 @@ def _build_get_persona_tool(persona_store: Any, max_chars: int = 120) -> AgentTo
         },
         handler=_handler,
         local=True,
+        enabled=lambda: bool(
+            persona_store.is_enabled()
+            if callable(getattr(persona_store, "is_enabled", None))
+            else True
+        ),
     )
 
 
