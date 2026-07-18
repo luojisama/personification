@@ -88,6 +88,39 @@ def test_target_inference_carries_recent_two_person_dialogue() -> None:
     assert set(decision.participants) == {"u1", "u2"}
 
 
+def test_explicit_bot_safety_request_overrides_human_dialogue_carry() -> None:
+    event = SimpleNamespace(
+        user_id="u1",
+        message_id="m5",
+        time=1040,
+        message=[
+            {"type": "at", "data": {"qq": "bot-1"}},
+            {"type": "text", "data": {"text": "路边有人没反应怎么办"}},
+        ],
+        reply=None,
+    )
+    recent = [
+        {
+            "message_id": "m1",
+            "user_id": "u1",
+            "mentioned_ids": ["u2"],
+            "source_kind": "user",
+            "time": 1000,
+        },
+        {"message_id": "m2", "user_id": "u2", "source_kind": "user", "time": 1020},
+    ]
+
+    decision = target_inference.infer_message_target(
+        event,
+        bot_self_id="bot-1",
+        recent_group_msgs=recent,
+    )
+
+    assert decision == target_inference.TARGET_BOT
+    assert decision.reason == "explicit_persona_mention"
+    assert set(decision.participants) == {"u1", "bot-1"}
+
+
 def test_target_inference_stops_human_dialogue_carry_on_third_party_or_persona() -> None:
     base = [
         {
@@ -362,6 +395,64 @@ def test_record_group_msg_keeps_plugin_episode_in_one_thread(tmp_path) -> None:
     assert context.plugin_episode.is_personification_output is False
     assert "其它插件交互 episode" in rendered
     assert "不要脱离插件结果" in rendered
+
+
+def test_two_ck_rounds_replay_keeps_each_external_plugin_episode_isolated(tmp_path) -> None:
+    cfg = SimpleNamespace(personification_data_dir=str(tmp_path))
+    data_store.init_data_store(cfg)
+    db.init_db_sync(tmp_path)
+
+    records = (
+        ("cmd-1", "u1", "甲", "[用户调用其它插件/命令] /ck", "plugin_command", 1000),
+        ("plugin-1", "bot-1", "bot", "辅助性T细胞", "plugin", 1010),
+        ("follow-1", "u2", "乙", "辅t都来了", "user", 1020),
+        ("cmd-2", "u3", "丙", "[用户调用其它插件/命令] /ck", "plugin_command", 1200),
+        ("plugin-2", "bot-1", "bot", "凯露", "plugin", 1210),
+        ("follow-2", "u2", "乙", "我cd4+在哪里", "user", 1220),
+    )
+    for message_id, user_id, nickname, content, source_kind, timestamp in records:
+        utils.record_group_msg(
+            "g1",
+            nickname,
+            content,
+            is_bot=source_kind == "plugin",
+            user_id=user_id,
+            message_id=message_id,
+            source_kind=source_kind,
+            time=timestamp,
+        )
+
+    first_ids = ["cmd-1", "plugin-1", "follow-1"]
+    second_ids = ["cmd-2", "plugin-2", "follow-2"]
+    first_threads = {
+        utils.get_group_msg_by_message_id("g1", message_id)["thread_id"]
+        for message_id in first_ids
+    }
+    second_threads = {
+        utils.get_group_msg_by_message_id("g1", message_id)["thread_id"]
+        for message_id in second_ids
+    }
+
+    assert len(first_threads) == 1
+    assert len(second_threads) == 1
+    assert first_threads != second_threads
+
+    recent = utils.get_recent_group_msgs("g1", limit=12, expire_hours=0)
+    context = group_context.build_group_conversation_context(
+        recent_messages=recent,
+        trigger_msg_id="follow-2",
+        trigger_user_id="u2",
+        bot_self_id="bot-1",
+    )
+
+    assert context.plugin_episode is not None
+    assert context.plugin_episode.command_message_id == "cmd-2"
+    assert context.plugin_episode.plugin_message_ids == ("plugin-2",)
+    assert context.plugin_episode.plugin_outputs == ("凯露",)
+    assert context.plugin_episode.followup_comments == ("乙: 我cd4+在哪里",)
+    assert context.plugin_episode.is_personification_output is False
+    assert context.topic_state.bot_in_current_thread is False
+    assert context.bot_recent_replies == []
 
 
 def test_group_context_does_not_count_plugin_output_as_persona_reply() -> None:

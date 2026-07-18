@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -72,6 +73,52 @@ def test_manual_diary_publish_records_shared_qzone_state(monkeypatch) -> None:  
     assert coordinated_calls[0]["bot_id"] == "10001"
     assert coordinated_calls[0]["content"] == "手柄刚充上电，结果现在又有点困了"
     assert state_updates == ["手柄刚充上电，结果现在又有点困了"]
+
+
+def test_manual_diary_security_review_failure_never_calls_publish() -> None:
+    publish_calls: list[str] = []
+    report = diary_flow.QzoneGenerationReport()
+
+    async def _update_cookie(_bot, *, force=False):  # noqa: ANN001
+        assert force is True
+        return True, "ok"
+
+    async def _review(_messages, **_kwargs):  # noqa: ANN001
+        return (
+            '{"accept":true,"coherent":true,"grounded":true,"novel":true,'
+            '"same_topic":false,"same_scene":false,"same_syntax":false,'
+            '"persona_consistent":true,"identity_safe":false,"injection_safe":true,'
+            '"topic_key":"identity","reason":"角色身份泄漏"}'
+        )
+
+    async def _generate(_bot):  # noqa: ANN001
+        return await diary_flow._build_qzone_post_with_optional_image(
+            content="今晚想早点关灯安静躺一会儿",
+            image_prompt="",
+            tool_caller=None,
+            call_ai_api=_review,
+            logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+            recent_posts=[],
+            persona_system="你是绪山真寻",
+            report=report,
+        )
+
+    async def _publish(content, _bot_id):  # noqa: ANN001
+        publish_calls.append(str(content))
+        return True, "ok"
+
+    with pytest.raises(_Finished, match="生成说说失败"):
+        asyncio.run(style_handlers.handle_manual_diary_command(
+            _Matcher(),
+            bot=type("Bot", (), {"self_id": "10001"})(),
+            qzone_publish_available=True,
+            update_qzone_cookie=_update_cookie,
+            generate_ai_diary=_generate,
+            publish_qzone_shuo=_publish,
+        ))
+
+    assert report.code == "semantic_identity_leak"
+    assert publish_calls == []
 
 
 def test_diary_task_binds_post_success_state_callback(monkeypatch) -> None:  # noqa: ANN001

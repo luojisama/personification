@@ -9,6 +9,7 @@ import yaml
 from .context_policy import (
     PROMPT_INJECTION_GUARD_MARKER,
     build_prompt_injection_guard,
+    ensure_prompt_injection_guard,
 )
 from .evidence_envelope import (
     EvidenceEnvelope,
@@ -241,12 +242,22 @@ class SocialSurfaceRenderer:
         kind = self.spec.output_kind if output_kind is None else _coerce_output_kind(output_kind)
         if kind is OutputKind.PERSONA_TEXT and prompt_data is not None:
             projected = self.project_persona(prompt_data, scope)
-            if projected and not any(
-                message.get("role") == "system"
-                and str(message.get("content", "") or "").strip() == projected
-                for message in prepared
-            ):
-                prepared.insert(0, {"role": "system", "content": projected})
+            if projected:
+                secured_projected = ensure_prompt_injection_guard(projected)
+                persona_index = next(
+                    (
+                        index
+                        for index, message in enumerate(prepared)
+                        if message.get("role") == "system"
+                        and str(message.get("content", "") or "").strip()
+                        in {projected, secured_projected}
+                    ),
+                    None,
+                )
+                if persona_index is None:
+                    prepared.insert(0, {"role": "system", "content": secured_projected})
+                else:
+                    prepared[persona_index]["content"] = secured_projected
         resolved_scope = self.spec.persona_scope if scope is None else _coerce_persona_scope(scope)
         if resolved_scope is not PersonaScope.NONE and not any(
             message.get("role") == "system"

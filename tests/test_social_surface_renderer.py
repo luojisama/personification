@@ -90,7 +90,13 @@ def test_prepare_messages_injects_persona_once_and_only_for_persona_text() -> No
 
     projected = persona_renderer.project_persona(persona)
     assert source == [{"role": "user", "content": "说句话"}]
-    assert [item.get("content") for item in prepared_again].count(projected) == 1
+    persona_systems = [
+        str(item.get("content", ""))
+        for item in prepared_again
+        if item.get("role") == "system" and projected in str(item.get("content", ""))
+    ]
+    assert len(persona_systems) == 1
+    assert renderer_module.PROMPT_INJECTION_GUARD_MARKER in persona_systems[0]
     assert sum(
         renderer_module.PROMPT_INJECTION_GUARD_MARKER in str(item.get("content", ""))
         for item in prepared_again

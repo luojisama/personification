@@ -161,6 +161,7 @@ def test_social_text_agent_injects_complete_runtime_persona_once(monkeypatch) ->
     assert "不脱离角色" in system_messages[0]
     assert "说话短一点" in system_messages[0]
     assert "你首先是群聊成员" not in system_messages[0]
+    assert "PERSONIFICATION_UNTRUSTED_DATA_GUARD_V1" in system_messages[0]
 
 
 def test_social_text_agent_requires_runtime_persona_loader(monkeypatch) -> None:  # noqa: ANN001

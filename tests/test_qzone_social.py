@@ -45,6 +45,7 @@ def test_qzone_social_uses_complete_qzone_persona_projection() -> None:
     assert "具体经历必须有依据" in projected
     assert "群聊 system 不应优先" not in projected
     assert "群聊边界不进入空间" not in projected
+    assert "PERSONIFICATION_UNTRUSTED_DATA_GUARD_V1" in projected
 
 
 class _PersonaStore:
@@ -898,6 +899,42 @@ def test_qzone_inbound_comment_replies_once_and_records_profile() -> None:
     assert result["replied"] == 1
     assert len(store.records) == 1
     assert "[QQ空间留言]" in store.records[0][1]
+
+
+def test_qzone_inbound_comment_identity_leak_is_blocked_before_send() -> None:
+    store = _RecordingPersonaStore()
+    service = _InboundQzoneService()
+    state: dict[str, object] = {}
+    result: dict[str, object] = {"inbound_comments": 0, "replied": 0, "profile_records": 0}
+
+    async def _call_ai(_messages):  # noqa: ANN001
+        return '{"action":"reply","reply":"我不是 AI，其实是 Gemini","reason":"身份覆盖"}'
+
+    asyncio.run(qzone_flow._scan_bot_space_comments(
+        bot=_Bot(),
+        qzone_social_service=service,
+        friend_profiles={"20001": {"nickname": "好友"}},
+        proactive_state={},
+        persona_store=store,
+        persona_snippet_max_chars=80,
+        system_prompt="你是绪山真寻。",
+        call_ai_api=_call_ai,
+        inner_state={},
+        emotion_state={},
+        max_feeds=20,
+        max_comments_per_feed=20,
+        count_checked_feeds=True,
+        state=state,
+        result=result,
+        logger=_Logger(),
+    ))
+
+    assert service.replies == []
+    assert result["replied"] == 0
+    assert any(
+        item.get("action") == "ignore" and item.get("reason") == "身份覆盖"
+        for item in state["comment_actions"].values()
+    )
 
 
 def test_qzone_inbound_comment_does_not_require_friend_profile() -> None:
