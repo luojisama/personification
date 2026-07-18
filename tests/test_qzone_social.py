@@ -23,6 +23,30 @@ def _reset_qzone_auth_states():  # noqa: ANN202
         qzone_service._AUTH_STATES.clear()
 
 
+def test_qzone_social_uses_complete_qzone_persona_projection() -> None:
+    projected = qzone_flow._extract_system_prompt(
+        {
+            "name": "小满",
+            "system": "群聊 system 不应优先。",
+            "qzone_system": "你是小满，在自己的空间随手说话。",
+            "persona_profile": {
+                "identity_rules": ["保持小满本人身份"],
+                "style_rules": ["自然短句"],
+                "boundary_rules": ["群聊边界不进入空间"],
+            },
+            "qzone_style": {"grounding": "具体经历必须有依据"},
+        }
+    )
+
+    assert "角色名：小满" in projected
+    assert "你是小满，在自己的空间随手说话" in projected
+    assert "保持小满本人身份" in projected
+    assert "自然短句" in projected
+    assert "具体经历必须有依据" in projected
+    assert "群聊 system 不应优先" not in projected
+    assert "群聊边界不进入空间" not in projected
+
+
 class _PersonaStore:
     def __init__(self, snippets: dict[str, str]) -> None:
         self.snippets = snippets
@@ -1163,11 +1187,11 @@ def test_qzone_feed_action_can_choose_forward() -> None:
     assert "瓜条" in captured["prompt"] and "黄赌毒暴" in captured["prompt"]
 
 
-def test_qzone_social_agents_use_read_only_tool_profile(monkeypatch) -> None:  # noqa: ANN001
-    profiles: list[str] = []
+def test_qzone_social_agents_use_structured_surface_and_read_only_profile(monkeypatch) -> None:  # noqa: ANN001
+    calls: list[dict[str, object]] = []
 
     async def _agent(**kwargs):  # noqa: ANN001
-        profiles.append(str(kwargs.get("tool_profile") or ""))
+        calls.append(kwargs)
         if kwargs.get("trigger_reason") == "qzone_comment_reply":
             return '{"action":"ignore","reply":"","reason":"结束"}'
         return '{"action":"ignore","comment":"","reason":"跳过"}'
@@ -1206,10 +1230,15 @@ def test_qzone_social_agents_use_read_only_tool_profile(monkeypatch) -> None:  #
 
     asyncio.run(_run())
 
-    assert profiles == [
+    assert [item["tool_profile"] for item in calls] == [
         qzone_flow.TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
         qzone_flow.TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
     ]
+    assert [item["surface"] for item in calls] == [
+        "qzone_social_feed_action",
+        "qzone_comment_reply",
+    ]
+    assert [item["structured_output"] for item in calls] == [True, True]
 
 
 def test_qzone_forward_limits_can_block_monthly_quota() -> None:

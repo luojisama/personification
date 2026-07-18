@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 _CONTROL_OUTPUTS = frozenset({"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"})
+_CONTROL_OUTPUT_RE = re.compile(r"(?:\[(?:NO_REPLY|SILENCE)\]|<(?:NO_REPLY|SILENCE)>)", re.IGNORECASE)
 _MEDIA_TAGS = {"IMAGE_B64", "IMAGE_URL", "AUDIO_B64"}
 _MEDIA_BLOCK_RE = re.compile(
     r"\[(IMAGE_B64|IMAGE_URL|AUDIO_B64)\](.*?)\[/\1\]",
@@ -15,6 +16,7 @@ _MEDIA_BLOCK_RE = re.compile(
 )
 _ANY_MEDIA_MARKER_RE = re.compile(r"\[/?(?:IMAGE_B64|IMAGE_URL|AUDIO_B64)\]")
 _INTERNAL_OUTPUT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"</?(?:think|output|message|status|action)>", re.IGNORECASE),
     re.compile(r"(?:严重|高危)?违规安全限制(?:已)?被触发"),
     re.compile(r"(?:服务器|服务端|供应商|provider).{0,16}(?:拦截|风控|安全策略)", re.IGNORECASE),
     re.compile(r"(?:finish[_ ]?reason|block[_ ]?reason|content[_ ]?filter)\s*[:=]", re.IGNORECASE),
@@ -66,8 +68,12 @@ def assess_visible_text(text: Any, *, allow_control: bool = True, allow_direct_m
     candidate = str(text or "").strip()
     if not candidate:
         return VisibleOutputDecision(False, "", "empty")
-    if allow_control and candidate in _CONTROL_OUTPUTS:
-        return VisibleOutputDecision(True, candidate)
+    if candidate in _CONTROL_OUTPUTS:
+        if allow_control:
+            return VisibleOutputDecision(True, candidate)
+        return VisibleOutputDecision(False, "", "control_not_allowed")
+    if not allow_control and _CONTROL_OUTPUT_RE.search(candidate):
+        return VisibleOutputDecision(False, "", "control_not_allowed")
     residual, media_error = _visible_residual(candidate, allow_direct_media=allow_direct_media)
     if media_error:
         return VisibleOutputDecision(False, "", media_error)
@@ -83,8 +89,13 @@ def guard_visible_text(
     logger: Any = None,
     surface: str = "",
     allow_direct_media: bool = True,
+    allow_control: bool = False,
 ) -> str:
-    decision = assess_visible_text(text, allow_direct_media=allow_direct_media)
+    decision = assess_visible_text(
+        text,
+        allow_control=allow_control,
+        allow_direct_media=allow_direct_media,
+    )
     if decision.allowed:
         return decision.text
     if logger is not None:

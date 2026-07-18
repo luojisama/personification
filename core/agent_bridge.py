@@ -6,7 +6,13 @@ from typing import Any
 from ..agent.runtime.runner import run_agent
 from ..agent.tool_registry import ToolRegistry
 from ..agent.query_rewriter import QueryRewriteContext
-from .visible_output import guard_visible_text
+from .social_surface_renderer import (
+    OutputKind,
+    SocialSurfaceRenderer,
+    SurfaceSpec,
+    infer_surface_name,
+    resolve_surface_spec,
+)
 
 
 TEXT_AGENT_TOOL_PROFILE_DEFAULT = "default"
@@ -129,6 +135,7 @@ async def run_text_agent(
     trigger_reason: str = "",
     chat_intent_hint: str = "",
     surface: str = "",
+    output_kind: OutputKind | str | None = None,
     structured_output: bool = False,
     tool_profile: str = TEXT_AGENT_TOOL_PROFILE_DEFAULT,
 ) -> str:
@@ -140,6 +147,25 @@ async def run_text_agent(
     tool profile when a non-chat surface requires a smaller capability set.
     """
 
+    surface_name = infer_surface_name(surface, trigger_reason)
+    surface_name, registered_spec = resolve_surface_spec(surface_name)
+    if output_kind is None:
+        resolved_output_kind = registered_spec.output_kind
+    else:
+        try:
+            resolved_output_kind = output_kind if isinstance(output_kind, OutputKind) else OutputKind(str(output_kind).strip().lower())
+        except ValueError as exc:
+            raise ValueError(f"unsupported text Agent output kind: {output_kind!r}") from exc
+    if structured_output:
+        if output_kind is not None and resolved_output_kind is not OutputKind.STRUCTURED_DECISION:
+            raise ValueError("structured_output conflicts with output_kind")
+        resolved_output_kind = OutputKind.STRUCTURED_DECISION
+    renderer = SocialSurfaceRenderer(
+        SurfaceSpec(
+            output_kind=resolved_output_kind,
+            persona_scope=registered_spec.persona_scope,
+        )
+    )
     logger = logger or _NullLogger()
     if not (
         getattr(plugin_config, "personification_agent_enabled", True)
@@ -148,7 +174,7 @@ async def run_text_agent(
     ):
         return ""
 
-    agent_messages = list(messages or [])
+    agent_messages = renderer.prepare_messages(messages)
     if use_builtin_search_hint:
         agent_messages.append(
             {
@@ -177,21 +203,32 @@ async def run_text_agent(
         logger=logger,
         max_steps=max_steps,
         query_rewrite_context=QueryRewriteContext(trigger_reason=trigger_reason),
-        is_group=False if surface else None,
-        surface=surface,
-        finalize_quality=not structured_output,
+        is_group=(
+            True
+            if registered_spec.persona_scope.value == "group_social"
+            else None
+            if registered_spec.persona_scope.value == "chat"
+            else False
+        ),
+        surface="" if surface_name == "agent_bridge" else surface_name,
+        finalize_quality=renderer.finalize_quality,
+        structured_output=resolved_output_kind is OutputKind.STRUCTURED_DECISION,
         allow_builtin_search=tool_profile == TEXT_AGENT_TOOL_PROFILE_DEFAULT,
     )
-    text = str(getattr(result, "text", "") or "").strip()
-    if text in {"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"}:
+    text = str(getattr(result, "text", "") or "")
+    if (
+        resolved_output_kind in {OutputKind.PERSONA_TEXT, OutputKind.DIRECT_ACTION}
+        and text.strip() in {"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"}
+    ):
         return ""
-    return guard_visible_text(text, logger=logger, surface=surface or "agent_bridge")
+    return renderer.finalize_text(text, logger=logger, surface=surface_name)
 
 
 __all__ = [
     "TEXT_AGENT_TOOL_PROFILE_DEFAULT",
     "TEXT_AGENT_TOOL_PROFILE_NONE",
     "TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY",
+    "OutputKind",
     "TextAgentExecutor",
     "clone_tool_registry",
     "run_text_agent",

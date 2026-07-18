@@ -326,13 +326,12 @@ def test_qzone_generation_recovers_structural_failures_within_five_calls() -> No
 
 
 def test_qzone_agent_exception_recovers_without_direct_provider_fallback(monkeypatch) -> None:  # noqa: ANN001
-    calls = 0
+    calls: list[dict] = []
     direct_calls = 0
 
-    async def _agent(**_kwargs):  # noqa: ANN001
-        nonlocal calls
-        calls += 1
-        if calls == 1:
+    async def _agent(**kwargs):  # noqa: ANN001
+        calls.append(kwargs)
+        if len(calls) == 1:
             raise RuntimeError("temporary agent failure")
         return json.dumps({"content": "今晚有点想早点关灯躺一会儿", "image_prompt": ""}, ensure_ascii=False)
 
@@ -352,7 +351,9 @@ def test_qzone_agent_exception_recovers_without_direct_provider_fallback(monkeyp
     ))
 
     assert json.loads(result)["content"] == "今晚有点想早点关灯躺一会儿"
-    assert calls == 2
+    assert len(calls) == 2
+    assert all(item["surface"] == "qzone_post" for item in calls)
+    assert all(item["structured_output"] is True for item in calls)
     assert direct_calls == 0
 
 
@@ -943,6 +944,36 @@ def test_review_qzone_post_rewrites_stiff_qzone_tic() -> None:
 
     assert result == "有点想吃夜宵了"
     assert not diary_flow._QZONE_STIFF_TIC_RE.search(result)
+
+
+def test_qzone_agent_rewrites_request_persona_text_output(monkeypatch) -> None:  # noqa: ANN001
+    calls: list[dict] = []
+
+    async def _agent(**kwargs):  # noqa: ANN001
+        calls.append(kwargs)
+        return "改写后的短句"
+
+    monkeypatch.setattr(diary_flow, "run_text_agent", _agent)
+
+    async def _run() -> None:
+        common = {
+            "tool_caller": object(),
+            "registry": object(),
+            "plugin_config": SimpleNamespace(personification_agent_enabled=True),
+            "persona_system": "你是某角色",
+            "logger": _Logger(),
+        }
+        await diary_flow._rewrite_qzone_net_slang("原句", **common)
+        await diary_flow._rewrite_qzone_stiff_tic("原句", **common)
+
+    asyncio.run(_run())
+
+    assert [item["trigger_reason"] for item in calls] == [
+        "qzone_net_slang_rewrite",
+        "qzone_stiff_tic_rewrite",
+    ]
+    assert all(item["surface"] == "qzone_post_rewrite" for item in calls)
+    assert all(item["structured_output"] is False for item in calls)
 
 
 def test_review_qzone_post_keeps_clean_text_untouched() -> None:

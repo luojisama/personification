@@ -53,6 +53,7 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
             "expression_style": "先听再回应",
             "group_atmosphere_positive": True,
             "interaction_interesting": True,
+            "future_commitment_candidate": True,
             "confidence": 1.8,
             "reason": "test",
         }
@@ -71,6 +72,7 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
     assert plan.emotional_support.advice_permission == "ask_first"
     assert plan.group_atmosphere_positive is True
     assert plan.interaction_interesting is True
+    assert plan.future_commitment_candidate is True
 
 
 def test_turn_plan_to_semantic_frame_maps_lookup_plugin() -> None:
@@ -129,6 +131,7 @@ def test_turn_plan_semantic_frame_round_trip_preserves_care_and_emotion() -> Non
         expression_style="先倾听确认",
         group_atmosphere_positive=True,
         interaction_interesting=True,
+        future_commitment_candidate=True,
     )
 
     frame = planner.turn_plan_to_semantic_frame(plan)
@@ -143,6 +146,7 @@ def test_turn_plan_semantic_frame_round_trip_preserves_care_and_emotion() -> Non
     assert frame.group_atmosphere_positive is True
     assert restored.group_atmosphere_positive is True
     assert restored.interaction_interesting is True
+    assert restored.future_commitment_candidate is True
 
 
 def test_legacy_turn_plan_derives_plugin_and_realtime_domains_when_new_field_missing() -> None:

@@ -25,9 +25,7 @@ from ..core.llm_context import (
     set_llm_context,
 )
 from ..core.operation_diagnostics import OperationDetail, OperationStep, detail, diagnostic, step
-from ..core.persona_profile import load_persona_profile
 from ..core.provider_health import classify_error as classify_provider_error
-from ..core.prompt_loader import AGENT_GUIDANCE_MARKER
 from ..core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
 from ..core.runtime_identity import get_runtime_identity
 from ..core.sticker_library import (
@@ -722,50 +720,11 @@ def _build_qzone_repair_prompt(
     )
 
 
-def _render_qzone_style(value: Any) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, list):
-        return "\n".join(f"- {str(item).strip()}" for item in value if str(item).strip())
-    if isinstance(value, dict):
-        lines: list[str] = []
-        for key, item in value.items():
-            if isinstance(item, list):
-                rendered = "；".join(str(part).strip() for part in item if str(part).strip())
-            else:
-                rendered = str(item or "").strip()
-            if rendered:
-                lines.append(f"- {key}: {rendered}")
-        return "\n".join(lines)
-    return ""
-
-
 def _project_qzone_system_prompt(system_prompt: Any) -> str:
     """Project a YAML persona onto the QZone surface without chat/XML fields."""
-    if not isinstance(system_prompt, dict):
-        base = str(system_prompt or "").strip()
-        snapshot = _render_qzone_persona_snapshot(system_prompt).strip()
-        return "\n\n".join(part for part in (base, snapshot) if part).strip()
-    parts: list[str] = []
-    name = str(system_prompt.get("name", "") or "").strip()
-    if name:
-        parts.append(f"角色名：{name}")
-    system = str(
-        system_prompt.get("qzone_system")
-        or system_prompt.get("system", "")
-        or ""
-    ).strip()
-    if AGENT_GUIDANCE_MARKER in system:
-        system = system.split(AGENT_GUIDANCE_MARKER, 1)[0].rstrip()
-    if system:
-        parts.append(system)
-    snapshot = _render_qzone_persona_snapshot(system_prompt).strip()
-    if snapshot:
-        parts.append(snapshot)
-    qzone_style = _render_qzone_style(system_prompt.get("qzone_style"))
-    if qzone_style:
-        parts.append("## QQ 空间专属表达\n" + qzone_style)
-    return "\n\n".join(parts).strip()
+    from ..core.social_surface_renderer import PersonaScope, SocialSurfaceRenderer
+
+    return SocialSurfaceRenderer().project_persona(system_prompt, PersonaScope.QZONE)
 
 
 def _format_qzone_quota_block(quota: Optional[dict]) -> str:
@@ -1093,7 +1052,7 @@ async def _rewrite_qzone_net_slang(
                     trigger_reason="qzone_net_slang_rewrite",
                     chat_intent_hint="qzone_net_slang_rewrite",
                     surface="qzone_post_rewrite",
-                    structured_output=True,
+                    structured_output=False,
                     tool_profile=TEXT_AGENT_TOOL_PROFILE_NONE,
                 ),
             )
@@ -1152,7 +1111,7 @@ async def _rewrite_qzone_stiff_tic(
                     trigger_reason="qzone_stiff_tic_rewrite",
                     chat_intent_hint="qzone_stiff_tic_rewrite",
                     surface="qzone_post_rewrite",
-                    structured_output=True,
+                    structured_output=False,
                     tool_profile=TEXT_AGENT_TOOL_PROFILE_NONE,
                 ),
             )
@@ -1762,29 +1721,6 @@ async def get_recent_chat_context(
         if report is not None:
             report.warnings.append(f"近期群聊素材读取失败，已改用基础生成：{type(e).__name__}")
         return ""
-
-
-def _render_qzone_persona_snapshot(system_prompt: Any) -> str:
-    """从人设里抽取身份/风格规则，拼成发空间用的人设快照。
-
-    复用群聊同款 `load_persona_profile`（支持 str / YAML 头 / dict 三种人设形态，
-    会兜底 DEFAULT_PERSONA_PROFILE）。只取 identity_rules + style_rules——
-    group-chat 的 boundary_rules（接话/[SILENCE] 之类）对"写一条个人动态"不适用，
-    带进来反而会干扰。这样即便发空间没有群上下文、人设是 dict 只用了 system 字段，
-    身份与说话风格约束也能被显式注入，避免说说脱离人设。
-    """
-    profile = load_persona_profile(system_prompt)
-    identity = profile.get("identity_rules", []) if isinstance(profile, dict) else []
-    style = profile.get("style_rules", []) if isinstance(profile, dict) else []
-    identity_lines = "\n".join(f"- {str(item)}" for item in list(identity)[:4])
-    style_lines = "\n".join(f"- {str(item)}" for item in list(style)[:4])
-    if not identity_lines and not style_lines:
-        return ""
-    return (
-        "\n\n## 人设快照（发空间也要严格保持）\n"
-        f"[身份一致性]\n{identity_lines or '- 保持角色一致，不提及自己是 AI/模型/程序'}\n"
-        f"[语气风格]\n{style_lines or '- 用角色一贯的口语化风格，避免客服腔和通用助手腔'}"
-    )
 
 
 async def _generate_once(

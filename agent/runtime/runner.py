@@ -235,6 +235,7 @@ async def run_agent(
     reply_required: bool = False,
     surface: str = "",
     finalize_quality: bool = True,
+    structured_output: bool = False,
     allow_builtin_search: bool = True,
     turn_media_context: list[Any] | None = None,
 ) -> AgentResult:
@@ -262,7 +263,7 @@ async def run_agent(
     )
 
     async def _finalize_result(result: AgentResult, *, reason: str) -> AgentResult:
-        if not finalize_quality:
+        if structured_output or not finalize_quality:
             return result
         try:
             return await _await_with_deadline(
@@ -756,6 +757,7 @@ async def run_agent(
                         append_evidence_guidance=_append_evidence_guidance_if_needed,
                         classify_deferred_lookup_reply=_classify_deferred_lookup_reply,
                         select_semantic_fallback_tool=_select_semantic_fallback_tool,
+                        structured_output=structured_output,
                     ),
                     budget_deadline,
                 )
@@ -862,7 +864,7 @@ async def run_agent(
                 result_text=result,
                 pending_actions=pending_actions,
             )
-            if direct_result is not None:
+            if direct_result is not None and not structured_output:
                 _record_reply_trace_stage(
                     key="agent_finish",
                     label="Agent 收尾",
@@ -889,6 +891,12 @@ async def run_agent(
         status="warn",
         detail=f"max_steps={effective_max_steps} last_tool={stop_state.last_tool_name or '-'}",
     )
+    if structured_output:
+        return AgentResult(
+            text="[NO_REPLY]",
+            pending_actions=pending_actions,
+            failure_code="agent_structured_max_steps_exhausted",
+        )
     if stop_state.last_usable_tool_result_text or stop_state.last_tool_result_text:
         fallback_tool_name = stop_state.last_usable_tool_name or stop_state.last_tool_name
         fallback_result_text = (

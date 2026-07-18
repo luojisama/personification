@@ -18,7 +18,7 @@ from ....core.visible_output import guard_visible_text
 
 _SCENARIO = "news_push"
 
-_PACK_PROMPT = """你是一个性格自然的聊天 bot，要把今天的{source_label}用你自己的话
+_PACK_PROMPT = """延续你既定的人设，把今天的{source_label}用你自己的话
 转述给一位朋友/群友，不要列点、不要工整结尾，像随手分享，30-90 字。
 
 [原始内容]
@@ -203,38 +203,25 @@ async def _pack_news(ctx: SocialContext, source: str, raw_news: str) -> str:
     label = _SOURCE_LABELS.get(source, "新闻")
     prompt = _PACK_PROMPT.format(source_label=label, raw_news=raw_news[:1500])
     messages = [{"role": "user", "content": prompt}]
-    if (
+    if not (
         getattr(ctx.plugin_config, "personification_agent_enabled", True)
         and ctx.tool_caller
         and ctx.tool_registry
     ):
-        try:
-            text = await run_social_text_agent(
-                ctx,
-                messages=messages,
-                trigger_reason="social_news_push",
-                chat_intent_hint="social_news_push",
-                use_builtin_search_hint=True,
-            )
-        except Exception as exc:
-            ctx.logger.debug(f"[social/news] Agent pack failed: {exc}")
-            return ""
-        text = text.strip('"').strip("'").strip("「」").strip()
-        return text[:300] if text else ""
-    if not ctx.tool_caller:
-        # 无 tool_caller 时退化为原文截断（避免完全发不出去）
-        return raw_news[:200]
+        return ""
     try:
-        response = await ctx.tool_caller.chat_with_tools(
+        text = await run_social_text_agent(
+            ctx,
             messages=messages,
-            tools=[],
-            use_builtin_search=False,
+            trigger_reason="social_news_push",
+            chat_intent_hint="social_news_push",
+            use_builtin_search_hint=True,
         )
     except Exception as exc:
-        ctx.logger.debug(f"[social/news] LLM pack failed: {exc}")
-        return raw_news[:200]
-    text = str(getattr(response, "content", "") or "").strip().strip('"').strip("'")
-    return text[:300] if text else raw_news[:200]
+        ctx.logger.debug(f"[social/news] Agent pack failed: {exc}")
+        return ""
+    text = text.strip().strip('"').strip("'").strip("「」")
+    return text[:300] if text else ""
 
 
 async def _gate_or_pass(
@@ -242,7 +229,7 @@ async def _gate_or_pass(
 ) -> str | None:
     if not gate_enabled:
         return draft
-    allow, rewritten, reason = await gate_should_send(
+    allow, _rewritten, reason = await gate_should_send(
         tool_caller=ctx.tool_caller,
         plugin_config=ctx.plugin_config,
         tool_registry=ctx.tool_registry,
@@ -257,7 +244,7 @@ async def _gate_or_pass(
     if not allow:
         ctx.logger.info(f"[social/news] gate denied {target_key}: {reason}")
         return None
-    return rewritten or draft
+    return draft
 
 
 def _now_str(ctx: SocialContext) -> str:

@@ -23,10 +23,24 @@ from ..model_router import (
 from ..qq_outbound import build_outbound_context
 from ..session_store import init_session_store
 from ..tasks_service import make_cancel_task_tool, make_create_task_tool
+from ..visible_output import guard_visible_text
 from ..web_fetch import WebFetchError, fetch_web_page
 from ..web_grounding import do_web_search as do_web_search_core
 from ...utils import init_utils_config
 from ..sticker_library import resolve_sticker_dir
+
+
+def guard_scheduled_user_task_message(task: dict[str, Any], message: Any, *, logger: Any) -> str:
+    visible_message = guard_visible_text(
+        message,
+        logger=logger,
+        surface="scheduled_user_task",
+        allow_direct_media=False,
+        allow_control=False,
+    )
+    if not visible_message and isinstance(task, dict):
+        task["last_status"] = "safety_blocked"
+    return visible_message
 
 
 def build_agent_tool_registry(
@@ -226,6 +240,9 @@ def build_agent_tool_registry(
                 user_id = task.get("user_id") or params.get("user_id")
                 message = params.get("message") or task.get("message", "")
                 if not user_id or not message:
+                    return
+                message = guard_scheduled_user_task_message(task, message, logger=logger)
+                if not message:
                     return
                 for bot in get_bots().values():
                     try:

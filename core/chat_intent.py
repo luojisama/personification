@@ -76,6 +76,7 @@ class TurnSemanticFrame:
     sticker_mood_hint: str = DEFAULT_STICKER_SEMANTIC_HINT
     group_atmosphere_positive: bool = False
     interaction_interesting: bool = False
+    future_commitment_candidate: bool = False
     conversation_scenario: ConversationScenario = "normal"
     # 由 LLM 决定回复时要不要 @ 对方 / 引用对方消息：auto=交给默认启发式；
     # none=直接接话；at=@对方；quote=引用回复；at_quote=两者都用。
@@ -262,6 +263,9 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
         sticker_mood_hint=normalize_sticker_semantic_hint(payload.get("sticker_mood_hint")),
         group_atmosphere_positive=_coerce_bool(payload.get("group_atmosphere_positive", False)),
         interaction_interesting=_coerce_bool(payload.get("interaction_interesting", False)),
+        future_commitment_candidate=_coerce_bool(
+            payload.get("future_commitment_candidate", False)
+        ),
         conversation_scenario=_parse_scenario(payload.get("conversation_scenario")),
         address_mode=_parse_address_mode(payload.get("address_mode")),
         confidence=max(0.0, min(1.0, confidence)),
@@ -359,6 +363,7 @@ async def infer_turn_semantic_frame_with_llm(
         '"sticker_mood_hint":"给表情包选择的结构化标签，格式固定为 情绪标签|场景标签",'
         '"group_atmosphere_positive":false,'
         '"interaction_interesting":false,'
+        '"future_commitment_candidate":false,'
         '"conversation_scenario":"normal|casual_banter|sarcasm_irony|argument|inside_joke|multi_thread|private_topic",'
         '"address_mode":"auto|none|at|quote|at_quote",'
         '"confidence":0.0,'
@@ -394,6 +399,8 @@ async def infer_turn_semantic_frame_with_llm(
         "8. expression_style 要指导本轮说话方式，偏行为策略，不要写长句。\n"
         "8b. group_atmosphere_positive 只在群聊整体互动明确友好、融洽或共同参与感很强时为 true；普通无冲突聊天不能机械设为 true，私聊必须 false。"
         "interaction_interesting 只在 bot 与当前用户这轮确实有明显趣味、默契或高质量互动时为 true；成功回复本身不等于有趣。\n"
+        "8c. future_commitment_candidate 只在私聊用户明确表达带时间线索的未来承诺、计划或待办时为 true；"
+        "已完成的事、无时间的愿望和普通闲聊必须为 false。\n"
         "9. recommend_silence 只有在群聊且明显高歧义、bot 插话风险高时才为 true。\n"
         "10. 群聊上下文中若标注“回复某人/提及某人/来源=其他插件输出/用户调用其它插件/命令/群聊旁观”，不要把它误认为用户正在要求 bot 解释内容；"
         "除非最新消息明确指向 bot，否则应提高插话谨慎度，必要时 recommend_silence=true。\n"

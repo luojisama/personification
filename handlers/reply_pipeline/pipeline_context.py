@@ -27,6 +27,7 @@ from ...core.qq_expression_tools import register_send_qq_expression_tools
 from ...core.gemini_profile import build_gemini_route_policy_prompt
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_style_policy import build_reply_style_policy_prompt
+from ...core.visible_output import guard_visible_text
 from ..reply_commit import (
     acquire_reply_commit,
     mark_reply_phase,
@@ -88,6 +89,16 @@ async def dispatch_reply_part(
         context,
         payload,
         lambda: bot.send(event, payload),
+    )
+
+
+def guard_reply_ack_text(text: Any, *, fallback: str, logger: Any) -> str:
+    return guard_visible_text(
+        str(text or "").strip() or fallback,
+        logger=logger,
+        surface="reply_ack",
+        allow_direct_media=False,
+        allow_control=False,
     )
 
 
@@ -873,6 +884,13 @@ async def run_agent_if_enabled(
     ack_sender = None
     if ack_phrase:
         async def _ack_sender(text: str, *, _phrase: str = ack_phrase) -> None:
+            visible_ack = guard_reply_ack_text(
+                text,
+                fallback=_phrase,
+                logger=runtime.logger,
+            )
+            if not visible_ack:
+                return
             commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
             mark_reply_phase(commit_state, "delivery_commit_wait")
             await acquire_reply_commit(commit_state)
@@ -885,7 +903,7 @@ async def run_agent_if_enabled(
                 send_result = await dispatch_reply_part(
                     bot=bot,
                     event=event,
-                    payload=str(text or "").strip() or _phrase,
+                    payload=visible_ack,
                     ledger=getattr(runtime, "qq_outbound_ledger", None),
                     surface="reply_ack",
                     reply_trace_id=str(commit_state.get("reply_trace_id", "") or ""),
@@ -1190,6 +1208,7 @@ __all__ = [
     "fold_consecutive_sticker_placeholders",
     "get_cached_friend_ids",
     "get_primary_provider_signature",
+    "guard_reply_ack_text",
     "IncomingImageClassification",
     "looks_like_photo_message",
     "looks_like_sticker_message",

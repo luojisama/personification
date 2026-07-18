@@ -233,6 +233,55 @@ def test_private_proactive_missing_message_id_does_not_commit_success(
     assert proactive_state["10001"].get("proactive_history", []) == []
 
 
+def test_private_proactive_agent_send_envelope_is_structured(monkeypatch) -> None:  # noqa: ANN001
+    _patch_common(monkeypatch)
+    config = _private_config()
+    config.personification_agent_enabled = True
+    now = datetime(2026, 7, 18, 10, 0, 0)
+    proactive_state = {
+        "10001": {"last_interaction": now.timestamp() - 48 * 60 * 60}
+    }
+    captured: dict = {}
+
+    class Bot:
+        async def get_friend_list(self):  # noqa: ANN202
+            return [{"user_id": 10001, "nickname": "friend"}]
+
+    async def _agent(**kwargs):  # noqa: ANN003, ANN202
+        captured.update(kwargs)
+        return "SKIP|现在没什么想说的"
+
+    async def _direct(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("Agent path must not use the direct Provider fallback")
+
+    monkeypatch.setattr(proactive_flow, "run_text_agent", _agent)
+    result = asyncio.run(
+        proactive_flow.run_proactive_messaging(
+            plugin_config=config,
+            sign_in_available=False,
+            is_rest_time=lambda **_kwargs: True,
+            get_bots=lambda: {"90001": Bot()},
+            load_data=lambda: {},
+            load_proactive_state=lambda: proactive_state,
+            save_proactive_state=lambda state: proactive_state.update(state),
+            get_user_data=lambda _user_id: {},
+            get_level_name=lambda _value: "",
+            get_now=lambda: now,
+            get_activity_status=lambda: "active",
+            load_prompt=lambda: "persona",
+            call_ai_api=_direct,
+            parse_yaml_response=lambda _text: None,
+            logger=_logger(),
+            agent_tool_caller=object(),
+            agent_tool_registry=object(),
+        )
+    )
+
+    assert result is False
+    assert captured["trigger_reason"] == "proactive_private"
+    assert captured["structured_output"] is True
+
+
 def _run_group_idle(
     *,
     config: SimpleNamespace,
@@ -242,6 +291,8 @@ def _run_group_idle(
     groups: list[str],
     proactive_state: dict,
     records: list[tuple],
+    agent_tool_caller=None,  # noqa: ANN001
+    agent_tool_registry=None,  # noqa: ANN001
 ) -> int:
     now = datetime(2026, 7, 18, 10, 0, 0)
     response_iter = iter(responses)
@@ -263,6 +314,8 @@ def _run_group_idle(
             get_now=lambda: now,
             record_group_msg=lambda *args, **kwargs: records.append((*args, kwargs)),
             logger=_logger(),
+            agent_tool_caller=agent_tool_caller,
+            agent_tool_registry=agent_tool_registry,
             qq_outbound_ledger=ledger,
         )
     )
@@ -383,6 +436,53 @@ def test_group_idle_send_exception_stays_unknown_without_fallback(
     assert "group_idle_20001" not in state
     assert "group_idle_20002" not in state
     assert records == []
+
+
+def test_group_idle_agent_keeps_visible_topic_quality_and_structures_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_common(monkeypatch)
+    proactive_flow._last_group_idle_sent_at = 0.0
+    config = _group_config(tmp_path)
+    config.personification_agent_enabled = True
+    calls: list[dict] = []
+    sent: list[str] = []
+
+    class Bot:
+        self_id = "90001"
+
+        async def get_group_info(self, **_kwargs):  # noqa: ANN202
+            return {"group_name": "test group"}
+
+        async def send_group_msg(self, *, group_id, message):  # noqa: ANN001, ANN202
+            sent.append(str(message))
+            return {"message_id": f"group-{group_id}-1"}
+
+    async def _agent(**kwargs):  # noqa: ANN003, ANN202
+        calls.append(kwargs)
+        if kwargs["trigger_reason"] == "proactive_group_idle_mode":
+            return '{"mode":"text","mood":"日常"}'
+        return "突然有点想吃冰淇淋"
+
+    monkeypatch.setattr(proactive_flow, "run_text_agent", _agent)
+    result = _run_group_idle(
+        config=config,
+        ledger=None,
+        bot=Bot(),
+        responses=[],
+        groups=["20001"],
+        proactive_state={},
+        records=[],
+        agent_tool_caller=object(),
+        agent_tool_registry=object(),
+    )
+
+    assert result == 1
+    assert sent == ["突然有点想吃冰淇淋"]
+    kwargs_by_trigger = {str(item["trigger_reason"]): item for item in calls}
+    assert kwargs_by_trigger["proactive_group_idle"]["structured_output"] is False
+    assert kwargs_by_trigger["proactive_group_idle_mode"]["structured_output"] is True
 
 
 def test_checker_builders_forward_optional_ledger(monkeypatch) -> None:  # noqa: ANN001

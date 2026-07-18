@@ -44,7 +44,7 @@ _BIRTHDAY_PATTERNS = (
     re.compile(r"birthday[:：]?\s*(\d{1,2})[-/.](\d{1,2})", re.IGNORECASE),
 )
 
-_GREETING_PROMPT = """你是一个性格自然的聊天 bot，今天是{occasion_label}，给一位朋友
+_GREETING_PROMPT = """延续你既定的人设，今天是{occasion_label}，给一位朋友
 发一句祝福。
 
 [对方画像摘要]
@@ -189,9 +189,8 @@ async def _try_send(
     draft = await _generate(ctx, snippet[:persona_max], occasion_label)
     if not draft:
         return False
-    final_text = draft
     if gate_enabled:
-        allow, rewritten, reason = await gate_should_send(
+        allow, _rewritten, reason = await gate_should_send(
             tool_caller=ctx.tool_caller,
             plugin_config=ctx.plugin_config,
             tool_registry=ctx.tool_registry,
@@ -206,8 +205,7 @@ async def _try_send(
         if not allow:
             ctx.logger.info(f"[social/festival] gate denied uid={uid}: {reason}")
             return False
-        if rewritten:
-            final_text = rewritten
+    final_text = draft
     final_text = guard_visible_text(
         final_text, logger=ctx.logger, surface="social_festival_greeting", allow_direct_media=False
     )
@@ -237,36 +235,24 @@ async def _try_send(
 async def _generate(ctx: SocialContext, snippet: str, occasion_label: str) -> str:
     prompt = _GREETING_PROMPT.format(occasion_label=occasion_label, persona_snippet=snippet or "<无画像>")
     messages = [{"role": "user", "content": prompt}]
-    if (
+    if not (
         getattr(ctx.plugin_config, "personification_agent_enabled", True)
         and ctx.tool_caller
         and ctx.tool_registry
     ):
-        try:
-            text = await run_social_text_agent(
-                ctx,
-                messages=messages,
-                trigger_reason="social_festival_greeting",
-                chat_intent_hint="social_festival_greeting",
-            )
-        except Exception as exc:
-            ctx.logger.debug(f"[social/festival] Agent generate failed: {exc}")
-            return ""
-        text = text.strip('"').strip("'").strip("「」").strip()
-        return text[:120] if text else ""
-    if not ctx.tool_caller:
-        return f"{occasion_label}快乐～"
+        return ""
     try:
-        response = await ctx.tool_caller.chat_with_tools(
+        text = await run_social_text_agent(
+            ctx,
             messages=messages,
-            tools=[],
-            use_builtin_search=False,
+            trigger_reason="social_festival_greeting",
+            chat_intent_hint="social_festival_greeting",
         )
     except Exception as exc:
-        ctx.logger.debug(f"[social/festival] generate failed: {exc}")
-        return f"{occasion_label}快乐～"
-    text = str(getattr(response, "content", "") or "").strip().strip('"').strip("'")
-    return text[:120] if text else f"{occasion_label}快乐～"
+        ctx.logger.debug(f"[social/festival] Agent generate failed: {exc}")
+        return ""
+    text = text.strip().strip('"').strip("'").strip("「」")
+    return text[:120] if text else ""
 
 
 def _get_first_bot(ctx: SocialContext) -> Any | None:

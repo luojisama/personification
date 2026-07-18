@@ -19,7 +19,7 @@ from ....core.visible_output import guard_visible_text
 _SCENARIO_MORNING = "morning_greeting"
 _SCENARIO_EVENING = "evening_greeting"
 
-_GREETING_PROMPT = """你是一个性格自然的聊天 bot，现在要主动给一位熟悉的朋友发"{time_label}"。
+_GREETING_PROMPT = """延续你既定的人设，现在要主动给一位熟悉的朋友发"{time_label}"。
 
 [对方画像摘要]
 {persona_snippet}
@@ -85,9 +85,8 @@ async def _run_greetings(ctx: SocialContext, *, time_of_day: str) -> None:
         draft = await _generate_greeting(ctx, persona_snippet[:persona_max], time_of_day)
         if not draft:
             continue
-        final_text = draft
         if gate_enabled:
-            allow, rewritten, reason = await gate_should_send(
+            allow, _rewritten, reason = await gate_should_send(
                 tool_caller=ctx.tool_caller,
                 plugin_config=ctx.plugin_config,
                 tool_registry=ctx.tool_registry,
@@ -102,8 +101,7 @@ async def _run_greetings(ctx: SocialContext, *, time_of_day: str) -> None:
             if not allow:
                 ctx.logger.info(f"[social/greetings] gate denied user={user_id}: {reason}")
                 continue
-            if rewritten:
-                final_text = rewritten
+        final_text = draft
         final_text = guard_visible_text(
             final_text, logger=ctx.logger, surface="social_greeting", allow_direct_media=False
         )
@@ -173,41 +171,24 @@ async def _generate_greeting(ctx: SocialContext, persona_snippet: str, time_of_d
     label = "早安问候" if time_of_day == "morning" else "晚安问候"
     prompt = _GREETING_PROMPT.format(time_label=label, persona_snippet=persona_snippet or "<无画像>")
     messages = [{"role": "user", "content": prompt}]
-    if (
+    if not (
         getattr(ctx.plugin_config, "personification_agent_enabled", True)
         and ctx.tool_caller
         and ctx.tool_registry
     ):
-        try:
-            text = await run_social_text_agent(
-                ctx,
-                messages=messages,
-                trigger_reason=f"social_{time_of_day}_greeting",
-                chat_intent_hint="social_greeting",
-            )
-        except Exception as exc:
-            ctx.logger.debug(f"[social/greetings] Agent generate failed: {exc}")
-            return ""
-        text = text.strip('"').strip("'").strip("「」").strip()
-        return text[:60] if text else ""
-    if not ctx.tool_caller:
-        return _fallback_text(time_of_day)
+        return ""
     try:
-        response = await ctx.tool_caller.chat_with_tools(
+        text = await run_social_text_agent(
+            ctx,
             messages=messages,
-            tools=[],
-            use_builtin_search=False,
+            trigger_reason=f"social_{time_of_day}_greeting",
+            chat_intent_hint="social_greeting",
         )
     except Exception as exc:
-        ctx.logger.debug(f"[social/greetings] generate failed: {exc}")
-        return _fallback_text(time_of_day)
-    text = str(getattr(response, "content", "") or "").strip()
+        ctx.logger.debug(f"[social/greetings] Agent generate failed: {exc}")
+        return ""
     text = text.strip('"').strip("'").strip("「」").strip()
-    return text[:60] if text else _fallback_text(time_of_day)
-
-
-def _fallback_text(time_of_day: str) -> str:
-    return "早～" if time_of_day == "morning" else "晚安"
+    return text[:60] if text else ""
 
 
 def _now_str(ctx: SocialContext) -> str:

@@ -23,6 +23,7 @@ class SocialContext:
     persona_store: Any
     data_dir: Any
     get_now: Callable[[], Any]
+    load_prompt: Callable[[str | None], Any] | None = None
     tool_registry: Any = None
     agent_max_steps: int = 4
     qq_outbound_ledger: Any = None
@@ -76,6 +77,31 @@ async def run_social_text_agent(
     if ctx.tool_caller is None or ctx.tool_registry is None:
         return ""
     from ...core.agent_bridge import run_text_agent
+    from ...core.social_surface_renderer import (
+        OutputKind,
+        SocialSurfaceRenderer,
+        resolve_surface_spec,
+    )
+
+    surface, spec = resolve_surface_spec(trigger_reason)
+    if not callable(ctx.load_prompt):
+        ctx.logger.warning(f"[social] persona loader unavailable surface={surface}")
+        return ""
+    try:
+        prompt_data = ctx.load_prompt(None)
+    except Exception as exc:
+        ctx.logger.warning(f"[social] load persona failed surface={surface}: {exc}")
+        return ""
+    renderer = SocialSurfaceRenderer(spec)
+    projected_persona = renderer.project_persona(prompt_data)
+    if not projected_persona:
+        ctx.logger.warning(f"[social] empty persona projection surface={surface}")
+        return ""
+    messages = renderer.prepare_messages(
+        messages,
+        prompt_data=prompt_data,
+        output_kind=OutputKind.PERSONA_TEXT,
+    )
 
     return await run_text_agent(
         messages=messages,
@@ -87,6 +113,8 @@ async def run_social_text_agent(
         use_builtin_search_hint=use_builtin_search_hint,
         trigger_reason=trigger_reason,
         chat_intent_hint=chat_intent_hint or trigger_reason,
+        surface=surface,
+        output_kind=OutputKind.PERSONA_TEXT,
     )
 
 

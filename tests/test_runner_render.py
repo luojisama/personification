@@ -1176,6 +1176,120 @@ def test_run_agent_uses_tool_metadata_contract_for_queued_action_silence() -> No
     assert len(caller.calls) == 1
 
 
+def test_structured_agent_stop_returns_raw_without_semantic_fallback() -> None:
+    raw = '  {"action":"send","reason":"provider marker stays internal"}\n'
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content=raw,
+                tool_calls=[],
+                raw={},
+            )
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "输出 planner JSON"}],
+            registry=tool_registry.ToolRegistry(),
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=3,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=True,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+            structured_output=True,
+        )
+    )
+
+    assert result.text == raw
+    assert len(caller.calls) == 1
+
+
+def test_structured_agent_max_steps_never_persona_synthesizes_tool_result() -> None:
+    async def _handler(**_kwargs):  # noqa: ANN003
+        return '{"results":[{"title":"evidence"}]}'
+
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-structured",
+                        name="search_web",
+                        arguments={"query": "topic"},
+                    )
+                ],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-structured-3",
+                        name="search_web",
+                        arguments={"query": "topic final"},
+                    )
+                ],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-structured-2",
+                        name="search_web",
+                        arguments={"query": "topic follow-up"},
+                    )
+                ],
+                raw={},
+            ),
+        ]
+    )
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "输出 planner JSON"}],
+            registry=_register_query_tool(_handler),
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=1,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+            max_steps=1,
+            structured_output=True,
+            finalize_quality=False,
+        )
+    )
+
+    assert result.text == "[NO_REPLY]"
+    assert result.failure_code == "agent_structured_max_steps_exhausted"
+    assert len(caller.calls) == 3
+
+
 def test_run_agent_routes_avatar_capability_to_current_user_tool() -> None:
     calls: list[str] = []
 

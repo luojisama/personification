@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +17,8 @@ from .prompt_hooks import HookContext, register_prompt_hook
 
 _FRIEND_IDS_CACHE: Dict[str, tuple[float, set[str]]] = {}
 _REGISTERED = False
+_PENDING_TOPIC_TASKS: dict[str, asyncio.Task[None]] = {}
+_PENDING_TOPIC_MAX_CONCURRENCY = 4
 
 
 def _stringify_message_content(content: Any) -> str:
@@ -519,7 +522,7 @@ async def _friend_request_hook(ctx: HookContext) -> Optional[str]:
     return None
 
 
-async def _pending_topic_extract_hook(ctx: HookContext) -> Optional[str]:
+async def schedule_pending_topic_extraction(ctx: HookContext) -> Optional[str]:
     """私聊场景下尝试从用户消息抽取 pending topic，fire-and-forget；
     不阻塞回复主流程，返回 None 即不注入 prompt。
     """
@@ -538,6 +541,11 @@ async def _pending_topic_extract_hook(ctx: HookContext) -> Optional[str]:
         return None
     if not pre_filter(text):
         return None
+    semantic_frame = getattr(ctx, "semantic_frame", None)
+    if semantic_frame is None or not bool(
+        getattr(semantic_frame, "future_commitment_candidate", False)
+    ):
+        return None
 
     tool_caller = getattr(ctx.runtime, "agent_tool_caller", None)
     tool_registry = getattr(ctx.runtime, "tool_registry", None)
@@ -545,8 +553,13 @@ async def _pending_topic_extract_hook(ctx: HookContext) -> Optional[str]:
     if not tool_caller or not logger:
         return None
     user_id = ctx.user_id
-
-    import asyncio as _asyncio
+    active_task = _PENDING_TOPIC_TASKS.get(user_id)
+    if active_task is not None and not active_task.done():
+        return None
+    active_count = sum(not task.done() for task in _PENDING_TOPIC_TASKS.values())
+    if active_count >= _PENDING_TOPIC_MAX_CONCURRENCY:
+        logger.debug("[topic_extract] background classifier capacity reached, skip")
+        return None
 
     async def _bg() -> None:
         try:
@@ -577,8 +590,19 @@ async def _pending_topic_extract_hook(ctx: HookContext) -> Optional[str]:
         except Exception as exc:
             logger.debug(f"[topic_extract] bg failed: {exc}")
 
-    _asyncio.create_task(_bg())
+    task = asyncio.create_task(_bg())
+    _PENDING_TOPIC_TASKS[user_id] = task
+
+    def _discard(completed: asyncio.Task[None], *, expected_user_id: str = user_id) -> None:
+        if _PENDING_TOPIC_TASKS.get(expected_user_id) is completed:
+            _PENDING_TOPIC_TASKS.pop(expected_user_id, None)
+
+    task.add_done_callback(_discard)
     return None
+
+
+async def _pending_topic_extract_hook(ctx: HookContext) -> Optional[str]:
+    return await schedule_pending_topic_extraction(ctx)
 
 
 def register_all_builtin_hooks() -> None:

@@ -420,7 +420,30 @@ async def handle_model_stop(
     append_evidence_guidance: Callable[..., Awaitable[Any]],
     classify_deferred_lookup_reply: Callable[..., Awaitable[bool]],
     select_semantic_fallback_tool: Callable[..., Awaitable[tuple[str, dict] | None]],
+    structured_output: bool = False,
 ) -> StopFlowDecision:
+    if structured_output and not response.tool_calls:
+        if content_len <= 0:
+            return StopFlowDecision.return_result(
+                AgentResult(
+                    text="[NO_REPLY]",
+                    pending_actions=pending_actions,
+                    failure_code="agent_structured_empty",
+                )
+            )
+        record_trace(
+            key="agent_finish",
+            label="Agent 结构化收尾",
+            status="ok",
+            detail=f"reason=structured_stop content_len={content_len}",
+        )
+        return StopFlowDecision.return_result(
+            AgentResult(
+                text=str(response.content or ""),
+                pending_actions=pending_actions,
+                bypass_length_limits=True,
+            )
+        )
     banter_requires_lookup_retry = await _classify_banter_lookup_retry(
         state=state,
         response=response,

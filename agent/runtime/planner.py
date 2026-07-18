@@ -97,6 +97,7 @@ class TurnPlan:
     expression_style: str = "自然简短"
     group_atmosphere_positive: bool = False
     interaction_interesting: bool = False
+    future_commitment_candidate: bool = False
 
     @property
     def length_bounds(self) -> tuple[int, int]:
@@ -217,6 +218,9 @@ def parse_turn_plan_payload(payload: Any) -> TurnPlan | None:
         expression_style=str(payload.get("expression_style", "") or "").strip()[:80] or "自然简短",
         group_atmosphere_positive=_coerce_bool(payload.get("group_atmosphere_positive"), False),
         interaction_interesting=_coerce_bool(payload.get("interaction_interesting"), False),
+        future_commitment_candidate=_coerce_bool(
+            payload.get("future_commitment_candidate"), False
+        ),
     )
 
 
@@ -411,6 +415,7 @@ async def plan_turn_with_llm(
         '"emotional_support":{"needed":false,"listen":false,"validate":false,"advice_permission":"not_needed|ask_first|allowed","risk_level":"none|concern|high"},'
         '"user_attitude":"一句短中文", "bot_emotion":"一句短中文", "emotion_intensity":"low|medium|high", "expression_style":"一句短中文",'
         '"group_atmosphere_positive":false,"interaction_interesting":false,'
+        '"future_commitment_candidate":false,'
         '"confidence":0.0,'
         '"reason":"极短中文原因"}\n'
         "判别要求：\n"
@@ -424,6 +429,8 @@ async def plan_turn_with_llm(
         "4. user_attitude、bot_emotion、emotion_intensity 和 expression_style 要结合上下文规划；TTS 和表情仍由下游决定。\n"
         "4b. group_atmosphere_positive 只在群聊整体互动明确友好融洽时为 true，私聊必须 false；"
         "interaction_interesting 只在 bot 与当前用户确实出现明显趣味、默契或高质量互动时为 true，普通成功回复不能机械加分。\n"
+        "4c. future_commitment_candidate 只在私聊用户明确表达带时间线索的未来承诺、计划或待办时为 true；"
+        "已完成事件、无时间的愿望和普通闲聊必须为 false。\n"
         "5. 工具意图只给候选方向，不要因为工具存在就强行使用。\n"
         "5a. 当前可用工具 metadata 中的 runtime_capability 只表示当前发送者安全头像摘要的第一方只读能力。"
         "当对方询问 bot 是否已有、能否读取或理解自己的头像摘要时，tool_intent 必须包含 runtime_capability，"
@@ -547,6 +554,9 @@ def turn_plan_from_semantic_frame(frame: Any, *, has_images: bool = False, messa
         expression_style=str(getattr(frame, "expression_style", "") or "自然简短"),
         group_atmosphere_positive=bool(getattr(frame, "group_atmosphere_positive", False)),
         interaction_interesting=bool(getattr(frame, "interaction_interesting", False)),
+        future_commitment_candidate=bool(
+            getattr(frame, "future_commitment_candidate", False)
+        ),
     )
 
 
@@ -588,6 +598,7 @@ def turn_plan_to_semantic_frame(plan: TurnPlan) -> Any:
         expression_style=plan.expression_style,
         group_atmosphere_positive=plan.group_atmosphere_positive,
         interaction_interesting=plan.interaction_interesting,
+        future_commitment_candidate=plan.future_commitment_candidate,
         tts_style_hint="自然",
         sticker_mood_hint=default_sticker_semantic_hint(chat_intent, is_random_chat=plan.reply_action == "silence"),
         confidence=plan.confidence,

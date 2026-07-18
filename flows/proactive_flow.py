@@ -700,6 +700,7 @@ async def _decide_idle_output_mode(
                     max_steps=agent_max_steps,
                     trigger_reason="proactive_group_idle_mode",
                     chat_intent_hint="proactive_group_idle_mode",
+                    structured_output=True,
                 )
             except Exception as exc:
                 logger.debug(f"[group_idle] mode Agent decision failed: {exc}")
@@ -1104,6 +1105,7 @@ async def run_proactive_messaging(
                     max_steps=agent_max_steps,
                     trigger_reason="proactive_private",
                     chat_intent_hint="proactive_private",
+                    structured_output=True,
                 )
             except Exception as exc:
                 logger.warning(f"[proactive] full Agent decision failed, skip direct-model fallback: {exc}")
@@ -1410,6 +1412,7 @@ async def run_group_idle_topic(
                             use_builtin_search_hint=True,
                             trigger_reason="proactive_group_idle",
                             chat_intent_hint="proactive_group_idle",
+                            structured_output=False,
                         )
                     except Exception as exc:
                         logger.warning(

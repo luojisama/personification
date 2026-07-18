@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 
@@ -157,12 +159,13 @@ def test_qzone_text_agent_profile_keeps_only_read_only_evidence_tools() -> None:
     assert spoofed_names == set()
 
 
-def test_qzone_text_agent_profile_disables_provider_builtin_search(monkeypatch) -> None:  # noqa: ANN001
+def test_qzone_text_agent_profile_disables_provider_builtin_search_and_preserves_structured_raw(monkeypatch) -> None:  # noqa: ANN001
     captured: dict = {}
+    raw = '  {"reason":"provider 安全策略拦截","action":"skip"}\n'
 
     async def _run_agent(**kwargs):  # noqa: ANN001
         captured.update(kwargs)
-        return SimpleNamespace(text="测试通过")
+        return SimpleNamespace(text=raw)
 
     monkeypatch.setattr(agent_bridge, "run_agent", _run_agent)
     registry = tool_registry.ToolRegistry()
@@ -175,12 +178,125 @@ def test_qzone_text_agent_profile_disables_provider_builtin_search(monkeypatch) 
         tool_caller=object(),
         registry=registry,
         surface="qzone_post",
-        structured_output=True,
         tool_profile=agent_bridge.TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
     ))
 
-    assert result == "测试通过"
+    assert result == raw
     assert captured["allow_builtin_search"] is False
+    assert captured["finalize_quality"] is False
+    assert captured["structured_output"] is True
+    assert captured["surface"] == "qzone_post"
+    assert captured["is_group"] is False
+
+
+def test_text_agent_structured_output_compatibility_and_explicit_conflict_fail_closed(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict = {}
+
+    async def _run_agent(**kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        return SimpleNamespace(text='{"ok":true}')
+
+    monkeypatch.setattr(agent_bridge, "run_agent", _run_agent)
+    registry = tool_registry.ToolRegistry()
+
+    result = asyncio.run(agent_bridge.run_text_agent(
+        messages=[{"role": "user", "content": "输出 JSON"}],
+        plugin_config=SimpleNamespace(personification_agent_enabled=True),
+        logger=None,
+        tool_caller=object(),
+        registry=registry,
+        structured_output=True,
+    ))
+
+    assert result == '{"ok":true}'
+    assert captured["finalize_quality"] is False
+    assert captured["structured_output"] is True
+
+    with pytest.raises(ValueError, match="structured_output conflicts"):
+        asyncio.run(agent_bridge.run_text_agent(
+            messages=[{"role": "user", "content": "冲突"}],
+            plugin_config=SimpleNamespace(personification_agent_enabled=True),
+            logger=None,
+            tool_caller=object(),
+            registry=registry,
+            output_kind=agent_bridge.OutputKind.PERSONA_TEXT,
+            structured_output=True,
+        ))
+
+
+def test_text_agent_persona_output_keeps_quality_and_visible_guard(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict = {}
+
+    async def _run_agent(**kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        return SimpleNamespace(text="  普通可见回复  ")
+
+    monkeypatch.setattr(agent_bridge, "run_agent", _run_agent)
+    result = asyncio.run(agent_bridge.run_text_agent(
+        messages=[{"role": "user", "content": "说句话"}],
+        plugin_config=SimpleNamespace(personification_agent_enabled=True),
+        logger=None,
+        tool_caller=object(),
+        registry=tool_registry.ToolRegistry(),
+    ))
+
+    assert result == "普通可见回复"
+    assert captured["finalize_quality"] is True
+
+
+def test_text_agent_admin_bypasses_guard_and_verbatim_keeps_only_safety(monkeypatch) -> None:  # noqa: ANN001
+    response = {"text": "provider internal server error"}
+
+    async def _run_agent(**_kwargs):  # noqa: ANN001
+        return SimpleNamespace(text=response["text"])
+
+    monkeypatch.setattr(agent_bridge, "run_agent", _run_agent)
+    kwargs = {
+        "messages": [{"role": "user", "content": "test"}],
+        "plugin_config": SimpleNamespace(personification_agent_enabled=True),
+        "logger": None,
+        "tool_caller": object(),
+        "registry": tool_registry.ToolRegistry(),
+    }
+
+    admin = asyncio.run(agent_bridge.run_text_agent(
+        **kwargs,
+        output_kind="admin_diagnostic",
+    ))
+    assert admin == "provider internal server error"
+
+    response["text"] = "[NO_REPLY]"
+    admin_control_text = asyncio.run(agent_bridge.run_text_agent(
+        **kwargs,
+        output_kind="admin_diagnostic",
+    ))
+    assert admin_control_text == "[NO_REPLY]"
+
+    response["text"] = "  用户要求逐字保留的安全原文  "
+    verbatim = asyncio.run(agent_bridge.run_text_agent(
+        **kwargs,
+        output_kind="verbatim_user_content",
+    ))
+    assert verbatim == "  用户要求逐字保留的安全原文  "
+
+    response["text"] = "provider 安全策略拦截"
+    blocked = asyncio.run(agent_bridge.run_text_agent(
+        **kwargs,
+        output_kind=agent_bridge.OutputKind.VERBATIM_USER_CONTENT,
+    ))
+    assert blocked == ""
+
+
+def test_text_agent_explicit_unknown_surface_fails_closed() -> None:
+    with pytest.raises(ValueError, match="unsupported social surface"):
+        asyncio.run(agent_bridge.run_text_agent(
+            messages=[{"role": "user", "content": "test"}],
+            plugin_config=SimpleNamespace(personification_agent_enabled=True),
+            logger=None,
+            tool_caller=object(),
+            registry=tool_registry.ToolRegistry(),
+            surface="unknown_surface",
+        ))
 
 
 def test_agent_prompting_adds_strict_technical_evidence_policy() -> None:

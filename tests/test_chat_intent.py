@@ -49,6 +49,7 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
             "sticker_mood_hint": "淡定|表达疑惑",
             "group_atmosphere_positive": True,
             "interaction_interesting": True,
+            "future_commitment_candidate": True,
             "confidence": 0.8,
             "reason": "test",
         }
@@ -66,6 +67,7 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
     assert valid.emotional_support.risk_level == "concern"
     assert valid.group_atmosphere_positive is True
     assert valid.interaction_interesting is True
+    assert valid.future_commitment_candidate is True
     assert invalid is None
 
 

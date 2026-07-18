@@ -153,7 +153,19 @@ def test_reply_dispatch_reraises_send_exception_and_records_unknown(tmp_path) ->
     assert row == ("unknown", "yaml_reply", "200")
 
 
-def test_normal_agent_ack_uses_reply_ack_ledger_surface(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+@pytest.mark.parametrize(
+    ("ack_text", "expected_sent"),
+    [
+        ("ack-now", True),
+        ("Authorization: Bearer secret-token-value", False),
+    ],
+)
+def test_normal_agent_ack_uses_reply_ack_ledger_surface(
+    tmp_path,
+    monkeypatch,
+    ack_text: str,
+    expected_sent: bool,
+) -> None:  # noqa: ANN001
     ledger, db_path = _ledger(tmp_path)
     bot = _Bot()
     event = _event()
@@ -166,7 +178,7 @@ def test_normal_agent_ack_uses_reply_ack_ledger_surface(tmp_path, monkeypatch) -
         return set()
 
     async def _run_agent(**kwargs):  # noqa: ANN202
-        await kwargs["ack_sender"]("ack-now")
+        await kwargs["ack_sender"](ack_text)
         return SimpleNamespace(
             text="reply",
             bypass_length_limits=False,
@@ -235,9 +247,14 @@ def test_normal_agent_ack_uses_reply_ack_ledger_surface(tmp_path, monkeypatch) -
             "FROM qq_outbound_ledger WHERE operation_id=?",
             ("trace-ack",),
         ).fetchone()
-    assert row == ("trace-ack", 0, "reply_ack", "sent", "message-1", "200")
-    assert bot.sends == [(event, "ack-now")]
-    assert commit_state["reply_delivery_confirmed"] is True
+    if expected_sent:
+        assert row == ("trace-ack", 0, "reply_ack", "sent", "message-1", "200")
+        assert bot.sends == [(event, "ack-now")]
+        assert commit_state["reply_delivery_confirmed"] is True
+    else:
+        assert row is None
+        assert bot.sends == []
+        assert "reply_delivery_started" not in commit_state
 
 
 def test_yaml_translation_forward_records_one_ledger_receipt(tmp_path) -> None:  # noqa: ANN001

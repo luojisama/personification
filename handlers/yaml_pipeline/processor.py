@@ -94,6 +94,7 @@ from ...core.sticker_feedback import (
 )
 from ...core.target_inference import TARGET_OTHERS
 from ...core.tts_service import extract_persona_tts_config
+from ...core.visible_output import guard_visible_text
 from ...core.turn_media import (
     attach_safe_visual_summary,
     coerce_turn_media,
@@ -142,6 +143,7 @@ from ..reply_pipeline.pipeline_context import (
     clone_tool_registry as _clone_tool_registry,
     compute_agent_time_budget as _compute_agent_time_budget,
     dispatch_reply_part as _dispatch_reply_part,
+    guard_reply_ack_text as _guard_reply_ack_text,
     build_reply_operation_id as _build_reply_operation_id,
     primary_route_supports_vision as _runtime_primary_route_supports_vision,
     should_use_agent_for_reply as _should_use_agent_for_reply,
@@ -321,8 +323,19 @@ async def _send_translation_forward(
     qq_outbound_ledger: QQOutboundLedger | None = None,
     operation_id: str = "",
     user_target: str = "",
+    logger: Any = None,
 ) -> bool | SendReceipt:
-    grouped = _group_translation_result(text)
+    guarded_text = guard_visible_text(
+        text,
+        logger=logger,
+        surface="reply_translation_forward",
+        allow_direct_media=False,
+        allow_control=False,
+    )
+    visible_text = normalize_visible_reply_text(strip_response_control_markers(guarded_text))
+    if not visible_text:
+        return False
+    grouped = _group_translation_result(visible_text)
     if not grouped:
         return False
 
@@ -1638,6 +1651,13 @@ async def process_yaml_response_logic(
         ack_sender = None
         if ack_phrase:
             async def _ack_sender(text: str, *, _phrase: str = ack_phrase) -> None:
+                visible_ack = _guard_reply_ack_text(
+                    text,
+                    fallback=_phrase,
+                    logger=logger,
+                )
+                if not visible_ack:
+                    return
                 mark_reply_phase(reply_commit_state, "delivery_commit_wait")
                 await acquire_reply_commit(reply_commit_state)
                 mark_reply_phase(reply_commit_state, "delivery")
@@ -1646,7 +1666,7 @@ async def process_yaml_response_logic(
                     if user_policy_gate is not None:
                         await user_policy_gate.ensure_current(event)
                     await _send_reply(
-                        str(text or "").strip() or _phrase,
+                        visible_ack,
                         surface="reply_ack",
                     )
                 finally:
@@ -1819,7 +1839,17 @@ async def process_yaml_response_logic(
                             qq_outbound_ledger=qq_outbound_ledger,
                             operation_id=outbound_reply_trace_id,
                             user_target=user_id,
+                            logger=logger,
                         )
+                        if translation_result is False:
+                            release_reply_commit(reply_commit_state)
+                            mark_reply_phase(reply_commit_state, "reply_complete")
+                            _trace_no_reply(
+                                "unsafe_visible_output",
+                                diagnosis_code="blocked",
+                                detail="翻译转发内容被安全门拦截",
+                            )
+                            return
                         translation_confirmed = (
                             not isinstance(translation_result, SendReceipt)
                             or translation_result.status == "sent"
@@ -1873,6 +1903,33 @@ async def process_yaml_response_logic(
                             return
                         logger.warning(f"拟人插件: 翻译结果转发发送失败，回退到普通消息: {e}")
                 raw_direct_output = normalize_visible_reply_text(strip_response_control_markers(raw_direct_output))
+                if raw_direct_output:
+                    raw_direct_output = guard_visible_text(
+                        raw_direct_output,
+                        logger=logger,
+                        surface="yaml_direct_output",
+                        allow_direct_media=False,
+                        allow_control=False,
+                    )
+                if not raw_direct_output:
+                    action_confirmed = bool(reply_commit_state.get("reply_delivery_confirmed", False))
+                    if action_confirmed:
+                        mark_reply_delivery_complete(reply_commit_state)
+                    release_reply_commit(reply_commit_state)
+                    mark_reply_phase(reply_commit_state, "reply_complete")
+                    if action_confirmed:
+                        _trace_finish(
+                            outcome="ok",
+                            diagnosis_code="blocked",
+                            detail={"direct_output": True, "visible_text_blocked": True, "actions_sent": True},
+                        )
+                    else:
+                        _trace_no_reply(
+                            "unsafe_visible_output",
+                            diagnosis_code="blocked",
+                            detail="YAML 直出内容为空或被安全门拦截",
+                        )
+                    return
                 direct_segments_sent = 0
                 for seg in re.split(r"(?:\r?\n){2,}", raw_direct_output):
                     text = seg.strip()
@@ -2238,8 +2295,6 @@ async def process_yaml_response_logic(
     elif cleaned_assistant_text != assistant_text:
         parsed = {"messages": [{"text": cleaned_assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
     assistant_text = cleaned_assistant_text
-    from ...core.visible_output import guard_visible_text
-
     assistant_text = guard_visible_text(assistant_text, logger=logger, surface="yaml_reply")
     if not assistant_text:
         _trace_no_reply("unsafe_visible_output", diagnosis_code="blocked", detail="最终可见输出被安全门拦截")

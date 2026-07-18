@@ -537,6 +537,7 @@ async def _install_personification_webui() -> None:
 async def _restore_user_tasks() -> None:
     from .core.tasks_service import restore_tasks_on_startup
     from .core.qq_outbound import build_outbound_context
+    from .core.services.agent_runtime import guard_scheduled_user_task_message
 
     bundle = _require_runtime_bundle()
     qq_outbound_ledger = bundle.qq_outbound_ledger
@@ -555,6 +556,9 @@ async def _restore_user_tasks() -> None:
             message = str(params.get("message", "") or "")
         if not message and isinstance(task, dict):
             message = str(task.get("message", "") or "")
+        if not message:
+            return
+        message = guard_scheduled_user_task_message(task, message, logger=logger)
         if not message:
             return
 
@@ -760,6 +764,7 @@ async def _setup_social_intelligence() -> None:
             persona_store=bundle.persona_store,
             data_dir=get_personification_data_dir(plugin_config),
             get_now=get_current_local_time,
+            load_prompt=bundle.load_prompt,
             tool_registry=bundle.reply_processor_deps.runtime.tool_registry,
             agent_max_steps=int(getattr(plugin_config, "personification_agent_max_steps", 10)),
             qq_outbound_ledger=bundle.qq_outbound_ledger,

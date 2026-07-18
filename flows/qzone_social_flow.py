@@ -309,14 +309,9 @@ async def recheck_qzone_permission_blocked_users(
 
 
 def _extract_system_prompt(prompt_data: Any) -> str:
-    if isinstance(prompt_data, dict):
-        value = prompt_data.get("system")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        return str(prompt_data)
-    if isinstance(prompt_data, str):
-        return prompt_data.strip()
-    return ""
+    from ..core.social_surface_renderer import PersonaScope, SocialSurfaceRenderer
+
+    return SocialSurfaceRenderer().project_persona(prompt_data, PersonaScope.QZONE)
 
 
 def _extract_json_object(raw: Any) -> dict[str, Any] | None:
@@ -880,6 +875,8 @@ async def _decide_feed_action(
                 use_builtin_search_hint=True,
                 trigger_reason="qzone_social_feed_action",
                 chat_intent_hint="qzone_social_feed_action",
+                surface="qzone_social_feed_action",
+                structured_output=True,
                 tool_profile=TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
             )
         except Exception as exc:
@@ -1091,6 +1088,8 @@ async def _decide_bot_comment_reply(
                 use_builtin_search_hint=True,
                 trigger_reason="qzone_comment_reply",
                 chat_intent_hint="qzone_comment_reply",
+                surface="qzone_comment_reply",
+                structured_output=True,
                 tool_profile=TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
             )
         except Exception as exc:

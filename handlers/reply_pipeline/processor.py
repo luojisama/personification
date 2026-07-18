@@ -1061,7 +1061,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 bot,
                 runtime,
                 event=event,
-                message_text=raw_message_text or message_text or message_content,
+                mood_hint=str(
+                    getattr(semantic_frame, "sticker_mood_hint", "")
+                    or getattr(semantic_frame, "bot_emotion", "")
+                    or ""
+                ),
                 group_id=str(group_id),
                 user_id=user_id,
                 is_private=is_private_session,
@@ -1574,6 +1578,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
     base_prompt = persona.load_prompt(str(group_id))
     if isinstance(base_prompt, dict):
+        from ...core.builtin_hooks import schedule_pending_topic_extraction
+
+        hook_ctx.session_messages = session_messages_for_model
+        hook_ctx.semantic_frame = semantic_frame
+        await schedule_pending_topic_extraction(hook_ctx)
         try:
             from ...core import reply_turn_trace
 
