@@ -139,6 +139,44 @@ def test_target_others_unrelated_still_does_not_trigger(monkeypatch) -> None:  #
     assert state["is_random_chat"] is False
 
 
+def test_two_person_dialogue_replay_is_structurally_silent(monkeypatch) -> None:  # noqa: ANN001
+    event = _GroupEvent("你也躺过去", user_id="u1")
+    event.message_id = "m5"
+    event.time = 1040
+    state: dict = {}
+    provider_calls: list[str] = []
+    recent = [
+        {
+            "message_id": "m1",
+            "user_id": "u1",
+            "mentioned_ids": ["u2"],
+            "source_kind": "user",
+            "time": 1000,
+        },
+        {"message_id": "m2", "user_id": "u2", "content": "[图片]", "source_kind": "user", "time": 1010},
+        {"message_id": "m3", "user_id": "u2", "content": "一墙之隔", "source_kind": "user", "time": 1020},
+        {"message_id": "m4", "user_id": "u1", "content": "看路边有人躺着", "source_kind": "user", "time": 1030},
+    ]
+    monkeypatch.setattr(event_rules.random, "random", lambda: provider_calls.append("random") or 0.0)
+
+    result = asyncio.run(
+        event_rules.personification_rule(
+            event,
+            state,
+            **_base_kwargs(
+                probability=1.0,
+                get_recent_group_msgs=lambda _gid, _limit: recent,
+            ),
+        )
+    )
+
+    assert result is False
+    assert state["message_target"] == target_inference.TARGET_OTHERS
+    assert state["message_target_reason"] == "carried_human_dialogue"
+    assert state["message_target_anchor_id"] == "m1"
+    assert provider_calls == []
+
+
 def test_reply_to_bot_target_gets_structural_probability_boost(monkeypatch) -> None:  # noqa: ANN001
     event = _GroupEvent("那我接着问一句", user_id="10002")
     state: dict = {}

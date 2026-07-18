@@ -229,8 +229,11 @@ def _is_direct_mention(event: Any, bot_self_id: str) -> bool:
     return False
 
 
-def _is_reply_to_bot(event: Any, bot_self_id: str) -> bool:
+def _is_reply_to_bot(event: Any, bot_self_id: str, *, message_target: str = "") -> bool:
     if not bot_self_id:
+        return False
+    normalized_target = normalize_message_target_for_review(message_target)
+    if normalized_target in {"external_plugin", "others"}:
         return False
     reply = getattr(event, "reply", None)
     if not reply:
@@ -247,6 +250,8 @@ def _is_reply_to_bot(event: Any, bot_self_id: str) -> bool:
         reply_user_id = str(getattr(reply, "self_id", "") or "").strip()
         if not reply_user_id and isinstance(reply, dict):
             reply_user_id = str(reply.get("self_id", "") or "").strip()
+    if normalized_target == "bot":
+        return True
     return bool(reply_user_id and reply_user_id == bot_self_id)
 
 
@@ -781,7 +786,11 @@ async def handle_reply_event(
     delay = _batch_delay(event, group_message_event_cls=group_message_event_cls)
     is_private_session = not isinstance(event, group_message_event_cls)
     is_direct_mention = _is_direct_mention(event, bot_self_id)
-    is_reply_to_bot = _is_reply_to_bot(event, bot_self_id)
+    is_reply_to_bot = _is_reply_to_bot(
+        event,
+        bot_self_id,
+        message_target=str(state.get("message_target", "") or ""),
+    )
     targets_bot = normalize_message_target_for_review(state.get("message_target")) == "bot"
     reply_required = bool(
         not state.get("is_random_chat", False)

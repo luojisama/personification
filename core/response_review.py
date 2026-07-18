@@ -14,6 +14,7 @@ from .reply_text_policy import (
     looks_like_visible_reasoning_trace,
     normalize_visible_reply_text,
 )
+from .message_provenance import is_personification_reply_record
 from .turn_media import render_turn_media_grounding
 
 
@@ -84,7 +85,7 @@ def extract_recent_bot_reply_texts(messages: Iterable[dict[str, Any]], *, limit:
     for message in list(messages or [])[-12:]:
         if not isinstance(message, dict):
             continue
-        if not (bool(message.get("is_bot")) or str(message.get("source_kind", "") or "").strip() == "bot_reply"):
+        if not is_personification_reply_record(message):
             continue
         text = str(message.get("content", "") or "").strip()
         if not text or text in collected:
@@ -182,6 +183,12 @@ def arbitrate_reply_mode(
         and message_target == "others"
         and confidence >= _SILENCE_CONFIDENCE_THRESHOLD
     )
+    structural_others_silence = (
+        not is_private
+        and not is_direct_mention
+        and not solo_speaker_follow
+        and message_target == "others"
+    )
     random_chat_structural_silence = (
         not is_private
         and is_random_chat
@@ -191,7 +198,7 @@ def arbitrate_reply_mode(
         and ambiguity == "high"
         and message_target in {"", "others", "uncertain"}
     )
-    if hard_silence or random_chat_structural_silence:
+    if structural_others_silence or hard_silence or random_chat_structural_silence:
         return "no_reply"
     if ambiguity == "high" and (is_private or is_direct_mention or message_target == "bot"):
         return "clarify"

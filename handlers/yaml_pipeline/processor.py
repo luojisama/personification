@@ -32,6 +32,7 @@ from ...core.favorability_turn import (
 from ...core.group_context import (
     build_group_conversation_context,
     render_group_conversation_context,
+    render_plugin_episode_trace_detail,
     render_topic_state_trace_detail,
 )
 from ...core.metrics import record_counter, record_timing
@@ -956,6 +957,15 @@ async def process_yaml_response_logic(
                 status="info",
                 detail=topic_detail,
                 hint="结构化线索用于判断当前消息接谁的话，不替代 LLM 语义判断",
+            )
+        plugin_detail = render_plugin_episode_trace_detail(conversation_context.plugin_episode)
+        if plugin_detail:
+            _trace_stage(
+                key="yaml_plugin_episode",
+                label="YAML 其它插件交互",
+                status="info",
+                detail=plugin_detail,
+                hint="其它插件输出仅作为带来源的群聊上下文，不等同于人格回复",
             )
     else:
         recent_window = []

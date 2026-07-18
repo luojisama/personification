@@ -28,7 +28,7 @@ ToolIntent = Literal[
     "lookup_web", "lookup_plugin", "runtime_capability", "vision", "image_gen", "memory", "expression", "none"
 ]
 AmbiguityLevel = Literal["low", "medium", "high"]
-MessageTarget = Literal["bot", "someone_else", "broadcast", "uncertain"]
+MessageTarget = Literal["bot", "someone_else", "external_plugin", "broadcast", "uncertain"]
 DomainFocus = Literal["general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"]
 EvidencePolicy = Literal["none", "light", "standard", "strict"]
 
@@ -52,7 +52,7 @@ ALLOWED_TOOL_INTENTS = {
     "lookup_web", "lookup_plugin", "runtime_capability", "vision", "image_gen", "memory", "expression", "none"
 }
 ALLOWED_AMBIGUITY_LEVELS = {"low", "medium", "high"}
-ALLOWED_MESSAGE_TARGETS = {"bot", "someone_else", "broadcast", "uncertain"}
+ALLOWED_MESSAGE_TARGETS = {"bot", "someone_else", "external_plugin", "broadcast", "uncertain"}
 ALLOWED_DOMAIN_FOCUS = {"general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"}
 ALLOWED_EVIDENCE_POLICIES = {"none", "light", "standard", "strict"}
 
@@ -408,7 +408,7 @@ async def plan_turn_with_llm(
         '"output_mode":"chat_short|chat_answer|structured_help|source_summary|qzone_reply",'
         '"tool_intent":["lookup_web|lookup_plugin|runtime_capability|vision|image_gen|memory|expression|none"],'
         '"ambiguity_level":"low|medium|high",'
-        '"message_target":"bot|someone_else|broadcast|uncertain",'
+        '"message_target":"bot|someone_else|external_plugin|broadcast|uncertain",'
         '"session_goal":"一句短中文目标",'
         '"domain_focus":"general|social|technology|science|game_anime|plugin|realtime|emotion",'
         '"evidence_policy":"none|light|standard|strict",'

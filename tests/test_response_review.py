@@ -42,7 +42,28 @@ def test_arbitrate_reply_mode_handles_key_combinations() -> None:
 
     assert no_reply == "no_reply"
     assert clarify == "clarify"
-    assert reply == "reply"
+    assert reply == "no_reply"
+
+
+def test_recent_bot_replies_only_include_personification_provenance() -> None:
+    replies = response_review.extract_recent_bot_reply_texts(
+        [
+            {
+                "content": "辅助性T细胞",
+                "user_id": "bot-1",
+                "is_bot": True,
+                "source_kind": "plugin",
+            },
+            {
+                "content": "这是人格回复",
+                "user_id": "bot-1",
+                "is_bot": True,
+                "source_kind": "bot_reply",
+            },
+        ]
+    )
+
+    assert replies == ["这是人格回复"]
 
 
 def test_arbitrate_reply_mode_silences_uncertain_random_chat_even_with_low_confidence() -> None:

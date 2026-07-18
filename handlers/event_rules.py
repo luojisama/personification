@@ -4,10 +4,23 @@ import re
 import time
 from typing import Any, Callable, Optional, Tuple
 
-from ..core.message_relations import build_event_relation_metadata
+from ..core.message_relations import (
+    build_event_relation_metadata,
+    extract_mentioned_ids,
+    extract_reply_message_id,
+)
+from ..core.message_provenance import (
+    is_human_chat_record,
+    is_personification_reply_record,
+)
 from ..core.group_roles import extract_sender_role
 from ..core.group_mute import is_group_muted
-from ..core.target_inference import TARGET_BOT, TARGET_OTHERS, infer_message_target
+from ..core.target_inference import (
+    MessageTargetDecision,
+    TARGET_BOT,
+    TARGET_OTHERS,
+    infer_message_target,
+)
 
 try:
     from nonebot.adapters.onebot.v11 import Event
@@ -37,7 +50,7 @@ def _detect_solo_speaker_follow(
     ]
     if not recent_window:
         return {}
-    recent_non_bot = [msg for msg in recent_window if not bool(msg.get("is_bot"))]
+    recent_non_bot = [msg for msg in recent_window if is_human_chat_record(msg)]
     if len(recent_non_bot) < 3:
         return {}
     tail = recent_non_bot[-4:]
@@ -46,7 +59,7 @@ def _detect_solo_speaker_follow(
         return {}
     if str(tail[-1].get("user_id", "") or "").strip() != current_user:
         return {}
-    if any(bool(msg.get("is_bot")) for msg in recent_window[-6:]):
+    if any(is_personification_reply_record(msg) for msg in recent_window[-6:]):
         return {}
 
     topic_seed = str(same_user_msgs[-1].get("content", "") or "").strip()
@@ -179,9 +192,17 @@ async def personification_rule(
         except Exception as e:
             logger.warning(f"拟人插件: 检查名字提及失败: {e}")
 
-        if event.to_me or is_name_mentioned:
+        _, explicitly_at_bot = extract_mentioned_ids(
+            getattr(event, "message", []) or [],
+            bot_self_id=str(getattr(event, "self_id", "") or ""),
+        )
+        adapter_direct_without_reply = bool(event.to_me) and not extract_reply_message_id(event)
+        if explicitly_at_bot or adapter_direct_without_reply or is_name_mentioned:
             state["is_random_chat"] = False
             state["message_target"] = TARGET_BOT
+            state["message_target_reason"] = (
+                "explicit_persona_mention" if explicitly_at_bot or adapter_direct_without_reply else "persona_name_mention"
+            )
             return True
 
         plain_text = str(event.get_plaintext() or "").strip()
@@ -195,12 +216,17 @@ async def personification_rule(
                 recent_msgs = get_recent_group_msgs(group_id, 8)
             except Exception:
                 recent_msgs = []
-            message_target = infer_message_target(
+            target_decision = infer_message_target(
                 event,
                 bot_self_id=str(getattr(event, "self_id", "") or ""),
                 recent_group_msgs=recent_msgs,
             )
-            state["message_target"] = message_target
+            if isinstance(target_decision, MessageTargetDecision):
+                state.update(target_decision.trace_fields())
+                message_target = target_decision.target
+            else:
+                message_target = str(target_decision or "")
+                state["message_target"] = message_target
         else:
             message_target = state.get("message_target", "")
 
@@ -221,7 +247,13 @@ async def personification_rule(
             same_user = bool(last_user_id) and last_user_id == user_id
             current_prob = float(max(0.0, min(1.0, group_chat_follow_probability)))
 
-            recent_bot_participated = any(bool(msg.get("is_bot")) for msg in recent_msgs[-4:])
+            recent_bot_participated = any(
+                is_personification_reply_record(
+                    msg,
+                    str(getattr(event, "self_id", "") or ""),
+                )
+                for msg in recent_msgs[-4:]
+            )
             if message_target == TARGET_OTHERS:
                 current_prob = 0.0
             elif message_target == TARGET_BOT:

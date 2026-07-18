@@ -51,11 +51,17 @@ from ...core.prompt_hooks import HookContext, get_hook_registry
 from ...core.group_context import (
     build_group_conversation_context,
     render_group_conversation_context,
+    render_plugin_episode_trace_detail,
     render_topic_state_trace_detail,
 )
 from ...core.group_mute import refresh_bot_group_mute_state
 from ...core.group_roles import extract_sender_role
-from ...core.target_inference import TARGET_OTHERS, TARGET_UNCLEAR, infer_message_target
+from ...core.target_inference import (
+    MessageTargetDecision,
+    TARGET_OTHERS,
+    TARGET_UNCLEAR,
+    infer_message_target,
+)
 from ...core.tts_service import extract_persona_tts_config
 from ...core.turn_media import (
     attach_safe_visual_summary,
@@ -1105,11 +1111,15 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 recent_group_msgs,
                 bot_self_id=str(getattr(bot, "self_id", "") or ""),
             )
-        state["message_target"] = infer_message_target(
+        target_decision = infer_message_target(
             event,
             bot_self_id=str(getattr(bot, "self_id", "") or ""),
             recent_group_msgs=recent_group_msgs,
         )
+        if isinstance(target_decision, MessageTargetDecision):
+            state.update(target_decision.trace_fields())
+        else:
+            state["message_target"] = str(target_decision or "")
     try:
         from ...core import reply_turn_trace
 
@@ -1119,7 +1129,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             status="info",
             detail=(
                 f"private={is_private_session} random={bool(is_random_chat)} "
-                f"direct={bool(is_direct_mention)} target={state.get('message_target') or '-'}"
+                f"direct={bool(is_direct_mention)} target={state.get('message_target') or '-'} "
+                f"reason={state.get('message_target_reason') or '-'} "
+                f"anchor={state.get('message_target_anchor_id') or '-'} "
+                f"participants={len(state.get('message_target_participants') or [])}"
             ),
         )
     except Exception:
@@ -1354,6 +1367,15 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     status="info",
                     detail=topic_detail,
                     hint="结构化线索用于判断当前消息接谁的话，不替代 LLM 语义判断",
+                )
+            plugin_detail = render_plugin_episode_trace_detail(conversation_context.plugin_episode)
+            if plugin_detail:
+                reply_turn_trace.record_stage(
+                    key="plugin_episode",
+                    label="其它插件交互",
+                    status="info",
+                    detail=plugin_detail,
+                    hint="其它插件输出仅作为带来源的群聊上下文，不等同于人格回复",
                 )
         except Exception:
             pass

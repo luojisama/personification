@@ -420,6 +420,21 @@ def test_random_bot_target_is_not_upgraded_to_required_reply() -> None:
     asyncio.run(run())
 
 
+def test_reply_to_same_account_external_plugin_is_not_persona_direct_turn() -> None:
+    event = _GroupEvent(1, "plugin followup")
+    event.reply = type(
+        "Reply",
+        (),
+        {"sender": type("Sender", (), {"user_id": "999"})()},
+    )()
+
+    assert reply_buffer._is_reply_to_bot(
+        event,
+        "999",
+        message_target="external_plugin",
+    ) is False
+
+
 def test_blocked_event_never_enters_direct_or_buffer_processing() -> None:
     async def run() -> None:
         processed: list[int] = []
