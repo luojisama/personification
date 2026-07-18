@@ -1673,7 +1673,13 @@ async def _build_qzone_post_with_optional_image(
     return decision.text
 
 
-async def get_recent_chat_context(bot: Any, logger: Any, report: QzoneGenerationReport | None = None) -> str:
+async def get_recent_chat_context(
+    bot: Any,
+    logger: Any,
+    report: QzoneGenerationReport | None = None,
+    *,
+    user_policy_authorizer: Callable[[str], Awaitable[Any]] | None = None,
+) -> str:
     """Sample recent non-bot group messages as diary context."""
     try:
         group_list = await bot.get_group_list()
@@ -1702,9 +1708,32 @@ async def get_recent_chat_context(bot: Any, logger: Any, report: QzoneGeneration
             lines = []
             for msg in messages["messages"]:
                 sender = msg.get("sender", {}) if isinstance(msg.get("sender"), dict) else {}
-                sender_id = str(sender.get("user_id") or msg.get("user_id") or "").strip()
+                sender_id = str(
+                    sender.get("user_id")
+                    or sender.get("sender_id")
+                    or msg.get("user_id")
+                    or msg.get("sender_id")
+                    or ""
+                ).strip()
                 if bot_id and sender_id == bot_id:
                     continue
+                if user_policy_authorizer is not None:
+                    if not sender_id:
+                        continue
+                    try:
+                        authorization = await user_policy_authorizer(sender_id)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning(
+                            "[diary] context authorization failed closed: "
+                            f"{type(e).__name__}"
+                        )
+                        continue
+                    if bool(getattr(authorization, "blocked", True)) or not bool(
+                        getattr(authorization, "allow_context_read", False)
+                    ):
+                        continue
                 sender_name = sender.get("nickname", "未知")
                 raw_msg = msg.get("message", "")
                 content = ""
@@ -2155,13 +2184,19 @@ async def generate_ai_diary(
     data_dir: Optional[Path] = None,
     registry: Any = None,
     agent_max_steps: int = 4,
+    user_policy_authorizer: Callable[[str], Awaitable[Any]] | None = None,
     _report: QzoneGenerationReport | None = None,
 ) -> str:
     """Generate a short Qzone post from recent chat context."""
     _report = _report or QzoneGenerationReport()
     system_prompt = load_prompt()
     qzone_persona = _project_qzone_system_prompt(system_prompt)
-    chat_context = await get_recent_chat_context(bot, logger, report=_report)
+    chat_context = await get_recent_chat_context(
+        bot,
+        logger,
+        report=_report,
+        user_policy_authorizer=user_policy_authorizer,
+    )
     recent_posts = _load_recent_qzone_posts()
     emotion_hint = ""
     if data_dir is not None:
@@ -2375,10 +2410,17 @@ async def generate_ai_diary(
 
 async def generate_ai_diary_detailed(
     bot: Any,
+    *,
+    user_policy_authorizer: Callable[[str], Awaitable[Any]] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     report = QzoneGenerationReport()
-    content = await generate_ai_diary(bot, _report=report, **kwargs)
+    content = await generate_ai_diary(
+        bot,
+        user_policy_authorizer=user_policy_authorizer,
+        _report=report,
+        **kwargs,
+    )
     return {
         "content": content,
         "diagnostic": report.to_diagnostic(ok=bool(content), content=content),
@@ -2400,11 +2442,16 @@ async def maybe_generate_proactive_qzone_post(
     registry: Any = None,
     agent_max_steps: int = 4,
     quota: Optional[dict] = None,
+    user_policy_authorizer: Callable[[str], Awaitable[Any]] | None = None,
 ) -> str:
     """根据近期聊天、内心状态与本月额度，决定是否主动发一条更日常的空间动态。"""
     system_prompt = load_prompt()
     qzone_persona = _project_qzone_system_prompt(system_prompt)
-    chat_context = await get_recent_chat_context(bot, logger)
+    chat_context = await get_recent_chat_context(
+        bot,
+        logger,
+        user_policy_authorizer=user_policy_authorizer,
+    )
     if not chat_context:
         chat_context = "最近群聊可用文本很少；可以把今天的游戏、动漫、轻新闻或自己的状态当成触发点。"
     recent_posts = _load_recent_qzone_posts()

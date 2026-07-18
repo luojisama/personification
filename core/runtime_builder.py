@@ -433,6 +433,7 @@ def build_plugin_runtime(
         logger=logger,
         legacy_block_checker=_legacy_policy_blocked,
     )
+    qzone_social_service.user_policy_authorizer = qq_user_policy_gate.current_authorization
     tts_service = TtsService(
         plugin_config=plugin_config,
         logger=logger,

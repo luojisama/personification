@@ -45,6 +45,23 @@ class _Logger:
         return None
 
 
+def _policy_authorization(*, allowed: bool):  # noqa: ANN202
+    return qzone_flow.PolicyAuthorization(
+        blocked=not allowed,
+        tier="allow" if allowed else "permanent",
+        allow_reply=allowed,
+        allow_visible_reaction=allowed,
+        allow_agent_action=allowed,
+        allow_proactive=allowed,
+        allow_qzone=allowed,
+        allow_profile_write=allowed,
+        allow_history_write=allowed,
+        allow_memory_write=allowed,
+        allow_relation_write=allowed,
+        allow_context_read=allowed,
+    )
+
+
 class _Bot:
     self_id = "99999"
 
@@ -583,6 +600,241 @@ def test_qzone_profile_evidence_records_once_with_source_label() -> None:
     assert "[QQ空间动态]" in store.records[0][1]
     assert "图片内部摘要（仅供理解）：一张饮料和便当的照片" in store.records[0][1]
     assert result["profile_records"] == 1
+
+
+@pytest.mark.parametrize("authorization_error", [False, True], ids=["blocked", "error"])
+def test_qzone_policy_denied_target_skips_context_fetch_and_llm(
+    monkeypatch,
+    authorization_error: bool,
+) -> None:  # noqa: ANN001
+    calls = {"friend_list": 0, "fetch": 0, "persona": 0, "proactive": 0, "llm": 0}
+
+    class _FriendBot:
+        self_id = "99999"
+
+        async def get_friend_list(self):  # noqa: ANN201
+            calls["friend_list"] += 1
+            return [{"user_id": "20001", "nickname": "好友"}]
+
+    class _Service:
+        async def fetch_user_feeds(self, **_kwargs):  # noqa: ANN003
+            calls["fetch"] += 1
+            return True, "ok", []
+
+    class _Persona:
+        def get_persona_snippet(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN201
+            calls["persona"] += 1
+            return "不应读取"
+
+    async def _authorize(_user_id: str):  # noqa: ANN202
+        if authorization_error:
+            raise RuntimeError("private policy failure")
+        return _policy_authorization(allowed=False)
+
+    def _load_proactive():  # noqa: ANN202
+        calls["proactive"] += 1
+        return {"20001": {"last_interaction": 1}}
+
+    async def _call_ai(_messages):  # noqa: ANN001
+        calls["llm"] += 1
+        return '{"action":"like"}'
+
+    monkeypatch.setattr(qzone_flow, "_normalize_state", lambda _now: {})
+    monkeypatch.setattr(qzone_flow, "_save_state", lambda _state, _result: None)
+
+    result = asyncio.run(
+        qzone_flow.scan_qzone_social_feeds(
+            bot=_FriendBot(),
+            plugin_config=SimpleNamespace(),
+            qzone_social_service=_Service(),
+            load_prompt=lambda: "你是绪山真寻。",
+            call_ai_api=_call_ai,
+            load_proactive_state=_load_proactive,
+            get_now=lambda: datetime(2026, 7, 18, 12, 0),
+            logger=_Logger(),
+            persona_store=_Persona(),
+            target_user_id="20001",
+            user_policy_authorizer=_authorize,
+        )
+    )
+
+    assert result["skipped"] is True
+    assert result["reason"] == "user_policy_blocked"
+    assert calls == {"friend_list": 0, "fetch": 0, "persona": 0, "proactive": 0, "llm": 0}
+
+
+def test_qzone_policy_blocked_commenter_skips_evidence_agent_and_reply(monkeypatch) -> None:  # noqa: ANN001
+    store = _RecordingPersonaStore()
+    service = _InboundQzoneService()
+    agent_calls: list[dict[str, object]] = []
+    direct_calls: list[object] = []
+
+    async def _authorize(user_id: str):  # noqa: ANN202
+        return _policy_authorization(allowed=user_id != "20001")
+
+    async def _agent(**kwargs):  # noqa: ANN003, ANN202
+        agent_calls.append(kwargs)
+        return '{"action":"reply","reply":"不应发送"}'
+
+    async def _call_ai(messages):  # noqa: ANN001
+        direct_calls.append(messages)
+        return '{"action":"reply","reply":"不应发送"}'
+
+    monkeypatch.setattr(qzone_flow, "run_text_agent", _agent)
+    state: dict[str, object] = {}
+    result: dict[str, object] = {"inbound_comments": 0, "replied": 0, "profile_records": 0}
+
+    asyncio.run(
+        qzone_flow._scan_bot_space_comments(
+            bot=_Bot(),
+            qzone_social_service=service,
+            friend_profiles={"20001": {"nickname": "好友"}},
+            proactive_state={"20001": {"last_interaction": 1}},
+            persona_store=store,
+            persona_snippet_max_chars=80,
+            system_prompt="你是绪山真寻。",
+            call_ai_api=_call_ai,
+            inner_state={},
+            emotion_state={},
+            max_feeds=20,
+            state=state,
+            result=result,
+            logger=_Logger(),
+            plugin_config=SimpleNamespace(personification_agent_enabled=True),
+            agent_tool_caller=object(),
+            agent_tool_registry=object(),
+            user_policy_authorizer=_authorize,
+        )
+    )
+
+    assert result["inbound_comments"] == 0
+    assert result["replied"] == 0
+    assert result["profile_records"] == 0
+    assert store.records == []
+    assert agent_calls == []
+    assert direct_calls == []
+    assert service.replies == []
+
+
+def test_qzone_policy_recheck_after_decision_blocks_like(monkeypatch) -> None:  # noqa: ANN001
+    policy_state = {"allowed": True}
+
+    class _FriendBot:
+        self_id = "99999"
+
+        async def get_friend_list(self):  # noqa: ANN201
+            return [{"user_id": "20001", "nickname": "好友"}]
+
+    class _Service:
+        def __init__(self) -> None:
+            self.likes = 0
+
+        async def fetch_user_feeds(self, **_kwargs):  # noqa: ANN003
+            return True, "ok", [
+                {
+                    "feed_key": "20001:feed1",
+                    "feed_id": "feed1",
+                    "owner_uin": "20001",
+                    "nickname": "好友",
+                    "content": "今天风很大",
+                    "images": [],
+                }
+            ]
+
+        async def like_feed(self, **_kwargs):  # noqa: ANN003
+            self.likes += 1
+            return True, "ok"
+
+    async def _authorize(_user_id: str):  # noqa: ANN202
+        return _policy_authorization(allowed=policy_state["allowed"])
+
+    async def _call_ai(_messages):  # noqa: ANN001
+        policy_state["allowed"] = False
+        return '{"action":"like","comment":"","reason":"自然互动"}'
+
+    service = _Service()
+    monkeypatch.setattr(qzone_flow, "_normalize_state", lambda _now: {})
+    monkeypatch.setattr(qzone_flow, "_save_state", lambda _state, _result: None)
+
+    result = asyncio.run(
+        qzone_flow.scan_qzone_social_feeds(
+            bot=_FriendBot(),
+            plugin_config=SimpleNamespace(
+                personification_agent_enabled=False,
+                personification_qzone_social_max_feeds_per_scan=5,
+                personification_qzone_social_like_limit=0,
+                personification_qzone_social_comment_limit=0,
+                personification_qzone_social_per_friend_limit=0,
+                personification_qzone_forward_enabled=False,
+                personification_persona_snippet_max_chars=80,
+            ),
+            qzone_social_service=service,
+            load_prompt=lambda: "你是绪山真寻。",
+            call_ai_api=_call_ai,
+            load_proactive_state=lambda: {"20001": {"last_interaction": 1}},
+            get_now=lambda: datetime(2026, 7, 18, 12, 0),
+            logger=_Logger(),
+            persona_store=_PersonaStore({"20001": "熟人"}),
+            target_user_id="20001",
+            user_policy_authorizer=_authorize,
+        )
+    )
+
+    assert service.likes == 0
+    assert result["liked"] == 0
+    assert result["ignored"] == 1
+
+
+def test_qzone_policy_blocked_outbound_owner_is_not_fetched() -> None:
+    class _Service:
+        def __init__(self) -> None:
+            self.fetches = 0
+
+        async def fetch_user_feeds(self, **_kwargs):  # noqa: ANN003
+            self.fetches += 1
+            return True, "ok", []
+
+    async def _authorize(user_id: str):  # noqa: ANN202
+        return _policy_authorization(allowed=user_id != "20001")
+
+    service = _Service()
+    state: dict[str, object] = {
+        "bot_outbound_comments": {
+            "20001:feed1": {
+                "target_uin": "20001",
+                "bot_comment": "上一句",
+                "recorded_at": 1710000000,
+            }
+        }
+    }
+    result: dict[str, object] = {"failed": 0, "inbound_comments": 0, "replied": 0}
+
+    asyncio.run(
+        qzone_flow._scan_bot_outbound_comment_replies(
+            bot=_Bot(),
+            qzone_social_service=service,
+            plugin_config=SimpleNamespace(
+                personification_qzone_outbound_reply_lookback_hours=999999,
+                personification_qzone_outbound_reply_max_feeds=30,
+            ),
+            friend_profiles={"20001": {"nickname": "好友"}},
+            proactive_state={"20001": {"last_interaction": 1}},
+            persona_store=_PersonaStore({"20001": "熟人"}),
+            persona_snippet_max_chars=80,
+            system_prompt="你是绪山真寻。",
+            call_ai_api=lambda _messages: None,
+            inner_state={},
+            emotion_state={},
+            state=state,
+            result=result,
+            logger=_Logger(),
+            user_policy_authorizer=_authorize,
+        )
+    )
+
+    assert service.fetches == 0
+    assert result["inbound_comments"] == 0
+    assert result["replied"] == 0
 
 
 def test_qzone_inbound_comment_replies_once_and_records_profile() -> None:

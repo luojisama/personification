@@ -133,6 +133,36 @@ def test_diary_task_resolves_current_tool_caller_for_each_run(monkeypatch) -> No
     assert seen == ["reloaded-caller", "reloaded-caller"]
 
 
+def test_qzone_generation_tasks_forward_user_policy_authorizer() -> None:
+    authorizer = object()
+    seen: list[object] = []
+
+    async def _flow(_bot, **kwargs):  # noqa: ANN001
+        seen.append(kwargs.get("user_policy_authorizer"))
+        return "内容"
+
+    diary_task = task_builders.build_generate_ai_diary_task(
+        plugin_config=object(),
+        generate_ai_diary_flow=_flow,
+        load_prompt=lambda: "persona",
+        call_ai_api=lambda *_args, **_kwargs: None,
+        logger=object(),
+        user_policy_authorizer=authorizer,
+    )
+    proactive_task = task_builders.build_maybe_generate_qzone_post_task(
+        plugin_config=object(),
+        maybe_generate_proactive_qzone_post_flow=_flow,
+        load_prompt=lambda: "persona",
+        call_ai_api=lambda *_args, **_kwargs: None,
+        logger=object(),
+        user_policy_authorizer=authorizer,
+    )
+
+    assert asyncio.run(diary_task(object())) == "内容"
+    assert asyncio.run(proactive_task(object())) == "内容"
+    assert seen == [authorizer, authorizer]
+
+
 def test_runtime_bundle_wires_current_caller_only_to_job_deps() -> None:
     source_path = Path(__file__).resolve().parents[1] / "core" / "runtime_assembly.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
@@ -148,6 +178,7 @@ def test_runtime_bundle_wires_current_caller_only_to_job_deps() -> None:
 
     assert "get_agent_tool_caller" not in keywords_by_factory["FlowSetupDeps"]
     assert "get_agent_tool_caller" in keywords_by_factory["JobSetupDeps"]
+    assert "user_policy_authorizer" in keywords_by_factory["JobSetupDeps"]
 
 
 def test_manual_diary_unknown_does_not_mark_published(monkeypatch) -> None:  # noqa: ANN001

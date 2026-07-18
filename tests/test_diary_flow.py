@@ -1049,6 +1049,116 @@ def test_recent_chat_context_filters_bot_self_messages() -> None:
     assert "其它插件自动播报" not in result
 
 
+def test_recent_chat_context_authorizes_each_sender_before_reading_content() -> None:
+    class _HistoryBot:
+        self_id = "99999"
+
+        async def get_group_list(self):  # noqa: ANN201
+            return [{"group_id": 1, "group_name": "测试群"}]
+
+        async def get_group_msg_history(self, *, group_id, count):  # noqa: ANN001, ANN201
+            return {
+                "messages": [
+                    {
+                        "sender": {"user_id": "10001", "nickname": "受限用户"},
+                        "message": [{"type": "text", "data": {"text": "受限素材不能进提示词"}}],
+                    },
+                    {
+                        "sender_id": "10002",
+                        "sender": {"nickname": "允许用户"},
+                        "message": [{"type": "text", "data": {"text": "允许素材应当保留"}}],
+                    },
+                    {
+                        "sender": {"user_id": "10003", "nickname": "异常用户"},
+                        "message": [{"type": "text", "data": {"text": "异常素材也不能进提示词"}}],
+                    },
+                ]
+            }
+
+    checked: list[str] = []
+
+    async def _authorize(user_id: str):  # noqa: ANN202
+        checked.append(user_id)
+        if user_id == "10003":
+            raise RuntimeError("policy unavailable")
+        return SimpleNamespace(
+            blocked=user_id == "10001",
+            allow_context_read=user_id == "10002",
+        )
+
+    result = asyncio.run(
+        diary_flow.get_recent_chat_context(
+            _HistoryBot(),
+            _Logger(),
+            user_policy_authorizer=_authorize,
+        )
+    )
+
+    assert checked == ["10001", "10002", "10003"]
+    assert "受限素材不能进提示词" not in result
+    assert "异常素材也不能进提示词" not in result
+    assert "允许素材应当保留" in result
+
+
+def test_generate_ai_diary_bot_original_is_not_user_targeted(monkeypatch) -> None:  # noqa: ANN001
+    class _SelfHistoryBot:
+        self_id = "99999"
+
+        async def get_group_list(self):  # noqa: ANN201
+            return [{"group_id": 1, "group_name": "测试群"}]
+
+        async def get_group_msg_history(self, *, group_id, count):  # noqa: ANN001, ANN201
+            return {
+                "messages": [
+                    {
+                        "sender": {"user_id": "99999", "nickname": "bot"},
+                        "message": [{"type": "text", "data": {"text": "Bot 自己此前发的内容"}}],
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(diary_flow, "get_data_store", lambda: _Store({"recent_contents": []}))
+    checked: list[str] = []
+
+    async def _authorize(user_id: str):  # noqa: ANN202
+        checked.append(user_id)
+        return SimpleNamespace(blocked=True, allow_context_read=False)
+
+    async def _call_ai(messages, **_kwargs):  # noqa: ANN001
+        if "发布前审阅器" in str(messages[0].get("content", "")):
+            return json.dumps(
+                {
+                    "accept": True,
+                    "coherent": True,
+                    "grounded": True,
+                    "novel": True,
+                    "same_topic": False,
+                    "same_scene": False,
+                    "same_syntax": False,
+                    "topic_key": "rest",
+                    "reason": "主观状态",
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {"content": "今晚有点想早点关灯躺一会儿", "image_prompt": ""},
+            ensure_ascii=False,
+        )
+
+    result = asyncio.run(
+        diary_flow.generate_ai_diary(
+            _SelfHistoryBot(),
+            load_prompt=lambda: "你是绪山真寻。",
+            call_ai_api=_call_ai,
+            logger=_Logger(),
+            user_policy_authorizer=_authorize,
+        )
+    )
+
+    assert result == "今晚有点想早点关灯躺一会儿"
+    assert checked == []
+
+
 def test_generate_once_reinforces_persona_in_system_prompt() -> None:
     """发空间生成必须保留角色人设：旧的"不扮演角色"措辞已去除，并注入人设快照。"""
     captured: dict = {}

@@ -331,6 +331,11 @@ class PluginRuntimeBundle:
                 getattr(self.plugin_config, "personification_qzone_inbound_check_interval", 3)
             ),
             qzone_inbound_poll_flow=self.qzone_inbound_poll_flow,
+            user_policy_authorizer=(
+                self.qq_user_policy_gate.current_authorization
+                if self.qq_user_policy_gate is not None
+                else None
+            ),
             persona_store=self.persona_store,
             vision_caller=self.reply_processor_deps.runtime.vision_caller,
             agent_tool_caller=self.reply_processor_deps.runtime.agent_tool_caller,

@@ -13,6 +13,7 @@ def build_generate_ai_diary_task(
     agent_tool_registry: Any = None,
     agent_max_steps: int = 4,
     agent_data_dir: Any = None,
+    user_policy_authorizer: Any = None,
 ) -> Callable[[Any], Awaitable[str]]:
     def _current_tool_caller() -> Any:
         return get_agent_tool_caller() if callable(get_agent_tool_caller) else agent_tool_caller
@@ -28,6 +29,7 @@ def build_generate_ai_diary_task(
             registry=agent_tool_registry,
             agent_max_steps=agent_max_steps,
             data_dir=agent_data_dir,
+            user_policy_authorizer=user_policy_authorizer,
         )
 
     async def _generate_ai_diary_detailed(bot: Any) -> dict[str, Any]:
@@ -45,6 +47,7 @@ def build_generate_ai_diary_task(
             registry=agent_tool_registry,
             agent_max_steps=agent_max_steps,
             data_dir=agent_data_dir,
+            user_policy_authorizer=user_policy_authorizer,
         )
 
     def _mark_published(content: str) -> None:
@@ -184,6 +187,7 @@ def build_maybe_generate_qzone_post_task(
     agent_tool_registry: Any = None,
     agent_max_steps: int = 4,
     agent_data_dir: Any = None,
+    user_policy_authorizer: Any = None,
 ) -> Callable[..., Awaitable[str]]:
     def _current_tool_caller() -> Any:
         return get_agent_tool_caller() if callable(get_agent_tool_caller) else agent_tool_caller
@@ -200,6 +204,7 @@ def build_maybe_generate_qzone_post_task(
             registry=agent_tool_registry,
             agent_max_steps=agent_max_steps,
             quota=quota,
+            user_policy_authorizer=user_policy_authorizer,
         )
 
     def _mark_published(content: str) -> None:

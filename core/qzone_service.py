@@ -965,10 +965,41 @@ def _classify_qzone_write_response(
 class QzoneSocialService:
     """Read and react to Qzone feeds through the same cookie used by shuoshuo publishing."""
 
-    def __init__(self, plugin_config: Any, logger: Any) -> None:
+    def __init__(
+        self,
+        plugin_config: Any,
+        logger: Any,
+        user_policy_authorizer: Callable[[str], Awaitable[Any]] | None = None,
+    ) -> None:
         self.plugin_config = plugin_config
         self.logger = logger
         self.enabled = bool(getattr(plugin_config, "personification_qzone_enabled", False))
+        self.user_policy_authorizer = user_policy_authorizer
+
+    async def _user_policy_allows(
+        self,
+        *,
+        user_id: str,
+        bot_id: str,
+        permissions: tuple[str, ...],
+    ) -> bool:
+        target = str(user_id or "").strip()
+        if not target:
+            return False
+        if target == str(bot_id or "").strip():
+            return True
+        authorizer = self.user_policy_authorizer
+        if authorizer is None:
+            return True
+        try:
+            authorization = await authorizer(target)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+        if authorization is None or bool(getattr(authorization, "blocked", True)):
+            return False
+        return all(bool(getattr(authorization, permission, False)) for permission in permissions)
 
     def _context(self, bot_id: str) -> tuple[bool, str, dict[str, Any]]:
         if not self.enabled:
@@ -984,12 +1015,18 @@ class QzoneSocialService:
         include_comments: bool = False,
         comment_count: int = 20,
     ) -> tuple[bool, str, list[dict[str, Any]]]:
-        ok, msg, ctx = self._context(bot_id)
-        if not ok:
-            return False, msg, []
         target = str(target_uin or "").strip()
         if not target:
             return False, "目标 QQ 为空", []
+        if not await self._user_policy_allows(
+            user_id=target,
+            bot_id=bot_id,
+            permissions=("allow_context_read", "allow_qzone"),
+        ):
+            return False, "policy_blocked", []
+        ok, msg, ctx = self._context(bot_id)
+        if not ok:
+            return False, msg, []
         url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
         params = {
             "uin": target,
@@ -1024,13 +1061,19 @@ class QzoneSocialService:
         return True, "ok", feeds
 
     async def like_feed(self, *, feed: dict[str, Any], bot_id: str) -> tuple[bool, str]:
-        ok, msg, ctx = self._context(bot_id)
-        if not ok:
-            return False, msg
         owner = str(feed.get("owner_uin", "") or "").strip()
         unikey = str(feed.get("unikey", "") or "").strip()
         if not owner or not unikey:
             return False, "动态缺少点赞所需字段"
+        if not await self._user_policy_allows(
+            user_id=owner,
+            bot_id=bot_id,
+            permissions=("allow_qzone", "allow_visible_reaction"),
+        ):
+            return False, "policy_blocked"
+        ok, msg, ctx = self._context(bot_id)
+        if not ok:
+            return False, msg
         url = "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app"
         data = {
             "qzreferrer": f"https://user.qzone.qq.com/{owner}",
@@ -1065,9 +1108,6 @@ class QzoneSocialService:
         bot_id: str,
         content: str = "",
     ) -> QzoneWriteResult:
-        ok, msg, ctx = self._context(bot_id)
-        if not ok:
-            return QzoneWriteResult("definite_failure", msg, "preflight_context")
         feed_identity = _qzone_feed_reply_identity(feed)
         owner = feed_identity["owner"]
         feed_id = feed_identity["feed_id"]
@@ -1076,6 +1116,15 @@ class QzoneSocialService:
         unikey = str(feed.get("unikey", "") or feed.get("curkey", "") or "").strip()
         if not owner or not feed_id or not topic_id:
             return QzoneWriteResult("definite_failure", "动态缺少转发所需字段", "preflight_feed_identity")
+        if not await self._user_policy_allows(
+            user_id=owner,
+            bot_id=bot_id,
+            permissions=("allow_qzone", "allow_visible_reaction"),
+        ):
+            return QzoneWriteResult("definite_failure", "policy_blocked", "policy_blocked")
+        ok, msg, ctx = self._context(bot_id)
+        if not ok:
+            return QzoneWriteResult("definite_failure", msg, "preflight_context")
         text = _clean_qzone_text(content)[:120]
         full_cookie = str(ctx.get("cookie", "") or ctx.get("formatted_cookie", ""))
         headers = _qzone_headers(ctx, referer_uin=owner)
@@ -1254,13 +1303,26 @@ class QzoneSocialService:
         text = str(content or "").strip()
         if not text:
             return False, "评论内容为空"
-        ok, msg, ctx = self._context(bot_id)
-        if not ok:
-            return False, msg
         owner = str(feed.get("owner_uin", "") or "").strip()
         topic_id = str(feed.get("topic_id", "") or "").strip()
         if not owner or not topic_id:
             return False, "动态缺少评论所需字段"
+        if not await self._user_policy_allows(
+            user_id=owner,
+            bot_id=bot_id,
+            permissions=("allow_qzone",),
+        ):
+            return False, "policy_blocked"
+        reply_actor = _qzone_comment_reply_target(reply_to_comment).get("user_id", "")
+        if reply_actor and not await self._user_policy_allows(
+            user_id=reply_actor,
+            bot_id=bot_id,
+            permissions=("allow_reply",),
+        ):
+            return False, "policy_blocked"
+        ok, msg, ctx = self._context(bot_id)
+        if not ok:
+            return False, msg
         if isinstance(reply_to_comment, dict):
             sub_ok, sub_msg = await self._reply_comment_sub(
                 feed=feed,
@@ -1774,5 +1836,13 @@ def build_qzone_services(
     return qzone_enabled, publish_qzone_shuo, update_qzone_cookie
 
 
-def build_qzone_social_service(plugin_config: Any, logger: Any) -> QzoneSocialService:
-    return QzoneSocialService(plugin_config=plugin_config, logger=logger)
+def build_qzone_social_service(
+    plugin_config: Any,
+    logger: Any,
+    user_policy_authorizer: Callable[[str], Awaitable[Any]] | None = None,
+) -> QzoneSocialService:
+    return QzoneSocialService(
+        plugin_config=plugin_config,
+        logger=logger,
+        user_policy_authorizer=user_policy_authorizer,
+    )

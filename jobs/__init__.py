@@ -74,6 +74,7 @@ class JobSetupDeps:
     qzone_inbound_enabled: bool = True
     qzone_inbound_check_interval_minutes: int = 3
     qzone_inbound_poll_flow: Any = None
+    user_policy_authorizer: Any = None
     persona_store: Any = None
     vision_caller: Any = None
     agent_tool_caller: Any = None
@@ -125,6 +126,7 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
         agent_tool_registry=deps.agent_tool_registry,
         agent_max_steps=deps.agent_max_steps,
         agent_data_dir=deps.agent_data_dir,
+        user_policy_authorizer=deps.user_policy_authorizer,
     )
     auto_post_diary = None
     proactive_qzone_post = None
@@ -147,6 +149,7 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                 agent_tool_registry=deps.agent_tool_registry,
                 agent_max_steps=deps.agent_max_steps,
                 agent_data_dir=deps.agent_data_dir,
+                user_policy_authorizer=deps.user_policy_authorizer,
             )
             proactive_qzone_post = build_proactive_qzone_post_task(
                 run_proactive_qzone_post=run_proactive_qzone_post,
@@ -197,6 +200,7 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                     agent_max_steps=deps.agent_max_steps,
                     target_user_id=target_user_id,
                     allow_open_user=allow_open_user,
+                    user_policy_authorizer=deps.user_policy_authorizer,
                 )
 
             qzone_social_scan = build_qzone_social_scan_task(
@@ -235,6 +239,7 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                     ),
                     agent_tool_registry=deps.agent_tool_registry,
                     agent_max_steps=deps.agent_max_steps,
+                    user_policy_authorizer=deps.user_policy_authorizer,
                 )
 
             qzone_inbound_poll = build_qzone_inbound_poll_task(
