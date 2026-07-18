@@ -101,6 +101,7 @@ from ...core.qq_expression_library import (
     semantic_text_for_qq_expression_segment,
 )
 from ...core.qq_user_policy import QQPolicyBlockedDuringTurn
+from ...core.qq_outbound import QQOutboundLedger, SendReceipt
 from ...core.sticker_feedback import (
     build_sticker_feedback_scene_key,
     mark_pending_sticker_reaction,
@@ -134,6 +135,7 @@ from .pipeline_context import (
     build_group_session_relation_metadata as _build_group_session_relation_metadata,
     build_tts_user_hint as _build_tts_user_hint,
     count_user_interactions as _count_user_interactions,
+    dispatch_reply_part as _dispatch_reply_part,
     extract_reply_sender_meta as _extract_reply_sender_meta,
     fold_consecutive_sticker_placeholders as _fold_consecutive_sticker_placeholders,
     get_primary_provider_signature as _get_primary_provider_signature,
@@ -350,6 +352,7 @@ class RuntimeDeps:
     memory_curator: Any = None
     background_intelligence: Any = None
     user_policy_gate: Any = None
+    qq_outbound_ledger: QQOutboundLedger | None = None
 
 
 @dataclass
@@ -1628,6 +1631,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             favorability_turn_id=favorability_turn_id,
             avatar_pair_candidates=avatar_pair_candidates,
             avatar_pair_runtime=runtime,
+            qq_outbound_ledger=getattr(runtime, "qq_outbound_ledger", None),
+            reply_trace_id=str(state.get("reply_trace_id", "") or ""),
         )
         return
 
@@ -1916,9 +1921,22 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if getattr(runtime, "user_policy_gate", None) is not None:
                 await runtime.user_policy_gate.ensure_current(event)
             mark_reply_delivery_started(state)
-            result = await bot.send(event, payload)
-            _confirm_reply_delivery()
+            result = await _dispatch_reply_part(
+                bot=bot,
+                event=event,
+                payload=payload,
+                ledger=getattr(runtime, "qq_outbound_ledger", None),
+                surface="normal_reply",
+                reply_trace_id=str(state.get("reply_trace_id", "") or ""),
+            )
+            if not isinstance(result, SendReceipt) or result.status == "sent":
+                _confirm_reply_delivery()
             return result
+
+        def _message_id_from_send_result(send_result: Any) -> str:
+            if isinstance(send_result, SendReceipt):
+                return str(send_result.message_id or "")
+            return extract_send_message_id(send_result)
 
         def _finish_action_only_trace() -> None:
             try:
@@ -2554,6 +2572,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         sent_as_tts = False
         delivery_partial = False
         delivery_unknown = False
+
+        def _mark_tts_delivery_unknown() -> None:
+            nonlocal delivery_unknown
+            delivery_unknown = True
         tts_service = getattr(runtime, "tts_service", None)
         stale_reason = _stale_reply_abort_reason(state)
         if stale_reason:
@@ -2611,6 +2633,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         pause_range=(1.2, 2.0),
                         on_delivery_started=lambda: mark_reply_delivery_started(state),
                         on_delivery_confirmed=_confirm_reply_delivery,
+                        on_delivery_unknown=_mark_tts_delivery_unknown,
+                        operation_id=str(state.get("reply_trace_id", "") or ""),
+                        user_target=user_id,
                     )
             except Exception as e:
                 likely_delivered = is_likely_delivered_send_timeout(e)
@@ -2754,7 +2779,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             outgoing = rendered_seg.message
                     send_result = await _send_reply(outgoing)
                     if not sent_message_id:
-                        sent_message_id = extract_send_message_id(send_result)
+                        sent_message_id = _message_id_from_send_result(send_result)
                     if i < len(segments) - 1 or sticker_segment:
                         if humanize_typing and i < len(segments) - 1:
                             await asyncio.sleep(
@@ -2779,7 +2804,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 return
             send_result = await _send_reply(runtime.message_segment_cls.image(f"base64://{image_b64}"))
             if not sent_message_id:
-                sent_message_id = extract_send_message_id(send_result)
+                sent_message_id = _message_id_from_send_result(send_result)
             if sticker_segment:
                 await asyncio.sleep(random.uniform(0.8, 1.6))
 
@@ -2790,7 +2815,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 return
             send_result = await _send_reply(sticker_segment)
             if not sent_message_id:
-                sent_message_id = extract_send_message_id(send_result)
+                sent_message_id = _message_id_from_send_result(send_result)
             if sticker_name:
                 mark_pending_sticker_reaction(
                     build_sticker_feedback_scene_key(

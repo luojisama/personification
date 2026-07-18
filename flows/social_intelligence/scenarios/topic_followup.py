@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from .. import pending_topics as pt
-from ..framework import SocialContext, run_social_text_agent
+from ..framework import SocialContext, dispatch_social_outbound, run_social_text_agent
 from ..gate import gate_should_send
 from ..quota import is_quota_exceeded, mark_sent
 from ....core.visible_output import guard_visible_text
@@ -104,9 +104,22 @@ async def topic_followup_handler(ctx: SocialContext) -> None:
             pt.mark_skipped(topic_id)
             continue
         try:
-            await bot.send_private_msg(user_id=int(uid), message=final_text)
+            confirmed = await dispatch_social_outbound(
+                ctx,
+                bot=bot,
+                conversation_kind="private",
+                conversation_id=uid,
+                surface="social_topic_followup",
+                content=final_text,
+                user_target=uid,
+            )
         except Exception as exc:
             ctx.logger.warning(f"[social/topic_followup] send {uid} failed: {exc}")
+            continue
+        if not confirmed:
+            ctx.logger.warning(
+                f"[social/topic_followup] send {uid} outcome unknown; quota/history not committed"
+            )
             continue
         mark_sent(uid, scenario=_SCENARIO)
         pt.mark_followed_up(topic_id)

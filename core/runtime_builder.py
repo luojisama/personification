@@ -132,6 +132,7 @@ from .profile_service import ProfileService
 from .policy_classifier import PolicyClassifier
 from .qzone_service import build_qzone_services, build_qzone_social_service
 from .qq_user_policy import QQUserPolicyGate
+from .qq_outbound import QQOutboundLedger
 from .runtime_assembly import PluginRuntimeBundle
 from .memory_defaults import DEFAULT_PERSONA_HISTORY_MAX
 from .model_router import (
@@ -220,6 +221,8 @@ def build_plugin_runtime(
     )
     qzone_social_service = build_qzone_social_service(plugin_config=plugin_config, logger=logger)
     data_dir = get_personification_data_dir(plugin_config)
+    policy_evidence_key = load_or_create_policy_evidence_key(data_dir)
+    qq_outbound_ledger = QQOutboundLedger(content_hmac_key=policy_evidence_key)
     knowledge_store = PluginKnowledgeStore(data_dir)
 
     if sign_in_available:
@@ -408,13 +411,14 @@ def build_plugin_runtime(
         profile_service=profile_service,
         memory_curator=memory_curator,
         background_intelligence=background_intelligence,
+        qq_outbound_ledger=qq_outbound_ledger,
     )
     policy_classifier = PolicyClassifier(
         lite_tool_caller or agent_tool_caller,
         logger=logger,
     )
     user_policy_service = UserPolicyService(
-        evidence_key=load_or_create_policy_evidence_key(data_dir),
+        evidence_key=policy_evidence_key,
         classifier=policy_classifier,
         logger=logger,
     )
@@ -440,6 +444,7 @@ def build_plugin_runtime(
         get_http_client=lambda: get_shared_http_client(max_connections=20),
         data_dir=data_dir,
         style_planner=tts_decision_call_ai_api,
+        qq_outbound_ledger=qq_outbound_ledger,
     )
     save_plugin_runtime_config, load_plugin_runtime_config = build_runtime_config_io(
         plugin_config=plugin_config,
@@ -528,6 +533,7 @@ def build_plugin_runtime(
         inner_state_updater=inner_state_updater,
         favorability_service=favorability_service,
         user_policy_gate=qq_user_policy_gate,
+        qq_outbound_ledger=qq_outbound_ledger,
     )
 
     get_custom_title = build_custom_title_getter(
@@ -621,6 +627,7 @@ def build_plugin_runtime(
             memory_curator=memory_curator,
             background_intelligence=background_intelligence,
             user_policy_gate=qq_user_policy_gate,
+            qq_outbound_ledger=qq_outbound_ledger,
         ),
         types=TypeDeps(
             poke_event_cls=poke_event_cls,
@@ -691,6 +698,7 @@ def build_plugin_runtime(
                 profile_service=profile_service,
                 memory_curator=memory_curator,
                 background_intelligence=background_intelligence,
+                qq_outbound_ledger=qq_outbound_ledger,
             )
             for tool in extension_tools:
                 if candidate_registry.get(tool.name) is None:
@@ -730,6 +738,7 @@ def build_plugin_runtime(
             inner_state_updater=inner_state_updater,
             favorability_service=favorability_service,
             user_policy_gate=qq_user_policy_gate,
+            qq_outbound_ledger=qq_outbound_ledger,
         )
         if tool_registry is not None and candidate_registry is not None and registry_version is not None:
             tool_registry.replace_all(candidate_registry.all(), expected_version=registry_version)
@@ -802,4 +811,5 @@ def build_plugin_runtime(
         background_intelligence=background_intelligence,
         user_policy_service=user_policy_service,
         qq_user_policy_gate=qq_user_policy_gate,
+        qq_outbound_ledger=qq_outbound_ledger,
     )

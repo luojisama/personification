@@ -97,11 +97,15 @@ async def execute_pending_actions(
         if state is not None:
             mark_reply_delivery_started(state)
         await executor.execute(action["type"], action["params"])
-        if state is not None and bool(getattr(executor, "last_delivery_confirmed", True)):
+        confirmed = bool(getattr(executor, "last_delivery_confirmed", True))
+        if state is not None and confirmed:
             mark_reply_delivery_confirmed(state)
-        history_text = qq_action_history_text(action)
-        if history_text:
-            history_parts.append(history_text)
+        if confirmed:
+            history_text = qq_action_history_text(action)
+            if history_text:
+                history_parts.append(history_text)
+        else:
+            break
     actions.clear()
     return history_parts
 

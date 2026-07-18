@@ -536,7 +536,10 @@ async def _install_personification_webui() -> None:
 @get_driver().on_startup
 async def _restore_user_tasks() -> None:
     from .core.tasks_service import restore_tasks_on_startup
+    from .core.qq_outbound import build_outbound_context
 
+    bundle = _require_runtime_bundle()
+    qq_outbound_ledger = bundle.qq_outbound_ledger
     data_dir = get_personification_data_dir(plugin_config)
 
     async def _bot_caller(task: dict) -> None:
@@ -571,12 +574,28 @@ async def _restore_user_tasks() -> None:
                 if friend_ids and str(user_id) not in friend_ids:
                     logger.warning(f"[user_tasks] 用户 {user_id} 不在好友列表，跳过发送确认")
                     continue
-                await bot.send_private_msg(user_id=int(user_id), message=message)
-                task["last_status"] = "sent"
+                if qq_outbound_ledger is None:
+                    await bot.send_private_msg(user_id=int(user_id), message=message)
+                    task["last_status"] = "sent"
+                else:
+                    outbound_context = build_outbound_context(
+                        bot=bot,
+                        event=types.SimpleNamespace(user_id=user_id),
+                        surface="scheduled_user_task",
+                        user_target=str(user_id),
+                    )
+                    receipt = await qq_outbound_ledger.dispatch(
+                        outbound_context,
+                        message,
+                        lambda: bot.send_private_msg(user_id=int(user_id), message=message),
+                    )
+                    task["last_status"] = receipt.status
                 return
             except Exception as e:
-                task["last_status"] = "failed"
+                task["last_status"] = "unknown" if qq_outbound_ledger is not None else "failed"
                 logger.warning(f"[user_tasks] 任务消息发送失败 user={user_id}: {e}")
+                if qq_outbound_ledger is not None:
+                    return
                 continue
 
     restore_tasks_on_startup(scheduler, data_dir, _bot_caller)
@@ -743,6 +762,7 @@ async def _setup_social_intelligence() -> None:
             get_now=get_current_local_time,
             tool_registry=bundle.reply_processor_deps.runtime.tool_registry,
             agent_max_steps=int(getattr(plugin_config, "personification_agent_max_steps", 10)),
+            qq_outbound_ledger=bundle.qq_outbound_ledger,
         )
         registered = setup_social_intelligence_jobs(scheduler=scheduler, ctx=ctx)
         if registered > 0:

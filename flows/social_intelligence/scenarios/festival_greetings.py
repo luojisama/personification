@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from ..framework import SocialContext, run_social_text_agent
+from ..framework import SocialContext, dispatch_social_outbound, run_social_text_agent
 from ..gate import gate_should_send
 from ..quota import is_quota_exceeded, mark_sent
 from ....core.visible_output import guard_visible_text
@@ -214,9 +214,20 @@ async def _try_send(
     if not final_text:
         return False
     try:
-        await bot.send_private_msg(user_id=int(uid), message=final_text)
+        confirmed = await dispatch_social_outbound(
+            ctx,
+            bot=bot,
+            conversation_kind="private",
+            conversation_id=uid,
+            surface="social_festival_greeting",
+            content=final_text,
+            user_target=uid,
+        )
     except Exception as exc:
         ctx.logger.warning(f"[social/festival] send {uid} failed: {exc}")
+        return False
+    if not confirmed:
+        ctx.logger.warning(f"[social/festival] send {uid} outcome unknown")
         return False
     mark_sent(uid, scenario=scenario)
     ctx.logger.info(f"[social/festival] sent uid={uid} occasion={occasion_label}: {final_text[:30]}")

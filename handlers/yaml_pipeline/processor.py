@@ -75,6 +75,7 @@ from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.target_inference import normalize_message_target_for_plan, normalize_message_target_for_review
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.prompt_loader import pick_ack_phrase
+from ...core.qq_outbound import QQOutboundLedger, SendReceipt, build_outbound_context
 from ...core.qq_expression_library import (
     build_qq_expression_prompt,
     contains_qq_expression_marker,
@@ -139,6 +140,8 @@ from ..reply_pipeline.pipeline_context import (
     batch_has_newer_messages as _shared_batch_has_newer_messages,
     clone_tool_registry as _clone_tool_registry,
     compute_agent_time_budget as _compute_agent_time_budget,
+    dispatch_reply_part as _dispatch_reply_part,
+    build_reply_operation_id as _build_reply_operation_id,
     primary_route_supports_vision as _runtime_primary_route_supports_vision,
     should_use_agent_for_reply as _should_use_agent_for_reply,
     strip_injected_visual_summary as _strip_injected_visual_summary,
@@ -309,7 +312,15 @@ def _group_translation_result(text: str) -> List[str]:
     return [raw]
 
 
-async def _send_translation_forward(bot: Any, event: Any, text: str) -> bool:
+async def _send_translation_forward(
+    bot: Any,
+    event: Any,
+    text: str,
+    *,
+    qq_outbound_ledger: QQOutboundLedger | None = None,
+    operation_id: str = "",
+    user_target: str = "",
+) -> bool | SendReceipt:
     grouped = _group_translation_result(text)
     if not grouped:
         return False
@@ -337,10 +348,29 @@ async def _send_translation_forward(bot: Any, event: Any, text: str) -> bool:
             }
         )
 
-    if hasattr(event, "group_id"):
-        await bot.call_api("send_group_forward_msg", group_id=event.group_id, messages=nodes)
-    else:
-        await bot.call_api("send_private_forward_msg", user_id=event.user_id, messages=nodes)
+    async def _send() -> Any:
+        if hasattr(event, "group_id"):
+            return await bot.call_api(
+                "send_group_forward_msg",
+                group_id=event.group_id,
+                messages=nodes,
+            )
+        return await bot.call_api(
+            "send_private_forward_msg",
+            user_id=event.user_id,
+            messages=nodes,
+        )
+
+    if qq_outbound_ledger is not None:
+        outbound_context = build_outbound_context(
+            bot=bot,
+            event=event,
+            surface="reply_translation_forward",
+            operation_id=operation_id,
+            user_target=user_target,
+        )
+        return await qq_outbound_ledger.dispatch(outbound_context, nodes, _send)
+    await _send()
     return True
 
 
@@ -544,11 +574,16 @@ async def process_yaml_response_logic(
     avatar_pair_candidates: List[Dict[str, str]] | None = None,
     avatar_pair_runtime: Any = None,
     user_policy_gate: Any = None,
+    qq_outbound_ledger: QQOutboundLedger | None = None,
+    reply_trace_id: str = "",
 ) -> None:
     """处理基于 YAML 模板的新版响应逻辑。"""
     if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
         return
     reply_commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
+    outbound_reply_trace_id = str(
+        reply_trace_id or reply_commit_state.get("reply_trace_id", "") or ""
+    ).strip()
     started_at = time.monotonic()
     begin_reply_lifecycle(reply_commit_state, "yaml_pipeline")
     lite_tool_caller = lite_tool_caller or agent_tool_caller
@@ -679,13 +714,26 @@ async def process_yaml_response_logic(
         mark_reply_delivery_confirmed(reply_commit_state)
         _commit_favorability_if_confirmed()
 
-    async def _send_reply(payload: Any) -> Any:
+    async def _send_reply(payload: Any, *, surface: str = "yaml_reply") -> Any:
         if user_policy_gate is not None:
             await user_policy_gate.ensure_current(event)
         mark_reply_delivery_started(reply_commit_state)
-        result = await bot.send(event, payload)
-        _confirm_reply_delivery()
+        result = await _dispatch_reply_part(
+            bot=bot,
+            event=event,
+            payload=payload,
+            ledger=qq_outbound_ledger,
+            surface=surface,
+            reply_trace_id=outbound_reply_trace_id,
+        )
+        if not isinstance(result, SendReceipt) or result.status == "sent":
+            _confirm_reply_delivery()
         return result
+
+    def _message_id_from_send_result(send_result: Any) -> str:
+        if isinstance(send_result, SendReceipt):
+            return str(send_result.message_id or "")
+        return extract_send_message_id(send_result)
 
     async def _commit_pending_actions() -> None:
         if not pending_actions:
@@ -1509,7 +1557,19 @@ async def process_yaml_response_logic(
         is_direct_mention=is_direct_mention,
         has_image_input=bool(tool_image_urls),
     ):
-        executor = ActionExecutor(bot, event, plugin_config, logger)
+        executor = ActionExecutor(
+            bot,
+            event,
+            plugin_config,
+            logger,
+            qq_outbound_ledger=qq_outbound_ledger,
+            operation_id=_build_reply_operation_id(
+                bot=bot,
+                event=event,
+                reply_trace_id=outbound_reply_trace_id,
+            ),
+            user_target=user_id,
+        )
         agent_tool_registry = _clone_tool_registry(tool_registry)
         register_current_user_avatar_tool(agent_tool_registry, profile_service, user_id)
         register_group_user_avatar_pair_insight_tool(
@@ -1569,11 +1629,13 @@ async def process_yaml_response_logic(
                 await acquire_reply_commit(reply_commit_state)
                 mark_reply_phase(reply_commit_state, "delivery")
                 try:
+                    # _send_reply keeps the legacy await bot.send(...) fallback without a ledger.
                     if user_policy_gate is not None:
                         await user_policy_gate.ensure_current(event)
-                    mark_reply_delivery_started(reply_commit_state)
-                    await bot.send(event, str(text or "").strip() or _phrase)
-                    mark_reply_delivery_confirmed(reply_commit_state)
+                    await _send_reply(
+                        str(text or "").strip() or _phrase,
+                        surface="reply_ack",
+                    )
                 finally:
                     release_reply_commit(reply_commit_state)
                     mark_reply_phase(reply_commit_state, "yaml_agent_after_ack")
@@ -1737,7 +1799,19 @@ async def process_yaml_response_logic(
                 if _looks_like_translation_result(raw_direct_output):
                     try:
                         mark_reply_delivery_started(reply_commit_state)
-                        if await _send_translation_forward(bot, event, raw_direct_output):
+                        translation_result = await _send_translation_forward(
+                            bot,
+                            event,
+                            raw_direct_output,
+                            qq_outbound_ledger=qq_outbound_ledger,
+                            operation_id=outbound_reply_trace_id,
+                            user_target=user_id,
+                        )
+                        translation_confirmed = (
+                            not isinstance(translation_result, SendReceipt)
+                            or translation_result.status == "sent"
+                        )
+                        if translation_confirmed:
                             _confirm_reply_delivery()
                             mark_reply_delivery_complete(reply_commit_state)
                             release_reply_commit(reply_commit_state)
@@ -1754,7 +1828,36 @@ async def process_yaml_response_logic(
                                 detail={"direct_output": True, "kind": "translation_forward"},
                             )
                             return
+                        delivery_unknown = True
+                        release_reply_commit(reply_commit_state)
+                        mark_reply_phase(reply_commit_state, "reply_complete")
+                        _trace_finish(
+                            outcome="outcome_unknown",
+                            diagnosis_code="send_outcome_unknown",
+                            detail={"direct_output": True, "kind": "translation_forward"},
+                        )
+                        return
                     except Exception as e:
+                        if qq_outbound_ledger is not None:
+                            delivery_partial = bool(
+                                reply_commit_state.get("reply_delivery_confirmed", False)
+                            )
+                            delivery_unknown = not delivery_partial
+                            logger.warning(
+                                f"拟人插件: 翻译结果转发发送结果未知，禁止自动回退重发: {e}"
+                            )
+                            release_reply_commit(reply_commit_state)
+                            mark_reply_phase(reply_commit_state, "reply_complete")
+                            _trace_finish(
+                                outcome="partial" if delivery_partial else "outcome_unknown",
+                                diagnosis_code=(
+                                    "partial_reply_timeout"
+                                    if delivery_partial
+                                    else "send_outcome_unknown"
+                                ),
+                                detail={"direct_output": True, "kind": "translation_forward"},
+                            )
+                            return
                         logger.warning(f"拟人插件: 翻译结果转发发送失败，回退到普通消息: {e}")
                 raw_direct_output = normalize_visible_reply_text(strip_response_control_markers(raw_direct_output))
                 direct_segments_sent = 0
@@ -2216,6 +2319,10 @@ async def process_yaml_response_logic(
     sent_as_tts = False
     delivery_partial = False
     delivery_unknown = False
+
+    def _mark_tts_delivery_unknown() -> None:
+        nonlocal delivery_unknown
+        delivery_unknown = True
     sent_message_id = ""
     address_plan = _humanize.decide_addressing(
         plugin_config=plugin_config,
@@ -2276,6 +2383,9 @@ async def process_yaml_response_logic(
                     pause_range=(0.8, 1.5),
                     on_delivery_started=lambda: mark_reply_delivery_started(reply_commit_state),
                     on_delivery_confirmed=_confirm_reply_delivery,
+                    on_delivery_unknown=_mark_tts_delivery_unknown,
+                    operation_id=outbound_reply_trace_id,
+                    user_target=user_id,
                 )
         except Exception as e:
             likely_delivered = is_likely_delivered_send_timeout(e)
@@ -2341,7 +2451,7 @@ async def process_yaml_response_logic(
                                     outgoing = rendered_seg.message
                             send_result = await _send_reply(outgoing)
                             if not sent_message_id:
-                                sent_message_id = extract_send_message_id(send_result)
+                                sent_message_id = _message_id_from_send_result(send_result)
                             await asyncio.sleep(random.uniform(0.4, 1.0))
 
                 for image_b64 in image_b64_payloads:
@@ -2351,7 +2461,7 @@ async def process_yaml_response_logic(
                         return
                     send_result = await _send_reply(message_segment_cls.image(f"base64://{image_b64}"))
                     if not sent_message_id:
-                        sent_message_id = extract_send_message_id(send_result)
+                        sent_message_id = _message_id_from_send_result(send_result)
                     await asyncio.sleep(random.uniform(0.4, 1.0))
 
                 chosen_sticker_path = chosen_sticker_paths.pop(0) if chosen_sticker_paths else None
@@ -2365,7 +2475,7 @@ async def process_yaml_response_logic(
                             message_segment_cls.image(f"file:///{chosen_sticker_path.absolute()}")
                         )
                         if not sent_message_id:
-                            sent_message_id = extract_send_message_id(send_result)
+                            sent_message_id = _message_id_from_send_result(send_result)
                         delivered_sticker_names.append(chosen_sticker_path.stem)
                         mark_pending_sticker_reaction(
                             build_sticker_feedback_scene_key(
@@ -2411,7 +2521,7 @@ async def process_yaml_response_logic(
                 else:
                     send_result = None
                 if send_result is not None and not sent_message_id:
-                    sent_message_id = extract_send_message_id(send_result)
+                    sent_message_id = _message_id_from_send_result(send_result)
             for image_b64 in image_b64_payloads:
                 if _has_newer_batch_now():
                     logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
@@ -2419,7 +2529,7 @@ async def process_yaml_response_logic(
                     return
                 send_result = await _send_reply(message_segment_cls.image(f"base64://{image_b64}"))
                 if not sent_message_id:
-                    sent_message_id = extract_send_message_id(send_result)
+                    sent_message_id = _message_id_from_send_result(send_result)
 
     if not delivery_partial and not delivery_unknown:
         mark_reply_delivery_complete(reply_commit_state)
@@ -2603,6 +2713,7 @@ def build_yaml_response_processor(
     inner_state_updater: Any = None,
     favorability_service: Any = None,
     user_policy_gate: Any = None,
+    qq_outbound_ledger: QQOutboundLedger | None = None,
 ) -> Callable[..., Awaitable[None]]:
     async def _processor(
         bot: Any,
@@ -2709,6 +2820,11 @@ def build_yaml_response_processor(
             avatar_pair_candidates=list(runtime_overrides.get("avatar_pair_candidates") or []),
             avatar_pair_runtime=runtime_overrides.get("avatar_pair_runtime"),
             user_policy_gate=runtime_overrides.get("user_policy_gate", user_policy_gate),
+            qq_outbound_ledger=runtime_overrides.get(
+                "qq_outbound_ledger",
+                qq_outbound_ledger,
+            ),
+            reply_trace_id=str(runtime_overrides.get("reply_trace_id", "") or ""),
         )
 
     return _processor

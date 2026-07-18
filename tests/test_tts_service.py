@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,8 @@ from ._loader import load_personification_module
 
 tts_service_mod = load_personification_module("plugin.personification.core.tts_service")
 send_outcome = load_personification_module("plugin.personification.core.send_outcome")
+db = load_personification_module("plugin.personification.core.db")
+qq_outbound = load_personification_module("plugin.personification.core.qq_outbound")
 
 
 class _Logger:
@@ -21,7 +24,7 @@ class _Logger:
         return None
 
 
-def _service(style_planner=None, **overrides):  # noqa: ANN001, ANN003
+def _service(style_planner=None, *, qq_outbound_ledger=None, **overrides):  # noqa: ANN001, ANN003
     config = SimpleNamespace(
         personification_tts_enabled=True,
         personification_tts_global_enabled=True,
@@ -49,6 +52,7 @@ def _service(style_planner=None, **overrides):  # noqa: ANN001, ANN003
         get_http_client=lambda: None,
         data_dir=Path(__file__).resolve().parent / ".tmp",
         style_planner=style_planner,
+        qq_outbound_ledger=qq_outbound_ledger,
     )
 
 
@@ -254,6 +258,184 @@ def test_tts_delivery_receipts_wrap_real_send_only(monkeypatch) -> None:  # noqa
         )
 
     assert events == ["synthesized", "started", "confirmed", "started"]
+
+
+def test_tts_fake_ledger_dispatches_each_record_segment(monkeypatch) -> None:  # noqa: ANN001
+    class _Ledger:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, str, str]] = []
+
+        async def dispatch(self, context, content, send):  # noqa: ANN001, ANN202
+            result = await send()
+            self.calls.append((context, str(content), result["message_id"]))
+            return SimpleNamespace(status="sent", message_id=result["message_id"])
+
+    class _Bot:
+        self_id = "bot-tts"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def send(self, _event, _message):  # noqa: ANN001
+            self.calls += 1
+            return {"message_id": f"tts-message-{self.calls}"}
+
+    ledger = _Ledger()
+    service = _service(qq_outbound_ledger=ledger)
+
+    async def _synthesize(*_args, **_kwargs):  # noqa: ANN001
+        return [Path("first.wav"), Path("second.wav")]
+
+    monkeypatch.setattr(service, "synthesize", _synthesize)
+    events: list[str] = []
+    delivered = asyncio.run(
+        service.send_tts(
+            bot=_Bot(),
+            event=SimpleNamespace(group_id=20001, user_id=10001),
+            message_segment_cls=SimpleNamespace(record=lambda value: f"record:{value}"),
+            text="两段语音",
+            pause_range=(0, 0),
+            operation_id="tts-operation",
+            user_target="10002",
+            on_delivery_started=lambda: events.append("started"),
+            on_delivery_confirmed=lambda: events.append("confirmed"),
+        )
+    )
+
+    assert delivered is True
+    assert [call[2] for call in ledger.calls] == ["tts-message-1", "tts-message-2"]
+    assert [call[0].operation_id for call in ledger.calls] == ["tts-operation", "tts-operation"]
+    assert [call[0].surface for call in ledger.calls] == ["reply_tts", "reply_tts"]
+    assert [call[0].user_target for call in ledger.calls] == ["10002", "10002"]
+    assert events == ["started", "confirmed", "started", "confirmed"]
+
+
+def test_tts_real_ledger_records_message_ids_per_segment(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    db_path = db.init_db_sync(tmp_path)
+    service = _service(qq_outbound_ledger=qq_outbound.QQOutboundLedger(db_path))
+
+    async def _synthesize(*_args, **_kwargs):  # noqa: ANN001
+        return [Path("first.wav"), Path("second.wav")]
+
+    class _Bot:
+        self_id = "bot-tts"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def send(self, _event, _message):  # noqa: ANN001
+            self.calls += 1
+            return {"data": {"message_id": f"real-tts-{self.calls}"}}
+
+    monkeypatch.setattr(service, "synthesize", _synthesize)
+    delivered = asyncio.run(
+        service.send_tts(
+            bot=_Bot(),
+            event=SimpleNamespace(group_id=20001, user_id=10001),
+            message_segment_cls=SimpleNamespace(record=lambda value: f"record:{value}"),
+            text="两段语音",
+            pause_range=(0, 0),
+            operation_id="real-tts-operation",
+            surface="reply_tts_test",
+        )
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT part_index, message_id, status, surface
+            FROM qq_outbound_ledger
+            WHERE operation_id=?
+            ORDER BY part_index
+            """,
+            ("real-tts-operation",),
+        ).fetchall()
+    assert delivered is True
+    assert rows == [
+        (0, "real-tts-1", "sent", "reply_tts_test"),
+        (1, "real-tts-2", "sent", "reply_tts_test"),
+    ]
+
+
+def test_tts_missing_message_id_reports_unknown_without_confirmation(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    db_path = db.init_db_sync(tmp_path)
+    service = _service(qq_outbound_ledger=qq_outbound.QQOutboundLedger(db_path))
+
+    async def _synthesize(*_args, **_kwargs):  # noqa: ANN001
+        return [Path("voice-1.wav"), Path("voice-2.wav")]
+
+    class _Bot:
+        self_id = "bot-tts"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def send(self, _event, _message):  # noqa: ANN001
+            self.calls += 1
+            return {"status": "ok"}
+
+    monkeypatch.setattr(service, "synthesize", _synthesize)
+    events: list[str] = []
+    bot = _Bot()
+    delivered = asyncio.run(
+        service.send_tts(
+            bot=bot,
+            event=SimpleNamespace(user_id=10001),
+            message_segment_cls=SimpleNamespace(record=lambda value: f"record:{value}"),
+            text="一段语音",
+            operation_id="tts-missing-message-id",
+            on_delivery_started=lambda: events.append("started"),
+            on_delivery_confirmed=lambda: events.append("confirmed"),
+            on_delivery_unknown=lambda: events.append("unknown"),
+        )
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT status, message_id, error_code FROM qq_outbound_ledger WHERE operation_id=?",
+            ("tts-missing-message-id",),
+        ).fetchone()
+    assert delivered is True
+    assert events == ["started", "unknown"]
+    assert bot.calls == 1
+    assert row == ("unknown", None, "message_id_missing")
+
+
+def test_tts_ledger_send_exception_stays_unknown(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    db_path = db.init_db_sync(tmp_path)
+    service = _service(qq_outbound_ledger=qq_outbound.QQOutboundLedger(db_path))
+
+    async def _synthesize(*_args, **_kwargs):  # noqa: ANN001
+        return [Path("voice.wav")]
+
+    class _Bot:
+        self_id = "bot-tts"
+
+        async def send(self, _event, _message):  # noqa: ANN001
+            raise RuntimeError("send failed")
+
+    monkeypatch.setattr(service, "synthesize", _synthesize)
+    events: list[str] = []
+    with pytest.raises(RuntimeError, match="send failed"):
+        asyncio.run(
+            service.send_tts(
+                bot=_Bot(),
+                event=SimpleNamespace(user_id=10001),
+                message_segment_cls=SimpleNamespace(record=lambda value: f"record:{value}"),
+                text="一段语音",
+                operation_id="tts-send-error",
+                on_delivery_started=lambda: events.append("started"),
+                on_delivery_confirmed=lambda: events.append("confirmed"),
+            )
+        )
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT status, message_id, error_code FROM qq_outbound_ledger WHERE operation_id=?",
+            ("tts-send-error",),
+        ).fetchone()
+    assert events == ["started"]
+    assert row == ("unknown", None, "RuntimeError")
 
 
 def test_likely_delivered_send_timeout_is_outcome_unknown() -> None:

@@ -56,6 +56,55 @@ def test_register_same_name_overwrites() -> None:
     assert triggers[0].schedule_args == {"hour": 9}
 
 
+@pytest.mark.parametrize(("status", "expected"), [("sent", True), ("unknown", False)])
+def test_social_outbound_requires_strict_ledger_confirmation(status: str, expected: bool) -> None:
+    captured: dict[str, Any] = {}
+
+    class _Ledger:
+        async def dispatch(self, context, content, send):  # noqa: ANN001, ANN202
+            captured["context"] = context
+            captured["content"] = content
+            await send()
+            return SimpleNamespace(status=status)
+
+    class _Bot:
+        self_id = "bot-social"
+
+        async def send_private_msg(self, **kwargs):  # noqa: ANN003, ANN202
+            captured["send"] = kwargs
+            return {"message_id": "social-message-1"}
+
+    ctx = framework.SocialContext(
+        plugin_config=SimpleNamespace(),
+        logger=MagicMock(),
+        get_bots=lambda: {},
+        get_whitelisted_groups=lambda: [],
+        tool_caller=None,
+        persona_store=None,
+        data_dir=None,
+        get_now=lambda: None,
+        qq_outbound_ledger=_Ledger(),
+    )
+
+    confirmed = asyncio.run(
+        framework.dispatch_social_outbound(
+            ctx,
+            bot=_Bot(),
+            conversation_kind="private",
+            conversation_id="10001",
+            surface="social_greeting",
+            content="hello",
+            user_target="10001",
+        )
+    )
+
+    assert confirmed is expected
+    assert captured["send"] == {"user_id": 10001, "message": "hello"}
+    assert captured["context"].bot_id == "bot-social"
+    assert captured["context"].conversation_id == "10001"
+    assert captured["context"].surface == "social_greeting"
+
+
 # ========== quota ==========
 
 @pytest.fixture(autouse=True)

@@ -242,8 +242,6 @@ class PolicyEvidenceCipher:
 
 
 def load_or_create_policy_evidence_key(data_dir: str | Path) -> bytes | None:
-    if AESGCM is None:
-        return None
     path = Path(data_dir) / "policy_evidence.key"
     try:
         if path.is_file():

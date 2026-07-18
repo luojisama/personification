@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..framework import SocialContext, run_social_text_agent
+from ..framework import SocialContext, dispatch_social_outbound, run_social_text_agent
 from ..gate import gate_should_send
 from ..quota import is_quota_exceeded, mark_sent
 from ....core.visible_output import guard_visible_text
@@ -91,9 +91,20 @@ async def news_push_handler(ctx: SocialContext) -> None:
         if not final_text:
             continue
         try:
-            await bot.send_private_msg(user_id=int(uid), message=final_text)
+            confirmed = await dispatch_social_outbound(
+                ctx,
+                bot=bot,
+                conversation_kind="private",
+                conversation_id=uid,
+                surface="social_news_private",
+                content=final_text,
+                user_target=uid,
+            )
         except Exception as exc:
             ctx.logger.warning(f"[social/news] send user {uid} failed: {exc}")
+            continue
+        if not confirmed:
+            ctx.logger.warning(f"[social/news] send user {uid} outcome unknown")
             continue
         mark_sent(uid, scenario=_SCENARIO)
         sent_user += 1
@@ -115,9 +126,19 @@ async def news_push_handler(ctx: SocialContext) -> None:
         if not final_text:
             continue
         try:
-            await bot.send_group_msg(group_id=int(gid), message=final_text)
+            confirmed = await dispatch_social_outbound(
+                ctx,
+                bot=bot,
+                conversation_kind="group",
+                conversation_id=gid,
+                surface="social_news_group",
+                content=final_text,
+            )
         except Exception as exc:
             ctx.logger.warning(f"[social/news] send group {gid} failed: {exc}")
+            continue
+        if not confirmed:
+            ctx.logger.warning(f"[social/news] send group {gid} outcome unknown")
             continue
         mark_sent(gid_key, scenario=_SCENARIO)
         sent_group += 1

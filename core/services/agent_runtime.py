@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
 from ...agent.inner_state import (
@@ -19,6 +20,7 @@ from ..model_router import (
     MODEL_ROLE_INTENT,
     get_model_override_for_role,
 )
+from ..qq_outbound import build_outbound_context
 from ..session_store import init_session_store
 from ..tasks_service import make_cancel_task_tool, make_create_task_tool
 from ..web_fetch import WebFetchError, fetch_web_page
@@ -43,6 +45,7 @@ def build_agent_tool_registry(
     profile_service: Any = None,
     memory_curator: Any = None,
     background_intelligence: Any = None,
+    qq_outbound_ledger: Any = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     skills_root_raw = getattr(plugin_config, "personification_skills_path", None)
@@ -226,12 +229,34 @@ def build_agent_tool_registry(
                     return
                 for bot in get_bots().values():
                     try:
-                        await bot.send_private_msg(
-                            user_id=int(user_id),
-                            message=str(message),
-                        )
+                        if qq_outbound_ledger is None:
+                            await bot.send_private_msg(
+                                user_id=int(user_id),
+                                message=str(message),
+                            )
+                        else:
+                            context = build_outbound_context(
+                                bot=bot,
+                                event=SimpleNamespace(user_id=user_id),
+                                surface="scheduled_user_task",
+                                user_target=str(user_id),
+                            )
+                            receipt = await qq_outbound_ledger.dispatch(
+                                context,
+                                str(message),
+                                lambda: bot.send_private_msg(
+                                    user_id=int(user_id),
+                                    message=str(message),
+                                ),
+                            )
+                            if receipt.status != "sent":
+                                logger.warning(
+                                    f"[user_tasks] 任务消息发送结果未知 user={user_id}，禁止自动重发"
+                                )
                         return
                     except Exception:
+                        if qq_outbound_ledger is not None:
+                            raise
                         continue
 
         registry.register(
@@ -851,6 +876,7 @@ def build_agent_runtime_deps(
     profile_service: Any = None,
     memory_curator: Any = None,
     background_intelligence: Any = None,
+    qq_outbound_ledger: Any = None,
  ) -> tuple[Any, Any, Any, Any]:
     compress_tool_caller = _build_compress_tool_caller(plugin_config, logger)
     init_session_store(plugin_config, compress_tool_caller)
@@ -876,6 +902,7 @@ def build_agent_runtime_deps(
         profile_service=profile_service,
         memory_curator=memory_curator,
         background_intelligence=background_intelligence,
+        qq_outbound_ledger=qq_outbound_ledger,
     )
     inner_state_updater = build_inner_state_updater(
         plugin_config=plugin_config,

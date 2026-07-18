@@ -149,6 +149,7 @@ class PluginRuntimeBundle:
     background_intelligence: Any = None
     user_policy_service: Any = None
     qq_user_policy_gate: Any = None
+    qq_outbound_ledger: Any = None
     qzone_social_scan: Any = None
     qzone_inbound_poll: Any = None
     qzone_generate_post: Any = None
@@ -194,6 +195,7 @@ class PluginRuntimeBundle:
             get_whitelisted_groups=self._get_whitelisted_groups,
             record_group_msg=record_group_msg,
             build_grounding_context=self.reply_processor_deps.runtime.build_grounding_context,
+            qq_outbound_ledger=self.qq_outbound_ledger,
         )
 
     def _get_whitelisted_groups(self) -> list[str]:

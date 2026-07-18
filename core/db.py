@@ -565,6 +565,42 @@ DDL_STATEMENTS = (
     CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_tool_registered_name
         ON mcp_tool_policies(registered_name)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS qq_outbound_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation_id TEXT NOT NULL,
+        part_index INTEGER NOT NULL CHECK (part_index >= 0),
+        bot_id TEXT NOT NULL,
+        conversation_kind TEXT NOT NULL CHECK (conversation_kind IN ('group', 'private')),
+        conversation_id TEXT NOT NULL,
+        message_id TEXT DEFAULT NULL,
+        user_target TEXT NOT NULL DEFAULT '',
+        surface TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('sent', 'failed', 'unknown')),
+        preview TEXT NOT NULL DEFAULT '',
+        content_hmac TEXT NOT NULL DEFAULT '',
+        error_code TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        recalled_at REAL NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_qq_outbound_operation_part
+        ON qq_outbound_ledger(operation_id, part_index)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_qq_outbound_scope
+        ON qq_outbound_ledger(bot_id, conversation_kind, conversation_id, created_at DESC, id DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_qq_outbound_message
+        ON qq_outbound_ledger(bot_id, conversation_kind, conversation_id, message_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_qq_outbound_status
+        ON qq_outbound_ledger(status, recalled_at, created_at DESC)
+    """,
 )
 
 

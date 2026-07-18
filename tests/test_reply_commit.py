@@ -150,3 +150,35 @@ def test_pending_action_without_external_send_is_not_confirmed() -> None:
         assert "reply_delivery_confirmed" not in state
 
     asyncio.run(run())
+
+
+def test_unknown_pending_action_stops_following_actions_and_history(monkeypatch) -> None:  # noqa: ANN001
+    class _UnknownExecutor:
+        last_delivery_confirmed = False
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def execute(self, action: str, _params: dict[str, Any]) -> str:
+            self.calls.append(action)
+            self.last_delivery_confirmed = False
+            return "发送结果未知"
+
+    async def run() -> None:
+        executor = _UnknownExecutor()
+        actions = [
+            {"type": "send_image_url", "params": {"url": "first"}},
+            {"type": "send_sticker", "params": {"path": "second"}},
+        ]
+        expression_tools = load_personification_module(
+            "plugin.personification.core.qq_expression_tools"
+        )
+        monkeypatch.setattr(expression_tools, "qq_action_history_text", lambda _action: "sent")
+
+        history = await reply_commit.execute_pending_actions(executor, actions, state={})
+
+        assert executor.calls == ["send_image_url"]
+        assert history == []
+        assert actions == []
+
+    asyncio.run(run())

@@ -5,6 +5,7 @@ import random
 import re as _re
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 
 from ..agent.inner_state import DEFAULT_STATE, load_inner_state
@@ -26,6 +27,7 @@ from ..core.qq_expression_library import (
     choose_qq_expression_marker_for_context,
     render_qq_expression_cq_text,
 )
+from ..core.qq_outbound import build_outbound_context
 from ..core.time_ctx import inject_current_time_context
 from ..skills.skillpacks.datetime_tool.scripts.impl import get_current_datetime_info
 from ..utils import get_group_topic_summary
@@ -33,6 +35,25 @@ from ..utils import get_group_topic_summary
 
 _GROUP_IDLE_LOCK = _asyncio.Lock()
 _last_group_idle_sent_at: float = 0.0
+
+
+class ProactiveOutboundOutcomeUnknown(RuntimeError):
+    pass
+
+
+async def _dispatch_proactive_outbound(
+    *,
+    qq_outbound_ledger: Any,
+    outbound_context: Any,
+    content: Any,
+    send: Callable[[], Awaitable[Any]],
+) -> Any:
+    if qq_outbound_ledger is None:
+        return await send()
+    receipt = await qq_outbound_ledger.dispatch(outbound_context, content, send)
+    if receipt.status != "sent":
+        raise ProactiveOutboundOutcomeUnknown("qq outbound message_id is missing")
+    return receipt
 
 
 PROACTIVE_DECISION_PROMPT = """[角色设定]
@@ -731,7 +752,10 @@ async def _send_group_idle_qq_expression(
     mood_hint: str,
     mode: str,
     logger: Any,
+    qq_outbound_ledger: Any = None,
+    outbound_context: Any = None,
 ) -> str:
+    send_invoked = False
     try:
         marker_mode = {
             "qq_face": "face",
@@ -755,10 +779,23 @@ async def _send_group_idle_qq_expression(
         )
         if not rendered.message:
             return ""
-        await bot.send_group_msg(group_id=int(group_id), message=rendered.message)
+
+        async def _send() -> Any:
+            nonlocal send_invoked
+            send_invoked = True
+            return await bot.send_group_msg(group_id=int(group_id), message=rendered.message)
+
+        await _dispatch_proactive_outbound(
+            qq_outbound_ledger=qq_outbound_ledger,
+            outbound_context=outbound_context,
+            content=rendered.message,
+            send=_send,
+        )
         logger.info(f"[group_idle] 群 {group_id} 发送 QQ 表情模式 {mode}: {rendered.history_text[:40]}")
         return rendered.history_text or content
     except Exception as e:
+        if qq_outbound_ledger is not None and send_invoked:
+            raise
         logger.warning(f"[group_idle] qq expression send failed for group {group_id}: {e}")
         return ""
 
@@ -772,8 +809,11 @@ async def _try_send_idle_sticker(
     mood_hint: str,
     topic_text_fallback: str,
     logger: Any,
+    qq_outbound_ledger: Any = None,
+    outbound_context: Any = None,
 ) -> bool:
-    """J4: 在群里发一张语义匹配 mood_hint 的表情包；失败返 False 让调用方回退到文本。"""
+    """发送前失败返回 False；ledger 已调用 send 后的异常必须向上传播。"""
+    send_invoked = False
     try:
         from ..core.sticker_library import (
             list_local_sticker_files,
@@ -830,7 +870,18 @@ async def _try_send_idle_sticker(
             return False
         # OneBot v11 CQ 码发送
         cq = f"[CQ:image,file=file:///{best_path.resolve().as_posix().lstrip('/')}]"
-        await bot.send_group_msg(group_id=int(group_id), message=cq)
+
+        async def _send() -> Any:
+            nonlocal send_invoked
+            send_invoked = True
+            return await bot.send_group_msg(group_id=int(group_id), message=cq)
+
+        await _dispatch_proactive_outbound(
+            qq_outbound_ledger=qq_outbound_ledger,
+            outbound_context=outbound_context,
+            content=cq,
+            send=_send,
+        )
         try:
             await record_sticker_sent(best_name)
         except Exception:
@@ -838,6 +889,8 @@ async def _try_send_idle_sticker(
         logger.info(f"[group_idle] 群 {group_id} 选发表情包 {best_name}（mood_hint='{mood_hint[:20]}'）")
         return True
     except Exception as e:
+        if qq_outbound_ledger is not None and send_invoked:
+            raise
         logger.warning(f"[group_idle] sticker send failed for group {group_id}: {e}")
         return False
 
@@ -864,6 +917,7 @@ async def run_proactive_messaging(
     agent_max_steps: int = 4,
     agent_data_dir: Optional[Path] = None,
     persona_store: Any = None,
+    qq_outbound_ledger: Any = None,
 ) -> bool:
     _ = get_user_data, get_level_name, get_activity_status, parse_yaml_response
 
@@ -1107,7 +1161,28 @@ async def run_proactive_messaging(
     if not payload:
         save_proactive_state(proactive_state)
         return False
-    await bot.send_private_msg(user_id=int(target_user_id), message=payload)
+    outbound_context = None
+    if qq_outbound_ledger is not None:
+        outbound_context = build_outbound_context(
+            bot=bot,
+            event=SimpleNamespace(user_id=target_user_id),
+            surface="proactive_private",
+            user_target=target_user_id,
+        )
+
+    try:
+        await _dispatch_proactive_outbound(
+            qq_outbound_ledger=qq_outbound_ledger,
+            outbound_context=outbound_context,
+            content=payload,
+            send=lambda: bot.send_private_msg(user_id=int(target_user_id), message=payload),
+        )
+    except ProactiveOutboundOutcomeUnknown:
+        logger.warning(
+            f"[proactive] 用户 {target_user_id} 发送结果未知，禁止自动重发且不提交成功状态"
+        )
+        save_proactive_state(proactive_state)
+        return False
     _diag.record(
         scope="private",
         outcome=_diag.OUTCOME_SENT,
@@ -1155,6 +1230,7 @@ async def run_group_idle_topic(
     superusers: Optional[set[str]] = None,
     get_user_data: Optional[Callable[[str], Any]] = None,
     build_grounding_context: Optional[Callable[[str, str], Awaitable[str]]] = None,
+    qq_outbound_ledger: Any = None,
 ) -> int:
     """
     扫描所有白名单群，对空闲群主动发起话题。
@@ -1399,6 +1475,13 @@ async def run_group_idle_topic(
             try:
                 # 根据 chosen_mode 决定发送方式
                 sent_record_text = topic
+                outbound_context = None
+                if qq_outbound_ledger is not None:
+                    outbound_context = build_outbound_context(
+                        bot=bot,
+                        event=SimpleNamespace(group_id=group_id),
+                        surface="proactive_group_idle",
+                    )
                 if chosen_mode == "sticker":
                     sticker_sent = await _try_send_idle_sticker(
                         bot=bot,
@@ -1408,17 +1491,29 @@ async def run_group_idle_topic(
                         mood_hint=sticker_mood_hint or topic,
                         topic_text_fallback=topic,
                         logger=logger,
+                        qq_outbound_ledger=qq_outbound_ledger,
+                        outbound_context=outbound_context,
                     )
                     if not sticker_sent:
-                        # 表情包发送失败回退到文本
-                        await bot.send_group_msg(group_id=int(group_id), message=topic)
+                        # 未选出可发送表情时回退文本；unknown 异常会直接向外传播。
+                        await _dispatch_proactive_outbound(
+                            qq_outbound_ledger=qq_outbound_ledger,
+                            outbound_context=outbound_context,
+                            content=topic,
+                            send=lambda: bot.send_group_msg(group_id=int(group_id), message=topic),
+                        )
                     elif chosen_mode == "combo":
                         # combo 已在 _try_send_idle_sticker 内发了表情，这里不再补
                         pass
                     else:
                         sent_record_text = "[发送了一张表情包]"
                 elif chosen_mode == "combo":
-                    await bot.send_group_msg(group_id=int(group_id), message=topic)
+                    await _dispatch_proactive_outbound(
+                        qq_outbound_ledger=qq_outbound_ledger,
+                        outbound_context=outbound_context,
+                        content=topic,
+                        send=lambda: bot.send_group_msg(group_id=int(group_id), message=topic),
+                    )
                     # 异步追加 sticker（不阻塞回 sent_count 计数）
                     await _try_send_idle_sticker(
                         bot=bot,
@@ -1428,6 +1523,8 @@ async def run_group_idle_topic(
                         mood_hint=sticker_mood_hint or topic,
                         topic_text_fallback="",
                         logger=logger,
+                        qq_outbound_ledger=qq_outbound_ledger,
+                        outbound_context=outbound_context,
                     )
                 elif chosen_mode in {"qq_face", "qq_face_combo", "qq_super", "text_qq_face"}:
                     qq_sent = await _send_group_idle_qq_expression(
@@ -1438,13 +1535,25 @@ async def run_group_idle_topic(
                         mood_hint=sticker_mood_hint or topic,
                         mode=chosen_mode,
                         logger=logger,
+                        qq_outbound_ledger=qq_outbound_ledger,
+                        outbound_context=outbound_context,
                     )
                     if qq_sent:
                         sent_record_text = qq_sent
                     else:
-                        await bot.send_group_msg(group_id=int(group_id), message=topic)
+                        await _dispatch_proactive_outbound(
+                            qq_outbound_ledger=qq_outbound_ledger,
+                            outbound_context=outbound_context,
+                            content=topic,
+                            send=lambda: bot.send_group_msg(group_id=int(group_id), message=topic),
+                        )
                 else:
-                    await bot.send_group_msg(group_id=int(group_id), message=topic)
+                    await _dispatch_proactive_outbound(
+                        qq_outbound_ledger=qq_outbound_ledger,
+                        outbound_context=outbound_context,
+                        content=topic,
+                        send=lambda: bot.send_group_msg(group_id=int(group_id), message=topic),
+                    )
                 sent_now = get_now()
                 sent_now_ts = sent_now.timestamp()
                 sent_today = sent_now.strftime("%Y-%m-%d")
@@ -1475,6 +1584,8 @@ async def run_group_idle_topic(
                 break
             except Exception as e:
                 logger.warning(f"[group_idle] send_group_msg failed for group {group_id}: {e}")
+                if qq_outbound_ledger is not None:
+                    break
 
     save_proactive_state(proactive_state)
     if sent_count > 0:
@@ -1504,6 +1615,7 @@ def build_proactive_checker(
     agent_max_steps: int = 4,
     agent_data_dir: Optional[Path] = None,
     persona_store: Any = None,
+    qq_outbound_ledger: Any = None,
 ) -> Callable[[], Awaitable[bool]]:
     async def _check_proactive_messaging() -> bool:
         return await run_proactive_messaging(
@@ -1527,6 +1639,7 @@ def build_proactive_checker(
             agent_max_steps=agent_max_steps,
             agent_data_dir=agent_data_dir,
             persona_store=persona_store,
+            qq_outbound_ledger=qq_outbound_ledger,
         )
 
     return _check_proactive_messaging
@@ -1553,6 +1666,7 @@ def build_group_idle_checker(
     superusers: Optional[set[str]] = None,
     get_user_data: Optional[Callable[[str], Any]] = None,
     build_grounding_context: Optional[Callable[[str, str], Awaitable[str]]] = None,
+    qq_outbound_ledger: Any = None,
 ) -> Callable[[], Awaitable[int]]:
     async def _check_group_idle_topic() -> int:
         return await run_group_idle_topic(
@@ -1575,6 +1689,7 @@ def build_group_idle_checker(
             superusers=superusers,
             get_user_data=get_user_data,
             build_grounding_context=build_grounding_context,
+            qq_outbound_ledger=qq_outbound_ledger,
         )
 
     return _check_group_idle_topic

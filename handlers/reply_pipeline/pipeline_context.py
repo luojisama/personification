@@ -21,6 +21,7 @@ from ...core.message_parts import build_user_message_content
 from ...core.message_relations import build_event_relation_metadata
 from ...core.persona_profile import load_persona_profile, render_persona_snapshot
 from ...core.prompt_loader import pick_ack_phrase
+from ...core.qq_outbound import QQOutboundLedger, SendReceipt, build_outbound_context
 from ...core.qq_expression_tools import register_send_qq_expression_tools
 from ...core.gemini_profile import build_gemini_route_policy_prompt
 from ...core.reply_text_policy import normalize_visible_reply_text
@@ -48,6 +49,45 @@ _IMAGE_CLASSIFY_CACHE: Dict[str, IncomingImageClassification] = {}
 _IMAGE_CLASSIFY_CACHE_MAX = 256
 _DEFAULT_RESPONSE_TIMEOUT_SECONDS = 180.0
 _AGENT_TIME_BUDGET_RESERVE_SECONDS = 30.0
+
+
+def build_reply_operation_id(*, bot: Any, event: Any, reply_trace_id: str = "") -> str:
+    trace_id = str(reply_trace_id or "").strip()
+    if trace_id:
+        return trace_id
+    bot_id = str(getattr(bot, "self_id", "") or getattr(event, "self_id", "") or "").strip()
+    message_id = str(getattr(event, "message_id", "") or "").strip()
+    event_identity = message_id or f"event-{id(event)}"
+    return f"qq-reply:{bot_id}:{event_identity}"
+
+
+async def dispatch_reply_part(
+    *,
+    bot: Any,
+    event: Any,
+    payload: Any,
+    ledger: QQOutboundLedger | None,
+    surface: str,
+    reply_trace_id: str = "",
+) -> Any:
+    if ledger is None:
+        return await bot.send(event, payload)
+    context = build_outbound_context(
+        bot=bot,
+        event=event,
+        surface=surface,
+        operation_id=build_reply_operation_id(
+            bot=bot,
+            event=event,
+            reply_trace_id=reply_trace_id,
+        ),
+        user_target=str(getattr(event, "user_id", "") or ""),
+    )
+    return await ledger.dispatch(
+        context,
+        payload,
+        lambda: bot.send(event, payload),
+    )
 
 
 @dataclass(frozen=True)
@@ -717,7 +757,20 @@ async def run_agent_if_enabled(
     ):
         return None, False, False, None, [], "", False, False, ""
 
-    executor = ActionExecutor(bot, event, runtime.plugin_config, runtime.logger)
+    commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
+    executor = ActionExecutor(
+        bot,
+        event,
+        runtime.plugin_config,
+        runtime.logger,
+        qq_outbound_ledger=getattr(runtime, "qq_outbound_ledger", None),
+        operation_id=build_reply_operation_id(
+            bot=bot,
+            event=event,
+            reply_trace_id=str(commit_state.get("reply_trace_id", "") or ""),
+        ),
+        user_target=str(getattr(event, "user_id", "") or ""),
+    )
     runtime_registry = clone_tool_registry(runtime.tool_registry)
     register_current_user_avatar_tool(
         runtime_registry,
@@ -816,11 +869,20 @@ async def run_agent_if_enabled(
             await acquire_reply_commit(commit_state)
             mark_reply_phase(commit_state, "delivery")
             try:
+                # dispatch_reply_part keeps the legacy await bot.send(...) fallback without a ledger.
                 if getattr(runtime, "user_policy_gate", None) is not None:
                     await runtime.user_policy_gate.ensure_current(event)
                 mark_reply_delivery_started(commit_state)
-                await bot.send(event, str(text or "").strip() or _phrase)
-                mark_reply_delivery_confirmed(commit_state)
+                send_result = await dispatch_reply_part(
+                    bot=bot,
+                    event=event,
+                    payload=str(text or "").strip() or _phrase,
+                    ledger=getattr(runtime, "qq_outbound_ledger", None),
+                    surface="reply_ack",
+                    reply_trace_id=str(commit_state.get("reply_trace_id", "") or ""),
+                )
+                if not isinstance(send_result, SendReceipt) or send_result.status == "sent":
+                    mark_reply_delivery_confirmed(commit_state)
             finally:
                 release_reply_commit(commit_state)
                 mark_reply_phase(commit_state, "agent_after_ack")
@@ -1111,8 +1173,10 @@ __all__ = [
     "clear_image_classify_cache",
     "classify_incoming_image",
     "clone_tool_registry",
+    "build_reply_operation_id",
     "compute_agent_time_budget",
     "count_user_interactions",
+    "dispatch_reply_part",
     "extract_reply_sender_meta",
     "fold_consecutive_sticker_placeholders",
     "get_cached_friend_ids",
