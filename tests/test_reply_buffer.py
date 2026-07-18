@@ -79,6 +79,16 @@ class _Logger:
         self.errors.append(str(message))
 
 
+class _PolicyGate:
+    def __init__(self, allowed: bool) -> None:
+        self.allowed = allowed
+        self.calls: list[int] = []
+
+    async def allows_current(self, event: Any) -> bool:
+        self.calls.append(int(event.message_id))
+        return self.allowed
+
+
 def test_private_message_preempts_processing_batch() -> None:
     asyncio.run(_run_private_message_preempts_processing_batch())
 
@@ -408,6 +418,81 @@ def test_random_bot_target_is_not_upgraded_to_required_reply() -> None:
         assert msg_buffer
 
     asyncio.run(run())
+
+
+def test_blocked_event_never_enters_direct_or_buffer_processing() -> None:
+    async def run() -> None:
+        processed: list[int] = []
+        msg_buffer: dict[str, dict[str, Any]] = {}
+        gate = _PolicyGate(False)
+
+        async def process(_bot: Any, event: Any, _state: dict[str, Any]) -> None:
+            processed.append(int(event.message_id))
+
+        await reply_buffer.handle_reply_event(
+            _Bot(),
+            _PrivateEvent(1, "blocked"),
+            {},
+            poke_event_cls=type("PokeEvent", (), {}),
+            message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent,
+            process_response_logic=process,
+            msg_buffer=msg_buffer,
+            start_buffer_timer=lambda *_args: None,
+            logger=_Logger(),
+            user_policy_gate=gate,
+        )
+
+        assert processed == []
+        assert msg_buffer == {}
+        assert gate.calls == [1]
+
+    asyncio.run(run())
+
+
+def test_buffer_dequeue_drops_user_blocked_after_enqueue() -> None:
+    async def run() -> None:
+        processed: list[int] = []
+        msg_buffer: dict[str, dict[str, Any]] = {}
+        gate = _PolicyGate(True)
+        event = _GroupEvent(1, "later blocked")
+
+        async def process(_bot: Any, current: Any, _state: dict[str, Any]) -> None:
+            processed.append(int(current.message_id))
+
+        await reply_buffer.handle_reply_event(
+            _Bot(),
+            event,
+            {"is_random_chat": True},
+            poke_event_cls=type("PokeEvent", (), {}),
+            message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent,
+            process_response_logic=process,
+            msg_buffer=msg_buffer,
+            start_buffer_timer=lambda *_args: None,
+            logger=_Logger(),
+            user_policy_gate=gate,
+        )
+        gate.allowed = False
+        key = reply_buffer._session_key(event, group_message_event_cls=_GroupEvent, bot_self_id="999")
+
+        await reply_buffer.run_buffer_timer(
+            key,
+            _Bot(),
+            msg_buffer=msg_buffer,
+            process_response_logic=process,
+            message_event_cls=_PrivateEvent,
+            message_cls=_Message,
+            message_segment_cls=_MessageSegment,
+            logger=_Logger(),
+            user_policy_gate=gate,
+        )
+
+        assert processed == []
+        assert msg_buffer == {}
+
+    asyncio.run(run())
+
 
 
 def test_direct_turn_cancels_active_random_turn_only() -> None:

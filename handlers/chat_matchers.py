@@ -30,12 +30,13 @@ def register_chat_matchers(
     plugin_config: Any,
     message_segment_cls: Any,
     handle_reply: Callable[[Bot, MessageEvent, T_State], Any],
+    user_policy_gate: Any = None,
 ) -> Dict[str, Any]:
     record_msg_matcher = on_message(rule=Rule(record_msg_rule), priority=999, block=False)
 
     @record_msg_matcher.handle()
     async def _handle_record_msg(_bot: Bot, event: MessageEvent):
-        handle_record_message_event(
+        await handle_record_message_event(
             event,
             resolve_record_message=resolve_record_message,
             get_custom_title=get_custom_title,
@@ -44,6 +45,7 @@ def register_chat_matchers(
             logger=logger,
             create_background_task=create_background_task,
             create_summary_task=create_summary_task,
+            user_policy_gate=user_policy_gate,
         )
 
     sticker_chat_matcher = on_message(rule=Rule(sticker_chat_rule), priority=101, block=True)

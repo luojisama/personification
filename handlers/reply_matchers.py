@@ -25,7 +25,10 @@ _RULE_EVAL_CACHE_MAX_SIZE = 128
 def _build_rule_cache_key(event: Event) -> str:
     message_id = str(getattr(event, "message_id", "") or "").strip()
     if message_id:
-        return f"{event.__class__.__name__}:{message_id}"
+        bot_self_id = str(getattr(event, "self_id", "") or "").strip()
+        group_id = str(getattr(event, "group_id", "") or "").strip()
+        user_id = str(getattr(event, "user_id", "") or "").strip()
+        return f"{event.__class__.__name__}:{bot_self_id}:{group_id}:{user_id}:{message_id}"
 
     user_id = str(getattr(event, "user_id", "") or "").strip()
     group_id = str(getattr(event, "group_id", "") or "").strip()
@@ -110,6 +113,7 @@ def register_reply_matchers(
     logger: Any,
     plugin_config: Any,
     finished_exception_cls: Any = None,
+    user_policy_gate: Any = None,
 ) -> Dict[str, Any]:
     response_timeout_seconds = max(
         30.0,
@@ -167,6 +171,7 @@ def register_reply_matchers(
             delay=wait_seconds,
             response_timeout_seconds=response_timeout_seconds,
             concurrency_controller=concurrency_controller,
+            user_policy_gate=user_policy_gate,
         )
 
     @direct_reply_matcher.handle()
@@ -189,6 +194,7 @@ def register_reply_matchers(
             concurrency_controller=concurrency_controller,
             response_timeout_seconds=response_timeout_seconds,
             finished_exception_cls=finished_exception_cls,
+            user_policy_gate=user_policy_gate,
         )
 
     return {

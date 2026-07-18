@@ -1,7 +1,7 @@
 from typing import Any, Callable, Optional
 
 
-def handle_record_message_event(
+async def handle_record_message_event(
     event: Any,
     *,
     resolve_record_message: Callable[..., Any],
@@ -11,7 +11,10 @@ def handle_record_message_event(
     logger: Any,
     create_background_task: Callable[[str], None],
     create_summary_task: Optional[Callable[[str], None]] = None,
+    user_policy_gate: Any = None,
 ) -> None:
+    if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
+        return
     custom_title_getter = get_custom_title or (lambda _user_id: None)
     group_id, should_auto_analyze = resolve_record_message(
         event,

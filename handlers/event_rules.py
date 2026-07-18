@@ -76,12 +76,35 @@ async def personification_rule(
     group_chat_follow_probability: float,
     looks_like_private_command: Callable[[str], bool],
     get_recent_group_msgs: Optional[Callable[[str, int], list[dict]]] = None,
+    user_policy_gate: Any = None,
 ) -> bool:
     # plugin_invoker 代为执行其它插件命令时会用 handle_event 重新分发合成事件，
     # 这里短路，避免合成事件再次进入拟人回复流程造成递归。
     if getattr(event, "_personification_synthetic", False):
         return False
     user_id = str(event.user_id)
+
+    if user_policy_gate is not None:
+        decision = await user_policy_gate.evaluate(
+            event,
+            bot_self_id=str(getattr(event, "self_id", "") or ""),
+        )
+        state["user_policy_decision"] = decision.to_dict()
+        if not decision.allow_normal_processing:
+            if isinstance(event, private_event_cls) and looks_like_private_command(
+                event.get_plaintext()
+            ):
+                return False
+            if isinstance(event, group_event_cls):
+                group_id = str(event.group_id)
+                if not is_group_whitelisted(group_id, plugin_whitelist):
+                    return False
+                if is_group_muted(group_id):
+                    return False
+            if decision.disposition == "direct_closure_candidate":
+                decision = await user_policy_gate.claim_direct_closure(decision)
+                state["user_policy_decision"] = decision.to_dict()
+            return decision.disposition == "direct_closure"
 
     if sign_in_available:
         user_data = get_user_data(user_id)
@@ -253,9 +276,17 @@ async def personification_rule(
     return False
 
 
-async def record_msg_rule(_event: Event) -> bool:
+async def record_msg_rule(_event: Event, *, user_policy_gate: Any = None) -> bool:
     if getattr(_event, "_personification_synthetic", False):
         return False
+    if not str(getattr(_event, "group_id", "") or "").strip():
+        return False
+    if user_policy_gate is not None:
+        decision = await user_policy_gate.evaluate(
+            _event,
+            bot_self_id=str(getattr(_event, "self_id", "") or ""),
+        )
+        return decision.allow_normal_processing
     return True
 
 
@@ -416,9 +447,17 @@ async def sticker_chat_rule(
     is_group_whitelisted: Callable[[str, list[str]], bool],
     plugin_whitelist: list[str],
     probability: float,
+    user_policy_gate: Any = None,
 ) -> bool:
     if getattr(event, "_personification_synthetic", False):
         return False
+    if user_policy_gate is not None:
+        decision = await user_policy_gate.evaluate(
+            event,
+            bot_self_id=str(getattr(event, "self_id", "") or ""),
+        )
+        if not decision.allow_normal_processing:
+            return False
     if event.to_me:
         return False
     group_id = str(event.group_id)
@@ -433,8 +472,11 @@ async def poke_rule(
     is_group_whitelisted: Callable[[str, list[str]], bool],
     plugin_whitelist: list[str],
     probability: float,
+    user_policy_gate: Any = None,
 ) -> bool:
     if getattr(event, "_personification_synthetic", False):
+        return False
+    if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
         return False
     target_id = getattr(event, "target_id", None)
     self_id = getattr(event, "self_id", None)
@@ -458,10 +500,13 @@ async def poke_notice_rule(
     plugin_whitelist: list[str],
     probability: float,
     logger: Any,
+    user_policy_gate: Any = None,
 ) -> bool:
     notice_type = str(getattr(event, "notice_type", "") or "").strip().lower()
     sub_type = str(getattr(event, "sub_type", "") or "").strip().lower()
     if notice_type != "notify" or sub_type != "poke":
+        return False
+    if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
         return False
 
     target_id = getattr(event, "target_id", None)

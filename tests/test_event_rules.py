@@ -35,6 +35,29 @@ class _GroupEvent:
         return self._text
 
 
+class _PolicyDecision:
+    def __init__(self, *, disposition: str, allowed: bool) -> None:
+        self.disposition = disposition
+        self.allow_normal_processing = allowed
+
+    def to_dict(self) -> dict:
+        return {"disposition": self.disposition}
+
+
+class _PolicyGate:
+    def __init__(self, decision: _PolicyDecision, *, current: bool = True) -> None:
+        self.decision = decision
+        self.current = current
+        self.evaluate_calls = 0
+
+    async def evaluate(self, _event, *, bot_self_id: str = ""):  # noqa: ANN001, ANN201
+        self.evaluate_calls += 1
+        return self.decision
+
+    async def allows_current(self, _event) -> bool:  # noqa: ANN001
+        return self.current
+
+
 def _base_kwargs(**overrides):  # noqa: ANN001
     kwargs = {
         "sign_in_available": False,
@@ -153,3 +176,124 @@ def test_group_plugin_command_is_record_only_not_random_reply(monkeypatch) -> No
     assert result is False
     assert state["is_random_chat"] is False
     assert state["message_target"] == target_inference.TARGET_OTHERS
+
+
+def test_policy_gate_runs_before_prompt_history_and_favorability_reads() -> None:
+    gate = _PolicyGate(_PolicyDecision(disposition="silent", allowed=False))
+    touched: list[str] = []
+    event = _GroupEvent("blocked")
+
+    result = asyncio.run(
+        event_rules.personification_rule(
+            event,
+            {},
+            **_base_kwargs(
+                sign_in_available=True,
+                get_user_data=lambda _uid: touched.append("favorability") or {},
+                load_prompt=lambda _gid: touched.append("prompt") or {},
+                get_recent_group_msgs=lambda _gid, _limit: touched.append("history") or [],
+                user_policy_gate=gate,
+            ),
+        )
+    )
+
+    assert result is False
+    assert touched == []
+    assert gate.evaluate_calls == 1
+
+
+def test_direct_boundary_routes_only_to_dedicated_closure() -> None:
+    gate = _PolicyGate(_PolicyDecision(disposition="direct_closure", allowed=False))
+    event = _GroupEvent("direct boundary")
+    state: dict = {}
+
+    result = asyncio.run(
+        event_rules.personification_rule(
+            event,
+            state,
+            **_base_kwargs(user_policy_gate=gate),
+        )
+    )
+
+    assert result is True
+    assert state["user_policy_decision"] == {"disposition": "direct_closure"}
+
+
+def test_record_sticker_and_poke_rules_fail_closed_for_policy() -> None:
+    denied = _PolicyGate(_PolicyDecision(disposition="silent", allowed=False), current=False)
+    event = _GroupEvent("blocked")
+    event.target_id = event.self_id
+    event.notice_type = "notify"
+    event.sub_type = "poke"
+
+    record = asyncio.run(event_rules.record_msg_rule(event, user_policy_gate=denied))
+    sticker = asyncio.run(
+        event_rules.sticker_chat_rule(
+            event,
+            is_group_whitelisted=lambda *_args: True,
+            plugin_whitelist=[],
+            probability=1.0,
+            user_policy_gate=denied,
+        )
+    )
+    poke = asyncio.run(
+        event_rules.poke_notice_rule(
+            event,
+            is_group_whitelisted=lambda *_args: True,
+            plugin_whitelist=[],
+            probability=1.0,
+            logger=_FakeLogger(),
+            user_policy_gate=denied,
+        )
+    )
+
+    assert record is False
+    assert sticker is False
+    assert poke is False
+
+
+def test_private_event_never_enters_group_record_rule() -> None:
+    event = SimpleNamespace(
+        user_id="10001",
+        self_id="bot-1",
+        get_plaintext=lambda: "private",
+    )
+    gate = _PolicyGate(_PolicyDecision(disposition="allow", allowed=True))
+
+    result = asyncio.run(event_rules.record_msg_rule(event, user_policy_gate=gate))
+
+    assert result is False
+    assert gate.evaluate_calls == 0
+
+
+def test_direct_closure_does_not_bypass_whitelist_or_own_private_commands() -> None:
+    gate = _PolicyGate(_PolicyDecision(disposition="direct_closure", allowed=False))
+    group_result = asyncio.run(
+        event_rules.personification_rule(
+            _GroupEvent("boundary"),
+            {},
+            **_base_kwargs(
+                user_policy_gate=gate,
+                is_group_whitelisted=lambda *_args: False,
+            ),
+        )
+    )
+    private_event = SimpleNamespace(
+        user_id="10001",
+        self_id="bot-1",
+        get_plaintext=lambda: "/other command",
+    )
+    private_result = asyncio.run(
+        event_rules.personification_rule(
+            private_event,
+            {},
+            **_base_kwargs(
+                user_policy_gate=gate,
+                private_event_cls=SimpleNamespace,
+                looks_like_private_command=lambda text: text.startswith("/"),
+            ),
+        )
+    )
+
+    assert group_result is False
+    assert private_result is False

@@ -543,8 +543,11 @@ async def process_yaml_response_logic(
     favorability_turn_id: str = "",
     avatar_pair_candidates: List[Dict[str, str]] | None = None,
     avatar_pair_runtime: Any = None,
+    user_policy_gate: Any = None,
 ) -> None:
     """处理基于 YAML 模板的新版响应逻辑。"""
+    if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
+        return
     reply_commit_state = reply_commit_state if isinstance(reply_commit_state, dict) else {}
     started_at = time.monotonic()
     begin_reply_lifecycle(reply_commit_state, "yaml_pipeline")
@@ -677,6 +680,8 @@ async def process_yaml_response_logic(
         _commit_favorability_if_confirmed()
 
     async def _send_reply(payload: Any) -> Any:
+        if user_policy_gate is not None:
+            await user_policy_gate.ensure_current(event)
         mark_reply_delivery_started(reply_commit_state)
         result = await bot.send(event, payload)
         _confirm_reply_delivery()
@@ -685,6 +690,8 @@ async def process_yaml_response_logic(
     async def _commit_pending_actions() -> None:
         if not pending_actions:
             return
+        if user_policy_gate is not None:
+            await user_policy_gate.ensure_current(event)
         mark_reply_phase(reply_commit_state, "delivery_commit_wait")
         await acquire_reply_commit(reply_commit_state)
         mark_reply_phase(reply_commit_state, "delivery")
@@ -1562,6 +1569,8 @@ async def process_yaml_response_logic(
                 await acquire_reply_commit(reply_commit_state)
                 mark_reply_phase(reply_commit_state, "delivery")
                 try:
+                    if user_policy_gate is not None:
+                        await user_policy_gate.ensure_current(event)
                     mark_reply_delivery_started(reply_commit_state)
                     await bot.send(event, str(text or "").strip() or _phrase)
                     mark_reply_delivery_confirmed(reply_commit_state)
@@ -1716,6 +1725,8 @@ async def process_yaml_response_logic(
             if agent_result.direct_output:
                 mark_reply_phase(reply_commit_state, "delivery_commit_wait")
                 await acquire_reply_commit(reply_commit_state)
+                if user_policy_gate is not None:
+                    await user_policy_gate.ensure_current(event)
                 mark_reply_phase(reply_commit_state, "delivery")
                 if _has_newer_batch_now():
                     logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
@@ -1884,6 +1895,8 @@ async def process_yaml_response_logic(
         if not pending_yaml_poke:
             return True
         await acquire_reply_commit(reply_commit_state)
+        if user_policy_gate is not None:
+            await user_policy_gate.ensure_current(event)
         if _has_newer_batch_now():
             _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="YAML 动作提交前出现更新批次")
             return False
@@ -2188,6 +2201,8 @@ async def process_yaml_response_logic(
         return
     mark_reply_phase(reply_commit_state, "delivery_commit_wait")
     await acquire_reply_commit(reply_commit_state)
+    if user_policy_gate is not None:
+        await user_policy_gate.ensure_current(event)
     delivery_started_at = time.monotonic()
     mark_reply_phase(reply_commit_state, "delivery")
     if _has_newer_batch_now():
@@ -2408,6 +2423,8 @@ async def process_yaml_response_logic(
 
     if not delivery_partial and not delivery_unknown:
         mark_reply_delivery_complete(reply_commit_state)
+    if user_policy_gate is not None:
+        await user_policy_gate.ensure_current(event)
     mark_reply_phase(reply_commit_state, "delivery_history_commit")
     session_id = build_private_session_id(user_id) if is_private_session else build_group_session_id(group_id)
     legacy_session_id = None if is_private_session else group_id
@@ -2585,6 +2602,7 @@ def build_yaml_response_processor(
     knowledge_store: Any = None,
     inner_state_updater: Any = None,
     favorability_service: Any = None,
+    user_policy_gate: Any = None,
 ) -> Callable[..., Awaitable[None]]:
     async def _processor(
         bot: Any,
@@ -2690,6 +2708,7 @@ def build_yaml_response_processor(
             favorability_turn_id=str(runtime_overrides.get("favorability_turn_id", "") or ""),
             avatar_pair_candidates=list(runtime_overrides.get("avatar_pair_candidates") or []),
             avatar_pair_runtime=runtime_overrides.get("avatar_pair_runtime"),
+            user_policy_gate=runtime_overrides.get("user_policy_gate", user_policy_gate),
         )
 
     return _processor

@@ -53,7 +53,12 @@ def test_policy_tables_and_default_authorization(service) -> None:  # noqa: ANN0
         }
 
     authorization = policy.authorize("10001", now=1000)
-    assert tables == {"user_policy_state", "user_policy_events", "user_policy_evidence"}
+    assert tables == {
+        "user_policy_state",
+        "user_policy_events",
+        "user_policy_evidence",
+        "user_policy_closures",
+    }
     assert authorization.blocked is False
     assert authorization.tier == "allow"
     assert all(
@@ -272,3 +277,37 @@ def test_concurrent_idempotency_and_distinct_events_are_atomic(service) -> None:
     assert state.auto_stage == 1
     assert state.auto_tier == "level_1"
     assert len(policy.list_events("10001", now=1003)) == 3
+
+
+def test_direct_closure_claim_is_atomic_and_expires(service) -> None:  # noqa: ANN001
+    policy, _ = service
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        claims = list(
+            pool.map(
+                lambda index: policy.claim_direct_closure(
+                    user_id="10001",
+                    channel_key="qq_group:20001",
+                    event_key=f"event-{index}",
+                    now=1000,
+                    cooldown_seconds=30,
+                ),
+                range(24),
+            )
+        )
+
+    assert sum(claims) == 1
+    assert policy.claim_direct_closure(
+        user_id="10001",
+        channel_key="qq_group:20001",
+        event_key="before-expiry",
+        now=1029,
+        cooldown_seconds=30,
+    ) is False
+    assert policy.claim_direct_closure(
+        user_id="10001",
+        channel_key="qq_group:20001",
+        event_key="after-expiry",
+        now=1031,
+        cooldown_seconds=30,
+    ) is True

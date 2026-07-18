@@ -465,6 +465,7 @@ async def run_buffer_timer(
     delay: float = 0.0,
     response_timeout_seconds: float = _PROCESS_RESPONSE_TIMEOUT_SECONDS,
     concurrency_controller: ReplyConcurrencyController | None = None,
+    user_policy_gate: Any = None,
 ) -> None:
     started_at = time.monotonic()
     await asyncio.sleep(max(0.0, float(delay or 0.0)))
@@ -495,6 +496,14 @@ async def run_buffer_timer(
         return
 
     items = list(entry.get("items") or [])
+    if user_policy_gate is not None and items:
+        allowed = await asyncio.gather(
+            *(
+                user_policy_gate.allows_current(item.get("event"))
+                for item in items
+            )
+        )
+        items = [item for item, is_allowed in zip(items, allowed) if is_allowed]
     if not items:
         if entry.get("pending_items"):
             _promote_pending_batch(entry)
@@ -517,6 +526,7 @@ async def run_buffer_timer(
                         delay=_delay,
                         response_timeout_seconds=response_timeout_seconds,
                         concurrency_controller=concurrency_controller,
+                        user_policy_gate=user_policy_gate,
                     )
                 ),
             )
@@ -667,6 +677,7 @@ async def run_buffer_timer(
                             delay=_delay,
                             response_timeout_seconds=response_timeout_seconds,
                             concurrency_controller=concurrency_controller,
+                            user_policy_gate=user_policy_gate,
                         )
                     ),
                 )
@@ -695,6 +706,7 @@ async def run_buffer_timer(
                             delay=_delay,
                             response_timeout_seconds=response_timeout_seconds,
                             concurrency_controller=concurrency_controller,
+                            user_policy_gate=user_policy_gate,
                         )
                     ),
                 )
@@ -717,7 +729,10 @@ async def handle_reply_event(
     concurrency_controller: ReplyConcurrencyController | None = None,
     response_timeout_seconds: float = _PROCESS_RESPONSE_TIMEOUT_SECONDS,
     finished_exception_cls: Any = None,
+    user_policy_gate: Any = None,
 ) -> None:
+    if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
+        return
     if isinstance(event, poke_event_cls):
         if concurrency_controller is None:
             await process_response_logic(bot, event, state)

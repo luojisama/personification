@@ -187,6 +187,20 @@ DDL_STATEMENTS = (
         ON user_policy_evidence(expires_at)
     """,
     """
+    CREATE TABLE IF NOT EXISTS user_policy_closures (
+        user_id TEXT NOT NULL,
+        channel_key TEXT NOT NULL,
+        event_key TEXT NOT NULL,
+        claimed_at REAL NOT NULL,
+        expires_at REAL NOT NULL,
+        PRIMARY KEY (user_id, channel_key)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_user_policy_closures_expiry
+        ON user_policy_closures(expires_at)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS user_tasks (
         task_id    TEXT    NOT NULL,
         user_id    TEXT    NOT NULL,

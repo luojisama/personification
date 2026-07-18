@@ -148,6 +148,7 @@ class PluginRuntimeBundle:
     memory_decay_scheduler: Any = None
     background_intelligence: Any = None
     user_policy_service: Any = None
+    qq_user_policy_gate: Any = None
     qzone_social_scan: Any = None
     qzone_inbound_poll: Any = None
     qzone_generate_post: Any = None
@@ -360,6 +361,7 @@ class PluginRuntimeBundle:
             sticker_chat_rule_core=sticker_chat_rule_core,
             process_response_logic_core=process_response_logic_core,
             reply_processor_deps=self.reply_processor_deps,
+            user_policy_gate=self.qq_user_policy_gate,
             handle_reply_event_core=handle_reply_event,
             run_buffer_timer_core=run_buffer_timer_core,
             msg_buffer=self.msg_buffer,

@@ -816,6 +816,8 @@ async def run_agent_if_enabled(
             await acquire_reply_commit(commit_state)
             mark_reply_phase(commit_state, "delivery")
             try:
+                if getattr(runtime, "user_policy_gate", None) is not None:
+                    await runtime.user_policy_gate.ensure_current(event)
                 mark_reply_delivery_started(commit_state)
                 await bot.send(event, str(text or "").strip() or _phrase)
                 mark_reply_delivery_confirmed(commit_state)

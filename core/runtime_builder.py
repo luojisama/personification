@@ -131,6 +131,7 @@ from .proactive_store import load_proactive_state, save_proactive_state, update_
 from .profile_service import ProfileService
 from .policy_classifier import PolicyClassifier
 from .qzone_service import build_qzone_services, build_qzone_social_service
+from .qq_user_policy import QQUserPolicyGate
 from .runtime_assembly import PluginRuntimeBundle
 from .memory_defaults import DEFAULT_PERSONA_HISTORY_MAX
 from .model_router import (
@@ -421,6 +422,17 @@ def build_plugin_runtime(
         logger.warning(
             "personification: user policy evidence encryption unavailable; excerpts will not be persisted"
         )
+    def _legacy_policy_blocked(user_id: str) -> bool:
+        if favorability_service is None or not hasattr(favorability_service, "peek_user_data"):
+            return False
+        profile = favorability_service.peek_user_data(str(user_id or "").strip())
+        return bool(isinstance(profile, dict) and profile.get("is_perm_blacklisted", False))
+
+    qq_user_policy_gate = QQUserPolicyGate(
+        user_policy_service,
+        logger=logger,
+        legacy_block_checker=_legacy_policy_blocked,
+    )
     tts_service = TtsService(
         plugin_config=plugin_config,
         logger=logger,
@@ -462,12 +474,14 @@ def build_plugin_runtime(
         ),
         looks_like_private_command=looks_like_private_command,
         get_recent_group_msgs=get_recent_group_msgs,
+        user_policy_gate=qq_user_policy_gate,
     )
     poke_rule = build_poke_rule(
         poke_rule_core=poke_rule_core,
         is_group_whitelisted=is_group_whitelisted,
         plugin_whitelist=plugin_config.personification_whitelist,
         probability=plugin_config.personification_poke_probability,
+        user_policy_gate=qq_user_policy_gate,
     )
     poke_notice_rule = build_poke_notice_rule(
         poke_notice_rule_core=poke_notice_rule_core,
@@ -475,6 +489,7 @@ def build_plugin_runtime(
         plugin_whitelist=plugin_config.personification_whitelist,
         probability=plugin_config.personification_poke_probability,
         logger=logger,
+        user_policy_gate=qq_user_policy_gate,
     )
 
     yaml_response_processor = build_yaml_response_processor(
@@ -511,6 +526,7 @@ def build_plugin_runtime(
         knowledge_store=knowledge_store,
         inner_state_updater=inner_state_updater,
         favorability_service=favorability_service,
+        user_policy_gate=qq_user_policy_gate,
     )
 
     get_custom_title = build_custom_title_getter(
@@ -603,6 +619,7 @@ def build_plugin_runtime(
             profile_service=profile_service,
             memory_curator=memory_curator,
             background_intelligence=background_intelligence,
+            user_policy_gate=qq_user_policy_gate,
         ),
         types=TypeDeps(
             poke_event_cls=poke_event_cls,
@@ -711,6 +728,7 @@ def build_plugin_runtime(
             knowledge_store=knowledge_store,
             inner_state_updater=inner_state_updater,
             favorability_service=favorability_service,
+            user_policy_gate=qq_user_policy_gate,
         )
         if tool_registry is not None and candidate_registry is not None and registry_version is not None:
             tool_registry.replace_all(candidate_registry.all(), expected_version=registry_version)
@@ -782,4 +800,5 @@ def build_plugin_runtime(
         memory_decay_scheduler=memory_decay_scheduler,
         background_intelligence=background_intelligence,
         user_policy_service=user_policy_service,
+        qq_user_policy_gate=qq_user_policy_gate,
     )

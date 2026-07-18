@@ -24,6 +24,7 @@ POLICY_AUTO_RESET_SECONDS = 30 * 24 * 60 * 60
 POLICY_LEVEL_1_SECONDS = 12 * 60 * 60
 POLICY_LEVEL_2_SECONDS = 24 * 60 * 60
 POLICY_EVIDENCE_RETENTION_SECONDS = 7 * 24 * 60 * 60
+POLICY_DIRECT_CLOSURE_COOLDOWN_SECONDS = 30 * 24 * 60 * 60
 
 POLICY_TIERS = {"allow", "level_1", "level_2", "permanent"}
 POLICY_MANUAL_MODES = {"inherit", "allow", "block"}
@@ -601,6 +602,37 @@ class UserPolicyService:
             conn.commit()
             return state
 
+    def claim_direct_closure(
+        self,
+        *,
+        user_id: str,
+        channel_key: str,
+        event_key: str,
+        now: float | None = None,
+        cooldown_seconds: float = POLICY_DIRECT_CLOSURE_COOLDOWN_SECONDS,
+    ) -> bool:
+        uid = str(user_id or "").strip()
+        channel = str(channel_key or "").strip()[:160]
+        key = str(event_key or "").strip()[:160]
+        if not uid or not channel or not key:
+            return False
+        current = float(now if now is not None else time.time())
+        expires_at = current + max(1.0, float(cooldown_seconds))
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM user_policy_closures WHERE expires_at<=?", (current,))
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO user_policy_closures(
+                    user_id,channel_key,event_key,claimed_at,expires_at
+                ) VALUES(?,?,?,?,?)
+                """,
+                (uid, channel, key, current, expires_at),
+            )
+            claimed = int(cursor.rowcount or 0) > 0
+            conn.commit()
+        return claimed
+
     def list_states(self, *, limit: int = 200, now: float | None = None) -> list[dict[str, Any]]:
         current = float(now if now is not None else time.time())
         with self._connect() as conn:
@@ -661,6 +693,7 @@ class UserPolicyService:
 
 __all__ = [
     "POLICY_AUTO_RESET_SECONDS", "POLICY_CLASSIFIER_VERSION",
+    "POLICY_DIRECT_CLOSURE_COOLDOWN_SECONDS",
     "POLICY_EVIDENCE_RETENTION_SECONDS", "POLICY_LEVEL_1_SECONDS",
     "POLICY_LEVEL_2_SECONDS", "PolicyAssessment", "PolicyAuthorization",
     "PolicyEventResult", "PolicyEvidenceCipher", "PolicyRevisionConflict",

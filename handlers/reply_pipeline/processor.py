@@ -100,6 +100,7 @@ from ...core.qq_expression_library import (
     render_qq_expression_message,
     semantic_text_for_qq_expression_segment,
 )
+from ...core.qq_user_policy import QQPolicyBlockedDuringTurn
 from ...core.sticker_feedback import (
     build_sticker_feedback_scene_key,
     mark_pending_sticker_reaction,
@@ -348,6 +349,7 @@ class RuntimeDeps:
     profile_service: Any = None
     memory_curator: Any = None
     background_intelligence: Any = None
+    user_policy_gate: Any = None
 
 
 @dataclass
@@ -387,6 +389,12 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
     # plugin_invoker 代为执行其它插件命令时会用 handle_event 重新分发合成事件，
     # 这里直接短路，确保合成事件永远不会再次进入拟人回复/Agent 流程（防递归）。
     if getattr(event, "_personification_synthetic", False):
+        return
+    policy_decision = state.get("user_policy_decision")
+    if isinstance(policy_decision, dict) and policy_decision.get("disposition") != "allow":
+        return
+    user_policy_gate = getattr(deps.runtime, "user_policy_gate", None)
+    if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
         return
     begin_reply_lifecycle(state)
 
@@ -655,6 +663,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         sender_name = "戳戳怪"
         runtime.logger.info(f"拟人插件：检测到来自 {user_id} 的戳一戳")
         async def _poke_back_after_commit_gate() -> None:
+            if (
+                getattr(runtime, "user_policy_gate", None) is not None
+                and not await runtime.user_policy_gate.allows_current(event)
+            ):
+                return
             commit_lock = state.get("reply_commit_lock")
             if isinstance(commit_lock, asyncio.Lock):
                 async with commit_lock:
@@ -1033,6 +1046,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     async def _maybe_silence_reaction() -> None:
         """NO_REPLY 沉默前的轻量回应（贴表情/拍一拍），never-raise。"""
         try:
+            if getattr(runtime, "user_policy_gate", None) is not None:
+                await runtime.user_policy_gate.ensure_current(event)
             await acquire_reply_commit(state)
             favorability = 0.0
             try:
@@ -1898,6 +1913,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             _commit_favorability_if_confirmed()
 
         async def _send_reply(payload: Any) -> Any:
+            if getattr(runtime, "user_policy_gate", None) is not None:
+                await runtime.user_policy_gate.ensure_current(event)
             mark_reply_delivery_started(state)
             result = await bot.send(event, payload)
             _confirm_reply_delivery()
@@ -1937,6 +1954,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         async def _commit_pending_actions() -> None:
             if not pending_actions:
                 return
+            if getattr(runtime, "user_policy_gate", None) is not None:
+                await runtime.user_policy_gate.ensure_current(event)
             mark_reply_phase(state, "delivery_commit_wait")
             await acquire_reply_commit(state)
             mark_reply_phase(state, "delivery")
@@ -1966,6 +1985,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             is_direct_mention=is_direct_mention,
             has_image_input=bool(tool_image_urls),
         ):
+            if getattr(runtime, "user_policy_gate", None) is not None:
+                await runtime.user_policy_gate.ensure_current(event)
             image_ctx_token = set_current_image_context(tool_image_urls, message_content)
             try:
                 try:
@@ -2546,6 +2567,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         if stale_reason:
             runtime.logger.info(f"拟人插件：{stale_reason}")
             return
+        if getattr(runtime, "user_policy_gate", None) is not None:
+            await runtime.user_policy_gate.ensure_current(event)
         await _commit_pending_actions()
         if (
             final_reply
@@ -2780,6 +2803,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
         if not delivery_partial and not delivery_unknown:
             mark_reply_delivery_complete(state)
+        if getattr(runtime, "user_policy_gate", None) is not None:
+            await runtime.user_policy_gate.ensure_current(event)
         mark_reply_phase(state, "delivery_history_commit")
         assistant_metadata = {
             "scene": "reply",
@@ -2964,6 +2989,18 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     "incoming_text": str(raw_message_text or message_text or message_content or "")[:500],
                     "outgoing_text": str(final_visible_reply_text or "")[:500],
                 },
+            )
+        except Exception:
+            pass
+    except QQPolicyBlockedDuringTurn:
+        runtime.logger.info(f"拟人插件：用户 {user_id or '-'} policy 状态已变化，本轮立即静默终止。")
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.finish_trace(
+                outcome="no_reply",
+                diagnosis_code="user_policy_blocked",
+                detail={"silent": True},
             )
         except Exception:
             pass
