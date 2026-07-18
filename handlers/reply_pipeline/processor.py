@@ -68,7 +68,10 @@ from ...core.turn_media import (
     serialize_turn_media,
 )
 from ...core.user_avatar_insight import schedule_user_avatar_analysis
-from ...core.user_avatar_pair_insight import build_avatar_pair_candidates
+from ...core.user_avatar_pair_insight import (
+    build_avatar_pair_candidates,
+    filter_avatar_candidates_by_policy,
+)
 from ...core.repeat_follow import maybe_follow_repeat_cluster
 from ...core.reply_style_policy import (
     build_direct_visual_identity_guard,
@@ -1347,6 +1350,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         bot_self_id=bot_self_id,
         batched_events=batched_events,
         recent_messages=recent_window,
+    )
+    avatar_pair_candidates = await filter_avatar_candidates_by_policy(
+        avatar_pair_candidates,
+        (
+            runtime.user_policy_gate.current_authorization
+            if getattr(runtime, "user_policy_gate", None) is not None
+            else None
+        ),
     )
     if not is_private_session and sticker_candidates:
         if _batch_media_owner_matches_selected_user(batched_events, user_id):

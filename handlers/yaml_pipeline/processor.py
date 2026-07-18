@@ -16,6 +16,7 @@ from ...core.chat_intent import (
     looks_like_explanatory_output,
 )
 from ...core.current_group_context_tool import register_current_group_context_tool
+from ...core.group_member_avatar_insight import register_group_member_avatar_insight_tool
 from ...core.emotion_state import (
     build_turn_emotion_prompt_block,
     render_emotion_memory_hint,
@@ -112,6 +113,7 @@ from ...core.user_avatar_insight import (
 )
 from ...core.user_avatar_pair_insight import (
     build_avatar_pair_candidates,
+    filter_avatar_candidates_by_policy,
     register_group_user_avatar_pair_insight_tool,
 )
 from ...skill_runtime.runtime_api import SkillRuntime
@@ -964,6 +966,14 @@ async def process_yaml_response_logic(
         batched_events=list(batched_events or []),
         recent_messages=avatar_pair_recent_messages,
     )
+    resolved_avatar_pair_candidates = await filter_avatar_candidates_by_policy(
+        resolved_avatar_pair_candidates,
+        (
+            user_policy_gate.current_authorization
+            if user_policy_gate is not None
+            else None
+        ),
+    )
     data_dir = get_personification_data_dir(plugin_config)
     if isinstance(prepared_inner_state, dict) and isinstance(prepared_emotion_state, dict):
         inner_state = dict(prepared_inner_state)
@@ -1621,6 +1631,27 @@ async def process_yaml_response_logic(
             bot=bot,
             event=event,
             candidates=resolved_avatar_pair_candidates,
+            policy_authorizer=(
+                user_policy_gate.current_authorization
+                if user_policy_gate is not None
+                else None
+            ),
+        )
+        register_group_member_avatar_insight_tool(
+            agent_tool_registry,
+            runtime=avatar_pair_runtime
+            or SimpleNamespace(
+                plugin_config=plugin_config,
+                get_configured_api_providers=get_configured_api_providers,
+            ),
+            bot=bot,
+            event=event,
+            candidates=resolved_avatar_pair_candidates,
+            policy_authorizer=(
+                user_policy_gate.current_authorization
+                if user_policy_gate is not None
+                else None
+            ),
         )
         register_send_qq_expression_tools(
             agent_tool_registry,

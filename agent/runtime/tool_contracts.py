@@ -3,14 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ...core.evidence_envelope import EvidenceEnvelope
 from ...core.qq_expression_tools import expression_tool_result_queued
 from ..tool_registry import ToolRegistry
 from .image_generation import _IMAGE_GENERATION_TOOL_NAME
 from .tool_catalog import tool_runtime_metadata
-from .wrappers import _is_direct_media_tool_result, render_avatar_pair_safe_result
-
-
-_AVATAR_PAIR_TOOL_NAME = "inspect_group_user_avatar_pair"
+from .wrappers import _is_direct_media_tool_result
 
 
 @dataclass(frozen=True)
@@ -21,6 +19,7 @@ class DirectToolResult:
     reason: str = ""
     failure_code: str = ""
     suppress_reply_recovery: bool = False
+    evidence_envelope: dict[str, Any] | None = None
 
 
 def metadata_tags(metadata: dict[str, Any]) -> set[str]:
@@ -74,16 +73,20 @@ def direct_tool_result_from_contract(
         and queued_success
     ):
         return DirectToolResult(text="[SILENCE]", reason="queued_send_message")
-    if (
-        normalized_tool_name == _AVATAR_PAIR_TOOL_NAME
-        and side_effect == "none"
-        and final_behavior == "safe_direct_output"
-    ):
+    if side_effect == "none" and final_behavior == "constrained_persona_output":
+        envelope = EvidenceEnvelope.from_value(text)
+        if envelope is None:
+            return DirectToolResult(
+                text="[SILENCE]",
+                reason="invalid_evidence_envelope",
+                suppress_reply_recovery=True,
+            )
         return DirectToolResult(
-            text=render_avatar_pair_safe_result(text),
-            direct_output=True,
-            bypass_length_limits=True,
-            reason="safe_direct_output",
+            text=envelope.natural_fallback,
+            direct_output=False,
+            bypass_length_limits=False,
+            reason="constrained_persona_output",
+            evidence_envelope=envelope.to_dict(),
         )
     if _is_direct_media_tool_result(normalized_tool_name, text):
         return DirectToolResult(text=text, bypass_length_limits=True, reason="direct_media")

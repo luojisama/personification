@@ -185,10 +185,10 @@ def append_agent_system_prompts(
     elif runtime_chat_intent == "plugin_question":
         if plugin_query_intent == "runtime_capability":
             plugin_hint = (
-                "当前是在问你是否已有、能否读取或理解当前发送者安全头像摘要的运行时能力。"
+                "当前是在问你是否具备读取或理解当前发送者头像可观察画面事实的运行时能力。"
                 "必须调用本轮可用的第一方只读 runtime capability 工具核实，不要调用插件清单、插件知识或源码工具猜测。"
-                "inspect_current_user_avatar 只能说明是否已有安全头像摘要，不能声称直接看到了 raw 头像；"
-                "available=false 时如实说明当前没有可用摘要。"
+                "inspect_current_user_avatar 只提供受约束的头像画面事实，不能声称看到了 raw 头像；"
+                "available=false 时如实说明当前没有可用的头像画面事实。"
             )
         else:
             plugin_hint = (

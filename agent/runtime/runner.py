@@ -289,6 +289,12 @@ async def run_agent(
             )
             if str(getattr(result, "failure_code", "") or ""):
                 return result
+            if (
+                str(getattr(result, "quality_context", "") or "")
+                == "constrained_persona_output"
+                and getattr(result, "evidence_envelope", None) is not None
+            ):
+                return result
             return AgentResult(
                 text="[NO_REPLY]",
                 pending_actions=list(getattr(result, "pending_actions", []) or []),

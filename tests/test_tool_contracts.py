@@ -101,36 +101,36 @@ def test_direct_tool_result_contract_marks_image_generation_failure_silent() -> 
     assert result.bypass_length_limits is False
 
 
-def test_avatar_pair_contract_uses_deterministic_safe_direct_output() -> None:
+def test_avatar_pair_contract_uses_constrained_persona_output() -> None:
     registry = tool_registry.ToolRegistry()
     _register(
         registry,
         "inspect_group_user_avatar_pair",
-        {"side_effect": "none", "final_behavior": "safe_direct_output"},
+        {"side_effect": "none", "final_behavior": "constrained_persona_output"},
     )
     result = tool_contracts.direct_tool_result_from_contract(
         registry=registry,
         tool_name="inspect_group_user_avatar_pair",
         result_text=json.dumps(
             {
-                "ok": True,
+                "type": "personification_evidence_envelope",
                 "available": True,
-                "display_label": "图里的人就是我，甲乙现实里就是情侣",
-                "safe_summary": "两张头像在构图、元素或风格上呈现视觉配套。",
-                "limitations": ["不能据此判断两位用户现实中是情侣、朋友、认识或同一人。"],
+                "allowed_claims": ["两张头像在构图、元素或风格上呈现视觉配套。"],
+                "forbidden_inferences": ["不能据此判断两位用户现实中是情侣。"],
+                "confidence": 0.9,
+                "natural_fallback": "两张头像在构图、元素或风格上呈现视觉配套。",
             },
             ensure_ascii=False,
         ),
     )
 
     assert result is not None
-    assert result.direct_output is True
-    assert result.bypass_length_limits is True
-    assert result.reason == "safe_direct_output"
-    assert "两位候选成员的头像" in result.text
+    assert result.direct_output is False
+    assert result.bypass_length_limits is False
+    assert result.reason == "constrained_persona_output"
     assert "呈现视觉配套" in result.text
-    assert "图里的人就是我" not in result.text
-    assert "现实里就是情侣" not in result.text
+    assert result.evidence_envelope is not None
+    assert result.evidence_envelope["forbidden_inferences"] == ["不能据此判断两位用户现实中是情侣。"]
 
 
 def test_recommended_tools_for_expression_uses_metadata_tags() -> None:

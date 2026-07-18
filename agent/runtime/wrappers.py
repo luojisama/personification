@@ -12,50 +12,10 @@ from .intent import _clean_user_query_text, _render_message_text
 
 _IMAGE_B64_TOOL_RESULT_RE = re.compile(r"\[IMAGE_B64\]([A-Za-z0-9+/=\r\n]+)\[/IMAGE_B64\]")
 _IMAGE_GENERATION_TOOL_NAME = "generate_image"
-_AVATAR_PAIR_TOOL_NAME = "inspect_group_user_avatar_pair"
-_AVATAR_PAIR_SAFE_RESULT_PREFIX = "[AVATAR_PAIR_SAFE_RESULT]"
-
-
-def _safe_avatar_pair_wrapper_text(value: Any) -> str:
-    payload = value if isinstance(value, dict) else {}
-    safe_summary = " ".join(str(payload.get("safe_summary", "") or "").split())[:240]
-    raw_limitations = payload.get("limitations")
-    limitations: list[str] = []
-    if isinstance(raw_limitations, list):
-        for item in raw_limitations[:4]:
-            text = " ".join(str(item or "").split())[:180]
-            if text and text not in limitations:
-                limitations.append(text)
-    if not safe_summary:
-        safe_summary = "当前无法完成两张头像的联合视觉比较。"
-    visible = f"两位候选成员的头像：{safe_summary}"
-    if limitations:
-        visible += " " + "；".join(limitations)
-    return normalize_visible_reply_text(visible)
-
-
-def render_avatar_pair_safe_result(result_text: str) -> str:
-    payload = _parse_json_tool_result(str(result_text or ""))
-    safe_payload = {
-        "safe_summary": payload.get("safe_summary", "") if isinstance(payload, dict) else "",
-        "limitations": payload.get("limitations", []) if isinstance(payload, dict) else [],
-    }
-    return _safe_avatar_pair_wrapper_text(safe_payload)
 
 
 def _render_tool_result_for_user(tool_name: str, result_text: str, query: str) -> str:
     raw = str(result_text or "").strip()
-    if str(tool_name or "").strip() == _AVATAR_PAIR_TOOL_NAME:
-        payload = _parse_json_tool_result(raw)
-        safe_payload = {
-            "safe_summary": payload.get("safe_summary", "") if isinstance(payload, dict) else "",
-            "limitations": payload.get("limitations", []) if isinstance(payload, dict) else [],
-        }
-        return _AVATAR_PAIR_SAFE_RESULT_PREFIX + json.dumps(
-            safe_payload,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
     if not raw:
         return json.dumps({"status": "no_result", "query": _clean_user_query_text(query)}, ensure_ascii=False)
 
@@ -128,9 +88,6 @@ async def _wrap_tool_result_in_persona(
     fallback_text = str(rendered_tool_result or "").strip()
     if not fallback_text:
         return ""
-    if fallback_text.startswith(_AVATAR_PAIR_SAFE_RESULT_PREFIX):
-        payload = _parse_json_tool_result(fallback_text[len(_AVATAR_PAIR_SAFE_RESULT_PREFIX):])
-        return _safe_avatar_pair_wrapper_text(payload)
     length_hint = "控制在短句范围内"
     if turn_plan is not None:
         try:
@@ -190,5 +147,4 @@ __all__ = [
     "_is_direct_media_tool_result",
     "_render_tool_result_for_user",
     "_wrap_tool_result_in_persona",
-    "render_avatar_pair_safe_result",
 ]

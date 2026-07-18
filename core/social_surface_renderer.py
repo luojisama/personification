@@ -6,6 +6,11 @@ from typing import Any
 
 import yaml
 
+from .evidence_envelope import (
+    EvidenceEnvelope,
+    EvidenceRenderOutcome,
+    render_constrained_evidence,
+)
 from .prompt_loader import AGENT_GUIDANCE_MARKER
 from .persona_profile import load_persona_profile
 from .visible_output import guard_visible_text
@@ -264,6 +269,21 @@ class SocialSurfaceRenderer:
             logger=logger,
             surface=surface,
             allow_control=False,
+        )
+
+    async def render_evidence(
+        self,
+        envelope: EvidenceEnvelope,
+        *,
+        tool_caller: Any,
+        persona_system: str = "",
+        timeout: float = 8.0,
+    ) -> EvidenceRenderOutcome:
+        return await render_constrained_evidence(
+            envelope,
+            tool_caller=tool_caller,
+            persona_system=persona_system,
+            timeout=timeout,
         )
 
 

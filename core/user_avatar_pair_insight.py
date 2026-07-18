@@ -9,14 +9,17 @@ import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from inspect import isawaitable
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
+from .avatar_relation_evidence import record_avatar_relation_evidence
 from .avatar_candidate import sanitize_image
+from .evidence_envelope import EvidenceEnvelope
 from .media_understanding import (
     analyze_images_with_primary_route_joint_only,
     get_primary_image_route_fingerprint,
 )
-from .onebot_cache import get_group_member_info
+from .protocol_adapter import get_protocol_adapter
 from .safe_image_download import download_public_image
 from .user_profile_meta import qq_avatar_url
 from .visual_capabilities import VISUAL_ROUTE_VISION
@@ -161,6 +164,31 @@ def _normalize_candidates(candidates: Sequence[Mapping[str, Any]] | None) -> lis
     return normalized
 
 
+async def _policy_allows_context(policy_authorizer: Any, user_id: str) -> bool:
+    if policy_authorizer is None:
+        return True
+    try:
+        authorization = policy_authorizer(str(user_id or ""))
+        if isawaitable(authorization):
+            authorization = await authorization
+    except Exception:
+        return False
+    return not bool(getattr(authorization, "blocked", True)) and bool(
+        getattr(authorization, "allow_context_read", False)
+    )
+
+
+async def filter_avatar_candidates_by_policy(
+    candidates: Sequence[Mapping[str, Any]] | None,
+    policy_authorizer: Any,
+) -> list[dict[str, str]]:
+    filtered: list[dict[str, str]] = []
+    for candidate in _normalize_candidates(candidates):
+        if await _policy_allows_context(policy_authorizer, candidate.user_id):
+            filtered.append({"user_id": candidate.user_id, "label": candidate.label})
+    return filtered
+
+
 def _message_segment_parts(segment: Any) -> tuple[str, Mapping[str, Any]]:
     if isinstance(segment, Mapping):
         segment_type = str(segment.get("type", "") or "").strip().lower()
@@ -302,6 +330,20 @@ def _group_scope_from_event(event: Any) -> tuple[str, str]:
     return group_id, sender_id
 
 
+async def get_group_member_info(
+    bot: Any,
+    group_id: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    """Adapter-backed membership proof kept as a narrow test seam."""
+
+    result = await get_protocol_adapter(bot).get_group_member_info(
+        group_id=group_id,
+        user_id=user_id,
+    )
+    return dict(result.data or {}) if result.ok else None
+
+
 def normalize_avatar_pair_assessment(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != _PAIR_FIELDS:
         raise ValueError("avatar pair assessment does not match the required schema")
@@ -384,18 +426,22 @@ def _safe_pair_payload(
     right_label: str,
     assessment: dict[str, Any] | None,
     *,
-    unavailable_summary: str = "当前无法完成两张头像的联合视觉比较。",
+    unavailable_summary: str = "这两张头像现在没法一起看清。",
 ) -> dict[str, Any]:
     del left_label, right_label
-    display_label = "两位候选成员的头像"
     if assessment is None:
-        return {
-            "ok": True,
-            "available": False,
-            "safe_summary": unavailable_summary,
-            "display_label": display_label,
-            "limitations": _base_limitations(uncertain=True),
-        }
+        return EvidenceEnvelope(
+            allowed_claims=(),
+            forbidden_inferences=tuple(
+                [
+                    *_base_limitations(uncertain=True),
+                    "不得提及系统、工具、接口、摘要、安全分析、内部机制或内容策略。",
+                ]
+            ),
+            confidence=0.0,
+            natural_fallback=unavailable_summary,
+            available=False,
+        ).to_dict()
     relation = str(assessment.get("relation", "uncertain") or "uncertain")
     summaries = {
         "near_duplicate": "两张头像的画面相同或近乎相同。",
@@ -406,16 +452,22 @@ def _safe_pair_payload(
         "uncertain": "现有图像证据不足以判断头像视觉关联。",
     }
     contains_real = "real_person" in list(assessment.get("asset_kinds") or [])
-    return {
-        "ok": True,
-        "available": True,
-        "safe_summary": summaries.get(relation, summaries["uncertain"]),
-        "display_label": display_label,
-        "limitations": _base_limitations(
-            real_person=contains_real,
-            uncertain=relation == "uncertain",
+    summary = summaries.get(relation, summaries["uncertain"])
+    return EvidenceEnvelope(
+        allowed_claims=(summary,),
+        forbidden_inferences=tuple(
+            [
+                *_base_limitations(
+                    real_person=contains_real,
+                    uncertain=relation == "uncertain",
+                ),
+                "不得提及系统、工具、接口、摘要、安全分析、内部机制或内容策略。",
+            ]
         ),
-    }
+        confidence=float(assessment.get("confidence", 0.0) or 0.0),
+        natural_fallback=summary,
+        available=True,
+    ).to_dict()
 
 
 def _cache_get(key: tuple[Any, ...]) -> tuple[bool, dict[str, Any] | None]:
@@ -483,6 +535,7 @@ async def analyze_group_user_avatar_pair(
     downloader: Callable[..., Awaitable[Any]] | None = None,
     analyzer: Callable[..., Awaitable[tuple[str, str]]] | None = None,
     membership_getter: Callable[..., Awaitable[dict[str, Any] | None]] | None = None,
+    policy_authorizer: Any = None,
 ) -> dict[str, Any]:
     runtime = _reply_runtime(runtime)
     group_key = _normalize_id(group_id)
@@ -505,10 +558,18 @@ async def analyze_group_user_avatar_pair(
             safe_left_label or "候选一",
             safe_right_label or "候选二",
             None,
-            unavailable_summary="头像比较候选无效，未进行联合视觉分析。",
+            unavailable_summary="这两张头像现在没法一起比较。",
         )
 
     users = frozenset({left_key, right_key})
+    for user_id in sorted(users):
+        if not await _policy_allows_context(policy_authorizer, user_id):
+            return _safe_pair_payload(
+                safe_left_label,
+                safe_right_label,
+                None,
+                unavailable_summary="这两张头像现在不适合拿来比较。",
+            )
     generation = _generation_snapshot(users)
     prove_membership = membership_getter or get_group_member_info
     for user_id in sorted(users):
@@ -520,7 +581,7 @@ async def analyze_group_user_avatar_pair(
                 safe_left_label,
                 safe_right_label,
                 None,
-                unavailable_summary="无法确认两位候选都属于当前群，未进行头像比较。",
+                unavailable_summary="我这边确认不了其中一位是不是这个群的。",
             )
     if not _generation_is_current(generation):
         return _safe_pair_payload(safe_left_label, safe_right_label, None)
@@ -536,7 +597,7 @@ async def analyze_group_user_avatar_pair(
             safe_left_label,
             safe_right_label,
             None,
-            unavailable_summary="至少一张头像当前不可安全读取，未进行视觉比较。",
+            unavailable_summary="这两张头像现在有一张看不清。",
         )
     if not _generation_is_current(generation):
         return _safe_pair_payload(safe_left_label, safe_right_label, None)
@@ -550,6 +611,32 @@ async def analyze_group_user_avatar_pair(
     )
     route_fingerprint = get_primary_image_route_fingerprint(runtime, route_name=VISUAL_ROUTE_VISION)
     pair_identity = tuple((user_id, content_hash) for user_id, _content, _mime, content_hash in records)
+    avatar_hashes = {
+        user_id: content_hash
+        for user_id, _content, _mime, content_hash in records
+    }
+
+    async def persist_if_allowed(assessment: dict[str, Any] | None) -> bool:
+        if assessment is None:
+            return False
+        for user_id in sorted(users):
+            if not await _policy_allows_context(policy_authorizer, user_id):
+                return False
+        try:
+            await asyncio.to_thread(
+                record_avatar_relation_evidence,
+                group_id=group_key,
+                left_user_id=left_key,
+                right_user_id=right_key,
+                relation=assessment.get("relation"),
+                confidence=assessment.get("confidence"),
+                evidence_tags=assessment.get("evidence_tags"),
+                asset_kinds=assessment.get("asset_kinds"),
+                avatar_hashes=avatar_hashes,
+            )
+        except Exception:
+            pass
+        return True
     cache_key = (
         AVATAR_PAIR_ANALYSIS_SCHEMA_VERSION,
         _PAIR_SCHEMA_FINGERPRINT,
@@ -560,6 +647,13 @@ async def analyze_group_user_avatar_pair(
     )
     hit, cached = _cache_get(cache_key)
     if hit:
+        if cached is not None and not await persist_if_allowed(cached):
+            return _safe_pair_payload(
+                safe_left_label,
+                safe_right_label,
+                None,
+                unavailable_summary="这两张头像现在不适合拿来比较。",
+            )
         return _safe_pair_payload(safe_left_label, safe_right_label, cached)
 
     async def compute() -> dict[str, Any] | None:
@@ -634,6 +728,8 @@ async def analyze_group_user_avatar_pair(
         assessment = None
     if not _generation_is_current(generation):
         assessment = None
+    if assessment is not None and not await persist_if_allowed(assessment):
+        assessment = None
     return _safe_pair_payload(safe_left_label, safe_right_label, assessment)
 
 
@@ -653,6 +749,12 @@ def clear_user_avatar_pair_analysis(user_id: str | int) -> int:
         if not task.done():
             task.cancel()
         removed += 1
+    try:
+        from .avatar_relation_evidence import delete_user_avatar_relation_evidence
+
+        removed += delete_user_avatar_relation_evidence(uid)
+    except Exception:
+        pass
     return removed
 
 
@@ -662,6 +764,7 @@ def build_group_user_avatar_pair_insight_tool(
     bot: Any,
     event: Any,
     candidates: Sequence[Mapping[str, Any]],
+    policy_authorizer: Any = None,
 ) -> Any | None:
     from ..agent.tool_registry import AgentTool
 
@@ -682,7 +785,7 @@ def build_group_user_avatar_pair_insight_tool(
                 left.label if left is not None else "候选一",
                 right.label if right is not None else "候选二",
                 None,
-                unavailable_summary="头像比较候选无效，请从本轮候选中选择两个不同成员。",
+                unavailable_summary="这两个名字现在对不上，没法比较头像。",
             )
             return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if used:
@@ -690,7 +793,7 @@ def build_group_user_avatar_pair_insight_tool(
                 left.label,
                 right.label,
                 None,
-                unavailable_summary="本轮已经完成过一次有效头像比较，不再重复分析。",
+                unavailable_summary="这轮先看刚才那一组头像。",
             )
             return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         used = True
@@ -704,6 +807,7 @@ def build_group_user_avatar_pair_insight_tool(
                 left_label=left.label,
                 right_user_id=right.user_id,
                 right_label=right.label,
+                policy_authorizer=policy_authorizer,
             )
         except Exception:
             payload = _safe_pair_payload(left.label, right.label, None)
@@ -737,7 +841,7 @@ def build_group_user_avatar_pair_insight_tool(
             "risk_level": "low",
             "read_only": True,
             "side_effect": "none",
-            "final_behavior": "safe_direct_output",
+            "final_behavior": "constrained_persona_output",
             "retryable": True,
             "source_kind": "first_party_runtime",
         },
@@ -752,6 +856,7 @@ def register_group_user_avatar_pair_insight_tool(
     bot: Any,
     event: Any,
     candidates: Sequence[Mapping[str, Any]],
+    policy_authorizer: Any = None,
 ) -> bool:
     if registry is None:
         return False
@@ -760,6 +865,7 @@ def register_group_user_avatar_pair_insight_tool(
         bot=bot,
         event=event,
         candidates=candidates,
+        policy_authorizer=policy_authorizer,
     )
     if tool is None:
         return False
@@ -787,6 +893,7 @@ __all__ = [
     "build_avatar_pair_candidates",
     "build_group_user_avatar_pair_insight_tool",
     "clear_user_avatar_pair_analysis",
+    "filter_avatar_candidates_by_policy",
     "normalize_avatar_pair_assessment",
     "register_group_user_avatar_pair_insight_tool",
 ]

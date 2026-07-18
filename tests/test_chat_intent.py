@@ -197,7 +197,8 @@ def test_semantic_frame_treats_avatar_visibility_as_runtime_capability() -> None
 
     system_prompt = captured["messages"][0]["content"]  # type: ignore[index]
     assert "runtime_capability 只覆盖" in system_prompt
-    assert "安全头像摘要" in system_prompt
+    assert "头像中的可观察画面事实" in system_prompt
+    assert "安全头像摘要" not in system_prompt
     assert "其它用户资料、记忆、群信息或会话能力问题仍使用 plugin_question/capability" in system_prompt
     assert frame.chat_intent == "plugin_question"
     assert frame.plugin_question_intent == "runtime_capability"

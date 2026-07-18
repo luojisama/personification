@@ -4,10 +4,12 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import re
 import time
 from typing import Any, Awaitable, Callable
 
+from .evidence_envelope import EvidenceEnvelope
 from .media_understanding import analyze_images_with_route_or_fallback
 from .safe_image_download import download_public_image
 from .visual_capabilities import VISUAL_ROUTE_VISION
@@ -243,6 +245,45 @@ def get_user_avatar_state(
         snapshot.profile_json if snapshot is not None else {},
         include_hash=include_hash,
         include_hash_short=include_hash_short,
+    )
+
+
+def build_avatar_evidence_envelope(
+    insight: dict[str, Any] | None = None,
+) -> EvidenceEnvelope:
+    current = dict(insight or {})
+    summary = " ".join(str(current.get("neutral_summary", "") or "").split())[:240]
+    try:
+        confidence = float(current.get("confidence", 0.0) or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        confidence = 0.0
+    if not math.isfinite(confidence):
+        confidence = 0.0
+    claims: list[str] = []
+    if summary:
+        claims.append(f"头像画面可描述为：{summary}")
+    candidates = [
+        " ".join(str(item or "").split())[:80]
+        for item in list(current.get("acg_candidates") or [])[:3]
+        if " ".join(str(item or "").split())
+    ]
+    if candidates:
+        claims.append("可能的虚构角色或作品候选：" + "、".join(candidates))
+    fallback = (
+        f"看得到，头像里像是{summary.rstrip('。')}。"
+        if summary
+        else "这会儿没看清头像里是什么。"
+    )
+    return EvidenceEnvelope(
+        allowed_claims=tuple(claims),
+        forbidden_inferences=(
+            "不得把头像中的人物、角色、性别、年龄或属性说成用户本人。",
+            "不得推断真人身份、现实关系、性格、经历或其他未观察到的事实。",
+            "不得提及系统、工具、接口、摘要、安全分析、内部机制或内容策略。",
+        ),
+        confidence=max(0.0, min(1.0, confidence)),
+        natural_fallback=fallback,
+        available=bool(summary),
     )
 
 
@@ -545,32 +586,21 @@ def build_inspect_current_user_avatar_tool(profile_service: Any, user_id: str) -
             if callable(getattr(profile_service, "is_enabled", None))
             else True
         ):
-            return json.dumps(
-                {"ok": True, "available": False, "analysis": {}, "insight": {}},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
+            return build_avatar_evidence_envelope().to_json()
         state = get_user_avatar_state(
             profile_service,
             uid,
             include_hash=False,
             include_hash_short=False,
         )
-        payload = {
-            "ok": True,
-            "available": bool(state.get("insight")),
-            "analysis": state.get("analysis", {}),
-            "insight": state.get("insight", {}),
-        }
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return build_avatar_evidence_envelope(state.get("insight", {})).to_json()
 
     return AgentTool(
         name="inspect_current_user_avatar",
         description=(
-            "只读确认 bot 当前是否已有当前发送者的安全头像摘要，并在可用时查看该摘要。"
-            "当对方询问 bot 能否看到或理解自己的头像，或当前对话确实涉及其头像类型、头像审美、"
-            "ACG 角色/作品候选时调用；"
-            "普通闲聊、身份或性格判断不要调用。结果不提供 URL、图片或真人身份信息。"
+            "读取当前发送者头像中可观察到的画面描述和可能的 ACG 角色/作品候选。"
+            "当对方询问你能否看到或理解自己的头像，或当前对话确实涉及头像类型、审美或角色候选时调用；"
+            "普通闲聊、身份或性格判断不要调用。画中人物或角色不等于发送者本人，结果不提供 URL、图片或真人身份。"
         ),
         parameters={"type": "object", "properties": {}, "required": []},
         handler=_handler,
@@ -586,7 +616,7 @@ def build_inspect_current_user_avatar_tool(profile_service: Any, user_id: str) -
             "latency_class": "fast",
             "risk_level": "low",
             "side_effect": "none",
-            "final_behavior": "continue",
+            "final_behavior": "constrained_persona_output",
             "retryable": True,
             "source_kind": "first_party_runtime",
         },
@@ -630,6 +660,7 @@ __all__ = [
     "AVATAR_VISION_TIMEOUT_SECONDS",
     "analyze_user_avatar",
     "add_current_user_avatar_planner_metadata",
+    "build_avatar_evidence_envelope",
     "build_inspect_current_user_avatar_tool",
     "clear_user_avatar_analysis",
     "force_user_avatar_analysis",

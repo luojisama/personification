@@ -109,7 +109,7 @@ def test_tool_build_scope_enum_handler_validation_and_metadata(monkeypatch) -> N
     assert tool.metadata["side_effect"] == "none"
     assert tool.metadata["retryable"] is True
     assert tool.metadata["requires_network"] is True
-    assert tool.metadata["final_behavior"] == "safe_direct_output"
+    assert tool.metadata["final_behavior"] == "constrained_persona_output"
 
     calls = 0
 
@@ -128,10 +128,11 @@ def test_tool_build_scope_enum_handler_validation_and_metadata(monkeypatch) -> N
         return invalid_enum, invalid_distinct, valid, repeated
 
     invalid_enum, invalid_distinct, valid, repeated = asyncio.run(_run())
-    assert invalid_enum["ok"] is True and invalid_enum["available"] is False
-    assert invalid_distinct["ok"] is True and invalid_distinct["available"] is False
+    assert invalid_enum["type"] == "personification_evidence_envelope"
+    assert invalid_enum["available"] is False
+    assert invalid_distinct["available"] is False
     assert valid["available"] is True
-    assert repeated["ok"] is True and repeated["available"] is False
+    assert repeated["available"] is False
     assert calls == 1
 
 
@@ -217,6 +218,18 @@ def test_candidate_builder_requires_group_and_two_distinct_members() -> None:
     ) == []
 
 
+def test_policy_filter_removes_blocked_candidates_before_tool_schema() -> None:
+    async def _authorize(user_id: str):
+        allowed = user_id != "10002"
+        return SimpleNamespace(blocked=not allowed, allow_context_read=allowed)
+
+    filtered = asyncio.run(
+        pair.filter_avatar_candidates_by_policy(_candidates(), _authorize)
+    )
+
+    assert filtered == [{"user_id": "10001", "label": "甲"}]
+
+
 def test_non_sender_membership_failure_is_fail_closed_before_download() -> None:
     async def _membership(_bot, group_id, user_id):  # noqa: ANN001, ANN202
         assert group_id == "20001"
@@ -240,9 +253,9 @@ def test_non_sender_membership_failure_is_fail_closed_before_download() -> None:
             downloader=_download,
         )
     )
-    assert result["ok"] is True
+    assert result["type"] == "personification_evidence_envelope"
     assert result["available"] is False
-    assert "当前群" in result["safe_summary"]
+    assert "这个群" in result["natural_fallback"]
 
 
 def test_exact_sanitized_bytes_skip_vision_and_use_only_deterministic_avatar_urls(monkeypatch) -> None:  # noqa: ANN001
@@ -281,7 +294,7 @@ def test_exact_sanitized_bytes_skip_vision_and_use_only_deterministic_avatar_url
     )
 
     assert result["available"] is True
-    assert "相同或近乎相同" in result["safe_summary"]
+    assert "相同或近乎相同" in result["natural_fallback"]
     assert [item[0] for item in download_calls] == [
         user_profile_meta.qq_avatar_url("10001"),
         user_profile_meta.qq_avatar_url("10002"),
@@ -289,8 +302,14 @@ def test_exact_sanitized_bytes_skip_vision_and_use_only_deterministic_avatar_url
     assert all(item[1]["max_bytes"] == 5 * 1024 * 1024 for item in download_calls)
     assert all(item[1]["allowed_mimes"] == {"image/jpeg", "image/png", "image/webp"} for item in download_calls)
     assert len(sanitize_calls) == 2
-    assert set(result) == {"ok", "available", "safe_summary", "display_label", "limitations"}
-    assert result["display_label"] == "两位候选成员的头像"
+    assert set(result) == {
+        "type",
+        "available",
+        "allowed_claims",
+        "forbidden_inferences",
+        "confidence",
+        "natural_fallback",
+    }
     serialized = json.dumps(result, ensure_ascii=False)
     for forbidden in ("10001", "10002", "q.qlogo.cn", "sha256", "raw", "relation"):
         assert forbidden not in serialized
@@ -342,8 +361,8 @@ def test_strict_normalization_thresholds_and_real_person_boundary() -> None:
     assert real_person["relation"] == "uncertain"
     assert "real_person_present" in real_person["evidence_tags"]
     payload = pair._safe_pair_payload("甲", "乙", real_person)
-    assert "同一虚构角色" not in payload["safe_summary"]
-    assert any("身份" in item and "same-person" in item for item in payload["limitations"])
+    assert "同一虚构角色" not in payload["natural_fallback"]
+    assert any("身份" in item and "same-person" in item for item in payload["forbidden_inferences"])
 
 
 def test_normal_and_yaml_agent_paths_register_pair_tool_per_turn() -> None:
@@ -354,8 +373,13 @@ def test_normal_and_yaml_agent_paths_register_pair_tool_per_turn() -> None:
 
     assert "register_group_user_avatar_pair_insight_tool(" in normal
     assert "avatar_pair_candidates=avatar_pair_candidates" in processor
-    assert "agent_direct_output" in processor
-    assert 'reason="safe_direct_output"' in processor
+    assert "filter_avatar_candidates_by_policy(" in processor
+    assert "constrained_persona_output" in pair.build_group_user_avatar_pair_insight_tool(
+        runtime=_runtime(),
+        bot=SimpleNamespace(self_id="90001"),
+        event=_event(),
+        candidates=_candidates(),
+    ).metadata["final_behavior"]
     assert "register_group_user_avatar_pair_insight_tool(" in yaml
     assert "resolved_avatar_pair_candidates" in yaml
 
@@ -414,6 +438,113 @@ def test_cache_is_order_canonical_and_invalidates_on_hash_prompt_and_provider(mo
         assert analyzer_calls == 4
 
     asyncio.run(_run())
+
+
+def test_pair_analysis_persists_visual_evidence_only_after_policy_recheck(monkeypatch) -> None:  # noqa: ANN001
+    persisted: list[dict] = []
+    authorization_calls: dict[str, int] = {"10001": 0, "10002": 0}
+
+    async def _membership(_bot, _group_id, user_id):  # noqa: ANN001, ANN202
+        return {"user_id": int(user_id)}
+
+    async def _download(url: str, **_kwargs):  # noqa: ANN202
+        content = b"left" if "dst_uin=10001" in url else b"right"
+        return SimpleNamespace(content=content, content_type="image/png")
+
+    def _sanitize(content: bytes, _content_type: str):  # noqa: ANN202
+        return b"sanitized:" + content, "image/png", 128, 128, ".png"
+
+    async def _analyze(**_kwargs):  # noqa: ANN202
+        return _assessment(), "route_direct"
+
+    async def _allow(user_id: str):
+        authorization_calls[user_id] += 1
+        return SimpleNamespace(blocked=False, allow_context_read=True)
+
+    monkeypatch.setattr(pair, "get_group_member_info", _membership)
+    monkeypatch.setattr(pair, "download_public_image", _download)
+    monkeypatch.setattr(pair, "sanitize_image", _sanitize)
+    monkeypatch.setattr(pair, "analyze_images_with_primary_route_joint_only", _analyze)
+    monkeypatch.setattr(
+        pair,
+        "record_avatar_relation_evidence",
+        lambda **kwargs: persisted.append(dict(kwargs)) or True,
+    )
+
+    payload = asyncio.run(
+        pair.analyze_group_user_avatar_pair(
+            runtime=_runtime(),
+            bot=SimpleNamespace(self_id="90001"),
+            group_id="20001",
+            sender_user_id="10001",
+            left_user_id="10001",
+            left_label="甲",
+            right_user_id="10002",
+            right_label="乙",
+            policy_authorizer=_allow,
+        )
+    )
+
+    assert payload["available"] is True
+    assert len(persisted) == 1
+    assert persisted[0]["relation"] == "coordinated_pair"
+    assert set(persisted[0]["avatar_hashes"]) == {"10001", "10002"}
+    assert authorization_calls == {"10001": 2, "10002": 2}
+
+
+def test_pair_analysis_drops_result_if_target_becomes_blocked_before_persist(monkeypatch) -> None:  # noqa: ANN001
+    target_calls = 0
+
+    async def _membership(_bot, _group_id, user_id):  # noqa: ANN001, ANN202
+        return {"user_id": int(user_id)}
+
+    async def _download(url: str, **_kwargs):  # noqa: ANN202
+        content = b"left" if "dst_uin=10001" in url else b"right"
+        return SimpleNamespace(content=content, content_type="image/png")
+
+    async def _authorize(user_id: str):
+        nonlocal target_calls
+        if user_id == "10002":
+            target_calls += 1
+            allowed = target_calls == 1
+        else:
+            allowed = True
+        return SimpleNamespace(blocked=not allowed, allow_context_read=allowed)
+
+    monkeypatch.setattr(pair, "get_group_member_info", _membership)
+    monkeypatch.setattr(pair, "download_public_image", _download)
+    monkeypatch.setattr(
+        pair,
+        "sanitize_image",
+        lambda content, _mime: (b"sanitized:" + content, "image/png", 128, 128, ".png"),
+    )
+    monkeypatch.setattr(
+        pair,
+        "analyze_images_with_primary_route_joint_only",
+        lambda **_kwargs: asyncio.sleep(0, result=(_assessment(), "route_direct")),
+    )
+    monkeypatch.setattr(
+        pair,
+        "record_avatar_relation_evidence",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("blocked evidence must not persist")),
+    )
+
+    payload = asyncio.run(
+        pair.analyze_group_user_avatar_pair(
+            runtime=_runtime(),
+            bot=SimpleNamespace(self_id="90001"),
+            group_id="20001",
+            sender_user_id="10001",
+            left_user_id="10001",
+            left_label="甲",
+            right_user_id="10002",
+            right_label="乙",
+            policy_authorizer=_authorize,
+        )
+    )
+
+    assert payload["available"] is False
+    assert payload["allowed_claims"] == []
 
 
 def test_failure_cooldown_inflight_dedup_and_clear_generation_guard(monkeypatch) -> None:  # noqa: ANN001
@@ -484,10 +615,11 @@ def test_failure_cooldown_inflight_dedup_and_clear_generation_guard(monkeypatch)
 
     async def _run_failure_cache() -> None:
         for _index in range(2):
-            tool = _tool()
-            assert tool is not None
-            payload = json.loads(await tool.handler(left_label="甲", right_label="乙"))
-            assert payload["ok"] is True and payload["available"] is False
+                tool = _tool()
+                assert tool is not None
+                payload = json.loads(await tool.handler(left_label="甲", right_label="乙"))
+                assert payload["type"] == "personification_evidence_envelope"
+                assert payload["available"] is False
 
     asyncio.run(_run_failure_cache())
     assert invalid_calls == 1

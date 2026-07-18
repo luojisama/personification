@@ -4,6 +4,7 @@ import time
 from typing import Any, Callable
 
 from ...core.context_policy import strip_response_control_markers
+from ...core.evidence_envelope import EvidenceEnvelope
 from ...core.metrics import record_counter, record_timing
 from ...core.reply_text_policy import (
     looks_like_formulaic_reply_tic,
@@ -12,6 +13,7 @@ from ...core.reply_text_policy import (
     normalize_visible_reply_text,
 )
 from ...core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
+from ...core.social_surface_renderer import SocialSurfaceRenderer
 from ...core.visible_output import assess_visible_text
 from .final_synthesis import AgentResult
 
@@ -66,6 +68,7 @@ def _copy_result_with_quality(
         failure_code=str(getattr(result, "failure_code", "") or ""),
         suppress_reply_recovery=suppress_reply_recovery,
         quality_context=quality_context,
+        evidence_envelope=getattr(result, "evidence_envelope", None),
     )
 
 
@@ -130,6 +133,51 @@ async def finalize_agent_reply_quality(
     raw_text = str(getattr(result, "text", "") or "").strip()
     quality_context = str(getattr(result, "quality_context", "") or "").strip()
     direct_output = bool(getattr(result, "direct_output", False))
+    envelope = EvidenceEnvelope.from_value(getattr(result, "evidence_envelope", None))
+    if quality_context == "constrained_persona_output" and envelope is not None:
+        outcome = await SocialSurfaceRenderer().render_evidence(
+            envelope,
+            tool_caller=tool_caller,
+            persona_system=_persona_system_from_messages(messages),
+        )
+        final_text = normalize_visible_reply_text(outcome.text) or envelope.natural_fallback
+        group_context = _looks_like_group_context(messages, turn_plan) if is_group is None else bool(is_group)
+        constraint_flags = ["constrained_evidence"]
+        if is_agent_reply_ooc(final_text):
+            final_text = envelope.natural_fallback
+            constraint_flags.append("style_fallback")
+        if group_context and looks_like_question_reply(final_text):
+            final_text = envelope.natural_fallback
+            constraint_flags.append("question_fallback")
+        visibility = assess_visible_text(final_text)
+        if not visibility.allowed:
+            final_text = envelope.natural_fallback
+            constraint_flags.append("visible_output_fallback")
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        check = {
+            "action": outcome.action,
+            "reason": str(reason or ""),
+            "flags": constraint_flags,
+            "revision_attempted": outcome.rewrite_used,
+            "elapsed_ms": elapsed_ms,
+            "original_chars": len(raw_text),
+            "final_chars": len(final_text),
+        }
+        record_timing("agent.reply_quality_ms", elapsed_ms, action=outcome.action)
+        record_counter("agent.reply_quality_total", action=outcome.action)
+        if record_trace is not None:
+            record_trace(
+                key="agent_reply_quality",
+                label="Agent 回复质量",
+                status="ok" if outcome.action in {"accepted", "rewritten"} else "warn",
+                detail=(
+                    f"action={outcome.action} source={reason or '-'} "
+                    f"flags={','.join(constraint_flags)} revision={str(outcome.rewrite_used).lower()} "
+                    f"elapsed_ms={elapsed_ms} chars={len(raw_text)}->{len(final_text)}"
+                ),
+                hint="头像等受约束证据已完成人设化与事实边界审阅。",
+            )
+        return _copy_result_with_quality(result, text=final_text, check=check)
     visibility = assess_visible_text(raw_text)
     if not visibility.allowed:
         check = {

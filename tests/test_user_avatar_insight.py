@@ -537,7 +537,7 @@ def test_bundle_is_normalized_to_reply_runtime_for_vision(tmp_path: Path) -> Non
     assert result["status"] == "success"
 
 
-def test_agent_tool_returns_only_current_safe_summary_without_url(tmp_path: Path) -> None:
+def test_agent_tool_returns_current_avatar_evidence_envelope_without_url(tmp_path: Path) -> None:
     service, _runtime = _service(tmp_path)
     service.patch_core_profile(
         user_id="10001",
@@ -560,15 +560,20 @@ def test_agent_tool_returns_only_current_safe_summary_without_url(tmp_path: Path
     tool = avatar.build_inspect_current_user_avatar_tool(service, "10001")
     result = asyncio.run(tool.handler())
     payload = json.loads(result)
-    assert payload["ok"] is True
+    assert payload["type"] == "personification_evidence_envelope"
     assert payload["available"] is True
-    assert payload["insight"]["asset_kind"] == "acg_character"
+    assert any("蓝发动画角色" in claim for claim in payload["allowed_claims"])
+    assert any("角色" in claim for claim in payload["allowed_claims"])
+    assert any("用户本人" in item for item in payload["forbidden_inferences"])
+    assert "头像里像是" in payload["natural_fallback"]
     assert "http" not in result.lower()
     assert "avatar_url" not in result
     assert "b" * 64 not in result
     assert "content_hash_short" not in result
     assert tool.metadata["side_effect"] == "none"
     assert tool.metadata["retryable"] is True
+    assert tool.metadata["final_behavior"] == "constrained_persona_output"
+    assert "安全头像摘要" not in tool.description
     assert "能否看到或理解自己的头像" in tool.description
     assert "runtime_capability" in tool.metadata["intent_tags"]
     assert tool.metadata["source_kind"] == "first_party_runtime"
@@ -588,7 +593,9 @@ def test_avatar_tool_is_dynamically_disabled_with_persona_profiles(tmp_path: Pat
     state["enabled"] = False
     assert tool.enabled() is False
     payload = json.loads(asyncio.run(tool.handler()))
-    assert payload == {"ok": True, "available": False, "analysis": {}, "insight": {}}
+    assert payload["type"] == "personification_evidence_envelope"
+    assert payload["available"] is False
+    assert payload["allowed_claims"] == []
     metadata = avatar.add_current_user_avatar_planner_metadata(
         [{"name": "other"}],
         service,

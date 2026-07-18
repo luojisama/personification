@@ -26,6 +26,7 @@ from ...core.qq_outbound import QQOutboundLedger, SendReceipt, build_outbound_co
 from ...core.qq_recall import register_qq_recall_tool
 from ...core.qq_expression_tools import register_send_qq_expression_tools
 from ...core.gemini_profile import build_gemini_route_policy_prompt
+from ...core.group_member_avatar_insight import register_group_member_avatar_insight_tool
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_style_policy import build_reply_style_policy_prompt
 from ...core.visible_output import guard_visible_text
@@ -816,6 +817,23 @@ async def run_agent_if_enabled(
         bot=bot,
         event=event,
         candidates=list(avatar_pair_candidates or []),
+        policy_authorizer=(
+            runtime.user_policy_gate.current_authorization
+            if getattr(runtime, "user_policy_gate", None) is not None
+            else None
+        ),
+    )
+    register_group_member_avatar_insight_tool(
+        runtime_registry,
+        runtime=runtime,
+        bot=bot,
+        event=event,
+        candidates=list(avatar_pair_candidates or []),
+        policy_authorizer=(
+            runtime.user_policy_gate.current_authorization
+            if getattr(runtime, "user_policy_gate", None) is not None
+            else None
+        ),
     )
     register_send_qq_expression_tools(
         runtime_registry,

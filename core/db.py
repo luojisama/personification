@@ -107,6 +107,27 @@ DDL_STATEMENTS = (
         ON group_relation_edges(group_id, last_seen_at)
     """,
     """
+    CREATE TABLE IF NOT EXISTS avatar_relation_evidence (
+        group_id         TEXT NOT NULL,
+        left_user_id     TEXT NOT NULL,
+        right_user_id    TEXT NOT NULL,
+        relation         TEXT NOT NULL,
+        confidence       REAL NOT NULL DEFAULT 0,
+        evidence_tags    TEXT NOT NULL DEFAULT '[]',
+        asset_kinds      TEXT NOT NULL DEFAULT '[]',
+        left_avatar_hash TEXT NOT NULL DEFAULT '',
+        right_avatar_hash TEXT NOT NULL DEFAULT '',
+        schema_version   INTEGER NOT NULL DEFAULT 1,
+        observed_at      REAL NOT NULL DEFAULT 0,
+        expires_at       REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (group_id, left_user_id, right_user_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_avatar_relation_evidence_group
+        ON avatar_relation_evidence(group_id, observed_at DESC)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS user_personas (
         user_id    TEXT    PRIMARY KEY,
         persona    TEXT    NOT NULL DEFAULT '',

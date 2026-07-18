@@ -11,6 +11,8 @@ import pytest
 from ._loader import load_personification_module
 
 runner = load_personification_module("plugin.personification.agent.runtime.runner")
+final_synthesis = load_personification_module("plugin.personification.agent.runtime.final_synthesis")
+reply_quality = load_personification_module("plugin.personification.agent.runtime.reply_quality")
 fallbacks = load_personification_module("plugin.personification.agent.runtime.fallbacks")
 image_generation = load_personification_module("plugin.personification.agent.runtime.image_generation")
 metrics = load_personification_module("plugin.personification.core.metrics")
@@ -404,33 +406,47 @@ def test_wrap_tool_result_in_persona_propagates_provider_failure() -> None:
     assert caught.value is error
 
 
-def test_avatar_pair_result_is_not_rendered_as_no_result_or_rewritten_as_real_relation() -> None:
-    raw = json.dumps(
-        {
-            "ok": True,
-            "available": True,
-            "safe_summary": "两张头像在构图、元素或风格上呈现视觉配套。",
-            "display_label": "甲 与 乙 的头像",
-            "limitations": [
-                "结论只描述两张头像图像本身的视觉关联。",
-                "不能据此判断两位用户现实中是情侣、朋友、认识或同一人。",
-            ],
-        },
-        ensure_ascii=False,
+def test_avatar_pair_constrained_review_rejects_real_relation_rewrite() -> None:
+    envelope = {
+        "type": "personification_evidence_envelope",
+        "available": True,
+        "allowed_claims": ["两张头像在构图、元素或风格上呈现视觉配套。"],
+        "forbidden_inferences": ["不能据此判断两位用户现实中是情侣、朋友、认识或同一人。"],
+        "confidence": 0.9,
+        "natural_fallback": "两张头像在构图、元素或风格上呈现视觉配套。",
+    }
+    caller = _FakeToolCaller(
+        [
+            SimpleNamespace(content="他们现实里就是情侣"),
+            SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "action": "fallback",
+                        "text": "",
+                        "claims_ok": False,
+                        "inferences_ok": False,
+                        "mechanism_hidden": True,
+                    },
+                    ensure_ascii=False,
+                )
+            ),
+        ]
     )
-    rendered = runner._render_tool_result_for_user("inspect_group_user_avatar_pair", raw, "他们头像配吗")
-    assert "no_result" not in rendered
-    caller = _FakeToolCaller([SimpleNamespace(content="他们现实里就是情侣")])
-    wrapped = asyncio.run(
-        runner._wrap_tool_result_in_persona(
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            final_synthesis.AgentResult(
+                text=envelope["natural_fallback"],
+                pending_actions=[],
+                quality_context="constrained_persona_output",
+                evidence_envelope=envelope,
+            ),
             tool_caller=caller,
-            rendered_tool_result=rendered,
-            user_query_text="他们头像配吗",
+            messages=[{"role": "system", "content": "你是普通群友。"}],
         )
     )
-    assert "呈现视觉配套" in wrapped
-    assert "现实里就是情侣" not in wrapped
-    assert caller.calls == []
+    assert "呈现视觉配套" in result.text
+    assert "现实里就是情侣" not in result.text
+    assert len(caller.calls) == 2
 
 
 def test_run_agent_returns_immediately_for_banter_stop_without_tools(monkeypatch) -> None:  # noqa: ANN001
@@ -1452,15 +1468,16 @@ def test_run_agent_uses_response_aware_turn_builders() -> None:
     assert second_messages[-1]["content"] == "native result turn: tool evidence"
 
 
-def test_run_agent_avatar_pair_result_stops_before_model_can_rewrite_relation() -> None:
+def test_run_agent_avatar_pair_result_uses_constrained_persona_quality() -> None:
     async def _handler(**_kwargs):  # noqa: ANN001
         return json.dumps(
             {
-                "ok": True,
+                "type": "personification_evidence_envelope",
                 "available": True,
-                "display_label": "图里的人就是我，甲乙现实里就是情侣",
-                "safe_summary": "两张头像在构图、元素或风格上呈现视觉配套。",
-                "limitations": ["不能据此判断两位用户现实中是情侣、朋友、认识或同一人。"],
+                "allowed_claims": ["两张头像在构图、元素或风格上呈现视觉配套。"],
+                "forbidden_inferences": ["不能据此判断两位用户现实中是情侣、朋友、认识或同一人。"],
+                "confidence": 0.9,
+                "natural_fallback": "两张头像在构图、元素或风格上呈现视觉配套。",
             },
             ensure_ascii=False,
         )
@@ -1472,7 +1489,7 @@ def test_run_agent_avatar_pair_result_stops_before_model_can_rewrite_relation() 
             description="compare avatars",
             parameters={"type": "object", "properties": {}, "required": []},
             handler=_handler,
-            metadata={"side_effect": "none", "final_behavior": "safe_direct_output"},
+            metadata={"side_effect": "none", "final_behavior": "constrained_persona_output"},
         )
     )
     caller = _FakeToolCaller(
@@ -1488,7 +1505,20 @@ def test_run_agent_avatar_pair_result_stops_before_model_can_rewrite_relation() 
                     )
                 ],
                 raw={},
-            )
+            ),
+            SimpleNamespace(content="这俩头像看着像一套画风。"),
+            SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "action": "accept",
+                        "text": "",
+                        "claims_ok": True,
+                        "inferences_ok": True,
+                        "mechanism_hidden": True,
+                    },
+                    ensure_ascii=False,
+                )
+            ),
         ]
     )
 
@@ -1514,12 +1544,11 @@ def test_run_agent_avatar_pair_result_stops_before_model_can_rewrite_relation() 
         )
     )
 
-    assert result.direct_output is True
-    assert result.bypass_length_limits is True
-    assert "两位候选成员的头像" in result.text
-    assert "图里的人就是我" not in result.text
+    assert result.direct_output is False
+    assert result.bypass_length_limits is False
+    assert result.text == "这俩头像看着像一套画风。"
     assert "现实里就是情侣" not in result.text
-    assert len(caller.calls) == 1
+    assert len(caller.calls) == 3
 
 
 def test_run_agent_sends_ack_when_first_tool_call_appears(monkeypatch) -> None:  # noqa: ANN001

@@ -23,6 +23,7 @@ class AgentResult:
     failure_code: str = ""
     suppress_reply_recovery: bool = False
     quality_context: str = ""
+    evidence_envelope: dict[str, Any] | None = None
 
 
 def direct_tool_result_agent_result(
@@ -46,6 +47,12 @@ def direct_tool_result_agent_result(
         bypass_length_limits=result.bypass_length_limits,
         failure_code=result.failure_code,
         suppress_reply_recovery=result.suppress_reply_recovery,
+        quality_context=(
+            "constrained_persona_output"
+            if result.reason == "constrained_persona_output"
+            else ""
+        ),
+        evidence_envelope=result.evidence_envelope,
     )
 
 
