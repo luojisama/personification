@@ -39,6 +39,19 @@ def test_context_continuity_policy_covers_media_only_and_direct_cues() -> None:
     assert "优先保持沉默" in prompt
     assert "相邻图片、表情或截图不能覆盖直接 cue 的文字问题" in prompt
     assert "优先回应这个问题本身" in prompt
+    assert "安全底线不是危险词触发器" in prompt
+    assert "没有 @/引用/直呼你的群友玩笑" in prompt
+
+
+def test_plugin_episode_policy_keeps_external_output_in_context() -> None:
+    prompt = reply_style_policy.build_plugin_interaction_policy_prompt(
+        is_direct_mention=True,
+    )
+
+    assert "不是你说过的话" in prompt
+    assert "不要因为结果里出现专业名词" in prompt
+    assert "不得声称插件结果是你抽到、查到或刚说的" in prompt
+    assert "直呼本身不等于要求" in prompt
 
 
 def test_observer_posture_policy_prefers_silence_over_status_announcement() -> None:

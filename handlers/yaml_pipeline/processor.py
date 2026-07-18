@@ -47,7 +47,7 @@ from ...core.sticker_library import (
 )
 from ...core.message_parts import build_user_message_content, clone_messages_with_text_suffix
 from ...core.context_policy import (
-    build_prompt_injection_guard,
+    ensure_prompt_injection_guard,
     has_silence_control_marker,
     strip_response_control_markers,
 )
@@ -60,9 +60,11 @@ from ...core.repeat_follow import maybe_follow_repeat_cluster
 from ...core.reply_style_policy import (
     build_direct_visual_identity_guard,
     build_directed_exchange_policy_prompt,
+    build_plugin_interaction_policy_prompt,
     build_reply_style_policy_prompt,
     build_speech_act_policy_prompt,
 )
+from ...core.role_integrity import detect_persona_identity_leak
 from ...core.response_review import (
     ReplyArbitrationIntent,
     arbitrate_reply_mode,
@@ -573,6 +575,7 @@ async def process_yaml_response_logic(
     intent_recommend_silence: bool | None = None,
     recent_context_hint: str = "",
     relationship_hint: str = "",
+    plugin_episode: Any = None,
     semantic_frame: Any = None,
     has_newer_batch: bool = False,
     batch_runtime_ref: Dict[str, Any] | None = None,
@@ -925,6 +928,8 @@ async def process_yaml_response_logic(
     ) or str(media_grounding or "").strip()
     photo_like = "[图片·照片]" in (history_last_text or raw_message_text or trigger_reason)
 
+    conversation_context = None
+    resolved_plugin_episode = plugin_episode
     if not is_private_session and not recent_context_hint:
         recent_window = build_group_context_window(
             group_id,
@@ -949,6 +954,7 @@ async def process_yaml_response_logic(
         )
         recent_context_hint = render_group_conversation_context(conversation_context)
         relationship_hint = relationship_hint or conversation_context.relationship_hint
+        resolved_plugin_episode = conversation_context.plugin_episode
         topic_detail = render_topic_state_trace_detail(conversation_context.topic_state)
         if topic_detail:
             _trace_stage(
@@ -1300,6 +1306,10 @@ async def process_yaml_response_logic(
     )
     if directed_exchange_prompt:
         system_prompt += "\n\n" + directed_exchange_prompt
+    if resolved_plugin_episode is not None:
+        system_prompt += "\n\n" + build_plugin_interaction_policy_prompt(
+            is_direct_mention=is_direct_mention,
+        )
     primary_api_type, primary_model = primary_route_signature(
         plugin_config,
         get_configured_api_providers=get_configured_api_providers,
@@ -1323,7 +1333,7 @@ async def process_yaml_response_logic(
             plugin_summary = ""
         if plugin_summary:
             system_prompt += f"\n\n[已安装插件摘要（仅供参考）]\n{plugin_summary}"
-    system_prompt += f"\n\n{build_prompt_injection_guard()}"
+    system_prompt = ensure_prompt_injection_guard(system_prompt)
 
     group_config = get_group_config(group_id)
     schedule_enabled = group_config.get("schedule_enabled", False)
@@ -2254,7 +2264,11 @@ async def process_yaml_response_logic(
     )
     should_review_visual_reply = bool(turn_media_refs and not _IMAGE_B64_RE.search(assistant_text or ""))
     should_review_agent_reply = bool(used_agent and should_review_visual_reply)
-    if used_agent and not should_review_agent_reply and not care_review_required:
+    protected_review_required = bool(
+        resolved_plugin_episode is not None
+        or detect_persona_identity_leak(assistant_text)
+    )
+    if used_agent and not should_review_agent_reply and not care_review_required and not protected_review_required:
         review_decision = make_passthrough_review_decision(
             assistant_text,
             reason="agent_passthrough",
@@ -2262,6 +2276,7 @@ async def process_yaml_response_logic(
     elif (
         not care_review_required
         and not should_review_visual_reply
+        and not protected_review_required
         and not bool(getattr(plugin_config, "personification_response_review_enabled", False))
     ):
         review_decision = make_passthrough_review_decision(
@@ -2284,6 +2299,7 @@ async def process_yaml_response_logic(
             reply_required=reply_required,
             semantic_frame=semantic_frame,
             turn_media_context=turn_media_refs,
+            plugin_episode=resolved_plugin_episode,
         )
     if review_decision.action == "no_reply":
         logger.info(f"拟人插件 (YAML)：回复审阅后选择沉默，group={group_id} user={user_id}")

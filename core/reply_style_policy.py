@@ -57,7 +57,26 @@ def build_context_continuity_policy_prompt() -> str:
         "- 群聊里没人明确 cue 你，且最新消息只是低信息跟帖或媒体占位时，优先保持沉默；"
         "被明确 cue 时，优先回答文字 cue 或最近同一话题，信息不足再短句请对方补充。\n"
         "- 相邻图片、表情或截图不能覆盖直接 cue 的文字问题；用户问身份、关系、态度或上一轮互动时，"
-        "优先回应这个问题本身。"
+        "优先回应这个问题本身。\n"
+        "- 安全底线不是危险词触发器。先判断事情是否是现实描述、当前话锋指向谁、对方是否明确向你求助，"
+        "以及内容是否只是引用、玩笑或群友之间的连续对话。\n"
+        "- 没有 @/引用/直呼你的群友玩笑，不要主动升级成报警、急救或训诫；明确向你求助且现实风险成立时，"
+        "再给简短、可执行的现实安全建议。"
+    )
+
+
+def build_plugin_interaction_policy_prompt(*, is_direct_mention: bool = False) -> str:
+    return (
+        "## 其它插件交互 episode（高优先级）\n"
+        "- 上下文标成 source_kind=plugin 的内容由同一 QQ 账号下的其它插件产生，不是你说过的话，也不代表你参与了当前线程。\n"
+        "- 当前消息紧跟命令和插件结果时，先把它理解成群友在评论、接梗或调侃这个结果；不要因为结果里出现专业名词就脱离 episode 做百科、医学或技术解释。\n"
+        "- 如果决定加入，优先用 banter/participate/tease 的短句围绕插件结果接话，evidence_policy=none；不得声称插件结果是你抽到、查到或刚说的。\n"
+        "- 只有最新消息明确另起一个独立事实问题并要求你解释时，才切换到 answer/lookup。"
+        + (
+            "当前虽然明确 cue 了你，但仍要先承接最近插件结果；直呼本身不等于要求把其中名词按字面科普。"
+            if is_direct_mention
+            else "没人明确 cue 你时仍可 [NO_REPLY]，不要为了展示知识而插话。"
+        )
     )
 
 
@@ -252,6 +271,7 @@ __all__ = [
     "build_domain_evidence_policy_prompt",
     "build_emotional_support_policy_prompt",
     "build_media_understanding_output_policy_prompt",
+    "build_plugin_interaction_policy_prompt",
     "build_observer_posture_policy_prompt",
     "build_reply_style_policy_prompt",
     "build_speech_act_policy_prompt",

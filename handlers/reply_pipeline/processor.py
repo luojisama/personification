@@ -82,8 +82,10 @@ from ...core.repeat_follow import maybe_follow_repeat_cluster
 from ...core.reply_style_policy import (
     build_direct_visual_identity_guard,
     build_directed_exchange_policy_prompt,
+    build_plugin_interaction_policy_prompt,
     build_speech_act_policy_prompt,
 )
+from ...core.role_integrity import detect_persona_identity_leak
 from ...core.response_review import (
     is_agent_reply_ooc,
     make_passthrough_review_decision,
@@ -1332,6 +1334,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     relationship_hint = ""
     recent_context_hint = ""
     recent_window: list[dict[str, Any]] = []
+    conversation_context = None
     if not is_private_session and recent_group_msgs:
         recent_window = build_group_context_window(
             str(group_id),
@@ -1683,6 +1686,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             intent_recommend_silence=intent_decision.recommend_silence,
             recent_context_hint=recent_context_hint,
             relationship_hint=relationship_hint,
+            plugin_episode=(
+                conversation_context.plugin_episode
+                if conversation_context is not None
+                else None
+            ),
             semantic_frame=semantic_frame,
             has_newer_batch=_batch_has_newer_messages(state),
             batch_runtime_ref=state.get("batch_runtime_ref"),
@@ -1767,6 +1775,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     )
     if directed_exchange_prompt:
         system_prompt += "\n\n" + directed_exchange_prompt
+    if conversation_context is not None and conversation_context.plugin_episode is not None:
+        system_prompt += "\n\n" + build_plugin_interaction_policy_prompt(
+            is_direct_mention=is_direct_mention,
+        )
     _msg_target = state.get("message_target")
     if _msg_target in (TARGET_OTHERS, TARGET_UNCLEAR):
         system_prompt += (
@@ -2476,12 +2488,16 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         )
         should_review_visual_reply = bool(turn_media_context and not _IMAGE_B64_RE.search(reply_content or ""))
         should_review_agent_reply = bool(used_agent and should_review_visual_reply)
-        if agent_direct_output:
+        plugin_episode = conversation_context.plugin_episode if conversation_context is not None else None
+        protected_review_required = bool(
+            plugin_episode is not None or detect_persona_identity_leak(reply_content)
+        )
+        if agent_direct_output and not protected_review_required:
             review_decision = make_passthrough_review_decision(
                 reply_content,
                 reason="safe_direct_output",
             )
-        elif used_agent and not should_review_agent_reply and not care_review_required:
+        elif used_agent and not should_review_agent_reply and not care_review_required and not protected_review_required:
             review_decision = make_passthrough_review_decision(
                 reply_content,
                 reason="agent_passthrough",
@@ -2489,6 +2505,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         elif (
             not care_review_required
             and not should_review_visual_reply
+            and not protected_review_required
             and not bool(getattr(runtime.plugin_config, "personification_response_review_enabled", False))
         ):
             review_decision = make_passthrough_review_decision(
@@ -2511,6 +2528,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 reply_required=reply_required,
                 semantic_frame=semantic_frame,
                 turn_media_context=turn_media_context,
+                plugin_episode=plugin_episode,
             )
         if review_decision.action == "no_reply":
             runtime.logger.info(f"拟人插件：回复审阅后选择沉默，group={group_id} user={user_id}")

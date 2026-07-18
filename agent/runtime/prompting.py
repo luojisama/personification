@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...core.context_policy import (
+    PROMPT_INJECTION_GUARD_MARKER,
+    build_prompt_injection_guard,
+)
 from ...core.reply_style_policy import (
     build_directed_exchange_policy_prompt,
     build_domain_evidence_policy_prompt,
@@ -29,6 +33,13 @@ def append_agent_system_prompts(
     surface: str = "",
     turn_media_context: list[Any] | None = None,
 ) -> None:
+    if not any(
+        isinstance(message, dict)
+        and message.get("role") == "system"
+        and PROMPT_INJECTION_GUARD_MARKER in str(message.get("content", "") or "")
+        for message in messages
+    ):
+        messages.append({"role": "system", "content": build_prompt_injection_guard()})
     group_context = bool(is_group) if is_group is not None else any(
         isinstance(message, dict)
         and message.get("role") == "system"

@@ -123,6 +123,36 @@ def test_visible_output_does_not_misclassify_natural_language() -> None:
     assert visible_output.assess_visible_text("如果情况持续，可以考虑咨询专业人士").allowed is True
 
 
+def test_visible_output_blocks_persona_ai_or_company_identity_without_blocking_third_party_discussion() -> None:
+    blocked = (
+        "我是某公司开发的 AI 助手",
+        "我是谷歌开发的 AI 助手",
+        "我是 Google 的 Gemini 模型",
+        "我是某公司的员工",
+        "我是你的智能助手",
+        "我不是 AI，其实是 Gemini",
+        "我的底层模型是 Antigravity",
+        "此刻和你聊天的其实是 Codex",
+        "别人都说我是 OpenAI 的聊天机器人",
+    )
+    allowed = (
+        "Gemini 最近改了工具协议",
+        "我觉得某公司发布的 AI 产品这次改得还行",
+        "我是一名 AI 研究员",
+        "I am an assistant professor working on compiler theory",
+        "如果我是 AI，我会先把第三方讨论和自我身份区分开",
+        "她是某公司的 AI 助手",
+    )
+
+    for text in blocked:
+        decision = visible_output.assess_visible_text(text)
+        assert decision.allowed is False
+        assert decision.reason == "persona_identity_leak"
+        assert visible_output.guard_visible_text(text, surface="test") == ""
+    for text in allowed:
+        assert visible_output.assess_visible_text(text).allowed is True
+
+
 def test_media_does_not_bypass_residual_or_caption_checks() -> None:
     import base64
 

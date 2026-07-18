@@ -6,6 +6,10 @@ from typing import Any
 
 import yaml
 
+from .context_policy import (
+    PROMPT_INJECTION_GUARD_MARKER,
+    build_prompt_injection_guard,
+)
 from .evidence_envelope import (
     EvidenceEnvelope,
     EvidenceRenderOutcome,
@@ -235,18 +239,21 @@ class SocialSurfaceRenderer:
     ) -> list[dict[str, Any]]:
         prepared = [dict(message) for message in list(messages or [])]
         kind = self.spec.output_kind if output_kind is None else _coerce_output_kind(output_kind)
-        if kind is not OutputKind.PERSONA_TEXT or prompt_data is None:
-            return prepared
-        projected = self.project_persona(prompt_data, scope)
-        if not projected:
-            return prepared
-        if any(
+        if kind is OutputKind.PERSONA_TEXT and prompt_data is not None:
+            projected = self.project_persona(prompt_data, scope)
+            if projected and not any(
+                message.get("role") == "system"
+                and str(message.get("content", "") or "").strip() == projected
+                for message in prepared
+            ):
+                prepared.insert(0, {"role": "system", "content": projected})
+        resolved_scope = self.spec.persona_scope if scope is None else _coerce_persona_scope(scope)
+        if resolved_scope is not PersonaScope.NONE and not any(
             message.get("role") == "system"
-            and str(message.get("content", "") or "").strip() == projected
+            and PROMPT_INJECTION_GUARD_MARKER in str(message.get("content", "") or "")
             for message in prepared
         ):
-            return prepared
-        prepared.insert(0, {"role": "system", "content": projected})
+            prepared.insert(0, {"role": "system", "content": build_prompt_injection_guard()})
         return prepared
 
     def finalize_text(

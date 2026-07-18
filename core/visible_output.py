@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+from .role_integrity import detect_persona_identity_leak
+
 _CONTROL_OUTPUTS = frozenset({"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"})
 _CONTROL_OUTPUT_RE = re.compile(r"(?:\[(?:NO_REPLY|SILENCE)\]|<(?:NO_REPLY|SILENCE)>)", re.IGNORECASE)
 _MEDIA_TAGS = {"IMAGE_B64", "IMAGE_URL", "AUDIO_B64"}
@@ -64,7 +66,14 @@ def _visible_residual(candidate: str, *, allow_direct_media: bool) -> tuple[str,
     return residual.strip(), ""
 
 
-def assess_visible_text(text: Any, *, allow_control: bool = True, allow_direct_media: bool = True) -> VisibleOutputDecision:
+def assess_visible_text(
+    text: Any,
+    *,
+    allow_control: bool = True,
+    allow_direct_media: bool = True,
+    enforce_role_integrity: bool = True,
+    identity_context: Any = None,
+) -> VisibleOutputDecision:
     candidate = str(text or "").strip()
     if not candidate:
         return VisibleOutputDecision(False, "", "empty")
@@ -80,6 +89,8 @@ def assess_visible_text(text: Any, *, allow_control: bool = True, allow_direct_m
     for pattern in _INTERNAL_OUTPUT_PATTERNS:
         if pattern.search(residual):
             return VisibleOutputDecision(False, "", "internal_or_policy_output")
+    if enforce_role_integrity and detect_persona_identity_leak(residual, identity_context):
+        return VisibleOutputDecision(False, "", "persona_identity_leak")
     return VisibleOutputDecision(True, candidate)
 
 
@@ -90,11 +101,15 @@ def guard_visible_text(
     surface: str = "",
     allow_direct_media: bool = True,
     allow_control: bool = False,
+    enforce_role_integrity: bool = True,
+    identity_context: Any = None,
 ) -> str:
     decision = assess_visible_text(
         text,
         allow_control=allow_control,
         allow_direct_media=allow_direct_media,
+        enforce_role_integrity=enforce_role_integrity,
+        identity_context=identity_context,
     )
     if decision.allowed:
         return decision.text
@@ -108,4 +123,9 @@ def guard_visible_text(
     return ""
 
 
-__all__ = ["VisibleOutputDecision", "assess_visible_text", "guard_visible_text"]
+__all__ = [
+    "VisibleOutputDecision",
+    "assess_visible_text",
+    "detect_persona_identity_leak",
+    "guard_visible_text",
+]

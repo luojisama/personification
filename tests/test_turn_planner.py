@@ -219,6 +219,8 @@ def test_turn_planner_prompt_includes_media_context_discipline() -> None:
     assert "群聊不追问纪律" in system_prompt
     assert "明确 @/直呼 bot 只表示轮到 bot 回应" in system_prompt
     assert "不要因为出现 @ 就把 chat_short 强行升级成长回答" in system_prompt
+    assert "message_target=external_plugin" in system_prompt
+    assert "不要因结果里的专业名词切成百科解释" in system_prompt
     assert plan.reply_action == "silence"
     assert plan.speech_act == "silence"
 

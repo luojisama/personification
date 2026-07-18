@@ -15,6 +15,7 @@ from .reply_text_policy import (
     normalize_visible_reply_text,
 )
 from .message_provenance import is_personification_reply_record
+from .role_integrity import detect_persona_identity_leak
 from .turn_media import render_turn_media_grounding
 
 
@@ -256,6 +257,11 @@ _CARE_REJECT_FLAGS = {
     "dependency_encouragement",
     "risk_mishandled",
 }
+_PLUGIN_EPISODE_REJECT_FLAGS = {
+    "plugin_context_literalization",
+    "plugin_provenance_confusion",
+}
+_ROLE_INTEGRITY_REJECT_FLAGS = {"persona_identity_leak"}
 
 
 def _care_fail_closed_decision(
@@ -291,6 +297,71 @@ async def _validate_care_rewrite(
                     ),
                 },
                 {"role": "user", "content": f"语义情绪帧：{semantic_hint}\n待复核改写：{rewritten_text}"},
+            ]
+        )
+    except Exception:
+        return None
+    return _parse_review_payload(str(raw or ""))
+
+
+def _render_plugin_episode_hint(plugin_episode: Any) -> str:
+    if plugin_episode is None:
+        return ""
+    if isinstance(plugin_episode, dict):
+        payload = dict(plugin_episode)
+    else:
+        payload = {
+            "thread_id": str(getattr(plugin_episode, "thread_id", "") or ""),
+            "command_text": str(getattr(plugin_episode, "command_text", "") or ""),
+            "plugin_outputs": list(getattr(plugin_episode, "plugin_outputs", ()) or ()),
+            "followup_comments": list(getattr(plugin_episode, "followup_comments", ()) or ()),
+            "is_personification_output": bool(
+                getattr(plugin_episode, "is_personification_output", False)
+            ),
+        }
+    payload["is_personification_output"] = False
+    return json.dumps(payload, ensure_ascii=False)[:1800]
+
+
+def _protected_review_failure(
+    *,
+    must_reply: bool,
+    reason: str,
+    flags: tuple[str, ...],
+) -> ResponseReviewDecision:
+    if must_reply:
+        return ResponseReviewDecision(
+            action="rewrite",
+            text=required_reply_fallback_text(),
+            reason=reason,
+            flags=flags,
+        )
+    return ResponseReviewDecision(action="no_reply", text="", reason=reason, flags=flags)
+
+
+async def _validate_plugin_episode_rewrite(
+    call_ai_api: Callable[[list[dict[str, Any]]], Awaitable[Any]],
+    *,
+    rewritten_text: str,
+    plugin_episode_hint: str,
+) -> ResponseReviewDecision | None:
+    try:
+        raw = await call_ai_api(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是其它插件 episode 改写复核器。确认可见回复仍围绕插件结果自然接话，"
+                        "没有把插件输出说成人格 bot 自己说过/做过的事，也没有脱离 episode 按专业名词做百科解释。"
+                        "只输出 JSON："
+                        '{"action":"accept|no_reply","text":"","reason":"...",'
+                        '"flags":["plugin_context_literalization|plugin_provenance_confusion"]}。'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"plugin_episode={plugin_episode_hint}\n待复核改写={rewritten_text}",
+                },
             ]
         )
     except Exception:
@@ -453,9 +524,12 @@ async def review_response_text(
     reply_required: bool = False,
     semantic_frame: Any = None,
     turn_media_context: list[Any] | None = None,
+    plugin_episode: Any = None,
 ) -> ResponseReviewDecision:
     must_reply = bool(reply_required or is_direct_mention)
     candidate = str(candidate_text or "").strip()
+    plugin_episode_hint = _render_plugin_episode_hint(plugin_episode)
+    identity_risk = detect_persona_identity_leak(candidate)
     if not candidate:
         if must_reply:
             return ResponseReviewDecision(
@@ -484,6 +558,14 @@ async def review_response_text(
         if visual_evidence
         else ""
     )
+    plugin_review_instruction = (
+        "\n当前存在结构化其它插件 interaction episode。候选必须先按插件结果语境理解当前评论；"
+        "如果候选把插件输出当成人格 bot 自己说过、抽到、查到或执行的结果，返回 plugin_provenance_confusion；"
+        "如果候选因为插件结果里的专业名词而脱离 episode 做百科、医学或技术说明，返回 plugin_context_literalization。"
+        "命中任一项必须 rewrite 或 no_reply，不能 accept。最新消息明确另起独立事实问题时才允许 answer/lookup。"
+        if plugin_episode_hint
+        else ""
+    )
     review_messages = [
         {
             "role": "system",
@@ -500,7 +582,10 @@ async def review_response_text(
                 "只输出 JSON，不要解释。"
                 "情绪支持轮次还要检查并在 flags 返回：dismissive/invalidating/unsolicited_advice/medicalizing/diagnosis/overpromise/dependency_encouragement/risk_mishandled。"
                 "候选若忽视倾听/确认、未经允许给建议、医疗化诊断、过度承诺、诱导依赖或错误处理风险，必须 rewrite 或 no_reply，不能 accept。"
+                "候选不得把当前角色本人直接或间接说成任何公司、AI、模型、助手、机器人或 Provider；"
+                "这类自我身份关联返回 persona_identity_leak 并必须 rewrite/no_reply。第三方 AI、公司和模型技术讨论不属于身份泄漏。"
                 f"{visual_review_instruction}"
+                f"{plugin_review_instruction}"
                 "\n## 必须 rewrite 的 AI 味回复模式（重点检查）\n1. 「回声评论」：把用户说的话原样重复后加“太真实了/太直球了/太 X 了吧/真的假的”等感叹——必须改写为不重复原话的短句接话。\n2. 候选回复中超过 3 个连续字与用户原话重叠，且没有新增信息或立场——必须 rewrite。\n3. 候选只是在用感叹词复述用户语义，没有新事实、延续话题、转向或明确态度——必须 rewrite。\n4. 「安抚式客服腔」：以“别这么说/已经很够用了/不要这样想/你很棒的”开头——改写为自然接话。\n5. 「旁白式观察」：类似“真去做了啊/真的行动了/居然真的 XX 了”的旁白——改写为参与式短句。\n6. 「梗分析腔」：用“像是把 X 玩成 Y 了/意思就是/可以理解成”解释梗结构——改写为直接接梗。\n7. 「营业感叹腔」：用“(也)太……了吧/……爆了/绝了/谁懂啊/笑死/绷不住了/yyds”这类口号式感叹收尾或起势——改写成平铺直叙的接话，去掉感叹营业腔和网络流行语，不喊口号。\n8. 「固定起手口癖」：用“等下，/等一下，”开头，或反复用“这也/这也太/你这也/这听着也”评价用户、图片、表情、剧情——必须换一种自然说法，不要保留这个开头或句式。\n改写原则：去掉对用户发言的复述和分析，按 output_mode 的长度要求输出；改写后不得引入新的回声模式、营业感叹腔或固定起手口癖。"
                 "\n9. 出现 markdown 格式、标题、项目符号列表、编号列表、代码块、链接列表时，必须改成纯文本短句。"
                 "\n10. 出现 Step 1/Step 2、步骤 1/步骤 2 这类内部推理、审查清单或草稿过程时，必须 rewrite，只保留最终要对用户说的一句。"
@@ -522,6 +607,7 @@ async def review_response_text(
                 f"互动关系：{str(relationship_hint or '').strip()[:320] or '[EMPTY]'}\n"
                 f"语义情绪帧：{semantic_hint or '[EMPTY]'}\n"
                 f"安全视觉 evidence：{visual_evidence or '[EMPTY]'}\n"
+                f"其它插件 episode：{plugin_episode_hint or '[EMPTY]'}\n"
                 f"输出模式：{output_mode_hint}\n"
                 f"复读线索：{json.dumps(list(repeat_clusters or [])[:3], ensure_ascii=False)}\n"
                 f"最近 bot 发言：{json.dumps(_to_text_list(recent_bot_replies or []), ensure_ascii=False)}\n"
@@ -537,6 +623,17 @@ async def review_response_text(
             return _care_fail_closed_decision(
                 is_private=is_private, is_direct_mention=is_direct_mention, risk_level=care_risk, reason="care_review_failed"
             )
+        if plugin_episode_hint or identity_risk:
+            flags = (
+                ("persona_identity_leak",)
+                if identity_risk
+                else ("plugin_context_literalization",)
+            )
+            return _protected_review_failure(
+                must_reply=must_reply,
+                reason="protected_review_failed",
+                flags=flags,
+            )
         return ResponseReviewDecision(action="accept", text=candidate, reason="review_failed")
     parsed = _parse_review_payload(str(raw or ""))
     if parsed is None:
@@ -544,8 +641,21 @@ async def review_response_text(
             return _care_fail_closed_decision(
                 is_private=is_private, is_direct_mention=is_direct_mention, risk_level=care_risk, reason="care_review_unparseable"
             )
+        if plugin_episode_hint or identity_risk:
+            flags = (
+                ("persona_identity_leak",)
+                if identity_risk
+                else ("plugin_context_literalization",)
+            )
+            return _protected_review_failure(
+                must_reply=must_reply,
+                reason="protected_review_unparseable",
+                flags=flags,
+            )
         return ResponseReviewDecision(action="accept", text=candidate, reason="review_unparseable")
     care_reject_flags = tuple(flag for flag in parsed.flags if flag in _CARE_REJECT_FLAGS)
+    plugin_reject_flags = tuple(flag for flag in parsed.flags if flag in _PLUGIN_EPISODE_REJECT_FLAGS)
+    role_reject_flags = tuple(flag for flag in parsed.flags if flag in _ROLE_INTEGRITY_REJECT_FLAGS)
     if care_required and care_reject_flags and not (parsed.action == "rewrite" and parsed.text):
         return _care_fail_closed_decision(
             is_private=is_private,
@@ -555,6 +665,12 @@ async def review_response_text(
             flags=care_reject_flags,
         )
     if parsed.action == "rewrite" and parsed.text:
+        if detect_persona_identity_leak(parsed.text):
+            return _protected_review_failure(
+                must_reply=must_reply,
+                reason="persona_identity_rewrite_failed",
+                flags=("persona_identity_leak",),
+            )
         if care_required:
             safety = await _validate_care_rewrite(
                 call_ai_api, rewritten_text=parsed.text, semantic_hint=semantic_hint
@@ -568,9 +684,44 @@ async def review_response_text(
                     reason="care_rewrite_unverified",
                     flags=unsafe_flags,
                 )
+        if plugin_episode_hint:
+            plugin_safety = await _validate_plugin_episode_rewrite(
+                call_ai_api,
+                rewritten_text=parsed.text,
+                plugin_episode_hint=plugin_episode_hint,
+            )
+            remaining_flags = tuple(
+                flag
+                for flag in (plugin_safety.flags if plugin_safety else ())
+                if flag in _PLUGIN_EPISODE_REJECT_FLAGS
+            )
+            if plugin_safety is None or plugin_safety.action != "accept" or remaining_flags:
+                return _protected_review_failure(
+                    must_reply=must_reply,
+                    reason="plugin_episode_rewrite_unverified",
+                    flags=remaining_flags or plugin_reject_flags or ("plugin_context_literalization",),
+                )
         return ResponseReviewDecision(action="rewrite", text=parsed.text, reason=parsed.reason, flags=parsed.flags)
+    if identity_risk or role_reject_flags:
+        return _protected_review_failure(
+            must_reply=must_reply,
+            reason=parsed.reason or "persona_identity_leak",
+            flags=role_reject_flags or ("persona_identity_leak",),
+        )
+    if plugin_reject_flags:
+        return _protected_review_failure(
+            must_reply=must_reply,
+            reason=parsed.reason or "plugin_episode_rejected",
+            flags=plugin_reject_flags,
+        )
     if parsed.action == "no_reply":
         if must_reply:
+            if plugin_episode_hint:
+                return _protected_review_failure(
+                    must_reply=True,
+                    reason=parsed.reason or "plugin_episode_no_reply",
+                    flags=parsed.flags,
+                )
             if care_required:
                 return _care_fail_closed_decision(
                     is_private=is_private,

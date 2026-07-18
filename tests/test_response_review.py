@@ -66,6 +66,78 @@ def test_recent_bot_replies_only_include_personification_provenance() -> None:
     assert replies == ["这是人格回复"]
 
 
+def test_plugin_episode_rewrites_literal_encyclopedia_answer() -> None:
+    calls: list[list[dict]] = []
+
+    async def _fake_call(messages):  # noqa: ANN001
+        calls.append(messages)
+        if len(calls) == 1:
+            assert "plugin_context_literalization" in messages[0]["content"]
+            assert "is_personification_output" in messages[1]["content"]
+            return (
+                '{"action":"rewrite","text":"抽到辅T就开始现场点名是吧",'
+                '"reason":"按插件结果接梗","flags":["plugin_context_literalization"]}'
+            )
+        return '{"action":"accept","text":"","reason":"已围绕插件结果","flags":[]}'
+
+    episode = SimpleNamespace(
+        thread_id="plugin-thread",
+        command_text="/ck",
+        plugin_outputs=("辅助性T细胞",),
+        followup_comments=("我cd4+在哪里",),
+        is_personification_output=False,
+    )
+    decision = asyncio.run(
+        response_review.review_response_text(
+            _fake_call,
+            candidate_text="CD4+主要在血液和淋巴组织中巡逻",
+            raw_message_text="我cd4+在哪里",
+            recent_context="其它插件输出了辅助性T细胞",
+            plugin_episode=episode,
+        )
+    )
+
+    assert decision.action == "rewrite"
+    assert decision.text == "抽到辅T就开始现场点名是吧"
+    assert len(calls) == 2
+
+
+def test_plugin_episode_review_failure_is_silent_when_not_directed() -> None:
+    async def _fake_call(_messages):  # noqa: ANN001
+        raise RuntimeError("review unavailable")
+
+    decision = asyncio.run(
+        response_review.review_response_text(
+            _fake_call,
+            candidate_text="这是一个字面解释",
+            raw_message_text="随口评论",
+            plugin_episode={"command_text": "/ck", "plugin_outputs": ["结果"]},
+        )
+    )
+
+    assert decision.action == "no_reply"
+    assert "plugin_context_literalization" in decision.flags
+
+
+def test_identity_leak_candidate_requires_safe_rewrite() -> None:
+    async def _fake_call(messages):  # noqa: ANN001
+        assert "persona_identity_leak" in messages[0]["content"]
+        return '{"action":"rewrite","text":"别给我乱贴身份，继续聊正题。","reason":"身份修复","flags":["persona_identity_leak"]}'
+
+    decision = asyncio.run(
+        response_review.review_response_text(
+            _fake_call,
+            candidate_text="我不是 AI，其实是 Gemini",
+            raw_message_text="你到底是什么模型",
+            is_direct_mention=True,
+            reply_required=True,
+        )
+    )
+
+    assert decision.action == "rewrite"
+    assert decision.text == "别给我乱贴身份，继续聊正题。"
+
+
 def test_arbitrate_reply_mode_silences_uncertain_random_chat_even_with_low_confidence() -> None:
     decision = response_review.arbitrate_reply_mode(
         intent_decision=SimpleNamespace(ambiguity_level="high", recommend_silence=True, confidence=0.18),

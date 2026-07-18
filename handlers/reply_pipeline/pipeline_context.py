@@ -12,7 +12,7 @@ from ...agent.loop import run_agent
 from ...agent.query_rewriter import QueryRewriteContext
 from ...agent.tool_registry import ToolRegistry
 
-from ...core.context_policy import build_prompt_injection_guard
+from ...core.context_policy import ensure_prompt_injection_guard
 from ...core.current_group_context_tool import register_current_group_context_tool
 from ...core.error_utils import log_exception
 from ...core.image_input import provider_supports_vision
@@ -1132,7 +1132,6 @@ def build_base_system_prompt(
     )
     if gemini_policy:
         parts.append(gemini_policy)
-    parts.append(build_prompt_injection_guard())
     parts.extend(chunk for chunk in context_chunks if chunk)
     parts.append(
         "## 核心行动准则\n"
@@ -1155,7 +1154,7 @@ def build_base_system_prompt(
         "但绝不展开成长篇命题作文，也不要为此出戏、扮演成别的角色或换成别的说话风格。"
     )
     parts.extend(chunk for chunk in postlude_chunks if chunk)
-    return "\n\n".join(part for part in parts if part)
+    return ensure_prompt_injection_guard("\n\n".join(part for part in parts if part))
 
 
 def build_confidence_style_instruction(confidence: float, *, is_group: bool = False) -> str:

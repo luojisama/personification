@@ -91,7 +91,10 @@ def test_prepare_messages_injects_persona_once_and_only_for_persona_text() -> No
     projected = persona_renderer.project_persona(persona)
     assert source == [{"role": "user", "content": "说句话"}]
     assert [item.get("content") for item in prepared_again].count(projected) == 1
-    assert prepared_again[0] == {"role": "system", "content": projected}
+    assert sum(
+        renderer_module.PROMPT_INJECTION_GUARD_MARKER in str(item.get("content", ""))
+        for item in prepared_again
+    ) == 1
 
     structured_renderer = renderer_module.SocialSurfaceRenderer(
         renderer_module.SurfaceSpec(
@@ -99,7 +102,9 @@ def test_prepare_messages_injects_persona_once_and_only_for_persona_text() -> No
             renderer_module.PersonaScope.PRIVATE_SOCIAL,
         )
     )
-    assert structured_renderer.prepare_messages(source, prompt_data=persona) == source
+    structured = structured_renderer.prepare_messages(source, prompt_data=persona)
+    assert structured[-1] == source[0]
+    assert renderer_module.PROMPT_INJECTION_GUARD_MARKER in structured[0]["content"]
 
 
 def test_structured_and_admin_outputs_bypass_visible_guard(monkeypatch) -> None:  # noqa: ANN001
