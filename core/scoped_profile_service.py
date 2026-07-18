@@ -227,6 +227,31 @@ class ScopedProfileService:
         self._tasks.clear()
         self._dirty_scopes.clear()
 
+    async def cancel_user_tasks(self, user_id: Any) -> int:
+        """Cancel pending scoped-profile work for one user before destructive purge."""
+
+        try:
+            uid = _normalize_scope_id(user_id, kind="user")
+        except ValueError:
+            return 0
+        selected = [
+            (key, task)
+            for key, task in list(self._tasks.items())
+            if key[1] == uid and not task.done()
+        ]
+        for key, task in selected:
+            self._tasks.pop(key, None)
+            self._dirty_scopes.pop(key, None)
+            task.cancel()
+        if selected:
+            await asyncio.gather(
+                *(task for _key, task in selected),
+                return_exceptions=True,
+            )
+        for key in [key for key in self._dirty_scopes if key[1] == uid]:
+            self._dirty_scopes.pop(key, None)
+        return len(selected)
+
     def _schedule_dirty_scope(self, key: tuple[str, str]) -> None:
         observed_generation = self._dirty_scopes.pop(key, None)
         if observed_generation is None:

@@ -63,6 +63,80 @@ def test_group_safe_export_scope_and_secret_exclusion(transfer) -> None:
         assert manifest["scope"] == {"kind": "group", "group_id": "g1"}
         assert manifest["source"] == {"bot_id": "bot1", "group_id": "g1"}
         assert "auth" in manifest["excluded"] and "qzone" in manifest["excluded"]
+        assert manifest["version"] == 2
+        assert "user_policy" in manifest["excluded"]
+
+
+def test_v1_package_remains_import_compatible(transfer) -> None:
+    service, db_path = transfer
+    _seed(db_path)
+    exported = service.create_export(
+        bot_id="bot1",
+        group_id="g1",
+        datasets=["group_messages", "group_relation_edges"],
+    )
+    rewritten = io.BytesIO()
+    with zipfile.ZipFile(service.export_path(exported["task_id"])) as source:
+        with zipfile.ZipFile(rewritten, "w") as target:
+            for name in source.namelist():
+                payload = source.read(name)
+                if name == "manifest.json":
+                    manifest = json.loads(payload)
+                    manifest["version"] = 1
+                    payload = json.dumps(
+                        manifest,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                target.writestr(name, payload)
+    uploaded = service.store_upload(io.BytesIO(rewritten.getvalue()))
+
+    inspected = service.inspect(uploaded["task_id"])
+
+    assert inspected["valid"] is True
+    assert inspected["manifest"]["version"] == 1
+    assert inspected["counts"] == {
+        "group_messages": 1,
+        "group_relation_edges": 1,
+    }
+
+
+def test_v2_avatar_relation_evidence_validation_is_fail_closed(transfer) -> None:
+    service, _db_path = transfer
+    error_type = load_personification_module(
+        "plugin.personification.core.data_transfer.service"
+    ).DataTransferError
+    manifest = {"scope": {"group_id": "20001"}}
+    valid = {
+        "group_id": "20001",
+        "left_user_id": "10001",
+        "right_user_id": "10002",
+        "relation": "coordinated_pair",
+        "confidence": 0.9,
+        "evidence_tags": '["matching_palette"]',
+        "asset_kinds": '["illustration"]',
+        "schema_version": 1,
+        "observed_at": 100.0,
+        "expires_at": 200.0,
+    }
+    service._validate_values(manifest, {"avatar_relation_evidence": [valid]})
+    invalid_updates = (
+        {"relation": "real_world_couple"},
+        {"confidence": float("nan")},
+        {"evidence_tags": '["matching_palette","injected_claim"]'},
+        {"evidence_tags": "[{}]"},
+        {"asset_kinds": "not-json"},
+        {"schema_version": 2},
+        {"left_user_id": "10002", "right_user_id": "10001"},
+        {"expires_at": 50.0},
+    )
+    for update in invalid_updates:
+        with pytest.raises(error_type):
+            service._validate_values(
+                manifest,
+                {"avatar_relation_evidence": [{**valid, **update}]},
+            )
 
 
 def test_inspect_rejects_zip_slip_duplicate_and_undeclared(transfer, tmp_path: Path) -> None:
@@ -284,6 +358,185 @@ def test_group_profiles_and_memories_round_trip_with_rollback(tmp_path: Path) ->
     service.rollback(applied["journal_id"])
     assert store.get_local_profile(group_id="g1", user_id="u1")["profile_text"] == "目标端修改"
     assert store.get_memory_item("m1")["summary"] == "目标端修改"
+
+
+def test_v2_filters_blocked_users_and_transfers_visual_evidence_without_hashes(
+    tmp_path: Path,
+) -> None:
+    db_mod = load_personification_module("plugin.personification.core.db")
+    memory_mod = load_personification_module(
+        "plugin.personification.core.memory_store"
+    )
+    policy_mod = load_personification_module(
+        "plugin.personification.core.user_policy"
+    )
+    service_mod = load_personification_module(
+        "plugin.personification.core.data_transfer.service"
+    )
+    db_path = db_mod.init_db_sync(tmp_path / "main")
+    cfg = type(
+        "Cfg",
+        (),
+        {
+            "personification_data_dir": str(tmp_path / "runtime"),
+            "personification_memory_enabled": True,
+            "personification_memory_palace_enabled": True,
+        },
+    )()
+    store = memory_mod.MemoryStore(cfg)
+    store.initialize()
+    policy = policy_mod.UserPolicyService(
+        db_path=db_path,
+        evidence_key=b"p" * 32,
+    )
+    blocked_state = policy.set_manual_override(
+        user_id="10002",
+        mode="block",
+        actor="test",
+    )
+    assert blocked_state.is_blocked()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO group_messages(group_id,user_id,nickname,content,timestamp) VALUES('20001','10001','甲','allowed-one',1)"
+        )
+        conn.execute(
+            "INSERT INTO group_messages(group_id,user_id,nickname,content,timestamp) VALUES('20001','10002','乙','blocked-secret',2)"
+        )
+        conn.execute(
+            "INSERT INTO group_messages(group_id,user_id,nickname,content,timestamp) VALUES('20001','10003','丙','allowed-two',3)"
+        )
+        conn.execute(
+            "INSERT INTO group_relation_edges VALUES('20001','10001','10002','reply',1,2,'m1')"
+        )
+        conn.execute(
+            "INSERT INTO group_relation_edges VALUES('20001','10001','10003','reply',1,3,'m2')"
+        )
+        for left, right, observed in (
+            ("10001", "10002", 2),
+            ("10001", "10003", 3),
+        ):
+            conn.execute(
+                "INSERT INTO avatar_relation_evidence(group_id,left_user_id,right_user_id,relation,confidence,evidence_tags,asset_kinds,left_avatar_hash,right_avatar_hash,schema_version,observed_at,expires_at) VALUES('20001',?,?, 'coordinated_pair',0.9,'[]','[]',?,?,1,?,9999999999)",
+                (left, right, left[-1] * 64, right[-1] * 64, observed),
+            )
+        conn.commit()
+    for user_id in ("10001", "10002", "10003"):
+        store.upsert_local_profile(
+            group_id="20001",
+            user_id=user_id,
+            profile_text=f"profile-{user_id}",
+        )
+        store.write_memory_item(
+            {
+                "memory_id": f"memory-{user_id}",
+                "summary": f"memory summary {user_id}",
+                "group_id": "20001",
+                "user_id": user_id,
+            }
+        )
+
+    source = service_mod.DataTransferService(
+        data_dir=tmp_path / "source-transfer",
+        db_path=db_path,
+        memory_store=store,
+    )
+    datasets = [
+        "group_messages",
+        "group_relation_edges",
+        "avatar_relation_evidence",
+        "local_user_profiles",
+        "group_memories",
+    ]
+    exported = source.create_export(
+        bot_id="bot1",
+        group_id="20001",
+        datasets=datasets,
+    )
+    package = source.export_path(exported["task_id"])
+    with zipfile.ZipFile(package) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        visual_rows = json.loads(
+            archive.read("datasets/avatar_relation_evidence.json")
+        )
+        combined = b"".join(
+            archive.read(name)
+            for name in archive.namelist()
+            if name.startswith("datasets/")
+        )
+    assert manifest["version"] == 2
+    assert len(visual_rows) == 2
+    assert all("avatar_hash" not in key for row in visual_rows for key in row)
+    assert b"user_policy_state" not in combined
+
+    target = service_mod.DataTransferService(
+        data_dir=tmp_path / "target-transfer",
+        db_path=db_path,
+        memory_store=store,
+        user_policy_service=policy,
+    )
+    uploaded = target.store_upload(io.BytesIO(package.read_bytes()))
+    inspected = target.inspect(uploaded["task_id"])
+    assert inspected["counts"] == {
+        "group_messages": 2,
+        "group_relation_edges": 1,
+        "avatar_relation_evidence": 1,
+        "local_user_profiles": 2,
+        "group_memories": 2,
+    }
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE group_messages SET content='frozen-blocked' WHERE group_id='20001' AND user_id='10002'"
+        )
+        conn.commit()
+    store.upsert_local_profile(
+        group_id="20001",
+        user_id="10002",
+        profile_text="frozen-blocked-profile",
+    )
+    store.write_memory_item(
+        {
+            "memory_id": "memory-10002",
+            "summary": "frozen blocked memory",
+            "group_id": "20001",
+            "user_id": "10002",
+            "revision": 50,
+        }
+    )
+
+    plan = target.dry_run(
+        uploaded["task_id"],
+        target_bot_id="bot1",
+        target_group_id="20001",
+        mode="scope-replace",
+    )
+    target.apply(
+        uploaded["task_id"],
+        target_bot_id="bot1",
+        target_group_id="20001",
+        mode="scope-replace",
+        plan_token=plan["plan_token"],
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        blocked_message = conn.execute(
+            "SELECT content FROM group_messages WHERE group_id='20001' AND user_id='10002'"
+        ).fetchone()[0]
+        blocked_edge_count = conn.execute(
+            "SELECT COUNT(*) FROM group_relation_edges WHERE group_id='20001' AND (src_user_id='10002' OR dst_user_id='10002')"
+        ).fetchone()[0]
+        blocked_visual_count = conn.execute(
+            "SELECT COUNT(*) FROM avatar_relation_evidence WHERE group_id='20001' AND (left_user_id='10002' OR right_user_id='10002')"
+        ).fetchone()[0]
+    assert blocked_message == "frozen-blocked"
+    assert blocked_edge_count == 1
+    assert blocked_visual_count == 1
+    assert store.get_local_profile(
+        group_id="20001",
+        user_id="10002",
+    )["profile_text"] == "frozen-blocked-profile"
+    assert store.get_memory_item("memory-10002")["summary"] == "frozen blocked memory"
 
 
 def test_memory_id_owned_by_another_group_is_rejected(tmp_path: Path) -> None:

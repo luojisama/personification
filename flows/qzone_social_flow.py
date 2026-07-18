@@ -75,6 +75,19 @@ async def _filter_qzone_comments_by_policy(
     return allowed
 
 
+def _qzone_write_available(service: Any, bot_id: str) -> bool:
+    checker = getattr(service, "write_available", None)
+    if not callable(checker):
+        # Compatibility for test doubles and third-party read/write services that
+        # predate the capability snapshot. The first-party service always exposes
+        # the checker and therefore fails closed in production.
+        return True
+    try:
+        return bool(checker(str(bot_id or "")))
+    except Exception:
+        return False
+
+
 class _QzoneScanLease:
     def __init__(self, coordinator: "_QzoneScanCoordinator", token: str) -> None:
         self._coordinator = coordinator
@@ -143,8 +156,8 @@ def _busy_scan_result() -> dict[str, Any]:
         "last_error": "",
     }
 
-# 权限保密用户黑名单：对方设置了"主人设置了保密"等访问限制时，记录 uin 跳过后续扫描。
-# 每 7 天自动重检一次，若仍无权限则继续保持在黑名单。
+# 空间访问拒绝缓存：对方设置了“主人设置了保密”等访问限制时，记录 uin 跳过后续扫描。
+# 这不是安全 Blacklist；每 7 天自动重检一次，若仍无权限则继续保持 access denied。
 _PERMISSION_BLOCK_RECHECK_SECONDS = 7 * 24 * 3600
 _PERMISSION_DENIED_HINTS = (
     "主人设置了保密",
@@ -166,19 +179,23 @@ def _is_permission_denied_message(message: Any) -> bool:
     return any(hint.lower() in lowered for hint in _PERMISSION_DENIED_HINTS)
 
 
-def _get_permission_block_bucket(state: dict[str, Any]) -> dict[str, Any]:
-    bucket = state.get("qzone_permission_blocked")
+def _get_access_denied_bucket(state: dict[str, Any]) -> dict[str, Any]:
+    bucket = state.get("qzone_access_denied")
     if not isinstance(bucket, dict):
         bucket = {}
-        state["qzone_permission_blocked"] = bucket
+        state["qzone_access_denied"] = bucket
+    legacy = state.pop("qzone_permission_blocked", None)
+    if isinstance(legacy, dict):
+        for user_id, entry in legacy.items():
+            bucket.setdefault(str(user_id), entry)
     return bucket
 
 
-def _is_qzone_user_blocked(state: dict[str, Any], user_id: str, *, now_ts: float | None = None) -> bool:
+def _is_qzone_access_denied(state: dict[str, Any], user_id: str, *, now_ts: float | None = None) -> bool:
     target = str(user_id or "").strip()
     if not target:
         return False
-    bucket = _get_permission_block_bucket(state)
+    bucket = _get_access_denied_bucket(state)
     entry = bucket.get(target)
     if not isinstance(entry, dict):
         return False
@@ -188,11 +205,11 @@ def _is_qzone_user_blocked(state: dict[str, Any], user_id: str, *, now_ts: float
     return (now - last_checked) < _PERMISSION_BLOCK_RECHECK_SECONDS
 
 
-def _mark_qzone_user_blocked(state: dict[str, Any], user_id: str, message: str) -> None:
+def _mark_qzone_access_denied(state: dict[str, Any], user_id: str, message: str) -> None:
     target = str(user_id or "").strip()
     if not target:
         return
-    bucket = _get_permission_block_bucket(state)
+    bucket = _get_access_denied_bucket(state)
     now = time.time()
     entry = bucket.get(target)
     if not isinstance(entry, dict):
@@ -203,11 +220,11 @@ def _mark_qzone_user_blocked(state: dict[str, Any], user_id: str, message: str) 
     bucket[target] = entry
 
 
-def _clear_qzone_user_block(state: dict[str, Any], user_id: str) -> None:
+def _clear_qzone_access_denied(state: dict[str, Any], user_id: str) -> None:
     target = str(user_id or "").strip()
     if not target:
         return
-    bucket = _get_permission_block_bucket(state)
+    bucket = _get_access_denied_bucket(state)
     if target in bucket:
         bucket.pop(target, None)
 
@@ -220,32 +237,32 @@ def _handle_qzone_fetch_outcome(
     msg: str,
     logger: Any,
 ) -> bool:
-    """根据 fetch_user_feeds 结果维护权限黑名单。返回值表示是否触发了 permission_block。"""
+    """根据 fetch_user_feeds 结果维护访问拒绝缓存。"""
     target = str(user_id or "").strip()
     if not target:
         return False
     if ok:
-        _clear_qzone_user_block(state, target)
+        _clear_qzone_access_denied(state, target)
         return False
     if _is_permission_denied_message(msg):
-        bucket = _get_permission_block_bucket(state)
+        bucket = _get_access_denied_bucket(state)
         existed = target in bucket
-        _mark_qzone_user_blocked(state, target, msg)
+        _mark_qzone_access_denied(state, target, msg)
         if not existed:
-            logger.info(f"[qzone_social] user {target} marked as permission_blocked: {msg}")
+            logger.info(f"[qzone_social] user {target} marked as access_denied: {msg}")
         else:
-            logger.debug(f"[qzone_social] user {target} still permission_blocked: {msg}")
+            logger.debug(f"[qzone_social] user {target} still access_denied: {msg}")
         return True
     return False
 
 
-async def recheck_qzone_permission_blocked_users(
+async def recheck_qzone_access_denied_users(
     *,
     bot: Any,
     qzone_social_service: Any,
     logger: Any,
 ) -> dict[str, Any]:
-    """周期性重检 qzone_permission_blocked 中的用户，看 bot 是否重新获得查看权限。
+    """周期性重检 qzone_access_denied 中的用户，看 bot 是否重新获得查看权限。
 
     每周运行一次。对每个 uid：
     - 调用 fetch_user_feeds 探测一次
@@ -256,8 +273,8 @@ async def recheck_qzone_permission_blocked_users(
     bot_id = str(getattr(bot, "self_id", "") or "")
     result: dict[str, Any] = {
         "checked": 0,
-        "unblocked": 0,
-        "still_blocked": 0,
+        "access_restored": 0,
+        "still_denied": 0,
         "errors": 0,
         "last_error": "",
     }
@@ -267,7 +284,7 @@ async def recheck_qzone_permission_blocked_users(
     state = await get_data_store().load(_STORE_NAME, default=lambda: {})
     if not isinstance(state, dict):
         state = {}
-    bucket = state.get("qzone_permission_blocked")
+    bucket = _get_access_denied_bucket(state)
     if not isinstance(bucket, dict) or not bucket:
         return result
     targets = list(bucket.keys())
@@ -288,12 +305,12 @@ async def recheck_qzone_permission_blocked_users(
             logger.warning(f"[qzone_permission_recheck] error checking {target_uid}: {exc}")
             continue
         if ok:
-            _clear_qzone_user_block(state, target_uid)
-            result["unblocked"] += 1
+            _clear_qzone_access_denied(state, target_uid)
+            result["access_restored"] += 1
             logger.info(f"[qzone_permission_recheck] unblocked {target_uid}, bot has access again")
         elif _is_permission_denied_message(msg):
-            _mark_qzone_user_blocked(state, target_uid, msg)
-            result["still_blocked"] += 1
+            _mark_qzone_access_denied(state, target_uid, msg)
+            result["still_denied"] += 1
         else:
             # 非权限错误（cookie 失效、网络等），不修改黑名单状态
             result["errors"] += 1
@@ -502,15 +519,15 @@ def _prune_state_maps(state: dict[str, Any], *, max_items: int = 2000) -> None:
             reverse=True,
         )
         state[key] = dict(items[:max_items])
-    # 权限黑名单按 last_checked_ts 排序裁剪
-    block_bucket = state.get("qzone_permission_blocked")
-    if isinstance(block_bucket, dict) and len(block_bucket) > max_items:
+    # 访问拒绝缓存按 last_checked_ts 排序裁剪，同时完成旧 key 的一次性迁移。
+    access_bucket = _get_access_denied_bucket(state)
+    if len(access_bucket) > max_items:
         items = sorted(
-            block_bucket.items(),
+            access_bucket.items(),
             key=lambda item: float((item[1] if isinstance(item[1], dict) else {}).get("last_checked_ts", 0) or 0),
             reverse=True,
         )
-        state["qzone_permission_blocked"] = dict(items[:max_items])
+        state["qzone_access_denied"] = dict(items[:max_items])
 
 
 def _save_state(state: dict[str, Any], result: dict[str, Any]) -> None:
@@ -1346,6 +1363,14 @@ async def _scan_bot_space_comments(
                     reason="user_policy_blocked_after_decision",
                 )
                 continue
+            if not _qzone_write_available(qzone_social_service, bot_id):
+                _mark_comment_processed(
+                    state,
+                    comment_key,
+                    action="ignore",
+                    reason="qzone_read_only",
+                )
+                continue
             ok_reply, reply_msg = await qzone_social_service.comment_feed(
                 feed=feed,
                 bot_id=bot_id,
@@ -1439,7 +1464,7 @@ async def _scan_bot_outbound_comment_replies(
             logger=logger,
         ):
             continue
-        if _is_qzone_user_blocked(state, owner_uin):
+        if _is_qzone_access_denied(state, owner_uin):
             logger.debug(f"[qzone_outbound] skip permission-blocked owner {owner_uin}")
             continue
         try:
@@ -1611,6 +1636,15 @@ async def _scan_bot_outbound_comment_replies(
                         "at": time.time(),
                         "action": "ignore",
                         "reason": "user_policy_blocked_after_decision",
+                    }
+                    if created_at > new_max_seen:
+                        new_max_seen = created_at
+                    continue
+                if not _qzone_write_available(qzone_social_service, bot_id):
+                    bot_replies_state[comment_key] = {
+                        "at": time.time(),
+                        "action": "ignore",
+                        "reason": "qzone_read_only",
                     }
                     if created_at > new_max_seen:
                         new_max_seen = created_at
@@ -1808,7 +1842,7 @@ async def scan_qzone_social_feeds(
                 if processed_feeds >= max_feeds:
                     break
                 candidate_uid = str(candidate["user_id"])
-                if _is_qzone_user_blocked(state, candidate_uid):
+                if _is_qzone_access_denied(state, candidate_uid):
                     logger.debug(f"[qzone_social] skip permission-blocked user {candidate_uid}")
                     continue
                 if not await _user_policy_allows(
@@ -1984,6 +2018,13 @@ async def scan_qzone_social_feeds(
                         if not comment_text:
                             result["ignored"] += 1
                             continue
+                    if action in {"forward", "like", "comment", "like_comment"} and not _qzone_write_available(
+                        qzone_social_service,
+                        str(getattr(bot, "self_id", "") or ""),
+                    ):
+                        result["ignored"] += 1
+                        result["last_error"] = "qzone_read_only"
+                        continue
                     reaction_text = comment_text
                     if action == "forward":
                         forward_text = str(decision.get("forward_text", "") or "")

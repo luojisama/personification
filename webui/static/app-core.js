@@ -39,10 +39,12 @@ let state = {
   logs: null, traces: null, logLevel: "", logQuery: "", logTraceId: "", logLoadingMore: false, logExpandedIds: {}, traceDetail: null, selectedTraceId: "",
   proactiveStats: null, proactiveRecent: null, proactiveScope: "",
   agentStatus: null, transferExport: null, transferImport: null, transferBotInfo: null,
+  userPolicy: null, userPolicyTier: "", selectedUserPolicy: null, userPolicyBusy: false,
+  outbound: null, outboundBotId: "", outboundKind: "", outboundConversationId: "", outboundStatus: "", outboundRecalled: "", outboundBusy: false,
 };
 
 const VIEW_ASSETS = {
-  dashboard:"app-admin.js",health:"app-admin.js",qzone:"app-admin.js",personas:"app-admin.js",groups:"app-admin.js",group_switch:"app-admin.js",persona_prompt:"app-admin.js",persona_builder:"app-admin.js",qq:"app-admin.js",
+  dashboard:"app-admin.js",health:"app-admin.js",qzone:"app-admin.js",personas:"app-admin.js",groups:"app-admin.js",group_switch:"app-admin.js",persona_prompt:"app-admin.js",persona_builder:"app-admin.js",qq:"app-admin.js",user_policy:"app-admin.js",outbound:"app-admin.js",
   config:"app-config.js",memory:"app-content.js",memory_graph:"app-content.js",stickers:"app-content.js",
   skills:"app-tools.js",mcp:"app-mcp.js",tool_creator:"app-tool-creator.js",plugin_knowledge:"app-tools.js",plugin_manager:"app-tools.js",test:"app-tools.js",
   proactive:"app-activity.js",audit:"app-activity.js",logs:"app-activity.js",traces:"app-activity.js",trace_detail:"app-activity.js",
@@ -552,6 +554,8 @@ function loadingMessageForView(view) {
     qq: "正在读取 QQ 账号信息...",
     agent_status: "正在汇总 Agent 运行状态...",
     data_transfer: "正在打开安全迁移工作台...",
+    user_policy: "正在读取用户策略与 Blacklist...",
+    outbound: "正在读取近期 Bot 消息账本...",
   })[view] || "正在加载页面...";
 }
 
@@ -721,6 +725,18 @@ async function loadView() {
       state.agentStatus = await api("/agent-status");
     } else if (view === "data_transfer") {
       state.transferBotInfo = await api("/qq/info").catch(() => null);
+    } else if (view === "user_policy") {
+      const qs = new URLSearchParams({ limit: "300" });
+      if (state.userPolicyTier) qs.set("tier", state.userPolicyTier);
+      state.userPolicy = await api("/user-policy/states?" + qs.toString(), {cache:"no-store"});
+    } else if (view === "outbound") {
+      const qs = new URLSearchParams({ limit: "300" });
+      if (state.outboundBotId) qs.set("bot_id", state.outboundBotId);
+      if (state.outboundKind) qs.set("conversation_kind", state.outboundKind);
+      if (state.outboundConversationId) qs.set("conversation_id", state.outboundConversationId);
+      if (state.outboundStatus) qs.set("status", state.outboundStatus);
+      if (state.outboundRecalled) qs.set("recalled", state.outboundRecalled);
+      state.outbound = await api("/outbound/recent?" + qs.toString(), {cache:"no-store"});
     }
   } catch (e) {
     if (e && e.name === "AbortError") return;
@@ -731,7 +747,7 @@ async function loadView() {
 }
 
 function viewTitle() {
-  return ({agent_status:"Agent 状态",data_transfer:"数据迁移",dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",mcp:"MCP 管理",tool_creator:"创建工具",plugin_knowledge:"插件知识库",plugin_manager:"插件管理",test:"模型测试",persona_prompt:"人设预览",persona_builder:"人设构建",audit:"审计日志",logs:"插件日志",traces:"消息 Trace",trace_detail:"Trace 详情",proactive:"主动诊断",health:"功能体检",qzone:"QQ 空间",qq:"QQ 管理",devices:"设备管理"})[state.view] || state.view;
+  return ({agent_status:"Agent 状态",data_transfer:"数据迁移",dashboard:"仪表盘",config:"配置中心",personas:"用户画像",groups:"群信息",group_switch:"群开关",memory:"Agent 记忆",memory_graph:"记忆宫殿",stickers:"表情包",skills:"Skill 管理",mcp:"MCP 管理",tool_creator:"创建工具",plugin_knowledge:"插件知识库",plugin_manager:"插件管理",test:"模型测试",persona_prompt:"人设预览",persona_builder:"人设构建",audit:"审计日志",logs:"插件日志",traces:"消息 Trace",trace_detail:"Trace 详情",proactive:"主动诊断",health:"功能体检",qzone:"QQ 空间",qq:"QQ 管理",devices:"设备管理",user_policy:"用户策略 / Blacklist",outbound:"近期 Bot 消息"})[state.view] || state.view;
 }
 
 async function navigateToView(view,{fromHistory=false}={}) {
@@ -863,6 +879,8 @@ function renderLayout() {
         ${navItem('proactive','主动诊断','activity')}
         ${navItem('traces','消息 Trace','search')}
         <div class="nav-group-label">运维</div>
+        ${navItem('user_policy','用户策略 / Blacklist','shield')}
+        ${navItem('outbound','近期 Bot 消息','message-square')}
         ${navItem('data_transfer','数据迁移','transfer')}
         ${navItem('audit','审计日志','shield')}
         ${navItem('logs','插件日志','archive')}
@@ -920,5 +938,7 @@ function renderView() {
   if (state.view === "proactive") return renderProactive();
   if (state.view === "agent_status") return renderAgentStatus();
   if (state.view === "data_transfer") return renderDataTransfer();
+  if (state.view === "user_policy") return renderUserPolicy();
+  if (state.view === "outbound") return renderOutbound();
   return `<div class="card"><h2>${escapeHtml(viewTitle())}</h2><p class="muted">该视图暂未实现。</p></div>`;
 }

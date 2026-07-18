@@ -21,6 +21,11 @@ assert.match(admin, /\["succeeded", "definite_failure"\]/);
 assert.match(admin, /\["reserved", "dispatching", "unknown"\]/);
 assert.match(admin, /\/qzone\/operations\/\$\{encodeURIComponent\(operationId\)\}/);
 assert.match(admin, /q\.auth_by_bot/);
+assert.match(admin, /q\.capabilities_by_bot/);
+assert.match(admin, /qzone\.cookie_export/);
+assert.match(admin, /qzone\.web_read/);
+assert.match(admin, /qzone\.web_write/);
+assert.match(admin, /read_only/);
 assert.match(admin, /risk_blocked/);
 
 assert.match(admin, /setTimeout\(\(\) => refreshQzoneSnapshot\(\), qzoneSnapshotNeedsFastRefresh\(\) \? 3000 : 15000\)/);

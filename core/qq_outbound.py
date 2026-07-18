@@ -618,6 +618,80 @@ class QQOutboundLedger:
             conn.commit()
         return cursor.rowcount == 1
 
+    def list_recent(
+        self,
+        *,
+        bot_id: str = "",
+        conversation_kind: str = "",
+        conversation_id: str = "",
+        status: str = "",
+        recalled: bool | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return a redacted administrator view of recent outbound receipts."""
+
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status and normalized_status not in QQ_OUTBOUND_STATUSES:
+            raise ValueError("invalid qq outbound status")
+        normalized_kind = str(conversation_kind or "").strip().lower()
+        if normalized_kind and normalized_kind not in {"group", "private"}:
+            raise ValueError("conversation_kind must be group or private")
+        clauses = ["1=1"]
+        params: list[Any] = []
+        if str(bot_id or "").strip():
+            clauses.append("ledger.bot_id=?")
+            params.append(str(bot_id).strip())
+        if normalized_kind:
+            clauses.append("ledger.conversation_kind=?")
+            params.append(normalized_kind)
+        if str(conversation_id or "").strip():
+            clauses.append("ledger.conversation_id=?")
+            params.append(str(conversation_id).strip())
+        if normalized_status:
+            clauses.append("ledger.status=?")
+            params.append(normalized_status)
+        if recalled is True:
+            clauses.append("ledger.recalled_at>0")
+        elif recalled is False:
+            clauses.append("ledger.recalled_at=0")
+        params.append(max(1, min(500, int(limit))))
+        with connect_sync(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT ledger.operation_id, ledger.part_index, ledger.bot_id,
+                       ledger.conversation_kind, ledger.conversation_id,
+                       ledger.surface, ledger.message_id, ledger.status,
+                       ledger.preview, ledger.created_at, ledger.updated_at,
+                       ledger.recalled_at,
+                       COALESCE(recall.status, '') AS recall_status
+                FROM qq_outbound_ledger AS ledger
+                LEFT JOIN qq_recall_operations AS recall
+                  ON recall.outbound_operation_id=ledger.operation_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY ledger.created_at DESC, ledger.id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [
+            {
+                "operation_id": str(row["operation_id"] or ""),
+                "part_index": int(row["part_index"] or 0),
+                "bot_id": str(row["bot_id"] or ""),
+                "conversation_kind": str(row["conversation_kind"] or ""),
+                "conversation_id": str(row["conversation_id"] or ""),
+                "surface": str(row["surface"] or ""),
+                "message_id": str(row["message_id"] or ""),
+                "status": str(row["status"] or ""),
+                "preview": str(row["preview"] or ""),
+                "created_at": float(row["created_at"] or 0),
+                "updated_at": float(row["updated_at"] or 0),
+                "recalled_at": float(row["recalled_at"] or 0),
+                "recall_status": str(row["recall_status"] or ""),
+            }
+            for row in rows
+        ]
+
 
 __all__ = [
     "DEFAULT_RECALL_WINDOW_SECONDS",

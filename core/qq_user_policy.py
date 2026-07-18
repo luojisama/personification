@@ -173,6 +173,84 @@ class QQUserPolicyGate:
                 )
             return _blocked_authorization()
 
+    @staticmethod
+    def _is_non_human_context_message(
+        message: dict[str, Any],
+        *,
+        bot_self_id: str = "",
+    ) -> bool:
+        source_kind = str(message.get("source_kind", "") or "").strip().lower()
+        if source_kind in {"bot", "bot_reply", "plugin", "plugin_command", "system"}:
+            return True
+        if bool(message.get("is_bot")):
+            return True
+        role = str(message.get("role", "") or "").strip().lower()
+        if role in {"assistant", "system", "tool"}:
+            return True
+        user_id = str(message.get("user_id", "") or "").strip()
+        return bool(bot_self_id and user_id == str(bot_self_id).strip())
+
+    async def filter_context_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        bot_self_id: str = "",
+    ) -> tuple[list[dict[str, Any]], set[str]]:
+        """Filter human context against current global policy, failing closed.
+
+        Bot/plugin/system rows remain available for provenance. Human rows without a
+        stable user id are excluded because they cannot be authorized. References to
+        excluded rows/users are scrubbed from the retained shallow copies as a second
+        line of defence against indirect prompt injection.
+        """
+
+        source = [item for item in list(messages or []) if isinstance(item, dict)]
+        human_user_ids = sorted(
+            {
+                str(item.get("user_id", "") or "").strip()
+                for item in source
+                if not self._is_non_human_context_message(item, bot_self_id=bot_self_id)
+                and str(item.get("user_id", "") or "").strip()
+            }
+        )
+        authorizations = await asyncio.gather(
+            *(self.current_authorization(user_id) for user_id in human_user_ids)
+        )
+        excluded_user_ids = {
+            user_id
+            for user_id, authorization in zip(human_user_ids, authorizations)
+            if bool(getattr(authorization, "blocked", True))
+            or not bool(getattr(authorization, "allow_context_read", False))
+        }
+        excluded_message_ids: set[str] = set()
+        retained: list[dict[str, Any]] = []
+        for item in source:
+            non_human = self._is_non_human_context_message(
+                item,
+                bot_self_id=bot_self_id,
+            )
+            user_id = str(item.get("user_id", "") or "").strip()
+            if not non_human and (not user_id or user_id in excluded_user_ids):
+                message_id = str(item.get("message_id", "") or "").strip()
+                if message_id:
+                    excluded_message_ids.add(message_id)
+                continue
+            retained.append(dict(item))
+
+        for item in retained:
+            if str(item.get("reply_to_user_id", "") or "").strip() in excluded_user_ids:
+                item["reply_to_user_id"] = ""
+            if str(item.get("reply_to_msg_id", "") or "").strip() in excluded_message_ids:
+                item["reply_to_msg_id"] = ""
+            mentioned = item.get("mentioned_ids", [])
+            if isinstance(mentioned, list):
+                item["mentioned_ids"] = [
+                    value
+                    for value in mentioned
+                    if str(value or "").strip() not in excluded_user_ids
+                ]
+        return retained, excluded_user_ids
+
     async def allows_current(self, event: Any) -> bool:
         user_id = _event_user_id(event)
         if not user_id:

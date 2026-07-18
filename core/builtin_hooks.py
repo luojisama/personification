@@ -79,11 +79,17 @@ def _format_recent_group_context(
     trigger_user_id: str = "",
     bot_self_id: str = "",
     repeat_clusters: list[dict[str, Any]] | None = None,
+    recent_messages: list[dict[str, Any]] | None = None,
+    excluded_user_ids: set[str] | None = None,
 ) -> str:
-    recent = build_group_context_window(
-        group_id,
-        limit=limit,
-        include_message_ids=[reply_to_msg_id],
+    recent = (
+        list(recent_messages)
+        if recent_messages is not None
+        else build_group_context_window(
+            group_id,
+            limit=limit,
+            include_message_ids=[reply_to_msg_id],
+        )
     )
     if not recent:
         return ""
@@ -93,8 +99,41 @@ def _format_recent_group_context(
         trigger_user_id=trigger_user_id,
         bot_self_id=bot_self_id,
         repeat_clusters=repeat_clusters,
+        excluded_user_ids=set(excluded_user_ids or set()),
     )
     return render_group_conversation_context(context)
+
+
+async def _format_recent_group_context_with_policy(
+    ctx: HookContext,
+    *,
+    limit: int,
+) -> str:
+    reply_to_msg_id = extract_reply_message_id(ctx.event)
+    recent = build_group_context_window(
+        ctx.group_id,
+        limit=limit,
+        include_message_ids=[reply_to_msg_id],
+    )
+    excluded_user_ids: set[str] = set()
+    user_policy_gate = getattr(ctx.runtime, "user_policy_gate", None)
+    bot_self_id = str(getattr(ctx.bot, "self_id", "") or "")
+    if user_policy_gate is not None:
+        recent, excluded_user_ids = await user_policy_gate.filter_context_messages(
+            recent,
+            bot_self_id=bot_self_id,
+        )
+    return _format_recent_group_context(
+        ctx.group_id,
+        limit=limit,
+        trigger_msg_id=extract_event_message_id(ctx.event),
+        reply_to_msg_id=reply_to_msg_id,
+        trigger_user_id=ctx.user_id,
+        bot_self_id=bot_self_id,
+        repeat_clusters=ctx.repeat_clusters,
+        recent_messages=recent,
+        excluded_user_ids=excluded_user_ids,
+    )
 
 
 def _is_domain_sensitive_frame(frame: Any) -> bool:
@@ -238,26 +277,16 @@ async def _group_style_hook(ctx: HookContext) -> Optional[str]:
 async def _recent_group_context_hook(ctx: HookContext) -> Optional[str]:
     if ctx.is_private:
         return None
-    base_recent = _format_recent_group_context(
-        ctx.group_id,
+    base_recent = await _format_recent_group_context_with_policy(
+        ctx,
         limit=6,
-        trigger_msg_id=extract_event_message_id(ctx.event),
-        reply_to_msg_id=extract_reply_message_id(ctx.event),
-        trigger_user_id=ctx.user_id,
-        bot_self_id=str(getattr(ctx.bot, "self_id", "") or ""),
-        repeat_clusters=ctx.repeat_clusters,
     )
     frame = await _ensure_semantic_frame(ctx, recent_context=base_recent)
     is_meta_question = bool(getattr(frame, "meta_question", False))
 
-    recent_block = _format_recent_group_context(
-        ctx.group_id,
+    recent_block = await _format_recent_group_context_with_policy(
+        ctx,
         limit=8 if is_meta_question else 6,
-        trigger_msg_id=extract_event_message_id(ctx.event),
-        reply_to_msg_id=extract_reply_message_id(ctx.event),
-        trigger_user_id=ctx.user_id,
-        bot_self_id=str(getattr(ctx.bot, "self_id", "") or ""),
-        repeat_clusters=ctx.repeat_clusters,
     )
     if not recent_block:
         return None
@@ -286,11 +315,19 @@ async def _group_relationship_hook(ctx: HookContext) -> Optional[str]:
         limit=8,
         include_message_ids=[extract_reply_message_id(ctx.event)],
     )
+    excluded_user_ids: set[str] = set()
+    user_policy_gate = getattr(ctx.runtime, "user_policy_gate", None)
+    if user_policy_gate is not None:
+        recent, excluded_user_ids = await user_policy_gate.filter_context_messages(
+            recent,
+            bot_self_id=str(getattr(ctx.bot, "self_id", "") or ""),
+        )
     summary = summarize_group_relationships(
         recent,
         trigger_msg_id=extract_event_message_id(ctx.event),
         trigger_user_id=ctx.user_id,
         bot_self_id=str(getattr(ctx.bot, "self_id", "") or ""),
+        excluded_user_ids=excluded_user_ids,
     )
     return summary or None
 
@@ -299,6 +336,12 @@ async def _group_member_alias_hook(ctx: HookContext) -> Optional[str]:
     if ctx.is_private:
         return None
     recent = build_group_context_window(ctx.group_id, limit=30)
+    user_policy_gate = getattr(ctx.runtime, "user_policy_gate", None)
+    if user_policy_gate is not None:
+        recent, _ = await user_policy_gate.filter_context_messages(
+            recent,
+            bot_self_id=str(getattr(ctx.bot, "self_id", "") or ""),
+        )
     known_names: dict[str, list[str]] = {}
     for msg in recent:
         if not isinstance(msg, dict):

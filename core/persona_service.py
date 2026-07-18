@@ -608,6 +608,14 @@ class PersonaStore:
             **counts,
         }
 
+    async def purge_user(self, user_id: str) -> dict[str, int]:
+        uid = str(user_id or "").strip()
+        if not uid:
+            raise ValueError("user_id is required")
+        counts = await asyncio.to_thread(self._purge_user_sync, uid)
+        self._generating.discard(uid)
+        return counts
+
     def _write_generation_snapshot(self) -> int:
         with self._write_fence:
             return self._write_generation
@@ -641,4 +649,27 @@ class PersonaStore:
                 "history_users": int(history_user_row["cnt"] if history_user_row else 0),
                 "history_messages": int(history_msg_row["cnt"] if history_msg_row else 0),
                 **profile_counts,
+            }
+
+    def _purge_user_sync(self, user_id: str) -> dict[str, int]:
+        uid = str(user_id or "").strip()
+        with self._write_fence:
+            # A global generation bump is deliberate: any concurrent persona task
+            # holding an older snapshot must fail before it can repopulate legacy or
+            # profile storage after the administrator's purge.
+            self._write_generation += 1
+            with connect_sync() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                persona_cursor = conn.execute(
+                    "DELETE FROM user_personas WHERE user_id=?",
+                    (uid,),
+                )
+                history_cursor = conn.execute(
+                    "DELETE FROM persona_histories WHERE user_id=?",
+                    (uid,),
+                )
+                conn.commit()
+            return {
+                "personas": max(0, int(persona_cursor.rowcount or 0)),
+                "persona_histories": max(0, int(history_cursor.rowcount or 0)),
             }

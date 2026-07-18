@@ -50,8 +50,37 @@ def build_group_conversation_context(
     repeat_clusters: list[dict[str, Any]] | None = None,
     bot_recent_replies: list[str] | None = None,
     emotional_climate: str = "未评估",
+    excluded_user_ids: set[str] | None = None,
 ) -> GroupConversationContext:
-    messages = [msg for msg in list(recent_messages or []) if isinstance(msg, dict)]
+    excluded = {
+        str(value or "").strip()
+        for value in set(excluded_user_ids or set())
+        if str(value or "").strip()
+    }
+    source_messages = [msg for msg in list(recent_messages or []) if isinstance(msg, dict)]
+    excluded_message_ids = {
+        str(msg.get("message_id", "") or "").strip()
+        for msg in source_messages
+        if str(msg.get("user_id", "") or "").strip() in excluded
+        and str(msg.get("message_id", "") or "").strip()
+    }
+    messages: list[dict[str, Any]] = []
+    for source in source_messages:
+        if str(source.get("user_id", "") or "").strip() in excluded:
+            continue
+        msg = dict(source)
+        if str(msg.get("reply_to_user_id", "") or "").strip() in excluded:
+            msg["reply_to_user_id"] = ""
+        if str(msg.get("reply_to_msg_id", "") or "").strip() in excluded_message_ids:
+            msg["reply_to_msg_id"] = ""
+        mentioned = msg.get("mentioned_ids", [])
+        if isinstance(mentioned, list):
+            msg["mentioned_ids"] = [
+                value
+                for value in mentioned
+                if str(value or "").strip() not in excluded
+            ]
+        messages.append(msg)
     speaker_relations: dict[str, str] = {}
     active_topics: list[str] = []
     seen_topics: set[str] = set()
@@ -87,6 +116,7 @@ def build_group_conversation_context(
         trigger_msg_id=trigger_msg_id,
         trigger_user_id=trigger_user_id,
         bot_self_id=bot_self_id,
+        excluded_user_ids=excluded,
     )
     topic_state = _build_short_term_topic_state(
         messages=messages,

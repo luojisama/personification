@@ -225,6 +225,7 @@ def _service(runtime) -> DataTransferService:
         data_dir=data_dir / "data_transfer",
         db_path=resolve_db_path(cfg),
         memory_store=getattr(bundle, "memory_store", None),
+        user_policy_service=getattr(bundle, "user_policy_service", None),
     )
 
 

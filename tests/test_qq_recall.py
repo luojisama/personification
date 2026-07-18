@@ -182,6 +182,165 @@ def test_user_recall_selects_latest_targeted_operation_and_all_parts(tmp_path) -
     assert all(timestamp > 0 for _message_id, timestamp in recalled)
 
 
+def test_admin_exact_operation_recall_revalidates_scope_and_all_parts(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    _seed(ledger, operation_id="older", message_ids=[11], created_at=90.0)
+    _seed(ledger, operation_id="chosen", message_ids=[21, 22], created_at=95.0)
+    adapter = _Adapter()
+    service = _service(ledger, adapter)
+
+    wrong_scope = asyncio.run(
+        service.recall_operation(
+            bot=_Bot(),
+            operation_id="chosen",
+            conversation_kind="group",
+            conversation_id="20002",
+            requester_user_id="90002",
+            cutoff=100.0,
+        )
+    )
+    assert wrong_scope.status == "no_candidate"
+    assert adapter.calls == []
+
+    result = asyncio.run(
+        service.recall_operation(
+            bot=_Bot(),
+            operation_id="chosen",
+            conversation_kind="group",
+            conversation_id="20001",
+            requester_user_id="90002",
+            cutoff=100.0,
+        )
+    )
+    assert result.status == "succeeded"
+    assert result.outbound_operation_id == "chosen"
+    assert (result.total_count, result.recalled_count) == (2, 2)
+    assert adapter.calls == [22, 21]
+
+    repeated = asyncio.run(
+        service.recall_operation(
+            bot=_Bot(),
+            operation_id="chosen",
+            conversation_kind="group",
+            conversation_id="20001",
+            requester_user_id="90002",
+            cutoff=100.0,
+        )
+    )
+    assert repeated.code == "already_attempted"
+    assert adapter.calls == [22, 21]
+
+
+def test_admin_exact_operation_never_partially_recalls_incomplete_operation(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    _seed(ledger, operation_id="incomplete-admin", message_ids=[31, 32], created_at=95.0)
+    with sqlite3.connect(ledger.db_path) as conn:
+        conn.execute(
+            "UPDATE qq_outbound_ledger SET status='unknown',message_id=NULL "
+            "WHERE operation_id='incomplete-admin' AND part_index=1"
+        )
+        conn.commit()
+    adapter = _Adapter()
+
+    result = asyncio.run(
+        _service(ledger, adapter).recall_operation(
+            bot=_Bot(),
+            operation_id="incomplete-admin",
+            conversation_kind="group",
+            conversation_id="20001",
+            requester_user_id="90002",
+            cutoff=100.0,
+        )
+    )
+
+    assert result.status == "no_candidate"
+    assert result.code == "operation_incomplete"
+    assert adapter.calls == []
+
+
+def test_admin_exact_operation_rejects_cross_scope_parts(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    _seed(ledger, operation_id="cross-scope-admin", message_ids=[31], created_at=95.0)
+    with sqlite3.connect(ledger.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO qq_outbound_ledger(
+                operation_id,part_index,bot_id,conversation_kind,conversation_id,
+                message_id,user_target,surface,status,preview,content_hmac,error_code,
+                created_at,updated_at,recalled_at
+            )
+            SELECT operation_id,1,bot_id,conversation_kind,'20002',
+                   '32',user_target,surface,status,preview,content_hmac,error_code,
+                   95.1,95.1,0
+            FROM qq_outbound_ledger
+            WHERE operation_id='cross-scope-admin' AND part_index=0
+            """
+        )
+        conn.commit()
+    adapter = _Adapter()
+
+    result = asyncio.run(
+        _service(ledger, adapter).recall_operation(
+            bot=_Bot(),
+            operation_id="cross-scope-admin",
+            conversation_kind="group",
+            conversation_id="20001",
+            requester_user_id="90002",
+            cutoff=100.0,
+        )
+    )
+
+    assert result.status == "no_candidate"
+    assert result.code == "operation_scope_mismatch"
+    assert adapter.calls == []
+
+
+def test_admin_exact_operation_rejects_mixed_or_partly_recalled_parts(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    _seed(ledger, operation_id="mixed-surface", message_ids=[41], created_at=95.0)
+    _seed(
+        ledger,
+        operation_id="mixed-surface",
+        message_ids=[42],
+        created_at=95.1,
+        surface="webui_diagnostic",
+    )
+    _seed(ledger, operation_id="partly-recalled", message_ids=[51, 52], created_at=96.0)
+    with sqlite3.connect(ledger.db_path) as conn:
+        conn.execute(
+            "UPDATE qq_outbound_ledger SET recalled_at=99 "
+            "WHERE operation_id='partly-recalled' AND part_index=1"
+        )
+        conn.commit()
+    adapter = _Adapter()
+    service = _service(ledger, adapter)
+
+    mixed = asyncio.run(
+        service.recall_operation(
+            bot=_Bot(),
+            operation_id="mixed-surface",
+            conversation_kind="group",
+            conversation_id="20001",
+            requester_user_id="90002",
+            cutoff=100.0,
+        )
+    )
+    partial = asyncio.run(
+        service.recall_operation(
+            bot=_Bot(),
+            operation_id="partly-recalled",
+            conversation_kind="group",
+            conversation_id="20001",
+            requester_user_id="90002",
+            cutoff=100.0,
+        )
+    )
+
+    assert mixed.code == "operation_surface_not_allowed"
+    assert partial.code == "already_recalled"
+    assert adapter.calls == []
+
+
 def test_operation_crossing_request_cutoff_is_never_partially_recalled(tmp_path) -> None:  # noqa: ANN001
     ledger = _ledger(tmp_path)
     _seed(ledger, operation_id="complete", message_ids=[13], created_at=90.0)

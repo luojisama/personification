@@ -259,24 +259,24 @@ def setup_jobs(*, scheduler: Any, deps: JobSetupDeps) -> Dict[str, Any]:
                     logger=deps.logger,
                 )
 
-        # 每周重检 qzone 权限黑名单
+        # 每周重检曾拒绝访问的 QZone 用户
         if deps.qzone_social_service is not None:
-            async def _recheck_qzone_permissions() -> None:
-                from ..flows.qzone_social_flow import recheck_qzone_permission_blocked_users
+            async def _recheck_qzone_access_denied() -> None:
+                from ..flows.qzone_social_flow import recheck_qzone_access_denied_users
                 bots = deps.get_bots() if callable(deps.get_bots) else {}
                 for bot in (bots or {}).values():
                     try:
-                        await recheck_qzone_permission_blocked_users(
+                        await recheck_qzone_access_denied_users(
                             bot=bot,
                             qzone_social_service=deps.qzone_social_service,
                             logger=deps.logger,
                         )
                     except Exception as exc:
-                        deps.logger.warning(f"[qzone_permission_recheck] bot {getattr(bot, 'self_id', '?')} failed: {exc}")
+                        deps.logger.warning(f"[qzone_access_denied_recheck] bot {getattr(bot, 'self_id', '?')} failed: {exc}")
 
             register_qzone_permission_recheck_job(
                 scheduler=scheduler,
-                permission_recheck_job=_recheck_qzone_permissions,
+                permission_recheck_job=_recheck_qzone_access_denied,
                 logger=deps.logger,
             )
     if getattr(deps, "proactive_enabled", True):

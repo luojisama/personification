@@ -930,12 +930,21 @@ async def process_yaml_response_logic(
             limit=8,
             include_message_ids=[extract_reply_message_id(event)],
         )
+        excluded_context_user_ids: set[str] = set()
+        if user_policy_gate is not None:
+            recent_window, excluded_context_user_ids = (
+                await user_policy_gate.filter_context_messages(
+                    recent_window,
+                    bot_self_id=str(getattr(bot, "self_id", "") or ""),
+                )
+            )
         conversation_context = build_group_conversation_context(
             recent_messages=recent_window,
             trigger_msg_id=extract_event_message_id(event),
             trigger_user_id=user_id,
             bot_self_id=str(getattr(bot, "self_id", "") or ""),
             repeat_clusters=list(repeat_clusters or []),
+            excluded_user_ids=excluded_context_user_ids,
         )
         recent_context_hint = render_group_conversation_context(conversation_context)
         relationship_hint = relationship_hint or conversation_context.relationship_hint

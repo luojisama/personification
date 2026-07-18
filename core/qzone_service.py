@@ -22,6 +22,21 @@ _AUTH_STATES: dict[str, dict[str, Any]] = {}
 _AUTH_REFRESH_CACHE_SECONDS = 300
 _AUTH_FAILURE_COOLDOWN_SECONDS = 15 * 60
 _COOKIE_FILE_LOCK = threading.Lock()
+_QZONE_CAPABILITY_NAMES = (
+    "qzone.cookie_export",
+    "qzone.web_read",
+    "qzone.web_write",
+)
+_QZONE_CAPABILITY_STATES = frozenset(
+    {"available", "degraded", "unavailable", "unknown", "disabled"}
+)
+
+
+def _new_qzone_capabilities() -> dict[str, dict[str, Any]]:
+    return {
+        name: {"state": "unknown", "reason_code": "not_observed", "updated_at": 0.0}
+        for name in _QZONE_CAPABILITY_NAMES
+    }
 
 
 def _new_qzone_auth_state() -> dict[str, Any]:
@@ -33,6 +48,7 @@ def _new_qzone_auth_state() -> dict[str, Any]:
         "last_failure_at": 0.0,
         "last_error": "",
         "cooldown_until": 0.0,
+        "capabilities": _new_qzone_capabilities(),
     }
 
 
@@ -46,7 +62,66 @@ def _qzone_auth_state_locked(bot_id: Any) -> dict[str, Any]:
     if state is None:
         state = _new_qzone_auth_state()
         _AUTH_STATES[key] = state
+    capabilities = state.get("capabilities")
+    if not isinstance(capabilities, dict):
+        capabilities = _new_qzone_capabilities()
+        state["capabilities"] = capabilities
+    for name, default in _new_qzone_capabilities().items():
+        if not isinstance(capabilities.get(name), dict):
+            capabilities[name] = default
     return state
+
+
+def _set_qzone_capability(
+    bot_id: Any,
+    name: str,
+    state: str,
+    reason_code: Any,
+) -> None:
+    normalized_state = str(state or "unknown").strip().lower()
+    if name not in _QZONE_CAPABILITY_NAMES or normalized_state not in _QZONE_CAPABILITY_STATES:
+        return
+    with _AUTH_STATE_LOCK:
+        auth_state = _qzone_auth_state_locked(bot_id)
+        auth_state["capabilities"][name] = {
+            "state": normalized_state,
+            "reason_code": re.sub(
+                r"[^A-Za-z0-9_.:-]+",
+                "_",
+                str(reason_code or "")[:64],
+            ).strip("_") or "observed",
+            "updated_at": time.time(),
+        }
+
+
+def get_qzone_capability_status(
+    bot_id: Any = "",
+    *,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    auth = get_qzone_auth_status(bot_id)
+    raw = auth.get("capabilities") if isinstance(auth, dict) else None
+    raw = raw if isinstance(raw, dict) else _new_qzone_capabilities()
+    capabilities: dict[str, dict[str, Any]] = {}
+    for name in _QZONE_CAPABILITY_NAMES:
+        source = raw.get(name) if isinstance(raw.get(name), dict) else {}
+        state = str(source.get("state", "unknown") or "unknown").lower()
+        if not enabled:
+            state = "disabled"
+        if state not in _QZONE_CAPABILITY_STATES:
+            state = "unknown"
+        capabilities[name] = {
+            "state": state,
+            "reason_code": str(source.get("reason_code", "") or "not_observed")[:64],
+            "updated_at": float(source.get("updated_at", 0) or 0),
+        }
+    web_read = capabilities["qzone.web_read"]["state"]
+    web_write = capabilities["qzone.web_write"]["state"]
+    return {
+        **capabilities,
+        "read_only": bool(enabled and web_read == "available" and web_write != "available"),
+        "write_available": bool(enabled and web_write == "available"),
+    }
 
 
 @dataclass(frozen=True)
@@ -103,6 +178,9 @@ def get_qzone_auth_status(bot_id: Any = "") -> dict[str, Any]:
         else:
             state = _new_qzone_auth_state()
     state["cooldown_remaining_seconds"] = max(0, int(float(state.get("cooldown_until", 0) or 0) - time.time()))
+    capabilities = state.get("capabilities")
+    if not isinstance(capabilities, dict):
+        state["capabilities"] = _new_qzone_capabilities()
     return state
 
 
@@ -127,6 +205,18 @@ def _set_qzone_auth_failure(
                 else 0.0
             ),
         })
+        if next_status == "login_required":
+            capability_state = "unavailable"
+        elif next_status == "risk_blocked":
+            capability_state = "degraded"
+        else:
+            capability_state = "degraded"
+        for name in ("qzone.web_read", "qzone.web_write"):
+            state["capabilities"][name] = {
+                "state": capability_state,
+                "reason_code": next_status,
+                "updated_at": now,
+            }
 
 
 def _qzone_response_page_kind(raw_text: Any) -> str:
@@ -279,6 +369,12 @@ async def install_qzone_cookie(
     probe_cookie = probe or _probe_qzone_cookie
     ok, reason = await probe_cookie(normalized, qq, p_skey)
     if not ok:
+        _set_qzone_capability(
+            expected_bot_id,
+            "qzone.web_read",
+            "unavailable" if reason == "auth_blocked" else "degraded",
+            reason,
+        )
         _set_qzone_auth_failure(
             reason,
             auth_failure=reason == "auth_blocked",
@@ -298,6 +394,22 @@ async def install_qzone_cookie(
             "cooldown_until": 0.0,
             "source": str(source or "unknown")[:32],
         })
+        state["capabilities"]["qzone.web_read"] = {
+            "state": "available",
+            "reason_code": "cookie_read_probe_succeeded",
+            "updated_at": now,
+        }
+        current_write = state["capabilities"].get("qzone.web_write") or {}
+        if str(current_write.get("reason_code") or "") in {
+            "login_required",
+            "risk_blocked",
+            "refresh_failed",
+        }:
+            state["capabilities"]["qzone.web_write"] = {
+                "state": "unknown",
+                "reason_code": "auth_recovered_write_unverified",
+                "updated_at": now,
+            }
     return True, "ok"
 
 
@@ -1006,6 +1118,14 @@ class QzoneSocialService:
             return False, "Qzone 功能未启用", {}
         return _resolve_qzone_context(self.plugin_config, bot_id)
 
+    def write_available(self, bot_id: str) -> bool:
+        return bool(
+            get_qzone_capability_status(bot_id, enabled=self.enabled).get(
+                "write_available",
+                False,
+            )
+        )
+
     async def fetch_user_feeds(
         self,
         *,
@@ -1046,18 +1166,43 @@ class QzoneSocialService:
             async with httpx.AsyncClient(timeout=12.0) as client:
                 resp = await client.get(url, params=params, headers=headers)
         except Exception as exc:
+            _set_qzone_capability(
+                bot_id,
+                "qzone.web_read",
+                "degraded",
+                f"transport_{type(exc).__name__}",
+            )
             return False, f"读取动态失败：{exc}", []
         if resp.status_code != 200:
+            _set_qzone_capability(
+                bot_id,
+                "qzone.web_read",
+                "unavailable" if resp.status_code in {401, 403} else "degraded",
+                f"http_{resp.status_code}",
+            )
             return False, f"读取动态失败，状态码：{resp.status_code}", []
         payload = _parse_qzone_jsonp(resp.text)
         payload_ok, payload_msg = _qzone_payload_success(payload, resp.text, bot_id=ctx["qq"])
         if not payload_ok:
+            auth_status = str(get_qzone_auth_status(bot_id).get("status", "") or "")
+            _set_qzone_capability(
+                bot_id,
+                "qzone.web_read",
+                "unavailable" if auth_status == "login_required" else "degraded",
+                auth_status or "read_rejected",
+            )
             return False, payload_msg, []
         feeds: list[dict[str, Any]] = []
         for item in _extract_msglist_payload(payload):
             normalized = _normalize_qzone_feed(item, target_uin=target)
             if normalized is not None:
                 feeds.append(normalized)
+        _set_qzone_capability(
+            bot_id,
+            "qzone.web_read",
+            "available",
+            "feed_read_succeeded",
+        )
         return True, "ok", feeds
 
     async def like_feed(self, *, feed: dict[str, Any], bot_id: str) -> tuple[bool, str]:
@@ -1655,8 +1800,26 @@ def build_qzone_services(
                 domain="qzone.qq.com"
             )
             if not cookie_result.ok:
+                _set_qzone_capability(
+                    bot_id,
+                    "qzone.cookie_export",
+                    (
+                        "unavailable"
+                        if cookie_result.status in {"unavailable", "definite_failure"}
+                        else "degraded"
+                        if cookie_result.status == "degraded"
+                        else "unknown"
+                    ),
+                    cookie_result.code,
+                )
                 _set_qzone_auth_failure(cookie_result.code, bot_id=bot_id)
                 return False, cookie_result.code
+            _set_qzone_capability(
+                bot_id,
+                "qzone.cookie_export",
+                "available",
+                "onebot_cookie_export_succeeded",
+            )
             cookies_resp = cookie_result.data if isinstance(cookie_result.data, dict) else {}
             cookie = str(cookies_resp.get("cookies", "") or "").strip()
             if not cookie:
@@ -1672,15 +1835,39 @@ def build_qzone_services(
                 source="onebot",
             )
         except Exception as e:
+            _set_qzone_capability(
+                bot_id,
+                "qzone.cookie_export",
+                "degraded",
+                f"exception_{type(e).__name__}",
+            )
             _set_qzone_auth_failure(e, bot_id=bot_id)
             return False, str(e)
         finally:
             with _AUTH_STATE_LOCK:
                 _qzone_auth_state_locked(bot_id)["refreshing"] = False
 
-    async def publish_qzone_shuo(content: str, bot_id: str) -> QzoneWriteResult:
+    async def publish_qzone_shuo(
+        content: str,
+        bot_id: str,
+        *,
+        allow_unknown_write: bool = False,
+    ) -> QzoneWriteResult:
         if not qzone_enabled:
             return QzoneWriteResult("definite_failure", "Qzone 功能未启用", "preflight_disabled")
+        write_state = get_qzone_capability_status(
+            bot_id,
+            enabled=qzone_enabled,
+        )["qzone.web_write"]["state"]
+        if write_state != "available" and not (
+            allow_unknown_write and write_state == "unknown"
+        ):
+            return QzoneWriteResult(
+                "definite_failure",
+                "Qzone 当前为只读或写能力尚未验证",
+                f"preflight_web_write_{write_state}",
+                detail={"read_only": True, "web_write_state": write_state},
+            )
         cookie = _get_cookie_from_config(plugin_config)
         if not cookie:
             return QzoneWriteResult("definite_failure", "未配置 Qzone Cookie", "preflight_cookie_missing")
@@ -1804,7 +1991,7 @@ def build_qzone_services(
                 })
             publish_detail.update(classified.detail)
             if classified.status == "succeeded":
-                return QzoneWriteResult(
+                result = QzoneWriteResult(
                     "succeeded",
                     "发布成功",
                     classified.result_code,
@@ -1812,20 +1999,41 @@ def build_qzone_services(
                     remote_time=classified.remote_time,
                     detail=publish_detail,
                 )
-            return QzoneWriteResult(
+                _set_qzone_capability(
+                    bot_id,
+                    "qzone.web_write",
+                    "available",
+                    "write_succeeded",
+                )
+                return result
+            result = QzoneWriteResult(
                 classified.status,
                 classified.message,
                 classified.result_code,
                 detail=publish_detail,
             )
+            _set_qzone_capability(
+                bot_id,
+                "qzone.web_write",
+                "unavailable" if classified.status == "definite_failure" else "degraded",
+                classified.result_code or classified.status,
+            )
+            return result
         except Exception as e:
             if post_started:
-                return QzoneWriteResult(
+                result = QzoneWriteResult(
                     "unknown",
                     f"outcome_unknown: 发布请求异常：{type(e).__name__}",
                     "dispatch_exception",
                     detail={"exception_type": type(e).__name__},
                 )
+                _set_qzone_capability(
+                    bot_id,
+                    "qzone.web_write",
+                    "degraded",
+                    "dispatch_exception",
+                )
+                return result
             return QzoneWriteResult(
                 "definite_failure",
                 f"发布前校验异常：{type(e).__name__}",
@@ -1833,6 +2041,7 @@ def build_qzone_services(
                 detail={"exception_type": type(e).__name__},
             )
 
+    publish_qzone_shuo.supports_unknown_write_probe = True  # type: ignore[attr-defined]
     return qzone_enabled, publish_qzone_shuo, update_qzone_cookie
 
 

@@ -170,7 +170,7 @@ def _safe_publish_operation(operation: Any) -> dict[str, Any]:
 
 def _build_status(runtime) -> dict[str, Any]:
     from ...core.data_store import get_data_store
-    from ...core.qzone_service import get_qzone_auth_status
+    from ...core.qzone_service import get_qzone_auth_status, get_qzone_capability_status
     from ...core.qzone_publish import list_qzone_publish_operations
     from ...core.time_ctx import get_configured_now
     from ...flows.qzone_social_flow import get_qzone_scan_status
@@ -231,12 +231,26 @@ def _build_status(runtime) -> dict[str, Any]:
         for key, bot in bot_items
     }
     auth = next(iter(auth_by_bot.values()), _safe_auth())
+    capabilities_by_bot = {
+        str(getattr(bot, "self_id", key) or key): get_qzone_capability_status(
+            str(getattr(bot, "self_id", key) or key),
+            enabled=enabled,
+        )
+        for key, bot in bot_items
+    }
+    capabilities = next(
+        iter(capabilities_by_bot.values()),
+        get_qzone_capability_status("", enabled=enabled),
+    )
     payload = {
         "enabled": enabled,
         "proactive_enabled": proactive_enabled,
         "social_enabled": social_enabled,
         "inbound_enabled": inbound_enabled,
-        "publish_available": bool(_bundle_attr(runtime, "qzone_publish_available")),
+        "publish_available": bool(capabilities.get("write_available")),
+        "read_only": bool(capabilities.get("read_only")),
+        "capabilities": capabilities,
+        "capabilities_by_bot": capabilities_by_bot,
         "bots": [{"bot_id": str(getattr(bot, "self_id", key) or key)} for key, bot in bot_items],
         "cookie_configured": bool(str(getattr(cfg, "personification_qzone_cookie", "") or "").strip()),
         "auth": auth,
@@ -284,7 +298,8 @@ def _build_status(runtime) -> dict[str, Any]:
         message="额度、认证、扫描和调度状态已生成安全快照。",
         details=(
             detail("已连接 Bot", len(bot_items), "ok" if bot_items else "warn"),
-            detail("发布能力", "available" if payload["publish_available"] else "unavailable", "info"),
+            detail("qzone.web_write", capabilities["qzone.web_write"]["state"], "info"),
+            detail("只读模式", payload["read_only"], "warn" if payload["read_only"] else "info"),
             detail("Build", payload["runtime"]["build_id"], "info"),
             detail("Worker", payload["runtime"]["worker_id"], "info"),
             detail("Process started", payload["runtime"]["process_started_at"], "info"),
@@ -569,7 +584,7 @@ def build_qzone_router(*, runtime) -> APIRouter:
         """管理员手动强制发一条说说（绕过额度/间隔/agent 决策，但仍计入月度额度）。"""
         from ...core.time_ctx import get_configured_now
         from ...core.qzone_publish import qzone_content_preview
-        from ...core.qzone_service import get_qzone_auth_status
+        from ...core.qzone_service import get_qzone_auth_status, get_qzone_capability_status
         from ...jobs.periodic_jobs import build_qzone_quota, coordinated_qzone_publish
 
         logger = getattr(runtime, "logger", None)
@@ -702,6 +717,43 @@ def build_qzone_router(*, runtime) -> APIRouter:
             )
             return result
 
+        first_party_publish = bool(getattr(publish, "supports_unknown_write_probe", False))
+        capability_status = get_qzone_capability_status(
+            str(getattr(bot, "self_id", "") or ""),
+            enabled=bool(
+                getattr(getattr(runtime, "plugin_config", None), "personification_qzone_enabled", False)
+                or _bundle_attr(runtime, "qzone_publish_available")
+            ),
+        )
+        web_write_state = str(
+            (capability_status.get("qzone.web_write") or {}).get("state", "unknown")
+        )
+        if first_party_publish and web_write_state in {"disabled", "degraded", "unavailable"}:
+            result = diagnostic(
+                ok=False,
+                code="qzone_web_write_unavailable",
+                phase="qzone_capability",
+                title="QZone 当前为只读模式",
+                message="Web read 与普通 QQ 能力可继续使用，但写能力当前不可用或结果不可信。",
+                details=(detail("qzone.web_write", web_write_state, "warn"),),
+                steps=tuple(auth_steps) + (
+                    step("capability_snapshot", "检查 QZone 写能力", "error", "写能力未处于 available。"),
+                ),
+                suggestion="先恢复认证或人工核对未知写结果；不要通过重复 POST 探测写能力。",
+                retryable=False,
+                operation_id=operation_id,
+            )
+            webui_audit_log.record(
+                action="qzone_post_now",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=str(getattr(bot, "self_id", "") or ""),
+                ip_hash=get_client_ip(request),
+                detail={"operation_id": operation_id, "code": result["code"], "web_write": web_write_state},
+                outcome="failed",
+            )
+            return result
+
         try:
             detailed_generate = getattr(generate, "detailed", None)
             if callable(detailed_generate):
@@ -771,7 +823,15 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 monthly_limit=int(getattr(cfg, "personification_qzone_monthly_limit", 30)),
                 min_interval_hours=float(getattr(cfg, "personification_qzone_min_interval_hours", 12.0) or 0),
                 kind="post",
-                publish=lambda: publish(content, getattr(bot, "self_id", "")),
+                publish=lambda: (
+                    publish(
+                        content,
+                        getattr(bot, "self_id", ""),
+                        allow_unknown_write=True,
+                    )
+                    if bool(getattr(publish, "supports_unknown_write_probe", False))
+                    else publish(content, getattr(bot, "self_id", ""))
+                ),
                 force=True,
             )
         except Exception as exc:

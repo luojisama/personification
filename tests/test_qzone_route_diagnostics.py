@@ -105,6 +105,48 @@ def test_qzone_status_sanitizes_all_last_errors_and_adds_diagnostic(_runtime_con
     assert "nested-secret" not in response.text
 
 
+def test_qzone_status_exposes_per_bot_read_only_capabilities_without_credentials(
+    _runtime_context,
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        _runtime_context.plugin_config,
+        "personification_qzone_enabled",
+        True,
+        raising=False,
+    )
+    with qzone_service._AUTH_STATE_LOCK:
+        qzone_service._AUTH_STATES.clear()
+    qzone_service._set_qzone_capability("10000", "qzone.cookie_export", "available", "onebot_cookie_verified")
+    qzone_service._set_qzone_capability("10000", "qzone.web_read", "available", "feed_probe_succeeded")
+    qzone_service._set_qzone_capability("10000", "qzone.web_write", "unknown", "not_destructively_probed")
+    _install_runtime(_runtime_context, bundle=SimpleNamespace(qzone_publish_available=True))
+    client = _admin_client(_runtime_context)
+
+    response = client.get("/personification/api/qzone/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    capabilities = body["capabilities_by_bot"]["10000"]
+    assert set(capabilities) == {
+        "qzone.cookie_export",
+        "qzone.web_read",
+        "qzone.web_write",
+        "read_only",
+        "write_available",
+    }
+    assert capabilities["qzone.cookie_export"]["state"] == "available"
+    assert capabilities["qzone.web_read"]["state"] == "available"
+    assert capabilities["qzone.web_write"]["state"] == "unknown"
+    assert capabilities["read_only"] is True
+    assert body["read_only"] is True
+    assert body["publish_available"] is False
+    for name in ("qzone.cookie_export", "qzone.web_read", "qzone.web_write"):
+        assert set(capabilities[name]) == {"state", "reason_code", "updated_at"}
+        assert "p_skey" not in str(capabilities[name]).lower()
+        assert "credential" not in str(capabilities[name]).lower()
+
+
 def test_qzone_status_projects_unresolved_operations_without_cache(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.setattr(
         qzone_publish,

@@ -676,6 +676,65 @@ class MemoryStore:
                     conn.commit()
         return counts
 
+    def purge_user_profile_data(self, user_id: str) -> dict[str, int]:
+        """Irreversibly remove one user's profiles and memory-palace items.
+
+        The shared maintenance lock and generation fence ensure an in-flight scoped
+        profile write cannot resurrect data after this operation completes.
+        """
+
+        uid = str(user_id or "").strip()
+        if not uid:
+            raise ValueError("user_id is required")
+        counts = {
+            "core_profiles": 0,
+            "local_profiles": 0,
+            "memory_items": 0,
+        }
+        with self.maintenance_lock:
+            self._advance_profile_generation_unlocked()
+            core_path = self.shared_dir / "core_user_profiles.db"
+            if core_path.is_file():
+                with _connect(core_path) as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    cursor = conn.execute("DELETE FROM profiles WHERE user_id=?", (uid,))
+                    counts["core_profiles"] = max(0, int(cursor.rowcount or 0))
+                    conn.commit()
+
+            for group_id in self.list_groups():
+                local_path = self.groups_dir / group_id / "local_user_profiles.db"
+                if not local_path.is_file():
+                    continue
+                with _connect(local_path) as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    cursor = conn.execute("DELETE FROM profiles WHERE user_id=?", (uid,))
+                    counts["local_profiles"] += max(0, int(cursor.rowcount or 0))
+                    conn.commit()
+
+            palace_path = self.memory_palace_dir / "memory_palace.db"
+            if palace_path.is_file():
+                with _connect(palace_path) as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    rows = conn.execute(
+                        "SELECT memory_id FROM memory_items WHERE user_id=?",
+                        (uid,),
+                    ).fetchall()
+                    memory_ids = [str(row["memory_id"] or "") for row in rows]
+                    for memory_id in memory_ids:
+                        conn.execute(
+                            "DELETE FROM memory_relations WHERE source_memory_id=? OR target_ref=?",
+                            (memory_id, memory_id),
+                        )
+                        conn.execute("DELETE FROM memory_entities WHERE memory_id=?", (memory_id,))
+                        conn.execute("DELETE FROM memory_embeddings WHERE memory_id=?", (memory_id,))
+                        conn.execute("DELETE FROM memory_vector_chunks WHERE memory_id=?", (memory_id,))
+                        if self._fts_available:
+                            conn.execute("DELETE FROM memory_fts WHERE memory_id=?", (memory_id,))
+                    cursor = conn.execute("DELETE FROM memory_items WHERE user_id=?", (uid,))
+                    counts["memory_items"] = max(0, int(cursor.rowcount or 0))
+                    conn.commit()
+        return counts
+
     def get_profile_generation(self) -> int:
         with self.maintenance_lock:
             return _PROFILE_GENERATIONS.get(self._profile_generation_key, 0)

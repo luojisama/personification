@@ -1,7 +1,8 @@
 FORMAT = "personification-data-package"
-VERSION = 1
+VERSION = 2
+SUPPORTED_VERSIONS = frozenset({1, 2})
 
-DATASETS = (
+V1_DATASETS = (
     "group_messages",
     "session_messages",
     "conversation_threads",
@@ -12,6 +13,11 @@ DATASETS = (
     "group_memories",
 )
 
+DATASETS = (
+    *V1_DATASETS,
+    "avatar_relation_evidence",
+)
+
 DEFAULT_DATASETS = (
     "conversation_threads",
     "group_relation_edges",
@@ -19,6 +25,7 @@ DEFAULT_DATASETS = (
     "group_state",
     "local_user_profiles",
     "group_memories",
+    "avatar_relation_evidence",
 )
 
 TABLE_FIELDS = {
@@ -27,6 +34,13 @@ TABLE_FIELDS = {
     "conversation_threads": ("thread_id", "group_id", "topic_summary", "participants", "created_at", "last_active_at"),
     "group_relation_edges": ("group_id", "src_user_id", "dst_user_id", "edge_kind", "weight", "last_seen_at", "sample_msg_id"),
     "group_style_snapshots": ("id", "group_id", "style_text", "style_json", "created_at"),
+    # Avatar hashes bind evidence to source-side assets and therefore never cross
+    # a transfer boundary. Imported visual priors remain short-lived and can be
+    # refreshed locally from current avatars.
+    "avatar_relation_evidence": (
+        "group_id", "left_user_id", "right_user_id", "relation", "confidence",
+        "evidence_tags", "asset_kinds", "schema_version", "observed_at", "expires_at",
+    ),
 }
 
 PRIMARY_KEYS = {
@@ -35,6 +49,7 @@ PRIMARY_KEYS = {
     "conversation_threads": ("thread_id",),
     "group_relation_edges": ("group_id", "src_user_id", "dst_user_id", "edge_kind"),
     "group_style_snapshots": ("id",),
+    "avatar_relation_evidence": ("group_id", "left_user_id", "right_user_id"),
 }
 
 GROUP_CONFIG_FIELDS = frozenset({
@@ -50,7 +65,7 @@ GROUP_KV_NAMESPACES = frozenset({
 
 EXCLUDED_CATEGORIES = (
     "credentials", "auth", "log", "audit", "trace", "token",
-    "provider_health", "tasks", "proactive", "qzone",
+    "provider_health", "tasks", "proactive", "qzone", "user_policy",
 )
 
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024

@@ -184,7 +184,7 @@ def register_qzone_permission_recheck_job(
     permission_recheck_job: Any,
     logger: Any,
 ) -> None:
-    """每周重检 qzone_permission_blocked 中的 uid 是否重新可访问。"""
+    """每周重检 qzone_access_denied 中的 uid 是否重新可访问。"""
     try:
         scheduler.add_job(
             permission_recheck_job,

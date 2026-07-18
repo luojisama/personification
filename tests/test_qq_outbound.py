@@ -168,6 +168,58 @@ def test_preview_redacts_sensitive_material_and_hmac_requires_key(tmp_path) -> N
         qq_outbound.QQOutboundLedger(db_path, content_hmac_key=b"short")
 
 
+def test_recent_admin_view_is_filterable_and_never_exposes_hmac(tmp_path) -> None:
+    ledger, _db_path = _ledger(tmp_path, key=b"k" * 32)
+    sent = asyncio.run(
+        ledger.dispatch(
+            _context("recent-sent"),
+            "visible https://secret.example token=hidden",
+            lambda: {"message_id": 123},
+            now=100,
+        )
+    )
+    ledger.begin(
+        _context("recent-private", kind="private", conversation_id="10001"),
+        "private",
+        now=101,
+    )
+
+    rows = ledger.list_recent(
+        bot_id="bot-1",
+        conversation_kind="group",
+        conversation_id="group-1",
+        status="sent",
+        recalled=False,
+        limit=10,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["operation_id"] == "recent-sent"
+    assert rows[0]["message_id"] == "123"
+    assert "secret.example" not in rows[0]["preview"]
+    assert set(rows[0]) == {
+        "operation_id",
+        "part_index",
+        "bot_id",
+        "conversation_kind",
+        "conversation_id",
+        "surface",
+        "message_id",
+        "status",
+        "preview",
+        "created_at",
+        "updated_at",
+        "recalled_at",
+        "recall_status",
+    }
+    assert sent.content_hmac
+    assert "content_hmac" not in rows[0]
+    assert "user_target" not in rows[0]
+
+    with pytest.raises(ValueError, match="invalid qq outbound status"):
+        ledger.list_recent(status="dispatching")
+
+
 def test_shared_policy_key_remains_available_for_hmac_without_aes(tmp_path, monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.setattr(user_policy, "AESGCM", None)
 

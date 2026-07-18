@@ -63,7 +63,7 @@ def test_every_static_table_uses_a_named_focusable_scroll_region() -> None:
         sources,
     )
 
-    assert table_count == 43
+    assert table_count == 46
     assert len(regions) == table_count
     assert len(re.findall(r'<table\b[^>]*class="[^"]*\bdata-table\b', sources)) == table_count
     assert re.findall(r'<th\b(?![^>]*\bscope="(?:col|row)")', sources) == []

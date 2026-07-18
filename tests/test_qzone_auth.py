@@ -187,6 +187,10 @@ def test_install_qzone_cookie_validates_identity_and_persists_only_after_probe(m
     assert config.personification_qzone_cookie == persisted[0]
     assert qzone_service.get_qzone_auth_status("99999")["status"] == "healthy"
     assert qzone_service.get_qzone_auth_status("10000")["status"] == "unknown"
+    capabilities = qzone_service.get_qzone_capability_status("99999", enabled=True)
+    assert capabilities["qzone.web_read"]["state"] == "available"
+    assert capabilities["qzone.web_write"]["state"] == "unknown"
+    assert capabilities["read_only"] is True
 
     mismatch = asyncio.run(
         qzone_service.install_qzone_cookie(
@@ -200,3 +204,54 @@ def test_install_qzone_cookie_validates_identity_and_persists_only_after_probe(m
     )
     assert mismatch == (False, "account_mismatch")
     assert persisted == ["uin=o99999; p_uin=o99999; skey=s-key; p_skey=p-secret;"]
+
+
+def test_cookie_recovery_reopens_only_auth_degraded_write_for_manual_probe(monkeypatch) -> None:  # noqa: ANN001
+    config = SimpleNamespace(personification_qzone_cookie="")
+    monkeypatch.setattr(qzone_service, "_persist_cookie_to_env", lambda *_args: None)
+
+    async def probe(_cookie: str, _qq: str, _p_skey: str) -> tuple[bool, str]:
+        return True, "ok"
+
+    qzone_service._set_qzone_auth_failure(
+        "expired",
+        auth_failure=True,
+        bot_id="99999",
+    )
+    before = qzone_service.get_qzone_capability_status("99999", enabled=True)
+    assert before["qzone.web_write"]["state"] == "unavailable"
+    ok, _message = asyncio.run(
+        qzone_service.install_qzone_cookie(
+            cookie="uin=o99999; p_skey=p-secret;",
+            expected_bot_id="99999",
+            plugin_config=config,
+            logger=_Logger(),
+            source="manual",
+            probe=probe,
+        )
+    )
+    recovered = qzone_service.get_qzone_capability_status("99999", enabled=True)
+    assert ok is True
+    assert recovered["qzone.web_read"]["state"] == "available"
+    assert recovered["qzone.web_write"]["state"] == "unknown"
+    assert recovered["qzone.web_write"]["reason_code"] == "auth_recovered_write_unverified"
+
+    qzone_service._set_qzone_capability(
+        "99999",
+        "qzone.web_write",
+        "unavailable",
+        "explicit_failure",
+    )
+    asyncio.run(
+        qzone_service.install_qzone_cookie(
+            cookie="uin=o99999; p_skey=p-secret;",
+            expected_bot_id="99999",
+            plugin_config=config,
+            logger=_Logger(),
+            source="manual",
+            probe=probe,
+        )
+    )
+    explicit = qzone_service.get_qzone_capability_status("99999", enabled=True)
+    assert explicit["qzone.web_write"]["state"] == "unavailable"
+    assert explicit["qzone.web_write"]["reason_code"] == "explicit_failure"

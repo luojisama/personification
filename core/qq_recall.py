@@ -141,6 +141,7 @@ class QQRecallService:
         window_seconds: float,
         surfaces: Iterable[str] | None,
         claim: bool,
+        preferred_operation_id: str = "",
     ) -> RecallClaim | QQRecallResult:
         allowed_surfaces = sorted(
             {
@@ -182,6 +183,10 @@ class QQRecallService:
         if preferred_message_id is not None:
             where += " AND message_id=?"
             params.append(str(preferred_message_id))
+        exact_operation_id = str(preferred_operation_id or "").strip()
+        if exact_operation_id:
+            where += " AND operation_id=?"
+            params.append(exact_operation_id)
 
         with connect_sync(self.ledger.db_path) as conn:
             if claim:
@@ -224,13 +229,38 @@ class QQRecallService:
 
             all_operation_rows = conn.execute(
                 """
-                SELECT status, message_id, user_target, created_at, updated_at
+                SELECT bot_id, conversation_kind, conversation_id, surface,
+                       status, message_id, user_target, created_at, updated_at,
+                       recalled_at
                 FROM qq_outbound_ledger
-                WHERE operation_id=? AND bot_id=?
-                  AND conversation_kind=? AND conversation_id=?
+                WHERE operation_id=?
                 """,
-                (outbound_operation_id, bot_id, conversation_kind, conversation_id),
+                (outbound_operation_id,),
             ).fetchall()
+            if not all_operation_rows or any(
+                str(row["bot_id"]) != bot_id
+                or str(row["conversation_kind"]) != conversation_kind
+                or str(row["conversation_id"]) != conversation_id
+                for row in all_operation_rows
+            ):
+                if claim:
+                    conn.commit()
+                return QQRecallResult(
+                    "no_candidate",
+                    "operation_scope_mismatch",
+                    outbound_operation_id=outbound_operation_id,
+                )
+            if any(
+                str(row["surface"] or "").strip() not in allowed_surfaces
+                for row in all_operation_rows
+            ):
+                if claim:
+                    conn.commit()
+                return QQRecallResult(
+                    "no_candidate",
+                    "operation_surface_not_allowed",
+                    outbound_operation_id=outbound_operation_id,
+                )
             if any(
                 str(row["status"]) != "sent"
                 or row["message_id"] is None
@@ -242,6 +272,14 @@ class QQRecallService:
                 return QQRecallResult(
                     "no_candidate",
                     "operation_incomplete",
+                    outbound_operation_id=outbound_operation_id,
+                )
+            if any(float(row["recalled_at"] or 0) > 0 for row in all_operation_rows):
+                if claim:
+                    conn.commit()
+                return QQRecallResult(
+                    "no_candidate",
+                    "already_recalled",
                     outbound_operation_id=outbound_operation_id,
                 )
             if any(
@@ -649,18 +687,89 @@ class QQRecallService:
         if isinstance(selected, QQRecallResult):
             return selected
 
+        return await self._execute_claim(bot=bot, claim=selected)
+
+    async def recall_operation(
+        self,
+        *,
+        bot: Any,
+        operation_id: str,
+        conversation_kind: str,
+        conversation_id: str,
+        requester_user_id: str,
+        cutoff: float | None = None,
+        window_seconds: float = DEFAULT_RECALL_WINDOW_SECONDS,
+    ) -> QQRecallResult:
+        """Claim and recall one exact administrator-selected operation."""
+
+        bot_id = str(getattr(bot, "self_id", "") or "").strip()
+        normalized_kind = str(conversation_kind or "").strip().lower()
+        normalized_conversation_id = str(conversation_id or "").strip()
+        normalized_operation_id = str(operation_id or "").strip()
+        if (
+            not bot_id
+            or bot_id == "0"
+            or normalized_kind not in {"group", "private"}
+            or not normalized_conversation_id.isdigit()
+            or int(normalized_conversation_id) <= 0
+            or not normalized_operation_id
+            or len(normalized_operation_id) > 200
+            or any(ord(char) < 32 for char in normalized_operation_id)
+        ):
+            return QQRecallResult("no_candidate", "invalid_scope")
+        selection_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._selection_sync,
+                bot_id=bot_id,
+                conversation_kind=normalized_kind,
+                conversation_id=normalized_conversation_id,
+                requester_user_id=str(requester_user_id or "").strip(),
+                actor_kind="admin",
+                trigger_kind="admin_command",
+                cutoff=float(cutoff or self._clock()),
+                current_operation_id="",
+                preferred_message_id=None,
+                window_seconds=window_seconds,
+                surfaces=None,
+                claim=True,
+                preferred_operation_id=normalized_operation_id,
+            )
+        )
+        try:
+            selected = await asyncio.shield(selection_task)
+        except asyncio.CancelledError:
+            selected = await selection_task
+            if isinstance(selected, RecallClaim):
+                await asyncio.to_thread(
+                    self._mark_remaining_unknown_sync,
+                    selected,
+                    error_code="cancelled_during_claim",
+                )
+                await asyncio.to_thread(self._finish_operation_sync, selected)
+            raise
+        if isinstance(selected, QQRecallResult):
+            return selected
+        return await self._execute_claim(bot=bot, claim=selected)
+
+    async def _execute_claim(
+        self,
+        *,
+        bot: Any,
+        claim: RecallClaim,
+    ) -> QQRecallResult:
+
         adapter = self._protocol_adapter_getter(
             bot,
             plugin_config=self.plugin_config,
             logger=self.logger,
         )
         try:
-            for item in selected.items:
+            for item in claim.items:
                 protocol_result = await adapter.recall_message(message_id=item.message_id)
                 item_status, code = self._map_protocol_result(protocol_result)
                 await asyncio.to_thread(
                     self._finalize_item_sync,
-                    selected,
+                    claim,
                     item,
                     status=item_status,
                     error_code=code,
@@ -668,7 +777,7 @@ class QQRecallService:
                 if item_status == "unknown":
                     await asyncio.to_thread(
                         self._mark_remaining_unknown_sync,
-                        selected,
+                        claim,
                         error_code="not_attempted_after_unknown",
                     )
                     break
@@ -676,13 +785,13 @@ class QQRecallService:
             cleanup_task = asyncio.create_task(
                 asyncio.to_thread(
                     self._mark_remaining_unknown_sync,
-                    selected,
+                    claim,
                     error_code="cancelled",
                 )
             )
             await asyncio.shield(cleanup_task)
             finish_task = asyncio.create_task(
-                asyncio.to_thread(self._finish_operation_sync, selected)
+                asyncio.to_thread(self._finish_operation_sync, claim)
             )
             await asyncio.shield(finish_task)
             raise
@@ -690,18 +799,18 @@ class QQRecallService:
             cleanup_task = asyncio.create_task(
                 asyncio.to_thread(
                     self._mark_remaining_unknown_sync,
-                    selected,
+                    claim,
                     error_code=f"internal_{type(exc).__name__}",
                 )
             )
             await asyncio.shield(cleanup_task)
-            return await asyncio.to_thread(self._finish_operation_sync, selected)
-        result = await asyncio.to_thread(self._finish_operation_sync, selected)
+            return await asyncio.to_thread(self._finish_operation_sync, claim)
+        result = await asyncio.to_thread(self._finish_operation_sync, claim)
         if self.logger is not None:
             self.logger.info(
                 "[qq_recall] "
                 f"status={result.status} code={result.code} "
-                f"scope={selected.conversation_kind} total={result.total_count} "
+                f"scope={claim.conversation_kind} total={result.total_count} "
                 f"recalled={result.recalled_count}"
             )
         return result

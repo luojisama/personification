@@ -480,10 +480,37 @@ def test_publish_service_returns_structured_write_classification(monkeypatch, re
         ),
         _Logger(),
     )
-    result = asyncio.run(publish("结构化正文", "10001"))
+    result = asyncio.run(
+        publish("结构化正文", "10001", allow_unknown_write=True)
+    )
 
     assert isinstance(result, qzone_service.QzoneWriteResult)
     assert result.status == expected
+    capability = qzone_service.get_qzone_capability_status("10001", enabled=True)
+    expected_capability = {
+        "succeeded": "available",
+        "definite_failure": "unavailable",
+        "unknown": "degraded",
+    }[expected]
+    assert capability["qzone.web_write"]["state"] == expected_capability
+
+
+def test_unverified_write_is_read_only_until_explicit_manual_attempt() -> None:
+    _, publish, _ = qzone_service.build_qzone_services(
+        SimpleNamespace(
+            personification_qzone_enabled=True,
+            personification_qzone_cookie="uin=o10001; skey=sk; p_skey=ps;",
+        ),
+        _Logger(),
+    )
+
+    result = asyncio.run(publish("周期任务不得探测写能力", "10001"))
+
+    assert result.status == "definite_failure"
+    assert result.result_code == "preflight_web_write_unknown"
+    capability = qzone_service.get_qzone_capability_status("10001", enabled=True)
+    assert capability["qzone.web_write"]["state"] == "unknown"
+    assert capability["write_available"] is False
 
 
 def test_qzone_gif_image_keeps_real_type_and_publishes_complete_media_fields(monkeypatch) -> None:  # noqa: ANN001
@@ -532,7 +559,13 @@ def test_qzone_gif_image_keeps_real_type_and_publishes_complete_media_fields(mon
         _Logger(),
     )
 
-    result = asyncio.run(publish(f"结构化配图正文 [IMAGE_B64]{marker}[/IMAGE_B64]", "10001"))
+    result = asyncio.run(
+        publish(
+            f"结构化配图正文 [IMAGE_B64]{marker}[/IMAGE_B64]",
+            "10001",
+            allow_unknown_write=True,
+        )
+    )
     requests = [item for item in calls if "url" in item]
 
     assert result.status == "succeeded"
@@ -590,7 +623,13 @@ def test_qzone_image_upload_failure_stops_before_publish(monkeypatch) -> None:  
         _Logger(),
     )
 
-    result = asyncio.run(publish(f"图片失败正文 [IMAGE_B64]{marker}[/IMAGE_B64]", "10001"))
+    result = asyncio.run(
+        publish(
+            f"图片失败正文 [IMAGE_B64]{marker}[/IMAGE_B64]",
+            "10001",
+            allow_unknown_write=True,
+        )
+    )
 
     assert result.status == "definite_failure"
     assert result.result_code == "image_upload_rejected"
@@ -622,7 +661,9 @@ def test_publish_network_interruption_after_post_is_unknown(monkeypatch) -> None
         _Logger(),
     )
 
-    result = asyncio.run(publish("网络中断正文", "10001"))
+    result = asyncio.run(
+        publish("网络中断正文", "10001", allow_unknown_write=True)
+    )
     assert result.status == "unknown"
 
 

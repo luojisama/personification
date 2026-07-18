@@ -1100,6 +1100,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     recent_group_msgs: List[Dict[str, Any]] = []
     if isinstance(event, types.group_message_event_cls) and not state.get("message_target"):
         recent_group_msgs = get_recent_group_msgs(str(group_id), limit=8, expire_hours=0)
+        if getattr(runtime, "user_policy_gate", None) is not None:
+            recent_group_msgs, _ = await runtime.user_policy_gate.filter_context_messages(
+                recent_group_msgs,
+                bot_self_id=str(getattr(bot, "self_id", "") or ""),
+            )
         state["message_target"] = infer_message_target(
             event,
             bot_self_id=str(getattr(bot, "self_id", "") or ""),
@@ -1320,12 +1325,21 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             limit=8,
             include_message_ids=[incoming_relation_metadata.get("reply_to_msg_id")],
         )
+        excluded_context_user_ids: set[str] = set()
+        if getattr(runtime, "user_policy_gate", None) is not None:
+            recent_window, excluded_context_user_ids = (
+                await runtime.user_policy_gate.filter_context_messages(
+                    recent_window,
+                    bot_self_id=bot_self_id,
+                )
+            )
         conversation_context = build_group_conversation_context(
             recent_messages=recent_window,
             trigger_msg_id=str(incoming_relation_metadata.get("message_id", "") or ""),
             trigger_user_id=user_id,
             bot_self_id=bot_self_id,
             repeat_clusters=repeat_clusters,
+            excluded_user_ids=excluded_context_user_ids,
         )
         recent_context_hint = render_group_conversation_context(conversation_context)
         relationship_hint = conversation_context.relationship_hint

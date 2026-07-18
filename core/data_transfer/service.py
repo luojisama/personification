@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import base64
 from contextlib import nullcontext
@@ -15,6 +16,12 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Iterable
 
+from ..avatar_relation_evidence import (
+    AVATAR_RELATION_EVIDENCE_ASSET_KINDS,
+    AVATAR_RELATION_EVIDENCE_RELATIONS,
+    AVATAR_RELATION_EVIDENCE_SCHEMA_VERSION,
+    AVATAR_RELATION_EVIDENCE_TAGS,
+)
 from ..db import connect_sync, get_db_path
 from ..paths import get_data_transfer_dir
 from .constants import (
@@ -23,6 +30,7 @@ from .constants import (
     MAX_ENTRIES, MAX_ENTRY_BYTES, PRIMARY_KEYS, TABLE_FIELDS, VERSION,
     ARTIFACT_RETENTION_SECONDS, BACKUP_RETENTION_SECONDS, MEMORY_PAYLOAD_FIELDS,
     PLAN_TOKEN_TTL_SECONDS,
+    SUPPORTED_VERSIONS, V1_DATASETS,
 )
 
 
@@ -43,10 +51,18 @@ def _sha256(payload: bytes) -> str:
 
 
 class DataTransferService:
-    def __init__(self, *, data_dir: Path | None = None, db_path: Path | None = None, memory_store: Any = None) -> None:
+    def __init__(
+        self,
+        *,
+        data_dir: Path | None = None,
+        db_path: Path | None = None,
+        memory_store: Any = None,
+        user_policy_service: Any = None,
+    ) -> None:
         self.root = Path(data_dir) if data_dir else get_data_transfer_dir()
         self.db_path = Path(db_path) if db_path else get_db_path()
         self.memory_store = memory_store
+        self.user_policy_service = user_policy_service
         for name in ("exports", "uploads", "backups"):
             (self.root / name).mkdir(parents=True, exist_ok=True)
         self._cleanup_stale_artifacts()
@@ -254,6 +270,184 @@ class DataTransferService:
         safe["thread_id"] = thread_id if not thread_id or thread_id.startswith(f"{group_id}:") else ""
         return safe
 
+    @staticmethod
+    def _human_group_message(row: dict[str, Any]) -> bool:
+        if bool(row.get("is_bot")):
+            return False
+        return str(row.get("source_kind", "") or "").strip().lower() not in {
+            "bot",
+            "bot_reply",
+            "plugin",
+            "plugin_command",
+            "system",
+        }
+
+    def _active_blocked_user_ids(self, user_ids: Iterable[Any]) -> set[str]:
+        service = self.user_policy_service
+        if service is None or not callable(getattr(service, "authorize", None)):
+            return set()
+        blocked: set[str] = set()
+        for user_id in sorted(
+            {
+                str(value or "").strip()
+                for value in user_ids
+                if str(value or "").strip()
+            }
+        ):
+            try:
+                authorization = service.authorize(user_id)
+                allowed = (
+                    not bool(getattr(authorization, "blocked", True))
+                    and bool(getattr(authorization, "allow_context_read", False))
+                )
+            except Exception:
+                allowed = False
+            if not allowed:
+                blocked.add(user_id)
+        return blocked
+
+    @staticmethod
+    def _participant_ids(value: Any) -> list[str]:
+        try:
+            parsed = json.loads(value) if isinstance(value, str) else value
+        except Exception:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        result: list[str] = []
+        for item in parsed:
+            if isinstance(item, dict):
+                candidate = item.get("user_id") or item.get("id")
+            else:
+                candidate = item
+            normalized = str(candidate or "").strip()
+            if normalized:
+                result.append(normalized)
+        return result
+
+    def _filter_policy_values(self, values: dict[str, Any]) -> dict[str, Any]:
+        if self.user_policy_service is None:
+            return values
+        user_ids: set[str] = set()
+        for name, data in values.items():
+            if not isinstance(data, list):
+                if name == "group_state" and isinstance(data, dict):
+                    aliases = (data.get("kv") or {}).get("group_member_aliases")
+                    if isinstance(aliases, dict):
+                        user_ids.update(str(key or "").strip() for key in aliases)
+                continue
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                if name == "group_messages":
+                    if self._human_group_message(row):
+                        user_ids.add(str(row.get("user_id", "") or "").strip())
+                    user_ids.add(str(row.get("reply_to_user_id", "") or "").strip())
+                    try:
+                        mentions = json.loads(row.get("mentioned_ids") or "[]")
+                    except Exception:
+                        mentions = []
+                    if isinstance(mentions, list):
+                        user_ids.update(str(value or "").strip() for value in mentions)
+                elif name == "group_relation_edges":
+                    user_ids.update(
+                        {
+                            str(row.get("src_user_id", "") or "").strip(),
+                            str(row.get("dst_user_id", "") or "").strip(),
+                        }
+                    )
+                elif name == "avatar_relation_evidence":
+                    user_ids.update(
+                        {
+                            str(row.get("left_user_id", "") or "").strip(),
+                            str(row.get("right_user_id", "") or "").strip(),
+                        }
+                    )
+                elif name in {"local_user_profiles", "group_memories"}:
+                    user_ids.add(str(row.get("user_id", "") or "").strip())
+                elif name == "conversation_threads":
+                    user_ids.update(self._participant_ids(row.get("participants")))
+        user_ids.discard("")
+        blocked = self._active_blocked_user_ids(user_ids)
+        if not blocked:
+            return values
+
+        filtered: dict[str, Any] = {}
+        for name, data in values.items():
+            if name == "group_state" and isinstance(data, dict):
+                copied = {
+                    "group_config": dict(data.get("group_config") or {}),
+                    "kv": dict(data.get("kv") or {}),
+                }
+                aliases = copied["kv"].get("group_member_aliases")
+                if isinstance(aliases, dict):
+                    copied["kv"]["group_member_aliases"] = {
+                        key: value
+                        for key, value in aliases.items()
+                        if str(key or "").strip() not in blocked
+                    }
+                filtered[name] = copied
+                continue
+            if not isinstance(data, list):
+                filtered[name] = data
+                continue
+            rows: list[dict[str, Any]] = []
+            for source in data:
+                if not isinstance(source, dict):
+                    rows.append(source)
+                    continue
+                row = dict(source)
+                if (
+                    name == "group_messages"
+                    and self._human_group_message(row)
+                    and str(row.get("user_id", "") or "").strip() in blocked
+                ):
+                    continue
+                if name == "group_messages":
+                    if str(row.get("reply_to_user_id", "") or "").strip() in blocked:
+                        row["reply_to_user_id"] = None
+                        row["reply_to_msg_id"] = None
+                    try:
+                        mentions = json.loads(row.get("mentioned_ids") or "[]")
+                    except Exception:
+                        mentions = []
+                    if isinstance(mentions, list):
+                        row["mentioned_ids"] = json.dumps(
+                            [
+                                value
+                                for value in mentions
+                                if str(value or "").strip() not in blocked
+                            ],
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                elif name == "group_relation_edges" and (
+                    str(row.get("src_user_id", "") or "").strip() in blocked
+                    or str(row.get("dst_user_id", "") or "").strip() in blocked
+                ):
+                    continue
+                elif name == "avatar_relation_evidence" and (
+                    str(row.get("left_user_id", "") or "").strip() in blocked
+                    or str(row.get("right_user_id", "") or "").strip() in blocked
+                ):
+                    continue
+                elif name in {"local_user_profiles", "group_memories"} and (
+                    str(row.get("user_id", "") or "").strip() in blocked
+                ):
+                    continue
+                elif name == "conversation_threads":
+                    participants = self._participant_ids(row.get("participants"))
+                    if any(user_id in blocked for user_id in participants):
+                        row["participants"] = json.dumps(
+                            [user_id for user_id in participants if user_id not in blocked],
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        row["topic_summary"] = ""
+                rows.append(row)
+            filtered[name] = rows
+        return filtered
+
     def create_export(self, *, bot_id: str, group_id: str, datasets: Iterable[str] | None = None) -> dict[str, Any]:
         bot_id, group_id = str(bot_id).strip(), str(group_id).strip()
         if not bot_id or not group_id:
@@ -265,7 +459,7 @@ class DataTransferService:
         target = self.root / "exports" / f"{package_id}.zip"
         self._task(task_id, "export", "running", package_id=package_id, group_id=group_id, bot_id=bot_id)
         try:
-            payloads: dict[str, bytes] = {}
+            values: dict[str, Any] = {}
             with self._conn() as conn:
                 for name in selected:
                     if name == "group_state":
@@ -276,7 +470,12 @@ class DataTransferService:
                         value = self._group_memories(group_id)
                     else:
                         value = self._table_rows(conn, name, group_id)
-                    payloads[f"datasets/{name}.json"] = _json_bytes(value)
+                    values[name] = value
+            values = self._filter_policy_values(values)
+            payloads = {
+                f"datasets/{name}.json": _json_bytes(values[name])
+                for name in selected
+            }
             files = {name: {"sha256": _sha256(data), "size": len(data)} for name, data in payloads.items()}
             manifest = {
                 "format": FORMAT, "version": VERSION, "package_id": package_id,
@@ -387,10 +586,13 @@ class DataTransferService:
                     raise DataTransferError(f"checksum mismatch: {name}")
                 values[name.removeprefix("datasets/").removesuffix(".json")] = json.loads(data)
         self._validate_values(manifest, values)
-        return manifest, values
+        return manifest, self._filter_policy_values(values)
 
     def _validate_manifest(self, manifest: Any) -> None:
-        if not isinstance(manifest, dict) or manifest.get("format") != FORMAT or manifest.get("version") != VERSION:
+        if not isinstance(manifest, dict) or manifest.get("format") != FORMAT:
+            raise DataTransferError("unsupported manifest")
+        version = manifest.get("version")
+        if isinstance(version, bool) or version not in SUPPORTED_VERSIONS:
             raise DataTransferError("unsupported manifest")
         scope = manifest.get("scope")
         source = manifest.get("source")
@@ -399,7 +601,8 @@ class DataTransferService:
             raise DataTransferError("invalid group scope")
         if not isinstance(source, dict) or source.get("group_id") != scope.get("group_id") or not str(source.get("bot_id", "")):
             raise DataTransferError("invalid source identity")
-        if not isinstance(datasets, list) or len(datasets) != len(set(datasets)) or any(x not in DATASETS for x in datasets):
+        allowed_datasets = V1_DATASETS if version == 1 else DATASETS
+        if not isinstance(datasets, list) or len(datasets) != len(set(datasets)) or any(x not in allowed_datasets for x in datasets):
             raise DataTransferError("invalid datasets")
         expected = {f"datasets/{name}.json" for name in datasets}
         files = manifest.get("files")
@@ -459,6 +662,59 @@ class DataTransferService:
                 scoped = row["session_id"] == f"group_{group_id}" if name == "session_messages" else str(row["group_id"]) == group_id
                 if not scoped:
                     raise DataTransferError(f"cross-group row: {name}")
+                if name == "avatar_relation_evidence":
+                    self._validate_avatar_relation_evidence(row)
+
+    @staticmethod
+    def _validate_avatar_relation_evidence(row: dict[str, Any]) -> None:
+        left = str(row.get("left_user_id", "") or "").strip()
+        right = str(row.get("right_user_id", "") or "").strip()
+        if any(
+            not value.isascii() or not value.isdecimal() or int(value) <= 0
+            for value in (left, right)
+        ) or left >= right:
+            raise DataTransferError("invalid avatar relation identity")
+        relation = str(row.get("relation", "") or "").strip().lower()
+        if relation not in AVATAR_RELATION_EVIDENCE_RELATIONS:
+            raise DataTransferError("invalid avatar relation kind")
+        confidence = row.get("confidence")
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence))
+            or not 0.0 <= float(confidence) <= 1.0
+        ):
+            raise DataTransferError("invalid avatar relation confidence")
+        for field, allowed, limit in (
+            ("evidence_tags", AVATAR_RELATION_EVIDENCE_TAGS, 12),
+            ("asset_kinds", AVATAR_RELATION_EVIDENCE_ASSET_KINDS, 2),
+        ):
+            try:
+                items = json.loads(row.get(field))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise DataTransferError(f"invalid avatar relation {field}") from exc
+            if (
+                not isinstance(items, list)
+                or len(items) > limit
+                or any(not isinstance(item, str) or item not in allowed for item in items)
+                or len(items) != len(set(items))
+            ):
+                raise DataTransferError(f"invalid avatar relation {field}")
+        schema_version = row.get("schema_version")
+        if (
+            isinstance(schema_version, bool)
+            or schema_version != AVATAR_RELATION_EVIDENCE_SCHEMA_VERSION
+        ):
+            raise DataTransferError("unsupported avatar relation schema")
+        observed_at = row.get("observed_at")
+        expires_at = row.get("expires_at")
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in (observed_at, expires_at)
+        ) or float(expires_at) <= float(observed_at):
+            raise DataTransferError("invalid avatar relation lifetime")
 
     def inspect(self, task_id: str) -> dict[str, Any]:
         manifest, values = self._validated_package(task_id)
@@ -505,6 +761,9 @@ class DataTransferService:
             lock.release()
 
     def _apply_locked(self, task_id: str, manifest: dict[str, Any], values: dict[str, Any], target_bot_id: str, target_group_id: str, mode: str) -> dict[str, Any]:
+        # Re-evaluate policy immediately before acquiring persistence snapshots so
+        # a user blocked after dry-run cannot be imported through a stale plan.
+        values = self._filter_policy_values(values)
         self._recover_interrupted(target_bot_id, target_group_id)
         with self._conn() as conn:
             prior = conn.execute("SELECT journal_id FROM data_transfer_journal WHERE package_id=? AND group_id=? AND bot_id=? AND mode=? AND status='applied'", (manifest["package_id"], target_group_id, target_bot_id, mode)).fetchone()
@@ -586,10 +845,69 @@ class DataTransferService:
                 if row and str(row[0] or "") != str(group_id):
                     raise DataTransferError("memory id belongs to another group")
 
+    def _delete_scope_rows_for_replace(
+        self,
+        conn: sqlite3.Connection,
+        name: str,
+        group_id: str,
+    ) -> None:
+        if name == "session_messages":
+            conn.execute("DELETE FROM session_messages WHERE session_id=?", (f"group_{group_id}",))
+            return
+        if name not in {
+            "group_messages",
+            "group_relation_edges",
+            "avatar_relation_evidence",
+        } or self.user_policy_service is None:
+            conn.execute(f"DELETE FROM {name} WHERE group_id=?", (group_id,))
+            return
+        if name == "group_messages":
+            rows = conn.execute(
+                "SELECT DISTINCT user_id FROM group_messages WHERE group_id=?",
+                (group_id,),
+            ).fetchall()
+            blocked = self._active_blocked_user_ids(row["user_id"] for row in rows)
+            columns = ("user_id",)
+        elif name == "group_relation_edges":
+            rows = conn.execute(
+                "SELECT src_user_id,dst_user_id FROM group_relation_edges WHERE group_id=?",
+                (group_id,),
+            ).fetchall()
+            blocked = self._active_blocked_user_ids(
+                value
+                for row in rows
+                for value in (row["src_user_id"], row["dst_user_id"])
+            )
+            columns = ("src_user_id", "dst_user_id")
+        else:
+            rows = conn.execute(
+                "SELECT left_user_id,right_user_id FROM avatar_relation_evidence WHERE group_id=?",
+                (group_id,),
+            ).fetchall()
+            blocked = self._active_blocked_user_ids(
+                value
+                for row in rows
+                for value in (row["left_user_id"], row["right_user_id"])
+            )
+            columns = ("left_user_id", "right_user_id")
+        if not blocked:
+            conn.execute(f"DELETE FROM {name} WHERE group_id=?", (group_id,))
+            return
+        placeholders = ",".join("?" for _ in blocked)
+        protected = " OR ".join(
+            f"{column} IN ({placeholders})" for column in columns
+        )
+        params: list[Any] = [group_id]
+        for _column in columns:
+            params.extend(sorted(blocked))
+        conn.execute(
+            f"DELETE FROM {name} WHERE group_id=? AND NOT ({protected})",
+            tuple(params),
+        )
+
     def _apply_rows(self, conn: sqlite3.Connection, name: str, group_id: str, rows: list[dict[str, Any]], mode: str) -> None:
         if mode == "scope-replace":
-            clause, value = ("session_id=?", f"group_{group_id}") if name == "session_messages" else ("group_id=?", group_id)
-            conn.execute(f"DELETE FROM {name} WHERE {clause}", (value,))
+            self._delete_scope_rows_for_replace(conn, name, group_id)
         fields = TABLE_FIELDS[name]
         sql = f"INSERT OR REPLACE INTO {name}({','.join(fields)}) VALUES({','.join('?' for _ in fields)})"
         for row in rows:
@@ -683,7 +1001,16 @@ class DataTransferService:
                 _palace, local_path = self._memory_paths(group_id)
                 if local_path is not None and local_path.is_file():
                     with sqlite3.connect(local_path) as conn:
-                        conn.execute("DELETE FROM profiles")
+                        existing = conn.execute("SELECT user_id FROM profiles").fetchall()
+                        blocked = self._active_blocked_user_ids(row[0] for row in existing)
+                        if blocked:
+                            placeholders = ",".join("?" for _ in blocked)
+                            conn.execute(
+                                f"DELETE FROM profiles WHERE user_id NOT IN ({placeholders})",
+                                tuple(sorted(blocked)),
+                            )
+                        else:
+                            conn.execute("DELETE FROM profiles")
                         conn.commit()
             for row in profiles:
                 store.upsert_local_profile(
@@ -699,10 +1026,22 @@ class DataTransferService:
             palace_path, _local = self._memory_paths(group_id)
             if mode == "scope-replace" and palace_path is not None and palace_path.is_file():
                 with sqlite3.connect(palace_path) as conn:
-                    ids = [row[0] for row in conn.execute("SELECT memory_id FROM memory_items WHERE group_id=?", (group_id,)).fetchall()]
+                    existing = conn.execute(
+                        "SELECT memory_id,user_id FROM memory_items WHERE group_id=?",
+                        (group_id,),
+                    ).fetchall()
+                    blocked = self._active_blocked_user_ids(row[1] for row in existing)
+                    ids = [
+                        row[0]
+                        for row in existing
+                        if str(row[1] or "").strip() not in blocked
+                    ]
                     for table, column in (("memory_fts", "memory_id"), ("memory_embeddings", "memory_id"), ("memory_vector_chunks", "memory_id"), ("memory_entities", "memory_id"), ("memory_relations", "source_memory_id")):
                         conn.executemany(f"DELETE FROM {table} WHERE {column}=?", ((item,) for item in ids))
-                    conn.execute("DELETE FROM memory_items WHERE group_id=?", (group_id,))
+                    conn.executemany(
+                        "DELETE FROM memory_items WHERE memory_id=? AND group_id=?",
+                        ((item, group_id) for item in ids),
+                    )
                     conn.commit()
             for item in memories:
                 store.write_memory_item(self._safe_memory_payload(item, group_id))

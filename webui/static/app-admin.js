@@ -1297,6 +1297,13 @@ function renderQzoneLive() {
   const enabledPill = (on, label) => `<span class="device-status ${on?'approved':'pending'}">${label}：${on?'开':'关'}</span>`;
   const authByBot = q.auth_by_bot && typeof q.auth_by_bot === 'object' ? q.auth_by_bot : {};
   const auth = authByBot[state.qzoneBotId] || q.auth || {}, scan = q.scan || {}, social = q.social || {}, inbound = q.inbound || {};
+  const capabilityByBot = q.capabilities_by_bot && typeof q.capabilities_by_bot === 'object' ? q.capabilities_by_bot : {};
+  const capability = capabilityByBot[state.qzoneBotId] || q.capabilities || {};
+  const cookieExportState = String((capability["qzone.cookie_export"]||{}).state||"unknown");
+  const webReadState = String((capability["qzone.web_read"]||{}).state||"unknown");
+  const webWriteState = String((capability["qzone.web_write"]||{}).state||"unknown");
+  const readOnly = Boolean(capability.read_only || q.read_only);
+  const manualWriteAllowed = webWriteState === "available" || webWriteState === "unknown";
   const statusText = auth.status === 'healthy' ? '认证正常' : auth.status === 'login_required' ? '需要登录' : auth.status === 'risk_blocked' ? '安全验证' : auth.status === 'refresh_failed' ? '刷新失败' : '尚未验证';
   const statusClass = auth.status === 'healthy' ? 'ok' : auth.status === 'unknown' ? 'info' : 'warn';
   const scanText = scan.running ? `${scan.owner==='social'?'好友动态扫描':'留言轮询'}运行 ${Number(scan.running_seconds||0)} 秒` : '当前空闲';
@@ -1320,7 +1327,11 @@ function renderQzoneLive() {
         <div><small>扫描协调器</small><strong>${scanText}</strong><span>忙碌跳过 ${Number(scan.busy_skip_count||0)} 次</span></div>
         <div><small>好友互动</small><strong>${social.job&&social.job.registered?'已注册':'未注册'}</strong><span>${escapeHtml(resultDigest(social))}</span></div>
         <div><small>留言轮询</small><strong>${inbound.job&&inbound.job.registered?'已注册':'未注册'}</strong><span>${escapeHtml(resultDigest(inbound))}</span></div>
+        <div><small>qzone.cookie_export</small><strong>${escapeHtml(cookieExportState)}</strong><span>OneBot Cookie 导出</span></div>
+        <div><small>qzone.web_read</small><strong>${escapeHtml(webReadState)}</strong><span>${webReadState==='available'?'可读取空间':'读取能力未确认'}</span></div>
+        <div><small>qzone.web_write</small><strong>${escapeHtml(webWriteState)}</strong><span>${readOnly?'read_only：写动作已停用':'写能力快照'}</span></div>
       </div>
+      ${readOnly?'<div class="alert info">QZone 当前为 read_only：读取仍可用，发布、评论、点赞与转发已停止；普通 QQ 功能不受影响。</div>':''}
       ${auth.cooldown_remaining_seconds>0?`<div class="alert err">${auth.status==='risk_blocked'?'检测到腾讯安全验证':'检测到登录失效'}，已暂停该 Bot 的空间请求，冷却剩余 ${_fmtDuration(auth.cooldown_remaining_seconds)}。</div>`:''}
       ${auth.last_error?`<p class="muted qzone-error-line">${escapeHtml(auth.last_error)}</p>`:''}
       <div class="row">
@@ -1359,7 +1370,7 @@ function renderQzoneLive() {
       <div>${escapeHtml(_fmtTs(q.last_post_at))}${q.last_content?'：'+escapeHtml(q.last_content):''}</div>
     </div>
     <div class="row" style="margin-top:14px">
-      <button class="btn primary" onclick="triggerQzonePost()" ${state.qzoneBusy?'disabled':''}>${state.qzoneBusy?'<span class="spinner"></span> 发布中…':'立即发一条'}</button>
+      <button class="btn primary" onclick="triggerQzonePost()" ${state.qzoneBusy||!manualWriteAllowed?'disabled':''}>${state.qzoneBusy?'<span class="spinner"></span> 发布中…':webWriteState==='unknown'?'立即发一条并验证写能力':'立即发一条'}</button>
       <button class="btn small" onclick="refreshQzoneSnapshot({forceRender:true,explicit:true})">刷新</button>
       <span class="muted" style="font-size:12px">「立即发一条」会强制生成并发布（绕过额度/间隔判断），但仍计入本月额度。</span>
     </div>
@@ -1730,6 +1741,238 @@ function renderPersonaDetail() {
     ${scopedCard}
     <h3 style="margin-bottom:10px">各群印象（${(p.local_profiles||[]).length}）</h3>
     ${locals || '<p class="muted">无各群画像</p>'}`;
+}
+
+function userPolicyTierLabel(value) {
+  return ({allow:"允许",level_1:"Level 1 · 12 小时",level_2:"Level 2 · 24 小时",permanent:"自动永久 Blacklist",manual_block:"管理员 Blacklist",manual_allow:"管理员允许"})[String(value||"")] || String(value||"未知");
+}
+
+function userPolicyExpiry(stateValue) {
+  const item=stateValue||{};
+  const manual=String(item.manual_mode||"");
+  const raw=(manual==="block"||manual==="allow")?Number(item.manual_expires_at||0):Number(item.auto_expires_at||0);
+  return raw>0?new Date(raw*1000).toLocaleString():"永久 / 无到期";
+}
+
+async function reloadUserPolicyList() {
+  const qs=new URLSearchParams({limit:"300"});
+  if(state.userPolicyTier)qs.set("tier",state.userPolicyTier);
+  state.userPolicy=await api("/user-policy/states?"+qs.toString(),{cache:"no-store"});
+}
+
+async function setUserPolicyTier(value) {
+  state.userPolicyTier=String(value||"");
+  state.selectedUserPolicy=null;
+  try{await reloadUserPolicyList();render();}catch(e){alertFlash("err",e.message||"用户策略读取失败");}
+}
+
+async function openUserPolicy(userId) {
+  const uid=String(userId||"");
+  state.userPolicyBusy=true;render();
+  try{
+    state.selectedUserPolicy=await api(`/user-policy/${encodeURIComponent(uid)}/events?include_evidence=true&limit=150`,{cache:"no-store"});
+  }catch(e){alertFlash("err",e.message||"策略详情读取失败");}
+  finally{state.userPolicyBusy=false;render();}
+}
+
+async function applyUserPolicyOverride(userId) {
+  const uid=String(userId||"");
+  const current=(state.selectedUserPolicy&&state.selectedUserPolicy.state)||{};
+  const mode=String(document.getElementById("user-policy-mode")?.value||"inherit");
+  const durationHours=Math.max(0,Number(document.getElementById("user-policy-hours")?.value||0));
+  const expiresAt=(mode==="inherit"||durationHours<=0)?0:(Date.now()/1000+durationHours*3600);
+  if(mode==="block"&&expiresAt===0&&!confirm(`永久 Blacklist 用户 ${uid}？`))return;
+  state.userPolicyBusy=true;render();
+  try{
+    const result=await api(`/user-policy/${encodeURIComponent(uid)}/override`,{
+      method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({mode,expected_revision:Number(current.revision||0),expires_at:expiresAt,reason_code:"webui_manual_override"}),
+    });
+    state.selectedUserPolicy={...(state.selectedUserPolicy||{}),state:result.state};
+    await reloadUserPolicyList();
+    alertFlash("ok","用户策略已更新");
+  }catch(e){alertFlash("err",e.message||"用户策略更新失败");}
+  finally{state.userPolicyBusy=false;render();}
+}
+
+async function clearUserPolicyAuto(userId) {
+  const uid=String(userId||"");
+  const current=(state.selectedUserPolicy&&state.selectedUserPolicy.state)||{};
+  if(!confirm(`清除用户 ${uid} 的自动 strikes 与自动 tier history？管理员 override 不受影响。`))return;
+  state.userPolicyBusy=true;render();
+  try{
+    const result=await api(`/user-policy/${encodeURIComponent(uid)}/clear-auto`,{
+      method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({expected_revision:Number(current.revision||0)}),
+    });
+    state.selectedUserPolicy={...(state.selectedUserPolicy||{}),state:result.state};
+    await reloadUserPolicyList();
+    alertFlash("ok","自动 strikes 已清除");
+  }catch(e){alertFlash("err",e.message||"自动状态清除失败");}
+  finally{state.userPolicyBusy=false;render();}
+}
+
+async function purgeUserPolicyProfile(userId) {
+  const uid=String(userId||"");
+  const current=(state.selectedUserPolicy&&state.selectedUserPolicy.state)||{};
+  const expected=`PURGE PROFILE ${uid}`;
+  const typed=window.prompt(`这是不可逆操作，将删除该用户所有全局/群内画像、Persona history、Memory、关系边与头像 visual evidence。\n\n请输入：${expected}`)||"";
+  if(typed!==expected){if(typed)alertFlash("err","确认串不匹配，未执行清除");return;}
+  state.userPolicyBusy=true;render();
+  try{
+    const result=await api(`/user-policy/${encodeURIComponent(uid)}/profile`,{
+      method:"DELETE",headers:{"content-type":"application/json"},
+      body:JSON.stringify({expected_revision:Number(current.revision||0),confirmation:typed}),
+    });
+    state.selectedUserPolicy={...(state.selectedUserPolicy||{}),state:result.state,purge_counts:result.counts};
+    const total=Object.values(result.counts||{}).reduce((sum,value)=>sum+Number(value||0),0);
+    alertFlash("ok",`用户画像数据已不可逆清除，共移除 ${total} 项；Policy state 保留。`);
+  }catch(e){alertFlash("err",e.message||"用户画像清除失败");}
+  finally{state.userPolicyBusy=false;render();}
+}
+
+function renderUserPolicyDetail() {
+  const detail=state.selectedUserPolicy;
+  if(!detail)return "";
+  const item=detail.state||{};
+  const uid=String(detail.user_id||item.user_id||"");
+  const events=(detail.events||[]).map(event=>{
+    const evidence=String(event.evidence_excerpt||"").trim();
+    const when=event.created_at?new Date(Number(event.created_at)*1000).toLocaleString():"-";
+    return `<tr>
+      <td class="col-time u-atomic u-tabular">${escapeHtml(when)}</td>
+      <td class="col-status u-atomic">${escapeHtml(event.event_kind||"")}</td>
+      <td class="col-status u-atomic">${escapeHtml(event.verdict||event.reason_code||"")}</td>
+      <td class="col-description u-wrap">${escapeHtml([event.category,event.intent,event.severity].filter(Boolean).join(" / "))}</td>
+      <td class="col-number u-tabular">${Number(event.confidence||0).toFixed(2)}</td>
+      <td class="col-description u-wrap">${evidence?escapeHtml(evidence):'<span class="muted">无 / 已到期</span>'}</td>
+    </tr>`;
+  }).join("");
+  return `<div class="row" style="margin-bottom:10px"><button class="btn small" onclick="state.selectedUserPolicy=null;render()">返回列表</button><span class="muted">用户 ${escapeHtml(uid)}</span></div>
+    <div class="card">
+      <div class="between" style="gap:12px;flex-wrap:wrap"><h2 style="margin:0">策略状态</h2><span class="tag tag--status">revision ${Number(item.revision||0)}</span></div>
+      <div class="row" style="gap:24px;margin-top:12px">
+        <div><div class="muted">effective tier</div><strong>${escapeHtml(userPolicyTierLabel(item.effective_tier))}</strong></div>
+        <div><div class="muted">到期</div><span class="u-tabular">${escapeHtml(userPolicyExpiry(item))}</span></div>
+        <div><div class="muted">auto stage / strikes</div><span class="u-tabular">${Number(item.auto_stage||0)} / ${Number(item.violation_count||0)}</span></div>
+        <div><div class="muted">最近更新</div><span class="u-tabular">${item.updated_at?escapeHtml(new Date(Number(item.updated_at)*1000).toLocaleString()):"-"}</span></div>
+      </div>
+      <div class="field-input" style="margin-top:14px">
+        <label>管理员策略 <select id="user-policy-mode"><option value="inherit">inherit（沿用自动状态）</option><option value="block">block</option><option value="allow">allow</option></select></label>
+        <label>临时小时数 <input id="user-policy-hours" type="number" min="0" max="8760" step="1" value="0" style="max-width:120px"></label>
+        <button class="btn small primary" onclick="applyUserPolicyOverride('${escapeAttr(uid)}')" ${state.userPolicyBusy?'disabled':''}>保存 override</button>
+        <button class="btn small" onclick="clearUserPolicyAuto('${escapeAttr(uid)}')" ${state.userPolicyBusy?'disabled':''}>清除自动 strikes</button>
+        <button class="btn small danger" onclick="purgeUserPolicyProfile('${escapeAttr(uid)}')" ${state.userPolicyBusy?'disabled':''}>彻底清除画像</button>
+      </div>
+      <p class="muted" style="font-size:11px">小时数为 0 时 block/allow 为永久 override；彻底清除画像不会删除 Policy state 或事件。所有写操作均使用当前 revision 防并发覆盖。</p>
+    </div>
+    ${detail.purge_counts?`<div class="card"><h2>最近清除结果</h2><pre class="u-pre-wrap">${escapeHtml(JSON.stringify(detail.purge_counts,null,2))}</pre></div>`:""}
+    <div class="card"><h2>事件时间线</h2>
+      <p class="muted">evidence 短摘只在此管理员详情请求中解密，页面不会写入浏览器持久存储；服务端 ciphertext 到期后自动删除。</p>
+      ${events?`<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="用户策略事件"><table class="data-table wide"><thead><tr><th scope="col">时间</th><th scope="col">类型</th><th scope="col">判定</th><th scope="col">分类</th><th scope="col">置信度</th><th scope="col">evidence 短摘</th></tr></thead><tbody>${events}</tbody></table></div>`:'<p class="muted">暂无策略事件。</p>'}
+    </div>`;
+}
+
+function renderUserPolicy() {
+  if(state.selectedUserPolicy)return renderUserPolicyDetail();
+  const rows=((state.userPolicy&&state.userPolicy.states)||[]).map(item=>`<tr>
+    <td class="u-atomic u-tabular"><button class="btn small" onclick="openUserPolicy('${escapeAttr(item.user_id)}')">${escapeHtml(item.user_id)}</button></td>
+    <td class="col-status"><span class="tag tag--status">${escapeHtml(userPolicyTierLabel(item.effective_tier))}</span></td>
+    <td class="col-time u-atomic u-tabular">${escapeHtml(userPolicyExpiry(item))}</td>
+    <td class="col-number u-tabular">${Number(item.auto_stage||0)} / ${Number(item.violation_count||0)}</td>
+    <td class="col-status u-atomic">${escapeHtml(item.manual_mode||"inherit")}</td>
+    <td class="col-number u-tabular">${Number(item.revision||0)}</td>
+    <td class="col-time u-atomic u-tabular">${item.updated_at?escapeHtml(new Date(Number(item.updated_at)*1000).toLocaleString()):"-"}</td>
+  </tr>`).join("");
+  const options=[["","全部"],["allow","允许"],["level_1","Level 1"],["level_2","Level 2"],["permanent","自动永久"],["manual_block","管理员 Blacklist"],["manual_allow","管理员允许"]].map(([value,label])=>`<option value="${escapeAttr(value)}" ${state.userPolicyTier===value?'selected':''}>${escapeHtml(label)}</option>`).join("");
+  return `<div class="card">
+    <div class="between" style="gap:12px;flex-wrap:wrap"><div><h2 style="margin:0">用户策略 / Blacklist</h2><p class="muted" style="margin:6px 0 0">全局 QQ 用户策略，跨群、私聊、Bot 身份与 QZone 生效。</p></div><label>tier <select onchange="setUserPolicyTier(this.value)">${options}</select></label></div>
+    ${rows?`<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="用户策略列表"><table class="data-table wide" style="margin-top:12px"><thead><tr><th scope="col">用户</th><th scope="col">effective tier</th><th scope="col">到期</th><th scope="col">stage / strikes</th><th scope="col">manual</th><th scope="col">revision</th><th scope="col">更新时间</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<p class="muted">当前筛选下没有已持久化策略状态。</p>'}
+  </div>`;
+}
+
+async function reloadOutbound() {
+  const qs=new URLSearchParams({limit:"300"});
+  if(state.outboundBotId)qs.set("bot_id",state.outboundBotId);
+  if(state.outboundKind)qs.set("conversation_kind",state.outboundKind);
+  if(state.outboundConversationId)qs.set("conversation_id",state.outboundConversationId);
+  if(state.outboundStatus)qs.set("status",state.outboundStatus);
+  if(state.outboundRecalled)qs.set("recalled",state.outboundRecalled);
+  state.outbound=await api("/outbound/recent?"+qs.toString(),{cache:"no-store"});
+}
+
+async function applyOutboundFilters() {
+  state.outboundBotId=String(document.getElementById("outbound-bot")?.value||"").trim();
+  state.outboundKind=String(document.getElementById("outbound-kind")?.value||"").trim();
+  state.outboundConversationId=String(document.getElementById("outbound-conversation")?.value||"").trim();
+  state.outboundStatus=String(document.getElementById("outbound-status")?.value||"").trim();
+  state.outboundRecalled=String(document.getElementById("outbound-recalled")?.value||"").trim();
+  state.outboundBusy=true;render();
+  try{await reloadOutbound();}catch(e){alertFlash("err",e.message||"出站账本读取失败");}
+  finally{state.outboundBusy=false;render();}
+}
+
+async function recallOutboundOperation(button) {
+  const operationId=String(button?.dataset?.operationId||"");
+  const botId=String(button?.dataset?.botId||"");
+  const kind=String(button?.dataset?.conversationKind||"");
+  const conversationId=String(button?.dataset?.conversationId||"");
+  const expected=`RECALL ${operationId}`;
+  const typed=window.prompt(`将撤回该 operation 的全部平台消息；服务端会重新验证 Bot、会话、窗口、完整性与未撤回状态。\n\n请输入：${expected}`)||"";
+  if(typed!==expected){if(typed)alertFlash("err","确认串不匹配，未执行撤回");return;}
+  state.outboundBusy=true;render();
+  try{
+    const result=await api(`/outbound/${encodeURIComponent(operationId)}/recall`,{
+      method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({bot_id:botId,conversation_kind:kind,conversation_id:conversationId,confirmation:typed}),
+    });
+    const diagnostic=rememberAdminOperation("outbound",result,"Bot 消息撤回未完成");
+    if(result.status==="succeeded")alertFlash("ok",diagnostic?.title||"Bot 消息撤回完成");
+    else if(result.status==="unknown"||result.status==="partial")alertFlash("info",diagnostic?.title||"撤回结果需要人工核对");
+    else alertFlash("err",diagnostic?.title||"Bot 消息撤回失败");
+    await reloadOutbound();
+  }catch(e){const diagnostic=rememberAdminOperation("outbound",e,"Bot 消息撤回未完成");alertFlash("err",diagnostic?.title||e.message||"Bot 消息撤回失败");}
+  finally{state.outboundBusy=false;render();}
+}
+
+function renderOutbound() {
+  const messages=(state.outbound&&state.outbound.messages)||[];
+  const seenOperations=new Set();
+  const rows=messages.map(item=>{
+    const operationId=String(item.operation_id||"");
+    const first=!seenOperations.has(operationId);
+    seenOperations.add(operationId);
+    const recalled=Number(item.recalled_at||0)>0;
+    const attempted=Boolean(String(item.recall_status||""));
+    const canRecall=first&&!recalled&&!attempted&&item.status==="sent";
+    const action=canRecall?`<button class="btn small danger" data-operation-id="${escapeAttr(operationId)}" data-bot-id="${escapeAttr(item.bot_id||'')}" data-conversation-kind="${escapeAttr(item.conversation_kind||'')}" data-conversation-id="${escapeAttr(item.conversation_id||'')}" onclick="recallOutboundOperation(this)" ${state.outboundBusy?'disabled':''}>撤回 operation</button>`:(first?'<span class="muted">不可撤回 / 已尝试</span>':'<span class="muted">同 operation</span>');
+    return `<tr>
+      <td class="col-time u-atomic u-tabular">${item.created_at?escapeHtml(new Date(Number(item.created_at)*1000).toLocaleString()):"-"}</td>
+      <td class="col-model"><code class="u-ellipsis" title="${escapeAttr(operationId)}">${escapeHtml(operationId)}</code><div class="muted u-tabular">part ${Number(item.part_index||0)}</div></td>
+      <td class="col-status u-atomic">${escapeHtml(item.bot_id||"")}</td>
+      <td class="col-model u-atomic">${escapeHtml(item.conversation_kind||"")} ${escapeHtml(item.conversation_id||"")}</td>
+      <td class="col-status u-atomic">${escapeHtml(item.surface||"")}</td>
+      <td class="col-model u-atomic u-tabular">${escapeHtml(item.message_id||"-")}</td>
+      <td class="col-status"><span class="tag tag--status">${escapeHtml(recalled?"recalled":(item.recall_status||item.status||""))}</span></td>
+      <td class="col-description u-wrap">${escapeHtml(item.preview||"")}</td>
+      <td class="col-actions">${action}</td>
+    </tr>`;
+  }).join("");
+  const diagnostics=renderAdminOperations("outbound","Bot 消息撤回诊断");
+  return `${diagnostics}
+    <div class="card">
+      <div class="between" style="gap:12px;flex-wrap:wrap"><div><h2 style="margin:0">近期 Bot 消息</h2><p class="muted" style="margin:6px 0 0">只展示持久账本中的脱敏 preview；不会返回消息 payload、HMAC key 或 Secret。</p></div><button class="btn small" onclick="applyOutboundFilters()" ${state.outboundBusy?'disabled':''}>刷新</button></div>
+      <div class="field-input" style="margin-top:12px">
+        <input id="outbound-bot" type="text" placeholder="Bot ID" value="${escapeAttr(state.outboundBotId)}">
+        <select id="outbound-kind"><option value="" ${!state.outboundKind?'selected':''}>全部会话</option><option value="group" ${state.outboundKind==='group'?'selected':''}>group</option><option value="private" ${state.outboundKind==='private'?'selected':''}>private</option></select>
+        <input id="outbound-conversation" type="text" placeholder="群号 / QQ 号" value="${escapeAttr(state.outboundConversationId)}">
+        <select id="outbound-status"><option value="" ${!state.outboundStatus?'selected':''}>全部发送状态</option><option value="sent" ${state.outboundStatus==='sent'?'selected':''}>sent</option><option value="unknown" ${state.outboundStatus==='unknown'?'selected':''}>unknown</option><option value="failed" ${state.outboundStatus==='failed'?'selected':''}>failed</option></select>
+        <select id="outbound-recalled"><option value="" ${!state.outboundRecalled?'selected':''}>全部撤回状态</option><option value="false" ${state.outboundRecalled==='false'?'selected':''}>未撤回</option><option value="true" ${state.outboundRecalled==='true'?'selected':''}>已撤回</option></select>
+        <button class="btn small primary" onclick="applyOutboundFilters()" ${state.outboundBusy?'disabled':''}>应用筛选</button>
+      </div>
+      ${rows?`<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="近期 Bot 出站消息"><table class="data-table xwide"><thead><tr><th scope="col">时间</th><th scope="col">operation / part</th><th scope="col">Bot</th><th scope="col">会话</th><th scope="col">surface</th><th scope="col">message_id</th><th scope="col">状态</th><th scope="col">脱敏 preview</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody>${rows}</tbody></table></div>`:'<p class="muted">当前筛选下没有出站账本记录。</p>'}
+      <p class="muted" style="font-size:11px">管理员只能选择完整 operation；前端不会提交任意 message_id。unknown/partial/已尝试 operation 会被服务端封存，禁止自动重试。</p>
+    </div>`;
 }
 
 const ADMIN_OPERATION_STORAGE_KEY = "personification_admin_operation_diagnostics_v1";
