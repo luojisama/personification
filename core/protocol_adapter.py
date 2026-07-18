@@ -105,8 +105,12 @@ _KNOWN_IMPLEMENTATIONS = {"napcat", "llonebot", "lagrange", "gocq", "unknown"}
 
 _STANDARD_CAPABILITIES: dict[str, str] = {
     "account.info.read": "get_login_info",
+    "group.list": "get_group_list",
     "group.info.read": "get_group_info",
     "group.member.read": "get_group_member_info",
+    "group.member.list": "get_group_member_list",
+    "group.member.card.write": "set_group_card",
+    "group.member.special_title.write": "set_group_special_title",
     "message.recall": "delete_msg",
     "qzone.cookie_export": "get_cookies",
 }
@@ -169,6 +173,140 @@ def _exception_code(exc: BaseException) -> tuple[CapabilityState, str, float]:
     if any(marker in text for marker in ("not supported", "unsupported", "action not found", "api not found")):
         return CapabilityState.UNAVAILABLE, "action_not_found", _UNAVAILABLE_COOLDOWN_SECONDS
     return CapabilityState.UNKNOWN, "action_failed", _TRANSIENT_COOLDOWN_SECONDS
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if result > 0 else None
+
+
+def _bounded_text(value: Any, limit: int) -> str:
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return ""
+    return " ".join(str(value).split())[: max(0, int(limit))]
+
+
+def _nonnegative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _list_payload(value: Any, *keys: str) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        for key in ("data", *keys):
+            nested = value.get(key)
+            if isinstance(nested, list):
+                return nested
+    return []
+
+
+def _normalize_group_info(value: Any, *, group_id: int) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    return {
+        "group_id": str(_positive_int(raw.get("group_id")) or group_id),
+        "group_name": _bounded_text(raw.get("group_name"), 160),
+        "group_memo": _bounded_text(raw.get("group_memo"), 1000),
+        "remark_name": _bounded_text(raw.get("remark_name"), 160),
+        "owner_id": str(_positive_int(raw.get("owner_id")) or ""),
+        "group_create_time": _nonnegative_int(raw.get("group_create_time")),
+        "member_count": _nonnegative_int(raw.get("member_count")),
+        "max_member_count": _nonnegative_int(raw.get("max_member_count")),
+        "avatar_url": _bounded_text(raw.get("avatar_url"), 1000),
+    }
+
+
+def _normalize_group_member(value: Any, *, group_id: int) -> dict[str, Any] | None:
+    raw = value if isinstance(value, dict) else {}
+    user_id = _positive_int(raw.get("user_id"))
+    if user_id is None:
+        return None
+    role = str(raw.get("role", "member") or "member").strip().lower()
+    if role not in {"owner", "admin", "member"}:
+        role = "member"
+    return {
+        "group_id": str(_positive_int(raw.get("group_id")) or group_id),
+        "user_id": str(user_id),
+        "nickname": _bounded_text(raw.get("nickname"), 160),
+        "card": _bounded_text(raw.get("card"), 160),
+        "card_or_nickname": _bounded_text(raw.get("card_or_nickname"), 160),
+        "sex": _bounded_text(raw.get("sex"), 16),
+        "age": _nonnegative_int(raw.get("age")),
+        "area": _bounded_text(raw.get("area"), 160),
+        "level": _bounded_text(raw.get("level"), 80),
+        "qq_level": _nonnegative_int(raw.get("qq_level")),
+        "join_time": _nonnegative_int(raw.get("join_time")),
+        "last_sent_time": _nonnegative_int(raw.get("last_sent_time")),
+        "role": role,
+        "title": _bounded_text(raw.get("title"), 160),
+        "title_expire_time": _nonnegative_int(raw.get("title_expire_time")),
+        "card_changeable": bool(raw.get("card_changeable", False)),
+        "is_robot": bool(raw.get("is_robot", False)),
+        "shut_up_timestamp": _nonnegative_int(raw.get("shut_up_timestamp")),
+    }
+
+
+def _normalize_group_notices(value: Any, *, group_id: int) -> list[dict[str, Any]]:
+    notices: list[dict[str, Any]] = []
+    for item in _list_payload(value, "notices")[:100]:
+        if not isinstance(item, dict):
+            continue
+        notice_id = _bounded_text(item.get("notice_id") or item.get("fid"), 256)
+        if not notice_id:
+            continue
+        message = item.get("message") if isinstance(item.get("message"), dict) else {}
+        raw_images = message.get("images")
+        if not isinstance(raw_images, list):
+            single = message.get("image")
+            raw_images = single if isinstance(single, list) else [single] if isinstance(single, dict) else []
+        images: list[dict[str, Any]] = []
+        for image in raw_images[:8]:
+            if not isinstance(image, dict):
+                continue
+            image_id = _bounded_text(image.get("id") or image.get("image_id"), 512)
+            if not image_id:
+                continue
+            images.append(
+                {
+                    "id": image_id,
+                    "width": _nonnegative_int(image.get("width")),
+                    "height": _nonnegative_int(image.get("height")),
+                }
+            )
+        settings = item.get("settings") if isinstance(item.get("settings"), dict) else {}
+        notices.append(
+            {
+                "group_id": str(group_id),
+                "notice_id": notice_id,
+                "sender_id": str(_positive_int(item.get("sender_id")) or ""),
+                "publish_time": _nonnegative_int(item.get("publish_time")),
+                "message": {
+                    "text": _bounded_text(message.get("text"), 4000),
+                    "images": images,
+                },
+                "settings": {
+                    key: bool(settings.get(key, False))
+                    for key in (
+                        "is_show_edit_card",
+                        "tip_window",
+                        "confirm_required",
+                        "pinned",
+                        "send_new_member",
+                    )
+                },
+            }
+        )
+    return notices
 
 
 class ProtocolAdapter:
@@ -502,6 +640,140 @@ class ProtocolAdapter:
         return self._observe(
             "qzone.cookie_export",
             await self._attempt("get_cookies", domain=str(domain or "")),
+        )
+
+    async def get_group_info(self, *, group_id: int | str) -> ProtocolResult:
+        gid = _positive_int(group_id)
+        if gid is None:
+            return ProtocolResult("definite_failure", "invalid_group_id")
+        result = await self._attempt("get_group_info", group_id=gid, no_cache=True)
+        if result.ok:
+            result = ProtocolResult(
+                result.status,
+                result.code,
+                data=_normalize_group_info(result.data, group_id=gid),
+                selected_path=result.selected_path,
+            )
+        return self._observe("group.info.read", result)
+
+    async def get_group_member_info(
+        self,
+        *,
+        group_id: int | str,
+        user_id: int | str,
+    ) -> ProtocolResult:
+        gid = _positive_int(group_id)
+        uid = _positive_int(user_id)
+        if gid is None or uid is None:
+            return ProtocolResult("definite_failure", "invalid_member_scope")
+        result = await self._attempt(
+            "get_group_member_info",
+            group_id=gid,
+            user_id=uid,
+            no_cache=True,
+        )
+        if result.ok:
+            member = _normalize_group_member(result.data, group_id=gid)
+            if member is None or member["group_id"] != str(gid) or member["user_id"] != str(uid):
+                result = ProtocolResult("definite_failure", "membership_mismatch", selected_path=result.selected_path)
+            else:
+                result = ProtocolResult(result.status, result.code, data=member, selected_path=result.selected_path)
+        return self._observe("group.member.read", result)
+
+    async def get_group_member_list(self, *, group_id: int | str) -> ProtocolResult:
+        gid = _positive_int(group_id)
+        if gid is None:
+            return ProtocolResult("definite_failure", "invalid_group_id")
+        result = await self._attempt("get_group_member_list", group_id=gid)
+        if result.ok:
+            members = [
+                member
+                for item in _list_payload(result.data, "members")
+                if (member := _normalize_group_member(item, group_id=gid)) is not None
+                and member["group_id"] == str(gid)
+            ]
+            result = ProtocolResult(result.status, result.code, data=members, selected_path=result.selected_path)
+        return self._observe("group.member.list", result)
+
+    async def get_group_notices(self, *, group_id: int | str) -> ProtocolResult:
+        gid = _positive_int(group_id)
+        if gid is None:
+            return ProtocolResult("definite_failure", "invalid_group_id")
+        capability = await self._capability("group.announcement.read")
+        if capability.state not in {CapabilityState.AVAILABLE, CapabilityState.DEGRADED}:
+            return ProtocolResult("unavailable", capability.reason_code)
+        result = await self._attempt(capability.selected_path, group_id=gid)
+        if result.ok:
+            result = ProtocolResult(
+                result.status,
+                result.code,
+                data=_normalize_group_notices(result.data, group_id=gid),
+                selected_path=result.selected_path,
+            )
+        return self._observe("group.announcement.read", result)
+
+    async def delete_group_notice(
+        self,
+        *,
+        group_id: int | str,
+        notice_id: str,
+    ) -> ProtocolResult:
+        gid = _positive_int(group_id)
+        normalized_notice_id = _bounded_text(notice_id, 256)
+        if gid is None or not normalized_notice_id:
+            return ProtocolResult("definite_failure", "invalid_notice_scope")
+        capability = await self._capability("group.announcement.delete")
+        if capability.state not in {CapabilityState.AVAILABLE, CapabilityState.DEGRADED}:
+            return ProtocolResult("unavailable", capability.reason_code)
+        return self._observe(
+            "group.announcement.delete",
+            await self._attempt(
+                capability.selected_path,
+                group_id=gid,
+                notice_id=normalized_notice_id,
+            ),
+        )
+
+    async def set_group_card(
+        self,
+        *,
+        group_id: int | str,
+        user_id: int | str,
+        card: str,
+    ) -> ProtocolResult:
+        gid = _positive_int(group_id)
+        uid = _positive_int(user_id)
+        if gid is None or uid is None:
+            return ProtocolResult("definite_failure", "invalid_member_scope")
+        return self._observe(
+            "group.member.card.write",
+            await self._attempt(
+                "set_group_card",
+                group_id=gid,
+                user_id=uid,
+                card=_bounded_text(card, 160),
+            ),
+        )
+
+    async def set_group_special_title(
+        self,
+        *,
+        group_id: int | str,
+        user_id: int | str,
+        special_title: str,
+    ) -> ProtocolResult:
+        gid = _positive_int(group_id)
+        uid = _positive_int(user_id)
+        if gid is None or uid is None:
+            return ProtocolResult("definite_failure", "invalid_member_scope")
+        return self._observe(
+            "group.member.special_title.write",
+            await self._attempt(
+                "set_group_special_title",
+                group_id=gid,
+                user_id=uid,
+                special_title=_bounded_text(special_title, 160),
+            ),
         )
 
 

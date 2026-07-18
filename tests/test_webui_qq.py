@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -177,3 +178,165 @@ def test_qq_frontend_keeps_and_renders_operation_diagnostics(_runtime_context) -
     assert "renderOperationHistory(" in js.text
     assert "const botId=qqSelectedBotId();" in js.text
     assert "memberships.includes(selectedBotId)" in js.text
+
+
+def test_qq_group_adapter_routes_cover_reads_and_audited_writes(
+    _runtime_context,
+    monkeypatch,
+) -> None:
+    from ._loader import load_personification_module
+
+    adapter_module = load_personification_module(
+        "plugin.personification.core.protocol_adapter"
+    )
+    qq_routes = load_personification_module(
+        "plugin.personification.webui.routes.qq_routes"
+    )
+
+    class _Capability:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def to_dict(self) -> dict:
+            return {"name": self.name, "state": "available", "selected_path": self.name}
+
+    class _Matrix:
+        def get(self, name: str):
+            return _Capability(name)
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def matrix(self):
+            return _Matrix()
+
+        async def get_group_info(self, **kwargs):
+            self.calls.append(("get_group_info", kwargs))
+            return adapter_module.ProtocolResult(
+                "succeeded",
+                "ok",
+                data={"group_id": "20001", "group_name": "当前群", "member_count": 2},
+                selected_path="get_group_info",
+            )
+
+        async def get_group_member_info(self, **kwargs):
+            self.calls.append(("get_group_member_info", kwargs))
+            return adapter_module.ProtocolResult(
+                "succeeded",
+                "ok",
+                data={"group_id": "20001", "user_id": str(kwargs["user_id"])},
+                selected_path="get_group_member_info",
+            )
+
+        async def get_group_member_list(self, **kwargs):
+            self.calls.append(("get_group_member_list", kwargs))
+            return adapter_module.ProtocolResult(
+                "succeeded",
+                "ok",
+                data=[
+                    {"group_id": "20001", "user_id": "10001", "role": "owner"},
+                    {"group_id": "20001", "user_id": "10002", "role": "member"},
+                ],
+                selected_path="get_group_member_list",
+            )
+
+        async def get_group_notices(self, **kwargs):
+            self.calls.append(("get_group_notices", kwargs))
+            return adapter_module.ProtocolResult(
+                "succeeded",
+                "ok",
+                data=[{"notice_id": "notice-1", "message": {"text": "公告"}}],
+                selected_path="_get_group_notice",
+            )
+
+        async def set_group_card(self, **kwargs):
+            self.calls.append(("set_group_card", kwargs))
+            return adapter_module.ProtocolResult(
+                "succeeded", "ok", selected_path="set_group_card"
+            )
+
+        async def set_group_special_title(self, **kwargs):
+            self.calls.append(("set_group_special_title", kwargs))
+            return adapter_module.ProtocolResult(
+                "succeeded", "ok", selected_path="set_group_special_title"
+            )
+
+        async def delete_group_notice(self, **kwargs):
+            self.calls.append(("delete_group_notice", kwargs))
+            return adapter_module.ProtocolResult(
+                "succeeded", "ok", selected_path="_del_group_notice"
+            )
+
+    adapter = _Adapter()
+    monkeypatch.setattr(qq_routes, "get_protocol_adapter", lambda *_a, **_k: adapter)
+    client = _build_client(_runtime_context)
+
+    assert client.get(
+        "/personification/api/qq/groups/20001/profile", params={"bot_id": "100"}
+    ).status_code == 401
+
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+    assert client.get("/personification/api/qq/groups/20001/profile").status_code == 400
+
+    profile = client.get(
+        "/personification/api/qq/groups/20001/profile", params={"bot_id": "100"}
+    )
+    assert profile.status_code == 200, profile.text
+    assert profile.json()["profile"]["group_name"] == "当前群"
+    assert profile.json()["capabilities"]["group.announcement.delete"]["state"] == "available"
+
+    members = client.get(
+        "/personification/api/qq/groups/20001/members",
+        params={"bot_id": "100", "limit": 1, "offset": 1},
+    )
+    assert members.status_code == 200, members.text
+    assert members.json()["members"] == [
+        {"group_id": "20001", "user_id": "10002", "role": "member"}
+    ]
+    assert members.json()["total"] == 2
+
+    notices = client.get(
+        "/personification/api/qq/groups/20001/announcements",
+        params={"bot_id": "100"},
+    )
+    assert notices.status_code == 200, notices.text
+    assert notices.json()["announcements"][0]["notice_id"] == "notice-1"
+
+    card_path = "/personification/api/qq/groups/20001/members/10002/card"
+    assert client.put(card_path, json={"bot_id": "100", "card": "新名片"}).status_code == 400
+    card = client.put(
+        card_path,
+        json={"bot_id": "100", "card": "新名片", "confirm": "CARD:100:20001:10002"},
+    )
+    assert card.status_code == 200, card.text
+    assert card.json()["code"] == "qq_group_card_updated"
+
+    title = client.put(
+        "/personification/api/qq/groups/20001/members/10002/special-title",
+        json={
+            "bot_id": "100",
+            "special_title": "新头衔",
+            "confirm": "TITLE:100:20001:10002",
+        },
+    )
+    assert title.status_code == 200, title.text
+    assert title.json()["code"] == "qq_group_title_updated"
+
+    notice = client.request(
+        "DELETE",
+        "/personification/api/qq/groups/20001/announcements/notice-1",
+        json={"bot_id": "100", "confirm": "NOTICE:100:20001:notice-1"},
+    )
+    assert notice.status_code == 200, notice.text
+    assert notice.json()["code"] == "qq_group_notice_deleted"
+    assert ("set_group_card", {"group_id": "20001", "user_id": "10002", "card": "新名片"}) in adapter.calls
+    assert (
+        "set_group_special_title",
+        {"group_id": "20001", "user_id": "10002", "special_title": "新头衔"},
+    ) in adapter.calls
+    assert (
+        "delete_group_notice",
+        {"group_id": "20001", "notice_id": "notice-1"},
+    ) in adapter.calls

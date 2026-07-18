@@ -15,6 +15,7 @@ class _Bot:
         self.app_version = app_version
         self.calls: list[tuple[str, dict]] = []
         self.fail_once: dict[str, BaseException] = {}
+        self.responses: dict[str, object] = {}
 
     async def call_api(self, action: str, **params):  # noqa: ANN001, ANN201
         self.calls.append((action, params))
@@ -27,6 +28,8 @@ class _Bot:
         failure = self.fail_once.pop(action, None)
         if failure is not None:
             raise failure
+        if action in self.responses:
+            return self.responses[action]
         if action == "get_cookies":
             return {"cookies": "uin=o10000; p_skey=secret;"}
         return None
@@ -166,3 +169,164 @@ def test_recall_message_action_not_found_is_unavailable_without_fallback() -> No
     assert result.code == "action_not_found"
     assert result.selected_path == "delete_msg"
     assert bot.calls == [("delete_msg", {"message_id": 123})]
+
+
+def test_group_standard_reads_and_member_writes_use_onebot_contract() -> None:
+    bot = _Bot("NapCat.Onebot")
+    bot.responses.update(
+        {
+            "get_group_info": {
+                "group_id": 20001,
+                "group_name": "测试群",
+                "group_memo": "群简介",
+                "member_count": 3,
+                "max_member_count": 200,
+                "owner_id": 10001,
+            },
+            "get_group_member_info": {
+                "group_id": 20001,
+                "user_id": 10002,
+                "nickname": "成员",
+                "card": "群名片",
+                "role": "admin",
+                "title": "头衔",
+            },
+            "get_group_member_list": [
+                {"group_id": 20001, "user_id": 10002, "nickname": "成员"},
+                {"group_id": 20001, "user_id": "bad"},
+            ],
+        }
+    )
+    adapter = adapter_module.get_protocol_adapter(bot, _config())
+
+    group = asyncio.run(adapter.get_group_info(group_id="20001"))
+    member = asyncio.run(adapter.get_group_member_info(group_id="20001", user_id="10002"))
+    members = asyncio.run(adapter.get_group_member_list(group_id="20001"))
+    card = asyncio.run(adapter.set_group_card(group_id="20001", user_id="10002", card="新名片"))
+    clear_card = asyncio.run(adapter.set_group_card(group_id="20001", user_id="10002", card=""))
+    title = asyncio.run(
+        adapter.set_group_special_title(
+            group_id="20001",
+            user_id="10002",
+            special_title="新头衔",
+        )
+    )
+
+    assert group.data["group_name"] == "测试群"
+    assert group.data["owner_id"] == "10001"
+    assert member.data["card"] == "群名片"
+    assert member.data["role"] == "admin"
+    assert members.data == [
+        {
+            "group_id": "20001",
+            "user_id": "10002",
+            "nickname": "成员",
+            "card": "",
+            "card_or_nickname": "",
+            "sex": "",
+            "age": 0,
+            "area": "",
+            "level": "",
+            "qq_level": 0,
+            "join_time": 0,
+            "last_sent_time": 0,
+            "role": "member",
+            "title": "",
+            "title_expire_time": 0,
+            "card_changeable": False,
+            "is_robot": False,
+            "shut_up_timestamp": 0,
+        }
+    ]
+    assert card.ok and clear_card.ok and title.ok
+    assert ("get_group_info", {"group_id": 20001, "no_cache": True}) in bot.calls
+    assert ("get_group_member_info", {"group_id": 20001, "user_id": 10002, "no_cache": True}) in bot.calls
+    assert ("get_group_member_list", {"group_id": 20001}) in bot.calls
+    assert ("set_group_card", {"group_id": 20001, "user_id": 10002, "card": "新名片"}) in bot.calls
+    assert ("set_group_card", {"group_id": 20001, "user_id": 10002, "card": ""}) in bot.calls
+    assert (
+        "set_group_special_title",
+        {"group_id": 20001, "user_id": 10002, "special_title": "新头衔"},
+    ) in bot.calls
+
+
+def test_group_notice_paths_and_payload_are_normalized_per_implementation() -> None:
+    for app_name, delete_action in (
+        ("NapCat.Onebot", "_del_group_notice"),
+        ("LLOneBot", "_delete_group_notice"),
+    ):
+        adapter_module.reset_protocol_adapters()
+        bot = _Bot(app_name, "8.0.13")
+        bot.responses["_get_group_notice"] = [
+            {
+                "fid": "notice-1",
+                "sender_id": 10001,
+                "publish_time": 123,
+                "message": {
+                    "text": "公告正文",
+                    "image": {"image_id": "img-1", "width": "20", "height": "30"},
+                },
+                "settings": {"pinned": True, "confirm_required": True},
+            }
+        ]
+        adapter = adapter_module.get_protocol_adapter(bot, _config())
+
+        read_result = asyncio.run(adapter.get_group_notices(group_id="20001"))
+        delete_result = asyncio.run(
+            adapter.delete_group_notice(group_id="20001", notice_id="notice-1")
+        )
+
+        assert read_result.ok is True
+        assert read_result.selected_path == "_get_group_notice"
+        assert read_result.data[0]["notice_id"] == "notice-1"
+        assert read_result.data[0]["message"] == {
+            "text": "公告正文",
+            "images": [{"id": "img-1", "width": 20, "height": 30}],
+        }
+        assert "fid" not in str(read_result.data)
+        assert delete_result.ok is True
+        assert delete_result.selected_path == delete_action
+        assert (delete_action, {"group_id": 20001, "notice_id": "notice-1"}) in bot.calls
+        assert not any("folder" in params for _action, params in bot.calls)
+
+
+def test_group_notice_delete_timeout_is_not_retried_or_fallback() -> None:
+    bot = _Bot("NapCat.Onebot")
+    bot.fail_once["_del_group_notice"] = TimeoutError("slow")
+    adapter = adapter_module.get_protocol_adapter(bot, _config())
+
+    result = asyncio.run(
+        adapter.delete_group_notice(group_id="20001", notice_id="notice-1")
+    )
+
+    assert result.status == "degraded"
+    assert result.code == "timeout"
+    assert bot.calls == [
+        ("get_version_info", {}),
+        ("_del_group_notice", {"group_id": 20001, "notice_id": "notice-1"}),
+    ]
+
+
+def test_group_extensions_disabled_keep_standard_member_actions_only() -> None:
+    bot = _Bot("NapCat.Onebot")
+    adapter = adapter_module.get_protocol_adapter(bot, _config("none"))
+    matrix = asyncio.run(adapter.matrix())
+
+    assert matrix.get("group.member.list").state.value == "available"
+    assert matrix.get("group.member.card.write").state.value == "available"
+    assert matrix.get("group.announcement.read").state.value == "disabled"
+    notices = asyncio.run(adapter.get_group_notices(group_id="20001"))
+    assert notices.status == "unavailable"
+    assert bot.calls == []
+
+
+def test_unknown_implementation_does_not_probe_notice_delete() -> None:
+    bot = _Bot("UnknownOneBot")
+    adapter = adapter_module.get_protocol_adapter(bot, _config())
+
+    result = asyncio.run(
+        adapter.delete_group_notice(group_id="20001", notice_id="notice-1")
+    )
+
+    assert result.status == "unavailable"
+    assert bot.calls == [("get_version_info", {})]

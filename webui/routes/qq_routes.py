@@ -16,6 +16,7 @@ from nonebot.exception import ActionFailed, ApiNotAvailable, NetworkError
 from ...core import webui_audit_log
 from ...core.group_directory import discover_group_union
 from ...core.operation_diagnostics import OperationDetail, detail, diagnostic, step
+from ...core.protocol_adapter import ProtocolResult, get_protocol_adapter
 from ..deps import AdminIdentity, require_admin
 
 
@@ -246,6 +247,175 @@ def _require_confirm(body: dict, *, expected: str, label: str) -> None:
         raise HTTPException(status_code=400, detail=f"危险操作需要 confirm={label}")
 
 
+def _protocol_adapter(runtime: Any, bot: Any) -> Any:
+    return get_protocol_adapter(
+        bot,
+        plugin_config=getattr(runtime, "plugin_config", None),
+        logger=getattr(runtime, "logger", None),
+    )
+
+
+def _raise_protocol_result(
+    result: ProtocolResult,
+    *,
+    bot_id: str,
+    operation_id: str,
+    side_effect: bool,
+    phase: str = "adapter_call",
+) -> None:
+    if result.status == "degraded":
+        status_code = 504 if result.code == "timeout" else 503
+        code = "qq_operation_timeout" if result.code == "timeout" else "qq_bot_disconnected"
+        title = "QQ 操作等待超时" if result.code == "timeout" else "QQ Bot 连接不稳定"
+        message = "协议端没有返回可确认的结果。"
+        outcome_unknown = side_effect
+        retryable = not side_effect
+    elif result.status == "unavailable":
+        status_code = 501
+        code = "qq_adapter_unsupported"
+        title = "协议端不支持该群能力"
+        message = "当前 Bot 的协议实现未提供所需群能力。"
+        outcome_unknown = False
+        retryable = False
+    elif result.code in {"membership_mismatch", "invalid_member_scope"}:
+        status_code = 409 if result.code == "membership_mismatch" else 400
+        code = "qq_membership_unconfirmed" if result.code == "membership_mismatch" else "qq_invalid_input"
+        title = "群 membership 未确认" if status_code == 409 else "群操作输入无效"
+        message = "协议端返回的群或成员身份与请求目标不一致。"
+        outcome_unknown = False
+        retryable = False
+    elif result.code in {"invalid_group_id", "invalid_notice_scope", "invalid_section"}:
+        status_code = 400
+        code = "qq_invalid_input"
+        title = "群操作输入无效"
+        message = "群号、成员或公告标识不符合协议调用要求。"
+        outcome_unknown = False
+        retryable = False
+    else:
+        status_code = 502
+        code = "qq_adapter_rejected"
+        title = "协议端拒绝了群操作"
+        message = "协议端未完成该群操作。"
+        outcome_unknown = side_effect and result.status not in {"definite_failure", "unavailable"}
+        retryable = False
+    raise HTTPException(
+        status_code=status_code,
+        detail=diagnostic(
+            ok=False,
+            code=code,
+            phase=phase,
+            title=title,
+            message=message,
+            details=_target_details(bot_id, result.selected_path),
+            steps=(
+                step("bot_selection", "确认目标 Bot", "ok", "已选择显式目标 Bot。"),
+                step(
+                    phase,
+                    "调用群能力",
+                    "unknown" if outcome_unknown else "error",
+                    message,
+                ),
+            ),
+            suggestion=(
+                "先在 QQ 中核对实际状态；写操作不要直接重复提交。"
+                if outcome_unknown
+                else "检查 Bot 群角色、目标 membership 和协议能力后再试。"
+            ),
+            retryable=retryable,
+            outcome_unknown=outcome_unknown,
+            operation_id=operation_id,
+        ),
+    )
+
+
+async def _fresh_group_profile(
+    runtime: Any,
+    bot: Any,
+    *,
+    bot_id: str,
+    group_id: str,
+    operation_id: str = "",
+) -> tuple[Any, dict[str, Any]]:
+    adapter = _protocol_adapter(runtime, bot)
+    result = await adapter.get_group_info(group_id=group_id)
+    if not result.ok:
+        _raise_protocol_result(
+            result,
+            bot_id=bot_id,
+            operation_id=operation_id,
+            side_effect=False,
+            phase="membership_check",
+        )
+    profile = dict(result.data or {})
+    if profile.get("group_id") != str(group_id):
+        _raise_protocol_result(
+            ProtocolResult("definite_failure", "membership_mismatch", selected_path=result.selected_path),
+            bot_id=bot_id,
+            operation_id=operation_id,
+            side_effect=False,
+            phase="membership_check",
+        )
+    return adapter, profile
+
+
+async def _fresh_group_member(
+    adapter: Any,
+    *,
+    bot_id: str,
+    group_id: str,
+    user_id: str,
+    operation_id: str,
+) -> dict[str, Any]:
+    result = await adapter.get_group_member_info(group_id=group_id, user_id=user_id)
+    if not result.ok:
+        _raise_protocol_result(
+            result,
+            bot_id=bot_id,
+            operation_id=operation_id,
+            side_effect=False,
+            phase="membership_check",
+        )
+    return dict(result.data or {})
+
+
+def _safe_audit(runtime: Any, **payload: Any) -> bool:
+    try:
+        webui_audit_log.record(**payload)
+        return True
+    except Exception as exc:
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.warning(f"[qq group operation] audit_failed type={type(exc).__name__}")
+        return False
+
+
+def _group_operation_success(
+    *,
+    code: str,
+    title: str,
+    message: str,
+    bot_id: str,
+    api: str,
+    operation_id: str,
+    audit_ok: bool,
+    extra_details: tuple[OperationDetail, ...] = (),
+) -> dict[str, Any]:
+    result = _success(
+        code=code,
+        title=title,
+        message=message,
+        bot_id=bot_id,
+        api=api,
+        operation_id=operation_id,
+        extra_details=extra_details,
+    )
+    result["partial"] = not audit_ok
+    result["warnings"] = (
+        [] if audit_ok else ["QQ 操作已成功，但管理员审计记录写入失败。"]
+    )
+    return result
+
+
 def build_qq_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/qq", tags=["qq"])
 
@@ -359,6 +529,259 @@ def build_qq_router(*, runtime) -> APIRouter:
         ]
         items.sort(key=lambda x: x["member_count"], reverse=True)
         return {"groups": items}
+
+    @router.get("/groups/{group_id}/profile")
+    async def group_profile(
+        group_id: str,
+        bot_id: str = "",
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        bot = _bot(runtime, bot_id, explicit=True, api="get_group_info")
+        selected_bot_id = _target_bot_id(bot, bot_id)
+        adapter, profile = await _fresh_group_profile(
+            runtime,
+            bot,
+            bot_id=selected_bot_id,
+            group_id=group_id,
+        )
+        matrix = await adapter.matrix()
+        return {
+            "bot_id": selected_bot_id,
+            "group_id": str(group_id),
+            "profile": profile,
+            "capabilities": {
+                name: matrix.get(name).to_dict()
+                for name in (
+                    "group.info.read",
+                    "group.member.list",
+                    "group.announcement.read",
+                    "group.announcement.delete",
+                    "group.member.card.write",
+                    "group.member.special_title.write",
+                )
+            },
+        }
+
+    @router.get("/groups/{group_id}/members")
+    async def group_members(
+        group_id: str,
+        bot_id: str = "",
+        limit: int = 200,
+        offset: int = 0,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        bot = _bot(runtime, bot_id, explicit=True, api="get_group_member_list")
+        selected_bot_id = _target_bot_id(bot, bot_id)
+        adapter, _profile = await _fresh_group_profile(
+            runtime,
+            bot,
+            bot_id=selected_bot_id,
+            group_id=group_id,
+        )
+        result = await adapter.get_group_member_list(group_id=group_id)
+        if not result.ok:
+            _raise_protocol_result(
+                result,
+                bot_id=selected_bot_id,
+                operation_id="",
+                side_effect=False,
+            )
+        members = list(result.data or [])
+        safe_limit = max(1, min(500, int(limit)))
+        safe_offset = max(0, int(offset))
+        return {
+            "bot_id": selected_bot_id,
+            "group_id": str(group_id),
+            "members": members[safe_offset : safe_offset + safe_limit],
+            "count": len(members[safe_offset : safe_offset + safe_limit]),
+            "total": len(members),
+            "limit": safe_limit,
+            "offset": safe_offset,
+        }
+
+    @router.get("/groups/{group_id}/announcements")
+    async def group_announcements(
+        group_id: str,
+        bot_id: str = "",
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        bot = _bot(runtime, bot_id, explicit=True, api="_get_group_notice")
+        selected_bot_id = _target_bot_id(bot, bot_id)
+        adapter, _profile = await _fresh_group_profile(
+            runtime,
+            bot,
+            bot_id=selected_bot_id,
+            group_id=group_id,
+        )
+        result = await adapter.get_group_notices(group_id=group_id)
+        if not result.ok:
+            _raise_protocol_result(
+                result,
+                bot_id=selected_bot_id,
+                operation_id="",
+                side_effect=False,
+            )
+        return {
+            "bot_id": selected_bot_id,
+            "group_id": str(group_id),
+            "announcements": list(result.data or []),
+            "count": len(result.data or []),
+            "api": result.selected_path,
+        }
+
+    @router.put("/groups/{group_id}/members/{user_id}/card")
+    async def update_group_card(
+        group_id: str,
+        user_id: str,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        operation_id = uuid.uuid4().hex
+        bot = _bot(runtime, body.get("bot_id"), explicit=True, api="set_group_card", operation_id=operation_id)
+        bot_id = _target_bot_id(bot, body.get("bot_id"))
+        expected_confirm = f"CARD:{bot_id}:{group_id}:{user_id}"
+        _require_confirm(body, expected=expected_confirm, label=expected_confirm)
+        card = body.get("card", "")
+        if not isinstance(card, str) or len(card) > 160:
+            raise HTTPException(status_code=400, detail="card 必须是不超过 160 字符的字符串")
+        adapter, _profile = await _fresh_group_profile(
+            runtime,
+            bot,
+            bot_id=bot_id,
+            group_id=group_id,
+            operation_id=operation_id,
+        )
+        await _fresh_group_member(
+            adapter,
+            bot_id=bot_id,
+            group_id=group_id,
+            user_id=user_id,
+            operation_id=operation_id,
+        )
+        result = await adapter.set_group_card(group_id=group_id, user_id=user_id, card=card)
+        if not result.ok:
+            _raise_protocol_result(result, bot_id=bot_id, operation_id=operation_id, side_effect=True)
+        audit_ok = _safe_audit(
+            runtime,
+            action="qq_group_card_update",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=f"{bot_id}:{group_id}:{user_id}",
+            detail={"cleared": not bool(card)},
+            outcome="ok",
+        )
+        return _group_operation_success(
+            code="qq_group_card_updated",
+            title="群名片已更新",
+            message="协议端已明确确认群名片更新成功。",
+            bot_id=bot_id,
+            api=result.selected_path,
+            operation_id=operation_id,
+            audit_ok=audit_ok,
+            extra_details=(detail("目标成员", str(user_id), "ok"),),
+        )
+
+    @router.put("/groups/{group_id}/members/{user_id}/special-title")
+    async def update_group_special_title(
+        group_id: str,
+        user_id: str,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        operation_id = uuid.uuid4().hex
+        bot = _bot(runtime, body.get("bot_id"), explicit=True, api="set_group_special_title", operation_id=operation_id)
+        bot_id = _target_bot_id(bot, body.get("bot_id"))
+        expected_confirm = f"TITLE:{bot_id}:{group_id}:{user_id}"
+        _require_confirm(body, expected=expected_confirm, label=expected_confirm)
+        title = body.get("special_title", "")
+        if not isinstance(title, str) or len(title) > 160:
+            raise HTTPException(status_code=400, detail="special_title 必须是不超过 160 字符的字符串")
+        adapter, _profile = await _fresh_group_profile(
+            runtime,
+            bot,
+            bot_id=bot_id,
+            group_id=group_id,
+            operation_id=operation_id,
+        )
+        await _fresh_group_member(
+            adapter,
+            bot_id=bot_id,
+            group_id=group_id,
+            user_id=user_id,
+            operation_id=operation_id,
+        )
+        result = await adapter.set_group_special_title(
+            group_id=group_id,
+            user_id=user_id,
+            special_title=title,
+        )
+        if not result.ok:
+            _raise_protocol_result(result, bot_id=bot_id, operation_id=operation_id, side_effect=True)
+        audit_ok = _safe_audit(
+            runtime,
+            action="qq_group_title_update",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=f"{bot_id}:{group_id}:{user_id}",
+            detail={"cleared": not bool(title)},
+            outcome="ok",
+        )
+        return _group_operation_success(
+            code="qq_group_title_updated",
+            title="群专属头衔已更新",
+            message="协议端已明确确认群专属头衔更新成功。",
+            bot_id=bot_id,
+            api=result.selected_path,
+            operation_id=operation_id,
+            audit_ok=audit_ok,
+            extra_details=(detail("目标成员", str(user_id), "ok"),),
+        )
+
+    @router.delete("/groups/{group_id}/announcements/{notice_id}")
+    async def delete_group_announcement(
+        group_id: str,
+        notice_id: str,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        operation_id = uuid.uuid4().hex
+        bot = _bot(runtime, body.get("bot_id"), explicit=True, api="group.announcement.delete", operation_id=operation_id)
+        bot_id = _target_bot_id(bot, body.get("bot_id"))
+        expected_confirm = f"NOTICE:{bot_id}:{group_id}:{notice_id}"
+        _require_confirm(body, expected=expected_confirm, label=expected_confirm)
+        adapter, _profile = await _fresh_group_profile(
+            runtime,
+            bot,
+            bot_id=bot_id,
+            group_id=group_id,
+            operation_id=operation_id,
+        )
+        current = await adapter.get_group_notices(group_id=group_id)
+        if not current.ok:
+            _raise_protocol_result(current, bot_id=bot_id, operation_id=operation_id, side_effect=False)
+        if not any(str(item.get("notice_id", "")) == str(notice_id) for item in (current.data or [])):
+            raise HTTPException(status_code=404, detail="目标公告已不存在，请刷新后重试")
+        result = await adapter.delete_group_notice(group_id=group_id, notice_id=notice_id)
+        if not result.ok:
+            _raise_protocol_result(result, bot_id=bot_id, operation_id=operation_id, side_effect=True)
+        audit_ok = _safe_audit(
+            runtime,
+            action="qq_group_notice_delete",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=f"{bot_id}:{group_id}:{notice_id}",
+            outcome="ok",
+        )
+        return _group_operation_success(
+            code="qq_group_notice_deleted",
+            title="群公告已删除",
+            message="协议端已明确确认群公告删除成功。",
+            bot_id=bot_id,
+            api=result.selected_path,
+            operation_id=operation_id,
+            audit_ok=audit_ok,
+            extra_details=(detail("目标群", str(group_id), "ok"),),
+        )
 
     @router.post("/groups/{group_id}/leave")
     async def leave_group(group_id: str, body: dict = Body(default_factory=dict), admin: AdminIdentity = Depends(require_admin)) -> dict:

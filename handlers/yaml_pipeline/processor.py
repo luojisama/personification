@@ -15,6 +15,7 @@ from ...agent.runtime.tool_catalog import registry_planner_metadata
 from ...core.chat_intent import (
     looks_like_explanatory_output,
 )
+from ...core.current_group_context_tool import register_current_group_context_tool
 from ...core.emotion_state import (
     build_turn_emotion_prompt_block,
     render_emotion_memory_hint,
@@ -1598,6 +1599,18 @@ async def process_yaml_response_logic(
             ),
         )
         register_current_user_avatar_tool(agent_tool_registry, profile_service, user_id)
+        register_current_group_context_tool(
+            agent_tool_registry,
+            bot=bot,
+            event=event,
+            plugin_config=plugin_config,
+            logger=logger,
+            policy_authorizer=(
+                user_policy_gate.current_authorization
+                if user_policy_gate is not None
+                else None
+            ),
+        )
         register_group_user_avatar_pair_insight_tool(
             agent_tool_registry,
             runtime=avatar_pair_runtime

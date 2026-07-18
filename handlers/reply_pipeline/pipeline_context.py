@@ -13,6 +13,7 @@ from ...agent.query_rewriter import QueryRewriteContext
 from ...agent.tool_registry import ToolRegistry
 
 from ...core.context_policy import build_prompt_injection_guard
+from ...core.current_group_context_tool import register_current_group_context_tool
 from ...core.error_utils import log_exception
 from ...core.image_input import provider_supports_vision
 from ...core.image_result_cache import image_fingerprint
@@ -796,6 +797,18 @@ async def run_agent_if_enabled(
         runtime_registry,
         getattr(runtime, "profile_service", None),
         str(getattr(event, "user_id", "") or ""),
+    )
+    register_current_group_context_tool(
+        runtime_registry,
+        bot=bot,
+        event=event,
+        plugin_config=runtime.plugin_config,
+        logger=runtime.logger,
+        policy_authorizer=(
+            runtime.user_policy_gate.current_authorization
+            if getattr(runtime, "user_policy_gate", None) is not None
+            else None
+        ),
     )
     register_group_user_avatar_pair_insight_tool(
         runtime_registry,
