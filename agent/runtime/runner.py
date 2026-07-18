@@ -84,12 +84,13 @@ from .tool_args import (
 )
 from .budgeting import apply_agent_budget_profile, derive_agent_budget_profile, render_agent_budget_trace_detail
 from .final_synthesis import AgentResult, direct_tool_result_agent_result, synthesize_max_steps_result
+from .tool_catalog import tool_runtime_metadata
+from .tool_contracts import recommended_tools_for_chat_intent
 from .tool_selection import (
     _normalize_agent_max_steps,
     _schema_tool_name,
     _select_tool_schemas,
 )
-from .tool_contracts import recommended_tools_for_chat_intent
 from .wrappers import (
     _IMAGE_B64_TOOL_RESULT_RE,
     _render_tool_result_for_user,
@@ -773,7 +774,20 @@ async def run_agent(
                 return await _finalize_result(stop_decision.result, reason="model_stop")
 
         if response.tool_calls:
-            if not stop_state.has_tool_call and not ack_sent and ack_sender is not None:
+            suppress_first_ack = any(
+                str(
+                    tool_runtime_metadata(registry, tool_call.name).get("ack_behavior", "")
+                    or ""
+                ).strip().lower()
+                == "suppress"
+                for tool_call in response.tool_calls
+            )
+            if (
+                not stop_state.has_tool_call
+                and not ack_sent
+                and ack_sender is not None
+                and not suppress_first_ack
+            ):
                 ack_sent = True
                 try:
                     await _await_with_deadline(

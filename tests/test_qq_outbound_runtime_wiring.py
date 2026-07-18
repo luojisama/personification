@@ -14,7 +14,13 @@ def _call_keywords(relative_path: str, function_name: str) -> list[set[str]]:
         if not isinstance(node, ast.Call):
             continue
         target = node.func
-        name = target.id if isinstance(target, ast.Name) else ""
+        name = (
+            target.id
+            if isinstance(target, ast.Name)
+            else target.attr
+            if isinstance(target, ast.Attribute)
+            else ""
+        )
         if name == function_name:
             matches.append({keyword.arg for keyword in node.keywords if keyword.arg})
     return matches
@@ -33,6 +39,8 @@ def test_runtime_builder_injects_single_ledger_into_all_runtime_owners() -> None
         calls = _call_keywords(runtime_builder, function_name)
         assert len(calls) == expected_calls
         assert all("qq_outbound_ledger" in keywords for keywords in calls)
+    recovery_calls = _call_keywords(runtime_builder, "recover_interrupted_dispatches")
+    assert len(recovery_calls) == 1
 
 
 def test_flow_and_agent_production_builders_forward_ledger() -> None:
@@ -48,3 +56,6 @@ def test_flow_and_agent_production_builders_forward_ledger() -> None:
         calls = _call_keywords(relative_path, "ActionExecutor")
         assert len(calls) == 1
         assert "qq_outbound_ledger" in calls[0]
+        recall_calls = _call_keywords(relative_path, "register_qq_recall_tool")
+        assert len(recall_calls) == 1
+        assert {"executor", "bot", "event", "cutoff"} <= recall_calls[0]

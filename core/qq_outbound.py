@@ -347,6 +347,17 @@ class QQOutboundLedger:
                     or str(existing_scope["conversation_id"]) != normalized.conversation_id
                 ):
                     raise ValueError("operation_id is already bound to another conversation scope")
+                recall_seal = conn.execute(
+                    """
+                    SELECT 1
+                    FROM qq_recall_operations
+                    WHERE outbound_operation_id=?
+                    LIMIT 1
+                    """,
+                    (normalized.operation_id,),
+                ).fetchone()
+                if recall_seal is not None:
+                    raise RuntimeError("operation_id is sealed by a recall claim")
                 row = conn.execute(
                     """
                     SELECT COALESCE(MAX(part_index), -1) + 1 AS next_part

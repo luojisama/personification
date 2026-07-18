@@ -57,10 +57,21 @@ def direct_tool_result_from_contract(
     metadata = tool_runtime_metadata(registry, normalized_tool_name)
     final_behavior = str(metadata.get("final_behavior", "") or "").strip()
     side_effect = str(metadata.get("side_effect", "") or "").strip()
+    queued_success = expression_tool_result_queued(text)
+    if (
+        side_effect == "message_recall"
+        and final_behavior == "silence_on_success"
+        and queued_success
+    ):
+        return DirectToolResult(
+            text="[SILENCE]",
+            reason="queued_message_recall",
+            suppress_reply_recovery=True,
+        )
     if (
         side_effect == "send_message"
         and final_behavior == "silence_on_success"
-        and expression_tool_result_queued(text)
+        and queued_success
     ):
         return DirectToolResult(text="[SILENCE]", reason="queued_send_message")
     if (

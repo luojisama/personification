@@ -4,7 +4,8 @@ from typing import Any
 
 from nonebot.adapters.onebot.v11 import MessageSegment
 
-from ..core.qq_outbound import SendReceipt, build_outbound_context
+from ..core.qq_outbound import QQOutboundLedger, SendReceipt, build_outbound_context
+from ..core.qq_recall import QQRecallService
 from ..core.visible_output import guard_visible_text
 
 
@@ -19,6 +20,8 @@ class ActionExecutor:
         qq_outbound_ledger: Any | None = None,
         operation_id: str | None = None,
         user_target: str | None = None,
+        qq_recall_service: QQRecallService | None = None,
+        recall_cutoff: float | None = None,
     ) -> None:
         self.bot = bot
         self.event = event
@@ -27,8 +30,17 @@ class ActionExecutor:
         self.qq_outbound_ledger = qq_outbound_ledger
         self.operation_id = str(operation_id or "").strip()
         self.user_target = str(user_target or "").strip()
+        self.qq_recall_service = qq_recall_service
+        if self.qq_recall_service is None and isinstance(qq_outbound_ledger, QQOutboundLedger):
+            self.qq_recall_service = QQRecallService(
+                qq_outbound_ledger,
+                plugin_config=config,
+                logger=logger,
+            )
+        self.recall_cutoff = float(recall_cutoff or 0.0)
         self.pending_actions: list[dict[str, Any]] = []
         self.last_delivery_confirmed = False
+        self.last_recall_result: Any = None
         self.receipts: list[SendReceipt] = []
 
     async def _send(self, message: Any, *, surface: str) -> None:
@@ -77,6 +89,18 @@ class ActionExecutor:
     async def execute(self, action: str, params: dict) -> str:
         self.last_delivery_confirmed = False
         match action:
+            case "recall_latest_qq_operation":
+                if self.qq_recall_service is None:
+                    return "撤回能力不可用"
+                self.last_recall_result = await self.qq_recall_service.recall_latest(
+                    bot=self.bot,
+                    event=self.event,
+                    requester_user_id=str(getattr(self.event, "user_id", "") or self.user_target),
+                    actor_kind="user",
+                    cutoff=self.recall_cutoff or None,
+                    current_operation_id=self.operation_id,
+                )
+                return f"撤回结果：{self.last_recall_result.status}"
             case "send_sticker":
                 await self._send(
                     MessageSegment.image(params["path"]),

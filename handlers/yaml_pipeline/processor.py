@@ -76,6 +76,7 @@ from ...core.target_inference import normalize_message_target_for_plan, normaliz
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.prompt_loader import pick_ack_phrase
 from ...core.qq_outbound import QQOutboundLedger, SendReceipt, build_outbound_context
+from ...core.qq_recall import register_qq_recall_tool
 from ...core.qq_expression_library import (
     build_qq_expression_prompt,
     contains_qq_expression_marker,
@@ -1569,8 +1570,20 @@ async def process_yaml_response_logic(
                 reply_trace_id=outbound_reply_trace_id,
             ),
             user_target=user_id,
+            recall_cutoff=float(
+                reply_commit_state.get("received_wall_at", 0.0) or time.time()
+            ),
         )
         agent_tool_registry = _clone_tool_registry(tool_registry)
+        register_qq_recall_tool(
+            agent_tool_registry,
+            executor=executor,
+            bot=bot,
+            event=event,
+            cutoff=float(
+                reply_commit_state.get("received_wall_at", 0.0) or time.time()
+            ),
+        )
         register_current_user_avatar_tool(agent_tool_registry, profile_service, user_id)
         register_group_user_avatar_pair_insight_tool(
             agent_tool_registry,

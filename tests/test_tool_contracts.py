@@ -46,6 +46,32 @@ def test_direct_tool_result_contract_silences_queued_send_action() -> None:
     assert result.text == "[SILENCE]"
     assert result.reason == "queued_send_message"
     assert result.bypass_length_limits is False
+    assert result.suppress_reply_recovery is False
+
+
+def test_direct_tool_result_contract_silences_queued_message_recall_without_recovery() -> None:
+    registry = tool_registry.ToolRegistry()
+    _register(
+        registry,
+        "recall_latest_own_output",
+        {
+            "side_effect": "message_recall",
+            "final_behavior": "silence_on_success",
+            "ack_behavior": "suppress",
+            "intent_tags": ["conversation_action"],
+        },
+    )
+
+    result = tool_contracts.direct_tool_result_from_contract(
+        registry=registry,
+        tool_name="recall_latest_own_output",
+        result_text=json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
+    )
+
+    assert result is not None
+    assert result.text == "[SILENCE]"
+    assert result.reason == "queued_message_recall"
+    assert result.suppress_reply_recovery is True
 
 
 def test_direct_tool_result_contract_keeps_media_marker_direct() -> None:

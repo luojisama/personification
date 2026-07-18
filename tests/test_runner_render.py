@@ -1172,6 +1172,7 @@ def test_run_agent_uses_tool_metadata_contract_for_queued_action_silence() -> No
     )
 
     assert result.text == "[SILENCE]"
+    assert result.suppress_reply_recovery is False
     assert len(caller.calls) == 1
 
 
@@ -1471,6 +1472,87 @@ def test_run_agent_sends_ack_when_first_tool_call_appears(monkeypatch) -> None: 
 
     assert result.text == "查到了。"
     assert ack_calls == [""]
+
+
+def test_run_agent_suppresses_ack_when_any_first_tool_call_requests_it() -> None:
+    ack_calls: list[str] = []
+    handled: list[str] = []
+
+    async def _search_handler(**_kwargs):  # noqa: ANN001
+        handled.append("search_web")
+        return "工具结果"
+
+    async def _recall_handler(**_kwargs):  # noqa: ANN001
+        handled.append("recall_latest_own_output")
+        return json.dumps({"ok": True, "queued": True}, ensure_ascii=False)
+
+    async def _ack_sender(text: str) -> None:
+        ack_calls.append(text)
+
+    registry = _register_query_tool(_search_handler)
+    registry.register(
+        tool_registry.AgentTool(
+            name="recall_latest_own_output",
+            description="recall latest own output",
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=_recall_handler,
+            metadata={
+                "intent_tags": ["conversation_action"],
+                "side_effect": "message_recall",
+                "final_behavior": "silence_on_success",
+                "ack_behavior": "suppress",
+            },
+        )
+    )
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-search",
+                        name="search_web",
+                        arguments={"query": "刚才的消息"},
+                    ),
+                    tool_impl.ToolCall(
+                        id="call-recall",
+                        name="recall_latest_own_output",
+                        arguments={},
+                    ),
+                ],
+                raw={},
+            )
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "处理上一条输出"}],
+            registry=registry,
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=2,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+            ack_sender=_ack_sender,
+        )
+    )
+
+    assert result.text == "[SILENCE]"
+    assert result.suppress_reply_recovery is True
+    assert ack_calls == []
+    assert handled == ["search_web", "recall_latest_own_output"]
 
 
 def test_run_agent_appends_evidence_guidance_after_tool_result(monkeypatch) -> None:  # noqa: ANN001

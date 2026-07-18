@@ -601,6 +601,50 @@ DDL_STATEMENTS = (
     CREATE INDEX IF NOT EXISTS idx_qq_outbound_status
         ON qq_outbound_ledger(status, recalled_at, created_at DESC)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS qq_recall_operations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        outbound_operation_id TEXT NOT NULL UNIQUE,
+        bot_id TEXT NOT NULL,
+        conversation_kind TEXT NOT NULL CHECK (conversation_kind IN ('group', 'private')),
+        conversation_id TEXT NOT NULL,
+        requester_user_id TEXT NOT NULL DEFAULT '',
+        actor_kind TEXT NOT NULL CHECK (actor_kind IN ('user', 'admin')),
+        trigger_kind TEXT NOT NULL CHECK (trigger_kind IN ('agent', 'admin_command')),
+        status TEXT NOT NULL CHECK (
+            status IN ('dispatching', 'succeeded', 'partial', 'definite_failure', 'unknown')
+        ),
+        total_count INTEGER NOT NULL CHECK (total_count >= 0),
+        recalled_count INTEGER NOT NULL DEFAULT 0 CHECK (recalled_count >= 0),
+        error_code TEXT NOT NULL DEFAULT '',
+        requested_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_qq_recall_scope
+        ON qq_recall_operations(bot_id, conversation_kind, conversation_id, requested_at DESC)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS qq_recall_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recall_operation_id INTEGER NOT NULL,
+        ledger_id INTEGER NOT NULL UNIQUE,
+        message_id TEXT NOT NULL,
+        part_index INTEGER NOT NULL CHECK (part_index >= 0),
+        status TEXT NOT NULL CHECK (
+            status IN ('dispatching', 'succeeded', 'definite_failure', 'unknown')
+        ),
+        error_code TEXT NOT NULL DEFAULT '',
+        updated_at REAL NOT NULL,
+        FOREIGN KEY(recall_operation_id) REFERENCES qq_recall_operations(id) ON DELETE CASCADE,
+        FOREIGN KEY(ledger_id) REFERENCES qq_outbound_ledger(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_qq_recall_items_operation
+        ON qq_recall_items(recall_operation_id, part_index DESC)
+    """,
 )
 
 

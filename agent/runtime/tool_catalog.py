@@ -138,6 +138,7 @@ def _default_tool_metadata(tool_name: str) -> dict[str, Any]:
         "risk_level": "low",
         "side_effect": "none",
         "final_behavior": "continue",
+        "ack_behavior": "send",
         "retryable": False,
     }
     if name in _ADMIN_TOOL_NAMES:
@@ -292,6 +293,7 @@ def tool_planner_metadata(tool: AgentTool) -> dict[str, Any]:
         "risk_level": str(metadata.get("risk_level", "low") or "low"),
         "side_effect": str(metadata.get("side_effect", "none") or "none"),
         "final_behavior": str(metadata.get("final_behavior", "continue") or "continue"),
+        "ack_behavior": str(metadata.get("ack_behavior", "send") or "send"),
         "retryable": bool(metadata.get("retryable", False)),
         "local": bool(tool.local),
     }
@@ -369,6 +371,7 @@ def select_tool_schemas(
                 schema_tool_name(schema) in _LIGHTWEIGHT_LOOKUP_TOOL_NAMES
                 or schema_tool_name(schema) in _QQ_EXPRESSION_TOOL_NAMES
                 or "expression" in _tool_tags(registry, schema_tool_name(schema))
+                or "conversation_action" in _tool_tags(registry, schema_tool_name(schema))
                 or (has_images and _tool_requires_image(registry, schema_tool_name(schema)))
             )
         ]
@@ -379,6 +382,7 @@ def select_tool_schemas(
             if (
                 schema_tool_name(schema) in _QQ_EXPRESSION_TOOL_NAMES
                 or "expression" in _tool_tags(registry, schema_tool_name(schema))
+                or "conversation_action" in _tool_tags(registry, schema_tool_name(schema))
             )
         ]
     elif effective_chat_intent == "image_generation":

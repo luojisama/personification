@@ -22,6 +22,7 @@ from ...core.message_relations import build_event_relation_metadata
 from ...core.persona_profile import load_persona_profile, render_persona_snapshot
 from ...core.prompt_loader import pick_ack_phrase
 from ...core.qq_outbound import QQOutboundLedger, SendReceipt, build_outbound_context
+from ...core.qq_recall import register_qq_recall_tool
 from ...core.qq_expression_tools import register_send_qq_expression_tools
 from ...core.gemini_profile import build_gemini_route_policy_prompt
 from ...core.reply_text_policy import normalize_visible_reply_text
@@ -770,8 +771,16 @@ async def run_agent_if_enabled(
             reply_trace_id=str(commit_state.get("reply_trace_id", "") or ""),
         ),
         user_target=str(getattr(event, "user_id", "") or ""),
+        recall_cutoff=float(commit_state.get("received_wall_at", 0.0) or time.time()),
     )
     runtime_registry = clone_tool_registry(runtime.tool_registry)
+    register_qq_recall_tool(
+        runtime_registry,
+        executor=executor,
+        bot=bot,
+        event=event,
+        cutoff=float(commit_state.get("received_wall_at", 0.0) or time.time()),
+    )
     register_current_user_avatar_tool(
         runtime_registry,
         getattr(runtime, "profile_service", None),

@@ -365,8 +365,14 @@ class ProtocolAdapter:
             return True
         return health.state not in {CapabilityState.DEGRADED, CapabilityState.UNAVAILABLE}
 
-    async def _attempt(self, action: str, **params: Any) -> ProtocolResult:
-        if not action or not self._path_available(action):
+    async def _attempt(
+        self,
+        action: str,
+        *,
+        respect_path_health: bool = True,
+        **params: Any,
+    ) -> ProtocolResult:
+        if not action or (respect_path_health and not self._path_available(action)):
             health = self._path_health.get(action)
             return ProtocolResult(
                 status=(
@@ -463,6 +469,33 @@ class ProtocolAdapter:
         return self._observe(
             "message.input_status",
             await self._attempt(capability.selected_path, user_id=int(user_id), event_type=1),
+        )
+
+    async def recall_message(self, *, message_id: int | str) -> ProtocolResult:
+        normalized_message_id: int | None = None
+        if isinstance(message_id, int) and not isinstance(message_id, bool):
+            normalized_message_id = message_id
+        elif isinstance(message_id, str):
+            digits = message_id[1:] if message_id.startswith("-") else message_id
+            if digits and digits.isascii() and digits.isdecimal():
+                normalized_message_id = int(message_id, 10)
+        if (
+            normalized_message_id is None
+            or normalized_message_id == 0
+            or normalized_message_id < -(2**31)
+            or normalized_message_id > 2**31 - 1
+        ):
+            return self._observe(
+                "message.recall",
+                ProtocolResult("definite_failure", "invalid_message_id"),
+            )
+        return self._observe(
+            "message.recall",
+            await self._attempt(
+                "delete_msg",
+                respect_path_health=False,
+                message_id=normalized_message_id,
+            ),
         )
 
     async def export_cookies(self, *, domain: str) -> ProtocolResult:

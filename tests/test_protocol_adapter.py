@@ -32,6 +32,10 @@ class _Bot:
         return None
 
 
+class _ActionNotFoundError(RuntimeError):
+    retcode = 404
+
+
 def setup_function(_fn) -> None:  # noqa: ANN001
     adapter_module.reset_protocol_adapters()
 
@@ -82,3 +86,83 @@ def test_extensions_disabled_preserves_standard_capabilities() -> None:
     matrix = asyncio.run(adapter.matrix())
     assert matrix.get("message.reaction").state.value == "disabled"
     assert matrix.get("message.recall").state.value == "available"
+
+
+def test_recall_message_calls_delete_msg_once_with_int_and_accepts_none_success() -> None:
+    bot = _Bot("NapCat.Onebot")
+    adapter = adapter_module.get_protocol_adapter(bot, _config())
+
+    result = asyncio.run(adapter.recall_message(message_id="123"))
+
+    assert result.status == "succeeded"
+    assert result.code == "ok"
+    assert result.data is None
+    assert result.selected_path == "delete_msg"
+    assert bot.calls == [("delete_msg", {"message_id": 123})]
+
+
+def test_recall_message_accepts_negative_int32() -> None:
+    bot = _Bot("LLOneBot", "7.12.3")
+    adapter = adapter_module.get_protocol_adapter(bot, _config())
+
+    result = asyncio.run(adapter.recall_message(message_id=-(2**31)))
+
+    assert result.ok is True
+    assert bot.calls == [("delete_msg", {"message_id": -(2**31)})]
+
+
+def test_recall_message_rejects_invalid_ids_without_calling_api() -> None:
+    bot = _Bot("NapCat.Onebot")
+    adapter = adapter_module.get_protocol_adapter(bot, _config())
+    invalid_ids = (
+        True,
+        False,
+        0,
+        2**31,
+        -(2**31) - 1,
+        "opaque",
+        " 123",
+        "1.5",
+        "2147483648",
+        "-2147483649",
+    )
+
+    for message_id in invalid_ids:
+        result = asyncio.run(adapter.recall_message(message_id=message_id))
+        assert result.status == "definite_failure"
+        assert result.code == "invalid_message_id"
+
+    assert bot.calls == []
+
+
+def test_recall_message_timeout_is_degraded_without_retry() -> None:
+    bot = _Bot("NapCat.Onebot")
+    bot.fail_once["delete_msg"] = TimeoutError("slow")
+    adapter = adapter_module.get_protocol_adapter(bot, _config())
+
+    result = asyncio.run(adapter.recall_message(message_id=123))
+
+    assert result.status == "degraded"
+    assert result.code == "timeout"
+    assert result.selected_path == "delete_msg"
+    assert bot.calls == [("delete_msg", {"message_id": 123})]
+
+    second = asyncio.run(adapter.recall_message(message_id=124))
+    assert second.status == "succeeded"
+    assert bot.calls == [
+        ("delete_msg", {"message_id": 123}),
+        ("delete_msg", {"message_id": 124}),
+    ]
+
+
+def test_recall_message_action_not_found_is_unavailable_without_fallback() -> None:
+    bot = _Bot("NapCat.Onebot")
+    bot.fail_once["delete_msg"] = _ActionNotFoundError("missing")
+    adapter = adapter_module.get_protocol_adapter(bot, _config())
+
+    result = asyncio.run(adapter.recall_message(message_id=123))
+
+    assert result.status == "unavailable"
+    assert result.code == "action_not_found"
+    assert result.selected_path == "delete_msg"
+    assert bot.calls == [("delete_msg", {"message_id": 123})]

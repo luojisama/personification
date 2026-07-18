@@ -183,6 +183,39 @@ def test_runtime_capability_exposes_only_safe_first_party_runtime_tools() -> Non
     assert static_capability_names == {"list_plugins"}
 
 
+def test_conversation_action_is_visible_in_chat_profiles_but_not_runtime_capability() -> None:
+    registry = tool_registry.ToolRegistry()
+    _register(
+        registry,
+        "recall_latest_own_output",
+        {
+            "intent_tags": ["conversation_action", "runtime_capability"],
+            "side_effect": "message_recall",
+            "final_behavior": "silence_on_success",
+            "ack_behavior": "suppress",
+        },
+    )
+
+    def _selected(chat_intent: str, plugin_question_intent: str = "") -> set[str]:
+        return {
+            tool_catalog.schema_tool_name(schema)
+            for schema in tool_catalog.select_tool_schemas(
+                registry,
+                has_images=False,
+                chat_intent=chat_intent,
+                plugin_question_intent=plugin_question_intent,
+            )
+        }
+
+    assert "recall_latest_own_output" in _selected("banter")
+    assert "recall_latest_own_output" in _selected("expression")
+    assert "recall_latest_own_output" in _selected("explanation")
+    assert "recall_latest_own_output" not in _selected("plugin_question", "runtime_capability")
+
+    planner_metadata = tool_catalog.registry_planner_metadata(registry)[0]
+    assert planner_metadata["ack_behavior"] == "suppress"
+
+
 def test_registry_planner_metadata_applies_name_defaults() -> None:
     registry = tool_registry.ToolRegistry()
     _register(registry, "parallel_research")
@@ -195,6 +228,7 @@ def test_registry_planner_metadata_applies_name_defaults() -> None:
     assert by_name["parallel_research"]["retryable"] is True
     assert by_name["parallel_research"]["side_effect"] == "none"
     assert by_name["parallel_research"]["final_behavior"] == "continue"
+    assert by_name["parallel_research"]["ack_behavior"] == "send"
     assert by_name["vision_analyze"]["requires_image"] is True
     assert "vision" in by_name["vision_analyze"]["intent_tags"]
 

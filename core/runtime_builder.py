@@ -133,6 +133,7 @@ from .policy_classifier import PolicyClassifier
 from .qzone_service import build_qzone_services, build_qzone_social_service
 from .qq_user_policy import QQUserPolicyGate
 from .qq_outbound import QQOutboundLedger
+from .qq_recall import QQRecallService
 from .runtime_assembly import PluginRuntimeBundle
 from .memory_defaults import DEFAULT_PERSONA_HISTORY_MAX
 from .model_router import (
@@ -223,6 +224,16 @@ def build_plugin_runtime(
     data_dir = get_personification_data_dir(plugin_config)
     policy_evidence_key = load_or_create_policy_evidence_key(data_dir)
     qq_outbound_ledger = QQOutboundLedger(content_hmac_key=policy_evidence_key)
+    recovered_recall_count = QQRecallService(
+        qq_outbound_ledger,
+        plugin_config=plugin_config,
+        logger=logger,
+    ).recover_interrupted_dispatches()
+    if recovered_recall_count:
+        logger.warning(
+            "personification: recovered interrupted QQ recall operations "
+            f"count={recovered_recall_count}; status set to unknown without retry"
+        )
     knowledge_store = PluginKnowledgeStore(data_dir)
 
     if sign_in_available:

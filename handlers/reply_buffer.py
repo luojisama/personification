@@ -788,6 +788,7 @@ async def handle_reply_event(
         and (is_private_session or is_direct_mention or is_reply_to_bot or targets_bot)
     )
     state["reply_required"] = reply_required
+    state.setdefault("received_wall_at", time.time())
     immediate_flush = reply_required
     if immediate_flush and concurrency_controller is not None:
         entry = msg_buffer.get(session_key)
