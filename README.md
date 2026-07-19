@@ -285,6 +285,7 @@ WebUI 页面覆盖：
 - Agent Memory、Memory graph、recall test 和向量重建。
 - 表情包、Skill/MCP、Plugin Knowledge、插件更新和模型测试。
 - Persona 预览、角色模板构建、主动行为诊断和消息 Trace。
+- UserPolicy / Blacklist（从指定 Bot 好友选取或手工输入 QQ、临时/永久加入、完整解除和事件时间线）、近期 Bot 消息。
 - 数据导入导出、审计日志、插件日志、QQ 账号管理和设备管理。
 
 ### 登录与安全

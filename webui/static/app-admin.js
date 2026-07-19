@@ -1754,6 +1754,101 @@ function userPolicyExpiry(stateValue) {
   return raw>0?new Date(raw*1000).toLocaleString():"永久 / 无到期";
 }
 
+function userPolicyFriendName(friend) {
+  const item=friend||{};
+  return String(item.remark||item.nickname||"未命名好友");
+}
+
+async function setUserPolicyBot(value) {
+  state.userPolicyBotId=String(value||"");
+  state.userPolicyFriends=[];
+  state.userPolicyFriendError="";
+  if(!state.userPolicyBotId){render();return;}
+  state.userPolicyBusy=true;render();
+  try{
+    const result=await api("/qq/friends?bot_id="+encodeURIComponent(state.userPolicyBotId),{cache:"no-store"});
+    state.userPolicyFriends=result.friends||[];
+  }catch(e){
+    state.userPolicyFriendError="好友列表读取失败，仍可手工输入 QQ。";
+    alertFlash("err",e.message||"好友列表读取失败");
+  }finally{state.userPolicyBusy=false;render();}
+}
+
+function selectUserPolicyFriend(value) {
+  state.userPolicyDraftUserId=String(value||"");
+  render();
+}
+
+function updateUserPolicyDraftUserId(input) {
+  const value=String(input&&input.value||"").replace(/\D/g,"").slice(0,20);
+  if(input)input.value=value;
+  state.userPolicyDraftUserId=value;
+}
+
+async function addUserPolicyBlacklist() {
+  const uid=String(state.userPolicyDraftUserId||"").trim();
+  const hours=Math.max(0,Math.min(8760,Number(document.getElementById("user-policy-add-hours")?.value||0)));
+  if(!/^[1-9][0-9]{4,19}$/.test(uid)){alertFlash("err","请输入 5～20 位、且不以 0 开头的 QQ 号");return;}
+  const duration=hours>0?`${hours} 小时`:"永久";
+  if(!confirm(`确认将用户 ${uid} 加入 ${duration} Blacklist？`))return;
+  state.userPolicyBusy=true;render();
+  try{
+    const detail=await api(`/user-policy/${encodeURIComponent(uid)}/events?include_evidence=false&limit=1`,{cache:"no-store"});
+    await api(`/user-policy/${encodeURIComponent(uid)}/override`,{
+      method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({
+        mode:"block",
+        expected_revision:Number((detail.state||{}).revision||0),
+        expires_at:hours>0?Date.now()/1000+hours*3600:0,
+        reason_code:"webui_blacklist_add",
+      }),
+    });
+    state.userPolicyDraftUserId="";
+    state.userPolicyDurationHours=0;
+    state.userPolicyTier="blocked";
+    await reloadUserPolicyList();
+    alertFlash("ok",`用户 ${uid} 已加入 Blacklist`);
+  }catch(e){alertFlash("err",e.message||"加入 Blacklist 失败");}
+  finally{state.userPolicyBusy=false;render();}
+}
+
+function currentUserPolicyState(userId) {
+  const uid=String(userId||"");
+  const selected=state.selectedUserPolicy&&state.selectedUserPolicy.state;
+  if(selected&&String(selected.user_id||state.selectedUserPolicy.user_id||"")===uid)return selected;
+  return ((state.userPolicy&&state.userPolicy.states)||[]).find(item=>String(item.user_id||"")===uid)||null;
+}
+
+async function unblockUserPolicy(userId) {
+  const uid=String(userId||"");
+  let current=currentUserPolicyState(uid);
+  if(!current)return;
+  if(!confirm(`确认解除用户 ${uid} 的当前 Blacklist？管理员 block 与自动 strikes 都会清除。`))return;
+  state.userPolicyBusy=true;render();
+  try{
+    if(String(current.manual_mode||"")==="block"){
+      const result=await api(`/user-policy/${encodeURIComponent(uid)}/override`,{
+        method:"POST",headers:{"content-type":"application/json"},
+        body:JSON.stringify({mode:"inherit",expected_revision:Number(current.revision||0),expires_at:0,reason_code:"webui_blacklist_unblock"}),
+      });
+      current=result.state||current;
+    }
+    if(Boolean(current.blocked)){
+      const result=await api(`/user-policy/${encodeURIComponent(uid)}/clear-auto`,{
+        method:"POST",headers:{"content-type":"application/json"},
+        body:JSON.stringify({expected_revision:Number(current.revision||0)}),
+      });
+      current=result.state||current;
+    }
+    await reloadUserPolicyList();
+    if(state.selectedUserPolicy&&String(state.selectedUserPolicy.user_id||"")===uid){
+      state.selectedUserPolicy=await api(`/user-policy/${encodeURIComponent(uid)}/events?include_evidence=true&limit=150`,{cache:"no-store"});
+    }
+    alertFlash("ok",`用户 ${uid} 已解除 Blacklist`);
+  }catch(e){alertFlash("err",e.message||"解除 Blacklist 失败");}
+  finally{state.userPolicyBusy=false;render();}
+}
+
 async function reloadUserPolicyList() {
   const qs=new URLSearchParams({limit:"300"});
   if(state.userPolicyTier)qs.set("tier",state.userPolicyTier);
@@ -1858,9 +1953,10 @@ function renderUserPolicyDetail() {
         <div><div class="muted">最近更新</div><span class="u-tabular">${item.updated_at?escapeHtml(new Date(Number(item.updated_at)*1000).toLocaleString()):"-"}</span></div>
       </div>
       <div class="field-input" style="margin-top:14px">
-        <label>管理员策略 <select id="user-policy-mode"><option value="inherit">inherit（沿用自动状态）</option><option value="block">block</option><option value="allow">allow</option></select></label>
+        <label>管理员策略 <select id="user-policy-mode"><option value="inherit" ${item.manual_mode==="inherit"?'selected':''}>inherit（沿用自动状态）</option><option value="block" ${item.manual_mode==="block"?'selected':''}>block</option><option value="allow" ${item.manual_mode==="allow"?'selected':''}>allow</option></select></label>
         <label>临时小时数 <input id="user-policy-hours" type="number" min="0" max="8760" step="1" value="0" style="max-width:120px"></label>
         <button class="btn small primary" onclick="applyUserPolicyOverride('${escapeAttr(uid)}')" ${state.userPolicyBusy?'disabled':''}>保存 override</button>
+        ${item.blocked?`<button class="btn small danger" onclick="unblockUserPolicy('${escapeAttr(uid)}')" ${state.userPolicyBusy?'disabled':''}>解除 Blacklist</button>`:""}
         <button class="btn small" onclick="clearUserPolicyAuto('${escapeAttr(uid)}')" ${state.userPolicyBusy?'disabled':''}>清除自动 strikes</button>
         <button class="btn small danger" onclick="purgeUserPolicyProfile('${escapeAttr(uid)}')" ${state.userPolicyBusy?'disabled':''}>彻底清除画像</button>
       </div>
@@ -1873,21 +1969,42 @@ function renderUserPolicyDetail() {
     </div>`;
 }
 
+function renderUserPolicyAdd() {
+  const bots=(state.userPolicyBotInfo&&state.userPolicyBotInfo.bots)||[];
+  const botOptions=bots.map(item=>{const id=String(item.bot_id||"");return `<option value="${escapeAttr(id)}" ${id===state.userPolicyBotId?'selected':''}>QQ ${escapeHtml(id)}</option>`;}).join("");
+  const friends=(state.userPolicyFriends||[]).filter(item=>/^[1-9][0-9]{4,19}$/.test(String(item.user_id||"")));
+  const friendOptions=friends.map(item=>{const uid=String(item.user_id||"");return `<option value="${escapeAttr(uid)}" ${uid===state.userPolicyDraftUserId?'selected':''}>${escapeHtml(userPolicyFriendName(item))} · ${escapeHtml(uid)}</option>`;}).join("");
+  return `<div class="card">
+    <div class="between" style="gap:12px;flex-wrap:wrap"><div><h2 style="margin:0">添加 Blacklist</h2><p class="muted" style="margin:6px 0 0">可从指定 Bot 的好友中选取，也可直接输入 QQ 号；QQ 只作为全局策略标识保存。</p></div><span class="tag tag--status">管理员操作</span></div>
+    <div class="field-input" style="margin-top:14px">
+      <label>好友来源 Bot <select onchange="setUserPolicyBot(this.value)" ${state.userPolicyBusy||!botOptions?'disabled':''}>${botOptions||'<option value="">无已连接 Bot</option>'}</select></label>
+      <label>选择好友 <select onchange="selectUserPolicyFriend(this.value)" ${state.userPolicyBusy||!friendOptions?'disabled':''}><option value="">请选择好友</option>${friendOptions}</select></label>
+      <label>QQ 号 <input inputmode="numeric" autocomplete="off" maxlength="20" value="${escapeAttr(state.userPolicyDraftUserId)}" placeholder="手工输入 5～20 位 QQ" oninput="updateUserPolicyDraftUserId(this)" ${state.userPolicyBusy?'disabled':''}></label>
+      <label>临时小时数 <input id="user-policy-add-hours" type="number" min="0" max="8760" step="1" value="${escapeAttr(state.userPolicyDurationHours)}" oninput="state.userPolicyDurationHours=Math.max(0,Math.min(8760,Number(this.value||0)))" style="max-width:120px" ${state.userPolicyBusy?'disabled':''}></label>
+      <button class="btn danger" onclick="addUserPolicyBlacklist()" ${state.userPolicyBusy?'disabled':''}>加入 Blacklist</button>
+    </div>
+    <p class="muted" style="font-size:11px">小时数为 0 表示永久管理员 Blacklist；好友列表不可用时不影响手工添加。加入、解除和详情修改均使用 revision 防止并发覆盖。</p>
+    ${state.userPolicyFriendError?`<div class="alert err">${escapeHtml(state.userPolicyFriendError)}</div>`:""}
+  </div>`;
+}
+
 function renderUserPolicy() {
   if(state.selectedUserPolicy)return renderUserPolicyDetail();
+  const friendMap=new Map((state.userPolicyFriends||[]).map(item=>[String(item.user_id||""),userPolicyFriendName(item)]));
   const rows=((state.userPolicy&&state.userPolicy.states)||[]).map(item=>`<tr>
-    <td class="u-atomic u-tabular"><button class="btn small" onclick="openUserPolicy('${escapeAttr(item.user_id)}')">${escapeHtml(item.user_id)}</button></td>
+    <td class="col-id"><button class="btn small u-atomic u-tabular" onclick="openUserPolicy('${escapeAttr(item.user_id)}')">${escapeHtml(item.user_id)}</button>${friendMap.has(String(item.user_id||""))?`<div class="muted u-wrap" style="margin-top:4px">${escapeHtml(friendMap.get(String(item.user_id||"")))}</div>`:""}</td>
     <td class="col-status"><span class="tag tag--status">${escapeHtml(userPolicyTierLabel(item.effective_tier))}</span></td>
     <td class="col-time u-atomic u-tabular">${escapeHtml(userPolicyExpiry(item))}</td>
     <td class="col-number u-tabular">${Number(item.auto_stage||0)} / ${Number(item.violation_count||0)}</td>
     <td class="col-status u-atomic">${escapeHtml(item.manual_mode||"inherit")}</td>
     <td class="col-number u-tabular">${Number(item.revision||0)}</td>
     <td class="col-time u-atomic u-tabular">${item.updated_at?escapeHtml(new Date(Number(item.updated_at)*1000).toLocaleString()):"-"}</td>
+    <td class="col-actions">${item.blocked?`<button class="btn small danger" onclick="unblockUserPolicy('${escapeAttr(item.user_id)}')" ${state.userPolicyBusy?'disabled':''}>解除</button>`:`<button class="btn small" onclick="openUserPolicy('${escapeAttr(item.user_id)}')">查看</button>`}</td>
   </tr>`).join("");
-  const options=[["","全部"],["allow","允许"],["level_1","Level 1"],["level_2","Level 2"],["permanent","自动永久"],["manual_block","管理员 Blacklist"],["manual_allow","管理员允许"]].map(([value,label])=>`<option value="${escapeAttr(value)}" ${state.userPolicyTier===value?'selected':''}>${escapeHtml(label)}</option>`).join("");
-  return `<div class="card">
+  const options=[["blocked","当前阻止"],["","全部策略记录"],["allow","允许"],["level_1","Level 1"],["level_2","Level 2"],["permanent","自动永久"],["manual_block","管理员 Blacklist"],["manual_allow","管理员允许"]].map(([value,label])=>`<option value="${escapeAttr(value)}" ${state.userPolicyTier===value?'selected':''}>${escapeHtml(label)}</option>`).join("");
+  return `${renderUserPolicyAdd()}<div class="card">
     <div class="between" style="gap:12px;flex-wrap:wrap"><div><h2 style="margin:0">用户策略 / Blacklist</h2><p class="muted" style="margin:6px 0 0">全局 QQ 用户策略，跨群、私聊、Bot 身份与 QZone 生效。</p></div><label>tier <select onchange="setUserPolicyTier(this.value)">${options}</select></label></div>
-    ${rows?`<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="用户策略列表"><table class="data-table wide" style="margin-top:12px"><thead><tr><th scope="col">用户</th><th scope="col">effective tier</th><th scope="col">到期</th><th scope="col">stage / strikes</th><th scope="col">manual</th><th scope="col">revision</th><th scope="col">更新时间</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<p class="muted">当前筛选下没有已持久化策略状态。</p>'}
+    ${rows?`<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="用户策略列表"><table class="data-table wide" style="margin-top:12px"><thead><tr><th scope="col">用户</th><th scope="col">effective tier</th><th scope="col">到期</th><th scope="col">stage / strikes</th><th scope="col">manual</th><th scope="col">revision</th><th scope="col">更新时间</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody>${rows}</tbody></table></div>`:'<p class="muted">当前筛选下没有已持久化策略状态。</p>'}
   </div>`;
 }
 

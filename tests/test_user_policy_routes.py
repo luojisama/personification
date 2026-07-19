@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -107,6 +108,11 @@ def test_user_policy_routes_are_revision_guarded_and_no_store(tmp_path) -> None:
     assert [item["user_id"] for item in states.json()["states"]] == ["10001"]
     assert states.headers["cache-control"] == "no-store, private"
 
+    blocked = client.get("/api/user-policy/states?tier=blocked")
+    assert blocked.status_code == 200
+    assert [item["user_id"] for item in blocked.json()["states"]] == ["10001"]
+    assert all(item["blocked"] for item in blocked.json()["states"])
+
     events = client.get(
         "/api/user-policy/10001/events?include_evidence=true"
     )
@@ -114,6 +120,95 @@ def test_user_policy_routes_are_revision_guarded_and_no_store(tmp_path) -> None:
     assert events.headers["cache-control"] == "no-store, private"
     excerpts = [item.get("evidence_excerpt", "") for item in events.json()["events"]]
     assert "需要加密的短摘" in excerpts
+
+
+def test_blacklist_manager_can_add_unknown_user_and_fully_unblock(tmp_path) -> None:
+    client, service, _store, _db_path = _client(tmp_path)
+
+    added = client.post(
+        "/api/user-policy/20002/override",
+        json={
+            "mode": "block",
+            "expected_revision": 0,
+            "expires_at": 0,
+            "reason_code": "webui_blacklist_add",
+        },
+    )
+    assert added.status_code == 200, added.text
+    state = added.json()["state"]
+    assert state["effective_tier"] == "manual_block"
+    assert state["blocked"] is True
+
+    inherited = client.post(
+        "/api/user-policy/20002/override",
+        json={
+            "mode": "inherit",
+            "expected_revision": state["revision"],
+            "expires_at": 0,
+            "reason_code": "webui_blacklist_unblock",
+        },
+    )
+    assert inherited.status_code == 200, inherited.text
+    assert inherited.json()["state"]["blocked"] is False
+    assert service.authorize("20002").blocked is False
+
+
+def test_blacklist_manager_unblock_sequence_clears_manual_and_auto_state(tmp_path) -> None:
+    client, service, _store, _db_path = _client(tmp_path)
+    now = time.time()
+    for index in range(3):
+        service.apply_assessment(
+            user_id="30003",
+            idempotency_key=f"auto-block-{index}",
+            surface="qq_group",
+            assessment=_violation(),
+            now=now + index,
+        )
+    automatic = service.get_state("30003", now=now + 3)
+    assert automatic.is_blocked(now=now + 3) is True
+
+    manual = client.post(
+        "/api/user-policy/30003/override",
+        json={
+            "mode": "block",
+            "expected_revision": automatic.revision,
+            "expires_at": 0,
+            "reason_code": "webui_blacklist_add",
+        },
+    ).json()["state"]
+    inherited = client.post(
+        "/api/user-policy/30003/override",
+        json={
+            "mode": "inherit",
+            "expected_revision": manual["revision"],
+            "expires_at": 0,
+            "reason_code": "webui_blacklist_unblock",
+        },
+    ).json()["state"]
+    assert inherited["blocked"] is True
+    assert inherited["effective_tier"] == "level_1"
+
+    cleared = client.post(
+        "/api/user-policy/30003/clear-auto",
+        json={"expected_revision": inherited["revision"]},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["state"]["blocked"] is False
+    assert service.authorize("30003").blocked is False
+
+
+def test_blacklist_manager_frontend_supports_friend_and_manual_sources() -> None:
+    root = Path(__file__).resolve().parents[1]
+    core_js = (root / "webui" / "static" / "app-core.js").read_text(encoding="utf-8")
+    admin_js = (root / "webui" / "static" / "app-admin.js").read_text(encoding="utf-8")
+
+    assert 'userPolicyTier: "blocked"' in core_js
+    assert 'api("/qq/friends?bot_id="+encodeURIComponent(state.userPolicyBotId)' in core_js
+    assert "function renderUserPolicyAdd" in admin_js
+    assert "function addUserPolicyBlacklist" in admin_js
+    assert "function unblockUserPolicy" in admin_js
+    assert 'placeholder="手工输入 5～20 位 QQ"' in admin_js
+    assert "选择好友" in admin_js
 
 
 def test_irreversible_profile_purge_retains_policy_state(tmp_path) -> None:

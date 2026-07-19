@@ -39,7 +39,9 @@ let state = {
   logs: null, traces: null, logLevel: "", logQuery: "", logTraceId: "", logLoadingMore: false, logExpandedIds: {}, traceDetail: null, selectedTraceId: "",
   proactiveStats: null, proactiveRecent: null, proactiveScope: "",
   agentStatus: null, transferExport: null, transferImport: null, transferBotInfo: null,
-  userPolicy: null, userPolicyTier: "", selectedUserPolicy: null, userPolicyBusy: false,
+  userPolicy: null, userPolicyTier: "blocked", selectedUserPolicy: null, userPolicyBusy: false,
+  userPolicyBotInfo: null, userPolicyBotId: "", userPolicyFriends: [], userPolicyFriendError: "",
+  userPolicyDraftUserId: "", userPolicyDurationHours: 0,
   outbound: null, outboundBotId: "", outboundKind: "", outboundConversationId: "", outboundStatus: "", outboundRecalled: "", outboundBusy: false,
 };
 
@@ -728,7 +730,23 @@ async function loadView() {
     } else if (view === "user_policy") {
       const qs = new URLSearchParams({ limit: "300" });
       if (state.userPolicyTier) qs.set("tier", state.userPolicyTier);
-      state.userPolicy = await api("/user-policy/states?" + qs.toString(), {cache:"no-store"});
+      const [policy, botInfo] = await Promise.all([
+        api("/user-policy/states?" + qs.toString(), {cache:"no-store"}),
+        api("/qq/info", {cache:"no-store"}).catch(() => ({bots:[]})),
+      ]);
+      state.userPolicy = policy;
+      state.userPolicyBotInfo = botInfo;
+      const botIds=(botInfo.bots||[]).map(item=>String(item.bot_id||"")).filter(Boolean);
+      if(!botIds.includes(state.userPolicyBotId))state.userPolicyBotId=botIds[0]||"";
+      if(state.userPolicyBotId){
+        const friendResult=await api("/qq/friends?bot_id="+encodeURIComponent(state.userPolicyBotId),{cache:"no-store"})
+          .catch(()=>({friends:[],unavailable:true}));
+        state.userPolicyFriends=friendResult.friends||[];
+        state.userPolicyFriendError=friendResult.unavailable?"好友列表读取失败，仍可手工输入 QQ。":"";
+      }else{
+        state.userPolicyFriends=[];
+        state.userPolicyFriendError="当前没有已连接 Bot，仍可手工输入 QQ。";
+      }
     } else if (view === "outbound") {
       const qs = new URLSearchParams({ limit: "300" });
       if (state.outboundBotId) qs.set("bot_id", state.outboundBotId);

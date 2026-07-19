@@ -116,6 +116,61 @@ def test_qq_delete_friend(_runtime_context) -> None:
     assert any(m.get("user_id") == 10001 for m in _runtime_context.sent)
 
 
+def test_qq_friend_list_supports_explicit_bot_selection() -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from ._loader import load_personification_module
+
+    qq_routes = load_personification_module(
+        "plugin.personification.webui.routes.qq_routes"
+    )
+
+    class _FriendBot:
+        def __init__(self, self_id: str, friend_id: str) -> None:
+            self.self_id = self_id
+            self.friend_id = friend_id
+
+        async def call_api(self, api: str, **_kwargs):
+            assert api == "get_friend_list"
+            return [
+                {
+                    "user_id": int(self.friend_id),
+                    "nickname": f"好友-{self.self_id}",
+                    "remark": "",
+                }
+            ]
+
+    bots = {
+        "100": _FriendBot("100", "10001"),
+        "200": _FriendBot("200", "20002"),
+    }
+    runtime = SimpleNamespace(get_bots=lambda: bots)
+    app = FastAPI()
+    app.include_router(qq_routes.build_qq_router(runtime=runtime))
+    app.dependency_overrides[qq_routes.require_admin] = lambda: qq_routes.AdminIdentity(
+        qq="90001",
+        device_id="device",
+        label="test",
+    )
+    client = TestClient(app)
+
+    selected = client.get("/api/qq/friends", params={"bot_id": "200"})
+    assert selected.status_code == 200, selected.text
+    assert selected.json() == {
+        "bot_id": "200",
+        "friends": [
+            {"user_id": "20002", "nickname": "好友-200", "remark": ""}
+        ],
+        "count": 1,
+    }
+    assert selected.headers["cache-control"] == "no-store, private"
+
+    missing = client.get("/api/qq/friends", params={"bot_id": "300"})
+    assert missing.status_code == 503
+    assert missing.json()["detail"]["code"] == "qq_bot_disconnected"
+
+
 @pytest.mark.parametrize(
     ("raised", "status_code", "code", "outcome_unknown"),
     [

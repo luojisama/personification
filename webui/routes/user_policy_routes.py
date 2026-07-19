@@ -16,7 +16,15 @@ from ..deps import AdminIdentity, require_admin
 
 _USER_ID_RE = re.compile(r"[1-9][0-9]{4,19}\Z")
 _TIERS = frozenset(
-    {"allow", "level_1", "level_2", "permanent", "manual_block", "manual_allow"}
+    {
+        "allow",
+        "blocked",
+        "level_1",
+        "level_2",
+        "permanent",
+        "manual_block",
+        "manual_allow",
+    }
 )
 
 
@@ -102,11 +110,14 @@ def build_user_policy_router(*, runtime: Any) -> APIRouter:
         fetch_limit = 1000 if normalized_tier else limit
         rows = await asyncio.to_thread(service.list_states, limit=fetch_limit)
         if normalized_tier:
-            rows = [
-                item
-                for item in rows
-                if str(item.get("effective_tier", "") or "") == normalized_tier
-            ][:limit]
+            if normalized_tier == "blocked":
+                rows = [item for item in rows if bool(item.get("blocked"))][:limit]
+            else:
+                rows = [
+                    item
+                    for item in rows
+                    if str(item.get("effective_tier", "") or "") == normalized_tier
+                ][:limit]
         return {"states": rows, "tier": normalized_tier, "available": True}
 
     @router.get("/{user_id}/events")

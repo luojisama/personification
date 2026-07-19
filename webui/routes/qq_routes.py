@@ -10,7 +10,7 @@ import asyncio
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from nonebot.exception import ActionFailed, ApiNotAvailable, NetworkError
 
 from ...core import webui_audit_log
@@ -863,8 +863,21 @@ def build_qq_router(*, runtime) -> APIRouter:
         )
 
     @router.get("/friends")
-    async def friends(_: AdminIdentity = Depends(require_admin)) -> dict:
-        bot = _bot(runtime, api="get_friend_list")
+    async def friends(
+        response: Response,
+        bot_id: str = Query(default="", max_length=32),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        response.headers["Cache-Control"] = "no-store, private"
+        response.headers["Pragma"] = "no-cache"
+        selected = str(bot_id or "").strip()
+        bot = _bot(
+            runtime,
+            selected,
+            explicit=bool(selected),
+            api="get_friend_list",
+        )
+        selected_bot_id = _target_bot_id(bot, selected)
         data = await _call(bot, "get_friend_list")
         items = [
             {
@@ -874,7 +887,11 @@ def build_qq_router(*, runtime) -> APIRouter:
             }
             for f in (data or []) if isinstance(f, dict)
         ]
-        return {"friends": items, "count": len(items)}
+        return {
+            "bot_id": selected_bot_id,
+            "friends": items,
+            "count": len(items),
+        }
 
     @router.delete("/friends/{user_id}")
     async def delete_friend(user_id: str, body: dict = Body(default_factory=dict), admin: AdminIdentity = Depends(require_admin)) -> dict:
