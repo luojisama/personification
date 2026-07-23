@@ -4,7 +4,10 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from ...core.reply_style_policy import build_directed_exchange_policy_prompt
+from ...core.reply_style_policy import (
+    build_directed_exchange_policy_prompt,
+    build_empty_evidence_output_policy_prompt,
+)
 from .planner import OUTPUT_MODE_LENGTHS, extract_json_payload
 
 
@@ -180,13 +183,14 @@ def _build_persona_responder_instruction(
         f"reply_text 按 output_mode={output_mode} 控制在 {min_chars}-{max_chars} 字附近。"
         "如果只是在复述用户语义，把 info_added 标为 tone_only；如果复用了用户原话连续片段，把 echoed_user_phrase 标为 true。"
         f"{no_reply_rule}\n"
-        "## 不确定性硬约束（拟人优先于装懂）\n"
+        "## 事实与不确定性硬约束（拟人优先于装懂）\n"
         "- 涉及具体事实、数字、时间、人名、新闻、产品参数、专有名词、角色/作品/游戏/动漫/卡牌术语、外号、缩写或梗的问题，"
         "  如果可用查证工具存在，Agent 阶段应已经先调用工具；本 JSON 收尾阶段不要再承诺『我去查查』，也不要反问群友这是什么。"
-        "  如果没有调用工具且你对答案不完全确定，reply_text 应当用口语自然地承认当前不知道（例如：『这个我不太确定』），"
-        "  把 info_added 设为 'refuse'。**禁止凭印象编造具体数字、链接、日期、官方说法。**\n"
-        "- 如果工具结果明显为空或与问题无关，也要承认信息不足，而不是绕开。\n"
-        "- 但闲聊、共情、表达情绪、复述用户观点这些**不需要外部事实**的话题，依然要正常回答，不要滥用『不知道』。"
+        "  没有可用证据时不得凭印象编造具体数字、链接、日期、官方说法或出处。\n"
+        "- 如果必须回应且只缺一个对方能提供的条件，reply_text 只索取这一项并把 info_added 设为 'redirect'；"
+        "  没有具体可索取条件时使用 [SILENCE]，不要把失败或不确定状态写成 reply_text。\n"
+        "- 闲聊、共情和表达情绪不需要外部事实时依然正常回答，不要误用空证据收口。\n"
+        + build_empty_evidence_output_policy_prompt()
     )
     directed_exchange_prompt = build_directed_exchange_policy_prompt(
         is_direct_mention=is_direct_mention,

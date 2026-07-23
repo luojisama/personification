@@ -290,6 +290,28 @@ def test_failed_evidence_draft_is_marked_for_persona_review() -> None:
     assert traces[-1]["status"] == "warn"
 
 
+def test_banter_draft_does_not_bypass_empty_evidence_quality_context() -> None:
+    tool = _LookupTool("")
+    state = stop_flow.StopFlowState(
+        has_tool_call=True,
+        last_tool_name="lookup_tool",
+        last_tool_outcome="empty_evidence",
+    )
+
+    decision, traces = _run_stop_handler(
+        state=state,
+        response=_stop_response("地点没拿准，我别乱猜天气。"),
+        content_len=14,
+        runtime_chat_intent="banter",
+        registry=_Registry(tool),
+    )
+
+    assert decision.action == "return"
+    assert decision.result.quality_context == "evidence_unavailable"
+    assert traces[-1]["status"] == "warn"
+    assert "reason=evidence_unavailable" in traces[-1]["detail"]
+
+
 def test_usable_evidence_is_not_overridden_by_later_tool_failure() -> None:
     tool = _LookupTool("", retryable=False)
     registry = _Registry(tool)

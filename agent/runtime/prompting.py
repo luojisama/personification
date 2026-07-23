@@ -9,6 +9,7 @@ from ...core.context_policy import (
 from ...core.reply_style_policy import (
     build_directed_exchange_policy_prompt,
     build_domain_evidence_policy_prompt,
+    build_empty_evidence_output_policy_prompt,
     build_emotional_support_policy_prompt,
     build_media_understanding_output_policy_prompt,
     build_speech_act_policy_prompt,
@@ -58,8 +59,10 @@ def append_agent_system_prompts(
                 "role": "system",
                 "content": (
                     "当前是结构上必须回应的强交互轮次（私聊、明确 @/回复 bot 或其它直接指向）。"
-                    "除非发送型工具已经成功排队，或安全边界要求给出拒绝，否则禁止输出 [NO_REPLY] 或 [SILENCE]。"
-                    "证据不足时应简短说明不确定或请求对方重试，不能用沉默代替回应。"
+                    "除非发送型工具已经成功排队、安全边界要求拒绝，或空证据且无法形成具体补充请求，"
+                    "否则禁止输出 [NO_REPLY] 或 [SILENCE]。"
+                    "如果只缺一个对方能提供的必要条件，就具体索取这一项；"
+                    "不要用无法确认、没有理解或查证无结果的状态播报顶替回答。"
                 ),
             }
         )
@@ -99,12 +102,12 @@ def append_agent_system_prompts(
                 "不要只附和、感叹，也不要把群友刚说过的内容换一种说法转述。"
                 "如果你只想说“先看看情况/等会再说/先围观一下”这类观察或等待宣告，直接输出 [NO_REPLY]。"
                 "不要暴露工具、检索、看图、回忆、审查清单或 Step 1/Step 2 这类中间步骤。"
-                "遇到不确定或有歧义时，如果有可用查证工具必须先查；工具不可用、查不到或时间预算不足时再承认不确定，不要硬猜。"
+                "遇到不确定或有歧义时，如果有可用查证工具必须先查；没有可用证据时不要硬猜，也不要把失败状态包装成回复。"
                 "遇到不认识的专有名词、外号、梗、游戏/动漫/卡牌术语或圈内说法，不要直接问群友那是什么，先用可用工具查证。"
                 "如果用户说“这个动画/这段动画/这个角色/这张图”是在接最近上下文里的 ACG 角色、抽卡、卡面、图片或视频，"
                 "先查清角色、作品、剧情/动画出处，再用一句具体评价参与讨论；不要泛泛附和“确实挺强”。"
                 "群聊里的可见回复不要用追问、澄清问句或征询式结尾把信息缺口丢回给群友；"
-                "轻松调侃时允许一句不索要信息的反击式反问。信息不足时给保守短反应或 [NO_REPLY]。"
+                "轻松调侃时允许一句不索要信息的反击式反问。信息不足但能给具体态度时再短答，否则按空证据纪律收口。"
                 "涉及本地天气、出行、城市或附近状态时，如果用户没明说地点，先看已注入的用户档案；仍不确定可调用记忆工具确认，不能猜城市。"
                 "最终只输出纯文本，不要 markdown、标题、项目符号列表、编号列表、URL 列表，也不要说“我需要确认一下”“根据搜索结果”。"
             ),
@@ -151,7 +154,7 @@ def append_agent_system_prompts(
                 "比如 A 在说地震位置是「广西柳州」，同时 B 在说「我家在浙江」，"
                 "当 C 问「这次地震严重吗」时，你只能基于 A 的位置信息回答，绝不能说「浙江有震感」。\n"
                 "3. 引用某人状态前先问自己：这个状态是不是当前消息的语境？如果不是，就不要写进去。\n"
-                "4. 拿不准时宁可简短、含糊或承认不知道，也不要把无关上下文糊上去。"
+                "4. 拿不准时不要把无关上下文糊上去；没有具体内容可说就按空证据纪律收口。"
             ),
         }
     )
@@ -230,6 +233,12 @@ def append_agent_system_prompts(
             "content": build_media_understanding_output_policy_prompt(),
         }
     )
+    messages.append(
+        {
+            "role": "system",
+            "content": build_empty_evidence_output_policy_prompt(),
+        }
+    )
     media_grounding = render_turn_media_grounding(turn_media_context)
     if media_grounding:
         messages.append({"role": "system", "content": media_grounding})
@@ -239,8 +248,8 @@ def append_agent_system_prompts(
                 "role": "system",
                 "content": (
                     "当前这句里有高歧义名词/对象，容易误解。"
-                    "如果有可用查证工具，先查证再说；上下文和工具证据仍不足时再承认不确定。"
-                    "群聊里若没人明确在 cue 你，也可以输出 [NO_REPLY]。"
+                    "如果有可用查证工具，先查证再说；上下文和工具证据仍不足时，"
+                    "非强交互直接 [NO_REPLY]，强交互只索取一个明确且对方能提供的必要条件。"
                 ),
             }
         )

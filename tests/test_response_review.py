@@ -184,6 +184,291 @@ def test_output_mode_hint_uses_turn_plan_lengths() -> None:
     assert "80-300" in hint
 
 
+def test_uncertain_visible_reply_silences_undirected_empty_evidence_without_model_call() -> None:
+    async def _should_not_call(_messages):  # noqa: ANN001
+        raise AssertionError("undirected empty evidence must be silent without a model call")
+
+    decision = asyncio.run(
+        response_review.resolve_uncertain_visible_reply(
+            _should_not_call,
+            candidate_text="看来是群里自定义的叫法，我没对上具体出处。",
+            raw_message_text="白咲真寻手机限时复活",
+            reply_required=False,
+            is_private=False,
+            evidence_unavailable=True,
+        )
+    )
+
+    assert decision.action == "silence"
+    assert decision.reason == "no_evidence_nonrequired"
+    assert decision.flags == ("empty_evidence_self_report",)
+
+
+def test_normal_and_yaml_uncertain_gate_uses_structured_frame_state() -> None:
+    cases = (
+        ("high", "accept", True),
+        ("low", "refuse", True),
+        ("medium", "redirect", False),
+        ("low", "accept", False),
+    )
+    for ambiguity_level, info_added, expected in cases:
+        assert response_review.needs_uncertain_visible_reply_review(
+            ambiguity_level=ambiguity_level,
+            persona_response_info_added=info_added,
+        ) is expected
+
+
+def test_uncertain_visible_reply_repairs_and_validates_required_context_request() -> None:
+    calls: list[list[dict]] = []
+
+    async def _fake_call(messages):  # noqa: ANN001
+        calls.append(messages)
+        if len(calls) == 1:
+            assert "禁止 accept" in messages[-2]["content"]
+            assert "白咲真寻手机限时复活" in messages[-1]["content"]
+            return '{"action":"request_context","text":"把这个叫法的原句或截图带上。","reason":"补语境"}'
+        assert "ACTIONABLE_CONTEXT_REQUEST" in messages[0]["content"]
+        return "ACTIONABLE_CONTEXT_REQUEST"
+
+    decision = asyncio.run(
+        response_review.resolve_uncertain_visible_reply(
+            _fake_call,
+            candidate_text="这个叫法的出处没对上。",
+            raw_message_text="@bot 白咲真寻手机限时复活是什么意思",
+            persona_system="你是群里的普通成员。",
+            turn_plan=SimpleNamespace(
+                speech_act="ask_followup",
+                ambiguity_level="high",
+                message_target="bot",
+            ),
+            reply_required=True,
+            is_private=False,
+            evidence_unavailable=True,
+        )
+    )
+
+    assert decision.action == "request_context"
+    assert decision.text == "把这个叫法的原句或截图带上。"
+    assert decision.reason == "uncertain_context_request"
+    assert len(calls) == 2
+    assert '"speech_act": "ask_followup"' in calls[0][-1]["content"]
+
+
+def test_uncertain_visible_reply_fails_closed_on_empty_or_invalid_resolution() -> None:
+    for raw_response in ("", "not json"):
+        async def _fake_call(_messages):  # noqa: ANN001
+            return raw_response
+
+        decision = asyncio.run(
+            response_review.resolve_uncertain_visible_reply(
+                _fake_call,
+                candidate_text="大概是群里自己叫的。",
+                raw_message_text="@bot 这个称呼是什么",
+                reply_required=True,
+                is_private=False,
+                evidence_unavailable=True,
+            )
+        )
+
+        assert decision.action == "silence"
+        assert decision.reason == "uncertain_resolution_failed"
+
+
+def test_uncertain_visible_reply_requires_bare_strict_json() -> None:
+    async def _fake_call(_messages):  # noqa: ANN001
+        return '```json\n{"action":"request_context","text":"把原句带上。","reason":"补语境"}\n```'
+
+    decision = asyncio.run(
+        response_review.resolve_uncertain_visible_reply(
+            _fake_call,
+            candidate_text="暂时无法确认。",
+            raw_message_text="这个称呼是什么",
+            reply_required=True,
+            is_private=True,
+            evidence_unavailable=True,
+        )
+    )
+
+    assert decision.action == "silence"
+    assert decision.reason == "uncertain_resolution_failed"
+
+
+def test_uncertain_visible_reply_fails_closed_on_provider_error() -> None:
+    async def _failed_call(_messages):  # noqa: ANN001
+        raise RuntimeError("provider unavailable")
+
+    decision = asyncio.run(
+        response_review.resolve_uncertain_visible_reply(
+            _failed_call,
+            candidate_text="这个叫法的出处暂时无法确认。",
+            raw_message_text="这个称呼是什么",
+            reply_required=True,
+            is_private=True,
+            evidence_unavailable=True,
+        )
+    )
+
+    assert decision.action == "silence"
+    assert decision.reason == "uncertain_resolution_failed"
+
+
+def test_uncertain_visible_reply_shares_deadline_across_resolution_and_validation() -> None:
+    calls = 0
+
+    async def _slow_validation(_messages):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return '{"action":"request_context","text":"把原句带上。","reason":"补语境"}'
+        await asyncio.sleep(0.2)
+        return "ACTIONABLE_CONTEXT_REQUEST"
+
+    decision = asyncio.run(
+        response_review.resolve_uncertain_visible_reply(
+            _slow_validation,
+            candidate_text="暂时无法确认。",
+            raw_message_text="这个称呼是什么",
+            reply_required=True,
+            is_private=True,
+            evidence_unavailable=True,
+            timeout=0.01,
+        )
+    )
+
+    assert calls == 2
+    assert decision.action == "silence"
+    assert decision.reason == "uncertain_validation_rejected"
+
+
+def test_uncertain_visible_reply_does_not_call_provider_after_deadline() -> None:
+    called = False
+
+    async def _should_not_call(_messages):  # noqa: ANN001
+        nonlocal called
+        called = True
+        return '{"action":"silence","text":"","reason":"late"}'
+
+    decision = asyncio.run(
+        response_review.resolve_uncertain_visible_reply(
+            _should_not_call,
+            candidate_text="暂时无法确认。",
+            raw_message_text="这个称呼是什么",
+            reply_required=True,
+            is_private=True,
+            evidence_unavailable=True,
+            timeout=0.0,
+        )
+    )
+
+    assert called is False
+    assert decision.action == "silence"
+    assert decision.reason == "uncertain_resolution_failed"
+
+
+def test_uncertain_visible_reply_rejects_unsupported_guess_after_revision() -> None:
+    replies = iter(
+        (
+            '{"action":"request_context","text":"这应该是你们群里的自定义叫法。","reason":"猜测"}',
+            "UNSUPPORTED_GUESS",
+        )
+    )
+
+    async def _fake_call(_messages):  # noqa: ANN001
+        return next(replies)
+
+    decision = asyncio.run(
+        response_review.resolve_uncertain_visible_reply(
+            _fake_call,
+            candidate_text="我不确定这个称呼。",
+            raw_message_text="@bot 这个称呼是什么",
+            reply_required=True,
+            is_private=False,
+            evidence_unavailable=True,
+        )
+    )
+
+    assert decision.action == "silence"
+    assert decision.reason == "uncertain_validation_rejected"
+
+
+def test_high_ambiguity_fallback_does_not_ask_context_on_undirected_turn() -> None:
+    replies = iter(
+        (
+            '{"action":"request_context","text":"把原句发来。","reason":"补语境"}',
+            "ACTIONABLE_CONTEXT_REQUEST",
+        )
+    )
+
+    async def _fake_call(_messages):  # noqa: ANN001
+        return next(replies)
+
+    decision = asyncio.run(
+        response_review.resolve_uncertain_visible_reply(
+            _fake_call,
+            candidate_text="这个说法得看上下文。",
+            raw_message_text="又开始叫那个新外号了",
+            reply_required=False,
+            is_private=False,
+            evidence_unavailable=False,
+        )
+    )
+
+    assert decision.action == "silence"
+    assert decision.reason == "uncertain_validation_rejected"
+
+
+def test_group_context_request_question_is_rejected_by_shared_gate() -> None:
+    replies = iter(
+        (
+            '{"action":"request_context","text":"你能把原句发来吗？","reason":"补语境"}',
+            "ACTIONABLE_CONTEXT_REQUEST",
+        )
+    )
+
+    async def _fake_call(_messages):  # noqa: ANN001
+        return next(replies)
+
+    decision = asyncio.run(
+        response_review.resolve_uncertain_visible_reply(
+            _fake_call,
+            candidate_text="暂时无法确认。",
+            raw_message_text="@bot 这个称呼是什么",
+            reply_required=True,
+            is_private=False,
+            evidence_unavailable=True,
+        )
+    )
+
+    assert decision.action == "silence"
+    assert decision.reason == "uncertain_validation_rejected"
+
+
+def test_uncertain_visible_reply_rejects_resolution_validation_action_mismatch() -> None:
+    replies = iter(
+        (
+            '{"action":"request_context","text":"先看这个时间点。","reason":"改成实质回复"}',
+            "SUBSTANTIVE_REPLY",
+        )
+    )
+
+    async def _fake_call(_messages):  # noqa: ANN001
+        return next(replies)
+
+    decision = asyncio.run(
+        response_review.resolve_uncertain_visible_reply(
+            _fake_call,
+            candidate_text="暂时无法确认。",
+            raw_message_text="这个情况怎么判断",
+            reply_required=True,
+            is_private=True,
+            evidence_unavailable=False,
+        )
+    )
+
+    assert decision.action == "silence"
+    assert decision.reason == "uncertain_validation_rejected"
+
+
 def test_review_blocks_no_reply_for_direct_mention() -> None:
     async def _fake_call(messages):  # noqa: ANN001
         assert "禁止输出 no_reply" in messages[0]["content"]
@@ -246,6 +531,7 @@ def test_review_prompt_rejects_empty_affirmation_and_status_announcement() -> No
         content = messages[0]["content"]
         assert "附和感叹/转述聊天" in content
         assert "等会再说" in content
+        assert "empty_evidence_self_report" in content
         return '{"action":"rewrite","text":"那就先卡这个点聊，别绕远。","reason":"empty_affirmation"}'
 
     decision = asyncio.run(

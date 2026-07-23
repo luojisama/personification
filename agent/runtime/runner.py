@@ -274,6 +274,8 @@ async def run_agent(
                     turn_plan=turn_plan,
                     is_group=is_group,
                     is_direct_mention=is_direct_mention,
+                    reply_required=reply_required,
+                    current_user_text=user_text,
                     record_trace=_record_reply_trace_stage,
                     logger=logger,
                     reason=reason,

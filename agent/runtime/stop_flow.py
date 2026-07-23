@@ -458,7 +458,13 @@ async def handle_model_stop(
         record_trace=record_trace,
         classify_deferred_lookup_reply=classify_deferred_lookup_reply,
     )
-    if runtime_chat_intent == "banter" and not response.tool_calls and content_len > 0 and not banter_requires_lookup_retry:
+    if (
+        runtime_chat_intent == "banter"
+        and not response.tool_calls
+        and content_len > 0
+        and not banter_requires_lookup_retry
+        and not _state_evidence_unavailable(state, registry)
+    ):
         record_trace(
             key="agent_finish",
             label="Agent 收尾",

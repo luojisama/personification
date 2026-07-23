@@ -71,8 +71,10 @@ from ...core.response_review import (
     extract_recent_bot_reply_texts,
     is_agent_reply_ooc,
     make_passthrough_review_decision,
+    needs_uncertain_visible_reply_review,
     required_reply_fallback_text,
     required_reply_needs_recovery,
+    resolve_uncertain_visible_reply,
     rewrite_agent_reply_ooc,
     review_response_text,
 )
@@ -1271,7 +1273,8 @@ async def process_yaml_response_logic(
         if str(intent_ambiguity_level or "").strip().lower() == "high":
             system_prompt += (
                 "\n- 当前最新名词/对象存在较高歧义。"
-                "如果上下文和现有证据不足，请优先承认不确定；群聊里若没人明确在 cue 你，且这轮明显会打断别人时，也可以保持沉默。"
+                "如果上下文和现有证据不足，非强交互直接保持沉默；"
+                "强交互只索取一个明确且对方能提供的必要条件，不要播报无法确认或查证无结果。"
             )
         if arbitration == "clarify":
             system_prompt += "\n- 这轮高歧义但对方像是在直接问你；群聊里不要用澄清问句追问，能判断就给保守短反应，不能判断就保持沉默。"
@@ -1549,6 +1552,7 @@ async def process_yaml_response_logic(
     used_agent = False
     agent_result: Any = None
     reply_content = ""
+    uncertain_reply_suppress_recovery = False
 
     def _trace_suppressed_agent_reply(background_detail: str, evidence_detail: str) -> None:
         if str(getattr(agent_result, "quality_context", "") or "") == "evidence_unavailable":
@@ -2044,6 +2048,47 @@ async def process_yaml_response_logic(
         else:
             _trace_no_reply("empty_model_reply", diagnosis_code="model_empty", detail="模型返回空内容")
             return
+    if not used_agent and needs_uncertain_visible_reply_review(
+        ambiguity_level=intent_ambiguity_level,
+        persona_response_info_added=getattr(
+            semantic_frame,
+            "persona_response_info_added",
+            "",
+        ),
+    ):
+        uncertain_started_at = time.monotonic()
+        uncertain_timeout = 8.0
+        if isinstance(response_deadline, (int, float)):
+            uncertain_timeout = min(
+                uncertain_timeout,
+                max(0.0, float(response_deadline) - time.monotonic()),
+            )
+        uncertain_decision = await resolve_uncertain_visible_reply(
+            review_call_ai_api or call_ai_api,
+            candidate_text=reply_content,
+            raw_message_text=raw_message_text or history_last_text or trigger_reason,
+            persona_system=system_prompt,
+            turn_plan=turn_plan,
+            reply_required=reply_required,
+            is_private=is_private_session,
+            evidence_unavailable=False,
+            timeout=uncertain_timeout,
+        )
+        if uncertain_decision.action == "request_context" and uncertain_decision.text:
+            reply_content = uncertain_decision.text.strip()
+        elif uncertain_decision.action == "silence":
+            reply_content = "[SILENCE]"
+            uncertain_reply_suppress_recovery = True
+        _trace_stage(
+            key="yaml_uncertain_reply_review",
+            label="YAML 高歧义回复收口",
+            status="ok" if uncertain_decision.action in {"accept", "request_context"} else "warn",
+            detail=(
+                f"action={uncertain_decision.action} "
+                f"flags={','.join(uncertain_decision.flags) or '-'} "
+                f"elapsed_ms={int((time.monotonic() - uncertain_started_at) * 1000)}"
+            ),
+        )
     if _has_newer_batch_now():
         logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
         _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="模型回复生成后出现更新批次")
@@ -2053,10 +2098,13 @@ async def process_yaml_response_logic(
         reply_required=reply_required,
         pending_actions=pending_actions,
         direct_output=bool(
-            agent_result is not None
-            and (
-                getattr(agent_result, "direct_output", False)
-                or getattr(agent_result, "suppress_reply_recovery", False)
+            uncertain_reply_suppress_recovery
+            or (
+                agent_result is not None
+                and (
+                    getattr(agent_result, "direct_output", False)
+                    or getattr(agent_result, "suppress_reply_recovery", False)
+                )
             )
         ),
     ):
@@ -2118,6 +2166,13 @@ async def process_yaml_response_logic(
             release_reply_commit(reply_commit_state)
             mark_reply_phase(reply_commit_state, "reply_complete")
             _trace_finish(outcome="ok", diagnosis_code="ok", detail={"action_only": True})
+            return
+        if uncertain_reply_suppress_recovery:
+            _trace_no_reply(
+                "uncertain_reply_silenced",
+                diagnosis_code="uncertain_reply_silenced",
+                detail="高歧义候选没有实质内容或具体补充请求",
+            )
             return
         if bool(getattr(agent_result, "suppress_reply_recovery", False)):
             _trace_suppressed_agent_reply(
@@ -2314,7 +2369,7 @@ async def process_yaml_response_logic(
 
     suppress_reply_recovery = bool(
         agent_result is not None and getattr(agent_result, "suppress_reply_recovery", False)
-    )
+    ) or uncertain_reply_suppress_recovery
     if (
         has_silence_control_marker(assistant_text)
         and reply_required

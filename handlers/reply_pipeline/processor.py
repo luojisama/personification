@@ -89,8 +89,10 @@ from ...core.role_integrity import detect_persona_identity_leak
 from ...core.response_review import (
     is_agent_reply_ooc,
     make_passthrough_review_decision,
+    needs_uncertain_visible_reply_review,
     required_reply_fallback_text,
     required_reply_needs_recovery,
+    resolve_uncertain_visible_reply,
     rewrite_agent_reply_ooc,
     review_response_text,
 )
@@ -1805,7 +1807,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     if intent_decision.ambiguity_level == "high":
         system_prompt += (
             "\n[系统提示] 当前最新名词/对象存在较高歧义。"
-            "如果上下文和现有证据不足，请优先承认不确定；群聊里若没人明确在 cue 你，且这轮明显会打断别人时，也可以输出 [NO_REPLY]。"
+            "如果上下文和现有证据不足，非强交互直接输出 [NO_REPLY]；"
+            "强交互只索取一个明确且对方能提供的必要条件，不要播报无法确认或查证无结果。"
         )
     system_prompt += _build_confidence_style_instruction(
         float(getattr(semantic_frame, "confidence", 0.0) or 0.0),
@@ -2042,6 +2045,13 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         outcome="no_reply",
                         diagnosis_code="evidence_unavailable",
                         detail={"silent": True, "evidence_unavailable": True},
+                    )
+                    return
+                if agent_quality_context == "uncertain_reply":
+                    reply_turn_trace.finish_trace(
+                        outcome="no_reply",
+                        diagnosis_code="uncertain_reply_silenced",
+                        detail={"silent": True, "uncertain_reply": True},
                     )
                     return
                 reply_turn_trace.finish_trace(
@@ -2288,6 +2298,53 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     except Exception:
                         pass
                     return
+            if needs_uncertain_visible_reply_review(
+                ambiguity_level=getattr(intent_decision, "ambiguity_level", ""),
+                persona_response_info_added=getattr(
+                    semantic_frame,
+                    "persona_response_info_added",
+                    "",
+                ),
+            ):
+                uncertain_started_at = time.monotonic()
+                uncertain_timeout = 8.0
+                if isinstance(response_deadline, (int, float)):
+                    uncertain_timeout = min(
+                        uncertain_timeout,
+                        max(0.0, float(response_deadline) - time.monotonic()),
+                    )
+                uncertain_decision = await resolve_uncertain_visible_reply(
+                    runtime.review_call_ai_api or runtime.lite_call_ai_api or runtime.call_ai_api,
+                    candidate_text=reply_content,
+                    raw_message_text=raw_message_text or message_text or message_content,
+                    persona_system=system_prompt,
+                    turn_plan=turn_plan,
+                    reply_required=reply_required,
+                    is_private=is_private_session,
+                    evidence_unavailable=False,
+                    timeout=uncertain_timeout,
+                )
+                if uncertain_decision.action == "request_context" and uncertain_decision.text:
+                    reply_content = uncertain_decision.text.strip()
+                elif uncertain_decision.action == "silence":
+                    reply_content = "[SILENCE]"
+                    agent_suppress_reply_recovery = True
+                    agent_quality_context = "uncertain_reply"
+                try:
+                    from ...core import reply_turn_trace
+
+                    reply_turn_trace.record_stage(
+                        key="uncertain_reply_review",
+                        label="高歧义回复收口",
+                        status="ok" if uncertain_decision.action in {"accept", "request_context"} else "warn",
+                        detail=(
+                            f"action={uncertain_decision.action} "
+                            f"flags={','.join(uncertain_decision.flags) or '-'} "
+                            f"elapsed_ms={int((time.monotonic() - uncertain_started_at) * 1000)}"
+                        ),
+                    )
+                except Exception:
+                    pass
         elif not agent_direct_output and is_agent_reply_ooc(reply_content):
             rewritten_ooc = await rewrite_agent_reply_ooc(
                 tool_caller=runtime.lite_tool_caller or runtime.agent_tool_caller,

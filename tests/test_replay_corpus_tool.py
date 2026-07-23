@@ -24,6 +24,7 @@ _REQUIRED_BAD_REPLY_TAGS = {
     "media_overexplaining",
     "wrong_topic_interjection",
     "vague_deferred_lookup",
+    "empty_evidence_self_report",
 }
 
 

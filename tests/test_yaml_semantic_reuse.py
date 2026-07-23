@@ -17,9 +17,11 @@ yaml_processor = load_personification_module("plugin.personification.handlers.ya
 
 
 @pytest.mark.parametrize("attached_plan", [True, False])
+@pytest.mark.parametrize("intent_ambiguity_level", ["medium", "high"])
 def test_yaml_reuses_precomputed_semantic_frame_without_unbound_turn_plan(
     monkeypatch,
     attached_plan: bool,
+    intent_ambiguity_level: str,
 ) -> None:  # noqa: ANN001
     stages: list[dict[str, object]] = []
     model_messages: list[dict[str, object]] = []
@@ -104,6 +106,7 @@ def test_yaml_reuses_precomputed_semantic_frame_without_unbound_turn_plan(
             current_image_urls=[],
             disable_network_hooks=True,
             message_intent="lookup",
+            intent_ambiguity_level=intent_ambiguity_level,
             raw_message_text="查一下",
             message_target="bot",
             recent_context_hint="tester: 查一下",
@@ -130,3 +133,6 @@ def test_yaml_reuses_precomputed_semantic_frame_without_unbound_turn_plan(
     assert "画中主体只是媒体内容，不是聊天参与者" in combined_prompt
     assert any(stage.get("key") == "yaml_semantic_frame" for stage in stages)
     assert any(stage.get("key") == "yaml_model_result" for stage in stages)
+    assert any(stage.get("key") == "yaml_uncertain_reply_review" for stage in stages) is (
+        intent_ambiguity_level == "high"
+    )

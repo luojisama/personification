@@ -12,7 +12,11 @@ from ...core.reply_text_policy import (
     looks_like_question_reply,
     normalize_visible_reply_text,
 )
-from ...core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
+from ...core.response_review import (
+    is_agent_reply_ooc,
+    resolve_uncertain_visible_reply,
+    rewrite_agent_reply_ooc,
+)
 from ...core.social_surface_renderer import SocialSurfaceRenderer
 from ...core.visible_output import assess_visible_text
 from .final_synthesis import AgentResult
@@ -117,6 +121,8 @@ async def finalize_agent_reply_quality(
     turn_plan: Any = None,
     is_group: bool | None = None,
     is_direct_mention: bool = False,
+    reply_required: bool = False,
+    current_user_text: str = "",
     record_trace: Callable[..., None] | None = None,
     logger: Any = None,
     reason: str = "",
@@ -178,28 +184,33 @@ async def finalize_agent_reply_quality(
                 hint="头像等受约束证据已完成人设化与事实边界审阅。",
             )
         return _copy_result_with_quality(result, text=final_text, check=check)
-    visibility = assess_visible_text(raw_text)
-    if not visibility.allowed:
-        check = {
-            "action": "silenced",
-            "reason": visibility.reason,
-            "source": str(reason or ""),
-            "flags": ["unsafe_visible_output"],
-            "revision_attempted": False,
-            "elapsed_ms": int((time.monotonic() - started_at) * 1000),
-            "original_chars": len(raw_text),
-            "final_chars": len("[SILENCE]"),
-        }
-        record_counter("agent.reply_quality_total", action="silenced")
-        if record_trace is not None:
-            record_trace(
-                key="agent_reply_quality",
-                label="Agent 回复质量",
-                status="warn",
-                detail=f"action=silenced reason={visibility.reason} flags=unsafe_visible_output",
-            )
-        return _copy_result_with_quality(result, text="[SILENCE]", check=check)
-    skipped = direct_output or _is_control_reply(raw_text) or _is_direct_media_reply(raw_text)
+    if quality_context != "evidence_unavailable":
+        visibility = assess_visible_text(raw_text)
+        if not visibility.allowed:
+            check = {
+                "action": "silenced",
+                "reason": visibility.reason,
+                "source": str(reason or ""),
+                "flags": ["unsafe_visible_output"],
+                "revision_attempted": False,
+                "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+                "original_chars": len(raw_text),
+                "final_chars": len("[SILENCE]"),
+            }
+            record_counter("agent.reply_quality_total", action="silenced")
+            if record_trace is not None:
+                record_trace(
+                    key="agent_reply_quality",
+                    label="Agent 回复质量",
+                    status="warn",
+                    detail=f"action=silenced reason={visibility.reason} flags=unsafe_visible_output",
+                )
+            return _copy_result_with_quality(result, text="[SILENCE]", check=check)
+    skipped = (
+        direct_output
+        or _is_direct_media_reply(raw_text)
+        or (_is_control_reply(raw_text) and quality_context != "evidence_unavailable")
+    )
     if skipped:
         check = {
             "action": "skipped",
@@ -223,6 +234,67 @@ async def finalize_agent_reply_quality(
             )
         record_counter("agent.reply_quality_total", action="skipped")
         return _copy_result_with_quality(result, text=raw_text, check=check)
+
+    if quality_context == "evidence_unavailable":
+        group_context = _looks_like_group_context(messages, turn_plan) if is_group is None else bool(is_group)
+
+        async def _call_uncertain_review(review_messages: list[dict[str, Any]]) -> str:
+            if tool_caller is None:
+                return ""
+            response = await tool_caller.chat_with_tools(review_messages, [], False)
+            return str(getattr(response, "content", "") or "")
+
+        decision = await resolve_uncertain_visible_reply(
+            _call_uncertain_review,
+            candidate_text=raw_text,
+            raw_message_text=current_user_text,
+            persona_system=_persona_system_from_messages(messages),
+            turn_plan=turn_plan,
+            reply_required=reply_required,
+            is_private=not group_context,
+            evidence_unavailable=True,
+            timeout=8.0,
+        )
+        final_text = "[SILENCE]"
+        action = (
+            "no_evidence_silenced"
+            if decision.reason == "no_evidence_nonrequired"
+            else "context_request_rejected"
+        )
+        if decision.action == "request_context" and decision.text:
+            candidate = normalize_visible_reply_text(strip_response_control_markers(decision.text))
+            candidate_visibility = assess_visible_text(candidate)
+            invalid_group_question = bool(
+                group_context
+                and looks_like_question_reply(
+                    candidate,
+                    allow_exclamatory_rhetorical=False,
+                )
+            )
+            if candidate and candidate_visibility.allowed and not invalid_group_question:
+                final_text = candidate
+                action = "context_request"
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        flags = list(dict.fromkeys(["evidence_unavailable", *decision.flags]))
+        check = {
+            "action": action,
+            "flags": flags,
+            "elapsed_ms": elapsed_ms,
+        }
+        record_timing("agent.reply_quality_ms", elapsed_ms, action=action)
+        record_counter("agent.reply_quality_total", action=action)
+        if record_trace is not None:
+            record_trace(
+                key="agent_reply_quality",
+                label="Agent 回复质量",
+                status="ok" if action == "context_request" else "warn",
+                detail=(
+                    f"action={action} flags={','.join(flags)} "
+                    f"elapsed_ms={elapsed_ms}"
+                ),
+                hint="空证据不再包装成可见失败说明；强交互仅允许经过语义复核的具体补充请求。",
+            )
+        return _copy_result_with_quality(result, text=final_text, check=check)
 
     stripped = strip_response_control_markers(raw_text)
     visible_text = normalize_visible_reply_text(stripped)

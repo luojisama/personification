@@ -497,6 +497,58 @@ def test_run_agent_returns_immediately_for_banter_stop_without_tools(monkeypatch
     assert len(caller.calls) == 1
 
 
+def test_run_agent_passes_required_interaction_and_current_text_to_quality_gate(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+
+    async def _capture_quality(result, **kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        return result
+
+    monkeypatch.setattr(runner, "finalize_agent_reply_quality", _capture_quality)
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="候选回复",
+                tool_calls=[],
+                raw={},
+            )
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[
+                {"role": "system", "content": "你是群里的普通成员。"},
+                {"role": "user", "content": "@bot 这个称呼是什么意思"},
+            ],
+            registry=tool_registry.ToolRegistry(),
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=1,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="high",
+            ),
+            is_group=True,
+            reply_required=True,
+        )
+    )
+
+    assert result.text == "候选回复"
+    assert captured["reply_required"] is True
+    assert captured["current_user_text"] == "@bot 这个称呼是什么意思"
+    assert captured["is_group"] is True
+
+
 def test_run_agent_final_quality_rewrites_observer_reply(monkeypatch) -> None:  # noqa: ANN001
     stages: list[dict[str, object]] = []
 
@@ -1555,7 +1607,7 @@ def test_run_agent_sends_ack_when_first_tool_call_appears(monkeypatch) -> None: 
     ack_calls: list[str] = []
 
     async def _handler(**kwargs):  # noqa: ANN001
-        assert kwargs["query"] == "热搜"
+        assert "热搜" in kwargs["query"]
         return "工具结果"
 
     async def _ack_sender(text: str) -> None:

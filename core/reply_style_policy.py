@@ -94,7 +94,8 @@ def build_group_no_question_policy_prompt() -> str:
     return (
         "## 群聊不追问纪律（高优先级）\n"
         "- 群聊里的可见回复默认不要用问句、反问句、澄清问句或征询式结尾来索要更多信息、把判断责任丢回给群友。\n"
-        "- 信息不足时，优先根据上下文和工具在内部判断；仍不足就给一句保守短反应、承认不确定，或直接 [NO_REPLY]，不要追着群友补材料。\n"
+        "- 信息不足时，优先根据上下文和工具在内部判断；仍不足且没有具体内容可说就直接 [NO_REPLY]，"
+        "不要把不确定状态写成回复，也不要追着群友补材料。\n"
         "- 即使被 cue 到，也尽量给一个具体建议、态度或选择；确实缺少关键条件时短句说明缺什么即可，不要连续发问。\n"
         "- 轻松调侃、反击或自辩时，可以有一句不索要信息的反问/反击句；它必须在推进情绪或立场，不能拿来逃避回答。\n"
         "- 私聊可以自然追问；这条纪律只约束群聊可见输出。"
@@ -146,6 +147,18 @@ def build_observer_posture_policy_prompt() -> str:
     )
 
 
+def build_empty_evidence_output_policy_prompt() -> str:
+    return (
+        "## 空证据可见输出纪律（高优先级）\n"
+        "- 没有新事实、具体态度或可执行下一步时，无法确认、没有理解、来源不明或查证没有结果本身不算一条回复；"
+        "不要把这些内部状态换成人设口吻发给对方。\n"
+        "- 没人明确需要你回应时直接 [NO_REPLY]；私聊、明确 @ 或回复你的强交互中，"
+        "只有确实缺少一个对方能提供的必要条件时，才索取一个具体条件。\n"
+        "- 群聊里的补充请求用一句陈述式或祈使式短句，不要连续追问；私聊可以用一个自然短问句。\n"
+        "- 没有证据时不得猜测出处、群内约定、人物关系或事实来源；无法形成具体补充请求时输出 [SILENCE]。"
+    )
+
+
 def build_media_understanding_output_policy_prompt() -> str:
     return (
         "## 媒体理解与可见输出纪律（高优先级）\n"
@@ -154,7 +167,7 @@ def build_media_understanding_output_policy_prompt() -> str:
         "- 除非对方明确要求识别、翻译、说明或解读图片/动图/表情包，最终回复不要讲解、复述、总结或分析画面内容，也不要主动讲图里是什么。\n"
         "- 真实照片可以帮助你理解关系、情绪和对方意图；可见回复只接对方这句话和当下关系，不列画面细节，不写成图片说明。\n"
         "- GIF、动态表情和表情包只当作语气/情绪/附和信号；不要主动说“这个表情包/这张图/这个动图是在……”。\n"
-        "- 看不懂且有视觉或查证工具时先内部使用工具；没有证据时宁可短句承认不确定或保持沉默，不要硬猜。"
+        "- 看不懂且有视觉或查证工具时先内部使用工具；没有证据时按空证据纪律保持沉默或只索取一个必要条件，不要硬猜。"
     )
 
 
@@ -179,6 +192,7 @@ def build_reply_style_policy_prompt(
     lines.append(build_formulaic_tic_policy_prompt())
     lines.append(build_context_continuity_policy_prompt())
     lines.append(build_observer_posture_policy_prompt())
+    lines.append(build_empty_evidence_output_policy_prompt())
     lines.append(build_media_understanding_output_policy_prompt())
     if has_visual_context and photo_like:
         lines.append("- 本轮有真实照片线索时，也只把它当作内部语境，最终不要主动输出画面说明。")
@@ -270,6 +284,7 @@ __all__ = [
     "build_group_no_question_policy_prompt",
     "build_domain_evidence_policy_prompt",
     "build_emotional_support_policy_prompt",
+    "build_empty_evidence_output_policy_prompt",
     "build_media_understanding_output_policy_prompt",
     "build_plugin_interaction_policy_prompt",
     "build_observer_posture_policy_prompt",

@@ -30,6 +30,9 @@ def test_reply_style_policy_keeps_visual_context_internal() -> None:
     assert "仅供理解" in prompt
     assert "不要把判断过程说给用户" in prompt
     assert "不要讲解、复述、总结或分析画面内容" in prompt
+    assert "空证据可见输出纪律" in prompt
+    assert "内部状态换成人设口吻" in prompt
+    assert "不得猜测出处、群内约定" in prompt
 
 
 def test_context_continuity_policy_covers_media_only_and_direct_cues() -> None:
@@ -143,4 +146,13 @@ def test_media_understanding_policy_allows_internal_distinction_only() -> None:
     assert "内部语境证据" in prompt
     assert "表情包、梗图、截图还是真实照片" in prompt
     assert "不要把判断过程说给用户" in prompt
-    assert "没有证据时宁可短句承认不确定或保持沉默" in prompt
+    assert "没有证据时按空证据纪律保持沉默或只索取一个必要条件" in prompt
+
+
+def test_empty_evidence_policy_prefers_silence_or_one_concrete_condition() -> None:
+    prompt = reply_style_policy.build_empty_evidence_output_policy_prompt()
+
+    assert "不算一条回复" in prompt
+    assert "没人明确需要你回应时直接 [NO_REPLY]" in prompt
+    assert "索取一个具体条件" in prompt
+    assert "无法形成具体补充请求时输出 [SILENCE]" in prompt

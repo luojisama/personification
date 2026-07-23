@@ -63,6 +63,38 @@ def test_agent_prompting_includes_directed_exchange_behavior() -> None:
     assert "轻松调侃时允许一句不索要信息的反击式反问" in combined
 
 
+def test_agent_prompting_high_ambiguity_uses_empty_evidence_policy() -> None:
+    messages: list[dict] = []
+
+    prompting.append_agent_system_prompts(
+        messages=messages,
+        runtime_chat_intent="banter",
+        plugin_query_intent="",
+        intent_decision=SimpleNamespace(ambiguity_level="high"),
+        rewritten_query=SimpleNamespace(
+            primary_query="",
+            query_candidates=[],
+            context_clues=[],
+            search_plan=[],
+        ),
+        turn_plan=SimpleNamespace(
+            speech_act="participate",
+            output_mode="chat_short",
+            session_goal="接住未知叫法",
+        ),
+        user_images=[],
+        direct_image_input=False,
+        is_group=True,
+        is_direct_mention=False,
+        reply_required=False,
+    )
+
+    combined = "\n".join(str(item.get("content", "")) for item in messages)
+    assert "空证据可见输出纪律" in combined
+    assert "失败状态包装成回复" in combined
+    assert "非强交互直接 [NO_REPLY]" in combined
+
+
 def test_qzone_surface_skips_group_chat_reply_discipline() -> None:
     messages: list[dict] = []
 
