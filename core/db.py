@@ -587,6 +587,23 @@ DDL_STATEMENTS = (
         ON mcp_tool_policies(registered_name)
     """,
     """
+    CREATE TABLE IF NOT EXISTS mcp_builtin_platforms (
+        installation_id TEXT NOT NULL,
+        platform TEXT NOT NULL CHECK (platform IN ('bilibili', 'douyin', 'tieba', 'xiaoheihe')),
+        desired_enabled INTEGER NOT NULL DEFAULT 0,
+        revision INTEGER NOT NULL DEFAULT 0,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY (installation_id, platform),
+        FOREIGN KEY (installation_id) REFERENCES mcp_installations(installation_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_mcp_builtin_platforms_enabled
+        ON mcp_builtin_platforms(installation_id, desired_enabled, platform)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS qq_outbound_ledger (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         operation_id TEXT NOT NULL,

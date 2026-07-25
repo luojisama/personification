@@ -20,6 +20,13 @@ import httpx
 from ..agent.tool_registry import AgentTool, ToolRegistry
 from ..skill_runtime.mcp_compat import McpStdioClient
 from .db import connect_sync
+from .mcp_builtin import (
+    BUILTIN_SOCIAL_MCP_ID,
+    builtin_social_installation,
+    builtin_social_launch,
+    builtin_social_tools,
+    is_builtin_social_installation,
+)
 from .paths import get_data_dir
 from .safe_image_download import resolve_public_url
 
@@ -422,6 +429,64 @@ class McpSecretStore:
 
 
 class McpStore:
+    def ensure_builtin_social(self) -> dict[str, Any]:
+        item = builtin_social_installation()
+        tools = [_tool_policy(item["installation_id"], item["name_prefix"], tool) for tool in builtin_social_tools()]
+        now = time.time()
+        metadata_json = json.dumps(item["metadata"], ensure_ascii=False)
+        with connect_sync() as conn:
+            conn.execute(
+                """INSERT INTO mcp_installations(
+                    installation_id,source_id,source_url,server_name,server_title,server_version,package_type,
+                    package_identifier,command,args_json,env_json,secret_names_json,name_prefix,desired_enabled,
+                    observed_status,metadata_json,last_error,created_by,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,'stopped',?,'','system',?,?)
+                ON CONFLICT(installation_id) DO UPDATE SET
+                    source_id=excluded.source_id,source_url=excluded.source_url,server_name=excluded.server_name,
+                    server_title=excluded.server_title,server_version=excluded.server_version,
+                    package_type=excluded.package_type,package_identifier=excluded.package_identifier,
+                    command=excluded.command,args_json=excluded.args_json,env_json=excluded.env_json,
+                    secret_names_json=excluded.secret_names_json,name_prefix=excluded.name_prefix,
+                    metadata_json=excluded.metadata_json,updated_at=excluded.updated_at""",
+                (
+                    item["installation_id"], item["source_id"], item["source_url"], item["server_name"],
+                    item["server_title"], item["server_version"], item["package_type"], item["package_identifier"],
+                    item["command"], json.dumps(item["args"], ensure_ascii=False), "{}", "[]", item["name_prefix"],
+                    metadata_json, now, now,
+                ),
+            )
+            for platform in ("bilibili", "douyin", "tieba", "xiaoheihe"):
+                conn.execute(
+                    """INSERT OR IGNORE INTO mcp_builtin_platforms(
+                        installation_id,platform,desired_enabled,revision,config_json,created_at,updated_at
+                    ) VALUES(?,?,0,0,'{}',?,?)""",
+                    (item["installation_id"], platform, now, now),
+                )
+            for policy in tools:
+                conn.execute(
+                    """INSERT INTO mcp_tool_policies(
+                        installation_id,remote_name,registered_name,title,description,parameters_json,
+                        output_schema_json,annotations_json,enabled,risk_level,side_effect,
+                        publisher_read_only,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,0,'low','none',1,?)
+                    ON CONFLICT(installation_id,remote_name) DO UPDATE SET
+                        registered_name=excluded.registered_name,title=excluded.title,
+                        description=excluded.description,parameters_json=excluded.parameters_json,
+                        output_schema_json=excluded.output_schema_json,annotations_json=excluded.annotations_json,
+                        risk_level='low',side_effect='none',publisher_read_only=1,updated_at=excluded.updated_at""",
+                    (
+                        policy["installation_id"], policy["remote_name"], policy["registered_name"], policy["title"],
+                        policy["description"], json.dumps(policy["parameters"], ensure_ascii=False),
+                        json.dumps(policy["output_schema"], ensure_ascii=False),
+                        json.dumps(policy["annotations"], ensure_ascii=False), now,
+                    ),
+                )
+            conn.commit()
+        result = self.get_installation(BUILTIN_SOCIAL_MCP_ID)
+        if result is None:
+            raise RuntimeError("builtin social MCP installation was not created")
+        return result
+
     def list_installations(self) -> list[dict[str, Any]]:
         with connect_sync() as conn:
             rows = conn.execute("SELECT * FROM mcp_installations ORDER BY created_at DESC").fetchall()
@@ -604,14 +669,24 @@ class McpStore:
             )
             conn.commit()
 
-    def set_tool_enabled(self, installation_id: str, remote_name: str, enabled: bool, *, approve_side_effect: bool = False) -> None:
+    def set_tool_enabled(
+        self,
+        installation_id: str,
+        remote_name: str,
+        enabled: bool,
+        *,
+        approve_side_effect: bool = False,
+        trusted_read_only: bool = False,
+    ) -> None:
         if enabled and not approve_side_effect:
             raise ValueError("enabling an MCP tool requires explicit risk approval")
         with connect_sync() as conn:
             assignments = "enabled=?,updated_at=?"
             values: list[Any] = [int(enabled), time.time()]
-            if enabled and approve_side_effect:
+            if enabled and approve_side_effect and not trusted_read_only:
                 assignments += ",risk_level='high',side_effect='external'"
+            elif trusted_read_only:
+                assignments += ",risk_level='low',side_effect='none',publisher_read_only=1"
             values.extend((installation_id, remote_name))
             if conn.execute(
                 f"UPDATE mcp_tool_policies SET {assignments} WHERE installation_id=? AND remote_name=?",
@@ -621,6 +696,8 @@ class McpStore:
             conn.commit()
 
     def delete(self, installation_id: str) -> None:
+        if is_builtin_social_installation(installation_id):
+            raise ValueError("builtin MCP installation cannot be deleted")
         with connect_sync() as conn:
             if conn.execute("DELETE FROM mcp_installations WHERE installation_id=?", (installation_id,)).rowcount != 1:
                 raise KeyError(installation_id)
@@ -768,6 +845,7 @@ class McpRuntimeManager:
         self._clients: dict[str, McpStdioClient] = {}
         self._tool_names: dict[str, set[str]] = {}
         self._lock = asyncio.Lock()
+        self.store.ensure_builtin_social()
 
     def _secret_environment(self, item: dict[str, Any]) -> dict[str, str]:
         required = [str(name) for name in item.get("secret_names") or [] if str(name)]
@@ -777,13 +855,19 @@ class McpRuntimeManager:
         return {name: str(stored[name]) for name in required}
 
     def _client(self, item: dict[str, Any]) -> McpStdioClient:
-        env_values = dict(item.get("env") or {})
-        env_values.update(self._secret_environment(item))
-        cwd = get_data_dir(self.runtime.plugin_config) / "mcp" / "runtime" / item["installation_id"][:16]
-        cwd.mkdir(parents=True, exist_ok=True)
+        if is_builtin_social_installation(item):
+            command, args, env_values, cwd_value = builtin_social_launch(self.runtime.plugin_config)
+            cwd = Path(cwd_value)
+        else:
+            command = str(item["command"])
+            args = [str(value) for value in item.get("args") or []]
+            env_values = dict(item.get("env") or {})
+            env_values.update(self._secret_environment(item))
+            cwd = get_data_dir(self.runtime.plugin_config) / "mcp" / "runtime" / item["installation_id"][:16]
+            cwd.mkdir(parents=True, exist_ok=True)
         return McpStdioClient(
-            command=str(item["command"]),
-            args=[str(value) for value in item.get("args") or []],
+            command=command,
+            args=args,
             env=_minimal_process_env(env_values),
             cwd=str(cwd),
             timeout=max(3, int(getattr(self.runtime.plugin_config, "personification_skill_mcp_timeout", 20) or 20)),
@@ -875,6 +959,13 @@ class McpRuntimeManager:
         try:
             await client.__aenter__()
             remote_tool_list = [tool for tool in await client.list_tools() if isinstance(tool, dict)]
+            if is_builtin_social_installation(item):
+                exposed = {str(tool.get("name") or "") for tool in remote_tool_list}
+                trusted = builtin_social_tools()
+                expected = {str(tool.get("name") or "") for tool in trusted}
+                if exposed != expected:
+                    raise ValueError("builtin MCP tool catalog does not match the trusted manifest")
+                remote_tool_list = trusted
             catalog = self.store.sync_tools(installation_id, item["name_prefix"], remote_tool_list)
             self.store.set_protocol_metadata(
                 installation_id,
@@ -909,7 +1000,7 @@ class McpRuntimeManager:
                         local=False,
                         metadata={
                             "category": "mcp",
-                            "source_kind": "mcp_managed",
+                            "source_kind": "mcp_builtin" if is_builtin_social_installation(item) else "mcp_managed",
                             "mcp_installation_id": installation_id,
                             "remote_name": policy["remote_name"],
                             "title": policy["title"],
@@ -919,6 +1010,15 @@ class McpRuntimeManager:
                             "risk_level": policy["risk_level"],
                             "side_effect": policy["side_effect"],
                             "retryable": policy["side_effect"] == "none",
+                            **(
+                                {
+                                    "intent_tags": ["lookup", "game_slang", "social_research"],
+                                    "evidence_kind": "social_platform",
+                                    "requires_network": True,
+                                }
+                                if is_builtin_social_installation(item)
+                                else {}
+                            ),
                         },
                     )
                 )
@@ -1067,6 +1167,8 @@ class McpRuntimeManager:
         item["registered_count"] = registered_count
         item["effective_count"] = effective_count
         item["tool_count"] = len(item["tools"])
+        item["builtin"] = is_builtin_social_installation(item)
+        item["deletable"] = not item["builtin"]
         item.pop("env", None)
         item.pop("args", None)
         return item
@@ -1081,6 +1183,7 @@ class McpRuntimeManager:
 
     async def reload(self) -> dict[str, int]:
         async with self._lock:
+            self.store.ensure_builtin_social()
             for installation_id in list(self._clients):
                 await self._stop_unlocked(installation_id)
             running = ready = failed = 0
@@ -1128,12 +1231,15 @@ class McpRuntimeManager:
                 remote_name,
                 enabled,
                 approve_side_effect=approve_side_effect,
+                trusted_read_only=is_builtin_social_installation(installation_id),
             )
             await self._activate_unlocked(installation_id)
             return self.public_installation(installation_id) or {}
 
     async def delete(self, installation_id: str) -> None:
         async with self._lock:
+            if is_builtin_social_installation(installation_id):
+                raise ValueError("builtin MCP installation cannot be deleted")
             await self._stop_unlocked(installation_id)
             self.store.delete(installation_id)
             self.secrets.delete(installation_id)
