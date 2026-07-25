@@ -318,6 +318,7 @@ async def infer_turn_semantic_frame_with_llm(
     is_group: bool = False,
     is_random_chat: bool = False,
     is_direct_mention: bool = False,
+    message_target: str = "",
     tool_caller: Any = None,
     recent_context: str = "",
     relationship_hint: str = "",
@@ -412,7 +413,8 @@ async def infer_turn_semantic_frame_with_llm(
         "情绪标签=[搞笑,开心,感动,尴尬,无语,惊讶,委屈,生气,害羞,得意,困惑,赞同,拒绝,期待,失落,撒娇,淡定,震惊]；"
         "场景标签=[回应笑点,接梗,表达赞同,化解尴尬,自嘲,反驳,表达惊讶,安慰对方,撒娇,表示无奈,冷场时,表达期待,庆祝,拒绝请求,结束对话,打招呼,表达关心,吐槽,卖萌,表达疑惑]；"
         "严格输出为“情绪标签|场景标签”。\n"
-        "## 中文互联网/游戏黑话歧义说明\n以下词语在中文群聊中有常见的非字面含义，判别时需结合上下文：\n- 粥/三角洲：腾讯游戏《三角洲行动》的别称（不是食物的粥）\n- 鸡：《绝地求生》PUBG；吃鸡=赢了PUBG\n- 原神/崩铁/ZZZ：米哈游系列游戏简称\n- dd/DD=关注/粉丝（虚拟主播圈）；典=嘘讽某行为；蚁埠住了=绷不住了；破防=情绪崩了\n12. 当最新消息包含上述歧义词且上下文不足以确认含义时，将 ambiguity_level 设为 high；若是随机插话场景还应将 recommend_silence 设为 true，等待更多上下文再参与。\n"
+        "12. 遇到陌生的游戏黑话、圈内说法或同词多义时，不要依赖静态词表猜义；结合当前对话、结构化词典 sense 与可用查证证据判断。"
+        "语境不足时提高 ambiguity_level；只有随机插话、没有指向 bot 且目标不明或明显是别人的对话时才强制建议静默。\n"
         "13. conversation_scenario 判断当前对话场景：\n"
         "- casual_banter：群友互相调侃、插科打诨\n"
         "- sarcasm_irony：反讽/阴阳怪气\n"
@@ -437,6 +439,7 @@ async def infer_turn_semantic_frame_with_llm(
         f"场景：{'群聊' if is_group else '私聊'}\n"
         f"是否随机插话：{'是' if is_random_chat else '否'}\n"
         f"是否明确 @/直呼 bot：{'是' if is_direct_mention else '否'}\n"
+        f"结构化消息目标：{str(message_target or '').strip() or 'uncertain'}\n"
         f"最新消息：{normalized}\n"
         f"最近上下文：{str(recent_context or '').strip()[:700] or '无'}\n"
         f"互动关系：{str(relationship_hint or '').strip()[:500] or '无'}\n"
@@ -462,9 +465,24 @@ async def infer_turn_semantic_frame_with_llm(
         frame = _parse_turn_semantic_frame_payload(payload) if payload is not None else None
         if frame is None:
             return fallback
+        normalized_target = str(message_target or "").strip().lower()
+        directed = is_direct_mention or normalized_target in {"target_bot", "bot", "broadcast"}
+        undirected_random_target = normalized_target in {
+            "",
+            "target_unclear",
+            "target_others",
+            "target_external_plugin",
+            "uncertain",
+            "others",
+            "someone_else",
+            "external_plugin",
+        }
         if is_group and frame.confidence < 0.4:
-            frame.recommend_silence = True
             frame.ambiguity_level = "high"
+            if is_random_chat and not directed and undirected_random_target:
+                frame.recommend_silence = True
+            elif directed:
+                frame.recommend_silence = False
         return frame
     except Exception:
         return fallback

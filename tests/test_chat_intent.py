@@ -71,7 +71,7 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
     assert invalid is None
 
 
-def test_low_confidence_group_frame_recommends_silence() -> None:
+def test_low_confidence_undirected_random_group_frame_recommends_silence() -> None:
     class _Caller:
         async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
             return type(
@@ -89,12 +89,52 @@ def test_low_confidence_group_frame_recommends_silence() -> None:
         chat_intent.infer_turn_semantic_frame_with_llm(
             "这句很不确定",
             is_group=True,
+            is_random_chat=True,
+            message_target="others",
             tool_caller=_Caller(),
         )
     )
 
     assert frame.recommend_silence is True
     assert frame.ambiguity_level == "high"
+
+
+def test_low_confidence_directed_group_frame_is_not_forced_silent() -> None:
+    captured: dict[str, object] = {}
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            captured["messages"] = messages
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"chat_intent":"banter","ambiguity_level":"low",'
+                        '"recommend_silence":true,"confidence":0.2}'
+                    )
+                },
+            )()
+
+    frame = asyncio.run(
+        chat_intent.infer_turn_semantic_frame_with_llm(
+            "这句很不确定，但我正在叫你",
+            is_group=True,
+            is_random_chat=True,
+            is_direct_mention=True,
+            message_target="target_bot",
+            tool_caller=_Caller(),
+        )
+    )
+
+    system_prompt = captured["messages"][0]["content"]  # type: ignore[index]
+    user_prompt = captured["messages"][1]["content"]  # type: ignore[index]
+    assert frame.ambiguity_level == "high"
+    assert frame.recommend_silence is False
+    assert "结构化消息目标：target_bot" in user_prompt
+    assert "陌生的游戏黑话" in system_prompt
+    assert "粥/三角洲" not in system_prompt
+    assert "dd/DD" not in system_prompt
 
 
 def test_semantic_frame_prompt_includes_media_context_discipline() -> None:

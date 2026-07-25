@@ -27,8 +27,10 @@ from .mcp_builtin import (
     builtin_social_tools,
     is_builtin_social_installation,
 )
+from .meme_learning_store import LearningThresholds, MemeLearningStore
 from .paths import get_data_dir
 from .safe_image_download import resolve_public_url
+from .slang_learning import BoundedSlangDiscoveryQueue, DiscoveryTask, SlangLearningPipeline
 
 
 OFFICIAL_MCP_REGISTRY = "https://registry.modelcontextprotocol.io"
@@ -845,8 +847,131 @@ class McpRuntimeManager:
         self.registry_client = McpRegistryClient(runtime.plugin_config)
         self._clients: dict[str, McpStdioClient] = {}
         self._tool_names: dict[str, set[str]] = {}
+        self._slang_discovery_queue: BoundedSlangDiscoveryQueue | None = None
         self._lock = asyncio.Lock()
         self.store.ensure_builtin_social()
+
+    def _slang_tool_caller(self) -> Any:
+        bundle = getattr(self.runtime, "runtime_bundle", None)
+        deps = getattr(bundle, "reply_processor_deps", None)
+        inner = getattr(deps, "runtime", None)
+        return (
+            getattr(inner, "lite_tool_caller", None)
+            or getattr(inner, "agent_tool_caller", None)
+            or getattr(bundle, "lite_tool_caller", None)
+            or getattr(bundle, "agent_tool_caller", None)
+        )
+
+    def _slang_thresholds(self) -> LearningThresholds:
+        cfg = self.runtime.plugin_config
+        return LearningThresholds(
+            auto_understand_min_sources=getattr(cfg, "personification_auto_understand_min_sources", 2),
+            auto_use_min_sources=getattr(cfg, "personification_auto_use_min_sources", 3),
+            auto_use_min_platforms=getattr(cfg, "personification_auto_use_min_platforms", 2),
+            claim_min_confidence=getattr(cfg, "personification_claim_min_confidence", 0.72),
+            semantic_equivalence_min_confidence=getattr(
+                cfg, "personification_semantic_equivalence_min_confidence", 0.80
+            ),
+            reverify_after_days=getattr(cfg, "personification_reverify_after_days", 30),
+            stale_after_days=getattr(cfg, "personification_stale_after_days", 90),
+        ).normalized()
+
+    async def _ingest_discovery_task(self, task: DiscoveryTask) -> None:
+        caller = self._slang_tool_caller()
+        if caller is None:
+            return
+        pipeline = SlangLearningPipeline(
+            tool_caller=caller,
+            max_claims=max(
+                1,
+                min(
+                    50,
+                    int(
+                        getattr(
+                            self.runtime.plugin_config,
+                            "personification_slang_max_claims",
+                            20,
+                        )
+                        or 20
+                    ),
+                ),
+            ),
+        )
+        await MemeLearningStore(self._slang_thresholds()).ingest_claims(
+            [task.claim],
+            semantic_pipeline=pipeline,
+            model_route="builtin_social_background",
+        )
+
+    def _discovery_queue(self) -> BoundedSlangDiscoveryQueue:
+        if self._slang_discovery_queue is None:
+            self._slang_discovery_queue = BoundedSlangDiscoveryQueue(
+                self._ingest_discovery_task,
+                max_global=100,
+                max_per_content=5,
+                max_per_platform=30,
+                concurrency=2,
+            )
+        return self._slang_discovery_queue
+
+    async def _postprocess_builtin_social_result(
+        self,
+        remote_name: str,
+        arguments: dict[str, Any],
+        raw_result: str,
+    ) -> str:
+        caller = self._slang_tool_caller()
+        if caller is None:
+            return raw_result
+        try:
+            packet = json.loads(raw_result)
+            if not isinstance(packet, dict):
+                return raw_result
+            max_claims = max(
+                1,
+                min(50, int(getattr(self.runtime.plugin_config, "personification_slang_max_claims", 20) or 20)),
+            )
+            target_term = str(arguments.get("term") or arguments.get("query") or "").strip()[:80]
+            pipeline = SlangLearningPipeline(tool_caller=caller, max_claims=max_claims)
+            claims = await pipeline.extract_claims(packet, target_term=target_term)
+            normalized_target = target_term.casefold()
+            target_claims = [
+                claim
+                for claim in claims
+                if normalized_target
+                and normalized_target
+                in {
+                    str(claim.get("term") or "").strip().casefold(),
+                    *{str(alias or "").strip().casefold() for alias in list(claim.get("aliases") or [])},
+                }
+            ]
+            target_senses: list[dict[str, Any]] = []
+            if target_claims:
+                target_senses = await MemeLearningStore(self._slang_thresholds()).ingest_claims(
+                    target_claims,
+                    semantic_pipeline=pipeline,
+                    model_route=f"builtin_social_{remote_name}",
+                )
+            target_claim_ids = {id(claim) for claim in target_claims}
+            extra_claims = [claim for claim in claims if id(claim) not in target_claim_ids]
+            queued = self._discovery_queue().schedule_claims(extra_claims, target_term=target_term)
+            return json.dumps(
+                {
+                    **packet,
+                    "slang_claims": claims,
+                    "target_senses": target_senses,
+                    "background_claims_queued": queued,
+                },
+                ensure_ascii=False,
+            )
+        except Exception as exc:
+            logger = getattr(self.runtime, "logger", None)
+            if logger is not None:
+                try:
+                    logger.debug(f"builtin social slang learning skipped: {type(exc).__name__}")
+                except Exception:
+                    pass
+            return raw_result
 
     def _secret_environment(self, item: dict[str, Any]) -> dict[str, str]:
         required = [str(name) for name in item.get("secret_names") or [] if str(name)]
@@ -937,7 +1062,36 @@ class McpRuntimeManager:
                 await self._mark_process_exited_unlocked(installation_id)
                 raise RuntimeError("managed MCP process is unavailable")
         try:
-            return await client.call_tool(remote_name, arguments)
+            if installation_id == BUILTIN_SOCIAL_MCP_ID:
+                status = await client.request("personification/builtin/status", {})
+                platforms = status.get("platforms") if isinstance(status, dict) else {}
+                raw_requested_platforms = arguments.get("platforms")
+                requested_platforms = {
+                    str(value or "").strip()
+                    for value in raw_requested_platforms
+                    if str(value or "").strip()
+                } if isinstance(raw_requested_platforms, list) else set()
+                single_platform = str(arguments.get("platform") or "").strip()
+                if single_platform:
+                    requested_platforms.add(single_platform)
+                candidate_statuses = (
+                    [platforms.get(name) for name in requested_platforms]
+                    if isinstance(platforms, dict) and requested_platforms
+                    else list(platforms.values())
+                    if isinstance(platforms, dict)
+                    else []
+                )
+                if not any(
+                    isinstance(item, dict)
+                    and item.get("enabled") is True
+                    and item.get("state") == "ready"
+                    for item in candidate_statuses
+                ):
+                    raise RuntimeError("builtin MCP has no ready platform")
+            result = await client.call_tool(remote_name, arguments)
+            if installation_id == BUILTIN_SOCIAL_MCP_ID:
+                return await self._postprocess_builtin_social_result(remote_name, arguments, result)
+            return result
         except BaseException:
             async with self._lock:
                 if self._clients.get(installation_id) is client and not client.is_running:
@@ -1293,6 +1447,9 @@ class McpRuntimeManager:
             self.secrets.delete(installation_id)
 
     async def shutdown(self) -> None:
+        if self._slang_discovery_queue is not None:
+            await self._slang_discovery_queue.close()
+            self._slang_discovery_queue = None
         async with self._lock:
             for installation_id in list(self._clients):
                 await self._stop_unlocked(installation_id)

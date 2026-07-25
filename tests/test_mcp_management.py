@@ -464,6 +464,126 @@ def test_builtin_social_mcp_stays_running_for_webui_control_without_tool_authori
     assert set(status["platforms"]) == {"bilibili", "douyin", "tieba", "xiaoheihe"}
 
 
+def test_builtin_social_agent_tool_requires_one_ready_platform(tmp_path: Path, monkeypatch) -> None:
+    _init_store(tmp_path, monkeypatch)
+    management = load_personification_module("plugin.personification.core.mcp_management")
+    registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
+    config = SimpleNamespace(
+        personification_data_dir=str(tmp_path),
+        personification_mcp_secret_file="",
+    )
+    registry = registry_mod.ToolRegistry()
+    runtime = SimpleNamespace(plugin_config=config, runtime_bundle=SimpleNamespace(tool_registry=registry))
+    manager = management.McpRuntimeManager(runtime, registry)
+
+    class _Client:
+        is_running = True
+
+        async def request(self, method, params):  # noqa: ANN001
+            assert method == "personification/builtin/status"
+            assert params == {}
+            return {
+                "platforms": {
+                    "bilibili": {"enabled": True, "state": "ready"},
+                    "douyin": {"enabled": True, "state": "login_required"},
+                }
+            }
+
+        async def call_tool(self, remote_name, arguments):  # noqa: ANN001
+            raise AssertionError(f"tool must not run without a ready platform: {remote_name} {arguments}")
+
+    manager._clients[management.BUILTIN_SOCIAL_MCP_ID] = _Client()
+
+    with pytest.raises(RuntimeError, match="no ready platform"):
+        asyncio.run(
+            manager._call_managed_tool(
+                management.BUILTIN_SOCIAL_MCP_ID,
+                "social_content_read",
+                {"platform": "douyin", "content_id": "D1"},
+            )
+        )
+
+
+def test_builtin_social_result_syncs_target_and_queues_only_extra_claims(tmp_path: Path, monkeypatch) -> None:
+    _init_store(tmp_path, monkeypatch)
+    management = load_personification_module("plugin.personification.core.mcp_management")
+    registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
+    config = SimpleNamespace(
+        personification_data_dir=str(tmp_path),
+        personification_mcp_secret_file="",
+        personification_slang_max_claims=20,
+    )
+    registry = registry_mod.ToolRegistry()
+    tool_caller = object()
+    runtime = SimpleNamespace(
+        plugin_config=config,
+        runtime_bundle=SimpleNamespace(
+            tool_registry=registry,
+            reply_processor_deps=SimpleNamespace(
+                runtime=SimpleNamespace(lite_tool_caller=tool_caller)
+            ),
+        ),
+    )
+    manager = management.McpRuntimeManager(runtime, registry)
+    claims = [
+        {"term": "刘涛", "aliases": [], "content_key": "bilibili:B1"},
+        {"term": "六甲昵称", "aliases": ["刘涛"], "content_key": "douyin:D1"},
+        {"term": "大红", "aliases": [], "content_key": "tieba:T1"},
+    ]
+
+    class _Pipeline:
+        def __init__(self, *, tool_caller, max_claims):  # noqa: ANN001
+            assert tool_caller is not None
+            assert max_claims == 20
+
+        async def extract_claims(self, packet, *, target_term):  # noqa: ANN001
+            assert packet["packet_id"] == "packet-one"
+            assert target_term == "刘涛"
+            return claims
+
+    class _Store:
+        ingested: list[dict] = []
+
+        def __init__(self, _thresholds=None):  # noqa: ANN001
+            pass
+
+        async def ingest_claims(self, values, *, semantic_pipeline, model_route):  # noqa: ANN001
+            type(self).ingested = list(values)
+            assert isinstance(semantic_pipeline, _Pipeline)
+            assert model_route == "builtin_social_research_game_slang"
+            return [{"sense_id": "sense-target", "status": "understand_only"}]
+
+    class _Queue:
+        scheduled: list[dict] = []
+
+        def schedule_claims(self, values, *, target_term):  # noqa: ANN001
+            self.scheduled = list(values)
+            assert target_term == "刘涛"
+            return len(self.scheduled)
+
+    fake_queue = _Queue()
+    monkeypatch.setattr(management, "SlangLearningPipeline", _Pipeline)
+    monkeypatch.setattr(management, "MemeLearningStore", _Store)
+    manager._discovery_queue = lambda: fake_queue
+
+    raw = json.dumps({"schema_version": 1, "packet_id": "packet-one", "items": []})
+    result = json.loads(
+        asyncio.run(
+            manager._postprocess_builtin_social_result(
+                "research_game_slang",
+                {"term": "刘涛"},
+                raw,
+            )
+        )
+    )
+
+    assert [item["term"] for item in _Store.ingested] == ["刘涛", "六甲昵称"]
+    assert [item["term"] for item in fake_queue.scheduled] == ["大红"]
+    assert result["slang_claims"] == claims
+    assert result["target_senses"][0]["sense_id"] == "sense-target"
+    assert result["background_claims_queued"] == 1
+
+
 def test_stdio_request_timeout_is_absolute_during_notifications() -> None:
     compat = load_personification_module("plugin.personification.skill_runtime.mcp_compat")
     client = compat.McpStdioClient(command="unused", args=[], env={}, cwd=None, timeout=1)

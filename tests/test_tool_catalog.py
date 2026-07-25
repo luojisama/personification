@@ -312,6 +312,32 @@ def test_select_tool_schemas_banter_exposes_lightweight_lookup_tools() -> None:
     assert "inspect_group_user_avatar_pair" in names_noimg
 
 
+def test_select_tool_schemas_banter_exposes_builtin_game_slang_research() -> None:
+    registry = tool_registry.ToolRegistry()
+    _register(
+        registry,
+        "research_game_slang",
+        {
+            "source_kind": "mcp_builtin",
+            "intent_tags": ["lookup", "game_slang", "social_research"],
+            "risk_level": "low",
+            "side_effect": "none",
+            "requires_network": True,
+        },
+    )
+
+    names = {
+        tool_catalog.schema_tool_name(schema)
+        for schema in tool_catalog.select_tool_schemas(
+            registry,
+            has_images=False,
+            chat_intent="banter",
+        )
+    }
+
+    assert "research_game_slang" in names
+
+
 def test_semantic_tool_guidance_requires_lookup_for_unknown_entities() -> None:
     guidance = tool_catalog.semantic_tool_guidance()
 
@@ -320,6 +346,8 @@ def test_semantic_tool_guidance_requires_lookup_for_unknown_entities() -> None:
     assert "不要直接在群里问" in guidance
     assert "专有名词" in guidance
     assert "resolve_acg_entity" in guidance
+    assert "research_game_slang" in guidance
+    assert "只读社交平台" in guidance
     assert "inspect_group_user_avatar_pair" in guidance
     assert "runtime_capability" in guidance
     assert "绝不表示两位用户现实中是情侣、朋友、认识或同一人" in guidance

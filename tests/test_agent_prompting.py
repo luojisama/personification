@@ -63,6 +63,54 @@ def test_agent_prompting_includes_directed_exchange_behavior() -> None:
     assert "轻松调侃时允许一句不索要信息的反击式反问" in combined
 
 
+def test_agent_prompting_reuses_attached_meme_turn_context() -> None:
+    messages: list[dict] = []
+    turn_plan = SimpleNamespace(
+        speech_act="participate",
+        output_mode="chat_short",
+        session_goal="自然接话",
+        meme_turn_context={
+            "understanding_senses": [
+                {
+                    "term": "大红",
+                    "meaning": "高价值红色物资",
+                    "status": "understand_only",
+                    "game_context": {"canonical_name": "三角洲行动"},
+                    "version_context": "",
+                    "risk_level": "low",
+                    "safe_usage": "仅在三角洲行动语境中理解",
+                }
+            ],
+            "selected_active_sense": None,
+            "active_use_allowed": False,
+            "max_active_memes": 1,
+        },
+    )
+
+    prompting.append_agent_system_prompts(
+        messages=messages,
+        runtime_chat_intent="banter",
+        plugin_query_intent="",
+        intent_decision=SimpleNamespace(ambiguity_level="low"),
+        rewritten_query=SimpleNamespace(
+            primary_query="",
+            query_candidates=[],
+            context_clues=[],
+            search_plan=[],
+        ),
+        turn_plan=turn_plan,
+        user_images=[],
+        direct_image_input=False,
+        is_group=True,
+    )
+
+    combined = "\n".join(str(item.get("content", "")) for item in messages)
+    assert "本轮多义黑话上下文" in combined
+    assert "大红: 高价值红色物资" in combined
+    assert "understand_only 只可用于理解或被问时解释" in combined
+    assert "本轮未通过主动玩梗抽样" in combined
+
+
 def test_agent_prompting_high_ambiguity_uses_empty_evidence_policy() -> None:
     messages: list[dict] = []
 

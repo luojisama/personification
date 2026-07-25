@@ -17,7 +17,7 @@ from ...core.mcp_management import (
 )
 from ...core.mcp_builtin import BUILTIN_SOCIAL_MCP_ID
 from ...core.mcp_builtin_platform_store import BuiltinPlatformStore, PLATFORMS
-from ...core.meme_learning_store import MemeLearningStore
+from ...core.meme_learning_store import LearningThresholds, MemeLearningStore
 from ...core.slang_learning import SlangLearningPipeline
 from ...core.operation_diagnostics import diagnostic, detail, step
 from ..deps import AdminIdentity, get_client_ip, require_admin
@@ -124,7 +124,24 @@ def _strict_bool(body: dict[str, Any], key: str, *, title: str, default: Any = N
 def build_mcp_router(*, runtime: Any) -> APIRouter:
     router = APIRouter(prefix="/api/mcp", tags=["mcp"])
     platform_store = BuiltinPlatformStore()
-    learning_store = MemeLearningStore()
+
+    def learning_store() -> MemeLearningStore:
+        cfg = runtime.plugin_config
+        return MemeLearningStore(
+            LearningThresholds(
+                auto_understand_min_sources=getattr(cfg, "personification_auto_understand_min_sources", 2),
+                auto_use_min_sources=getattr(cfg, "personification_auto_use_min_sources", 3),
+                auto_use_min_platforms=getattr(cfg, "personification_auto_use_min_platforms", 2),
+                claim_min_confidence=getattr(cfg, "personification_claim_min_confidence", 0.72),
+                semantic_equivalence_min_confidence=getattr(
+                    cfg,
+                    "personification_semantic_equivalence_min_confidence",
+                    0.80,
+                ),
+                reverify_after_days=getattr(cfg, "personification_reverify_after_days", 30),
+                stale_after_days=getattr(cfg, "personification_stale_after_days", 90),
+            )
+        )
 
     def manager():
         return get_mcp_manager(runtime)
@@ -150,10 +167,22 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         if caller is not None:
             pipeline = SlangLearningPipeline(
                 tool_caller=caller,
-                max_claims=max(1, min(50, int(body.get("max_claims", 20) or 20))),
+                max_claims=max(
+                    1,
+                    min(
+                        50,
+                        int(
+                            body.get(
+                                "max_claims",
+                                getattr(runtime.plugin_config, "personification_slang_max_claims", 20),
+                            )
+                            or 20
+                        ),
+                    ),
+                ),
             )
             claims = await pipeline.extract_claims(packet, target_term=term)
-            senses = await learning_store.ingest_claims(
+            senses = await learning_store().ingest_claims(
                 claims,
                 semantic_pipeline=pipeline,
                 model_route="webui_social_research",
@@ -700,7 +729,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
     ) -> dict[str, Any]:
         _private(response)
         try:
-            items = learning_store.list_senses(status=status, term=term, limit=limit)
+            items = learning_store().list_senses(status=status, term=term, limit=limit)
         except Exception as exc:
             raise _safe_builtin_error(exc, "学习词条读取失败") from exc
         return {"senses": items, "total": len(items)}
@@ -712,7 +741,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
-        item = learning_store.get_sense(sense_id, include_detail=True)
+        item = learning_store().get_sense(sense_id, include_detail=True)
         if item is None:
             raise _safe_builtin_error(KeyError(sense_id), "找不到该 sense")
         return {"sense": item}
@@ -726,7 +755,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         action: str,
     ) -> dict[str, Any]:
         try:
-            item = learning_store.set_manual_status(
+            item = learning_store().set_manual_status(
                 sense_id,
                 status=status,
                 actor=admin.qq,
@@ -779,7 +808,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
-        current = learning_store.get_sense(sense_id)
+        current = learning_store().get_sense(sense_id)
         if current is None:
             raise _safe_builtin_error(KeyError(sense_id), "找不到该 sense")
         if current["revision"] != int(body.get("revision", -1)):
@@ -790,7 +819,10 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
                 "context": current["usage_context"] or current["meaning"],
                 "game": (current.get("game_context") or {}).get("canonical_name", ""),
                 "depth": "deep",
-                "max_claims": body.get("max_claims", 20),
+                "max_claims": body.get(
+                    "max_claims",
+                    getattr(runtime.plugin_config, "personification_slang_max_claims", 20),
+                ),
             })
         except Exception as exc:
             raise _safe_builtin_error(exc, "重新验证失败") from exc
@@ -798,7 +830,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
             action="meme_sense_reverify", qq=admin.qq, device_id=admin.device_id, target=sense_id,
             ip_hash=get_client_ip(request), detail={"claims": len(research.get("claims") or [])},
         )
-        return {"sense": learning_store.get_sense(sense_id, include_detail=True), "research": research}
+        return {"sense": learning_store().get_sense(sense_id, include_detail=True), "research": research}
 
     @router.post("/builtin/social-research/slang/senses/merge")
     async def merge_slang_senses(
@@ -808,7 +840,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
     ) -> dict[str, Any]:
         _private(response)
         try:
-            item = learning_store.merge_senses(
+            item = learning_store().merge_senses(
                 target_sense_id=str(body.get("target_sense_id") or ""),
                 source_sense_ids=[str(value) for value in list(body.get("source_sense_ids") or [])],
                 expected_revisions={str(key): int(value) for key, value in dict(body.get("revisions") or {}).items()},
@@ -831,7 +863,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
     ) -> dict[str, Any]:
         _private(response)
         try:
-            item = learning_store.split_sense(
+            item = learning_store().split_sense(
                 sense_id,
                 claim_ids=[str(value) for value in list(body.get("claim_ids") or [])],
                 patch=body.get("sense") if isinstance(body.get("sense"), dict) else {},
@@ -854,7 +886,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
-        items = learning_store.list_events(sense_id=sense_id, limit=limit)
+        items = learning_store().list_events(sense_id=sense_id, limit=limit)
         return {"events": items, "total": len(items)}
 
     return router

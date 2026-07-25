@@ -369,6 +369,7 @@ def select_tool_schemas(
             for schema in schemas
             if (
                 schema_tool_name(schema) in _LIGHTWEIGHT_LOOKUP_TOOL_NAMES
+                or "game_slang" in _tool_tags(registry, schema_tool_name(schema))
                 or schema_tool_name(schema) in _QQ_EXPRESSION_TOOL_NAMES
                 or "expression" in _tool_tags(registry, schema_tool_name(schema))
                 or "conversation_action" in _tool_tags(registry, schema_tool_name(schema))
@@ -445,7 +446,8 @@ def semantic_tool_guidance() -> str:
         "工具使用总原则：能直接回答就别起工具；不确定、高风险、时效性强、明显需要查证时再调用工具。"
         "当当前消息包含你不认识、无法确定指代或可能有圈内含义的专有名词、角色名、作品名、游戏/动漫/卡牌术语、"
         "怪物/装备/地图名、外号、别称、缩写、谐音、空耳、梗或活动名时，如果可用工具里有 web_search、search_web、"
-        "wiki_lookup、resolve_acg_entity 或 parallel_research，必须先调用合适工具查证；不要凭记忆猜，也不要直接在群里问"
+        "wiki_lookup、resolve_acg_entity、research_game_slang 或 parallel_research，必须先调用合适工具查证；"
+        "游戏黑话优先使用已登录的只读社交平台 research_game_slang 做多源核验；不要凭记忆猜，也不要直接在群里问"
         "“这是什么梗/哪个游戏/什么意思”。"
         "当用户用“这个/这段/这角色/这动画/这张图”承接最近 ACG 角色、作品、抽卡卡面、图片或视频时，也按指代消解处理，"
         "先结合上下文查角色/作品/剧情锚点，再短句参与讨论。"

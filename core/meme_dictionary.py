@@ -212,6 +212,7 @@ def query_meme_dictionary(
     top_k: int = 8,
     game_context: Any = "",
     version_context: str = "",
+    context_text: str = "",
 ) -> list[dict[str, Any]]:
     text = str(message_text or "").strip().lower()
     if not text:
@@ -233,6 +234,7 @@ def query_meme_dictionary(
             term=entry["term"],
             game_context=game_context,
             version_context=version_context,
+            context_text=f"{message_text} {context_text}".strip(),
         )
         if not senses:
             continue
@@ -378,9 +380,11 @@ def _candidate_senses(
     term: str,
     game_context: Any,
     version_context: str,
+    context_text: str = "",
 ) -> list[dict[str, Any]]:
     requested_games = _context_names(game_context)
     requested_version = str(version_context or "").strip().casefold().replace(" ", "")
+    normalized_context = str(context_text or "").casefold().replace(" ", "")
     with connect_sync() as conn:
         rows = conn.execute(
             """SELECT * FROM meme_senses WHERE scope=? AND group_id=? AND term=?
@@ -392,11 +396,19 @@ def _candidate_senses(
     for row in rows:
         game = _json_object(row["game_context_json"])
         sense_games = _context_names(game)
-        if sense_games and not sense_games.intersection(requested_games):
-            continue
+        if sense_games:
+            if requested_games:
+                if not sense_games.intersection(requested_games):
+                    continue
+            elif not any(name in normalized_context for name in sense_games):
+                continue
         sense_version = str(row["version_context"] or "").strip().casefold().replace(" ", "")
-        if sense_version and sense_version != requested_version:
-            continue
+        if sense_version:
+            if requested_version:
+                if sense_version != requested_version:
+                    continue
+            elif sense_version not in normalized_context:
+                continue
         result.append({
             "sense_id": str(row["sense_id"] or ""),
             "term": str(row["term"] or ""),

@@ -33,6 +33,15 @@ class Config(BaseModel):
 
     personification_whitelist: List[str] = []
     personification_probability: float = 0.30
+    personification_meme_reply_probability: float = 0.18
+    personification_slang_max_claims: int = 20
+    personification_auto_understand_min_sources: int = 2
+    personification_auto_use_min_sources: int = 3
+    personification_auto_use_min_platforms: int = 2
+    personification_claim_min_confidence: float = 0.72
+    personification_semantic_equivalence_min_confidence: float = 0.80
+    personification_reverify_after_days: int = 30
+    personification_stale_after_days: int = 90
 
     # 其他机器人 / Q 群管家的 user_id（用于 peer_awareness 检测），
     # 命中后本轮静默，避免 bot 与管家互相对话。

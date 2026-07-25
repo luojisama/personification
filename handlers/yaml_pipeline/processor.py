@@ -36,6 +36,7 @@ from ...core.group_context import (
     render_topic_state_trace_detail,
 )
 from ...core.metrics import record_counter, record_timing
+from ...core.meme_reply_policy import format_meme_turn_prompt, prepare_meme_turn_context
 from ...core.message_relations import extract_event_message_id, extract_reply_message_id, extract_send_message_id
 from ...core.image_input import (
     is_image_input_unsupported_error,
@@ -1095,6 +1096,7 @@ async def process_yaml_response_logic(
                     is_group=not is_private_session,
                     is_random_chat=is_random_chat,
                     is_direct_mention=is_direct_mention,
+                    message_target=planner_message_target,
                     tool_caller=lite_tool_caller,
                     fallback_tool_caller=agent_tool_caller,
                     recent_context=recent_context_hint,
@@ -1242,11 +1244,32 @@ async def process_yaml_response_logic(
         _trace_no_reply("stale_random_chat", diagnosis_code="stale_reply", detail="随机插话期间出现更新批次")
         return
 
+    meme_turn_prompt = ""
+    try:
+        meme_turn_context = prepare_meme_turn_context(
+            group_id="" if is_private_session else str(group_id),
+            message_text=plan_source_text,
+            recent_context=recent_context_hint,
+            probability=float(getattr(plugin_config, "personification_meme_reply_probability", 0.18) or 0.0),
+            semantic_frame=semantic_frame,
+            rng=random.random,
+        )
+        meme_turn_prompt = format_meme_turn_prompt(meme_turn_context)
+        record_counter(
+            "reply.meme_turn_total",
+            allowed=str(bool(meme_turn_context.get("active_use_allowed"))).lower(),
+            understood=len(meme_turn_context.get("understanding_senses") or []),
+        )
+    except Exception as exc:
+        logger.debug(f"拟人插件 (YAML)：本轮黑话上下文不可用，按无词典提示继续: {type(exc).__name__}")
+
     system_prompt = prompt_config.get("system", "")
     if user_profile_block:
         system_prompt += f"\n\n{user_profile_block}"
     if favorability_context_block:
         system_prompt += f"\n\n{favorability_context_block}"
+    if meme_turn_prompt:
+        system_prompt += f"\n\n{meme_turn_prompt}"
     if is_private_session:
         system_prompt += (
             "\n\n## 私聊称呼规则（高优先级）\n"

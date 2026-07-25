@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...core.meme_reply_policy import format_meme_turn_prompt
 from ...core.context_policy import (
     PROMPT_INJECTION_GUARD_MARKER,
     build_prompt_injection_guard,
@@ -134,6 +135,9 @@ def append_agent_system_prompts(
         support_prompt = build_emotional_support_policy_prompt(getattr(turn_plan, "emotional_support", None))
         if support_prompt:
             messages.append({"role": "system", "content": support_prompt})
+        meme_prompt = format_meme_turn_prompt(getattr(turn_plan, "meme_turn_context", None))
+        if meme_prompt:
+            messages.append({"role": "system", "content": meme_prompt})
     directed_exchange_prompt = build_directed_exchange_policy_prompt(
         is_direct_mention=is_direct_mention,
         is_group=group_context,

@@ -26,6 +26,7 @@ from ...core.image_input import (
     normalize_image_input_mode,
 )
 from ...core.metrics import record_counter, record_timing
+from ...core.meme_reply_policy import format_meme_turn_prompt, prepare_meme_turn_context
 from ...core.message_parts import build_user_message_content, clone_messages_with_text_suffix
 from ...core.message_relations import extract_send_message_id
 from ...core.context_policy import (
@@ -1562,6 +1563,25 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 pass
             return
 
+    meme_turn_prompt = ""
+    try:
+        meme_turn_context = prepare_meme_turn_context(
+            group_id="" if is_private_session else str(group_id),
+            message_text=raw_message_text or current_agent_message_content,
+            recent_context=recent_context_hint,
+            probability=float(getattr(runtime.plugin_config, "personification_meme_reply_probability", 0.18) or 0.0),
+            semantic_frame=semantic_frame,
+            rng=random.random,
+        )
+        meme_turn_prompt = format_meme_turn_prompt(meme_turn_context)
+        record_counter(
+            "reply.meme_turn_total",
+            allowed=str(bool(meme_turn_context.get("active_use_allowed"))).lower(),
+            understood=len(meme_turn_context.get("understanding_senses") or []),
+        )
+    except Exception as exc:
+        runtime.logger.debug(f"拟人插件：本轮黑话上下文不可用，按无词典提示继续: {type(exc).__name__}")
+
     current_user_content = build_user_message_content(
         text=f"{msg_prefix}{current_text_message_content}",
         image_urls=image_urls_for_text_model,
@@ -1762,6 +1782,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         system_prompt += f"\n\n{user_profile_block}"
     if media_grounding:
         system_prompt += f"\n\n{media_grounding}"
+    if meme_turn_prompt:
+        system_prompt += f"\n\n{meme_turn_prompt}"
     turn_plan = getattr(semantic_frame, "turn_plan", None)
     system_prompt += "\n\n" + build_speech_act_policy_prompt(
         speech_act=str(getattr(turn_plan, "speech_act", getattr(semantic_frame, "speech_act", "")) or ""),
