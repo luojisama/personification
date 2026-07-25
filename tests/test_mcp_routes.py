@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import json
+import time
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -86,6 +89,47 @@ class _Manager:
             "catalog_updated": 2,
             "catalog_removed": 3,
         }
+
+
+class _BuiltinManager(_Manager):
+    def __init__(self) -> None:
+        super().__init__()
+        self.current = {
+            "installation_id": "builtin_social_platform_research",
+            "desired_enabled": True,
+            "process_state": "running",
+            "tools": [],
+        }
+
+    async def builtin_request(self, method: str, params: dict):
+        if method.endswith("/status") and "/auth/" not in method:
+            return {"schema_version": 1, "platforms": {}}
+        if method.endswith("/configure"):
+            return {"schema_version": 1, "platforms": {params["platform"]: {"state": "login_required"}}}
+        if method.endswith("/auth/start"):
+            return {"session_id": "session-1", "platform": params["platform"], "status": "waiting_scan", "qr_available": True, "expires_at": time.time() + 300}
+        if method.endswith("/auth/status"):
+            return {"session_id": params["session_id"], "platform": "bilibili", "status": "waiting_scan", "qr_available": True, "expires_at": time.time() + 300}
+        if method.endswith("/auth/qrcode"):
+            return {"data_base64": base64.b64encode(b"png-data").decode("ascii")}
+        if method.endswith("/auth/logout"):
+            return {"platform": params["platform"], "state": "login_required", "authenticated": False}
+        raise KeyError(method)
+
+    async def builtin_call_tool(self, remote_name: str, arguments: dict):
+        assert remote_name == "research_game_slang"
+        return json.dumps({
+            "schema_version": 1,
+            "packet_id": "packet-preview",
+            "trust": "untrusted_data_only",
+            "retrieved_at": time.time(),
+            "expires_at": time.time() + 3600,
+            "partial": False,
+            "platform_statuses": {},
+            "items": [],
+            "filtered_counts": {},
+            "warnings": [],
+        })
 
 
 def test_mcp_api_uses_fresh_registry_fetch_and_strict_bool_requests(monkeypatch) -> None:
@@ -190,3 +234,71 @@ def test_mcp_tool_partial_authorization_is_audited(monkeypatch) -> None:
     assert audit_actions[-1]["action"] == "mcp_tool_toggle"
     assert audit_actions[-1]["outcome"] == "partial"
     assert audit_actions[-1]["detail"]["enabled"] is False
+
+
+def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkeypatch) -> None:
+    paths = load_personification_module("plugin.personification.core.paths")
+    data_store = load_personification_module("plugin.personification.core.data_store")
+    management = load_personification_module("plugin.personification.core.mcp_management")
+    monkeypatch.setattr(paths, "get_data_dir", lambda _cfg=None: tmp_path)
+    monkeypatch.setattr(management, "get_data_dir", lambda _cfg=None: tmp_path)
+    data_store.init_data_store(SimpleNamespace(personification_data_dir=str(tmp_path)))
+    management.McpStore().ensure_builtin_social()
+
+    manager = _BuiltinManager()
+    client = _client(monkeypatch, manager)
+
+    status = client.get("/api/mcp/builtin/social-research/status")
+    assert status.status_code == 200
+    assert status.headers["cache-control"] == "no-store, private"
+    assert set(status.json()["platforms"]) == {"bilibili", "douyin", "tieba", "xiaoheihe"}
+
+    configured = client.post(
+        "/api/mcp/builtin/social-research/platforms/bilibili/configure",
+        json={"enabled": True, "revision": 0, "config": {"quality_mode": "balanced"}},
+    )
+    assert configured.status_code == 200
+    assert configured.json()["platform"]["revision"] == 1
+    stale_revision = client.post(
+        "/api/mcp/builtin/social-research/platforms/bilibili/configure",
+        json={"enabled": False, "revision": 0, "config": {}},
+    )
+    assert stale_revision.status_code == 409
+    assert stale_revision.json()["detail"]["code"] == "revision_conflict"
+
+    invalid_config = client.post(
+        "/api/mcp/builtin/social-research/platforms/bilibili/configure",
+        json={"enabled": True, "revision": 1, "config": {"comment_limit": 201}},
+    )
+    assert invalid_config.status_code == 400
+    assert invalid_config.json()["detail"]["code"] == "builtin_social_operation_failed"
+
+    login = client.post("/api/mcp/builtin/social-research/auth/start", json={"platform": "bilibili"})
+    assert login.status_code == 200
+    qr = client.get(
+        "/api/mcp/builtin/social-research/auth/session-1/qrcode",
+        params={"platform": "bilibili"},
+    )
+    assert qr.status_code == 200
+    assert qr.content == b"png-data"
+    assert qr.headers["cache-control"] == "no-store, private"
+    assert "owner" not in login.text
+
+    wrong_logout = client.post(
+        "/api/mcp/builtin/social-research/auth/logout",
+        json={"platform": "bilibili", "confirm": "logout"},
+    )
+    assert wrong_logout.status_code == 400
+    logout = client.post(
+        "/api/mcp/builtin/social-research/auth/logout",
+        json={"platform": "bilibili", "confirm": "确认注销B站"},
+    )
+    assert logout.status_code == 200
+
+    preview = client.post(
+        "/api/mcp/builtin/social-research/preview",
+        json={"term": "刘涛", "context": "三角洲行动装备", "game": "三角洲行动"},
+    )
+    assert preview.status_code == 200
+    assert preview.headers["cache-control"] == "no-store, private"
+    assert preview.json()["packet"]["trust"] == "untrusted_data_only"

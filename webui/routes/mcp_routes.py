@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import base64
+import json
+import re
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+import httpx
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 
 from ...core import webui_audit_log
 from ...core.mcp_management import (
@@ -10,8 +15,67 @@ from ...core.mcp_management import (
     mcp_registry_sources,
     resolve_registry_source,
 )
+from ...core.mcp_builtin import BUILTIN_SOCIAL_MCP_ID
+from ...core.mcp_builtin_platform_store import BuiltinPlatformStore, PLATFORMS
+from ...core.meme_learning_store import MemeLearningStore
+from ...core.slang_learning import SlangLearningPipeline
 from ...core.operation_diagnostics import diagnostic, detail, step
 from ..deps import AdminIdentity, get_client_ip, require_admin
+
+
+_PLATFORM_LABELS = {"bilibili": "B站", "douyin": "抖音", "tieba": "贴吧", "xiaoheihe": "小黑盒"}
+_COVER_HOSTS = {
+    "bilibili": ("hdslb.com", "biliimg.com"),
+    "douyin": ("douyinpic.com", "byteimg.com", "pstatp.com"),
+    "tieba": ("tiebapic.baidu.com", "imgsa.baidu.com", "hiphotos.baidu.com"),
+    "xiaoheihe": ("xiaoheihe.cn", "heybox.cn", "max-c.com"),
+}
+
+
+def _private(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+
+
+def _auth_owner(admin: AdminIdentity, platform: str) -> str:
+    return f"{admin.qq}:{admin.device_id}:{platform}"
+
+
+def _safe_builtin_error(exc: Exception, title: str) -> HTTPException:
+    code = str(exc).strip()
+    status = 409 if code in {"revision_conflict", "builtin MCP is disabled"} else 404 if isinstance(exc, KeyError) else 400 if isinstance(exc, (TypeError, ValueError)) else 503
+    messages = {
+        "revision_conflict": "配置已被其他管理员更新，请刷新页面后重试。",
+        "builtin MCP is disabled": "请先开启原生社交平台 MCP 服务。",
+    }
+    return HTTPException(status_code=status, detail={
+        "ok": False,
+        "code": code if code in messages else "builtin_social_operation_failed",
+        "title": title,
+        "message": messages.get(code, "原生社交平台 MCP 操作未完成，请检查服务、登录态或平台风控状态。"),
+        "error_type": type(exc).__name__,
+    })
+
+
+def _runtime_tool_caller(runtime: Any) -> Any:
+    bundle = getattr(runtime, "runtime_bundle", None)
+    deps = getattr(bundle, "reply_processor_deps", None)
+    inner = getattr(deps, "runtime", None)
+    return getattr(inner, "lite_tool_caller", None) or getattr(inner, "agent_tool_caller", None)
+
+
+def _cover_url_allowed(platform: str, value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower()
+    return (
+        parsed.scheme == "https"
+        and parsed.username is None
+        and parsed.password is None
+        and any(host == suffix or host.endswith("." + suffix) for suffix in _COVER_HOSTS.get(platform, ()))
+    )
 
 
 def _failure(
@@ -59,9 +123,42 @@ def _strict_bool(body: dict[str, Any], key: str, *, title: str, default: Any = N
 
 def build_mcp_router(*, runtime: Any) -> APIRouter:
     router = APIRouter(prefix="/api/mcp", tags=["mcp"])
+    platform_store = BuiltinPlatformStore()
+    learning_store = MemeLearningStore()
 
     def manager():
         return get_mcp_manager(runtime)
+
+    async def run_slang_research(body: dict[str, Any]) -> dict[str, Any]:
+        term = " ".join(str(body.get("term") or body.get("query") or "").split())[:100]
+        context = " ".join(str(body.get("context") or term).split())[:1000]
+        game = " ".join(str(body.get("game") or "").split())[:100]
+        depth = str(body.get("depth") or "auto")
+        if not term or depth not in {"auto", "deep"}:
+            raise ValueError("term and valid depth are required")
+        raw = await manager().builtin_call_tool(
+            "research_game_slang",
+            {"term": term, "context": context, "game": game, "depth": depth},
+        )
+        try:
+            packet = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("invalid builtin content packet") from exc
+        caller = _runtime_tool_caller(runtime)
+        claims: list[dict[str, Any]] = []
+        senses: list[dict[str, Any]] = []
+        if caller is not None:
+            pipeline = SlangLearningPipeline(
+                tool_caller=caller,
+                max_claims=max(1, min(50, int(body.get("max_claims", 20) or 20))),
+            )
+            claims = await pipeline.extract_claims(packet, target_term=term)
+            senses = await learning_store.ingest_claims(
+                claims,
+                semantic_pipeline=pipeline,
+                model_route="webui_social_research",
+            )
+        return {"packet": packet, "claims": claims, "senses": senses, "target_term": term}
 
     @router.get("/sources")
     async def sources(_: AdminIdentity = Depends(require_admin)) -> dict:
@@ -367,5 +464,397 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
             partial=failed > 0,
         )
         return {**result, "diagnostic": report}
+
+    @router.get("/builtin/social-research/status")
+    async def builtin_social_status(
+        response: Response,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        installation = manager().public_installation(BUILTIN_SOCIAL_MCP_ID)
+        persisted = {item["platform"]: item for item in platform_store.list()}
+        runtime_status: dict[str, Any] = {"schema_version": 1, "platforms": {}}
+        if installation and installation.get("desired_enabled"):
+            try:
+                runtime_status = await manager().builtin_request("personification/builtin/status", {})
+            except Exception:
+                runtime_status = {"schema_version": 1, "platforms": {}, "state": "unavailable"}
+        platforms = {}
+        for platform in PLATFORMS:
+            stored = persisted.get(platform, {"platform": platform, "enabled": False, "revision": 0, "config": {}})
+            live = dict((runtime_status.get("platforms") or {}).get(platform) or {})
+            platforms[platform] = {
+                **live,
+                **stored,
+                "config": {**dict(live.get("config") or {}), **dict(stored.get("config") or {})},
+                "runtime_state": live.get("state", "service_disabled"),
+            }
+        return {"installation": installation, "platforms": platforms}
+
+    @router.post("/builtin/social-research/platforms/{platform}/configure")
+    async def configure_builtin_platform(
+        platform: str,
+        request: Request,
+        response: Response,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        try:
+            if type(body.get("revision")) is not int or not isinstance(body.get("config"), dict):
+                raise ValueError("revision must be an integer and config must be an object")
+            stored = platform_store.update(
+                platform=platform,
+                enabled=_strict_bool(body, "enabled", title="平台配置无效"),
+                config=body.get("config") if isinstance(body.get("config"), dict) else {},
+                expected_revision=int(body.get("revision")),
+            )
+            live = await manager().builtin_request(
+                "personification/builtin/configure",
+                {"platform": platform, "enabled": stored["enabled"], "config": stored["config"]},
+            )
+        except Exception as exc:
+            webui_audit_log.record(
+                action="mcp_builtin_platform_configure", qq=admin.qq, device_id=admin.device_id,
+                target=platform, ip_hash=get_client_ip(request), detail={"error_type": type(exc).__name__}, outcome="error",
+            )
+            raise _safe_builtin_error(exc, "平台配置未完成") from exc
+        webui_audit_log.record(
+            action="mcp_builtin_platform_configure", qq=admin.qq, device_id=admin.device_id,
+            target=platform, ip_hash=get_client_ip(request), detail={"enabled": stored["enabled"], "revision": stored["revision"]},
+        )
+        return {"platform": stored, "runtime": live}
+
+    @router.post("/builtin/social-research/auth/start")
+    async def builtin_auth_start(
+        request: Request,
+        response: Response,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        platform = str(body.get("platform") or "")
+        if platform not in PLATFORMS:
+            raise _safe_builtin_error(ValueError("unsupported platform"), "登录请求无效")
+        try:
+            result = await manager().builtin_request(
+                "personification/builtin/auth/start",
+                {"platform": platform, "owner": _auth_owner(admin, platform)},
+            )
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "登录会话创建失败") from exc
+        webui_audit_log.record(
+            action="mcp_builtin_auth_start", qq=admin.qq, device_id=admin.device_id,
+            target=platform, ip_hash=get_client_ip(request), detail={"session_id": result.get("session_id", "")},
+        )
+        return result
+
+    @router.get("/builtin/social-research/auth/{session_id}/status")
+    async def builtin_auth_status(
+        session_id: str,
+        platform: str,
+        response: Response,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        if platform not in PLATFORMS:
+            raise _safe_builtin_error(ValueError("unsupported platform"), "登录状态请求无效")
+        try:
+            return await manager().builtin_request(
+                "personification/builtin/auth/status",
+                {"session_id": session_id, "owner": _auth_owner(admin, platform)},
+            )
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "登录状态读取失败") from exc
+
+    @router.get("/builtin/social-research/auth/{session_id}/qrcode")
+    async def builtin_auth_qrcode(
+        session_id: str,
+        platform: str,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> Response:
+        if platform not in PLATFORMS:
+            raise _safe_builtin_error(ValueError("unsupported platform"), "二维码请求无效")
+        try:
+            result = await manager().builtin_request(
+                "personification/builtin/auth/qrcode",
+                {"session_id": session_id, "owner": _auth_owner(admin, platform)},
+            )
+            image = base64.b64decode(str(result.get("data_base64") or ""), validate=True)
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "登录二维码读取失败") from exc
+        return Response(
+            content=image,
+            media_type="image/png",
+            headers={"Cache-Control": "no-store, private", "Pragma": "no-cache", "X-Content-Type-Options": "nosniff"},
+        )
+
+    @router.post("/builtin/social-research/auth/{session_id}/cancel")
+    async def builtin_auth_cancel(
+        session_id: str,
+        platform: str,
+        response: Response,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        if platform not in PLATFORMS:
+            raise _safe_builtin_error(ValueError("unsupported platform"), "登录会话取消失败")
+        try:
+            return await manager().builtin_request(
+                "personification/builtin/auth/cancel",
+                {"session_id": session_id, "owner": _auth_owner(admin, platform)},
+            )
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "登录会话取消失败") from exc
+
+    @router.post("/builtin/social-research/auth/logout")
+    async def builtin_auth_logout(
+        request: Request,
+        response: Response,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        platform = str(body.get("platform") or "")
+        expected = f"确认注销{_PLATFORM_LABELS.get(platform, platform)}"
+        if platform not in PLATFORMS or body.get("confirm") != expected:
+            raise _safe_builtin_error(ValueError("logout confirmation mismatch"), f"请输入精确确认文本：{expected}")
+        try:
+            result = await manager().builtin_request("personification/builtin/auth/logout", {"platform": platform})
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "平台注销失败") from exc
+        webui_audit_log.record(
+            action="mcp_builtin_auth_logout", qq=admin.qq, device_id=admin.device_id,
+            target=platform, ip_hash=get_client_ip(request), detail={"profile_deleted": True},
+        )
+        return result
+
+    @router.post("/builtin/social-research/preview")
+    async def builtin_social_preview(
+        request: Request,
+        response: Response,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        try:
+            result = await run_slang_research(body)
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "社交平台检索预览失败") from exc
+        webui_audit_log.record(
+            action="mcp_builtin_social_preview", qq=admin.qq, device_id=admin.device_id,
+            target=str(result.get("target_term") or "")[:100], ip_hash=get_client_ip(request),
+            detail={"claims": len(result.get("claims") or []), "senses": len(result.get("senses") or [])},
+        )
+        return result
+
+    @router.get("/builtin/social-research/cover/{cover_ref}")
+    async def builtin_cover_proxy(
+        cover_ref: str,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> Response:
+        if not re.fullmatch(r"cover_[0-9a-f]{40}", cover_ref):
+            raise HTTPException(status_code=404, detail="封面引用不存在。")
+        try:
+            resolved = await manager().builtin_request(
+                "personification/builtin/cover/resolve", {"cover_ref": cover_ref}
+            )
+            platform = str(resolved.get("platform") or "")
+            url = str(resolved.get("url") or "")
+            if not _cover_url_allowed(platform, url):
+                raise ValueError("cover URL rejected")
+            async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+                for _redirect in range(4):
+                    async with client.stream("GET", url, headers={"Accept": "image/*"}) as upstream:
+                        if upstream.status_code in {301, 302, 303, 307, 308}:
+                            url = urljoin(url, upstream.headers.get("location", ""))
+                            if not _cover_url_allowed(platform, url):
+                                raise ValueError("cover redirect rejected")
+                            continue
+                        upstream.raise_for_status()
+                        content_type = upstream.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                        content_length = int(upstream.headers.get("content-length", "0") or 0)
+                        if not content_type.startswith("image/") or content_length > 5 * 1024 * 1024:
+                            raise ValueError("cover response rejected")
+                        content = bytearray()
+                        async for chunk in upstream.aiter_bytes():
+                            content.extend(chunk)
+                            if len(content) > 5 * 1024 * 1024:
+                                raise ValueError("cover response rejected")
+                        return Response(
+                            content=bytes(content),
+                            media_type=content_type,
+                            headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"},
+                        )
+                raise ValueError("too many cover redirects")
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "封面代理读取失败") from exc
+
+    @router.get("/builtin/social-research/slang/senses")
+    async def list_slang_senses(
+        response: Response,
+        status: str = "",
+        term: str = "",
+        limit: int = Query(200, ge=1, le=2000),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        try:
+            items = learning_store.list_senses(status=status, term=term, limit=limit)
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "学习词条读取失败") from exc
+        return {"senses": items, "total": len(items)}
+
+    @router.get("/builtin/social-research/slang/senses/{sense_id}")
+    async def slang_sense_detail(
+        sense_id: str,
+        response: Response,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        item = learning_store.get_sense(sense_id, include_detail=True)
+        if item is None:
+            raise _safe_builtin_error(KeyError(sense_id), "找不到该 sense")
+        return {"sense": item}
+
+    async def update_manual_sense(
+        *,
+        sense_id: str,
+        status: str,
+        body: dict[str, Any],
+        admin: AdminIdentity,
+        action: str,
+    ) -> dict[str, Any]:
+        try:
+            item = learning_store.set_manual_status(
+                sense_id,
+                status=status,
+                actor=admin.qq,
+                expected_revision=int(body.get("revision")),
+            )
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "Sense 状态更新失败") from exc
+        webui_audit_log.record(
+            action=action, qq=admin.qq, device_id=admin.device_id, target=sense_id,
+            detail={"status": status, "revision": item.get("revision")},
+        )
+        return {"sense": item}
+
+    @router.post("/builtin/social-research/slang/senses/{sense_id}/accept")
+    async def accept_slang_sense(
+        sense_id: str,
+        response: Response,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        return await update_manual_sense(sense_id=sense_id, status="manual_locked", body=body, admin=admin, action="meme_sense_accept")
+
+    @router.post("/builtin/social-research/slang/senses/{sense_id}/reject")
+    async def reject_slang_sense(
+        sense_id: str,
+        response: Response,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        return await update_manual_sense(sense_id=sense_id, status="rejected", body=body, admin=admin, action="meme_sense_reject")
+
+    @router.post("/builtin/social-research/slang/senses/{sense_id}/lock")
+    async def lock_slang_sense(
+        sense_id: str,
+        response: Response,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        return await update_manual_sense(sense_id=sense_id, status="manual_locked", body=body, admin=admin, action="meme_sense_lock")
+
+    @router.post("/builtin/social-research/slang/senses/{sense_id}/reverify")
+    async def reverify_slang_sense(
+        sense_id: str,
+        request: Request,
+        response: Response,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        current = learning_store.get_sense(sense_id)
+        if current is None:
+            raise _safe_builtin_error(KeyError(sense_id), "找不到该 sense")
+        if current["revision"] != int(body.get("revision", -1)):
+            raise _safe_builtin_error(RuntimeError("revision_conflict"), "Sense 已更新")
+        try:
+            research = await run_slang_research({
+                "term": current["term"],
+                "context": current["usage_context"] or current["meaning"],
+                "game": (current.get("game_context") or {}).get("canonical_name", ""),
+                "depth": "deep",
+                "max_claims": body.get("max_claims", 20),
+            })
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "重新验证失败") from exc
+        webui_audit_log.record(
+            action="meme_sense_reverify", qq=admin.qq, device_id=admin.device_id, target=sense_id,
+            ip_hash=get_client_ip(request), detail={"claims": len(research.get("claims") or [])},
+        )
+        return {"sense": learning_store.get_sense(sense_id, include_detail=True), "research": research}
+
+    @router.post("/builtin/social-research/slang/senses/merge")
+    async def merge_slang_senses(
+        response: Response,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        try:
+            item = learning_store.merge_senses(
+                target_sense_id=str(body.get("target_sense_id") or ""),
+                source_sense_ids=[str(value) for value in list(body.get("source_sense_ids") or [])],
+                expected_revisions={str(key): int(value) for key, value in dict(body.get("revisions") or {}).items()},
+                actor=admin.qq,
+            )
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "Sense 合并失败") from exc
+        webui_audit_log.record(
+            action="meme_sense_merge", qq=admin.qq, device_id=admin.device_id,
+            target=item["sense_id"], detail={"source_sense_ids": list(body.get("source_sense_ids") or [])[:20]},
+        )
+        return {"sense": item}
+
+    @router.post("/builtin/social-research/slang/senses/{sense_id}/split")
+    async def split_slang_sense(
+        sense_id: str,
+        response: Response,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        try:
+            item = learning_store.split_sense(
+                sense_id,
+                claim_ids=[str(value) for value in list(body.get("claim_ids") or [])],
+                patch=body.get("sense") if isinstance(body.get("sense"), dict) else {},
+                expected_revision=int(body.get("revision")),
+                actor=admin.qq,
+            )
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "Sense 拆分失败") from exc
+        webui_audit_log.record(
+            action="meme_sense_split", qq=admin.qq, device_id=admin.device_id,
+            target=sense_id, detail={"new_sense_id": item["sense_id"], "claim_count": len(body.get("claim_ids") or [])},
+        )
+        return {"sense": item}
+
+    @router.get("/builtin/social-research/slang/events")
+    async def slang_learning_events(
+        response: Response,
+        sense_id: str = "",
+        limit: int = Query(200, ge=1, le=2000),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        items = learning_store.list_events(sense_id=sense_id, limit=limit)
+        return {"events": items, "total": len(items)}
 
     return router

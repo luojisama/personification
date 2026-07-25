@@ -19,6 +19,7 @@ let state = {
   skillSourceForm: { source: "", name: "", ref: "", subdir: "", kind: "auto", preferFirst: false, autoApprove: false },
   toolCreatorTasks: [], toolCreatorSelectedId: "", toolCreatorDetail: null, toolCreatorRequest: "", toolCreatorSuggestedName: "", toolCreatorAnswer: "", toolCreatorBusy: false, toolCreatorDiagnostic: null,
   mcpSources: [], mcpSourceId: "official", mcpQuery: "", mcpResults: [], mcpNextCursor: "", mcpSearchLoaded: false, mcpDetail: null, mcpPackageIndex: 0, mcpPrefix: "", mcpInstallations: [], mcpBusy: false, mcpLoadingMore: false,
+  mcpTab: "builtin", mcpBuiltin: null, mcpSenses: [], mcpSenseFilter: "", mcpSelectedSense: null, mcpSelectedSenseIds: [], mcpAuth: {}, mcpPreview: null,
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
   personaTemplateForm: { mode: "source", work_title: "", character_name: "", persona_name: "", gender: "", personality: "", traits: "", hobbies: "", description: "" }, personaTemplateResult: null, personaTemplateBusy: false, personaTemplateTask: null, personaTemplateHistory: [],
   personaAvatarCandidateId: "", personaSignatureCandidateId: "", personaProfileBotId: "",
@@ -604,12 +605,16 @@ async function loadView() {
       state.skillRemoteSources = data.remote_sources || [];
       state.skillMcpTools = data.mcp_tools || [];
     } else if (view === "mcp") {
-      const [sourceData, installationData] = await Promise.all([
+      const [sourceData, installationData, builtinData, senseData] = await Promise.all([
         api("/mcp/sources"),
         api("/mcp/installations"),
+        api("/mcp/builtin/social-research/status", {cache:"no-store"}),
+        api("/mcp/builtin/social-research/slang/senses?limit=200", {cache:"no-store"}),
       ]);
       state.mcpSources = sourceData.sources || [];
       state.mcpInstallations = installationData.installations || [];
+      state.mcpBuiltin = builtinData || null;
+      state.mcpSenses = senseData.senses || [];
       if (!state.mcpSources.some(source => source.id === state.mcpSourceId)) {
         state.mcpSourceId = state.mcpSources[0]?.id || "official";
       }

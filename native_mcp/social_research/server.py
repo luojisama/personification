@@ -65,6 +65,8 @@ class SocialResearchMcpServer:
             return await self.service.auth_cancel(params)
         if method == "personification/builtin/auth/logout":
             return await self.service.auth_logout(params)
+        if method == "personification/builtin/cover/resolve":
+            return self.service.cover_resolve(params)
         raise KeyError("method_not_found")
 
     async def close(self) -> None:

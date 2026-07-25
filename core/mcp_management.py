@@ -967,6 +967,17 @@ class McpRuntimeManager:
                 if exposed != expected:
                     raise ValueError("builtin MCP tool catalog does not match the trusted manifest")
                 remote_tool_list = trusted
+                from .mcp_builtin_platform_store import BuiltinPlatformStore
+
+                for platform in BuiltinPlatformStore().list():
+                    await client.request(
+                        "personification/builtin/configure",
+                        {
+                            "platform": platform["platform"],
+                            "enabled": platform["enabled"],
+                            "config": platform["config"],
+                        },
+                    )
             catalog = self.store.sync_tools(installation_id, item["name_prefix"], remote_tool_list)
             self.store.set_protocol_metadata(
                 installation_id,
@@ -1060,6 +1071,22 @@ class McpRuntimeManager:
             if client is None or not client.is_running:
                 raise RuntimeError("builtin MCP process is unavailable")
         return await client.request(method, dict(params or {}))
+
+    async def builtin_call_tool(self, remote_name: str, arguments: dict[str, Any] | None = None) -> str:
+        allowed = {str(tool.get("name") or "") for tool in builtin_social_tools()}
+        if remote_name not in allowed:
+            raise ValueError("unsupported builtin MCP tool")
+        async with self._lock:
+            item = self.store.get_installation(BUILTIN_SOCIAL_MCP_ID)
+            if item is None or not item.get("desired_enabled"):
+                raise RuntimeError("builtin MCP is disabled")
+            client = self._clients.get(BUILTIN_SOCIAL_MCP_ID)
+            if client is None or not client.is_running:
+                await self._activate_unlocked(BUILTIN_SOCIAL_MCP_ID)
+                client = self._clients.get(BUILTIN_SOCIAL_MCP_ID)
+            if client is None or not client.is_running:
+                raise RuntimeError("builtin MCP process is unavailable")
+        return await client.call_tool(remote_name, dict(arguments or {}))
 
     async def install(
         self,

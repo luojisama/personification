@@ -197,6 +197,18 @@ class MemeLearningStore:
                 ]
             return sense
 
+    def list_events(self, *, sense_id: str = "", limit: int = 200) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        query = "SELECT * FROM meme_learning_events"
+        if sense_id:
+            query += " WHERE sense_id=?"
+            params.append(_clean(sense_id, 80))
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(2000, int(limit))))
+        with connect_sync() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [{**dict(row), "detail": _json(row["detail_json"], {})} for row in rows]
+
     async def ingest_claims(
         self,
         claims: list[dict[str, Any]],
@@ -579,6 +591,129 @@ class MemeLearningStore:
                 )
                 conn.commit()
         return updated
+
+    def merge_senses(
+        self,
+        *,
+        target_sense_id: str,
+        source_sense_ids: list[str],
+        expected_revisions: dict[str, int],
+        actor: str,
+    ) -> dict[str, Any]:
+        target = self.get_sense(target_sense_id)
+        sources = [self.get_sense(value) for value in source_sense_ids if value != target_sense_id]
+        if target is None or any(item is None for item in sources) or not sources:
+            raise KeyError("sense_not_found")
+        concrete_sources = [item for item in sources if item is not None]
+        all_senses = [target, *concrete_sources]
+        if any(item["term"] != target["term"] or item["scope"] != target["scope"] or item["group_id"] != target["group_id"] for item in all_senses):
+            raise ValueError("only senses under the same dictionary root can be merged")
+        if any(item["revision"] != int(expected_revisions.get(item["sense_id"], -1)) for item in all_senses):
+            raise RuntimeError("revision_conflict")
+        now = time.time()
+        with connect_sync() as conn:
+            for source in concrete_sources:
+                evidence = conn.execute(
+                    "SELECT * FROM meme_evidence_claims WHERE sense_id=?",
+                    (source["sense_id"],),
+                ).fetchall()
+                for row in evidence:
+                    new_claim_id = "claim_" + hashlib.sha256(
+                        f"{target_sense_id}\0{row['source_cluster_id']}".encode("utf-8")
+                    ).hexdigest()[:32]
+                    values = dict(row)
+                    values["claim_id"] = new_claim_id
+                    values["sense_id"] = target_sense_id
+                    columns = list(values)
+                    conn.execute(
+                        f"INSERT OR IGNORE INTO meme_evidence_claims({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                        tuple(values[column] for column in columns),
+                    )
+                conn.execute("DELETE FROM meme_evidence_claims WHERE sense_id=?", (source["sense_id"],))
+                conn.execute(
+                    """UPDATE meme_senses SET status='rejected',manual_locked=0,auto_managed=0,
+                           revision=revision+1,updated_at=? WHERE sense_id=? AND revision=?""",
+                    (now, source["sense_id"], source["revision"]),
+                )
+            conn.commit()
+        merged = self._refresh_state(target_sense_id, now=now)
+        merged = self.set_manual_status(
+            target_sense_id,
+            status="manual_locked",
+            actor=actor,
+            expected_revision=merged["revision"],
+        )
+        for source in concrete_sources:
+            self._event(
+                source["sense_id"], "merged", source["status"], "rejected",
+                {"target_sense_id": target_sense_id}, now=now, actor=actor,
+            )
+        return merged
+
+    def split_sense(
+        self,
+        sense_id: str,
+        *,
+        claim_ids: list[str],
+        patch: dict[str, Any],
+        expected_revision: int,
+        actor: str,
+    ) -> dict[str, Any]:
+        current = self.get_sense(sense_id)
+        if current is None:
+            raise KeyError(sense_id)
+        if current["revision"] != int(expected_revision):
+            raise RuntimeError("revision_conflict")
+        selected = list(dict.fromkeys(_clean(value, 80) for value in claim_ids if _clean(value, 80)))
+        if not selected:
+            raise ValueError("claim_ids are required")
+        now = time.time()
+        new_id = "sense_" + uuid.uuid4().hex
+        game_context = patch.get("game_context") if isinstance(patch.get("game_context"), dict) else current["game_context"]
+        with connect_sync() as conn:
+            rows = conn.execute(
+                f"SELECT claim_id FROM meme_evidence_claims WHERE sense_id=? AND claim_id IN ({','.join('?' for _ in selected)})",
+                (sense_id, *selected),
+            ).fetchall()
+            if len(rows) != len(selected):
+                raise ValueError("one or more evidence claims do not belong to the sense")
+            conn.execute(
+                """INSERT INTO meme_senses(
+                       sense_id,scope,group_id,term,meaning,aliases_json,game_context_json,
+                       version_context,usage_context,safe_usage,risk_level,status,confidence,
+                       source_count,platform_count,auto_managed,first_seen_at,last_verified_at,
+                       reverify_after,expires_at,manual_locked,revision,updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_locked', 0, 0, 0, 0, ?, ?, 0, 0, 1, 1, ?)""",
+                (
+                    new_id,
+                    current["scope"],
+                    current["group_id"],
+                    _clean(patch.get("term") or current["term"], 80),
+                    _clean(patch.get("meaning") or current["meaning"], 500),
+                    json.dumps(patch.get("aliases") if isinstance(patch.get("aliases"), list) else current["aliases"], ensure_ascii=False),
+                    json.dumps(game_context, ensure_ascii=False),
+                    _clean(patch.get("version_context", current["version_context"]), 100),
+                    _clean(patch.get("usage_context", current["usage_context"]), 300),
+                    _clean(patch.get("safe_usage", current["safe_usage"]), 300),
+                    _clean(patch.get("risk_level", current["risk_level"]), 20),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                f"UPDATE meme_evidence_claims SET sense_id=? WHERE sense_id=? AND claim_id IN ({','.join('?' for _ in selected)})",
+                (new_id, sense_id, *selected),
+            )
+            conn.commit()
+        self._refresh_state(sense_id, now=now)
+        split = self._refresh_state(new_id, now=now)
+        self._event(sense_id, "split", current["status"], current["status"], {"new_sense_id": new_id}, now=now, actor=actor)
+        self._event(new_id, "split_created", "", split["status"], {"source_sense_id": sense_id}, now=now, actor=actor)
+        detail = self.get_sense(new_id, include_detail=True)
+        if detail is None:
+            raise KeyError(new_id)
+        return detail
 
     def _write_manual_root(self, sense: dict[str, Any], *, now: float) -> None:
         with connect_sync() as conn:

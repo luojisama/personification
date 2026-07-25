@@ -24,6 +24,7 @@ try {
 function stopMcpViewLifecycle() {
   // Pending confirmation may contain Secret input values and must stay page-local.
   _mcpPendingInstall = null;
+  if (_mcpAuthTimer) { clearInterval(_mcpAuthTimer); _mcpAuthTimer = null; }
 }
 
 function mcpSourceById(sourceId) {
@@ -274,7 +275,7 @@ function renderMcpInstallation(item) {
 }
 
 function renderMcpRuntimeInstallations() {
-  const installations = state.mcpInstallations || [];
+  const installations = (state.mcpInstallations || []).filter(item => item.installation_id !== MCP_BUILTIN_ID);
   const totals = installations.reduce((acc, item) => {
     acc.authorized += Number(item.authorized_count || 0);
     acc.registered += Number(item.registered_count || 0);
@@ -313,15 +314,125 @@ function renderMcpInstallConfirmation() {
   </section></div>`;
 }
 
+const MCP_BUILTIN_ID = "builtin_social_platform_research";
+const MCP_PLATFORM_LABELS = {bilibili:"B站", douyin:"抖音", tieba:"贴吧", xiaoheihe:"小黑盒"};
+const MCP_STATE_LABELS = {
+  disabled:"已关闭", service_disabled:"服务未启动", ready:"可用", login_required:"需要登录",
+  manual_verification_required:"需要人工验证", risk_controlled:"平台风控暂停", unavailable:"不可用",
+  waiting_scan:"等待扫码", success:"登录成功", expired:"会话已过期", cancelled:"已取消", error:"登录失败",
+  verified:"自动收录", understand_only:"只理解", observed:"待确认", disputed:"冲突", stale:"已过期",
+  rejected:"已拒绝", manual_locked:"人工锁定",
+};
+let _mcpAuthTimer = null;
+
+function mcpChineseState(value) {
+  const raw = String(value || "unknown");
+  return MCP_STATE_LABELS[raw] || "状态未知";
+}
+
+function builtinMcpInstallation() {
+  return (state.mcpInstallations || []).find(item => item.installation_id === MCP_BUILTIN_ID)
+    || (state.mcpBuiltin || {}).installation || null;
+}
+
+function renderBuiltinServiceCard() {
+  const item = builtinMcpInstallation();
+  if (!item) return '<section class="card"><p class="muted">原生 MCP 清单尚未初始化，请重载插件后重试。</p></section>';
+  const desired = item.desired_enabled === true;
+  const tools = item.tools || [];
+  return `<section class="card mcp-native-service">
+    <div class="mcp-section-heading"><div><span class="eyebrow">BUILTIN SERVICE</span><h2>社交平台游戏梗查证</h2><p>登录态只保存在四个平台各自的浏览器 profile；Agent 只能调用三个固定只读工具。</p></div>
+      <div class="mcp-runtime-actions"><span class="mcp-state ${mcpStatusTone(item.process_state)}"><i></i>${escapeHtml(item.process_state || "stopped")}</span><button class="btn ${desired ? "danger" : "primary"}" data-mcp-installation-toggle="${MCP_BUILTIN_ID}" data-mcp-enabled="${desired ? "false" : "true"}">${desired ? "停止服务" : "开启服务"}</button><button class="btn" data-mcp-reload>重载并诊断</button></div></div>
+    <div class="mcp-native-tool-grid">${tools.map(tool => `<article><div><strong>${escapeHtml(tool.title || tool.remote_name)}</strong><code>${escapeHtml(tool.remote_name || "")}</code><small>source_kind=mcp_builtin · risk_level=low · side_effect=none</small></div><button class="btn small ${tool.authorized ? "danger" : "primary"}" data-mcp-tool-toggle="${escapeAttr(tool.remote_name || "")}" data-mcp-installation="${MCP_BUILTIN_ID}" data-mcp-enabled="${tool.authorized ? "false" : "true"}" data-mcp-risk="builtin">${tool.authorized ? "撤销授权" : "授权给 Agent"}</button></article>`).join("")}</div>
+    <p class="muted">实际可用还要求：服务进程存活、工具已授权注册，并且至少一个已开启平台处于已登录且能力健康状态。</p>
+  </section>`;
+}
+
+function renderBuiltinPlatformCard(platform, item) {
+  const label = MCP_PLATFORM_LABELS[platform] || platform;
+  const config = item.config || {};
+  const auth = (state.mcpAuth || {})[platform] || null;
+  const runtimeState = item.runtime_state || item.state || "service_disabled";
+  const capabilities = item.capabilities || {};
+  const qr = auth && auth.session_id && auth.qr_available
+    ? `<img class="mcp-login-qr" alt="${escapeAttr(label)}登录二维码" src="${API}/mcp/builtin/social-research/auth/${encodeURIComponent(auth.session_id)}/qrcode?platform=${encodeURIComponent(platform)}">`
+    : "";
+  const authPanel = auth ? `<div class="mcp-auth-panel">${qr}<div><strong>${escapeHtml(mcpChineseState(auth.status))}</strong><code>${escapeHtml(auth.status || "")}</code><small>会话将在 ${auth.expires_at ? new Date(Number(auth.expires_at) * 1000).toLocaleTimeString() : "5 分钟内"}过期</small>${auth.status === "manual_verification_required" ? '<p class="muted">请在官方页面完成人机验证；系统不会绕过滑块或验证码。</p>' : ""}</div></div>` : "";
+  const danmaku = capabilities.danmaku === false ? "不支持弹幕" : "页面提供时读取弹幕";
+  return `<article class="card mcp-platform-card" data-platform="${escapeAttr(platform)}">
+    <header><div><span class="eyebrow">${escapeHtml(platform)}</span><h3>${escapeHtml(label)}</h3></div><div><strong class="mcp-native-state ${mcpStatusTone(runtimeState)}">${escapeHtml(mcpChineseState(runtimeState))}</strong><code>${escapeHtml(runtimeState)}</code></div></header>
+    <div class="mcp-capability-line"><span>搜索</span><span>封面</span><span>正文</span><span>评论/回复</span><span>${escapeHtml(danmaku)}</span></div>
+    <div class="mcp-platform-actions"><button class="btn ${item.enabled ? "danger" : "primary"}" data-mcp-platform-toggle="${escapeAttr(platform)}" data-enabled="${item.enabled ? "false" : "true"}">${item.enabled ? "关闭平台" : "开启平台"}</button><button class="btn" data-mcp-auth-start="${escapeAttr(platform)}">扫码/官方登录</button><button class="btn danger" data-mcp-auth-logout="${escapeAttr(platform)}">注销并删除 profile</button></div>
+    ${authPanel}
+    <details><summary>过滤、采样与缓存设置</summary><div class="mcp-platform-config">
+      <label>质量模式<select data-mcp-config="quality_mode"><option value="balanced" ${config.quality_mode === "balanced" ? "selected" : ""}>平衡</option><option value="strict" ${config.quality_mode === "strict" ? "selected" : ""}>严格</option><option value="ranking_only" ${config.quality_mode === "ranking_only" ? "selected" : ""}>仅排序不排除</option></select></label>
+      <label>营销阈值<input data-mcp-config="marketing_threshold" type="number" min="0" max="1" step="0.05" value="${escapeAttr(config.marketing_threshold ?? 0.75)}"></label>
+      <label>最低播放<input data-mcp-config="min_play_count" type="number" min="0" value="${escapeAttr(config.min_play_count ?? 3000)}"></label>
+      <label>最低评论<input data-mcp-config="min_comment_count" type="number" min="0" value="${escapeAttr(config.min_comment_count ?? 5)}"></label>
+      <label>最低回复<input data-mcp-config="min_reply_count" type="number" min="0" value="${escapeAttr(config.min_reply_count ?? 3)}"></label>
+      <label>最大结果<input data-mcp-config="max_results" type="number" min="1" max="50" value="${escapeAttr(config.max_results ?? 12)}"></label>
+      <label>评论采样<input data-mcp-config="comment_limit" type="number" min="0" max="200" value="${escapeAttr(config.comment_limit ?? 50)}"></label>
+      <label>弹幕采样<input data-mcp-config="danmaku_limit" type="number" min="0" max="500" value="${escapeAttr(config.danmaku_limit ?? 200)}"></label>
+      <label>缓存秒数<input data-mcp-config="cache_ttl_seconds" type="number" min="60" max="86400" value="${escapeAttr(config.cache_ttl_seconds ?? 21600)}"></label>
+      <label>请求超时<input data-mcp-config="request_timeout_seconds" type="number" min="3" max="60" value="${escapeAttr(config.request_timeout_seconds ?? 20)}"></label>
+      <button class="btn primary" data-mcp-platform-save="${escapeAttr(platform)}">保存设置</button>
+    </div></details><small>revision=${Number(item.revision || 0)} · 登录态不会出现在此 JSON、日志或导出中。</small>
+  </article>`;
+}
+
+function renderBuiltinPlatforms() {
+  const platforms = (state.mcpBuiltin || {}).platforms || {};
+  return `<section class="mcp-native-platforms"><div class="mcp-section-heading"><div><span class="eyebrow">PLATFORM ISOLATION</span><h2>平台登录与能力</h2><p>每个平台使用独立 persistent context；关闭服务保留登录态，只有显式注销会删除对应 profile。</p></div></div><div class="mcp-platform-grid">${Object.entries(MCP_PLATFORM_LABELS).map(([platform]) => renderBuiltinPlatformCard(platform, platforms[platform] || {platform, enabled:false, revision:0, config:{}})).join("")}</div></section>`;
+}
+
+function renderPreviewDiscussion(item) {
+  return (item.discussion || []).slice(0, 12).map(row => `<li><span>${escapeHtml(row.type || "comment")}</span>${escapeHtml(row.text || "")}</li>`).join("");
+}
+
+function renderBuiltinPreview() {
+  const result = state.mcpPreview;
+  const packet = result && result.packet || null;
+  const cards = packet ? (packet.items || []).map(item => `<article class="mcp-content-card">${item.cover_ref ? `<img src="${API}/mcp/builtin/social-research/cover/${encodeURIComponent(item.cover_ref)}" alt="内容封面" loading="lazy">` : ""}<div><span>${escapeHtml(MCP_PLATFORM_LABELS[item.platform] || item.platform)}</span><h4>${escapeHtml(item.title || "无标题")}</h4><p>${escapeHtml(item.caption_or_body || "")}</p><small>quality_score=${Number(item.quality_score || 0).toFixed(2)} · marketing_score=${Number(item.marketing_score || 0).toFixed(2)}${item.filtered_reason ? ` · ${escapeHtml(item.filtered_reason)}` : ""}</small><ul>${renderPreviewDiscussion(item)}</ul></div></article>`).join("") : "";
+  const claims = result ? (result.claims || []).map(claim => `<article class="mcp-claim-card"><header><strong>${escapeHtml(claim.term || "")}</strong><span>${escapeHtml((claim.game_context || {}).canonical_name || "未确定游戏")}</span></header><p>${escapeHtml(claim.meaning || "")}</p><small>${escapeHtml(claim.safe_usage || "")} · confidence=${Number(claim.extractor_confidence || 0).toFixed(2)}</small><blockquote>${escapeHtml(((claim.evidence_refs || [])[0] || {}).quote || "")}</blockquote></article>`).join("") : "";
+  return `<section class="card mcp-native-preview"><div class="mcp-section-heading"><div><span class="eyebrow">RESEARCH PREVIEW</span><h2>检索预览与多梗提取</h2><p>一次内容默认提取全部黑话；每条 claim 必须引用标题、正文、评论、回复或弹幕原文。</p></div></div>
+    <div class="mcp-preview-form"><label>游戏（可选）<input id="mcp-preview-game" placeholder="例如：三角洲行动"></label><label>查询词<input id="mcp-preview-term" placeholder="例如：刘涛"></label><label>深度<select id="mcp-preview-depth"><option value="auto">两阶段自动</option><option value="deep">四平台深挖</option></select></label><label>最多 claims<input id="mcp-preview-max" type="number" min="1" max="50" value="20"></label><button class="btn primary" data-mcp-preview-run ${state.mcpBusy ? "disabled" : ""}>检索并提取全部黑话</button></div>
+    ${packet ? `<div class="mcp-preview-summary">packet_id=<code>${escapeHtml(packet.packet_id || "")}</code> · trust=<code>${escapeHtml(packet.trust || "")}</code> · ${packet.partial ? "部分结果" : "完整结果"}</div><div class="mcp-content-grid">${cards || '<p class="muted">没有通过质量过滤的内容。</p>'}</div><h3>本次提取的 claims</h3><div class="mcp-claim-grid">${claims || '<p class="muted">没有找到带明确“词语 → 含义”关系的证据。</p>'}</div>` : ""}
+  </section>`;
+}
+
+function renderSenseDetail() {
+  const sense = state.mcpSelectedSense;
+  if (!sense) return "";
+  const evidence = (sense.evidence || []).map(item => `<li><div><strong>${escapeHtml(MCP_PLATFORM_LABELS[item.platform] || item.platform)} · ${escapeHtml(item.content_id || "")}</strong><small>${new Date(Number(item.created_at || 0) * 1000).toLocaleString()} · cluster=${escapeHtml(item.source_cluster_id || "")}</small></div><blockquote>${escapeHtml(item.quote || "")}</blockquote></li>`).join("");
+  const events = (sense.events || []).slice(0, 30).map(item => `<li><span>${escapeHtml(item.event_type || "")}</span><strong>${escapeHtml(item.old_status || "")} → ${escapeHtml(item.new_status || "")}</strong><small>${new Date(Number(item.created_at || 0) * 1000).toLocaleString()}</small></li>`).join("");
+  return `<section class="card mcp-sense-detail"><div class="mcp-section-heading"><div><span class="eyebrow">SENSE DETAIL</span><h2>${escapeHtml(sense.term || "")}</h2><p>${escapeHtml(sense.meaning || "")}</p></div><button class="btn" data-mcp-sense-close>关闭详情</button></div>
+    <div class="mcp-sense-facts"><span>状态<strong>${escapeHtml(mcpChineseState(sense.status))}</strong><code>${escapeHtml(sense.status || "")}</code></span><span>游戏<strong>${escapeHtml((sense.game_context || {}).canonical_name || "通用")}</strong></span><span>版本<strong>${escapeHtml(sense.version_context || "未限定")}</strong></span><span>独立内容<strong>${Number(sense.source_count || 0)}</strong></span><span>平台<strong>${Number(sense.platform_count || 0)}</strong></span><span>置信度<strong>${Number(sense.confidence || 0).toFixed(2)}</strong></span></div>
+    <p>${escapeHtml(sense.usage_context || "")}</p><p class="muted">安全用法：${escapeHtml(sense.safe_usage || "未填写")}</p>
+    <div class="mcp-platform-actions"><button class="btn primary" data-mcp-sense-action="accept" data-sense-id="${escapeAttr(sense.sense_id)}" data-revision="${Number(sense.revision)}">确认并锁定</button><button class="btn" data-mcp-sense-action="reverify" data-sense-id="${escapeAttr(sense.sense_id)}" data-revision="${Number(sense.revision)}">四平台重新验证</button><button class="btn" data-mcp-sense-split="${escapeAttr(sense.sense_id)}" data-revision="${Number(sense.revision)}">拆分 sense</button><button class="btn danger" data-mcp-sense-action="reject" data-sense-id="${escapeAttr(sense.sense_id)}" data-revision="${Number(sense.revision)}">拒绝</button></div>
+    <h3>证据来源</h3><ul class="mcp-evidence-list">${evidence || '<li class="muted">暂无证据详情。</li>'}</ul><h3>状态历史</h3><ul class="mcp-event-list">${events || '<li class="muted">暂无事件。</li>'}</ul>
+  </section>`;
+}
+
+function renderLearningCenter() {
+  const statuses = ["verified","understand_only","observed","disputed","stale","rejected","manual_locked"];
+  const filter = state.mcpSenseFilter || "";
+  const senses = (state.mcpSenses || []).filter(item => !filter || item.status === filter);
+  const cards = senses.map(sense => `<article class="mcp-sense-card"><label><input type="checkbox" data-mcp-sense-select="${escapeAttr(sense.sense_id)}" ${(state.mcpSelectedSenseIds || []).includes(sense.sense_id) ? "checked" : ""}><span>选择合并</span></label><button data-mcp-sense-open="${escapeAttr(sense.sense_id)}"><header><strong>${escapeHtml(sense.term || "")}</strong><span>${escapeHtml(mcpChineseState(sense.status))}</span></header><p>${escapeHtml(sense.meaning || "")}</p><small>${escapeHtml((sense.game_context || {}).canonical_name || "通用语境")} · sources=${Number(sense.source_count || 0)} · platforms=${Number(sense.platform_count || 0)} · confidence=${Number(sense.confidence || 0).toFixed(2)}</small></button></article>`).join("");
+  return `<section class="card mcp-learning-center"><div class="mcp-section-heading"><div><span class="eyebrow">SLANG LEARNING CENTER</span><h2>学习中心</h2><p>自动收录不需要前置人工确认，但每次升级、冲突、降级和人工操作都有事件记录。</p></div><button class="btn" data-mcp-sense-merge ${(state.mcpSelectedSenseIds || []).length < 2 ? "disabled" : ""}>合并所选 sense</button></div><nav class="mcp-learning-tabs"><button data-mcp-sense-filter="" class="${!filter ? "active" : ""}">全部</button>${statuses.map(status => `<button data-mcp-sense-filter="${status}" class="${filter === status ? "active" : ""}">${escapeHtml(mcpChineseState(status))}</button>`).join("")}</nav><div class="mcp-sense-grid">${cards || '<p class="muted">当前分类没有 sense。</p>'}</div></section>${renderSenseDetail()}`;
+}
+
+function renderBuiltinMcp() {
+  return `${renderBuiltinServiceCard()}${renderBuiltinPlatforms()}${renderBuiltinPreview()}${renderLearningCenter()}`;
+}
+
 function renderMcp() {
   const running = (state.mcpInstallations || []).filter(item => item.process_state === "running").length;
   const effective = (state.mcpInstallations || []).reduce((sum, item) => sum + Number(item.effective_count || 0), 0);
   return `<div class="mcp-console">
     <section class="mcp-hero"><div><span class="eyebrow">MODEL CONTEXT PROTOCOL / CONTROL PLANE</span><h1>MCP 管理</h1><p>将 Registry discovery 与 Runtime installations 分离：先核验权威 metadata，再明确控制 process 与逐 tool 授权。</p></div><div class="mcp-hero-readout"><span>sources<strong>${(state.mcpSources || []).length}</strong></span><span>installations<strong>${(state.mcpInstallations || []).length}</strong></span><span>running<strong>${running}</strong></span><span>effective<strong>${effective}</strong></span></div></section>
+    <nav class="mcp-primary-tabs"><button data-mcp-tab="builtin" class="${state.mcpTab === "builtin" ? "active" : ""}">原生 MCP</button><button data-mcp-tab="extension" class="${state.mcpTab === "extension" ? "active" : ""}">扩展 MCP</button></nav>
     ${renderMcpOperationResult()}
-    ${renderMcpRegistryDiscovery()}
-    ${renderMcpRuntimeInstallations()}
-    ${renderMcpInstallConfirmation()}
+    ${state.mcpTab === "builtin" ? renderBuiltinMcp() : `${renderMcpRegistryDiscovery()}${renderMcpRuntimeInstallations()}${renderMcpInstallConfirmation()}`}
   </div>`;
 }
 
@@ -480,6 +591,7 @@ async function toggleMcpInstallation(installationId, enabled) {
     const result = await api(`/mcp/installations/${encodeURIComponent(installationId)}/toggle`, {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({enabled})});
     persistMcpOperationResult(result);
     replaceMcpInstallation(result.installation);
+    if (installationId === MCP_BUILTIN_ID) await refreshBuiltinMcp();
     alertFlash("ok", enabled ? "Server 已允许启动" : "Server 已停止运行，工具授权保留");
   } catch (error) {
     const diagnostic = operationDiagnosticFromError(error, "MCP Server 状态切换失败");
@@ -494,7 +606,9 @@ async function toggleMcpInstallation(installationId, enabled) {
 async function toggleManagedMcpTool(installationId, remoteName, enabled, risk) {
   if (!installationId || !remoteName || state.mcpBusy) return;
   if (enabled) {
-    const riskText = risk === "read"
+    const riskText = risk === "builtin"
+      ? "这是宿主可信清单内的只读工具，固定 side_effect=none；平台内容仍是不可信数据。"
+      : risk === "read"
       ? "publisher 的 readOnlyHint 是未受信任声明，不能作为安全保证。"
       : "publisher 未提供可信只读保证，副作用按 unknown 处理。";
     if (!confirm(`${riskText}\n授权后仅在 Server 运行且 tool 已注册时才可调用。确认授权？`)) return;
@@ -505,6 +619,7 @@ async function toggleManagedMcpTool(installationId, remoteName, enabled, risk) {
     const result = await api(`/mcp/installations/${encodeURIComponent(installationId)}/tools/${encodeURIComponent(remoteName)}/toggle`, {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({enabled, confirm_side_effect:enabled})});
     persistMcpOperationResult(result);
     replaceMcpInstallation(result.installation);
+    if (installationId === MCP_BUILTIN_ID) await refreshBuiltinMcp();
     alertFlash("ok", enabled ? "MCP tool 已授权" : "MCP tool 已撤销授权");
   } catch (error) {
     const diagnostic = operationDiagnosticFromError(error, "MCP 工具授权切换失败");
@@ -546,6 +661,7 @@ async function reloadMcpRuntime() {
     let refreshFailed = false;
     try {
       await loadMcpInstallations();
+      await refreshBuiltinMcp();
     } catch (refreshError) {
       refreshFailed = true;
       const refreshDiagnostic = operationDiagnosticFromError(refreshError, "MCP reload 后状态刷新失败");
@@ -562,10 +678,160 @@ async function reloadMcpRuntime() {
   }
 }
 
+async function refreshBuiltinMcp() {
+  const [builtin, senses] = await Promise.all([
+    api("/mcp/builtin/social-research/status", {cache:"no-store"}),
+    api("/mcp/builtin/social-research/slang/senses?limit=200", {cache:"no-store"}),
+  ]);
+  state.mcpBuiltin = builtin;
+  state.mcpSenses = senses.senses || [];
+  if (builtin.installation) replaceMcpInstallation(builtin.installation);
+}
+
+function builtinPlatformConfig(platform) {
+  const card = document.querySelector(`.mcp-platform-card[data-platform="${CSS.escape(platform)}"]`);
+  const config = {};
+  if (!card) return config;
+  card.querySelectorAll("[data-mcp-config]").forEach(input => {
+    const key = input.getAttribute("data-mcp-config");
+    if (!key) return;
+    config[key] = key === "quality_mode" ? String(input.value || "balanced") : Number(input.value || 0);
+  });
+  return config;
+}
+
+async function configureBuiltinPlatform(platform, enabled, {useForm=false}={}) {
+  const current = ((state.mcpBuiltin || {}).platforms || {})[platform];
+  if (!current || state.mcpBusy) return;
+  const desiredConfig = useForm ? builtinPlatformConfig(platform) : (current.config || {});
+  state.mcpBusy = true; render();
+  try {
+    await api(`/mcp/builtin/social-research/platforms/${encodeURIComponent(platform)}/configure`, {
+      method:"POST", headers:{"content-type":"application/json"},
+      body:JSON.stringify({enabled, revision:Number(current.revision || 0), config:desiredConfig}),
+    });
+    await refreshBuiltinMcp();
+    alertFlash("ok", `${MCP_PLATFORM_LABELS[platform] || platform}配置已保存`);
+  } catch (error) {
+    alertFlash("err", operationDiagnosticFromError(error, "平台配置失败").message || "平台配置失败");
+  } finally { state.mcpBusy = false; render(); }
+}
+
+function startBuiltinAuthPolling() {
+  if (_mcpAuthTimer) clearInterval(_mcpAuthTimer);
+  _mcpAuthTimer = setInterval(async () => {
+    if (state.view !== "mcp" || state.mcpTab !== "builtin") return;
+    const sessions = Object.entries(state.mcpAuth || {}).filter(([, value]) => value && ["starting","waiting_scan","manual_verification_required"].includes(value.status));
+    if (!sessions.length) return;
+    for (const [platform, session] of sessions) {
+      try {
+        const next = await api(`/mcp/builtin/social-research/auth/${encodeURIComponent(session.session_id)}/status?platform=${encodeURIComponent(platform)}`, {cache:"no-store"});
+        state.mcpAuth = {...state.mcpAuth, [platform]:next};
+        if (next.status === "success") await refreshBuiltinMcp();
+      } catch {}
+    }
+    render();
+  }, 1800);
+}
+
+async function startBuiltinAuth(platform) {
+  if (state.mcpBusy) return;
+  state.mcpBusy = true; render();
+  try {
+    const session = await api("/mcp/builtin/social-research/auth/start", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({platform})});
+    state.mcpAuth = {...state.mcpAuth, [platform]:session};
+    startBuiltinAuthPolling();
+    alertFlash(session.status === "manual_verification_required" ? "err" : "ok", session.status === "manual_verification_required" ? "请在官方页面完成人工验证" : "请使用官方客户端扫码登录");
+  } catch (error) { alertFlash("err", operationDiagnosticFromError(error, "登录启动失败").message || "登录启动失败"); }
+  finally { state.mcpBusy = false; render(); }
+}
+
+async function logoutBuiltinPlatform(platform) {
+  const exact = `确认注销${MCP_PLATFORM_LABELS[platform] || platform}`;
+  const input = prompt(`注销会删除该平台的独立浏览器 profile，其他平台不受影响。\n请输入：${exact}`) || "";
+  if (input !== exact) return;
+  state.mcpBusy = true; render();
+  try {
+    await api("/mcp/builtin/social-research/auth/logout", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({platform, confirm:exact})});
+    const nextAuth = {...state.mcpAuth}; delete nextAuth[platform]; state.mcpAuth = nextAuth;
+    await refreshBuiltinMcp();
+    alertFlash("ok", `${MCP_PLATFORM_LABELS[platform] || platform}已注销，profile 已删除`);
+  } catch (error) { alertFlash("err", operationDiagnosticFromError(error, "注销失败").message || "注销失败"); }
+  finally { state.mcpBusy = false; render(); }
+}
+
+async function runBuiltinPreview() {
+  const term = String(document.getElementById("mcp-preview-term")?.value || "").trim();
+  const game = String(document.getElementById("mcp-preview-game")?.value || "").trim();
+  const depth = String(document.getElementById("mcp-preview-depth")?.value || "auto");
+  const maxClaims = Number(document.getElementById("mcp-preview-max")?.value || 20);
+  if (!term) { alertFlash("err", "请输入要查证的游戏黑话或梗"); return; }
+  state.mcpBusy = true; render();
+  try {
+    state.mcpPreview = await api("/mcp/builtin/social-research/preview", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({term, context:`查证 ${term} 的玩家语境含义`, game, depth, max_claims:maxClaims})});
+    await refreshBuiltinMcp();
+    alertFlash("ok", `提取到 ${(state.mcpPreview.claims || []).length} 条 claim`);
+  } catch (error) { alertFlash("err", operationDiagnosticFromError(error, "检索预览失败").message || "检索预览失败"); }
+  finally { state.mcpBusy = false; render(); }
+}
+
+async function openSlangSense(senseId) {
+  try {
+    const data = await api(`/mcp/builtin/social-research/slang/senses/${encodeURIComponent(senseId)}`, {cache:"no-store"});
+    state.mcpSelectedSense = data.sense || null; render();
+  } catch (error) { alertFlash("err", operationDiagnosticFromError(error, "Sense 详情读取失败").message || "Sense 详情读取失败"); }
+}
+
+async function actOnSlangSense(action, senseId, revision) {
+  state.mcpBusy = true; render();
+  try {
+    const result = await api(`/mcp/builtin/social-research/slang/senses/${encodeURIComponent(senseId)}/${encodeURIComponent(action)}`, {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({revision:Number(revision)})});
+    state.mcpSelectedSense = result.sense || null;
+    await refreshBuiltinMcp();
+    alertFlash("ok", "Sense 状态已更新");
+  } catch (error) { alertFlash("err", operationDiagnosticFromError(error, "Sense 操作失败").message || "Sense 操作失败"); }
+  finally { state.mcpBusy = false; render(); }
+}
+
+async function mergeSelectedSenses() {
+  const ids = state.mcpSelectedSenseIds || [];
+  if (ids.length < 2) return;
+  const selected = ids.map(id => (state.mcpSenses || []).find(item => item.sense_id === id)).filter(Boolean);
+  const target = selected[0];
+  if (!target || !confirm(`将其余 ${selected.length - 1} 个 sense 合并到“${target.term}：${target.meaning}”，并人工锁定目标？`)) return;
+  const revisions = Object.fromEntries(selected.map(item => [item.sense_id, Number(item.revision)]));
+  state.mcpBusy = true; render();
+  try {
+    const result = await api("/mcp/builtin/social-research/slang/senses/merge", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({target_sense_id:target.sense_id, source_sense_ids:selected.slice(1).map(item => item.sense_id), revisions})});
+    state.mcpSelectedSenseIds = [];
+    state.mcpSelectedSense = result.sense || null;
+    await refreshBuiltinMcp();
+    alertFlash("ok", "Sense 已合并并锁定");
+  } catch (error) { alertFlash("err", operationDiagnosticFromError(error, "Sense 合并失败").message || "Sense 合并失败"); }
+  finally { state.mcpBusy = false; render(); }
+}
+
+async function splitSelectedSense(senseId, revision) {
+  const sense = state.mcpSelectedSense;
+  if (!sense || sense.sense_id !== senseId) return;
+  const claimId = prompt("输入要移到新 sense 的证据 claim_id：", (sense.evidence || [])[0]?.claim_id || "") || "";
+  if (!claimId) return;
+  const meaning = prompt("输入新 sense 的含义：", sense.meaning || "") || "";
+  if (!meaning) return;
+  state.mcpBusy = true; render();
+  try {
+    const result = await api(`/mcp/builtin/social-research/slang/senses/${encodeURIComponent(senseId)}/split`, {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({revision:Number(revision), claim_ids:[claimId], sense:{meaning}})});
+    state.mcpSelectedSense = result.sense || null;
+    await refreshBuiltinMcp();
+    alertFlash("ok", "新 sense 已拆分并人工锁定");
+  } catch (error) { alertFlash("err", operationDiagnosticFromError(error, "Sense 拆分失败").message || "Sense 拆分失败"); }
+  finally { state.mcpBusy = false; render(); }
+}
+
 if (!window.__personificationMcpPageEvents) {
   window.__personificationMcpPageEvents = true;
   document.addEventListener("click", event => {
-    const element = event.target instanceof Element ? event.target.closest("[data-mcp-operation-clear],[data-mcp-search],[data-mcp-load-more],[data-mcp-detail],[data-mcp-detail-close],[data-mcp-install-plan],[data-mcp-install-confirm],[data-mcp-install-cancel],[data-mcp-installation-toggle],[data-mcp-tool-toggle],[data-mcp-delete],[data-mcp-reload]") : null;
+    const element = event.target instanceof Element ? event.target.closest("[data-mcp-operation-clear],[data-mcp-search],[data-mcp-load-more],[data-mcp-detail],[data-mcp-detail-close],[data-mcp-install-plan],[data-mcp-install-confirm],[data-mcp-install-cancel],[data-mcp-installation-toggle],[data-mcp-tool-toggle],[data-mcp-delete],[data-mcp-reload],[data-mcp-tab],[data-mcp-platform-toggle],[data-mcp-platform-save],[data-mcp-auth-start],[data-mcp-auth-logout],[data-mcp-preview-run],[data-mcp-sense-filter],[data-mcp-sense-open],[data-mcp-sense-close],[data-mcp-sense-action],[data-mcp-sense-merge],[data-mcp-sense-split]") : null;
     if (!element) return;
     if (element.hasAttribute("data-mcp-operation-clear")) { persistMcpOperationResult(null); render(); return; }
     if (element.hasAttribute("data-mcp-search")) { searchMcpRegistry(); return; }
@@ -578,7 +844,19 @@ if (!window.__personificationMcpPageEvents) {
     if (element.hasAttribute("data-mcp-installation-toggle")) { toggleMcpInstallation(element.getAttribute("data-mcp-installation-toggle") || "", element.getAttribute("data-mcp-enabled") === "true"); return; }
     if (element.hasAttribute("data-mcp-tool-toggle")) { toggleManagedMcpTool(element.getAttribute("data-mcp-installation") || "", element.getAttribute("data-mcp-tool-toggle") || "", element.getAttribute("data-mcp-enabled") === "true", element.getAttribute("data-mcp-risk") || "unknown"); return; }
     if (element.hasAttribute("data-mcp-delete")) { deleteMcpInstallation(element.getAttribute("data-mcp-delete") || ""); return; }
-    if (element.hasAttribute("data-mcp-reload")) reloadMcpRuntime();
+    if (element.hasAttribute("data-mcp-reload")) { reloadMcpRuntime(); return; }
+    if (element.hasAttribute("data-mcp-tab")) { state.mcpTab = element.getAttribute("data-mcp-tab") || "builtin"; if (state.mcpTab === "builtin") startBuiltinAuthPolling(); render(); return; }
+    if (element.hasAttribute("data-mcp-platform-toggle")) { configureBuiltinPlatform(element.getAttribute("data-mcp-platform-toggle") || "", element.getAttribute("data-enabled") === "true"); return; }
+    if (element.hasAttribute("data-mcp-platform-save")) { const platform=element.getAttribute("data-mcp-platform-save") || ""; const current=((state.mcpBuiltin||{}).platforms||{})[platform]||{}; configureBuiltinPlatform(platform, current.enabled === true, {useForm:true}); return; }
+    if (element.hasAttribute("data-mcp-auth-start")) { startBuiltinAuth(element.getAttribute("data-mcp-auth-start") || ""); return; }
+    if (element.hasAttribute("data-mcp-auth-logout")) { logoutBuiltinPlatform(element.getAttribute("data-mcp-auth-logout") || ""); return; }
+    if (element.hasAttribute("data-mcp-preview-run")) { runBuiltinPreview(); return; }
+    if (element.hasAttribute("data-mcp-sense-filter")) { state.mcpSenseFilter=element.getAttribute("data-mcp-sense-filter") || ""; render(); return; }
+    if (element.hasAttribute("data-mcp-sense-open")) { openSlangSense(element.getAttribute("data-mcp-sense-open") || ""); return; }
+    if (element.hasAttribute("data-mcp-sense-close")) { state.mcpSelectedSense=null; render(); return; }
+    if (element.hasAttribute("data-mcp-sense-action")) { actOnSlangSense(element.getAttribute("data-mcp-sense-action") || "", element.getAttribute("data-sense-id") || "", Number(element.getAttribute("data-revision") || 0)); return; }
+    if (element.hasAttribute("data-mcp-sense-merge")) { mergeSelectedSenses(); return; }
+    if (element.hasAttribute("data-mcp-sense-split")) { splitSelectedSense(element.getAttribute("data-mcp-sense-split") || "", Number(element.getAttribute("data-revision") || 0)); }
   });
   document.addEventListener("change", event => {
     const element = event.target;
@@ -593,6 +871,12 @@ if (!window.__personificationMcpPageEvents) {
     } else if (element.id === "mcp-package-select") {
       state.mcpPackageIndex = Number(element.value || 0);
       _mcpPendingInstall = null;
+      render();
+    } else if (element.hasAttribute("data-mcp-sense-select")) {
+      const id = element.getAttribute("data-mcp-sense-select") || "";
+      const selected = new Set(state.mcpSelectedSenseIds || []);
+      if (element.checked) selected.add(id); else selected.delete(id);
+      state.mcpSelectedSenseIds = [...selected];
       render();
     }
   });

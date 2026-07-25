@@ -196,3 +196,29 @@ def test_live_page_state_is_mapped_to_safe_control_code(tmp_path: Path) -> None:
 def test_xiaoheihe_uses_current_web_search_route() -> None:
     adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
     assert adapters_mod.SPECS["xiaoheihe"].search_url.startswith("https://www.xiaoheihe.cn/app/search/list?q=")
+
+
+def test_cover_registry_returns_opaque_reference_and_enforces_platform_hosts(tmp_path: Path) -> None:
+    covers_mod = load_personification_module("plugin.personification.native_mcp.social_research.covers")
+    registry = covers_mod.CoverRegistry(tmp_path)
+    ref = registry.register("bilibili", "https://i0.hdslb.com/bfs/archive/demo.jpg?signed=internal")
+    assert ref.startswith("cover_")
+    assert "hdslb" not in ref and "signed" not in ref
+    resolved = registry.resolve(ref)
+    assert resolved["platform"] == "bilibili"
+    assert resolved["url"].startswith("https://i0.hdslb.com/")
+    assert registry.register("bilibili", "https://example.com/private.jpg") == ""
+
+
+def test_auth_session_is_bound_to_owner_and_public_shape_excludes_owner(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    session = browser_mod.AuthSession(session_id="session", platform="bilibili", owner="admin:device:bilibili")
+    pool._auth[session.session_id] = session
+    assert "owner" not in pool.public_auth(session)
+    try:
+        pool.get_auth("session", "another-device")
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("auth session was not bound to owner")

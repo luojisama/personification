@@ -160,16 +160,58 @@ def test_install_confirmation_is_fresh_and_does_not_invent_paths() -> None:
     assert 'String(choice) === registryDefault ? "selected"' in source
 
 
-def test_mcp_events_are_single_registration_and_page_has_no_polling() -> None:
+def test_mcp_events_are_single_registration_and_only_auth_session_polls() -> None:
     source = _source("app-mcp.js")
 
     assert source.count("if (!window.__personificationMcpPageEvents)") == 1
     assert source.count('document.addEventListener("click"') == 1
     assert source.count('document.addEventListener("change"') == 1
     assert source.count('document.addEventListener("keydown"') == 1
-    assert "setInterval(" not in source
+    assert source.count("setInterval(") == 1
     assert "setTimeout(" not in source
     assert "function stopMcpViewLifecycle" in source
+    assert "function startBuiltinAuthPolling" in source
+    assert 'state.view !== "mcp" || state.mcpTab !== "builtin"' in source
+    assert 'value.status));' in source
+    assert source.count("clearInterval(_mcpAuthTimer)") == 2
+
+
+def test_builtin_social_research_has_native_controls_and_safe_learning_views() -> None:
+    source = _source("app-mcp.js")
+
+    for visible_copy in (
+        "原生 MCP",
+        "扩展 MCP",
+        "平台登录与能力",
+        "扫码/官方登录",
+        "注销并删除 profile",
+        "检索预览",
+        "一次内容默认提取全部黑话",
+        "学习中心",
+        "自动收录",
+        "只理解",
+        "待确认",
+        "冲突",
+        "已过期",
+        "已拒绝",
+        "独立内容",
+        "状态历史",
+    ):
+        assert visible_copy in source
+
+    for endpoint in (
+        "/mcp/builtin/social-research/status",
+        "/mcp/builtin/social-research/platforms/",
+        "/mcp/builtin/social-research/auth/",
+        "/mcp/builtin/social-research/preview",
+        "/mcp/builtin/social-research/slang/senses",
+    ):
+        assert endpoint in source
+
+    assert "cover_ref" in source
+    assert "/cover/" in source
+    for forbidden in ("cookie", "localStorage.setItem", "profile_path", "device_id", "raw_html"):
+        assert forbidden not in source.lower()
 
 
 def test_mcp_external_links_reject_empty_values_before_url_resolution() -> None:

@@ -10,6 +10,7 @@ from typing import Any
 from .adapters import SPECS, PlatformAdapter, build_adapters
 from .browser import BrowserPool
 from .cache import PacketCache
+from .covers import CoverRegistry
 from .models import (
     ContentPacket,
     DEFAULT_PLATFORM_CONFIG,
@@ -49,6 +50,7 @@ class SocialResearchService:
         self.browsers = BrowserPool(self.root)
         self.adapters = build_adapters(self.browsers)
         self.cache = PacketCache(self.root / "cache")
+        self.covers = CoverRegistry(self.root)
         self.config_path = self.root / "config.json"
         self._config_lock = asyncio.Lock()
         self._config = self._load_config()
@@ -185,6 +187,8 @@ class SocialResearchService:
         )
         filtered = [apply_quality_filter(item, config) for item in rows]
         retained = [item for item in filtered if item["retained"]]
+        for item in retained:
+            item["cover_ref"] = self.covers.register(platform, str(item.get("cover_ref") or ""))
         return retained, {"state": "ready", "elapsed_ms": int((time.monotonic() - started) * 1000)}, len(filtered) - len(retained)
 
     async def search(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -206,7 +210,7 @@ class SocialResearchService:
         if quality_mode not in QUALITY_MODES:
             raise ValueError("quality_mode is invalid")
         cache_key = json.dumps(
-            ["search", query, platforms, content_types, limit, quality_mode, self._config],
+            ["search", "opaque_cover_v1", query, platforms, content_types, limit, quality_mode, self._config],
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -247,7 +251,11 @@ class SocialResearchService:
         danmaku_limit = min(500, max(0, int(params.get("danmaku_limit", config["danmaku_limit"]) or 0)))
         content_id = clean_text(params.get("content_id"), 300)
         url = clean_text(params.get("url"), 1000)
-        cache_key = json.dumps(["read", platform, content_id, url, include, comment_limit, danmaku_limit], ensure_ascii=False, sort_keys=True)
+        cache_key = json.dumps(
+            ["read", "opaque_cover_v1", platform, content_id, url, include, comment_limit, danmaku_limit],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         cached = self.cache.get(cache_key)
         if cached is not None:
             cached["cache_hit"] = True
@@ -264,6 +272,7 @@ class SocialResearchService:
             timeout=float(config["request_timeout_seconds"]) + 3,
         )
         item = apply_quality_filter(raw, config)
+        item["cover_ref"] = self.covers.register(platform, str(item.get("cover_ref") or ""))
         packet = ContentPacket(
             items=[item] if item["retained"] or str(config.get("quality_mode")) == "ranking_only" else [],
             platform_statuses={platform: {"state": "ready"}},
@@ -327,6 +336,9 @@ class SocialResearchService:
 
     async def close(self) -> None:
         await self.browsers.close()
+
+    def cover_resolve(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.covers.resolve(clean_text(params.get("cover_ref"), 100))
 
 
 __all__ = ["SocialResearchService"]

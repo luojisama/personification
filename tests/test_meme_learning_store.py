@@ -209,3 +209,36 @@ def test_existing_dictionary_entry_migrates_to_manual_locked_sense(tmp_path) -> 
     assert len(senses) == 1
     assert senses[0]["status"] == "manual_locked"
     assert senses[0]["manual_locked"] is True
+
+
+def test_admin_merge_and_split_preserve_evidence_with_revision_guards(tmp_path) -> None:
+    store = _init(tmp_path)
+    _ingest(store, [
+        _claim(term="合并词", meaning="解释甲", platform="bilibili", content_id="B1"),
+        _claim(term="合并词", meaning="解释乙", platform="douyin", content_id="D1"),
+    ], _ConflictPipeline())
+    senses = store.list_senses(term="合并词")
+    assert len(senses) == 2
+    target, source = senses
+    merged = store.merge_senses(
+        target_sense_id=target["sense_id"],
+        source_sense_ids=[source["sense_id"]],
+        expected_revisions={target["sense_id"]: target["revision"], source["sense_id"]: source["revision"]},
+        actor="admin",
+    )
+    assert merged["status"] == "manual_locked"
+    assert len(merged["evidence"]) == 2
+    rejected = store.get_sense(source["sense_id"])
+    assert rejected["status"] == "rejected"
+
+    claim_id = merged["evidence"][0]["claim_id"]
+    split = store.split_sense(
+        merged["sense_id"],
+        claim_ids=[claim_id],
+        patch={"meaning": "拆分后的独立解释"},
+        expected_revision=merged["revision"],
+        actor="admin",
+    )
+    assert split["status"] == "manual_locked"
+    assert split["meaning"] == "拆分后的独立解释"
+    assert len(split["evidence"]) == 1
