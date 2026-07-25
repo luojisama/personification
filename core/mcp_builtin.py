@@ -163,10 +163,11 @@ def builtin_social_launch(plugin_config: Any) -> tuple[str, list[str], dict[str,
     from .paths import get_data_dir
 
     project_root = Path(__file__).resolve().parents[2]
+    entrypoint = Path(__file__).resolve().parents[1] / "native_mcp" / "social_research" / "entrypoint.py"
     data_dir = get_data_dir(plugin_config).resolve()
     return (
         sys.executable,
-        ["-m", BUILTIN_SOCIAL_MCP_MODULE],
+        [str(entrypoint)],
         {"PERSONIFICATION_SOCIAL_DATA_DIR": str(data_dir / "mcp" / "social_platform")},
         str(project_root),
     )

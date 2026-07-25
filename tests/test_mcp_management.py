@@ -421,13 +421,47 @@ def test_builtin_social_mcp_uses_fixed_launch_and_cannot_be_deleted(tmp_path: Pa
     tampered = manager.store.get_installation(item["installation_id"])
     client = manager._client(tampered)
     assert client.command == sys.executable
-    assert client.args == ["-m", "plugin.personification.native_mcp.social_research.server"]
+    assert len(client.args) == 1
+    assert client.args[0].endswith("native_mcp\\social_research\\entrypoint.py") or client.args[0].endswith(
+        "native_mcp/social_research/entrypoint.py"
+    )
     assert client.env["PERSONIFICATION_SOCIAL_DATA_DIR"].endswith("mcp\\social_platform") or client.env[
         "PERSONIFICATION_SOCIAL_DATA_DIR"
     ].endswith("mcp/social_platform")
 
     with pytest.raises(ValueError, match="cannot be deleted"):
         asyncio.run(manager.delete(item["installation_id"]))
+
+
+def test_builtin_social_mcp_stays_running_for_webui_control_without_tool_authorization(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _init_store(tmp_path, monkeypatch)
+    management = load_personification_module("plugin.personification.core.mcp_management")
+    registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
+    config = SimpleNamespace(
+        personification_data_dir=str(tmp_path),
+        personification_mcp_secret_file="",
+        personification_skill_mcp_timeout=8,
+        personification_mcp_registry_sources=[],
+        personification_mcp_registry_timeout=5,
+    )
+    registry = registry_mod.ToolRegistry()
+    runtime = SimpleNamespace(plugin_config=config, runtime_bundle=SimpleNamespace(tool_registry=registry))
+    manager = management.McpRuntimeManager(runtime, registry)
+
+    async def run() -> tuple[dict, dict]:
+        try:
+            installation = await manager.toggle_installation("builtin_social_platform_research", True)
+            status = await manager.builtin_request("personification/builtin/status", {})
+            return installation, status
+        finally:
+            await manager.shutdown()
+
+    installation, status = asyncio.run(run())
+    assert installation["process_state"] == "running"
+    assert all(tool["enabled"] is False for tool in installation["tools"])
+    assert set(status["platforms"]) == {"bilibili", "douyin", "tieba", "xiaoheihe"}
 
 
 def test_stdio_request_timeout_is_absolute_during_notifications() -> None:

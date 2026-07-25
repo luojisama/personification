@@ -706,10 +706,11 @@ class McpStore:
 
 def _minimal_process_env(extra: dict[str, str]) -> dict[str, str]:
     allowed = {
-        "PATH", "SystemRoot", "WINDIR", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+        "PATH", "SystemRoot", "WINDIR", "COMSPEC", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
         "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
     }
-    env = {key: value for key, value in os.environ.items() if key in allowed}
+    allowed_lower = {key.lower() for key in allowed}
+    env = {key: value for key, value in os.environ.items() if key.lower() in allowed_lower}
     env.update({str(key): str(value) for key, value in extra.items()})
     return env
 
@@ -976,8 +977,13 @@ class McpRuntimeManager:
             policies = self.store.tools(installation_id)
             enabled_policies = [policy for policy in policies if policy["enabled"]]
             if not enabled_policies:
-                await client.__aexit__(None, None, None)
-                self.store.set_status(installation_id, "ready")
+                if is_builtin_social_installation(item):
+                    self._clients[installation_id] = client
+                    self._tool_names[installation_id] = set()
+                    self.store.set_status(installation_id, "running")
+                else:
+                    await client.__aexit__(None, None, None)
+                    self.store.set_status(installation_id, "ready")
                 return catalog
             names: set[str] = set()
             registry_version, registry_snapshot = self.registry.snapshot()
@@ -1039,6 +1045,21 @@ class McpRuntimeManager:
     async def activate(self, installation_id: str) -> None:
         async with self._lock:
             await self._activate_unlocked(installation_id)
+
+    async def builtin_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        if not str(method or "").startswith("personification/builtin/"):
+            raise ValueError("unsupported builtin MCP control method")
+        async with self._lock:
+            item = self.store.get_installation(BUILTIN_SOCIAL_MCP_ID)
+            if item is None or not item.get("desired_enabled"):
+                raise RuntimeError("builtin MCP is disabled")
+            client = self._clients.get(BUILTIN_SOCIAL_MCP_ID)
+            if client is None or not client.is_running:
+                await self._activate_unlocked(BUILTIN_SOCIAL_MCP_ID)
+                client = self._clients.get(BUILTIN_SOCIAL_MCP_ID)
+            if client is None or not client.is_running:
+                raise RuntimeError("builtin MCP process is unavailable")
+        return await client.request(method, dict(params or {}))
 
     async def install(
         self,
