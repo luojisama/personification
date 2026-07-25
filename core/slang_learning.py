@@ -116,6 +116,7 @@ def validate_content_packet(packet: Any, *, now: float | None = None) -> dict[st
             "external_source_url": _clean(raw.get("external_source_url"), 1000),
             "repost_of": _clean(raw.get("repost_of"), 500),
             "quality_score": _float01(raw.get("quality_score", 0.5)),
+            "published_at": float(raw.get("published_at", 0) or 0),
             "discussion": discussions,
         })
     return {
@@ -275,6 +276,18 @@ def cluster_content_sources(packet: dict[str, Any]) -> dict[str, str]:
 
 def attach_source_clusters(claims: list[dict[str, Any]], packet: dict[str, Any]) -> list[dict[str, Any]]:
     clusters = cluster_content_sources(packet)
+    sources = {
+        _content_key(item["platform"], item["content_id"]): {
+            "canonical_url": item.get("canonical_url", ""),
+            "content_type": item.get("content_type", ""),
+            "content_fingerprint": item.get("content_fingerprint", ""),
+            "media_fingerprint": item.get("media_fingerprint", ""),
+            "quality_score": item.get("quality_score", 0),
+            "published_at": item.get("published_at", 0),
+            "retrieved_at": packet.get("retrieved_at", 0),
+        }
+        for item in packet.get("items", [])
+    }
     result: list[dict[str, Any]] = []
     for raw in claims:
         claim = dict(raw)
@@ -282,6 +295,7 @@ def attach_source_clusters(claims: list[dict[str, Any]], packet: dict[str, Any])
         if not cluster_id:
             continue
         claim["source_cluster_id"] = cluster_id
+        claim["source"] = sources.get(str(claim.get("content_key") or ""), {})
         result.append(claim)
     return result
 

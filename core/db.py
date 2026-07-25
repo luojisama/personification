@@ -457,6 +457,7 @@ DDL_STATEMENTS = (
         confidence REAL NOT NULL DEFAULT 0,
         evidence_message_ids TEXT NOT NULL DEFAULT '[]',
         safe_usage TEXT NOT NULL DEFAULT '',
+        managed_by TEXT NOT NULL DEFAULT 'manual',
         updated_at REAL NOT NULL,
         PRIMARY KEY(scope, group_id, term)
     )
@@ -464,6 +465,93 @@ DDL_STATEMENTS = (
     """
     CREATE INDEX IF NOT EXISTS idx_meme_dictionary_scope
         ON meme_dictionary(scope, group_id, updated_at DESC)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS meme_senses (
+        sense_id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL DEFAULT 'public',
+        group_id TEXT NOT NULL DEFAULT '',
+        term TEXT NOT NULL,
+        meaning TEXT NOT NULL,
+        aliases_json TEXT NOT NULL DEFAULT '[]',
+        game_context_json TEXT NOT NULL DEFAULT '{}',
+        version_context TEXT NOT NULL DEFAULT '',
+        usage_context TEXT NOT NULL DEFAULT '',
+        safe_usage TEXT NOT NULL DEFAULT '',
+        risk_level TEXT NOT NULL DEFAULT 'low',
+        status TEXT NOT NULL DEFAULT 'observed',
+        confidence REAL NOT NULL DEFAULT 0,
+        source_count INTEGER NOT NULL DEFAULT 0,
+        platform_count INTEGER NOT NULL DEFAULT 0,
+        auto_managed INTEGER NOT NULL DEFAULT 1,
+        first_seen_at REAL NOT NULL,
+        last_verified_at REAL NOT NULL DEFAULT 0,
+        reverify_after REAL NOT NULL DEFAULT 0,
+        expires_at REAL NOT NULL DEFAULT 0,
+        manual_locked INTEGER NOT NULL DEFAULT 0,
+        revision INTEGER NOT NULL DEFAULT 1,
+        updated_at REAL NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_meme_senses_lookup
+        ON meme_senses(scope, group_id, term, status, updated_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_meme_senses_review
+        ON meme_senses(status, reverify_after, expires_at, updated_at DESC)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS meme_evidence_claims (
+        claim_id TEXT PRIMARY KEY,
+        sense_id TEXT NOT NULL,
+        packet_id TEXT NOT NULL DEFAULT '',
+        platform TEXT NOT NULL,
+        content_id TEXT NOT NULL,
+        canonical_url TEXT NOT NULL DEFAULT '',
+        content_type TEXT NOT NULL DEFAULT '',
+        discussion_id TEXT NOT NULL DEFAULT '',
+        evidence_type TEXT NOT NULL DEFAULT '',
+        author_fingerprint TEXT NOT NULL DEFAULT '',
+        quote TEXT NOT NULL,
+        content_fingerprint TEXT NOT NULL DEFAULT '',
+        media_fingerprint TEXT NOT NULL DEFAULT '',
+        source_cluster_id TEXT NOT NULL,
+        extractor_version TEXT NOT NULL DEFAULT '',
+        model_route TEXT NOT NULL DEFAULT '',
+        confidence REAL NOT NULL DEFAULT 0,
+        source_quality REAL NOT NULL DEFAULT 0,
+        published_at REAL NOT NULL DEFAULT 0,
+        retrieved_at REAL NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL,
+        FOREIGN KEY(sense_id) REFERENCES meme_senses(sense_id) ON DELETE CASCADE,
+        UNIQUE(sense_id, source_cluster_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_meme_evidence_sense
+        ON meme_evidence_claims(sense_id, created_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_meme_evidence_source
+        ON meme_evidence_claims(source_cluster_id, platform, content_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS meme_learning_events (
+        event_id TEXT PRIMARY KEY,
+        sense_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        old_status TEXT NOT NULL DEFAULT '',
+        new_status TEXT NOT NULL DEFAULT '',
+        actor TEXT NOT NULL DEFAULT 'system',
+        detail_json TEXT NOT NULL DEFAULT '{}',
+        created_at REAL NOT NULL,
+        FOREIGN KEY(sense_id) REFERENCES meme_senses(sense_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_meme_learning_events_sense
+        ON meme_learning_events(sense_id, created_at DESC)
     """,
     """
     CREATE TABLE IF NOT EXISTS data_transfer_tasks (
@@ -911,6 +999,56 @@ def _migrate_qzone_monthly_usage(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_legacy_meme_senses(conn: sqlite3.Connection) -> None:
+    if not _table_columns(conn, "meme_senses"):
+        return
+    rows = conn.execute("SELECT * FROM meme_dictionary WHERE managed_by!='auto'").fetchall()
+    for row in rows:
+        scope = str(row["scope"] or "public")
+        group_id = str(row["group_id"] or "")
+        term = str(row["term"] or "")
+        existing_manual = conn.execute(
+            """SELECT 1 FROM meme_senses WHERE scope=? AND group_id=? AND term=?
+               AND manual_locked=1 LIMIT 1""",
+            (scope, group_id, term),
+        ).fetchone()
+        if existing_manual is not None:
+            continue
+        identity = f"legacy\0{scope}\0{group_id}\0{term}".encode("utf-8")
+        sense_id = "legacy_" + hashlib.sha256(identity).hexdigest()[:32]
+        updated_at = float(row["updated_at"] or 0)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO meme_senses(
+                sense_id,scope,group_id,term,meaning,aliases_json,game_context_json,
+                version_context,usage_context,safe_usage,risk_level,status,confidence,
+                source_count,platform_count,auto_managed,first_seen_at,last_verified_at,
+                reverify_after,expires_at,manual_locked,revision,updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, '{}', '', '', ?, ?, 'manual_locked', ?, 0, 0, 0, ?, ?, 0, 0, 1, 1, ?)
+            """,
+            (
+                sense_id,
+                scope,
+                group_id,
+                term,
+                str(row["meaning"] or ""),
+                str(row["aliases"] or "[]"),
+                str(row["safe_usage"] or ""),
+                str(row["risk_level"] or "low"),
+                float(row["confidence"] or 0),
+                updated_at,
+                updated_at,
+                updated_at,
+            ),
+        )
+
+
+def _ensure_meme_dictionary_schema(conn: sqlite3.Connection) -> None:
+    columns = _table_columns(conn, "meme_dictionary")
+    if columns and "managed_by" not in columns:
+        conn.execute("ALTER TABLE meme_dictionary ADD COLUMN managed_by TEXT NOT NULL DEFAULT 'manual'")
+
+
 def init_db_sync(data_dir: str | Path) -> Path:
     global _db_path
     _db_path = Path(data_dir) / DB_FILENAME
@@ -921,10 +1059,12 @@ def init_db_sync(data_dir: str | Path) -> Path:
         _ensure_group_message_schema(conn)
         _ensure_qzone_publish_schema(conn)
         _ensure_mcp_tool_policy_schema(conn)
+        _ensure_meme_dictionary_schema(conn)
         conn.commit()  # 让迁移立即可见，下面的 DDL CREATE INDEX 才能引用新列
         for ddl in DDL_STATEMENTS:
             conn.execute(ddl)
         _migrate_qzone_monthly_usage(conn)
+        _migrate_legacy_meme_senses(conn)
         conn.commit()
     return _db_path
 
