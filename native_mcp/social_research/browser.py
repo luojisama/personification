@@ -5,6 +5,7 @@ import base64
 import os
 import shutil
 import stat
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -12,6 +13,41 @@ from pathlib import Path
 from typing import Any
 
 from .models import PLATFORMS
+
+
+def _restrict_private_directory(path: Path) -> None:
+    if os.name == "nt":
+        creation_flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+        identity = subprocess.run(
+            ["whoami"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=creation_flags,
+        ).stdout.strip()
+        if not identity:
+            raise RuntimeError("profile_permission_hardening_failed")
+        result = subprocess.run(
+            [
+                "icacls",
+                str(path),
+                "/inheritance:r",
+                "/grant:r",
+                f"{identity}:(OI)(CI)F",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=10,
+            creationflags=creation_flags,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("profile_permission_hardening_failed")
+        return
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    except OSError as exc:
+        raise RuntimeError("profile_permission_hardening_failed") from exc
 
 
 @dataclass
@@ -31,12 +67,10 @@ class BrowserPool:
         self.root = root.resolve()
         self.profiles_root = (self.root / "profiles").resolve()
         self.profiles_root.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(self.profiles_root, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-        except OSError:
-            pass
+        _restrict_private_directory(self.profiles_root)
         self._playwright: Any = None
         self._contexts: dict[str, Any] = {}
+        self._context_headless: dict[str, bool] = {}
         self._locks = {platform: asyncio.Lock() for platform in PLATFORMS}
         self._auth: dict[str, AuthSession] = {}
 
@@ -54,24 +88,25 @@ class BrowserPool:
             raise ValueError("unsupported platform")
         return (self.profiles_root / platform).resolve()
 
-    async def context(self, platform: str) -> Any:
+    async def context(self, platform: str, *, headless: bool = True) -> Any:
         if platform not in PLATFORMS:
             raise ValueError("unsupported platform")
         async with self._locks[platform]:
             existing = self._contexts.get(platform)
-            if existing is not None:
+            if existing is not None and self._context_headless.get(platform, True) == bool(headless):
                 return existing
+            if existing is not None:
+                await existing.close()
+                self._contexts.pop(platform, None)
+                self._context_headless.pop(platform, None)
             await self._ensure_runtime()
             profile = self.profile_dir(platform)
             profile.mkdir(parents=True, exist_ok=True)
-            try:
-                os.chmod(profile, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-            except OSError:
-                pass
+            _restrict_private_directory(profile)
             try:
                 context = await self._playwright.chromium.launch_persistent_context(
                     str(profile),
-                    headless=True,
+                    headless=bool(headless),
                     viewport={"width": 1280, "height": 900},
                     locale="zh-CN",
                     args=["--disable-blink-features=AutomationControlled"],
@@ -79,16 +114,18 @@ class BrowserPool:
             except Exception as exc:
                 raise RuntimeError("chromium_unavailable") from exc
             self._contexts[platform] = context
+            self._context_headless[platform] = bool(headless)
             return context
 
-    async def page(self, platform: str) -> Any:
-        context = await self.context(platform)
+    async def page(self, platform: str, *, headless: bool = True) -> Any:
+        context = await self.context(platform, headless=headless)
         pages = list(context.pages)
         return pages[0] if pages else await context.new_page()
 
     async def close_platform(self, platform: str) -> None:
         async with self._locks[platform]:
             context = self._contexts.pop(platform, None)
+            self._context_headless.pop(platform, None)
             if context is not None:
                 await context.close()
 
@@ -99,12 +136,13 @@ class BrowserPool:
             await self._playwright.stop()
             self._playwright = None
 
-    async def cookies(self, platform: str) -> list[dict[str, Any]]:
-        context = await self.context(platform)
+    async def cookies(self, platform: str, *, headless: bool | None = None) -> list[dict[str, Any]]:
+        resolved_headless = self._context_headless.get(platform, True) if headless is None else bool(headless)
+        context = await self.context(platform, headless=resolved_headless)
         return [dict(item) for item in await context.cookies()]
 
-    async def authenticated(self, platform: str, cookie_names: set[str]) -> bool:
-        names = {str(item.get("name") or "") for item in await self.cookies(platform)}
+    async def authenticated(self, platform: str, cookie_names: set[str], *, headless: bool | None = None) -> bool:
+        names = {str(item.get("name") or "") for item in await self.cookies(platform, headless=headless)}
         return bool(names & cookie_names)
 
     async def start_auth(
@@ -118,7 +156,17 @@ class BrowserPool:
         session = AuthSession(session_id=uuid.uuid4().hex, platform=platform, owner=owner)
         self._auth[session.session_id] = session
         try:
-            page = await self.page(platform)
+            # Login uses the same persistent profile as later read-only requests,
+            # but stays visible so official sliders/device confirmation remain possible.
+            interactive_window = True
+            try:
+                page = await self.page(platform, headless=False)
+            except RuntimeError:
+                # A headless server can still provide the official QR flow. If the
+                # platform later asks for a slider/device confirmation, the status
+                # clearly reports that a desktop window is required.
+                interactive_window = False
+                page = await self.page(platform, headless=True)
             await page.goto(login_url, wait_until="domcontentloaded", timeout=20000)
             await page.wait_for_timeout(1200)
             for selector in login_trigger_selectors:
@@ -142,8 +190,12 @@ class BrowserPool:
             if qr_png:
                 session.qr_png = qr_png
                 session.status = "waiting_scan"
+                if not interactive_window:
+                    session.error_code = "interactive_window_unavailable"
             else:
                 session.status = "manual_verification_required"
+                if not interactive_window:
+                    session.error_code = "interactive_window_unavailable"
         except RuntimeError as exc:
             session.status = "error"
             session.error_code = str(exc)

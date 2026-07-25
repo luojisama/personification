@@ -1,6 +1,6 @@
 FORMAT = "personification-data-package"
-VERSION = 2
-SUPPORTED_VERSIONS = frozenset({1, 2})
+VERSION = 3
+SUPPORTED_VERSIONS = frozenset({1, 2, 3})
 
 V1_DATASETS = (
     "group_messages",
@@ -13,9 +13,14 @@ V1_DATASETS = (
     "group_memories",
 )
 
-DATASETS = (
+V2_DATASETS = (
     *V1_DATASETS,
     "avatar_relation_evidence",
+)
+
+DATASETS = (
+    *V2_DATASETS,
+    "meme_dictionary",
 )
 
 DEFAULT_DATASETS = (
@@ -26,6 +31,7 @@ DEFAULT_DATASETS = (
     "local_user_profiles",
     "group_memories",
     "avatar_relation_evidence",
+    "meme_dictionary",
 )
 
 TABLE_FIELDS = {
@@ -88,3 +94,32 @@ MEMORY_PAYLOAD_FIELDS = frozenset({
     "supports_autofill", "revision", "tone_risk", "irony_risk",
     "time_sensitivity", "reinforcement_count", "tier",
 })
+
+# Logical slang data is transferable, but platform author fingerprints and all
+# browser/login state deliberately have no field in this package schema.
+MEME_DICTIONARY_ROOT_FIELDS = (
+    "term", "aliases", "meaning", "tone", "risk_level", "examples",
+    "scope", "group_id", "confidence", "evidence_message_ids", "safe_usage",
+    "managed_by", "updated_at",
+)
+
+MEME_SENSE_FIELDS = (
+    "sense_id", "scope", "group_id", "term", "meaning", "aliases_json",
+    "game_context_json", "version_context", "usage_context", "safe_usage",
+    "risk_level", "status", "confidence", "source_count", "platform_count",
+    "auto_managed", "first_seen_at", "last_verified_at", "reverify_after",
+    "expires_at", "manual_locked", "revision", "updated_at",
+)
+
+MEME_EVIDENCE_FIELDS = (
+    "claim_id", "sense_id", "packet_id", "platform", "content_id",
+    "canonical_url", "content_type", "discussion_id", "evidence_type", "quote",
+    "content_fingerprint", "media_fingerprint", "source_cluster_id",
+    "extractor_version", "model_route", "confidence", "source_quality",
+    "published_at", "retrieved_at", "created_at",
+)
+
+MEME_EVENT_FIELDS = (
+    "event_id", "sense_id", "event_type", "old_status", "new_status", "actor",
+    "detail_json", "created_at",
+)

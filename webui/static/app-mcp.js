@@ -357,7 +357,7 @@ function renderBuiltinPlatformCard(platform, item) {
   const qr = auth && auth.session_id && auth.qr_available
     ? `<img class="mcp-login-qr" alt="${escapeAttr(label)}登录二维码" src="${API}/mcp/builtin/social-research/auth/${encodeURIComponent(auth.session_id)}/qrcode?platform=${encodeURIComponent(platform)}">`
     : "";
-  const authPanel = auth ? `<div class="mcp-auth-panel">${qr}<div><strong>${escapeHtml(mcpChineseState(auth.status))}</strong><code>${escapeHtml(auth.status || "")}</code><small>会话将在 ${auth.expires_at ? new Date(Number(auth.expires_at) * 1000).toLocaleTimeString() : "5 分钟内"}过期</small>${auth.status === "manual_verification_required" ? '<p class="muted">请在官方页面完成人机验证；系统不会绕过滑块或验证码。</p>' : ""}</div></div>` : "";
+  const authPanel = auth ? `<div class="mcp-auth-panel">${qr}<div><strong>${escapeHtml(mcpChineseState(auth.status))}</strong><code>${escapeHtml(auth.status || "")}</code><small>会话将在 ${auth.expires_at ? new Date(Number(auth.expires_at) * 1000).toLocaleTimeString() : "5 分钟内"}过期</small>${auth.status === "manual_verification_required" ? '<p class="muted">请在自动打开的官方页面窗口完成人机验证；系统不会绕过滑块或验证码。</p>' : ""}${auth.error_code === "interactive_window_unavailable" ? '<p class="muted">当前运行环境无法打开可见浏览器；二维码仍可扫码，但设备确认/滑块需要在有桌面的运行账户下重试。</p>' : ""}</div></div>` : "";
   const danmaku = capabilities.danmaku === false ? "不支持弹幕" : "页面提供时读取弹幕";
   return `<article class="card mcp-platform-card" data-platform="${escapeAttr(platform)}">
     <header><div><span class="eyebrow">${escapeHtml(platform)}</span><h3>${escapeHtml(label)}</h3></div><div><strong class="mcp-native-state ${mcpStatusTone(runtimeState)}">${escapeHtml(mcpChineseState(runtimeState))}</strong><code>${escapeHtml(runtimeState)}</code></div></header>

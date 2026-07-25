@@ -15,6 +15,7 @@ import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Iterable
+from urllib.parse import urlsplit, urlunsplit
 
 from ..avatar_relation_evidence import (
     AVATAR_RELATION_EVIDENCE_ASSET_KINDS,
@@ -29,8 +30,10 @@ from .constants import (
     GROUP_KV_NAMESPACES, MAX_ARCHIVE_BYTES, MAX_COMPRESSION_RATIO,
     MAX_ENTRIES, MAX_ENTRY_BYTES, PRIMARY_KEYS, TABLE_FIELDS, VERSION,
     ARTIFACT_RETENTION_SECONDS, BACKUP_RETENTION_SECONDS, MEMORY_PAYLOAD_FIELDS,
+    MEME_DICTIONARY_ROOT_FIELDS, MEME_EVIDENCE_FIELDS, MEME_EVENT_FIELDS,
+    MEME_SENSE_FIELDS,
     PLAN_TOKEN_TTL_SECONDS,
-    SUPPORTED_VERSIONS, V1_DATASETS,
+    SUPPORTED_VERSIONS, V1_DATASETS, V2_DATASETS,
 )
 
 
@@ -258,6 +261,75 @@ class DataTransferService:
         return memories
 
     @staticmethod
+    def _canonical_evidence_url(value: Any) -> str:
+        """Keep a public canonical URL while dropping query credentials and fragments."""
+
+        try:
+            parsed = urlsplit(str(value or "").strip())
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+            ):
+                return ""
+            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))[:1000]
+        except (TypeError, ValueError):
+            return ""
+
+    def _meme_dictionary_data(self, conn: sqlite3.Connection, group_id: str) -> dict[str, list[dict[str, Any]]]:
+        scope_where = "(scope='public' AND group_id='') OR (scope IN ('group','concept') AND group_id=?)"
+        roots = [
+            dict(row)
+            for row in conn.execute(
+                f"SELECT {','.join(MEME_DICTIONARY_ROOT_FIELDS)} FROM meme_dictionary "
+                f"WHERE {scope_where} ORDER BY scope,group_id,term",
+                (group_id,),
+            ).fetchall()
+        ]
+        senses = [
+            dict(row)
+            for row in conn.execute(
+                f"SELECT {','.join(MEME_SENSE_FIELDS)} FROM meme_senses "
+                f"WHERE {scope_where} ORDER BY scope,group_id,term,sense_id",
+                (group_id,),
+            ).fetchall()
+        ]
+        sense_ids = [str(row["sense_id"]) for row in senses]
+        evidence: list[dict[str, Any]] = []
+        events: list[dict[str, Any]] = []
+        for offset in range(0, len(sense_ids), 500):
+            batch = sense_ids[offset:offset + 500]
+            placeholders = ",".join("?" for _ in batch)
+            evidence.extend(
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT {','.join(MEME_EVIDENCE_FIELDS)} FROM meme_evidence_claims "
+                    f"WHERE sense_id IN ({placeholders}) ORDER BY sense_id,created_at,claim_id",
+                    tuple(batch),
+                ).fetchall()
+            )
+            events.extend(
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT {','.join(MEME_EVENT_FIELDS)} FROM meme_learning_events "
+                    f"WHERE sense_id IN ({placeholders}) ORDER BY sense_id,created_at,event_id",
+                    tuple(batch),
+                ).fetchall()
+            )
+        for row in evidence:
+            row["canonical_url"] = self._canonical_evidence_url(row.get("canonical_url"))
+        for row in events:
+            try:
+                detail = json.loads(row.get("detail_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                detail = {}
+            if not isinstance(detail, dict) or self._contains_meme_secret_key(detail):
+                detail = {}
+            row["detail_json"] = json.dumps(detail, ensure_ascii=False, separators=(",", ":"))
+        return {"roots": roots, "senses": senses, "evidence": evidence, "events": events}
+
+    @staticmethod
     def _safe_memory_payload(payload: Any, group_id: str) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise DataTransferError("invalid memory payload")
@@ -468,6 +540,8 @@ class DataTransferService:
                         value = self._local_profiles(group_id)
                     elif name == "group_memories":
                         value = self._group_memories(group_id)
+                    elif name == "meme_dictionary":
+                        value = self._meme_dictionary_data(conn, group_id)
                     else:
                         value = self._table_rows(conn, name, group_id)
                     values[name] = value
@@ -601,7 +675,7 @@ class DataTransferService:
             raise DataTransferError("invalid group scope")
         if not isinstance(source, dict) or source.get("group_id") != scope.get("group_id") or not str(source.get("bot_id", "")):
             raise DataTransferError("invalid source identity")
-        allowed_datasets = V1_DATASETS if version == 1 else DATASETS
+        allowed_datasets = V1_DATASETS if version == 1 else V2_DATASETS if version == 2 else DATASETS
         if not isinstance(datasets, list) or len(datasets) != len(set(datasets)) or any(x not in allowed_datasets for x in datasets):
             raise DataTransferError("invalid datasets")
         expected = {f"datasets/{name}.json" for name in datasets}
@@ -614,9 +688,187 @@ class DataTransferService:
             if not isinstance(value["sha256"], str) or len(value["sha256"]) != 64 or not isinstance(value["size"], int) or value["size"] < 0:
                 raise DataTransferError("invalid file checksum metadata")
 
+    @staticmethod
+    def _validate_meme_json_field(row: dict[str, Any], field: str, expected_type: type) -> Any:
+        try:
+            value = json.loads(row.get(field))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise DataTransferError(f"invalid meme dictionary JSON: {field}") from exc
+        if not isinstance(value, expected_type):
+            raise DataTransferError(f"invalid meme dictionary JSON type: {field}")
+        return value
+
+    @staticmethod
+    def _contains_meme_secret_key(value: Any) -> bool:
+        forbidden_markers = {
+            "authorfingerprint", "cookie", "token", "credential",
+            "browserprofile", "profilepath", "deviceid", "phone",
+            "verificationcode",
+        }
+        if isinstance(value, dict):
+            return any(
+                any(
+                    marker in "".join(char for char in str(key or "").casefold() if char.isalnum())
+                    for marker in forbidden_markers
+                )
+                or DataTransferService._contains_meme_secret_key(item)
+                for key, item in value.items()
+            )
+        if isinstance(value, list):
+            return any(DataTransferService._contains_meme_secret_key(item) for item in value)
+        return False
+
+    def _validate_meme_dictionary(self, data: Any, group_id: str) -> None:
+        if not isinstance(data, dict) or set(data) != {"roots", "senses", "evidence", "events"}:
+            raise DataTransferError("invalid meme dictionary dataset")
+        if any(not isinstance(data[name], list) for name in data):
+            raise DataTransferError("invalid meme dictionary section")
+
+        def valid_scope(row: dict[str, Any]) -> bool:
+            scope = str(row.get("scope") or "")
+            scoped_group = str(row.get("group_id") or "")
+            return (scope == "public" and not scoped_group) or (
+                scope in {"group", "concept"} and scoped_group == group_id
+            )
+
+        def finite01(value: Any) -> bool:
+            return (
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
+                and 0.0 <= float(value) <= 1.0
+            )
+
+        def finite_number(value: Any) -> bool:
+            return (
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
+            )
+
+        root_keys: set[tuple[str, str, str]] = set()
+        for row in data["roots"]:
+            if not isinstance(row, dict) or set(row) != set(MEME_DICTIONARY_ROOT_FIELDS) or not valid_scope(row):
+                raise DataTransferError("invalid meme dictionary root")
+            key = (str(row["scope"]), str(row["group_id"]), str(row["term"]))
+            if not key[2] or key in root_keys or not finite01(row.get("confidence")):
+                raise DataTransferError("invalid meme dictionary root identity")
+            if not finite_number(row.get("updated_at")) or any(
+                not isinstance(row.get(field), str)
+                for field in ("term", "meaning", "risk_level", "scope", "group_id", "safe_usage", "managed_by")
+            ):
+                raise DataTransferError("invalid meme dictionary root values")
+            root_keys.add(key)
+            for field in ("aliases", "tone", "examples", "evidence_message_ids"):
+                items = self._validate_meme_json_field(row, field, list)
+                if any(not isinstance(item, str) for item in items):
+                    raise DataTransferError("invalid meme dictionary text list")
+            if str(row.get("risk_level") or "") not in {"low", "medium", "high"}:
+                raise DataTransferError("invalid meme dictionary risk")
+
+        sense_ids: set[str] = set()
+        statuses = {
+            "observed", "understand_only", "verified", "disputed", "stale",
+            "rejected", "manual_locked",
+        }
+        for row in data["senses"]:
+            if not isinstance(row, dict) or set(row) != set(MEME_SENSE_FIELDS) or not valid_scope(row):
+                raise DataTransferError("invalid meme sense")
+            sense_id = str(row.get("sense_id") or "")
+            if not sense_id or sense_id in sense_ids or not str(row.get("term") or ""):
+                raise DataTransferError("invalid meme sense identity")
+            sense_ids.add(sense_id)
+            if str(row.get("status") or "") not in statuses or str(row.get("risk_level") or "") not in {"low", "medium", "high"}:
+                raise DataTransferError("invalid meme sense state")
+            if not finite01(row.get("confidence")):
+                raise DataTransferError("invalid meme sense confidence")
+            for field in ("source_count", "platform_count"):
+                if isinstance(row.get(field), bool) or not isinstance(row.get(field), int) or int(row[field]) < 0:
+                    raise DataTransferError("invalid meme sense count")
+            for field in ("auto_managed", "manual_locked"):
+                if isinstance(row.get(field), bool) or row.get(field) not in {0, 1}:
+                    raise DataTransferError("invalid meme sense flag")
+            if isinstance(row.get("revision"), bool) or not isinstance(row.get("revision"), int) or int(row["revision"]) < 1:
+                raise DataTransferError("invalid meme sense revision")
+            if any(
+                not finite_number(row.get(field))
+                for field in ("first_seen_at", "last_verified_at", "reverify_after", "expires_at", "updated_at")
+            ) or any(
+                not isinstance(row.get(field), str)
+                for field in (
+                    "sense_id", "scope", "group_id", "term", "meaning", "version_context",
+                    "usage_context", "safe_usage", "risk_level", "status",
+                )
+            ):
+                raise DataTransferError("invalid meme sense values")
+            aliases = self._validate_meme_json_field(row, "aliases_json", list)
+            game_context = self._validate_meme_json_field(row, "game_context_json", dict)
+            if any(not isinstance(item, str) for item in aliases):
+                raise DataTransferError("invalid meme sense aliases")
+            if set(game_context) - {"canonical_name", "aliases"} or not isinstance(game_context.get("aliases", []), list):
+                raise DataTransferError("invalid meme game context")
+            if not isinstance(game_context.get("canonical_name", ""), str) or any(
+                not isinstance(item, str) for item in game_context.get("aliases", [])
+            ):
+                raise DataTransferError("invalid meme game context values")
+
+        claim_ids: set[str] = set()
+        claim_source_keys: set[tuple[str, str]] = set()
+        for row in data["evidence"]:
+            if not isinstance(row, dict) or set(row) != set(MEME_EVIDENCE_FIELDS):
+                raise DataTransferError("invalid meme evidence")
+            claim_id = str(row.get("claim_id") or "")
+            if (
+                not claim_id
+                or claim_id in claim_ids
+                or str(row.get("sense_id") or "") not in sense_ids
+                or str(row.get("platform") or "") not in {"bilibili", "douyin", "tieba", "xiaoheihe"}
+                or not str(row.get("source_cluster_id") or "")
+                or not str(row.get("quote") or "")
+                or not finite01(row.get("confidence"))
+                or not finite01(row.get("source_quality"))
+            ):
+                raise DataTransferError("invalid meme evidence identity")
+            source_key = (str(row.get("sense_id") or ""), str(row.get("source_cluster_id") or ""))
+            if source_key in claim_source_keys:
+                raise DataTransferError("duplicate meme evidence source")
+            canonical_url = str(row.get("canonical_url") or "")
+            if canonical_url and canonical_url != self._canonical_evidence_url(canonical_url):
+                raise DataTransferError("unsafe meme evidence URL")
+            if any(
+                not finite_number(row.get(field))
+                for field in ("published_at", "retrieved_at", "created_at")
+            ) or any(not isinstance(row.get(field), str) for field in MEME_EVIDENCE_FIELDS if field not in {
+                "confidence", "source_quality", "published_at", "retrieved_at", "created_at"
+            }):
+                raise DataTransferError("invalid meme evidence values")
+            claim_ids.add(claim_id)
+            claim_source_keys.add(source_key)
+
+        event_ids: set[str] = set()
+        for row in data["events"]:
+            if not isinstance(row, dict) or set(row) != set(MEME_EVENT_FIELDS):
+                raise DataTransferError("invalid meme learning event")
+            event_id = str(row.get("event_id") or "")
+            if not event_id or event_id in event_ids or str(row.get("sense_id") or "") not in sense_ids:
+                raise DataTransferError("invalid meme learning event identity")
+            if not finite_number(row.get("created_at")) or any(
+                not isinstance(row.get(field), str)
+                for field in MEME_EVENT_FIELDS
+                if field != "created_at"
+            ):
+                raise DataTransferError("invalid meme learning event values")
+            event_ids.add(event_id)
+            detail = self._validate_meme_json_field(row, "detail_json", dict)
+            if self._contains_meme_secret_key(detail):
+                raise DataTransferError("meme learning event contains forbidden secret fields")
+
     def _validate_values(self, manifest: dict[str, Any], values: dict[str, Any]) -> None:
         group_id = str(manifest["scope"]["group_id"])
         for name, data in values.items():
+            if name == "meme_dictionary":
+                self._validate_meme_dictionary(data, group_id)
+                continue
             if name == "group_state":
                 if not isinstance(data, dict) or set(data) - {"group_config", "kv"}:
                     raise DataTransferError("invalid group state")
@@ -794,6 +1046,8 @@ class DataTransferService:
                             self._apply_group_state(conn, target_group_id, data, mode)
                         elif name in {"local_user_profiles", "group_memories"}:
                             continue
+                        elif name == "meme_dictionary":
+                            self._apply_meme_dictionary(conn, data, target_group_id, mode)
                         else:
                             self._apply_rows(conn, name, target_group_id, data, mode)
                     conn.commit()
@@ -844,6 +1098,193 @@ class DataTransferService:
                 row = conn.execute("SELECT group_id FROM memory_items WHERE memory_id=?", (memory_id,)).fetchone()
                 if row and str(row[0] or "") != str(group_id):
                     raise DataTransferError("memory id belongs to another group")
+
+    @staticmethod
+    def _delete_ids(
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        values: Iterable[Any],
+    ) -> None:
+        normalized = list(dict.fromkeys(str(value or "") for value in values if str(value or "")))
+        for offset in range(0, len(normalized), 500):
+            batch = normalized[offset:offset + 500]
+            conn.execute(
+                f"DELETE FROM {table} WHERE {column} IN ({','.join('?' for _ in batch)})",
+                tuple(batch),
+            )
+
+    def _delete_group_meme_dictionary(self, conn: sqlite3.Connection, group_id: str) -> None:
+        sense_ids = [
+            str(row["sense_id"])
+            for row in conn.execute(
+                "SELECT sense_id FROM meme_senses WHERE scope IN ('group','concept') AND group_id=?",
+                (group_id,),
+            ).fetchall()
+        ]
+        self._delete_ids(conn, "meme_learning_events", "sense_id", sense_ids)
+        self._delete_ids(conn, "meme_evidence_claims", "sense_id", sense_ids)
+        self._delete_ids(conn, "meme_senses", "sense_id", sense_ids)
+        conn.execute(
+            "DELETE FROM meme_dictionary WHERE scope IN ('group','concept') AND group_id=?",
+            (group_id,),
+        )
+
+    def _apply_meme_dictionary(
+        self,
+        conn: sqlite3.Connection,
+        data: dict[str, list[dict[str, Any]]],
+        group_id: str,
+        mode: str,
+        *,
+        preserve_manual: bool = True,
+    ) -> None:
+        if mode == "scope-replace":
+            self._delete_group_meme_dictionary(conn, group_id)
+
+        root_updates = ",".join(
+            f"{field}=excluded.{field}"
+            for field in MEME_DICTIONARY_ROOT_FIELDS
+            if field not in {"scope", "group_id", "term"}
+        )
+        root_sql = (
+            f"INSERT INTO meme_dictionary({','.join(MEME_DICTIONARY_ROOT_FIELDS)}) "
+            f"VALUES({','.join('?' for _ in MEME_DICTIONARY_ROOT_FIELDS)}) "
+            f"ON CONFLICT(scope,group_id,term) DO UPDATE SET {root_updates}"
+        )
+        if preserve_manual:
+            root_sql += " WHERE meme_dictionary.managed_by!='manual' OR excluded.managed_by='manual'"
+        for row in data["roots"]:
+            conn.execute(root_sql, tuple(row[field] for field in MEME_DICTIONARY_ROOT_FIELDS))
+
+        sense_updates = ",".join(
+            f"{field}=excluded.{field}"
+            for field in MEME_SENSE_FIELDS
+            if field != "sense_id"
+        )
+        sense_sql = (
+            f"INSERT INTO meme_senses({','.join(MEME_SENSE_FIELDS)}) "
+            f"VALUES({','.join('?' for _ in MEME_SENSE_FIELDS)}) "
+            f"ON CONFLICT(sense_id) DO UPDATE SET {sense_updates}"
+        )
+        if preserve_manual:
+            sense_sql += " WHERE meme_senses.manual_locked=0 OR excluded.manual_locked=1"
+        for row in data["senses"]:
+            conn.execute(sense_sql, tuple(row[field] for field in MEME_SENSE_FIELDS))
+
+        evidence_fields = (*MEME_EVIDENCE_FIELDS, "author_fingerprint")
+        evidence_sql = (
+            f"INSERT OR IGNORE INTO meme_evidence_claims({','.join(evidence_fields)}) "
+            f"VALUES({','.join('?' for _ in evidence_fields)})"
+        )
+        for row in data["evidence"]:
+            conn.execute(
+                evidence_sql,
+                (*tuple(row[field] for field in MEME_EVIDENCE_FIELDS), ""),
+            )
+
+        event_sql = (
+            f"INSERT OR IGNORE INTO meme_learning_events({','.join(MEME_EVENT_FIELDS)}) "
+            f"VALUES({','.join('?' for _ in MEME_EVENT_FIELDS)})"
+        )
+        for row in data["events"]:
+            conn.execute(event_sql, tuple(row[field] for field in MEME_EVENT_FIELDS))
+
+    def _meme_dictionary_snapshot(
+        self,
+        conn: sqlite3.Connection,
+        data: dict[str, list[dict[str, Any]]],
+        group_id: str,
+        mode: str,
+    ) -> dict[str, Any]:
+        current = self._meme_dictionary_data(conn, group_id)
+        root_keys = {(row["scope"], row["group_id"], row["term"]) for row in data["roots"]}
+        sense_ids = {str(row["sense_id"]) for row in data["senses"]}
+        claim_ids = {str(row["claim_id"]) for row in data["evidence"]}
+        event_ids = {str(row["event_id"]) for row in data["events"]}
+
+        def group_scoped(row: dict[str, Any]) -> bool:
+            return row.get("scope") in {"group", "concept"} and str(row.get("group_id") or "") == group_id
+
+        before_roots = [
+            row for row in current["roots"]
+            if (row["scope"], row["group_id"], row["term"]) in root_keys
+            or (mode == "scope-replace" and group_scoped(row))
+        ]
+        before_senses = [
+            row for row in current["senses"]
+            if str(row["sense_id"]) in sense_ids or (mode == "scope-replace" and group_scoped(row))
+        ]
+        replaced_group_senses = {
+            str(row["sense_id"])
+            for row in before_senses
+            if mode == "scope-replace" and group_scoped(row)
+        }
+        before_evidence = [
+            row for row in current["evidence"]
+            if str(row["claim_id"]) in claim_ids or str(row["sense_id"]) in replaced_group_senses
+        ]
+        before_events = [
+            row for row in current["events"]
+            if str(row["event_id"]) in event_ids or str(row["sense_id"]) in replaced_group_senses
+        ]
+        return {
+            "mode": mode,
+            "incoming_root_keys": [list(key) for key in sorted(root_keys)],
+            "incoming_sense_ids": sorted(sense_ids),
+            "incoming_claim_ids": sorted(claim_ids),
+            "incoming_event_ids": sorted(event_ids),
+            "before": {
+                "roots": before_roots,
+                "senses": before_senses,
+                "evidence": before_evidence,
+                "events": before_events,
+            },
+        }
+
+    def _rollback_meme_dictionary(
+        self,
+        conn: sqlite3.Connection,
+        snapshot: dict[str, Any],
+        group_id: str,
+    ) -> None:
+        before = snapshot.get("before") if isinstance(snapshot.get("before"), dict) else {
+            "roots": [], "senses": [], "evidence": [], "events": [],
+        }
+        if snapshot.get("mode") == "scope-replace":
+            self._delete_group_meme_dictionary(conn, group_id)
+
+        self._delete_ids(conn, "meme_learning_events", "event_id", snapshot.get("incoming_event_ids", []))
+        self._delete_ids(conn, "meme_evidence_claims", "claim_id", snapshot.get("incoming_claim_ids", []))
+        existing_sense_ids = {str(row["sense_id"]) for row in before.get("senses", [])}
+        new_sense_ids = [
+            value for value in snapshot.get("incoming_sense_ids", [])
+            if str(value) not in existing_sense_ids
+        ]
+        self._delete_ids(conn, "meme_senses", "sense_id", new_sense_ids)
+        existing_root_keys = {
+            (str(row["scope"]), str(row["group_id"]), str(row["term"]))
+            for row in before.get("roots", [])
+        }
+        for raw in snapshot.get("incoming_root_keys", []):
+            key = tuple(str(value) for value in raw) if isinstance(raw, list) else ()
+            if len(key) == 3 and key not in existing_root_keys:
+                conn.execute(
+                    "DELETE FROM meme_dictionary WHERE scope=? AND group_id=? AND term=?",
+                    key,
+                )
+        self._apply_meme_dictionary(
+            conn,
+            {
+                "roots": list(before.get("roots", [])),
+                "senses": list(before.get("senses", [])),
+                "evidence": list(before.get("evidence", [])),
+                "events": list(before.get("events", [])),
+            },
+            group_id,
+            "merge",
+            preserve_manual=False,
+        )
 
     def _delete_scope_rows_for_replace(
         self,
@@ -915,6 +1356,9 @@ class DataTransferService:
 
     def _check_row_conflicts(self, conn: sqlite3.Connection, group_id: str, values: dict[str, Any]) -> None:
         for name, rows in values.items():
+            if name == "meme_dictionary":
+                self._check_meme_dictionary_conflicts(conn, rows)
+                continue
             if name in {"group_state", "local_user_profiles", "group_memories"}:
                 continue
             scope_column = "session_id" if name == "session_messages" else "group_id"
@@ -927,6 +1371,33 @@ class DataTransferService:
                 ).fetchone()
                 if conflict and str(conflict[scope_column]) != scope_value:
                     raise DataTransferError(f"{name} id conflicts with another group")
+
+    @staticmethod
+    def _check_meme_dictionary_conflicts(
+        conn: sqlite3.Connection,
+        data: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        for row in data["senses"]:
+            existing = conn.execute(
+                "SELECT scope,group_id FROM meme_senses WHERE sense_id=?",
+                (row["sense_id"],),
+            ).fetchone()
+            if existing and (
+                str(existing["scope"]) != str(row["scope"])
+                or str(existing["group_id"]) != str(row["group_id"])
+            ):
+                raise DataTransferError("meme sense id conflicts with another scope")
+        for section, table, id_field in (
+            ("evidence", "meme_evidence_claims", "claim_id"),
+            ("events", "meme_learning_events", "event_id"),
+        ):
+            for row in data[section]:
+                existing = conn.execute(
+                    f"SELECT sense_id FROM {table} WHERE {id_field}=?",
+                    (row[id_field],),
+                ).fetchone()
+                if existing and str(existing["sense_id"]) != str(row["sense_id"]):
+                    raise DataTransferError(f"meme {section} id conflicts with another sense")
 
     def _apply_group_state(self, conn: sqlite3.Connection, group_id: str, state: dict[str, Any], mode: str) -> None:
         incoming = {"group_config": state.get("group_config", {}), **(state.get("kv", {}) or {})}
@@ -953,6 +1424,9 @@ class DataTransferService:
         snapshot: dict[str, Any] = {"tables": {}, "incoming_keys": {}, "group_state": {}, "profiles": [], "memories": [], "memory_cluster": None}
         for name, rows in values.items():
             if name in {"group_state", "local_user_profiles", "group_memories"}:
+                continue
+            if name == "meme_dictionary":
+                snapshot["meme_dictionary"] = self._meme_dictionary_snapshot(conn, rows, group_id, mode)
                 continue
             current = self._table_rows(conn, name, group_id)
             incoming = {tuple(row[field] for field in PRIMARY_KEYS[name]) for row in rows}
@@ -1086,6 +1560,9 @@ class DataTransferService:
         self._advance_profile_generation_for_snapshot(snapshot)
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            meme_snapshot = snapshot.get("meme_dictionary")
+            if isinstance(meme_snapshot, dict):
+                self._rollback_meme_dictionary(conn, meme_snapshot, group_id)
             for name, keys in snapshot.get("incoming_keys", {}).items():
                 scope_column = "session_id" if name == "session_messages" else "group_id"
                 scope_value = f"group_{group_id}" if name == "session_messages" else group_id

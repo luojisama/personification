@@ -222,3 +222,133 @@ def test_auth_session_is_bound_to_owner_and_public_shape_excludes_owner(tmp_path
         pass
     else:
         raise AssertionError("auth session was not bound to owner")
+
+
+def test_browser_pool_switches_between_headless_reads_and_visible_official_login(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    launches: list[bool] = []
+
+    class FakeContext:
+        pages = []
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakeChromium:
+        async def launch_persistent_context(self, _profile, *, headless, **_kwargs):  # noqa: ANN001
+            launches.append(bool(headless))
+            return FakeContext()
+
+    async def run() -> tuple[object, object, object]:
+        pool = browser_mod.BrowserPool(tmp_path)
+        pool._playwright = type("FakePlaywright", (), {"chromium": FakeChromium()})()
+        read_context = await pool.context("bilibili", headless=True)
+        reused = await pool.context("bilibili", headless=True)
+        login_context = await pool.context("bilibili", headless=False)
+        assert read_context.closed is True
+        await pool.close_platform("bilibili")
+        return read_context, reused, login_context
+
+    read_context, reused, login_context = asyncio.run(run())
+    assert read_context is reused
+    assert login_context is not read_context
+    assert launches == [True, False]
+
+
+def test_auth_qr_falls_back_to_headless_with_explicit_interactive_warning(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    modes: list[bool] = []
+
+    class FakeLocator:
+        first = None
+
+        def __init__(self) -> None:
+            self.first = self
+
+        async def count(self) -> int:
+            return 1
+
+        async def is_visible(self) -> bool:
+            return True
+
+        async def screenshot(self, **_kwargs) -> bytes:
+            return b"png"
+
+    class FakePage:
+        async def goto(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def wait_for_timeout(self, _milliseconds) -> None:  # noqa: ANN001
+            return None
+
+        def locator(self, _selector) -> FakeLocator:  # noqa: ANN001
+            return FakeLocator()
+
+    async def fake_page(_platform, *, headless=True):  # noqa: ANN001
+        modes.append(bool(headless))
+        if not headless:
+            raise RuntimeError("chromium_unavailable")
+        return FakePage()
+
+    pool.page = fake_page
+    result = asyncio.run(
+        pool.start_auth(
+            "bilibili",
+            "admin:device:bilibili",
+            "https://passport.bilibili.com/login",
+            ("qr",),
+            (),
+        )
+    )
+
+    assert modes == [False, True]
+    assert result["status"] == "waiting_scan"
+    assert result["qr_available"] is True
+    assert result["error_code"] == "interactive_window_unavailable"
+
+
+def test_auth_status_uses_visible_profile_and_closes_window_after_success(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+    session = browser_mod.AuthSession(
+        session_id="session",
+        platform="bilibili",
+        owner="admin:device:bilibili",
+        status="manual_verification_required",
+    )
+
+    class FakeBrowsers:
+        closed: list[str] = []
+
+        def get_auth(self, session_id, owner):  # noqa: ANN001
+            assert (session_id, owner) == ("session", "admin:device:bilibili")
+            return session
+
+        def public_auth(self, value):  # noqa: ANN001
+            return {"status": value.status, "platform": value.platform}
+
+        async def close_platform(self, platform):  # noqa: ANN001
+            self.closed.append(platform)
+
+    class FakeAdapter:
+        async def authenticated(self, *, interactive=None):  # noqa: ANN001
+            assert interactive is True
+            return True
+
+    async def run() -> tuple[dict, list[str]]:
+        service = service_mod.SocialResearchService(tmp_path)
+        browsers = FakeBrowsers()
+        service.browsers = browsers
+        service.adapters["bilibili"] = FakeAdapter()
+        result = await service.auth_status(
+            {"session_id": "session", "owner": "admin:device:bilibili"}
+        )
+        return result, browsers.closed
+
+    result, closed = asyncio.run(run())
+    assert result["status"] == "success"
+    assert closed == ["bilibili"]

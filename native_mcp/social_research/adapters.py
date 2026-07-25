@@ -107,8 +107,12 @@ class PlatformAdapter:
             "authenticated": True,
         }
 
-    async def authenticated(self) -> bool:
-        return await self.browsers.authenticated(self.spec.name, set(self.spec.auth_cookie_names))
+    async def authenticated(self, *, interactive: bool | None = None) -> bool:
+        return await self.browsers.authenticated(
+            self.spec.name,
+            set(self.spec.auth_cookie_names),
+            headless=None if interactive is None else not interactive,
+        )
 
     def validate_url(self, value: str) -> str:
         url = normalize_url(value)

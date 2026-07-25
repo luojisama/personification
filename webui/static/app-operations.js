@@ -45,7 +45,7 @@ function renderDataTransfer(){
 async function createTransferExport(){
   const botId=document.getElementById("transfer-bot").value.trim(),groupId=document.getElementById("transfer-group").value.trim(),raw=document.getElementById("transfer-raw-history").checked;
   if(!botId||!groupId)return alertFlash("err","请填写 Bot QQ 和群号");
-  const datasets=["conversation_threads","group_relation_edges","group_style_snapshots","group_state","local_user_profiles","group_memories"];
+  const datasets=["conversation_threads","group_relation_edges","group_style_snapshots","group_state","local_user_profiles","group_memories","avatar_relation_evidence","meme_dictionary"];
   if(raw)datasets.unshift("group_messages","session_messages");
   try{state.transferExport=await api("/data-transfer/exports/create",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({bot_id:botId,group_id:groupId,datasets})});}
   catch(e){state.transferExport=operationDiagnosticFromError(e,"创建迁移包未完成");}

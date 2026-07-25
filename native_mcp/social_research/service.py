@@ -144,9 +144,12 @@ class SocialResearchService:
         owner = clean_text(params.get("owner"), 200)
         session = self.browsers.get_auth(str(params.get("session_id") or ""), owner)
         if session.status in {"waiting_scan", "manual_verification_required"}:
-            if await self.adapters[session.platform].authenticated():
+            if await self.adapters[session.platform].authenticated(interactive=True):
                 session.status = "success"
                 session.qr_png = b""
+                await self.browsers.close_platform(session.platform)
+        elif session.status == "expired":
+            await self.browsers.close_platform(session.platform)
         return self.browsers.public_auth(session)
 
     async def auth_qrcode(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -156,10 +159,12 @@ class SocialResearchService:
         )
 
     async def auth_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.browsers.cancel_auth(
+        result = self.browsers.cancel_auth(
             str(params.get("session_id") or ""),
             clean_text(params.get("owner"), 200),
         )
+        await self.browsers.close_platform(str(result.get("platform") or ""))
+        return result
 
     async def auth_logout(self, params: dict[str, Any]) -> dict[str, Any]:
         platform = str(params.get("platform") or "")

@@ -63,7 +63,7 @@ def test_group_safe_export_scope_and_secret_exclusion(transfer) -> None:
         assert manifest["scope"] == {"kind": "group", "group_id": "g1"}
         assert manifest["source"] == {"bot_id": "bot1", "group_id": "g1"}
         assert "auth" in manifest["excluded"] and "qzone" in manifest["excluded"]
-        assert manifest["version"] == 2
+        assert manifest["version"] == 3
         assert "user_policy" in manifest["excluded"]
 
 
@@ -137,6 +137,194 @@ def test_v2_avatar_relation_evidence_validation_is_fail_closed(transfer) -> None
                 manifest,
                 {"avatar_relation_evidence": [{**valid, **update}]},
             )
+
+
+def test_v2_manifest_cannot_claim_v3_meme_dictionary_dataset(transfer) -> None:
+    service, _db_path = transfer
+    constants = load_personification_module("plugin.personification.core.data_transfer.constants")
+    error_type = load_personification_module(
+        "plugin.personification.core.data_transfer.service"
+    ).DataTransferError
+    manifest = {
+        "format": constants.FORMAT,
+        "version": 2,
+        "source": {"bot_id": "bot1", "group_id": "g1"},
+        "scope": {"kind": "group", "group_id": "g1"},
+        "datasets": ["meme_dictionary"],
+        "files": {"datasets/meme_dictionary.json": {"sha256": "0" * 64, "size": 0}},
+    }
+
+    with pytest.raises(error_type, match="invalid datasets"):
+        service._validate_manifest(manifest)
+
+
+def test_v3_meme_dictionary_transfer_excludes_login_and_author_fingerprints(transfer, tmp_path: Path) -> None:
+    service, db_path = transfer
+    profile = tmp_path / "mcp" / "social_platform" / "bilibili" / "profile"
+    profile.mkdir(parents=True)
+    (profile / "Cookies").write_text("private-login-cookie", encoding="utf-8")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO meme_dictionary(
+                   term,aliases,meaning,tone,risk_level,examples,scope,group_id,
+                   confidence,evidence_message_ids,safe_usage,managed_by,updated_at
+               ) VALUES('刘涛','[]','六级防具','[]','low','[]','public','',0.95,'[]',
+                        '仅在三角洲行动语境中使用','auto',1000)"""
+        )
+        conn.execute(
+            """INSERT INTO meme_senses(
+                   sense_id,scope,group_id,term,meaning,aliases_json,game_context_json,
+                   version_context,usage_context,safe_usage,risk_level,status,confidence,
+                   source_count,platform_count,auto_managed,first_seen_at,last_verified_at,
+                   reverify_after,expires_at,manual_locked,revision,updated_at
+               ) VALUES(
+                   'sense-public','public','','刘涛','六级防具','[]',
+                   '{"canonical_name":"三角洲行动","aliases":["三角洲"]}',
+                   '','讨论护甲时','仅在三角洲行动语境中使用','low','verified',0.95,
+                   3,3,1,1000,1000,2000,3000,0,4,1000
+               )"""
+        )
+        conn.execute(
+            """INSERT INTO meme_evidence_claims(
+                   claim_id,sense_id,packet_id,platform,content_id,canonical_url,content_type,
+                   discussion_id,evidence_type,author_fingerprint,quote,content_fingerprint,
+                   media_fingerprint,source_cluster_id,extractor_version,model_route,confidence,
+                   source_quality,published_at,retrieved_at,created_at
+               ) VALUES(
+                   'claim-public','sense-public','packet-public','bilibili','BV1',
+                   'https://www.bilibili.com/video/BV1?token=private-login-token#reply',
+                   'video','reply-1','comment','private-author-fingerprint','刘涛就是六级甲',
+                   'content-fp','media-fp','source-public','extractor-v1','social-route',
+                   0.93,0.9,900,1000,1000
+               )"""
+        )
+        conn.execute(
+            """INSERT INTO meme_learning_events(
+                   event_id,sense_id,event_type,old_status,new_status,actor,detail_json,created_at
+               ) VALUES(
+                   'event-public','sense-public','status_changed','understand_only','verified',
+                   'system','{"source_count":3,"cookie":"must-not-transfer"}',1000
+               )"""
+        )
+        conn.execute(
+            """INSERT INTO meme_senses(
+                   sense_id,scope,group_id,term,meaning,first_seen_at,updated_at
+               ) VALUES('sense-other','group','g2','别群词','不应导出',1000,1000)"""
+        )
+        conn.commit()
+
+    exported = service.create_export(
+        bot_id="bot1",
+        group_id="g1",
+        datasets=["meme_dictionary"],
+    )
+    package = service.export_path(exported["task_id"])
+    with zipfile.ZipFile(package) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        payload_bytes = archive.read("datasets/meme_dictionary.json")
+        payload = json.loads(payload_bytes)
+
+    assert manifest["version"] == 3
+    assert manifest["datasets"] == ["meme_dictionary"]
+    rendered = payload_bytes.decode("utf-8")
+    assert "刘涛" in rendered
+    assert "别群词" not in rendered
+    assert "author_fingerprint" not in rendered
+    assert "private-author-fingerprint" not in rendered
+    assert "private-login-token" not in rendered
+    assert "private-login-cookie" not in rendered
+    assert payload["evidence"][0]["canonical_url"] == "https://www.bilibili.com/video/BV1"
+    assert payload["events"][0]["detail_json"] == "{}"
+
+    poisoned = json.loads(json.dumps(payload, ensure_ascii=False))
+    poisoned["events"][0]["detail_json"] = '{"loginToken":"must-not-transfer"}'
+    error_type = load_personification_module(
+        "plugin.personification.core.data_transfer.service"
+    ).DataTransferError
+    with pytest.raises(error_type, match="forbidden secret"):
+        service._validate_values(
+            {"scope": {"group_id": "g1"}},
+            {"meme_dictionary": poisoned},
+        )
+
+    duplicate_source = json.loads(json.dumps(payload, ensure_ascii=False))
+    duplicate_source["evidence"].append({
+        **duplicate_source["evidence"][0],
+        "claim_id": "claim-duplicate-source",
+    })
+    with pytest.raises(error_type, match="duplicate meme evidence source"):
+        service._validate_values(
+            {"scope": {"group_id": "g1"}},
+            {"meme_dictionary": duplicate_source},
+        )
+
+    uploaded = service.store_upload(io.BytesIO(package.read_bytes()))
+    inspected = service.inspect(uploaded["task_id"])
+    assert inspected["valid"] is True
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM meme_learning_events WHERE sense_id='sense-public'")
+        conn.execute("DELETE FROM meme_evidence_claims WHERE sense_id='sense-public'")
+        conn.execute("DELETE FROM meme_senses WHERE sense_id='sense-public'")
+        conn.execute("DELETE FROM meme_dictionary WHERE term='刘涛' AND scope='public'")
+        conn.commit()
+
+    applied = _apply_from_plan(service, uploaded["task_id"])
+    with sqlite3.connect(db_path) as conn:
+        restored = conn.execute(
+            "SELECT canonical_url,author_fingerprint FROM meme_evidence_claims WHERE claim_id='claim-public'"
+        ).fetchone()
+        assert restored == ("https://www.bilibili.com/video/BV1", "")
+        assert conn.execute("SELECT status FROM meme_senses WHERE sense_id='sense-public'").fetchone()[0] == "verified"
+        assert conn.execute("SELECT COUNT(*) FROM meme_learning_events WHERE event_id='event-public'").fetchone()[0] == 1
+
+    service.rollback(applied["journal_id"])
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM meme_senses WHERE sense_id='sense-public'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM meme_dictionary WHERE term='刘涛' AND scope='public'").fetchone()[0] == 0
+
+
+def test_meme_transfer_global_ids_cannot_cross_scope_or_sense(transfer) -> None:
+    service, db_path = transfer
+    error_type = load_personification_module(
+        "plugin.personification.core.data_transfer.service"
+    ).DataTransferError
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """INSERT INTO meme_senses(
+                   sense_id,scope,group_id,term,meaning,first_seen_at,updated_at
+               ) VALUES('shared-sense','group','g2','别群词','别群含义',1,1)"""
+        )
+        conn.execute(
+            """INSERT INTO meme_evidence_claims(
+                   claim_id,sense_id,platform,content_id,quote,source_cluster_id,created_at
+               ) VALUES('shared-claim','shared-sense','bilibili','BV1','明确解释','cluster-1',1)"""
+        )
+        conn.execute(
+            """INSERT INTO meme_learning_events(
+                   event_id,sense_id,event_type,created_at
+               ) VALUES('shared-event','shared-sense','observed',1)"""
+        )
+        conn.commit()
+
+        with pytest.raises(error_type, match="sense id conflicts with another scope"):
+            service._check_meme_dictionary_conflicts(conn, {
+                "senses": [{"sense_id": "shared-sense", "scope": "group", "group_id": "g1"}],
+                "evidence": [],
+                "events": [],
+            })
+        with pytest.raises(error_type, match="evidence id conflicts with another sense"):
+            service._check_meme_dictionary_conflicts(conn, {
+                "senses": [],
+                "evidence": [{"claim_id": "shared-claim", "sense_id": "different-sense"}],
+                "events": [],
+            })
+        with pytest.raises(error_type, match="events id conflicts with another sense"):
+            service._check_meme_dictionary_conflicts(conn, {
+                "senses": [],
+                "evidence": [],
+                "events": [{"event_id": "shared-event", "sense_id": "different-sense"}],
+            })
 
 
 def test_inspect_rejects_zip_slip_duplicate_and_undeclared(transfer, tmp_path: Path) -> None:
@@ -360,7 +548,7 @@ def test_group_profiles_and_memories_round_trip_with_rollback(tmp_path: Path) ->
     assert store.get_memory_item("m1")["summary"] == "目标端修改"
 
 
-def test_v2_filters_blocked_users_and_transfers_visual_evidence_without_hashes(
+def test_v3_filters_blocked_users_and_transfers_visual_evidence_without_hashes(
     tmp_path: Path,
 ) -> None:
     db_mod = load_personification_module("plugin.personification.core.db")
@@ -464,7 +652,7 @@ def test_v2_filters_blocked_users_and_transfers_visual_evidence_without_hashes(
             for name in archive.namelist()
             if name.startswith("datasets/")
         )
-    assert manifest["version"] == 2
+    assert manifest["version"] == 3
     assert len(visual_rows) == 2
     assert all("avatar_hash" not in key for row in visual_rows for key in row)
     assert b"user_policy_state" not in combined
@@ -703,5 +891,6 @@ def test_data_transfer_frontend_renders_operation_diagnostics() -> None:
     source = (Path(__file__).parents[1] / "webui" / "static" / "app-operations.js").read_text(encoding="utf-8")
     assert "renderOperationHistory(items" in source
     assert source.count("operationDiagnosticFromError(") >= 6
+    assert '"avatar_relation_evidence","meme_dictionary"' in source
     for legacy in ("打包失败：\"+e.message", "验包失败：\"+e.message", "预演失败：\"+e.message", "导入失败：\"+e.message", "回滚失败：\"+e.message"):
         assert legacy not in source

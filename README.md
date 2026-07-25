@@ -169,6 +169,7 @@ Config model 当前包含数百个字段。下面只列启动、风险和行为�
 | `personification_whitelist` | `[]` | 允许插件参与的群号；私聊不受群白名单限制 |
 | `personification_global_enabled` | `true` | 全局聊天总开关 |
 | `personification_probability` | `0.30` | 非明确呼叫场景的参与概率基础值 |
+| `personification_meme_reply_probability` | `0.18` | 已经决定回复后，允许自然带入一个匹配语境的低风险 `verified/manual_locked` 梗的概率；不提高随机发言概率 |
 | `personification_agent_enabled` | `true` | 启用完整 Agent tool loop |
 | `personification_agent_max_steps` | `10` | 单轮 Agent 最大步骤 |
 | `personification_agent_budget_mode` | `shadow` | `shadow` 仅观测预算；`adaptive` 才接管实际步数和 deadline |
@@ -347,6 +348,16 @@ WebUI 的 Skill 页面还提供托管 MCP 安装：可搜索 Official MCP Regist
 
 MCP Secret 只允许通过环境变量传给子进程，独立保存在 `personification_mcp_secret_file` 或数据目录 `mcp/secrets.json`，不会写入数据库、WebUI response、审计详情或日志。快捷安装会以 Bot 系统用户权限执行第三方 package；Registry 命名空间验证不等于安全审计，安装前仍应检查源码和 package identity。
 
+### 原生社交平台查梗 MCP
+
+项目内置不可删除的 `builtin_social_platform_research`，首版覆盖 B站、抖音、贴吧和小黑盒。它默认关闭，并同时受 MCP 服务开关、平台开关和 Agent 工具授权三层约束；只有目标平台已开启、登录态有效且能力健康时，工具调用才会执行。WebUI 的“MCP → 原生 MCP”页可扫码或打开平台官方兜底页登录、单独启停平台、调整来源质量阈值，并预览封面、标题、正文、评论、回复和支持平台的弹幕。
+
+向 Agent 公开的能力只有 `social_content_search`、`social_content_read` 和 `research_game_slang`。全部为只读工具，不包含任意登录态 HTTP、任意 JavaScript、Cookie 导出、点赞、投币、收藏、关注、评论、发布、删除或私信。平台访问使用互相隔离的 Playwright persistent context，优先读取官方页面及页面自身产生的 XHR/Fetch；验证码、滑块和风控必须由管理员在官方页面处理，不实现绕过。
+
+宿主侧会从一份内容中提取最多 20 个独立黑话 claim，并按内容簇而不是评论条数计算独立来源。默认两个独立内容进入 `understand_only`；三个独立内容且至少两个平台一致时进入 `verified`。同一游戏/版本下有两份独立反向解释会转为 `disputed`；人工 `manual_locked` 不会被自动流水线覆盖。所有自动含义都携带游戏、版本和安全使用语境，不能把《三角洲行动》中的“刘涛”映射到真人、影视或其它游戏讨论。
+
+登录 profile 位于插件数据目录的 `mcp/social_platform/profiles/`，停止或重载 MCP 会保留，只有 WebUI 显式注销才删除对应平台 profile。二维码 session、Cookie、Token、验证码、设备标识、浏览器 profile 路径和请求签名不会返回 Agent、普通 API、日志、Trace、审计详情或 Data Transfer。详细配置、状态与验收步骤见 [SOCIAL_RESEARCH_MCP.md](SOCIAL_RESEARCH_MCP.md)。
+
 Skill 标准结构、metadata、isolation 与 MCP 示例见 [DIRECTORY_GUIDE.md](DIRECTORY_GUIDE.md)。
 
 ## 数据与备份
@@ -360,11 +371,13 @@ Skill 标准结构、metadata、isolation 与 MCP 示例见 [DIRECTORY_GUIDE.md]
 - `plugin_knowledge/`：已构建的插件知识。
 - `skill_cache/`：远程 Skill cache。
 - `mcp/secrets.json`、`mcp/runtime/`：托管 MCP 的受限 Secret 文件与隔离工作目录。
+- `mcp/social_platform/profiles/`：四个平台互相隔离的浏览器登录 profile；属于秘密目录，不进入 Data Transfer、诊断包或知识库。
+- `mcp/social_platform/cache/`：最长默认 6 小时的标准化搜索/内容包缓存；不保存完整视频或原始整页 HTML。
 - `persona_templates/`、`persona_template_exports/`、`persona_avatar_candidates/`：Persona 构建产物。
 - `data_transfer/`：管理员显式创建的导入导出任务文件。
 - 表情包目录默认是项目级 `data/stickers`，可用 `personification_sticker_path` 修改。
 
-升级或迁移前至少备份整个插件数据目录和表情包目录。不要只备份 JSON；主要运行状态已经进入 SQLite。WebUI 的数据迁移页提供导出、预检和应用流程，破坏性操作应先查看 Operation diagnostic 和审计日志。
+升级或迁移前至少备份整个插件数据目录和表情包目录。不要只备份 JSON；主要运行状态已经进入 SQLite。WebUI 的 Data Transfer v3 会迁移逻辑词典根、sense、短证据和学习事件，但会剔除脱敏作者指纹、URL query，并且绝不打包平台 profile、Cookie、登录 session 或短期原始社交缓存。数据迁移页提供导出、预检和应用流程，破坏性操作应先查看 Operation diagnostic 和审计日志。
 
 ## 运维与排错
 
@@ -375,6 +388,7 @@ Skill 标准结构、metadata、isolation 与 MCP 示例见 [DIRECTORY_GUIDE.md]
 3. WebUI“插件日志”按 level、query、Trace ID 筛选。
 4. 使用“模型测试”单独验证 Provider 和 vision route。
 5. QQ 空间异常先看 Operation ID 和状态，不要先重试外部写入。
+6. 社交平台查梗异常先看“原生 MCP”平台状态：`login_required` 重新登录，`manual_verification_required` 在官方页完成人工验证，`risk_controlled` 停止该平台请求并等待风控解除；其它已登录平台仍可返回 partial 结果。
 
 常见边界：
 
