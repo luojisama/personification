@@ -20,6 +20,7 @@ MAX_PIXELS = 20_000_000
 MIN_EDGE = 96
 MAX_REDIRECTS = 4
 ALLOWED_MIMES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+MAX_PHASH_DUPLICATE_DISTANCE = 4
 Fetcher = Callable[[str], Awaitable[Any]]
 
 
@@ -92,7 +93,8 @@ def perceptual_hash(payload: bytes) -> str:
         raise AvatarCandidateError("Pillow is required to hash avatar images") from exc
     with Image.open(io.BytesIO(payload)) as image:
         gray = image.convert("L").resize((8, 8))
-        values = list(gray.getdata())
+        flattened = getattr(gray, "get_flattened_data", None)
+        values = list(flattened() if callable(flattened) else gray.getdata())
     average = sum(values) / len(values)
     bits = "".join("1" if value >= average else "0" for value in values)
     return f"{int(bits, 2):016x}"
@@ -235,7 +237,9 @@ async def build_avatar_candidates(
             continue
         sha256 = candidate["sha256"]
         phash = candidate["phash"]
-        if sha256 in sha_seen or any(phash_distance(phash, old) <= 5 for old in phashes):
+        if sha256 in sha_seen or any(
+            phash_distance(phash, old) <= MAX_PHASH_DUPLICATE_DISTANCE for old in phashes
+        ):
             failure_counts["duplicate"] += 1
             continue
         sha_seen.add(sha256)
