@@ -94,6 +94,7 @@ class _Manager:
 class _BuiltinManager(_Manager):
     def __init__(self) -> None:
         super().__init__()
+        self.auth_requests = []
         self.current = {
             "installation_id": "builtin_social_platform_research",
             "desired_enabled": True,
@@ -107,7 +108,8 @@ class _BuiltinManager(_Manager):
         if method.endswith("/configure"):
             return {"schema_version": 1, "platforms": {params["platform"]: {"state": "login_required"}}}
         if method.endswith("/auth/start"):
-            return {"session_id": "session-1", "platform": params["platform"], "status": "waiting_scan", "qr_available": True, "expires_at": time.time() + 300}
+            self.auth_requests.append(dict(params))
+            return {"session_id": "session-1", "platform": params["platform"], "status": "waiting_scan", "qr_available": True, "expires_at": time.time() + 900, "remaining_seconds": 900, "login_mode": params.get("mode", "embedded_qr")}
         if method.endswith("/auth/status"):
             return {"session_id": params["session_id"], "platform": "bilibili", "status": "waiting_scan", "qr_available": True, "expires_at": time.time() + 300}
         if method.endswith("/auth/qrcode"):
@@ -275,6 +277,14 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
 
     login = client.post("/api/mcp/builtin/social-research/auth/start", json={"platform": "bilibili"})
     assert login.status_code == 200
+    assert manager.auth_requests[-1]["mode"] == "embedded_qr"
+    manual_login = client.post(
+        "/api/mcp/builtin/social-research/auth/start",
+        json={"platform": "douyin", "mode": "manual_browser"},
+    )
+    assert manual_login.status_code == 200
+    assert manager.auth_requests[-1]["mode"] == "manual_browser"
+    assert "profile" not in manual_login.text.lower()
     qr = client.get(
         "/api/mcp/builtin/social-research/auth/session-1/qrcode",
         params={"platform": "bilibili"},

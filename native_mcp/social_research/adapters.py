@@ -149,7 +149,15 @@ class PlatformAdapter:
             raise ValueError("content URL is outside the selected platform")
         return url
 
-    async def start_auth(self, owner: str) -> dict[str, Any]:
+    async def start_auth(self, owner: str, *, mode: str = "embedded_qr") -> dict[str, Any]:
+        if mode == "manual_browser":
+            return await self.browsers.start_manual_auth(
+                self.spec.name,
+                owner,
+                self.spec.login_url,
+            )
+        if mode != "embedded_qr":
+            raise ValueError("unsupported auth mode")
         return await self.browsers.start_auth(
             self.spec.name,
             owner,

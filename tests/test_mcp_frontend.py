@@ -174,6 +174,10 @@ def test_mcp_events_are_single_registration_and_only_auth_session_polls() -> Non
     assert 'state.view !== "mcp" || state.mcpTab !== "builtin"' in source
     assert 'value.status));' in source
     assert source.count("clearInterval(_mcpAuthTimer)") == 2
+    assert "_mcpAuthPollInFlight" in source
+    assert "_mcpAuthPollInFlight = true" in source
+    assert "_mcpAuthPollInFlight = false" in source
+    assert "}, 3000);" in source
 
 
 def test_builtin_social_research_has_native_controls_and_safe_learning_views() -> None:
@@ -184,7 +188,8 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
         "原生 MCP",
         "扩展 MCP",
         "平台登录与能力",
-        "扫码/官方登录",
+        "获取 WebUI 二维码",
+        "在普通浏览器中登录",
         "注销并删除 profile",
         "检索预览",
         "一次内容默认提取全部黑话",
@@ -199,8 +204,9 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
         "状态历史",
         "机器人验证",
         "不要扫描 Logo 占位图",
-        "重新获取二维码",
-        "官方登录窗口保持开启",
+        "重新获取 WebUI 二维码",
+        "服务端会话剩余",
+        "完成登录后请关闭该窗口",
     ):
         assert visible_copy in source
 
@@ -216,6 +222,9 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
     assert "cover_ref" in source
     assert "/cover/" in source
     assert "qr_revision" in source
+    assert "remaining_seconds" in source
+    assert '"manual_browser"' in source
+    assert "data-mcp-auth-manual" in source
     assert '"risk_controlled","qr_expired"' in source
     assert ".mcp-login-qr { width:240px; height:240px;" in styles
     assert "image-rendering:pixelated" in styles

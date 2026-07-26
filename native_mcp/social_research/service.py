@@ -27,6 +27,7 @@ _SAFE_OPERATION_CODES = {
     "login_page_unavailable",
     "login_required",
     "manual_verification_required",
+    "manual_browser_start_failed",
     "official_window_closed",
     "platform_disabled",
     "playwright_unavailable",
@@ -34,6 +35,8 @@ _SAFE_OPERATION_CODES = {
     "platform_timeout",
     "risk_controlled",
     "qr_expired",
+    "qr_refresh_failed",
+    "system_browser_unavailable",
 }
 
 
@@ -138,13 +141,33 @@ class SocialResearchService:
     async def auth_start(self, params: dict[str, Any]) -> dict[str, Any]:
         platform = str(params.get("platform") or "")
         owner = clean_text(params.get("owner"), 200)
-        if platform not in PLATFORMS or not owner:
-            raise ValueError("platform and owner are required")
-        return await self.adapters[platform].start_auth(owner)
+        mode = str(params.get("mode") or "embedded_qr")
+        if platform not in PLATFORMS or not owner or mode not in {"embedded_qr", "manual_browser"}:
+            raise ValueError("platform, owner and a valid auth mode are required")
+        return await self.adapters[platform].start_auth(owner, mode=mode)
 
     async def auth_status(self, params: dict[str, Any]) -> dict[str, Any]:
         owner = clean_text(params.get("owner"), 200)
         session = self.browsers.get_auth(str(params.get("session_id") or ""), owner)
+        if session.login_mode == "manual_browser" and session.status != "expired":
+            if self.browsers.manual_browser_running(session):
+                return self.browsers.public_auth(session)
+            session.official_window_open = False
+            if session.verification_kind == "official_browser_login":
+                await asyncio.sleep(0.5)
+            try:
+                authenticated = await self.adapters[session.platform].authenticated(interactive=False)
+            except Exception:
+                authenticated = False
+            if authenticated:
+                session.status = "success"
+                session.error_code = ""
+                session.verification_kind = ""
+                await self.browsers.close_platform(session.platform)
+            else:
+                session.status = "manual_verification_required"
+                session.verification_kind = "manual_login_incomplete"
+            return self.browsers.public_auth(session)
         if session.status in {
             "starting", "waiting_scan", "manual_verification_required", "risk_controlled", "qr_expired"
         }:
@@ -162,8 +185,7 @@ class SocialResearchService:
             else:
                 await self.browsers.refresh_auth(session)
         elif session.status == "expired":
-            session.official_window_open = False
-            await self.browsers.close_platform(session.platform)
+            await self.browsers.expire_auth(session)
         return self.browsers.public_auth(session)
 
     async def auth_qrcode(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -173,7 +195,7 @@ class SocialResearchService:
         )
 
     async def auth_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
-        result = self.browsers.cancel_auth(
+        result = await self.browsers.cancel_auth(
             str(params.get("session_id") or ""),
             clean_text(params.get("owner"), 200),
         )

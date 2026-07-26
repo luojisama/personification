@@ -324,6 +324,7 @@ const MCP_STATE_LABELS = {
   rejected:"已拒绝", manual_locked:"人工锁定",
 };
 let _mcpAuthTimer = null;
+let _mcpAuthPollInFlight = false;
 
 function mcpChineseState(value) {
   const raw = String(value || "unknown");
@@ -335,12 +336,22 @@ function builtinMcpInstallation() {
     || (state.mcpBuiltin || {}).installation || null;
 }
 
+function formatBuiltinAuthRemaining(auth) {
+  const seconds = Math.max(0, Number(auth && auth.remaining_seconds || 0));
+  if (!Number.isFinite(seconds)) return "等待服务端计时";
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.floor(seconds % 60);
+  return `${minutes} 分 ${String(rest).padStart(2, "0")} 秒`;
+}
+
 function renderBuiltinAuthHint(auth) {
   if (!auth) return "";
   const kind = String(auth.verification_kind || "");
-  if (kind === "robot_verification") return '<p class="muted">官方页面已要求机器人验证。请只在自动打开的官方窗口中手动完成；MCP 会暂停登录自动动作并继续检查结果，不会绕过验证。</p>';
+  if (kind === "robot_verification") return '<p class="muted">官方页面已要求机器人验证，但本机没有可用的普通系统浏览器兜底。请在当前官方窗口手动完成；MCP 不会绕过验证。</p>';
+  if (kind === "official_browser_login") return '<p class="muted">已切换到不受 Playwright 控制的普通系统浏览器。请在该窗口完成扫码、验证码或机器人验证，登录成功后关闭该窗口；MCP 会在窗口关闭后检测登录态。</p>';
+  if (kind === "manual_login_incomplete") return '<p class="muted">尚未检测到有效登录态。请确认普通浏览器窗口已经完成登录并完全关闭；需要时可重新打开普通浏览器继续。</p>';
   if (kind === "device_confirmation") return '<p class="muted">二维码已扫描，请在对应平台官方 App 中确认登录；确认前请不要关闭官方窗口。</p>';
-  if (kind === "qr_expired" || auth.status === "qr_expired") return '<p class="muted">官方二维码已经过期。请点击“重新获取二维码”，旧二维码不会继续使用。</p>';
+  if (kind === "qr_expired" || auth.status === "qr_expired") return '<p class="muted">官方二维码已经过期，MCP 正在自动刷新官方页面获取新二维码；旧二维码不会继续使用。</p>';
   if (kind === "qr_generation_blocked") return '<p class="muted">官方登录面板已打开，但平台没有生成真实二维码。请在官方窗口完成人工验证，或使用平台提供的验证码登录；不要扫描 Logo 占位图。</p>';
   if (kind === "official_page" && auth.status === "manual_verification_required") return '<p class="muted">官方页面没有提供可转发的二维码，请在自动打开的官方窗口中完成登录。</p>';
   if (auth.error_code === "official_window_closed") return '<p class="muted">官方登录窗口已关闭。请重新获取二维码并保持窗口打开，直到登录状态变为成功。</p>';
@@ -372,14 +383,19 @@ function renderBuiltinPlatformCard(platform, item) {
     ? `<img class="mcp-login-qr" alt="${escapeAttr(label)}登录二维码" src="${API}/mcp/builtin/social-research/auth/${encodeURIComponent(auth.session_id)}/qrcode?platform=${encodeURIComponent(platform)}&revision=${encodeURIComponent(String(auth.qr_revision || 0))}">`
     : "";
   const authHint = renderBuiltinAuthHint(auth);
-  const windowHint = auth && auth.official_window_open ? '<p class="muted">官方登录窗口保持开启；扫码、手机确认或人工验证完成后，本页会自动更新。</p>' : "";
-  const authPanel = auth ? `<div class="mcp-auth-panel">${qr}<div><strong>${escapeHtml(mcpChineseState(auth.status))}</strong><code>${escapeHtml(auth.status || "")}</code><small>会话将在 ${auth.expires_at ? new Date(Number(auth.expires_at) * 1000).toLocaleTimeString() : "5 分钟内"}过期</small>${authHint}${windowHint}${auth.error_code === "interactive_window_unavailable" ? '<p class="muted">当前运行环境无法打开可见浏览器；二维码仍可扫码，但手机确认/滑块需要在有桌面的运行账户下重试。</p>' : ""}</div></div>` : "";
-  const authAction = auth && !["success","cancelled"].includes(auth.status) ? "重新获取二维码" : "扫码/官方登录";
+  const windowHint = auth && auth.official_window_open
+    ? auth.login_mode === "manual_browser"
+      ? '<p class="muted">普通系统浏览器窗口正在运行；完成登录后请关闭该窗口，本页会自动检测。</p>'
+      : '<p class="muted">官方二维码窗口保持开启；扫码、手机确认完成后，本页会自动更新。</p>'
+    : "";
+  const authPanel = auth ? `<div class="mcp-auth-panel">${qr}<div><strong>${escapeHtml(mcpChineseState(auth.status))}</strong><code>${escapeHtml(auth.status || "")}</code><small>服务端会话剩余 ${escapeHtml(formatBuiltinAuthRemaining(auth))}</small>${authHint}${windowHint}${auth.error_code === "interactive_window_unavailable" ? '<p class="muted">当前运行环境无法打开可见浏览器；二维码仍可扫码，但手机确认/滑块需要在有桌面的运行账户下重试。</p>' : ""}</div></div>` : "";
+  const authAction = auth && !["success","cancelled"].includes(auth.status) ? "重新获取 WebUI 二维码" : "获取 WebUI 二维码";
+  const manualAction = auth && auth.login_mode === "manual_browser" ? "重新打开普通浏览器" : "在普通浏览器中登录";
   const danmaku = capabilities.danmaku === false ? "不支持弹幕" : "页面提供时读取弹幕";
   return `<article class="card mcp-platform-card" data-platform="${escapeAttr(platform)}">
     <header><div><span class="eyebrow">${escapeHtml(platform)}</span><h3>${escapeHtml(label)}</h3></div><div><strong class="mcp-native-state ${mcpStatusTone(runtimeState)}">${escapeHtml(mcpChineseState(runtimeState))}</strong><code>${escapeHtml(runtimeState)}</code></div></header>
     <div class="mcp-capability-line"><span>搜索</span><span>封面</span><span>正文</span><span>评论/回复</span><span>${escapeHtml(danmaku)}</span></div>
-    <div class="mcp-platform-actions"><button class="btn ${item.enabled ? "danger" : "primary"}" data-mcp-platform-toggle="${escapeAttr(platform)}" data-enabled="${item.enabled ? "false" : "true"}">${item.enabled ? "关闭平台" : "开启平台"}</button><button class="btn" data-mcp-auth-start="${escapeAttr(platform)}">${escapeHtml(authAction)}</button><button class="btn danger" data-mcp-auth-logout="${escapeAttr(platform)}">注销并删除 profile</button></div>
+    <div class="mcp-platform-actions"><button class="btn ${item.enabled ? "danger" : "primary"}" data-mcp-platform-toggle="${escapeAttr(platform)}" data-enabled="${item.enabled ? "false" : "true"}">${item.enabled ? "关闭平台" : "开启平台"}</button><button class="btn" data-mcp-auth-start="${escapeAttr(platform)}">${escapeHtml(authAction)}</button><button class="btn" data-mcp-auth-manual="${escapeAttr(platform)}">${escapeHtml(manualAction)}</button><button class="btn danger" data-mcp-auth-logout="${escapeAttr(platform)}">注销并删除 profile</button></div>
     ${authPanel}
     <details><summary>过滤、采样与缓存设置</summary><div class="mcp-platform-config">
       <label>质量模式<select data-mcp-config="quality_mode"><option value="balanced" ${config.quality_mode === "balanced" ? "selected" : ""}>平衡</option><option value="strict" ${config.quality_mode === "strict" ? "selected" : ""}>严格</option><option value="ranking_only" ${config.quality_mode === "ranking_only" ? "selected" : ""}>仅排序不排除</option></select></label>
@@ -737,29 +753,35 @@ async function configureBuiltinPlatform(platform, enabled, {useForm=false}={}) {
 function startBuiltinAuthPolling() {
   if (_mcpAuthTimer) clearInterval(_mcpAuthTimer);
   _mcpAuthTimer = setInterval(async () => {
-    if (state.view !== "mcp" || state.mcpTab !== "builtin") return;
+    if (state.view !== "mcp" || state.mcpTab !== "builtin" || _mcpAuthPollInFlight) return;
     const sessions = Object.entries(state.mcpAuth || {}).filter(([, value]) => value && ["starting","waiting_scan","manual_verification_required","risk_controlled","qr_expired"].includes(value.status));
     if (!sessions.length) return;
-    for (const [platform, session] of sessions) {
-      try {
-        const next = await api(`/mcp/builtin/social-research/auth/${encodeURIComponent(session.session_id)}/status?platform=${encodeURIComponent(platform)}`, {cache:"no-store"});
-        state.mcpAuth = {...state.mcpAuth, [platform]:next};
-        if (next.status === "success") await refreshBuiltinMcp();
-      } catch {}
+    _mcpAuthPollInFlight = true;
+    try {
+      for (const [platform, session] of sessions) {
+        try {
+          const next = await api(`/mcp/builtin/social-research/auth/${encodeURIComponent(session.session_id)}/status?platform=${encodeURIComponent(platform)}`, {cache:"no-store"});
+          state.mcpAuth = {...state.mcpAuth, [platform]:next};
+          if (next.status === "success") await refreshBuiltinMcp();
+        } catch {}
+      }
+      render();
+    } finally {
+      _mcpAuthPollInFlight = false;
     }
-    render();
-  }, 1800);
+  }, 3000);
 }
 
-async function startBuiltinAuth(platform) {
+async function startBuiltinAuth(platform, mode="embedded_qr") {
   if (state.mcpBusy) return;
   state.mcpBusy = true; render();
   try {
-    const session = await api("/mcp/builtin/social-research/auth/start", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({platform})});
+    const session = await api("/mcp/builtin/social-research/auth/start", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({platform, mode})});
     state.mcpAuth = {...state.mcpAuth, [platform]:session};
     startBuiltinAuthPolling();
-    const manual = session.status === "manual_verification_required" || session.status === "risk_controlled";
-    alertFlash(manual ? "err" : "ok", manual ? "请在已打开的官方页面完成人工验证" : "请使用官方客户端扫码登录");
+    const browserMode = session.login_mode === "manual_browser";
+    const failed = session.status === "error" || session.status === "risk_controlled";
+    alertFlash(failed ? "err" : "ok", browserMode ? "请在普通系统浏览器完成登录，完成后关闭该窗口" : failed ? "登录会话启动失败，请查看状态说明" : "请使用官方客户端扫描 WebUI 二维码");
   } catch (error) { alertFlash("err", operationDiagnosticFromError(error, "登录启动失败").message || "登录启动失败"); }
   finally { state.mcpBusy = false; render(); }
 }
@@ -849,7 +871,7 @@ async function splitSelectedSense(senseId, revision) {
 if (!window.__personificationMcpPageEvents) {
   window.__personificationMcpPageEvents = true;
   document.addEventListener("click", event => {
-    const element = event.target instanceof Element ? event.target.closest("[data-mcp-operation-clear],[data-mcp-search],[data-mcp-load-more],[data-mcp-detail],[data-mcp-detail-close],[data-mcp-install-plan],[data-mcp-install-confirm],[data-mcp-install-cancel],[data-mcp-installation-toggle],[data-mcp-tool-toggle],[data-mcp-delete],[data-mcp-reload],[data-mcp-tab],[data-mcp-platform-toggle],[data-mcp-platform-save],[data-mcp-auth-start],[data-mcp-auth-logout],[data-mcp-preview-run],[data-mcp-sense-filter],[data-mcp-sense-open],[data-mcp-sense-close],[data-mcp-sense-action],[data-mcp-sense-merge],[data-mcp-sense-split]") : null;
+    const element = event.target instanceof Element ? event.target.closest("[data-mcp-operation-clear],[data-mcp-search],[data-mcp-load-more],[data-mcp-detail],[data-mcp-detail-close],[data-mcp-install-plan],[data-mcp-install-confirm],[data-mcp-install-cancel],[data-mcp-installation-toggle],[data-mcp-tool-toggle],[data-mcp-delete],[data-mcp-reload],[data-mcp-tab],[data-mcp-platform-toggle],[data-mcp-platform-save],[data-mcp-auth-start],[data-mcp-auth-manual],[data-mcp-auth-logout],[data-mcp-preview-run],[data-mcp-sense-filter],[data-mcp-sense-open],[data-mcp-sense-close],[data-mcp-sense-action],[data-mcp-sense-merge],[data-mcp-sense-split]") : null;
     if (!element) return;
     if (element.hasAttribute("data-mcp-operation-clear")) { persistMcpOperationResult(null); render(); return; }
     if (element.hasAttribute("data-mcp-search")) { searchMcpRegistry(); return; }
@@ -867,6 +889,7 @@ if (!window.__personificationMcpPageEvents) {
     if (element.hasAttribute("data-mcp-platform-toggle")) { configureBuiltinPlatform(element.getAttribute("data-mcp-platform-toggle") || "", element.getAttribute("data-enabled") === "true"); return; }
     if (element.hasAttribute("data-mcp-platform-save")) { const platform=element.getAttribute("data-mcp-platform-save") || ""; const current=((state.mcpBuiltin||{}).platforms||{})[platform]||{}; configureBuiltinPlatform(platform, current.enabled === true, {useForm:true}); return; }
     if (element.hasAttribute("data-mcp-auth-start")) { startBuiltinAuth(element.getAttribute("data-mcp-auth-start") || ""); return; }
+    if (element.hasAttribute("data-mcp-auth-manual")) { startBuiltinAuth(element.getAttribute("data-mcp-auth-manual") || "", "manual_browser"); return; }
     if (element.hasAttribute("data-mcp-auth-logout")) { logoutBuiltinPlatform(element.getAttribute("data-mcp-auth-logout") || ""); return; }
     if (element.hasAttribute("data-mcp-preview-run")) { runBuiltinPreview(); return; }
     if (element.hasAttribute("data-mcp-sense-filter")) { state.mcpSenseFilter=element.getAttribute("data-mcp-sense-filter") || ""; render(); return; }

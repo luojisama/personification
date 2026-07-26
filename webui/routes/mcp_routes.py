@@ -563,18 +563,19 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
     ) -> dict[str, Any]:
         _private(response)
         platform = str(body.get("platform") or "")
-        if platform not in PLATFORMS:
+        mode = str(body.get("mode") or "embedded_qr")
+        if platform not in PLATFORMS or mode not in {"embedded_qr", "manual_browser"}:
             raise _safe_builtin_error(ValueError("unsupported platform"), "登录请求无效")
         try:
             result = await manager().builtin_request(
                 "personification/builtin/auth/start",
-                {"platform": platform, "owner": _auth_owner(admin, platform)},
+                {"platform": platform, "owner": _auth_owner(admin, platform), "mode": mode},
             )
         except Exception as exc:
             raise _safe_builtin_error(exc, "登录会话创建失败") from exc
         webui_audit_log.record(
             action="mcp_builtin_auth_start", qq=admin.qq, device_id=admin.device_id,
-            target=platform, ip_hash=get_client_ip(request), detail={"session_id": result.get("session_id", "")},
+            target=platform, ip_hash=get_client_ip(request), detail={"mode": mode},
         )
         return result
 

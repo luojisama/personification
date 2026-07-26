@@ -47,6 +47,10 @@ _QR_EXPIRED_MARKERS = (
     "二维码已过期",
     "扫码已过期",
 )
+_QR_AUTH_TTL_SECONDS = 15 * 60
+_MANUAL_AUTH_TTL_SECONDS = 30 * 60
+_QR_REFRESH_COOLDOWN_SECONDS = 5.0
+_MAX_QR_REFRESHES = 8
 
 
 def _restrict_private_directory(path: Path) -> None:
@@ -90,7 +94,7 @@ class AuthSession:
     platform: str
     owner: str
     created_at: float = field(default_factory=time.time)
-    expires_at: float = field(default_factory=lambda: time.time() + 300)
+    expires_at: float = field(default_factory=lambda: time.time() + _QR_AUTH_TTL_SECONDS)
     status: str = "starting"
     qr_png: bytes = b""
     qr_revision: int = 0
@@ -100,6 +104,11 @@ class AuthSession:
     qr_selectors: tuple[str, ...] = ()
     login_trigger_selectors: tuple[str, ...] = ()
     login_triggered: bool = False
+    login_url: str = ""
+    login_mode: str = "embedded_qr"
+    qr_refresh_count: int = 0
+    last_qr_refresh_at: float = 0.0
+    native_process: Any = field(default=None, repr=False, compare=False)
 
 
 class BrowserPool:
@@ -152,7 +161,7 @@ class BrowserPool:
             elif preferred:
                 channels = ("",) if preferred == "bundled" else (preferred, "")
             else:
-                channels = ("",)
+                channels = ("chrome", "msedge", "") if os.name == "nt" else ("chrome", "")
             context = None
             last_error: BaseException | None = None
             for channel in dict.fromkeys(channels):
@@ -191,6 +200,8 @@ class BrowserPool:
                 await context.close()
 
     async def close(self) -> None:
+        for session in self._auth.values():
+            await self._stop_manual_browser(session)
         for platform in list(self._contexts):
             await self.close_platform(platform)
         if self._playwright is not None:
@@ -205,6 +216,102 @@ class BrowserPool:
     async def authenticated(self, platform: str, cookie_names: set[str], *, headless: bool | None = None) -> bool:
         names = {str(item.get("name") or "") for item in await self.cookies(platform, headless=headless)}
         return bool(names & cookie_names)
+
+    @staticmethod
+    def _system_browser() -> tuple[Path, str] | None:
+        candidates: list[tuple[Path, str]] = []
+        if os.name == "nt":
+            local = Path(os.environ.get("LOCALAPPDATA") or "")
+            program_files = Path(os.environ.get("PROGRAMFILES") or "")
+            program_files_x86 = Path(os.environ.get("PROGRAMFILES(X86)") or "")
+            candidates.extend(
+                (
+                    (local / "Google/Chrome/Application/chrome.exe", "chrome"),
+                    (program_files / "Google/Chrome/Application/chrome.exe", "chrome"),
+                    (program_files_x86 / "Google/Chrome/Application/chrome.exe", "chrome"),
+                    (program_files / "Microsoft/Edge/Application/msedge.exe", "msedge"),
+                    (program_files_x86 / "Microsoft/Edge/Application/msedge.exe", "msedge"),
+                )
+            )
+        else:
+            for name, channel in (("google-chrome", "chrome"), ("chromium", "bundled")):
+                resolved = shutil.which(name)
+                if resolved:
+                    candidates.append((Path(resolved), channel))
+        for executable, channel in candidates:
+            if executable.is_file():
+                return executable.resolve(), channel
+        return None
+
+    @staticmethod
+    def manual_browser_running(session: AuthSession) -> bool:
+        process = session.native_process
+        return process is not None and process.poll() is None
+
+    async def _stop_manual_browser(self, session: AuthSession) -> None:
+        process = session.native_process
+        session.native_process = None
+        if process is None or process.poll() is not None:
+            session.official_window_open = False
+            return
+
+        def stop() -> None:
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+                return
+            except Exception:
+                pass
+            try:
+                process.kill()
+                process.wait(timeout=2)
+            except Exception:
+                pass
+
+        await asyncio.to_thread(stop)
+        session.official_window_open = False
+
+    async def _launch_manual_browser(self, session: AuthSession) -> None:
+        resolved = self._system_browser()
+        if resolved is None:
+            raise RuntimeError("system_browser_unavailable")
+        executable, channel = resolved
+        await self.close_platform(session.platform)
+        profile = self.profile_dir(session.platform)
+        profile.mkdir(parents=True, exist_ok=True)
+        _restrict_private_directory(profile)
+        await self._stop_manual_browser(session)
+        options: dict[str, Any] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            options["creationflags"] = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) or 0)
+        else:
+            options["start_new_session"] = True
+        process = subprocess.Popen(
+            [
+                str(executable),
+                f"--user-data-dir={profile}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-background-mode",
+                "--new-window",
+                session.login_url,
+            ],
+            **options,
+        )
+        session.native_process = process
+        session.login_mode = "manual_browser"
+        session.status = "manual_verification_required"
+        session.verification_kind = "official_browser_login"
+        session.error_code = ""
+        session.official_window_open = True
+        session.qr_png = b""
+        session.expires_at = time.time() + _MANUAL_AUTH_TTL_SECONDS
+        self._browser_channel[session.platform] = channel
 
     @staticmethod
     async def _page_text(page: Any) -> str:
@@ -322,6 +429,40 @@ class BrowserPool:
             else "official_page"
         )
 
+    async def _renew_expired_qr(self, session: AuthSession, page: Any) -> None:
+        now = time.time()
+        if session.qr_refresh_count >= _MAX_QR_REFRESHES:
+            return
+        if now - session.last_qr_refresh_at < _QR_REFRESH_COOLDOWN_SECONDS:
+            return
+        session.qr_refresh_count += 1
+        session.last_qr_refresh_at = now
+        session.status = "starting"
+        session.verification_kind = ""
+        session.error_code = ""
+        session.qr_png = b""
+        session.login_triggered = False
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=20000)
+            await page.wait_for_timeout(500)
+            if await self._click_login_trigger(session, page):
+                await page.wait_for_timeout(500)
+            await self._wait_for_auth_surface(session, page, timeout_seconds=8.0)
+        except Exception:
+            session.status = "qr_expired"
+            session.verification_kind = "qr_expired"
+            session.error_code = "qr_refresh_failed"
+
+    async def _supersede_auth(self, platform: str, owner: str) -> None:
+        for current in self._auth.values():
+            if current.platform == platform and current.owner == owner and current.status not in {
+                "success", "expired", "cancelled", "error"
+            }:
+                await self._stop_manual_browser(current)
+                current.status = "cancelled"
+                current.qr_png = b""
+                current.official_window_open = False
+
     async def refresh_auth(self, session: AuthSession) -> dict[str, Any]:
         if session.status in {"success", "expired", "cancelled", "error"}:
             return self.public_auth(session)
@@ -345,6 +486,13 @@ class BrowserPool:
                 except Exception:
                     pass
             await self._inspect_auth_page(session, pages[-1])
+            if session.status == "qr_expired":
+                await self._renew_expired_qr(session, pages[-1])
+            if session.verification_kind in {"robot_verification", "qr_generation_blocked"} and session.login_mode == "embedded_qr":
+                try:
+                    await self._launch_manual_browser(session)
+                except RuntimeError as exc:
+                    session.error_code = str(exc)
         except Exception:
             session.status = "error"
             session.error_code = "login_page_unavailable"
@@ -360,19 +508,14 @@ class BrowserPool:
         qr_selectors: tuple[str, ...],
         login_trigger_selectors: tuple[str, ...],
     ) -> dict[str, Any]:
-        for current in self._auth.values():
-            if current.platform == platform and current.owner == owner and current.status not in {
-                "success", "expired", "cancelled", "error"
-            }:
-                current.status = "cancelled"
-                current.qr_png = b""
-                current.official_window_open = False
+        await self._supersede_auth(platform, owner)
         session = AuthSession(
             session_id=uuid.uuid4().hex,
             platform=platform,
             owner=owner,
             qr_selectors=tuple(qr_selectors),
             login_trigger_selectors=tuple(login_trigger_selectors),
+            login_url=str(login_url),
         )
         self._auth[session.session_id] = session
         try:
@@ -395,12 +538,39 @@ class BrowserPool:
             await self._wait_for_auth_surface(session, page)
             if not interactive_window:
                 session.error_code = "interactive_window_unavailable"
+            if session.verification_kind in {"robot_verification", "qr_generation_blocked"}:
+                try:
+                    await self._launch_manual_browser(session)
+                except RuntimeError as exc:
+                    session.error_code = str(exc)
         except RuntimeError as exc:
             session.status = "error"
             session.error_code = str(exc)
         except Exception:
             session.status = "error"
             session.error_code = "login_page_unavailable"
+        return self.public_auth(session)
+
+    async def start_manual_auth(self, platform: str, owner: str, login_url: str) -> dict[str, Any]:
+        await self._supersede_auth(platform, owner)
+        session = AuthSession(
+            session_id=uuid.uuid4().hex,
+            platform=platform,
+            owner=owner,
+            login_url=str(login_url),
+            login_mode="manual_browser",
+        )
+        self._auth[session.session_id] = session
+        try:
+            await self._launch_manual_browser(session)
+        except RuntimeError as exc:
+            session.status = "error"
+            session.error_code = str(exc)
+            session.verification_kind = ""
+        except Exception:
+            session.status = "error"
+            session.error_code = "manual_browser_start_failed"
+            session.verification_kind = ""
         return self.public_auth(session)
 
     def get_auth(self, session_id: str, owner: str) -> AuthSession:
@@ -419,11 +589,14 @@ class BrowserPool:
             "status": session.status,
             "created_at": session.created_at,
             "expires_at": session.expires_at,
+            "remaining_seconds": max(0, int(session.expires_at - time.time())),
             "qr_available": bool(session.qr_png),
             "qr_revision": int(session.qr_revision),
             "error_code": session.error_code,
             "verification_kind": session.verification_kind,
             "official_window_open": bool(session.official_window_open),
+            "login_mode": session.login_mode,
+            "qr_refresh_count": int(session.qr_refresh_count),
         }
 
     def auth_qrcode(self, session_id: str, owner: str) -> dict[str, Any]:
@@ -436,14 +609,25 @@ class BrowserPool:
             "data_base64": base64.b64encode(session.qr_png).decode("ascii"),
         }
 
-    def cancel_auth(self, session_id: str, owner: str) -> dict[str, Any]:
+    async def cancel_auth(self, session_id: str, owner: str) -> dict[str, Any]:
         session = self.get_auth(session_id, owner)
+        await self._stop_manual_browser(session)
         session.status = "cancelled"
         session.qr_png = b""
         session.official_window_open = False
         return self.public_auth(session)
 
+    async def expire_auth(self, session: AuthSession) -> None:
+        await self._stop_manual_browser(session)
+        await self.close_platform(session.platform)
+        session.status = "expired"
+        session.qr_png = b""
+        session.official_window_open = False
+
     async def logout(self, platform: str) -> None:
+        for session in self._auth.values():
+            if session.platform == platform:
+                await self._stop_manual_browser(session)
         await self.close_platform(platform)
         profile = self.profile_dir(platform)
         if profile == self.profiles_root or not profile.is_relative_to(self.profiles_root):

@@ -233,6 +233,10 @@ def test_auth_session_is_bound_to_owner_and_public_shape_excludes_owner(tmp_path
     assert "login_trigger_selectors" not in public
     assert public["qr_revision"] == 0
     assert public["verification_kind"] == ""
+    assert public["login_mode"] == "embedded_qr"
+    assert 890 <= public["remaining_seconds"] <= 900
+    assert "native_process" not in public
+    assert "login_url" not in public
     try:
         pool.get_auth("session", "another-device")
     except KeyError:
@@ -275,7 +279,7 @@ def test_browser_pool_switches_between_headless_reads_and_visible_official_login
     assert read_context is reused
     assert login_context is not read_context
     assert launches == [True, False]
-    assert channels == ["bundled", "chrome"]
+    assert channels == ["chrome", "chrome"]
 
 
 def test_auth_page_refresh_distinguishes_qr_robot_verification_and_device_confirmation(tmp_path: Path) -> None:
@@ -369,6 +373,52 @@ def test_auth_refresh_reports_closed_official_window_without_reopening_browser(t
     assert pool._playwright is None
 
 
+def test_robot_verification_switches_embedded_login_to_manual_browser(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    session = browser_mod.AuthSession(
+        session_id="robot-switch",
+        platform="douyin",
+        owner="owner",
+        status="waiting_scan",
+        login_url="https://www.douyin.com/",
+    )
+
+    class FakePage:
+        frames: list[object] = []
+
+        def locator(self, selector):  # noqa: ANN001, ANN201
+            class Locator:
+                first = None
+
+                def __init__(self) -> None:
+                    self.first = self
+
+                async def inner_text(self, **_kwargs) -> str:  # noqa: ANN001
+                    return "请完成下列验证 机器人验证" if selector == "body" else ""
+
+            return Locator()
+
+    page = FakePage()
+    pool._contexts["douyin"] = type("Context", (), {"pages": [page]})()
+    switched: list[str] = []
+
+    async def fake_manual(value):  # noqa: ANN001
+        switched.append(value.platform)
+        value.login_mode = "manual_browser"
+        value.verification_kind = "official_browser_login"
+        value.official_window_open = True
+
+    pool._launch_manual_browser = fake_manual
+
+    result = asyncio.run(pool.refresh_auth(session))
+
+    assert switched == ["douyin"]
+    assert result["login_mode"] == "manual_browser"
+    assert result["verification_kind"] == "official_browser_login"
+    assert result["official_window_open"] is True
+
+
 def test_auth_wait_marks_visible_scan_panel_without_real_qr_as_generation_blocked(tmp_path: Path) -> None:
     browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
     pool = browser_mod.BrowserPool(tmp_path)
@@ -411,6 +461,122 @@ def test_auth_wait_marks_visible_scan_panel_without_real_qr_as_generation_blocke
     assert session.status == "manual_verification_required"
     assert session.verification_kind == "qr_generation_blocked"
     assert session.qr_png == b""
+
+
+def test_expired_qr_is_reloaded_and_replaced_inside_same_management_session(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+
+    class FakeLocator:
+        first = None
+
+        def __init__(self, page, selector: str) -> None:  # noqa: ANN001
+            self.page = page
+            self.selector = selector
+            self.first = self
+
+        async def count(self) -> int:
+            return int(self.selector == "fresh-qr" and self.page.reloaded)
+
+        async def is_visible(self) -> bool:
+            return self.selector == "fresh-qr" and self.page.reloaded
+
+        async def bounding_box(self) -> dict[str, int]:
+            return {"width": 180, "height": 180}
+
+        async def screenshot(self, **_kwargs) -> bytes:  # noqa: ANN001
+            return b"fresh-qr-png"
+
+        async def inner_text(self, **_kwargs) -> str:  # noqa: ANN001
+            if self.selector != "body":
+                return ""
+            return "扫码登录" if self.page.reloaded else "二维码已过期"
+
+    class FakePage:
+        frames: list[object] = []
+
+        def __init__(self) -> None:
+            self.reloaded = False
+            self.reloads = 0
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(self, selector)
+
+        async def reload(self, **_kwargs) -> None:  # noqa: ANN001
+            self.reloaded = True
+            self.reloads += 1
+
+        async def wait_for_timeout(self, _milliseconds) -> None:  # noqa: ANN001
+            return None
+
+    session = browser_mod.AuthSession(
+        session_id="renew",
+        platform="bilibili",
+        owner="owner",
+        status="qr_expired",
+        qr_selectors=("fresh-qr",),
+        login_url="https://passport.bilibili.com/login",
+    )
+    page = FakePage()
+
+    asyncio.run(pool._renew_expired_qr(session, page))
+
+    assert page.reloads == 1
+    assert session.status == "waiting_scan"
+    assert session.qr_png == b"fresh-qr-png"
+    assert session.qr_revision == 1
+    assert session.qr_refresh_count == 1
+
+
+def test_manual_browser_login_uses_fixed_system_browser_and_private_profile(tmp_path: Path, monkeypatch) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    executable = tmp_path / "chrome.exe"
+    executable.write_bytes(b"")
+    launched: list[list[str]] = []
+
+    class FakeProcess:
+        returncode = None
+
+        def poll(self):  # noqa: ANN201
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = -1
+
+        def wait(self, **_kwargs):  # noqa: ANN201, ANN003
+            return self.returncode
+
+    def fake_popen(args, **_kwargs):  # noqa: ANN001, ANN201
+        launched.append([str(value) for value in args])
+        return FakeProcess()
+
+    async def run() -> tuple[dict, dict]:
+        pool = browser_mod.BrowserPool(tmp_path / "data")
+        monkeypatch.setattr(browser_mod.BrowserPool, "_system_browser", staticmethod(lambda: (executable, "chrome")))
+        monkeypatch.setattr(browser_mod, "_restrict_private_directory", lambda _path: None)
+        monkeypatch.setattr(browser_mod.subprocess, "Popen", fake_popen)
+        started = await pool.start_manual_auth(
+            "douyin", "admin:device:douyin", "https://www.douyin.com/"
+        )
+        cancelled = await pool.cancel_auth(started["session_id"], "admin:device:douyin")
+        await pool.close()
+        return started, cancelled
+
+    started, cancelled = asyncio.run(run())
+    assert started["login_mode"] == "manual_browser"
+    assert started["verification_kind"] == "official_browser_login"
+    assert started["official_window_open"] is True
+    assert 1790 <= started["remaining_seconds"] <= 1800
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["official_window_open"] is False
+    assert launched and launched[0][0] == str(executable)
+    assert launched[0][-1] == "https://www.douyin.com/"
+    assert "--disable-background-mode" in launched[0]
+    assert any(value.startswith("--user-data-dir=") for value in launched[0])
+    assert "owner" not in started and "native_process" not in started and "login_url" not in started
 
 
 def test_auth_qr_falls_back_to_headless_with_explicit_interactive_warning(tmp_path: Path) -> None:
@@ -560,3 +726,69 @@ def test_auth_status_refreshes_official_page_when_cookie_is_not_ready(tmp_path: 
         "platform": "douyin",
         "verification_kind": "robot_verification",
     }
+
+
+def test_manual_browser_status_waits_for_window_close_before_cookie_detection(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+    session = browser_mod.AuthSession(
+        session_id="manual",
+        platform="douyin",
+        owner="admin:device:douyin",
+        status="manual_verification_required",
+        verification_kind="official_browser_login",
+        login_mode="manual_browser",
+        official_window_open=True,
+    )
+
+    class FakeBrowsers:
+        running = True
+        closed: list[str] = []
+
+        def get_auth(self, _session_id, _owner):  # noqa: ANN001
+            return session
+
+        def manual_browser_running(self, _session) -> bool:  # noqa: ANN001
+            return self.running
+
+        def public_auth(self, value):  # noqa: ANN001
+            return {
+                "status": value.status,
+                "platform": value.platform,
+                "verification_kind": value.verification_kind,
+                "official_window_open": value.official_window_open,
+            }
+
+        async def close_platform(self, platform):  # noqa: ANN001
+            self.closed.append(platform)
+
+    class FakeAdapter:
+        calls = 0
+
+        async def authenticated(self, *, interactive=None):  # noqa: ANN001
+            self.calls += 1
+            assert interactive is False
+            return True
+
+    async def run() -> tuple[dict, dict, int, list[str]]:
+        service = service_mod.SocialResearchService(tmp_path)
+        browsers = FakeBrowsers()
+        adapter = FakeAdapter()
+        service.browsers = browsers
+        service.adapters["douyin"] = adapter
+        waiting = await service.auth_status(
+            {"session_id": "manual", "owner": "admin:device:douyin"}
+        )
+        browsers.running = False
+        completed = await service.auth_status(
+            {"session_id": "manual", "owner": "admin:device:douyin"}
+        )
+        return waiting, completed, adapter.calls, browsers.closed
+
+    waiting, completed, calls, closed = asyncio.run(run())
+    assert waiting["verification_kind"] == "official_browser_login"
+    assert waiting["official_window_open"] is True
+    assert completed["status"] == "success"
+    assert completed["official_window_open"] is False
+    assert calls == 1
+    assert closed == ["douyin"]
