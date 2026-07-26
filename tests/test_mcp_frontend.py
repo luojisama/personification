@@ -178,6 +178,7 @@ def test_mcp_events_are_single_registration_and_only_auth_session_polls() -> Non
 
 def test_builtin_social_research_has_native_controls_and_safe_learning_views() -> None:
     source = _source("app-mcp.js")
+    styles = _source("style.css")
 
     for visible_copy in (
         "原生 MCP",
@@ -196,6 +197,10 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
         "已拒绝",
         "独立内容",
         "状态历史",
+        "机器人验证",
+        "不要扫描 Logo 占位图",
+        "重新获取二维码",
+        "官方登录窗口保持开启",
     ):
         assert visible_copy in source
 
@@ -210,6 +215,10 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
 
     assert "cover_ref" in source
     assert "/cover/" in source
+    assert "qr_revision" in source
+    assert '"risk_controlled","qr_expired"' in source
+    assert ".mcp-login-qr { width:240px; height:240px;" in styles
+    assert "image-rendering:pixelated" in styles
     for forbidden in ("cookie", "localStorage.setItem", "profile_path", "device_id", "raw_html"):
         assert forbidden not in source.lower()
 

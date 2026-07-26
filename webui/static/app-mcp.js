@@ -319,7 +319,7 @@ const MCP_PLATFORM_LABELS = {bilibili:"B站", douyin:"抖音", tieba:"贴吧", x
 const MCP_STATE_LABELS = {
   disabled:"已关闭", service_disabled:"服务未启动", ready:"可用", login_required:"需要登录",
   manual_verification_required:"需要人工验证", risk_controlled:"平台风控暂停", unavailable:"不可用",
-  waiting_scan:"等待扫码", success:"登录成功", expired:"会话已过期", cancelled:"已取消", error:"登录失败",
+  waiting_scan:"等待扫码", qr_expired:"二维码已过期", success:"登录成功", expired:"会话已过期", cancelled:"已取消", error:"登录失败",
   verified:"自动收录", understand_only:"只理解", observed:"待确认", disputed:"冲突", stale:"已过期",
   rejected:"已拒绝", manual_locked:"人工锁定",
 };
@@ -333,6 +333,20 @@ function mcpChineseState(value) {
 function builtinMcpInstallation() {
   return (state.mcpInstallations || []).find(item => item.installation_id === MCP_BUILTIN_ID)
     || (state.mcpBuiltin || {}).installation || null;
+}
+
+function renderBuiltinAuthHint(auth) {
+  if (!auth) return "";
+  const kind = String(auth.verification_kind || "");
+  if (kind === "robot_verification") return '<p class="muted">官方页面已要求机器人验证。请只在自动打开的官方窗口中手动完成；MCP 会暂停登录自动动作并继续检查结果，不会绕过验证。</p>';
+  if (kind === "device_confirmation") return '<p class="muted">二维码已扫描，请在对应平台官方 App 中确认登录；确认前请不要关闭官方窗口。</p>';
+  if (kind === "qr_expired" || auth.status === "qr_expired") return '<p class="muted">官方二维码已经过期。请点击“重新获取二维码”，旧二维码不会继续使用。</p>';
+  if (kind === "qr_generation_blocked") return '<p class="muted">官方登录面板已打开，但平台没有生成真实二维码。请在官方窗口完成人工验证，或使用平台提供的验证码登录；不要扫描 Logo 占位图。</p>';
+  if (kind === "official_page" && auth.status === "manual_verification_required") return '<p class="muted">官方页面没有提供可转发的二维码，请在自动打开的官方窗口中完成登录。</p>';
+  if (auth.error_code === "official_window_closed") return '<p class="muted">官方登录窗口已关闭。请重新获取二维码并保持窗口打开，直到登录状态变为成功。</p>';
+  if (auth.status === "manual_verification_required") return '<p class="muted">请在自动打开的官方页面窗口完成人工验证；系统不会绕过滑块或验证码。</p>';
+  if (auth.status === "starting" && !auth.qr_available) return '<p class="muted">正在等待官方页面生成二维码，页面延迟渲染时会自动刷新此状态。</p>';
+  return "";
 }
 
 function renderBuiltinServiceCard() {
@@ -355,14 +369,17 @@ function renderBuiltinPlatformCard(platform, item) {
   const runtimeState = item.runtime_state || item.state || "service_disabled";
   const capabilities = item.capabilities || {};
   const qr = auth && auth.session_id && auth.qr_available
-    ? `<img class="mcp-login-qr" alt="${escapeAttr(label)}登录二维码" src="${API}/mcp/builtin/social-research/auth/${encodeURIComponent(auth.session_id)}/qrcode?platform=${encodeURIComponent(platform)}">`
+    ? `<img class="mcp-login-qr" alt="${escapeAttr(label)}登录二维码" src="${API}/mcp/builtin/social-research/auth/${encodeURIComponent(auth.session_id)}/qrcode?platform=${encodeURIComponent(platform)}&revision=${encodeURIComponent(String(auth.qr_revision || 0))}">`
     : "";
-  const authPanel = auth ? `<div class="mcp-auth-panel">${qr}<div><strong>${escapeHtml(mcpChineseState(auth.status))}</strong><code>${escapeHtml(auth.status || "")}</code><small>会话将在 ${auth.expires_at ? new Date(Number(auth.expires_at) * 1000).toLocaleTimeString() : "5 分钟内"}过期</small>${auth.status === "manual_verification_required" ? '<p class="muted">请在自动打开的官方页面窗口完成人机验证；系统不会绕过滑块或验证码。</p>' : ""}${auth.error_code === "interactive_window_unavailable" ? '<p class="muted">当前运行环境无法打开可见浏览器；二维码仍可扫码，但设备确认/滑块需要在有桌面的运行账户下重试。</p>' : ""}</div></div>` : "";
+  const authHint = renderBuiltinAuthHint(auth);
+  const windowHint = auth && auth.official_window_open ? '<p class="muted">官方登录窗口保持开启；扫码、手机确认或人工验证完成后，本页会自动更新。</p>' : "";
+  const authPanel = auth ? `<div class="mcp-auth-panel">${qr}<div><strong>${escapeHtml(mcpChineseState(auth.status))}</strong><code>${escapeHtml(auth.status || "")}</code><small>会话将在 ${auth.expires_at ? new Date(Number(auth.expires_at) * 1000).toLocaleTimeString() : "5 分钟内"}过期</small>${authHint}${windowHint}${auth.error_code === "interactive_window_unavailable" ? '<p class="muted">当前运行环境无法打开可见浏览器；二维码仍可扫码，但手机确认/滑块需要在有桌面的运行账户下重试。</p>' : ""}</div></div>` : "";
+  const authAction = auth && !["success","cancelled"].includes(auth.status) ? "重新获取二维码" : "扫码/官方登录";
   const danmaku = capabilities.danmaku === false ? "不支持弹幕" : "页面提供时读取弹幕";
   return `<article class="card mcp-platform-card" data-platform="${escapeAttr(platform)}">
     <header><div><span class="eyebrow">${escapeHtml(platform)}</span><h3>${escapeHtml(label)}</h3></div><div><strong class="mcp-native-state ${mcpStatusTone(runtimeState)}">${escapeHtml(mcpChineseState(runtimeState))}</strong><code>${escapeHtml(runtimeState)}</code></div></header>
     <div class="mcp-capability-line"><span>搜索</span><span>封面</span><span>正文</span><span>评论/回复</span><span>${escapeHtml(danmaku)}</span></div>
-    <div class="mcp-platform-actions"><button class="btn ${item.enabled ? "danger" : "primary"}" data-mcp-platform-toggle="${escapeAttr(platform)}" data-enabled="${item.enabled ? "false" : "true"}">${item.enabled ? "关闭平台" : "开启平台"}</button><button class="btn" data-mcp-auth-start="${escapeAttr(platform)}">扫码/官方登录</button><button class="btn danger" data-mcp-auth-logout="${escapeAttr(platform)}">注销并删除 profile</button></div>
+    <div class="mcp-platform-actions"><button class="btn ${item.enabled ? "danger" : "primary"}" data-mcp-platform-toggle="${escapeAttr(platform)}" data-enabled="${item.enabled ? "false" : "true"}">${item.enabled ? "关闭平台" : "开启平台"}</button><button class="btn" data-mcp-auth-start="${escapeAttr(platform)}">${escapeHtml(authAction)}</button><button class="btn danger" data-mcp-auth-logout="${escapeAttr(platform)}">注销并删除 profile</button></div>
     ${authPanel}
     <details><summary>过滤、采样与缓存设置</summary><div class="mcp-platform-config">
       <label>质量模式<select data-mcp-config="quality_mode"><option value="balanced" ${config.quality_mode === "balanced" ? "selected" : ""}>平衡</option><option value="strict" ${config.quality_mode === "strict" ? "selected" : ""}>严格</option><option value="ranking_only" ${config.quality_mode === "ranking_only" ? "selected" : ""}>仅排序不排除</option></select></label>
@@ -721,7 +738,7 @@ function startBuiltinAuthPolling() {
   if (_mcpAuthTimer) clearInterval(_mcpAuthTimer);
   _mcpAuthTimer = setInterval(async () => {
     if (state.view !== "mcp" || state.mcpTab !== "builtin") return;
-    const sessions = Object.entries(state.mcpAuth || {}).filter(([, value]) => value && ["starting","waiting_scan","manual_verification_required"].includes(value.status));
+    const sessions = Object.entries(state.mcpAuth || {}).filter(([, value]) => value && ["starting","waiting_scan","manual_verification_required","risk_controlled","qr_expired"].includes(value.status));
     if (!sessions.length) return;
     for (const [platform, session] of sessions) {
       try {
@@ -741,7 +758,8 @@ async function startBuiltinAuth(platform) {
     const session = await api("/mcp/builtin/social-research/auth/start", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({platform})});
     state.mcpAuth = {...state.mcpAuth, [platform]:session};
     startBuiltinAuthPolling();
-    alertFlash(session.status === "manual_verification_required" ? "err" : "ok", session.status === "manual_verification_required" ? "请在官方页面完成人工验证" : "请使用官方客户端扫码登录");
+    const manual = session.status === "manual_verification_required" || session.status === "risk_controlled";
+    alertFlash(manual ? "err" : "ok", manual ? "请在已打开的官方页面完成人工验证" : "请使用官方客户端扫码登录");
   } catch (error) { alertFlash("err", operationDiagnosticFromError(error, "登录启动失败").message || "登录启动失败"); }
   finally { state.mcpBusy = false; render(); }
 }

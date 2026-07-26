@@ -27,11 +27,13 @@ _SAFE_OPERATION_CODES = {
     "login_page_unavailable",
     "login_required",
     "manual_verification_required",
+    "official_window_closed",
     "platform_disabled",
     "playwright_unavailable",
     "platform_request_failed",
     "platform_timeout",
     "risk_controlled",
+    "qr_expired",
 }
 
 
@@ -143,12 +145,24 @@ class SocialResearchService:
     async def auth_status(self, params: dict[str, Any]) -> dict[str, Any]:
         owner = clean_text(params.get("owner"), 200)
         session = self.browsers.get_auth(str(params.get("session_id") or ""), owner)
-        if session.status in {"waiting_scan", "manual_verification_required"}:
-            if await self.adapters[session.platform].authenticated(interactive=True):
+        if session.status in {
+            "starting", "waiting_scan", "manual_verification_required", "risk_controlled", "qr_expired"
+        }:
+            try:
+                authenticated = await self.adapters[session.platform].authenticated(interactive=True)
+            except Exception:
+                authenticated = False
+            if authenticated:
                 session.status = "success"
                 session.qr_png = b""
+                session.error_code = ""
+                session.verification_kind = ""
+                session.official_window_open = False
                 await self.browsers.close_platform(session.platform)
+            else:
+                await self.browsers.refresh_auth(session)
         elif session.status == "expired":
+            session.official_window_open = False
             await self.browsers.close_platform(session.platform)
         return self.browsers.public_auth(session)
 

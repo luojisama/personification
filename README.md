@@ -350,9 +350,9 @@ MCP Secret 只允许通过环境变量传给子进程，独立保存在 `personi
 
 ### 原生社交平台查梗 MCP
 
-项目内置不可删除的 `builtin_social_platform_research`，首版覆盖 B站、抖音、贴吧和小黑盒。它默认关闭，并同时受 MCP 服务开关、平台开关和 Agent 工具授权三层约束；只有目标平台已开启、登录态有效且能力健康时，工具调用才会执行。WebUI 的“MCP → 原生 MCP”页可扫码或打开平台官方兜底页登录、单独启停平台、调整来源质量阈值，并预览封面、标题、正文、评论、回复和支持平台的弹幕。
+项目内置不可删除的 `builtin_social_platform_research`，首版覆盖 B站、抖音、贴吧和小黑盒。它默认关闭，并同时受 MCP 服务开关、平台开关和 Agent 工具授权三层约束；只有目标平台已开启、登录态有效且能力健康时，工具调用才会执行。WebUI 的“MCP → 原生 MCP”页可扫码或打开平台官方兜底页登录、单独启停平台、调整来源质量阈值，并预览封面、标题、正文、评论、回复和支持平台的弹幕。登录二维码支持延迟渲染和 revision 刷新；B站当前官方 `Scan me!` 图片、小黑盒 QR canvas、抖音官方二维码均有专用定位。
 
-向 Agent 公开的能力只有 `social_content_search`、`social_content_read` 和 `research_game_slang`。全部为只读工具，不包含任意登录态 HTTP、任意 JavaScript、Cookie 导出、点赞、投币、收藏、关注、评论、发布、删除或私信。平台访问使用互相隔离的 Playwright persistent context，优先读取官方页面及页面自身产生的 XHR/Fetch；验证码、滑块和风控必须由管理员在官方页面处理，不实现绕过。
+向 Agent 公开的能力只有 `social_content_search`、`social_content_read` 和 `research_game_slang`。全部为只读工具，不包含任意登录态 HTTP、任意 JavaScript、Cookie 导出、点赞、投币、收藏、关注、评论、发布、删除或私信。平台访问使用互相隔离的 Playwright persistent context，登录优先调用本机正式 Chrome/Edge 且不伪造浏览器身份，内容读取优先解析官方页面及页面自身产生的 XHR/Fetch；验证码、滑块、机器人验证和风控必须由管理员在官方页面处理，不实现绕过。
 
 宿主侧会从一份内容中提取最多 20 个独立黑话 claim，并按内容簇而不是评论条数计算独立来源。默认两个独立内容进入 `understand_only`；三个独立内容且至少两个平台一致时进入 `verified`。同一游戏/版本下有两份独立反向解释会转为 `disputed`；人工 `manual_locked` 不会被自动流水线覆盖。所有自动含义都携带游戏、版本和安全使用语境，不能把《三角洲行动》中的“刘涛”映射到真人、影视或其它游戏讨论。
 
@@ -388,7 +388,7 @@ Skill 标准结构、metadata、isolation 与 MCP 示例见 [DIRECTORY_GUIDE.md]
 3. WebUI“插件日志”按 level、query、Trace ID 筛选。
 4. 使用“模型测试”单独验证 Provider 和 vision route。
 5. QQ 空间异常先看 Operation ID 和状态，不要先重试外部写入。
-6. 社交平台查梗异常先看“原生 MCP”平台状态：`login_required` 重新登录，`manual_verification_required` 在官方页完成人工验证，`risk_controlled` 停止该平台请求并等待风控解除；其它已登录平台仍可返回 partial 结果。
+6. 社交平台查梗异常先看“原生 MCP”平台状态：`login_required` 重新登录；`manual_verification_required` 按 `verification_kind` 在官方窗口处理机器人验证或在官方 App 确认；`qr_expired` 重新获取二维码；`official_window_closed` 保持新官方窗口开启；`risk_controlled` 停止该平台请求并等待风控解除。其它已登录平台仍可返回 partial 结果。
 
 常见边界：
 

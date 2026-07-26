@@ -198,6 +198,18 @@ def test_xiaoheihe_uses_current_web_search_route() -> None:
     assert adapters_mod.SPECS["xiaoheihe"].search_url.startswith("https://www.xiaoheihe.cn/app/search/list?q=")
 
 
+def test_platform_login_selectors_cover_current_official_qr_surfaces() -> None:
+    adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+
+    assert 'img[alt="Scan me!"]' in adapters_mod.SPECS["bilibili"].qr_selectors
+    assert '[title*="scan-web"] img' in adapters_mod.SPECS["bilibili"].qr_selectors
+    assert 'img[alt="二维码"]' in adapters_mod.SPECS["douyin"].qr_selectors
+    assert 'div:text-is("登录")' in adapters_mod.SPECS["douyin"].login_trigger_selectors
+    assert adapters_mod.SPECS["douyin"].auth_cookie_names == frozenset({"sessionid", "sessionid_ss"})
+    assert "passport_csrf_token" not in adapters_mod.SPECS["douyin"].auth_cookie_names
+    assert 'canvas.website-login__qr-canvas' in adapters_mod.SPECS["xiaoheihe"].qr_selectors
+
+
 def test_cover_registry_returns_opaque_reference_and_enforces_platform_hosts(tmp_path: Path) -> None:
     covers_mod = load_personification_module("plugin.personification.native_mcp.social_research.covers")
     registry = covers_mod.CoverRegistry(tmp_path)
@@ -215,7 +227,12 @@ def test_auth_session_is_bound_to_owner_and_public_shape_excludes_owner(tmp_path
     pool = browser_mod.BrowserPool(tmp_path)
     session = browser_mod.AuthSession(session_id="session", platform="bilibili", owner="admin:device:bilibili")
     pool._auth[session.session_id] = session
-    assert "owner" not in pool.public_auth(session)
+    public = pool.public_auth(session)
+    assert "owner" not in public
+    assert "qr_selectors" not in public
+    assert "login_trigger_selectors" not in public
+    assert public["qr_revision"] == 0
+    assert public["verification_kind"] == ""
     try:
         pool.get_auth("session", "another-device")
     except KeyError:
@@ -227,6 +244,7 @@ def test_auth_session_is_bound_to_owner_and_public_shape_excludes_owner(tmp_path
 def test_browser_pool_switches_between_headless_reads_and_visible_official_login(tmp_path: Path) -> None:
     browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
     launches: list[bool] = []
+    channels: list[str] = []
 
     class FakeContext:
         pages = []
@@ -240,6 +258,7 @@ def test_browser_pool_switches_between_headless_reads_and_visible_official_login
     class FakeChromium:
         async def launch_persistent_context(self, _profile, *, headless, **_kwargs):  # noqa: ANN001
             launches.append(bool(headless))
+            channels.append(str(_kwargs.get("channel") or "bundled"))
             return FakeContext()
 
     async def run() -> tuple[object, object, object]:
@@ -256,6 +275,142 @@ def test_browser_pool_switches_between_headless_reads_and_visible_official_login
     assert read_context is reused
     assert login_context is not read_context
     assert launches == [True, False]
+    assert channels == ["bundled", "chrome"]
+
+
+def test_auth_page_refresh_distinguishes_qr_robot_verification_and_device_confirmation(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+
+    class FakeLocator:
+        first = None
+
+        def __init__(self, page, selector: str) -> None:  # noqa: ANN001
+            self.page = page
+            self.selector = selector
+            self.first = self
+
+        async def count(self) -> int:
+            return int(self.selector == "current-qr")
+
+        async def is_visible(self) -> bool:
+            return self.selector == "current-qr"
+
+        async def bounding_box(self) -> dict[str, int]:
+            return {"width": 156, "height": 156}
+
+        async def screenshot(self, **_kwargs) -> bytes:  # noqa: ANN001
+            return self.page.qr
+
+        async def inner_text(self, **_kwargs) -> str:  # noqa: ANN001
+            return self.page.text if self.selector == "body" else ""
+
+    class FakePage:
+        frames: list[object] = []
+
+        def __init__(self, text: str, qr: bytes = b"qr-one") -> None:
+            self.text = text
+            self.qr = qr
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(self, selector)
+
+    async def run() -> tuple[object, object, object]:
+        qr_session = browser_mod.AuthSession(
+            session_id="qr", platform="bilibili", owner="owner", qr_selectors=("current-qr",)
+        )
+        qr_page = FakePage("扫码登录，也可以切换验证码登录并获取验证码")
+        await pool._inspect_auth_page(qr_session, qr_page)
+        await pool._inspect_auth_page(qr_session, qr_page)
+        assert qr_session.qr_revision == 1
+        qr_page.qr = b"qr-two"
+        await pool._inspect_auth_page(qr_session, qr_page)
+
+        robot_session = browser_mod.AuthSession(
+            session_id="robot", platform="douyin", owner="owner", qr_selectors=("current-qr",)
+        )
+        await pool._inspect_auth_page(robot_session, FakePage("请完成下列验证 机器人验证"))
+
+        device_session = browser_mod.AuthSession(
+            session_id="device", platform="xiaoheihe", owner="owner", qr_selectors=("current-qr",)
+        )
+        await pool._inspect_auth_page(device_session, FakePage("扫码成功，请在手机上确认"))
+        return qr_session, robot_session, device_session
+
+    qr_session, robot_session, device_session = asyncio.run(run())
+    assert qr_session.status == "waiting_scan"
+    assert qr_session.qr_revision == 2
+    assert robot_session.status == "manual_verification_required"
+    assert robot_session.verification_kind == "robot_verification"
+    assert robot_session.qr_png == b""
+    assert device_session.status == "manual_verification_required"
+    assert device_session.verification_kind == "device_confirmation"
+    assert device_session.qr_png == b""
+
+
+def test_auth_refresh_reports_closed_official_window_without_reopening_browser(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    session = browser_mod.AuthSession(
+        session_id="closed",
+        platform="douyin",
+        owner="owner",
+        status="waiting_scan",
+        official_window_open=True,
+        qr_png=b"old-qr",
+    )
+
+    result = asyncio.run(pool.refresh_auth(session))
+
+    assert result["status"] == "error"
+    assert result["error_code"] == "official_window_closed"
+    assert result["official_window_open"] is False
+    assert result["qr_available"] is False
+    assert pool._playwright is None
+
+
+def test_auth_wait_marks_visible_scan_panel_without_real_qr_as_generation_blocked(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+
+    class FakeLocator:
+        first = None
+
+        def __init__(self, selector: str) -> None:
+            self.selector = selector
+            self.first = self
+
+        async def count(self) -> int:
+            return 0
+
+        async def is_visible(self) -> bool:
+            return False
+
+        async def inner_text(self, **_kwargs) -> str:  # noqa: ANN001
+            return "扫码登录 验证码登录" if self.selector == "body" else ""
+
+    class FakePage:
+        frames: list[object] = []
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector)
+
+        async def wait_for_timeout(self, _milliseconds) -> None:  # noqa: ANN001
+            await asyncio.sleep(0.01)
+
+    session = browser_mod.AuthSession(
+        session_id="blocked",
+        platform="douyin",
+        owner="owner",
+        qr_selectors=("missing-qr",),
+        login_triggered=True,
+    )
+
+    asyncio.run(pool._wait_for_auth_surface(session, FakePage(), timeout_seconds=0.05))
+
+    assert session.status == "manual_verification_required"
+    assert session.verification_kind == "qr_generation_blocked"
+    assert session.qr_png == b""
 
 
 def test_auth_qr_falls_back_to_headless_with_explicit_interactive_warning(tmp_path: Path) -> None:
@@ -352,3 +507,56 @@ def test_auth_status_uses_visible_profile_and_closes_window_after_success(tmp_pa
     result, closed = asyncio.run(run())
     assert result["status"] == "success"
     assert closed == ["bilibili"]
+
+
+def test_auth_status_refreshes_official_page_when_cookie_is_not_ready(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+    session = browser_mod.AuthSession(
+        session_id="session",
+        platform="douyin",
+        owner="admin:device:douyin",
+        status="waiting_scan",
+    )
+
+    class FakeBrowsers:
+        refreshed = False
+
+        def get_auth(self, _session_id, _owner):  # noqa: ANN001
+            return session
+
+        async def refresh_auth(self, value):  # noqa: ANN001
+            self.refreshed = True
+            value.status = "manual_verification_required"
+            value.verification_kind = "robot_verification"
+            return self.public_auth(value)
+
+        def public_auth(self, value):  # noqa: ANN001
+            return {
+                "status": value.status,
+                "platform": value.platform,
+                "verification_kind": value.verification_kind,
+            }
+
+    class FakeAdapter:
+        async def authenticated(self, *, interactive=None):  # noqa: ANN001
+            assert interactive is True
+            return False
+
+    async def run() -> tuple[dict, bool]:
+        service = service_mod.SocialResearchService(tmp_path)
+        browsers = FakeBrowsers()
+        service.browsers = browsers
+        service.adapters["douyin"] = FakeAdapter()
+        result = await service.auth_status(
+            {"session_id": "session", "owner": "admin:device:douyin"}
+        )
+        return result, browsers.refreshed
+
+    result, refreshed = asyncio.run(run())
+    assert refreshed is True
+    assert result == {
+        "status": "manual_verification_required",
+        "platform": "douyin",
+        "verification_kind": "robot_verification",
+    }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import os
 import shutil
 import stat
@@ -13,6 +14,39 @@ from pathlib import Path
 from typing import Any
 
 from .models import PLATFORMS
+
+
+_ROBOT_VERIFICATION_MARKERS = (
+    "机器人验证",
+    "人机验证",
+    "请完成下列验证",
+    "请完成验证",
+    "安全验证",
+    "拖动滑块",
+    "拖动完成拼图",
+    "captcha challenge",
+)
+_DEVICE_CONFIRMATION_MARKERS = (
+    "请在手机上确认",
+    "请在客户端确认",
+    "请在app确认",
+    "扫描成功",
+    "扫码成功",
+    "确认登录",
+)
+_RISK_CONTROL_MARKERS = (
+    "访问过于频繁",
+    "操作过于频繁",
+    "请求过于频繁",
+    "账号存在风险",
+    "risk control",
+    "risk_control",
+)
+_QR_EXPIRED_MARKERS = (
+    "二维码已失效",
+    "二维码已过期",
+    "扫码已过期",
+)
 
 
 def _restrict_private_directory(path: Path) -> None:
@@ -59,7 +93,13 @@ class AuthSession:
     expires_at: float = field(default_factory=lambda: time.time() + 300)
     status: str = "starting"
     qr_png: bytes = b""
+    qr_revision: int = 0
     error_code: str = ""
+    verification_kind: str = ""
+    official_window_open: bool = False
+    qr_selectors: tuple[str, ...] = ()
+    login_trigger_selectors: tuple[str, ...] = ()
+    login_triggered: bool = False
 
 
 class BrowserPool:
@@ -71,6 +111,7 @@ class BrowserPool:
         self._playwright: Any = None
         self._contexts: dict[str, Any] = {}
         self._context_headless: dict[str, bool] = {}
+        self._browser_channel: dict[str, str] = {}
         self._locks = {platform: asyncio.Lock() for platform in PLATFORMS}
         self._auth: dict[str, AuthSession] = {}
 
@@ -103,16 +144,36 @@ class BrowserPool:
             profile = self.profile_dir(platform)
             profile.mkdir(parents=True, exist_ok=True)
             _restrict_private_directory(profile)
-            try:
-                context = await self._playwright.chromium.launch_persistent_context(
-                    str(profile),
-                    headless=bool(headless),
-                    viewport={"width": 1280, "height": 900},
-                    locale="zh-CN",
-                    args=["--disable-blink-features=AutomationControlled"],
-                )
-            except Exception as exc:
-                raise RuntimeError("chromium_unavailable") from exc
+            preferred = self._browser_channel.get(platform)
+            if not headless:
+                system_channels = ("chrome", "msedge") if os.name == "nt" else ("chrome",)
+                preferred_channels = (preferred,) if preferred and preferred != "bundled" else ()
+                channels = (*preferred_channels, *system_channels, "")
+            elif preferred:
+                channels = ("",) if preferred == "bundled" else (preferred, "")
+            else:
+                channels = ("",)
+            context = None
+            last_error: BaseException | None = None
+            for channel in dict.fromkeys(channels):
+                options: dict[str, Any] = {
+                    "headless": bool(headless),
+                    "viewport": {"width": 1280, "height": 900},
+                    "locale": "zh-CN",
+                }
+                if channel:
+                    options["channel"] = channel
+                try:
+                    context = await self._playwright.chromium.launch_persistent_context(
+                        str(profile),
+                        **options,
+                    )
+                    self._browser_channel[platform] = str(channel or "bundled")
+                    break
+                except Exception as exc:
+                    last_error = exc
+            if context is None:
+                raise RuntimeError("chromium_unavailable") from last_error
             self._contexts[platform] = context
             self._context_headless[platform] = bool(headless)
             return context
@@ -145,6 +206,152 @@ class BrowserPool:
         names = {str(item.get("name") or "") for item in await self.cookies(platform, headless=headless)}
         return bool(names & cookie_names)
 
+    @staticmethod
+    async def _page_text(page: Any) -> str:
+        parts: list[str] = []
+        frames = list(getattr(page, "frames", ()) or ()) or [page]
+        for frame in frames:
+            try:
+                text = await frame.locator("body").inner_text(timeout=1000)
+            except Exception:
+                continue
+            if text:
+                parts.append(str(text)[:5000])
+        return " ".join(parts).casefold()
+
+    @staticmethod
+    async def _capture_qr(page: Any, selectors: tuple[str, ...]) -> bytes:
+        frames = list(getattr(page, "frames", ()) or ()) or [page]
+        for frame in frames:
+            for selector in selectors:
+                try:
+                    locator = frame.locator(selector).first
+                    if not await locator.count() or not await locator.is_visible():
+                        continue
+                    if hasattr(locator, "bounding_box"):
+                        box = await locator.bounding_box()
+                        if box:
+                            width = float(box.get("width") or 0)
+                            height = float(box.get("height") or 0)
+                            if width < 80 or height < 80 or width > 800 or height > 800:
+                                continue
+                    image = await locator.screenshot(type="png")
+                    if image:
+                        return bytes(image)
+                except Exception:
+                    continue
+        return b""
+
+    @staticmethod
+    def _marker_present(text: str, markers: tuple[str, ...]) -> bool:
+        return any(marker.casefold() in text for marker in markers)
+
+    @staticmethod
+    def _clear_page_error(session: AuthSession) -> None:
+        if session.error_code != "interactive_window_unavailable":
+            session.error_code = ""
+
+    async def _inspect_auth_page(self, session: AuthSession, page: Any) -> None:
+        text = await self._page_text(page)
+        if self._marker_present(text, _ROBOT_VERIFICATION_MARKERS):
+            self._clear_page_error(session)
+            session.status = "manual_verification_required"
+            session.verification_kind = "robot_verification"
+            session.qr_png = b""
+            return
+        if self._marker_present(text, _RISK_CONTROL_MARKERS):
+            session.status = "risk_controlled"
+            session.verification_kind = "risk_control"
+            session.error_code = "risk_controlled"
+            session.qr_png = b""
+            return
+        if self._marker_present(text, _DEVICE_CONFIRMATION_MARKERS):
+            self._clear_page_error(session)
+            session.status = "manual_verification_required"
+            session.verification_kind = "device_confirmation"
+            session.qr_png = b""
+            return
+        if self._marker_present(text, _QR_EXPIRED_MARKERS):
+            self._clear_page_error(session)
+            session.status = "qr_expired"
+            session.verification_kind = "qr_expired"
+            session.qr_png = b""
+            return
+        qr_png = await self._capture_qr(page, session.qr_selectors)
+        if qr_png:
+            self._clear_page_error(session)
+            old_digest = hashlib.sha256(session.qr_png).digest() if session.qr_png else b""
+            new_digest = hashlib.sha256(qr_png).digest()
+            if new_digest != old_digest:
+                session.qr_revision += 1
+            session.qr_png = qr_png
+            session.status = "waiting_scan"
+            session.verification_kind = ""
+
+    @staticmethod
+    async def _click_login_trigger(session: AuthSession, page: Any) -> bool:
+        if session.login_triggered or not session.login_trigger_selectors:
+            return session.login_triggered
+        for selector in session.login_trigger_selectors:
+            try:
+                trigger = page.locator(selector).first
+                if await trigger.count() and await trigger.is_visible():
+                    await trigger.click(timeout=3000)
+                    session.login_triggered = True
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _wait_for_auth_surface(self, session: AuthSession, page: Any, timeout_seconds: float = 10.0) -> None:
+        deadline = time.monotonic() + max(0.5, float(timeout_seconds))
+        while time.monotonic() < deadline:
+            await self._inspect_auth_page(session, page)
+            if session.status != "starting":
+                return
+            await self._click_login_trigger(session, page)
+            try:
+                await page.wait_for_timeout(400)
+            except Exception:
+                break
+        session.status = "manual_verification_required"
+        text = await self._page_text(page)
+        session.verification_kind = (
+            "qr_generation_blocked"
+            if "扫码登录" in text or "扫码快捷登录" in text
+            else "official_page"
+        )
+
+    async def refresh_auth(self, session: AuthSession) -> dict[str, Any]:
+        if session.status in {"success", "expired", "cancelled", "error"}:
+            return self.public_auth(session)
+        context = self._contexts.get(session.platform)
+        try:
+            pages = list(context.pages) if context is not None else []
+        except Exception:
+            pages = []
+        if not pages:
+            session.status = "error"
+            session.error_code = "official_window_closed"
+            session.verification_kind = ""
+            session.official_window_open = False
+            session.qr_png = b""
+            return self.public_auth(session)
+        try:
+            if session.verification_kind == "official_page":
+                await self._click_login_trigger(session, pages[-1])
+                try:
+                    await pages[-1].wait_for_timeout(400)
+                except Exception:
+                    pass
+            await self._inspect_auth_page(session, pages[-1])
+        except Exception:
+            session.status = "error"
+            session.error_code = "login_page_unavailable"
+            session.verification_kind = ""
+            session.qr_png = b""
+        return self.public_auth(session)
+
     async def start_auth(
         self,
         platform: str,
@@ -153,7 +360,20 @@ class BrowserPool:
         qr_selectors: tuple[str, ...],
         login_trigger_selectors: tuple[str, ...],
     ) -> dict[str, Any]:
-        session = AuthSession(session_id=uuid.uuid4().hex, platform=platform, owner=owner)
+        for current in self._auth.values():
+            if current.platform == platform and current.owner == owner and current.status not in {
+                "success", "expired", "cancelled", "error"
+            }:
+                current.status = "cancelled"
+                current.qr_png = b""
+                current.official_window_open = False
+        session = AuthSession(
+            session_id=uuid.uuid4().hex,
+            platform=platform,
+            owner=owner,
+            qr_selectors=tuple(qr_selectors),
+            login_trigger_selectors=tuple(login_trigger_selectors),
+        )
         self._auth[session.session_id] = session
         try:
             # Login uses the same persistent profile as later read-only requests,
@@ -167,35 +387,14 @@ class BrowserPool:
                 # clearly reports that a desktop window is required.
                 interactive_window = False
                 page = await self.page(platform, headless=True)
+            session.official_window_open = interactive_window
             await page.goto(login_url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(1200)
-            for selector in login_trigger_selectors:
-                trigger = page.locator(selector).first
-                try:
-                    if await trigger.count() and await trigger.is_visible():
-                        await trigger.click(timeout=3000)
-                        await page.wait_for_timeout(800)
-                        break
-                except Exception:
-                    continue
-            qr_png = b""
-            for selector in qr_selectors:
-                locator = page.locator(selector).first
-                try:
-                    if await locator.count() and await locator.is_visible():
-                        qr_png = await locator.screenshot(type="png")
-                        break
-                except Exception:
-                    continue
-            if qr_png:
-                session.qr_png = qr_png
-                session.status = "waiting_scan"
-                if not interactive_window:
-                    session.error_code = "interactive_window_unavailable"
-            else:
-                session.status = "manual_verification_required"
-                if not interactive_window:
-                    session.error_code = "interactive_window_unavailable"
+            await page.wait_for_timeout(500)
+            if await self._click_login_trigger(session, page):
+                await page.wait_for_timeout(500)
+            await self._wait_for_auth_surface(session, page)
+            if not interactive_window:
+                session.error_code = "interactive_window_unavailable"
         except RuntimeError as exc:
             session.status = "error"
             session.error_code = str(exc)
@@ -221,7 +420,10 @@ class BrowserPool:
             "created_at": session.created_at,
             "expires_at": session.expires_at,
             "qr_available": bool(session.qr_png),
+            "qr_revision": int(session.qr_revision),
             "error_code": session.error_code,
+            "verification_kind": session.verification_kind,
+            "official_window_open": bool(session.official_window_open),
         }
 
     def auth_qrcode(self, session_id: str, owner: str) -> dict[str, Any]:
@@ -238,6 +440,7 @@ class BrowserPool:
         session = self.get_auth(session_id, owner)
         session.status = "cancelled"
         session.qr_png = b""
+        session.official_window_open = False
         return self.public_auth(session)
 
     async def logout(self, platform: str) -> None:
@@ -251,6 +454,8 @@ class BrowserPool:
             if session.platform == platform:
                 session.status = "cancelled"
                 session.qr_png = b""
+                session.official_window_open = False
+        self._browser_channel.pop(platform, None)
 
 
 __all__ = ["AuthSession", "BrowserPool"]
