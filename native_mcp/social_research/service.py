@@ -37,6 +37,14 @@ _SAFE_OPERATION_CODES = {
     "qr_expired",
     "qr_refresh_failed",
     "system_browser_unavailable",
+    "bilibili_login_state_missing",
+    "bilibili_qr_generate_failed",
+    "bilibili_qr_poll_failed",
+    "bilibili_qr_refresh_limit",
+    "bilibili_qr_session_invalid",
+    "bilibili_qr_unknown_state",
+    "qrcode_encoder_failed",
+    "qrcode_encoder_unavailable",
 }
 
 
@@ -149,6 +157,14 @@ class SocialResearchService:
     async def auth_status(self, params: dict[str, Any]) -> dict[str, Any]:
         owner = clean_text(params.get("owner"), 200)
         session = self.browsers.get_auth(str(params.get("session_id") or ""), owner)
+        if session.login_mode == "protocol_qr":
+            if session.status == "expired":
+                await self.browsers.expire_auth(session)
+                return self.browsers.public_auth(session)
+            return await self.browsers.refresh_bilibili_qr_auth(
+                session,
+                set(SPECS["bilibili"].auth_cookie_names),
+            )
         if session.login_mode == "manual_browser" and session.status != "expired":
             if self.browsers.manual_browser_running(session):
                 return self.browsers.public_auth(session)
@@ -172,7 +188,9 @@ class SocialResearchService:
             "starting", "waiting_scan", "manual_verification_required", "risk_controlled", "qr_expired"
         }:
             try:
-                authenticated = await self.adapters[session.platform].authenticated(interactive=True)
+                authenticated = await self.adapters[session.platform].authenticated(
+                    interactive=session.login_mode == "embedded_qr"
+                )
             except Exception:
                 authenticated = False
             if authenticated:

@@ -84,7 +84,7 @@ python -m playwright install chromium
 只把本仓库接入其它 NoneBot 项目时，至少安装以下运行依赖；按实际启用的媒体和 Skill 能力补充可选依赖：
 
 ```powershell
-python -m pip install "nonebot2[fastapi,httpx]>=2.4.4" "nonebot-adapter-onebot>=2.4.6" "nonebot-plugin-apscheduler>=0.5.0" "nonebot-plugin-htmlrender>=0.3.6" "nonebot-plugin-alconna>=0.62.0" "nonebot-plugin-uninfo>=0.11.0" "nonebot-plugin-localstore>=0.7.4" "aiohttp>=3.10.0" "aiosqlite>=0.20.0" "ruamel.yaml>=0.18.0" "python-dateutil>=2.9.0" "Pillow>=10.4.0" "pillow-avif-plugin>=1.5.2" "filelock>=3.13.1" "openai>=1.50.0" "google-generativeai>=0.8.0" "anthropic>=0.30.0" "playwright>=1.50.0" "watchdog>=4.0.0" aiofiles beautifulsoup4 emoji imageio-ffmpeg msgspec yt-dlp
+python -m pip install "nonebot2[fastapi,httpx]>=2.4.4" "nonebot-adapter-onebot>=2.4.6" "nonebot-plugin-apscheduler>=0.5.0" "nonebot-plugin-htmlrender>=0.3.6" "nonebot-plugin-alconna>=0.62.0" "nonebot-plugin-uninfo>=0.11.0" "nonebot-plugin-localstore>=0.7.4" "aiohttp>=3.10.0" "aiosqlite>=0.20.0" "ruamel.yaml>=0.18.0" "python-dateutil>=2.9.0" "Pillow>=10.4.0" "qrcode>=8.0,<9.0" "python-multipart>=0.0.20" "pillow-avif-plugin>=1.5.2" "filelock>=3.13.1" "openai>=1.50.0" "google-generativeai>=0.8.0" "anthropic>=0.30.0" "playwright>=1.50.0" "watchdog>=4.0.0" aiofiles beautifulsoup4 emoji imageio-ffmpeg msgspec yt-dlp
 ```
 
 ## 安装
@@ -350,7 +350,7 @@ MCP Secret 只允许通过环境变量传给子进程，独立保存在 `personi
 
 ### 原生社交平台查梗 MCP
 
-项目内置不可删除的 `builtin_social_platform_research`，首版覆盖 B站、抖音、贴吧和小黑盒。它默认关闭，并同时受 MCP 服务开关、平台开关和 Agent 工具授权三层约束；只有目标平台已开启、登录态有效且能力健康时，工具调用才会执行。WebUI 的“MCP → 原生 MCP”页提供“获取 WebUI 二维码”和“在普通浏览器中登录”两条路径，可单独启停平台、调整来源质量阈值，并预览封面、标题、正文、评论、回复和支持平台的弹幕。二维码管理会话为 15 分钟，官方二维码过期时会在原会话内自动刷新；B站当前官方 `Scan me!` 图片、小黑盒 QR canvas、抖音官方二维码均有专用定位。
+项目内置不可删除的 `builtin_social_platform_research`，首版覆盖 B站、抖音、贴吧和小黑盒。它默认关闭，并同时受 MCP 服务开关、平台开关和 Agent 工具授权三层约束；只有目标平台已开启、登录态有效且能力健康时，工具调用才会执行。WebUI 的“MCP → 原生 MCP”页提供“获取 WebUI 二维码”和“在普通浏览器中登录”两条路径，可单独启停平台、调整来源质量阈值，并预览封面、标题、正文、评论、回复和支持平台的弹幕。二维码管理会话为 15 分钟，官方二维码过期时会在原会话内自动刷新；B站使用官方二维码生成/轮询事务并在本机编码二维码，轮询与 persistent profile 共用登录态，不依赖可见登录窗口。小黑盒的官方页面在后台保持，canvas 通过黑白比例、对比度和边缘密度校验后才会转发，避免把“二维码加载中”占位图当成二维码。抖音仍从官方页面读取二维码；遇到机器人验证、滑块或风控只切换官方普通浏览器人工处理，不提供绕过。
 
 向 Agent 公开的能力只有 `social_content_search`、`social_content_read` 和 `research_game_slang`。全部为只读工具，不包含任意登录态 HTTP、任意 JavaScript、Cookie 导出、点赞、投币、收藏、关注、评论、发布、删除或私信。平台访问使用互相隔离的 persistent profile；WebUI 二维码路径由 Playwright 观察官方页面，普通浏览器路径则直接启动不受 Playwright 控制的系统 Chrome/Edge。抖音等平台出现机器人验证时自动切到后一条路径，由管理员在官方窗口处理；登录完成并关闭该窗口后 MCP 才检测 Cookie，不实现验证绕过。
 
@@ -388,7 +388,7 @@ Skill 标准结构、metadata、isolation 与 MCP 示例见 [DIRECTORY_GUIDE.md]
 3. WebUI“插件日志”按 level、query、Trace ID 筛选。
 4. 使用“模型测试”单独验证 Provider 和 vision route。
 5. QQ 空间异常先看 Operation ID 和状态，不要先重试外部写入。
-6. 社交平台查梗异常先看“原生 MCP”平台状态：`login_required` 重新登录；`manual_verification_required` 按 `verification_kind` 在官方窗口处理机器人验证或在官方 App 确认；`qr_expired` 重新获取二维码；`official_window_closed` 保持新官方窗口开启；`risk_controlled` 停止该平台请求并等待风控解除。其它已登录平台仍可返回 partial 结果。
+6. 社交平台查梗异常先看“原生 MCP”平台状态：`login_required` 重新登录；B站 `protocol_qr` 无需保持窗口，扫码后在官方 App 确认；其它平台的 `manual_verification_required` 按 `verification_kind` 在官方窗口处理机器人验证或设备确认；`qr_expired` 会在原管理会话内换新；`official_window_closed` 只适用于页面二维码链路；`risk_controlled` 停止该平台请求并等待风控解除。其它已登录平台仍可返回 partial 结果。
 
 常见边界：
 

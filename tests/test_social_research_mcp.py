@@ -237,12 +237,276 @@ def test_auth_session_is_bound_to_owner_and_public_shape_excludes_owner(tmp_path
     assert 890 <= public["remaining_seconds"] <= 900
     assert "native_process" not in public
     assert "login_url" not in public
+    assert "protocol_secret" not in public
     try:
         pool.get_auth("session", "another-device")
     except KeyError:
         pass
     else:
         raise AssertionError("auth session was not bound to owner")
+
+
+def test_bilibili_protocol_validates_official_challenge_and_poll_states() -> None:
+    protocol = load_personification_module("plugin.personification.native_mcp.social_research.bilibili_auth")
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, payload) -> None:  # noqa: ANN001
+            self.payload = payload
+
+        async def json(self):  # noqa: ANN201
+            return self.payload
+
+    class FakeRequest:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+            self.responses = [
+                FakeResponse({
+                    "code": 0,
+                    "data": {
+                        "qrcode_key": "a" * 32,
+                        "url": "https://account.bilibili.com/h5/account-h5/auth/scan-web?qrcode_key=" + "a" * 32,
+                    },
+                }),
+                FakeResponse({"code": 0, "data": {"code": 86101, "message": "未扫码"}}),
+            ]
+
+        async def get(self, url, **kwargs):  # noqa: ANN001, ANN201
+            self.calls.append((url, kwargs))
+            return self.responses.pop(0)
+
+    async def run():
+        request = FakeRequest()
+        challenge = await protocol.generate_challenge(request)
+        state = await protocol.poll_challenge(request, challenge.key)
+        return request, challenge, state
+
+    request, challenge, state = asyncio.run(run())
+    assert challenge.key == "a" * 32
+    assert challenge.qr_url.startswith("https://account.bilibili.com/h5/account-h5/auth/scan-web?")
+    assert state == 86101
+    assert request.calls[0][0] == "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
+    assert request.calls[1][0] == "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
+    assert request.calls[1][1]["params"] == {"qrcode_key": "a" * 32, "source": "main_web"}
+    assert all(call[1]["max_redirects"] == 0 for call in request.calls)
+
+
+def test_bilibili_protocol_rejects_cross_origin_qr_and_unknown_poll_state() -> None:
+    protocol = load_personification_module("plugin.personification.native_mcp.social_research.bilibili_auth")
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, payload) -> None:  # noqa: ANN001
+            self.payload = payload
+
+        async def json(self):  # noqa: ANN201
+            return self.payload
+
+    class FakeRequest:
+        def __init__(self, response) -> None:  # noqa: ANN001
+            self.response = response
+
+        async def get(self, *_args, **_kwargs):  # noqa: ANN001, ANN201
+            return self.response
+
+    bad_origin = FakeRequest(FakeResponse({
+        "code": 0,
+        "data": {"qrcode_key": "b" * 32, "url": "https://example.com/scan?qrcode_key=" + "b" * 32},
+    }))
+    unknown = FakeRequest(FakeResponse({"code": 0, "data": {"code": 12345, "message": "unexpected"}}))
+
+    async def run() -> list[str]:
+        errors: list[str] = []
+        try:
+            await protocol.generate_challenge(bad_origin)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+        try:
+            await protocol.poll_challenge(unknown, "c" * 32)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+        return errors
+
+    assert asyncio.run(run()) == ["bilibili_qr_generate_failed", "bilibili_qr_unknown_state"]
+
+
+def test_bilibili_protocol_renders_qr_locally_as_png() -> None:
+    protocol = load_personification_module("plugin.personification.native_mcp.social_research.bilibili_auth")
+    image = protocol.render_qr_png(
+        "https://account.bilibili.com/h5/account-h5/auth/scan-web?qrcode_key=" + "f" * 32
+    )
+    assert image.startswith(b"\x89PNG\r\n\x1a\n")
+    assert len(image) < 1024 * 1024
+
+
+def test_qr_visual_gate_rejects_loading_placeholder_and_accepts_real_qr() -> None:
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw
+
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    protocol = load_personification_module("plugin.personification.native_mcp.social_research.bilibili_auth")
+    placeholder = Image.new("RGB", (156, 156), "#535353")
+    ImageDraw.Draw(placeholder).text((30, 70), "QR loading", fill="white")
+    output = BytesIO()
+    placeholder.save(output, format="PNG")
+    real_qr = protocol.render_qr_png(
+        "https://account.bilibili.com/h5/account-h5/auth/scan-web?qrcode_key=" + "1" * 32
+    )
+
+    assert browser_mod.BrowserPool._looks_like_qr_png(output.getvalue()) is False
+    assert browser_mod.BrowserPool._looks_like_qr_png(real_qr) is True
+
+
+def test_bilibili_adapter_routes_embedded_qr_to_protocol_login() -> None:
+    adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+
+    class FakeBrowsers:
+        async def start_bilibili_qr_auth(self, owner):  # noqa: ANN001, ANN201
+            return {"owner_seen": owner, "login_mode": "protocol_qr"}
+
+        async def start_auth(self, *_args, **_kwargs):  # noqa: ANN001, ANN201
+            raise AssertionError("Bilibili must not use the page QR flow")
+
+    adapter = adapters_mod.PlatformAdapter(adapters_mod.SPECS["bilibili"], FakeBrowsers())
+    result = asyncio.run(adapter.start_auth("admin:device:bilibili", mode="embedded_qr"))
+    assert result == {"owner_seen": "admin:device:bilibili", "login_mode": "protocol_qr"}
+
+
+def test_xiaoheihe_adapter_keeps_official_qr_page_headless() -> None:
+    adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+
+    class FakeBrowsers:
+        async def start_auth(self, platform, owner, login_url, qr_selectors, login_triggers, **kwargs):  # noqa: ANN001, ANN201
+            return {
+                "platform": platform,
+                "owner": owner,
+                "login_url": login_url,
+                "qr_selectors": qr_selectors,
+                "login_triggers": login_triggers,
+                **kwargs,
+            }
+
+    adapter = adapters_mod.PlatformAdapter(adapters_mod.SPECS["xiaoheihe"], FakeBrowsers())
+    result = asyncio.run(adapter.start_auth("admin:device:xiaoheihe", mode="embedded_qr"))
+    assert result["platform"] == "xiaoheihe"
+    assert result["prefer_headless"] is True
+
+
+def test_bilibili_qr_login_uses_no_visible_page_and_hides_transaction_key(tmp_path: Path, monkeypatch) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    challenge_type = load_personification_module(
+        "plugin.personification.native_mcp.social_research.bilibili_auth"
+    ).BilibiliQrChallenge
+    pool = browser_mod.BrowserPool(tmp_path)
+
+    class FakeContext:
+        request = object()
+
+    async def fake_context(platform, *, headless=True):  # noqa: ANN001
+        assert platform == "bilibili"
+        assert headless is True
+        return FakeContext()
+
+    async def fake_generate(_request):  # noqa: ANN001
+        return challenge_type(key="secret-transaction-key-12345678", qr_url="https://account.bilibili.com/scan")
+
+    async def page_must_not_open(*_args, **_kwargs):  # noqa: ANN001
+        raise AssertionError("protocol login must not open a page")
+
+    monkeypatch.setattr(pool, "context", fake_context)
+    monkeypatch.setattr(pool, "page", page_must_not_open)
+    monkeypatch.setattr(browser_mod, "generate_challenge", fake_generate)
+    monkeypatch.setattr(browser_mod, "render_qr_png", lambda _url: b"protocol-qr-png")
+
+    result = asyncio.run(pool.start_bilibili_qr_auth("admin:device:bilibili"))
+    session = pool.get_auth(result["session_id"], "admin:device:bilibili")
+
+    assert result["status"] == "waiting_scan"
+    assert result["login_mode"] == "protocol_qr"
+    assert result["official_window_open"] is False
+    assert result["qr_available"] is True
+    assert result["qr_revision"] == 1
+    assert session.protocol_secret == "secret-transaction-key-12345678"
+    serialized = json.dumps(result, ensure_ascii=False)
+    assert "secret-transaction" not in serialized
+    assert "qr_url" not in serialized
+
+
+def test_bilibili_protocol_poll_handles_confirmation_refresh_and_success(tmp_path: Path, monkeypatch) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    challenge_type = load_personification_module(
+        "plugin.personification.native_mcp.social_research.bilibili_auth"
+    ).BilibiliQrChallenge
+    pool = browser_mod.BrowserPool(tmp_path)
+
+    class FakeContext:
+        request = object()
+
+        def __init__(self) -> None:
+            self.logged_in = False
+
+        async def cookies(self):  # noqa: ANN201
+            return [{"name": "SESSDATA"}] if self.logged_in else []
+
+    context = FakeContext()
+    states = [86090, 86038, 0]
+
+    async def fake_context(_platform, *, headless=True):  # noqa: ANN001
+        assert headless is True
+        return context
+
+    async def fake_poll(_request, _key):  # noqa: ANN001
+        code = states.pop(0)
+        if code == 0:
+            context.logged_in = True
+        return code
+
+    async def fake_generate(_request):  # noqa: ANN001
+        return challenge_type(key="d" * 32, qr_url="https://account.bilibili.com/scan")
+
+    async def fake_close(platform):  # noqa: ANN001
+        assert platform == "bilibili"
+
+    monkeypatch.setattr(pool, "context", fake_context)
+    monkeypatch.setattr(pool, "close_platform", fake_close)
+    monkeypatch.setattr(browser_mod, "poll_challenge", fake_poll)
+    monkeypatch.setattr(browser_mod, "generate_challenge", fake_generate)
+    monkeypatch.setattr(browser_mod, "render_qr_png", lambda _url: b"fresh-qr")
+
+    session = browser_mod.AuthSession(
+        session_id="protocol",
+        platform="bilibili",
+        owner="owner",
+        status="waiting_scan",
+        login_mode="protocol_qr",
+        protocol_secret="e" * 32,
+        qr_png=b"old-qr",
+        qr_revision=1,
+    )
+
+    async def run():
+        first = await pool.refresh_bilibili_qr_auth(session, {"SESSDATA", "DedeUserID"})
+        session.last_protocol_poll_at = 0
+        session.last_qr_refresh_at = 0
+        second = await pool.refresh_bilibili_qr_auth(session, {"SESSDATA", "DedeUserID"})
+        session.last_protocol_poll_at = 0
+        third = await pool.refresh_bilibili_qr_auth(session, {"SESSDATA", "DedeUserID"})
+        return first, second, third
+
+    first, second, third = asyncio.run(run())
+    assert first["status"] == "manual_verification_required"
+    assert first["verification_kind"] == "device_confirmation"
+    assert first["qr_available"] is False
+    assert second["status"] == "waiting_scan"
+    assert second["qr_available"] is True
+    assert second["qr_revision"] == 2
+    assert second["qr_refresh_count"] == 1
+    assert third["status"] == "success"
+    assert third["qr_available"] is False
+    assert session.protocol_secret == ""
 
 
 def test_browser_pool_switches_between_headless_reads_and_visible_official_login(tmp_path: Path) -> None:
@@ -282,8 +546,9 @@ def test_browser_pool_switches_between_headless_reads_and_visible_official_login
     assert channels == ["chrome", "chrome"]
 
 
-def test_auth_page_refresh_distinguishes_qr_robot_verification_and_device_confirmation(tmp_path: Path) -> None:
+def test_auth_page_refresh_distinguishes_qr_robot_verification_and_device_confirmation(tmp_path: Path, monkeypatch) -> None:
     browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    monkeypatch.setattr(browser_mod.BrowserPool, "_looks_like_qr_png", staticmethod(lambda _image: True))
     pool = browser_mod.BrowserPool(tmp_path)
 
     class FakeLocator:
@@ -463,8 +728,9 @@ def test_auth_wait_marks_visible_scan_panel_without_real_qr_as_generation_blocke
     assert session.qr_png == b""
 
 
-def test_expired_qr_is_reloaded_and_replaced_inside_same_management_session(tmp_path: Path) -> None:
+def test_expired_qr_is_reloaded_and_replaced_inside_same_management_session(tmp_path: Path, monkeypatch) -> None:
     browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    monkeypatch.setattr(browser_mod.BrowserPool, "_looks_like_qr_png", staticmethod(lambda _image: True))
     pool = browser_mod.BrowserPool(tmp_path)
 
     class FakeLocator:
@@ -579,8 +845,9 @@ def test_manual_browser_login_uses_fixed_system_browser_and_private_profile(tmp_
     assert "owner" not in started and "native_process" not in started and "login_url" not in started
 
 
-def test_auth_qr_falls_back_to_headless_with_explicit_interactive_warning(tmp_path: Path) -> None:
+def test_auth_qr_falls_back_to_headless_with_explicit_interactive_warning(tmp_path: Path, monkeypatch) -> None:
     browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    monkeypatch.setattr(browser_mod.BrowserPool, "_looks_like_qr_png", staticmethod(lambda _image: True))
     pool = browser_mod.BrowserPool(tmp_path)
     modes: list[bool] = []
 
@@ -630,6 +897,7 @@ def test_auth_qr_falls_back_to_headless_with_explicit_interactive_warning(tmp_pa
     assert result["status"] == "waiting_scan"
     assert result["qr_available"] is True
     assert result["error_code"] == "interactive_window_unavailable"
+    assert result["login_mode"] == "headless_page_qr"
 
 
 def test_auth_status_uses_visible_profile_and_closes_window_after_success(tmp_path: Path) -> None:
@@ -726,6 +994,50 @@ def test_auth_status_refreshes_official_page_when_cookie_is_not_ready(tmp_path: 
         "platform": "douyin",
         "verification_kind": "robot_verification",
     }
+
+
+def test_auth_status_preserves_headless_qr_context(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+    session = browser_mod.AuthSession(
+        session_id="headless",
+        platform="xiaoheihe",
+        owner="admin:device:xiaoheihe",
+        status="waiting_scan",
+        login_mode="headless_page_qr",
+    )
+
+    class FakeBrowsers:
+        refreshed = False
+
+        def get_auth(self, _session_id, _owner):  # noqa: ANN001
+            return session
+
+        async def refresh_auth(self, value):  # noqa: ANN001
+            self.refreshed = True
+            return self.public_auth(value)
+
+        def public_auth(self, value):  # noqa: ANN001
+            return {"status": value.status, "login_mode": value.login_mode}
+
+    class FakeAdapter:
+        async def authenticated(self, *, interactive=None):  # noqa: ANN001
+            assert interactive is False
+            return False
+
+    async def run() -> tuple[dict, bool]:
+        service = service_mod.SocialResearchService(tmp_path)
+        browsers = FakeBrowsers()
+        service.browsers = browsers
+        service.adapters["xiaoheihe"] = FakeAdapter()
+        result = await service.auth_status(
+            {"session_id": "headless", "owner": "admin:device:xiaoheihe"}
+        )
+        return result, browsers.refreshed
+
+    result, refreshed = asyncio.run(run())
+    assert refreshed is True
+    assert result == {"status": "waiting_scan", "login_mode": "headless_page_qr"}
 
 
 def test_manual_browser_status_waits_for_window_close_before_cookie_detection(tmp_path: Path) -> None:

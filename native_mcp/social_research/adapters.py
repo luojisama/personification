@@ -158,12 +158,15 @@ class PlatformAdapter:
             )
         if mode != "embedded_qr":
             raise ValueError("unsupported auth mode")
+        if self.spec.name == "bilibili":
+            return await self.browsers.start_bilibili_qr_auth(owner)
         return await self.browsers.start_auth(
             self.spec.name,
             owner,
             self.spec.login_url,
             self.spec.qr_selectors,
             self.spec.login_trigger_selectors,
+            prefer_headless=self.spec.name == "xiaoheihe",
         )
 
     async def _page(self, url: str, timeout_seconds: float) -> Any:

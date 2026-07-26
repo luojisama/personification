@@ -347,14 +347,21 @@ function formatBuiltinAuthRemaining(auth) {
 function renderBuiltinAuthHint(auth) {
   if (!auth) return "";
   const kind = String(auth.verification_kind || "");
+  if (auth.login_mode === "protocol_qr" && auth.status === "waiting_scan") return '<p class="muted">B站二维码由官方登录接口生成并在本机编码；轮询直接写入隔离的 persistent profile，不依赖可见窗口，页面关闭或刷新不会让二维码立即失效。</p>';
+  if (auth.login_mode === "headless_page_qr" && auth.status === "waiting_scan") return '<p class="muted">官方登录页由服务端后台保持；只有通过二维码像素结构校验后才会显示，加载中占位图不会再被当成二维码。无需保持可见窗口。</p>';
   if (kind === "robot_verification") return '<p class="muted">官方页面已要求机器人验证，但本机没有可用的普通系统浏览器兜底。请在当前官方窗口手动完成；MCP 不会绕过验证。</p>';
   if (kind === "official_browser_login") return '<p class="muted">已切换到不受 Playwright 控制的普通系统浏览器。请在该窗口完成扫码、验证码或机器人验证，登录成功后关闭该窗口；MCP 会在窗口关闭后检测登录态。</p>';
   if (kind === "manual_login_incomplete") return '<p class="muted">尚未检测到有效登录态。请确认普通浏览器窗口已经完成登录并完全关闭；需要时可重新打开普通浏览器继续。</p>';
-  if (kind === "device_confirmation") return '<p class="muted">二维码已扫描，请在对应平台官方 App 中确认登录；确认前请不要关闭官方窗口。</p>';
+  if (kind === "device_confirmation") return ["protocol_qr","headless_page_qr"].includes(auth.login_mode)
+    ? '<p class="muted">二维码已扫描，请在对应平台官方 App 中确认登录；本页会继续轮询，不需要保持任何浏览器窗口。</p>'
+    : '<p class="muted">二维码已扫描，请在对应平台官方 App 中确认登录；确认前请不要关闭官方窗口。</p>';
   if (kind === "qr_expired" || auth.status === "qr_expired") return '<p class="muted">官方二维码已经过期，MCP 正在自动刷新官方页面获取新二维码；旧二维码不会继续使用。</p>';
   if (kind === "qr_generation_blocked") return '<p class="muted">官方登录面板已打开，但平台没有生成真实二维码。请在官方窗口完成人工验证，或使用平台提供的验证码登录；不要扫描 Logo 占位图。</p>';
   if (kind === "official_page" && auth.status === "manual_verification_required") return '<p class="muted">官方页面没有提供可转发的二维码，请在自动打开的官方窗口中完成登录。</p>';
   if (auth.error_code === "official_window_closed") return '<p class="muted">官方登录窗口已关闭。请重新获取二维码并保持窗口打开，直到登录状态变为成功。</p>';
+  if (auth.error_code === "bilibili_login_state_missing") return '<p class="muted">B站已确认扫码，但没有把有效登录态写入隔离 profile。请重新获取二维码；若仍失败，改用普通浏览器登录并在成功后关闭窗口。</p>';
+  if (auth.error_code === "qrcode_encoder_unavailable") return '<p class="muted">服务端缺少本地二维码编码依赖 qrcode，安装依赖并重载原生 MCP 后重试。</p>';
+  if (["bilibili_qr_generate_failed","bilibili_qr_poll_failed","bilibili_qr_unknown_state"].includes(auth.error_code)) return '<p class="muted">B站官方二维码事务未完成，未使用未知响应或回退到非官方接口。请稍后重新获取二维码。</p>';
   if (auth.status === "manual_verification_required") return '<p class="muted">请在自动打开的官方页面窗口完成人工验证；系统不会绕过滑块或验证码。</p>';
   if (auth.status === "starting" && !auth.qr_available) return '<p class="muted">正在等待官方页面生成二维码，页面延迟渲染时会自动刷新此状态。</p>';
   return "";
@@ -389,7 +396,9 @@ function renderBuiltinPlatformCard(platform, item) {
       : '<p class="muted">官方二维码窗口保持开启；扫码、手机确认完成后，本页会自动更新。</p>'
     : "";
   const authPanel = auth ? `<div class="mcp-auth-panel">${qr}<div><strong>${escapeHtml(mcpChineseState(auth.status))}</strong><code>${escapeHtml(auth.status || "")}</code><small>服务端会话剩余 ${escapeHtml(formatBuiltinAuthRemaining(auth))}</small>${authHint}${windowHint}${auth.error_code === "interactive_window_unavailable" ? '<p class="muted">当前运行环境无法打开可见浏览器；二维码仍可扫码，但手机确认/滑块需要在有桌面的运行账户下重试。</p>' : ""}</div></div>` : "";
-  const authAction = auth && !["success","cancelled"].includes(auth.status) ? "重新获取 WebUI 二维码" : "获取 WebUI 二维码";
+  const authAction = platform === "bilibili"
+    ? auth && !["success","cancelled"].includes(auth.status) ? "重新获取无窗口二维码" : "获取无窗口二维码"
+    : auth && !["success","cancelled"].includes(auth.status) ? "重新获取 WebUI 二维码" : "获取 WebUI 二维码";
   const manualAction = auth && auth.login_mode === "manual_browser" ? "重新打开普通浏览器" : "在普通浏览器中登录";
   const danmaku = capabilities.danmaku === false ? "不支持弹幕" : "页面提供时读取弹幕";
   return `<article class="card mcp-platform-card" data-platform="${escapeAttr(platform)}">

@@ -204,8 +204,10 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
         "状态历史",
         "机器人验证",
         "不要扫描 Logo 占位图",
-        "重新获取 WebUI 二维码",
-        "服务端会话剩余",
+            "重新获取 WebUI 二维码",
+            "获取无窗口二维码",
+            "不依赖可见窗口",
+            "服务端会话剩余",
         "完成登录后请关闭该窗口",
     ):
         assert visible_copy in source

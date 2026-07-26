@@ -10,9 +10,16 @@ import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from .bilibili_auth import (
+    BilibiliQrProtocolError,
+    generate_challenge,
+    poll_challenge,
+    render_qr_png,
+)
 from .models import PLATFORMS
 
 
@@ -51,6 +58,7 @@ _QR_AUTH_TTL_SECONDS = 15 * 60
 _MANUAL_AUTH_TTL_SECONDS = 30 * 60
 _QR_REFRESH_COOLDOWN_SECONDS = 5.0
 _MAX_QR_REFRESHES = 8
+_PROTOCOL_POLL_INTERVAL_SECONDS = 1.5
 
 
 def _restrict_private_directory(path: Path) -> None:
@@ -108,6 +116,8 @@ class AuthSession:
     login_mode: str = "embedded_qr"
     qr_refresh_count: int = 0
     last_qr_refresh_at: float = 0.0
+    protocol_secret: str = field(default="", repr=False, compare=False)
+    last_protocol_poll_at: float = field(default=0.0, repr=False, compare=False)
     native_process: Any = field(default=None, repr=False, compare=False)
 
 
@@ -202,6 +212,8 @@ class BrowserPool:
     async def close(self) -> None:
         for session in self._auth.values():
             await self._stop_manual_browser(session)
+            session.protocol_secret = ""
+            session.qr_png = b""
         for platform in list(self._contexts):
             await self.close_platform(platform)
         if self._playwright is not None:
@@ -327,6 +339,32 @@ class BrowserPool:
         return " ".join(parts).casefold()
 
     @staticmethod
+    def _looks_like_qr_png(image: bytes) -> bool:
+        try:
+            from PIL import Image
+
+            with Image.open(BytesIO(image)) as source:
+                width, height = source.size
+                if width < 80 or height < 80 or width > 1024 or height > 1024:
+                    return False
+                grayscale = source.convert("L").resize((128, 128), Image.Resampling.NEAREST)
+                flattened = getattr(grayscale, "get_flattened_data", None)
+                pixels = list(flattened() if callable(flattened) else grayscale.getdata())
+        except Exception:
+            return False
+        dark = [value < 128 for value in pixels]
+        dark_ratio = sum(dark) / len(dark)
+        extreme_ratio = sum(value < 32 or value > 223 for value in pixels) / len(pixels)
+        transitions = 0
+        for y in range(128):
+            row = dark[y * 128 : (y + 1) * 128]
+            transitions += sum(left != right for left, right in zip(row, row[1:]))
+        for x in range(128):
+            column = [dark[y * 128 + x] for y in range(128)]
+            transitions += sum(top != bottom for top, bottom in zip(column, column[1:]))
+        return 0.10 <= dark_ratio <= 0.80 and extreme_ratio >= 0.25 and transitions >= 800
+
+    @staticmethod
     async def _capture_qr(page: Any, selectors: tuple[str, ...]) -> bytes:
         frames = list(getattr(page, "frames", ()) or ()) or [page]
         for frame in frames:
@@ -343,7 +381,7 @@ class BrowserPool:
                             if width < 80 or height < 80 or width > 800 or height > 800:
                                 continue
                     image = await locator.screenshot(type="png")
-                    if image:
+                    if image and BrowserPool._looks_like_qr_png(bytes(image)):
                         return bytes(image)
                 except Exception:
                     continue
@@ -461,7 +499,136 @@ class BrowserPool:
                 await self._stop_manual_browser(current)
                 current.status = "cancelled"
                 current.qr_png = b""
+                current.protocol_secret = ""
                 current.official_window_open = False
+
+    @staticmethod
+    async def _context_authenticated(context: Any, cookie_names: set[str]) -> bool:
+        names = {str(item.get("name") or "") for item in await context.cookies()}
+        return bool(names & cookie_names)
+
+    async def _replace_bilibili_challenge(self, session: AuthSession, context: Any) -> None:
+        challenge = await generate_challenge(context.request)
+        qr_png = render_qr_png(challenge.qr_url)
+        old_digest = hashlib.sha256(session.qr_png).digest() if session.qr_png else b""
+        new_digest = hashlib.sha256(qr_png).digest()
+        if new_digest != old_digest:
+            session.qr_revision += 1
+        session.protocol_secret = challenge.key
+        session.qr_png = qr_png
+        session.status = "waiting_scan"
+        session.error_code = ""
+        session.verification_kind = ""
+        session.official_window_open = False
+
+    async def start_bilibili_qr_auth(self, owner: str) -> dict[str, Any]:
+        await self._supersede_auth("bilibili", owner)
+        session = AuthSession(
+            session_id=uuid.uuid4().hex,
+            platform="bilibili",
+            owner=owner,
+            login_mode="protocol_qr",
+        )
+        self._auth[session.session_id] = session
+        try:
+            context = await self.context("bilibili", headless=True)
+            await self._replace_bilibili_challenge(session, context)
+        except BilibiliQrProtocolError as exc:
+            session.status = "error"
+            session.error_code = str(exc)
+            session.protocol_secret = ""
+            session.qr_png = b""
+        except RuntimeError as exc:
+            session.status = "error"
+            session.error_code = str(exc)
+            session.protocol_secret = ""
+            session.qr_png = b""
+        except Exception:
+            session.status = "error"
+            session.error_code = "bilibili_qr_generate_failed"
+            session.protocol_secret = ""
+            session.qr_png = b""
+        return self.public_auth(session)
+
+    async def refresh_bilibili_qr_auth(
+        self,
+        session: AuthSession,
+        cookie_names: set[str],
+    ) -> dict[str, Any]:
+        if session.platform != "bilibili" or session.login_mode != "protocol_qr":
+            raise ValueError("not a Bilibili protocol QR session")
+        if session.status in {"success", "expired", "cancelled", "error"}:
+            return self.public_auth(session)
+        try:
+            context = await self.context("bilibili", headless=True)
+            if await self._context_authenticated(context, cookie_names):
+                session.status = "success"
+                session.error_code = ""
+                session.verification_kind = ""
+                session.protocol_secret = ""
+                session.qr_png = b""
+                await self.close_platform("bilibili")
+                return self.public_auth(session)
+            now = time.monotonic()
+            if now - session.last_protocol_poll_at < _PROTOCOL_POLL_INTERVAL_SECONDS:
+                return self.public_auth(session)
+            session.last_protocol_poll_at = now
+            code = await poll_challenge(context.request, session.protocol_secret)
+            if code == 86101:
+                session.status = "waiting_scan"
+                session.verification_kind = ""
+                session.error_code = ""
+            elif code == 86090:
+                session.status = "manual_verification_required"
+                session.verification_kind = "device_confirmation"
+                session.error_code = ""
+                session.qr_png = b""
+            elif code == 86038:
+                if session.qr_refresh_count >= _MAX_QR_REFRESHES:
+                    session.status = "expired"
+                    session.verification_kind = "qr_expired"
+                    session.error_code = "bilibili_qr_refresh_limit"
+                    session.protocol_secret = ""
+                    session.qr_png = b""
+                elif time.time() - session.last_qr_refresh_at >= _QR_REFRESH_COOLDOWN_SECONDS:
+                    session.qr_refresh_count += 1
+                    session.last_qr_refresh_at = time.time()
+                    await self._replace_bilibili_challenge(session, context)
+                else:
+                    session.status = "qr_expired"
+                    session.verification_kind = "qr_expired"
+                    session.qr_png = b""
+            else:
+                # A successful poll writes Set-Cookie into BrowserContext.request's
+                # shared cookie jar. No token-bearing response field is consumed.
+                await asyncio.sleep(0)
+                if not await self._context_authenticated(context, cookie_names):
+                    raise BilibiliQrProtocolError("bilibili_login_state_missing")
+                session.status = "success"
+                session.error_code = ""
+                session.verification_kind = ""
+                session.protocol_secret = ""
+                session.qr_png = b""
+                await self.close_platform("bilibili")
+        except BilibiliQrProtocolError as exc:
+            session.status = "error"
+            session.error_code = str(exc)
+            session.verification_kind = ""
+            session.protocol_secret = ""
+            session.qr_png = b""
+        except RuntimeError as exc:
+            session.status = "error"
+            session.error_code = str(exc)
+            session.verification_kind = ""
+            session.protocol_secret = ""
+            session.qr_png = b""
+        except Exception:
+            session.status = "error"
+            session.error_code = "bilibili_qr_poll_failed"
+            session.verification_kind = ""
+            session.protocol_secret = ""
+            session.qr_png = b""
+        return self.public_auth(session)
 
     async def refresh_auth(self, session: AuthSession) -> dict[str, Any]:
         if session.status in {"success", "expired", "cancelled", "error"}:
@@ -488,7 +655,10 @@ class BrowserPool:
             await self._inspect_auth_page(session, pages[-1])
             if session.status == "qr_expired":
                 await self._renew_expired_qr(session, pages[-1])
-            if session.verification_kind in {"robot_verification", "qr_generation_blocked"} and session.login_mode == "embedded_qr":
+            if (
+                session.verification_kind in {"robot_verification", "qr_generation_blocked"}
+                and session.login_mode in {"embedded_qr", "headless_page_qr"}
+            ):
                 try:
                     await self._launch_manual_browser(session)
                 except RuntimeError as exc:
@@ -507,6 +677,8 @@ class BrowserPool:
         login_url: str,
         qr_selectors: tuple[str, ...],
         login_trigger_selectors: tuple[str, ...],
+        *,
+        prefer_headless: bool = False,
     ) -> dict[str, Any]:
         await self._supersede_auth(platform, owner)
         session = AuthSession(
@@ -516,27 +688,35 @@ class BrowserPool:
             qr_selectors=tuple(qr_selectors),
             login_trigger_selectors=tuple(login_trigger_selectors),
             login_url=str(login_url),
+            login_mode="headless_page_qr" if prefer_headless else "embedded_qr",
         )
         self._auth[session.session_id] = session
         try:
-            # Login uses the same persistent profile as later read-only requests,
-            # but stays visible so official sliders/device confirmation remain possible.
-            interactive_window = True
-            try:
-                page = await self.page(platform, headless=False)
-            except RuntimeError:
-                # A headless server can still provide the official QR flow. If the
-                # platform later asks for a slider/device confirmation, the status
-                # clearly reports that a desktop window is required.
-                interactive_window = False
+            # Page-based login uses the same persistent profile as later read-only
+            # requests. Platforms that need a slider can still hand off to the
+            # fixed ordinary-browser path.
+            interactive_window = not prefer_headless
+            interactive_fallback = False
+            if prefer_headless:
                 page = await self.page(platform, headless=True)
+            else:
+                try:
+                    page = await self.page(platform, headless=False)
+                except RuntimeError:
+                    # A headless server can still provide the official QR flow. If
+                    # the platform later asks for a slider, the status clearly
+                    # reports that a desktop window is required.
+                    interactive_window = False
+                    interactive_fallback = True
+                    session.login_mode = "headless_page_qr"
+                    page = await self.page(platform, headless=True)
             session.official_window_open = interactive_window
             await page.goto(login_url, wait_until="domcontentloaded", timeout=20000)
             await page.wait_for_timeout(500)
             if await self._click_login_trigger(session, page):
                 await page.wait_for_timeout(500)
             await self._wait_for_auth_surface(session, page)
-            if not interactive_window:
+            if interactive_fallback:
                 session.error_code = "interactive_window_unavailable"
             if session.verification_kind in {"robot_verification", "qr_generation_blocked"}:
                 try:
@@ -580,6 +760,7 @@ class BrowserPool:
         if session.expires_at <= time.time() and session.status not in {"success", "cancelled"}:
             session.status = "expired"
             session.qr_png = b""
+            session.protocol_secret = ""
         return session
 
     def public_auth(self, session: AuthSession) -> dict[str, Any]:
@@ -614,6 +795,7 @@ class BrowserPool:
         await self._stop_manual_browser(session)
         session.status = "cancelled"
         session.qr_png = b""
+        session.protocol_secret = ""
         session.official_window_open = False
         return self.public_auth(session)
 
@@ -622,6 +804,7 @@ class BrowserPool:
         await self.close_platform(session.platform)
         session.status = "expired"
         session.qr_png = b""
+        session.protocol_secret = ""
         session.official_window_open = False
 
     async def logout(self, platform: str) -> None:
@@ -638,6 +821,7 @@ class BrowserPool:
             if session.platform == platform:
                 session.status = "cancelled"
                 session.qr_png = b""
+                session.protocol_secret = ""
                 session.official_window_open = False
         self._browser_channel.pop(platform, None)
 
