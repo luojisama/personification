@@ -130,4 +130,4 @@ class BuiltinPlatformStore:
         }
 
 
-__all__ = ["BuiltinPlatformStore", "PLATFORMS"]
+__all__ = ["BuiltinPlatformStore", "CONFIG_FIELDS", "PLATFORMS"]

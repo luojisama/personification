@@ -36,6 +36,35 @@ def test_social_research_server_exposes_only_read_tools_and_control_is_not_liste
     assert not any("auth" in tool["name"] or "configure" in tool["name"] for tool in tools)
     assert set(status["platforms"]) == {"bilibili", "douyin", "tieba", "xiaoheihe"}
     assert all(item["state"] == "disabled" for item in status["platforms"].values())
+    assert all("enabled" not in item["config"] for item in status["platforms"].values())
+
+
+def test_platform_status_keeps_auth_probe_failure_partial_and_config_control_fields_separate(tmp_path: Path) -> None:
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+
+    class FailingAdapter:
+        async def authenticated(self):
+            raise OSError("private browser detail")
+
+        def capabilities(self):
+            return {"search": True}
+
+    async def run():
+        service = service_mod.SocialResearchService(tmp_path)
+        service._config["xiaoheihe"]["enabled"] = True
+        service.adapters["xiaoheihe"] = FailingAdapter()
+        try:
+            return await service.status()
+        finally:
+            await service.close()
+
+    status = asyncio.run(run())
+    platform = status["platforms"]["xiaoheihe"]
+    assert platform["enabled"] is True
+    assert platform["state"] == "unavailable"
+    assert platform["error_code"] == "platform_request_failed"
+    assert "enabled" not in platform["config"]
+    assert "private browser detail" not in json.dumps(platform, ensure_ascii=False)
 
 
 def test_balanced_filter_requires_both_video_thresholds_and_filters_marketing() -> None:

@@ -204,11 +204,14 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
         "状态历史",
         "机器人验证",
         "不要扫描 Logo 占位图",
-            "重新获取 WebUI 二维码",
-            "获取无窗口二维码",
-            "不依赖可见窗口",
-            "服务端会话剩余",
+        "重新获取 WebUI 二维码",
+        "获取无窗口二维码",
+        "不依赖可见窗口",
+        "服务端会话剩余",
+        "登录会话已完成；profile 登录态不会按此倒计时清除",
         "完成登录后请关闭该窗口",
+        "登录态已保存，但平台开关仍关闭",
+        "登录和平台开关彼此独立",
     ):
         assert visible_copy in source
 
@@ -227,6 +230,8 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
     assert "remaining_seconds" in source
     assert '"manual_browser"' in source
     assert "data-mcp-auth-manual" in source
+    assert "MCP_PLATFORM_CONFIG_KEYS" in source
+    assert "normalizedBuiltinPlatformConfig" in source
     assert '"risk_controlled","qr_expired"' in source
     assert ".mcp-login-qr { width:240px; height:240px;" in styles
     assert "image-rendering:pixelated" in styles

@@ -120,6 +120,10 @@ Data Transfer v3 只导出逻辑词典根、sense、短证据和学习事件。�
 | `error` + `bilibili_qr_*` | B站固定官方二维码事务返回异常、未知状态或本地编码不可用 | 重载后重新获取；不要改用非官方接口或导出事务键 |
 | `unavailable` | 浏览器、页面或适配器异常 | 运行健康诊断并检查 Chromium/Playwright 与页面改版 |
 
+登录态、平台开关和 Agent 工具授权是三个独立状态。卡片显示 `success` 只表示登录 Cookie 已保存到该平台的隔离 profile，不会自动把平台从 `disabled` 改成 `ready`；登录成功后的管理会话倒计时也不会删除 profile 登录态。随后仍需点击“开启平台”，并在服务卡片中授权所需工具。只有三层均满足时，顶部 `EFFECTIVE` 才会大于零。
+
+平台配置 JSON 只允许过滤、采样、缓存与超时字段，`enabled` 只能作为独立控制字段传递。native MCP 状态、WebUI API 和浏览器提交都会剥离嵌套的 `config.enabled`；否则严格配置校验会拒绝开启请求。若升级前曾看到“登录成功”但仍为 `revision=0 / disabled`，请部署本修复并重载原生 MCP 后重新点击“开启平台”，不需要注销或重新扫码。
+
 `manual_verification_required` 还会携带不含页面正文的安全分类：
 
 - `verification_kind=robot_verification`：抖音等平台显示机器人/滑块验证，只能在官方窗口人工完成；状态轮询只读取页面状态和登录 Cookie，不会点击验证控件。

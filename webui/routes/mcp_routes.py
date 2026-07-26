@@ -16,7 +16,7 @@ from ...core.mcp_management import (
     resolve_registry_source,
 )
 from ...core.mcp_builtin import BUILTIN_SOCIAL_MCP_ID
-from ...core.mcp_builtin_platform_store import BuiltinPlatformStore, PLATFORMS
+from ...core.mcp_builtin_platform_store import BuiltinPlatformStore, CONFIG_FIELDS, PLATFORMS
 from ...core.meme_learning_store import LearningThresholds, MemeLearningStore
 from ...core.slang_learning import SlangLearningPipeline
 from ...core.operation_diagnostics import diagnostic, detail, step
@@ -47,6 +47,7 @@ def _safe_builtin_error(exc: Exception, title: str) -> HTTPException:
     messages = {
         "revision_conflict": "配置已被其他管理员更新，请刷新页面后重试。",
         "builtin MCP is disabled": "请先开启原生社交平台 MCP 服务。",
+        "config contains unsupported fields": "平台配置混入了不受支持的字段，请刷新页面后重试。",
     }
     return HTTPException(status_code=status, detail={
         "ok": False,
@@ -512,10 +513,14 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         for platform in PLATFORMS:
             stored = persisted.get(platform, {"platform": platform, "enabled": False, "revision": 0, "config": {}})
             live = dict((runtime_status.get("platforms") or {}).get(platform) or {})
+            merged_config = {**dict(live.get("config") or {}), **dict(stored.get("config") or {})}
             platforms[platform] = {
                 **live,
                 **stored,
-                "config": {**dict(live.get("config") or {}), **dict(stored.get("config") or {})},
+                # Older/restarting native processes may still report the
+                # top-level ``enabled`` flag inside config. Never reflect an
+                # unknown field back to the browser's editable config model.
+                "config": {key: value for key, value in merged_config.items() if key in CONFIG_FIELDS},
                 "runtime_state": live.get("state", "service_disabled"),
             }
         return {"installation": installation, "platforms": platforms}

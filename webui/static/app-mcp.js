@@ -316,6 +316,11 @@ function renderMcpInstallConfirmation() {
 
 const MCP_BUILTIN_ID = "builtin_social_platform_research";
 const MCP_PLATFORM_LABELS = {bilibili:"B站", douyin:"抖音", tieba:"贴吧", xiaoheihe:"小黑盒"};
+const MCP_PLATFORM_CONFIG_KEYS = new Set([
+  "quality_mode", "marketing_threshold", "min_play_count", "min_comment_count",
+  "min_reply_count", "max_results", "comment_limit", "danmaku_limit",
+  "cache_ttl_seconds", "request_timeout_seconds",
+]);
 const MCP_STATE_LABELS = {
   disabled:"已关闭", service_disabled:"服务未启动", ready:"可用", login_required:"需要登录",
   manual_verification_required:"需要人工验证", risk_controlled:"平台风控暂停", unavailable:"不可用",
@@ -344,9 +349,16 @@ function formatBuiltinAuthRemaining(auth) {
   return `${minutes} 分 ${String(rest).padStart(2, "0")} 秒`;
 }
 
-function renderBuiltinAuthHint(auth) {
+function builtinAuthSessionSummary(auth) {
+  if (auth && auth.status === "success") return "登录会话已完成；profile 登录态不会按此倒计时清除";
+  return `服务端会话剩余 ${formatBuiltinAuthRemaining(auth)}`;
+}
+
+function renderBuiltinAuthHint(auth, platformEnabled=false) {
   if (!auth) return "";
   const kind = String(auth.verification_kind || "");
+  if (auth.status === "success" && !platformEnabled) return '<p class="muted">登录态已保存，但平台开关仍关闭。点击“开启平台”后才会参与只读检索；登录和平台开关彼此独立。</p>';
+  if (auth.status === "success") return '<p class="muted">登录态已保存且平台已开启。Agent 是否可调用还取决于上方工具授权。</p>';
   if (auth.login_mode === "protocol_qr" && auth.status === "waiting_scan") return '<p class="muted">B站二维码由官方登录接口生成并在本机编码；轮询直接写入隔离的 persistent profile，不依赖可见窗口，页面关闭或刷新不会让二维码立即失效。</p>';
   if (auth.login_mode === "headless_page_qr" && auth.status === "waiting_scan") return '<p class="muted">官方登录页由服务端后台保持；只有通过二维码像素结构校验后才会显示，加载中占位图不会再被当成二维码。无需保持可见窗口。</p>';
   if (kind === "robot_verification") return '<p class="muted">官方页面已要求机器人验证，但本机没有可用的普通系统浏览器兜底。请在当前官方窗口手动完成；MCP 不会绕过验证。</p>';
@@ -389,13 +401,13 @@ function renderBuiltinPlatformCard(platform, item) {
   const qr = auth && auth.session_id && auth.qr_available
     ? `<img class="mcp-login-qr" alt="${escapeAttr(label)}登录二维码" src="${API}/mcp/builtin/social-research/auth/${encodeURIComponent(auth.session_id)}/qrcode?platform=${encodeURIComponent(platform)}&revision=${encodeURIComponent(String(auth.qr_revision || 0))}">`
     : "";
-  const authHint = renderBuiltinAuthHint(auth);
+  const authHint = renderBuiltinAuthHint(auth, item.enabled === true);
   const windowHint = auth && auth.official_window_open
     ? auth.login_mode === "manual_browser"
       ? '<p class="muted">普通系统浏览器窗口正在运行；完成登录后请关闭该窗口，本页会自动检测。</p>'
       : '<p class="muted">官方二维码窗口保持开启；扫码、手机确认完成后，本页会自动更新。</p>'
     : "";
-  const authPanel = auth ? `<div class="mcp-auth-panel">${qr}<div><strong>${escapeHtml(mcpChineseState(auth.status))}</strong><code>${escapeHtml(auth.status || "")}</code><small>服务端会话剩余 ${escapeHtml(formatBuiltinAuthRemaining(auth))}</small>${authHint}${windowHint}${auth.error_code === "interactive_window_unavailable" ? '<p class="muted">当前运行环境无法打开可见浏览器；二维码仍可扫码，但手机确认/滑块需要在有桌面的运行账户下重试。</p>' : ""}</div></div>` : "";
+  const authPanel = auth ? `<div class="mcp-auth-panel">${qr}<div><strong>${escapeHtml(mcpChineseState(auth.status))}</strong><code>${escapeHtml(auth.status || "")}</code><small>${escapeHtml(builtinAuthSessionSummary(auth))}</small>${authHint}${windowHint}${auth.error_code === "interactive_window_unavailable" ? '<p class="muted">当前运行环境无法打开可见浏览器；二维码仍可扫码，但手机确认/滑块需要在有桌面的运行账户下重试。</p>' : ""}</div></div>` : "";
   const authAction = platform === "bilibili"
     ? auth && !["success","cancelled"].includes(auth.status) ? "重新获取无窗口二维码" : "获取无窗口二维码"
     : auth && !["success","cancelled"].includes(auth.status) ? "重新获取 WebUI 二维码" : "获取 WebUI 二维码";
@@ -742,10 +754,15 @@ function builtinPlatformConfig(platform) {
   return config;
 }
 
+function normalizedBuiltinPlatformConfig(value) {
+  const input = value && typeof value === "object" ? value : {};
+  return Object.fromEntries(Object.entries(input).filter(([key]) => MCP_PLATFORM_CONFIG_KEYS.has(key)));
+}
+
 async function configureBuiltinPlatform(platform, enabled, {useForm=false}={}) {
   const current = ((state.mcpBuiltin || {}).platforms || {})[platform];
   if (!current || state.mcpBusy) return;
-  const desiredConfig = useForm ? builtinPlatformConfig(platform) : (current.config || {});
+  const desiredConfig = normalizedBuiltinPlatformConfig(useForm ? builtinPlatformConfig(platform) : current.config);
   state.mcpBusy = true; render();
   try {
     await api(`/mcp/builtin/social-research/platforms/${encodeURIComponent(platform)}/configure`, {
@@ -755,6 +772,7 @@ async function configureBuiltinPlatform(platform, enabled, {useForm=false}={}) {
     await refreshBuiltinMcp();
     alertFlash("ok", `${MCP_PLATFORM_LABELS[platform] || platform}配置已保存`);
   } catch (error) {
+    try { await refreshBuiltinMcp(); } catch {}
     alertFlash("err", operationDiagnosticFromError(error, "平台配置失败").message || "平台配置失败");
   } finally { state.mcpBusy = false; render(); }
 }

@@ -118,7 +118,7 @@ class SocialResearchService:
         if config.get("enabled"):
             try:
                 authenticated = await adapter.authenticated()
-            except RuntimeError as exc:
+            except Exception as exc:
                 error_code = _safe_operation_code(exc)
         state = "disabled" if not config.get("enabled") else "ready" if authenticated else "login_required"
         if error_code:
@@ -130,7 +130,13 @@ class SocialResearchService:
             "state": state,
             "error_code": error_code,
             "capabilities": adapter.capabilities(),
-            "config": dict(config),
+            # ``enabled`` is a control-plane field, not platform configuration.
+            # Keeping it out of this nested object prevents WebUI status data
+            # from being replayed as an unsupported configure field.
+            "config": {
+                key: config.get(key, default)
+                for key, default in DEFAULT_PLATFORM_CONFIG.items()
+            },
         }
 
     async def status(self) -> dict[str, Any]:

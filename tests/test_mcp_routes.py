@@ -104,7 +104,16 @@ class _BuiltinManager(_Manager):
 
     async def builtin_request(self, method: str, params: dict):
         if method.endswith("/status") and "/auth/" not in method:
-            return {"schema_version": 1, "platforms": {}}
+            return {
+                "schema_version": 1,
+                "platforms": {
+                    "bilibili": {
+                        "state": "disabled",
+                        "enabled": False,
+                        "config": {"enabled": False, "quality_mode": "balanced"},
+                    }
+                },
+            }
         if method.endswith("/configure"):
             return {"schema_version": 1, "platforms": {params["platform"]: {"state": "login_required"}}}
         if method.endswith("/auth/start"):
@@ -254,6 +263,7 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
     assert status.status_code == 200
     assert status.headers["cache-control"] == "no-store, private"
     assert set(status.json()["platforms"]) == {"bilibili", "douyin", "tieba", "xiaoheihe"}
+    assert status.json()["platforms"]["bilibili"]["config"] == {"quality_mode": "balanced"}
 
     configured = client.post(
         "/api/mcp/builtin/social-research/platforms/bilibili/configure",
