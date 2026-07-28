@@ -102,6 +102,23 @@ def test_group_config_only_is_in_union_and_probe_is_bounded(store, monkeypatch) 
     assert all(entry["group_id"] == "100" for entry in store.data.get("group_directory", {}).values())
 
 
+def test_default_discovery_does_not_probe_non_members(store, monkeypatch) -> None:
+    monkeypatch.setattr(utils, "load_group_configs", lambda: {"100": {"enabled": True}})
+    bot = _Bot("10", [])
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(personification_whitelist=[]),
+        get_bots=lambda: {"10": bot},
+        runtime_bundle=None,
+    )
+
+    rows = asyncio.run(directory.discover_group_union(runtime))
+
+    assert [row["group_id"] for row in rows] == ["100"]
+    assert bot.list_calls == 1
+    assert bot.probes == []
+    assert rows[0]["bot_self_ids"] == []
+
+
 def test_record_observed_group_keeps_provenance_and_freshness(store) -> None:
     directory.record_observed_group("10", "100", source="event", observed_at=10)
     value = directory.record_observed_group("10", "100", source="profile_memory", observed_at=20)

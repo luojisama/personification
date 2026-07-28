@@ -47,7 +47,7 @@ let state = {
 };
 
 const VIEW_ASSETS = {
-  dashboard:"app-admin.js",health:"app-admin.js",qzone:"app-admin.js",personas:"app-admin.js",groups:"app-admin.js",group_switch:"app-admin.js",persona_prompt:"app-admin.js",persona_builder:"app-admin.js",qq:"app-admin.js",user_policy:"app-admin.js",outbound:"app-admin.js",
+  dashboard:"app-admin.js",health:"app-admin.js",qzone:"app-admin.js",personas:"app-admin.js",groups:"app-admin.js",group_switch:"app-admin.js",persona_prompt:"app-tools.js",persona_builder:"app-admin.js",qq:"app-admin.js",user_policy:"app-admin.js",outbound:"app-admin.js",
   config:"app-config.js",memory:"app-content.js",memory_graph:"app-content.js",stickers:"app-content.js",
   skills:"app-tools.js",mcp:"app-mcp.js",tool_creator:"app-tool-creator.js",plugin_knowledge:"app-tools.js",plugin_manager:"app-tools.js",test:"app-tools.js",
   proactive:"app-activity.js",audit:"app-activity.js",logs:"app-activity.js",traces:"app-activity.js",trace_detail:"app-activity.js",
@@ -568,7 +568,7 @@ async function loadView() {
   _viewAbortController?.abort();
   _viewAbortController = new AbortController();
   await ensureViewAsset(view);
-  if(navigationId!==_navigationId)return;
+  if(navigationId!==_navigationId)return false;
   state.loading = true;
   state.loadingMessage = loadingMessageForView(view);
   if (state.logged) render();
@@ -762,11 +762,12 @@ async function loadView() {
       state.outbound = await api("/outbound/recent?" + qs.toString(), {cache:"no-store"});
     }
   } catch (e) {
-    if (e && e.name === "AbortError") return;
+    if (e && e.name === "AbortError") return false;
     throw e;
   } finally {
     if (navigationId === _navigationId) { state.loading = false; state.loadingMessage = ""; }
   }
+  return navigationId === _navigationId;
 }
 
 function viewTitle() {
@@ -782,7 +783,13 @@ async function navigateToView(view,{fromHistory=false}={}) {
   if(state.view==="mcp"&&nextView!=="mcp"&&typeof stopMcpViewLifecycle==="function")stopMcpViewLifecycle();
   state.view=nextView;
   if(state.mobileNavOpen)state.mobileNavOpen=false;
-  try{await loadView();render();}catch(e){alertFlash("err",e.message);}
+  try{
+    const loaded=await loadView();
+    if(loaded&&state.view===nextView)render();
+  }catch(e){
+    if((e&&e.name==="AbortError")||state.view!==nextView)return;
+    alertFlash("err",e.message);
+  }
 }
 
 function render() {

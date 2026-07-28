@@ -186,12 +186,27 @@ async function doVerify() {
   const label = document.getElementById("login-label").value.trim();
   const msg = document.getElementById("login-msg");
   msg.textContent = "正在验证…";
+  let r;
   try {
-    const r = await api("/auth/verify", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq: state.pendingQq, code, device_label: label }) });
-    clearInMemorySensitiveState();
-    if (r && r.pending) { state.logged = false; state.devicePending = true; state.qq = state.pendingQq; render(); return; }
-    state.logged = true; state.devicePending = false; state.qq = state.pendingQq; await loadView(); render();
+    r = await api("/auth/verify", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq: state.pendingQq, code, device_label: label }) });
   } catch (e) { msg.textContent = "验证失败：" + e.message; }
+  if (!r) return;
+  clearInMemorySensitiveState();
+  if (r.pending) { state.logged = false; state.devicePending = true; state.qq = state.pendingQq; render(); return; }
+  state.logged = true; state.devicePending = false; state.qq = state.pendingQq;
+  try {
+    const loaded = await loadView();
+    if (loaded) render();
+  } catch (e) {
+    const failedView = state.view;
+    state.view = "dashboard";
+    history.replaceState({view:state.view}, "", "#dashboard");
+    const loaded = await loadView().catch(() => false);
+    if (loaded) {
+      state.alert = {kind:"err", text:`登录成功，但“${failedView}”页面加载失败：${e.message}`};
+      render();
+    }
+  }
 }
 
 function escapeHtml(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }

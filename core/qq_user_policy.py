@@ -14,6 +14,7 @@ QQ_POLICY_ALLOW = "allow"
 QQ_POLICY_SILENT = "silent"
 QQ_POLICY_DIRECT_CLOSURE = "direct_closure"
 QQ_POLICY_DIRECT_CLOSURE_CANDIDATE = "direct_closure_candidate"
+_CLASSIFIER_UNAVAILABLE_CLOSURE_COOLDOWN_SECONDS = 60.0
 
 
 class QQPolicyBlockedDuringTurn(RuntimeError):
@@ -265,13 +266,23 @@ class QQUserPolicyGate:
     async def claim_direct_closure(self, decision: QQPolicyDecision) -> QQPolicyDecision:
         if decision.disposition != QQ_POLICY_DIRECT_CLOSURE_CANDIDATE:
             return decision
+        classifier_unavailable = decision.assessment.reason_code == "classifier_unavailable"
+        channel_key = decision.channel_key
+        cooldown_seconds = None
+        if classifier_unavailable:
+            # 分类服务暂时不可用不是用户违规；使用独立、短时的提示冷却，既避免
+            # 故障期间刷屏，也不让真实边界闭环的 30 天记录吞掉服务恢复提示。
+            channel_key = f"{channel_key}:classifier_unavailable"
+            cooldown_seconds = _CLASSIFIER_UNAVAILABLE_CLOSURE_COOLDOWN_SECONDS
         try:
-            claimed = await asyncio.to_thread(
-                self.service.claim_direct_closure,
-                user_id=decision.user_id,
-                channel_key=decision.channel_key,
-                event_key=decision.event_key,
-            )
+            kwargs = {
+                "user_id": decision.user_id,
+                "channel_key": channel_key,
+                "event_key": decision.event_key,
+            }
+            if cooldown_seconds is not None:
+                kwargs["cooldown_seconds"] = cooldown_seconds
+            claimed = await asyncio.to_thread(self.service.claim_direct_closure, **kwargs)
         except Exception as exc:
             if self.logger is not None:
                 self.logger.warning(

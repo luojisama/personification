@@ -24,14 +24,32 @@ class _Gate:
         return self.allowed
 
 
-def test_reply_processor_rejects_boundary_route_before_lifecycle() -> None:
+def test_reply_processor_sends_dedicated_closure_without_entering_lifecycle() -> None:
     gate = _Gate(True)
-    deps = SimpleNamespace(runtime=SimpleNamespace(user_policy_gate=gate))
-    state = {"user_policy_decision": {"disposition": "direct_closure"}}
+    sent: list[str] = []
 
-    asyncio.run(processor.process_response_logic(None, object(), state, deps))
+    class _Bot:
+        async def send(self, _event, payload) -> None:  # noqa: ANN001
+            sent.append(str(payload))
 
-    assert gate.calls == 0
+    deps = SimpleNamespace(
+        runtime=SimpleNamespace(
+            user_policy_gate=gate,
+            plugin_config=SimpleNamespace(personification_turn_trace_enabled=False),
+            qq_outbound_ledger=None,
+        )
+    )
+    state = {
+        "user_policy_decision": {
+            "disposition": "direct_closure",
+            "reason_code": "classifier_unavailable",
+        }
+    }
+
+    asyncio.run(processor.process_response_logic(_Bot(), object(), state, deps))
+
+    assert gate.calls == 1
+    assert sent == ["我这边暂时没判断好，这条先不接了。你可以稍后再发一次。"]
     assert "_reply_lifecycle_started_at" not in state
 
 

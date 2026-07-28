@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -121,6 +122,48 @@ def test_health_db_is_live_query(_runtime_context) -> None:
     st = _statuses(client.get("/personification/api/health/check").json())
     assert st["db"]["status"] == "ok"
     assert "查询正常" in st["db"]["detail"]
+
+
+def test_health_mcp_check_counts_native_tools_and_explains_authorization(monkeypatch) -> None:
+    mcp_compat = load_personification_module("plugin.personification.skill_runtime.mcp_compat")
+    monkeypatch.setattr(mcp_compat, "_REGISTERED_MCP_TOOLS", {})
+
+    class _Registry:
+        def __init__(self, tools):  # noqa: ANN001
+            self._tools = tools
+
+        def all(self):  # noqa: ANN201
+            return list(self._tools)
+
+    builtin = SimpleNamespace(metadata={"source_kind": "mcp_builtin"})
+    checks = diagnostics._skill_checks(SimpleNamespace(), SimpleNamespace(tool_registry=_Registry([builtin])))
+    mcp = next(item for item in checks if item["key"] == "mcp")
+
+    assert mcp["status"] == "ok"
+    assert "原生 1" in mcp["detail"]
+
+    checks = diagnostics._skill_checks(SimpleNamespace(), SimpleNamespace(tool_registry=_Registry([])))
+    mcp = next(item for item in checks if item["key"] == "mcp")
+    assert mcp["status"] == "info"
+    assert "服务运行不等于工具已对 Agent 生效" in mcp["detail"]
+
+
+def test_health_tts_http_error_is_connectivity_warning(monkeypatch) -> None:
+    async def _not_found(_url, *, timeout=8):  # noqa: ARG001
+        return True, "HTTP 404"
+
+    monkeypatch.setattr(diagnostics, "_http_reachable", _not_found)
+    cfg = SimpleNamespace(
+        personification_tts_enabled=True,
+        personification_tts_api_url="https://tts.example.test/v1",
+        personification_tts_api_key="configured",
+    )
+
+    check = asyncio.run(diagnostics._tts_checks(cfg))[0]
+
+    assert check["status"] == "warn"
+    assert "尚未验证语音合成" in check["detail"]
+    assert "/chat/completions" in check["hint"]
 
 
 def test_health_only_runs_single_category(_runtime_context) -> None:

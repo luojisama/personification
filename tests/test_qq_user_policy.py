@@ -179,6 +179,32 @@ def test_unaddressed_boundary_is_silent_and_direct_closure_is_one_shot(tmp_path)
     asyncio.run(run())
 
 
+def test_classifier_unavailable_closure_uses_separate_short_cooldown(tmp_path) -> None:  # noqa: ANN001
+    async def run() -> None:
+        unavailable = user_policy.PolicyAssessment(
+            reason_code="classifier_unavailable",
+            confirmed=False,
+        )
+        gate, service, _classifier = _gate(tmp_path, unavailable)
+        captured: list[dict] = []
+        original = service.claim_direct_closure
+
+        def claim(**kwargs):  # noqa: ANN003, ANN202
+            captured.append(dict(kwargs))
+            return original(**kwargs)
+
+        service.claim_direct_closure = claim
+        decision = await gate.claim_direct_closure(
+            await gate.evaluate(_Event(50, "分类服务超时", group_id=None), bot_self_id="bot-1")
+        )
+
+        assert decision.disposition == qq_policy.QQ_POLICY_DIRECT_CLOSURE
+        assert captured[0]["channel_key"].endswith(":classifier_unavailable")
+        assert captured[0]["cooldown_seconds"] == 60.0
+
+    asyncio.run(run())
+
+
 def test_non_text_event_only_checks_existing_authorization(tmp_path) -> None:  # noqa: ANN001
     async def run() -> None:
         gate, _service, classifier = _gate(tmp_path, _assessment("boundary"))

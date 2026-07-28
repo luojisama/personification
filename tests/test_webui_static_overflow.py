@@ -167,3 +167,40 @@ def test_operation_summary_accessibility_contract_stays_intact() -> None:
     assert ".operation-summary:focus-visible" in css
     assert "min-height:54px" in css
     assert "min-height:68px" in css
+
+
+def test_rapid_navigation_never_renders_a_stale_lazy_view() -> None:
+    core = _source("app-core.js")
+    load_view = _function(core, "loadView")
+    navigate = _function(core, "navigateToView")
+
+    assert "if(navigationId!==_navigationId)return false;" in load_view
+    assert 'if (e && e.name === "AbortError") return false;' in load_view
+    assert "return navigationId === _navigationId;" in load_view
+    assert "const loaded=await loadView();" in navigate
+    assert "if(loaded&&state.view===nextView)render();" in navigate
+    assert 'if((e&&e.name==="AbortError")||state.view!==nextView)return;' in navigate
+
+
+def test_persona_prompt_loads_the_asset_that_defines_its_renderer() -> None:
+    core = _source("app-core.js")
+
+    assert 'persona_prompt:"app-tools.js"' in core
+    assert "function renderPersonaPrompt()" in _source("app-tools.js")
+
+
+def test_successful_login_does_not_mislabel_a_view_render_failure() -> None:
+    verify = _function(_source("app-auth.js"), "doVerify")
+
+    assert verify.count("catch") >= 2
+    assert 'msg.textContent = "验证失败：" + e.message' in verify
+    assert 'text:`登录成功，但“${failedView}”页面加载失败：${e.message}`' in verify
+    assert 'state.view = "dashboard"' in verify
+
+
+def test_trace_budget_labels_describe_limits_instead_of_elapsed_usage() -> None:
+    activity = _source("app-activity.js")
+
+    assert activity.count('actual_steps: "运行步数上限"') == 2
+    assert activity.count('actual_seconds: "运行预算秒数"') == 2
+    assert 'actual_seconds: "实际秒数"' not in activity

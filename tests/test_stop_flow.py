@@ -141,6 +141,36 @@ def test_should_review_banter_lookup_draft_uses_structural_signals() -> None:
     assert not stop_flow._should_review_banter_lookup_draft(ambiguity_level="low", draft_answer_text="接一句")
 
 
+def test_direct_image_answer_does_not_force_an_unrelated_capability_tool() -> None:
+    state = stop_flow.StopFlowState()
+
+    async def _unexpected_selector(**_kwargs):  # noqa: ANN001
+        raise AssertionError("a grounded image answer must not force a fallback tool")
+
+    selected = asyncio.run(
+        stop_flow._select_stop_fallback_lookup(
+            state=state,
+            response=_stop_response("主色调是蓝色，更像抽象壁纸"),
+            content_len=15,
+            runtime_chat_intent="plugin_question",
+            banter_requires_lookup_retry=False,
+            user_query_text="请看这张图并说说主色调",
+            rewritten_query=None,
+            context_hint="",
+            user_images=["https://example.invalid/current-image.jpg"],
+            plugin_query_intent="runtime_capability",
+            tool_caller=SimpleNamespace(),
+            registry=_Registry(),
+            record_trace=lambda **_kwargs: None,
+            logger=SimpleNamespace(info=lambda _msg: None),
+            select_semantic_fallback_tool=_unexpected_selector,
+        )
+    )
+
+    assert selected is None
+    assert state.semantic_fallback_attempted is False
+
+
 def test_handle_model_stop_returns_banter_text_without_bypass() -> None:
     decision, traces = _run_stop_handler(
         state=stop_flow.StopFlowState(),

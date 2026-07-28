@@ -250,8 +250,16 @@ async def _select_stop_fallback_lookup(
         and state.last_tool_outcome
         in {TOOL_RESULT_EMPTY_EVIDENCE, TOOL_RESULT_OPERATIONAL_FAILURE}
     )
+    image_grounded_answer_ready = bool(
+        user_images
+        and content_len > 0
+        and not response.vision_unavailable
+        and not state.pending_evidence_followup_query
+        and runtime_chat_intent in {"explanation", "plugin_question"}
+    )
     non_banter_fallback_needed = (
         runtime_chat_intent != "banter"
+        and not image_grounded_answer_ready
         and (
             not state.has_tool_call
             or previous_tool_unavailable

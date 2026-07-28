@@ -7,7 +7,12 @@ from .data_store import get_data_store
 
 
 _NAMESPACE = "group_directory"
-_DEFAULT_PROBE_LIMIT = 20
+# WebUI 列表首先依赖 get_group_list 的实时 membership 结果。配置、白名单、
+# 画像与历史目录仍会进入 union，但不应在每次只读列表加载时同步探测一批
+# 已不在实时群列表中的候选；NapCat 对不存在群的 get_group_info 可能逐次等待
+# 数秒，旧默认 20 会把多个页面的首载放大到约 45 秒。需要主动核验的调用方
+# 仍可显式传入正数 probe_limit。
+_DEFAULT_PROBE_LIMIT = 0
 
 
 def normalize_group_list(data: Any) -> list[dict[str, Any]]:

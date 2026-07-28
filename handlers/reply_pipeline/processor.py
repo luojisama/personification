@@ -114,7 +114,7 @@ from ...core.qq_expression_library import (
     render_qq_expression_message,
     semantic_text_for_qq_expression_segment,
 )
-from ...core.qq_user_policy import QQPolicyBlockedDuringTurn
+from ...core.qq_user_policy import QQ_POLICY_DIRECT_CLOSURE, QQPolicyBlockedDuringTurn
 from ...core.qq_outbound import QQOutboundLedger, SendReceipt
 from ...core.sticker_feedback import (
     build_sticker_feedback_scene_key,
@@ -402,15 +402,114 @@ def _should_regenerate_for_banter(
     return str(message_intent or "").strip() == "banter"
 
 
+def _policy_direct_closure_text(policy_decision: dict[str, Any]) -> str:
+    if str(policy_decision.get("reason_code", "") or "") == "classifier_unavailable":
+        return "我这边暂时没判断好，这条先不接了。你可以稍后再发一次。"
+    return "这个话题我不参与，我们换个话题吧。"
+
+
+async def _send_policy_direct_closure(
+    bot: Any,
+    event: Any,
+    state: Dict[str, Any],
+    deps: ReplyProcessorDeps,
+    policy_decision: dict[str, Any],
+) -> None:
+    """Send the one-shot policy closure without entering Agent/history/memory."""
+    runtime = deps.runtime
+    trace_mod = None
+    trace_id = ""
+    reason_code = str(policy_decision.get("reason_code", "") or "policy_boundary")
+    try:
+        plugin_config = getattr(runtime, "plugin_config", None)
+        if bool(getattr(plugin_config, "personification_turn_trace_enabled", True)):
+            from ...core import reply_turn_trace as trace_mod  # type: ignore[assignment]
+
+            group_id = str(getattr(event, "group_id", "") or "")
+            user_id = str(getattr(event, "user_id", "") or "")
+            trace_id = trace_mod.start_trace(
+                session_type="group" if group_id else "private",
+                group_id=group_id,
+                user_id=user_id,
+                detail={
+                    "source": "user_policy_direct_closure",
+                    "message_id": str(getattr(event, "message_id", "") or ""),
+                },
+            )
+            state["reply_trace_id"] = trace_id
+            trace_mod.record_stage(
+                trace_id=trace_id,
+                key="policy_ingress",
+                label="用户策略入口",
+                status="warn",
+                detail=f"disposition=direct_closure reason={reason_code}",
+            )
+    except Exception:
+        trace_mod = None
+        trace_id = ""
+
+    try:
+        result = await _dispatch_reply_part(
+            bot=bot,
+            event=event,
+            payload=_policy_direct_closure_text(policy_decision),
+            ledger=getattr(runtime, "qq_outbound_ledger", None),
+            surface="policy_direct_closure",
+            reply_trace_id=trace_id,
+        )
+    except Exception as exc:
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.warning(
+                f"[user_policy] direct closure send failed: {type(exc).__name__}"
+            )
+        if trace_mod is not None and trace_id:
+            trace_mod.record_stage(
+                trace_id=trace_id,
+                key="policy_closure_send",
+                label="策略提示发送",
+                status="error",
+                detail=f"type={type(exc).__name__}",
+            )
+            trace_mod.finish_trace(
+                trace_id=trace_id,
+                outcome="failed",
+                diagnosis_code="policy_closure_send_failed",
+            )
+        return
+
+    sent = not isinstance(result, SendReceipt) or result.status == "sent"
+    if trace_mod is not None and trace_id:
+        trace_mod.record_stage(
+            trace_id=trace_id,
+            key="policy_closure_send",
+            label="策略提示发送",
+            status="ok" if sent else "warn",
+            detail="固定非模型提示已发送" if sent else f"ledger_status={result.status}",
+        )
+        trace_mod.finish_trace(
+            trace_id=trace_id,
+            outcome="ok" if sent else "outcome_unknown",
+            diagnosis_code=(
+                "policy_classifier_unavailable"
+                if reason_code == "classifier_unavailable"
+                else "policy_direct_closure"
+            ),
+        )
+
+
 async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], deps: ReplyProcessorDeps) -> None:
     # plugin_invoker 代为执行其它插件命令时会用 handle_event 重新分发合成事件，
     # 这里直接短路，确保合成事件永远不会再次进入拟人回复/Agent 流程（防递归）。
     if getattr(event, "_personification_synthetic", False):
         return
+    user_policy_gate = getattr(deps.runtime, "user_policy_gate", None)
     policy_decision = state.get("user_policy_decision")
     if isinstance(policy_decision, dict) and policy_decision.get("disposition") != "allow":
+        if policy_decision.get("disposition") == QQ_POLICY_DIRECT_CLOSURE:
+            if user_policy_gate is None or await user_policy_gate.allows_current(event):
+                await _send_policy_direct_closure(bot, event, state, deps, policy_decision)
         return
-    user_policy_gate = getattr(deps.runtime, "user_policy_gate", None)
     if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
         return
     begin_reply_lifecycle(state)
