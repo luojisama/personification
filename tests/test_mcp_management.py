@@ -696,6 +696,7 @@ def test_registry_detail_can_bypass_cache_and_exposes_file_hash() -> None:
 def test_runtime_manager_registers_only_enabled_policy(tmp_path: Path, monkeypatch) -> None:
     _init_store(tmp_path, monkeypatch)
     management = load_personification_module("plugin.personification.core.mcp_management")
+    executor = load_personification_module("plugin.personification.agent.runtime.executor")
     registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
     monkeypatch.setattr(management, "get_data_dir", lambda _cfg=None: tmp_path)
     config = SimpleNamespace(
@@ -742,6 +743,7 @@ def test_runtime_manager_registers_only_enabled_policy(tmp_path: Path, monkeypat
         await manager.activate("install-1")
         read_tool = registry.get("mcp_demo_read_demo")
         assert read_tool is not None
+        assert read_tool.local is True
         assert registry.get("mcp_demo_write_demo") is None
         assert registry.get("mcp_demo_deleted_demo") is None
         assert {tool["remote_name"] for tool in manager.store.tools("install-1")} == {"read_demo", "write_demo"}
@@ -754,7 +756,11 @@ def test_runtime_manager_registers_only_enabled_policy(tmp_path: Path, monkeypat
         assert running["tools"][0]["authorized"] is True
         assert running["tools"][0]["registered"] is True
         assert running["tools"][0]["effective"] is True
-        result = await read_tool.handler(query="hello")
+        result = await executor._invoke_tool_handler(
+            tool_name=read_tool.name,
+            tool=read_tool,
+            tool_args={"query": "hello"},
+        )
         stopped = await manager.toggle_installation("install-1", False)
         assert stopped["authorized_count"] == 1
         assert stopped["registered_count"] == 0

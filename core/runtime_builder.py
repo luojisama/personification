@@ -719,7 +719,14 @@ def build_plugin_runtime(
         extension_tools: list[Any] = []
         if tool_registry is not None:
             registry_version, registry_snapshot = tool_registry.snapshot()
-            extension_source_kinds = {"generated", "local", "mcp", "mcp_managed", "remote"}
+            extension_source_kinds = {
+                "generated",
+                "local",
+                "mcp",
+                "mcp_builtin",
+                "mcp_managed",
+                "remote",
+            }
             extension_tools = [
                 tool
                 for tool in registry_snapshot.values()

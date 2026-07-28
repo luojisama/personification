@@ -58,7 +58,7 @@ async def _invoke_tool_handler(
 ) -> str:
     if tool.local:
         return await tool.handler(**tool_args)
-    from ..mcp.bridge import McpBridge
+    from ...mcp.bridge import McpBridge
 
     return await McpBridge().call_remote(tool_name, tool_args)
 

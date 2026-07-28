@@ -1168,7 +1168,9 @@ class McpRuntimeManager:
                         description=policy["description"],
                         parameters=policy["parameters"],
                         handler=_handler,
-                        local=False,
+                        # 托管进程由当前 manager 持有，必须调用上面绑定的持久 client handler。
+                        # local=False 仅保留给 legacy Skill MCP 的按次 McpBridge 路径。
+                        local=True,
                         metadata={
                             "category": "mcp",
                             "source_kind": "mcp_builtin" if is_builtin_social_installation(item) else "mcp_managed",

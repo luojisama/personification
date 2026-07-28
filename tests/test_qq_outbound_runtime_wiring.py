@@ -43,6 +43,24 @@ def test_runtime_builder_injects_single_ledger_into_all_runtime_owners() -> None
     assert len(recovery_calls) == 1
 
 
+def test_runtime_reload_preserves_native_mcp_tools() -> None:
+    tree = ast.parse((ROOT / "core/runtime_builder.py").read_text(encoding="utf-8"))
+    source_kinds: set[str] | None = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "extension_source_kinds"
+            for target in node.targets
+        ):
+            continue
+        source_kinds = set(ast.literal_eval(node.value))
+        break
+
+    assert source_kinds is not None
+    assert "mcp_builtin" in source_kinds
+
+
 def test_flow_and_agent_production_builders_forward_ledger() -> None:
     for function_name in ("build_proactive_checker", "build_group_idle_checker"):
         calls = _call_keywords("flows/__init__.py", function_name)
