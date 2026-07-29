@@ -224,7 +224,111 @@ def test_live_page_state_is_mapped_to_safe_control_code(tmp_path: Path) -> None:
 
 def test_xiaoheihe_uses_current_web_search_route() -> None:
     adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
-    assert adapters_mod.SPECS["xiaoheihe"].search_url.startswith("https://www.xiaoheihe.cn/app/search/list?q=")
+    spec = adapters_mod.SPECS["xiaoheihe"]
+    assert spec.login_url == "https://xiaoheihe.cn/app/bbs/home"
+    assert spec.search_url.startswith("https://xiaoheihe.cn/app/search/list?q=")
+    assert spec.content_link_selector == 'a[href*="/app/bbs/link/"]'
+
+
+def test_platform_content_id_parsers_accept_only_real_content_routes(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+    pool = browser_mod.BrowserPool(tmp_path)
+    cases = {
+        "bilibili": ("https://www.bilibili.com/video/BV1abc123/", "BV1abc123"),
+        "douyin": ("https://www.douyin.com/video/7520000000000000000", "7520000000000000000"),
+        "tieba": ("https://tieba.baidu.com/p/9876543210", "9876543210"),
+        "xiaoheihe": ("https://xiaoheihe.cn/app/bbs/link/179364001", "179364001"),
+    }
+    for platform, (url, expected) in cases.items():
+        adapter = adapters_mod.PlatformAdapter(adapters_mod.SPECS[platform], pool)
+        assert adapter.content_id(url) == expected
+
+    xiaoheihe = adapters_mod.PlatformAdapter(adapters_mod.SPECS["xiaoheihe"], pool)
+    for url in (
+        "https://xiaoheihe.cn/app/bbs/home",
+        "https://xiaoheihe.cn/app/search/list?q=test",
+        "https://xiaoheihe.cn/app/user/profile/75746007",
+        "https://xiaoheihe.cn/app/bbs/topic/123",
+    ):
+        assert xiaoheihe.content_id(url) == ""
+
+
+def test_xiaoheihe_normalizes_www_content_urls_and_builds_canonical_detail_url(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+    adapter = adapters_mod.PlatformAdapter(adapters_mod.SPECS["xiaoheihe"], browser_mod.BrowserPool(tmp_path))
+
+    assert adapter.validate_url("https://www.xiaoheihe.cn/app/bbs/link/179364001") == (
+        "https://xiaoheihe.cn/app/bbs/link/179364001"
+    )
+    assert adapter.url_for_id("179364001") == "https://xiaoheihe.cn/app/bbs/link/179364001"
+
+
+def test_xiaoheihe_detail_read_waits_for_and_extracts_article_container() -> None:
+    adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+
+    class FakeResponse:
+        status = 200
+
+    class FakeLocator:
+        async def all_inner_texts(self):  # noqa: ANN201
+            return []
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.waited_selector = ""
+            self.evaluate_calls = 0
+
+        async def goto(self, url, **_kwargs):  # noqa: ANN001, ANN201
+            assert url == "https://xiaoheihe.cn/app/bbs/link/179364001"
+            return FakeResponse()
+
+        async def wait_for_timeout(self, _milliseconds):  # noqa: ANN001, ANN201
+            return None
+
+        async def wait_for_selector(self, selector, **_kwargs):  # noqa: ANN001, ANN201
+            self.waited_selector = selector
+            return object()
+
+        async def evaluate(self, script):  # noqa: ANN001, ANN201
+            self.evaluate_calls += 1
+            if self.evaluate_calls == 1:
+                return {"title": "小黑盒", "body": "公开帖子"}
+            assert ".post__content .hb-article" in script
+            return {
+                "title": "花来成就要注意",
+                "description": "S9赛季正文，不含导航与评论",
+                "cover": "",
+                "body": "",
+            }
+
+        def locator(self, _selector):  # noqa: ANN001, ANN201
+            return FakeLocator()
+
+    class FakeBrowsers:
+        def __init__(self) -> None:
+            self.fake_page = FakePage()
+
+        async def page(self, _platform):  # noqa: ANN001, ANN201
+            return self.fake_page
+
+    browsers = FakeBrowsers()
+    adapter = adapters_mod.PlatformAdapter(adapters_mod.SPECS["xiaoheihe"], browsers)
+    item = asyncio.run(
+        adapter.read(
+            content_id="",
+            url="https://www.xiaoheihe.cn/app/bbs/link/179364001",
+            include=["caption"],
+            comment_limit=0,
+            danmaku_limit=0,
+            timeout_seconds=5,
+        )
+    )
+
+    assert browsers.fake_page.waited_selector == ".hb-bbs-post .post__content .hb-article"
+    assert item["content_id"] == "179364001"
+    assert item["caption_or_body"] == "S9赛季正文，不含导航与评论"
 
 
 def test_platform_login_selectors_cover_current_official_qr_surfaces() -> None:

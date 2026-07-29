@@ -92,10 +92,10 @@ SPECS: dict[str, PlatformSpec] = {
     ),
     "xiaoheihe": PlatformSpec(
         name="xiaoheihe",
-        login_url="https://www.xiaoheihe.cn/home",
-        search_url="https://www.xiaoheihe.cn/app/search/list?q={query}",
+        login_url="https://xiaoheihe.cn/app/bbs/home",
+        search_url="https://xiaoheihe.cn/app/search/list?q={query}",
         allowed_hosts=("xiaoheihe.cn", "www.xiaoheihe.cn"),
-        content_link_selector='a[href*="/bbs/"],a[href*="/article/"],a[href*="/app/bbs/link/"]',
+        content_link_selector='a[href*="/app/bbs/link/"]',
         discussion_selectors=(("[class*=comment] [class*=content]", "comment"), ("[class*=reply] [class*=content]", "reply")),
         qr_selectors=(
             'canvas.website-login__qr-canvas',
@@ -147,6 +147,8 @@ class PlatformAdapter:
         allowed = any(host == suffix or host.endswith("." + suffix) for suffix in self.spec.allowed_hosts)
         if parsed.scheme != "https" or not allowed or parsed.username is not None or parsed.password is not None:
             raise ValueError("content URL is outside the selected platform")
+        if self.spec.name == "xiaoheihe" and host == "www.xiaoheihe.cn":
+            return parsed._replace(netloc="xiaoheihe.cn").geturl()
         return url
 
     async def start_auth(self, owner: str, *, mode: str = "embedded_qr") -> dict[str, Any]:
@@ -193,18 +195,24 @@ class PlatformAdapter:
         url = self.spec.search_url.format(query=quote(clean_text(query, 200), safe=""))
         page = await self._page(url, timeout_seconds)
         rows = await page.locator(self.spec.content_link_selector).evaluate_all(
-            """(nodes, maxItems) => nodes.slice(0, maxItems * 4).map((node) => {
+            """(nodes, options) => nodes.slice(0, options.maxItems * 4).map((node) => {
                 const card = node.closest('article,li,[class*=card],[class*=item],[class*=video],[class*=result]') || node.parentElement;
                 const img = card && card.querySelector('img');
                 const text = (card && card.innerText) || node.innerText || '';
+                const metricText = options.platform === 'xiaoheihe' && card
+                    ? Array.from(card.querySelectorAll('button,[class*=stat],[class*=count],[class*=like],[class*=comment]'))
+                        .map((item) => item.innerText || item.textContent || '')
+                        .filter(Boolean)
+                    : [];
                 return {
                     href: node.href || node.getAttribute('href') || '',
                     title: node.getAttribute('title') || node.getAttribute('aria-label') || node.innerText || '',
                     text,
+                    metricText,
                     cover: img ? (img.currentSrc || img.src || img.getAttribute('data-src') || '') : '',
                 };
             })""",
-            limit,
+            {"maxItems": limit, "platform": self.spec.name},
         )
         result: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -224,7 +232,15 @@ class PlatformAdapter:
             seen.add(content_id)
             text = clean_text(raw.get("text"), 1200)
             title = clean_text(raw.get("title"), 300) or text[:200]
-            counts = [_compact_count(value) for value in re.findall(r"[0-9]+(?:\.[0-9]+)?\s*[万w千k]?", text, re.IGNORECASE)]
+            count_source = (
+                " ".join(str(value or "") for value in list(raw.get("metricText") or []))
+                if self.spec.name == "xiaoheihe"
+                else text
+            )
+            counts = [
+                _compact_count(value)
+                for value in re.findall(r"[0-9]+(?:\.[0-9]+)?\s*[万w千k]?", count_source, re.IGNORECASE)
+            ]
             stats = {
                 "play_count": counts[0] if self.spec.content_type == "video" and counts else 0,
                 "comment_count": counts[1] if self.spec.content_type == "video" and len(counts) > 1 else 0,
@@ -252,10 +268,16 @@ class PlatformAdapter:
 
     def content_id(self, url: str) -> str:
         parsed = urlparse(url)
-        match = re.search(r"/(?:video|note|p|article|bbs)/(?:av)?([A-Za-z0-9_-]+)", parsed.path)
+        patterns = {
+            "bilibili": r"/video/((?:BV|av)[A-Za-z0-9_-]+)(?:/|$)",
+            "douyin": r"/(?:video|note)/([0-9]+)(?:/|$)",
+            "tieba": r"/p/([0-9]+)(?:/|$)",
+            "xiaoheihe": r"/app/bbs/link/([0-9]+)(?:/|$)",
+        }
+        match = re.search(patterns[self.spec.name], parsed.path, re.IGNORECASE)
         if match:
             return match.group(1)[:200]
-        return stable_fingerprint(self.spec.name, parsed.path, parsed.query)[:32]
+        return ""
 
     async def read(
         self,
@@ -272,8 +294,29 @@ class PlatformAdapter:
         else:
             canonical_url = self.url_for_id(content_id)
         page = await self._page(canonical_url, timeout_seconds)
-        metadata = await page.evaluate(
-            """() => {
+        if self.spec.name == "xiaoheihe":
+            try:
+                await page.wait_for_selector(
+                    ".hb-bbs-post .post__content .hb-article",
+                    state="visible",
+                    timeout=max(1000, int(timeout_seconds * 1000)),
+                )
+            except Exception as exc:
+                raise RuntimeError("detail_content_unavailable") from exc
+            metadata_script = """() => {
+                const root = document.querySelector('.hb-bbs-post');
+                const title = root && root.querySelector('.link-section-title');
+                const article = root && root.querySelector('.post__content .hb-article');
+                const cover = article && article.querySelector('img');
+                return {
+                    title: title ? title.innerText : '',
+                    description: article ? article.innerText : '',
+                    cover: cover ? (cover.currentSrc || cover.src || '') : '',
+                    body: '',
+                };
+            }"""
+        else:
+            metadata_script = """() => {
                 const meta = (name, property=false) => {
                     const selector = property ? `meta[property="${name}"]` : `meta[name="${name}"]`;
                     const node = document.querySelector(selector);
@@ -287,7 +330,7 @@ class PlatformAdapter:
                     body: document.body ? document.body.innerText.slice(0, 12000) : '',
                 };
             }"""
-        )
+        metadata = await page.evaluate(metadata_script)
         discussions: list[dict[str, Any]] = []
         if any(name in include for name in ("comments", "replies", "danmaku")):
             for selector, kind in self.spec.discussion_selectors:
@@ -321,10 +364,13 @@ class PlatformAdapter:
         description = clean_text(metadata.get("description"), 4000)
         if not description:
             description = clean_text(metadata.get("body"), 4000)
+        resolved_content_id = self.content_id(canonical_url)
+        if not resolved_content_id:
+            raise ValueError("content URL is not a supported content route")
         return {
             "platform": self.spec.name,
             "content_type": self.spec.content_type,
-            "content_id": self.content_id(canonical_url),
+            "content_id": resolved_content_id,
             "canonical_url": canonical_url,
             "title": title,
             "caption_or_body": description,
@@ -349,7 +395,7 @@ class PlatformAdapter:
             "bilibili": "https://www.bilibili.com/video/{id}/",
             "douyin": "https://www.douyin.com/video/{id}",
             "tieba": "https://tieba.baidu.com/p/{id}",
-            "xiaoheihe": "https://www.xiaoheihe.cn/app/bbs/link/{id}",
+            "xiaoheihe": "https://xiaoheihe.cn/app/bbs/link/{id}",
         }
         return templates[self.spec.name].format(id=safe)
 
