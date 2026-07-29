@@ -419,10 +419,12 @@ async def plan_turn_with_llm(
         '"confidence":0.0,'
         '"reason":"极短中文原因"}\n'
         "判别要求：\n"
-        "1. reply_action 只决定回不回复；群聊不确定是否 cue bot 时用 silence。\n"
+        "1. reply_action 只决定回不回复；群聊没有 cue bot 不等于必须 silence。"
+        "开放表达且能沿最近同一话题自然推进时可 reply；明确群友点对点、纯媒体/回声、私密话题或上下文不足时才 silence。\n"
         "2. speech_act 决定最终回复承担的聊天动作：participate=参与讨论/闲聊推进半步，answer=回答问题，ask_followup=追问一个具体点，"
         "clarify=信息不足时短澄清，tease=轻吐槽接梗，execute_action=调用会外发内容的工具后少说或静默，source_summary=基于证据总结，silence=不说。\n"
-        "3. message_target 由 @、引用、称呼、上下文共同判断；uncertain 时通常 silence。\n"
+        "3. message_target 由 @、引用、称呼、上下文共同判断；uncertain 时继续结合最近话题和参与者判断，"
+        "不能直接当成 someone_else，也不能仅因目标暂不明确就静默。\n"
         "3b. 明确 @/直呼 bot 只表示轮到 bot 回应，不代表 speech_act 必须是 answer："
         "正文若是调侃、甩锅、轻挑衅或玩笑指控，优先 tease/participate + chat_short；"
         "只有真的索取知识结论、查证或步骤时才用 answer/source_summary。\n"

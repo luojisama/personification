@@ -133,6 +133,9 @@ def test_low_confidence_directed_group_frame_is_not_forced_silent() -> None:
     assert frame.recommend_silence is False
     assert "结构化消息目标：target_bot" in user_prompt
     assert "陌生的游戏黑话" in system_prompt
+    assert "不能只因为本轮是随机插话" in system_prompt
+    assert "目标只是 unclear 时" in system_prompt
+    assert "不能等同于 target_others" in system_prompt
     assert "粥/三角洲" not in system_prompt
     assert "dd/DD" not in system_prompt
 
