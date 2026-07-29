@@ -19,7 +19,7 @@ DEFAULT_PLATFORM_CONFIG: dict[str, Any] = {
     "min_play_count": 3000,
     "min_comment_count": 5,
     "min_reply_count": 3,
-    "max_results": 12,
+    "max_results": 10,
     "comment_limit": 50,
     "danmaku_limit": 200,
     "cache_ttl_seconds": 21600,
@@ -118,6 +118,8 @@ class ContentPacket:
     partial: bool = False
     warnings: list[str] = field(default_factory=list)
     filtered_counts: dict[str, int] = field(default_factory=dict)
+    aggregation: dict[str, Any] = field(default_factory=dict)
+    source_groups: list[dict[str, Any]] = field(default_factory=list)
     ttl_seconds: int = 21600
     packet_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     retrieved_at: float = field(default_factory=time.time)
@@ -134,6 +136,8 @@ class ContentPacket:
             "items": list(self.items),
             "filtered_counts": dict(self.filtered_counts),
             "warnings": list(dict.fromkeys(clean_text(item, 300) for item in self.warnings if clean_text(item, 300))),
+            "aggregation": dict(self.aggregation),
+            "source_groups": list(self.source_groups),
         }
 
 
@@ -167,4 +171,3 @@ __all__ = [
     "stable_fingerprint",
     "validate_platforms",
 ]
-

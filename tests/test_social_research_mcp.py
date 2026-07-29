@@ -38,6 +38,12 @@ def test_social_research_server_exposes_only_read_tools_and_control_is_not_liste
     assert all(item["state"] == "disabled" for item in status["platforms"].values())
     assert all("enabled" not in item["config"] for item in status["platforms"].values())
 
+    search = next(tool for tool in tools if tool["name"] == "social_content_search")
+    research = next(tool for tool in tools if tool["name"] == "research_game_slang")
+    assert search["inputSchema"]["properties"]["limit"]["default"] == 10
+    assert research["inputSchema"]["properties"]["limit"]["default"] == 10
+    assert {"aggregation", "source_groups"} <= set(search["outputSchema"]["properties"])
+
 
 def test_platform_status_keeps_auth_probe_failure_partial_and_config_control_fields_separate(tmp_path: Path) -> None:
     service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
@@ -195,6 +201,182 @@ def test_social_search_honors_content_type_filter(tmp_path: Path) -> None:
     packet = asyncio.run(run())
     assert packet["items"] == []
     assert packet["filtered_counts"]["bilibili"] == 1
+
+
+def _fake_social_item(platform: str, index: int, *, fingerprint: str = "") -> dict:
+    is_video = platform in {"bilibili", "douyin"}
+    content_id = f"BV{index}" if platform == "bilibili" else str(100000 + index)
+    host = {
+        "bilibili": "www.bilibili.com/video/",
+        "douyin": "www.douyin.com/video/",
+        "tieba": "tieba.baidu.com/p/",
+        "xiaoheihe": "xiaoheihe.cn/app/bbs/link/",
+    }[platform]
+    return {
+        "platform": platform,
+        "content_type": "video" if is_video else "article" if platform == "xiaoheihe" else "post",
+        "content_id": content_id,
+        "canonical_url": f"https://{host}{content_id}",
+        "title": f"{platform} 资料 {index}",
+        "caption_or_body": f"{platform} 的独立讨论内容 {index}",
+        "cover_ref": "",
+        "author": {"display_name": "", "fingerprint": ""},
+        "published_at": index,
+        "stats": (
+            {"play_count": 200000 - index, "comment_count": 100}
+            if is_video
+            else {"reply_count": 20, "like_count": 50}
+        ),
+        "discussion": [],
+        "content_fingerprint": fingerprint or f"{platform}-{index}",
+    }
+
+
+def test_social_search_default_is_global_ten_with_fair_platform_coverage(tmp_path: Path) -> None:
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+
+    class FakeAdapter:
+        def __init__(self, platform: str) -> None:
+            self.platform = platform
+            self.limits: list[int] = []
+
+        async def authenticated(self):  # noqa: ANN201
+            return True
+
+        async def search(self, _query, *, limit, timeout_seconds):  # noqa: ANN001, ANN201
+            self.limits.append(limit)
+            return [_fake_social_item(self.platform, index) for index in range(limit)]
+
+    async def run():
+        service = service_mod.SocialResearchService(tmp_path)
+        service._config["bilibili"]["enabled"] = True
+        service._config["xiaoheihe"]["enabled"] = True
+        bilibili = FakeAdapter("bilibili")
+        xiaoheihe = FakeAdapter("xiaoheihe")
+        service.adapters["bilibili"] = bilibili
+        service.adapters["xiaoheihe"] = xiaoheihe
+        try:
+            packet = await service.search({"query": "花来"})
+            return packet, bilibili.limits, xiaoheihe.limits
+        finally:
+            await service.close()
+
+    packet, bilibili_limits, xiaoheihe_limits = asyncio.run(run())
+    assert len(packet["items"]) == 10
+    assert bilibili_limits == [10]
+    assert xiaoheihe_limits == [10]
+    assert packet["aggregation"]["requested_limit"] == 10
+    assert packet["aggregation"]["returned_count"] == 10
+    assert packet["aggregation"]["selected_platforms"] == ["bilibili", "xiaoheihe"]
+    assert packet["aggregation"]["covered_platforms"] == ["bilibili", "xiaoheihe"]
+    assert packet["aggregation"]["satisfies_request"] is True
+    assert {item["platform"] for item in packet["items"]} == {"bilibili", "xiaoheihe"}
+    assert all(item["source_group_id"].startswith("source_") for item in packet["items"])
+
+
+def test_social_search_groups_reposts_and_prefers_unseen_sources(tmp_path: Path) -> None:
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+
+    class FakeAdapter:
+        def __init__(self, items: list[dict]) -> None:
+            self.items = items
+
+        async def authenticated(self):  # noqa: ANN201
+            return True
+
+        async def search(self, _query, *, limit, timeout_seconds):  # noqa: ANN001, ANN201
+            return self.items[:limit]
+
+    shared = "same-reposted-content"
+
+    async def run():
+        service = service_mod.SocialResearchService(tmp_path)
+        for platform in ("bilibili", "xiaoheihe"):
+            service._config[platform]["enabled"] = True
+        service.adapters["bilibili"] = FakeAdapter([
+            _fake_social_item("bilibili", 1, fingerprint=shared),
+            _fake_social_item("bilibili", 2),
+        ])
+        service.adapters["xiaoheihe"] = FakeAdapter([
+            _fake_social_item("xiaoheihe", 1, fingerprint=shared),
+            _fake_social_item("xiaoheihe", 2),
+        ])
+        try:
+            return await service.search({"query": "花来", "limit": 3})
+        finally:
+            await service.close()
+
+    packet = asyncio.run(run())
+    assert len(packet["items"]) == 3
+    assert packet["aggregation"]["source_group_count"] == 3
+    assert len({item["source_group_id"] for item in packet["items"]}) == 3
+    assert all(group["member_count"] == 1 for group in packet["source_groups"])
+
+
+def test_social_search_without_enabled_platform_fails_with_stable_code(tmp_path: Path) -> None:
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+
+    async def run():
+        service = service_mod.SocialResearchService(tmp_path)
+        try:
+            return await service.search({"query": "花来"})
+        finally:
+            await service.close()
+
+    try:
+        asyncio.run(run())
+    except RuntimeError as exc:
+        assert str(exc) == "no_enabled_platform"
+        assert service_mod._safe_operation_code(exc) == "no_enabled_platform"
+    else:
+        raise AssertionError("missing enabled platforms must fail closed")
+
+
+def test_research_game_slang_keeps_search_card_when_detail_read_fails(tmp_path: Path) -> None:
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+
+    async def run():
+        service = service_mod.SocialResearchService(tmp_path)
+        first = {**_fake_social_item("bilibili", 1), "source_group_id": "source_one"}
+        second = {**_fake_social_item("xiaoheihe", 2), "source_group_id": "source_two"}
+
+        async def fake_search(params):  # noqa: ANN001
+            assert params["limit"] == 2
+            assert "platforms" not in params
+            return {
+                "items": [first, second],
+                "platform_statuses": {"bilibili": {"state": "ready"}, "xiaoheihe": {"state": "ready"}},
+                "partial": False,
+                "warnings": [],
+                "filtered_counts": {},
+                "aggregation": {
+                    "requested_limit": 2,
+                    "returned_count": 2,
+                    "source_group_count": 2,
+                    "coverage_status": "complete",
+                    "satisfies_request": True,
+                },
+            }
+
+        async def fake_read(params):  # noqa: ANN001
+            if params["platform"] == "xiaoheihe":
+                raise RuntimeError("detail_content_unavailable")
+            return {"items": [{**first, "caption_or_body": "详情正文"}]}
+
+        service.search = fake_search
+        service.read = fake_read
+        try:
+            return await service.research({"term": "花来", "context": "群聊", "limit": 2})
+        finally:
+            await service.close()
+
+    packet = asyncio.run(run())
+    assert len(packet["items"]) == 2
+    assert packet["items"][0]["detail_status"] == "ready"
+    assert packet["items"][1]["detail_status"] == "detail_content_unavailable"
+    assert packet["items"][1]["canonical_url"].startswith("https://xiaoheihe.cn/app/bbs/link/")
+    assert packet["partial"] is True
+    assert packet["aggregation"]["coverage_status"] == "degraded"
 
 
 def test_platform_url_validation_rejects_cross_origin_and_credentials(tmp_path: Path) -> None:

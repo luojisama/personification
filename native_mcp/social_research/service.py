@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -20,6 +21,7 @@ from .models import (
     clean_text,
     validate_platforms,
 )
+from .source_grouping import attach_source_group_ids, build_source_groups, select_multi_source_items
 
 
 _SAFE_OPERATION_CODES = {
@@ -45,6 +47,7 @@ _SAFE_OPERATION_CODES = {
     "bilibili_qr_unknown_state",
     "qrcode_encoder_failed",
     "qrcode_encoder_unavailable",
+    "no_enabled_platform",
 }
 
 
@@ -254,13 +257,23 @@ class SocialResearchService:
         retained = [item for item in filtered if item["retained"]]
         for item in retained:
             item["cover_ref"] = self.covers.register(platform, str(item.get("cover_ref") or ""))
-        return retained, {"state": "ready", "elapsed_ms": int((time.monotonic() - started) * 1000)}, len(filtered) - len(retained)
+        return retained, {
+            "state": "ready",
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "candidate_count": len(rows),
+            "retained_count": len(retained),
+        }, len(filtered) - len(retained)
 
     async def search(self, params: dict[str, Any]) -> dict[str, Any]:
         query = clean_text(params.get("query"), 200)
         if not query:
             raise ValueError("query is required")
-        platforms = validate_platforms(params.get("platforms"))
+        if params.get("platforms") is None:
+            platforms = [platform for platform in PLATFORMS if self._config[platform].get("enabled")]
+            if not platforms:
+                raise RuntimeError("no_enabled_platform")
+        else:
+            platforms = validate_platforms(params.get("platforms"))
         raw_content_types = params.get("content_types")
         if raw_content_types is None:
             content_types = ["video", "article", "post"]
@@ -270,12 +283,12 @@ class SocialResearchService:
                 raise ValueError("content_types is invalid")
         else:
             raise ValueError("content_types must be an array")
-        limit = min(50, max(1, int(params.get("limit", 12) or 12)))
+        limit = min(50, max(1, int(params.get("limit", 10) or 10)))
         quality_mode = str(params.get("quality_mode") or "balanced")
         if quality_mode not in QUALITY_MODES:
             raise ValueError("quality_mode is invalid")
         cache_key = json.dumps(
-            ["search", "opaque_cover_v1", query, platforms, content_types, limit, quality_mode, self._config],
+            ["search", "multi_source_v1", query, platforms, content_types, limit, quality_mode, self._config],
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -283,11 +296,26 @@ class SocialResearchService:
         if cached is not None:
             cached["cache_hit"] = True
             return cached
+        per_platform_budget = max(3, 2 * math.ceil(limit / len(platforms)))
         results = await asyncio.gather(
-            *(self._search_platform(platform, query, limit, quality_mode) for platform in platforms),
+            *(
+                self._search_platform(
+                    platform,
+                    query,
+                    min(int(self._config[platform].get("max_results", 10) or 10), per_platform_budget),
+                    quality_mode,
+                )
+                for platform in platforms
+            ),
             return_exceptions=True,
         )
         packet = ContentPacket(ttl_seconds=min(self._config[p]["cache_ttl_seconds"] for p in platforms))
+        candidates: list[dict[str, Any]] = []
+        successful_platforms: list[str] = []
+        per_platform_counts: dict[str, dict[str, int]] = {
+            platform: {"candidates": 0, "filtered": 0, "returned": 0}
+            for platform in platforms
+        }
         for platform, result in zip(platforms, results):
             if isinstance(result, BaseException):
                 code = _safe_operation_code(result)
@@ -295,12 +323,50 @@ class SocialResearchService:
                 packet.partial = True
                 continue
             items, status, filtered_count = result
+            successful_platforms.append(platform)
             retained_types = [item for item in items if str(item.get("content_type") or "") in content_types]
-            packet.items.extend(retained_types)
+            candidates.extend(retained_types)
             packet.platform_statuses[platform] = status
             packet.filtered_counts[platform] = filtered_count + len(items) - len(retained_types)
-        packet.items.sort(key=lambda item: float(item.get("quality_score", 0) or 0), reverse=True)
-        packet.items = packet.items[: limit * len(platforms)]
+            per_platform_counts[platform]["candidates"] = int(status.get("candidate_count", len(items)) or 0)
+            per_platform_counts[platform]["filtered"] = packet.filtered_counts[platform]
+
+        best_by_content: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in candidates:
+            key = (str(item.get("platform") or ""), str(item.get("content_id") or ""))
+            previous = best_by_content.get(key)
+            if previous is None or float(item.get("quality_score", 0) or 0) > float(previous.get("quality_score", 0) or 0):
+                best_by_content[key] = item
+        grouped_candidates = attach_source_group_ids(list(best_by_content.values()))
+        packet.items = select_multi_source_items(grouped_candidates, platforms=platforms, limit=limit)
+        packet.source_groups = build_source_groups(packet.items)
+        covered_platforms = list(dict.fromkeys(str(item.get("platform") or "") for item in packet.items))
+        for platform in covered_platforms:
+            returned = sum(1 for item in packet.items if item.get("platform") == platform)
+            per_platform_counts[platform]["returned"] = returned
+            packet.platform_statuses[platform]["returned_count"] = returned
+        required_groups = min(2, limit)
+        required_platforms = min(2, len(platforms))
+        satisfies_request = bool(
+            packet.items
+            and len(packet.source_groups) >= required_groups
+            and len(covered_platforms) >= required_platforms
+        )
+        coverage_status = "empty" if not packet.items else "complete" if satisfies_request and not packet.partial else "degraded"
+        if packet.items and not satisfies_request:
+            packet.warnings.append("social_coverage_degraded")
+        packet.aggregation = {
+            "requested_limit": limit,
+            "candidate_count": sum(item["candidates"] for item in per_platform_counts.values()),
+            "returned_count": len(packet.items),
+            "source_group_count": len(packet.source_groups),
+            "selected_platforms": list(platforms),
+            "successful_platforms": successful_platforms,
+            "covered_platforms": covered_platforms,
+            "per_platform_counts": per_platform_counts,
+            "coverage_status": coverage_status,
+            "satisfies_request": satisfies_request,
+        }
         value = packet.to_dict()
         self.cache.set(cache_key, value, packet.ttl_seconds)
         return value
@@ -355,19 +421,14 @@ class SocialResearchService:
         depth = str(params.get("depth") or "auto")
         if not term or not context or depth not in {"auto", "deep"}:
             raise ValueError("term, context and a valid depth are required")
+        limit = min(50, max(1, int(params.get("limit", 10) or 10)))
         query = " ".join(value for value in (game, term) if value)
-        if depth == "deep":
-            platforms = list(PLATFORMS)
-        else:
-            video = next((name for name in ("bilibili", "douyin") if self._config[name].get("enabled")), None)
-            community = next((name for name in ("xiaoheihe", "tieba") if self._config[name].get("enabled")), None)
-            platforms = [name for name in (video, community) if name]
-            if not platforms:
-                platforms = ["bilibili", "xiaoheihe"]
         search_packet = await self.search(
-            {"query": query, "platforms": platforms, "limit": 6, "quality_mode": "balanced"}
+            {"query": query, "limit": limit, "quality_mode": "balanced"}
         )
-        candidates = list(search_packet.get("items") or [])[: (12 if depth == "deep" else 6)]
+        candidates = list(search_packet.get("items") or [])[:limit]
+        comment_limit = 80 if depth == "deep" else 30
+        danmaku_limit = 200 if depth == "deep" else 80
         read_results = await asyncio.gather(
             *(
                 self.read(
@@ -375,8 +436,8 @@ class SocialResearchService:
                         "platform": item["platform"],
                         "url": item["canonical_url"],
                         "include": ["caption", "comments", "replies", "danmaku"],
-                        "comment_limit": 30,
-                        "danmaku_limit": 80,
+                        "comment_limit": comment_limit,
+                        "danmaku_limit": danmaku_limit,
                     }
                 )
                 for item in candidates
@@ -388,15 +449,36 @@ class SocialResearchService:
             partial=bool(search_packet.get("partial")),
             warnings=list(search_packet.get("warnings") or []),
             filtered_counts=dict(search_packet.get("filtered_counts") or {}),
+            aggregation=dict(search_packet.get("aggregation") or {}),
         )
-        for result in read_results:
-            if isinstance(result, BaseException):
+        for candidate, result in zip(candidates, read_results):
+            if isinstance(result, BaseException) or not list(result.get("items") or []):
                 packet.partial = True
+                fallback = {**candidate, "detail_status": "detail_content_unavailable"}
+                packet.items.append(fallback)
+                packet.warnings.append(
+                    f"detail_content_unavailable:{candidate.get('platform', '')}:{candidate.get('content_id', '')}"
+                )
                 continue
-            packet.items.extend(list(result.get("items") or []))
-        if not packet.items:
-            packet.items = candidates
-        packet.items = packet.items[: (12 if depth == "deep" else 6)]
+            detailed = dict(list(result.get("items") or [])[0])
+            detailed["source_group_id"] = str(candidate.get("source_group_id") or "")
+            detailed["detail_status"] = "ready"
+            packet.items.append(detailed)
+        packet.items = packet.items[:limit]
+        packet.source_groups = build_source_groups(packet.items)
+        packet.aggregation.update(
+            {
+                "returned_count": len(packet.items),
+                "source_group_count": len(packet.source_groups),
+                "coverage_status": (
+                    "empty"
+                    if not packet.items
+                    else "degraded"
+                    if packet.partial
+                    else str(packet.aggregation.get("coverage_status") or "complete")
+                ),
+            }
+        )
         return packet.to_dict()
 
     async def close(self) -> None:

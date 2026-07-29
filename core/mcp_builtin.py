@@ -23,6 +23,8 @@ _CONTENT_PACKET_OUTPUT: dict[str, Any] = {
         "items": {"type": "array", "items": {"type": "object"}},
         "filtered_counts": {"type": "object"},
         "warnings": {"type": "array", "items": {"type": "string"}},
+        "aggregation": {"type": "object"},
+        "source_groups": {"type": "array", "items": {"type": "object"}},
     },
     "required": [
         "schema_version",
@@ -63,7 +65,13 @@ _BUILTIN_SOCIAL_TOOLS: tuple[dict[str, Any], ...] = (
                     "uniqueItems": True,
                     "maxItems": 3,
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 12},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "default": 10,
+                    "description": "所有选中平台聚合后的最终结果总上限。",
+                },
                 "quality_mode": {
                     "type": "string",
                     "enum": ["balanced", "strict", "ranking_only"],
@@ -119,6 +127,13 @@ _BUILTIN_SOCIAL_TOOLS: tuple[dict[str, Any], ...] = (
                 "context": {"type": "string", "maxLength": 1000},
                 "game": {"type": "string", "maxLength": 100},
                 "depth": {"type": "string", "enum": ["auto", "deep"], "default": "auto"},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "default": 10,
+                    "description": "跨平台聚合后的最终材料总上限。",
+                },
             },
             "required": ["term", "context"],
             "additionalProperties": False,

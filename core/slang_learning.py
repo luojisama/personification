@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from typing import Any, Awaitable, Callable
+
+from ..native_mcp.social_research.source_grouping import cluster_content_sources
 
 
 SEMANTIC_RELATIONS = frozenset({"same", "compatible", "different_context", "conflict", "unrelated"})
@@ -213,69 +213,12 @@ def validate_extracted_claims(
     return result
 
 
-def _similarity(left: str, right: str) -> float:
-    a = _clean(left, 2000).casefold()
-    b = _clean(right, 2000).casefold()
-    if not a or not b:
-        return 0.0
-    return SequenceMatcher(None, a, b).ratio()
-
-
-def cluster_content_sources(packet: dict[str, Any]) -> dict[str, str]:
-    items = list(packet.get("items") or [])
-    keys = [_content_key(item["platform"], item["content_id"]) for item in items]
-    parents = {key: key for key in keys}
-    reasons: dict[str, set[str]] = defaultdict(set)
-
-    def find(value: str) -> str:
-        while parents[value] != value:
-            parents[value] = parents[parents[value]]
-            value = parents[value]
-        return value
-
-    def union(left: str, right: str, reason: str) -> None:
-        root_left, root_right = find(left), find(right)
-        if root_left == root_right:
-            return
-        winner, loser = sorted((root_left, root_right))
-        parents[loser] = winner
-        reasons[winner].update(reasons.pop(loser, set()))
-        reasons[winner].add(reason)
-
-    for left_index, left in enumerate(items):
-        left_key = keys[left_index]
-        for right_index in range(left_index + 1, len(items)):
-            right = items[right_index]
-            right_key = keys[right_index]
-            if left_key == right_key:
-                union(left_key, right_key, "same_platform_content")
-                continue
-            explicit_left = left.get("repost_of") or left.get("external_source_url")
-            explicit_right = right.get("repost_of") or right.get("external_source_url")
-            if explicit_left and explicit_left == explicit_right:
-                union(left_key, right_key, "shared_original_source")
-                continue
-            if left.get("media_fingerprint") and left["media_fingerprint"] == right.get("media_fingerprint"):
-                union(left_key, right_key, "same_media_fingerprint")
-                continue
-            if left.get("content_fingerprint") and left["content_fingerprint"] == right.get("content_fingerprint"):
-                union(left_key, right_key, "same_content_fingerprint")
-                continue
-            left_body = f"{left.get('title', '')} {left.get('caption_or_body', '')}"
-            right_body = f"{right.get('title', '')} {right.get('caption_or_body', '')}"
-            if min(len(_clean(left_body, 2000)), len(_clean(right_body, 2000))) >= 40 and _similarity(left_body, right_body) >= 0.92:
-                union(left_key, right_key, "near_duplicate_text")
-
-    roots: dict[str, str] = {}
-    for key in keys:
-        root = find(key)
-        digest = hashlib.sha256(root.encode("utf-8")).hexdigest()[:24]
-        roots[key] = f"source_{digest}"
-    return roots
-
-
 def attach_source_clusters(claims: list[dict[str, Any]], packet: dict[str, Any]) -> list[dict[str, Any]]:
     clusters = cluster_content_sources(packet)
+    for item in packet.get("items", []):
+        supplied_group = str(item.get("source_group_id") or "").strip()
+        if supplied_group:
+            clusters[_content_key(item["platform"], item["content_id"])] = supplied_group
     sources = {
         _content_key(item["platform"], item["content_id"]): {
             "canonical_url": item.get("canonical_url", ""),
