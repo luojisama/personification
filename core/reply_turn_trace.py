@@ -422,6 +422,18 @@ def build_process_view(trace: dict[str, Any] | None, *, logs: list[dict[str, Any
 
     outcome = str(trace.get("outcome") or "")
     diagnosis_code = str(trace.get("diagnosis_code") or "")
+    trace_detail = trace.get("detail") if isinstance(trace.get("detail"), dict) else {}
+    completion = {
+        key: _compact_value(trace_detail.get(key), limit=80)
+        for key in (
+            "tool_execution",
+            "evidence_delivery",
+            "outbound_delivery",
+            "social_coverage_status",
+            "evidence_recovered",
+        )
+        if trace_detail.get(key) not in {None, ""}
+    }
     return {
         "summary": {
             "trace_id": str(trace.get("trace_id") or ""),
@@ -435,6 +447,7 @@ def build_process_view(trace: dict[str, Any] | None, *, logs: list[dict[str, Any
             "category_counts": category_counts,
             "log_levels": log_levels,
             "slow_stages": slow_items[:5],
+            "completion": completion,
         },
         "items": items,
         "agent_inspection": _build_agent_inspection(items),

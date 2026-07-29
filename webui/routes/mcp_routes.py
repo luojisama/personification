@@ -152,11 +152,29 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         context = " ".join(str(body.get("context") or term).split())[:1000]
         game = " ".join(str(body.get("game") or "").split())[:100]
         depth = str(body.get("depth") or "auto")
+        tool_name = str(body.get("tool") or "research_game_slang").strip()
+        if tool_name not in {"social_content_search", "research_game_slang"}:
+            raise ValueError("unsupported preview tool")
         if not term or depth not in {"auto", "deep"}:
             raise ValueError("term and valid depth are required")
+        try:
+            limit = max(1, min(50, int(body.get("limit", 10) or 10)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("limit must be an integer") from exc
+        if tool_name == "social_content_search":
+            query = " ".join(str(body.get("query") or " ".join((game, term))).split())[:200]
+            tool_arguments: dict[str, Any] = {"query": query, "limit": limit}
+        else:
+            tool_arguments = {
+                "term": term,
+                "context": context,
+                "game": game,
+                "depth": depth,
+                "limit": limit,
+            }
         raw = await manager().builtin_call_tool(
-            "research_game_slang",
-            {"term": term, "context": context, "game": game, "depth": depth},
+            tool_name,
+            tool_arguments,
         )
         try:
             packet = json.loads(raw)
@@ -165,7 +183,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         caller = _runtime_tool_caller(runtime)
         claims: list[dict[str, Any]] = []
         senses: list[dict[str, Any]] = []
-        if caller is not None:
+        if caller is not None and tool_name == "research_game_slang":
             pipeline = SlangLearningPipeline(
                 tool_caller=caller,
                 max_claims=max(
@@ -188,7 +206,19 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
                 semantic_pipeline=pipeline,
                 model_route="webui_social_research",
             )
-        return {"packet": packet, "claims": claims, "senses": senses, "target_term": term}
+        return {
+            "tool_name": tool_name,
+            "packet": packet,
+            "claims": claims,
+            "senses": senses,
+            "target_term": term,
+            "delivery": {
+                "evidence_delivery": "not_applicable",
+                "visible_output_recovered": False,
+                "outbound_delivery": "not_applicable",
+                "note": "工具预览不生成最终回复，也不发送 QQ 消息",
+            },
+        }
 
     @router.get("/sources")
     async def sources(_: AdminIdentity = Depends(require_admin)) -> dict:

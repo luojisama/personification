@@ -413,8 +413,11 @@ function renderBuiltinPlatformCard(platform, item) {
     : auth && !["success","cancelled"].includes(auth.status) ? "重新获取 WebUI 二维码" : "获取 WebUI 二维码";
   const manualAction = auth && auth.login_mode === "manual_browser" ? "重新打开普通浏览器" : "在普通浏览器中登录";
   const danmaku = capabilities.danmaku === false ? "不支持弹幕" : "页面提供时读取弹幕";
+  const platformTitle = platform === "xiaoheihe"
+    ? renderMcpExternalLink("https://xiaoheihe.cn/app/bbs/home", label)
+    : escapeHtml(label);
   return `<article class="card mcp-platform-card" data-platform="${escapeAttr(platform)}">
-    <header><div><span class="eyebrow">${escapeHtml(platform)}</span><h3>${escapeHtml(label)}</h3></div><div><strong class="mcp-native-state ${mcpStatusTone(runtimeState)}">${escapeHtml(mcpChineseState(runtimeState))}</strong><code>${escapeHtml(runtimeState)}</code></div></header>
+    <header><div><span class="eyebrow">${escapeHtml(platform)}</span><h3>${platformTitle}</h3></div><div><strong class="mcp-native-state ${mcpStatusTone(runtimeState)}">${escapeHtml(mcpChineseState(runtimeState))}</strong><code>${escapeHtml(runtimeState)}</code></div></header>
     <div class="mcp-capability-line"><span>搜索</span><span>封面</span><span>正文</span><span>评论/回复</span><span>${escapeHtml(danmaku)}</span></div>
     <div class="mcp-platform-actions"><button class="btn ${item.enabled ? "danger" : "primary"}" data-mcp-platform-toggle="${escapeAttr(platform)}" data-enabled="${item.enabled ? "false" : "true"}">${item.enabled ? "关闭平台" : "开启平台"}</button><button class="btn" data-mcp-auth-start="${escapeAttr(platform)}">${escapeHtml(authAction)}</button><button class="btn" data-mcp-auth-manual="${escapeAttr(platform)}">${escapeHtml(manualAction)}</button><button class="btn danger" data-mcp-auth-logout="${escapeAttr(platform)}">注销并删除 profile</button></div>
     ${authPanel}
@@ -424,7 +427,7 @@ function renderBuiltinPlatformCard(platform, item) {
       <label>最低播放<input data-mcp-config="min_play_count" type="number" min="0" value="${escapeAttr(config.min_play_count ?? 3000)}"></label>
       <label>最低评论<input data-mcp-config="min_comment_count" type="number" min="0" value="${escapeAttr(config.min_comment_count ?? 5)}"></label>
       <label>最低回复<input data-mcp-config="min_reply_count" type="number" min="0" value="${escapeAttr(config.min_reply_count ?? 3)}"></label>
-      <label>最大结果<input data-mcp-config="max_results" type="number" min="1" max="50" value="${escapeAttr(config.max_results ?? 12)}"></label>
+      <label>平台候选上限<input data-mcp-config="max_results" type="number" min="1" max="50" value="${escapeAttr(config.max_results ?? 10)}"></label>
       <label>评论采样<input data-mcp-config="comment_limit" type="number" min="0" max="200" value="${escapeAttr(config.comment_limit ?? 50)}"></label>
       <label>弹幕采样<input data-mcp-config="danmaku_limit" type="number" min="0" max="500" value="${escapeAttr(config.danmaku_limit ?? 200)}"></label>
       <label>缓存秒数<input data-mcp-config="cache_ttl_seconds" type="number" min="60" max="86400" value="${escapeAttr(config.cache_ttl_seconds ?? 21600)}"></label>
@@ -443,14 +446,39 @@ function renderPreviewDiscussion(item) {
   return (item.discussion || []).slice(0, 12).map(row => `<li><span>${escapeHtml(row.type || "comment")}</span>${escapeHtml(row.text || "")}</li>`).join("");
 }
 
+function renderBuiltinPreviewDiagnostics(packet, result) {
+  const aggregation = packet && packet.aggregation || {};
+  const counts = aggregation.per_platform_counts || {};
+  const statuses = packet && packet.platform_statuses || {};
+  const selected = aggregation.selected_platforms || [];
+  const platforms = [...new Set([...selected, ...Object.keys(statuses), ...Object.keys(counts)])];
+  const platformRows = platforms.map(platform => {
+    const count = counts[platform] || {};
+    const status = statuses[platform] || {};
+    return `<tr><td>${escapeHtml(MCP_PLATFORM_LABELS[platform] || platform)}</td><td><code>${escapeHtml(status.state || "unknown")}</code>${status.error_code ? ` · ${escapeHtml(status.error_code)}` : ""}</td><td class="u-tabular">${Number(count.candidates || status.candidate_count || 0)}</td><td class="u-tabular">${Number(count.filtered || 0)}</td><td class="u-tabular">${Number(count.returned || status.returned_count || 0)}</td><td class="u-tabular">${Number(status.elapsed_ms || 0).toLocaleString()}ms</td></tr>`;
+  }).join("");
+  const stages = aggregation.stages || {};
+  const delivery = result && result.delivery || {};
+  const warnings = (packet && packet.warnings || []).map(item => `<code>${escapeHtml(item)}</code>`).join(" ");
+  return `<div class="mcp-preview-diagnostics">
+    <div class="mcp-runtime-overview"><span>请求总上限<strong>${Number(aggregation.requested_limit || 0)}</strong></span><span>实际返回<strong>${Number(aggregation.returned_count || (packet.items || []).length || 0)}</strong></span><span>候选总数<strong>${Number(aggregation.candidate_count || 0)}</strong></span><span>独立来源组<strong>${Number(aggregation.source_group_count || 0)}</strong></span></div>
+    <div class="mcp-preview-summary">选中平台：${escapeHtml(selected.map(item => MCP_PLATFORM_LABELS[item] || item).join("、") || "无")} · 成功平台：${escapeHtml((aggregation.successful_platforms || []).map(item => MCP_PLATFORM_LABELS[item] || item).join("、") || "无")} · 实际覆盖：${escapeHtml((aggregation.covered_platforms || []).map(item => MCP_PLATFORM_LABELS[item] || item).join("、") || "无")}</div>
+    <div class="mcp-preview-summary">coverage_status=<code>${escapeHtml(aggregation.coverage_status || "empty")}</code> · satisfies_request=<code>${String(aggregation.satisfies_request === true)}</code> · cache_hit=<code>${String(packet.cache_hit === true)}</code> · partial=<code>${String(packet.partial === true)}</code></div>
+    ${stages.search || stages.detail ? `<div class="mcp-preview-summary">搜索阶段：<code>${escapeHtml((stages.search || {}).status || "-")}</code> / ${Number((stages.search || {}).elapsed_ms || 0).toLocaleString()}ms · 详情阶段：<code>${escapeHtml((stages.detail || {}).status || "-")}</code> / ${Number((stages.detail || {}).elapsed_ms || 0).toLocaleString()}ms</div>` : ""}
+    ${platformRows ? `<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="社交平台检索统计"><table class="data-table"><thead><tr><th scope="col">平台</th><th scope="col">状态 / 错误码</th><th scope="col">候选</th><th scope="col">过滤</th><th scope="col">返回</th><th scope="col">耗时</th></tr></thead><tbody>${platformRows}</tbody></table></div>` : ""}
+    ${warnings ? `<div class="alert warn">警告：${warnings}</div>` : ""}
+    <div class="mcp-preview-summary">证据交付：<code>${escapeHtml(delivery.evidence_delivery || "not_applicable")}</code> · 安全降级：<code>${String(delivery.visible_output_recovered === true)}</code> · QQ 发送：<code>${escapeHtml(delivery.outbound_delivery || "not_applicable")}</code> · ${escapeHtml(delivery.note || "工具预览不生成最终回复，也不发送 QQ 消息")}</div>
+  </div>`;
+}
+
 function renderBuiltinPreview() {
   const result = state.mcpPreview;
   const packet = result && result.packet || null;
-  const cards = packet ? (packet.items || []).map(item => `<article class="mcp-content-card">${item.cover_ref ? `<img src="${API}/mcp/builtin/social-research/cover/${encodeURIComponent(item.cover_ref)}" alt="内容封面" loading="lazy">` : ""}<div><span>${escapeHtml(MCP_PLATFORM_LABELS[item.platform] || item.platform)}</span><h4>${escapeHtml(item.title || "无标题")}</h4><p>${escapeHtml(item.caption_or_body || "")}</p><small>quality_score=${Number(item.quality_score || 0).toFixed(2)} · marketing_score=${Number(item.marketing_score || 0).toFixed(2)}${item.filtered_reason ? ` · ${escapeHtml(item.filtered_reason)}` : ""}</small><ul>${renderPreviewDiscussion(item)}</ul></div></article>`).join("") : "";
+  const cards = packet ? (packet.items || []).map(item => `<article class="mcp-content-card">${item.cover_ref ? `<img src="${API}/mcp/builtin/social-research/cover/${encodeURIComponent(item.cover_ref)}" alt="内容封面" loading="lazy">` : ""}<div><span>${escapeHtml(MCP_PLATFORM_LABELS[item.platform] || item.platform)} · source_group=${escapeHtml(item.source_group_id || "-")}</span><h4>${escapeHtml(item.title || "无标题")}</h4><p>${escapeHtml(item.caption_or_body || "")}</p>${renderMcpExternalLink(item.canonical_url, item.canonical_url || "打开规范来源")}<small>quality_score=${Number(item.quality_score || 0).toFixed(2)} · marketing_score=${Number(item.marketing_score || 0).toFixed(2)}${item.filtered_reason ? ` · ${escapeHtml(item.filtered_reason)}` : ""}${item.detail_status ? ` · detail=${escapeHtml(item.detail_status)}` : ""}</small><ul>${renderPreviewDiscussion(item)}</ul></div></article>`).join("") : "";
   const claims = result ? (result.claims || []).map(claim => `<article class="mcp-claim-card"><header><strong>${escapeHtml(claim.term || "")}</strong><span>${escapeHtml((claim.game_context || {}).canonical_name || "未确定游戏")}</span></header><p>${escapeHtml(claim.meaning || "")}</p><small>${escapeHtml(claim.safe_usage || "")} · confidence=${Number(claim.extractor_confidence || 0).toFixed(2)}</small><blockquote>${escapeHtml(((claim.evidence_refs || [])[0] || {}).quote || "")}</blockquote></article>`).join("") : "";
-  return `<section class="card mcp-native-preview"><div class="mcp-section-heading"><div><span class="eyebrow">RESEARCH PREVIEW</span><h2>检索预览与多梗提取</h2><p>一次内容默认提取全部黑话；每条 claim 必须引用标题、正文、评论、回复或弹幕原文。</p></div></div>
-    <div class="mcp-preview-form"><label>游戏（可选）<input id="mcp-preview-game" placeholder="例如：三角洲行动"></label><label>查询词<input id="mcp-preview-term" placeholder="例如：刘涛"></label><label>深度<select id="mcp-preview-depth"><option value="auto">两阶段自动</option><option value="deep">四平台深挖</option></select></label><label>最多 claims<input id="mcp-preview-max" type="number" min="1" max="50" value="20"></label><button class="btn primary" data-mcp-preview-run ${state.mcpBusy ? "disabled" : ""}>检索并提取全部黑话</button></div>
-    ${packet ? `<div class="mcp-preview-summary">packet_id=<code>${escapeHtml(packet.packet_id || "")}</code> · trust=<code>${escapeHtml(packet.trust || "")}</code> · ${packet.partial ? "部分结果" : "完整结果"}</div><div class="mcp-content-grid">${cards || '<p class="muted">没有通过质量过滤的内容。</p>'}</div><h3>本次提取的 claims</h3><div class="mcp-claim-grid">${claims || '<p class="muted">没有找到带明确“词语 → 含义”关系的证据。</p>'}</div>` : ""}
+  return `<section class="card mcp-native-preview"><div class="mcp-section-heading"><div><span class="eyebrow">RESEARCH PREVIEW</span><h2>检索预览与多梗提取</h2><p>跨平台检索默认总计最多 10 条；黑话研究中一次内容默认提取全部黑话，并要求每条 claim 引用可审计证据。</p></div></div>
+    <div class="mcp-preview-form"><label>预览工具<select id="mcp-preview-tool"><option value="social_content_search">social_content_search</option><option value="research_game_slang">research_game_slang</option></select></label><label>游戏（可选）<input id="mcp-preview-game" placeholder="例如：三角洲行动"></label><label>查询词<input id="mcp-preview-term" placeholder="例如：花来"></label><label>结果总上限<input id="mcp-preview-limit" type="number" min="1" max="50" value="10"></label><label>深度<select id="mcp-preview-depth"><option value="auto">两阶段自动</option><option value="deep">四平台深挖</option></select></label><label>最多 claims<input id="mcp-preview-max" type="number" min="1" max="50" value="20"></label><button class="btn primary" data-mcp-preview-run ${state.mcpBusy ? "disabled" : ""}>运行原生 MCP 预览</button></div>
+    ${packet ? `<div class="mcp-preview-summary">tool=<code>${escapeHtml(result.tool_name || "")}</code> · packet_id=<code>${escapeHtml(packet.packet_id || "")}</code> · trust=<code>${escapeHtml(packet.trust || "")}</code> · ${packet.partial ? "部分结果" : "完整结果"}</div>${renderBuiltinPreviewDiagnostics(packet, result)}<div class="mcp-content-grid">${cards || '<p class="muted">没有通过质量过滤的内容。</p>'}</div>${result.tool_name === "research_game_slang" ? `<h3>本次提取的 claims</h3><div class="mcp-claim-grid">${claims || '<p class="muted">没有找到带明确“词语 → 含义”关系的证据。</p>'}</div>` : ""}` : ""}
   </section>`;
 }
 
@@ -828,16 +856,18 @@ async function logoutBuiltinPlatform(platform) {
 }
 
 async function runBuiltinPreview() {
+  const tool = String(document.getElementById("mcp-preview-tool")?.value || "social_content_search");
   const term = String(document.getElementById("mcp-preview-term")?.value || "").trim();
   const game = String(document.getElementById("mcp-preview-game")?.value || "").trim();
   const depth = String(document.getElementById("mcp-preview-depth")?.value || "auto");
   const maxClaims = Number(document.getElementById("mcp-preview-max")?.value || 20);
+  const limit = Number(document.getElementById("mcp-preview-limit")?.value || 10);
   if (!term) { alertFlash("err", "请输入要查证的游戏黑话或梗"); return; }
   state.mcpBusy = true; render();
   try {
-    state.mcpPreview = await api("/mcp/builtin/social-research/preview", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({term, context:`查证 ${term} 的玩家语境含义`, game, depth, max_claims:maxClaims})});
+    state.mcpPreview = await api("/mcp/builtin/social-research/preview", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({tool, term, query:[game, term].filter(Boolean).join(" "), context:`查证 ${term} 的玩家语境含义`, game, depth, limit, max_claims:maxClaims})});
     await refreshBuiltinMcp();
-    alertFlash("ok", `提取到 ${(state.mcpPreview.claims || []).length} 条 claim`);
+    alertFlash("ok", `原生 MCP 返回 ${Number((state.mcpPreview.packet || {}).aggregation?.returned_count || (state.mcpPreview.packet || {}).items?.length || 0)} 条内容`);
   } catch (error) { alertFlash("err", operationDiagnosticFromError(error, "检索预览失败").message || "检索预览失败"); }
   finally { state.mcpBusy = false; render(); }
 }

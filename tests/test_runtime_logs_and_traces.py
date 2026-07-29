@@ -218,6 +218,38 @@ def test_reply_turn_trace_builds_safe_process_view(_db_tmp) -> None:
     assert view["items"][1]["signals"]["tool"] == "web_search"
 
 
+def test_reply_turn_trace_exposes_only_completion_contract_summary(_db_tmp) -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    trace_id = traces.start_trace(session_type="group", group_id="123", user_id="456")
+    token = traces.set_current_trace_id(trace_id)
+    try:
+        traces.finish_trace(
+            outcome="partial",
+            diagnosis_code="visible_output_recovered",
+            detail={
+                "tool_execution": "partial",
+                "evidence_delivery": "recovered",
+                "outbound_delivery": "confirmed",
+                "social_coverage_status": "degraded",
+                "evidence_recovered": True,
+                "raw_tool_result": "must-not-be-exposed",
+            },
+        )
+    finally:
+        traces.reset_current_trace_id(token)
+
+    view = traces.build_process_view(traces.get_trace(trace_id))
+
+    assert view["summary"]["completion"] == {
+        "tool_execution": "partial",
+        "evidence_delivery": "recovered",
+        "outbound_delivery": "confirmed",
+        "social_coverage_status": "degraded",
+        "evidence_recovered": "True",
+    }
+    assert "raw_tool_result" not in view["summary"]["completion"]
+
+
 def test_reply_turn_trace_extracts_budget_signals(_db_tmp) -> None:
     traces = load_personification_module("plugin.personification.core.reply_turn_trace")
     logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")

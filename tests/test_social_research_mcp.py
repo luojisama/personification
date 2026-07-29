@@ -377,6 +377,11 @@ def test_research_game_slang_keeps_search_card_when_detail_read_fails(tmp_path: 
     assert packet["items"][1]["canonical_url"].startswith("https://xiaoheihe.cn/app/bbs/link/")
     assert packet["partial"] is True
     assert packet["aggregation"]["coverage_status"] == "degraded"
+    assert packet["aggregation"]["stages"]["search"]["returned_count"] == 2
+    assert packet["aggregation"]["stages"]["detail"]["ready_count"] == 1
+    assert packet["aggregation"]["stages"]["detail"]["unavailable_count"] == 1
+    assert packet["items"][1]["detail_error_code"] == "detail_content_unavailable"
+    assert packet["items"][1]["detail_elapsed_ms"] >= 0
 
 
 def test_platform_url_validation_rejects_cross_origin_and_credentials(tmp_path: Path) -> None:

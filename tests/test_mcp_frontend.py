@@ -212,6 +212,14 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
         "完成登录后请关闭该窗口",
         "登录态已保存，但平台开关仍关闭",
         "登录和平台开关彼此独立",
+        "平台候选上限",
+        "结果总上限",
+        "请求总上限",
+        "独立来源组",
+        "实际覆盖",
+        "证据交付",
+        "QQ 发送",
+        "工具预览不生成最终回复，也不发送 QQ 消息",
     ):
         assert visible_copy in source
 
@@ -233,6 +241,12 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
     assert "MCP_PLATFORM_CONFIG_KEYS" in source
     assert "normalizedBuiltinPlatformConfig" in source
     assert '"risk_controlled","qr_expired"' in source
+    assert 'value="social_content_search"' in source
+    assert 'https://xiaoheihe.cn/app/bbs/home' in source
+    assert "renderMcpExternalLink(item.canonical_url" in source
+    assert "aggregation.per_platform_counts" in source
+    assert "aggregation.source_group_count" in source
+    assert "aggregation.satisfies_request" in source
     assert ".mcp-login-qr { width:240px; height:240px;" in styles
     assert "image-rendering:pixelated" in styles
     for forbidden in ("cookie", "localStorage.setItem", "profile_path", "device_id", "raw_html"):

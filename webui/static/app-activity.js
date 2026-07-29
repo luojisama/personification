@@ -228,11 +228,24 @@ function renderTraceProcess() {
     actual_steps: "运行步数上限",
     suggested_seconds: "建议预算秒数",
     actual_seconds: "运行预算秒数",
+    tool_execution: "工具执行",
+    evidence_delivery: "证据交付",
+    outbound_delivery: "QQ 发送",
+    social_coverage_status: "社交覆盖",
+    evidence_recovered: "安全降级恢复",
   };
   const kvTags = (obj) => Object.entries(obj || {})
     .filter(([_, value]) => value)
     .map(([key, value]) => `<span class="tag" title="${escapeAttr(key)}">${escapeHtml(readableKeys[key] || key)}: ${escapeHtml(String(value))}</span>`)
     .join("");
+  const completion = summary.completion || {};
+  const completionBlock = Object.keys(completion).length ? `<div class="trace-inspection-card"><h3>完成契约</h3><div class="trace-step-signals">${kvTags({
+    tool_execution: completion.tool_execution,
+    evidence_delivery: completion.evidence_delivery,
+    outbound_delivery: completion.outbound_delivery,
+    social_coverage_status: completion.social_coverage_status,
+    evidence_recovered: completion.evidence_recovered,
+  })}</div></div>` : "";
   const toolRows = (inspection.tools || []).map(tool => `<tr>
     <td class="col-status"><span class="tag tag--status">${escapeHtml(tool.stage === "result" ? "结果" : "调用")}</span></td>
     <td class="col-id"><code class="u-ellipsis" title="${escapeAttr(tool.tool || "-")}">${escapeHtml(tool.tool || "-")}</code></td>
@@ -243,6 +256,7 @@ function renderTraceProcess() {
   const questionTags = (inspection.questions || []).map(q => `<span class="tag">${escapeHtml(q)}</span>`).join("");
   const qualityTags = (inspection.quality || []).map(q => `<div class="trace-step-detail">${escapeHtml(q)}</div>`).join("");
   const inspectionBlock = `<div class="trace-inspection-grid">
+    ${completionBlock}
     <div class="trace-inspection-card">
       <h3>怎么理解发言</h3>
       <div class="trace-step-signals">${kvTags(understanding) || '<span class="muted">暂无语义信号</span>'}</div>

@@ -95,6 +95,7 @@ class _BuiltinManager(_Manager):
     def __init__(self) -> None:
         super().__init__()
         self.auth_requests = []
+        self.tool_calls = []
         self.current = {
             "installation_id": "builtin_social_platform_research",
             "desired_enabled": True,
@@ -128,7 +129,8 @@ class _BuiltinManager(_Manager):
         raise KeyError(method)
 
     async def builtin_call_tool(self, remote_name: str, arguments: dict):
-        assert remote_name == "research_game_slang"
+        assert remote_name in {"social_content_search", "research_game_slang"}
+        self.tool_calls.append((remote_name, dict(arguments)))
         return json.dumps({
             "schema_version": 1,
             "packet_id": "packet-preview",
@@ -322,3 +324,30 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
     assert preview.status_code == 200
     assert preview.headers["cache-control"] == "no-store, private"
     assert preview.json()["packet"]["trust"] == "untrusted_data_only"
+    assert manager.tool_calls[-1] == (
+        "research_game_slang",
+        {
+            "term": "刘涛",
+            "context": "三角洲行动装备",
+            "game": "三角洲行动",
+            "depth": "auto",
+            "limit": 10,
+        },
+    )
+    assert preview.json()["delivery"]["outbound_delivery"] == "not_applicable"
+
+    search_preview = client.post(
+        "/api/mcp/builtin/social-research/preview",
+        json={
+            "tool": "social_content_search",
+            "term": "花来",
+            "game": "三角洲行动",
+            "limit": 7,
+        },
+    )
+    assert search_preview.status_code == 200
+    assert manager.tool_calls[-1] == (
+        "social_content_search",
+        {"query": "三角洲行动 花来", "limit": 7},
+    )
+    assert search_preview.json()["tool_name"] == "social_content_search"

@@ -48,6 +48,7 @@ _SAFE_OPERATION_CODES = {
     "qrcode_encoder_failed",
     "qrcode_encoder_unavailable",
     "no_enabled_platform",
+    "detail_content_unavailable",
 }
 
 
@@ -423,15 +424,19 @@ class SocialResearchService:
             raise ValueError("term, context and a valid depth are required")
         limit = min(50, max(1, int(params.get("limit", 10) or 10)))
         query = " ".join(value for value in (game, term) if value)
+        search_started = time.monotonic()
         search_packet = await self.search(
             {"query": query, "limit": limit, "quality_mode": "balanced"}
         )
+        search_elapsed_ms = int((time.monotonic() - search_started) * 1000)
         candidates = list(search_packet.get("items") or [])[:limit]
         comment_limit = 80 if depth == "deep" else 30
         danmaku_limit = 200 if depth == "deep" else 80
-        read_results = await asyncio.gather(
-            *(
-                self.read(
+
+        async def read_detail(item: dict[str, Any]) -> tuple[dict[str, Any] | None, str, int]:
+            started = time.monotonic()
+            try:
+                result = await self.read(
                     {
                         "platform": item["platform"],
                         "url": item["canonical_url"],
@@ -440,10 +445,18 @@ class SocialResearchService:
                         "danmaku_limit": danmaku_limit,
                     }
                 )
+                return result, "ready", int((time.monotonic() - started) * 1000)
+            except Exception as exc:
+                return None, _safe_operation_code(exc), int((time.monotonic() - started) * 1000)
+
+        detail_started = time.monotonic()
+        read_results = await asyncio.gather(
+            *(
+                read_detail(item)
                 for item in candidates
             ),
-            return_exceptions=True,
         )
+        detail_elapsed_ms = int((time.monotonic() - detail_started) * 1000)
         packet = ContentPacket(
             platform_statuses=dict(search_packet.get("platform_statuses") or {}),
             partial=bool(search_packet.get("partial")),
@@ -451,10 +464,16 @@ class SocialResearchService:
             filtered_counts=dict(search_packet.get("filtered_counts") or {}),
             aggregation=dict(search_packet.get("aggregation") or {}),
         )
-        for candidate, result in zip(candidates, read_results):
-            if isinstance(result, BaseException) or not list(result.get("items") or []):
+        ready_details = 0
+        for candidate, (result, detail_code, item_elapsed_ms) in zip(candidates, read_results):
+            if result is None or not list(result.get("items") or []):
                 packet.partial = True
-                fallback = {**candidate, "detail_status": "detail_content_unavailable"}
+                fallback = {
+                    **candidate,
+                    "detail_status": "detail_content_unavailable",
+                    "detail_error_code": detail_code,
+                    "detail_elapsed_ms": item_elapsed_ms,
+                }
                 packet.items.append(fallback)
                 packet.warnings.append(
                     f"detail_content_unavailable:{candidate.get('platform', '')}:{candidate.get('content_id', '')}"
@@ -463,7 +482,9 @@ class SocialResearchService:
             detailed = dict(list(result.get("items") or [])[0])
             detailed["source_group_id"] = str(candidate.get("source_group_id") or "")
             detailed["detail_status"] = "ready"
+            detailed["detail_elapsed_ms"] = item_elapsed_ms
             packet.items.append(detailed)
+            ready_details += 1
         packet.items = packet.items[:limit]
         packet.source_groups = build_source_groups(packet.items)
         packet.aggregation.update(
@@ -477,6 +498,30 @@ class SocialResearchService:
                     if packet.partial
                     else str(packet.aggregation.get("coverage_status") or "complete")
                 ),
+                "stages": {
+                    "search": {
+                        "status": str(
+                            (search_packet.get("aggregation") or {}).get("coverage_status")
+                            or "empty"
+                        ),
+                        "elapsed_ms": search_elapsed_ms,
+                        "cache_hit": bool(search_packet.get("cache_hit", False)),
+                        "returned_count": len(candidates),
+                    },
+                    "detail": {
+                        "status": (
+                            "empty"
+                            if not candidates
+                            else "complete"
+                            if ready_details == len(candidates)
+                            else "degraded"
+                        ),
+                        "elapsed_ms": detail_elapsed_ms,
+                        "requested_count": len(candidates),
+                        "ready_count": ready_details,
+                        "unavailable_count": len(candidates) - ready_details,
+                    },
+                },
             }
         )
         return packet.to_dict()
