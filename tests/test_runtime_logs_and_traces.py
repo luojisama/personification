@@ -7,6 +7,10 @@ import pytest
 
 from ._loader import load_personification_module
 
+completion_contract = load_personification_module(
+    "plugin.personification.core.reply_completion_contract"
+)
+
 
 @pytest.fixture
 def _db_tmp(tmp_path: Path, monkeypatch):
@@ -120,6 +124,61 @@ def test_reply_turn_trace_records_and_finishes(_db_tmp) -> None:
 
     recent = traces.query_recent(session_type="group", group_id="123", user_id="456")
     assert recent and recent[0]["trace_id"] == trace_id
+
+
+@pytest.mark.parametrize(
+    ("state", "delivery_partial", "delivery_unknown", "outcome", "diagnosis"),
+    [
+        (
+            {
+                "agent_evidence_delivery_required": True,
+                "agent_evidence_delivery_status": "met",
+                "agent_social_tool_execution": "ok",
+                "agent_social_coverage_status": "complete",
+            },
+            False,
+            False,
+            "ok",
+            "ok",
+        ),
+        (
+            {
+                "agent_evidence_delivery_required": True,
+                "agent_evidence_delivery_status": "recovered",
+                "agent_evidence_recovered": True,
+                "agent_social_tool_execution": "ok",
+            },
+            False,
+            False,
+            "partial",
+            "visible_output_recovered",
+        ),
+        (
+            {
+                "agent_evidence_delivery_required": True,
+                "agent_evidence_delivery_status": "failed",
+            },
+            False,
+            False,
+            "partial",
+            "evidence_delivery_incomplete",
+        ),
+        ({}, False, True, "failed", "outbound_send_failed"),
+    ],
+)
+def test_reply_completion_contract_separates_evidence_and_outbound_states(
+    state, delivery_partial, delivery_unknown, outcome, diagnosis
+) -> None:
+    resolved = completion_contract.resolve_sent_reply_completion(
+        state=state,
+        visible_text="已发送",
+        delivery_partial=delivery_partial,
+        delivery_unknown=delivery_unknown,
+    )
+
+    assert resolved["outcome"] == outcome
+    assert resolved["diagnosis_code"] == diagnosis
+    assert resolved["outbound_delivery"] == ("unconfirmed" if delivery_unknown else "confirmed")
 
 
 def test_reply_turn_trace_builds_safe_process_view(_db_tmp) -> None:

@@ -1841,6 +1841,135 @@ def test_run_agent_appends_evidence_guidance_after_tool_result(monkeypatch) -> N
     )
 
 
+def test_run_agent_stops_equivalent_searches_after_social_coverage_is_satisfied() -> None:
+    handled: list[str] = []
+
+    async def _social_handler(**_kwargs):  # noqa: ANN001
+        handled.append("social_content_search")
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "partial": False,
+                "aggregation": {
+                    "requested_limit": 10,
+                    "returned_count": 2,
+                    "source_group_count": 2,
+                    "selected_platforms": ["xiaoheihe", "bilibili"],
+                    "successful_platforms": ["xiaoheihe", "bilibili"],
+                    "covered_platforms": ["xiaoheihe", "bilibili"],
+                    "coverage_status": "complete",
+                    "satisfies_request": True,
+                },
+                "items": [
+                    {
+                        "platform": "xiaoheihe",
+                        "content_id": "179364001",
+                        "source_group_id": "source_1",
+                        "title": "花来出处",
+                        "canonical_url": "https://xiaoheihe.cn/app/bbs/link/179364001",
+                    },
+                    {
+                        "platform": "bilibili",
+                        "content_id": "BV1abc",
+                        "source_group_id": "source_2",
+                        "title": "花来讨论",
+                        "canonical_url": "https://www.bilibili.com/video/BV1abc/",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    async def _web_handler(**_kwargs):  # noqa: ANN001
+        raise AssertionError("generic web search must not run after satisfied social evidence")
+
+    registry = tool_registry.ToolRegistry()
+    for name, handler in (
+        ("social_content_search", _social_handler),
+        ("web_search", _web_handler),
+    ):
+        registry.register(
+            tool_registry.AgentTool(
+                name=name,
+                description="lookup",
+                parameters={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+                handler=handler,
+                metadata={
+                    "category": "retrieval",
+                    "intent_tags": ["lookup", "game_slang"],
+                    "evidence_kind": "social" if name == "social_content_search" else "web",
+                    "side_effect": "none",
+                    "retryable": True,
+                },
+            )
+        )
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-social",
+                        name="social_content_search",
+                        arguments={"query": "花来"},
+                    )
+                ],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="花来是玩家社区里的调侃说法。",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+    )
+    turn_plan = SimpleNamespace(
+        tool_intent=["lookup_web"],
+        research_need="high",
+        session_goal="解释这个说法",
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "花来是什么意思"}],
+            registry=registry,
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=3,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+                personification_evidence_synthesizer_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+            turn_plan=turn_plan,
+        )
+    )
+
+    assert handled == ["social_content_search"]
+    second_tools = {
+        schema["function"]["name"] for schema in caller.calls[1]["tools"]
+    }
+    assert "social_content_search" not in second_tools
+    assert "web_search" not in second_tools
+    assert "社交证据已满足" in turn_plan.session_goal
+    assert "https://xiaoheihe.cn/app/bbs/link/179364001" in result.text
+    assert result.evidence_delivery_status == "recovered"
+
+
 def test_run_agent_returns_generated_image_marker_without_rewrite(monkeypatch) -> None:  # noqa: ANN001
     async def _handler(**kwargs):  # noqa: ANN001
         assert kwargs["prompt"] == "Kobe Bryant iced tea poster"

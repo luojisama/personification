@@ -141,6 +141,58 @@ def test_should_review_banter_lookup_draft_uses_structural_signals() -> None:
     assert not stop_flow._should_review_banter_lookup_draft(ambiguity_level="low", draft_answer_text="接一句")
 
 
+def test_satisfied_social_packet_blocks_semantic_fallback_search() -> None:
+    state = stop_flow.StopFlowState(has_tool_call=True)
+    packet = {
+        "aggregation": {
+            "source_group_count": 2,
+            "covered_platforms": ["xiaoheihe", "bilibili"],
+            "satisfies_request": True,
+        },
+        "items": [
+            {
+                "platform": "xiaoheihe",
+                "content_id": "179364001",
+                "canonical_url": "https://xiaoheihe.cn/app/bbs/link/179364001",
+            }
+        ],
+    }
+    stop_flow.update_stop_flow_tool_result(
+        state=state,
+        registry=_Registry(),
+        tool_name="social_content_search",
+        tool_args={"query": "花来"},
+        result=json.dumps(packet),
+    )
+
+    async def _unexpected_selector(**_kwargs):  # noqa: ANN001
+        raise AssertionError("satisfied structured social evidence must stop fallback lookup")
+
+    selected = asyncio.run(
+        stop_flow._select_stop_fallback_lookup(
+            state=state,
+            response=_stop_response("查到了"),
+            content_len=3,
+            runtime_chat_intent="lookup",
+            banter_requires_lookup_retry=False,
+            user_query_text="花来是什么意思",
+            rewritten_query=None,
+            context_hint="",
+            user_images=[],
+            plugin_query_intent="",
+            tool_caller=SimpleNamespace(),
+            registry=_Registry(),
+            record_trace=lambda **_kwargs: None,
+            logger=SimpleNamespace(info=lambda _msg: None),
+            select_semantic_fallback_tool=_unexpected_selector,
+        )
+    )
+
+    assert state.social_evidence_satisfied is True
+    assert state.pending_evidence_followup_query == ""
+    assert selected is None
+
+
 def test_direct_image_answer_does_not_force_an_unrelated_capability_tool() -> None:
     state = stop_flow.StopFlowState()
 

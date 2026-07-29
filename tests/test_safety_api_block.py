@@ -115,6 +115,8 @@ def test_screenshot_server_refusal_is_never_visible() -> None:
     assert safety_filter.detect_refusal(text) is True
     decision = visible_output.assess_visible_text(text)
     assert decision.allowed is False
+    assert decision.pattern_id == "provider_policy_text"
+    assert len(decision.summary_hash) == 12
     assert visible_output.guard_visible_text(text, surface="test") == ""
 
 
@@ -148,6 +150,7 @@ def test_visible_output_blocks_persona_ai_or_company_identity_without_blocking_t
         decision = visible_output.assess_visible_text(text)
         assert decision.allowed is False
         assert decision.reason == "persona_identity_leak"
+        assert decision.pattern_id == "persona_identity_leak"
         assert visible_output.guard_visible_text(text, surface="test") == ""
     for text in allowed:
         assert visible_output.assess_visible_text(text).allowed is True
@@ -167,7 +170,9 @@ def test_media_does_not_bypass_residual_or_caption_checks() -> None:
 
 def test_visible_output_scans_beyond_old_prefix_limit() -> None:
     text = "正常内容" * 500 + "\napi_key=very-secret-token"
-    assert visible_output.assess_visible_text(text).allowed is False
+    decision = visible_output.assess_visible_text(text)
+    assert decision.allowed is False
+    assert decision.pattern_id == "credential_like_text"
 
 
 def test_nested_cli_block_reason_is_detected() -> None:

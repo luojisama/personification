@@ -28,10 +28,12 @@ from .executor import (
 )
 from .evidence import (
     EvidenceSynthesis,
+    SOCIAL_SEARCH_EQUIVALENT_TOOL_NAMES,
     build_tool_result_record as _build_tool_result_record,
     evidence_synthesizer_enabled as _evidence_synthesizer_enabled,
     plan_for_evidence as _plan_for_evidence,
     render_evidence_guidance as _evidence_guidance,
+    social_evidence_from_records,
     synthesize_evidence_with_llm,
 )
 from .image_generation import (
@@ -59,7 +61,7 @@ from .loop_utils import (
     tool_result_trace_status as _tool_result_trace_status,
 )
 from .prompting import append_agent_system_prompts
-from .reply_quality import finalize_agent_reply_quality
+from .reply_quality import finalize_agent_reply_quality, finalize_social_evidence_delivery
 from .stop_flow import (
     StopFlowState,
     _has_lookup_schema,
@@ -263,10 +265,24 @@ async def run_agent(
     )
 
     async def _finalize_result(result: AgentResult, *, reason: str) -> AgentResult:
+        social = social_evidence_from_records(stop_state.tool_result_records)
+        result.social_evidence = list(social.get("sources") or [])
+        result.social_coverage = {
+            **dict(social.get("aggregation") or {}),
+            "partial": bool(social.get("partial", False)),
+            "warnings": list(social.get("warnings") or []),
+        }
+        result.evidence_delivery_required = bool(
+            result.social_evidence
+            or (
+                bool(social.get("search_seen", False))
+                and int(result.social_coverage.get("returned_count", 0) or 0) > 0
+            )
+        )
         if structured_output or not finalize_quality:
             return result
         try:
-            return await _await_with_deadline(
+            finalized = await _await_with_deadline(
                 lambda: finalize_agent_reply_quality(
                     result,
                     tool_caller=tool_caller,
@@ -290,18 +306,40 @@ async def run_agent(
                 detail=f"reason={reason} elapsed_ms=0",
             )
             if str(getattr(result, "failure_code", "") or ""):
-                return result
-            if (
+                finalized = result
+            elif (
                 str(getattr(result, "quality_context", "") or "")
                 == "constrained_persona_output"
                 and getattr(result, "evidence_envelope", None) is not None
             ):
-                return result
-            return AgentResult(
-                text="[NO_REPLY]",
-                pending_actions=list(getattr(result, "pending_actions", []) or []),
-                failure_code="agent_quality_timeout",
-            )
+                finalized = result
+            else:
+                finalized = AgentResult(
+                    text="[NO_REPLY]",
+                    pending_actions=list(getattr(result, "pending_actions", []) or []),
+                    failure_code="agent_quality_timeout",
+                    social_evidence=list(result.social_evidence),
+                    social_coverage=dict(result.social_coverage),
+                    evidence_delivery_required=bool(result.evidence_delivery_required),
+                )
+        return finalize_social_evidence_delivery(
+            finalized,
+            sources=list(social.get("sources") or []),
+            coverage=dict(social.get("aggregation") or {}),
+            partial=bool(social.get("partial", False)),
+            warnings=list(social.get("warnings") or []),
+            record_trace=_record_reply_trace_stage,
+        )
+
+    def _mark_social_evidence_satisfied() -> None:
+        marker = "社交证据已满足，直接收束回答"
+        for plan in (turn_plan, evidence_turn_plan):
+            if plan is None or not hasattr(plan, "session_goal"):
+                continue
+            current = str(getattr(plan, "session_goal", "") or "").strip()
+            if marker in current:
+                continue
+            setattr(plan, "session_goal", f"{current}；{marker}".strip("；")[:80])
 
     evidence_synthesis_rounds = 0
     last_evidence_tool_count = 0
@@ -647,8 +685,12 @@ async def run_agent(
             "evidence_synthesizer.synthesis_ms",
             (time.monotonic() - started_at) * 1000.0,
         )
+        if stop_state.social_evidence_satisfied:
+            evidence.needs_more_research = False
+            evidence.research_followup_query = ""
+            _mark_social_evidence_satisfied()
         messages.append({"role": "system", "content": _evidence_guidance(evidence)})
-        if evidence.needs_more_research:
+        if evidence.needs_more_research and not stop_state.social_evidence_satisfied:
             stop_state.semantic_fallback_attempted = False
             stop_state.pending_evidence_followup_query = str(evidence.research_followup_query or "").strip()
         logger.info(
@@ -695,6 +737,13 @@ async def run_agent(
             chat_intent=runtime_chat_intent,
             plugin_question_intent=plugin_query_intent,
         )
+        if stop_state.social_evidence_satisfied:
+            active_schemas = [
+                schema
+                for schema in active_schemas
+                if _schema_tool_name(schema) not in SOCIAL_SEARCH_EQUIVALENT_TOOL_NAMES
+            ]
+            _mark_social_evidence_satisfied()
         selected_names = selected_tool_names(active_schemas, _schema_tool_name)
         logger.debug(f"[agent] exposed {len(active_schemas)} tools to model")
         logger.info(f"[agent] selected tools: {', '.join(selected_names) if selected_names else 'none'}")
@@ -704,7 +753,7 @@ async def run_agent(
                 lambda: tool_caller.chat_with_tools(
                     messages,
                     active_schemas,
-                    use_builtin_search,
+                    use_builtin_search and not stop_state.social_evidence_satisfied,
                 ),
                 budget_deadline,
             )
@@ -822,6 +871,30 @@ async def run_agent(
                 step=_step + 1,
                 record_trace=_record_reply_trace_stage,
             )
+            if (
+                stop_state.social_evidence_satisfied
+                and str(tool_call.name or "").strip() in SOCIAL_SEARCH_EQUIVALENT_TOOL_NAMES
+            ):
+                result = (
+                    '{"status":"skipped","error_code":"social_evidence_already_satisfied",'
+                    '"message":"Structured social evidence already satisfies this turn."}'
+                )
+                trace_tool_result(
+                    tool_name=str(tool_call.name or "").strip(),
+                    result=result,
+                    step=_step + 1,
+                    elapsed_ms=0,
+                    record_trace=_record_reply_trace_stage,
+                    status_for_result=_tool_result_trace_status,
+                )
+                _record_reply_trace_stage(
+                    key="agent_social_search_suppressed",
+                    label="社交检索去重",
+                    status="info",
+                    detail=f"tool={str(tool_call.name or '').strip()} reason=evidence_satisfied",
+                )
+                turn_tool_results.append((tool_call, result))
+                continue
             tool_started_at = time.monotonic()
             if tool is None:
                 result = f"工具 {tool_call.name} 不存在"
@@ -858,6 +931,8 @@ async def run_agent(
                 tool_args=tool_args,
                 result=result,
             )
+            if stop_state.social_evidence_satisfied:
+                _mark_social_evidence_satisfied()
             stop_state.tool_result_records.append(
                 _build_tool_result_record(
                     tool_name=stop_state.last_tool_name,

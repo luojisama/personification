@@ -996,6 +996,25 @@ async def run_agent_if_enabled(
         reply_required=reply_required,
         turn_media_context=turn_media_context,
     )
+    social_coverage = dict(getattr(result, "social_coverage", {}) or {})
+    if isinstance(commit_state, dict):
+        commit_state["agent_evidence_delivery_required"] = bool(
+            getattr(result, "evidence_delivery_required", False)
+        )
+        commit_state["agent_evidence_delivery_status"] = str(
+            getattr(result, "evidence_delivery_status", "not_required") or "not_required"
+        )
+        commit_state["agent_evidence_recovered"] = bool(
+            getattr(result, "evidence_recovered", False)
+        )
+        commit_state["agent_social_coverage_status"] = str(
+            social_coverage.get("coverage_status", "") or ""
+        )
+        commit_state["agent_social_tool_execution"] = (
+            "partial" if bool(social_coverage.get("partial", False)) else "ok"
+            if bool(getattr(result, "social_evidence", None))
+            else "not_used"
+        )
     return (
         result.text,
         True,

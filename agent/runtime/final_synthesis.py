@@ -24,6 +24,11 @@ class AgentResult:
     suppress_reply_recovery: bool = False
     quality_context: str = ""
     evidence_envelope: dict[str, Any] | None = None
+    social_evidence: list[dict[str, Any]] = field(default_factory=list)
+    social_coverage: dict[str, Any] = field(default_factory=dict)
+    evidence_delivery_required: bool = False
+    evidence_delivery_status: str = "not_required"
+    evidence_recovered: bool = False
 
 
 def direct_tool_result_agent_result(

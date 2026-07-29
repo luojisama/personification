@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from ...core.metrics import record_timing
-from .evidence import build_tool_result_record
+from .evidence import build_tool_result_record, social_evidence_metadata
 from .executor import _execute_tool_with_retries
 from .fallbacks import (
     TOOL_RESULT_EMPTY_EVIDENCE,
@@ -38,6 +38,7 @@ class StopFlowState:
     pending_evidence_followup_query: str = ""
     unavailable_tool_signatures: set[str] = field(default_factory=set)
     tool_result_records: list[dict[str, Any]] = field(default_factory=list)
+    social_evidence_satisfied: bool = False
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,11 @@ def update_stop_flow_tool_result(
         state.has_usable_evidence = True
         state.last_usable_tool_name = name
         state.last_usable_tool_result_text = text
+    social = social_evidence_metadata(tool_name=name, result=result)
+    aggregation = social.get("aggregation") if isinstance(social, dict) else None
+    if isinstance(aggregation, dict) and bool(aggregation.get("satisfies_request", False)):
+        state.social_evidence_satisfied = True
+        state.pending_evidence_followup_query = ""
     if not is_retryable_evidence_tool(registry, name):
         return
     signature = tool_signature(name, args)
@@ -244,6 +250,10 @@ async def _select_stop_fallback_lookup(
     logger: Any,
     select_semantic_fallback_tool: Callable[..., Awaitable[tuple[str, dict] | None]],
 ) -> tuple[str, dict] | None:
+    if state.social_evidence_satisfied:
+        state.pending_evidence_followup_query = ""
+        logger.info("[agent] semantic fallback skipped: social evidence already satisfies request")
+        return None
     previous_tool_unavailable = bool(
         state.has_tool_call
         and is_retryable_evidence_tool(registry, state.last_tool_name)

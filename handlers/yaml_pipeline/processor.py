@@ -82,6 +82,7 @@ from ...core.response_review import (
 from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.target_inference import normalize_message_target_for_plan, normalize_message_target_for_review
 from ...core.reply_text_policy import normalize_visible_reply_text
+from ...core.reply_completion_contract import resolve_sent_reply_completion
 from ...core.prompt_loader import pick_ack_phrase
 from ...core.qq_outbound import QQOutboundLedger, SendReceipt, build_outbound_context
 from ...core.qq_recall import register_qq_recall_tool
@@ -1831,6 +1832,24 @@ async def process_yaml_response_logic(
         finally:
             reset_current_image_context(image_ctx_token)
         if agent_result is not None:
+            social_coverage = dict(getattr(agent_result, "social_coverage", {}) or {})
+            reply_commit_state["agent_evidence_delivery_required"] = bool(
+                getattr(agent_result, "evidence_delivery_required", False)
+            )
+            reply_commit_state["agent_evidence_delivery_status"] = str(
+                getattr(agent_result, "evidence_delivery_status", "not_required") or "not_required"
+            )
+            reply_commit_state["agent_evidence_recovered"] = bool(
+                getattr(agent_result, "evidence_recovered", False)
+            )
+            reply_commit_state["agent_social_coverage_status"] = str(
+                social_coverage.get("coverage_status", "") or ""
+            )
+            reply_commit_state["agent_social_tool_execution"] = (
+                "partial" if bool(social_coverage.get("partial", False)) else "ok"
+                if bool(getattr(agent_result, "social_evidence", None))
+                else "not_used"
+            )
             agent_failure_code = str(getattr(agent_result, "failure_code", "") or "").strip()
             if agent_failure_code:
                 delivery_started = bool(reply_commit_state.get("reply_delivery_started", False))
@@ -1841,8 +1860,8 @@ async def process_yaml_response_logic(
                     diagnosis_code = f"partial_{agent_failure_code}"
                 elif delivery_started:
                     delivery_state = "dispatching"
-                    trace_outcome = "outcome_unknown"
-                    diagnosis_code = "send_outcome_unknown"
+                    trace_outcome = "failed"
+                    diagnosis_code = "outbound_send_failed"
                 else:
                     delivery_state = "not_started"
                     trace_outcome = "failed"
@@ -1975,8 +1994,8 @@ async def process_yaml_response_logic(
                         release_reply_commit(reply_commit_state)
                         mark_reply_phase(reply_commit_state, "reply_complete")
                         _trace_finish(
-                            outcome="outcome_unknown",
-                            diagnosis_code="send_outcome_unknown",
+                            outcome="failed",
+                            diagnosis_code="outbound_send_failed",
                             detail={"direct_output": True, "kind": "translation_forward"},
                         )
                         return
@@ -1992,11 +2011,11 @@ async def process_yaml_response_logic(
                             release_reply_commit(reply_commit_state)
                             mark_reply_phase(reply_commit_state, "reply_complete")
                             _trace_finish(
-                                outcome="partial" if delivery_partial else "outcome_unknown",
+                                outcome="partial" if delivery_partial else "failed",
                                 diagnosis_code=(
                                     "partial_reply_timeout"
                                     if delivery_partial
-                                    else "send_outcome_unknown"
+                                    else "outbound_send_failed"
                                 ),
                                 detail={"direct_output": True, "kind": "translation_forward"},
                             )
@@ -2879,23 +2898,37 @@ async def process_yaml_response_logic(
         status="ok",
         detail=f"elapsed_ms={bookkeeping_elapsed_ms}",
     )
+    completion = resolve_sent_reply_completion(
+        state=reply_commit_state,
+        visible_text=assistant_history_text,
+        delivery_partial=delivery_partial,
+        delivery_unknown=delivery_unknown,
+    )
     _trace_stage(
         key="yaml_reply_success",
         label="YAML 回复完成",
-        status="warn" if delivery_partial or delivery_unknown else "ok",
-        detail=f"chars={len(assistant_history_text)} tts={bool(sent_as_tts)} sticker={bool(stickers_sent)}",
+        status="ok" if completion["outcome"] == "ok" else "warn",
+        detail=(
+            f"chars={len(assistant_history_text)} tts={bool(sent_as_tts)} "
+            f"sticker={bool(stickers_sent)} tool_execution={completion['tool_execution']} "
+            f"evidence_delivery={completion['evidence_delivery']} "
+            f"outbound_delivery={completion['outbound_delivery']}"
+        ),
     )
     _trace_finish(
-        outcome="outcome_unknown" if delivery_unknown else "partial" if delivery_partial else "ok",
-        diagnosis_code=(
-            "tts_send_outcome_unknown" if delivery_unknown else "tts_partial" if delivery_partial else "ok"
-        ),
+        outcome=completion["outcome"],
+        diagnosis_code=completion["diagnosis_code"],
         detail={
             "reply_chars": len(assistant_history_text),
             "tts": bool(sent_as_tts),
             "sticker": bool(stickers_sent),
             "delivery_partial": delivery_partial,
             "delivery_unknown": delivery_unknown,
+            "tool_execution": completion["tool_execution"],
+            "evidence_delivery": completion["evidence_delivery"],
+            "outbound_delivery": completion["outbound_delivery"],
+            "social_coverage_status": completion["coverage_status"],
+            "evidence_recovered": completion["evidence_recovered"],
             "incoming_text": str(raw_message_text or history_last_text or trigger_reason or "")[:500],
             "outgoing_text": str(assistant_history_text or "")[:500],
         },

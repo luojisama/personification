@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Callable
 
@@ -73,7 +74,162 @@ def _copy_result_with_quality(
         suppress_reply_recovery=suppress_reply_recovery,
         quality_context=quality_context,
         evidence_envelope=getattr(result, "evidence_envelope", None),
+        social_evidence=list(getattr(result, "social_evidence", []) or []),
+        social_coverage=dict(getattr(result, "social_coverage", {}) or {}),
+        evidence_delivery_required=bool(getattr(result, "evidence_delivery_required", False)),
+        evidence_delivery_status=str(getattr(result, "evidence_delivery_status", "not_required") or "not_required"),
+        evidence_recovered=bool(getattr(result, "evidence_recovered", False)),
     )
+
+
+_SOCIAL_PLATFORM_LABELS = {
+    "bilibili": "B站",
+    "douyin": "抖音",
+    "tieba": "贴吧",
+    "xiaoheihe": "小黑盒",
+}
+
+
+def _distinct_social_sources(sources: list[dict[str, Any]], *, limit: int = 3) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    seen_groups: set[str] = set()
+    seen_urls: set[str] = set()
+    for source in list(sources or []):
+        if not isinstance(source, dict):
+            continue
+        url = str(source.get("canonical_url") or "").strip()
+        group_id = str(source.get("source_group_id") or url).strip()
+        if not url or url in seen_urls or group_id in seen_groups:
+            continue
+        seen_urls.add(url)
+        seen_groups.add(group_id)
+        selected.append(source)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _safe_social_source_line(source: dict[str, Any]) -> str:
+    platform = str(source.get("platform") or "").strip().lower()
+    label = _SOCIAL_PLATFORM_LABELS.get(platform, platform or "社交平台")
+    url = str(source.get("canonical_url") or "").strip()
+    title = re.sub(r"\s+", " ", str(source.get("title") or "")).strip()[:120]
+    if title:
+        decision = assess_visible_text(
+            title,
+            allow_control=False,
+            allow_direct_media=False,
+            enforce_role_integrity=True,
+        )
+        if decision.allowed:
+            return f"{title}（{label}）：{url}"
+    return f"{label}：{url}"
+
+
+def finalize_social_evidence_delivery(
+    result: AgentResult,
+    *,
+    sources: list[dict[str, Any]],
+    coverage: dict[str, Any] | None = None,
+    partial: bool = False,
+    warnings: list[str] | None = None,
+    record_trace: Callable[..., None] | None = None,
+) -> AgentResult:
+    """Enforce the visible source-link contract for validated social MCP data."""
+
+    result.social_evidence = list(sources or [])[:10]
+    result.social_coverage = {
+        **dict(coverage or {}),
+        "partial": bool(partial),
+        "warnings": list(warnings or [])[:8],
+    }
+    result.evidence_delivery_required = bool(
+        result.evidence_delivery_required
+        or result.social_evidence
+        or int(result.social_coverage.get("returned_count", 0) or 0) > 0
+    )
+    if not result.evidence_delivery_required:
+        result.evidence_delivery_status = "not_required"
+        return result
+
+    if not result.social_evidence:
+        result.text = "[NO_REPLY]"
+        result.evidence_delivery_status = "failed"
+        result.failure_code = "evidence_delivery_incomplete"
+        if record_trace is not None:
+            record_trace(
+                key="agent_evidence_delivery",
+                label="Agent 证据交付",
+                status="error",
+                detail="status=failed diagnostic=evidence_delivery_incomplete links=0",
+            )
+        return result
+
+    current = str(getattr(result, "text", "") or "").strip()
+    valid_urls = [str(source.get("canonical_url") or "") for source in result.social_evidence]
+    current_visibility = assess_visible_text(current)
+    if current_visibility.allowed and any(url and url in current for url in valid_urls):
+        result.evidence_delivery_status = "met"
+        if record_trace is not None:
+            record_trace(
+                key="agent_evidence_delivery",
+                label="Agent 证据交付",
+                status="ok",
+                detail=(
+                    f"status=met links={sum(1 for url in valid_urls if url and url in current)} "
+                    f"groups={int(result.social_coverage.get('source_group_count', 0) or 0)}"
+                ),
+            )
+        return result
+
+    selected = _distinct_social_sources(result.social_evidence, limit=3)
+    lines = [_safe_social_source_line(source) for source in selected]
+    safe_base = current if current_visibility.allowed and current not in _CONTROL_REPLIES else ""
+    fallback = "\n".join([safe_base, "来源：" if safe_base else "查到的来源：", *lines]).strip()
+    fallback_visibility = assess_visible_text(
+        fallback,
+        allow_control=False,
+        allow_direct_media=False,
+    )
+    if not fallback_visibility.allowed:
+        fallback = "\n".join(
+            ["查到的来源：", *(str(source.get("canonical_url") or "") for source in selected)]
+        ).strip()
+        fallback_visibility = assess_visible_text(
+            fallback,
+            allow_control=False,
+            allow_direct_media=False,
+        )
+    if fallback_visibility.allowed and any(url and url in fallback for url in valid_urls):
+        result.text = fallback_visibility.text
+        result.evidence_delivery_status = "recovered"
+        result.evidence_recovered = True
+        result.failure_code = ""
+        if record_trace is not None:
+            record_trace(
+                key="agent_evidence_delivery",
+                label="Agent 证据交付",
+                status="warn",
+                detail=(
+                    "status=recovered diagnostic=visible_output_recovered "
+                    f"model_visible={str(current_visibility.allowed).lower()} "
+                    f"pattern_id={current_visibility.pattern_id or '-'} links={len(selected)}"
+                ),
+                hint="主回复未保留来源或被可见输出规则拦截，已改用经过校验的结构化来源。",
+            )
+        return result
+
+    result.text = "[NO_REPLY]"
+    result.evidence_delivery_status = "failed"
+    result.failure_code = "evidence_delivery_incomplete"
+    if record_trace is not None:
+        record_trace(
+            key="agent_evidence_delivery",
+            label="Agent 证据交付",
+            status="error",
+            detail="status=failed diagnostic=evidence_delivery_incomplete links=0",
+        )
+    return result
 
 
 def _looks_like_group_context(messages: list[dict[str, Any]], turn_plan: Any = None) -> bool:
@@ -190,6 +346,8 @@ async def finalize_agent_reply_quality(
             check = {
                 "action": "silenced",
                 "reason": visibility.reason,
+                "pattern_id": visibility.pattern_id,
+                "summary_hash": visibility.summary_hash,
                 "source": str(reason or ""),
                 "flags": ["unsafe_visible_output"],
                 "revision_attempted": False,
@@ -203,7 +361,11 @@ async def finalize_agent_reply_quality(
                     key="agent_reply_quality",
                     label="Agent 回复质量",
                     status="warn",
-                    detail=f"action=silenced reason={visibility.reason} flags=unsafe_visible_output",
+                    detail=(
+                        f"action=silenced reason={visibility.reason} "
+                        f"pattern_id={visibility.pattern_id or '-'} chars={len(raw_text)} "
+                        f"summary_hash={visibility.summary_hash or '-'} flags=unsafe_visible_output"
+                    ),
                 )
             return _copy_result_with_quality(result, text="[SILENCE]", check=check)
     skipped = (
@@ -396,4 +558,5 @@ async def finalize_agent_reply_quality(
 
 __all__ = [
     "finalize_agent_reply_quality",
+    "finalize_social_evidence_delivery",
 ]

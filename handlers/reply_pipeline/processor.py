@@ -99,6 +99,7 @@ from ...core.response_review import (
 )
 from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.reply_text_policy import normalize_visible_reply_text
+from ...core.reply_completion_contract import resolve_sent_reply_completion
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_PLAIN
 from ...skills.skillpacks.sticker_tool.scripts.impl import (
     reset_current_image_context,
@@ -2314,8 +2315,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 diagnosis_code = f"partial_{agent_failure_code}"
             elif delivery_started:
                 delivery_state = "dispatching"
-                trace_outcome = "outcome_unknown"
-                diagnosis_code = "send_outcome_unknown"
+                trace_outcome = "failed"
+                diagnosis_code = "outbound_send_failed"
             else:
                 delivery_state = "not_started"
                 trace_outcome = "failed"
@@ -3261,23 +3262,37 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 status="ok",
                 detail=f"elapsed_ms={bookkeeping_elapsed_ms}",
             )
+            completion = resolve_sent_reply_completion(
+                state=state,
+                visible_text=final_visible_reply_text,
+                delivery_partial=delivery_partial,
+                delivery_unknown=delivery_unknown,
+            )
             reply_turn_trace.record_stage(
                 key="reply_success",
                 label="回复完成",
-                status="warn" if delivery_partial or delivery_unknown else "ok",
-                detail=f"chars={len(final_visible_reply_text)} tts={bool(sent_as_tts)} sticker={bool(sticker_name)}",
+                status="ok" if completion["outcome"] == "ok" else "warn",
+                detail=(
+                    f"chars={len(final_visible_reply_text)} tts={bool(sent_as_tts)} "
+                    f"sticker={bool(sticker_name)} tool_execution={completion['tool_execution']} "
+                    f"evidence_delivery={completion['evidence_delivery']} "
+                    f"outbound_delivery={completion['outbound_delivery']}"
+                ),
             )
             reply_turn_trace.finish_trace(
-                outcome="outcome_unknown" if delivery_unknown else "partial" if delivery_partial else "ok",
-                diagnosis_code=(
-                    "tts_send_outcome_unknown" if delivery_unknown else "tts_partial" if delivery_partial else "ok"
-                ),
+                outcome=completion["outcome"],
+                diagnosis_code=completion["diagnosis_code"],
                 detail={
                     "reply_chars": len(final_visible_reply_text),
                     "tts": bool(sent_as_tts),
                     "sticker": bool(sticker_name),
                     "delivery_partial": delivery_partial,
                     "delivery_unknown": delivery_unknown,
+                    "tool_execution": completion["tool_execution"],
+                    "evidence_delivery": completion["evidence_delivery"],
+                    "outbound_delivery": completion["outbound_delivery"],
+                    "social_coverage_status": completion["coverage_status"],
+                    "evidence_recovered": completion["evidence_recovered"],
                     "incoming_text": str(raw_message_text or message_text or message_content or "")[:500],
                     "outgoing_text": str(final_visible_reply_text or "")[:500],
                 },
@@ -3314,8 +3329,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             diagnosis_code = "partial_provider_failure" if provider_code else "partial_internal_exception"
         elif delivery_started:
             delivery_state = "dispatching"
-            trace_outcome = "outcome_unknown"
-            diagnosis_code = "send_outcome_unknown"
+            trace_outcome = "failed"
+            diagnosis_code = "outbound_send_failed"
         else:
             delivery_state = "not_started"
             trace_outcome = "failed"

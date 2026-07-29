@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from base64 import b64decode
 from binascii import Error as BinasciiError
@@ -17,14 +18,23 @@ _MEDIA_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 _ANY_MEDIA_MARKER_RE = re.compile(r"\[/?(?:IMAGE_B64|IMAGE_URL|AUDIO_B64)\]")
-_INTERNAL_OUTPUT_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"</?(?:think|output|message|status|action)>", re.IGNORECASE),
-    re.compile(r"(?:严重|高危)?违规安全限制(?:已)?被触发"),
-    re.compile(r"(?:服务器|服务端|供应商|provider).{0,16}(?:拦截|风控|安全策略)", re.IGNORECASE),
-    re.compile(r"(?:finish[_ ]?reason|block[_ ]?reason|content[_ ]?filter)\s*[:=]", re.IGNORECASE),
-    re.compile(r"(?:system|developer)\s+(?:prompt|message)\s*[:=]", re.IGNORECASE),
-    re.compile(r"(?:traceback|stack trace|internal server error)\b", re.IGNORECASE),
-    re.compile(r"(?:api[_ -]?key|authorization)\s*[:=]\s*(?:bearer\s+)?[A-Za-z0-9_.-]{8,}", re.IGNORECASE),
+_INTERNAL_OUTPUT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("internal_tag", re.compile(r"</?(?:think|output|message|status|action)>", re.IGNORECASE)),
+    ("provider_policy_text", re.compile(r"(?:严重|高危)?违规安全限制(?:已)?被触发")),
+    (
+        "provider_policy_text",
+        re.compile(r"(?:服务器|服务端|供应商|provider).{0,16}(?:拦截|风控|安全策略)", re.IGNORECASE),
+    ),
+    (
+        "provider_policy_text",
+        re.compile(r"(?:finish[_ ]?reason|block[_ ]?reason|content[_ ]?filter)\s*[:=]", re.IGNORECASE),
+    ),
+    ("internal_tag", re.compile(r"(?:system|developer)\s+(?:prompt|message)\s*[:=]", re.IGNORECASE)),
+    ("internal_error", re.compile(r"(?:traceback|stack trace|internal server error)\b", re.IGNORECASE)),
+    (
+        "credential_like_text",
+        re.compile(r"(?:api[_ -]?key|authorization)\s*[:=]\s*(?:bearer\s+)?[A-Za-z0-9_.-]{8,}", re.IGNORECASE),
+    ),
 )
 
 
@@ -33,6 +43,18 @@ class VisibleOutputDecision:
     allowed: bool
     text: str
     reason: str = ""
+    pattern_id: str = ""
+    summary_hash: str = ""
+
+
+def _blocked_decision(candidate: str, reason: str, pattern_id: str) -> VisibleOutputDecision:
+    return VisibleOutputDecision(
+        False,
+        "",
+        reason,
+        pattern_id,
+        hashlib.sha256(str(candidate or "").encode("utf-8", errors="replace")).hexdigest()[:12],
+    )
 
 
 def _valid_media_payload(kind: str, payload: str) -> bool:
@@ -76,21 +98,21 @@ def assess_visible_text(
 ) -> VisibleOutputDecision:
     candidate = str(text or "").strip()
     if not candidate:
-        return VisibleOutputDecision(False, "", "empty")
+        return _blocked_decision(candidate, "empty", "empty_output")
     if candidate in _CONTROL_OUTPUTS:
         if allow_control:
             return VisibleOutputDecision(True, candidate)
-        return VisibleOutputDecision(False, "", "control_not_allowed")
+        return _blocked_decision(candidate, "control_not_allowed", "control_output")
     if not allow_control and _CONTROL_OUTPUT_RE.search(candidate):
-        return VisibleOutputDecision(False, "", "control_not_allowed")
+        return _blocked_decision(candidate, "control_not_allowed", "control_output")
     residual, media_error = _visible_residual(candidate, allow_direct_media=allow_direct_media)
     if media_error:
-        return VisibleOutputDecision(False, "", media_error)
-    for pattern in _INTERNAL_OUTPUT_PATTERNS:
+        return _blocked_decision(candidate, media_error, media_error)
+    for pattern_id, pattern in _INTERNAL_OUTPUT_PATTERNS:
         if pattern.search(residual):
-            return VisibleOutputDecision(False, "", "internal_or_policy_output")
+            return _blocked_decision(candidate, "internal_or_policy_output", pattern_id)
     if enforce_role_integrity and detect_persona_identity_leak(residual, identity_context):
-        return VisibleOutputDecision(False, "", "persona_identity_leak")
+        return _blocked_decision(candidate, "persona_identity_leak", "persona_identity_leak")
     return VisibleOutputDecision(True, candidate)
 
 
@@ -116,7 +138,9 @@ def guard_visible_text(
     if logger is not None:
         try:
             logger.warning(
-                f"[visible_output] blocked surface={surface or 'unknown'} reason={decision.reason}"
+                f"[visible_output] blocked surface={surface or 'unknown'} "
+                f"reason={decision.reason} pattern_id={decision.pattern_id or '-'} "
+                f"chars={len(str(text or ''))} summary_hash={decision.summary_hash or '-'}"
             )
         except Exception:
             pass
