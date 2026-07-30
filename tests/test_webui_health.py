@@ -265,6 +265,7 @@ def _install_fake_interaction_runtime(
     group_id: str = "123456",
     user_id: str = "20001",
     rule_exc: Exception | None = None,
+    authorize_test_user: bool = True,
 ):
     from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageEvent, MessageSegment
 
@@ -338,7 +339,7 @@ def _install_fake_interaction_runtime(
     )
     _runtime_context.app_module.set_runtime_context(
         plugin_config=cfg,
-        superusers={"10001"},
+        superusers={"10001", *({user_id} if authorize_test_user else set())},
         get_bots=lambda: {"100": _FakeBot()},
         logger=logger,
         runtime_bundle=bundle,
@@ -395,6 +396,38 @@ def test_interaction_test_group_uses_plugin_path_and_captures_reply(_runtime_con
     assert body["diagnosis_code"] == "ok"
     assert "自检回复" in body["reply"]
     assert body["target_detail"]["group_id"] == _runtime_context.plugin_config.personification_webui_test_group_id
+
+
+def test_interaction_test_rejects_non_admin_injected_identity_before_event_dispatch(
+    _runtime_context,
+    monkeypatch,
+) -> None:
+    sent = _install_fake_interaction_runtime(
+        _runtime_context,
+        monkeypatch,
+        user_id="20001",
+        authorize_test_user=False,
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    _set_csrf(client)
+    sent_before_test = len(sent)
+
+    response = client.post(
+        "/personification/api/health/interaction-test",
+        json={"target": "group", "text": "不应注入"},
+    )
+
+    assert response.status_code == 403
+    detail = response.json()["detail"]
+    assert detail["code"] == "health_interaction_test_identity_forbidden"
+    assert detail["trace_id"]
+    assert sent[sent_before_test:] == []
+    audit = load_personification_module("plugin.personification.core.webui_audit_log")
+    rows = audit.query_recent(action="health_interaction_test", limit=5)
+    assert rows[0]["outcome"] == "forbidden"
+    assert rows[0]["detail"]["target_qq"] == "20001"
+    assert "不应注入" not in str(rows[0])
 
 
 def test_interaction_exception_is_structured_without_raw_message(_runtime_context, monkeypatch) -> None:

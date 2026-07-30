@@ -299,6 +299,17 @@ async def _select_stop_fallback_lookup(
         logger.info("[agent] semantic fallback skipped: social evidence already satisfies request")
         return None
     if state.semantic_web_fallback_needed:
+        semantic_diagnosis = (
+            "semantic_consensus_conflict"
+            if "semantic_conflict" in state.semantic_gap_codes
+            else "semantic_consensus_incomplete"
+        )
+        record_trace(
+            key=semantic_diagnosis,
+            label="黑话语义共识",
+            status="warn",
+            detail=f"gap_codes={','.join(state.semantic_gap_codes) or '-'}",
+        )
         if state.semantic_web_fallback_attempted:
             state.pending_evidence_followup_query = ""
             return None
@@ -317,6 +328,12 @@ async def _select_stop_fallback_lookup(
         state.semantic_web_fallback_needed = False
         query = str(state.pending_evidence_followup_query or user_query_text or "").strip()[:240]
         state.pending_evidence_followup_query = ""
+        record_trace(
+            key="web_fallback_used",
+            label="网页多源补证",
+            status="info",
+            detail="tool=parallel_research workers=3 once_per_turn=true",
+        )
         return (
             "parallel_research",
             {

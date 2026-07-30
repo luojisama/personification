@@ -36,9 +36,13 @@ class ReplyArbitrationIntent:
 
 
 def required_reply_fallback_text(*, has_images: bool = False) -> str:
-    if has_images:
-        return "这张图我刚刚没读出来，重发一下试试。"
-    return "刚刚卡了一下，再发一次吧。"
+    """Compatibility shim for callers migrating away from fixed fallbacks.
+
+    Required turns must now pass through ``resolve_uncertain_visible_reply``;
+    an operational failure never manufactures a visible retry sentence.
+    """
+
+    return ""
 
 
 def required_reply_needs_recovery(
@@ -557,13 +561,6 @@ def _protected_review_failure(
     reason: str,
     flags: tuple[str, ...],
 ) -> ResponseReviewDecision:
-    if must_reply:
-        return ResponseReviewDecision(
-            action="rewrite",
-            text=required_reply_fallback_text(),
-            reason=reason,
-            flags=flags,
-        )
     return ResponseReviewDecision(action="no_reply", text="", reason=reason, flags=flags)
 
 
@@ -759,13 +756,11 @@ async def review_response_text(
     plugin_episode_hint = _render_plugin_episode_hint(plugin_episode)
     identity_risk = detect_persona_identity_leak(candidate)
     if not candidate:
-        if must_reply:
-            return ResponseReviewDecision(
-                action="rewrite",
-                text=required_reply_fallback_text(),
-                reason="required_empty_candidate",
-            )
-        return ResponseReviewDecision(action="no_reply", text="", reason="empty_candidate")
+        return ResponseReviewDecision(
+            action="no_reply",
+            text="",
+            reason="required_empty_candidate" if must_reply else "empty_candidate",
+        )
     if recent_bot_replies and _looks_like_recent_duplicate(candidate, recent_bot_replies):
         if must_reply:
             return ResponseReviewDecision(action="accept", text=candidate, reason="required_recent_duplicate")

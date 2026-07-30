@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 import re
 import time
@@ -9,6 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
+from ...core.admin_acl import is_plugin_admin, is_superuser
 from ...core.operation_diagnostics import (
     detail as operation_detail,
     diagnostic as operation_diagnostic,
@@ -209,6 +211,36 @@ def _record_qzone_forward_test_audit(
             device_id=admin.device_id,
             target=str(target_user_id or ""),
             detail=detail or {},
+            outcome=outcome,
+        )
+    except Exception:
+        pass
+
+
+def _record_interaction_test_audit(
+    *,
+    admin: AdminIdentity,
+    target_user_id: str,
+    target_group_id: str,
+    trace_id: str,
+    outcome: str,
+    diagnosis_code: str,
+) -> None:
+    try:
+        from ...core import webui_audit_log
+
+        webui_audit_log.record(
+            action="health_interaction_test",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=str(target_group_id or target_user_id or ""),
+            detail={
+                "operator_qq": str(admin.qq or ""),
+                "target_qq": str(target_user_id or ""),
+                "target_group": str(target_group_id or ""),
+                "trace_id": str(trace_id or ""),
+                "diagnosis_code": str(diagnosis_code or ""),
+            },
             outcome=outcome,
         )
     except Exception:
@@ -702,7 +734,7 @@ def _finish_payload(
 
     if replied:
         outcome = "ok"
-    elif diagnosis_code in {"no_reply", "model_empty", "stale_reply", "capture_timeout"}:
+    elif diagnosis_code in {"no_reply", "model_empty", "stale_reply"}:
         outcome = "no_reply"
     else:
         outcome = "failed"
@@ -886,9 +918,74 @@ def build_health_router(*, runtime) -> APIRouter:
             session_type=target_label,
             group_id=target_group,
             user_id=target_user,
-            detail={"source": "webui_interaction_test", "text": text[:200]},
+            detail={
+                "source": "webui_interaction_test",
+                "operator_qq": str(admin.qq or ""),
+                "text_length": len(text),
+                "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+            },
         )
         target_detail = {"group_id": target_group, "user_id": target_user}
+        superusers = set(getattr(runtime, "superusers", set()) or set())
+        operator_authorized = is_superuser(admin.qq, superusers) or is_plugin_admin(admin.qq)
+        target_authorized = is_superuser(target_user, superusers) or is_plugin_admin(target_user)
+        reply_turn_trace.record_stage(
+            trace_id=trace_id,
+            key="interaction_test_identity",
+            label="测试身份授权",
+            status="ok" if operator_authorized and target_authorized else "error",
+            detail=(
+                f"operator_authorized={str(operator_authorized).lower()} "
+                f"target_authorized={str(target_authorized).lower()}"
+            ),
+        )
+        if not operator_authorized or not target_authorized:
+            reply_turn_trace.finish_trace(
+                trace_id=trace_id,
+                outcome="failed",
+                diagnosis_code="health_interaction_test_identity_forbidden",
+                detail={"operator_authorized": operator_authorized, "target_authorized": target_authorized},
+            )
+            _record_interaction_test_audit(
+                admin=admin,
+                target_user_id=target_user,
+                target_group_id=target_group,
+                trace_id=trace_id,
+                outcome="forbidden",
+                diagnosis_code="health_interaction_test_identity_forbidden",
+            )
+            report = operation_diagnostic(
+                ok=False,
+                code="health_interaction_test_identity_forbidden",
+                phase="identity_authorization",
+                title="交互测试身份未获授权",
+                message="测试操作者和被注入 QQ 身份都必须是 Bot 超级管理员或插件管理员；未注入事件。",
+                details=(
+                    operation_detail("操作者授权", operator_authorized, "ok" if operator_authorized else "error"),
+                    operation_detail("测试身份授权", target_authorized, "ok" if target_authorized else "error"),
+                    operation_detail("目标群", target_group or "私聊", "info"),
+                ),
+                steps=(
+                    operation_step(
+                        "interaction_test_identity",
+                        "校验测试身份",
+                        "error",
+                        "授权失败，未构造或注入 QQ 事件。",
+                    ),
+                ),
+                suggestion="将 personification_webui_test_user_id 配置为 SUPERUSER 或插件管理员 QQ 后重试。",
+                retryable=False,
+                trace_id=trace_id,
+            )
+            raise HTTPException(status_code=403, detail=report)
+        _record_interaction_test_audit(
+            admin=admin,
+            target_user_id=target_user,
+            target_group_id=target_group,
+            trace_id=trace_id,
+            outcome="started",
+            diagnosis_code="authorized",
+        )
         _stage(stages, trace_id, "runtime_ready", "运行时", "ok" if cfg is not None else "error",
                "运行时配置已就绪" if cfg is not None else "运行时配置缺失")
         if cfg is None:
@@ -1016,6 +1113,17 @@ def build_health_router(*, runtime) -> APIRouter:
                 response_timeout_seconds=response_timeout_seconds,
             )
             if direct_result is not None:
+                _record_interaction_test_audit(
+                    admin=admin,
+                    target_user_id=target_user,
+                    target_group_id=target_group,
+                    trace_id=trace_id,
+                    outcome=str(
+                        (direct_result.get("last_trace") or {}).get("outcome")
+                        or ("ok" if bool(direct_result.get("replied")) else "failed")
+                    ),
+                    diagnosis_code=str(direct_result.get("diagnosis_code") or ""),
+                )
                 return direct_result
 
             _stage(
@@ -1070,7 +1178,7 @@ def build_health_router(*, runtime) -> APIRouter:
                 f"捕获 {len(proxy.captured)} 条 send",
                 started_at=started,
             )
-            return _finish_payload(
+            payload = _finish_payload(
                 trace_id=trace_id,
                 stages=stages,
                 replied=True,
@@ -1081,6 +1189,15 @@ def build_health_router(*, runtime) -> APIRouter:
                 duration_ms=ms,
                 target_detail=target_detail,
             )
+            _record_interaction_test_audit(
+                admin=admin,
+                target_user_id=target_user,
+                target_group_id=target_group,
+                trace_id=trace_id,
+                outcome="ok",
+                diagnosis_code="ok",
+            )
+            return payload
         last_trace = reply_turn_trace.get_trace(trace_id) or {}
         diagnosis = str(last_trace.get("diagnosis_code") or "") or "capture_timeout"
         if diagnosis == "ok":
@@ -1089,7 +1206,7 @@ def build_health_router(*, runtime) -> APIRouter:
                "未捕获到 bot.send",
                "查看上方阶段和插件日志；常见原因是 NO_REPLY、规则未进入、模型超时或发送失败",
                started_at=started)
-        return _finish_payload(
+        payload = _finish_payload(
             trace_id=trace_id,
             stages=stages,
             replied=False,
@@ -1099,6 +1216,15 @@ def build_health_router(*, runtime) -> APIRouter:
             duration_ms=ms,
             target_detail=target_detail,
         )
+        _record_interaction_test_audit(
+            admin=admin,
+            target_user_id=target_user,
+            target_group_id=target_group,
+            trace_id=trace_id,
+            outcome=str((payload.get("last_trace") or {}).get("outcome") or "failed"),
+            diagnosis_code=diagnosis,
+        )
+        return payload
 
     @router.post("/qzone-forward-test")
     async def qzone_forward_test(

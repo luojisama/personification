@@ -24,7 +24,7 @@ class _Gate:
         return self.allowed
 
 
-def test_reply_processor_sends_dedicated_closure_without_entering_lifecycle() -> None:
+def test_reply_processor_silences_classifier_unavailable_without_entering_lifecycle() -> None:
     gate = _Gate(True)
     sent: list[str] = []
 
@@ -49,7 +49,7 @@ def test_reply_processor_sends_dedicated_closure_without_entering_lifecycle() ->
     asyncio.run(processor.process_response_logic(_Bot(), object(), state, deps))
 
     assert gate.calls == 1
-    assert sent == ["我这边暂时没判断好，这条先不接了。你可以稍后再发一次。"]
+    assert sent == []
     assert "_reply_lifecycle_started_at" not in state
 
 

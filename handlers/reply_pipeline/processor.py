@@ -92,7 +92,6 @@ from ...core.response_review import (
     is_agent_reply_ooc,
     make_passthrough_review_decision,
     needs_uncertain_visible_reply_review,
-    required_reply_fallback_text,
     required_reply_needs_recovery,
     resolve_uncertain_visible_reply,
     rewrite_agent_reply_ooc,
@@ -405,8 +404,6 @@ def _should_regenerate_for_banter(
 
 
 def _policy_direct_closure_text(policy_decision: dict[str, Any]) -> str:
-    if str(policy_decision.get("reason_code", "") or "") == "classifier_unavailable":
-        return "我这边暂时没判断好，这条先不接了。你可以稍后再发一次。"
     return "这个话题我不参与，我们换个话题吧。"
 
 
@@ -450,6 +447,23 @@ async def _send_policy_direct_closure(
         trace_mod = None
         trace_id = ""
 
+    if reason_code == "classifier_unavailable":
+        if trace_mod is not None and trace_id:
+            trace_mod.record_stage(
+                trace_id=trace_id,
+                key="policy_no_reply",
+                label="策略分类器不可用",
+                status="warn",
+                detail="fail_closed=true outbound=false history=false memory=false",
+            )
+            trace_mod.finish_trace(
+                trace_id=trace_id,
+                outcome="no_reply",
+                diagnosis_code="policy_classifier_unavailable",
+                detail={"reason": "classifier_unavailable"},
+            )
+        return
+
     try:
         result = await _dispatch_reply_part(
             bot=bot,
@@ -486,17 +500,13 @@ async def _send_policy_direct_closure(
             trace_id=trace_id,
             key="policy_closure_send",
             label="策略提示发送",
-            status="ok" if sent else "warn",
+            status="ok" if sent else "error",
             detail="固定非模型提示已发送" if sent else f"ledger_status={result.status}",
         )
         trace_mod.finish_trace(
             trace_id=trace_id,
-            outcome="ok" if sent else "outcome_unknown",
-            diagnosis_code=(
-                "policy_classifier_unavailable"
-                if reason_code == "classifier_unavailable"
-                else "policy_direct_closure"
-            ),
+            outcome="ok" if sent else "failed",
+            diagnosis_code="policy_direct_closure" if sent else "outbound_send_failed",
         )
 
 
@@ -1904,6 +1914,53 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         system_prompt += "\n\n" + build_plugin_interaction_policy_prompt(
             is_direct_mention=is_direct_mention,
         )
+
+    async def _resolve_operational_empty_reply(reason_code: str) -> str:
+        timeout = 8.0
+        if isinstance(response_deadline, (int, float)):
+            timeout = min(timeout, max(0.0, float(response_deadline) - time.monotonic()))
+        decision = await resolve_uncertain_visible_reply(
+            runtime.review_call_ai_api or runtime.lite_call_ai_api or runtime.call_ai_api,
+            candidate_text="",
+            raw_message_text=raw_message_text or message_text or message_content,
+            persona_system=system_prompt,
+            turn_plan=turn_plan,
+            reply_required=reply_required,
+            is_private=is_private_session,
+            evidence_unavailable=True,
+            timeout=timeout,
+        )
+        if decision.action == "request_context" and decision.text:
+            try:
+                from ...core import reply_turn_trace
+
+                reply_turn_trace.record_stage(
+                    key="actionable_context_requested",
+                    label="索取必要上下文",
+                    status="ok",
+                    detail=f"source={reason_code} one_condition=true",
+                )
+            except Exception:
+                pass
+            return decision.text.strip()
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.record_stage(
+                key=reason_code,
+                label="可见回复收口",
+                status="warn",
+                detail="outbound=false actionable_context=false",
+            )
+            reply_turn_trace.finish_trace(
+                outcome="no_reply",
+                diagnosis_code=reason_code,
+                detail={"reason": decision.reason or reason_code},
+            )
+        except Exception:
+            pass
+        return ""
+
     _msg_target = state.get("message_target")
     if _msg_target in (TARGET_OTHERS, TARGET_UNCLEAR):
         system_prompt += (
@@ -2405,7 +2462,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if not reply_content:
                 runtime.logger.warning("拟人插件：未能获取到 AI 回复内容")
                 if reply_required:
-                    reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+                    reply_content = await _resolve_operational_empty_reply("model_empty")
+                    if not reply_content:
+                        return
                 else:
                     try:
                         from ...core import reply_turn_trace
@@ -2552,7 +2611,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             pending_actions=pending_actions,
             direct_output=bool(agent_direct_output or agent_suppress_reply_recovery),
         ):
-            reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+            reply_content = await _resolve_operational_empty_reply("evidence_unavailable")
+            if not reply_content:
+                return
         reply_content, legacy_favorability_signals = extract_legacy_favorability_markers(reply_content)
         favorability_signals.merge(legacy_favorability_signals)
         has_block_marker = "[BLOCK]" in reply_content or "<BLOCK>" in reply_content
@@ -2575,7 +2636,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 _finish_suppressed_reply_trace()
                 return
             if reply_required:
-                reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+                reply_content = await _resolve_operational_empty_reply("evidence_unavailable")
+                if not reply_content:
+                    return
             else:
                 return
 
@@ -2725,7 +2788,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             and not pending_actions
             and not agent_suppress_reply_recovery
         ):
-            reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+            reply_content = await _resolve_operational_empty_reply("evidence_unavailable")
+            if not reply_content:
+                return
         if has_silence_control_marker(reply_content):
             await _commit_pending_actions()
             if _record_pending_action_history_if_any():
@@ -2743,7 +2808,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 _finish_suppressed_reply_trace()
                 return
             if reply_required:
-                reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+                reply_content = await _resolve_operational_empty_reply("evidence_unavailable")
+                if not reply_content:
+                    return
             else:
                 return
         # 兼容 yaml_pipeline prompt 的 <output><message>...</message></output> 思维链结构：
@@ -2768,7 +2835,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 return
             if not reply_required:
                 return
-            reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+            reply_content = await _resolve_operational_empty_reply("model_empty")
+            if not reply_content:
+                return
 
         stale_reason = _stale_reply_abort_reason(state)
         if stale_reason:

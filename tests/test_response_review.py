@@ -8,6 +8,11 @@ from ._loader import load_personification_module
 response_review = load_personification_module("plugin.personification.core.response_review")
 
 
+def test_required_reply_compatibility_fallback_is_silent() -> None:
+    assert response_review.required_reply_fallback_text() == ""
+    assert response_review.required_reply_fallback_text(has_images=True) == ""
+
+
 def test_looks_like_recent_duplicate_detects_same_and_similar_text() -> None:
     assert response_review._looks_like_recent_duplicate("太真实了", ["太真实了", "别的"])
     assert response_review._looks_like_recent_duplicate("这也太典了吧", ["这也太典了"])

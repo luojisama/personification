@@ -73,7 +73,6 @@ from ...core.response_review import (
     is_agent_reply_ooc,
     make_passthrough_review_decision,
     needs_uncertain_visible_reply_review,
-    required_reply_fallback_text,
     required_reply_needs_recovery,
     resolve_uncertain_visible_reply,
     rewrite_agent_reply_ooc,
@@ -2076,6 +2075,36 @@ async def process_yaml_response_logic(
                     detail={"direct_output": True, "segments": direct_segments_sent},
                 )
                 return
+    async def _resolve_operational_empty_reply(reason_code: str) -> str:
+        timeout = 8.0
+        if isinstance(response_deadline, (int, float)):
+            timeout = min(timeout, max(0.0, float(response_deadline) - time.monotonic()))
+        decision = await resolve_uncertain_visible_reply(
+            review_call_ai_api or call_ai_api,
+            candidate_text="",
+            raw_message_text=raw_message_text or history_last_text or trigger_reason,
+            persona_system=system_prompt,
+            turn_plan=turn_plan,
+            reply_required=reply_required,
+            is_private=is_private_session,
+            evidence_unavailable=True,
+            timeout=timeout,
+        )
+        if decision.action == "request_context" and decision.text:
+            _trace_stage(
+                key="actionable_context_requested",
+                label="索取必要上下文",
+                status="ok",
+                detail=f"source={reason_code} one_condition=true",
+            )
+            return decision.text.strip()
+        _trace_no_reply(
+            reason_code,
+            diagnosis_code=reason_code,
+            detail="没有可验证的具体补充请求，保持静默",
+        )
+        return ""
+
     if not used_agent:
         reply_content = await _call_text_model_with_retry(messages)
         _trace_stage(
@@ -2087,7 +2116,9 @@ async def process_yaml_response_logic(
     if not reply_content:
         logger.warning("拟人插件 (YAML): 未能获取到 AI 回复内容")
         if reply_required:
-            reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+            reply_content = await _resolve_operational_empty_reply("model_empty")
+            if not reply_content:
+                return
         else:
             _trace_no_reply("empty_model_reply", diagnosis_code="model_empty", detail="模型返回空内容")
             return
@@ -2151,7 +2182,9 @@ async def process_yaml_response_logic(
             )
         ),
     ):
-        reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+        reply_content = await _resolve_operational_empty_reply("evidence_unavailable")
+        if not reply_content:
+            return
     if used_agent and reply_content in ("[NO_REPLY]", "<NO_REPLY>"):
         logger.info("拟人插件 (YAML)：Agent 返回 NO_REPLY，保持沉默。")
         _trace_no_reply("agent_no_reply", detail="Agent 返回 NO_REPLY")
@@ -2224,7 +2257,9 @@ async def process_yaml_response_logic(
             )
             return
         if reply_required:
-            reply_content = required_reply_fallback_text(has_images=bool(tool_image_urls))
+            reply_content = await _resolve_operational_empty_reply("evidence_unavailable")
+            if not reply_content:
+                return
             parsed = parse_yaml_response(reply_content)
         else:
             _trace_no_reply("silence_marker", detail="模型返回 SILENCE 控制标记")
@@ -2419,7 +2454,9 @@ async def process_yaml_response_logic(
         and not pending_actions
         and not suppress_reply_recovery
     ):
-        assistant_text = required_reply_fallback_text(has_images=bool(tool_image_urls))
+        assistant_text = await _resolve_operational_empty_reply("evidence_unavailable")
+        if not assistant_text:
+            return
         parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
     if has_silence_control_marker(assistant_text):
         logger.info(f"拟人插件 (YAML)：最终回复含沉默控制标记，group={group_id} user={user_id}")
@@ -2437,7 +2474,9 @@ async def process_yaml_response_logic(
             )
             return
         if reply_required:
-            assistant_text = required_reply_fallback_text(has_images=bool(tool_image_urls))
+            assistant_text = await _resolve_operational_empty_reply("evidence_unavailable")
+            if not assistant_text:
+                return
             parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
         else:
             _trace_no_reply("final_silence_marker", detail="最终回复含沉默控制标记")
@@ -2453,7 +2492,9 @@ async def process_yaml_response_logic(
             )
             return
         if reply_required:
-            cleaned_assistant_text = required_reply_fallback_text(has_images=bool(tool_image_urls))
+            cleaned_assistant_text = await _resolve_operational_empty_reply("model_empty")
+            if not cleaned_assistant_text:
+                return
             parsed = {
                 "messages": [{"text": cleaned_assistant_text, "sticker": ""}],
                 "think": "",
