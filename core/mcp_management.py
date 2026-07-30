@@ -1396,9 +1396,9 @@ class McpRuntimeManager:
                 token = str(ref or "").strip()
                 if re.fullmatch(r"cover_[0-9a-f]{40}", token) and token not in refs:
                     refs.append(token)
-                if len(refs) >= 4:
+                if len(refs) >= 2:
                     break
-            if len(refs) >= 4:
+            if len(refs) >= 2:
                 break
         resolved: list[tuple[str, str]] = []
         for ref in refs:
@@ -1419,8 +1419,8 @@ class McpRuntimeManager:
                 downloaded = await download_public_image(
                     url,
                     headers={"Accept": "image/jpeg,image/png,image/webp"},
-                    timeout=8,
-                    connect_timeout=4,
+                    timeout=4,
+                    connect_timeout=2,
                     max_bytes=4 * 1024 * 1024,
                     allowed_mimes=_SOCIAL_IMAGE_MIMES,
                     max_redirects=3,
@@ -1433,7 +1433,7 @@ class McpRuntimeManager:
             return await asyncio.to_thread(_social_image_data_url, downloaded.content)
 
         media = await asyncio.gather(*(materialize(platform, url) for platform, url in resolved))
-        return [value for value in media if value][:4]
+        return [value for value in media if value][:2]
 
     async def builtin_call_tool(self, remote_name: str, arguments: dict[str, Any] | None = None) -> str:
         allowed = {str(tool.get("name") or "") for tool in builtin_social_tools()}

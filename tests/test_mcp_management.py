@@ -547,9 +547,9 @@ def test_builtin_social_result_media_resolver_is_xiaoheihe_only_bounded_and_fail
 
     media = asyncio.run(manager._resolve_builtin_social_result_media(json.dumps(packet)))
 
-    assert resolved_calls == tokens[:4]
-    assert len(download_calls) == 3
-    assert len(media) == 3
+    assert resolved_calls == tokens[:2]
+    assert len(download_calls) == 2
+    assert len(media) == 2
     assert all(value.startswith("data:image/jpeg;base64,") for value in media)
     assert asyncio.run(manager._resolve_builtin_social_result_media("not-json")) == []
     assert asyncio.run(

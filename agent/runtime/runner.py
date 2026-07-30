@@ -65,6 +65,8 @@ from .reply_quality import finalize_agent_reply_quality, finalize_social_evidenc
 from .stop_flow import (
     StopFlowState,
     _has_lookup_schema,
+    _run_stop_fallback_tool,
+    _select_stop_fallback_lookup,
     _should_review_banter_lookup_draft,
     handle_model_stop,
     update_stop_flow_tool_result,
@@ -106,7 +108,9 @@ from .fallbacks import (
 
 _TIME_SENSITIVE_SEARCH_TOOLS = frozenset({"web_search", "search_web"})
 _TIME_SENSITIVE_RE = re.compile("\u6700\u65b0|\u8fd1\u671f|\u73b0\u5728|\u4eca\u5e74|\u4eca\u5929|\u5f53\u524d|latest|recent|now", re.IGNORECASE)
-_QUERY_REWRITE_TIMEOUT_SECONDS = 8.0
+_QUERY_REWRITE_TIMEOUT_SECONDS = 3.0
+_SOCIAL_MEDIA_RESOLVE_TIMEOUT_SECONDS = 4.0
+_SEMANTIC_WEB_FALLBACK_TIMEOUT_SECONDS = 12.0
 
 
 async def _await_with_deadline(
@@ -958,9 +962,12 @@ async def run_agent(
             media_resolver = getattr(tool, "result_media_resolver", None) if tool is not None else None
             if callable(media_resolver) and len(turn_tool_media_urls) < 4:
                 try:
+                    media_deadline = time.monotonic() + _SOCIAL_MEDIA_RESOLVE_TIMEOUT_SECONDS
+                    if budget_deadline is not None:
+                        media_deadline = min(media_deadline, budget_deadline)
                     resolved_media = await _await_with_deadline(
                         lambda: media_resolver(str(result or "")),
-                        budget_deadline,
+                        media_deadline,
                     )
                 except Exception:
                     resolved_media = []
@@ -1004,6 +1011,50 @@ async def run_agent(
                 untrusted_image_urls=turn_tool_media_urls,
             )
             await _append_evidence_guidance_if_needed()
+            if (
+                stop_state.semantic_web_fallback_needed
+                and not stop_state.semantic_web_fallback_attempted
+            ):
+                fallback_lookup = await _select_stop_fallback_lookup(
+                    state=stop_state,
+                    response=response,
+                    content_len=0,
+                    runtime_chat_intent=runtime_chat_intent,
+                    banter_requires_lookup_retry=False,
+                    user_query_text=user_query_text,
+                    rewritten_query=rewritten_query,
+                    context_hint=context_hint,
+                    user_images=user_images,
+                    plugin_query_intent=plugin_query_intent,
+                    tool_caller=tool_caller,
+                    registry=registry,
+                    record_trace=_record_reply_trace_stage,
+                    logger=logger,
+                    select_semantic_fallback_tool=_select_semantic_fallback_tool,
+                )
+                if fallback_lookup is not None:
+                    fallback_name, fallback_args = fallback_lookup
+                    fallback_deadline = (
+                        time.monotonic() + _SEMANTIC_WEB_FALLBACK_TIMEOUT_SECONDS
+                    )
+                    if budget_deadline is not None:
+                        fallback_deadline = min(fallback_deadline, budget_deadline)
+                    await _run_stop_fallback_tool(
+                        state=stop_state,
+                        fallback_name=fallback_name,
+                        fallback_args=fallback_args,
+                        step=_step + 1,
+                        registry=registry,
+                        rewritten_query=rewritten_query,
+                        user_images=user_images,
+                        logger=logger,
+                        budget_deadline=fallback_deadline,
+                        messages=messages,
+                        tool_caller=tool_caller,
+                        origin_response=response,
+                        record_trace=_record_reply_trace_stage,
+                        append_evidence_guidance=_append_evidence_guidance_if_needed,
+                    )
 
     logger.warning("[agent] MAX_STEPS reached")
     _record_reply_trace_stage(

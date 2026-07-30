@@ -105,7 +105,10 @@ SPECS: dict[str, PlatformSpec] = {
         search_url="https://xiaoheihe.cn/app/search/list?q={query}",
         allowed_hosts=("xiaoheihe.cn", "www.xiaoheihe.cn"),
         content_link_selector='a[href*="/app/bbs/link/"]',
-        discussion_selectors=(("[class*=comment] [class*=content]", "comment"), ("[class*=reply] [class*=content]", "reply")),
+        discussion_selectors=(
+            (".link-comment__comment-item .comment-item__content", "comment"),
+            (".link-comment__comment-item .children-item__comment-content", "reply"),
+        ),
         qr_selectors=(
             'canvas.website-login__qr-canvas',
             'canvas[class*="qr"]',
@@ -410,7 +413,11 @@ class PlatformAdapter:
 
     def _detail_selector(self, canonical_url: str) -> str:
         if self.spec.name == "xiaoheihe":
-            return ".hb-bbs-post .post__content .hb-article"
+            return (
+                ".hb-bbs-link__content .hb-bbs-image-text .image-text__content,"
+                ".hb-bbs-link__content .image-text__content,"
+                ".hb-bbs-post .post__content .hb-article"
+            )
         if self.spec.name == "douyin":
             return "main" if urlparse(canonical_url).path.lower().startswith("/note/") else "h1"
         if self.spec.name == "tieba":
@@ -420,9 +427,11 @@ class PlatformAdapter:
     def _detail_script(self, canonical_url: str) -> str:
         if self.spec.name == "xiaoheihe":
             return """() => {
-            const root = document.querySelector('.hb-bbs-post');
+            const root = document.querySelector('.hb-bbs-link__content,.hb-bbs-post');
             const title = root && root.querySelector('.link-section-title');
-            const article = root && root.querySelector('.post__content .hb-article');
+            const article = root && root.querySelector(
+                '.hb-bbs-image-text .image-text__content,.image-text__content,.post__content .hb-article'
+            );
             const cover = article && article.querySelector('img');
             const images = article ? Array.from(article.querySelectorAll('img')).map((item) => ({
                 url: item.currentSrc || item.src || item.getAttribute('data-src') || '',

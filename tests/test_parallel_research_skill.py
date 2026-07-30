@@ -211,8 +211,8 @@ def test_lookup_limits_clamp_v2_and_legacy_to_one_absolute_reply_budget() -> Non
     bounded = parallel_impl._bounded_lookup_limits(limits)
 
     assert bounded.max_workers == 3
-    assert bounded.worker_timeout == 18.0
-    assert bounded.total_timeout == 30.0
+    assert bounded.worker_timeout == 10.0
+    assert bounded.total_timeout == 15.0
     assert bounded.max_tool_rounds == 1
     assert bounded.pages_per_worker == 8
     assert bounded.level == "high:lookup"

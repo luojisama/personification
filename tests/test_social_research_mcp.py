@@ -482,7 +482,7 @@ def test_xiaoheihe_detail_read_waits_for_and_extracts_article_container() -> Non
             self.evaluate_calls += 1
             if self.evaluate_calls == 1:
                 return {"title": "小黑盒", "body": "公开帖子"}
-            assert ".post__content .hb-article" in script
+            assert ".hb-bbs-image-text .image-text__content" in script
             return {
                 "title": "花来成就要注意",
                 "description": "S9赛季正文，不含导航与评论",
@@ -517,7 +517,9 @@ def test_xiaoheihe_detail_read_waits_for_and_extracts_article_container() -> Non
         )
     )
 
-    assert browsers.fake_page.waited_selector == ".hb-bbs-post .post__content .hb-article"
+    assert browsers.fake_page.waited_selector.startswith(
+        ".hb-bbs-link__content .hb-bbs-image-text .image-text__content"
+    )
     assert item["content_id"] == "179364001"
     assert item["caption_or_body"] == "S9赛季正文，不含导航与评论"
     assert item["image_urls"] == [
@@ -525,6 +527,24 @@ def test_xiaoheihe_detail_read_waits_for_and_extracts_article_container() -> Non
         "https://cdn.xiaoheihe.cn/post/result.jpg",
     ]
     assert item["image_count"] == 2
+
+
+def test_xiaoheihe_current_detail_boundaries_exclude_navigation_and_split_replies() -> None:
+    adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+    spec = adapters_mod.SPECS["xiaoheihe"]
+
+    assert spec.discussion_selectors == (
+        (".link-comment__comment-item .comment-item__content", "comment"),
+        (".link-comment__comment-item .children-item__comment-content", "reply"),
+    )
+    adapter = adapters_mod.PlatformAdapter(spec, object())
+    selector = adapter._detail_selector("https://xiaoheihe.cn/app/bbs/link/179364001")
+    script = adapter._detail_script("https://xiaoheihe.cn/app/bbs/link/179364001")
+
+    assert ".hb-bbs-link__content" in selector
+    assert ".image-text__content" in selector
+    assert "document.body.innerText" not in script
+    assert ".hb-bbs-link__content,.hb-bbs-post" in script
 
 
 def test_xiaoheihe_search_waits_for_dynamic_results_and_closes_fresh_page() -> None:
