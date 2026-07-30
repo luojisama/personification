@@ -246,6 +246,7 @@ def test_action_tool_metadata_declares_side_effect_contract() -> None:
         assert by_name[name]["side_effect"] == "send_message"
         assert by_name[name]["final_behavior"] == "silence_on_success"
         assert by_name[name]["retryable"] is False
+    assert by_name["send_qq_face"]["ack_behavior"] == "suppress"
 
 
 def test_runtime_metadata_merges_custom_tool_contract() -> None:

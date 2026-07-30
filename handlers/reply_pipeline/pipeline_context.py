@@ -998,6 +998,12 @@ async def run_agent_if_enabled(
     )
     social_coverage = dict(getattr(result, "social_coverage", {}) or {})
     if isinstance(commit_state, dict):
+        commit_state["agent_social_evidence"] = [
+            dict(item)
+            for item in list(getattr(result, "social_evidence", []) or [])[:10]
+            if isinstance(item, dict)
+        ]
+        commit_state["agent_social_coverage"] = dict(social_coverage)
         commit_state["agent_evidence_delivery_required"] = bool(
             getattr(result, "evidence_delivery_required", False)
         )

@@ -48,6 +48,7 @@ from ...agent.runtime.responder import (
     parse_persona_response,
     with_persona_responder_instruction,
 )
+from ...agent.runtime.reply_quality import finalize_social_evidence_delivery_boundary
 from ...core.prompt_hooks import HookContext, get_hook_registry
 from ...core.group_context import (
     build_group_conversation_context,
@@ -2803,6 +2804,45 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             except Exception as exc:
                 log_exception(runtime.logger, "[reply_processor] get_group_member_info failed", exc, level="debug")
         final_reply = normalize_visible_reply_text(reply_content)
+
+        def _record_final_social_evidence_trace(**kwargs: Any) -> None:
+            try:
+                from ...core import reply_turn_trace
+
+                reply_turn_trace.record_stage(**kwargs)
+            except Exception:
+                pass
+
+        final_evidence = finalize_social_evidence_delivery_boundary(
+            final_reply,
+            sources=list(state.get("agent_social_evidence") or []),
+            coverage=dict(state.get("agent_social_coverage") or {}),
+            evidence_delivery_required=bool(
+                state.get("agent_evidence_delivery_required", False)
+            ),
+            previous_status=str(
+                state.get("agent_evidence_delivery_status", "not_required") or "not_required"
+            ),
+            previous_recovered=bool(state.get("agent_evidence_recovered", False)),
+            record_trace=_record_final_social_evidence_trace,
+        )
+        final_reply = str(final_evidence.text or "").strip()
+        state["agent_evidence_delivery_status"] = str(
+            final_evidence.evidence_delivery_status or "not_required"
+        )
+        state["agent_evidence_recovered"] = bool(final_evidence.evidence_recovered)
+        if final_evidence.failure_code:
+            try:
+                from ...core import reply_turn_trace
+
+                reply_turn_trace.finish_trace(
+                    outcome="failed",
+                    diagnosis_code=final_evidence.failure_code,
+                    detail={"silent": True, "evidence_delivery": "failed"},
+                )
+            except Exception:
+                pass
+            return
         from ...core.visible_output import guard_visible_text
 
         final_reply = guard_visible_text(final_reply, logger=runtime.logger, surface="normal_reply")
@@ -2826,7 +2866,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 final_reply = qq_auto_marker
             else:
                 final_reply = f"{final_reply}{qq_auto_marker}".strip()
-        max_chars = 0 if bypass_length_limits else getattr(runtime.plugin_config, "personification_max_output_chars", 0)
+        max_chars = (
+            0
+            if bypass_length_limits or bool(state.get("agent_evidence_delivery_required", False))
+            else getattr(runtime.plugin_config, "personification_max_output_chars", 0)
+        )
         final_reply, image_b64_payloads = _extract_image_b64_markers(final_reply)
         if max_chars and max_chars > 0 and len(final_reply) > max_chars:
             final_reply = _truncate_at_punctuation(final_reply, max_chars)
@@ -2864,6 +2908,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             final_reply
             and not sticker_segment
             and not contains_qq_expression_marker(final_reply)
+            and not bool(state.get("agent_evidence_delivery_required", False))
             and tts_service is not None
         ):
             try:

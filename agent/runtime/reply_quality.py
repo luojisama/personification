@@ -232,6 +232,67 @@ def finalize_social_evidence_delivery(
     return result
 
 
+def finalize_social_evidence_delivery_boundary(
+    visible_text: str,
+    *,
+    sources: list[dict[str, Any]],
+    coverage: dict[str, Any] | None = None,
+    evidence_delivery_required: bool = False,
+    previous_status: str = "not_required",
+    previous_recovered: bool = False,
+    record_trace: Callable[..., None] | None = None,
+) -> AgentResult:
+    """Recheck social links after every downstream rewrite and before sending.
+
+    The Agent-level evidence finalizer runs before the normal/YAML reply pipelines.
+    Those pipelines may still normalize, review, split, or rewrite the text, so the
+    send boundary must enforce the same contract against the text that will really
+    be dispatched to QQ.
+    """
+
+    boundary_result = AgentResult(
+        text=str(visible_text or "").strip(),
+        pending_actions=[],
+        social_evidence=list(sources or [])[:10],
+        social_coverage=dict(coverage or {}),
+        evidence_delivery_required=bool(evidence_delivery_required),
+        evidence_delivery_status=str(previous_status or "not_required"),
+        evidence_recovered=bool(previous_recovered),
+    )
+    boundary_result = finalize_social_evidence_delivery(
+        boundary_result,
+        sources=list(sources or []),
+        coverage=dict(coverage or {}),
+        partial=bool(dict(coverage or {}).get("partial", False)),
+        warnings=list(dict(coverage or {}).get("warnings") or []),
+    )
+    if record_trace is not None and boundary_result.evidence_delivery_required:
+        urls = [
+            str(source.get("canonical_url") or "").strip()
+            for source in boundary_result.social_evidence
+            if isinstance(source, dict)
+        ]
+        delivered_links = sum(1 for url in urls if url and url in boundary_result.text)
+        delivery_status = str(boundary_result.evidence_delivery_status or "failed")
+        record_trace(
+            key="agent_evidence_delivery_final",
+            label="Agent 最终证据交付",
+            status="error" if delivery_status == "failed" else "warn"
+            if delivery_status == "recovered"
+            else "ok",
+            detail=(
+                f"status={delivery_status} links={delivered_links} "
+                f"recovered={str(bool(boundary_result.evidence_recovered)).lower()}"
+            ),
+            hint=(
+                "最终发送边界重新附加了经过校验的社交来源。"
+                if delivery_status == "recovered"
+                else "最终发送文本已通过社交证据链接契约。"
+            ),
+        )
+    return boundary_result
+
+
 def _looks_like_group_context(messages: list[dict[str, Any]], turn_plan: Any = None) -> bool:
     for message in list(messages or []):
         if not isinstance(message, dict) or message.get("role") != "system":
@@ -340,8 +401,16 @@ async def finalize_agent_reply_quality(
                 hint="头像等受约束证据已完成人设化与事实边界审阅。",
             )
         return _copy_result_with_quality(result, text=final_text, check=check)
+    # The model is allowed to use the documented <output><message> wrapper.
+    # Remove only the known control blocks first, then assess the exact text that
+    # can become visible.  Assessing raw XML here incorrectly classified every
+    # well-formed response as ``internal_tag`` before the safe message body could
+    # be extracted.
+    stripped = strip_response_control_markers(raw_text)
+    visible_text = normalize_visible_reply_text(stripped)
+    visibility_candidate = visible_text or raw_text
     if quality_context != "evidence_unavailable":
-        visibility = assess_visible_text(raw_text)
+        visibility = assess_visible_text(visibility_candidate)
         if not visibility.allowed:
             check = {
                 "action": "silenced",
@@ -458,8 +527,6 @@ async def finalize_agent_reply_quality(
             )
         return _copy_result_with_quality(result, text=final_text, check=check)
 
-    stripped = strip_response_control_markers(raw_text)
-    visible_text = normalize_visible_reply_text(stripped)
     group_context = _looks_like_group_context(messages, turn_plan) if is_group is None else bool(is_group)
     speech_act = str(getattr(turn_plan, "speech_act", "") or "").strip()
     allow_rhetorical_banter = bool(
@@ -492,7 +559,8 @@ async def finalize_agent_reply_quality(
             rewrite_reason=quality_context,
         )
         candidate = normalize_visible_reply_text(strip_response_control_markers(rewritten)) if rewritten else ""
-        if candidate:
+        candidate_visibility = assess_visible_text(candidate) if candidate else None
+        if candidate and candidate_visibility is not None and candidate_visibility.allowed:
             if group_context and looks_like_question_reply(
                 candidate,
                 allow_exclamatory_rhetorical=allow_rhetorical_banter,
@@ -559,4 +627,5 @@ async def finalize_agent_reply_quality(
 __all__ = [
     "finalize_agent_reply_quality",
     "finalize_social_evidence_delivery",
+    "finalize_social_evidence_delivery_boundary",
 ]

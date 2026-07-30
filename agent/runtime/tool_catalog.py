@@ -169,6 +169,7 @@ def _default_tool_metadata(tool_name: str) -> dict[str, Any]:
                 "risk_level": "low",
                 "side_effect": "send_message",
                 "final_behavior": "silence_on_success",
+                "ack_behavior": "suppress",
             }
         )
     if name in _IMAGE_GENERATION_CONTEXT_TOOL_NAMES:

@@ -1750,6 +1750,71 @@ def test_run_agent_suppresses_ack_when_any_first_tool_call_requests_it() -> None
     assert handled == ["search_web", "recall_latest_own_output"]
 
 
+def test_run_agent_qq_expression_name_default_suppresses_ack() -> None:
+    ack_calls: list[str] = []
+    handled: list[str] = []
+
+    async def _face_handler(**_kwargs):  # noqa: ANN001
+        handled.append("send_qq_face")
+        return json.dumps({"ok": True, "queued": True}, ensure_ascii=False)
+
+    async def _ack_sender(text: str) -> None:
+        ack_calls.append(text)
+
+    registry = tool_registry.ToolRegistry()
+    registry.register(
+        tool_registry.AgentTool(
+            name="send_qq_face",
+            description="send QQ face",
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=_face_handler,
+        )
+    )
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-face",
+                        name="send_qq_face",
+                        arguments={},
+                    )
+                ],
+                raw={},
+            )
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "只发一个QQ表情，不要文字"}],
+            registry=registry,
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=2,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="expression",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+            ack_sender=_ack_sender,
+        )
+    )
+
+    assert result.text == "[SILENCE]"
+    assert ack_calls == []
+    assert handled == ["send_qq_face"]
+
+
 def test_run_agent_appends_evidence_guidance_after_tool_result(monkeypatch) -> None:  # noqa: ANN001
     handled: list[dict[str, object]] = []
 

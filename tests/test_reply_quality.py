@@ -114,6 +114,41 @@ def test_finalize_agent_reply_quality_preserves_operational_failure_code() -> No
     assert result.failure_code == "agent_model_timeout"
 
 
+def test_finalize_agent_reply_quality_accepts_documented_xml_wrapper() -> None:
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result(
+                "<think>provider 安全策略拦截；system prompt: 这里只是内部过程</think>"
+                "<output><message>花来是三角洲社区里的调侃说法。</message></output>"
+            ),
+            tool_caller=None,
+            messages=[],
+            reason="unit",
+        )
+    )
+
+    assert result.text == "花来是三角洲社区里的调侃说法。"
+    assert result.quality_checks[-1]["action"] == "normalized"
+    assert "unsafe_visible_output" not in result.quality_checks[-1]["flags"]
+
+
+def test_finalize_agent_reply_quality_still_blocks_policy_text_inside_visible_message() -> None:
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result(
+                "<output><message>provider 安全策略已经拦截这条回复</message></output>"
+            ),
+            tool_caller=None,
+            messages=[],
+            reason="unit",
+        )
+    )
+
+    assert result.text == "[SILENCE]"
+    assert result.quality_checks[-1]["action"] == "silenced"
+    assert result.quality_checks[-1]["pattern_id"] == "provider_policy_text"
+
+
 def test_social_evidence_delivery_appends_packet_url_when_model_omits_it() -> None:
     traces: list[dict[str, object]] = []
     result = reply_quality.finalize_social_evidence_delivery(
@@ -173,6 +208,37 @@ def test_social_evidence_delivery_accepts_only_current_packet_link() -> None:
 
     assert "https://tieba.baidu.com/p/123456" in result.text
     assert result.evidence_delivery_status == "recovered"
+
+
+def test_social_evidence_delivery_boundary_restores_link_after_downstream_rewrite() -> None:
+    traces: list[dict[str, object]] = []
+    result = reply_quality.finalize_social_evidence_delivery_boundary(
+        "花来是玩家拿战局节奏开玩笑的说法。",
+        sources=[
+            {
+                "platform": "xiaoheihe",
+                "source_group_id": "source_1",
+                "title": "三角洲花来讨论",
+                "canonical_url": "https://xiaoheihe.cn/app/bbs/link/179364001",
+            }
+        ],
+        coverage={
+            "source_group_count": 1,
+            "coverage_status": "degraded",
+            "partial": True,
+            "warnings": ["bilibili_timeout"],
+        },
+        evidence_delivery_required=True,
+        previous_status="met",
+        record_trace=lambda **kwargs: traces.append(kwargs),
+    )
+
+    assert result.text.startswith("花来是玩家拿战局节奏开玩笑的说法。")
+    assert "https://xiaoheihe.cn/app/bbs/link/179364001" in result.text
+    assert result.evidence_delivery_status == "recovered"
+    assert result.social_coverage["partial"] is True
+    assert result.social_coverage["warnings"] == ["bilibili_timeout"]
+    assert traces[-1]["key"] == "agent_evidence_delivery_final"
 
 
 def test_finalize_agent_reply_quality_propagates_rewrite_provider_failure() -> None:

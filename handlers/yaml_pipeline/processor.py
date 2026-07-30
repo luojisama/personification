@@ -127,6 +127,7 @@ from ...skill_runtime.runtime_api import SkillRuntime
 
 from ...agent.action_executor import ActionExecutor
 from ...agent.loop import run_agent
+from ...agent.runtime.reply_quality import finalize_social_evidence_delivery_boundary
 from ...agent.query_rewriter import QueryRewriteContext
 from ..reply_pipeline.pipeline_emotion import (
     attach_turn_plan_to_semantic_frame,
@@ -2471,6 +2472,47 @@ async def process_yaml_response_logic(
     elif cleaned_assistant_text != assistant_text:
         parsed = {"messages": [{"text": cleaned_assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
     assistant_text = cleaned_assistant_text
+    final_evidence = finalize_social_evidence_delivery_boundary(
+        assistant_text,
+        sources=list(getattr(agent_result, "social_evidence", []) or [])
+        if agent_result is not None
+        else [],
+        coverage=dict(getattr(agent_result, "social_coverage", {}) or {})
+        if agent_result is not None
+        else {},
+        evidence_delivery_required=bool(
+            agent_result is not None
+            and getattr(agent_result, "evidence_delivery_required", False)
+        ),
+        previous_status=str(
+            getattr(agent_result, "evidence_delivery_status", "not_required") or "not_required"
+        )
+        if agent_result is not None
+        else "not_required",
+        previous_recovered=bool(
+            agent_result is not None and getattr(agent_result, "evidence_recovered", False)
+        ),
+        record_trace=_trace_stage,
+    )
+    assistant_text = str(final_evidence.text or "").strip()
+    reply_commit_state["agent_evidence_delivery_status"] = str(
+        final_evidence.evidence_delivery_status or "not_required"
+    )
+    reply_commit_state["agent_evidence_recovered"] = bool(final_evidence.evidence_recovered)
+    if final_evidence.failure_code:
+        _trace_finish(
+            outcome="failed",
+            diagnosis_code=final_evidence.failure_code,
+            detail={"silent": True, "evidence_delivery": "failed"},
+        )
+        return
+    if final_evidence.evidence_delivery_required:
+        parsed = {
+            "messages": [{"text": assistant_text, "sticker": ""}],
+            "think": "",
+            "status": "",
+            "action": "",
+        }
     assistant_text = guard_visible_text(assistant_text, logger=logger, surface="yaml_reply")
     if not assistant_text:
         _trace_no_reply("unsafe_visible_output", diagnosis_code="blocked", detail="最终可见输出被安全门拦截")
@@ -2596,6 +2638,7 @@ async def process_yaml_response_logic(
         and not has_generated_image
         and not stickers_sent
         and not contains_qq_expression_marker(assistant_text)
+        and not bool(reply_commit_state.get("agent_evidence_delivery_required", False))
         and tts_service is not None
     ):
         try:
