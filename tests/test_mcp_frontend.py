@@ -244,6 +244,9 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
     assert 'value="social_content_search"' in source
     assert 'https://xiaoheihe.cn/app/bbs/home' in source
     assert "renderMcpExternalLink(item.canonical_url" in source
+    assert "item.image_refs" in source
+    assert 'class="mcp-media-gallery"' in source
+    assert ".mcp-media-gallery img" in styles
     assert "aggregation.per_platform_counts" in source
     assert "aggregation.source_group_count" in source
     assert "aggregation.satisfies_request" in source
