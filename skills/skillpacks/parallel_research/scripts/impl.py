@@ -53,6 +53,7 @@ _LOOKUP_WORKER_TIMEOUT_SECONDS = 18.0
 _LOOKUP_MAX_TOOL_ROUNDS = 1
 _LOOKUP_PAGES_PER_WORKER = 8
 _BACKGROUND_LEARNING_TASKS: set[asyncio.Task[Any]] = set()
+_DETACHED_RESEARCH_TASKS: set[asyncio.Task[Any]] = set()
 
 
 @dataclass(slots=True)
@@ -82,6 +83,31 @@ class _SilentLogger:
 
     def warning(self, _msg: str) -> None:
         return None
+
+
+def _detach_cancelled_task(task: asyncio.Task[Any]) -> None:
+    """Cancel a provider/tool task without waiting for cooperative shutdown.
+
+    ``asyncio.wait_for`` waits for a cancelled coroutine to finish its cleanup,
+    so a provider that delays or suppresses cancellation can silently turn a
+    30-second research budget into the full Agent budget.  Keep a reference to
+    the cancelled task and consume its eventual exception, but let the visible
+    research call return at the declared deadline.
+    """
+
+    task.cancel()
+    _DETACHED_RESEARCH_TASKS.add(task)
+
+    def _finish(done: asyncio.Task[Any]) -> None:
+        _DETACHED_RESEARCH_TASKS.discard(done)
+        if done.cancelled():
+            return
+        try:
+            done.exception()
+        except Exception:
+            return
+
+    task.add_done_callback(_finish)
 
 
 def _logger(runtime: Any) -> Any:
@@ -530,12 +556,18 @@ async def _call_llm_json(
 ) -> dict[str, Any] | None:
     if tool_caller is None:
         return None
+    task = asyncio.create_task(tool_caller.chat_with_tools(messages, [], False))
     try:
-        response = await asyncio.wait_for(
-            tool_caller.chat_with_tools(messages, [], False),
-            timeout=timeout,
-        )
-    except Exception:
+        done, _pending = await asyncio.wait({task}, timeout=max(0.01, float(timeout)))
+    except asyncio.CancelledError:
+        _detach_cancelled_task(task)
+        raise
+    if task not in done:
+        _detach_cancelled_task(task)
+        return None
+    try:
+        response = task.result()
+    except (asyncio.CancelledError, Exception):
         return None
     if getattr(response, "tool_calls", None):
         return None
@@ -1188,38 +1220,48 @@ async def parallel_research(
             plans = []
         tasks = [
             asyncio.create_task(
-                asyncio.wait_for(
-                    _run_worker(
-                        plan=plan,
-                        query=query_text,
-                        purpose=purpose_text,
-                        context=context_text,
-                        images=image_refs,
-                        tool_caller=tool_caller,
-                        registry=registry,
-                        max_tool_rounds=limits.max_tool_rounds,
-                        pages_per_worker=limits.pages_per_worker,
-                    ),
-                    timeout=min(limits.worker_timeout, max(0.1, remaining_total)),
+                _run_worker(
+                    plan=plan,
+                    query=query_text,
+                    purpose=purpose_text,
+                    context=context_text,
+                    images=image_refs,
+                    tool_caller=tool_caller,
+                    registry=registry,
+                    max_tool_rounds=limits.max_tool_rounds,
+                    pages_per_worker=limits.pages_per_worker,
                 )
             )
             for plan in plans
         ]
+        worker_wait_timeout = min(limits.worker_timeout, max(0.01, remaining_total))
         try:
-            raw_results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=max(0.1, remaining_total),
-            )
-        except asyncio.TimeoutError:
-            raw_results = []
-            notes.append("parallel_research_total_timeout")
+            done, pending = await asyncio.wait(tasks, timeout=worker_wait_timeout)
+        except asyncio.CancelledError:
             for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-        for index, item in enumerate(raw_results):
-            if isinstance(item, Exception):
+                if not task.done():
+                    _detach_cancelled_task(task)
+            raise
+        if pending:
+            notes.append(
+                "parallel_research_total_timeout"
+                if worker_wait_timeout >= remaining_total
+                else "parallel_research_worker_timeout"
+            )
+            for task in pending:
+                _detach_cancelled_task(task)
+        for index, task in enumerate(tasks):
+            if task not in done:
+                continue
+            if task.cancelled():
                 role = plans[index].role if index < len(plans) else f"worker_{index + 1}"
-                notes.append(f"{role}: {type(item).__name__}: {item}")
+                notes.append(f"{role}: CancelledError")
+                continue
+            try:
+                item = task.result()
+            except Exception as exc:
+                role = plans[index].role if index < len(plans) else f"worker_{index + 1}"
+                notes.append(f"{role}: {type(exc).__name__}: {exc}")
                 continue
             if isinstance(item, dict):
                 worker_results.append(item)

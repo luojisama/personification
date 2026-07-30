@@ -142,6 +142,37 @@ def test_target_extraction_timeout_returns_empty_evidence_status() -> None:
     assert pipeline.last_extraction_status == "timeout"
 
 
+def test_target_research_packet_prioritizes_six_compact_target_items() -> None:
+    slang = load_personification_module("plugin.personification.core.slang_learning")
+    long_body = "前置无关材料" * 500 + "花来指夺取装备后快速撤离的玩法" + "后置无关材料" * 500
+    packet = slang.validate_content_packet(
+        _packet(
+            *[
+                _item(
+                    "bilibili" if index % 2 == 0 else "xiaoheihe",
+                    f"item-{index}",
+                    [
+                        (f"target-{index}", "花来会保留头甲并拿走装备"),
+                        *[(f"other-{index}-{row}", "与目标无关的长评论" * 80) for row in range(12)],
+                    ],
+                    title=f"三角洲行动花来解释 {index}",
+                    caption_or_body=long_body,
+                )
+                for index in range(8)
+            ]
+        )
+    )
+
+    targeted = slang._target_research_packet(packet, target_term="花来")
+    rendered = slang._bounded_packet_json(targeted, max_chars=slang.MAX_TARGET_PACKET_CHARS)
+
+    assert len(targeted["items"]) == 6
+    assert all(len(item["caption_or_body"]) <= slang.MAX_TARGET_BODY_CHARS for item in targeted["items"])
+    assert all(len(item["discussion"]) <= 8 for item in targeted["items"])
+    assert all("花来" in item["caption_or_body"] for item in targeted["items"])
+    assert len(rendered) <= slang.MAX_TARGET_PACKET_CHARS
+
+
 def test_invalid_or_cross_content_evidence_is_rejected() -> None:
     slang = load_personification_module("plugin.personification.core.slang_learning")
     validated = slang.validate_content_packet(_packet(

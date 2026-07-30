@@ -243,6 +243,39 @@ def test_lookup_deadline_covers_workers_and_aggregation(monkeypatch) -> None:
     assert "parallel_research_total_timeout" in result
 
 
+def test_lookup_deadline_does_not_wait_for_provider_cancellation(monkeypatch) -> None:
+    class _CancellationSlowCaller(_FakeToolCaller):
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            system_text = str(messages[0]["content"])
+            if "只读研究子Agent" in system_text:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    await asyncio.sleep(0.2)
+                    raise
+            return await super().chat_with_tools(messages, tools, use_builtin_search)
+
+    async def _run() -> tuple[float, str]:
+        started_at = time.monotonic()
+        result = await parallel_impl.parallel_research(
+            runtime=_runtime(_CancellationSlowCaller()),
+            query="取消不协作的限时查证",
+            purpose="lookup",
+            focus=["查定义", "查玩法", "查反证"],
+            max_workers=3,
+        )
+        elapsed = time.monotonic() - started_at
+        await asyncio.sleep(0.25)
+        return elapsed, result
+
+    monkeypatch.setattr(parallel_impl, "_LOOKUP_TOTAL_TIMEOUT_SECONDS", 0.06)
+    monkeypatch.setattr(parallel_impl, "_LOOKUP_WORKER_TIMEOUT_SECONDS", 0.05)
+    elapsed, result = asyncio.run(_run())
+
+    assert elapsed < 0.15
+    assert "parallel_research_total_timeout" in result
+
+
 def test_parallel_research_max_workers_zero_skips_llm_calls() -> None:
     caller = _FakeToolCaller()
     result = asyncio.run(
