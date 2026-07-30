@@ -255,6 +255,35 @@ def test_research_slang_uses_semantic_validation_instead_of_coverage_for_stop_co
     assert consolidated["aggregation"]["satisfies_request"] is True
 
 
+def test_research_slang_prioritizes_sources_referenced_by_target_claims() -> None:
+    packet = _social_packet()
+    packet["semantic_validation"] = {
+        "target_term": "花来",
+        "target_game": "三角洲行动",
+        "status": "insufficient",
+        "satisfies_request": False,
+        "gap_codes": ["source_origins_insufficient"],
+    }
+    packet["slang_claims"] = [
+        {
+            "term": "花来",
+            "aliases": [],
+            "evidence_refs": [
+                {"platform": "bilibili", "content_id": "BV1abc", "quote": "花来解释"}
+            ],
+        }
+    ]
+
+    metadata = evidence.social_evidence_metadata(
+        tool_name="research_game_slang",
+        result=json.dumps(packet, ensure_ascii=False),
+    )
+
+    assert metadata["sources"][0]["content_id"] == "BV1abc"
+    assert metadata["sources"][0]["target_support"] is True
+    assert metadata["sources"][1]["target_support"] is False
+
+
 def test_parallel_research_record_preserves_structured_fact_support_outside_truncation() -> None:
     payload = {
         "summary": "完成",

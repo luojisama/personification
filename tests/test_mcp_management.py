@@ -589,9 +589,10 @@ def test_builtin_social_result_syncs_target_and_queues_only_extra_claims(tmp_pat
             assert tool_caller is not None
             assert max_claims == 20
 
-        async def extract_claims(self, packet, *, target_term):  # noqa: ANN001
+        async def extract_claims(self, packet, *, target_term, target_game):  # noqa: ANN001
             assert packet["packet_id"] == "packet-one"
             assert target_term == "刘涛"
+            assert target_game == "三角洲行动"
             return claims
 
     class _Store:
@@ -624,7 +625,7 @@ def test_builtin_social_result_syncs_target_and_queues_only_extra_claims(tmp_pat
         asyncio.run(
             manager._postprocess_builtin_social_result(
                 "research_game_slang",
-                {"term": "刘涛"},
+                {"term": "刘涛", "game": "三角洲行动"},
                 raw,
             )
         )
@@ -632,11 +633,12 @@ def test_builtin_social_result_syncs_target_and_queues_only_extra_claims(tmp_pat
 
     assert [item["term"] for item in _Store.ingested] == ["刘涛", "六甲昵称"]
     assert [item["term"] for item in fake_queue.scheduled] == ["大红"]
-    assert result["slang_claims"] == claims
+    assert result["slang_claims"] == claims[:2]
     assert result["target_senses"][0]["sense_id"] == "sense-target"
     assert result["background_claims_queued"] == 1
     assert result["semantic_validation"]["status"] == "insufficient"
     assert result["semantic_validation"]["satisfies_request"] is False
+    assert list(result)[:2] == ["semantic_validation", "slang_claims"]
 
 
 def test_stdio_request_timeout_is_absolute_during_notifications() -> None:

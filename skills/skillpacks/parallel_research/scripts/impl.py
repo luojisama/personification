@@ -48,6 +48,11 @@ _READ_ONLY_TOOL_NAMES = frozenset(
         "vision_analyze",
     }
 )
+_LOOKUP_TOTAL_TIMEOUT_SECONDS = 30.0
+_LOOKUP_WORKER_TIMEOUT_SECONDS = 18.0
+_LOOKUP_MAX_TOOL_ROUNDS = 1
+_LOOKUP_PAGES_PER_WORKER = 8
+_BACKGROUND_LEARNING_TASKS: set[asyncio.Task[Any]] = set()
 
 
 @dataclass(slots=True)
@@ -595,6 +600,41 @@ def _normalize_worker_plans(data: dict[str, Any] | None, *, query: str, purpose:
     return _fallback_plan(query, purpose, focus, max_workers)
 
 
+def _lookup_worker_plans(
+    *,
+    query: str,
+    focus: list[str],
+    max_workers: int,
+) -> list[ResearchWorkerPlan]:
+    """Turn structured lookup focuses into deterministic independent workers."""
+
+    plans: list[ResearchWorkerPlan] = []
+    for index, item in enumerate(focus[:max_workers], 1):
+        goal = str(item or "").strip()
+        if not goal:
+            continue
+        plans.append(
+            ResearchWorkerPlan(
+                role=f"lookup_{index}",
+                goal=f"围绕「{query}」查证：{goal}",
+                focus=[goal],
+                preferred_tools=["web_search", "search_web"],
+            )
+        )
+    return plans
+
+
+def _bounded_lookup_limits(limits: ResearchLimits) -> ResearchLimits:
+    return ResearchLimits(
+        max_workers=min(3, limits.max_workers),
+        worker_timeout=min(_LOOKUP_WORKER_TIMEOUT_SECONDS, limits.worker_timeout),
+        total_timeout=min(_LOOKUP_TOTAL_TIMEOUT_SECONDS, limits.total_timeout),
+        max_tool_rounds=min(_LOOKUP_MAX_TOOL_ROUNDS, limits.max_tool_rounds),
+        pages_per_worker=min(_LOOKUP_PAGES_PER_WORKER, limits.pages_per_worker),
+        level=f"{limits.level}:lookup",
+    )
+
+
 async def _plan_workers(
     *,
     query: str,
@@ -1040,6 +1080,11 @@ async def _aggregate_results(
             merged[key] = payload[key]
     merged["purpose"] = purpose
     merged["research_plan"] = fallback["research_plan"]
+    merged["source_notes"] = _coerce_text_items(
+        [*list(fallback.get("source_notes") or []), *list(merged.get("source_notes") or [])],
+        limit=20,
+        max_chars=300,
+    )
     # Fact/source mappings are accepted only from worker-level, actually-read
     # evidence.  The aggregation model may summarize them but cannot mint new
     # support URLs or quotes.
@@ -1102,15 +1147,28 @@ async def parallel_research(
     focus_items = [str(item or "").strip() for item in list(focus or []) if str(item or "").strip()][:12]
     image_refs = _merge_image_refs(images, image_urls)
     purpose_text = str(purpose or "image_generation").strip() or "image_generation"
+    if purpose_text == "lookup":
+        limits = _bounded_lookup_limits(limits)
     context_text = str(context or "").strip()[:1200]
 
     started_at = time.monotonic()
+    deadline = started_at + limits.total_timeout
     notes: list[str] = []
     if limits.max_workers <= 0:
         plans = []
         notes.append("max_workers_zero")
+    elif purpose_text == "lookup" and focus_items:
+        plans = _lookup_worker_plans(
+            query=query_text,
+            focus=focus_items,
+            max_workers=limits.max_workers,
+        )
+        notes.append("structured_lookup_plan")
     else:
-        planner_timeout = min(12.0, max(4.0, limits.total_timeout * 0.18))
+        planner_timeout = min(
+            12.0,
+            max(1.0, min(limits.total_timeout * 0.18, deadline - time.monotonic())),
+        )
         plans = await _plan_workers(
             query=query_text,
             purpose=purpose_text,
@@ -1124,7 +1182,10 @@ async def parallel_research(
     registry = _build_readonly_registry(runtime)
     worker_results: list[dict[str, Any]] = []
     if plans and tool_caller is not None:
-        remaining_total = max(1.0, limits.total_timeout - (time.monotonic() - started_at))
+        remaining_total = max(0.0, deadline - time.monotonic())
+        if remaining_total <= 0.0:
+            notes.append("parallel_research_total_timeout")
+            plans = []
         tasks = [
             asyncio.create_task(
                 asyncio.wait_for(
@@ -1139,7 +1200,7 @@ async def parallel_research(
                         max_tool_rounds=limits.max_tool_rounds,
                         pages_per_worker=limits.pages_per_worker,
                     ),
-                    timeout=limits.worker_timeout,
+                    timeout=min(limits.worker_timeout, max(0.1, remaining_total)),
                 )
             )
             for plan in plans
@@ -1147,7 +1208,7 @@ async def parallel_research(
         try:
             raw_results = await asyncio.wait_for(
                 asyncio.gather(*tasks, return_exceptions=True),
-                timeout=remaining_total,
+                timeout=max(0.1, remaining_total),
             )
         except asyncio.TimeoutError:
             raw_results = []
@@ -1179,17 +1240,27 @@ async def parallel_research(
             fallback_payload
         )
 
-    remaining_for_aggregate = max(3.0, limits.total_timeout - (time.monotonic() - started_at))
-    aggregate = await _aggregate_results(
-        query=query_text,
-        purpose=purpose_text,
-        context=context_text,
-        plans=plans,
-        worker_results=worker_results,
-        notes=notes,
-        tool_caller=tool_caller,
-        timeout=min(15.0, remaining_for_aggregate),
-    )
+    remaining_for_aggregate = max(0.0, deadline - time.monotonic())
+    if remaining_for_aggregate <= 0.05:
+        notes.append("parallel_research_total_timeout")
+        aggregate = _fallback_aggregate(
+            query=query_text,
+            purpose=purpose_text,
+            plans=plans,
+            worker_results=worker_results,
+            notes=notes,
+        )
+    else:
+        aggregate = await _aggregate_results(
+            query=query_text,
+            purpose=purpose_text,
+            context=context_text,
+            plans=plans,
+            worker_results=worker_results,
+            notes=notes,
+            tool_caller=tool_caller,
+            timeout=min(15.0, remaining_for_aggregate),
+        )
     aggregate["research_level"] = limits.level
     aggregate["pages_per_worker"] = limits.pages_per_worker
     term_text = str(target_term or "").strip()[:80]
@@ -1211,13 +1282,31 @@ async def parallel_research(
                 reverify_after_days=getattr(plugin_config, "personification_reverify_after_days", 30),
                 stale_after_days=getattr(plugin_config, "personification_stale_after_days", 90),
             ).normalized()
-            aggregate["web_slang_learning"] = await ingest_web_fact_evidence(
-                fact_evidence=fact_evidence,
-                target_term=term_text,
-                target_game=game_text,
-                tool_caller=tool_caller,
-                thresholds=thresholds,
+            task = asyncio.create_task(
+                ingest_web_fact_evidence(
+                    fact_evidence=fact_evidence,
+                    target_term=term_text,
+                    target_game=game_text,
+                    tool_caller=tool_caller,
+                    thresholds=thresholds,
+                )
             )
+            _BACKGROUND_LEARNING_TASKS.add(task)
+
+            def _finish_background_learning(done: asyncio.Task[Any]) -> None:
+                _BACKGROUND_LEARNING_TASKS.discard(done)
+                if done.cancelled():
+                    return
+                try:
+                    done.exception()
+                except Exception:
+                    return
+
+            task.add_done_callback(_finish_background_learning)
+            aggregate["web_slang_learning"] = {
+                "status": "scheduled",
+                "fact_evidence_count": len(fact_evidence),
+            }
         except Exception as exc:
             aggregate.setdefault("source_notes", []).append(
                 f"web_slang_learning_skipped:{type(exc).__name__}"

@@ -37,6 +37,7 @@ from .slang_learning import (
     DiscoveryTask,
     SlangLearningPipeline,
     build_semantic_validation,
+    ground_target_game_context,
 )
 
 
@@ -68,6 +69,7 @@ _EXACT_PEP440 = re.compile(
 )
 _MAX_REGISTRY_QUERY_CHARS = 1000
 _MAX_REGISTRY_CURSOR_CHARS = 16384
+_FOREGROUND_SLANG_LEARNING_TIMEOUT_SECONDS = 6.0
 _MAX_REGISTRY_INPUT_CHARS = 18000
 _SECRET_LOCK = threading.RLock()
 _SOCIAL_MEDIA_HOSTS = {
@@ -1001,8 +1003,20 @@ class McpRuntimeManager:
                 min(50, int(getattr(self.runtime.plugin_config, "personification_slang_max_claims", 20) or 20)),
             )
             target_term = str(arguments.get("term") or arguments.get("query") or "").strip()[:80]
+            target_game = str(arguments.get("game") or "").strip()[:100]
             pipeline = SlangLearningPipeline(tool_caller=caller, max_claims=max_claims)
-            claims = await pipeline.extract_claims(packet, target_term=target_term)
+            extraction_started_at = time.monotonic()
+            claims = await pipeline.extract_claims(
+                packet,
+                target_term=target_term,
+                target_game=target_game,
+            )
+            claims = ground_target_game_context(claims, packet, target_game=target_game)
+            extraction_elapsed_ms = int((time.monotonic() - extraction_started_at) * 1000)
+            extraction_status = str(
+                getattr(pipeline, "last_extraction_status", "ready" if claims else "empty")
+                or "empty"
+            )
             normalized_target = target_term.casefold()
             target_claims = [
                 claim
@@ -1015,12 +1029,34 @@ class McpRuntimeManager:
                 }
             ]
             target_senses: list[dict[str, Any]] = []
+            learning_elapsed_ms = 0
+            learning_status = "not_required"
+            target_learning_queued = 0
             if target_claims:
-                target_senses = await MemeLearningStore(self._slang_thresholds()).ingest_claims(
-                    target_claims,
-                    semantic_pipeline=pipeline,
-                    model_route=f"builtin_social_{remote_name}",
-                )
+                learning_started_at = time.monotonic()
+                try:
+                    target_senses = await asyncio.wait_for(
+                        MemeLearningStore(self._slang_thresholds()).ingest_claims(
+                            target_claims,
+                            semantic_pipeline=pipeline,
+                            model_route=f"builtin_social_{remote_name}",
+                        ),
+                        timeout=_FOREGROUND_SLANG_LEARNING_TIMEOUT_SECONDS,
+                    )
+                    learning_status = "completed"
+                except asyncio.TimeoutError:
+                    learning_status = "timed_out"
+                    target_learning_queued = self._discovery_queue().schedule_claims(
+                        target_claims,
+                        target_term="",
+                    )
+                except Exception:
+                    learning_status = "failed"
+                    target_learning_queued = self._discovery_queue().schedule_claims(
+                        target_claims,
+                        target_term="",
+                    )
+                learning_elapsed_ms = int((time.monotonic() - learning_started_at) * 1000)
             target_claim_ids = {id(claim) for claim in target_claims}
             extra_claims = [claim for claim in claims if id(claim) not in target_claim_ids]
             queued = self._discovery_queue().schedule_claims(extra_claims, target_term=target_term)
@@ -1028,26 +1064,39 @@ class McpRuntimeManager:
             if remote_name == "research_game_slang":
                 semantic_validation = build_semantic_validation(
                     target_term=target_term,
-                    target_game=str(arguments.get("game") or ""),
+                    target_game=target_game,
                     target_claims=target_claims,
                     target_senses=target_senses,
                     packet=packet,
                     claim_min_confidence=self._slang_thresholds().claim_min_confidence,
                 )
-            return json.dumps(
-                {
-                    **packet,
-                    "slang_claims": claims,
-                    "target_senses": target_senses,
-                    "background_claims_queued": queued,
-                    **(
-                        {"semantic_validation": semantic_validation}
-                        if semantic_validation is not None
-                        else {}
-                    ),
+            enrichment = {
+                **(
+                    {"semantic_validation": semantic_validation}
+                    if semantic_validation is not None
+                    else {}
+                ),
+                "slang_claims": target_claims if remote_name == "research_game_slang" else claims,
+                "target_senses": target_senses,
+                "background_claims_queued": queued,
+                "semantic_processing": {
+                    "extraction_status": extraction_status,
+                    "extraction_elapsed_ms": extraction_elapsed_ms,
+                    "learning_status": learning_status,
+                    "learning_elapsed_ms": learning_elapsed_ms,
+                    "target_learning_queued": target_learning_queued,
+                    "extracted_claim_count": len(claims),
+                    "target_claim_count": len(target_claims),
+                    "background_claim_count": len(extra_claims),
                 },
-                ensure_ascii=False,
-            )
+            }
+            # Put the target-term contract before the large untrusted items so
+            # both compact evidence records and the outer model see the actual
+            # research target before unrelated article text.
+            packet_fields = {
+                key: value for key, value in packet.items() if key not in enrichment
+            }
+            return json.dumps({**enrichment, **packet_fields}, ensure_ascii=False)
         except Exception as exc:
             logger = getattr(self.runtime, "logger", None)
             if logger is not None:

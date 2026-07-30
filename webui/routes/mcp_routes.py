@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
+import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -184,6 +186,11 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         claims: list[dict[str, Any]] = []
         senses: list[dict[str, Any]] = []
         store = learning_store()
+        extraction_elapsed_ms = 0
+        learning_elapsed_ms = 0
+        extraction_status = "not_started"
+        learning_status = "not_required"
+        target_learning_queued = 0
         if caller is not None and tool_name == "research_game_slang":
             pipeline = SlangLearningPipeline(
                 tool_caller=caller,
@@ -201,12 +208,42 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
                     ),
                 ),
             )
-            claims = await pipeline.extract_claims(packet, target_term=term)
-            senses = await store.ingest_claims(
-                claims,
-                semantic_pipeline=pipeline,
-                model_route="webui_social_research",
+            extraction_started_at = time.monotonic()
+            claims = await pipeline.extract_claims(
+                packet,
+                target_term=term,
+                target_game=game,
             )
+            extraction_elapsed_ms = int((time.monotonic() - extraction_started_at) * 1000)
+            extraction_status = str(
+                getattr(pipeline, "last_extraction_status", "ready" if claims else "empty")
+                or "empty"
+            )
+            learning_started_at = time.monotonic()
+            if claims:
+                try:
+                    senses = await asyncio.wait_for(
+                        store.ingest_claims(
+                            claims,
+                            semantic_pipeline=pipeline,
+                            model_route="webui_social_research",
+                        ),
+                        timeout=6.0,
+                    )
+                    learning_status = "completed"
+                except asyncio.TimeoutError:
+                    learning_status = "timed_out"
+                    target_learning_queued = manager()._discovery_queue().schedule_claims(
+                        claims,
+                        target_term="",
+                    )
+                except Exception:
+                    learning_status = "failed"
+                    target_learning_queued = manager()._discovery_queue().schedule_claims(
+                        claims,
+                        target_term="",
+                    )
+            learning_elapsed_ms = int((time.monotonic() - learning_started_at) * 1000)
         if tool_name == "research_game_slang":
             normalized_target = term.casefold()
             target_claims = [
@@ -230,6 +267,14 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
                 packet=packet,
                 claim_min_confidence=store.thresholds.claim_min_confidence,
             )
+            packet["semantic_processing"] = {
+                "extraction_status": extraction_status,
+                "extraction_elapsed_ms": extraction_elapsed_ms,
+                "learning_status": learning_status,
+                "learning_elapsed_ms": learning_elapsed_ms,
+                "target_learning_queued": target_learning_queued,
+                "target_claim_count": len(target_claims),
+            }
         return {
             "tool_name": tool_name,
             "packet": packet,

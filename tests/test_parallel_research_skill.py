@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
@@ -175,6 +176,71 @@ def test_parallel_research_truncates_planner_workers_to_limit() -> None:
 
     assert len(plans) == 6
     assert plans[-1].role == "r5"
+
+
+def test_lookup_focus_uses_three_structured_workers_without_planner() -> None:
+    caller = _FakeToolCaller()
+    result = asyncio.run(
+        parallel_impl.parallel_research(
+            runtime=_runtime(caller),
+            query="三角洲行动 花来 梗百科 黑话 由来 玩法",
+            purpose="lookup",
+            focus=["查定义", "查玩法", "查反证"],
+            max_workers=3,
+        )
+    )
+
+    system_prompts = [str(call["messages"][0]["content"]) for call in caller.calls]
+    assert not any("任务规划器" in prompt for prompt in system_prompts)
+    assert sum("只读研究子Agent" in prompt for prompt in system_prompts) == 3
+    assert "structured_lookup_plan" in result
+    assert '"research_level": "legacy:lookup"' in result
+    assert '"pages_per_worker": 8' in result
+
+
+def test_lookup_limits_clamp_v2_and_legacy_to_one_absolute_reply_budget() -> None:
+    limits = parallel_impl.ResearchLimits(
+        max_workers=8,
+        worker_timeout=180.0,
+        total_timeout=300.0,
+        max_tool_rounds=4,
+        pages_per_worker=40,
+        level="high",
+    )
+
+    bounded = parallel_impl._bounded_lookup_limits(limits)
+
+    assert bounded.max_workers == 3
+    assert bounded.worker_timeout == 18.0
+    assert bounded.total_timeout == 30.0
+    assert bounded.max_tool_rounds == 1
+    assert bounded.pages_per_worker == 8
+    assert bounded.level == "high:lookup"
+
+
+def test_lookup_deadline_covers_workers_and_aggregation(monkeypatch) -> None:
+    class _SlowCaller(_FakeToolCaller):
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            system_text = str(messages[0]["content"])
+            if "只读研究子Agent" in system_text or "结果聚合器" in system_text:
+                await asyncio.sleep(0.2)
+            return await super().chat_with_tools(messages, tools, use_builtin_search)
+
+    monkeypatch.setattr(parallel_impl, "_LOOKUP_TOTAL_TIMEOUT_SECONDS", 0.08)
+    monkeypatch.setattr(parallel_impl, "_LOOKUP_WORKER_TIMEOUT_SECONDS", 0.05)
+    started_at = time.monotonic()
+    result = asyncio.run(
+        parallel_impl.parallel_research(
+            runtime=_runtime(_SlowCaller()),
+            query="限时查证",
+            purpose="lookup",
+            focus=["查定义", "查反证"],
+            max_workers=2,
+        )
+    )
+
+    assert time.monotonic() - started_at < 0.8
+    assert "parallel_research_total_timeout" in result
 
 
 def test_parallel_research_max_workers_zero_skips_llm_calls() -> None:

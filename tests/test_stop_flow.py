@@ -223,6 +223,7 @@ def test_research_slang_coverage_does_not_stop_when_semantic_consensus_is_incomp
     assert selected[0] == "parallel_research"
     assert selected[1]["purpose"] == "lookup"
     assert selected[1]["max_workers"] == 3
+    assert selected[1]["research_level"] == "low"
     assert "三角洲行动 花来" in selected[1]["query"]
     assert selected[1]["focus"] == [
         "定义、称呼来源和梗的出处",

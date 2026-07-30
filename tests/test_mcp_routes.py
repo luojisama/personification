@@ -347,6 +347,14 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
         "satisfies_request": False,
         "gap_codes": ["no_target_claim"],
     }
+    assert preview.json()["packet"]["semantic_processing"] == {
+        "extraction_status": "not_started",
+        "extraction_elapsed_ms": 0,
+        "learning_status": "not_required",
+        "learning_elapsed_ms": 0,
+        "target_learning_queued": 0,
+        "target_claim_count": 0,
+    }
 
     search_preview = client.post(
         "/api/mcp/builtin/social-research/preview",

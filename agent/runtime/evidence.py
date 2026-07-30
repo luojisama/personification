@@ -365,6 +365,32 @@ def social_evidence_metadata(*, tool_name: str, result: Any) -> dict[str, Any]:
         if isinstance(packet.get("semantic_validation"), dict)
         else {}
     )
+    target_term_key = re.sub(
+        r"\s+", " ", str(semantic_raw.get("target_term") or "")
+    ).strip().casefold()
+    target_source_keys: set[tuple[str, str]] = set()
+    if name == "research_game_slang" and target_term_key:
+        for claim in list(packet.get("slang_claims") or []):
+            if not isinstance(claim, dict):
+                continue
+            claim_terms = {
+                re.sub(r"\s+", " ", str(claim.get("term") or "")).strip().casefold(),
+                *{
+                    re.sub(r"\s+", " ", str(alias or "")).strip().casefold()
+                    for alias in list(claim.get("aliases") or [])
+                },
+            }
+            if target_term_key not in claim_terms:
+                continue
+            for ref in list(claim.get("evidence_refs") or []):
+                if not isinstance(ref, dict):
+                    continue
+                key = (
+                    str(ref.get("platform") or "").strip().lower(),
+                    str(ref.get("content_id") or "").strip(),
+                )
+                if all(key):
+                    target_source_keys.add(key)
     group_by_key: dict[tuple[str, str], str] = {}
     for group in list(packet.get("source_groups") or []):
         if not isinstance(group, dict):
@@ -398,12 +424,15 @@ def social_evidence_metadata(*, tool_name: str, result: Any) -> dict[str, Any]:
                 "platform": platform,
                 "content_id": content_id,
                 "source_group_id": group_id,
+                "target_support": (platform, content_id) in target_source_keys,
                 "title": re.sub(r"\s+", " ", str(item.get("title") or "")).strip()[:180],
                 "canonical_url": canonical_url,
             }
         )
         if len(sources) >= 10:
             break
+    if target_source_keys:
+        sources.sort(key=lambda source: not bool(source.get("target_support", False)))
     if not aggregation and not sources and not semantic_raw:
         return {}
     source_group_count = _coerce_nonnegative_int(aggregation.get("source_group_count", 0))
@@ -682,12 +711,15 @@ def _render_tool_results(tool_results: list[dict[str, Any]] | None, *, cross_ver
             if isinstance(semantic, dict):
                 line += (
                     "\n[黑话语义校验] "
+                    f"target={semantic.get('target_term') or '-'} "
+                    f"game={semantic.get('target_game') or '-'} "
                     f"status={semantic.get('status') or 'empty'} "
                     f"claims={_coerce_nonnegative_int(semantic.get('claim_count', 0))} "
                     f"groups={_coerce_nonnegative_int(semantic.get('supporting_source_group_count', 0))} "
                     f"origins={','.join(semantic.get('supporting_origins') or []) or '-'} "
                     f"satisfies={str(bool(semantic.get('satisfies_request', False))).lower()} "
-                    f"gaps={','.join(semantic.get('gap_codes') or []) or '-'}"
+                    f"gaps={','.join(semantic.get('gap_codes') or []) or '-'} "
+                    f"meaning={str(semantic.get('consensus_meaning') or '')[:300] or '-'}"
                 )
         fact_evidence = item.get("fact_evidence")
         if isinstance(fact_evidence, list) and fact_evidence:

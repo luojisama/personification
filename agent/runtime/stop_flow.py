@@ -349,10 +349,15 @@ async def _select_stop_fallback_lookup(
                     "独立梗百科、攻略或社区文章的反证与交叉验证",
                 ],
                 "max_workers": 3,
+                "research_level": "low",
                 "target_term": state.semantic_target_term,
                 "target_game": state.semantic_target_game,
             },
         )
+    if state.semantic_web_fallback_attempted:
+        state.pending_evidence_followup_query = ""
+        logger.info("[agent] semantic fallback skipped: web fallback already attempted")
+        return None
     previous_tool_unavailable = bool(
         state.has_tool_call
         and is_retryable_evidence_tool(registry, state.last_tool_name)

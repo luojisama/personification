@@ -80,9 +80,66 @@ def test_one_content_extracts_multiple_slang_claims() -> None:
             assert "untrusted_data_only" in messages[1]["content"]
             return SimpleNamespace(content=json.dumps(payload, ensure_ascii=False))
 
-    claims = asyncio.run(slang.SlangLearningPipeline(tool_caller=Caller()).extract_claims(packet, target_term="刘涛"))
+    claims = asyncio.run(slang.SlangLearningPipeline(tool_caller=Caller()).extract_claims(packet))
     assert {claim["term"] for claim in claims} == {"刘涛", "牢大", "大红"}
     assert len({claim["source_cluster_id"] for claim in claims}) == 1
+
+
+def test_target_extraction_keeps_only_target_and_grounds_explicit_game_context() -> None:
+    slang = load_personification_module("plugin.personification.core.slang_learning")
+    packet = _packet(
+        _item(
+            "bilibili",
+            "BV1",
+            [("c1", "花来在三角洲行动里指一种夺取装备的玩法"), ("c2", "好事成双是另一个成就")],
+            title="三角洲行动花来解释",
+            source_group_id="source-explicit",
+        )
+    )
+    target = _claim("花来", "一种夺取装备的玩法", "BV1", "c1", "花来在三角洲行动里指一种夺取装备的玩法")
+    target["game_context"] = {"canonical_name": "未确定游戏", "aliases": []}
+    unrelated = _claim("好事成双", "另一个成就", "BV1", "c2", "好事成双是另一个成就")
+    payload = {"claims": [unrelated, target]}
+
+    class Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            prompt = messages[1]["content"]
+            assert "当前目标词（若非空需优先提取）：花来" in prompt
+            assert "当前目标游戏（仅在证据明确支持时填写）：三角洲行动" in prompt
+            return SimpleNamespace(content=json.dumps(payload, ensure_ascii=False))
+
+    claims = asyncio.run(
+        slang.SlangLearningPipeline(tool_caller=Caller()).extract_claims(
+            packet,
+            target_term="花来",
+            target_game="三角洲行动",
+        )
+    )
+
+    assert [claim["term"] for claim in claims] == ["花来"]
+    assert claims[0]["game_context"]["canonical_name"] == "三角洲行动"
+    assert claims[0]["source_cluster_id"] == "source-explicit"
+
+
+def test_target_extraction_timeout_returns_empty_evidence_status() -> None:
+    slang = load_personification_module("plugin.personification.core.slang_learning")
+
+    class Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            await asyncio.sleep(0.2)
+            return SimpleNamespace(content='{"claims":[]}')
+
+    pipeline = slang.SlangLearningPipeline(tool_caller=Caller(), extraction_timeout=0.05)
+    claims = asyncio.run(
+        pipeline.extract_claims(
+            _packet(_item("bilibili", "BV1", [("c1", "花来解释")], title="花来")),
+            target_term="花来",
+            target_game="三角洲行动",
+        )
+    )
+
+    assert claims == []
+    assert pipeline.last_extraction_status == "timeout"
 
 
 def test_invalid_or_cross_content_evidence_is_rejected() -> None:
