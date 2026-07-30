@@ -18,7 +18,7 @@ from ...core.mcp_management import (
 from ...core.mcp_builtin import BUILTIN_SOCIAL_MCP_ID
 from ...core.mcp_builtin_platform_store import BuiltinPlatformStore, CONFIG_FIELDS, PLATFORMS
 from ...core.meme_learning_store import LearningThresholds, MemeLearningStore
-from ...core.slang_learning import SlangLearningPipeline
+from ...core.slang_learning import SlangLearningPipeline, build_semantic_validation
 from ...core.operation_diagnostics import diagnostic, detail, step
 from ..deps import AdminIdentity, get_client_ip, require_admin
 
@@ -183,6 +183,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         caller = _runtime_tool_caller(runtime)
         claims: list[dict[str, Any]] = []
         senses: list[dict[str, Any]] = []
+        store = learning_store()
         if caller is not None and tool_name == "research_game_slang":
             pipeline = SlangLearningPipeline(
                 tool_caller=caller,
@@ -201,10 +202,33 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
                 ),
             )
             claims = await pipeline.extract_claims(packet, target_term=term)
-            senses = await learning_store().ingest_claims(
+            senses = await store.ingest_claims(
                 claims,
                 semantic_pipeline=pipeline,
                 model_route="webui_social_research",
+            )
+        if tool_name == "research_game_slang":
+            normalized_target = term.casefold()
+            target_claims = [
+                claim
+                for claim in claims
+                if normalized_target
+                and normalized_target
+                in {
+                    str(claim.get("term") or "").strip().casefold(),
+                    *{
+                        str(alias or "").strip().casefold()
+                        for alias in list(claim.get("aliases") or [])
+                    },
+                }
+            ]
+            packet["semantic_validation"] = build_semantic_validation(
+                target_term=term,
+                target_game=game,
+                target_claims=target_claims,
+                target_senses=senses,
+                packet=packet,
+                claim_min_confidence=store.thresholds.claim_min_confidence,
             )
         return {
             "tool_name": tool_name,

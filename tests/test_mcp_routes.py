@@ -335,6 +335,18 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
         },
     )
     assert preview.json()["delivery"]["outbound_delivery"] == "not_applicable"
+    assert preview.json()["packet"]["semantic_validation"] == {
+        "target_term": "刘涛",
+        "target_game": "三角洲行动",
+        "status": "empty",
+        "claim_count": 0,
+        "supporting_source_group_count": 0,
+        "supporting_origins": [],
+        "consensus_sense_id": "",
+        "consensus_meaning": "",
+        "satisfies_request": False,
+        "gap_codes": ["no_target_claim"],
+    }
 
     search_preview = client.post(
         "/api/mcp/builtin/social-research/preview",
@@ -351,3 +363,4 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
         {"query": "三角洲行动 花来", "limit": 7},
     )
     assert search_preview.json()["tool_name"] == "social_content_search"
+    assert "semantic_validation" not in search_preview.json()["packet"]
