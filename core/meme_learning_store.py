@@ -463,6 +463,18 @@ class MemeLearningStore:
                     sense["sense_id"], "conflict", old, "disputed",
                     {"opposing_sense_id": opposing["sense_id"] if sense is current else current["sense_id"]}, now=now,
                 )
+        elif current["source_count"] >= 2 and not opposing["manual_locked"]:
+            old = opposing["status"]
+            with connect_sync() as conn:
+                conn.execute(
+                    "UPDATE meme_senses SET status='disputed',revision=revision+1,updated_at=? WHERE sense_id=?",
+                    (now, opposing["sense_id"]),
+                )
+                conn.commit()
+            self._event(
+                opposing["sense_id"], "conflict_superseded", old, "disputed",
+                {"opposing_sense_id": current["sense_id"]}, now=now,
+            )
         elif not opposing["manual_locked"]:
             with connect_sync() as conn:
                 conn.execute(

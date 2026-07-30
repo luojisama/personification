@@ -153,3 +153,90 @@ def test_discovery_queue_is_bounded_per_content_and_skips_target() -> None:
     added, tasks = asyncio.run(run())
     assert added == 2
     assert [task.term for task in tasks] == ["牢大", "大红"]
+
+
+def test_semantic_validation_confirms_compatible_detail_claims_from_two_origins() -> None:
+    slang = load_personification_module("plugin.personification.core.slang_learning")
+    packet = _packet(
+        _item("bilibili", "BV1", [("c1", "刘涛指六级防具")], detail_status="ready"),
+        _item("tieba", "T1", [("c2", "刘涛就是六级甲")], detail_status="ready"),
+    )
+    claims = [
+        _claim("刘涛", "六级防具", "BV1", "c1", "刘涛指六级防具"),
+        _claim("刘涛", "六级甲", "T1", "c2", "刘涛就是六级甲", "tieba"),
+    ]
+    claims[0]["source_cluster_id"] = "source-one"
+    claims[1]["source_cluster_id"] = "source-two"
+
+    result = slang.build_semantic_validation(
+        target_term="刘涛",
+        target_game="三角洲行动",
+        target_claims=claims,
+        target_senses=[
+            {"sense_id": "sense-one", "meaning": "六级防具", "status": "understand_only"},
+            {"sense_id": "sense-one", "meaning": "六级防具", "status": "understand_only"},
+        ],
+        packet=packet,
+    )
+
+    assert result["status"] == "confirmed"
+    assert result["satisfies_request"] is True
+    assert result["supporting_source_group_count"] == 2
+    assert result["supporting_origins"] == ["bilibili", "tieba"]
+    assert result["gap_codes"] == []
+
+
+def test_semantic_validation_does_not_confirm_search_cards_without_detail() -> None:
+    slang = load_personification_module("plugin.personification.core.slang_learning")
+    packet = _packet(
+        _item("bilibili", "BV1", [("c1", "刘涛指六级防具")], detail_status="detail_content_unavailable"),
+        _item("tieba", "T1", [("c2", "刘涛就是六级甲")], detail_status="detail_content_unavailable"),
+    )
+    claims = [
+        _claim("刘涛", "六级防具", "BV1", "c1", "刘涛指六级防具"),
+        _claim("刘涛", "六级甲", "T1", "c2", "刘涛就是六级甲", "tieba"),
+    ]
+    claims[0]["source_cluster_id"] = "source-one"
+    claims[1]["source_cluster_id"] = "source-two"
+
+    result = slang.build_semantic_validation(
+        target_term="刘涛",
+        target_game="三角洲行动",
+        target_claims=claims,
+        target_senses=[{"sense_id": "sense-one", "meaning": "六级防具", "status": "understand_only"}],
+        packet=packet,
+    )
+
+    assert result["status"] == "insufficient"
+    assert result["satisfies_request"] is False
+    assert "detail_evidence_missing" in result["gap_codes"]
+
+
+def test_semantic_validation_reports_conflicting_senses_even_when_coverage_is_high() -> None:
+    slang = load_personification_module("plugin.personification.core.slang_learning")
+    packet = _packet(
+        _item("bilibili", "BV1", [("c1", "刘涛指六级防具")], detail_status="ready"),
+        _item("douyin", "D1", [("c2", "刘涛指另一个互斥玩法")], detail_status="ready"),
+    )
+    packet["aggregation"] = {"satisfies_request": True, "source_group_count": 2}
+    claims = [
+        _claim("刘涛", "六级防具", "BV1", "c1", "刘涛指六级防具"),
+        _claim("刘涛", "另一个互斥玩法", "D1", "c2", "刘涛指另一个互斥玩法", "douyin"),
+    ]
+    claims[0]["source_cluster_id"] = "source-one"
+    claims[1]["source_cluster_id"] = "source-two"
+
+    result = slang.build_semantic_validation(
+        target_term="刘涛",
+        target_game="三角洲行动",
+        target_claims=claims,
+        target_senses=[
+            {"sense_id": "sense-one", "meaning": "六级防具", "status": "observed"},
+            {"sense_id": "sense-two", "meaning": "另一个互斥玩法", "status": "observed"},
+        ],
+        packet=packet,
+    )
+
+    assert result["status"] == "conflict"
+    assert result["satisfies_request"] is False
+    assert "semantic_conflict" in result["gap_codes"]

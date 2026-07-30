@@ -25,6 +25,8 @@ def build_tools(runtime: Any) -> list[AgentTool]:
         image_urls: list[str] | None = None,
         max_workers: int | None = None,
         research_level: str = "medium",
+        target_term: str = "",
+        target_game: str = "",
     ) -> str:
         if str(purpose or "").strip().lower() == "lookup" and not bool(
             getattr(plugin_config, "personification_parallel_research_lookup_enabled", True)
@@ -33,7 +35,7 @@ def build_tools(runtime: Any) -> list[AgentTool]:
                 "<parallel_research_json>\n"
                 '{"summary":"查询场景并行研究已关闭。","purpose":"lookup","research_plan":[],'
                 '"facts":[],"visual_refs":[],"prompt_hints":[],"must_include":[],"must_avoid":[],'
-                '"source_notes":["lookup_disabled_by_config"],"confidence":"low"}\n'
+                '"source_notes":["lookup_disabled_by_config"],"fact_evidence":[],"confidence":"low"}\n'
                 "</parallel_research_json>\n摘要：查询场景并行研究已关闭。"
             )
         return await parallel_research(
@@ -46,6 +48,8 @@ def build_tools(runtime: Any) -> list[AgentTool]:
             image_urls=image_urls,
             max_workers=max_workers,
             research_level=research_level,
+            target_term=target_term,
+            target_game=target_game,
         )
 
     return [
@@ -92,6 +96,16 @@ def build_tools(runtime: Any) -> list[AgentTool]:
                         "type": "string",
                         "description": "深度研究 v2 档位：low/medium/high；仅在 personification_deep_research_v2_enabled=true 时生效",
                         "default": "medium",
+                    },
+                    "target_term": {
+                        "type": "string",
+                        "description": "仅用于黑话查证后的结构化学习目标词；普通研究留空",
+                        "maxLength": 80,
+                    },
+                    "target_game": {
+                        "type": "string",
+                        "description": "目标词所属游戏语境；普通研究留空",
+                        "maxLength": 100,
                     },
                 },
                 "required": ["query"],

@@ -635,6 +635,8 @@ def test_builtin_social_result_syncs_target_and_queues_only_extra_claims(tmp_pat
     assert result["slang_claims"] == claims
     assert result["target_senses"][0]["sense_id"] == "sense-target"
     assert result["background_claims_queued"] == 1
+    assert result["semantic_validation"]["status"] == "insufficient"
+    assert result["semantic_validation"]["satisfies_request"] is False
 
 
 def test_stdio_request_timeout_is_absolute_during_notifications() -> None:

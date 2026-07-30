@@ -247,3 +247,56 @@ def test_parallel_research_fallback_aggregate_cross_verifies_repeated_facts() ->
     assert payload["single_source_facts"] == ["单源 A", "单源 B"]
     assert payload["sources"] == ["https://example.com/a", "https://example.com/b"]
     assert payload["conflicts"] == ["B 与 A 的年份说法不同"]
+
+
+def test_parallel_research_fact_evidence_keeps_url_quote_mapping_and_deduplicates_mirrors() -> None:
+    payload = parallel_impl._fallback_aggregate(
+        query="三角洲行动 黑话",
+        purpose="lookup",
+        plans=[],
+        worker_results=[
+            {
+                "role": "definition",
+                "facts": ["该词描述一种玩法"],
+                "fact_evidence": [
+                    {
+                        "claim": "该词描述一种玩法",
+                        "support": [
+                            {
+                                "canonical_url": "https://example.com/article#part",
+                                "title": "梗百科",
+                                "quote": "该词描述一种保留对方护甲后夺取装备的玩法。",
+                                "content_fingerprint": "a" * 64,
+                            },
+                            {
+                                "canonical_url": "https://mirror.example.net/repost",
+                                "title": "转载",
+                                "quote": "该词描述一种保留对方护甲后夺取装备的玩法。",
+                                "content_fingerprint": "a" * 64,
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+        notes=[],
+    )
+
+    fact = payload["fact_evidence"][0]
+    assert fact["claim"] == "该词描述一种玩法"
+    assert fact["support"][0]["canonical_url"] == "https://example.com/article"
+    assert {item["source_group_id"] for item in fact["support"]} == {"web_source_" + "a" * 24}
+    assert {item["evidence_origin"] for item in fact["support"]} == {
+        "web:example.com",
+        "web:mirror.example.net",
+    }
+
+
+def test_parallel_research_fact_evidence_rejects_nonpublic_or_unquoted_sources() -> None:
+    assert parallel_impl._fact_evidence_items(
+        [
+            {"claim": "事实", "support": [{"canonical_url": "http://example.com", "quote": "有效摘录"}]},
+            {"claim": "事实", "support": [{"canonical_url": "https://127.0.0.1/a", "quote": "有效摘录"}]},
+            {"claim": "事实", "support": [{"canonical_url": "https://example.com/a", "quote": ""}]},
+        ]
+    ) == []

@@ -225,3 +225,68 @@ def test_strict_evidence_keeps_research_open_with_one_independent_source() -> No
     assert result.needs_more_research is True
     assert result.research_followup_query == "核验结论"
     assert "独立来源不足" in result.uncertainty_notes
+
+
+def test_research_slang_uses_semantic_validation_instead_of_coverage_for_stop_contract() -> None:
+    packet = _social_packet()
+    packet["semantic_validation"] = {
+        "target_term": "花来",
+        "target_game": "三角洲行动",
+        "status": "insufficient",
+        "claim_count": 1,
+        "supporting_source_group_count": 1,
+        "supporting_origins": ["xiaoheihe"],
+        "consensus_sense_id": "sense-one",
+        "consensus_meaning": "一种玩法",
+        "satisfies_request": False,
+        "gap_codes": ["independent_sources_insufficient"],
+    }
+    record = evidence.build_tool_result_record(
+        tool_name="research_game_slang",
+        tool_args={"term": "花来", "game": "三角洲行动"},
+        result=json.dumps(packet, ensure_ascii=False),
+    )
+
+    consolidated = evidence.social_evidence_from_records([record])
+
+    assert record["social_evidence"]["aggregation"]["satisfies_request"] is True
+    assert record["social_evidence"]["semantic_validation"]["satisfies_request"] is False
+    assert consolidated["satisfies_request"] is False
+    assert consolidated["aggregation"]["satisfies_request"] is True
+
+
+def test_parallel_research_record_preserves_structured_fact_support_outside_truncation() -> None:
+    payload = {
+        "summary": "完成",
+        "verified_facts": ["共同事实"],
+        "single_source_facts": [],
+        "conflicts": [],
+        "fact_evidence": [
+            {
+                "claim": "共同事实",
+                "support": [
+                    {
+                        "canonical_url": "https://example.com/article#part",
+                        "title": "文章",
+                        "quote": "正文中能够直接核验的摘录。",
+                        "content_fingerprint": "b" * 64,
+                        "evidence_origin": "web:example.com",
+                        "source_group_id": "web_source_" + "b" * 24,
+                    }
+                ],
+            }
+        ],
+        "padding": "x" * 4000,
+    }
+    rendered = "<parallel_research_json>\n" + json.dumps(payload, ensure_ascii=False) + "\n</parallel_research_json>\n摘要：完成"
+
+    record = evidence.build_tool_result_record(
+        tool_name="parallel_research",
+        tool_args={"query": "查证"},
+        result=rendered,
+    )
+
+    assert len(record["result"]) == 2400
+    assert record["fact_evidence"][0]["support"][0]["canonical_url"] == "https://example.com/article"
+    assert evidence._independent_source_count([record]) == 1
+    assert "[网页事实来源映射]" in evidence._render_tool_results([record])

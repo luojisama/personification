@@ -5,7 +5,11 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from ...core.metrics import record_timing
-from .evidence import build_tool_result_record, social_evidence_metadata
+from .evidence import (
+    build_tool_result_record,
+    social_evidence_metadata,
+    web_slang_learning_metadata,
+)
 from .executor import _execute_tool_with_retries
 from .fallbacks import (
     TOOL_RESULT_EMPTY_EVIDENCE,
@@ -39,6 +43,11 @@ class StopFlowState:
     unavailable_tool_signatures: set[str] = field(default_factory=set)
     tool_result_records: list[dict[str, Any]] = field(default_factory=list)
     social_evidence_satisfied: bool = False
+    semantic_web_fallback_needed: bool = False
+    semantic_web_fallback_attempted: bool = False
+    semantic_gap_codes: list[str] = field(default_factory=list)
+    semantic_target_term: str = ""
+    semantic_target_game: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,9 +93,44 @@ def update_stop_flow_tool_result(
         state.last_usable_tool_result_text = text
     social = social_evidence_metadata(tool_name=name, result=result)
     aggregation = social.get("aggregation") if isinstance(social, dict) else None
-    if isinstance(aggregation, dict) and bool(aggregation.get("satisfies_request", False)):
-        state.social_evidence_satisfied = True
+    semantic = social.get("semantic_validation") if isinstance(social, dict) else None
+    if name == "research_game_slang" and isinstance(semantic, dict):
+        semantic_satisfied = bool(semantic.get("satisfies_request", False))
+        state.social_evidence_satisfied = semantic_satisfied
+        state.semantic_web_fallback_needed = not semantic_satisfied
+        state.semantic_gap_codes = [
+            str(value or "").strip()[:64]
+            for value in list(semantic.get("gap_codes") or [])
+            if str(value or "").strip()
+        ][:8]
+        state.semantic_target_term = str(semantic.get("target_term") or "").strip()[:80]
+        state.semantic_target_game = str(semantic.get("target_game") or "").strip()[:100]
+        if semantic_satisfied:
+            state.pending_evidence_followup_query = ""
+        elif not state.semantic_web_fallback_attempted:
+            term = str(semantic.get("target_term") or "").strip()
+            game = str(semantic.get("target_game") or "").strip()
+            state.pending_evidence_followup_query = (
+                " ".join(value for value in (game, term, "梗百科 黑话 由来 玩法") if value).strip()
+            )[:240]
+    elif name == "social_content_search" and isinstance(aggregation, dict):
+        if bool(aggregation.get("satisfies_request", False)):
+            state.social_evidence_satisfied = True
+            state.pending_evidence_followup_query = ""
+    if name == "parallel_research" and (
+        state.semantic_web_fallback_needed or state.semantic_web_fallback_attempted
+    ):
+        state.semantic_web_fallback_attempted = True
+        state.semantic_web_fallback_needed = False
         state.pending_evidence_followup_query = ""
+        web_learning = web_slang_learning_metadata(tool_name=name, result=result)
+        web_semantic = (
+            web_learning.get("semantic_validation")
+            if isinstance(web_learning, dict)
+            else None
+        )
+        if isinstance(web_semantic, dict) and bool(web_semantic.get("satisfies_request", False)):
+            state.social_evidence_satisfied = True
     if not is_retryable_evidence_tool(registry, name):
         return
     signature = tool_signature(name, args)
@@ -254,6 +298,44 @@ async def _select_stop_fallback_lookup(
         state.pending_evidence_followup_query = ""
         logger.info("[agent] semantic fallback skipped: social evidence already satisfies request")
         return None
+    if state.semantic_web_fallback_needed:
+        if state.semantic_web_fallback_attempted:
+            state.pending_evidence_followup_query = ""
+            return None
+        fallback_tool = registry.get("parallel_research")
+        try:
+            fallback_enabled = fallback_tool is not None and bool(fallback_tool.enabled())
+        except Exception:
+            fallback_enabled = False
+        if not fallback_enabled:
+            logger.info("[agent] semantic web fallback unavailable: parallel_research disabled")
+            state.semantic_web_fallback_attempted = True
+            state.semantic_web_fallback_needed = False
+            state.pending_evidence_followup_query = ""
+            return None
+        state.semantic_web_fallback_attempted = True
+        state.semantic_web_fallback_needed = False
+        query = str(state.pending_evidence_followup_query or user_query_text or "").strip()[:240]
+        state.pending_evidence_followup_query = ""
+        return (
+            "parallel_research",
+            {
+                "query": query,
+                "purpose": "lookup",
+                "context": (
+                    "社交材料的黑话语义共识仍不完整；按缺口补证，并保留事实、规范 URL 与正文摘录对应关系。"
+                    f" gap_codes={','.join(state.semantic_gap_codes) or '-'}"
+                )[:600],
+                "focus": [
+                    "定义、称呼来源和梗的出处",
+                    "实际玩法、武器、角色、机制和使用语境",
+                    "独立梗百科、攻略或社区文章的反证与交叉验证",
+                ],
+                "max_workers": 3,
+                "target_term": state.semantic_target_term,
+                "target_game": state.semantic_target_game,
+            },
+        )
     previous_tool_unavailable = bool(
         state.has_tool_call
         and is_retryable_evidence_tool(registry, state.last_tool_name)

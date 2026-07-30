@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import ipaddress
 import json
 import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlparse
 
 from ..native_mcp.social_research.source_grouping import cluster_content_sources
 
@@ -30,6 +33,36 @@ _COMPARISON_SYSTEM_PROMPT = """你是游戏黑话 sense 归一器。输入是两
 
 def _clean(value: Any, limit: int) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+
+def _supported_evidence_origin(value: Any) -> bool:
+    origin = _clean(value, 200).lower()
+    return origin in PLATFORMS or bool(
+        re.fullmatch(r"web:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", origin)
+    )
+
+
+def _web_support_url_matches_origin(url: str, origin: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        host = str(parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    if (
+        parsed.scheme.lower() != "https"
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or origin != f"web:{host.removeprefix('www.')}"
+    ):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return address.is_global
 
 
 def _float01(value: Any) -> float:
@@ -90,7 +123,7 @@ def validate_content_packet(packet: Any, *, now: float | None = None) -> dict[st
             continue
         platform = _clean(raw.get("platform"), 30)
         content_id = _clean(raw.get("content_id"), 300)
-        if platform not in PLATFORMS or not content_id or raw.get("retained") is False:
+        if not _supported_evidence_origin(platform) or not content_id or raw.get("retained") is False:
             continue
         discussions: list[dict[str, Any]] = []
         for discussion in list(raw.get("discussion") or [])[:700]:
@@ -247,6 +280,272 @@ def independent_source_count(claims: list[dict[str, Any]]) -> int:
     return len({str(claim.get("source_cluster_id") or "") for claim in claims if claim.get("source_cluster_id")})
 
 
+def build_semantic_validation(
+    *,
+    target_term: str,
+    target_game: str,
+    target_claims: list[dict[str, Any]],
+    target_senses: list[dict[str, Any]],
+    packet: dict[str, Any],
+    claim_min_confidence: float = 0.72,
+) -> dict[str, Any]:
+    """Summarize whether extracted claims establish one target-term meaning.
+
+    Search coverage is intentionally not consulted here.  A semantic result is
+    confirmed only by compatible claims from independent source groups and
+    channels, including at least one successfully-read detail item.
+    """
+
+    term = _clean(target_term, 80)
+    game = _clean(target_game, 100)
+    game_key = game.casefold()
+    item_by_key = {
+        _content_key(_clean(item.get("platform"), 30), _clean(item.get("content_id"), 300)): item
+        for item in list(packet.get("items") or [])
+        if isinstance(item, dict)
+    }
+    contextual_claims: list[dict[str, Any]] = []
+    game_mismatch = False
+    for claim in target_claims:
+        if _float01(claim.get("extractor_confidence")) < max(
+            0.0, min(1.0, float(claim_min_confidence))
+        ):
+            continue
+        game_context = claim.get("game_context") if isinstance(claim.get("game_context"), dict) else {}
+        claim_games = {
+            _clean(game_context.get("canonical_name"), 100).casefold(),
+            *{
+                _clean(alias, 100).casefold()
+                for alias in list(game_context.get("aliases") or [])
+            },
+        }
+        claim_games.discard("")
+        if game_key and (not claim_games or game_key not in claim_games):
+            game_mismatch = True
+            continue
+        contextual_claims.append(claim)
+
+    source_groups = {
+        _clean(claim.get("source_cluster_id"), 120)
+        for claim in contextual_claims
+        if _clean(claim.get("source_cluster_id"), 120)
+    }
+    origins: set[str] = set()
+    detail_evidence = False
+    for claim in contextual_claims:
+        for ref in list(claim.get("evidence_refs") or []):
+            if not isinstance(ref, dict):
+                continue
+            platform = _clean(ref.get("platform"), 30)
+            content_id = _clean(ref.get("content_id"), 300)
+            if platform:
+                origins.add(platform)
+            item = item_by_key.get(_content_key(platform, content_id), {})
+            if str(item.get("detail_status") or "").strip() == "ready":
+                detail_evidence = True
+
+    senses_by_id: dict[str, dict[str, Any]] = {}
+    for sense in target_senses:
+        if not isinstance(sense, dict):
+            continue
+        sense_id = _clean(sense.get("sense_id"), 100)
+        if sense_id:
+            senses_by_id[sense_id] = sense
+    unresolved_conflict = len(senses_by_id) > 1 or any(
+        str(sense.get("status") or "").strip() == "disputed"
+        for sense in senses_by_id.values()
+    )
+    consensus = next(iter(senses_by_id.values()), {}) if len(senses_by_id) == 1 else {}
+
+    gaps: list[str] = []
+    if not target_claims:
+        gaps.append("no_target_claim")
+    if game_mismatch:
+        gaps.append("game_context_mismatch")
+    if contextual_claims and not detail_evidence:
+        gaps.append("detail_evidence_missing")
+    if contextual_claims and len(source_groups) < 2:
+        gaps.append("independent_sources_insufficient")
+    if contextual_claims and len(origins) < 2:
+        gaps.append("source_origins_insufficient")
+    if unresolved_conflict:
+        gaps.append("semantic_conflict")
+
+    confirmed = bool(
+        contextual_claims
+        and len(contextual_claims) >= 2
+        and len(source_groups) >= 2
+        and len(origins) >= 2
+        and detail_evidence
+        and consensus
+        and not unresolved_conflict
+    )
+    if confirmed:
+        status = "confirmed"
+        gaps = []
+    elif not target_claims:
+        status = "empty"
+    elif unresolved_conflict:
+        status = "conflict"
+    else:
+        status = "insufficient"
+    return {
+        "target_term": term,
+        "target_game": game,
+        "status": status,
+        "claim_count": len(contextual_claims),
+        "supporting_source_group_count": len(source_groups),
+        "supporting_origins": sorted(origins),
+        "consensus_sense_id": _clean(consensus.get("sense_id"), 100),
+        "consensus_meaning": _clean(consensus.get("meaning"), 500),
+        "satisfies_request": confirmed,
+        "gap_codes": gaps,
+    }
+
+
+async def ingest_web_fact_evidence(
+    *,
+    fact_evidence: list[dict[str, Any]],
+    target_term: str,
+    target_game: str,
+    tool_caller: Any,
+    thresholds: Any = None,
+) -> dict[str, Any]:
+    """Convert verified web fact/source mappings into ordinary slang claims.
+
+    The conversion deliberately refuses unquoted or ungrouped material.  It
+    reuses the same untrusted-data extractor and semantic store as social
+    evidence, so web search summaries alone can never promote a sense.
+    """
+
+    term = _clean(target_term, 80)
+    game = _clean(target_game, 100)
+    if not term or tool_caller is None:
+        return {"ingested_claim_count": 0, "target_senses": []}
+    now = time.time()
+    items: list[dict[str, Any]] = []
+    for fact in list(fact_evidence or [])[:20]:
+        if not isinstance(fact, dict):
+            continue
+        claim_text = _clean(fact.get("claim"), 500)
+        for support in list(fact.get("support") or [])[:8]:
+            if not isinstance(support, dict):
+                continue
+            url = _clean(support.get("canonical_url"), 1200)
+            quote = _clean(support.get("quote"), 600)
+            origin = _clean(support.get("evidence_origin"), 200).lower()
+            group_id = _clean(support.get("source_group_id"), 120)
+            if (
+                not claim_text
+                or len(quote) < 4
+                or not _web_support_url_matches_origin(url, origin)
+                or not _supported_evidence_origin(origin)
+                or not origin.startswith("web:")
+                or not group_id
+            ):
+                continue
+            content_id = hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
+            items.append(
+                {
+                    "platform": origin,
+                    "content_type": "article",
+                    "content_id": content_id,
+                    "canonical_url": url,
+                    "title": _clean(support.get("title"), 240),
+                    "caption_or_body": f"{claim_text}。原文摘录：{quote}",
+                    "content_fingerprint": _clean(support.get("content_fingerprint"), 128),
+                    "source_group_id": group_id,
+                    "quality_score": 0.7,
+                    "published_at": 0,
+                    "detail_status": "ready",
+                    "retained": True,
+                    "discussion": [],
+                }
+            )
+    if not items:
+        return {"ingested_claim_count": 0, "target_senses": []}
+    packet = {
+        "schema_version": 1,
+        "packet_id": "web_packet_" + hashlib.sha256(
+            "\n".join(sorted(item["canonical_url"] for item in items)).encode("utf-8")
+        ).hexdigest()[:24],
+        "trust": "untrusted_data_only",
+        "retrieved_at": now,
+        "expires_at": now + 3600,
+        "items": items,
+    }
+    pipeline = SlangLearningPipeline(tool_caller=tool_caller, max_claims=min(50, max(8, len(items) * 2)))
+    claims = await pipeline.extract_claims(packet, target_term=term)
+    term_key = term.casefold()
+    target_claims = [
+        claim
+        for claim in claims
+        if term_key
+        in {
+            _clean(claim.get("term"), 80).casefold(),
+            *{_clean(alias, 80).casefold() for alias in list(claim.get("aliases") or [])},
+        }
+    ]
+    if game:
+        game_key = game.casefold()
+        target_claims = [
+            claim
+            for claim in target_claims
+            if game_key
+            in {
+                _clean((claim.get("game_context") or {}).get("canonical_name"), 100).casefold(),
+                *{
+                    _clean(alias, 100).casefold()
+                    for alias in list((claim.get("game_context") or {}).get("aliases") or [])
+                },
+            }
+        ]
+    if not target_claims:
+        return {"ingested_claim_count": 0, "target_senses": []}
+    from .meme_learning_store import LearningThresholds, MemeLearningStore
+
+    normalized_thresholds = thresholds or LearningThresholds().normalized()
+    senses = await MemeLearningStore(normalized_thresholds).ingest_claims(
+        target_claims,
+        semantic_pipeline=pipeline,
+        model_route="parallel_research_web_fact_evidence",
+    )
+    unique_senses = {
+        _clean(sense.get("sense_id"), 100): sense
+        for sense in senses
+        if isinstance(sense, dict) and _clean(sense.get("sense_id"), 100)
+    }
+    active = next(iter(unique_senses.values()), {}) if len(unique_senses) == 1 else {}
+    return {
+        "ingested_claim_count": len(target_claims),
+        "target_senses": list(unique_senses.values()),
+        "semantic_validation": {
+            "target_term": term,
+            "target_game": game,
+            "status": (
+                "confirmed"
+                if active
+                and str(active.get("status") or "") in {"understand_only", "verified"}
+                and int(active.get("source_count", 0) or 0) >= 2
+                and int(active.get("platform_count", 0) or 0) >= 2
+                else "conflict"
+                if len(unique_senses) > 1 or str(active.get("status") or "") == "disputed"
+                else "insufficient"
+            ),
+            "consensus_sense_id": _clean(active.get("sense_id"), 100),
+            "consensus_meaning": _clean(active.get("meaning"), 500),
+            "supporting_source_group_count": int(active.get("source_count", 0) or 0),
+            "supporting_origins_count": int(active.get("platform_count", 0) or 0),
+            "satisfies_request": bool(
+                active
+                and str(active.get("status") or "") in {"understand_only", "verified"}
+                and int(active.get("source_count", 0) or 0) >= 2
+                and int(active.get("platform_count", 0) or 0) >= 2
+            ),
+        },
+    }
+
+
 class SlangLearningPipeline:
     def __init__(self, *, tool_caller: Any, max_claims: int = DEFAULT_MAX_CLAIMS) -> None:
         self.tool_caller = tool_caller
@@ -344,7 +643,7 @@ class BoundedSlangDiscoveryQueue:
             game = _clean(game_raw.get("canonical_name"), 100)
             unique_key = (term.casefold(), game.casefold(), content_key)
             if (
-                platform not in PLATFORMS
+                not _supported_evidence_origin(platform)
                 or not content_key
                 or unique_key in self._seen
                 or self._content_counts[content_key] >= self.max_per_content
@@ -394,8 +693,10 @@ __all__ = [
     "SEMANTIC_RELATIONS",
     "SlangLearningPipeline",
     "attach_source_clusters",
+    "build_semantic_validation",
     "cluster_content_sources",
     "independent_source_count",
+    "ingest_web_fact_evidence",
     "validate_content_packet",
     "validate_extracted_claims",
 ]

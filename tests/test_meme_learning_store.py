@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
@@ -10,6 +11,7 @@ db = load_personification_module("plugin.personification.core.db")
 data_store = load_personification_module("plugin.personification.core.data_store")
 dictionary = load_personification_module("plugin.personification.core.meme_dictionary")
 learning = load_personification_module("plugin.personification.core.meme_learning_store")
+slang = load_personification_module("plugin.personification.core.slang_learning")
 
 
 def _init(tmp_path):
@@ -135,6 +137,104 @@ def test_two_supported_conflicting_senses_become_disputed(tmp_path) -> None:
     assert len(senses) == 2
     assert {item["status"] for item in senses} == {"disputed"}
     assert {item["source_count"] for item in senses} == {2}
+
+
+def test_supported_consensus_marks_single_source_conflict_disputed(tmp_path) -> None:
+    store = _init(tmp_path)
+    _ingest(
+        store,
+        [_claim(term="旧词", meaning="旧的不完整解释", platform="bilibili", content_id="B1")],
+        _ConflictPipeline(),
+    )
+    _ingest(
+        store,
+        [
+            _claim(term="旧词", meaning="新的完整解释", platform="xiaoheihe", content_id="X1"),
+            _claim(term="旧词", meaning="新的完整解释", platform="tieba", content_id="T1"),
+        ],
+        _ConflictPipeline(),
+    )
+
+    senses = store.list_senses(term="旧词")
+    old = next(item for item in senses if item["meaning"] == "旧的不完整解释")
+    current = next(item for item in senses if item["meaning"] == "新的完整解释")
+    assert old["status"] == "disputed"
+    assert old["source_count"] == 1
+    assert current["status"] == "understand_only"
+    assert current["source_count"] == 2
+
+
+def test_structured_web_fact_evidence_can_raise_existing_sense_without_search_summaries(tmp_path) -> None:
+    _init(tmp_path)
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            packet = json.loads(messages[1]["content"].split("content_packet=", 1)[1])
+            claims = []
+            for item in packet["items"]:
+                quote = item["caption_or_body"].split("原文摘录：", 1)[1]
+                claims.append(
+                    {
+                        "term": "测试黑话",
+                        "aliases": [],
+                        "meaning": "一种经多个网页正文支持的玩法",
+                        "game_context": {"canonical_name": "测试游戏", "aliases": []},
+                        "version_context": "",
+                        "usage_context": "玩家讨论玩法时",
+                        "safe_usage": "仅在测试游戏语境使用",
+                        "risk_level": "low",
+                        "extractor_confidence": 0.95,
+                        "evidence_refs": [
+                            {
+                                "packet_id": packet["packet_id"],
+                                "platform": item["platform"],
+                                "content_id": item["content_id"],
+                                "discussion_id": "",
+                                "quote": quote,
+                            }
+                        ],
+                    }
+                )
+            return SimpleNamespace(content=json.dumps({"claims": claims}, ensure_ascii=False))
+
+    result = asyncio.run(
+        slang.ingest_web_fact_evidence(
+            fact_evidence=[
+                {
+                    "claim": "测试黑话是一种玩法",
+                    "support": [
+                        {
+                            "canonical_url": "https://one.example/article",
+                            "title": "来源一",
+                            "quote": "测试黑话描述这种玩法的具体执行方式。",
+                            "content_fingerprint": "1" * 64,
+                            "evidence_origin": "web:one.example",
+                            "source_group_id": "web-source-one",
+                        },
+                        {
+                            "canonical_url": "https://two.example/guide",
+                            "title": "来源二",
+                            "quote": "测试黑话就是该玩法在社区里的称呼。",
+                            "content_fingerprint": "2" * 64,
+                            "evidence_origin": "web:two.example",
+                            "source_group_id": "web-source-two",
+                        },
+                    ],
+                }
+            ],
+            target_term="测试黑话",
+            target_game="测试游戏",
+            tool_caller=_Caller(),
+        )
+    )
+
+    assert result["ingested_claim_count"] == 2
+    assert result["semantic_validation"]["status"] == "confirmed"
+    assert result["semantic_validation"]["satisfies_request"] is True
+    sense = learning.MemeLearningStore().list_senses(term="测试黑话")[0]
+    assert sense["status"] == "understand_only"
+    assert sense["source_count"] == 2
+    assert sense["platform_count"] == 2
 
 
 def test_manual_locked_sense_is_not_overwritten_by_conflict(tmp_path) -> None:

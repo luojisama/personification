@@ -332,7 +332,11 @@ async def run_agent(
         )
 
     def _mark_social_evidence_satisfied() -> None:
-        marker = "社交证据已满足，直接收束回答"
+        marker = (
+            "社交证据已满足，直接收束回答"
+            if stop_state.last_tool_name == "social_content_search"
+            else "黑话语义证据已满足，直接收束回答"
+        )
         for plan in (turn_plan, evidence_turn_plan):
             if plan is None or not hasattr(plan, "session_goal"):
                 continue
@@ -340,6 +344,12 @@ async def run_agent(
             if marker in current:
                 continue
             setattr(plan, "session_goal", f"{current}；{marker}".strip("；")[:80])
+
+    def _research_lookup_complete() -> bool:
+        return bool(
+            stop_state.social_evidence_satisfied
+            or stop_state.semantic_web_fallback_attempted
+        )
 
     evidence_synthesis_rounds = 0
     last_evidence_tool_count = 0
@@ -689,8 +699,11 @@ async def run_agent(
             evidence.needs_more_research = False
             evidence.research_followup_query = ""
             _mark_social_evidence_satisfied()
+        elif stop_state.semantic_web_fallback_attempted:
+            evidence.needs_more_research = False
+            evidence.research_followup_query = ""
         messages.append({"role": "system", "content": _evidence_guidance(evidence)})
-        if evidence.needs_more_research and not stop_state.social_evidence_satisfied:
+        if evidence.needs_more_research and not _research_lookup_complete():
             stop_state.semantic_fallback_attempted = False
             stop_state.pending_evidence_followup_query = str(evidence.research_followup_query or "").strip()
         logger.info(
@@ -737,13 +750,14 @@ async def run_agent(
             chat_intent=runtime_chat_intent,
             plugin_question_intent=plugin_query_intent,
         )
-        if stop_state.social_evidence_satisfied:
+        if _research_lookup_complete():
             active_schemas = [
                 schema
                 for schema in active_schemas
                 if _schema_tool_name(schema) not in SOCIAL_SEARCH_EQUIVALENT_TOOL_NAMES
             ]
-            _mark_social_evidence_satisfied()
+            if stop_state.social_evidence_satisfied:
+                _mark_social_evidence_satisfied()
         selected_names = selected_tool_names(active_schemas, _schema_tool_name)
         logger.debug(f"[agent] exposed {len(active_schemas)} tools to model")
         logger.info(f"[agent] selected tools: {', '.join(selected_names) if selected_names else 'none'}")
@@ -753,7 +767,7 @@ async def run_agent(
                 lambda: tool_caller.chat_with_tools(
                     messages,
                     active_schemas,
-                    use_builtin_search and not stop_state.social_evidence_satisfied,
+                    use_builtin_search and not _research_lookup_complete(),
                 ),
                 budget_deadline,
             )
@@ -873,7 +887,7 @@ async def run_agent(
                 record_trace=_record_reply_trace_stage,
             )
             if (
-                stop_state.social_evidence_satisfied
+                _research_lookup_complete()
                 and str(tool_call.name or "").strip() in SOCIAL_SEARCH_EQUIVALENT_TOOL_NAMES
             ):
                 result = (

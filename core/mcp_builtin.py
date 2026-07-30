@@ -25,6 +25,7 @@ _CONTENT_PACKET_OUTPUT: dict[str, Any] = {
         "warnings": {"type": "array", "items": {"type": "string"}},
         "aggregation": {"type": "object"},
         "source_groups": {"type": "array", "items": {"type": "object"}},
+        "semantic_validation": {"type": "object"},
     },
     "required": [
         "schema_version",

@@ -32,7 +32,12 @@ from .mcp_builtin import (
 from .meme_learning_store import LearningThresholds, MemeLearningStore
 from .paths import get_data_dir
 from .safe_image_download import download_public_image, resolve_public_url
-from .slang_learning import BoundedSlangDiscoveryQueue, DiscoveryTask, SlangLearningPipeline
+from .slang_learning import (
+    BoundedSlangDiscoveryQueue,
+    DiscoveryTask,
+    SlangLearningPipeline,
+    build_semantic_validation,
+)
 
 
 OFFICIAL_MCP_REGISTRY = "https://registry.modelcontextprotocol.io"
@@ -971,7 +976,22 @@ class McpRuntimeManager:
     ) -> str:
         caller = self._slang_tool_caller()
         if caller is None:
-            return raw_result
+            if remote_name != "research_game_slang":
+                return raw_result
+            try:
+                packet = json.loads(raw_result)
+                if not isinstance(packet, dict):
+                    return raw_result
+                packet["semantic_validation"] = build_semantic_validation(
+                    target_term=str(arguments.get("term") or ""),
+                    target_game=str(arguments.get("game") or ""),
+                    target_claims=[],
+                    target_senses=[],
+                    packet=packet,
+                )
+                return json.dumps(packet, ensure_ascii=False)
+            except Exception:
+                return raw_result
         try:
             packet = json.loads(raw_result)
             if not isinstance(packet, dict):
@@ -1004,12 +1024,27 @@ class McpRuntimeManager:
             target_claim_ids = {id(claim) for claim in target_claims}
             extra_claims = [claim for claim in claims if id(claim) not in target_claim_ids]
             queued = self._discovery_queue().schedule_claims(extra_claims, target_term=target_term)
+            semantic_validation = None
+            if remote_name == "research_game_slang":
+                semantic_validation = build_semantic_validation(
+                    target_term=target_term,
+                    target_game=str(arguments.get("game") or ""),
+                    target_claims=target_claims,
+                    target_senses=target_senses,
+                    packet=packet,
+                    claim_min_confidence=self._slang_thresholds().claim_min_confidence,
+                )
             return json.dumps(
                 {
                     **packet,
                     "slang_claims": claims,
                     "target_senses": target_senses,
                     "background_claims_queued": queued,
+                    **(
+                        {"semantic_validation": semantic_validation}
+                        if semantic_validation is not None
+                        else {}
+                    ),
                 },
                 ensure_ascii=False,
             )
@@ -1020,7 +1055,22 @@ class McpRuntimeManager:
                     logger.debug(f"builtin social slang learning skipped: {type(exc).__name__}")
                 except Exception:
                     pass
-            return raw_result
+            if remote_name != "research_game_slang":
+                return raw_result
+            try:
+                packet = json.loads(raw_result)
+                if not isinstance(packet, dict):
+                    return raw_result
+                packet["semantic_validation"] = build_semantic_validation(
+                    target_term=str(arguments.get("term") or ""),
+                    target_game=str(arguments.get("game") or ""),
+                    target_claims=[],
+                    target_senses=[],
+                    packet=packet,
+                )
+                return json.dumps(packet, ensure_ascii=False)
+            except Exception:
+                return raw_result
 
     def _secret_environment(self, item: dict[str, Any]) -> dict[str, str]:
         required = [str(name) for name in item.get("secret_names") or [] if str(name)]

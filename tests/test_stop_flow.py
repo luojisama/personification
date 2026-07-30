@@ -193,6 +193,93 @@ def test_satisfied_social_packet_blocks_semantic_fallback_search() -> None:
     assert selected is None
 
 
+def test_research_slang_coverage_does_not_stop_when_semantic_consensus_is_incomplete() -> None:
+    state = stop_flow.StopFlowState(has_tool_call=True)
+    packet = {
+        "aggregation": {"source_group_count": 3, "covered_platforms": ["bilibili", "tieba"], "satisfies_request": True},
+        "semantic_validation": {
+            "target_term": "花来",
+            "target_game": "三角洲行动",
+            "status": "insufficient",
+            "satisfies_request": False,
+            "gap_codes": ["detail_evidence_missing"],
+        },
+        "items": [],
+    }
+    stop_flow.update_stop_flow_tool_result(
+        state=state,
+        registry=_Registry(),
+        tool_name="research_game_slang",
+        tool_args={"term": "花来"},
+        result=json.dumps(packet, ensure_ascii=False),
+    )
+    parallel_tool = SimpleNamespace(enabled=lambda: True)
+
+    selected = _select_fallback(state=state, registry=_Registry(parallel_tool), selection=None)
+
+    assert state.social_evidence_satisfied is False
+    assert state.semantic_web_fallback_attempted is True
+    assert selected is not None
+    assert selected[0] == "parallel_research"
+    assert selected[1]["purpose"] == "lookup"
+    assert selected[1]["max_workers"] == 3
+    assert "三角洲行动 花来" in selected[1]["query"]
+    assert selected[1]["focus"] == [
+        "定义、称呼来源和梗的出处",
+        "实际玩法、武器、角色、机制和使用语境",
+        "独立梗百科、攻略或社区文章的反证与交叉验证",
+    ]
+
+
+def test_research_slang_confirmed_semantics_blocks_web_fallback() -> None:
+    state = stop_flow.StopFlowState(has_tool_call=True)
+    packet = {
+        "aggregation": {"satisfies_request": True},
+        "semantic_validation": {
+            "target_term": "花来",
+            "target_game": "三角洲行动",
+            "status": "confirmed",
+            "satisfies_request": True,
+            "gap_codes": [],
+        },
+        "items": [],
+    }
+    stop_flow.update_stop_flow_tool_result(
+        state=state,
+        registry=_Registry(),
+        tool_name="research_game_slang",
+        tool_args={"term": "花来"},
+        result=json.dumps(packet, ensure_ascii=False),
+    )
+
+    selected = _select_fallback(
+        state=state,
+        registry=_Registry(SimpleNamespace(enabled=lambda: True)),
+        selection=("web_search", {"query": "不应执行"}),
+    )
+
+    assert state.social_evidence_satisfied is True
+    assert state.semantic_web_fallback_needed is False
+    assert selected is None
+
+
+def test_semantic_web_fallback_is_allowed_only_once() -> None:
+    state = stop_flow.StopFlowState(
+        semantic_web_fallback_needed=True,
+        semantic_web_fallback_attempted=True,
+        pending_evidence_followup_query="继续查证",
+    )
+
+    selected = _select_fallback(
+        state=state,
+        registry=_Registry(SimpleNamespace(enabled=lambda: True)),
+        selection=("web_search", {"query": "重复"}),
+    )
+
+    assert selected is None
+    assert state.pending_evidence_followup_query == ""
+
+
 def test_direct_image_answer_does_not_force_an_unrelated_capability_tool() -> None:
     state = stop_flow.StopFlowState()
 
