@@ -594,6 +594,312 @@ def test_xiaoheihe_search_waits_for_dynamic_results_and_closes_fresh_page() -> N
     assert items[0]["image_count"] == 2
 
 
+def test_douyin_search_reads_waterfall_cards_without_content_anchors() -> None:
+    adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+
+    class FakeResponse:
+        status = 200
+
+    class FakeLocator:
+        async def evaluate_all(self, _script, _options):  # noqa: ANN001, ANN201
+            return [
+                {
+                    "contentId": "7506916630866218267",
+                    "contentKind": "video",
+                    "title": "夺舍流红狼",
+                    "author": "红狼玩家",
+                    "text": "夺舍流红狼 00:57",
+                    "metricText": ["12.5万", "321"],
+                    "cover": "https://p3-sign.douyinpic.com/video.jpg?card_type=153",
+                    "images": [{"url": "https://p3-sign.douyinpic.com/video.jpg?card_type=153"}],
+                },
+                {
+                    "contentId": "7668144591689864549",
+                    "contentKind": "note",
+                    "title": "花来配装图文",
+                    "author": "三角洲玩家",
+                    "text": "花来配装图文 图文",
+                    "metricText": ["88"],
+                    "cover": "https://p3-sign.douyinpic.com/note.jpg?card_type=303",
+                    "images": [{"url": "https://p3-sign.douyinpic.com/note.jpg?card_type=303"}],
+                },
+                {"contentId": "1", "contentKind": "video", "text": "相关搜索", "skip": True},
+                {"contentId": "2", "contentKind": "", "text": "类型不明"},
+            ]
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.waited_selector = ""
+            self.locator_selector = ""
+            self.closed = False
+
+        async def goto(self, url, **_kwargs):  # noqa: ANN001, ANN201
+            assert url.startswith("https://www.douyin.com/search/")
+            return FakeResponse()
+
+        async def wait_for_timeout(self, _milliseconds):  # noqa: ANN001, ANN201
+            return None
+
+        async def evaluate(self, _script):  # noqa: ANN001, ANN201
+            return {"title": "抖音搜索", "body": "三角洲行动 花来"}
+
+        async def wait_for_selector(self, selector, **_kwargs):  # noqa: ANN001, ANN201
+            self.waited_selector = selector
+            return object()
+
+        def locator(self, selector):  # noqa: ANN001, ANN201
+            self.locator_selector = selector
+            return FakeLocator()
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakeBrowsers:
+        def __init__(self) -> None:
+            self.fake_page = FakePage()
+
+        async def fresh_page(self, _platform):  # noqa: ANN001, ANN201
+            return self.fake_page
+
+    browsers = FakeBrowsers()
+    adapter = adapters_mod.PlatformAdapter(adapters_mod.SPECS["douyin"], browsers)
+    items = asyncio.run(adapter.search("三角洲行动 花来", limit=10, timeout_seconds=5))
+
+    assert browsers.fake_page.waited_selector == '[id^="waterfall_item_"]'
+    assert browsers.fake_page.locator_selector == '[id^="waterfall_item_"]'
+    assert browsers.fake_page.closed is True
+    assert [(item["content_id"], item["content_type"]) for item in items] == [
+        ("7506916630866218267", "video"),
+        ("7668144591689864549", "article"),
+    ]
+    assert items[0]["canonical_url"] == "https://www.douyin.com/video/7506916630866218267"
+    assert items[1]["canonical_url"] == "https://www.douyin.com/note/7668144591689864549"
+    assert items[1]["author"]["display_name"] == "三角洲玩家"
+
+
+def test_tieba_search_groups_repeated_post_links_by_thread_card() -> None:
+    adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+
+    class FakeResponse:
+        status = 200
+
+    class FakeLocator:
+        async def evaluate_all(self, _script, _options):  # noqa: ANN001, ANN201
+            return [
+                {"href": "https://tieba.baidu.com/p/9876543210", "title": "花来是什么", "text": "正文一", "metricText": ["25"]},
+                {"href": "https://tieba.baidu.com/p/9876543210", "title": "回复入口", "text": "重复链接", "metricText": ["25"]},
+                {"href": "https://tieba.baidu.com/p/9876543211", "title": "红狼夺舍流", "text": "正文二", "metricText": ["18"]},
+                {"href": "https://tieba.baidu.com/f?kw=test", "title": "贴吧首页", "text": "非内容"},
+            ]
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.waited_selector = ""
+
+        async def goto(self, url, **_kwargs):  # noqa: ANN001, ANN201
+            assert url.startswith("https://tieba.baidu.com/f/search/res?")
+            return FakeResponse()
+
+        async def wait_for_timeout(self, _milliseconds):  # noqa: ANN001, ANN201
+            return None
+
+        async def evaluate(self, _script):  # noqa: ANN001, ANN201
+            return {"title": "贴吧搜索", "body": "三角洲行动"}
+
+        async def wait_for_selector(self, selector, **_kwargs):  # noqa: ANN001, ANN201
+            self.waited_selector = selector
+            return object()
+
+        def locator(self, _selector):  # noqa: ANN001, ANN201
+            return FakeLocator()
+
+    class FakeBrowsers:
+        def __init__(self) -> None:
+            self.fake_page = FakePage()
+
+        async def page(self, _platform):  # noqa: ANN001, ANN201
+            return self.fake_page
+
+    browsers = FakeBrowsers()
+    adapter = adapters_mod.PlatformAdapter(adapters_mod.SPECS["tieba"], browsers)
+    items = asyncio.run(adapter.search("三角洲行动 花来", limit=10, timeout_seconds=5))
+
+    assert browsers.fake_page.waited_selector == ".virtual-list-item"
+    assert [item["content_id"] for item in items] == ["9876543210", "9876543211"]
+    assert all(item["content_type"] == "post" for item in items)
+
+
+def test_douyin_note_detail_uses_main_content_images_and_comment_boundaries() -> None:
+    adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+
+    class FakeResponse:
+        status = 200
+
+    class FakeLocator:
+        def __init__(self, selector: str) -> None:
+            self.selector = selector
+
+        async def all_inner_texts(self):  # noqa: ANN201
+            if self.selector == '[data-e2e="comment-item"]':
+                return ["头 甲 枪 胸挂 背包 花来"]
+            if "reply" in self.selector:
+                return ["这就是红狼夺舍流"]
+            return []
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.evaluate_calls = 0
+            self.waited_selector = ""
+
+        async def goto(self, url, **_kwargs):  # noqa: ANN001, ANN201
+            assert url == "https://www.douyin.com/note/7668144591689864549"
+            return FakeResponse()
+
+        async def wait_for_timeout(self, _milliseconds):  # noqa: ANN001, ANN201
+            return None
+
+        async def wait_for_selector(self, selector, **_kwargs):  # noqa: ANN001, ANN201
+            self.waited_selector = selector
+            return object()
+
+        async def evaluate(self, script):  # noqa: ANN001, ANN201
+            self.evaluate_calls += 1
+            if self.evaluate_calls == 1:
+                return {"title": "抖音", "body": "图文详情"}
+            assert "const isNote = true" in script
+            assert "comment-item" in script
+            return {
+                "title": "花来配装",
+                "description": "红狼使用高射速武器修脚，保留头甲后夺舍撤离",
+                "cover": "https://p3-sign.douyinpic.com/note-1.jpg",
+                "images": [
+                    {"url": "https://p3-sign.douyinpic.com/note-1.jpg"},
+                    {"url": "https://p3-sign.douyinpic.com/note-2.jpg"},
+                ],
+                "author": "三角洲玩家",
+                "body": "导航和相关推荐不应使用",
+            }
+
+        def locator(self, selector):  # noqa: ANN001, ANN201
+            return FakeLocator(selector)
+
+    class FakeBrowsers:
+        def __init__(self) -> None:
+            self.fake_page = FakePage()
+
+        async def page(self, _platform):  # noqa: ANN001, ANN201
+            return self.fake_page
+
+    browsers = FakeBrowsers()
+    adapter = adapters_mod.PlatformAdapter(adapters_mod.SPECS["douyin"], browsers)
+    item = asyncio.run(
+        adapter.read(
+            content_id="",
+            url="https://www.douyin.com/note/7668144591689864549",
+            include=["caption", "comments", "replies"],
+            comment_limit=30,
+            danmaku_limit=0,
+            timeout_seconds=5,
+        )
+    )
+
+    assert browsers.fake_page.waited_selector == "main"
+    assert item["content_type"] == "article"
+    assert item["caption_or_body"] == "红狼使用高射速武器修脚，保留头甲后夺舍撤离"
+    assert len(item["image_urls"]) == 2
+    assert [entry["type"] for entry in item["discussion"]] == ["comment", "reply"]
+
+
+def test_tieba_detail_uses_current_post_and_comment_containers() -> None:
+    adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+
+    class FakeResponse:
+        status = 200
+
+    class FakeLocator:
+        def __init__(self, selector: str) -> None:
+            self.selector = selector
+
+        async def all_inner_texts(self):  # noqa: ANN201
+            return ["楼中楼讨论花来出处"] if self.selector == ".pb-comment-item" else []
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.evaluate_calls = 0
+            self.waited_selector = ""
+
+        async def goto(self, url, **_kwargs):  # noqa: ANN001, ANN201
+            assert url == "https://tieba.baidu.com/p/9876543210"
+            return FakeResponse()
+
+        async def wait_for_timeout(self, _milliseconds):  # noqa: ANN001, ANN201
+            return None
+
+        async def wait_for_selector(self, selector, **_kwargs):  # noqa: ANN001, ANN201
+            self.waited_selector = selector
+            return object()
+
+        async def evaluate(self, script):  # noqa: ANN001, ANN201
+            self.evaluate_calls += 1
+            if self.evaluate_calls == 1:
+                return {"title": "贴吧", "body": "帖子详情"}
+            assert ".pb-content-wrap" in script
+            assert ".pb-comment-list" in script
+            return {
+                "title": "三角洲花来玩法讨论",
+                "description": "使用肉伤弹修脚并保留装备耐久",
+                "cover": "https://imgsa.baidu.com/forum/post-1.jpg",
+                "images": [{"url": "https://imgsa.baidu.com/forum/post-1.jpg"}],
+                "author": "吧友",
+                "body": "导航内容不应使用",
+            }
+
+        def locator(self, selector):  # noqa: ANN001, ANN201
+            return FakeLocator(selector)
+
+    class FakeBrowsers:
+        def __init__(self) -> None:
+            self.fake_page = FakePage()
+
+        async def page(self, _platform):  # noqa: ANN001, ANN201
+            return self.fake_page
+
+    browsers = FakeBrowsers()
+    adapter = adapters_mod.PlatformAdapter(adapters_mod.SPECS["tieba"], browsers)
+    item = asyncio.run(
+        adapter.read(
+            content_id="",
+            url="https://tieba.baidu.com/p/9876543210",
+            include=["caption", "comments", "replies"],
+            comment_limit=30,
+            danmaku_limit=0,
+            timeout_seconds=5,
+        )
+    )
+
+    assert browsers.fake_page.waited_selector == ".pb-content-wrap"
+    assert item["caption_or_body"] == "使用肉伤弹修脚并保留装备耐久"
+    assert item["image_urls"] == ["https://imgsa.baidu.com/forum/post-1.jpg"]
+    assert [entry["text"] for entry in item["discussion"]] == ["楼中楼讨论花来出处"]
+
+
+def test_article_and_post_media_keep_six_opaque_image_refs(tmp_path: Path) -> None:
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+    service = service_mod.SocialResearchService(tmp_path)
+    item = {
+        "content_type": "article",
+        "cover_ref": "https://p3-sign.douyinpic.com/cover.jpg",
+        "image_urls": [f"https://p3-sign.douyinpic.com/note-{index}.jpg" for index in range(1, 8)],
+        "image_count": 7,
+    }
+
+    service._register_item_media("douyin", item)
+
+    assert len(item["image_refs"]) == 6
+    assert item["cover_ref"] == item["image_refs"][0]
+    assert item["image_count"] == 7
+
+
 def test_detail_read_keeps_selected_source_without_engagement_and_uses_opaque_image_refs(tmp_path: Path) -> None:
     service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
 

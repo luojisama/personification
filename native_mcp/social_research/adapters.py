@@ -61,7 +61,11 @@ SPECS: dict[str, PlatformSpec] = {
         search_url="https://www.douyin.com/search/{query}",
         allowed_hosts=("douyin.com", "www.douyin.com"),
         content_link_selector='a[href*="/video/"],a[href*="/note/"]',
-        discussion_selectors=(("[data-e2e=comment-item]", "comment"), ('[class*="comment-item"]', "comment"), ('[class*="reply"]', "reply")),
+        discussion_selectors=(
+            ('[data-e2e="comment-item"]', "comment"),
+            ('[data-e2e="comment-item"] [class*="reply"]', "reply"),
+            ('[class*="danmaku"] [class*="item"]', "danmaku"),
+        ),
         qr_selectors=(
             'img[alt="二维码"]',
             '[id^="login-full-panel-"] img[alt]',
@@ -83,7 +87,12 @@ SPECS: dict[str, PlatformSpec] = {
         search_url="https://tieba.baidu.com/f/search/res?ie=utf-8&qw={query}",
         allowed_hosts=("tieba.baidu.com", "baidu.com", "www.baidu.com"),
         content_link_selector='a[href*="/p/"]',
-        discussion_selectors=((".l_post .d_post_content", "post"), (".j_l_post .d_post_content", "reply"), (".lzl_content_main", "reply")),
+        discussion_selectors=(
+            (".pb-comment-item", "comment"),
+            (".pb-comment-item [class*=reply]", "reply"),
+            (".l_post .d_post_content", "post"),
+            (".lzl_content_main", "reply"),
+        ),
         qr_selectors=('img[src*="qrcode"]', 'img[src*="qr"]', '[class*="qrcode"] img', '[class*="tang-pass-qrcode"] img'),
         login_trigger_selectors=('a:has-text("登录")', 'button:has-text("登录")'),
         auth_cookie_names=frozenset({"BDUSS", "STOKEN", "PTOKEN"}),
@@ -198,41 +207,116 @@ class PlatformAdapter:
                 await page.close()
             raise
 
+    def _search_selector(self) -> str:
+        if self.spec.name == "douyin":
+            return '[id^="waterfall_item_"]'
+        if self.spec.name == "tieba":
+            return ".virtual-list-item"
+        return self.spec.content_link_selector
+
+    def _search_script(self) -> str:
+        if self.spec.name == "douyin":
+            return """(cards, options) => cards.slice(0, options.maxItems * 4).map((card) => {
+            const idMatch = /^waterfall_item_([0-9]+)$/.exec(card.id || '');
+            const text = card.innerText || '';
+            const exactText = (value) => String(value || '').trim();
+            const nodes = Array.from(card.querySelectorAll('*'));
+            const noteMarker = nodes.some((node) => exactText(node.textContent) === '图文');
+            const durationMarker = nodes.some((node) => /^[0-9]{1,2}:[0-9]{2}$/.test(exactText(node.textContent)));
+            const imageUrls = Array.from(card.querySelectorAll('img')).map((item) => ({
+                url: item.currentSrc || item.src || item.getAttribute('data-src') || '',
+                alt: item.getAttribute('alt') || item.getAttribute('title') || '',
+            })).filter((item) => item.url);
+            const signedUrls = imageUrls.map((item) => item.url).join(' ');
+            const isNote = noteMarker || signedUrls.includes('card_type=303');
+            const isVideo = !isNote && (durationMarker || card.querySelector('video') || signedUrls.includes('card_type=153'));
+            const titleNode = card.querySelector('h1,h2,h3,[data-e2e*=title],[class*=title]');
+            const authorNode = card.querySelector('[data-e2e*=author],[class*=author],[class*=nickname]');
+            const metricText = Array.from(card.querySelectorAll('[data-e2e*=count],[class*=count],[class*=stats],[class*=metric]'))
+                .map((item) => item.innerText || item.textContent || '').filter(Boolean);
+            const related = Boolean(card.querySelector('[class*=related-search],[data-e2e*=related-search]'))
+                || exactText(text).startsWith('相关搜索');
+            const promoted = Boolean(card.querySelector('[class*=advert],[class*=promotion],[data-e2e*=ad]'));
+            return {
+                contentId: idMatch ? idMatch[1] : '',
+                contentKind: isNote ? 'note' : (isVideo ? 'video' : ''),
+                title: titleNode ? titleNode.innerText : '',
+                author: authorNode ? authorNode.innerText : '',
+                text,
+                metricText,
+                cover: imageUrls.length ? imageUrls[0].url : '',
+                images: imageUrls,
+                skip: related || promoted,
+                commercialLabel: promoted,
+            };
+            })"""
+        if self.spec.name == "tieba":
+            return """(cards, options) => cards.slice(0, options.maxItems * 4).map((outer) => {
+            const card = outer.querySelector('.threadcardclass,.thread-new3.index-feed-cards,.thread-content-box') || outer;
+            const anchors = Array.from(card.querySelectorAll('a[href*="/p/"]'));
+            const contentAnchor = anchors.find((node) => {
+                try { return /^\\/p\\/[0-9]+(?:\\/|$)/.test(new URL(node.href, location.href).pathname); }
+                catch (_) { return false; }
+            });
+            const titleNode = card.querySelector('[class*=title],h1,h2,h3') || contentAnchor;
+            const authorNode = card.querySelector('[class*=author],[class*=user],[class*=name]');
+            const imageUrls = Array.from(card.querySelectorAll('.thread-content-box img,[class*=content] img')).map((item) => ({
+                url: item.currentSrc || item.src || item.getAttribute('data-src') || '',
+                alt: item.getAttribute('alt') || item.getAttribute('title') || '',
+            })).filter((item) => item.url && !item.closest('[class*=avatar]'));
+            const metricText = Array.from(card.querySelectorAll('[class*=count],[class*=reply],[class*=like],[class*=stats]'))
+                .map((item) => item.innerText || item.textContent || '').filter(Boolean);
+            const promoted = Boolean(card.querySelector('[class*=advert],[class*=promotion],[class*=recommend-ad]'));
+            return {
+                href: contentAnchor ? (contentAnchor.href || contentAnchor.getAttribute('href') || '') : '',
+                title: titleNode ? titleNode.innerText : '',
+                author: authorNode ? authorNode.innerText : '',
+                text: card.innerText || '',
+                metricText,
+                cover: imageUrls.length ? imageUrls[0].url : '',
+                images: imageUrls,
+                skip: promoted,
+                commercialLabel: promoted,
+            };
+            })"""
+        return """(nodes, options) => nodes.slice(0, options.maxItems * 4).map((node) => {
+        const card = node.closest('article,li,[class*=card],[class*=item],[class*=video],[class*=result]') || node.parentElement;
+        const img = card && card.querySelector('img');
+        const text = (card && card.innerText) || node.innerText || '';
+        const images = card
+            ? Array.from(card.querySelectorAll('img')).map((item) => ({
+                url: item.currentSrc || item.src || item.getAttribute('data-src') || '',
+                alt: item.getAttribute('alt') || item.getAttribute('title') || '',
+            })).filter((item) => item.url)
+            : [];
+        const metricText = options.platform === 'xiaoheihe' && card
+            ? Array.from(card.querySelectorAll('button,[class*=stat],[class*=count],[class*=like],[class*=comment]'))
+                .map((item) => item.innerText || item.textContent || '')
+                .filter(Boolean)
+            : [];
+        return {
+            href: node.href || node.getAttribute('href') || '',
+            title: node.getAttribute('title') || node.getAttribute('aria-label') || node.innerText || '',
+            text,
+            metricText,
+            cover: img ? (img.currentSrc || img.src || img.getAttribute('data-src') || '') : '',
+            images,
+        };
+        })"""
+
     async def search(self, query: str, *, limit: int, timeout_seconds: float) -> list[dict[str, Any]]:
         url = self.spec.search_url.format(query=quote(clean_text(query, 200), safe=""))
         page, owned_page = await self._page(url, timeout_seconds)
         try:
-            if self.spec.name == "xiaoheihe":
+            selector = self._search_selector()
+            if self.spec.name in {"douyin", "tieba", "xiaoheihe"}:
                 await page.wait_for_selector(
-                    self.spec.content_link_selector,
+                    selector,
                     state="attached",
                     timeout=max(1000, int(timeout_seconds * 1000) - 1000),
                 )
-            rows = await page.locator(self.spec.content_link_selector).evaluate_all(
-                """(nodes, options) => nodes.slice(0, options.maxItems * 4).map((node) => {
-                const card = node.closest('article,li,[class*=card],[class*=item],[class*=video],[class*=result]') || node.parentElement;
-                const img = card && card.querySelector('img');
-                const text = (card && card.innerText) || node.innerText || '';
-                const images = card
-                    ? Array.from(card.querySelectorAll('img')).map((item) => ({
-                        url: item.currentSrc || item.src || item.getAttribute('data-src') || '',
-                        alt: item.getAttribute('alt') || item.getAttribute('title') || '',
-                    })).filter((item) => item.url)
-                    : [];
-                const metricText = options.platform === 'xiaoheihe' && card
-                    ? Array.from(card.querySelectorAll('button,[class*=stat],[class*=count],[class*=like],[class*=comment]'))
-                        .map((item) => item.innerText || item.textContent || '')
-                        .filter(Boolean)
-                    : [];
-                return {
-                    href: node.href || node.getAttribute('href') || '',
-                    title: node.getAttribute('title') || node.getAttribute('aria-label') || node.innerText || '',
-                    text,
-                    metricText,
-                    cover: img ? (img.currentSrc || img.src || img.getAttribute('data-src') || '') : '',
-                    images,
-                };
-                })""",
+            rows = await page.locator(selector).evaluate_all(
+                self._search_script(),
                 {"maxItems": limit, "platform": self.spec.name},
             )
         finally:
@@ -241,9 +325,16 @@ class PlatformAdapter:
         result: list[dict[str, Any]] = []
         seen: set[str] = set()
         for raw in rows:
-            if not isinstance(raw, dict):
+            if not isinstance(raw, dict) or bool(raw.get("skip")):
                 continue
-            href = normalize_url(raw.get("href"))
+            content_kind = clean_text(raw.get("contentKind"), 20).lower()
+            if self.spec.name == "douyin":
+                raw_content_id = clean_text(raw.get("contentId"), 200)
+                if not re.fullmatch(r"[0-9]+", raw_content_id) or content_kind not in {"video", "note"}:
+                    continue
+                href = f"https://www.douyin.com/{content_kind}/{raw_content_id}"
+            else:
+                href = normalize_url(raw.get("href"))
             if not href:
                 continue
             try:
@@ -256,19 +347,17 @@ class PlatformAdapter:
             seen.add(content_id)
             text = clean_text(raw.get("text"), 1200)
             title = clean_text(raw.get("title"), 300) or text[:200]
-            count_source = (
-                " ".join(str(value or "") for value in list(raw.get("metricText") or []))
-                if self.spec.name == "xiaoheihe"
-                else text
-            )
+            metric_source = " ".join(str(value or "") for value in list(raw.get("metricText") or []))
+            count_source = metric_source or text
             counts = [
                 _compact_count(value)
                 for value in re.findall(r"[0-9]+(?:\.[0-9]+)?\s*[万w千k]?", count_source, re.IGNORECASE)
             ]
+            content_type = "article" if self.spec.name == "douyin" and content_kind == "note" else self.spec.content_type
             stats = {
-                "play_count": counts[0] if self.spec.content_type == "video" and counts else 0,
-                "comment_count": counts[1] if self.spec.content_type == "video" and len(counts) > 1 else 0,
-                "reply_count": counts[0] if self.spec.content_type != "video" and counts else 0,
+                "play_count": counts[0] if content_type == "video" and counts else 0,
+                "comment_count": counts[1] if content_type == "video" and len(counts) > 1 else 0,
+                "reply_count": counts[0] if content_type != "video" and counts else 0,
             }
             image_urls = list(
                 dict.fromkeys(
@@ -281,7 +370,7 @@ class PlatformAdapter:
             result.append(
                 {
                     "platform": self.spec.name,
-                    "content_type": self.spec.content_type,
+                    "content_type": content_type,
                     "content_id": content_id,
                     "canonical_url": href,
                     "title": title,
@@ -289,10 +378,11 @@ class PlatformAdapter:
                     "cover_ref": normalize_url(raw.get("cover")),
                     "image_urls": image_urls,
                     "image_count": max(len(image_urls), int(image_count_match.group(1)) if image_count_match else 0),
-                    "author": {"display_name": "", "fingerprint": ""},
+                    "author": {"display_name": clean_text(raw.get("author"), 120), "fingerprint": ""},
                     "published_at": 0,
                     "stats": stats,
                     "discussion": [],
+                    "commercial_label": bool(raw.get("commercialLabel")),
                     "content_fingerprint": stable_fingerprint(title, text),
                 }
             )
@@ -313,6 +403,113 @@ class PlatformAdapter:
             return match.group(1)[:200]
         return ""
 
+    def _content_type_for_url(self, url: str) -> str:
+        if self.spec.name == "douyin" and urlparse(url).path.lower().startswith("/note/"):
+            return "article"
+        return self.spec.content_type
+
+    def _detail_selector(self, canonical_url: str) -> str:
+        if self.spec.name == "xiaoheihe":
+            return ".hb-bbs-post .post__content .hb-article"
+        if self.spec.name == "douyin":
+            return "main" if urlparse(canonical_url).path.lower().startswith("/note/") else "h1"
+        if self.spec.name == "tieba":
+            return ".pb-content-wrap"
+        return ""
+
+    def _detail_script(self, canonical_url: str) -> str:
+        if self.spec.name == "xiaoheihe":
+            return """() => {
+            const root = document.querySelector('.hb-bbs-post');
+            const title = root && root.querySelector('.link-section-title');
+            const article = root && root.querySelector('.post__content .hb-article');
+            const cover = article && article.querySelector('img');
+            const images = article ? Array.from(article.querySelectorAll('img')).map((item) => ({
+                url: item.currentSrc || item.src || item.getAttribute('data-src') || '',
+                alt: item.getAttribute('alt') || item.getAttribute('title') || '',
+            })).filter((item) => item.url) : [];
+            return {
+                title: title ? title.innerText : '',
+                description: article ? article.innerText : '',
+                cover: cover ? (cover.currentSrc || cover.src || '') : '',
+                images,
+                author: '',
+                body: '',
+            };
+            }"""
+        if self.spec.name == "douyin":
+            is_note = urlparse(canonical_url).path.lower().startswith("/note/")
+            return f"""() => {{
+            const isNote = {str(is_note).lower()};
+            const main = document.querySelector('main,[role="main"]');
+            const heading = document.querySelector('h1');
+            const root = isNote ? main : (heading && heading.closest('main,[role="main"]')) || main || heading;
+            const clone = root ? root.cloneNode(true) : null;
+            if (clone) {{
+                clone.querySelectorAll('[data-e2e="comment-item"],[class*="comment-list"],[class*="recommend"],[class*="related"]')
+                    .forEach((node) => node.remove());
+            }}
+            const images = root ? Array.from(root.querySelectorAll('img')).filter((item) =>
+                !item.closest('[data-e2e="comment-item"],[class*="comment"],[class*="avatar"],[class*="recommend"],[class*="related"]')
+            ).map((item) => ({{
+                url: item.currentSrc || item.src || item.getAttribute('data-src') || '',
+                alt: item.getAttribute('alt') || item.getAttribute('title') || '',
+            }})).filter((item) => item.url) : [];
+            const author = root && root.querySelector('[data-e2e*=author],[class*=author],[class*=nickname]');
+            return {{
+                title: heading ? heading.innerText : (document.title || ''),
+                description: isNote ? ((clone && clone.innerText) || '') : ((heading && heading.innerText) || ''),
+                cover: images.length ? images[0].url : '',
+                images,
+                author: author ? author.innerText : '',
+                body: '',
+            }};
+            }}"""
+        if self.spec.name == "tieba":
+            return """() => {
+            const root = document.querySelector('.pb-content-wrap');
+            const title = document.querySelector('h1,.core_title_txt,[class*=thread-title]');
+            const contentNodes = root ? Array.from(root.querySelectorAll('.richtext-item,.pb-text-wrapper')) : [];
+            const descriptions = [];
+            const seen = new Set();
+            for (const node of contentNodes) {
+                if (node.closest('.pb-comment-list,.pb-comment-item')) continue;
+                const text = (node.innerText || '').trim();
+                if (text && !seen.has(text)) { seen.add(text); descriptions.push(text); }
+            }
+            const images = root ? Array.from(root.querySelectorAll('.richtext-item img,.pb-text-wrapper img')).filter((item) =>
+                !item.closest('.pb-comment-list,.pb-comment-item,[class*=avatar]')
+            ).map((item) => ({
+                url: item.currentSrc || item.src || item.getAttribute('data-src') || '',
+                alt: item.getAttribute('alt') || item.getAttribute('title') || '',
+            })).filter((item) => item.url) : [];
+            const author = root && root.querySelector('[class*=author],[class*=user-name],[class*=username]');
+            return {
+                title: title ? title.innerText : (document.title || ''),
+                description: descriptions.join('\n'),
+                cover: images.length ? images[0].url : '',
+                images,
+                author: author ? author.innerText : '',
+                body: '',
+            };
+            }"""
+        return """() => {
+        const meta = (name, property=false) => {
+            const selector = property ? `meta[property="${name}"]` : `meta[name="${name}"]`;
+            const node = document.querySelector(selector);
+            return node ? (node.content || '') : '';
+        };
+        const h1 = document.querySelector('h1');
+        return {
+            title: meta('og:title', true) || (h1 && h1.innerText) || document.title || '',
+            description: meta('description') || meta('og:description', true) || '',
+            cover: meta('og:image', true) || '',
+            images: [],
+            author: '',
+            body: document.body ? document.body.innerText.slice(0, 12000) : '',
+        };
+        }"""
+
     async def read(
         self,
         *,
@@ -329,50 +526,19 @@ class PlatformAdapter:
             canonical_url = self.url_for_id(content_id)
         page, owned_page = await self._page(canonical_url, timeout_seconds)
         try:
-            if self.spec.name == "xiaoheihe":
+            detail_selector = self._detail_selector(canonical_url)
+            if detail_selector:
                 try:
                     await page.wait_for_selector(
-                        ".hb-bbs-post .post__content .hb-article",
+                        detail_selector,
                         state="visible",
                         timeout=max(1000, int(timeout_seconds * 1000)),
                     )
                 except Exception as exc:
                     raise RuntimeError("detail_content_unavailable") from exc
-                metadata_script = """() => {
-                const root = document.querySelector('.hb-bbs-post');
-                const title = root && root.querySelector('.link-section-title');
-                const article = root && root.querySelector('.post__content .hb-article');
-                const cover = article && article.querySelector('img');
-                const images = article ? Array.from(article.querySelectorAll('img')).map((item) => ({
-                    url: item.currentSrc || item.src || item.getAttribute('data-src') || '',
-                    alt: item.getAttribute('alt') || item.getAttribute('title') || '',
-                })).filter((item) => item.url) : [];
-                return {
-                    title: title ? title.innerText : '',
-                    description: article ? article.innerText : '',
-                    cover: cover ? (cover.currentSrc || cover.src || '') : '',
-                    images,
-                    body: '',
-                };
-                }"""
-            else:
-                metadata_script = """() => {
-                const meta = (name, property=false) => {
-                    const selector = property ? `meta[property="${name}"]` : `meta[name="${name}"]`;
-                    const node = document.querySelector(selector);
-                    return node ? (node.content || '') : '';
-                };
-                const h1 = document.querySelector('h1');
-                return {
-                    title: meta('og:title', true) || (h1 && h1.innerText) || document.title || '',
-                    description: meta('description') || meta('og:description', true) || '',
-                    cover: meta('og:image', true) || '',
-                    images: [],
-                    body: document.body ? document.body.innerText.slice(0, 12000) : '',
-                };
-                }"""
-            metadata = await page.evaluate(metadata_script)
+            metadata = await page.evaluate(self._detail_script(canonical_url))
             discussions: list[dict[str, Any]] = []
+            seen_discussions: set[tuple[str, str]] = set()
             if any(name in include for name in ("comments", "replies", "danmaku")):
                 for selector, kind in self.spec.discussion_selectors:
                     if kind == "danmaku" and "danmaku" not in include:
@@ -388,8 +554,10 @@ class PlatformAdapter:
                         texts = []
                     for index, text in enumerate(texts[:maximum]):
                         cleaned = clean_text(text, 600)
-                        if not cleaned:
+                        discussion_key = (kind, cleaned)
+                        if not cleaned or discussion_key in seen_discussions:
                             continue
+                        seen_discussions.add(discussion_key)
                         discussions.append(
                             {
                                 "discussion_id": stable_fingerprint(canonical_url, kind, index, cleaned)[:32],
@@ -408,6 +576,8 @@ class PlatformAdapter:
         description = clean_text(metadata.get("description"), 4000)
         if not description:
             description = clean_text(metadata.get("body"), 4000)
+        if self.spec.name in {"douyin", "tieba", "xiaoheihe"} and not description:
+            raise RuntimeError("detail_content_unavailable")
         resolved_content_id = self.content_id(canonical_url)
         if not resolved_content_id:
             raise ValueError("content URL is not a supported content route")
@@ -420,7 +590,7 @@ class PlatformAdapter:
         )[:12]
         return {
             "platform": self.spec.name,
-            "content_type": self.spec.content_type,
+            "content_type": self._content_type_for_url(canonical_url),
             "content_id": resolved_content_id,
             "canonical_url": canonical_url,
             "title": title,
@@ -428,7 +598,7 @@ class PlatformAdapter:
             "cover_ref": normalize_url(metadata.get("cover")),
             "image_urls": image_urls,
             "image_count": len(image_urls),
-            "author": {"display_name": "", "fingerprint": ""},
+            "author": {"display_name": clean_text(metadata.get("author"), 120), "fingerprint": ""},
             "published_at": 0,
             "stats": {
                 "play_count": 0,

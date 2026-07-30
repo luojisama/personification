@@ -261,7 +261,9 @@ class SocialResearchService:
             if ref
         ]
         item["cover_ref"] = refs[0] if refs else ""
-        item["image_refs"] = refs[:6] if platform == "xiaoheihe" else refs[:3]
+        content_type = str(item.get("content_type") or "").strip().lower()
+        media_limit = 6 if platform == "xiaoheihe" or content_type in {"article", "post"} else 3
+        item["image_refs"] = refs[:media_limit]
         item["image_count"] = max(int(item.get("image_count", 0) or 0), len(raw_images))
 
     async def _enrich_xiaoheihe_search_items(
