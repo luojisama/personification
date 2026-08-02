@@ -177,7 +177,7 @@ def test_target_research_packet_prioritizes_three_compact_cross_platform_items()
     assert len(rendered) <= slang.MAX_TARGET_PACKET_CHARS
 
 
-def test_invalid_or_cross_content_evidence_is_rejected() -> None:
+def test_invalid_quote_is_rejected_and_cross_content_evidence_is_split() -> None:
     slang = load_personification_module("plugin.personification.core.slang_learning")
     validated = slang.validate_content_packet(_packet(
         _item("bilibili", "BV1", [("c1", "刘涛就是六级甲")]),
@@ -188,7 +188,58 @@ def test_invalid_or_cross_content_evidence_is_rejected() -> None:
     cross["evidence_refs"].append({
         "packet_id": "packet-one", "platform": "douyin", "content_id": "D1", "discussion_id": "c2", "quote": "刘涛就是六套"
     })
-    assert slang.validate_extracted_claims({"claims": [invalid_quote, cross]}, validated) == []
+    repaired = slang.validate_extracted_claims({"claims": [invalid_quote, cross]}, validated)
+    assert [claim["content_key"] for claim in repaired] == ["bilibili:BV1", "douyin:D1"]
+    assert all(claim["meaning"] == "六级甲" for claim in repaired)
+
+
+def test_extractor_schema_normalization_splits_cross_content_claims() -> None:
+    slang = load_personification_module("plugin.personification.core.slang_learning")
+    validated = slang.validate_content_packet(_packet(
+        _item("bilibili", "BV1", [("c1", "花来就是完整夺取对方装备")]),
+        _item("xiaoheihe", "X1", [("c2", "花来指换上对方装备后撤离")]),
+    ))
+    payload = {
+        "claims": [{
+            "term": "花来",
+            "aliases": [],
+            "meaning": "击败对手后换上其装备并撤离",
+            "game_context": "三角洲行动",
+            "version_context": "",
+            "usage_context": "讨论夺取装备时",
+            "safe_usage": "仅在游戏语境使用",
+            "risk_level": "低",
+            "extractor_confidence": 0.91,
+            "evidence_refs": [
+                {
+                    "packet_id": "packet-one",
+                    "platform": "bilibili",
+                    "content_id": "BV1",
+                    "discussion_id": "c1",
+                    "quote": "花来就是完整夺取对方装备",
+                },
+                {
+                    "packet_id": "packet-one",
+                    "platform": "xiaoheihe",
+                    "content_id": "X1",
+                    "discussion_id": "c2",
+                    "quote": "花来指换上对方装备后撤离",
+                },
+            ],
+        }],
+    }
+
+    claims = slang.validate_extracted_claims(payload, validated)
+
+    assert [claim["content_key"] for claim in claims] == [
+        "bilibili:BV1",
+        "xiaoheihe:X1",
+    ]
+    assert {claim["risk_level"] for claim in claims} == {"low"}
+    assert {claim["game_context"]["canonical_name"] for claim in claims} == {
+        "三角洲行动"
+    }
+    assert len({claim["meaning"] for claim in claims}) == 1
 
 
 def test_comments_in_one_video_count_once_and_reposts_merge_across_platforms() -> None:
