@@ -128,8 +128,18 @@ class _BuiltinManager(_Manager):
             return {"platform": params["platform"], "state": "login_required", "authenticated": False}
         raise KeyError(method)
 
-    async def builtin_call_tool(self, remote_name: str, arguments: dict):
+    async def builtin_call_tool(
+        self,
+        remote_name: str,
+        arguments: dict,
+        *,
+        postprocess_max_claims: int | None = None,
+    ):
         assert remote_name in {"social_content_search", "research_game_slang"}
+        if remote_name == "research_game_slang":
+            assert postprocess_max_claims == 20
+        else:
+            assert postprocess_max_claims is None
         self.tool_calls.append((remote_name, dict(arguments)))
         return json.dumps({
             "schema_version": 1,
@@ -142,6 +152,56 @@ class _BuiltinManager(_Manager):
             "items": [],
             "filtered_counts": {},
             "warnings": [],
+        })
+
+
+class _EnrichedBuiltinManager(_BuiltinManager):
+    async def builtin_call_tool(
+        self,
+        remote_name: str,
+        arguments: dict,
+        *,
+        postprocess_max_claims: int | None = None,
+    ):
+        assert postprocess_max_claims == 20
+        self.tool_calls.append((remote_name, dict(arguments)))
+        return json.dumps({
+            "schema_version": 1,
+            "packet_id": "packet-enriched",
+            "trust": "untrusted_data_only",
+            "retrieved_at": time.time(),
+            "expires_at": time.time() + 3600,
+            "partial": False,
+            "platform_statuses": {},
+            "items": [],
+            "filtered_counts": {},
+            "warnings": [],
+            "slang_claims": [{"term": "花来", "meaning": "红狼夺舍流玩法"}],
+            "target_senses": [{
+                "sense_id": "sense-enriched",
+                "meaning": "红狼夺舍流玩法",
+                "status": "understand_only",
+            }],
+            "semantic_validation": {
+                "target_term": "花来",
+                "target_game": "三角洲行动",
+                "status": "confirmed",
+                "claim_count": 2,
+                "supporting_source_group_count": 2,
+                "supporting_origins": ["bilibili", "xiaoheihe"],
+                "consensus_sense_id": "sense-enriched",
+                "consensus_meaning": "红狼夺舍流玩法",
+                "satisfies_request": True,
+                "gap_codes": [],
+            },
+            "semantic_processing": {
+                "extraction_status": "ready",
+                "extraction_elapsed_ms": 1234,
+                "learning_status": "completed",
+                "learning_elapsed_ms": 456,
+                "target_learning_queued": 0,
+                "target_claim_count": 2,
+            },
         })
 
 
@@ -372,3 +432,28 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
     )
     assert search_preview.json()["tool_name"] == "social_content_search"
     assert "semantic_validation" not in search_preview.json()["packet"]
+
+
+def test_builtin_social_preview_reuses_manager_semantic_postprocessing(monkeypatch) -> None:
+    manager = _EnrichedBuiltinManager()
+    client = _client(monkeypatch, manager)
+
+    response = client.post(
+        "/api/mcp/builtin/social-research/preview",
+        json={"term": "花来", "game": "三角洲行动"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["claims"] == [{"term": "花来", "meaning": "红狼夺舍流玩法"}]
+    assert payload["senses"][0]["sense_id"] == "sense-enriched"
+    assert payload["packet"]["semantic_validation"]["status"] == "confirmed"
+    assert payload["packet"]["semantic_validation"]["satisfies_request"] is True
+    assert payload["packet"]["semantic_processing"] == {
+        "extraction_status": "ready",
+        "extraction_elapsed_ms": 1234,
+        "learning_status": "completed",
+        "learning_elapsed_ms": 456,
+        "target_learning_queued": 0,
+        "target_claim_count": 2,
+    }

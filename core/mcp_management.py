@@ -975,6 +975,8 @@ class McpRuntimeManager:
         remote_name: str,
         arguments: dict[str, Any],
         raw_result: str,
+        *,
+        postprocess_max_claims: int | None = None,
     ) -> str:
         caller = self._slang_tool_caller()
         if caller is None:
@@ -1000,7 +1002,19 @@ class McpRuntimeManager:
                 return raw_result
             max_claims = max(
                 1,
-                min(50, int(getattr(self.runtime.plugin_config, "personification_slang_max_claims", 20) or 20)),
+                min(
+                    50,
+                    int(
+                        postprocess_max_claims
+                        if postprocess_max_claims is not None
+                        else getattr(
+                            self.runtime.plugin_config,
+                            "personification_slang_max_claims",
+                            20,
+                        )
+                        or 20
+                    ),
+                ),
             )
             target_term = str(arguments.get("term") or arguments.get("query") or "").strip()[:80]
             target_game = str(arguments.get("game") or "").strip()[:100]
@@ -1435,7 +1449,13 @@ class McpRuntimeManager:
         media = await asyncio.gather(*(materialize(platform, url) for platform, url in resolved))
         return [value for value in media if value][:2]
 
-    async def builtin_call_tool(self, remote_name: str, arguments: dict[str, Any] | None = None) -> str:
+    async def builtin_call_tool(
+        self,
+        remote_name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        postprocess_max_claims: int | None = None,
+    ) -> str:
         allowed = {str(tool.get("name") or "") for tool in builtin_social_tools()}
         if remote_name not in allowed:
             raise ValueError("unsupported builtin MCP tool")
@@ -1449,7 +1469,16 @@ class McpRuntimeManager:
                 client = self._clients.get(BUILTIN_SOCIAL_MCP_ID)
             if client is None or not client.is_running:
                 raise RuntimeError("builtin MCP process is unavailable")
-        return await client.call_tool(remote_name, dict(arguments or {}))
+        tool_arguments = dict(arguments or {})
+        result = await client.call_tool(remote_name, tool_arguments)
+        if remote_name != "research_game_slang":
+            return result
+        return await self._postprocess_builtin_social_result(
+            remote_name,
+            tool_arguments,
+            result,
+            postprocess_max_claims=postprocess_max_claims,
+        )
 
     async def install(
         self,

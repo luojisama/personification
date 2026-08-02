@@ -504,6 +504,59 @@ def test_builtin_social_agent_tool_requires_one_ready_platform(tmp_path: Path, m
         )
 
 
+def test_builtin_social_webui_call_uses_shared_postprocessing(tmp_path: Path, monkeypatch) -> None:
+    _init_store(tmp_path, monkeypatch)
+    management = load_personification_module("plugin.personification.core.mcp_management")
+    registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
+    config = SimpleNamespace(
+        personification_data_dir=str(tmp_path),
+        personification_mcp_secret_file="",
+    )
+    registry = registry_mod.ToolRegistry()
+    runtime = SimpleNamespace(plugin_config=config, runtime_bundle=SimpleNamespace(tool_registry=registry))
+    manager = management.McpRuntimeManager(runtime, registry)
+    manager.store.ensure_builtin_social()
+    manager.store.set_installation_enabled(management.BUILTIN_SOCIAL_MCP_ID, True)
+
+    class _Client:
+        is_running = True
+
+        async def call_tool(self, remote_name, arguments):  # noqa: ANN001
+            assert remote_name == "research_game_slang"
+            assert arguments == {"term": "花来", "game": "三角洲行动"}
+            return '{"schema_version":1,"packet_id":"packet-one","items":[]}'
+
+    observed: dict = {}
+
+    async def postprocess(remote_name, arguments, raw_result, *, postprocess_max_claims=None):  # noqa: ANN001
+        observed.update({
+            "remote_name": remote_name,
+            "arguments": arguments,
+            "raw_result": raw_result,
+            "postprocess_max_claims": postprocess_max_claims,
+        })
+        return '{"semantic_validation":{"status":"confirmed"}}'
+
+    manager._clients[management.BUILTIN_SOCIAL_MCP_ID] = _Client()
+    manager._postprocess_builtin_social_result = postprocess
+
+    result = asyncio.run(
+        manager.builtin_call_tool(
+            "research_game_slang",
+            {"term": "花来", "game": "三角洲行动"},
+            postprocess_max_claims=7,
+        )
+    )
+
+    assert json.loads(result)["semantic_validation"]["status"] == "confirmed"
+    assert observed == {
+        "remote_name": "research_game_slang",
+        "arguments": {"term": "花来", "game": "三角洲行动"},
+        "raw_result": '{"schema_version":1,"packet_id":"packet-one","items":[]}',
+        "postprocess_max_claims": 7,
+    }
+
+
 def test_builtin_social_result_media_resolver_is_xiaoheihe_only_bounded_and_fail_closed(
     tmp_path: Path, monkeypatch
 ) -> None:

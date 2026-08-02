@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import re
-import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -20,7 +18,7 @@ from ...core.mcp_management import (
 from ...core.mcp_builtin import BUILTIN_SOCIAL_MCP_ID
 from ...core.mcp_builtin_platform_store import BuiltinPlatformStore, CONFIG_FIELDS, PLATFORMS
 from ...core.meme_learning_store import LearningThresholds, MemeLearningStore
-from ...core.slang_learning import SlangLearningPipeline, build_semantic_validation
+from ...core.slang_learning import build_semantic_validation
 from ...core.operation_diagnostics import diagnostic, detail, step
 from ..deps import AdminIdentity, get_client_ip, require_admin
 
@@ -58,13 +56,6 @@ def _safe_builtin_error(exc: Exception, title: str) -> HTTPException:
         "message": messages.get(code, "原生社交平台 MCP 操作未完成，请检查服务、登录态或平台风控状态。"),
         "error_type": type(exc).__name__,
     })
-
-
-def _runtime_tool_caller(runtime: Any) -> Any:
-    bundle = getattr(runtime, "runtime_bundle", None)
-    deps = getattr(bundle, "reply_processor_deps", None)
-    inner = getattr(deps, "runtime", None)
-    return getattr(inner, "lite_tool_caller", None) or getattr(inner, "agent_tool_caller", None)
 
 
 def _cover_url_allowed(platform: str, value: str) -> bool:
@@ -174,27 +165,10 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
                 "depth": depth,
                 "limit": limit,
             }
-        raw = await manager().builtin_call_tool(
-            tool_name,
-            tool_arguments,
-        )
-        try:
-            packet = json.loads(raw)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("invalid builtin content packet") from exc
-        caller = _runtime_tool_caller(runtime)
-        claims: list[dict[str, Any]] = []
-        senses: list[dict[str, Any]] = []
-        store = learning_store()
-        extraction_elapsed_ms = 0
-        learning_elapsed_ms = 0
-        extraction_status = "not_started"
-        learning_status = "not_required"
-        target_learning_queued = 0
-        if caller is not None and tool_name == "research_game_slang":
-            pipeline = SlangLearningPipeline(
-                tool_caller=caller,
-                max_claims=max(
+        max_claims: int | None = None
+        if tool_name == "research_game_slang":
+            try:
+                max_claims = max(
                     1,
                     min(
                         50,
@@ -206,75 +180,51 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
                             or 20
                         ),
                     ),
-                ),
-            )
-            extraction_started_at = time.monotonic()
-            claims = await pipeline.extract_claims(
-                packet,
-                target_term=term,
-                target_game=game,
-            )
-            extraction_elapsed_ms = int((time.monotonic() - extraction_started_at) * 1000)
-            extraction_status = str(
-                getattr(pipeline, "last_extraction_status", "ready" if claims else "empty")
-                or "empty"
-            )
-            learning_started_at = time.monotonic()
-            if claims:
-                try:
-                    senses = await asyncio.wait_for(
-                        store.ingest_claims(
-                            claims,
-                            semantic_pipeline=pipeline,
-                            model_route="webui_social_research",
-                        ),
-                        timeout=6.0,
-                    )
-                    learning_status = "completed"
-                except asyncio.TimeoutError:
-                    learning_status = "timed_out"
-                    target_learning_queued = manager()._discovery_queue().schedule_claims(
-                        claims,
-                        target_term="",
-                    )
-                except Exception:
-                    learning_status = "failed"
-                    target_learning_queued = manager()._discovery_queue().schedule_claims(
-                        claims,
-                        target_term="",
-                    )
-            learning_elapsed_ms = int((time.monotonic() - learning_started_at) * 1000)
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("max_claims must be an integer") from exc
+        raw = await manager().builtin_call_tool(
+            tool_name,
+            tool_arguments,
+            postprocess_max_claims=max_claims,
+        )
+        try:
+            packet = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("invalid builtin content packet") from exc
+        claims = [
+            dict(item)
+            for item in list(packet.get("slang_claims") or [])
+            if isinstance(item, dict)
+        ]
+        senses = [
+            dict(item)
+            for item in list(packet.get("target_senses") or [])
+            if isinstance(item, dict)
+        ]
         if tool_name == "research_game_slang":
-            normalized_target = term.casefold()
-            target_claims = [
-                claim
-                for claim in claims
-                if normalized_target
-                and normalized_target
-                in {
-                    str(claim.get("term") or "").strip().casefold(),
-                    *{
-                        str(alias or "").strip().casefold()
-                        for alias in list(claim.get("aliases") or [])
-                    },
-                }
-            ]
-            packet["semantic_validation"] = build_semantic_validation(
-                target_term=term,
-                target_game=game,
-                target_claims=target_claims,
-                target_senses=senses,
-                packet=packet,
-                claim_min_confidence=store.thresholds.claim_min_confidence,
-            )
-            packet["semantic_processing"] = {
-                "extraction_status": extraction_status,
-                "extraction_elapsed_ms": extraction_elapsed_ms,
-                "learning_status": learning_status,
-                "learning_elapsed_ms": learning_elapsed_ms,
-                "target_learning_queued": target_learning_queued,
-                "target_claim_count": len(target_claims),
-            }
+            semantic = packet.get("semantic_validation")
+            if not isinstance(semantic, dict):
+                semantic = build_semantic_validation(
+                    target_term=term,
+                    target_game=game,
+                    target_claims=claims,
+                    target_senses=senses,
+                    packet=packet,
+                    claim_min_confidence=learning_store().thresholds.claim_min_confidence,
+                )
+            packet["semantic_validation"] = semantic
+            processing = packet.get("semantic_processing")
+            if not isinstance(processing, dict):
+                processing = {}
+            processing = dict(processing)
+            processing.setdefault("extraction_status", "not_started")
+            processing.setdefault("extraction_elapsed_ms", 0)
+            processing.setdefault("learning_status", "not_required")
+            processing.setdefault("learning_elapsed_ms", 0)
+            processing.setdefault("target_learning_queued", 0)
+            processing.setdefault("target_claim_count", len(claims))
+            packet["semantic_processing"] = processing
         return {
             "tool_name": tool_name,
             "packet": packet,
