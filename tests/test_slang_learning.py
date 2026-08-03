@@ -148,7 +148,7 @@ def test_target_extraction_timeout_returns_empty_evidence_status() -> None:
 def test_default_target_extraction_budget_covers_observed_routed_model_latency() -> None:
     slang = load_personification_module("plugin.personification.core.slang_learning")
 
-    assert slang.DEFAULT_EXTRACTION_TIMEOUT_SECONDS == 18.0
+    assert slang.DEFAULT_EXTRACTION_TIMEOUT_SECONDS == 27.0
 
 
 def test_extraction_diagnostics_explain_items_removed_before_model_call() -> None:
