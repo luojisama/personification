@@ -125,7 +125,16 @@ class _BuiltinManager(_Manager):
         if method.endswith("/auth/qrcode"):
             return {"data_base64": base64.b64encode(b"png-data").decode("ascii")}
         if method.endswith("/auth/frame"):
-            return {"mime_type": "image/jpeg", "data_base64": base64.b64encode(b"jpeg-data").decode("ascii")}
+            self.auth_requests.append({"interactive_frame": dict(params)})
+            if int(params.get("after_revision") or 0) >= 1:
+                return {"interactive_frame_revision": 1, "changed": False, "stale": False}
+            return {
+                "mime_type": "image/jpeg",
+                "data_base64": base64.b64encode(b"jpeg-data").decode("ascii"),
+                "interactive_frame_revision": 1,
+                "changed": True,
+                "stale": False,
+            }
         if method.endswith("/auth/input"):
             self.auth_requests.append({"interactive_input": dict(params)})
             return {
@@ -398,6 +407,15 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
     assert frame.content == b"jpeg-data"
     assert frame.headers["content-type"] == "image/jpeg"
     assert frame.headers["cache-control"] == "no-store, private"
+    assert frame.headers["x-interactive-revision"] == "1"
+    unchanged_frame = client.get(
+        "/api/mcp/builtin/social-research/auth/session-1/frame",
+        params={"platform": "douyin", "revision": 1},
+    )
+    assert unchanged_frame.status_code == 204
+    assert unchanged_frame.content == b""
+    assert unchanged_frame.headers["x-interactive-revision"] == "1"
+    assert manager.auth_requests[-1]["interactive_frame"]["after_revision"] == 1
     interactive_input = client.post(
         "/api/mcp/builtin/social-research/auth/session-1/input",
         params={"platform": "douyin"},

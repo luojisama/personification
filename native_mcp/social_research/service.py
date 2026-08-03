@@ -173,6 +173,13 @@ class SocialResearchService:
     async def auth_status(self, params: dict[str, Any]) -> dict[str, Any]:
         owner = clean_text(params.get("owner"), 200)
         session = self.browsers.get_auth(str(params.get("session_id") or ""), owner)
+        if (
+            session.login_mode == "webui_interactive"
+            and session.status == "starting"
+            and session.interactive_start_task is not None
+            and not session.interactive_start_task.done()
+        ):
+            return self.browsers.public_auth(session)
         if session.login_mode == "protocol_qr":
             if session.status == "expired":
                 await self.browsers.expire_auth(session)
@@ -232,6 +239,7 @@ class SocialResearchService:
         return await self.browsers.interactive_frame(
             str(params.get("session_id") or ""),
             clean_text(params.get("owner"), 200),
+            after_revision=params.get("after_revision", 0),
         )
 
     async def auth_input(self, params: dict[str, Any]) -> dict[str, Any]:

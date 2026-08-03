@@ -686,6 +686,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
     async def builtin_auth_frame(
         session_id: str,
         platform: str,
+        revision: int = Query(default=0, ge=0, le=2_147_483_647),
         admin: AdminIdentity = Depends(require_admin),
     ) -> Response:
         if platform not in PLATFORMS:
@@ -693,8 +694,24 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         try:
             result = await manager().builtin_request(
                 "personification/builtin/auth/frame",
-                {"session_id": session_id, "owner": _auth_owner(admin, platform)},
+                {
+                    "session_id": session_id,
+                    "owner": _auth_owner(admin, platform),
+                    "after_revision": revision,
+                },
             )
+            frame_revision = max(0, int(result.get("interactive_frame_revision") or 0))
+            changed = bool(result.get("changed", bool(result.get("data_base64"))))
+            common_headers = {
+                "Cache-Control": "no-store, private",
+                "Pragma": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'",
+                "X-Interactive-Revision": str(frame_revision),
+                "X-Interactive-Stale": "1" if result.get("stale") else "0",
+            }
+            if not changed:
+                return Response(status_code=204, headers=common_headers)
             image = base64.b64decode(str(result.get("data_base64") or ""), validate=True)
             mime_type = str(result.get("mime_type") or "")
             if mime_type not in {"image/jpeg", "image/png"} or not image or len(image) > 2 * 1024 * 1024:
@@ -704,12 +721,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         return Response(
             content=image,
             media_type=mime_type,
-            headers={
-                "Cache-Control": "no-store, private",
-                "Pragma": "no-cache",
-                "X-Content-Type-Options": "nosniff",
-                "Content-Security-Policy": "default-src 'none'",
-            },
+            headers=common_headers,
         )
 
     @router.post("/builtin/social-research/auth/{session_id}/input")

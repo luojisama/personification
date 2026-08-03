@@ -160,7 +160,7 @@ def test_install_confirmation_is_fresh_and_does_not_invent_paths() -> None:
     assert 'String(choice) === registryDefault ? "selected"' in source
 
 
-def test_mcp_events_are_single_registration_and_only_auth_session_polls() -> None:
+def test_mcp_events_are_single_registration_and_polling_is_bounded() -> None:
     source = _source("app-mcp.js")
 
     assert source.count("if (!window.__personificationMcpPageEvents)") == 1
@@ -168,7 +168,9 @@ def test_mcp_events_are_single_registration_and_only_auth_session_polls() -> Non
     assert source.count('document.addEventListener("change"') == 1
     assert source.count('document.addEventListener("keydown"') == 1
     assert source.count("setInterval(") == 1
-    assert "setTimeout(" not in source
+    assert source.count("setTimeout(") == 1
+    assert "_mcpInteractiveFrameGeneration" in source
+    assert "_mcpInteractiveFrameInFlight" in source
     assert "function stopMcpViewLifecycle" in source
     assert "function startBuiltinAuthPolling" in source
     assert 'state.view !== "mcp" || state.mcpTab !== "builtin"' in source
@@ -185,18 +187,18 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
     styles = _source("style.css")
 
     for visible_copy in (
-        "原生 MCP",
-        "扩展 MCP",
-        "平台登录与能力",
-        "获取 WebUI 二维码",
-        "在普通浏览器中登录",
-        "在 WebUI 中人工验证",
+            "原生 MCP",
+            "扩展 MCP",
+            "平台登录与能力",
+            "尝试读取官方二维码",
+            "在普通浏览器中登录",
+            "在 WebUI 中登录（推荐）",
         "确认接管",
         "确认并启动人工验证",
         "WebUI 人工验证",
         "验证完成，检查登录态",
         "系统不会自动识别或破解验证码",
-        "拖动轨迹由你的指针原样转发",
+            "点击、拖动和输入按顺序发送",
         "注销并删除 profile",
         "检索预览",
         "一次内容默认提取全部黑话",
@@ -211,7 +213,7 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
         "状态历史",
         "机器人验证",
         "不要扫描 Logo 占位图",
-        "重新获取 WebUI 二维码",
+            "重新尝试读取官方二维码",
         "获取无窗口二维码",
         "不依赖可见窗口",
         "服务端会话剩余",
@@ -250,6 +252,7 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
     assert "data-mcp-auth-interactive-confirm" in source
     assert "data-mcp-auth-interactive-cancel" in source
     assert "data-mcp-interactive-frame" in source
+    assert "data-mcp-interactive-status" in source
     assert "/frame?platform=" in source
     assert "/input?platform=" in source
     assert "/finish?platform=" in source
@@ -268,6 +271,7 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
     assert ".mcp-login-qr { width:240px; height:240px;" in styles
     assert ".mcp-interactive-screen" in styles
     assert "image-rendering:pixelated" in styles
+    assert ".mcp-interactive-frame-placeholder" in styles
     for forbidden in ("cookie", "localStorage.setItem", "profile_path", "device_id", "raw_html"):
         assert forbidden not in source.lower()
 
@@ -292,6 +296,25 @@ def test_interactive_auth_uses_accessible_webui_confirmation_before_starting_ses
     assert '_mcpPendingInteractiveAuth = null' in confirmer
     assert 'startBuiltinAuth(platform, "webui_interactive")' in confirmer
     assert "_mcpPendingInteractiveAuth = null" in source.split("function stopMcpViewLifecycle", 1)[1].split("\n}", 1)[0]
+
+
+def test_interactive_auth_uses_stable_incremental_frames_and_queued_actions() -> None:
+    source = _source("app-mcp.js")
+    renderer = source.split("function renderBuiltinInteractiveAuth", 1)[1].split("\n}", 1)[0]
+    refresher = source.split("async function refreshVisibleBuiltinInteractiveFrames", 1)[1].split("\n}", 1)[0]
+    sender = source.split("function sendBuiltinInteractiveAction", 1)[1].split("\n}", 1)[0]
+    status_poll = source.split("function startBuiltinAuthPolling", 1)[1].split("\n}", 1)[0]
+
+    assert "Date.now()" not in renderer
+    assert "frame.objectUrl" in renderer
+    assert "_mcpInteractiveFrameInFlight" in refresher
+    assert 'response.status === 204' in refresher
+    assert 'X-Interactive-Revision' in refresher
+    assert "_mcpInteractiveActionQueue.push" in sender
+    assert "_MCP_INTERACTIVE_ACTION_QUEUE_MAX" in sender
+    assert "render();" not in sender
+    assert "builtinAuthRenderSignature" in status_poll
+    assert "shouldRender" in status_poll
 
 
 def test_mcp_external_links_reject_empty_values_before_url_resolution() -> None:

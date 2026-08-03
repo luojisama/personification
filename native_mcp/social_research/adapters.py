@@ -68,7 +68,7 @@ SPECS: dict[str, PlatformSpec] = {
         ),
         qr_selectors=(
             'img[alt="二维码"]',
-            '[id^="login-full-panel-"] img[alt]',
+            '[id^="login-full-panel-"] img[alt*="二维码"]',
             'img[src*="qrcode"]',
             'canvas[class*="qr"]',
             '[class*="login"] canvas',

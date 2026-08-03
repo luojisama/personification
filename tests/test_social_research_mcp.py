@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1341,11 +1342,21 @@ def test_qr_visual_gate_rejects_loading_placeholder_and_accepts_real_qr() -> Non
     ImageDraw.Draw(placeholder).text((30, 70), "QR loading", fill="white")
     output = BytesIO()
     placeholder.save(output, format="PNG")
+    avatar = Image.new("RGB", (240, 240), "white")
+    avatar_draw = ImageDraw.Draw(avatar)
+    avatar_draw.ellipse((18, 18, 222, 222), fill="#f2a6b8", outline="#242936", width=8)
+    avatar_draw.polygon(((20, 70), (85, 10), (125, 88)), fill="#7b2339")
+    avatar_draw.ellipse((62, 65, 118, 132), fill="#f7fbff", outline="#162033", width=7)
+    avatar_draw.ellipse((78, 74, 104, 125), fill="#54a9ee", outline="#162033", width=5)
+    avatar_draw.arc((80, 120, 190, 205), 15, 150, fill="#7b2339", width=8)
+    avatar_output = BytesIO()
+    avatar.save(avatar_output, format="PNG")
     real_qr = protocol.render_qr_png(
         "https://account.bilibili.com/h5/account-h5/auth/scan-web?qrcode_key=" + "1" * 32
     )
 
     assert browser_mod.BrowserPool._looks_like_qr_png(output.getvalue()) is False
+    assert browser_mod.BrowserPool._looks_like_qr_png(avatar_output.getvalue()) is False
     assert browser_mod.BrowserPool._looks_like_qr_png(real_qr) is True
 
 
@@ -1900,7 +1911,7 @@ def test_webui_interactive_auth_relays_only_bounded_human_input(tmp_path: Path) 
         screenshots = 0
 
         async def screenshot(self, **kwargs):  # noqa: ANN001, ANN201
-            assert kwargs == {"type": "jpeg", "quality": 70}
+            assert kwargs == {"type": "jpeg", "quality": 60}
             self.screenshots += 1
             return b"safe-jpeg"
 
@@ -1922,7 +1933,11 @@ def test_webui_interactive_auth_relays_only_bounded_human_input(tmp_path: Path) 
 
     async def run():
         first = await pool.interactive_frame("interactive", "admin:device:douyin")
-        second = await pool.interactive_frame("interactive", "admin:device:douyin")
+        second = await pool.interactive_frame(
+            "interactive",
+            "admin:device:douyin",
+            after_revision=first["interactive_frame_revision"],
+        )
         await pool.interactive_action(
             "interactive", "admin:device:douyin", {"type": "click", "x": 100, "y": 200}
         )
@@ -1952,6 +1967,8 @@ def test_webui_interactive_auth_relays_only_bounded_human_input(tmp_path: Path) 
     first, second = asyncio.run(run())
     assert base64.b64decode(first["data_base64"]) == b"safe-jpeg"
     assert second["interactive_frame_revision"] == 1
+    assert second["changed"] is False
+    assert "data_base64" not in second
     assert page.screenshots == 1
     assert first["interactive_display_url"] == "https://passport.douyin.com/"
     assert "secret" not in json.dumps(first)
@@ -1974,6 +1991,172 @@ def test_webui_interactive_auth_relays_only_bounded_human_input(tmp_path: Path) 
                 "interactive", "admin:device:douyin", {"type": "key", "key": "Control+L"}
             )
         )
+
+
+def test_webui_interactive_auth_starts_page_in_background(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+
+    async def run():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class FakePage:
+            url = "https://www.douyin.com/"
+
+            async def goto(self, *_args, **_kwargs) -> None:
+                entered.set()
+                await release.wait()
+
+            async def wait_for_timeout(self, _milliseconds) -> None:  # noqa: ANN001
+                return None
+
+        async def fake_page(_platform, *, headless=True):  # noqa: ANN001
+            assert headless is True
+            return FakePage()
+
+        async def fake_wait(session, _page, timeout_seconds=10.0):  # noqa: ANN001
+            assert timeout_seconds == 10.0
+            session.status = "manual_verification_required"
+            session.verification_kind = "official_page"
+
+        pool.page = fake_page
+        pool._wait_for_auth_surface = fake_wait
+        result = await pool.start_interactive_auth(
+            "douyin",
+            "admin:device:douyin",
+            "https://www.douyin.com/",
+            ("douyin.com",),
+            (),
+            (),
+        )
+        assert result["status"] == "starting"
+        assert result["interactive_available"] is False
+        await entered.wait()
+        session = pool.get_auth(result["session_id"], "admin:device:douyin")
+        assert session.interactive_start_task is not None
+        assert session.interactive_start_task.done() is False
+        release.set()
+        await session.interactive_start_task
+        return pool.public_auth(session)
+
+    finished = asyncio.run(run())
+    assert finished["status"] == "manual_verification_required"
+    assert finished["interactive_available"] is True
+
+
+def test_scanned_qr_avatar_transitions_to_device_confirmation(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    session = browser_mod.AuthSession(
+        session_id="scanned",
+        platform="douyin",
+        owner="admin:device:douyin",
+        status="waiting_scan",
+        login_mode="headless_page_qr",
+        qr_png=b"original-qr",
+        qr_missing_since=time.time() - 1.0,
+    )
+
+    async def no_qr(_page, _selectors):  # noqa: ANN001
+        return b""
+
+    async def no_text(_page):  # noqa: ANN001
+        return ""
+
+    pool._capture_qr = no_qr
+    pool._page_text = no_text
+    asyncio.run(pool._inspect_auth_page(session, object()))
+
+    assert session.status == "manual_verification_required"
+    assert session.verification_kind == "device_confirmation"
+    assert session.qr_png == b""
+
+
+def test_interactive_frame_returns_cached_frame_while_page_is_busy(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    session = browser_mod.AuthSession(
+        session_id="busy-frame",
+        platform="douyin",
+        owner="admin:device:douyin",
+        status="manual_verification_required",
+        login_mode="webui_interactive",
+        official_window_open=True,
+        interactive_allowed_hosts=("douyin.com",),
+        interactive_frame=b"cached-jpeg",
+        interactive_frame_revision=3,
+    )
+    pool._auth[session.session_id] = session
+
+    async def run():
+        async with session.interactive_lock:
+            return await pool.interactive_frame(
+                session.session_id,
+                session.owner,
+                after_revision=2,
+            )
+
+    result = asyncio.run(run())
+    assert result["stale"] is True
+    assert result["changed"] is True
+    assert base64.b64decode(result["data_base64"]) == b"cached-jpeg"
+
+
+def test_interactive_drag_replay_time_is_capped(tmp_path: Path, monkeypatch) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    delays: list[float] = []
+
+    class FakeMouse:
+        async def move(self, *_args) -> None:
+            return None
+
+        async def down(self) -> None:
+            return None
+
+        async def up(self) -> None:
+            return None
+
+    class FakePage:
+        url = "https://www.douyin.com/"
+        viewport_size = {"width": 1280, "height": 900}
+        mouse = FakeMouse()
+
+        async def wait_for_timeout(self, _milliseconds) -> None:  # noqa: ANN001
+            return None
+
+    async def fake_sleep(seconds):  # noqa: ANN001
+        delays.append(float(seconds))
+
+    monkeypatch.setattr(browser_mod.asyncio, "sleep", fake_sleep)
+    pool._contexts["douyin"] = type("Context", (), {"pages": [FakePage()]})()
+    session = browser_mod.AuthSession(
+        session_id="long-drag",
+        platform="douyin",
+        owner="admin:device:douyin",
+        status="manual_verification_required",
+        login_mode="webui_interactive",
+        official_window_open=True,
+        interactive_allowed_hosts=("douyin.com",),
+    )
+    pool._auth[session.session_id] = session
+
+    asyncio.run(
+        pool.interactive_action(
+            session.session_id,
+            session.owner,
+            {
+                "type": "drag",
+                "points": [
+                    {"x": 10, "y": 10, "t": 0},
+                    {"x": 300, "y": 100, "t": 2500},
+                    {"x": 600, "y": 120, "t": 5000},
+                ],
+            },
+        )
+    )
+    assert 0 < sum(delays) <= browser_mod._INTERACTIVE_DRAG_REPLAY_MAX_SECONDS
 
 
 def test_webui_interactive_auth_fails_closed_after_cross_platform_redirect(tmp_path: Path) -> None:

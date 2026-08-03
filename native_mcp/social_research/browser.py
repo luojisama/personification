@@ -62,10 +62,11 @@ _INTERACTIVE_AUTH_TTL_SECONDS = 10 * 60
 _QR_REFRESH_COOLDOWN_SECONDS = 5.0
 _MAX_QR_REFRESHES = 8
 _PROTOCOL_POLL_INTERVAL_SECONDS = 1.5
-_INTERACTIVE_FRAME_CACHE_SECONDS = 0.75
+_INTERACTIVE_FRAME_CACHE_SECONDS = 0.9
 _INTERACTIVE_FRAME_MAX_BYTES = 2 * 1024 * 1024
 _INTERACTIVE_TEXT_MAX_CHARS = 200
-_INTERACTIVE_DRAG_MAX_POINTS = 64
+_INTERACTIVE_DRAG_MAX_POINTS = 32
+_INTERACTIVE_DRAG_REPLAY_MAX_SECONDS = 0.8
 _INTERACTIVE_KEYS = frozenset(
     {
         "Tab",
@@ -140,6 +141,7 @@ class AuthSession:
     login_mode: str = "embedded_qr"
     qr_refresh_count: int = 0
     last_qr_refresh_at: float = 0.0
+    qr_missing_since: float = field(default=0.0, repr=False, compare=False)
     protocol_secret: str = field(default="", repr=False, compare=False)
     last_protocol_poll_at: float = field(default=0.0, repr=False, compare=False)
     native_process: Any = field(default=None, repr=False, compare=False)
@@ -153,6 +155,7 @@ class AuthSession:
     interactive_viewport_width: int = 1280
     interactive_viewport_height: int = 900
     interactive_lock: Any = field(default_factory=asyncio.Lock, repr=False, compare=False)
+    interactive_start_task: Any = field(default=None, repr=False, compare=False)
 
 
 class BrowserPool:
@@ -250,6 +253,7 @@ class BrowserPool:
 
     async def close(self) -> None:
         for session in self._auth.values():
+            await self._cancel_interactive_start(session)
             await self._stop_manual_browser(session)
             session.protocol_secret = ""
             session.qr_png = b""
@@ -388,6 +392,49 @@ class BrowserPool:
             session.interactive_viewport_height = min(1440, max(240, int(viewport.get("height") or 900)))
         return page
 
+    async def _cancel_interactive_start(self, session: AuthSession) -> None:
+        task = session.interactive_start_task
+        session.interactive_start_task = None
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    async def _prepare_interactive_auth(self, session: AuthSession) -> None:
+        try:
+            async with session.interactive_lock:
+                if session.status == "cancelled":
+                    return
+                page = await self.page(session.platform, headless=True)
+                await page.goto(session.login_url, wait_until="domcontentloaded", timeout=20000)
+                await page.wait_for_timeout(350)
+                if await self._click_login_trigger(session, page):
+                    await page.wait_for_timeout(350)
+                await self._wait_for_auth_surface(session, page)
+                current_url = str(getattr(page, "url", "") or "")
+                if not self._interactive_url_allowed(session, current_url):
+                    raise RuntimeError("interactive_page_outside_platform")
+                if session.status == "starting":
+                    session.status = "manual_verification_required"
+                    session.verification_kind = "official_page"
+                session.interactive_display_url = self._interactive_display_url(current_url)
+                session.official_window_open = True
+        except asyncio.CancelledError:
+            return
+        except RuntimeError as exc:
+            session.status = "error"
+            session.error_code = str(exc)
+            session.official_window_open = False
+        except Exception:
+            session.status = "error"
+            session.error_code = "interactive_page_unavailable"
+            session.official_window_open = False
+
     async def start_interactive_auth(
         self,
         platform: str,
@@ -414,33 +461,50 @@ class BrowserPool:
             session.status = "error"
             session.error_code = "interactive_page_outside_platform"
             return self.public_auth(session)
-        try:
-            page = await self.page(platform, headless=True)
-            session.official_window_open = True
-            await page.goto(login_url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(500)
-            if await self._click_login_trigger(session, page):
-                await page.wait_for_timeout(500)
-            await self._wait_for_auth_surface(session, page)
-            current_url = str(getattr(page, "url", "") or "")
-            if not self._interactive_url_allowed(session, current_url):
-                raise RuntimeError("interactive_page_outside_platform")
-            if session.status == "starting":
-                session.status = "manual_verification_required"
-                session.verification_kind = "official_page"
-            session.interactive_display_url = self._interactive_display_url(current_url)
-        except RuntimeError as exc:
-            session.status = "error"
-            session.error_code = str(exc)
-            session.official_window_open = False
-        except Exception:
-            session.status = "error"
-            session.error_code = "interactive_page_unavailable"
-            session.official_window_open = False
+        session.interactive_start_task = asyncio.create_task(self._prepare_interactive_auth(session))
         return self.public_auth(session)
 
-    async def interactive_frame(self, session_id: str, owner: str) -> dict[str, Any]:
+    def _interactive_frame_result(
+        self,
+        session: AuthSession,
+        *,
+        after_revision: int,
+        stale: bool = False,
+    ) -> dict[str, Any]:
+        changed = bool(
+            session.interactive_frame
+            and session.interactive_frame_revision > after_revision
+        )
+        result = {
+            **self.public_auth(session),
+            "changed": changed,
+            "stale": bool(stale),
+            "mime_type": session.interactive_frame_mime,
+            "captured_at": float(session.interactive_frame_captured_at or 0.0),
+        }
+        if changed:
+            result["data_base64"] = base64.b64encode(session.interactive_frame).decode("ascii")
+        return result
+
+    async def interactive_frame(
+        self,
+        session_id: str,
+        owner: str,
+        *,
+        after_revision: int = 0,
+    ) -> dict[str, Any]:
         session = self.get_auth(session_id, owner)
+        if isinstance(after_revision, bool) or not isinstance(after_revision, int) or after_revision < 0:
+            raise ValueError("interactive frame revision is invalid")
+        # A frame refresh is expendable. When a direct caller races an input
+        # operation, keep serving the last safe frame instead of making the
+        # human interaction wait behind another screenshot.
+        if session.interactive_lock.locked() and session.interactive_frame:
+            return self._interactive_frame_result(
+                session,
+                after_revision=after_revision,
+                stale=True,
+            )
         async with session.interactive_lock:
             page = await self._interactive_page(session)
             now = time.time()
@@ -448,18 +512,15 @@ class BrowserPool:
                 not session.interactive_frame
                 or now - session.interactive_frame_captured_at >= _INTERACTIVE_FRAME_CACHE_SECONDS
             ):
-                image = bytes(await page.screenshot(type="jpeg", quality=70))
+                image = bytes(await page.screenshot(type="jpeg", quality=60))
                 if not image or len(image) > _INTERACTIVE_FRAME_MAX_BYTES:
                     raise RuntimeError("interactive_frame_unavailable")
-                session.interactive_frame = image
-                session.interactive_frame_mime = "image/jpeg"
-                session.interactive_frame_revision += 1
+                if image != session.interactive_frame:
+                    session.interactive_frame = image
+                    session.interactive_frame_mime = "image/jpeg"
+                    session.interactive_frame_revision += 1
                 session.interactive_frame_captured_at = now
-            return {
-                **self.public_auth(session),
-                "mime_type": session.interactive_frame_mime,
-                "data_base64": base64.b64encode(session.interactive_frame).decode("ascii"),
-            }
+            return self._interactive_frame_result(session, after_revision=after_revision)
 
     @staticmethod
     def _interactive_coordinate(value: Any, maximum: int) -> float:
@@ -508,9 +569,11 @@ class BrowserPool:
                 await page.mouse.move(normalized[0][0], normalized[0][1])
                 await page.mouse.down()
                 previous = normalized[0][2]
+                total_seconds = max(0.001, (normalized[-1][2] - previous) / 1000)
+                timing_scale = min(1.0, _INTERACTIVE_DRAG_REPLAY_MAX_SECONDS / total_seconds)
                 try:
                     for x, y, elapsed in normalized[1:]:
-                        await asyncio.sleep(min(0.12, max(0, elapsed - previous) / 1000))
+                        await asyncio.sleep(max(0, elapsed - previous) / 1000 * timing_scale)
                         await page.mouse.move(x, y)
                         previous = elapsed
                 finally:
@@ -535,10 +598,12 @@ class BrowserPool:
             else:
                 raise ValueError("interactive action is not allowed")
             session.interactive_last_action_at = time.time()
-            session.interactive_frame = b""
+            # Keep the last frame visible while the next screenshot is being
+            # produced. A zero capture time marks it dirty without flashing the
+            # WebUI back to an empty canvas.
             session.interactive_frame_captured_at = 0.0
             try:
-                await page.wait_for_timeout(120)
+                await page.wait_for_timeout(60)
             except Exception:
                 pass
             return {**self.public_auth(session), "action_applied": True}
@@ -601,13 +666,15 @@ class BrowserPool:
     @staticmethod
     def _looks_like_qr_png(image: bytes) -> bool:
         try:
-            from PIL import Image
+            from PIL import Image, ImageOps
 
             with Image.open(BytesIO(image)) as source:
                 width, height = source.size
                 if width < 80 or height < 80 or width > 1024 or height > 1024:
                     return False
-                grayscale = source.convert("L").resize((128, 128), Image.Resampling.NEAREST)
+                if not 0.75 <= width / max(1, height) <= 1.33:
+                    return False
+                grayscale = ImageOps.autocontrast(source.convert("L")).resize((160, 160), Image.Resampling.NEAREST)
                 flattened = getattr(grayscale, "get_flattened_data", None)
                 pixels = list(flattened() if callable(flattened) else grayscale.getdata())
         except Exception:
@@ -616,13 +683,93 @@ class BrowserPool:
         dark_ratio = sum(dark) / len(dark)
         extreme_ratio = sum(value < 32 or value > 223 for value in pixels) / len(pixels)
         transitions = 0
-        for y in range(128):
-            row = dark[y * 128 : (y + 1) * 128]
+        for y in range(160):
+            row = dark[y * 160 : (y + 1) * 160]
             transitions += sum(left != right for left, right in zip(row, row[1:]))
-        for x in range(128):
-            column = [dark[y * 128 + x] for y in range(128)]
+        for x in range(160):
+            column = [dark[y * 160 + x] for y in range(160)]
             transitions += sum(top != bottom for top, bottom in zip(column, column[1:]))
-        return 0.10 <= dark_ratio <= 0.80 and extreme_ratio >= 0.25 and transitions >= 800
+        if not (0.10 <= dark_ratio <= 0.72 and extreme_ratio >= 0.35 and transitions >= 1000):
+            return False
+
+        def finder_hits(*, horizontal: bool) -> list[tuple[float, float, float]]:
+            hits: list[tuple[float, float, float]] = []
+            for fixed in range(160):
+                values = (
+                    dark[fixed * 160 : (fixed + 1) * 160]
+                    if horizontal
+                    else [dark[index * 160 + fixed] for index in range(160)]
+                )
+                runs: list[tuple[bool, int, int]] = []
+                start = 0
+                current = values[0]
+                for index, value in enumerate(values[1:], start=1):
+                    if value == current:
+                        continue
+                    runs.append((current, start, index - start))
+                    current = value
+                    start = index
+                runs.append((current, start, len(values) - start))
+                for index in range(len(runs) - 4):
+                    window = runs[index : index + 5]
+                    if [item[0] for item in window] != [True, False, True, False, True]:
+                        continue
+                    lengths = [item[2] for item in window]
+                    module = sum(lengths) / 7.0
+                    if module < 1.0:
+                        continue
+                    if any(abs(length - module) > module * 0.9 for length in (*lengths[:2], *lengths[3:])):
+                        continue
+                    if abs(lengths[2] - 3 * module) > 1.35 * module:
+                        continue
+                    center = window[2][1] + window[2][2] / 2
+                    hits.append((center, float(fixed), module) if horizontal else (float(fixed), center, module))
+            return hits
+
+        horizontal_hits = finder_hits(horizontal=True)
+        vertical_hits = finder_hits(horizontal=False)
+        candidates: list[tuple[float, float, float]] = []
+        for horizontal in horizontal_hits:
+            for vertical in vertical_hits:
+                module = min(horizontal[2], vertical[2])
+                if not 0.5 <= horizontal[2] / max(0.01, vertical[2]) <= 2.0:
+                    continue
+                if math.hypot(horizontal[0] - vertical[0], horizontal[1] - vertical[1]) <= max(3.0, 2.5 * module):
+                    candidates.append(((horizontal[0] + vertical[0]) / 2, (horizontal[1] + vertical[1]) / 2, module))
+
+        centers: list[list[float]] = []
+        for x, y, module in candidates:
+            match = next(
+                (
+                    center
+                    for center in centers
+                    if math.hypot(center[0] - x, center[1] - y) <= max(6.0, 2.5 * max(center[2], module))
+                ),
+                None,
+            )
+            if match is None:
+                centers.append([x, y, module, 1.0])
+            else:
+                count = match[3] + 1.0
+                match[0] = (match[0] * match[3] + x) / count
+                match[1] = (match[1] * match[3] + y) / count
+                match[2] = max(match[2], module)
+                match[3] = count
+
+        reliable = [center for center in centers if center[3] >= 2]
+        for corner in reliable:
+            others = [center for center in reliable if center is not corner]
+            for left_index, first in enumerate(others):
+                for second in others[left_index + 1 :]:
+                    ax, ay = first[0] - corner[0], first[1] - corner[1]
+                    bx, by = second[0] - corner[0], second[1] - corner[1]
+                    a_length = math.hypot(ax, ay)
+                    b_length = math.hypot(bx, by)
+                    if min(a_length, b_length) < 40 or not 0.45 <= a_length / max(0.01, b_length) <= 2.2:
+                        continue
+                    if abs(ax * bx + ay * by) / max(0.01, a_length * b_length) <= 0.42:
+                        return True
+        return False
 
     @staticmethod
     async def _capture_qr(page: Any, selectors: tuple[str, ...]) -> bytes:
@@ -685,6 +832,7 @@ class BrowserPool:
         qr_png = await self._capture_qr(page, session.qr_selectors)
         if qr_png:
             self._clear_page_error(session)
+            session.qr_missing_since = 0.0
             old_digest = hashlib.sha256(session.qr_png).digest() if session.qr_png else b""
             new_digest = hashlib.sha256(qr_png).digest()
             if new_digest != old_digest:
@@ -692,6 +840,21 @@ class BrowserPool:
             session.qr_png = qr_png
             session.status = "waiting_scan"
             session.verification_kind = ""
+            return
+        if session.status == "waiting_scan" and session.qr_png:
+            now = time.time()
+            if session.qr_missing_since <= 0:
+                session.qr_missing_since = now
+                return
+            if now - session.qr_missing_since >= 0.8:
+                # QR login panels commonly replace the QR with the account
+                # avatar immediately after a successful scan. That image is not
+                # a new QR: it is the device-confirmation stage.
+                self._clear_page_error(session)
+                session.status = "manual_verification_required"
+                session.verification_kind = "device_confirmation"
+                session.qr_png = b""
+                session.qr_missing_since = 0.0
 
     @staticmethod
     async def _click_login_trigger(session: AuthSession, page: Any) -> bool:
@@ -739,6 +902,7 @@ class BrowserPool:
         session.verification_kind = ""
         session.error_code = ""
         session.qr_png = b""
+        session.qr_missing_since = 0.0
         session.login_triggered = False
         try:
             await page.reload(wait_until="domcontentloaded", timeout=20000)
@@ -758,12 +922,15 @@ class BrowserPool:
             if current.platform == platform and current.status not in {
                 "success", "expired", "cancelled", "error"
             }:
+                await self._cancel_interactive_start(current)
                 await self._stop_manual_browser(current)
                 current.status = "cancelled"
                 current.qr_png = b""
                 current.protocol_secret = ""
                 current.interactive_frame = b""
                 current.official_window_open = False
+                if current.login_mode == "webui_interactive":
+                    await self.close_platform(current.platform)
 
     @staticmethod
     async def _context_authenticated(context: Any, cookie_names: set[str]) -> bool:
@@ -1045,7 +1212,7 @@ class BrowserPool:
             "qr_refresh_count": int(session.qr_refresh_count),
             "interactive_available": bool(
                 session.login_mode == "webui_interactive"
-                and session.status not in {"success", "expired", "cancelled", "error"}
+                and session.status not in {"starting", "success", "expired", "cancelled", "error"}
                 and session.official_window_open
             ),
             "interactive_frame_revision": int(session.interactive_frame_revision),
@@ -1068,7 +1235,10 @@ class BrowserPool:
 
     async def cancel_auth(self, session_id: str, owner: str) -> dict[str, Any]:
         session = self.get_auth(session_id, owner)
+        await self._cancel_interactive_start(session)
         await self._stop_manual_browser(session)
+        if session.login_mode == "webui_interactive":
+            await self.close_platform(session.platform)
         session.status = "cancelled"
         session.qr_png = b""
         session.protocol_secret = ""
@@ -1077,6 +1247,7 @@ class BrowserPool:
         return self.public_auth(session)
 
     async def expire_auth(self, session: AuthSession) -> None:
+        await self._cancel_interactive_start(session)
         await self._stop_manual_browser(session)
         await self.close_platform(session.platform)
         session.status = "expired"
@@ -1088,6 +1259,7 @@ class BrowserPool:
     async def logout(self, platform: str) -> None:
         for session in self._auth.values():
             if session.platform == platform:
+                await self._cancel_interactive_start(session)
                 await self._stop_manual_browser(session)
                 session.status = "cancelled"
                 session.qr_png = b""
