@@ -77,6 +77,34 @@ def test_platform_status_keeps_auth_probe_failure_partial_and_config_control_fie
     assert "private browser detail" not in json.dumps(platform, ensure_ascii=False)
 
 
+def test_platform_status_bounds_slow_auth_probe(tmp_path: Path, monkeypatch) -> None:
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+    monkeypatch.setattr(service_mod, "_AUTH_PROBE_TIMEOUT_SECONDS", 0.03)
+
+    class SlowAdapter:
+        async def authenticated(self):
+            await asyncio.Event().wait()
+
+        def capabilities(self):
+            return {"search": True}
+
+    async def run():
+        service = service_mod.SocialResearchService(tmp_path)
+        service._config["xiaoheihe"]["enabled"] = True
+        service.adapters["xiaoheihe"] = SlowAdapter()
+        try:
+            return await service.status()
+        finally:
+            await service.close()
+
+    started = time.monotonic()
+    status = asyncio.run(run())
+    assert time.monotonic() - started < 0.5
+    platform = status["platforms"]["xiaoheihe"]
+    assert platform["state"] == "unavailable"
+    assert platform["error_code"] == "platform_timeout"
+
+
 def test_balanced_filter_requires_both_video_thresholds_and_filters_marketing() -> None:
     models = load_personification_module("plugin.personification.native_mcp.social_research.models")
     config = dict(models.DEFAULT_PLATFORM_CONFIG)

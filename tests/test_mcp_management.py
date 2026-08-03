@@ -712,6 +712,22 @@ def test_stdio_request_timeout_is_absolute_during_notifications() -> None:
         asyncio.run(client.request("tools/list", {}))
 
 
+def test_stdio_request_queue_wait_is_bounded(monkeypatch) -> None:
+    compat = load_personification_module("plugin.personification.skill_runtime.mcp_compat")
+    client = compat.McpStdioClient(command="unused", args=[], env={}, cwd=None, timeout=30)
+    monkeypatch.setattr(compat, "MCP_REQUEST_QUEUE_TIMEOUT_SECONDS", 0.03)
+
+    async def run() -> None:
+        await client._request_lock.acquire()
+        try:
+            await client.request("tools/list", {})
+        finally:
+            client._request_lock.release()
+
+    with pytest.raises(compat.McpProtocolError, match="request queue timed out"):
+        asyncio.run(run())
+
+
 def test_package_digest_binds_full_registry_metadata() -> None:
     management = load_personification_module("plugin.personification.core.mcp_management")
     package = {

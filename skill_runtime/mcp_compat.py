@@ -18,6 +18,7 @@ SUPPORTED_PROTOCOL_VERSIONS = frozenset({PREFERRED_PROTOCOL_VERSION, "2025-06-18
 MAX_TOOLS_LIST_PAGES = 20
 MAX_TOOLS = 1000
 MAX_CURSOR_CHARS = 65536
+MCP_REQUEST_QUEUE_TIMEOUT_SECONDS = 5.0
 
 
 class McpProtocolError(RuntimeError):
@@ -156,8 +157,17 @@ class McpStdioClient:
             return parsed
 
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        async with self._request_lock:
+        try:
+            await asyncio.wait_for(
+                self._request_lock.acquire(),
+                timeout=min(float(self.timeout), MCP_REQUEST_QUEUE_TIMEOUT_SECONDS),
+            )
+        except (TimeoutError, asyncio.TimeoutError) as exc:
+            raise McpProtocolError("MCP request queue timed out") from exc
+        try:
             return await asyncio.wait_for(self._request_unlocked(method, params), timeout=self.timeout)
+        finally:
+            self._request_lock.release()
 
     async def _request_unlocked(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
         request_id = next(self._seq)

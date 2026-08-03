@@ -55,6 +55,8 @@ _SAFE_OPERATION_CODES = {
     "interactive_page_unavailable",
 }
 
+_AUTH_PROBE_TIMEOUT_SECONDS = 3.0
+
 
 def _safe_operation_code(exc: BaseException) -> str:
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
@@ -75,6 +77,11 @@ class SocialResearchService:
         self.config_path = self.root / "config.json"
         self._config_lock = asyncio.Lock()
         self._config = self._load_config()
+
+    async def _authenticated(self, platform: str, *, interactive: bool | None = None) -> bool:
+        adapter = self.adapters[platform]
+        probe = adapter.authenticated() if interactive is None else adapter.authenticated(interactive=interactive)
+        return await asyncio.wait_for(probe, timeout=_AUTH_PROBE_TIMEOUT_SECONDS)
 
     def _load_config(self) -> dict[str, dict[str, Any]]:
         try:
@@ -125,7 +132,7 @@ class SocialResearchService:
         error_code = ""
         if config.get("enabled"):
             try:
-                authenticated = await adapter.authenticated()
+                authenticated = await self._authenticated(platform)
             except Exception as exc:
                 error_code = _safe_operation_code(exc)
         state = "disabled" if not config.get("enabled") else "ready" if authenticated else "login_required"
@@ -195,7 +202,7 @@ class SocialResearchService:
             if session.verification_kind == "official_browser_login":
                 await asyncio.sleep(0.5)
             try:
-                authenticated = await self.adapters[session.platform].authenticated(interactive=False)
+                authenticated = await self._authenticated(session.platform, interactive=False)
             except Exception:
                 authenticated = False
             if authenticated:
@@ -211,8 +218,9 @@ class SocialResearchService:
             "starting", "waiting_scan", "manual_verification_required", "risk_controlled", "qr_expired"
         }:
             try:
-                authenticated = await self.adapters[session.platform].authenticated(
-                    interactive=session.login_mode == "embedded_qr"
+                authenticated = await self._authenticated(
+                    session.platform,
+                    interactive=session.login_mode == "embedded_qr",
                 )
             except Exception:
                 authenticated = False
@@ -258,7 +266,7 @@ class SocialResearchService:
         if session.login_mode != "webui_interactive":
             raise RuntimeError("interactive_auth_unavailable")
         try:
-            authenticated = await self.adapters[session.platform].authenticated(interactive=False)
+            authenticated = await self._authenticated(session.platform, interactive=False)
         except Exception:
             authenticated = False
         if authenticated:
@@ -299,7 +307,7 @@ class SocialResearchService:
         if self.browsers.platform_auth_active(platform):
             raise RuntimeError("manual_verification_required")
         adapter = self.adapters[platform]
-        if not await adapter.authenticated():
+        if not await self._authenticated(platform):
             raise RuntimeError("login_required")
         return adapter, config
 
@@ -374,12 +382,18 @@ class SocialResearchService:
 
     async def _search_platform(self, platform: str, query: str, limit: int, quality_mode: str) -> tuple[list[dict[str, Any]], dict[str, Any], int]:
         started = time.monotonic()
-        adapter, base_config = await self._ready_adapter(platform)
+        base_config = self._config[platform]
         config = {**base_config, "quality_mode": quality_mode}
-        rows = await asyncio.wait_for(
-            adapter.search(query, limit=limit, timeout_seconds=float(config["request_timeout_seconds"])),
-            timeout=float(config["request_timeout_seconds"]) + 2,
-        )
+
+        async def collect() -> list[dict[str, Any]]:
+            adapter, _ = await self._ready_adapter(platform)
+            return await adapter.search(
+                query,
+                limit=limit,
+                timeout_seconds=float(config["request_timeout_seconds"]),
+            )
+
+        rows = await asyncio.wait_for(collect(), timeout=float(config["request_timeout_seconds"]) + 2)
         filtered = [apply_quality_filter(item, config) for item in rows]
         retained = [item for item in filtered if item["retained"]]
         for item in retained:
