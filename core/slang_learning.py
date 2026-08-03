@@ -691,6 +691,18 @@ class SlangLearningPipeline:
         self.max_claims = max(1, min(50, int(max_claims)))
         self.extraction_timeout = max(0.05, min(30.0, float(extraction_timeout)))
         self.last_extraction_status = "not_started"
+        self.last_extraction_diagnostics: dict[str, Any] = {
+            "input_item_count": 0,
+            "validated_item_count": 0,
+            "selected_item_count": 0,
+            "caller_available": tool_caller is not None,
+            "model_invoked": False,
+            "model_claim_count": 0,
+            "validated_claim_count": 0,
+            "clustered_claim_count": 0,
+            "grounded_claim_count": 0,
+            "target_claim_count": 0,
+        }
 
     async def extract_claims(
         self,
@@ -699,11 +711,25 @@ class SlangLearningPipeline:
         target_term: str = "",
         target_game: str = "",
     ) -> list[dict[str, Any]]:
+        self.last_extraction_diagnostics = {
+            "input_item_count": len(packet.get("items") or []) if isinstance(packet, dict) else 0,
+            "validated_item_count": 0,
+            "selected_item_count": 0,
+            "caller_available": self.tool_caller is not None,
+            "model_invoked": False,
+            "model_claim_count": 0,
+            "validated_claim_count": 0,
+            "clustered_claim_count": 0,
+            "grounded_claim_count": 0,
+            "target_claim_count": 0,
+        }
         validated = validate_content_packet(packet)
+        self.last_extraction_diagnostics["validated_item_count"] = len(validated["items"])
         if not validated["items"] or self.tool_caller is None:
             self.last_extraction_status = "empty"
             return []
         extraction_packet = _target_research_packet(validated, target_term=target_term)
+        self.last_extraction_diagnostics["selected_item_count"] = len(extraction_packet["items"])
         packet_text = _bounded_packet_json(
             extraction_packet,
             max_chars=MAX_TARGET_PACKET_CHARS if _clean(target_term, 80) else MAX_PACKET_CHARS,
@@ -726,6 +752,7 @@ class SlangLearningPipeline:
                 use_builtin_search=False,
             )
         )
+        self.last_extraction_diagnostics["model_invoked"] = True
         try:
             done, _pending = await asyncio.wait(
                 {extraction_task}, timeout=self.extraction_timeout
@@ -746,11 +773,18 @@ class SlangLearningPipeline:
         if payload is None:
             self.last_extraction_status = "invalid"
             return []
+        self.last_extraction_diagnostics["model_claim_count"] = (
+            len(payload.get("claims") or []) if isinstance(payload.get("claims"), list) else 0
+        )
         claims = validate_extracted_claims(payload, validated, max_claims=self.max_claims)
+        self.last_extraction_diagnostics["validated_claim_count"] = len(claims)
         clustered = attach_source_clusters(claims, validated)
+        self.last_extraction_diagnostics["clustered_claim_count"] = len(clustered)
         grounded = ground_target_game_context(clustered, validated, target_game=target_game)
+        self.last_extraction_diagnostics["grounded_claim_count"] = len(grounded)
         target_key = _clean(target_term, 80).casefold()
         if not target_key:
+            self.last_extraction_diagnostics["target_claim_count"] = len(grounded)
             self.last_extraction_status = "ready" if grounded else "empty"
             return grounded
         result = [
@@ -765,6 +799,7 @@ class SlangLearningPipeline:
                 },
             }
         ]
+        self.last_extraction_diagnostics["target_claim_count"] = len(result)
         self.last_extraction_status = "ready" if result else "empty"
         return result
 

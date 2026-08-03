@@ -608,6 +608,22 @@ class SocialResearchService:
                 )
                 continue
             detailed = dict(list(result.get("items") or [])[0])
+            # Search candidates have already passed the platform quality gate.
+            # Detail pages (especially Bilibili) do not always expose the same
+            # engagement counters, so applying the search thresholds again can
+            # incorrectly mark every successfully-read detail as filtered.  A
+            # missing-engagement warning must not erase the selected source;
+            # newly discovered marketing risk still remains filtered.
+            detail_filtered_reason = str(detailed.get("filtered_reason") or "")
+            if (
+                candidate.get("retained") is not False
+                and detailed.get("retained") is False
+                and detail_filtered_reason
+                in {"low_video_engagement", "low_community_engagement"}
+            ):
+                detailed["detail_filtered_reason"] = detail_filtered_reason
+                detailed["filtered_reason"] = str(candidate.get("filtered_reason") or "")
+                detailed["retained"] = True
             detailed["source_group_id"] = str(candidate.get("source_group_id") or "")
             detailed["detail_status"] = "ready"
             detailed["detail_elapsed_ms"] = item_elapsed_ms

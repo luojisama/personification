@@ -1031,6 +1031,9 @@ class McpRuntimeManager:
                 getattr(pipeline, "last_extraction_status", "ready" if claims else "empty")
                 or "empty"
             )
+            extraction_diagnostics = dict(
+                getattr(pipeline, "last_extraction_diagnostics", {}) or {}
+            )
             normalized_target = target_term.casefold()
             target_claims = [
                 claim
@@ -1102,6 +1105,7 @@ class McpRuntimeManager:
                     "extracted_claim_count": len(claims),
                     "target_claim_count": len(target_claims),
                     "background_claim_count": len(extra_claims),
+                    "diagnostics": extraction_diagnostics,
                 },
             }
             # Put the target-term contract before the large untrusted items so

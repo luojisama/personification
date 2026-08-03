@@ -387,6 +387,111 @@ def test_research_game_slang_keeps_search_card_when_detail_read_fails(tmp_path: 
     assert packet["items"][1]["detail_elapsed_ms"] >= 0
 
 
+def test_research_game_slang_keeps_selected_detail_when_only_detail_engagement_is_missing(
+    tmp_path: Path,
+) -> None:
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+    slang = load_personification_module("plugin.personification.core.slang_learning")
+
+    async def run():
+        service = service_mod.SocialResearchService(tmp_path)
+        selected = {
+            **_fake_social_item("bilibili", 7),
+            "retained": True,
+            "filtered_reason": "",
+            "source_group_id": "source_selected",
+        }
+
+        async def fake_search(_params):  # noqa: ANN001
+            return {
+                "items": [selected],
+                "platform_statuses": {"bilibili": {"state": "ready"}},
+                "partial": False,
+                "warnings": [],
+                "filtered_counts": {},
+                "aggregation": {
+                    "requested_limit": 1,
+                    "returned_count": 1,
+                    "source_group_count": 1,
+                    "coverage_status": "complete",
+                    "satisfies_request": True,
+                },
+            }
+
+        async def fake_read(_params):  # noqa: ANN001
+            return {
+                "items": [
+                    {
+                        **selected,
+                        "caption_or_body": "花来是红狼使用高射速武器修脚夺舍后开大撤离的玩法。",
+                        "stats": {},
+                        "retained": False,
+                        "filtered_reason": "low_video_engagement",
+                    }
+                ]
+            }
+
+        service.search = fake_search
+        service.read = fake_read
+        try:
+            packet = await service.research(
+                {"term": "花来", "game": "三角洲行动", "context": "群聊", "limit": 1}
+            )
+            return packet, slang.validate_content_packet(packet)
+        finally:
+            await service.close()
+
+    packet, validated = asyncio.run(run())
+    item = packet["items"][0]
+    assert item["retained"] is True
+    assert item["filtered_reason"] == ""
+    assert item["detail_filtered_reason"] == "low_video_engagement"
+    assert item["detail_status"] == "ready"
+    assert len(validated["items"]) == 1
+
+
+def test_research_game_slang_does_not_restore_detail_marketing_risk(tmp_path: Path) -> None:
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+
+    async def run():
+        service = service_mod.SocialResearchService(tmp_path)
+        selected = {**_fake_social_item("bilibili", 8), "retained": True}
+
+        async def fake_search(_params):  # noqa: ANN001
+            return {
+                "items": [selected],
+                "platform_statuses": {"bilibili": {"state": "ready"}},
+                "partial": False,
+                "warnings": [],
+                "filtered_counts": {},
+                "aggregation": {},
+            }
+
+        async def fake_read(_params):  # noqa: ANN001
+            return {
+                "items": [
+                    {
+                        **selected,
+                        "retained": False,
+                        "filtered_reason": "marketing_risk",
+                    }
+                ]
+            }
+
+        service.search = fake_search
+        service.read = fake_read
+        try:
+            return await service.research(
+                {"term": "花来", "game": "三角洲行动", "context": "群聊", "limit": 1}
+            )
+        finally:
+            await service.close()
+
+    packet = asyncio.run(run())
+    assert packet["items"][0]["retained"] is False
+    assert packet["items"][0]["filtered_reason"] == "marketing_risk"
+
+
 def test_platform_url_validation_rejects_cross_origin_and_credentials(tmp_path: Path) -> None:
     browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
     adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")

@@ -142,6 +142,36 @@ def test_target_extraction_timeout_returns_empty_evidence_status() -> None:
     assert pipeline.last_extraction_status == "timeout"
 
 
+def test_extraction_diagnostics_explain_items_removed_before_model_call() -> None:
+    slang = load_personification_module("plugin.personification.core.slang_learning")
+    packet = _packet(_item("bilibili", "BV-filtered", []))
+    packet["items"][0]["retained"] = False
+
+    class Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            raise AssertionError("filtered evidence must not invoke the model")
+
+    pipeline = slang.SlangLearningPipeline(tool_caller=Caller())
+    claims = asyncio.run(
+        pipeline.extract_claims(packet, target_term="花来", target_game="三角洲行动")
+    )
+
+    assert claims == []
+    assert pipeline.last_extraction_status == "empty"
+    assert pipeline.last_extraction_diagnostics == {
+        "input_item_count": 1,
+        "validated_item_count": 0,
+        "selected_item_count": 0,
+        "caller_available": True,
+        "model_invoked": False,
+        "model_claim_count": 0,
+        "validated_claim_count": 0,
+        "clustered_claim_count": 0,
+        "grounded_claim_count": 0,
+        "target_claim_count": 0,
+    }
+
+
 def test_target_research_packet_prioritizes_six_compact_cross_platform_items() -> None:
     slang = load_personification_module("plugin.personification.core.slang_learning")
     long_body = "前置无关材料" * 500 + "花来指夺取装备后快速撤离的玩法" + "后置无关材料" * 500
