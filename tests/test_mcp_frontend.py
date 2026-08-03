@@ -191,6 +191,8 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
         "获取 WebUI 二维码",
         "在普通浏览器中登录",
         "在 WebUI 中人工验证",
+        "确认接管",
+        "确认并启动人工验证",
         "WebUI 人工验证",
         "验证完成，检查登录态",
         "系统不会自动识别或破解验证码",
@@ -245,6 +247,8 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
     assert '"webui_interactive"' in source
     assert "data-mcp-auth-manual" in source
     assert "data-mcp-auth-interactive" in source
+    assert "data-mcp-auth-interactive-confirm" in source
+    assert "data-mcp-auth-interactive-cancel" in source
     assert "data-mcp-interactive-frame" in source
     assert "/frame?platform=" in source
     assert "/input?platform=" in source
@@ -266,6 +270,28 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
     assert "image-rendering:pixelated" in styles
     for forbidden in ("cookie", "localStorage.setItem", "profile_path", "device_id", "raw_html"):
         assert forbidden not in source.lower()
+
+
+def test_interactive_auth_uses_accessible_webui_confirmation_before_starting_session() -> None:
+    source = _source("app-mcp.js")
+
+    renderer = source.split("function renderBuiltinInteractiveConfirmation", 1)[1].split("\n}", 1)[0]
+    opener = source.split("async function startBuiltinInteractiveAuth", 1)[1].split("\n}", 1)[0]
+    confirmer = source.split("async function confirmBuiltinInteractiveAuth", 1)[1].split("\n}", 1)[0]
+
+    assert 'role="dialog"' in renderer
+    assert 'aria-modal="true"' in renderer
+    assert 'aria-labelledby="mcp-interactive-confirm-title"' in renderer
+    assert 'aria-describedby="mcp-interactive-confirm-description"' in renderer
+    assert "不会自动识别或破解验证码" in renderer
+    assert "任意 URL、JavaScript、登录凭据、文件或剪贴板" in renderer
+    assert "_mcpPendingInteractiveAuth = platform" in opener
+    assert "startBuiltinAuth(" not in opener
+    assert "confirm(" not in opener
+    assert "_mcpPendingInteractiveAuth !== platform" in confirmer
+    assert '_mcpPendingInteractiveAuth = null' in confirmer
+    assert 'startBuiltinAuth(platform, "webui_interactive")' in confirmer
+    assert "_mcpPendingInteractiveAuth = null" in source.split("function stopMcpViewLifecycle", 1)[1].split("\n}", 1)[0]
 
 
 def test_mcp_external_links_reject_empty_values_before_url_resolution() -> None:

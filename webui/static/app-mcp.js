@@ -1,8 +1,10 @@
 const _MCP_OPERATION_RESULT_STORAGE_KEY = "personification_mcp_operation_result_v1";
 let _mcpPendingInstall = null;
+let _mcpPendingInteractiveAuth = null;
 
 function clearMcpSensitiveState() {
   _mcpPendingInstall = null;
+  _mcpPendingInteractiveAuth = null;
   _mcpInteractivePointer = null;
   _mcpInteractiveBusy = false;
 }
@@ -26,6 +28,7 @@ try {
 function stopMcpViewLifecycle() {
   // Pending confirmation may contain Secret input values and must stay page-local.
   _mcpPendingInstall = null;
+  _mcpPendingInteractiveAuth = null;
   _mcpInteractivePointer = null;
   if (_mcpAuthTimer) { clearInterval(_mcpAuthTimer); _mcpAuthTimer = null; }
 }
@@ -480,6 +483,17 @@ function renderBuiltinPlatforms() {
   return `<section class="mcp-native-platforms"><div class="mcp-section-heading"><div><span class="eyebrow">PLATFORM ISOLATION</span><h2>平台登录与能力</h2><p>每个平台使用独立 persistent context；关闭服务保留登录态，只有显式注销会删除对应 profile。</p></div></div><div class="mcp-platform-grid">${Object.entries(MCP_PLATFORM_LABELS).map(([platform]) => renderBuiltinPlatformCard(platform, platforms[platform] || {platform, enabled:false, revision:0, config:{}})).join("")}</div></section>`;
 }
 
+function renderBuiltinInteractiveConfirmation() {
+  const platform = String(_mcpPendingInteractiveAuth || "");
+  if (!platform) return "";
+  const label = MCP_PLATFORM_LABELS[platform] || platform;
+  return `<div class="mcp-confirm-backdrop" role="presentation"><section class="mcp-confirm-panel mcp-interactive-confirm-panel" role="dialog" aria-modal="true" aria-labelledby="mcp-interactive-confirm-title" aria-describedby="mcp-interactive-confirm-description">
+    <div class="mcp-section-heading"><div><span class="eyebrow">HUMAN VERIFICATION CONFIRMATION</span><h2 id="mcp-interactive-confirm-title">确认接管 ${escapeHtml(label)} 官方登录页面</h2><p id="mcp-interactive-confirm-description">验证期间会暂停该平台检索；只有你在本面板执行的点击、原始拖动轨迹、有限按键、滚动和短文本会被转发到固定官方域名。</p></div><button class="btn small" data-mcp-auth-interactive-cancel>取消</button></div>
+    <div class="alert warn">插件不会自动识别或破解验证码，也不会开放任意 URL、JavaScript、登录凭据、文件或剪贴板。页面离开 ${escapeHtml(label)} 官方允许域名时会立即失败并关闭。</div>
+    <div class="mcp-confirm-actions"><button class="btn" data-mcp-auth-interactive-cancel>返回</button><button class="btn primary" data-mcp-auth-interactive-confirm="${escapeAttr(platform)}" ${state.mcpBusy ? "disabled" : ""}>确认并启动人工验证</button></div>
+  </section></div>`;
+}
+
 function renderPreviewDiscussion(item) {
   return (item.discussion || []).slice(0, 12).map(row => `<li><span>${escapeHtml(row.type || "comment")}</span>${escapeHtml(row.text || "")}</li>`).join("");
 }
@@ -550,7 +564,7 @@ function renderLearningCenter() {
 }
 
 function renderBuiltinMcp() {
-  return `${renderBuiltinServiceCard()}${renderBuiltinPlatforms()}${renderBuiltinPreview()}${renderLearningCenter()}`;
+  return `${renderBuiltinServiceCard()}${renderBuiltinPlatforms()}${renderBuiltinPreview()}${renderLearningCenter()}${renderBuiltinInteractiveConfirmation()}`;
 }
 
 function renderMcp() {
@@ -890,9 +904,14 @@ async function startBuiltinAuth(platform, mode="embedded_qr") {
 }
 
 async function startBuiltinInteractiveAuth(platform) {
-  const label = MCP_PLATFORM_LABELS[platform] || platform;
-  const confirmed = confirm(`将启动 ${label} 官方登录页面的 WebUI 人工验证接管。\n\n验证期间会暂停该平台检索；点击、拖动和输入只转发到固定官方域名。插件不会自动识别或破解验证码。\n\n确认继续？`);
-  if (!confirmed) return;
+  if (!MCP_PLATFORM_LABELS[platform] || state.mcpBusy) return;
+  _mcpPendingInteractiveAuth = platform;
+  render();
+}
+
+async function confirmBuiltinInteractiveAuth(platform) {
+  if (!MCP_PLATFORM_LABELS[platform] || _mcpPendingInteractiveAuth !== platform || state.mcpBusy) return;
+  _mcpPendingInteractiveAuth = null;
   await startBuiltinAuth(platform, "webui_interactive");
 }
 
@@ -1055,7 +1074,7 @@ async function splitSelectedSense(senseId, revision) {
 if (!window.__personificationMcpPageEvents) {
   window.__personificationMcpPageEvents = true;
   document.addEventListener("click", event => {
-    const element = event.target instanceof Element ? event.target.closest("[data-mcp-operation-clear],[data-mcp-search],[data-mcp-load-more],[data-mcp-detail],[data-mcp-detail-close],[data-mcp-install-plan],[data-mcp-install-confirm],[data-mcp-install-cancel],[data-mcp-installation-toggle],[data-mcp-tool-toggle],[data-mcp-delete],[data-mcp-reload],[data-mcp-tab],[data-mcp-platform-toggle],[data-mcp-platform-save],[data-mcp-auth-start],[data-mcp-auth-interactive],[data-mcp-auth-manual],[data-mcp-auth-logout],[data-mcp-interactive-type],[data-mcp-interactive-key],[data-mcp-interactive-scroll],[data-mcp-interactive-refresh],[data-mcp-interactive-finish],[data-mcp-interactive-cancel],[data-mcp-preview-run],[data-mcp-sense-filter],[data-mcp-sense-open],[data-mcp-sense-close],[data-mcp-sense-action],[data-mcp-sense-merge],[data-mcp-sense-split]") : null;
+    const element = event.target instanceof Element ? event.target.closest("[data-mcp-operation-clear],[data-mcp-search],[data-mcp-load-more],[data-mcp-detail],[data-mcp-detail-close],[data-mcp-install-plan],[data-mcp-install-confirm],[data-mcp-install-cancel],[data-mcp-installation-toggle],[data-mcp-tool-toggle],[data-mcp-delete],[data-mcp-reload],[data-mcp-tab],[data-mcp-platform-toggle],[data-mcp-platform-save],[data-mcp-auth-start],[data-mcp-auth-interactive],[data-mcp-auth-interactive-confirm],[data-mcp-auth-interactive-cancel],[data-mcp-auth-manual],[data-mcp-auth-logout],[data-mcp-interactive-type],[data-mcp-interactive-key],[data-mcp-interactive-scroll],[data-mcp-interactive-refresh],[data-mcp-interactive-finish],[data-mcp-interactive-cancel],[data-mcp-preview-run],[data-mcp-sense-filter],[data-mcp-sense-open],[data-mcp-sense-close],[data-mcp-sense-action],[data-mcp-sense-merge],[data-mcp-sense-split]") : null;
     if (!element) return;
     if (element.hasAttribute("data-mcp-operation-clear")) { persistMcpOperationResult(null); render(); return; }
     if (element.hasAttribute("data-mcp-search")) { searchMcpRegistry(); return; }
@@ -1074,6 +1093,8 @@ if (!window.__personificationMcpPageEvents) {
     if (element.hasAttribute("data-mcp-platform-save")) { const platform=element.getAttribute("data-mcp-platform-save") || ""; const current=((state.mcpBuiltin||{}).platforms||{})[platform]||{}; configureBuiltinPlatform(platform, current.enabled === true, {useForm:true}); return; }
     if (element.hasAttribute("data-mcp-auth-start")) { startBuiltinAuth(element.getAttribute("data-mcp-auth-start") || ""); return; }
     if (element.hasAttribute("data-mcp-auth-interactive")) { startBuiltinInteractiveAuth(element.getAttribute("data-mcp-auth-interactive") || ""); return; }
+    if (element.hasAttribute("data-mcp-auth-interactive-confirm")) { confirmBuiltinInteractiveAuth(element.getAttribute("data-mcp-auth-interactive-confirm") || ""); return; }
+    if (element.hasAttribute("data-mcp-auth-interactive-cancel")) { _mcpPendingInteractiveAuth = null; render(); return; }
     if (element.hasAttribute("data-mcp-auth-manual")) { startBuiltinAuth(element.getAttribute("data-mcp-auth-manual") || "", "manual_browser"); return; }
     if (element.hasAttribute("data-mcp-auth-logout")) { logoutBuiltinPlatform(element.getAttribute("data-mcp-auth-logout") || ""); return; }
     if (element.hasAttribute("data-mcp-interactive-type")) { sendBuiltinInteractiveText(element); return; }
