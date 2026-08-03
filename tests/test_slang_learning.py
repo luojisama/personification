@@ -142,7 +142,7 @@ def test_target_extraction_timeout_returns_empty_evidence_status() -> None:
     assert pipeline.last_extraction_status == "timeout"
 
 
-def test_target_research_packet_prioritizes_three_compact_cross_platform_items() -> None:
+def test_target_research_packet_prioritizes_six_compact_cross_platform_items() -> None:
     slang = load_personification_module("plugin.personification.core.slang_learning")
     long_body = "前置无关材料" * 500 + "花来指夺取装备后快速撤离的玩法" + "后置无关材料" * 500
     packet = slang.validate_content_packet(
@@ -166,7 +166,7 @@ def test_target_research_packet_prioritizes_three_compact_cross_platform_items()
     targeted = slang._target_research_packet(packet, target_term="花来")
     rendered = slang._bounded_packet_json(targeted, max_chars=slang.MAX_TARGET_PACKET_CHARS)
 
-    assert len(targeted["items"]) == 3
+    assert len(targeted["items"]) == 6
     assert {item["platform"] for item in targeted["items"]} == {"bilibili", "xiaoheihe"}
     assert all(len(item["caption_or_body"]) <= slang.MAX_TARGET_BODY_CHARS for item in targeted["items"])
     assert all(
@@ -175,6 +175,36 @@ def test_target_research_packet_prioritizes_three_compact_cross_platform_items()
     )
     assert all("花来" in item["caption_or_body"] for item in targeted["items"])
     assert len(rendered) <= slang.MAX_TARGET_PACKET_CHARS
+
+
+def test_target_research_packet_prefers_explanatory_detail_over_repeated_search_noise() -> None:
+    slang = load_personification_module("plugin.personification.core.slang_learning")
+    packet = slang.validate_content_packet(
+        _packet(
+            *[
+                _item(
+                    "bilibili",
+                    f"noise-{index}",
+                    [],
+                    title=f"花来 花来 热门视频 {index}",
+                    caption_or_body="花来相关视频推荐，点击查看更多花来内容",
+                )
+                for index in range(6)
+            ],
+            _item(
+                "bilibili",
+                "explained",
+                [("c-explained", "玩家把这种保留护甲、拿走装备再撤离的玩法称为花来")],
+                title="三角洲行动玩法解释",
+                caption_or_body="花来指使用低级肉伤弹攻击腿部，击败后夺取装备并快速撤离的玩法。",
+            ),
+        )
+    )
+
+    targeted = slang._target_research_packet(packet, target_term="花来")
+
+    assert targeted["items"][0]["content_id"] == "explained"
+    assert len(targeted["items"]) == slang.MAX_TARGET_PACKET_ITEMS
 
 
 def test_invalid_quote_is_rejected_and_cross_content_evidence_is_split() -> None:
