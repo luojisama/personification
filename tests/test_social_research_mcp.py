@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import sys
 from pathlib import Path
+
+import pytest
 
 from ._loader import load_personification_module
 
@@ -1256,6 +1259,35 @@ def test_bilibili_adapter_routes_embedded_qr_to_protocol_login() -> None:
     assert result == {"owner_seen": "admin:device:bilibili", "login_mode": "protocol_qr"}
 
 
+def test_platform_adapter_routes_webui_interactive_to_fixed_official_surface() -> None:
+    adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+    captured: dict = {}
+
+    class FakeBrowsers:
+        async def start_interactive_auth(
+            self, platform, owner, login_url, allowed_hosts, qr_selectors, login_trigger_selectors
+        ):  # noqa: ANN001, ANN201
+            captured.update(
+                platform=platform,
+                owner=owner,
+                login_url=login_url,
+                allowed_hosts=allowed_hosts,
+                qr_selectors=qr_selectors,
+                login_trigger_selectors=login_trigger_selectors,
+            )
+            return {"login_mode": "webui_interactive", "status": "manual_verification_required"}
+
+    adapter = adapters_mod.PlatformAdapter(adapters_mod.SPECS["tieba"], FakeBrowsers())
+    result = asyncio.run(adapter.start_auth("admin:device:tieba", mode="webui_interactive"))
+
+    assert result["login_mode"] == "webui_interactive"
+    assert captured["platform"] == "tieba"
+    assert captured["owner"] == "admin:device:tieba"
+    assert captured["login_url"] == "https://tieba.baidu.com/"
+    assert captured["allowed_hosts"] == ("tieba.baidu.com", "baidu.com", "www.baidu.com")
+    assert captured["qr_selectors"] == adapters_mod.SPECS["tieba"].qr_selectors
+
+
 def test_xiaoheihe_adapter_keeps_official_qr_page_headless() -> None:
     adapters_mod = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
 
@@ -1724,6 +1756,234 @@ def test_manual_browser_login_uses_fixed_system_browser_and_private_profile(tmp_
     assert "--disable-background-mode" in launched[0]
     assert any(value.startswith("--user-data-dir=") for value in launched[0])
     assert "owner" not in started and "native_process" not in started and "login_url" not in started
+
+
+def test_webui_interactive_auth_relays_only_bounded_human_input(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    mouse_events: list[tuple] = []
+    key_events: list[tuple] = []
+
+    class FakeMouse:
+        async def click(self, x, y, **kwargs):  # noqa: ANN001, ANN201
+            mouse_events.append(("click", x, y, kwargs.get("delay")))
+
+        async def move(self, x, y):  # noqa: ANN001, ANN201
+            mouse_events.append(("move", x, y))
+
+        async def down(self):  # noqa: ANN201
+            mouse_events.append(("down",))
+
+        async def up(self):  # noqa: ANN201
+            mouse_events.append(("up",))
+
+        async def wheel(self, x, y):  # noqa: ANN001, ANN201
+            mouse_events.append(("wheel", x, y))
+
+    class FakeKeyboard:
+        async def insert_text(self, value):  # noqa: ANN001, ANN201
+            key_events.append(("type", value))
+
+        async def press(self, value):  # noqa: ANN001, ANN201
+            key_events.append(("key", value))
+
+    class FakePage:
+        url = "https://passport.douyin.com/login/?secret=must-not-leak"
+        viewport_size = {"width": 1280, "height": 900}
+        mouse = FakeMouse()
+        keyboard = FakeKeyboard()
+        screenshots = 0
+
+        async def screenshot(self, **kwargs):  # noqa: ANN001, ANN201
+            assert kwargs == {"type": "jpeg", "quality": 70}
+            self.screenshots += 1
+            return b"safe-jpeg"
+
+        async def wait_for_timeout(self, _milliseconds):  # noqa: ANN001, ANN201
+            return None
+
+    page = FakePage()
+    pool._contexts["douyin"] = type("Context", (), {"pages": [page]})()
+    session = browser_mod.AuthSession(
+        session_id="interactive",
+        platform="douyin",
+        owner="admin:device:douyin",
+        status="manual_verification_required",
+        login_mode="webui_interactive",
+        official_window_open=True,
+        interactive_allowed_hosts=("douyin.com",),
+    )
+    pool._auth[session.session_id] = session
+
+    async def run():
+        first = await pool.interactive_frame("interactive", "admin:device:douyin")
+        second = await pool.interactive_frame("interactive", "admin:device:douyin")
+        await pool.interactive_action(
+            "interactive", "admin:device:douyin", {"type": "click", "x": 100, "y": 200}
+        )
+        await pool.interactive_action(
+            "interactive",
+            "admin:device:douyin",
+            {
+                "type": "drag",
+                "points": [
+                    {"x": 100, "y": 300, "t": 0},
+                    {"x": 130, "y": 301, "t": 20},
+                    {"x": 180, "y": 299, "t": 40},
+                ],
+            },
+        )
+        await pool.interactive_action(
+            "interactive", "admin:device:douyin", {"type": "type", "text": "123456"}
+        )
+        await pool.interactive_action(
+            "interactive", "admin:device:douyin", {"type": "key", "key": "Enter"}
+        )
+        await pool.interactive_action(
+            "interactive", "admin:device:douyin", {"type": "scroll", "delta_y": 800}
+        )
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert base64.b64decode(first["data_base64"]) == b"safe-jpeg"
+    assert second["interactive_frame_revision"] == 1
+    assert page.screenshots == 1
+    assert first["interactive_display_url"] == "https://passport.douyin.com/"
+    assert "secret" not in json.dumps(first)
+    assert ("click", 100.0, 200.0, 60) in mouse_events
+    assert ("down",) in mouse_events and ("up",) in mouse_events
+    assert ("wheel", 0, 800.0) in mouse_events
+    assert key_events == [("type", "123456"), ("key", "Enter")]
+
+    with pytest.raises(KeyError):
+        asyncio.run(pool.interactive_frame("interactive", "other-admin:device:douyin"))
+    with pytest.raises(ValueError):
+        asyncio.run(
+            pool.interactive_action(
+                "interactive", "admin:device:douyin", {"type": "click", "x": 5000, "y": 1}
+            )
+        )
+    with pytest.raises(ValueError):
+        asyncio.run(
+            pool.interactive_action(
+                "interactive", "admin:device:douyin", {"type": "key", "key": "Control+L"}
+            )
+        )
+
+
+def test_webui_interactive_auth_fails_closed_after_cross_platform_redirect(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    page = type(
+        "Page",
+        (),
+        {"url": "https://evil.example/login", "viewport_size": {"width": 1280, "height": 900}},
+    )()
+    pool._contexts["tieba"] = type("Context", (), {"pages": [page]})()
+    session = browser_mod.AuthSession(
+        session_id="outside",
+        platform="tieba",
+        owner="admin:device:tieba",
+        status="manual_verification_required",
+        login_mode="webui_interactive",
+        official_window_open=True,
+        interactive_allowed_hosts=("baidu.com",),
+    )
+    pool._auth[session.session_id] = session
+
+    with pytest.raises(RuntimeError, match="interactive_page_outside_platform"):
+        asyncio.run(pool.interactive_frame("outside", "admin:device:tieba"))
+    assert session.status == "error"
+    assert session.official_window_open is False
+    assert session.interactive_frame == b""
+
+
+def test_platform_profile_allows_only_one_active_admin_auth_session(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    first = browser_mod.AuthSession(
+        session_id="first",
+        platform="xiaoheihe",
+        owner="admin-a:device:xiaoheihe",
+        status="manual_verification_required",
+        login_mode="webui_interactive",
+        official_window_open=True,
+        interactive_frame=b"frame-a",
+    )
+    second = browser_mod.AuthSession(
+        session_id="second",
+        platform="xiaoheihe",
+        owner="admin-b:device:xiaoheihe",
+        status="waiting_scan",
+        interactive_frame=b"frame-b",
+    )
+    unrelated = browser_mod.AuthSession(
+        session_id="other-platform",
+        platform="tieba",
+        owner="admin-a:device:tieba",
+        status="waiting_scan",
+    )
+    pool._auth = {item.session_id: item for item in (first, second, unrelated)}
+
+    asyncio.run(pool._supersede_auth("xiaoheihe", "admin-c:device:xiaoheihe"))
+
+    assert first.status == second.status == "cancelled"
+    assert first.interactive_frame == second.interactive_frame == b""
+    assert first.official_window_open is False
+    assert unrelated.status == "waiting_scan"
+
+
+def test_webui_interactive_finish_reuses_profile_and_closes_browser_context(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+    session = browser_mod.AuthSession(
+        session_id="finish",
+        platform="douyin",
+        owner="admin:device:douyin",
+        status="manual_verification_required",
+        login_mode="webui_interactive",
+        official_window_open=True,
+        interactive_frame=b"sensitive-pixels",
+    )
+
+    class FakeBrowsers:
+        closed: list[str] = []
+
+        def get_auth(self, session_id, owner):  # noqa: ANN001
+            assert (session_id, owner) == ("finish", "admin:device:douyin")
+            return session
+
+        def public_auth(self, value):  # noqa: ANN001
+            return {
+                "status": value.status,
+                "platform": value.platform,
+                "login_mode": value.login_mode,
+                "official_window_open": value.official_window_open,
+            }
+
+        async def close_platform(self, platform):  # noqa: ANN001
+            self.closed.append(platform)
+
+    class FakeAdapter:
+        async def authenticated(self, *, interactive=None):  # noqa: ANN001
+            assert interactive is False
+            return True
+
+    async def run():
+        service = service_mod.SocialResearchService(tmp_path)
+        browsers = FakeBrowsers()
+        service.browsers = browsers
+        service.adapters["douyin"] = FakeAdapter()
+        result = await service.auth_finish(
+            {"session_id": "finish", "owner": "admin:device:douyin"}
+        )
+        return result, browsers.closed
+
+    result, closed = asyncio.run(run())
+    assert result["status"] == "success"
+    assert result["official_window_open"] is False
+    assert session.interactive_frame == b""
+    assert closed == ["douyin"]
 
 
 def test_auth_qr_falls_back_to_headless_with_explicit_interactive_warning(tmp_path: Path, monkeypatch) -> None:

@@ -48,6 +48,10 @@ def _safe_builtin_error(exc: Exception, title: str) -> HTTPException:
         "revision_conflict": "配置已被其他管理员更新，请刷新页面后重试。",
         "builtin MCP is disabled": "请先开启原生社交平台 MCP 服务。",
         "config contains unsupported fields": "平台配置混入了不受支持的字段，请刷新页面后重试。",
+        "interactive_auth_unavailable": "当前登录会话不支持 WebUI 人工验证，请重新创建接管会话。",
+        "interactive_frame_unavailable": "官方登录页面画面暂时无法读取，请刷新接管画面。",
+        "interactive_page_outside_platform": "官方登录页面跳转到了平台允许范围之外，接管会话已停止。",
+        "interactive_page_unavailable": "官方登录页面已经关闭或不可用，请重新创建接管会话。",
     }
     return HTTPException(status_code=status, detail={
         "ok": False,
@@ -618,7 +622,9 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         _private(response)
         platform = str(body.get("platform") or "")
         mode = str(body.get("mode") or "embedded_qr")
-        if platform not in PLATFORMS or mode not in {"embedded_qr", "manual_browser"}:
+        if platform not in PLATFORMS or mode not in {
+            "embedded_qr", "manual_browser", "webui_interactive"
+        }:
             raise _safe_builtin_error(ValueError("unsupported platform"), "登录请求无效")
         try:
             result = await manager().builtin_request(
@@ -664,7 +670,10 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
                 "personification/builtin/auth/qrcode",
                 {"session_id": session_id, "owner": _auth_owner(admin, platform)},
             )
-            image = base64.b64decode(str(result.get("data_base64") or ""), validate=True)
+            encoded = str(result.get("data_base64") or "")
+            if len(encoded) > 3 * 1024 * 1024:
+                raise ValueError("interactive_frame_unavailable")
+            image = base64.b64decode(encoded, validate=True)
         except Exception as exc:
             raise _safe_builtin_error(exc, "登录二维码读取失败") from exc
         return Response(
@@ -672,6 +681,93 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
             media_type="image/png",
             headers={"Cache-Control": "no-store, private", "Pragma": "no-cache", "X-Content-Type-Options": "nosniff"},
         )
+
+    @router.get("/builtin/social-research/auth/{session_id}/frame")
+    async def builtin_auth_frame(
+        session_id: str,
+        platform: str,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> Response:
+        if platform not in PLATFORMS:
+            raise _safe_builtin_error(ValueError("unsupported platform"), "人工验证画面请求无效")
+        try:
+            result = await manager().builtin_request(
+                "personification/builtin/auth/frame",
+                {"session_id": session_id, "owner": _auth_owner(admin, platform)},
+            )
+            image = base64.b64decode(str(result.get("data_base64") or ""), validate=True)
+            mime_type = str(result.get("mime_type") or "")
+            if mime_type not in {"image/jpeg", "image/png"} or not image or len(image) > 2 * 1024 * 1024:
+                raise ValueError("interactive_frame_unavailable")
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "人工验证画面读取失败") from exc
+        return Response(
+            content=image,
+            media_type=mime_type,
+            headers={
+                "Cache-Control": "no-store, private",
+                "Pragma": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'",
+            },
+        )
+
+    @router.post("/builtin/social-research/auth/{session_id}/input")
+    async def builtin_auth_input(
+        session_id: str,
+        platform: str,
+        response: Response,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        action = body.get("action")
+        if (
+            platform not in PLATFORMS
+            or not isinstance(action, dict)
+            or len(json.dumps(action, ensure_ascii=False, separators=(",", ":"))) > 16 * 1024
+        ):
+            raise _safe_builtin_error(ValueError("interactive action is required"), "人工验证操作无效")
+        try:
+            return await manager().builtin_request(
+                "personification/builtin/auth/input",
+                {
+                    "session_id": session_id,
+                    "owner": _auth_owner(admin, platform),
+                    "action": action,
+                },
+            )
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "人工验证操作未完成") from exc
+
+    @router.post("/builtin/social-research/auth/{session_id}/finish")
+    async def builtin_auth_finish(
+        session_id: str,
+        platform: str,
+        request: Request,
+        response: Response,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _private(response)
+        if platform not in PLATFORMS:
+            raise _safe_builtin_error(ValueError("unsupported platform"), "人工验证完成请求无效")
+        try:
+            result = await manager().builtin_request(
+                "personification/builtin/auth/finish",
+                {"session_id": session_id, "owner": _auth_owner(admin, platform)},
+            )
+        except Exception as exc:
+            raise _safe_builtin_error(exc, "人工验证状态确认失败") from exc
+        webui_audit_log.record(
+            action="mcp_builtin_auth_finish",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=platform,
+            ip_hash=get_client_ip(request),
+            detail={"status": str(result.get("status") or "unknown")},
+            outcome="success" if result.get("status") == "success" else "partial",
+        )
+        return result
 
     @router.post("/builtin/social-research/auth/{session_id}/cancel")
     async def builtin_auth_cancel(

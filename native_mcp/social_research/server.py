@@ -14,9 +14,15 @@ _SAFE_RUNTIME_ERRORS = {
     "builtin MCP is disabled",
     "chromium_unavailable",
     "login_required",
+    "manual_verification_required",
     "platform_disabled",
     "platform_request_failed",
     "playwright_unavailable",
+    "risk_controlled",
+    "interactive_auth_unavailable",
+    "interactive_frame_unavailable",
+    "interactive_page_outside_platform",
+    "interactive_page_unavailable",
 }
 
 
@@ -61,6 +67,12 @@ class SocialResearchMcpServer:
             return await self.service.auth_status(params)
         if method == "personification/builtin/auth/qrcode":
             return await self.service.auth_qrcode(params)
+        if method == "personification/builtin/auth/frame":
+            return await self.service.auth_frame(params)
+        if method == "personification/builtin/auth/input":
+            return await self.service.auth_input(params)
+        if method == "personification/builtin/auth/finish":
+            return await self.service.auth_finish(params)
         if method == "personification/builtin/auth/cancel":
             return await self.service.auth_cancel(params)
         if method == "personification/builtin/auth/logout":

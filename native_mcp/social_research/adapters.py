@@ -170,6 +170,15 @@ class PlatformAdapter:
                 owner,
                 self.spec.login_url,
             )
+        if mode == "webui_interactive":
+            return await self.browsers.start_interactive_auth(
+                self.spec.name,
+                owner,
+                self.spec.login_url,
+                self.spec.allowed_hosts,
+                self.spec.qr_selectors,
+                self.spec.login_trigger_selectors,
+            )
         if mode != "embedded_qr":
             raise ValueError("unsupported auth mode")
         if self.spec.name == "bilibili":

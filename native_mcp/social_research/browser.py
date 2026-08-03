@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import math
 import os
 import shutil
 import stat
@@ -13,6 +14,7 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .bilibili_auth import (
     BilibiliQrProtocolError,
@@ -56,9 +58,31 @@ _QR_EXPIRED_MARKERS = (
 )
 _QR_AUTH_TTL_SECONDS = 15 * 60
 _MANUAL_AUTH_TTL_SECONDS = 30 * 60
+_INTERACTIVE_AUTH_TTL_SECONDS = 10 * 60
 _QR_REFRESH_COOLDOWN_SECONDS = 5.0
 _MAX_QR_REFRESHES = 8
 _PROTOCOL_POLL_INTERVAL_SECONDS = 1.5
+_INTERACTIVE_FRAME_CACHE_SECONDS = 0.75
+_INTERACTIVE_FRAME_MAX_BYTES = 2 * 1024 * 1024
+_INTERACTIVE_TEXT_MAX_CHARS = 200
+_INTERACTIVE_DRAG_MAX_POINTS = 64
+_INTERACTIVE_KEYS = frozenset(
+    {
+        "Tab",
+        "Enter",
+        "Escape",
+        "Backspace",
+        "Delete",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "Home",
+        "End",
+        "PageUp",
+        "PageDown",
+    }
+)
 
 
 def _restrict_private_directory(path: Path) -> None:
@@ -119,6 +143,16 @@ class AuthSession:
     protocol_secret: str = field(default="", repr=False, compare=False)
     last_protocol_poll_at: float = field(default=0.0, repr=False, compare=False)
     native_process: Any = field(default=None, repr=False, compare=False)
+    interactive_allowed_hosts: tuple[str, ...] = field(default=(), repr=False, compare=False)
+    interactive_frame: bytes = field(default=b"", repr=False, compare=False)
+    interactive_frame_mime: str = field(default="image/jpeg", repr=False, compare=False)
+    interactive_frame_revision: int = 0
+    interactive_frame_captured_at: float = field(default=0.0, repr=False, compare=False)
+    interactive_last_action_at: float = field(default=0.0, repr=False, compare=False)
+    interactive_display_url: str = ""
+    interactive_viewport_width: int = 1280
+    interactive_viewport_height: int = 900
+    interactive_lock: Any = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
 
 class BrowserPool:
@@ -219,6 +253,7 @@ class BrowserPool:
             await self._stop_manual_browser(session)
             session.protocol_secret = ""
             session.qr_png = b""
+            session.interactive_frame = b""
         for platform in list(self._contexts):
             await self.close_platform(platform)
         if self._playwright is not None:
@@ -287,6 +322,226 @@ class BrowserPool:
 
         await asyncio.to_thread(stop)
         session.official_window_open = False
+
+    @staticmethod
+    def _interactive_url_allowed(session: AuthSession, value: str) -> bool:
+        try:
+            parsed = urlparse(str(value or ""))
+        except ValueError:
+            return False
+        host = (parsed.hostname or "").lower()
+        return bool(
+            parsed.scheme == "https"
+            and parsed.username is None
+            and parsed.password is None
+            and any(host == suffix or host.endswith("." + suffix) for suffix in session.interactive_allowed_hosts)
+        )
+
+    @staticmethod
+    def _interactive_display_url(value: str) -> str:
+        try:
+            parsed = urlparse(str(value or ""))
+        except ValueError:
+            return ""
+        if parsed.scheme != "https" or not parsed.hostname:
+            return ""
+        port = f":{parsed.port}" if parsed.port else ""
+        # Paths may contain opaque challenge identifiers; the WebUI only needs
+        # to show which official origin currently owns the page.
+        return f"https://{parsed.hostname.lower()}{port}/"[:500]
+
+    def platform_auth_active(self, platform: str) -> bool:
+        now = time.time()
+        return any(
+            session.platform == platform
+            and session.expires_at > now
+            and session.status not in {"success", "expired", "cancelled", "error"}
+            for session in self._auth.values()
+        )
+
+    async def _interactive_page(self, session: AuthSession) -> Any:
+        if session.login_mode != "webui_interactive":
+            raise RuntimeError("interactive_auth_unavailable")
+        if session.status in {"success", "expired", "cancelled", "error"}:
+            raise RuntimeError("interactive_auth_unavailable")
+        context = self._contexts.get(session.platform)
+        try:
+            pages = list(context.pages) if context is not None else []
+        except Exception:
+            pages = []
+        if not pages:
+            session.status = "error"
+            session.error_code = "interactive_page_unavailable"
+            session.official_window_open = False
+            raise RuntimeError("interactive_page_unavailable")
+        page = pages[-1]
+        page_url = str(getattr(page, "url", "") or "")
+        if not self._interactive_url_allowed(session, page_url):
+            session.status = "error"
+            session.error_code = "interactive_page_outside_platform"
+            session.official_window_open = False
+            raise RuntimeError("interactive_page_outside_platform")
+        session.interactive_display_url = self._interactive_display_url(page_url)
+        viewport = getattr(page, "viewport_size", None)
+        if isinstance(viewport, dict):
+            session.interactive_viewport_width = min(1920, max(320, int(viewport.get("width") or 1280)))
+            session.interactive_viewport_height = min(1440, max(240, int(viewport.get("height") or 900)))
+        return page
+
+    async def start_interactive_auth(
+        self,
+        platform: str,
+        owner: str,
+        login_url: str,
+        allowed_hosts: tuple[str, ...],
+        qr_selectors: tuple[str, ...],
+        login_trigger_selectors: tuple[str, ...],
+    ) -> dict[str, Any]:
+        await self._supersede_auth(platform, owner)
+        session = AuthSession(
+            session_id=uuid.uuid4().hex,
+            platform=platform,
+            owner=owner,
+            expires_at=time.time() + _INTERACTIVE_AUTH_TTL_SECONDS,
+            qr_selectors=tuple(qr_selectors),
+            login_trigger_selectors=tuple(login_trigger_selectors),
+            login_url=str(login_url),
+            login_mode="webui_interactive",
+            interactive_allowed_hosts=tuple(str(item).lower() for item in allowed_hosts if str(item).strip()),
+        )
+        self._auth[session.session_id] = session
+        if not self._interactive_url_allowed(session, login_url):
+            session.status = "error"
+            session.error_code = "interactive_page_outside_platform"
+            return self.public_auth(session)
+        try:
+            page = await self.page(platform, headless=True)
+            session.official_window_open = True
+            await page.goto(login_url, wait_until="domcontentloaded", timeout=20000)
+            await page.wait_for_timeout(500)
+            if await self._click_login_trigger(session, page):
+                await page.wait_for_timeout(500)
+            await self._wait_for_auth_surface(session, page)
+            current_url = str(getattr(page, "url", "") or "")
+            if not self._interactive_url_allowed(session, current_url):
+                raise RuntimeError("interactive_page_outside_platform")
+            if session.status == "starting":
+                session.status = "manual_verification_required"
+                session.verification_kind = "official_page"
+            session.interactive_display_url = self._interactive_display_url(current_url)
+        except RuntimeError as exc:
+            session.status = "error"
+            session.error_code = str(exc)
+            session.official_window_open = False
+        except Exception:
+            session.status = "error"
+            session.error_code = "interactive_page_unavailable"
+            session.official_window_open = False
+        return self.public_auth(session)
+
+    async def interactive_frame(self, session_id: str, owner: str) -> dict[str, Any]:
+        session = self.get_auth(session_id, owner)
+        async with session.interactive_lock:
+            page = await self._interactive_page(session)
+            now = time.time()
+            if (
+                not session.interactive_frame
+                or now - session.interactive_frame_captured_at >= _INTERACTIVE_FRAME_CACHE_SECONDS
+            ):
+                image = bytes(await page.screenshot(type="jpeg", quality=70))
+                if not image or len(image) > _INTERACTIVE_FRAME_MAX_BYTES:
+                    raise RuntimeError("interactive_frame_unavailable")
+                session.interactive_frame = image
+                session.interactive_frame_mime = "image/jpeg"
+                session.interactive_frame_revision += 1
+                session.interactive_frame_captured_at = now
+            return {
+                **self.public_auth(session),
+                "mime_type": session.interactive_frame_mime,
+                "data_base64": base64.b64encode(session.interactive_frame).decode("ascii"),
+            }
+
+    @staticmethod
+    def _interactive_coordinate(value: Any, maximum: int) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("interactive coordinates must be numbers")
+        number = float(value)
+        if not math.isfinite(number) or number < 0 or number > maximum:
+            raise ValueError("interactive coordinates are outside the viewport")
+        return number
+
+    async def interactive_action(
+        self,
+        session_id: str,
+        owner: str,
+        action: dict[str, Any],
+    ) -> dict[str, Any]:
+        session = self.get_auth(session_id, owner)
+        async with session.interactive_lock:
+            page = await self._interactive_page(session)
+            action_type = str(action.get("type") or "")
+            width = session.interactive_viewport_width
+            height = session.interactive_viewport_height
+            if action_type == "click":
+                x = self._interactive_coordinate(action.get("x"), width)
+                y = self._interactive_coordinate(action.get("y"), height)
+                await page.mouse.click(x, y, delay=60)
+            elif action_type == "drag":
+                points = action.get("points")
+                if not isinstance(points, list) or not 2 <= len(points) <= _INTERACTIVE_DRAG_MAX_POINTS:
+                    raise ValueError("interactive drag points are invalid")
+                normalized: list[tuple[float, float, int]] = []
+                last_elapsed = 0
+                for point in points:
+                    if not isinstance(point, dict):
+                        raise ValueError("interactive drag points are invalid")
+                    x = self._interactive_coordinate(point.get("x"), width)
+                    y = self._interactive_coordinate(point.get("y"), height)
+                    elapsed = point.get("t", last_elapsed)
+                    if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)):
+                        raise ValueError("interactive drag timing is invalid")
+                    elapsed_int = int(elapsed)
+                    if elapsed_int < last_elapsed or elapsed_int > 5000:
+                        raise ValueError("interactive drag timing is invalid")
+                    normalized.append((x, y, elapsed_int))
+                    last_elapsed = elapsed_int
+                await page.mouse.move(normalized[0][0], normalized[0][1])
+                await page.mouse.down()
+                previous = normalized[0][2]
+                try:
+                    for x, y, elapsed in normalized[1:]:
+                        await asyncio.sleep(min(0.12, max(0, elapsed - previous) / 1000))
+                        await page.mouse.move(x, y)
+                        previous = elapsed
+                finally:
+                    await page.mouse.up()
+            elif action_type == "type":
+                text = action.get("text")
+                if not isinstance(text, str) or not text or len(text) > _INTERACTIVE_TEXT_MAX_CHARS:
+                    raise ValueError("interactive text is invalid")
+                if any(character in text for character in ("\x00", "\r", "\n")):
+                    raise ValueError("interactive text contains unsupported characters")
+                await page.keyboard.insert_text(text)
+            elif action_type == "key":
+                key = str(action.get("key") or "")
+                if key not in _INTERACTIVE_KEYS:
+                    raise ValueError("interactive key is not allowed")
+                await page.keyboard.press(key)
+            elif action_type == "scroll":
+                delta = action.get("delta_y")
+                if isinstance(delta, bool) or not isinstance(delta, (int, float)) or not math.isfinite(float(delta)):
+                    raise ValueError("interactive scroll delta is invalid")
+                await page.mouse.wheel(0, max(-1200, min(1200, float(delta))))
+            else:
+                raise ValueError("interactive action is not allowed")
+            session.interactive_last_action_at = time.time()
+            session.interactive_frame = b""
+            session.interactive_frame_captured_at = 0.0
+            try:
+                await page.wait_for_timeout(120)
+            except Exception:
+                pass
+            return {**self.public_auth(session), "action_applied": True}
 
     async def _launch_manual_browser(self, session: AuthSession) -> None:
         resolved = self._system_browser()
@@ -498,13 +753,16 @@ class BrowserPool:
 
     async def _supersede_auth(self, platform: str, owner: str) -> None:
         for current in self._auth.values():
-            if current.platform == platform and current.owner == owner and current.status not in {
+            # A platform owns exactly one persistent profile. A second admin
+            # session must not race the first session for that same profile.
+            if current.platform == platform and current.status not in {
                 "success", "expired", "cancelled", "error"
             }:
                 await self._stop_manual_browser(current)
                 current.status = "cancelled"
                 current.qr_png = b""
                 current.protocol_secret = ""
+                current.interactive_frame = b""
                 current.official_window_open = False
 
     @staticmethod
@@ -766,6 +1024,8 @@ class BrowserPool:
             session.status = "expired"
             session.qr_png = b""
             session.protocol_secret = ""
+            session.interactive_frame = b""
+            session.official_window_open = False
         return session
 
     def public_auth(self, session: AuthSession) -> dict[str, Any]:
@@ -783,6 +1043,17 @@ class BrowserPool:
             "official_window_open": bool(session.official_window_open),
             "login_mode": session.login_mode,
             "qr_refresh_count": int(session.qr_refresh_count),
+            "interactive_available": bool(
+                session.login_mode == "webui_interactive"
+                and session.status not in {"success", "expired", "cancelled", "error"}
+                and session.official_window_open
+            ),
+            "interactive_frame_revision": int(session.interactive_frame_revision),
+            "interactive_display_url": session.interactive_display_url,
+            "interactive_viewport": {
+                "width": int(session.interactive_viewport_width),
+                "height": int(session.interactive_viewport_height),
+            },
         }
 
     def auth_qrcode(self, session_id: str, owner: str) -> dict[str, Any]:
@@ -801,6 +1072,7 @@ class BrowserPool:
         session.status = "cancelled"
         session.qr_png = b""
         session.protocol_secret = ""
+        session.interactive_frame = b""
         session.official_window_open = False
         return self.public_auth(session)
 
@@ -810,12 +1082,18 @@ class BrowserPool:
         session.status = "expired"
         session.qr_png = b""
         session.protocol_secret = ""
+        session.interactive_frame = b""
         session.official_window_open = False
 
     async def logout(self, platform: str) -> None:
         for session in self._auth.values():
             if session.platform == platform:
                 await self._stop_manual_browser(session)
+                session.status = "cancelled"
+                session.qr_png = b""
+                session.protocol_secret = ""
+                session.interactive_frame = b""
+                session.official_window_open = False
         await self.close_platform(platform)
         profile = self.profile_dir(platform)
         if profile == self.profiles_root or not profile.is_relative_to(self.profiles_root):

@@ -124,6 +124,24 @@ class _BuiltinManager(_Manager):
             return {"session_id": params["session_id"], "platform": "bilibili", "status": "waiting_scan", "qr_available": True, "expires_at": time.time() + 300}
         if method.endswith("/auth/qrcode"):
             return {"data_base64": base64.b64encode(b"png-data").decode("ascii")}
+        if method.endswith("/auth/frame"):
+            return {"mime_type": "image/jpeg", "data_base64": base64.b64encode(b"jpeg-data").decode("ascii")}
+        if method.endswith("/auth/input"):
+            self.auth_requests.append({"interactive_input": dict(params)})
+            return {
+                "session_id": params["session_id"],
+                "platform": "douyin",
+                "status": "manual_verification_required",
+                "login_mode": "webui_interactive",
+                "action_applied": True,
+            }
+        if method.endswith("/auth/finish"):
+            return {
+                "session_id": params["session_id"],
+                "platform": "douyin",
+                "status": "success",
+                "login_mode": "webui_interactive",
+            }
         if method.endswith("/auth/logout"):
             return {"platform": params["platform"], "state": "login_required", "authenticated": False}
         raise KeyError(method)
@@ -357,6 +375,12 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
     assert manual_login.status_code == 200
     assert manager.auth_requests[-1]["mode"] == "manual_browser"
     assert "profile" not in manual_login.text.lower()
+    interactive_login = client.post(
+        "/api/mcp/builtin/social-research/auth/start",
+        json={"platform": "douyin", "mode": "webui_interactive"},
+    )
+    assert interactive_login.status_code == 200
+    assert manager.auth_requests[-1]["mode"] == "webui_interactive"
     qr = client.get(
         "/api/mcp/builtin/social-research/auth/session-1/qrcode",
         params={"platform": "bilibili"},
@@ -365,6 +389,29 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
     assert qr.content == b"png-data"
     assert qr.headers["cache-control"] == "no-store, private"
     assert "owner" not in login.text
+    frame = client.get(
+        "/api/mcp/builtin/social-research/auth/session-1/frame",
+        params={"platform": "douyin"},
+    )
+    assert frame.status_code == 200
+    assert frame.content == b"jpeg-data"
+    assert frame.headers["content-type"] == "image/jpeg"
+    assert frame.headers["cache-control"] == "no-store, private"
+    interactive_input = client.post(
+        "/api/mcp/builtin/social-research/auth/session-1/input",
+        params={"platform": "douyin"},
+        json={"action": {"type": "click", "x": 120, "y": 80}},
+    )
+    assert interactive_input.status_code == 200
+    recorded_input = manager.auth_requests[-1]["interactive_input"]
+    assert recorded_input["action"] == {"type": "click", "x": 120, "y": 80}
+    assert "owner" in recorded_input and "owner" not in interactive_input.text
+    finished = client.post(
+        "/api/mcp/builtin/social-research/auth/session-1/finish",
+        params={"platform": "douyin"},
+    )
+    assert finished.status_code == 200
+    assert finished.json()["status"] == "success"
 
     wrong_logout = client.post(
         "/api/mcp/builtin/social-research/auth/logout",

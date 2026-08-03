@@ -49,6 +49,10 @@ _SAFE_OPERATION_CODES = {
     "qrcode_encoder_unavailable",
     "no_enabled_platform",
     "detail_content_unavailable",
+    "interactive_auth_unavailable",
+    "interactive_frame_unavailable",
+    "interactive_page_outside_platform",
+    "interactive_page_unavailable",
 }
 
 
@@ -160,7 +164,9 @@ class SocialResearchService:
         platform = str(params.get("platform") or "")
         owner = clean_text(params.get("owner"), 200)
         mode = str(params.get("mode") or "embedded_qr")
-        if platform not in PLATFORMS or not owner or mode not in {"embedded_qr", "manual_browser"}:
+        if platform not in PLATFORMS or not owner or mode not in {
+            "embedded_qr", "manual_browser", "webui_interactive"
+        }:
             raise ValueError("platform, owner and a valid auth mode are required")
         return await self.adapters[platform].start_auth(owner, mode=mode)
 
@@ -222,6 +228,47 @@ class SocialResearchService:
             clean_text(params.get("owner"), 200),
         )
 
+    async def auth_frame(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self.browsers.interactive_frame(
+            str(params.get("session_id") or ""),
+            clean_text(params.get("owner"), 200),
+        )
+
+    async def auth_input(self, params: dict[str, Any]) -> dict[str, Any]:
+        action = params.get("action")
+        if not isinstance(action, dict):
+            raise ValueError("interactive action is required")
+        return await self.browsers.interactive_action(
+            str(params.get("session_id") or ""),
+            clean_text(params.get("owner"), 200),
+            action,
+        )
+
+    async def auth_finish(self, params: dict[str, Any]) -> dict[str, Any]:
+        owner = clean_text(params.get("owner"), 200)
+        session = self.browsers.get_auth(str(params.get("session_id") or ""), owner)
+        if session.login_mode != "webui_interactive":
+            raise RuntimeError("interactive_auth_unavailable")
+        try:
+            authenticated = await self.adapters[session.platform].authenticated(interactive=False)
+        except Exception:
+            authenticated = False
+        if authenticated:
+            session.status = "success"
+            session.qr_png = b""
+            session.error_code = ""
+            session.verification_kind = ""
+            session.interactive_frame = b""
+            session.official_window_open = False
+            await self.browsers.close_platform(session.platform)
+            return self.browsers.public_auth(session)
+        await self.browsers.refresh_auth(session)
+        if session.status not in {"risk_controlled", "qr_expired", "error"}:
+            session.status = "manual_verification_required"
+            if not session.verification_kind:
+                session.verification_kind = "manual_login_incomplete"
+        return self.browsers.public_auth(session)
+
     async def auth_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
         result = await self.browsers.cancel_auth(
             str(params.get("session_id") or ""),
@@ -241,6 +288,8 @@ class SocialResearchService:
         config = self._config[platform]
         if not config.get("enabled"):
             raise RuntimeError("platform_disabled")
+        if self.browsers.platform_auth_active(platform):
+            raise RuntimeError("manual_verification_required")
         adapter = self.adapters[platform]
         if not await adapter.authenticated():
             raise RuntimeError("login_required")
