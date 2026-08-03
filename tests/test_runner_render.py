@@ -2040,8 +2040,8 @@ def test_run_agent_stops_equivalent_searches_after_social_coverage_is_satisfied(
                 "partial": False,
                 "aggregation": {
                     "requested_limit": 10,
-                    "returned_count": 2,
-                    "source_group_count": 2,
+                    "returned_count": 10,
+                    "source_group_count": 10,
                     "selected_platforms": ["xiaoheihe", "bilibili"],
                     "successful_platforms": ["xiaoheihe", "bilibili"],
                     "covered_platforms": ["xiaoheihe", "bilibili"],
@@ -2155,6 +2155,221 @@ def test_run_agent_stops_equivalent_searches_after_social_coverage_is_satisfied(
     assert "web_search" not in second_tools
     assert "社交证据已满足" in turn_plan.session_goal
     assert "https://xiaoheihe.cn/app/bbs/link/179364001" in result.text
+    assert result.evidence_delivery_status == "recovered"
+
+
+def test_run_agent_allows_one_slang_web_fallback_then_blocks_multi_search() -> None:
+    handled: list[str] = []
+    web_url = "https://example.com/delta-force-slang"
+
+    async def _slang_handler(**_kwargs):  # noqa: ANN001
+        handled.append("research_game_slang")
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "partial": False,
+                "aggregation": {
+                    "requested_limit": 10,
+                    "returned_count": 2,
+                    "source_group_count": 2,
+                    "selected_platforms": ["bilibili"],
+                    "successful_platforms": ["bilibili"],
+                    "covered_platforms": ["bilibili"],
+                    "coverage_status": "complete",
+                    "satisfies_request": True,
+                },
+                "semantic_validation": {
+                    "target_term": "花来",
+                    "target_game": "三角洲行动",
+                    "status": "insufficient",
+                    "claim_count": 1,
+                    "supporting_source_group_count": 1,
+                    "supporting_origins": ["bilibili"],
+                    "satisfies_request": False,
+                    "gap_codes": ["source_origins_insufficient"],
+                },
+                "items": [
+                    {
+                        "platform": "bilibili",
+                        "content_id": f"BV{index}abc",
+                        "source_group_id": f"social_{index}",
+                        "title": f"花来玩法{index}",
+                        "canonical_url": f"https://www.bilibili.com/video/BV{index}abc/",
+                    }
+                    for index in range(10)
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    async def _parallel_handler(**_kwargs):  # noqa: ANN001
+        handled.append("parallel_research")
+        return json.dumps(
+            {
+                "verified_facts": [],
+                "single_source_facts": ["现有网页将花来描述为玩家玩法称呼"],
+                "conflicts": [],
+                "fact_evidence": [
+                    {
+                        "claim": "现有网页将花来描述为玩家玩法称呼",
+                        "support": [
+                            {
+                                "canonical_url": web_url,
+                                "title": "三角洲玩家用语整理",
+                                "quote": "花来是玩家用于称呼一类夺舍玩法的说法。",
+                                "content_fingerprint": "web-fingerprint-1",
+                                "source_group_id": "web_group_1",
+                                "evidence_origin": "web:example.com",
+                            }
+                        ],
+                    }
+                ],
+                "web_slang_learning": {
+                    "ingested_claim_count": 1,
+                    "semantic_validation": {
+                        "target_term": "花来",
+                        "target_game": "三角洲行动",
+                        "status": "insufficient",
+                        "supporting_source_group_count": 2,
+                        "supporting_origins_count": 2,
+                        "satisfies_request": False,
+                        "gap_codes": ["independent_sources_insufficient"],
+                    },
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    async def _multi_handler(**_kwargs):  # noqa: ANN001
+        raise AssertionError("multi_search_engine must not run after the one web fallback")
+
+    rewrite_response = tool_impl.ToolCallerResponse(
+        finish_reason="stop",
+        content=json.dumps(
+            {
+                "primary_query": "三角洲行动 花来",
+                "query_candidates": ["三角洲行动 花来"],
+                "context_clues": ["用户要求不同来源"],
+                "need_image_understanding": False,
+                "recommended_tools": ["research_game_slang"],
+                "search_plan": ["先查社交详情，再按缺口补证"],
+            },
+            ensure_ascii=False,
+        ),
+        tool_calls=[],
+        raw={},
+    )
+
+    registry = tool_registry.ToolRegistry()
+    for name, handler in (
+        ("research_game_slang", _slang_handler),
+        ("parallel_research", _parallel_handler),
+        ("multi_search_engine", _multi_handler),
+    ):
+        registry.register(
+            tool_registry.AgentTool(
+                name=name,
+                description="lookup",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "term": {"type": "string"},
+                        "game": {"type": "string"},
+                    },
+                    "required": [],
+                },
+                handler=handler,
+                metadata={
+                    "category": "retrieval",
+                    "intent_tags": ["lookup", "game_slang"],
+                    "evidence_kind": "social_platform" if name == "research_game_slang" else "web",
+                    "side_effect": "none",
+                    "retryable": True,
+                },
+            )
+        )
+
+    caller = _FakeToolCaller(
+        [
+            rewrite_response,
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-slang",
+                        name="research_game_slang",
+                        arguments={"game": "三角洲行动", "term": "花来"},
+                    )
+                ],
+                raw={},
+            ),
+            # Providers can occasionally return a stale/unexposed tool call;
+            # the execution guard must still suppress it deterministically.
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-multi-after-fallback",
+                        name="multi_search_engine",
+                        arguments={"query": "三角洲行动 花来"},
+                    )
+                ],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="现有材料多把花来用作一类夺舍玩法的称呼。",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "花来是什么意思，给出不同来源"}],
+            registry=registry,
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=3,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+                personification_evidence_synthesizer_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="lookup",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+            turn_plan=SimpleNamespace(
+                tool_intent=["lookup_web"],
+                research_need="high",
+                session_goal="解释花来",
+                evidence_policy="strict",
+            ),
+        )
+    )
+
+    assert handled == ["research_game_slang", "parallel_research"]
+    second_tools = {schema["function"]["name"] for schema in caller.calls[2]["tools"]}
+    assert "multi_search_engine" not in second_tools
+    assert "parallel_research" not in second_tools
+    assert "research_game_slang" not in second_tools
+    second_messages = caller.calls[2]["messages"]
+    assert any(
+        "[本轮研究收束契约]" in str(message.get("content", ""))
+        and "semantic_status=insufficient" in str(message.get("content", ""))
+        for message in second_messages
+        if isinstance(message, dict)
+    )
+    assert web_url in result.text
     assert result.evidence_delivery_status == "recovered"
 
 

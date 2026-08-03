@@ -355,6 +355,50 @@ async def run_agent(
             or stop_state.semantic_web_fallback_attempted
         )
 
+    def _append_research_closure_guidance() -> None:
+        if (
+            not stop_state.semantic_web_fallback_attempted
+            or stop_state.research_closure_guidance_injected
+        ):
+            return
+        stop_state.research_closure_guidance_injected = True
+        status = str(stop_state.semantic_validation_status or "insufficient").strip().lower()
+        gap_text = ",".join(stop_state.semantic_gap_codes) or "-"
+        if stop_state.social_evidence_satisfied:
+            claim_rule = "结构化语义共识已满足，可以陈述证据共同支持的核心解释。"
+        elif status == "conflict":
+            claim_rule = (
+                "结构化语义校验仍为 conflict；必须明确材料之间存在冲突，"
+                "不得选择其中一种说法冒充定论。"
+            )
+        else:
+            claim_rule = (
+                "结构化语义校验仍未满足；只能表述为现有材料中的常见用法或当前证据支持的解释，"
+                "不得使用‘已经证实、可以确定、就是’等确定性结论，也不得补写证据未支持的细节。"
+            )
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "[本轮研究收束契约]\n"
+                    "社交详情读取及唯一一次网页并行补证已经结束；不要再调用任何搜索、百科、资源收集或社交检索工具。"
+                    "请直接基于已提供的结构化来源完成回答。\n"
+                    f"semantic_status={status} satisfies="
+                    f"{str(stop_state.social_evidence_satisfied).lower()} gap_codes={gap_text}\n"
+                    f"{claim_rule}"
+                ),
+            }
+        )
+        _record_reply_trace_stage(
+            key="agent_research_closure",
+            label="研究收束契约",
+            status="ok" if stop_state.social_evidence_satisfied else "warn",
+            detail=(
+                f"semantic_status={status} satisfies="
+                f"{str(stop_state.social_evidence_satisfied).lower()} gaps={gap_text}"
+            ),
+        )
+
     evidence_synthesis_rounds = 0
     last_evidence_tool_count = 0
     max_evidence_synthesis_rounds = 2
@@ -706,6 +750,13 @@ async def run_agent(
         elif stop_state.semantic_web_fallback_attempted:
             evidence.needs_more_research = False
             evidence.research_followup_query = ""
+            uncertainty_note = (
+                "黑话解释存在未解决冲突"
+                if stop_state.semantic_validation_status == "conflict"
+                else "黑话语义共识仍不完整"
+            )
+            if uncertainty_note not in evidence.uncertainty_notes:
+                evidence.uncertainty_notes.append(uncertainty_note)
         messages.append({"role": "system", "content": _evidence_guidance(evidence)})
         if evidence.needs_more_research and not _research_lookup_complete():
             stop_state.semantic_fallback_attempted = False
@@ -762,6 +813,7 @@ async def run_agent(
             ]
             if stop_state.social_evidence_satisfied:
                 _mark_social_evidence_satisfied()
+        _append_research_closure_guidance()
         selected_names = selected_tool_names(active_schemas, _schema_tool_name)
         logger.debug(f"[agent] exposed {len(active_schemas)} tools to model")
         logger.info(f"[agent] selected tools: {', '.join(selected_names) if selected_names else 'none'}")
@@ -895,8 +947,8 @@ async def run_agent(
                 and str(tool_call.name or "").strip() in SOCIAL_SEARCH_EQUIVALENT_TOOL_NAMES
             ):
                 result = (
-                    '{"status":"skipped","error_code":"social_evidence_already_satisfied",'
-                    '"message":"Structured social evidence already satisfies this turn."}'
+                    '{"status":"skipped","error_code":"research_lookup_already_completed",'
+                    '"message":"Structured research for this turn is already complete."}'
                 )
                 trace_tool_result(
                     tool_name=str(tool_call.name or "").strip(),
@@ -907,10 +959,13 @@ async def run_agent(
                     status_for_result=_tool_result_trace_status,
                 )
                 _record_reply_trace_stage(
-                    key="agent_social_search_suppressed",
-                    label="社交检索去重",
+                    key="agent_research_lookup_suppressed",
+                    label="研究检索去重",
                     status="info",
-                    detail=f"tool={str(tool_call.name or '').strip()} reason=evidence_satisfied",
+                    detail=(
+                        f"tool={str(tool_call.name or '').strip()} "
+                        "reason=research_lookup_complete"
+                    ),
                 )
                 turn_tool_results.append((tool_call, result))
                 continue

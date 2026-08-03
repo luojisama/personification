@@ -16,8 +16,26 @@ _SOCIAL_RESEARCH_TOOL_NAMES = frozenset(
     {"social_content_search", "social_content_read", "research_game_slang"}
 )
 _SOCIAL_SEARCH_TOOL_NAMES = frozenset({"social_content_search", "research_game_slang"})
+# Once structured social research is satisfied, or its one allowed web
+# cross-check has completed, every equivalent discovery surface must be hidden.
+# Keeping this list broader than the two legacy web-search aliases prevents a
+# model from changing tool names (for example to ``multi_search_engine``) and
+# accidentally starting a second research pass for the same turn.
 _SOCIAL_SEARCH_EQUIVALENT_TOOL_NAMES = frozenset(
-    {"social_content_search", "research_game_slang", "web_search", "search_web", "parallel_research"}
+    {
+        "social_content_search",
+        "research_game_slang",
+        "web_search",
+        "search_web",
+        "parallel_research",
+        "multi_search_engine",
+        "collect_resources",
+        "search_official_site",
+        "search_github_repos",
+        "wiki_lookup",
+        "get_baike_entry",
+        "resolve_acg_entity",
+    }
 )
 SOCIAL_SEARCH_EQUIVALENT_TOOL_NAMES = _SOCIAL_SEARCH_EQUIVALENT_TOOL_NAMES
 _SOCIAL_CONTENT_ROUTES: dict[str, tuple[frozenset[str], re.Pattern[str]]] = {
@@ -294,6 +312,7 @@ def web_slang_learning_metadata(*, tool_name: str, result: Any) -> dict[str, Any
                 semantic.get("supporting_origins_count", 0)
             ),
             "satisfies_request": _coerce_bool(semantic.get("satisfies_request"), False),
+            "gap_codes": _coerce_text_list(semantic.get("gap_codes"), limit=8, item_chars=64),
         },
     }
 
@@ -538,8 +557,85 @@ def social_evidence_from_records(tool_results: list[dict[str, Any]] | None) -> d
                 continue
             seen_urls.add(url)
             sources.append(dict(source))
+    # ``parallel_research`` keeps URL/quote provenance outside its truncated
+    # raw text. Promote those validated supports into the same delivery pool so
+    # the final reply can cite a genuinely different web origin instead of
+    # filling all three visible links with one social platform.
+    for record in list(tool_results or []):
+        if not isinstance(record, dict):
+            continue
+        fact_evidence = record.get("fact_evidence")
+        if not isinstance(fact_evidence, list):
+            fact_evidence = web_fact_evidence_metadata(
+                tool_name=str(record.get("tool_name") or record.get("name") or ""),
+                result=record.get("result") or record.get("text") or "",
+            )
+        for fact in list(fact_evidence or [])[:12]:
+            if not isinstance(fact, dict):
+                continue
+            for support in list(fact.get("support") or [])[:8]:
+                if not isinstance(support, dict):
+                    continue
+                url = _validated_web_evidence_url(support.get("canonical_url"))
+                if not url or url in seen_urls:
+                    continue
+                host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+                origin = str(support.get("evidence_origin") or "").strip()[:200]
+                if not origin.startswith("web:"):
+                    origin = f"web:{host}"
+                group_id = str(support.get("source_group_id") or "").strip()[:120]
+                if not group_id:
+                    group_id = str(support.get("content_fingerprint") or "").strip()[:120]
+                if not group_id:
+                    group_id = f"web:{url}"
+                seen_urls.add(url)
+                sources.append(
+                    {
+                        "platform": "web",
+                        "evidence_origin": origin,
+                        "content_id": str(support.get("content_fingerprint") or "").strip()[:128],
+                        "source_group_id": group_id,
+                        "title": re.sub(
+                            r"\s+", " ", str(support.get("title") or "")
+                        ).strip()[:180],
+                        "canonical_url": url,
+                        "target_support": True,
+                    }
+                )
+
+    def _delivery_origin(source: dict[str, Any]) -> str:
+        explicit = str(source.get("evidence_origin") or "").strip().lower()
+        if explicit:
+            return explicit
+        platform = str(source.get("platform") or "").strip().lower()
+        if platform and platform != "web":
+            return platform
+        url = str(source.get("canonical_url") or "").strip()
+        return (urlparse(url).hostname or "").lower().removeprefix("www.")
+
+    # Preserve the compact ten-source envelope without allowing ten results
+    # from one platform to push every validated web origin past the truncation
+    # boundary. Stable first-origin coverage is followed by the remaining
+    # source-group order from the original packets.
+    ordered_sources: list[dict[str, Any]] = []
+    ordered_urls: set[str] = set()
+    ordered_origins: set[str] = set()
+    for source in sources:
+        origin = _delivery_origin(source)
+        if origin and origin in ordered_origins:
+            continue
+        ordered_sources.append(source)
+        ordered_urls.add(str(source.get("canonical_url") or "").strip())
+        if origin:
+            ordered_origins.add(origin)
+    for source in sources:
+        url = str(source.get("canonical_url") or "").strip()
+        if url in ordered_urls:
+            continue
+        ordered_sources.append(source)
+        ordered_urls.add(url)
     return {
-        "sources": sources[:10],
+        "sources": ordered_sources[:10],
         "aggregation": coverage,
         "partial": partial,
         "warnings": warnings[:8],

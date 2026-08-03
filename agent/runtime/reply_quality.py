@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import time
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from ...core.context_policy import strip_response_control_markers
 from ...core.evidence_envelope import EvidenceEnvelope
@@ -91,7 +92,7 @@ _SOCIAL_PLATFORM_LABELS = {
 
 
 def _distinct_social_sources(sources: list[dict[str, Any]], *, limit: int = 3) -> list[dict[str, Any]]:
-    selected: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
     seen_groups: set[str] = set()
     seen_urls: set[str] = set()
     for source in list(sources or []):
@@ -103,7 +104,40 @@ def _distinct_social_sources(sources: list[dict[str, Any]], *, limit: int = 3) -
             continue
         seen_urls.add(url)
         seen_groups.add(group_id)
+        candidates.append(source)
+
+    def _origin_key(source: dict[str, Any]) -> str:
+        explicit = str(source.get("evidence_origin") or "").strip().lower()
+        if explicit:
+            return explicit
+        platform = str(source.get("platform") or "").strip().lower()
+        if platform and platform != "web":
+            return platform
+        url = str(source.get("canonical_url") or "").strip()
+        return (urlparse(url).hostname or "").lower().removeprefix("www.")
+
+    # First cover different platforms/domains, then use remaining distinct
+    # source groups. This makes a web cross-check visible even when the social
+    # packet contains many high-quality results from a single platform.
+    selected: list[dict[str, Any]] = []
+    selected_urls: set[str] = set()
+    seen_origins: set[str] = set()
+    for source in candidates:
+        origin = _origin_key(source)
+        if origin and origin in seen_origins:
+            continue
         selected.append(source)
+        selected_urls.add(str(source.get("canonical_url") or "").strip())
+        if origin:
+            seen_origins.add(origin)
+        if len(selected) >= limit:
+            return selected
+    for source in candidates:
+        url = str(source.get("canonical_url") or "").strip()
+        if url in selected_urls:
+            continue
+        selected.append(source)
+        selected_urls.add(url)
         if len(selected) >= limit:
             break
     return selected
@@ -111,8 +145,12 @@ def _distinct_social_sources(sources: list[dict[str, Any]], *, limit: int = 3) -
 
 def _safe_social_source_line(source: dict[str, Any]) -> str:
     platform = str(source.get("platform") or "").strip().lower()
-    label = _SOCIAL_PLATFORM_LABELS.get(platform, platform or "社交平台")
     url = str(source.get("canonical_url") or "").strip()
+    if platform == "web":
+        origin = str(source.get("evidence_origin") or "").strip()
+        label = origin.removeprefix("web:") or (urlparse(url).hostname or "网页来源")
+    else:
+        label = _SOCIAL_PLATFORM_LABELS.get(platform, platform or "社交平台")
     title = re.sub(r"\s+", " ", str(source.get("title") or "")).strip()[:120]
     if title:
         decision = assess_visible_text(

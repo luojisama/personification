@@ -48,6 +48,8 @@ class StopFlowState:
     semantic_gap_codes: list[str] = field(default_factory=list)
     semantic_target_term: str = ""
     semantic_target_game: str = ""
+    semantic_validation_status: str = ""
+    research_closure_guidance_injected: bool = False
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,7 @@ def update_stop_flow_tool_result(
         semantic_satisfied = bool(semantic.get("satisfies_request", False))
         state.social_evidence_satisfied = semantic_satisfied
         state.semantic_web_fallback_needed = not semantic_satisfied
+        state.semantic_validation_status = str(semantic.get("status") or "empty").strip().lower()[:24]
         state.semantic_gap_codes = [
             str(value or "").strip()[:64]
             for value in list(semantic.get("gap_codes") or [])
@@ -131,6 +134,17 @@ def update_stop_flow_tool_result(
         )
         if isinstance(web_semantic, dict) and bool(web_semantic.get("satisfies_request", False)):
             state.social_evidence_satisfied = True
+        if isinstance(web_semantic, dict):
+            state.semantic_validation_status = str(
+                web_semantic.get("status") or state.semantic_validation_status or "insufficient"
+            ).strip().lower()[:24]
+            web_gap_codes = [
+                str(value or "").strip()[:64]
+                for value in list(web_semantic.get("gap_codes") or [])
+                if str(value or "").strip()
+            ][:8]
+            if web_gap_codes:
+                state.semantic_gap_codes = web_gap_codes
     if not is_retryable_evidence_tool(registry, name):
         return
     signature = tool_signature(name, args)
