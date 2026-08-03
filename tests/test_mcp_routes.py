@@ -337,7 +337,8 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
     management.McpStore().ensure_builtin_social()
 
     manager = _BuiltinManager()
-    client = _client(monkeypatch, manager)
+    audit_actions: list[dict] = []
+    client = _client(monkeypatch, manager, audit_actions)
 
     status = client.get("/api/mcp/builtin/social-research/status")
     assert status.status_code == 200
@@ -406,12 +407,15 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
     recorded_input = manager.auth_requests[-1]["interactive_input"]
     assert recorded_input["action"] == {"type": "click", "x": 120, "y": 80}
     assert "owner" in recorded_input and "owner" not in interactive_input.text
+    assert all(item.get("action") != "mcp_builtin_auth_input" for item in audit_actions)
     finished = client.post(
         "/api/mcp/builtin/social-research/auth/session-1/finish",
         params={"platform": "douyin"},
     )
     assert finished.status_code == 200
     assert finished.json()["status"] == "success"
+    finish_audit = next(item for item in audit_actions if item.get("action") == "mcp_builtin_auth_finish")
+    assert finish_audit["detail"] == {"status": "success"}
 
     wrong_logout = client.post(
         "/api/mcp/builtin/social-research/auth/logout",
@@ -479,6 +483,28 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
     )
     assert search_preview.json()["tool_name"] == "social_content_search"
     assert "semantic_validation" not in search_preview.json()["packet"]
+
+
+def test_builtin_interactive_auth_routes_require_webui_admin() -> None:
+    route_mod = load_personification_module("plugin.personification.webui.routes.mcp_routes")
+    runtime = SimpleNamespace(plugin_config=SimpleNamespace(personification_mcp_registry_sources=[]))
+    app = FastAPI()
+    app.include_router(route_mod.build_mcp_router(runtime=runtime))
+    client = TestClient(app)
+
+    assert client.get(
+        "/api/mcp/builtin/social-research/auth/session/frame",
+        params={"platform": "douyin"},
+    ).status_code == 401
+    assert client.post(
+        "/api/mcp/builtin/social-research/auth/session/input",
+        params={"platform": "douyin"},
+        json={"action": {"type": "click", "x": 1, "y": 1}},
+    ).status_code == 401
+    assert client.post(
+        "/api/mcp/builtin/social-research/auth/session/finish",
+        params={"platform": "douyin"},
+    ).status_code == 401
 
 
 def test_builtin_social_preview_reuses_manager_semantic_postprocessing(monkeypatch) -> None:

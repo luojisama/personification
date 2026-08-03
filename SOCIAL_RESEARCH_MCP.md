@@ -8,10 +8,11 @@
 2. 打开“MCP → 原生 MCP”，开启服务总开关。
 3. 逐个平台开启 B站、抖音、贴吧或小黑盒。
 4. 优先点击二维码按钮。B站调用官方固定二维码生成接口，在服务端本机编码 PNG，并用同一 persistent context 的请求上下文轮询，因此不打开也不依赖可见窗口；其它平台仍从各自官方页面截取真实二维码。管理会话保持 15 分钟，官方二维码自身过期时会在同一会话中换新。
-5. 若小黑盒二维码仍无法扫描，或抖音出现机器人验证，点击“在普通浏览器中登录”。MCP 会关闭自动化窗口，使用同一隔离 profile 直接启动不受 Playwright 控制的系统 Chrome/Edge，并给人工登录保留 30 分钟。B站协议二维码异常时也保留此人工兜底。
-6. 在普通浏览器窗口中完成扫码、短信验证码、滑块、机器人验证或官方 App 确认；成功后完全关闭该隔离窗口。MCP 只在窗口关闭后检测登录 Cookie，不会在验证期间抢占 profile，也不会操作或绕过验证。
-7. 平台状态变为 `ready` 后，再逐项授权 Agent 工具。
-8. 使用检索预览读取一个真实词，确认封面、标题、正文/文案、评论/回复和能力矩阵符合预期。
+5. 若服务器没有可操作桌面，或二维码页面出现机器人验证，点击“在 WebUI 中人工验证”并完成二次确认。MCP 使用同一隔离 profile 在后台保留固定官方登录页，WebUI 约每 3 秒取得一张低频画面；管理员的点击、原始拖动轨迹、有限按键和最多 200 字输入只发送给当前官方页面。接管会话保留 10 分钟，验证期间暂停该平台的实时检索；页面跳到平台允许域名之外时立即失败关闭。
+6. WebUI 接管不自动识别或破解验证码，也不记录输入内容、页面画面或挑战路径。完成官方验证后点击“验证完成，检查登录态”；检测到真实登录 Cookie 后关闭接管页面并继续复用该 profile。
+7. 若运行账户本身有可操作桌面，也可点击“在普通浏览器中登录”。MCP 会关闭自动化窗口，使用同一隔离 profile 直接启动不受 Playwright 控制的系统 Chrome/Edge，并给人工登录保留 30 分钟。成功后完全关闭该隔离窗口，MCP 才检测登录 Cookie。B站协议二维码异常时也保留此人工兜底。
+8. 平台状态变为 `ready` 后，再逐项授权 Agent 工具。
+9. 使用检索预览读取一个真实词，确认封面、标题、正文/文案、评论/回复和能力矩阵符合预期。
 
 停止或重载服务不会清除登录态。注销要求 WebUI 精确确认，只删除所选平台的独立 profile，不影响其它平台。服务不实现验证码或风控绕过，也不承诺平台页面改版后无需更新选择器。重新获取二维码会取消同一管理员、同一平台的旧登录会话，旧二维码不再用于状态判断。
 
@@ -35,7 +36,7 @@
 | `social_content_read` | 按平台内容 ID 或 URL 读取正文、评论、回复、弹幕/字幕 | 无 |
 | `research_game_slang` | 针对一个词和当前游戏语境做跨平台两阶段查证 | 无 |
 
-管理面的登录、状态、配置、取消和注销使用私有 JSON-RPC，只允许 WebUI 后端调用，不出现在 `tools/list`。MCP 不公开任意 HTTP、任意浏览器操作、任意 JavaScript、Cookie 导出或平台管理工具。
+管理面的登录、状态、配置、取消、人工验证画面/输入、完成检查和注销使用私有 JSON-RPC，只允许 WebUI 后端调用，不出现在 `tools/list`。人工验证输入只允许边界化的点击、管理员原始拖动轨迹、有限按键、滚动和短文本；MCP 不公开任意 HTTP、任意 URL 导航、任意 JavaScript、Cookie 导出或平台管理工具。
 
 ## 平台能力
 
@@ -133,6 +134,8 @@ Data Transfer v3 只导出逻辑词典根、sense、短证据和学习事件。�
 - `verification_kind=qr_generation_blocked`：官方扫码面板已经打开，但二维码区域只有 Logo/占位图，没有真实二维码；在官方窗口完成人工验证或使用平台提供的验证码登录，MCP 不会把占位图转发到 WebUI。
 - `verification_kind=official_page`：官方页面没有提供可以安全转发到 WebUI 的二维码，需要直接在官方窗口完成登录。
 
+`login_mode=webui_interactive` 表示管理员已启动 WebUI 人工验证接管。会话与管理员 QQ、WebUI device 和平台绑定；同一平台只有一个活动会话，新的管理员会话会取消旧会话，避免两个窗口争用同一 profile。WebUI 只显示官方 origin，不显示可能含挑战标识的 query、fragment 或路径；画面响应为 `no-store, private`，单帧上限 2 MiB，操作请求上限 16 KiB。输入动作不进入审计详情，审计只保留会话开始、完成状态和管理员/平台元数据。
+
 WebUI 的二维码 URL 带 `qr_revision`，响应始终为 `Cache-Control: no-store, private`。页面延迟出码、二维码自动更新或扫码后切换确认状态时，不需要重启 MCP。
 
 抖音未登录页面也可能下发通用 `passport_csrf_token`；它不是登录成功证据。适配器只以真实会话 Cookie 判断抖音登录完成，避免机器人验证或手机确认尚未结束时误报 `success` 并关闭官方窗口。
@@ -146,3 +149,5 @@ WebUI 的二维码 URL 带 `qr_revision`，响应始终为 `Cache-Control: no-st
 同日针对无法扫码问题继续核对官方实时实现：B站官方登录页实际调用固定 generate/poll 端点，官方前端 bundle 仍按 `86101/86090/86038/0` 驱动未扫码、待确认、过期和成功。改为 `protocol_qr` 后，真实未登录探针从 `898` 秒运行到 `895` 秒，始终 `waiting_scan`、`qr_revision=1`、`official_window_open=false`。小黑盒视觉探针确认 canvas 可见初期确实是“二维码加载中”占位图，约数秒后才绘制黑白二维码；启用像素结构门和 `headless_page_qr` 后，真实探针从 `896` 秒运行到 `893` 秒，返回通过结构校验的 PNG，期间不需要可见窗口。临时 profile 和视觉探针图片均已删除。该证据验证了未扫码阶段和占位图修复，扫码到 `success` 仍需管理员用真实账号完成。
 
 本轮最终验证：完整 pytest 使用 Windows 短 `--basetemp=.pf` 得到 `1946 passed, 3 warnings`；长 basetemp 下出现的 3 个 Remote Skill snapshot 失败按项目已知路径限制改用 `.pt` 定向复跑为 `15 passed`。聊天模拟器 `9/9`、personification semantic scan、Python compileall/py_compile、10 个 WebUI JavaScript `node --check` 和 `git diff --check` 均通过。真实 stdio MCP 私有 RPC smoke 依次执行 `auth/start → auth/qrcode → auth/status`：B站返回 `protocol_qr`，小黑盒返回 `headless_page_qr`，两者 3 秒后仍 `waiting_scan`、`official_window_open=false`、`qr_revision=1`，且 QR PNG 可取；临时 profile 在子进程关闭后删除。
+
+2026-08-03 增加零新增系统依赖的 `webui_interactive` 人工验证接管，按“增加社交平台WebUI人工验证接管”和“完善人工验证WebUI与操作提示”两个提交边界交付：私有 RPC 新增 `auth/frame`、`auth/input` 和 `auth/finish`，WebUI 增加二次确认、低频官方页面画面、点击/原始拖动轨迹/有限输入、完成检查和取消入口。定向 MCP/WebUI/安全回归为 `122 passed`，完整插件回归为 `2029 passed, 3 warnings`，Python compileall、WebUI JavaScript 语法和 diff check 通过。该结果只验证本地代码契约；小黑盒、抖音、贴吧的真实验证码完成和登录后读取仍必须在部署后由管理员逐平台验收。

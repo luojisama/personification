@@ -190,6 +190,11 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
         "平台登录与能力",
         "获取 WebUI 二维码",
         "在普通浏览器中登录",
+        "在 WebUI 中人工验证",
+        "WebUI 人工验证",
+        "验证完成，检查登录态",
+        "系统不会自动识别或破解验证码",
+        "拖动轨迹由你的指针原样转发",
         "注销并删除 profile",
         "检索预览",
         "一次内容默认提取全部黑话",
@@ -237,7 +242,13 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
     assert "qr_revision" in source
     assert "remaining_seconds" in source
     assert '"manual_browser"' in source
+    assert '"webui_interactive"' in source
     assert "data-mcp-auth-manual" in source
+    assert "data-mcp-auth-interactive" in source
+    assert "data-mcp-interactive-frame" in source
+    assert "/frame?platform=" in source
+    assert "/input?platform=" in source
+    assert "/finish?platform=" in source
     assert "MCP_PLATFORM_CONFIG_KEYS" in source
     assert "normalizedBuiltinPlatformConfig" in source
     assert '"risk_controlled","qr_expired"' in source
@@ -251,6 +262,7 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
     assert "aggregation.source_group_count" in source
     assert "aggregation.satisfies_request" in source
     assert ".mcp-login-qr { width:240px; height:240px;" in styles
+    assert ".mcp-interactive-screen" in styles
     assert "image-rendering:pixelated" in styles
     for forbidden in ("cookie", "localStorage.setItem", "profile_path", "device_id", "raw_html"):
         assert forbidden not in source.lower()
