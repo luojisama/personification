@@ -29,7 +29,10 @@ RISK_LEVEL_ALIASES = {
 }
 PLATFORMS = frozenset({"bilibili", "douyin", "tieba", "xiaoheihe"})
 DEFAULT_MAX_CLAIMS = 20
-DEFAULT_EXTRACTION_TIMEOUT_SECONDS = 12.0
+# Production routed models can need slightly more than 12 seconds to emit the
+# bounded six-claim JSON object.  Keep this below the research tool's overall
+# latency target while leaving room for parallel search/detail and sense merge.
+DEFAULT_EXTRACTION_TIMEOUT_SECONDS = 18.0
 MAX_PACKET_CHARS = 80000
 MAX_TARGET_PACKET_CHARS = 12000
 MAX_TARGET_PACKET_ITEMS = 6
