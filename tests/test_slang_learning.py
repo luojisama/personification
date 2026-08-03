@@ -108,8 +108,9 @@ def test_target_extraction_keeps_only_target_and_grounds_explicit_game_context()
             assert "当前目标游戏（仅在证据明确支持时填写）：三角洲行动" in prompt
             return SimpleNamespace(content=json.dumps(payload, ensure_ascii=False))
 
+    pipeline = slang.SlangLearningPipeline(tool_caller=Caller())
     claims = asyncio.run(
-        slang.SlangLearningPipeline(tool_caller=Caller()).extract_claims(
+        pipeline.extract_claims(
             packet,
             target_term="花来",
             target_game="三角洲行动",
@@ -119,6 +120,8 @@ def test_target_extraction_keeps_only_target_and_grounds_explicit_game_context()
     assert [claim["term"] for claim in claims] == ["花来"]
     assert claims[0]["game_context"]["canonical_name"] == "三角洲行动"
     assert claims[0]["source_cluster_id"] == "source-explicit"
+    assert 0 < pipeline.last_extraction_diagnostics["prompt_packet_chars"] <= 6000
+    assert pipeline.last_extraction_diagnostics["target_claim_limit"] == 3
 
 
 def test_target_extraction_timeout_returns_empty_evidence_status() -> None:
@@ -175,10 +178,12 @@ def test_extraction_diagnostics_explain_items_removed_before_model_call() -> Non
         "clustered_claim_count": 0,
         "grounded_claim_count": 0,
         "target_claim_count": 0,
+        "prompt_packet_chars": 0,
+        "target_claim_limit": 0,
     }
 
 
-def test_target_research_packet_prioritizes_six_compact_cross_platform_items() -> None:
+def test_target_research_packet_prioritizes_three_compact_cross_platform_items() -> None:
     slang = load_personification_module("plugin.personification.core.slang_learning")
     long_body = "前置无关材料" * 500 + "花来指夺取装备后快速撤离的玩法" + "后置无关材料" * 500
     packet = slang.validate_content_packet(
@@ -202,7 +207,7 @@ def test_target_research_packet_prioritizes_six_compact_cross_platform_items() -
     targeted = slang._target_research_packet(packet, target_term="花来")
     rendered = slang._bounded_packet_json(targeted, max_chars=slang.MAX_TARGET_PACKET_CHARS)
 
-    assert len(targeted["items"]) == 6
+    assert len(targeted["items"]) == 3
     assert {item["platform"] for item in targeted["items"]} == {"bilibili", "xiaoheihe"}
     assert all(len(item["caption_or_body"]) <= slang.MAX_TARGET_BODY_CHARS for item in targeted["items"])
     assert all(
