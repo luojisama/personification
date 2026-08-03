@@ -1223,7 +1223,9 @@ def test_platform_login_selectors_cover_current_official_qr_surfaces() -> None:
     assert '[title*="scan-web"] img' in adapters_mod.SPECS["bilibili"].qr_selectors
     assert 'img[alt="二维码"]' in adapters_mod.SPECS["douyin"].qr_selectors
     assert 'div:text-is("登录")' in adapters_mod.SPECS["douyin"].login_trigger_selectors
-    assert adapters_mod.SPECS["douyin"].auth_cookie_names == frozenset({"sessionid", "sessionid_ss"})
+    assert adapters_mod.SPECS["douyin"].auth_cookie_names == frozenset(
+        {"sessionid", "sessionid_ss", "sid_guard"}
+    )
     assert "passport_csrf_token" not in adapters_mod.SPECS["douyin"].auth_cookie_names
     assert 'canvas.website-login__qr-canvas' in adapters_mod.SPECS["xiaoheihe"].qr_selectors
 
@@ -2099,6 +2101,67 @@ def test_scanned_qr_avatar_transitions_to_device_confirmation(tmp_path: Path) ->
     assert session.status == "manual_verification_required"
     assert session.verification_kind == "device_confirmation"
     assert session.qr_png == b""
+
+
+def test_douyin_device_confirmation_accepts_sid_guard_and_finishes_login(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    service_mod = load_personification_module("plugin.personification.native_mcp.social_research.service")
+    service = service_mod.SocialResearchService(tmp_path)
+    pool = service.browsers
+    session = browser_mod.AuthSession(
+        session_id="douyin-confirmed",
+        platform="douyin",
+        owner="admin:device:douyin",
+        status="waiting_scan",
+        login_mode="webui_interactive",
+        qr_png=b"original-qr",
+        qr_missing_since=time.time() - 1.0,
+        official_window_open=True,
+    )
+
+    class FakeContext:
+        pages: list[object] = []
+        closed = False
+
+        async def cookies(self):  # noqa: ANN201
+            return [
+                {
+                    "name": "sid_guard",
+                    "value": "authenticated-session-guard",
+                    "domain": ".douyin.com",
+                }
+            ]
+
+        async def close(self) -> None:
+            self.closed = True
+
+    context = FakeContext()
+    pool._contexts["douyin"] = context
+    pool._context_headless["douyin"] = True
+    pool._auth[session.session_id] = session
+
+    async def no_qr(_page, _selectors):  # noqa: ANN001
+        return b""
+
+    async def no_text(_page):  # noqa: ANN001
+        return ""
+
+    async def run():
+        pool._capture_qr = no_qr
+        pool._page_text = no_text
+        await pool._inspect_auth_page(session, object())
+        assert session.verification_kind == "device_confirmation"
+        return await service.auth_status(
+            {"session_id": session.session_id, "owner": session.owner}
+        )
+
+    result = asyncio.run(run())
+
+    assert result["status"] == "success"
+    assert result["verification_kind"] == ""
+    assert result["qr_available"] is False
+    assert result["official_window_open"] is False
+    assert context.closed is True
 
 
 def test_interactive_frame_returns_cached_frame_while_page_is_busy(tmp_path: Path) -> None:

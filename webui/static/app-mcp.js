@@ -571,13 +571,13 @@ function renderBuiltinAuthHint(auth, platformEnabled=false) {
   if (auth.status === "success") return '<p class="muted">登录态已保存且平台已开启。Agent 是否可调用还取决于上方工具授权。</p>';
   if (auth.login_mode === "protocol_qr" && auth.status === "waiting_scan") return '<p class="muted">B站二维码由官方登录接口生成并在本机编码；轮询直接写入隔离的 persistent profile，不依赖可见窗口，页面关闭或刷新不会让二维码立即失效。</p>';
   if (auth.login_mode === "headless_page_qr" && auth.status === "waiting_scan") return '<p class="muted">官方登录页由服务端后台保持；只有通过二维码像素结构校验后才会显示，加载中占位图不会再被当成二维码。无需保持可见窗口。</p>';
+  if (kind === "device_confirmation") return ["protocol_qr","headless_page_qr"].includes(auth.login_mode)
+    ? '<p class="muted">二维码已扫描，请在对应平台官方 App 中确认登录；本页会继续轮询，不需要保持任何浏览器窗口。</p>'
+    : '<p class="muted">二维码已扫描，账号头像不是新二维码。请在对应平台官方 App 中确认登录；确认成功后本页会自动保存登录态并关闭接管页面。</p>';
   if (auth.login_mode === "webui_interactive" && auth.interactive_available) return '<p class="muted">官方登录页面正在通过当前管理员会话转交到 WebUI。点击、拖动和输入只发送到该平台的隔离浏览器；系统不会自动识别或破解验证码。</p>';
   if (kind === "robot_verification") return '<p class="muted">官方页面已要求机器人验证，但本机没有可用的普通系统浏览器兜底。请在当前官方窗口手动完成；MCP 不会绕过验证。</p>';
   if (kind === "official_browser_login") return '<p class="muted">已切换到不受 Playwright 控制的普通系统浏览器。请在该窗口完成扫码、验证码或机器人验证，登录成功后关闭该窗口；MCP 会在窗口关闭后检测登录态。</p>';
   if (kind === "manual_login_incomplete") return '<p class="muted">尚未检测到有效登录态。请确认普通浏览器窗口已经完成登录并完全关闭；需要时可重新打开普通浏览器继续。</p>';
-  if (kind === "device_confirmation") return ["protocol_qr","headless_page_qr"].includes(auth.login_mode)
-    ? '<p class="muted">二维码已扫描，请在对应平台官方 App 中确认登录；本页会继续轮询，不需要保持任何浏览器窗口。</p>'
-    : '<p class="muted">二维码已扫描，请在对应平台官方 App 中确认登录；确认前请不要关闭官方窗口。</p>';
   if (kind === "qr_expired" || auth.status === "qr_expired") return '<p class="muted">官方二维码已经过期，MCP 正在自动刷新官方页面获取新二维码；旧二维码不会继续使用。</p>';
   if (kind === "qr_generation_blocked") return '<p class="muted">官方登录面板已打开，但平台没有生成真实二维码。请在官方窗口完成人工验证，或使用平台提供的验证码登录；不要扫描 Logo 占位图。</p>';
   if (kind === "official_page" && auth.status === "manual_verification_required") return '<p class="muted">官方页面没有提供可转发的二维码，请在自动打开的官方窗口中完成登录。</p>';

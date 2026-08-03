@@ -77,7 +77,9 @@ SPECS: dict[str, PlatformSpec] = {
         login_trigger_selectors=('div:text-is("登录")', 'button:has-text("登录")'),
         # passport_csrf_token is issued to anonymous login pages as well and
         # must never be treated as proof that QR/device verification succeeded.
-        auth_cookie_names=frozenset({"sessionid", "sessionid_ss"}),
+        # sid_guard is a real account-session cookie and may be the first
+        # durable login marker written after the mobile app confirms the QR.
+        auth_cookie_names=frozenset({"sessionid", "sessionid_ss", "sid_guard"}),
         content_type="video",
         danmaku=True,
     ),

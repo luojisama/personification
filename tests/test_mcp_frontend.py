@@ -317,6 +317,17 @@ def test_interactive_auth_uses_stable_incremental_frames_and_queued_actions() ->
     assert "shouldRender" in status_poll
 
 
+def test_device_confirmation_hint_is_not_hidden_by_generic_interactive_copy() -> None:
+    source = _source("app-mcp.js")
+    helper = source.split("function renderBuiltinAuthHint", 1)[1].split("\n}", 1)[0]
+
+    assert helper.index('kind === "device_confirmation"') < helper.index(
+        'auth.login_mode === "webui_interactive"'
+    )
+    assert "账号头像不是新二维码" in helper
+    assert "确认成功后本页会自动保存登录态并关闭接管页面" in helper
+
+
 def test_mcp_external_links_reject_empty_values_before_url_resolution() -> None:
     source = _source("app-mcp.js")
 
