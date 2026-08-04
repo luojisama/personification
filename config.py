@@ -245,6 +245,39 @@ class Config(BaseModel):
     personification_vision_fallback_provider: str = ""
     personification_vision_fallback_model: str = ""
     personification_video_understanding_enabled: bool = False
+    personification_video_route_mode: str = "auto"
+    personification_video_frame_preset: str = "balanced"
+    personification_video_custom_frame_budgets: dict[str, int] = {
+        "15": 16,
+        "60": 36,
+        "180": 72,
+        "600": 96,
+    }
+    personification_video_custom_scan_fps: float = 4.0
+    personification_video_visual_soft_limit: int = 96
+    personification_video_visual_hard_limit: int = 128
+    personification_video_max_scan_samples: int = 1800
+    personification_video_contact_sheet_frames: int = 6
+    personification_video_payload_max_bytes: int = 10485760
+    personification_video_max_bytes: int = 134217728
+    personification_video_download_timeout: float = 45.0
+    personification_video_analysis_timeout: float = 120.0
+    personification_audio_transcription_enabled: bool = True
+    personification_audio_transcription_provider: str = "auto"
+    personification_audio_transcription_workspace_id: str = ""
+    personification_audio_transcription_api_url: str = ""
+    personification_audio_transcription_api_key: str = ""
+    personification_audio_transcription_model: str = ""
+    personification_audio_transcription_custom_protocol: str = "dashscope_async_url"
+    personification_audio_transcription_language: str = "auto"
+    personification_audio_transcription_prompt: str = ""
+    personification_audio_transcription_hotwords: list[str] = []
+    personification_audio_transcription_diarization_enabled: bool = False
+    personification_audio_transcription_speaker_count: int = 0
+    personification_audio_transcription_timeout: float = 180.0
+    personification_audio_transcription_poll_seconds: float = 1.5
+    personification_audio_transcription_max_bytes: int = 26214400
+    personification_audio_transcription_max_chars: int = 12000
     personification_video_fallback_enabled: bool = True
     personification_video_fallback_provider: str = ""
     personification_video_fallback_api_url: str = ""

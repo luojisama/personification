@@ -133,3 +133,21 @@ def test_secret_inference_for_key_and_auth_path_fields() -> None:
     assert entries["fallback_api_url"].secret is False
     # 普通 toggle 不 secret
     assert entries["tts_global_enabled"].secret is False
+
+
+def test_video_and_audio_presets_are_exposed_as_webui_selects() -> None:
+    cfg = config_mod.Config()
+    entries = {entry.key: entry for entry in config_registry.get_config_entries()}
+    assert cfg.personification_video_frame_preset == "balanced"
+    assert entries["video_frame_preset"].choices == ("economy", "balanced", "quality", "custom")
+    assert entries["video_route_mode"].choices == ("auto", "native", "hybrid", "storyboard")
+    assert entries["audio_transcription_provider"].choices == (
+        "auto",
+        "qwen_audio",
+        "paraformer",
+        "custom",
+        "disabled",
+    )
+    assert cfg.personification_audio_transcription_provider == "auto"
+    assert entries["audio_transcription_api_key"].secret is True
+    assert entries["audio_transcription_provider"].group == "视频理解"
