@@ -13,6 +13,34 @@ import pytest
 from ._loader import load_personification_module
 
 
+def test_social_video_ref_accepts_only_verified_platform_cdn_https() -> None:
+    adapters = load_personification_module("plugin.personification.native_mcp.social_research.adapters")
+    assert adapters.normalize_platform_video_url(
+        "douyin", "https://v3-web.douyinvod.com/video/tos/example.mp4?token=1"
+    ).startswith("https://v3-web.douyinvod.com/")
+    assert adapters.normalize_platform_video_url(
+        "bilibili", "https://xy-videos.bilivideo.com/upgcxcode/example.m4s"
+    ).startswith("https://xy-videos.bilivideo.com/")
+    assert adapters.normalize_platform_video_url("douyin", "http://v3-web.douyinvod.com/video.mp4") == ""
+    assert adapters.normalize_platform_video_url("douyin", "https://evil.example/video.mp4") == ""
+    assert adapters.normalize_platform_video_url("tieba", "https://v3-web.douyinvod.com/video.mp4") == ""
+    rows = adapters._parse_subtitle_payload(
+        json.dumps(
+            {
+                "body": [
+                    {"from": 1.25, "content": "花来"},
+                    {"from": 2.5, "content": "修脚抢装撤离"},
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+    assert rows == [
+        {"text": "花来", "offset_seconds": 1.25},
+        {"text": "修脚抢装撤离", "offset_seconds": 2.5},
+    ]
+
+
 def test_social_research_server_exposes_only_read_tools_and_control_is_not_listed(tmp_path: Path) -> None:
     compat = load_personification_module("plugin.personification.skill_runtime.mcp_compat")
     project_root = Path(__file__).resolve().parents[2]

@@ -559,7 +559,7 @@ class SocialResearchService:
             raise ValueError("unsupported platform")
         async with self._browser_activity(platform):
             adapter, config = await self._ready_adapter(platform)
-            include = params.get("include") if isinstance(params.get("include"), list) else ["caption", "comments", "replies", "danmaku"]
+            include = params.get("include") if isinstance(params.get("include"), list) else ["caption", "comments", "replies", "danmaku", "subtitles"]
             include = [str(item) for item in include]
             comment_limit = min(200, max(0, int(params.get("comment_limit", config["comment_limit"]) or 0)))
             danmaku_limit = min(500, max(0, int(params.get("danmaku_limit", config["danmaku_limit"]) or 0)))
@@ -625,7 +625,7 @@ class SocialResearchService:
                     {
                         "platform": item["platform"],
                         "url": item["canonical_url"],
-                        "include": ["caption", "comments", "replies", "danmaku"],
+                        "include": ["caption", "comments", "replies", "danmaku", "subtitles"],
                         "comment_limit": comment_limit,
                         "danmaku_limit": danmaku_limit,
                     }

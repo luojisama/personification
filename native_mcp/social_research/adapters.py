@@ -1,12 +1,156 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlparse
 
+import httpx
+
 from .browser import BrowserPool
 from .models import clean_text, normalize_url, stable_fingerprint
+
+
+_VIDEO_MEDIA_HOSTS: dict[str, tuple[str, ...]] = {
+    "bilibili": ("bilivideo.com", "bilibili.com"),
+    "douyin": ("douyinvod.com", "douyin.com", "bytecdn.cn", "byteimg.com", "pstatp.com"),
+}
+_BILIBILI_SUBTITLE_SEMAPHORE = asyncio.Semaphore(2)
+_BILIBILI_SUBTITLE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+
+def normalize_platform_video_url(platform: str, value: Any) -> str:
+    url = normalize_url(value)
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        parsed.scheme != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or not any(host == suffix or host.endswith("." + suffix) for suffix in _VIDEO_MEDIA_HOSTS.get(platform, ()))
+    ):
+        return ""
+    return parsed.geturl()
+
+
+def _subtitle_url_allowed(value: str) -> bool:
+    try:
+        parsed = urlparse(str(value or "").strip())
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return (
+        parsed.scheme == "https"
+        and parsed.username is None
+        and parsed.password is None
+        and any(
+            host == suffix or host.endswith("." + suffix)
+            for suffix in ("bilibili.com", "hdslb.com", "bilivideo.com", "biliapi.net")
+        )
+    )
+
+
+def _bilibili_subtitle_track(canonical_url: str) -> tuple[str, str]:
+    try:
+        import yt_dlp
+    except Exception:
+        return "", ""
+    options = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True, "socket_timeout": 8}
+    try:
+        with yt_dlp.YoutubeDL(options) as downloader:
+            info = downloader.extract_info(canonical_url, download=False)
+    except Exception:
+        return "", ""
+    if not isinstance(info, dict):
+        return "", ""
+    collections = [info.get("subtitles"), info.get("automatic_captions")]
+    languages = ("zh-CN", "zh-Hans", "zh-Hant", "zh", "ai-zh")
+    for collection in collections:
+        if not isinstance(collection, dict):
+            continue
+        for language in languages:
+            tracks = collection.get(language)
+            if not isinstance(tracks, list):
+                continue
+            for track in reversed(tracks):
+                if not isinstance(track, dict):
+                    continue
+                inline = str(track.get("data") or "")
+                if inline:
+                    return inline, ""
+                url = str(track.get("url") or "").strip()
+                if _subtitle_url_allowed(url):
+                    return "", url
+    return "", ""
+
+
+def _parse_subtitle_payload(raw: str, *, maximum: int = 200) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(str(raw or ""))
+    except (TypeError, ValueError):
+        payload = None
+    rows: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        candidates = payload.get("body") or payload.get("events") or []
+        for item in list(candidates):
+            if not isinstance(item, dict):
+                continue
+            text = clean_text(item.get("content") or item.get("text"), 600)
+            if not text and isinstance(item.get("segs"), list):
+                text = clean_text(
+                    "".join(str(segment.get("utf8") or "") for segment in item["segs"] if isinstance(segment, dict)),
+                    600,
+                )
+            if text:
+                rows.append({"text": text, "offset_seconds": float(item.get("from") or 0.0)})
+            if len(rows) >= maximum:
+                break
+        return rows
+    for line in str(raw or "").splitlines():
+        text = re.sub(r"<[^>]+>", "", line).strip()
+        if not text or "-->" in text or text.upper() == "WEBVTT" or re.fullmatch(r"[0-9]+", text):
+            continue
+        if not rows or rows[-1]["text"] != text:
+            rows.append({"text": clean_text(text, 600), "offset_seconds": 0.0})
+        if len(rows) >= maximum:
+            break
+    return rows
+
+
+async def read_bilibili_ai_subtitles(canonical_url: str) -> list[dict[str, Any]]:
+    now = time.monotonic()
+    cached = _BILIBILI_SUBTITLE_CACHE.get(canonical_url)
+    if cached is not None and now - cached[0] <= 1800:
+        return [dict(item) for item in cached[1]]
+    async with _BILIBILI_SUBTITLE_SEMAPHORE:
+        inline, url = await asyncio.to_thread(_bilibili_subtitle_track, canonical_url)
+        raw = inline
+        if url:
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(8.0, connect=4.0), follow_redirects=False, trust_env=False
+                ) as client:
+                    response = await client.get(url, headers={"Accept": "application/json,text/vtt,text/plain"})
+                    response.raise_for_status()
+                    if len(response.content) > 2 * 1024 * 1024:
+                        return []
+                    raw = response.text
+            except Exception:
+                return []
+        rows = _parse_subtitle_payload(raw) if raw else []
+        if len(_BILIBILI_SUBTITLE_CACHE) >= 64:
+            oldest = min(_BILIBILI_SUBTITLE_CACHE, key=lambda key: _BILIBILI_SUBTITLE_CACHE[key][0])
+            _BILIBILI_SUBTITLE_CACHE.pop(oldest, None)
+        _BILIBILI_SUBTITLE_CACHE[canonical_url] = (time.monotonic(), [dict(item) for item in rows])
+        return rows
 
 
 def _compact_count(value: str) -> int:
@@ -476,12 +620,14 @@ class PlatformAdapter:
                 alt: item.getAttribute('alt') || item.getAttribute('title') || '',
             }})).filter((item) => item.url) : [];
             const author = root && root.querySelector('[data-e2e*=author],[class*=author],[class*=nickname]');
+            const video = !isNote && root ? root.querySelector('video') : null;
             return {{
                 title: heading ? heading.innerText : (document.title || ''),
                 description: isNote ? ((clone && clone.innerText) || '') : ((heading && heading.innerText) || ''),
                 cover: images.length ? images[0].url : '',
                 images,
                 author: author ? author.innerText : '',
+                video: video ? (video.currentSrc || video.src || '') : '',
                 body: '',
             }};
             }}"""
@@ -520,12 +666,14 @@ class PlatformAdapter:
             return node ? (node.content || '') : '';
         };
         const h1 = document.querySelector('h1');
+        const video = document.querySelector('video');
         return {
             title: meta('og:title', true) || (h1 && h1.innerText) || document.title || '',
             description: meta('description') || meta('og:description', true) || '',
             cover: meta('og:image', true) || '',
             images: [],
             author: '',
+            video: video ? (video.currentSrc || video.src || '') : '',
             body: document.body ? document.body.innerText.slice(0, 12000) : '',
         };
         }"""
@@ -589,6 +737,23 @@ class PlatformAdapter:
                                 "stats": {},
                             }
                         )
+            if self.spec.name == "bilibili" and "subtitles" in include:
+                subtitle_rows = await read_bilibili_ai_subtitles(canonical_url)
+                for index, row in enumerate(subtitle_rows):
+                    cleaned = clean_text(row.get("text"), 600)
+                    if not cleaned:
+                        continue
+                    discussions.append(
+                        {
+                            "discussion_id": stable_fingerprint(canonical_url, "subtitle", index, cleaned)[:32],
+                            "type": "subtitle",
+                            "text": cleaned,
+                            "author": {"display_name": "Bilibili AI 字幕", "fingerprint": ""},
+                            "published_at": 0,
+                            "offset_seconds": float(row.get("offset_seconds") or 0.0),
+                            "stats": {},
+                        }
+                    )
         finally:
             if owned_page:
                 await page.close()
@@ -618,6 +783,7 @@ class PlatformAdapter:
             "cover_ref": normalize_url(metadata.get("cover")),
             "image_urls": image_urls,
             "image_count": len(image_urls),
+            "video_ref": normalize_platform_video_url(self.spec.name, metadata.get("video")),
             "author": {"display_name": clean_text(metadata.get("author"), 120), "fingerprint": ""},
             "published_at": 0,
             "stats": {
@@ -647,4 +813,11 @@ def build_adapters(browsers: BrowserPool) -> dict[str, PlatformAdapter]:
     return {name: PlatformAdapter(spec, browsers) for name, spec in SPECS.items()}
 
 
-__all__ = ["PlatformAdapter", "PlatformSpec", "SPECS", "build_adapters"]
+__all__ = [
+    "PlatformAdapter",
+    "PlatformSpec",
+    "SPECS",
+    "build_adapters",
+    "normalize_platform_video_url",
+    "read_bilibili_ai_subtitles",
+]
