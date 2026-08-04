@@ -190,6 +190,7 @@ def _render_index_html() -> str:
         "app-core.js",
         "app-activity.js",
         "app-content.js",
+        "app-admin.js",
         "app-admin-common.js",
         "app-dashboard.js",
         "app-health-qq.js",

@@ -91,7 +91,14 @@ def test_admin_pages_are_split_and_browser_metrics_stay_local_and_bounded() -> N
         "app-groups.js",
     )
 
-    assert not (STATIC / "app-admin.js").exists()
+    legacy = (STATIC / "app-admin.js").read_text(encoding="utf-8")
+    assert (STATIC / "app-admin.js").stat().st_size < 10_000
+    assert "bootstrapLegacyAdminBundle" in legacy
+    assert "__personificationLegacyAdminReady" in legacy
+    assert "正在兼容当前已打开的旧标签页" in legacy
+    for filename in bundles:
+        assert filename in legacy
+    assert '"app-admin.js"' not in core
     assert (STATIC / "app-admin-common.js").stat().st_size < 10_000
     assert all((STATIC / filename).stat().st_size < 50_000 for filename in bundles[1:])
     for filename in bundles:

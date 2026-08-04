@@ -71,7 +71,7 @@ def test_index_serves_static_frontend(_runtime_context) -> None:
     assert "__PERSONIFICATION_WEBUI_INSTANCE_ID__" not in res.text
     second = client.get("/personification/")
     assert f'PERSONIFICATION_WEBUI_INSTANCE_ID="{instance.group(1)}"' in second.text
-    for lazy_asset in ("app-activity.js", "app-content.js", "app-admin-common.js", "app-dashboard.js", "app-health-qq.js", "app-qzone.js", "app-identity-policy.js", "app-persona-builder.js", "app-groups.js", "app-tools.js", "app-mcp.js", "app-config.js", "app-operations.js"):
+    for lazy_asset in ("app-activity.js", "app-content.js", "app-admin.js", "app-admin-common.js", "app-dashboard.js", "app-health-qq.js", "app-qzone.js", "app-identity-policy.js", "app-persona-builder.js", "app-groups.js", "app-tools.js", "app-mcp.js", "app-config.js", "app-operations.js"):
         assert lazy_asset in res.text
         assert f'<script src="/personification/static/{lazy_asset}' not in res.text
     assert "no-store" in res.headers.get("cache-control", "")
@@ -121,6 +121,11 @@ def test_static_frontend_assets_are_served(_runtime_context) -> None:
     assert "await refreshEligibleAdmins()" in auth_js.text
     assert "免验证设备" not in auth_js.text
     assert "同意登录" not in auth_js.text
+
+    legacy_admin_js = client.get("/personification/static/app-admin.js")
+    assert legacy_admin_js.status_code == 200
+    assert "bootstrapLegacyAdminBundle" in legacy_admin_js.text
+    assert "正在兼容当前已打开的旧标签页" in legacy_admin_js.text
 
     health_js = client.get("/personification/static/app-health-qq.js")
     assert health_js.status_code == 200
