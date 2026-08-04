@@ -31,16 +31,17 @@ _VIDEO_MIMES = {
     "video/x-msvideo",
 }
 _PRESET_ANCHORS: dict[str, tuple[tuple[float, int], ...]] = {
-    "economy": ((15.0, 12), (60.0, 24), (180.0, 48), (600.0, 64)),
-    "balanced": ((15.0, 16), (60.0, 36), (180.0, 72), (600.0, 96)),
-    "quality": ((15.0, 20), (60.0, 48), (180.0, 96), (600.0, 128)),
+    "economy": ((15.0, 16), (60.0, 36), (180.0, 72), (600.0, 96)),
+    "balanced": ((15.0, 24), (60.0, 60), (180.0, 120), (600.0, 160)),
+    "quality": ((15.0, 32), (60.0, 84), (180.0, 168), (600.0, 192)),
 }
-_PRESET_SCAN_FPS = {"economy": 2.0, "balanced": 4.0, "quality": 6.0}
-_DEFAULT_HARD_FRAME_LIMIT = 128
+_PRESET_SCAN_FPS = {"economy": 2.5, "balanced": 5.0, "quality": 7.5}
+_DEFAULT_HARD_FRAME_LIMIT = 192
+_MAX_HARD_FRAME_LIMIT = 256
 _DEFAULT_MAX_SCAN_SAMPLES = 1800
-_DEFAULT_CONTACT_SHEET_FRAMES = 6
-_DEFAULT_MAX_VIDEO_BYTES = 128 * 1024 * 1024
-_DEFAULT_PAYLOAD_BYTES = 10 * 1024 * 1024
+_DEFAULT_CONTACT_SHEET_FRAMES = 8
+_DEFAULT_MAX_VIDEO_BYTES = 256 * 1024 * 1024
+_DEFAULT_PAYLOAD_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -154,11 +155,11 @@ def resolve_video_frame_budget(duration_seconds: float, config: Any) -> VideoFra
         getattr(config, "personification_video_visual_hard_limit", _DEFAULT_HARD_FRAME_LIMIT),
         _DEFAULT_HARD_FRAME_LIMIT,
         12,
-        _DEFAULT_HARD_FRAME_LIMIT,
+        _MAX_HARD_FRAME_LIMIT,
     )
     soft_limit = _bounded_int(
-        getattr(config, "personification_video_visual_soft_limit", 96),
-        96,
+        getattr(config, "personification_video_visual_soft_limit", 160),
+        160,
         8,
         hard_limit,
     )
@@ -167,7 +168,7 @@ def resolve_video_frame_budget(duration_seconds: float, config: Any) -> VideoFra
     if preset != "quality":
         target = min(target, soft_limit)
     target = max(4, min(hard_limit, target))
-    scan_default = 4.0 if preset == "custom" else _PRESET_SCAN_FPS[preset]
+    scan_default = 5.0 if preset == "custom" else _PRESET_SCAN_FPS[preset]
     scan_fps = _bounded_float(
         getattr(config, "personification_video_custom_scan_fps", scan_default) if preset == "custom" else scan_default,
         scan_default,
@@ -578,7 +579,7 @@ async def _materialize_video(video_ref: str, temp_dir: Path, config: Any) -> tup
                 temp_dir,
                 max_bytes=max_bytes,
                 timeout=_bounded_float(
-                    getattr(config, "personification_video_download_timeout", 45.0), 45.0, 8.0, 120.0
+                    getattr(config, "personification_video_download_timeout", 90.0), 90.0, 8.0, 180.0
                 ),
             )
         except Exception as exc:
@@ -587,7 +588,7 @@ async def _materialize_video(video_ref: str, temp_dir: Path, config: Any) -> tup
         await download_public_media_to_path(
             normalized,
             target,
-            timeout=_bounded_float(getattr(config, "personification_video_download_timeout", 45.0), 45.0, 8.0, 120.0),
+            timeout=_bounded_float(getattr(config, "personification_video_download_timeout", 90.0), 90.0, 8.0, 180.0),
             max_bytes=max_bytes,
             allowed_mimes=_VIDEO_MIMES,
         )

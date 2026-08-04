@@ -825,7 +825,7 @@ async def analyze_videos_with_route_or_fallback(
         20.0,
         min(
             300.0,
-            float(getattr(plugin_config, "personification_video_analysis_timeout", 120.0) or 120.0),
+            float(getattr(plugin_config, "personification_video_analysis_timeout", 180.0) or 180.0),
         ),
     )
     outputs: list[str] = []

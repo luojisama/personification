@@ -139,7 +139,17 @@ def test_video_and_audio_presets_are_exposed_as_webui_selects() -> None:
     cfg = config_mod.Config()
     entries = {entry.key: entry for entry in config_registry.get_config_entries()}
     assert cfg.personification_video_frame_preset == "balanced"
+    assert cfg.personification_video_custom_frame_budgets == {"15": 24, "60": 60, "180": 120, "600": 160}
+    assert cfg.personification_video_contact_sheet_frames == 8
+    assert cfg.personification_video_visual_soft_limit == 160
+    assert cfg.personification_video_visual_hard_limit == 192
+    assert cfg.personification_video_payload_max_bytes == 16 * 1024 * 1024
+    assert cfg.personification_video_max_bytes == 256 * 1024 * 1024
+    assert cfg.personification_video_download_timeout == 90.0
+    assert cfg.personification_video_analysis_timeout == 180.0
     assert entries["video_frame_preset"].choices == ("economy", "balanced", "quality", "custom")
+    assert entries["video_visual_hard_limit"].max_value == 256
+    assert entries["video_max_bytes"].default == 256 * 1024 * 1024
     assert entries["video_route_mode"].choices == ("auto", "native", "hybrid", "storyboard")
     assert entries["audio_transcription_provider"].choices == (
         "auto",

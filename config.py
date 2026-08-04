@@ -248,20 +248,20 @@ class Config(BaseModel):
     personification_video_route_mode: str = "auto"
     personification_video_frame_preset: str = "balanced"
     personification_video_custom_frame_budgets: dict[str, int] = {
-        "15": 16,
-        "60": 36,
-        "180": 72,
-        "600": 96,
+        "15": 24,
+        "60": 60,
+        "180": 120,
+        "600": 160,
     }
-    personification_video_custom_scan_fps: float = 4.0
-    personification_video_visual_soft_limit: int = 96
-    personification_video_visual_hard_limit: int = 128
+    personification_video_custom_scan_fps: float = 5.0
+    personification_video_visual_soft_limit: int = 160
+    personification_video_visual_hard_limit: int = 192
     personification_video_max_scan_samples: int = 1800
-    personification_video_contact_sheet_frames: int = 6
-    personification_video_payload_max_bytes: int = 10485760
-    personification_video_max_bytes: int = 134217728
-    personification_video_download_timeout: float = 45.0
-    personification_video_analysis_timeout: float = 120.0
+    personification_video_contact_sheet_frames: int = 8
+    personification_video_payload_max_bytes: int = 16777216
+    personification_video_max_bytes: int = 268435456
+    personification_video_download_timeout: float = 90.0
+    personification_video_analysis_timeout: float = 180.0
     personification_audio_transcription_enabled: bool = True
     personification_audio_transcription_provider: str = "auto"
     personification_audio_transcription_workspace_id: str = ""
