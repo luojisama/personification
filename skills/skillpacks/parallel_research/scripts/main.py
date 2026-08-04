@@ -27,6 +27,7 @@ def build_tools(runtime: Any) -> list[AgentTool]:
         research_level: str = "medium",
         target_term: str = "",
         target_game: str = "",
+        time_budget_seconds: float | None = None,
     ) -> str:
         if str(purpose or "").strip().lower() == "lookup" and not bool(
             getattr(plugin_config, "personification_parallel_research_lookup_enabled", True)
@@ -50,6 +51,7 @@ def build_tools(runtime: Any) -> list[AgentTool]:
             research_level=research_level,
             target_term=target_term,
             target_game=target_game,
+            time_budget_seconds=time_budget_seconds,
         )
 
     return [
@@ -107,6 +109,12 @@ def build_tools(runtime: Any) -> list[AgentTool]:
                         "description": "目标词所属游戏语境；普通研究留空",
                         "maxLength": 100,
                     },
+                    "time_budget_seconds": {
+                        "type": "number",
+                        "description": "可选阶段预算；运行时会按绝对回复截止与 30 秒硬上限再次收紧",
+                        "minimum": 0.01,
+                        "maximum": 30,
+                    },
                 },
                 "required": ["query"],
             },
@@ -114,5 +122,6 @@ def build_tools(runtime: Any) -> list[AgentTool]:
             enabled=lambda: bool(
                 getattr(plugin_config, "personification_parallel_research_enabled", True)
             ),
+            metadata={"query_retry_limit": 1},
         )
     ]

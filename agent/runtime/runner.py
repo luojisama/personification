@@ -110,7 +110,7 @@ _TIME_SENSITIVE_SEARCH_TOOLS = frozenset({"web_search", "search_web"})
 _TIME_SENSITIVE_RE = re.compile("\u6700\u65b0|\u8fd1\u671f|\u73b0\u5728|\u4eca\u5e74|\u4eca\u5929|\u5f53\u524d|latest|recent|now", re.IGNORECASE)
 _QUERY_REWRITE_TIMEOUT_SECONDS = 3.0
 _SOCIAL_MEDIA_RESOLVE_TIMEOUT_SECONDS = 4.0
-_SEMANTIC_WEB_FALLBACK_TIMEOUT_SECONDS = 12.0
+_SEMANTIC_RESEARCH_TARGET_SECONDS = 45.0
 
 
 async def _await_with_deadline(
@@ -262,6 +262,7 @@ async def run_agent(
         bind_actions(pending_actions)
     stop_state = StopFlowState()
     agent_started_at = time.monotonic()
+    semantic_research_target_deadline = agent_started_at + _SEMANTIC_RESEARCH_TARGET_SECONDS
     budget_deadline = (
         agent_started_at + max(0.0, float(time_budget_seconds or 0.0))
         if time_budget_seconds is not None
@@ -885,6 +886,7 @@ async def run_agent(
                         classify_deferred_lookup_reply=_classify_deferred_lookup_reply,
                         select_semantic_fallback_tool=_select_semantic_fallback_tool,
                         structured_output=structured_output,
+                        semantic_research_target_deadline=semantic_research_target_deadline,
                     ),
                     budget_deadline,
                 )
@@ -898,6 +900,15 @@ async def run_agent(
                     reason="stop_flow_timeout",
                 )
             if stop_decision.action == "continue":
+                if (
+                    stop_state.semantic_web_fallback_attempted
+                    and stop_state.last_tool_name == "parallel_research"
+                ):
+                    budget_deadline = (
+                        semantic_research_target_deadline
+                        if budget_deadline is None
+                        else min(budget_deadline, semantic_research_target_deadline)
+                    )
                 continue
             if stop_decision.result is not None:
                 return await _finalize_result(stop_decision.result, reason="model_stop")
@@ -1086,15 +1097,12 @@ async def run_agent(
                     record_trace=_record_reply_trace_stage,
                     logger=logger,
                     select_semantic_fallback_tool=_select_semantic_fallback_tool,
+                    budget_deadline=budget_deadline,
+                    semantic_research_target_deadline=semantic_research_target_deadline,
                 )
                 if fallback_lookup is not None:
                     fallback_name, fallback_args = fallback_lookup
-                    fallback_deadline = (
-                        time.monotonic() + _SEMANTIC_WEB_FALLBACK_TIMEOUT_SECONDS
-                    )
-                    if budget_deadline is not None:
-                        fallback_deadline = min(fallback_deadline, budget_deadline)
-                    await _run_stop_fallback_tool(
+                    ran_fallback = await _run_stop_fallback_tool(
                         state=stop_state,
                         fallback_name=fallback_name,
                         fallback_args=fallback_args,
@@ -1103,13 +1111,20 @@ async def run_agent(
                         rewritten_query=rewritten_query,
                         user_images=user_images,
                         logger=logger,
-                        budget_deadline=fallback_deadline,
+                        budget_deadline=budget_deadline,
                         messages=messages,
                         tool_caller=tool_caller,
                         origin_response=response,
                         record_trace=_record_reply_trace_stage,
                         append_evidence_guidance=_append_evidence_guidance_if_needed,
+                        semantic_research_target_deadline=semantic_research_target_deadline,
                     )
+                    if ran_fallback:
+                        budget_deadline = (
+                            semantic_research_target_deadline
+                            if budget_deadline is None
+                            else min(budget_deadline, semantic_research_target_deadline)
+                        )
 
     logger.warning("[agent] MAX_STEPS reached")
     _record_reply_trace_stage(

@@ -27,6 +27,36 @@ from .tool_args import _sanitize_tool_args_for_schema
 from .tool_selection import _schema_tool_name
 
 
+_SEMANTIC_WEB_FALLBACK_OUTER_MAX_SECONDS = 32.0
+_SEMANTIC_WEB_FALLBACK_INNER_MAX_SECONDS = 30.0
+_SEMANTIC_WEB_FALLBACK_EXECUTION_RESERVE_SECONDS = 2.0
+_SEMANTIC_WEB_FALLBACK_FINALIZE_RESERVE_SECONDS = 8.0
+_SEMANTIC_WEB_FALLBACK_MIN_SECONDS = 4.0
+
+
+def _semantic_web_fallback_budget(
+    *,
+    budget_deadline: float | None,
+    semantic_research_target_deadline: float | None,
+    now: float | None = None,
+) -> tuple[float, float] | None:
+    current = time.monotonic() if now is None else float(now)
+    outer_deadline = current + _SEMANTIC_WEB_FALLBACK_OUTER_MAX_SECONDS
+    for deadline in (budget_deadline, semantic_research_target_deadline):
+        if deadline is not None:
+            outer_deadline = min(
+                outer_deadline,
+                float(deadline) - _SEMANTIC_WEB_FALLBACK_FINALIZE_RESERVE_SECONDS,
+            )
+    inner_budget = min(
+        _SEMANTIC_WEB_FALLBACK_INNER_MAX_SECONDS,
+        outer_deadline - current - _SEMANTIC_WEB_FALLBACK_EXECUTION_RESERVE_SECONDS,
+    )
+    if inner_budget < _SEMANTIC_WEB_FALLBACK_MIN_SECONDS:
+        return None
+    return inner_budget, outer_deadline
+
+
 @dataclass
 class StopFlowState:
     has_tool_call: bool = False
@@ -307,6 +337,8 @@ async def _select_stop_fallback_lookup(
     record_trace: Callable[..., None],
     logger: Any,
     select_semantic_fallback_tool: Callable[..., Awaitable[tuple[str, dict] | None]],
+    budget_deadline: float | None = None,
+    semantic_research_target_deadline: float | None = None,
 ) -> tuple[str, dict] | None:
     if state.social_evidence_satisfied:
         state.pending_evidence_followup_query = ""
@@ -338,6 +370,22 @@ async def _select_stop_fallback_lookup(
             state.semantic_web_fallback_needed = False
             state.pending_evidence_followup_query = ""
             return None
+        fallback_budget = _semantic_web_fallback_budget(
+            budget_deadline=budget_deadline,
+            semantic_research_target_deadline=semantic_research_target_deadline,
+        )
+        if fallback_budget is None:
+            state.semantic_web_fallback_attempted = True
+            state.semantic_web_fallback_needed = False
+            state.pending_evidence_followup_query = ""
+            record_trace(
+                key="web_fallback_skipped",
+                label="网页多源补证",
+                status="warn",
+                detail="started=false reason=budget_exhausted",
+            )
+            return None
+        fallback_time_budget, _fallback_deadline = fallback_budget
         state.semantic_web_fallback_attempted = True
         state.semantic_web_fallback_needed = False
         query = str(state.pending_evidence_followup_query or user_query_text or "").strip()[:240]
@@ -346,7 +394,10 @@ async def _select_stop_fallback_lookup(
             key="web_fallback_used",
             label="网页多源补证",
             status="info",
-            detail="tool=parallel_research workers=3 once_per_turn=true",
+            detail=(
+                "tool=parallel_research workers=3 once_per_turn=true "
+                f"budget_ms={int(fallback_time_budget * 1000)}"
+            ),
         )
         return (
             "parallel_research",
@@ -366,6 +417,7 @@ async def _select_stop_fallback_lookup(
                 "research_level": "low",
                 "target_term": state.semantic_target_term,
                 "target_game": state.semantic_target_game,
+                "time_budget_seconds": fallback_time_budget,
             },
         )
     if state.semantic_web_fallback_attempted:
@@ -475,11 +527,29 @@ async def _run_stop_fallback_tool(
     origin_response: Any,
     record_trace: Callable[..., None],
     append_evidence_guidance: Callable[..., Awaitable[Any]],
+    semantic_research_target_deadline: float | None = None,
 ) -> bool:
     fallback_tool = registry.get(fallback_name)
     if fallback_tool is None:
         logger.info(f"[agent] semantic fallback selected unavailable tool: {fallback_name}")
         return False
+    execution_deadline = budget_deadline
+    if fallback_name == "parallel_research" and str(fallback_args.get("purpose") or "") == "lookup":
+        fallback_budget = _semantic_web_fallback_budget(
+            budget_deadline=budget_deadline,
+            semantic_research_target_deadline=semantic_research_target_deadline,
+        )
+        if fallback_budget is None:
+            return False
+        available_inner_budget, execution_deadline = fallback_budget
+        try:
+            requested_inner_budget = float(fallback_args.get("time_budget_seconds"))
+        except (TypeError, ValueError):
+            requested_inner_budget = available_inner_budget
+        fallback_args = {
+            **fallback_args,
+            "time_budget_seconds": min(available_inner_budget, max(0.01, requested_inner_budget)),
+        }
     fallback_tool_started_at = time.monotonic()
     fallback_args, fallback_result = await _execute_tool_with_retries(
         registry=registry,
@@ -491,7 +561,7 @@ async def _run_stop_fallback_tool(
         previous_tool_result_text=state.last_tool_result_text,
         unavailable_tool_signatures=state.unavailable_tool_signatures,
         logger=logger,
-        budget_deadline=budget_deadline,
+        budget_deadline=execution_deadline,
     )
     record_trace(
         key="agent_fallback_tool",
@@ -557,6 +627,7 @@ async def handle_model_stop(
     classify_deferred_lookup_reply: Callable[..., Awaitable[bool]],
     select_semantic_fallback_tool: Callable[..., Awaitable[tuple[str, dict] | None]],
     structured_output: bool = False,
+    semantic_research_target_deadline: float | None = None,
 ) -> StopFlowDecision:
     if structured_output and not response.tool_calls:
         if content_len <= 0:
@@ -647,6 +718,8 @@ async def handle_model_stop(
         record_trace=record_trace,
         logger=logger,
         select_semantic_fallback_tool=select_semantic_fallback_tool,
+        budget_deadline=budget_deadline,
+        semantic_research_target_deadline=semantic_research_target_deadline,
     )
     if fallback_lookup is not None:
         fallback_name, fallback_args = fallback_lookup
@@ -665,6 +738,7 @@ async def handle_model_stop(
             origin_response=response,
             record_trace=record_trace,
             append_evidence_guidance=append_evidence_guidance,
+            semantic_research_target_deadline=semantic_research_target_deadline,
         )
         if ran_tool:
             return StopFlowDecision.continue_loop()

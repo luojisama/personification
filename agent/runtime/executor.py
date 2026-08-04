@@ -100,6 +100,16 @@ async def _execute_tool_with_retries(
     supports_query_retry = bool(
         retryable_evidence and _tool_allows_parameter(registry, tool_name, "query")
     )
+    try:
+        query_retry_limit = max(
+            1,
+            min(
+                MAX_LOOKUP_QUERY_VARIANTS,
+                int((tool.metadata or {}).get("query_retry_limit", MAX_LOOKUP_QUERY_VARIANTS)),
+            ),
+        )
+    except (TypeError, ValueError):
+        query_retry_limit = MAX_LOOKUP_QUERY_VARIANTS
     unavailable_signatures = (
         unavailable_tool_signatures if unavailable_tool_signatures is not None else set()
     )
@@ -107,7 +117,7 @@ async def _execute_tool_with_retries(
         tool_name=tool_name,
         tool_args=tool_args,
         rewritten_query=rewritten_query,
-        max_variants=MAX_LOOKUP_QUERY_VARIANTS if supports_query_retry else 1,
+        max_variants=query_retry_limit if supports_query_retry else 1,
     )
     if not query_variants:
         query_variants = [_clean_user_query_text(tool_args.get("query", ""))]

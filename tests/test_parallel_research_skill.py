@@ -195,7 +195,7 @@ def test_lookup_focus_uses_three_structured_workers_without_planner() -> None:
     assert sum("只读研究子Agent" in prompt for prompt in system_prompts) == 3
     assert "structured_lookup_plan" in result
     assert '"research_level": "legacy:lookup"' in result
-    assert '"pages_per_worker": 8' in result
+    assert '"pages_per_worker": 4' in result
     worker_calls = [call for call in caller.calls if call["tools"]]
     assert worker_calls
     for call in worker_calls:
@@ -216,14 +216,21 @@ def test_lookup_limits_clamp_v2_and_legacy_to_one_absolute_reply_budget() -> Non
     bounded = parallel_impl._bounded_lookup_limits(limits)
 
     assert bounded.max_workers == 3
-    assert bounded.worker_timeout == 10.0
-    assert bounded.total_timeout == 15.0
-    assert bounded.max_tool_rounds == 1
-    assert bounded.pages_per_worker == 8
+    assert bounded.worker_timeout == 28.0
+    assert bounded.total_timeout == 30.0
+    assert bounded.max_tool_rounds == 2
+    assert bounded.pages_per_worker == 4
     assert bounded.level == "high:lookup"
 
+    constrained = parallel_impl._bounded_lookup_limits(
+        limits,
+        time_budget_seconds=7.5,
+    )
+    assert constrained.total_timeout == 7.5
+    assert constrained.worker_timeout == 7.5
 
-def test_lookup_deadline_covers_workers_and_aggregation(monkeypatch) -> None:
+
+def test_lookup_worker_deadline_is_distinct_from_total_deadline(monkeypatch) -> None:
     class _SlowCaller(_FakeToolCaller):
         async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
             system_text = str(messages[0]["content"])
@@ -231,7 +238,7 @@ def test_lookup_deadline_covers_workers_and_aggregation(monkeypatch) -> None:
                 await asyncio.sleep(0.2)
             return await super().chat_with_tools(messages, tools, use_builtin_search)
 
-    monkeypatch.setattr(parallel_impl, "_LOOKUP_TOTAL_TIMEOUT_SECONDS", 0.08)
+    monkeypatch.setattr(parallel_impl, "_LOOKUP_TOTAL_TIMEOUT_SECONDS", 0.20)
     monkeypatch.setattr(parallel_impl, "_LOOKUP_WORKER_TIMEOUT_SECONDS", 0.05)
     started_at = time.monotonic()
     result = asyncio.run(
@@ -245,7 +252,42 @@ def test_lookup_deadline_covers_workers_and_aggregation(monkeypatch) -> None:
     )
 
     assert time.monotonic() - started_at < 0.8
-    assert "parallel_research_total_timeout" in result
+    assert "parallel_research_worker_timeout" in result
+    assert "parallel_research_total_timeout" not in result
+    payload = json.loads(result.split("<parallel_research_json>\n", 1)[1].split("\n</parallel_research_json>", 1)[0])
+    assert payload["research_runtime"]["status"] == "timeout"
+    assert payload["research_runtime"]["worker_timeout_count"] == 2
+    assert payload["research_runtime"]["total_deadline_exhausted"] is False
+
+
+def test_lookup_worker_timeout_preserves_completed_partial_evidence(monkeypatch) -> None:
+    class _PartiallySlowCaller(_FakeToolCaller):
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            system_text = str(messages[0]["content"])
+            if "只读研究子Agent" in system_text:
+                user_payload = json.loads(messages[1]["content"])
+                if user_payload["role"] == "lookup_2":
+                    await asyncio.sleep(0.2)
+            return await super().chat_with_tools(messages, tools, use_builtin_search)
+
+    monkeypatch.setattr(parallel_impl, "_LOOKUP_TOTAL_TIMEOUT_SECONDS", 0.20)
+    monkeypatch.setattr(parallel_impl, "_LOOKUP_WORKER_TIMEOUT_SECONDS", 0.05)
+    result = asyncio.run(
+        parallel_impl.parallel_research(
+            runtime=_runtime(_PartiallySlowCaller()),
+            query="保留部分查证",
+            purpose="lookup",
+            focus=["查定义", "查反证"],
+            max_workers=2,
+        )
+    )
+
+    payload = json.loads(result.split("<parallel_research_json>\n", 1)[1].split("\n</parallel_research_json>", 1)[0])
+    runtime = payload["research_runtime"]
+    assert runtime["status"] == "partial"
+    assert runtime["completed_workers"] == 1
+    assert runtime["worker_timeout_count"] == 1
+    assert "lookup_1 fact" in payload["facts"]
 
 
 def test_lookup_deadline_does_not_wait_for_provider_cancellation(monkeypatch) -> None:
@@ -273,12 +315,42 @@ def test_lookup_deadline_does_not_wait_for_provider_cancellation(monkeypatch) ->
         await asyncio.sleep(0.25)
         return elapsed, result
 
-    monkeypatch.setattr(parallel_impl, "_LOOKUP_TOTAL_TIMEOUT_SECONDS", 0.06)
-    monkeypatch.setattr(parallel_impl, "_LOOKUP_WORKER_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(parallel_impl, "_LOOKUP_TOTAL_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(parallel_impl, "_LOOKUP_WORKER_TIMEOUT_SECONDS", 0.20)
     elapsed, result = asyncio.run(_run())
 
     assert elapsed < 0.15
     assert "parallel_research_total_timeout" in result
+    assert "parallel_research_worker_timeout" not in result
+    payload = json.loads(result.split("<parallel_research_json>\n", 1)[1].split("\n</parallel_research_json>", 1)[0])
+    assert payload["research_runtime"]["status"] == "timeout"
+    assert payload["research_runtime"]["total_deadline_exhausted"] is True
+    assert parallel_impl._detached_research_task_snapshot()["active"] == 0
+
+
+def test_detached_research_task_registry_recovers_after_cancellation_burst() -> None:
+    before = parallel_impl._detached_research_task_snapshot()
+
+    async def _run() -> None:
+        async def _slow_cleanup() -> None:
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.01)
+                raise
+
+        tasks = [asyncio.create_task(_slow_cleanup()) for _ in range(50)]
+        await asyncio.sleep(0)
+        for task in tasks:
+            parallel_impl._detach_cancelled_task(task)
+        assert parallel_impl._detached_research_task_snapshot()["active"] >= 50
+        await asyncio.sleep(0.05)
+
+    asyncio.run(_run())
+    after = parallel_impl._detached_research_task_snapshot()
+    assert after["active"] == 0
+    assert after["created_total"] - before["created_total"] == 50
+    assert after["completed_total"] - before["completed_total"] == 50
 
 
 def test_parallel_research_max_workers_zero_skips_llm_calls() -> None:
@@ -303,6 +375,8 @@ def test_parallel_research_tool_respects_lookup_switch() -> None:
     result = asyncio.run(tool.handler("查资料", purpose="lookup"))
 
     assert "lookup_disabled_by_config" in result
+    assert tool.parameters["properties"]["time_budget_seconds"]["maximum"] == 30
+    assert tool.metadata["query_retry_limit"] == 1
 
 
 def test_parallel_research_v2_high_profile_expands_limits() -> None:

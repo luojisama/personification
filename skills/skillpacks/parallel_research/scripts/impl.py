@@ -52,12 +52,14 @@ _READ_ONLY_TOOL_NAMES = frozenset(
         "vision_analyze",
     }
 )
-_LOOKUP_TOTAL_TIMEOUT_SECONDS = 15.0
-_LOOKUP_WORKER_TIMEOUT_SECONDS = 10.0
-_LOOKUP_MAX_TOOL_ROUNDS = 1
-_LOOKUP_PAGES_PER_WORKER = 8
+_LOOKUP_TOTAL_TIMEOUT_SECONDS = 30.0
+_LOOKUP_WORKER_TIMEOUT_SECONDS = 28.0
+_LOOKUP_MAX_TOOL_ROUNDS = 2
+_LOOKUP_PAGES_PER_WORKER = 4
 _BACKGROUND_LEARNING_TASKS: set[asyncio.Task[Any]] = set()
 _DETACHED_RESEARCH_TASKS: set[asyncio.Task[Any]] = set()
+_DETACHED_RESEARCH_TASKS_CREATED = 0
+_DETACHED_RESEARCH_TASKS_COMPLETED = 0
 _ZERO_WIDTH_TEXT_RE = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")
 _EVIDENCE_PUNCTUATION_TRANSLATION = str.maketrans(
     {
@@ -112,11 +114,17 @@ def _detach_cancelled_task(task: asyncio.Task[Any]) -> None:
     research call return at the declared deadline.
     """
 
+    global _DETACHED_RESEARCH_TASKS_CREATED
+    global _DETACHED_RESEARCH_TASKS_COMPLETED
+
     task.cancel()
     _DETACHED_RESEARCH_TASKS.add(task)
+    _DETACHED_RESEARCH_TASKS_CREATED += 1
 
     def _finish(done: asyncio.Task[Any]) -> None:
+        global _DETACHED_RESEARCH_TASKS_COMPLETED
         _DETACHED_RESEARCH_TASKS.discard(done)
+        _DETACHED_RESEARCH_TASKS_COMPLETED += 1
         if done.cancelled():
             return
         try:
@@ -125,6 +133,14 @@ def _detach_cancelled_task(task: asyncio.Task[Any]) -> None:
             return
 
     task.add_done_callback(_finish)
+
+
+def _detached_research_task_snapshot() -> dict[str, int]:
+    return {
+        "active": len(_DETACHED_RESEARCH_TASKS),
+        "created_total": _DETACHED_RESEARCH_TASKS_CREATED,
+        "completed_total": _DETACHED_RESEARCH_TASKS_COMPLETED,
+    }
 
 
 def _logger(runtime: Any) -> Any:
@@ -741,11 +757,21 @@ def _lookup_worker_plans(
     return plans
 
 
-def _bounded_lookup_limits(limits: ResearchLimits) -> ResearchLimits:
+def _bounded_lookup_limits(
+    limits: ResearchLimits,
+    *,
+    time_budget_seconds: float | None = None,
+) -> ResearchLimits:
+    total_cap = _LOOKUP_TOTAL_TIMEOUT_SECONDS
+    if time_budget_seconds is not None:
+        try:
+            total_cap = min(total_cap, max(0.01, float(time_budget_seconds)))
+        except (TypeError, ValueError):
+            total_cap = _LOOKUP_TOTAL_TIMEOUT_SECONDS
     return ResearchLimits(
         max_workers=min(3, limits.max_workers),
-        worker_timeout=min(_LOOKUP_WORKER_TIMEOUT_SECONDS, limits.worker_timeout),
-        total_timeout=min(_LOOKUP_TOTAL_TIMEOUT_SECONDS, limits.total_timeout),
+        worker_timeout=min(_LOOKUP_WORKER_TIMEOUT_SECONDS, limits.worker_timeout, total_cap),
+        total_timeout=min(total_cap, limits.total_timeout),
         max_tool_rounds=min(_LOOKUP_MAX_TOOL_ROUNDS, limits.max_tool_rounds),
         pages_per_worker=min(_LOOKUP_PAGES_PER_WORKER, limits.pages_per_worker),
         level=f"{limits.level}:lookup",
@@ -1354,6 +1380,42 @@ def _render_result(payload: dict[str, Any]) -> str:
     )
 
 
+def _research_runtime_payload(
+    *,
+    started_at: float,
+    total_budget_seconds: float,
+    planned_workers: int,
+    completed_workers: int,
+    failed_workers: int,
+    cancelled_workers: int,
+    worker_timeout_count: int,
+    total_deadline_exhausted: bool,
+    aggregation_mode: str,
+) -> dict[str, Any]:
+    incomplete = completed_workers < planned_workers
+    if total_deadline_exhausted or (worker_timeout_count > 0 and completed_workers <= 0):
+        status = "timeout"
+    elif failed_workers > 0 and completed_workers <= 0:
+        status = "failed"
+    elif failed_workers > 0 or cancelled_workers > 0 or worker_timeout_count > 0 or incomplete:
+        status = "partial"
+    else:
+        status = "complete"
+    return {
+        "status": status,
+        "total_budget_ms": max(0, int(total_budget_seconds * 1000)),
+        "elapsed_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+        "planned_workers": max(0, int(planned_workers)),
+        "completed_workers": max(0, int(completed_workers)),
+        "failed_workers": max(0, int(failed_workers)),
+        "cancelled_workers": max(0, int(cancelled_workers)),
+        "worker_timeout_count": max(0, int(worker_timeout_count)),
+        "total_deadline_exhausted": bool(total_deadline_exhausted),
+        "aggregation_mode": str(aggregation_mode or "none"),
+        "detached_tasks": _detached_research_task_snapshot(),
+    }
+
+
 async def parallel_research(
     *,
     runtime: Any,
@@ -1367,6 +1429,7 @@ async def parallel_research(
     research_level: str = "medium",
     target_term: str = "",
     target_game: str = "",
+    time_budget_seconds: float | None = None,
 ) -> str:
     plugin_config = getattr(runtime, "plugin_config", None)
     tool_caller = getattr(runtime, "tool_caller", None)
@@ -1389,6 +1452,19 @@ async def parallel_research(
                 "must_avoid": [],
                 "source_notes": ["missing_query"],
                 "confidence": "low",
+                "research_runtime": {
+                    "status": "failed",
+                    "total_budget_ms": 0,
+                    "elapsed_ms": 0,
+                    "planned_workers": 0,
+                    "completed_workers": 0,
+                    "failed_workers": 0,
+                    "cancelled_workers": 0,
+                    "worker_timeout_count": 0,
+                    "total_deadline_exhausted": False,
+                    "aggregation_mode": "none",
+                    "detached_tasks": _detached_research_task_snapshot(),
+                },
             }
         )
     limits = _resolve_research_limits(
@@ -1400,12 +1476,21 @@ async def parallel_research(
     image_refs = _merge_image_refs(images, image_urls)
     purpose_text = str(purpose or "image_generation").strip() or "image_generation"
     if purpose_text == "lookup":
-        limits = _bounded_lookup_limits(limits)
+        limits = _bounded_lookup_limits(
+            limits,
+            time_budget_seconds=time_budget_seconds,
+        )
     context_text = str(context or "").strip()[:1200]
 
     started_at = time.monotonic()
     deadline = started_at + limits.total_timeout
     notes: list[str] = []
+    completed_workers = 0
+    failed_workers = 0
+    cancelled_workers = 0
+    worker_timeout_count = 0
+    total_deadline_exhausted = False
+    aggregation_mode = "none"
     if limits.max_workers <= 0:
         plans = []
         notes.append("max_workers_zero")
@@ -1431,12 +1516,14 @@ async def parallel_research(
             max_workers=limits.max_workers,
             timeout=planner_timeout,
         )
+    planned_workers = len(plans)
     registry = _build_readonly_registry(runtime)
     worker_results: list[dict[str, Any]] = []
     if plans and tool_caller is not None:
         remaining_total = max(0.0, deadline - time.monotonic())
         if remaining_total <= 0.0:
             notes.append("parallel_research_total_timeout")
+            total_deadline_exhausted = True
             plans = []
         tasks = [
             asyncio.create_task(
@@ -1463,11 +1550,14 @@ async def parallel_research(
                     _detach_cancelled_task(task)
             raise
         if pending:
-            notes.append(
-                "parallel_research_total_timeout"
-                if worker_wait_timeout >= remaining_total
-                else "parallel_research_worker_timeout"
-            )
+            limited_by_total_deadline = worker_wait_timeout >= remaining_total
+            if limited_by_total_deadline:
+                notes.append("parallel_research_total_timeout")
+                total_deadline_exhausted = True
+            else:
+                notes.append("parallel_research_worker_timeout")
+                worker_timeout_count += len(pending)
+            cancelled_workers += len(pending)
             for task in pending:
                 _detach_cancelled_task(task)
         for index, task in enumerate(tasks):
@@ -1475,18 +1565,24 @@ async def parallel_research(
                 continue
             if task.cancelled():
                 role = plans[index].role if index < len(plans) else f"worker_{index + 1}"
-                notes.append(f"{role}: CancelledError")
+                notes.append(f"{role}:worker_cancelled")
+                cancelled_workers += 1
                 continue
             try:
                 item = task.result()
             except Exception as exc:
                 role = plans[index].role if index < len(plans) else f"worker_{index + 1}"
-                notes.append(f"{role}: {type(exc).__name__}: {exc}")
+                notes.append(f"{role}:worker_failed:{type(exc).__name__}")
+                failed_workers += 1
                 continue
             if isinstance(item, dict):
                 worker_results.append(item)
+                completed_workers += 1
+            else:
+                failed_workers += 1
     elif plans and tool_caller is None:
         notes.append("tool_caller_unavailable")
+        failed_workers = len(plans)
 
     if not plans:
         fallback_payload = _fallback_aggregate(
@@ -1498,13 +1594,38 @@ async def parallel_research(
         )
         fallback_payload["research_level"] = limits.level
         fallback_payload["pages_per_worker"] = limits.pages_per_worker
+        fallback_payload["research_runtime"] = _research_runtime_payload(
+            started_at=started_at,
+            total_budget_seconds=limits.total_timeout,
+            planned_workers=planned_workers,
+            completed_workers=completed_workers,
+            failed_workers=failed_workers,
+            cancelled_workers=cancelled_workers,
+            worker_timeout_count=worker_timeout_count,
+            total_deadline_exhausted=total_deadline_exhausted,
+            aggregation_mode="deterministic",
+        )
         return _render_result(
             fallback_payload
         )
 
     remaining_for_aggregate = max(0.0, deadline - time.monotonic())
-    if remaining_for_aggregate <= 0.05:
+    if purpose_text == "lookup":
+        # The outer Agent performs final semantic synthesis.  A second LLM
+        # aggregation would spend the remaining reply budget and is not
+        # allowed to mint any additional URL/quote evidence.
+        aggregation_mode = "deterministic"
+        aggregate = _fallback_aggregate(
+            query=query_text,
+            purpose=purpose_text,
+            plans=plans,
+            worker_results=worker_results,
+            notes=notes,
+        )
+    elif remaining_for_aggregate <= 0.05:
         notes.append("parallel_research_total_timeout")
+        total_deadline_exhausted = True
+        aggregation_mode = "deterministic"
         aggregate = _fallback_aggregate(
             query=query_text,
             purpose=purpose_text,
@@ -1513,6 +1634,7 @@ async def parallel_research(
             notes=notes,
         )
     else:
+        aggregation_mode = "model"
         aggregate = await _aggregate_results(
             query=query_text,
             purpose=purpose_text,
@@ -1525,6 +1647,17 @@ async def parallel_research(
         )
     aggregate["research_level"] = limits.level
     aggregate["pages_per_worker"] = limits.pages_per_worker
+    aggregate["research_runtime"] = _research_runtime_payload(
+        started_at=started_at,
+        total_budget_seconds=limits.total_timeout,
+        planned_workers=planned_workers,
+        completed_workers=completed_workers,
+        failed_workers=failed_workers,
+        cancelled_workers=cancelled_workers,
+        worker_timeout_count=worker_timeout_count,
+        total_deadline_exhausted=total_deadline_exhausted,
+        aggregation_mode=aggregation_mode,
+    )
     term_text = str(target_term or "").strip()[:80]
     game_text = str(target_game or "").strip()[:100]
     fact_evidence = list(aggregate.get("fact_evidence") or [])

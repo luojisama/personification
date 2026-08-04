@@ -60,7 +60,7 @@ class _FakeToolCaller:
         }
 
 
-def _register_query_tool(handler):  # noqa: ANN001
+def _register_query_tool(handler, *, metadata=None):  # noqa: ANN001
     registry = tool_registry.ToolRegistry()
     registry.register(
         tool_registry.AgentTool(
@@ -72,6 +72,7 @@ def _register_query_tool(handler):  # noqa: ANN001
                 "required": [],
             },
             handler=handler,
+            metadata=dict(metadata or {}),
         )
     )
     return registry
@@ -204,6 +205,32 @@ def test_execute_tool_with_retries_skips_failed_signatures_and_uses_new_query() 
     assert tool_args == {"query": "第三个问题"}
     assert json.loads(result)["results"]
     assert fallbacks.tool_signature("search_web", {"query": "新问题"}) in unavailable
+
+
+def test_execute_tool_with_retries_respects_single_query_attempt_metadata() -> None:
+    calls: list[str] = []
+
+    async def _handler(**kwargs):  # noqa: ANN001
+        calls.append(kwargs["query"])
+        return json.dumps({"results": []})
+
+    tool_args, result = asyncio.run(
+        runner._execute_tool_with_retries(
+            registry=_register_query_tool(_handler, metadata={"query_retry_limit": 1}),
+            tool_name="search_web",
+            tool_args={"query": "主查询"},
+            rewritten_query=SimpleNamespace(
+                primary_query="改写查询",
+                query_candidates=["候选查询"],
+            ),
+            user_images=[],
+            logger=_FakeLogger(),
+        )
+    )
+
+    assert calls == ["改写查询"]
+    assert tool_args == {"query": "改写查询"}
+    assert json.loads(result)["results"] == []
 
 
 def test_execute_tool_with_retries_skips_zero_arg_signature_without_invoking() -> None:
@@ -2160,6 +2187,7 @@ def test_run_agent_stops_equivalent_searches_after_social_coverage_is_satisfied(
 
 def test_run_agent_allows_one_slang_web_fallback_then_blocks_multi_search() -> None:
     handled: list[str] = []
+    parallel_args: list[dict[str, object]] = []
     web_url = "https://example.com/delta-force-slang"
 
     async def _slang_handler(**_kwargs):  # noqa: ANN001
@@ -2202,8 +2230,9 @@ def test_run_agent_allows_one_slang_web_fallback_then_blocks_multi_search() -> N
             ensure_ascii=False,
         )
 
-    async def _parallel_handler(**_kwargs):  # noqa: ANN001
+    async def _parallel_handler(**kwargs):  # noqa: ANN001
         handled.append("parallel_research")
+        parallel_args.append(dict(kwargs))
         return json.dumps(
             {
                 "verified_facts": [],
@@ -2276,6 +2305,7 @@ def test_run_agent_allows_one_slang_web_fallback_then_blocks_multi_search() -> N
                         "query": {"type": "string"},
                         "term": {"type": "string"},
                         "game": {"type": "string"},
+                        "time_budget_seconds": {"type": "number"},
                     },
                     "required": [],
                 },
@@ -2358,6 +2388,8 @@ def test_run_agent_allows_one_slang_web_fallback_then_blocks_multi_search() -> N
     )
 
     assert handled == ["research_game_slang", "parallel_research"]
+    assert len(parallel_args) == 1
+    assert 4.0 <= float(parallel_args[0]["time_budget_seconds"]) <= 30.0
     second_tools = {schema["function"]["name"] for schema in caller.calls[2]["tools"]}
     assert "multi_search_engine" not in second_tools
     assert "parallel_research" not in second_tools

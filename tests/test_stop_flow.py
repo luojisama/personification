@@ -110,7 +110,14 @@ def _run_stop_handler(
     return decision, traces
 
 
-def _select_fallback(*, state, registry, selection):
+def _select_fallback(
+    *,
+    state,
+    registry,
+    selection,
+    budget_deadline=None,
+    semantic_research_target_deadline=None,
+):
     async def _selector(**_kwargs):  # noqa: ANN001
         return selection
 
@@ -131,6 +138,8 @@ def _select_fallback(*, state, registry, selection):
             record_trace=lambda **_kwargs: None,
             logger=SimpleNamespace(info=lambda _msg: None),
             select_semantic_fallback_tool=_selector,
+            budget_deadline=budget_deadline,
+            semantic_research_target_deadline=semantic_research_target_deadline,
         )
     )
 
@@ -224,12 +233,28 @@ def test_research_slang_coverage_does_not_stop_when_semantic_consensus_is_incomp
     assert selected[1]["purpose"] == "lookup"
     assert selected[1]["max_workers"] == 3
     assert selected[1]["research_level"] == "low"
+    assert selected[1]["time_budget_seconds"] == 30.0
     assert "三角洲行动 花来" in selected[1]["query"]
     assert selected[1]["focus"] == [
         "定义、称呼来源和梗的出处",
         "实际玩法、武器、角色、机制和使用语境",
         "独立梗百科、攻略或社区文章的反证与交叉验证",
     ]
+
+
+def test_semantic_web_fallback_budget_reserves_execution_and_finalization_time() -> None:
+    budget = stop_flow._semantic_web_fallback_budget(
+        budget_deadline=130.0,
+        semantic_research_target_deadline=145.0,
+        now=100.0,
+    )
+
+    assert budget == (20.0, 122.0)
+    assert stop_flow._semantic_web_fallback_budget(
+        budget_deadline=110.0,
+        semantic_research_target_deadline=145.0,
+        now=100.0,
+    ) is None
 
 
 def test_research_slang_confirmed_semantics_blocks_web_fallback() -> None:
