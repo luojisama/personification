@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
 
 from ..core.config_manager import get_env_config_load_info, get_env_config_path
+from ..core.context_cleanup import release_message_buffer_entry_resources
 from ..core.remote_skill_review import (
     get_remote_skill_review_stats,
     list_remote_skill_reviews,
@@ -839,6 +840,7 @@ async def handle_full_reset_memory_command(
         timer_task = item.get("timer_task")
         if timer_task:
             timer_task.cancel()
+        release_message_buffer_entry_resources(item)
         msg_buffer.pop(key, None)
 
     session_count = await clear_all_session_histories()

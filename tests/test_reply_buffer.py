@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any
+
+import pytest
 
 from ._loader import load_personification_module
 
@@ -636,5 +639,153 @@ def test_session_queue_does_not_consume_global_slots() -> None:
         await asyncio.gather(first, queued, other)
 
         assert order == ["a1", "b1", "a2"]
+
+    asyncio.run(run())
+
+
+def test_session_gates_are_reclaimed_after_large_session_churn() -> None:
+    async def run() -> None:
+        controller = reply_buffer.ReplyConcurrencyController(session_limit=3, global_limit=12)
+        for index in range(10_000):
+            async with controller.direct_turn(f"bot:private_{index}"):
+                pass
+        assert controller.snapshot() == {"active": 0, "waiting": 0, "session_gates": 0}
+
+    asyncio.run(run())
+
+
+def test_reply_admission_timeout_and_cancellation_release_all_gates() -> None:
+    async def run() -> None:
+        controller = reply_buffer.ReplyConcurrencyController(session_limit=1, global_limit=1)
+        occupied = asyncio.Event()
+        release = asyncio.Event()
+
+        async def holder() -> None:
+            async with controller.direct_turn("bot:group-a"):
+                occupied.set()
+                await release.wait()
+
+        first = asyncio.create_task(holder())
+        await occupied.wait()
+        with pytest.raises(reply_buffer.ReplyAdmissionTimeout):
+            async with controller.direct_turn(
+                "bot:group-b",
+                deadline=time.monotonic() + 0.02,
+            ):
+                raise AssertionError("timed out turn must not be admitted")
+
+        async def queued() -> None:
+            async with controller.direct_turn(
+                "bot:group-c",
+                deadline=time.monotonic() + 1.0,
+            ):
+                pass
+
+        pending = asyncio.create_task(queued())
+        await asyncio.sleep(0)
+        assert controller.snapshot()["waiting"] == 1
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        release.set()
+        await first
+        assert controller.snapshot() == {"active": 0, "waiting": 0, "session_gates": 0}
+
+    asyncio.run(run())
+
+
+def test_processing_timeout_is_not_reclassified_as_admission_timeout() -> None:
+    async def run() -> None:
+        controller = reply_buffer.ReplyConcurrencyController()
+        with pytest.raises(asyncio.TimeoutError):
+            async with controller.direct_turn("bot:group-a"):
+                raise asyncio.TimeoutError
+        assert controller.snapshot() == {"active": 0, "waiting": 0, "session_gates": 0}
+
+    asyncio.run(run())
+
+
+def test_reply_concurrency_limits_hold_under_fifty_turn_burst() -> None:
+    async def run() -> None:
+        controller = reply_buffer.ReplyConcurrencyController(session_limit=3, global_limit=12)
+        global_active = 0
+        global_peak = 0
+        session_active: dict[str, int] = {}
+        session_peak: dict[str, int] = {}
+        guard = asyncio.Lock()
+
+        async def worker(index: int) -> None:
+            nonlocal global_active, global_peak
+            key = f"bot:group-{index % 10}"
+            async with controller.direct_turn(key, deadline=time.monotonic() + 2.0):
+                async with guard:
+                    global_active += 1
+                    global_peak = max(global_peak, global_active)
+                    session_active[key] = session_active.get(key, 0) + 1
+                    session_peak[key] = max(session_peak.get(key, 0), session_active[key])
+                await asyncio.sleep(0.002)
+                async with guard:
+                    global_active -= 1
+                    session_active[key] -= 1
+
+        await asyncio.gather(*(worker(index) for index in range(50)))
+        assert global_peak <= 12
+        assert max(session_peak.values()) <= 3
+        assert controller.snapshot() == {"active": 0, "waiting": 0, "session_gates": 0}
+
+    asyncio.run(run())
+
+
+def test_external_buffer_cleanup_releases_retained_session_gate() -> None:
+    context_cleanup = load_personification_module("plugin.personification.core.context_cleanup")
+    controller = reply_buffer.ReplyConcurrencyController()
+    controller.retain_buffer_session("bot:group-1")
+    entry: dict[str, Any] = {
+        "timer_task": None,
+        "_release_concurrency_gate": lambda: controller.release_buffer_session("bot:group-1"),
+    }
+    msg_buffer = {"bot:group-1": entry}
+    assert controller.snapshot()["session_gates"] == 1
+    assert context_cleanup.clear_message_buffer(msg_buffer, "group-1") == 1
+    assert controller.snapshot() == {"active": 0, "waiting": 0, "session_gates": 0}
+
+
+def test_buffer_entry_retains_gate_until_dequeue_finishes() -> None:
+    async def run() -> None:
+        controller = reply_buffer.ReplyConcurrencyController()
+        msg_buffer: dict[str, dict[str, Any]] = {}
+        event = _GroupEvent(1, "buffered")
+
+        async def process(_bot: Any, _event: Any, _state: dict[str, Any]) -> None:
+            await asyncio.sleep(0)
+
+        await reply_buffer.handle_reply_event(
+            _Bot(),
+            event,
+            {"is_random_chat": True},
+            poke_event_cls=type("PokeEvent", (), {}),
+            message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent,
+            process_response_logic=process,
+            msg_buffer=msg_buffer,
+            start_buffer_timer=lambda *_args: None,
+            logger=_Logger(),
+            concurrency_controller=controller,
+        )
+        assert controller.snapshot()["session_gates"] == 1
+        key = reply_buffer._session_key(event, group_message_event_cls=_GroupEvent, bot_self_id="999")
+        await reply_buffer.run_buffer_timer(
+            key,
+            _Bot(),
+            msg_buffer=msg_buffer,
+            process_response_logic=process,
+            message_event_cls=_PrivateEvent,
+            message_cls=_Message,
+            message_segment_cls=_MessageSegment,
+            logger=_Logger(),
+            concurrency_controller=controller,
+        )
+        assert msg_buffer == {}
+        assert controller.snapshot() == {"active": 0, "waiting": 0, "session_gates": 0}
 
     asyncio.run(run())

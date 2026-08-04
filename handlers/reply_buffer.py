@@ -2,8 +2,11 @@ import asyncio
 import re
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
+from ..core import metrics
+from ..core.context_cleanup import release_message_buffer_entry_resources
 from ..core.target_inference import normalize_message_target_for_review
 from ..core.turn_media import extract_turn_media_from_event, media_from_batched_events, serialize_turn_media
 from .reply_commit import reply_lifecycle_snapshot
@@ -14,6 +17,9 @@ _PRIVATE_BATCH_DELAY_SECONDS = 0.8
 _MAX_BATCH_EVENTS = 8
 _PROCESS_RESPONSE_TIMEOUT_SECONDS = 180.0
 _DIRECT_REPLY_PREEMPT_SECONDS = 8.0
+_ADMISSION_TIMEOUT_SECONDS = 15.0
+
+
 async def _handle_reply_timeout(
     *,
     bot: Any,
@@ -88,50 +94,237 @@ async def _handle_reply_timeout(
         pass
 
 
+def _record_reply_admission_timeout(
+    *,
+    event: Any,
+    state: dict[str, Any],
+    session_key: str,
+    wait_ms: int,
+    mode: str,
+) -> None:
+    try:
+        from ..core import reply_turn_trace
+
+        trace_id = reply_turn_trace.start_trace(
+            trace_id=str(state.get("reply_trace_id", "") or ""),
+            session_type="group" if getattr(event, "group_id", None) else "private",
+            group_id=str(getattr(event, "group_id", "") or ""),
+            user_id=str(getattr(event, "user_id", "") or ""),
+            detail={"source": "reply_admission", "mode": mode},
+        )
+        state["reply_trace_id"] = trace_id
+        reply_turn_trace.record_stage(
+            trace_id=trace_id,
+            key="reply_admission_timeout",
+            label="回复排队超时",
+            status="warn",
+            detail=(
+                f"mode={mode} wait_ms={max(0, int(wait_ms))} "
+                f"reply_required={str(bool(state.get('reply_required', False))).lower()}"
+            ),
+            hint="检查回复并发、事件循环延迟和上游请求耗时",
+        )
+        reply_turn_trace.finish_trace(
+            trace_id=trace_id,
+            outcome="failed" if state.get("reply_required") else "no_reply",
+            diagnosis_code="reply_admission_timeout",
+            detail={
+                "session": session_key,
+                "mode": mode,
+                "wait_ms": max(0, int(wait_ms)),
+                "reply_required": bool(state.get("reply_required", False)),
+                "silent": True,
+            },
+        )
+    except Exception:
+        pass
+
+
+def _pop_buffer_entry(
+    msg_buffer: Dict[str, Dict[str, Any]],
+    key: str,
+) -> dict[str, Any] | None:
+    entry = msg_buffer.pop(key, None)
+    if isinstance(entry, dict):
+        release_message_buffer_entry_resources(entry)
+    return entry
+
+
+def _retain_buffer_entry(
+    *,
+    entry: dict[str, Any],
+    key: str,
+    concurrency_controller: "ReplyConcurrencyController | None",
+) -> None:
+    if concurrency_controller is None or callable(entry.get("_release_concurrency_gate")):
+        return
+    concurrency_controller.retain_buffer_session(key)
+    entry["_release_concurrency_gate"] = (
+        lambda controller=concurrency_controller, session_key=key: controller.release_buffer_session(
+            session_key
+        )
+    )
+
+
+class ReplyAdmissionTimeout(asyncio.TimeoutError):
+    def __init__(self, wait_ms: int) -> None:
+        super().__init__("reply admission timed out")
+        self.wait_ms = max(0, int(wait_ms))
+
+
+@dataclass
+class _SessionGate:
+    semaphore: asyncio.Semaphore
+    commit_lock: asyncio.Lock
+    direct_idle: asyncio.Event
+    refs: int = 0
+    direct_count: int = 0
+    waiters: int = 0
+    active: int = 0
+
+
 class ReplyConcurrencyController:
     def __init__(self, *, session_limit: int = 3, global_limit: int = 12) -> None:
         self._global_semaphore = asyncio.Semaphore(max(1, int(global_limit)))
         self._session_limit = max(1, int(session_limit))
-        self._session_semaphores: dict[str, asyncio.Semaphore] = {}
-        self._commit_locks: dict[str, asyncio.Lock] = {}
-        self._direct_counts: dict[str, int] = {}
-        self._direct_idle: dict[str, asyncio.Event] = {}
+        self._session_gates: dict[str, _SessionGate] = {}
+
+    def _gate(self, key: str) -> _SessionGate:
+        gate = self._session_gates.get(key)
+        if gate is None:
+            idle = asyncio.Event()
+            idle.set()
+            gate = _SessionGate(
+                semaphore=asyncio.Semaphore(self._session_limit),
+                commit_lock=asyncio.Lock(),
+                direct_idle=idle,
+            )
+            self._session_gates[key] = gate
+        return gate
+
+    def _retain(self, key: str) -> _SessionGate:
+        gate = self._gate(key)
+        gate.refs += 1
+        return gate
+
+    def _release(self, key: str, gate: _SessionGate) -> None:
+        gate.refs = max(0, gate.refs - 1)
+        self._cleanup(key, gate)
+
+    def _cleanup(self, key: str, gate: _SessionGate) -> None:
+        if (
+            gate.refs == 0
+            and gate.direct_count == 0
+            and gate.waiters == 0
+            and gate.active == 0
+            and not gate.commit_lock.locked()
+            and self._session_gates.get(key) is gate
+        ):
+            self._session_gates.pop(key, None)
+
+    def retain_buffer_session(self, key: str) -> None:
+        self._retain(key)
+
+    def release_buffer_session(self, key: str) -> None:
+        gate = self._session_gates.get(key)
+        if gate is not None:
+            self._release(key, gate)
 
     def commit_lock(self, key: str) -> asyncio.Lock:
-        return self._commit_locks.setdefault(key, asyncio.Lock())
-
-    def _session_semaphore(self, key: str) -> asyncio.Semaphore:
-        return self._session_semaphores.setdefault(
-            key,
-            asyncio.Semaphore(self._session_limit),
-        )
-
-    def _idle_event(self, key: str) -> asyncio.Event:
-        event = self._direct_idle.get(key)
-        if event is None:
-            event = asyncio.Event()
-            event.set()
-            self._direct_idle[key] = event
-        return event
+        return self._gate(key).commit_lock
 
     async def wait_for_direct_idle(self, key: str) -> None:
-        await self._idle_event(key).wait()
+        gate = self._retain(key)
+        try:
+            await gate.direct_idle.wait()
+        finally:
+            self._release(key, gate)
+
+    def snapshot(self) -> dict[str, int]:
+        return {
+            "active": sum(gate.active for gate in self._session_gates.values()),
+            "waiting": sum(gate.waiters for gate in self._session_gates.values()),
+            "session_gates": len(self._session_gates),
+        }
+
+    @staticmethod
+    def _admission_deadline(deadline: float | None) -> float:
+        now = time.monotonic()
+        allowed = _ADMISSION_TIMEOUT_SECONDS
+        if deadline is not None:
+            allowed = min(allowed, max(0.0, float(deadline) - now))
+        return now + max(0.0, allowed)
+
+    async def _wait_until(self, awaitable: Any, *, deadline: float) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            raise asyncio.TimeoutError
+        await asyncio.wait_for(awaitable, timeout=remaining)
 
     @asynccontextmanager
-    async def direct_turn(self, key: str):
-        self._direct_counts[key] = int(self._direct_counts.get(key, 0) or 0) + 1
-        self._idle_event(key).clear()
+    async def _turn(self, key: str, *, direct: bool, deadline: float | None = None):
+        gate = self._retain(key)
+        started_at = time.monotonic()
+        acquired_session = False
+        acquired_global = False
+        admitted = False
+        if direct:
+            gate.direct_count += 1
+            gate.direct_idle.clear()
+        gate.waiters += 1
         try:
-            async with self._session_semaphore(key):
-                async with self._global_semaphore:
-                    yield self.commit_lock(key)
+            try:
+                admission_deadline = self._admission_deadline(deadline)
+                if not direct:
+                    await self._wait_until(gate.direct_idle.wait(), deadline=admission_deadline)
+                await self._wait_until(gate.semaphore.acquire(), deadline=admission_deadline)
+                acquired_session = True
+                await self._wait_until(self._global_semaphore.acquire(), deadline=admission_deadline)
+                acquired_global = True
+            except asyncio.TimeoutError as exc:
+                wait_ms = int(max(0.0, (time.monotonic() - started_at) * 1000.0))
+                metrics.record_counter(
+                    "reply_admission_timeout_total",
+                    mode="direct" if direct else "buffered",
+                )
+                raise ReplyAdmissionTimeout(wait_ms) from exc
+            gate.waiters = max(0, gate.waiters - 1)
+            gate.active += 1
+            admitted = True
+            wait_ms = max(0.0, (time.monotonic() - started_at) * 1000.0)
+            metrics.record_timing(
+                "reply_admission_wait_ms",
+                wait_ms,
+                mode="direct" if direct else "buffered",
+            )
+            yield gate.commit_lock
         finally:
-            remaining = max(0, int(self._direct_counts.get(key, 1) or 1) - 1)
-            if remaining:
-                self._direct_counts[key] = remaining
+            if admitted:
+                gate.active = max(0, gate.active - 1)
             else:
-                self._direct_counts.pop(key, None)
-                self._idle_event(key).set()
+                gate.waiters = max(0, gate.waiters - 1)
+            if acquired_global:
+                self._global_semaphore.release()
+            if acquired_session:
+                gate.semaphore.release()
+            if direct:
+                gate.direct_count = max(0, gate.direct_count - 1)
+                if gate.direct_count == 0:
+                    gate.direct_idle.set()
+            self._release(key, gate)
+
+    @asynccontextmanager
+    async def direct_turn(self, key: str, *, deadline: float | None = None):
+        async with self._turn(key, direct=True, deadline=deadline) as commit_lock:
+            yield commit_lock
+
+    @asynccontextmanager
+    async def buffered_turn(self, key: str, *, deadline: float | None = None):
+        async with self._turn(key, direct=False, deadline=deadline) as commit_lock:
+            yield commit_lock
 
 
 def _has_reply_semantics(event: Any) -> bool:
@@ -491,9 +684,6 @@ async def run_buffer_timer(
     if not isinstance(entry, dict):
         return
 
-    if concurrency_controller is not None:
-        await concurrency_controller.wait_for_direct_idle(key)
-
     if entry.get("processing"):
         if entry.get("pending_items"):
             entry["pending_ready"] = True
@@ -536,7 +726,7 @@ async def run_buffer_timer(
                 ),
             )
             return
-        msg_buffer.pop(key, None)
+        _pop_buffer_entry(msg_buffer, key)
         return
 
     entry["processing"] = True
@@ -553,12 +743,14 @@ async def run_buffer_timer(
     selected_event = trigger_item.get("event")
     if selected_event is None:
         entry["processing"] = False
+        _pop_buffer_entry(msg_buffer, key)
         return
 
     state = dict(trigger_item.get("state") or {})
     events = [item.get("event") for item in items if isinstance(item.get("event"), message_event_cls)]
     if not events:
         entry["processing"] = False
+        _pop_buffer_entry(msg_buffer, key)
         return
 
     combined_message = None
@@ -617,9 +809,31 @@ async def run_buffer_timer(
         pass
 
     try:
-        await asyncio.wait_for(
-            process_response_logic(bot, selected_event, state),
-            timeout=timeout_seconds,
+        if concurrency_controller is None:
+            await asyncio.wait_for(
+                process_response_logic(bot, selected_event, state),
+                timeout=max(0.001, float(state["response_deadline"]) - time.monotonic()),
+            )
+        else:
+            async with concurrency_controller.buffered_turn(
+                key,
+                deadline=float(state["response_deadline"]),
+            ) as commit_lock:
+                state["reply_commit_lock"] = commit_lock
+                await asyncio.wait_for(
+                    process_response_logic(bot, selected_event, state),
+                    timeout=max(0.001, float(state["response_deadline"]) - time.monotonic()),
+                )
+    except ReplyAdmissionTimeout as exc:
+        logger.warning(
+            f"拟人插件：会话 {key} 缓冲回复排队超时，已静默放弃。"
+        )
+        _record_reply_admission_timeout(
+            event=selected_event,
+            state=state,
+            session_key=key,
+            wait_ms=exc.wait_ms,
+            mode="buffered",
         )
     except asyncio.TimeoutError:
         logger.warning(
@@ -716,7 +930,7 @@ async def run_buffer_timer(
                     ),
                 )
         elif not entry.get("items"):
-            msg_buffer.pop(key, None)
+            _pop_buffer_entry(msg_buffer, key)
 
 
 async def handle_reply_event(
@@ -752,26 +966,40 @@ async def handle_reply_event(
         direct_state["reply_required"] = True
         timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
         direct_state["response_deadline"] = time.monotonic() + timeout_seconds
-        async with concurrency_controller.direct_turn(session_key) as commit_lock:
-            direct_state["reply_commit_lock"] = commit_lock
-            try:
+        try:
+            async with concurrency_controller.direct_turn(
+                session_key,
+                deadline=float(direct_state["response_deadline"]),
+            ) as commit_lock:
+                direct_state["reply_commit_lock"] = commit_lock
                 await asyncio.wait_for(
                     process_response_logic(bot, event, direct_state),
-                    timeout=timeout_seconds,
+                    timeout=max(
+                        0.001,
+                        float(direct_state["response_deadline"]) - time.monotonic(),
+                    ),
                 )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"拟人插件：会话 {session_key} poke turn 超时（>{timeout_seconds:.0f}s），已终止本轮。"
-                )
-                await _handle_reply_timeout(
-                    bot=bot,
-                    event=event,
-                    state=direct_state,
-                    session_key=session_key,
-                    timeout_seconds=timeout_seconds,
-                    logger=logger,
-                    commit_lock=commit_lock,
-                )
+        except ReplyAdmissionTimeout as exc:
+            logger.warning(f"拟人插件：会话 {session_key} poke turn 排队超时，已静默放弃。")
+            _record_reply_admission_timeout(
+                event=event,
+                state=direct_state,
+                session_key=session_key,
+                wait_ms=exc.wait_ms,
+                mode="direct",
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"拟人插件：会话 {session_key} poke turn 超时（>{timeout_seconds:.0f}s），已终止本轮。"
+            )
+            await _handle_reply_timeout(
+                bot=bot,
+                event=event,
+                state=direct_state,
+                session_key=session_key,
+                timeout_seconds=timeout_seconds,
+                logger=logger,
+            )
         return
 
     if not isinstance(event, message_event_cls):
@@ -820,47 +1048,66 @@ async def handle_reply_event(
         )
         timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
         direct_state["response_deadline"] = time.monotonic() + timeout_seconds
-        async with concurrency_controller.direct_turn(session_key) as commit_lock:
-            direct_state["reply_commit_lock"] = commit_lock
-            try:
+        try:
+            async with concurrency_controller.direct_turn(
+                session_key,
+                deadline=float(direct_state["response_deadline"]),
+            ) as commit_lock:
+                direct_state["reply_commit_lock"] = commit_lock
                 await asyncio.wait_for(
                     process_response_logic(bot, event, direct_state),
-                    timeout=timeout_seconds,
+                    timeout=max(
+                        0.001,
+                        float(direct_state["response_deadline"]) - time.monotonic(),
+                    ),
                 )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"拟人插件：会话 {session_key} direct turn 超时（>{timeout_seconds:.0f}s），已终止本轮。"
+        except ReplyAdmissionTimeout as exc:
+            logger.warning(f"拟人插件：会话 {session_key} direct turn 排队超时，已静默放弃。")
+            _record_reply_admission_timeout(
+                event=event,
+                state=direct_state,
+                session_key=session_key,
+                wait_ms=exc.wait_ms,
+                mode="direct",
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"拟人插件：会话 {session_key} direct turn 超时（>{timeout_seconds:.0f}s），已终止本轮。"
+            )
+            await _handle_reply_timeout(
+                bot=bot,
+                event=event,
+                state=direct_state,
+                session_key=session_key,
+                timeout_seconds=timeout_seconds,
+                logger=logger,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if finished_exception_cls and isinstance(exc, finished_exception_cls):
+                logger.debug("拟人插件：direct turn 提前结束（FinishedException）")
+            else:
+                delivery_state = (
+                    "complete"
+                    if direct_state.get("reply_delivery_complete")
+                    else "partial"
+                    if direct_state.get("reply_delivery_confirmed")
+                    else "dispatching"
+                    if direct_state.get("reply_delivery_started")
+                    else "not_started"
                 )
-                await _handle_reply_timeout(
-                    bot=bot,
-                    event=event,
-                    state=direct_state,
-                    session_key=session_key,
-                    timeout_seconds=timeout_seconds,
-                    logger=logger,
-                    commit_lock=commit_lock,
+                logger.error(
+                    f"拟人插件：会话 {session_key} direct turn 处理失败，保持静默: "
+                    f"type={type(exc).__name__} delivery_state={delivery_state}"
                 )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if finished_exception_cls and isinstance(exc, finished_exception_cls):
-                    logger.debug("拟人插件：direct turn 提前结束（FinishedException）")
-                else:
-                    delivery_state = (
-                        "complete"
-                        if direct_state.get("reply_delivery_complete")
-                        else "partial"
-                        if direct_state.get("reply_delivery_confirmed")
-                        else "dispatching"
-                        if direct_state.get("reply_delivery_started")
-                        else "not_started"
-                    )
-                    logger.error(
-                        f"拟人插件：会话 {session_key} direct turn 处理失败，保持静默: "
-                        f"type={type(exc).__name__} delivery_state={delivery_state}"
-                    )
         return
     entry = msg_buffer.setdefault(session_key, _new_entry(delay))
+    _retain_buffer_entry(
+        entry=entry,
+        key=session_key,
+        concurrency_controller=concurrency_controller,
+    )
     entry["delay"] = delay
     now_ts = time.monotonic()
     item = {

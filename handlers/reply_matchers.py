@@ -6,6 +6,7 @@ from nonebot import on_message, on_notice
 from nonebot.rule import Rule
 
 from ..core.group_mute import update_group_mute_from_notice
+from ..core.runtime_performance import register_reply_reporter
 from .reply_buffer import ReplyConcurrencyController
 
 try:
@@ -123,6 +124,7 @@ def register_reply_matchers(
         session_limit=int(getattr(plugin_config, "personification_reply_session_concurrency", 3) or 3),
         global_limit=int(getattr(plugin_config, "personification_reply_global_concurrency", 12) or 12),
     )
+    register_reply_reporter(concurrency_controller.snapshot)
 
     async def _direct_reply_rule(event: Event, state: T_State) -> bool:
         result = await _evaluate_personification_rule(

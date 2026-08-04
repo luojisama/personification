@@ -4,6 +4,12 @@ from typing import Any, Callable, Dict, Optional, Tuple
 GLOBAL_CLEAR_ARGS = {"全局", "all", "所有"}
 
 
+def release_message_buffer_entry_resources(entry: Dict[str, Any]) -> None:
+    release = entry.pop("_release_concurrency_gate", None)
+    if callable(release):
+        release()
+
+
 def is_global_clear_command(args_text: str) -> bool:
     return args_text in GLOBAL_CLEAR_ARGS
 
@@ -51,6 +57,7 @@ def clear_message_buffer(msg_buffer: Dict[str, Dict[str, Any]], target_id: str) 
         timer_task = msg_buffer[key].get("timer_task")
         if timer_task:
             timer_task.cancel()
+        release_message_buffer_entry_resources(msg_buffer[key])
         del msg_buffer[key]
     return len(keys_to_remove)
 
