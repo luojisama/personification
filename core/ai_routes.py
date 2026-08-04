@@ -778,6 +778,41 @@ def resolve_video_fallback_provider(
 ) -> ProviderResolution | None:
     if not bool(getattr(plugin_config, "personification_video_fallback_enabled", True)):
         return None
+    raw_api_type = str(
+        getattr(plugin_config, "personification_video_fallback_provider", "") or ""
+    ).strip().lower().replace("-", "_")
+    if raw_api_type in {"disabled", "off", "none"}:
+        return None
+    if raw_api_type in {"qwen", "qwen_omni", "dashscope_omni"}:
+        api_key = str(
+            getattr(plugin_config, "personification_video_fallback_api_key", "") or ""
+        ).strip()
+        if not api_key:
+            return None
+        return ProviderResolution(
+            provider={
+                "api_type": "qwen_omni",
+                "api_url": str(
+                    getattr(plugin_config, "personification_video_fallback_api_url", "") or ""
+                ).strip(),
+                "api_key": api_key,
+                "model": str(
+                    getattr(plugin_config, "personification_video_fallback_model", "") or ""
+                ).strip()
+                or "qwen3.5-omni-plus",
+                "workspace_id": str(
+                    getattr(
+                        plugin_config,
+                        "personification_video_fallback_workspace_id",
+                        "",
+                    )
+                    or ""
+                ).strip(),
+                "auth_path": "",
+                "gemini_auth_mode": "auto",
+            },
+            source="video_fallback",
+        )
     global_fallback = resolve_global_fallback_provider(plugin_config, logger, warn=warn)
     base_provider = dict(global_fallback.provider) if global_fallback is not None else {}
     explicit_values = (
@@ -789,7 +824,13 @@ def resolve_video_fallback_provider(
     )
     if _any_values(explicit_values):
         provider = _build_provider(
-            api_type=str(getattr(plugin_config, "personification_video_fallback_provider", "") or ""),
+            api_type=(
+                ""
+                if raw_api_type in {"", "auto"}
+                else str(
+                    getattr(plugin_config, "personification_video_fallback_provider", "") or ""
+                )
+            ),
             api_url=str(getattr(plugin_config, "personification_video_fallback_api_url", "") or ""),
             api_key=str(getattr(plugin_config, "personification_video_fallback_api_key", "") or ""),
             model=str(getattr(plugin_config, "personification_video_fallback_model", "") or ""),

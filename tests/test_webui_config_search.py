@@ -118,3 +118,34 @@ def test_api_pool_mutations_all_update_the_draft() -> None:
     assert 'oninput="syncApiPoolRawDraft(this)"' in app_config_js
     assert "const draft = apiPoolDraftState(e.field_name)" in app_config_js
     assert "await saveField(field, sanitizeApiProviders(providers), {preserveDraft:true})" in app_config_js
+
+
+def test_video_understanding_uses_structured_form_instead_of_json_editor() -> None:
+    root = Path(__file__).resolve().parents[1]
+    app_config_js = (root / "webui" / "static" / "app-config.js").read_text(encoding="utf-8")
+    style_css = (root / "webui" / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "function renderVideoUnderstandingEditor" in app_config_js
+    assert 'activeGroup === "视频理解"' in app_config_js
+    assert "原生音视频 Provider" in app_config_js
+    assert "Qwen-Omni（百炼官方 API）" in app_config_js
+    assert "qwen3.5-omni-plus" in app_config_js
+    assert "qwen3.5-omni-flash" in app_config_js
+    assert "qwen3-omni-flash" in app_config_js
+    assert "最长 1 小时视频" in app_config_js
+    assert "150 秒以内短视频" in app_config_js
+    assert "function renderVideoBudgetEditor" in app_config_js
+    assert '"15":"15 秒"' in app_config_js
+    assert '"180":"3 分钟"' in app_config_js
+    assert "目标帧数" in app_config_js
+    assert "视频下载上限（MiB）" in app_config_js
+    assert "固定热词" in app_config_js
+    assert "不需要 JSON" in app_config_js
+    assert 'api("/config/video-understanding"' in app_config_js
+    assert "function readVideoUnderstandingForm" in app_config_js
+    assert "video-config-grid" in style_css
+    custom_budget_branch = app_config_js.split(
+        'if (e.field_name === "personification_video_custom_frame_budgets")', 1
+    )[1].split('if (e.kind === "json")', 1)[0]
+    assert "renderVideoBudgetEditor" in custom_budget_branch
+    assert "textarea" not in custom_budget_branch

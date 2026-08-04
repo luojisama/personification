@@ -339,6 +339,166 @@ def test_video_auto_uses_native_full_modal_route_without_extracting_frames(monke
     assert route == "video_route_direct"
 
 
+def test_qwen_omni_uses_official_streaming_video_url_contract(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 200
+        text = (
+            'data: {"choices":[{"delta":{"content":"先看到红狼修脚，"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"随后开大撤离。"}}]}\n\n'
+            "data: [DONE]\n"
+        )
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {}
+
+    class _Client:
+        def __init__(self, **kwargs):  # noqa: ANN001
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def post(self, url, headers=None, json=None):  # noqa: ANN001, ANN201
+            captured.update(url=url, headers=headers or {}, json=json or {})
+            return _Response()
+
+    monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
+    result = asyncio.run(
+        media_understanding._call_qwen_omni_media(
+            api_key="qwen-secret",
+            base_url="",
+            workspace_id="workspace-123",
+            model="qwen3.5-omni-plus",
+            prompt="按时间线解释视频里的梗",
+            video_refs=["https://cdn.example/video.mp4?sig=opaque"],
+        )
+    )
+
+    assert result == "先看到红狼修脚，随后开大撤离。"
+    assert captured["url"] == (
+        "https://workspace-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions"
+    )
+    assert captured["headers"] == {
+        "Authorization": "Bearer qwen-secret",
+        "Accept": "text/event-stream",
+        "Content-Type": "application/json",
+    }
+    payload = captured["json"]
+    assert payload["model"] == "qwen3.5-omni-plus"  # type: ignore[index]
+    assert payload["modalities"] == ["text"]  # type: ignore[index]
+    assert payload["stream"] is True  # type: ignore[index]
+    assert "audio" not in payload  # type: ignore[operator]
+    content = payload["messages"][0]["content"]  # type: ignore[index]
+    assert content[0] == {
+        "type": "video_url",
+        "video_url": {"url": "https://cdn.example/video.mp4?sig=opaque"},
+    }
+    assert content[1]["type"] == "text"
+
+
+def test_qwen_omni_flash_forces_non_thinking_mode(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 200
+        text = 'data: {"choices":[{"delta":{"content":"ok"}}]}\n'
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {}
+
+    class _Client:
+        def __init__(self, **_kwargs):  # noqa: ANN001
+            pass
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def post(self, _url, **kwargs):  # noqa: ANN001, ANN201
+            captured["json"] = kwargs["json"]
+            return _Response()
+
+    monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
+    asyncio.run(
+        media_understanding._call_qwen_omni_media(
+            api_key="key",
+            base_url="https://workspace.example/compatible-mode/v1",
+            workspace_id="",
+            model="qwen3-omni-flash",
+            prompt="理解短视频",
+            video_refs=["https://cdn.example/short.mp4"],
+        )
+    )
+    assert captured["json"]["enable_thinking"] is False  # type: ignore[index]
+
+
+def test_qwen_omni_rejects_insecure_remote_and_large_local_video(tmp_path: Path) -> None:
+    try:
+        media_understanding._qwen_video_part("http://cdn.example/video.mp4")
+    except ValueError as exc:
+        assert str(exc) == "qwen_omni_video_url_invalid"
+    else:
+        raise AssertionError("HTTP video URL must be rejected")
+
+    video = tmp_path / "large.mp4"
+    with video.open("wb") as handle:
+        handle.truncate(media_understanding._QWEN_INLINE_MAX_BYTES + 1)
+    try:
+        media_understanding._qwen_video_part(str(video))
+    except ValueError as exc:
+        assert str(exc) == "qwen_omni_local_video_too_large"
+    else:
+        raise AssertionError("large local video must fall back instead of being base64 encoded")
+
+
+def test_video_native_fallback_can_use_qwen_omni(monkeypatch) -> None:  # noqa: ANN001
+    async def _no_primary(**_kwargs):  # noqa: ANN003, ANN202
+        return ""
+
+    async def _qwen(**kwargs):  # noqa: ANN003, ANN202
+        assert kwargs["workspace_id"] == "ws-video"
+        assert kwargs["model"] == "qwen3.5-omni-flash"
+        return "Qwen 原生音视频结论"
+
+    monkeypatch.setattr(media_understanding, "_try_primary_video_routes", _no_primary)
+    monkeypatch.setattr(media_understanding, "_call_qwen_omni_media", _qwen)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_video_understanding_enabled=True,
+            personification_video_route_mode="native",
+            personification_video_fallback_enabled=True,
+            personification_video_fallback_provider="qwen_omni",
+            personification_video_fallback_workspace_id="ws-video",
+            personification_video_fallback_api_url="",
+            personification_video_fallback_api_key="key",
+            personification_video_fallback_model="qwen3.5-omni-flash",
+            personification_video_analysis_timeout=120,
+        )
+    )
+    result, route = asyncio.run(
+        media_understanding.analyze_videos_with_route_or_fallback(
+            runtime=runtime,
+            prompt="理解视频",
+            video_refs=["https://cdn.example/video.mp4"],
+        )
+    )
+    assert result == "Qwen 原生音视频结论"
+    assert route == "video_qwen_omni"
+
+
 def test_video_storyboard_combines_untrusted_transcript_and_always_cleans(monkeypatch) -> None:  # noqa: ANN001
     captured: dict[str, object] = {}
 

@@ -280,6 +280,7 @@ class Config(BaseModel):
     personification_audio_transcription_max_chars: int = 12000
     personification_video_fallback_enabled: bool = True
     personification_video_fallback_provider: str = ""
+    personification_video_fallback_workspace_id: str = ""
     personification_video_fallback_api_url: str = ""
     personification_video_fallback_api_key: str = ""
     personification_video_fallback_model: str = ""

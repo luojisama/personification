@@ -43,6 +43,88 @@ def test_config_value_reports_persistence_and_runtime_reload(
     assert reload_calls == ["reload"]
 
 
+def test_video_config_form_saves_atomically_and_reloads_once(
+    _runtime_context, monkeypatch  # noqa: ANN001
+) -> None:
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    monkeypatch.setattr(config_routes, "_schedule_diagnostics_warm", lambda _runtime: None)
+    captured: list[dict] = []
+
+    def _write_many(values, _plugin_config):  # noqa: ANN001, ANN202
+        captured.append(dict(values))
+        return {
+            "env_json_path": "D:/data/personification/env.json",
+            "dotenv_path": None,
+            "errors": [],
+        }
+
+    monkeypatch.setattr(config_routes.env_writer, "write_many", _write_many)
+    reload_calls: list[str] = []
+    runtime = _runtime_context.app_module.get_runtime_context()
+    runtime.runtime_bundle = SimpleNamespace(
+        reload_runtime_services=lambda: reload_calls.append("reload")
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    response = client.post(
+        "/personification/api/config/video-understanding",
+        json={
+            "values": {
+                "personification_video_understanding_enabled": True,
+                "personification_video_route_mode": "hybrid",
+                "personification_video_fallback_provider": "qwen_omni",
+                "personification_video_fallback_workspace_id": "ws-video",
+                "personification_video_fallback_api_key": "qwen-secret",
+                "personification_video_fallback_model": "qwen3.5-omni-plus",
+                "personification_video_custom_frame_budgets": {
+                    "15": 32,
+                    "60": 72,
+                    "180": 144,
+                    "600": 192,
+                },
+                "personification_video_max_bytes": 320 * 1024 * 1024,
+                "personification_audio_transcription_hotwords": ["花来", "红狼"],
+            }
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    assert body["diagnostic"]["code"] == "video_config_updated"
+    assert body["new_values"]["personification_video_fallback_api_key"] == "***"
+    assert "qwen-secret" not in response.text
+    assert len(captured) == 1
+    assert captured[0]["personification_video_custom_frame_budgets"]["180"] == 144
+    assert captured[0]["personification_video_max_bytes"] == 320 * 1024 * 1024
+    assert runtime.plugin_config.personification_video_fallback_workspace_id == "ws-video"
+    assert reload_calls == ["reload"]
+
+
+def test_video_config_form_rejects_non_video_fields_without_writing(
+    _runtime_context, monkeypatch  # noqa: ANN001
+) -> None:
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        config_routes.env_writer,
+        "write_many",
+        lambda values, _config: writes.append(dict(values)),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    response = client.post(
+        "/personification/api/config/video-understanding",
+        json={"values": {"personification_agent_max_steps": 99}},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "video_config_field_forbidden"
+    assert writes == []
+
+
 def test_config_value_unexpected_exception_is_structured_and_safe(
     _runtime_context, monkeypatch  # noqa: ANN001
 ) -> None:

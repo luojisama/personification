@@ -151,6 +151,15 @@ def test_video_and_audio_presets_are_exposed_as_webui_selects() -> None:
     assert entries["video_visual_hard_limit"].max_value == 256
     assert entries["video_max_bytes"].default == 256 * 1024 * 1024
     assert entries["video_route_mode"].choices == ("auto", "native", "hybrid", "storyboard")
+    assert entries["video_fallback_provider"].choices == (
+        "",
+        "auto",
+        "qwen_omni",
+        "gemini",
+        "disabled",
+    )
+    assert cfg.personification_video_fallback_workspace_id == ""
+    assert entries["video_fallback_workspace_id"].group == "视频理解"
     assert entries["audio_transcription_provider"].choices == (
         "auto",
         "qwen_audio",

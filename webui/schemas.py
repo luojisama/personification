@@ -83,6 +83,10 @@ class ConfigUpdateRequest(BaseModel):
     value: Any
 
 
+class ConfigBatchUpdateRequest(BaseModel):
+    values: dict[str, Any] = Field(default_factory=dict)
+
+
 class ConfigUpdateResponse(BaseModel):
     success: bool
     errors: list[str] = []

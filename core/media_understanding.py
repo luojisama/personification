@@ -7,6 +7,7 @@ import json
 import mimetypes
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -34,7 +35,9 @@ def _build_tool_caller(config: Any) -> Any:
 
 
 _VIDEO_INLINE_MAX_BYTES = 20 * 1024 * 1024
+_QWEN_INLINE_MAX_BYTES = 8 * 1024 * 1024
 _GEMINI_DEFAULT_MODEL = "gemini-2.0-flash"
+_QWEN_OMNI_DEFAULT_MODEL = "qwen3.5-omni-plus"
 _GENERIC_REFUSAL_TEXTS = {
     "i can't discuss that.",
     "i cant discuss that.",
@@ -359,6 +362,17 @@ def _build_video_fallback_provider_config(runtime: Any) -> dict[str, str] | None
     if resolution is None:
         return None
     payload = dict(resolution.provider)
+    raw_type = str(payload.get("api_type", "") or "").strip().lower().replace("-", "_")
+    if raw_type == "qwen_omni":
+        return {
+            "api_type": "qwen_omni",
+            "api_url": str(payload.get("api_url", "") or "").strip(),
+            "api_key": str(payload.get("api_key", "") or "").strip(),
+            "model": str(payload.get("model", "") or "").strip() or _QWEN_OMNI_DEFAULT_MODEL,
+            "workspace_id": str(payload.get("workspace_id", "") or "").strip(),
+            "auth_path": "",
+            "gemini_auth_mode": "auto",
+        }
     normalized_type = _normalize_media_api_type(str(payload.get("api_type", "") or ""))
     if normalized_type not in {"gemini_official"}:
         return None
@@ -370,6 +384,131 @@ def _build_video_fallback_provider_config(runtime: Any) -> dict[str, str] | None
         "auth_path": str(payload.get("auth_path", "") or "").strip(),
         "gemini_auth_mode": str(payload.get("gemini_auth_mode", "auto") or "auto").strip(),
     }
+
+
+def _qwen_omni_endpoint(base_url: str, workspace_id: str = "") -> str:
+    raw = str(base_url or "").strip().rstrip("/")
+    if not raw:
+        workspace = str(workspace_id or "").strip()
+        if not workspace:
+            raise ValueError("qwen_omni_endpoint_missing")
+        if not all(character.isalnum() or character == "-" for character in workspace):
+            raise ValueError("qwen_omni_workspace_id_invalid")
+        raw = f"https://{workspace}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    parsed = urlsplit(raw)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("qwen_omni_endpoint_invalid")
+    if parsed.query or parsed.fragment:
+        raise ValueError("qwen_omni_endpoint_invalid")
+    if parsed.path.rstrip("/").endswith("/chat/completions"):
+        return raw
+    return f"{raw}/chat/completions"
+
+
+def _qwen_video_part(video_ref: str) -> dict[str, Any]:
+    normalized, problem = normalize_video_ref(video_ref)
+    if not normalized:
+        raise ValueError(f"invalid_video_ref:{problem or 'unknown'}")
+    if normalized.startswith(("http://", "https://")):
+        parsed = urlsplit(normalized)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("qwen_omni_video_url_invalid")
+        return {"type": "video_url", "video_url": {"url": normalized}}
+    path = Path(normalized)
+    if path.stat().st_size > _QWEN_INLINE_MAX_BYTES:
+        raise ValueError("qwen_omni_local_video_too_large")
+    payload = base64.b64encode(path.read_bytes()).decode("ascii")
+    return {"type": "video_url", "video_url": {"url": f"data:;base64,{payload}"}}
+
+
+def _qwen_text_delta(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return ""
+    delta = choices[0].get("delta")
+    if not isinstance(delta, dict):
+        message = choices[0].get("message")
+        delta = message if isinstance(message, dict) else {}
+    content = delta.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(item.get("text", ""))
+            for item in content
+            if isinstance(item, dict) and item.get("text")
+        )
+    return ""
+
+
+def _parse_qwen_omni_response(response: httpx.Response) -> str:
+    chunks: list[str] = []
+    for raw_line in str(response.text or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payload = json.loads(data)
+        except (TypeError, ValueError):
+            continue
+        text = _qwen_text_delta(payload)
+        if text:
+            chunks.append(text)
+    if chunks:
+        return "".join(chunks).strip()
+    try:
+        return _qwen_text_delta(response.json()).strip()
+    except Exception:
+        return ""
+
+
+async def _call_qwen_omni_media(
+    *,
+    api_key: str,
+    base_url: str,
+    workspace_id: str,
+    model: str,
+    prompt: str,
+    video_refs: Sequence[str],
+    timeout: float = 180.0,
+) -> str:
+    key = str(api_key or "").strip()
+    if not key:
+        raise ValueError("qwen_omni_api_key_missing")
+    endpoint = _qwen_omni_endpoint(base_url, workspace_id)
+    selected_model = str(model or "").strip() or _QWEN_OMNI_DEFAULT_MODEL
+    content = [_qwen_video_part(str(ref or "").strip()) for ref in video_refs]
+    content.append({"type": "text", "text": str(prompt or "").strip() or "请分析这段视频内容"})
+    payload: dict[str, Any] = {
+        "model": selected_model,
+        "messages": [{"role": "user", "content": content}],
+        "modalities": ["text"],
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if selected_model.startswith("qwen3-omni-flash"):
+        payload["enable_thinking"] = False
+    bounded_timeout = max(20.0, min(300.0, float(timeout or 180.0)))
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(bounded_timeout, connect=15.0),
+        follow_redirects=False,
+    ) as client:
+        response = await client.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Accept": "text/event-stream",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+    return _parse_qwen_omni_response(response)
 
 
 def _gemini_endpoint(base_url: str, model: str) -> str:
@@ -751,21 +890,43 @@ async def analyze_videos_with_route_or_fallback(
         if not fallback or not fallback.get("api_key"):
             return "", "video_unavailable"
         try:
-            result = await _call_gemini_media(
-                api_key=fallback["api_key"],
-                base_url=fallback.get("api_url", ""),
-                model=fallback.get("model", "") or _GEMINI_DEFAULT_MODEL,
-                auth_mode=fallback.get("gemini_auth_mode", "auto"),
-                prompt=prompt,
-                video_refs=refs,
-            )
+            if fallback.get("api_type") == "qwen_omni":
+                result = await _call_qwen_omni_media(
+                    api_key=fallback["api_key"],
+                    base_url=fallback.get("api_url", ""),
+                    workspace_id=fallback.get("workspace_id", ""),
+                    model=fallback.get("model", "") or _QWEN_OMNI_DEFAULT_MODEL,
+                    prompt=prompt,
+                    video_refs=refs,
+                    timeout=float(
+                        getattr(
+                            plugin_config,
+                            "personification_video_analysis_timeout",
+                            180.0,
+                        )
+                        or 180.0
+                    ),
+                )
+            else:
+                result = await _call_gemini_media(
+                    api_key=fallback["api_key"],
+                    base_url=fallback.get("api_url", ""),
+                    model=fallback.get("model", "") or _GEMINI_DEFAULT_MODEL,
+                    auth_mode=fallback.get("gemini_auth_mode", "auto"),
+                    prompt=prompt,
+                    video_refs=refs,
+                )
         except Exception as exc:
             _log_warning(runtime, f"[video] native fallback failed: {sanitize_text(exc)}")
             return "", "video_unavailable"
         result_text = str(result or "").strip()
         if _invalid_media_text(result_text):
             return "", "video_unavailable"
-        return result_text, "video_fallback"
+        return result_text, (
+            "video_qwen_omni"
+            if fallback.get("api_type") == "qwen_omni"
+            else "video_fallback"
+        )
 
     native_text = ""
     native_route = "video_unavailable"

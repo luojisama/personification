@@ -39,6 +39,7 @@ def _schedule_diagnostics_warm(runtime: Any) -> None:
     except Exception:
         pass
 from ..schemas import (
+    ConfigBatchUpdateRequest,
     ConfigEntriesResponse,
     ConfigEntryView,
     ConfigUpdateRequest,
@@ -1059,6 +1060,173 @@ def build_config_router(*, runtime) -> APIRouter:
                     if field_name == "personification_api_pools"
                     else sanitize_object(normalized)
                 ),
+            },
+            operation_diagnostic,
+        )
+
+    @router.post("/video-understanding")
+    async def update_video_understanding(
+        payload: ConfigBatchUpdateRequest,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        values = dict(payload.values or {})
+        if not values or len(values) > 40:
+            raise HTTPException(
+                status_code=400,
+                detail=diagnostic(
+                    ok=False,
+                    code="video_config_batch_invalid",
+                    phase="request_validation",
+                    title="视频理解配置表单无效",
+                    message="配置字段数量必须在 1 到 40 之间。",
+                    suggestion="刷新视频理解配置页后重新填写表单。",
+                    retryable=True,
+                ),
+            )
+        entries = {
+            candidate.field_name: candidate
+            for candidate in config_registry.get_config_entries("global")
+        }
+        allowed = {
+            field_name
+            for field_name in entries
+            if field_name.startswith("personification_video_")
+            or field_name.startswith("personification_audio_transcription_")
+        }
+        unknown = sorted(set(values) - allowed)
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=diagnostic(
+                    ok=False,
+                    code="video_config_field_forbidden",
+                    phase="request_validation",
+                    title="包含非视频理解配置字段",
+                    message="专用表单只能修改视频理解与音频转写字段。",
+                    details=tuple(detail("字段", field_name, "error") for field_name in unknown[:5]),
+                    suggestion="刷新页面后仅通过视频理解表单提交。",
+                    retryable=False,
+                ),
+            )
+        normalized_values: dict[str, Any] = {}
+        try:
+            for field_name, value in values.items():
+                entry = entries[field_name]
+                normalized_values[field_name] = _restore_masked_config_secrets(
+                    field_name,
+                    entry.normalize_value(value),
+                    runtime.plugin_config,
+                )
+        except (KeyError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail=diagnostic(
+                    ok=False,
+                    code="video_config_value_invalid",
+                    phase="value_normalization",
+                    title="视频理解配置值无效",
+                    message="至少一个表单值未通过类型或范围校验。",
+                    suggestion="根据输入框范围和单位修改后重试。",
+                    retryable=True,
+                ),
+            )
+        try:
+            result = env_writer.write_many(normalized_values, runtime.plugin_config)
+            if not isinstance(result, dict):
+                raise TypeError("batch config writer returned invalid result")
+        except Exception as exc:
+            failure = _unexpected_failure(
+                runtime,
+                exc,
+                operation="video configuration persistence",
+                code="video_config_persist_exception",
+                phase="persist_config",
+                title="视频理解配置持久化异常中断",
+            )
+            raise HTTPException(status_code=500, detail=failure) from exc
+        if result.get("errors") or not result.get("env_json_path"):
+            operation_diagnostic = diagnostic(
+                ok=False,
+                code="video_config_persist_failed",
+                phase="persist_config",
+                title="视频理解配置未能持久化",
+                message="env.json 原子写入失败，当前进程配置没有修改。",
+                steps=(
+                    step("value_normalization", "Normalize video configuration", "ok", "全部表单值已通过校验。"),
+                    _persistence_step(result),
+                ),
+                suggestion="检查数据目录写权限后重试。",
+                retryable=True,
+            )
+            return _attach_diagnostic({"success": False, "updated": []}, operation_diagnostic)
+        previous_values = {
+            field_name: getattr(runtime.plugin_config, field_name, None)
+            for field_name in normalized_values
+        }
+        runtime_synced = True
+        try:
+            for field_name, value in normalized_values.items():
+                setattr(runtime.plugin_config, field_name, value)
+        except Exception:
+            runtime_synced = False
+            for field_name, old_value in previous_values.items():
+                try:
+                    setattr(runtime.plugin_config, field_name, old_value)
+                except Exception:
+                    pass
+        reload_step, reload_error = await _reload_runtime_step(runtime, enabled=runtime_synced)
+        success = runtime_synced and not reload_error
+        operation_diagnostic = diagnostic(
+            ok=success,
+            code="video_config_updated" if success else "video_config_runtime_partial",
+            phase="runtime_reload",
+            title="视频理解配置已保存并生效" if success else "视频理解配置已持久化，但运行时更新不完整",
+            message=f"已在一次原子写入中处理 {len(normalized_values)} 个字段。",
+            details=(
+                detail("更新字段", len(normalized_values), "ok"),
+                detail("敏感字段", sum(1 for name in normalized_values if entries[name].secret)),
+            ),
+            steps=(
+                step("value_normalization", "Normalize video configuration", "ok", "全部表单值已通过校验。"),
+                _persistence_step(result),
+                step(
+                    "runtime_config_sync",
+                    "Synchronize plugin_config",
+                    "ok" if runtime_synced else "error",
+                    "当前进程配置已同步。" if runtime_synced else "当前进程配置同步失败，已尽力恢复原值。",
+                ),
+                reload_step,
+            ),
+            suggestion="无需重启。" if success else "当前 env.json 已保存；请查看运行时步骤后决定是否重启。",
+            retryable=not success,
+            partial=not success,
+        )
+        _record_audit(
+            action="config_video_understanding_update",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            detail={
+                "field_names": sorted(normalized_values),
+                "secret_count": sum(1 for name in normalized_values if entries[name].secret),
+                "code": operation_diagnostic["code"],
+            },
+            outcome="ok" if success else "partial",
+        )
+        if success:
+            _schedule_diagnostics_warm(runtime)
+        masked_values = {
+            field_name: (
+                _MASKED_CONFIG_VALUE if entries[field_name].secret else sanitize_object(value)
+            )
+            for field_name, value in normalized_values.items()
+        }
+        return _attach_diagnostic(
+            {
+                "success": success,
+                "updated": sorted(normalized_values),
+                "new_values": masked_values,
+                "env_json_path": result.get("env_json_path"),
+                "dotenv_path": None,
             },
             operation_diagnostic,
         )
