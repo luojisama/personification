@@ -229,6 +229,50 @@ def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
     assert overview_purposes["persona_template_synthesis"]["percent"] > 0
 
 
+def test_dashboard_query_bundle_deduplicates_caches_and_invalidates(monkeypatch, tmp_path) -> None:
+    metrics_routes = load_personification_module("plugin.personification.webui.routes.metrics_routes")
+    metrics_routes._reset_dashboard_cache_for_testing()
+    generation = {"value": 7}
+    calls = {"summary": [], "provider": 0, "total": 0}
+
+    monkeypatch.setattr(metrics_routes, "get_db_path", lambda: tmp_path / "personification.db")
+    monkeypatch.setattr(
+        metrics_routes.token_ledger,
+        "ledger_generation",
+        lambda: generation["value"],
+    )
+
+    def _summary(window: str) -> dict:
+        calls["summary"].append(window)
+        return {"window": window, "total": {"total_tokens": 1}, "series": []}
+
+    def _provider(window: str) -> dict:
+        calls["provider"] += 1
+        return {"window": window, "providers": []}
+
+    def _total() -> dict:
+        calls["total"] += 1
+        return {"total": {"total_tokens": 1}}
+
+    monkeypatch.setattr(metrics_routes.token_ledger, "query_summary", _summary)
+    monkeypatch.setattr(metrics_routes.token_ledger, "query_provider_summary", _provider)
+    monkeypatch.setattr(metrics_routes.token_ledger, "query_total_consumption", _total)
+
+    first = metrics_routes._query_dashboard_bundle("month")
+    first["selected"]["mutated"] = True
+    second = metrics_routes._query_dashboard_bundle("month")
+    assert calls == {"summary": ["day", "week", "month"], "provider": 1, "total": 1}
+    assert "mutated" not in second["selected"]
+
+    generation["value"] += 1
+    metrics_routes._query_dashboard_bundle("month")
+    assert calls == {
+        "summary": ["day", "week", "month", "day", "week", "month"],
+        "provider": 2,
+        "total": 2,
+    }
+
+
 def test_dashboard_group_rows_never_emit_fake_unnamed_label() -> None:
     metrics_routes = load_personification_module("plugin.personification.webui.routes.metrics_routes")
     runtime = SimpleNamespace(runtime_bundle=SimpleNamespace(get_bots=lambda: {"1": SimpleNamespace()}))

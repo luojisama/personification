@@ -654,7 +654,7 @@ class QQOutboundLedger:
             clauses.append("ledger.recalled_at>0")
         elif recalled is False:
             clauses.append("ledger.recalled_at=0")
-        params.append(max(1, min(500, int(limit))))
+        params.append(max(1, min(501, int(limit))))
         with connect_sync(self.db_path) as conn:
             rows = conn.execute(
                 f"""

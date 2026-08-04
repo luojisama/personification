@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -25,7 +26,7 @@ def build_agent_status_router(*, runtime: Any) -> APIRouter:
     async def status(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
         now = time.time()
         timeout = max(10.0, float(getattr(runtime.plugin_config, "personification_response_timeout", 120) or 120))
-        traces = reply_turn_trace.query_recent(limit=80)
+        traces = await asyncio.to_thread(reply_turn_trace.query_recent, limit=80)
         recent: list[dict[str, Any]] = []
         running = 0
         stale = 0

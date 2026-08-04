@@ -121,7 +121,7 @@ def build_outbound_router(*, runtime: Any) -> APIRouter:
         conversation_id: str = Query(default="", max_length=32),
         status: str = Query(default="", max_length=16),
         recalled: bool | None = Query(default=None),
-        limit: int = Query(default=200, ge=1, le=500),
+        limit: int = Query(default=50, ge=1, le=500),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _no_store(response)
@@ -134,11 +134,18 @@ def build_outbound_router(*, runtime: Any) -> APIRouter:
                 conversation_id=conversation_id,
                 status=status,
                 recalled=recalled,
-                limit=limit,
+                limit=limit + 1,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="出站账本筛选参数无效") from exc
-        return {"messages": rows, "available": True}
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        return {
+            "messages": rows,
+            "available": True,
+            "returned_count": len(rows),
+            "has_more": has_more,
+        }
 
     @router.post("/{operation_id}/recall")
     async def recall_operation(

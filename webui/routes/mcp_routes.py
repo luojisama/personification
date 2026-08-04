@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
@@ -887,15 +888,27 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
         response: Response,
         status: str = "",
         term: str = "",
-        limit: int = Query(200, ge=1, le=2000),
+        limit: int = Query(50, ge=1, le=2000),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
         try:
-            items = learning_store().list_senses(status=status, term=term, limit=limit)
+            items = await asyncio.to_thread(
+                learning_store().list_senses,
+                status=status,
+                term=term,
+                limit=min(2000, limit + 1),
+            )
         except Exception as exc:
             raise _safe_builtin_error(exc, "学习词条读取失败") from exc
-        return {"senses": items, "total": len(items)}
+        has_more = len(items) > limit
+        items = items[:limit]
+        return {
+            "senses": items,
+            "total": len(items),
+            "returned_count": len(items),
+            "has_more": has_more,
+        }
 
     @router.get("/builtin/social-research/slang/senses/{sense_id}")
     async def slang_sense_detail(
@@ -1045,11 +1058,22 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
     async def slang_learning_events(
         response: Response,
         sense_id: str = "",
-        limit: int = Query(200, ge=1, le=2000),
+        limit: int = Query(50, ge=1, le=2000),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
-        items = learning_store().list_events(sense_id=sense_id, limit=limit)
-        return {"events": items, "total": len(items)}
+        items = await asyncio.to_thread(
+            learning_store().list_events,
+            sense_id=sense_id,
+            limit=min(2000, limit + 1),
+        )
+        has_more = len(items) > limit
+        items = items[:limit]
+        return {
+            "events": items,
+            "total": len(items),
+            "returned_count": len(items),
+            "has_more": has_more,
+        }
 
     return router

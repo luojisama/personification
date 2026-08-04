@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+import gzip
+import hashlib
 import json
 import secrets
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from .routes.audit_routes import build_audit_router
 from .routes.auth_routes import build_auth_router
@@ -36,6 +41,7 @@ from .routes.data_transfer_routes import build_data_transfer_router
 from .routes.user_policy_routes import build_user_policy_router
 from .routes.outbound_routes import build_outbound_router
 from .routes.performance_routes import build_performance_router
+from ..core.runtime_performance import register_cache_reporter
 
 
 @dataclass
@@ -123,8 +129,14 @@ def build_router() -> APIRouter:
         )
 
     @router.get("/static/{filename}")
-    async def static_asset(filename: str, request: Request) -> FileResponse:
-        return _serve_static_asset(filename, versioned=bool(request.query_params.get("v")))
+    async def static_asset(filename: str, request: Request) -> Response:
+        return await asyncio.to_thread(
+            _serve_static_asset,
+            filename,
+            versioned=bool(request.query_params.get("v")),
+            accept_encoding=str(request.headers.get("accept-encoding", "") or ""),
+            if_none_match=str(request.headers.get("if-none-match", "") or ""),
+        )
 
     @router.get("/health")
     async def health() -> dict:
@@ -140,6 +152,22 @@ _STATIC_CONTENT_TYPES = {
     ".js": "text/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
 }
+_STATIC_GZIP_CACHE_MAX_SIZE = 16
+_STATIC_GZIP_CACHE: OrderedDict[tuple[str, int, int], bytes] = OrderedDict()
+_STATIC_GZIP_CACHE_LOCK = threading.RLock()
+_STATIC_GZIP_CACHE_EVICTIONS = 0
+
+
+def _static_gzip_cache_snapshot() -> dict[str, int]:
+    with _STATIC_GZIP_CACHE_LOCK:
+        return {
+            "entries": len(_STATIC_GZIP_CACHE),
+            "limit": _STATIC_GZIP_CACHE_MAX_SIZE,
+            "evictions": _STATIC_GZIP_CACHE_EVICTIONS,
+        }
+
+
+register_cache_reporter("webui_static_gzip", _static_gzip_cache_snapshot)
 
 
 def _load_index_html() -> str:
@@ -181,7 +209,52 @@ def _render_index_html() -> str:
     return html
 
 
-def _serve_static_asset(filename: str, *, versioned: bool = False) -> FileResponse:
+def _accepts_gzip(value: str) -> bool:
+    for item in str(value or "").lower().split(","):
+        encoding, _, params = item.strip().partition(";")
+        if encoding != "gzip":
+            continue
+        quality = 1.0
+        for param in params.split(";"):
+            key, _, raw_value = param.strip().partition("=")
+            if key == "q":
+                try:
+                    quality = float(raw_value)
+                except ValueError:
+                    quality = 0.0
+        return quality > 0
+    return False
+
+
+def _gzip_asset(target: Path, *, filename: str, mtime_ns: int, size: int) -> bytes:
+    global _STATIC_GZIP_CACHE_EVICTIONS
+    key = (filename, int(mtime_ns), int(size))
+    with _STATIC_GZIP_CACHE_LOCK:
+        cached = _STATIC_GZIP_CACHE.get(key)
+        if cached is not None:
+            _STATIC_GZIP_CACHE.move_to_end(key)
+            return cached
+    compressed = gzip.compress(target.read_bytes(), compresslevel=6, mtime=0)
+    with _STATIC_GZIP_CACHE_LOCK:
+        _STATIC_GZIP_CACHE[key] = compressed
+        _STATIC_GZIP_CACHE.move_to_end(key)
+        stale = [item for item in _STATIC_GZIP_CACHE if item[0] == filename and item != key]
+        for item in stale:
+            _STATIC_GZIP_CACHE.pop(item, None)
+            _STATIC_GZIP_CACHE_EVICTIONS += 1
+        while len(_STATIC_GZIP_CACHE) > _STATIC_GZIP_CACHE_MAX_SIZE:
+            _STATIC_GZIP_CACHE.popitem(last=False)
+            _STATIC_GZIP_CACHE_EVICTIONS += 1
+    return compressed
+
+
+def _serve_static_asset(
+    filename: str,
+    *,
+    versioned: bool = False,
+    accept_encoding: str = "",
+    if_none_match: str = "",
+) -> Response:
     if Path(filename).name != filename:
         raise HTTPException(status_code=404, detail="static asset not found")
     target = (_STATIC_ROOT / filename).resolve()
@@ -192,9 +265,28 @@ def _serve_static_asset(filename: str, *, versioned: bool = False) -> FileRespon
     media_type = _STATIC_CONTENT_TYPES.get(target.suffix.lower())
     if media_type is None or not target.is_file():
         raise HTTPException(status_code=404, detail="static asset not found")
+    stat = target.stat()
+    identity = f"{filename}:{int(stat.st_mtime_ns)}:{int(stat.st_size)}".encode("utf-8")
+    etag = f'W/"{hashlib.sha256(identity).hexdigest()[:20]}"'
     headers = {
         "Cache-Control": "public, max-age=31536000, immutable"
         if versioned
-        else "no-cache, max-age=0, must-revalidate"
+        else "no-cache, max-age=0, must-revalidate",
+        "ETag": etag,
+        "Vary": "Accept-Encoding",
     }
+    if str(if_none_match or "").strip() == etag:
+        return Response(status_code=304, headers=headers)
+    if _accepts_gzip(accept_encoding):
+        headers["Content-Encoding"] = "gzip"
+        return Response(
+            content=_gzip_asset(
+                target,
+                filename=filename,
+                mtime_ns=stat.st_mtime_ns,
+                size=stat.st_size,
+            ),
+            media_type=media_type,
+            headers=headers,
+        )
     return FileResponse(target, media_type=media_type, headers=headers)

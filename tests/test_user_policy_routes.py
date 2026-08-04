@@ -106,6 +106,8 @@ def test_user_policy_routes_are_revision_guarded_and_no_store(tmp_path) -> None:
     states = client.get("/api/user-policy/states?tier=manual_block")
     assert states.status_code == 200
     assert [item["user_id"] for item in states.json()["states"]] == ["10001"]
+    assert states.json()["returned_count"] == 1
+    assert states.json()["has_more"] is False
     assert states.headers["cache-control"] == "no-store, private"
 
     blocked = client.get("/api/user-policy/states?tier=blocked")

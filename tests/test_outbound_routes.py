@@ -97,6 +97,8 @@ def test_recent_outbound_route_only_returns_redacted_ledger_fields(tmp_path, mon
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store, private"
     rows = response.json()["messages"]
+    assert response.json()["returned_count"] == 1
+    assert response.json()["has_more"] is False
     assert len(rows) == 1
     assert rows[0]["operation_id"] == "route-operation"
     assert rows[0]["message_id"] == "123"

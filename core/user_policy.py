@@ -631,12 +631,41 @@ class UserPolicyService:
             conn.commit()
         return claimed
 
-    def list_states(self, *, limit: int = 200, now: float | None = None) -> list[dict[str, Any]]:
+    def list_states(
+        self,
+        *,
+        limit: int = 200,
+        tier: str = "",
+        now: float | None = None,
+    ) -> list[dict[str, Any]]:
         current = float(now if now is not None else time.time())
+        normalized_tier = str(tier or "").strip().lower()
+        effective_tier_sql = """
+            CASE
+                WHEN manual_mode='block' AND (manual_expires_at=0 OR manual_expires_at>?)
+                    THEN 'manual_block'
+                WHEN manual_mode='allow' AND (manual_expires_at=0 OR manual_expires_at>?)
+                    THEN 'manual_allow'
+                WHEN auto_tier='permanent' THEN 'permanent'
+                WHEN auto_tier IN ('level_1','level_2') AND auto_expires_at>?
+                    THEN auto_tier
+                ELSE 'allow'
+            END
+        """
+        where = ""
+        params: list[Any] = []
+        if normalized_tier:
+            params.extend((current, current, current))
+            if normalized_tier == "blocked":
+                where = f"WHERE ({effective_tier_sql}) IN ('manual_block','level_1','level_2','permanent')"
+            else:
+                where = f"WHERE ({effective_tier_sql})=?"
+                params.append(normalized_tier)
+        params.append(max(1, min(int(limit), 1000)))
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT user_id FROM user_policy_state ORDER BY updated_at DESC LIMIT ?",
-                (max(1, min(int(limit), 1000)),),
+                f"SELECT user_id FROM user_policy_state {where} ORDER BY updated_at DESC LIMIT ?",
+                tuple(params),
             ).fetchall()
         return [
             self.get_state(str(row["user_id"]), now=current).to_dict(now=current)

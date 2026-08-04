@@ -99,7 +99,7 @@ def build_user_policy_router(*, runtime: Any) -> APIRouter:
     async def states(
         response: Response,
         tier: str = Query(default="", max_length=32),
-        limit: int = Query(default=200, ge=1, le=500),
+        limit: int = Query(default=50, ge=1, le=500),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _no_store(response)
@@ -107,18 +107,20 @@ def build_user_policy_router(*, runtime: Any) -> APIRouter:
         if normalized_tier and normalized_tier not in _TIERS:
             raise HTTPException(status_code=400, detail="tier 无效")
         service = _bundle(runtime).user_policy_service
-        fetch_limit = 1000 if normalized_tier else limit
-        rows = await asyncio.to_thread(service.list_states, limit=fetch_limit)
-        if normalized_tier:
-            if normalized_tier == "blocked":
-                rows = [item for item in rows if bool(item.get("blocked"))][:limit]
-            else:
-                rows = [
-                    item
-                    for item in rows
-                    if str(item.get("effective_tier", "") or "") == normalized_tier
-                ][:limit]
-        return {"states": rows, "tier": normalized_tier, "available": True}
+        rows = await asyncio.to_thread(
+            service.list_states,
+            limit=limit + 1,
+            tier=normalized_tier,
+        )
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        return {
+            "states": rows,
+            "tier": normalized_tier,
+            "available": True,
+            "returned_count": len(rows),
+            "has_more": has_more,
+        }
 
     @router.get("/{user_id}/events")
     async def events(

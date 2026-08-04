@@ -83,7 +83,26 @@ def test_static_frontend_assets_are_served(_runtime_context) -> None:
     assert js.status_code == 200
     assert "text/javascript" in js.headers["content-type"]
     assert "no-cache" in js.headers.get("cache-control", "")
+    assert js.headers.get("etag")
+    assert js.headers.get("vary") == "Accept-Encoding"
     assert 'const API = "/personification/api";' in js.text
+    not_modified = client.get(
+        "/personification/static/app-core.js",
+        headers={"If-None-Match": js.headers["etag"]},
+    )
+    assert not_modified.status_code == 304
+    gzip_js = client.get(
+        "/personification/static/app-core.js",
+        headers={"Accept-Encoding": "gzip"},
+    )
+    assert gzip_js.status_code == 200
+    assert gzip_js.headers.get("content-encoding") == "gzip"
+    identity_js = client.get(
+        "/personification/static/app-core.js",
+        headers={"Accept-Encoding": "identity"},
+    )
+    assert identity_js.status_code == 200
+    assert "content-encoding" not in identity_js.headers
     assert "plugin_manager" in js.text
     versioned_js = client.get("/personification/static/app-core.js?v=test")
     assert versioned_js.status_code == 200
