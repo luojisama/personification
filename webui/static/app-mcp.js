@@ -349,6 +349,7 @@ const _mcpInteractiveActionQueue = [];
 const _mcpInteractiveFrames = new Map();
 const _MCP_INTERACTIVE_FRAME_INTERVAL_MS = 1200;
 const _MCP_INTERACTIVE_ACTION_QUEUE_MAX = 32;
+const _MCP_INTERACTIVE_FRAME_PLACEHOLDER_SRC = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 
 function clearBuiltinInteractiveFrameCache() {
   for (const entry of _mcpInteractiveFrames.values()) {
@@ -382,11 +383,14 @@ function resetBuiltinInteractiveClientState() {
   stopBuiltinInteractiveFramePolling();
 }
 
-function builtinInteractiveFrameEntry(sessionId, revision=0) {
+function builtinInteractiveFrameEntry(sessionId) {
   const key = String(sessionId || "");
   let entry = _mcpInteractiveFrames.get(key);
   if (!entry) {
-    entry = {revision:Math.max(0, Number(revision || 0)), objectUrl:"", force:true, updatedAt:0};
+    // The server revision only says a frame exists remotely. Until this
+    // browser owns a Blob URL it must request from revision 0, otherwise a
+    // transient first-fetch failure can leave it receiving HTTP 204 forever.
+    entry = {revision:0, objectUrl:"", force:true, updatedAt:0};
     _mcpInteractiveFrames.set(key, entry);
   }
   return entry;
@@ -466,12 +470,11 @@ async function refreshVisibleBuiltinInteractiveFrames({force=false, sessionId=""
       const currentSessionId = image.getAttribute("data-session-id") || "";
       if (!currentSessionId || (sessionId && currentSessionId !== sessionId)) continue;
       const platform = image.getAttribute("data-platform") || "";
-      const auth = (state.mcpAuth || {})[platform] || {};
-      const entry = builtinInteractiveFrameEntry(currentSessionId, auth.interactive_frame_revision || 0);
+      const entry = builtinInteractiveFrameEntry(currentSessionId);
       const forceCurrent = force || entry.force;
       entry.force = false;
       updateBuiltinInteractiveTransportStatus(currentSessionId);
-      const revision = forceCurrent ? 0 : Math.max(0, Number(entry.revision || 0));
+      const revision = forceCurrent || !entry.objectUrl ? 0 : Math.max(0, Number(entry.revision || 0));
       const path = `/mcp/builtin/social-research/auth/${encodeURIComponent(currentSessionId)}/frame?platform=${encodeURIComponent(platform)}&revision=${encodeURIComponent(String(revision))}`;
       const response = await fetch(API + path, {
         method:"GET",
@@ -488,11 +491,17 @@ async function refreshVisibleBuiltinInteractiveFrames({force=false, sessionId=""
       if (!response.ok && response.status !== 204) {
         throw new Error(`人工验证画面请求失败（HTTP ${response.status}）`);
       }
-      const nextRevision = Math.max(entry.revision, Number(response.headers.get("X-Interactive-Revision") || 0));
-      entry.revision = nextRevision;
+      const responseRevision = Number(response.headers.get("X-Interactive-Revision") || 0);
       if (response.status === 204) {
         entry.updatedAt = Date.now();
-        updateBuiltinInteractiveTransportStatus(currentSessionId, "官方页面画面无变化");
+        if (!entry.objectUrl) {
+          entry.revision = 0;
+          entry.force = true;
+          updateBuiltinInteractiveTransportStatus(currentSessionId, "正在获取首帧画面");
+        } else {
+          entry.revision = Math.max(entry.revision, responseRevision);
+          updateBuiltinInteractiveTransportStatus(currentSessionId, "官方页面画面无变化");
+        }
         continue;
       }
       const blob = await response.blob();
@@ -505,19 +514,41 @@ async function refreshVisibleBuiltinInteractiveFrames({force=false, sessionId=""
         continue;
       }
       const previousUrl = entry.objectUrl;
+      const previousRevision = entry.revision;
+      entry.revision = Math.max(entry.revision, responseRevision);
       entry.objectUrl = objectUrl;
       entry.updatedAt = Date.now();
       liveImage.addEventListener("load", () => {
+        if (entry.objectUrl !== objectUrl) return;
+        liveImage.classList.remove("is-loading");
         if (previousUrl && previousUrl !== objectUrl) {
           try { URL.revokeObjectURL(previousUrl); } catch {}
         }
+        updateBuiltinInteractiveTransportStatus(currentSessionId, response.headers.get("X-Interactive-Stale") === "1" ? "操作处理中，暂时保留上一帧" : "画面已更新");
+      }, {once:true});
+      liveImage.addEventListener("error", () => {
+        if (entry.objectUrl !== objectUrl) return;
+        try { URL.revokeObjectURL(objectUrl); } catch {}
+        entry.objectUrl = previousUrl;
+        entry.revision = previousRevision;
+        entry.updatedAt = Date.now();
+        entry.force = !previousUrl;
+        liveImage.src = previousUrl || _MCP_INTERACTIVE_FRAME_PLACEHOLDER_SRC;
+        liveImage.classList.toggle("is-loading", !previousUrl);
+        updateBuiltinInteractiveTransportStatus(currentSessionId, previousUrl ? "新画面无效，已保留上一帧" : "画面解码失败，正在重新获取");
       }, {once:true});
       liveImage.src = objectUrl;
-      liveImage.classList.remove("is-loading");
-      updateBuiltinInteractiveTransportStatus(currentSessionId, response.headers.get("X-Interactive-Stale") === "1" ? "操作处理中，暂时保留上一帧" : "画面已更新");
+      updateBuiltinInteractiveTransportStatus(currentSessionId, "正在解码官方页面画面");
     }
   } catch (error) {
     if (!(error && error.name === "AbortError")) {
+      images.forEach(image => {
+        const entry = builtinInteractiveFrameEntry(image.getAttribute("data-session-id") || "");
+        if (!entry.objectUrl) {
+          entry.revision = 0;
+          entry.force = true;
+        }
+      });
       images.forEach(image => updateBuiltinInteractiveTransportStatus(image.getAttribute("data-session-id") || "", "画面暂时未更新，可继续操作或手动刷新"));
       if (force) alertFlash("err", error?.message || "人工验证画面未更新");
     }
@@ -660,12 +691,12 @@ function renderBuiltinInteractiveAuth(platform, auth) {
   const viewport = auth.interactive_viewport || {};
   const width = Math.max(320, Number(viewport.width || 1280));
   const height = Math.max(240, Number(viewport.height || 900));
-  const frame = builtinInteractiveFrameEntry(sessionId, auth.interactive_frame_revision || 0);
-  const frameSource = frame.objectUrl ? ` src="${escapeAttr(frame.objectUrl)}"` : "";
+  const frame = builtinInteractiveFrameEntry(sessionId);
+  const frameSource = frame.objectUrl || _MCP_INTERACTIVE_FRAME_PLACEHOLDER_SRC;
   return `<section class="mcp-interactive-auth" data-mcp-interactive-session="${escapeAttr(sessionId)}" data-platform="${escapeAttr(platform)}">
     <div class="mcp-interactive-heading"><div><strong>WebUI 人工验证</strong><small data-mcp-interactive-url>当前官方页面：${escapeHtml(auth.interactive_display_url || "正在读取")}</small></div><span class="tag required">仅管理员</span></div>
     <div class="mcp-interactive-screen" role="application" aria-label="${escapeAttr(MCP_PLATFORM_LABELS[platform] || platform)}官方登录页面人工验证画面">
-      <img draggable="false" alt="${escapeAttr(MCP_PLATFORM_LABELS[platform] || platform)}官方登录页面"${frameSource} class="${frame.objectUrl ? "" : "is-loading"}" data-mcp-interactive-frame data-platform="${escapeAttr(platform)}" data-session-id="${escapeAttr(sessionId)}" data-viewport-width="${width}" data-viewport-height="${height}">
+      <img draggable="false" alt="${escapeAttr(MCP_PLATFORM_LABELS[platform] || platform)}官方登录页面" src="${escapeAttr(frameSource)}" class="${frame.objectUrl ? "" : "is-loading"}" data-mcp-interactive-frame data-platform="${escapeAttr(platform)}" data-session-id="${escapeAttr(sessionId)}" data-viewport-width="${width}" data-viewport-height="${height}">
       <span class="mcp-interactive-frame-placeholder">正在读取官方页面画面…</span>
     </div>
     <div class="mcp-interactive-transport" data-mcp-interactive-status role="status">画面与操作通道准备中</div>

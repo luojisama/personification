@@ -317,6 +317,26 @@ def test_interactive_auth_uses_stable_incremental_frames_and_queued_actions() ->
     assert "shouldRender" in status_poll
 
 
+def test_interactive_auth_retries_first_frame_when_server_revision_has_no_local_blob() -> None:
+    source = _source("app-mcp.js")
+    entry = source.split("function builtinInteractiveFrameEntry", 1)[1].split("\n}", 1)[0]
+    refresher = source.split("async function refreshVisibleBuiltinInteractiveFrames", 1)[1].split("\n}", 1)[0]
+    renderer = source.split("function renderBuiltinInteractiveAuth", 1)[1].split("\n}", 1)[0]
+
+    assert "entry = {revision:0, objectUrl:\"\", force:true" in entry
+    assert "forceCurrent || !entry.objectUrl ? 0" in refresher
+    assert "if (!entry.objectUrl)" in refresher
+    assert "entry.revision = 0" in refresher
+    assert "entry.force = true" in refresher
+    assert "正在获取首帧画面" in refresher
+    assert 'liveImage.addEventListener("error"' in refresher
+    assert "画面解码失败，正在重新获取" in refresher
+    assert 'liveImage.addEventListener("load"' in refresher
+    assert 'liveImage.classList.remove("is-loading")' in refresher
+    assert "_MCP_INTERACTIVE_FRAME_PLACEHOLDER_SRC" in renderer
+    assert 'src="${escapeAttr(frameSource)}"' in renderer
+
+
 def test_device_confirmation_hint_is_not_hidden_by_generic_interactive_copy() -> None:
     source = _source("app-mcp.js")
     helper = source.split("function renderBuiltinAuthHint", 1)[1].split("\n}", 1)[0]
