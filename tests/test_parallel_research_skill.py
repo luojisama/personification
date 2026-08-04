@@ -196,6 +196,11 @@ def test_lookup_focus_uses_three_structured_workers_without_planner() -> None:
     assert "structured_lookup_plan" in result
     assert '"research_level": "legacy:lookup"' in result
     assert '"pages_per_worker": 8' in result
+    worker_calls = [call for call in caller.calls if call["tools"]]
+    assert worker_calls
+    for call in worker_calls:
+        names = {tool["function"]["name"] for tool in call["tools"]}
+        assert "web_fetch" in names
 
 
 def test_lookup_limits_clamp_v2_and_legacy_to_one_absolute_reply_budget() -> None:
@@ -399,3 +404,161 @@ def test_parallel_research_fact_evidence_rejects_nonpublic_or_unquoted_sources()
             {"claim": "事实", "support": [{"canonical_url": "https://example.com/a", "quote": ""}]},
         ]
     ) == []
+
+
+def test_worker_fact_evidence_requires_quote_from_fetched_page() -> None:
+    fingerprint = "b" * 64
+    result = parallel_impl._validated_worker_fact_evidence(
+        [
+            {
+                "claim": "花来描述一种夺取装备的玩法",
+                "support": [
+                    {
+                        "canonical_url": "https://example.com/article#section",
+                        "title": "玩法说明",
+                        "quote": "击杀后带走对方整套装备",
+                    },
+                    {
+                        "canonical_url": "https://example.com/article",
+                        "title": "伪造摘录",
+                        "quote": "页面里不存在的句子",
+                    },
+                ],
+            }
+        ],
+        fetched_pages={
+            "https://example.com/article": {
+                "title": "真实页面",
+                "text": "这种玩法会在击杀后带走对方整套装备，并尽快撤离。",
+                "content_fingerprint": fingerprint,
+            }
+        },
+    )
+
+    assert len(result) == 1
+    assert len(result[0]["support"]) == 1
+    assert result[0]["support"][0]["content_fingerprint"] == fingerprint
+    assert result[0]["support"][0]["canonical_url"] == "https://example.com/article"
+
+
+def test_worker_fact_evidence_normalizes_unicode_and_inline_cjk_spacing() -> None:
+    body = "红狼开启大招后捏碎一朵“花”，并快速撤离。"
+    result = parallel_impl._validated_worker_fact_evidence(
+        [
+            {
+                "claim": "花来与红狼玩法有关",
+                "support": [
+                    {
+                        "canonical_url": "https://example.com/article",
+                        "quote": '红狼开启大招后捏碎一朵 "花"',
+                    }
+                ],
+            }
+        ],
+        fetched_pages={
+            "https://example.com/article": {
+                "title": "真实页面",
+                "text": "红狼开启大招后\n捏碎一朵“花”，并快速撤离。",
+                "content_fingerprint": "c" * 64,
+                "content_similarity_fingerprint": parallel_impl._content_simhash(body),
+                "content_length": str(len(body)),
+            }
+        },
+    )
+
+    assert len(result) == 1
+    assert result[0]["support"][0]["quote"] == '红狼开启大招后捏碎一朵"花"'
+
+
+def test_fact_evidence_groups_near_duplicate_reposts() -> None:
+    original = (
+        "花来是三角洲行动中的红狼夺舍玩法。玩家使用高射速武器和低级肉伤弹攻击腿部，"
+        "尽量保留对方头盔与护甲耐久，击杀后带走装备，再开启大招快速撤离。"
+    )
+    repost = (
+        "转载说明：花来是三角洲行动里的红狼夺舍玩法。玩家使用高射速武器和低级肉伤弹攻击腿部，"
+        "尽量保留对方头盔与护甲耐久，击杀之后带走装备，然后开启大招快速撤离。"
+    )
+    unrelated = (
+        "本期介绍排位地图的出生点位和物资刷新规律，重点分析队伍站位、侦察路线、"
+        "交战距离以及不同天气下的视野变化，不涉及红狼夺取装备的玩法。"
+    )
+    original_simhash = parallel_impl._content_simhash(original)
+    repost_simhash = parallel_impl._content_simhash(repost)
+    unrelated_simhash = parallel_impl._content_simhash(unrelated)
+    assert (int(original_simhash, 16) ^ int(repost_simhash, 16)).bit_count() <= 12
+    assert (int(original_simhash, 16) ^ int(unrelated_simhash, 16)).bit_count() > 12
+
+    evidence = parallel_impl._fact_evidence_items(
+        [
+            {
+                "claim": "花来是一种红狼夺舍玩法",
+                "support": [
+                    {
+                        "canonical_url": "https://example.com/original",
+                        "quote": "使用高射速武器和低级肉伤弹攻击腿部",
+                        "content_fingerprint": "d" * 64,
+                        "content_similarity_fingerprint": original_simhash,
+                        "content_length": len(original),
+                    },
+                    {
+                        "canonical_url": "https://mirror.example.net/repost",
+                        "quote": "使用高射速武器和低级肉伤弹攻击腿部",
+                        "content_fingerprint": "e" * 64,
+                        "content_similarity_fingerprint": repost_simhash,
+                        "content_length": len(repost),
+                    },
+                    {
+                        "canonical_url": "https://guide.example.org/map",
+                        "quote": "重点分析队伍站位、侦察路线",
+                        "content_fingerprint": "f" * 64,
+                        "content_similarity_fingerprint": unrelated_simhash,
+                        "content_length": len(unrelated),
+                    },
+                ],
+            }
+        ]
+    )
+
+    assert len(evidence) == 1
+    supports = evidence[0]["support"]
+    assert supports[0]["source_group_id"] == supports[1]["source_group_id"]
+    assert supports[2]["source_group_id"] != supports[0]["source_group_id"]
+    assert len({item["evidence_origin"] for item in supports}) == 3
+
+
+def test_web_fetch_tool_rejects_unsafe_targets_without_echoing_input(monkeypatch) -> None:
+    registry = parallel_impl._build_readonly_registry(_runtime())
+    tool = registry.get("web_fetch")
+    assert tool is not None
+
+    result = json.loads(asyncio.run(tool.handler(url="http://user:secret@127.0.0.1/private")))
+
+    assert result == {"ok": False, "error_code": "web_fetch_target_rejected"}
+    assert "secret" not in json.dumps(result)
+
+
+def test_web_fetch_tool_validates_final_url_and_returns_stable_errors(monkeypatch) -> None:
+    registry = parallel_impl._build_readonly_registry(_runtime())
+    tool = registry.get("web_fetch")
+    assert tool is not None
+
+    async def _redirected_to_http(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return {
+            "url": "http://example.com/downgrade",
+            "status_code": 200,
+            "title": "不应返回",
+            "text": "正文",
+        }
+
+    monkeypatch.setattr(parallel_impl, "fetch_web_page", _redirected_to_http)
+    rejected = json.loads(asyncio.run(tool.handler(url="https://example.com/start")))
+    assert rejected == {"ok": False, "error_code": "web_fetch_redirect_rejected"}
+
+    async def _known_failure(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise parallel_impl.WebFetchError("包含不应回传的内部地址和秘密")
+
+    monkeypatch.setattr(parallel_impl, "fetch_web_page", _known_failure)
+    failed = json.loads(asyncio.run(tool.handler(url="https://example.com/start")))
+    assert failed == {"ok": False, "error_code": "web_fetch_rejected"}
+    assert "秘密" not in json.dumps(failed, ensure_ascii=False)

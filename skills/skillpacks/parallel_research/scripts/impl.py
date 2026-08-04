@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import hashlib
 import ipaddress
 import json
 import os
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -19,6 +21,7 @@ from plugin.personification.agent.runtime.tool_loop import (
     append_tool_result_messages,
 )
 from plugin.personification.core.web_grounding import do_web_search
+from plugin.personification.core.web_fetch import WebFetchError, fetch_web_page
 from plugin.personification.skills.skillpacks.acg_resolver.scripts import impl as acg_impl
 from plugin.personification.skills.skillpacks.resource_collector.scripts import impl as resource_impl
 from plugin.personification.skills.skillpacks.vision_analyze.scripts import impl as vision_impl
@@ -41,6 +44,7 @@ _READ_ONLY_TOOL_NAMES = frozenset(
     {
         "web_search",
         "search_web",
+        "web_fetch",
         "search_images",
         "collect_resources",
         "wiki_lookup",
@@ -54,6 +58,19 @@ _LOOKUP_MAX_TOOL_ROUNDS = 1
 _LOOKUP_PAGES_PER_WORKER = 8
 _BACKGROUND_LEARNING_TASKS: set[asyncio.Task[Any]] = set()
 _DETACHED_RESEARCH_TASKS: set[asyncio.Task[Any]] = set()
+_ZERO_WIDTH_TEXT_RE = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")
+_EVIDENCE_PUNCTUATION_TRANSLATION = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2032": "'",
+        "\u2033": '"',
+    }
+)
+_NEAR_DUPLICATE_SIMHASH_DISTANCE = 12
+_NEAR_DUPLICATE_MIN_LENGTH = 48
 
 
 @dataclass(slots=True)
@@ -353,6 +370,53 @@ def _build_readonly_registry(runtime: Any) -> ToolRegistry:
 
         return await _with_http_client(runtime, _call)
 
+    async def _web_fetch_handler(url: str, max_chars: int = 4000) -> str:
+        target = str(url or "").strip()
+        canonical_target = _canonical_public_https_url(target)
+        if not canonical_target:
+            return _json_dumps({"ok": False, "error_code": "web_fetch_target_rejected"})
+        blocked = list(
+            getattr(plugin_config, "personification_tool_web_fetch_blocked_domains", []) or []
+        )
+        configured_timeout = _normalize_float(
+            getattr(plugin_config, "personification_tool_web_fetch_timeout", 60.0),
+            default=60.0,
+            lower=3.0,
+            upper=60.0,
+        )
+        proxy = str(getattr(plugin_config, "personification_web_proxy", "") or "").strip()
+        try:
+            result = await fetch_web_page(
+                canonical_target,
+                timeout=min(12.0, configured_timeout),
+                max_chars=_normalize_int(max_chars, default=4000, lower=800, upper=5000),
+                blocked_domains=blocked or None,
+                proxy=proxy or None,
+            )
+        except WebFetchError:
+            return _json_dumps({"ok": False, "error_code": "web_fetch_rejected"})
+        except Exception as exc:
+            logger.debug(f"[parallel_research] web_fetch failed: {type(exc).__name__}")
+            return _json_dumps({"ok": False, "error_code": "web_fetch_failed"})
+        final_url = _canonical_public_https_url(result.get("url"))
+        status_code = _normalize_int(
+            result.get("status_code"),
+            default=0,
+            lower=0,
+            upper=999,
+        )
+        if not final_url:
+            return _json_dumps({"ok": False, "error_code": "web_fetch_redirect_rejected"})
+        if not 200 <= status_code < 300:
+            return _json_dumps(
+                {
+                    "ok": False,
+                    "error_code": "web_fetch_http_status_unusable",
+                    "status_code": status_code,
+                }
+            )
+        return _json_dumps({"ok": True, **result, "url": final_url, "status_code": status_code})
+
     async def _search_images_handler(
         query: str,
         limit: int = 5,
@@ -466,6 +530,27 @@ def _build_readonly_registry(runtime: Any) -> ToolRegistry:
                 "required": ["query"],
             },
             handler=_search_web_handler,
+        )
+    )
+    _register(
+        AgentTool(
+            name="web_fetch",
+            description=(
+                "打开一个已由搜索发现的 HTTPS 网页并读取正文，用于把事实、规范 URL 与原文摘录对应起来。"
+                "拒绝内网地址、非 HTTPS URL 和配置中禁止的域名。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "max_chars": {"type": "integer", "default": 4000},
+                },
+                "required": ["url"],
+            },
+            handler=_web_fetch_handler,
+            enabled=lambda: bool(
+                getattr(plugin_config, "personification_tool_web_fetch_enabled", True)
+            ),
         )
     )
     _register(
@@ -650,7 +735,7 @@ def _lookup_worker_plans(
                 role=f"lookup_{index}",
                 goal=f"围绕「{query}」查证：{goal}",
                 focus=[goal],
-                preferred_tools=["web_search", "search_web"],
+                preferred_tools=["web_search", "search_web", "web_fetch"],
             )
         )
     return plans
@@ -801,6 +886,7 @@ async def _run_worker(
         },
     ]
     last_content = ""
+    fetched_pages: dict[str, dict[str, str]] = {}
     for _round in range(max_tool_rounds + 1):
         response = await tool_caller.chat_with_tools(messages, schemas, False)
         content = str(getattr(response, "content", "") or "").strip()
@@ -810,6 +896,10 @@ async def _run_worker(
             if payload is not None:
                 payload.setdefault("role", plan.role)
                 payload.setdefault("goal", plan.goal)
+                payload["fact_evidence"] = _validated_worker_fact_evidence(
+                    payload.get("fact_evidence"),
+                    fetched_pages=fetched_pages,
+                )
                 return payload
             return {
                 "role": plan.role,
@@ -850,6 +940,19 @@ async def _run_worker(
                 turn_results.append((tool_call, f"工具调用失败：{type(item).__name__}"))
                 continue
             _tool_id, _tool_name, result = item
+            if _tool_name == "web_fetch":
+                fetched = _extract_json_object(result)
+                if isinstance(fetched, dict) and fetched.get("ok") is True:
+                    canonical_url = _canonical_public_https_url(fetched.get("url"))
+                    body = _normalize_evidence_text(fetched.get("text"), limit=5000)
+                    if canonical_url and body:
+                        fetched_pages[canonical_url] = {
+                            "title": _normalize_evidence_text(fetched.get("title"), limit=240),
+                            "text": body,
+                            "content_fingerprint": hashlib.sha256(body.casefold().encode("utf-8")).hexdigest(),
+                            "content_similarity_fingerprint": _content_simhash(body),
+                            "content_length": str(len(body)),
+                        }
             last_content = result
             turn_results.append((tool_call, result[:4000]))
         append_tool_result_messages(
@@ -916,10 +1019,67 @@ def _canonical_public_https_url(value: Any) -> str:
     return urlunparse(("https", netloc, parsed.path or "/", "", parsed.query, ""))[:1200]
 
 
+def _normalize_evidence_text(value: Any, *, limit: int = 6000) -> str:
+    text = html.unescape(str(value or ""))
+    text = unicodedata.normalize("NFKC", text)
+    text = _ZERO_WIDTH_TEXT_RE.sub("", text)
+    text = text.translate(_EVIDENCE_PUNCTUATION_TRANSLATION)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s*([\"'])\s*", r"\1", text)
+    # HTML extraction can place inline CJK fragments on separate lines.  Those
+    # boundaries are formatting noise rather than lexical spaces.
+    text = re.sub(r"(?<=[\u3400-\u9fff])\s+(?=[\u3400-\u9fff])", "", text)
+    return text[: max(0, int(limit))]
+
+
+def _content_simhash(value: Any) -> str:
+    normalized = _normalize_evidence_text(value, limit=6000).casefold()
+    if len(normalized) < _NEAR_DUPLICATE_MIN_LENGTH:
+        return ""
+    tokens = re.findall(r"[a-z0-9]+|[\u3400-\u9fff]", normalized)
+    if len(tokens) < 12:
+        return ""
+    width = 2 if len(tokens) >= 12 else 1
+    features = ["\x1f".join(tokens[index : index + width]) for index in range(len(tokens) - width + 1)]
+    weights = [0] * 64
+    for feature in features:
+        digest = int.from_bytes(hashlib.sha256(feature.encode("utf-8")).digest()[:8], "big")
+        for bit in range(64):
+            weights[bit] += 1 if digest & (1 << bit) else -1
+    fingerprint = 0
+    for bit, weight in enumerate(weights):
+        if weight >= 0:
+            fingerprint |= 1 << bit
+    return f"{fingerprint:016x}"
+
+
+def _similarity_source_group(
+    *,
+    content_fingerprint: str,
+    similarity_fingerprint: str,
+    content_length: int,
+    representatives: list[tuple[int, int, str]],
+) -> str:
+    fallback = f"web_source_{content_fingerprint[:24]}"
+    if (
+        not re.fullmatch(r"[a-f0-9]{16}", similarity_fingerprint)
+        or content_length < _NEAR_DUPLICATE_MIN_LENGTH
+    ):
+        return fallback
+    similarity_value = int(similarity_fingerprint, 16)
+    for known_value, known_length, group_id in representatives:
+        length_ratio = min(content_length, known_length) / max(content_length, known_length)
+        if length_ratio >= 0.75 and (similarity_value ^ known_value).bit_count() <= _NEAR_DUPLICATE_SIMHASH_DISTANCE:
+            return group_id
+    representatives.append((similarity_value, content_length, fallback))
+    return fallback
+
+
 def _fact_evidence_items(value: Any, *, limit: int = 20) -> list[dict[str, Any]]:
     rows = value if isinstance(value, list) else []
     grouped: dict[str, dict[str, Any]] = {}
     order: list[str] = []
+    similarity_representatives: list[tuple[int, int, str]] = []
     for raw in rows[: max(1, min(60, int(limit) * 3))]:
         if not isinstance(raw, dict):
             continue
@@ -939,18 +1099,29 @@ def _fact_evidence_items(value: Any, *, limit: int = 20) -> list[dict[str, Any]]
             if not isinstance(support, dict):
                 continue
             canonical_url = _canonical_public_https_url(support.get("canonical_url"))
-            quote = re.sub(r"\s+", " ", str(support.get("quote") or "")).strip()[:600]
+            quote = _normalize_evidence_text(support.get("quote"), limit=600)
             if not canonical_url or len(quote) < 4:
                 continue
-            normalized_quote = quote.casefold()
             supplied_fingerprint = str(support.get("content_fingerprint") or "").strip().lower()
-            fingerprint = (
-                supplied_fingerprint[:128]
-                if re.fullmatch(r"[a-f0-9]{16,128}", supplied_fingerprint)
-                else hashlib.sha256(normalized_quote.encode("utf-8")).hexdigest()
+            if not re.fullmatch(r"[a-f0-9]{16,128}", supplied_fingerprint):
+                continue
+            fingerprint = supplied_fingerprint[:128]
+            similarity_fingerprint = str(
+                support.get("content_similarity_fingerprint") or ""
+            ).strip().lower()
+            content_length = _normalize_int(
+                support.get("content_length"),
+                default=0,
+                lower=0,
+                upper=10000000,
             )
             host = str(urlparse(canonical_url).hostname or "").removeprefix("www.")
-            source_group_id = f"web_source_{fingerprint[:24]}"
+            source_group_id = _similarity_source_group(
+                content_fingerprint=fingerprint,
+                similarity_fingerprint=similarity_fingerprint,
+                content_length=content_length,
+                representatives=similarity_representatives,
+            )
             key = (source_group_id, canonical_url)
             if key in existing:
                 continue
@@ -960,6 +1131,8 @@ def _fact_evidence_items(value: Any, *, limit: int = 20) -> list[dict[str, Any]]
                     "title": re.sub(r"\s+", " ", str(support.get("title") or "")).strip()[:240],
                     "quote": quote,
                     "content_fingerprint": fingerprint,
+                    "content_similarity_fingerprint": similarity_fingerprint,
+                    "content_length": content_length,
                     "evidence_origin": f"web:{host}"[:200],
                     "source_group_id": source_group_id,
                 }
@@ -968,10 +1141,57 @@ def _fact_evidence_items(value: Any, *, limit: int = 20) -> list[dict[str, Any]]
     return [grouped[key] for key in order if grouped[key]["support"]][:limit]
 
 
+def _validated_worker_fact_evidence(
+    value: Any,
+    *,
+    fetched_pages: dict[str, dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Only retain quotes that occur in a page fetched by this worker."""
+
+    rows = value if isinstance(value, list) else []
+    validated: list[dict[str, Any]] = []
+    for raw in rows[:40]:
+        if not isinstance(raw, dict):
+            continue
+        claim = _normalize_evidence_text(raw.get("claim"), limit=500)
+        if len(claim) < 2:
+            continue
+        support_rows: list[dict[str, Any]] = []
+        for support in list(raw.get("support") or [])[:12]:
+            if not isinstance(support, dict):
+                continue
+            canonical_url = _canonical_public_https_url(support.get("canonical_url"))
+            page = fetched_pages.get(canonical_url)
+            quote = _normalize_evidence_text(support.get("quote"), limit=600)
+            page_text = _normalize_evidence_text((page or {}).get("text"), limit=6000)
+            if not page or len(quote) < 4 or quote.casefold() not in page_text.casefold():
+                continue
+            support_rows.append(
+                {
+                    "canonical_url": canonical_url,
+                    "title": _normalize_evidence_text(
+                        page.get("title") or support.get("title"),
+                        limit=240,
+                    ),
+                    "quote": quote,
+                    "content_fingerprint": page["content_fingerprint"],
+                    "content_similarity_fingerprint": page.get(
+                        "content_similarity_fingerprint", ""
+                    ),
+                    "content_length": page.get("content_length", len(page_text)),
+                }
+            )
+        if support_rows:
+            validated.append({"claim": claim, "support": support_rows})
+    return _fact_evidence_items(validated, limit=20)
+
+
 def _collect_fact_evidence(worker_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     combined: list[dict[str, Any]] = []
     for result in worker_results:
-        combined.extend(_fact_evidence_items(result.get("fact_evidence"), limit=20))
+        rows = result.get("fact_evidence")
+        if isinstance(rows, list):
+            combined.extend(row for row in rows[:20] if isinstance(row, dict))
     return _fact_evidence_items(combined, limit=20)
 
 
