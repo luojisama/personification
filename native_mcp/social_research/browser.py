@@ -5,12 +5,13 @@ import base64
 import hashlib
 import math
 import os
+import re
 import shutil
 import stat
 import subprocess
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -68,6 +69,9 @@ _INTERACTIVE_FRAME_MAX_BYTES = 2 * 1024 * 1024
 _INTERACTIVE_TEXT_MAX_CHARS = 200
 _INTERACTIVE_DRAG_MAX_POINTS = 32
 _INTERACTIVE_DRAG_REPLAY_MAX_SECONDS = 0.8
+_INTERACTIVE_POINTER_MOVE_MAX_POINTS = 6
+_INTERACTIVE_POINTER_TIMEOUT_SECONDS = 5.0
+_INTERACTIVE_POINTER_GESTURE = re.compile(r"^gesture_[A-Za-z0-9_-]{8,80}$")
 _INTERACTIVE_KEYS = frozenset(
     {
         "Tab",
@@ -159,6 +163,14 @@ class AuthSession:
     interactive_viewport_height: int = 900
     interactive_lock: Any = field(default_factory=asyncio.Lock, repr=False, compare=False)
     interactive_start_task: Any = field(default=None, repr=False, compare=False)
+    interactive_pointer_task: Any = field(default=None, repr=False, compare=False)
+    interactive_pointer_down: bool = field(default=False, repr=False, compare=False)
+    interactive_pointer_gesture_id: str = field(default="", repr=False, compare=False)
+    interactive_pointer_seq: int = field(default=-1, repr=False, compare=False)
+    interactive_pointer_last_at: float = field(default=0.0, repr=False, compare=False)
+    interactive_pointer_last_gesture_id: str = field(default="", repr=False, compare=False)
+    interactive_pointer_last_seq: int = field(default=-1, repr=False, compare=False)
+    interactive_pointer_error_code: str = field(default="", repr=False, compare=False)
 
 
 class BrowserPool:
@@ -358,6 +370,11 @@ class BrowserPool:
 
     async def close_platform(self, platform: str) -> None:
         self._cancel_idle_task(platform)
+        for session in self._auth.values():
+            if session.platform == platform and (
+                session.interactive_pointer_down or session.interactive_pointer_task is not None
+            ):
+                await self._release_interactive_pointer(session)
         async with self._locks[platform]:
             context = self._contexts.pop(platform, None)
             self._context_headless.pop(platform, None)
@@ -374,6 +391,8 @@ class BrowserPool:
         for session in self._auth.values():
             await self._cancel_interactive_start(session)
             await self._stop_manual_browser(session)
+            if session.interactive_pointer_down or session.interactive_pointer_task is not None:
+                await self._release_interactive_pointer(session)
             session.protocol_secret = ""
             session.qr_png = b""
             session.interactive_frame = b""
@@ -510,6 +529,82 @@ class BrowserPool:
             session.interactive_viewport_width = min(1920, max(320, int(viewport.get("width") or 1280)))
             session.interactive_viewport_height = min(1440, max(240, int(viewport.get("height") or 900)))
         return page
+
+    @staticmethod
+    def _cancel_interactive_pointer_task(session: AuthSession) -> None:
+        task = session.interactive_pointer_task
+        session.interactive_pointer_task = None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+
+    def _interactive_pointer_page(self, session: AuthSession) -> Any | None:
+        context = self._contexts.get(session.platform)
+        try:
+            pages = list(context.pages) if context is not None else []
+        except Exception:
+            pages = []
+        if not pages:
+            return None
+        page = pages[-1]
+        page_url = str(getattr(page, "url", "") or "")
+        return page if self._interactive_url_allowed(session, page_url) else None
+
+    async def _release_interactive_pointer_unlocked(
+        self,
+        session: AuthSession,
+        *,
+        error_code: str = "",
+    ) -> None:
+        gesture_id = session.interactive_pointer_gesture_id
+        sequence = session.interactive_pointer_seq
+        self._cancel_interactive_pointer_task(session)
+        if session.interactive_pointer_down:
+            page = self._interactive_pointer_page(session)
+            if page is not None:
+                with suppress(Exception):
+                    await page.mouse.up()
+        session.interactive_pointer_down = False
+        session.interactive_pointer_gesture_id = ""
+        session.interactive_pointer_seq = -1
+        session.interactive_pointer_last_at = 0.0
+        if gesture_id:
+            session.interactive_pointer_last_gesture_id = gesture_id
+            session.interactive_pointer_last_seq = sequence
+        session.interactive_pointer_error_code = str(error_code or "")
+        session.interactive_last_action_at = time.time()
+        session.interactive_frame_captured_at = 0.0
+
+    async def _release_interactive_pointer(
+        self,
+        session: AuthSession,
+        *,
+        error_code: str = "",
+    ) -> None:
+        async with session.interactive_lock:
+            await self._release_interactive_pointer_unlocked(session, error_code=error_code)
+
+    async def _interactive_pointer_watchdog(self, session: AuthSession, gesture_id: str) -> None:
+        try:
+            delay = _INTERACTIVE_POINTER_TIMEOUT_SECONDS
+            while True:
+                await asyncio.sleep(delay)
+                async with session.interactive_lock:
+                    if (
+                        not session.interactive_pointer_down
+                        or session.interactive_pointer_gesture_id != gesture_id
+                    ):
+                        return
+                    elapsed = time.monotonic() - session.interactive_pointer_last_at
+                    if elapsed < _INTERACTIVE_POINTER_TIMEOUT_SECONDS:
+                        delay = max(0.01, _INTERACTIVE_POINTER_TIMEOUT_SECONDS - elapsed)
+                        continue
+                    await self._release_interactive_pointer_unlocked(
+                        session,
+                        error_code="interactive_pointer_timeout",
+                    )
+                    return
+        except asyncio.CancelledError:
+            return
 
     async def _cancel_interactive_start(self, session: AuthSession) -> None:
         task = session.interactive_start_task
@@ -650,6 +745,58 @@ class BrowserPool:
             raise ValueError("interactive coordinates are outside the viewport")
         return number
 
+    @staticmethod
+    def _interactive_pointer_gesture(action: dict[str, Any]) -> str:
+        gesture_id = str(action.get("gesture_id") or "")
+        if not _INTERACTIVE_POINTER_GESTURE.fullmatch(gesture_id):
+            raise ValueError("interactive pointer gesture is invalid")
+        return gesture_id
+
+    @staticmethod
+    def _interactive_pointer_sequence(action: dict[str, Any]) -> int:
+        sequence = action.get("seq")
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or not 0 <= sequence <= 1_000_000_000:
+            raise ValueError("interactive pointer sequence is invalid")
+        return sequence
+
+    def _interactive_pointer_points(
+        self,
+        value: Any,
+        width: int,
+        height: int,
+    ) -> list[tuple[float, float]]:
+        if not isinstance(value, list) or not 1 <= len(value) <= _INTERACTIVE_POINTER_MOVE_MAX_POINTS:
+            raise ValueError("interactive pointer points are invalid")
+        points: list[tuple[float, float]] = []
+        for point in value:
+            if not isinstance(point, dict):
+                raise ValueError("interactive pointer points are invalid")
+            points.append(
+                (
+                    self._interactive_coordinate(point.get("x"), width),
+                    self._interactive_coordinate(point.get("y"), height),
+                )
+            )
+        return points
+
+    def _interactive_action_result(
+        self,
+        session: AuthSession,
+        *,
+        applied: bool,
+        duplicate: bool = False,
+        pointer_error_code: str = "",
+    ) -> dict[str, Any]:
+        return {
+            **self.public_auth(session),
+            "action_applied": bool(applied),
+            "action_duplicate": bool(duplicate),
+            "interactive_pointer_active": bool(session.interactive_pointer_down),
+            "interactive_pointer_error_code": str(
+                pointer_error_code or session.interactive_pointer_error_code or ""
+            ),
+        }
+
     async def interactive_action(
         self,
         session_id: str,
@@ -658,10 +805,107 @@ class BrowserPool:
     ) -> dict[str, Any]:
         session = self.get_auth(session_id, owner)
         async with session.interactive_lock:
-            page = await self._interactive_page(session)
             action_type = str(action.get("type") or "")
             width = session.interactive_viewport_width
             height = session.interactive_viewport_height
+            pointer_action = action_type in {
+                "pointer_start",
+                "pointer_move",
+                "pointer_end",
+                "pointer_cancel",
+            }
+            gesture_id = self._interactive_pointer_gesture(action) if pointer_action else ""
+            sequence = self._interactive_pointer_sequence(action) if pointer_action else -1
+
+            if action_type == "pointer_move":
+                points = self._interactive_pointer_points(action.get("points"), width, height)
+            else:
+                points = []
+            if action_type in {"pointer_start", "pointer_end"}:
+                pointer_x = self._interactive_coordinate(action.get("x"), width)
+                pointer_y = self._interactive_coordinate(action.get("y"), height)
+            else:
+                pointer_x = pointer_y = 0.0
+
+            if pointer_action and not session.interactive_pointer_down:
+                if (
+                    gesture_id == session.interactive_pointer_last_gesture_id
+                    and session.interactive_pointer_error_code == "interactive_pointer_timeout"
+                ):
+                    return self._interactive_action_result(
+                        session,
+                        applied=False,
+                        pointer_error_code="interactive_pointer_timeout",
+                    )
+                if (
+                    gesture_id == session.interactive_pointer_last_gesture_id
+                    and sequence <= session.interactive_pointer_last_seq
+                ):
+                    return self._interactive_action_result(session, applied=False, duplicate=True)
+                if action_type != "pointer_start":
+                    return self._interactive_action_result(
+                        session,
+                        applied=False,
+                        pointer_error_code="interactive_pointer_not_active",
+                    )
+
+            if pointer_action and session.interactive_pointer_down:
+                if gesture_id != session.interactive_pointer_gesture_id:
+                    if action_type != "pointer_start":
+                        return self._interactive_action_result(
+                            session,
+                            applied=False,
+                            pointer_error_code="interactive_pointer_gesture_mismatch",
+                        )
+                    await self._release_interactive_pointer_unlocked(session)
+                elif action_type == "pointer_start" and sequence == 0:
+                    return self._interactive_action_result(session, applied=False, duplicate=True)
+                elif sequence <= session.interactive_pointer_seq:
+                    return self._interactive_action_result(
+                        session,
+                        applied=False,
+                        duplicate=sequence == session.interactive_pointer_seq,
+                        pointer_error_code=(
+                            "" if sequence == session.interactive_pointer_seq else "interactive_pointer_sequence_invalid"
+                        ),
+                    )
+
+            try:
+                page = await self._interactive_page(session)
+            except Exception:
+                if pointer_action and session.interactive_pointer_down:
+                    await self._release_interactive_pointer_unlocked(session)
+                raise
+
+            if action_type == "pointer_start":
+                if sequence != 0:
+                    raise ValueError("interactive pointer start sequence is invalid")
+                await page.mouse.move(pointer_x, pointer_y)
+                await page.mouse.down()
+                session.interactive_pointer_down = True
+                session.interactive_pointer_gesture_id = gesture_id
+                session.interactive_pointer_seq = sequence
+                session.interactive_pointer_last_at = time.monotonic()
+                session.interactive_pointer_error_code = ""
+                session.interactive_pointer_task = asyncio.create_task(
+                    self._interactive_pointer_watchdog(session, gesture_id),
+                    name=f"social-pointer-timeout:{session.platform}:{session.session_id[:8]}",
+                )
+            elif action_type == "pointer_move":
+                for x, y in points:
+                    await page.mouse.move(x, y)
+                session.interactive_pointer_seq = sequence
+                session.interactive_pointer_last_at = time.monotonic()
+            elif action_type == "pointer_end":
+                session.interactive_pointer_seq = sequence
+                session.interactive_pointer_last_at = time.monotonic()
+                try:
+                    await page.mouse.move(pointer_x, pointer_y)
+                finally:
+                    await self._release_interactive_pointer_unlocked(session)
+            elif action_type == "pointer_cancel":
+                session.interactive_pointer_seq = sequence
+                await self._release_interactive_pointer_unlocked(session)
             if action_type == "click":
                 x = self._interactive_coordinate(action.get("x"), width)
                 y = self._interactive_coordinate(action.get("y"), height)
@@ -714,18 +958,19 @@ class BrowserPool:
                 if isinstance(delta, bool) or not isinstance(delta, (int, float)) or not math.isfinite(float(delta)):
                     raise ValueError("interactive scroll delta is invalid")
                 await page.mouse.wheel(0, max(-1200, min(1200, float(delta))))
-            else:
+            elif not pointer_action:
                 raise ValueError("interactive action is not allowed")
             session.interactive_last_action_at = time.time()
             # Keep the last frame visible while the next screenshot is being
             # produced. A zero capture time marks it dirty without flashing the
             # WebUI back to an empty canvas.
             session.interactive_frame_captured_at = 0.0
-            try:
-                await page.wait_for_timeout(60)
-            except Exception:
-                pass
-            return {**self.public_auth(session), "action_applied": True}
+            if not pointer_action:
+                try:
+                    await page.wait_for_timeout(60)
+                except Exception:
+                    pass
+            return self._interactive_action_result(session, applied=True)
 
     async def _launch_manual_browser(self, session: AuthSession) -> None:
         resolved = self._system_browser()
@@ -1336,6 +1581,8 @@ class BrowserPool:
             ),
             "interactive_frame_revision": int(session.interactive_frame_revision),
             "interactive_display_url": session.interactive_display_url,
+            "interactive_pointer_active": bool(session.interactive_pointer_down),
+            "interactive_pointer_error_code": session.interactive_pointer_error_code,
             "interactive_viewport": {
                 "width": int(session.interactive_viewport_width),
                 "height": int(session.interactive_viewport_height),

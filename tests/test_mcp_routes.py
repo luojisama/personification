@@ -426,6 +426,25 @@ def test_builtin_mcp_status_config_auth_and_preview_are_private(tmp_path, monkey
     assert recorded_input["action"] == {"type": "click", "x": 120, "y": 80}
     assert "owner" in recorded_input and "owner" not in interactive_input.text
     assert all(item.get("action") != "mcp_builtin_auth_input" for item in audit_actions)
+    pointer_input = client.post(
+        "/api/mcp/builtin/social-research/auth/session-1/input",
+        params={"platform": "douyin"},
+        json={
+            "action": {
+                "type": "pointer_move",
+                "gesture_id": "gesture_route001",
+                "seq": 4,
+                "points": [{"x": 140, "y": 80}, {"x": 180, "y": 81}],
+            }
+        },
+    )
+    assert pointer_input.status_code == 200
+    assert manager.auth_requests[-1]["interactive_input"]["action"] == {
+        "type": "pointer_move",
+        "gesture_id": "gesture_route001",
+        "seq": 4,
+        "points": [{"x": 140, "y": 80}, {"x": 180, "y": 81}],
+    }
     finished = client.post(
         "/api/mcp/builtin/social-research/auth/session-1/finish",
         params={"platform": "douyin"},

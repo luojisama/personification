@@ -2077,6 +2077,247 @@ def test_webui_interactive_auth_relays_only_bounded_human_input(tmp_path: Path) 
         )
 
 
+def test_webui_interactive_pointer_stream_moves_before_release_and_is_idempotent(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    mouse_events: list[tuple] = []
+
+    class FakeMouse:
+        async def move(self, x, y):  # noqa: ANN001, ANN201
+            mouse_events.append(("move", x, y))
+
+        async def down(self):  # noqa: ANN201
+            mouse_events.append(("down",))
+
+        async def up(self):  # noqa: ANN201
+            mouse_events.append(("up",))
+
+    class FakePage:
+        url = "https://www.douyin.com/"
+        viewport_size = {"width": 1280, "height": 900}
+        mouse = FakeMouse()
+
+    pool._contexts["douyin"] = type("Context", (), {"pages": [FakePage()]})()
+    session = browser_mod.AuthSession(
+        session_id="pointer-stream",
+        platform="douyin",
+        owner="admin:device:douyin",
+        status="manual_verification_required",
+        login_mode="webui_interactive",
+        official_window_open=True,
+        interactive_allowed_hosts=("douyin.com",),
+    )
+    pool._auth[session.session_id] = session
+
+    async def run():
+        started = await pool.interactive_action(
+            session.session_id,
+            session.owner,
+            {"type": "pointer_start", "gesture_id": "gesture_stream01", "seq": 0, "x": 100, "y": 200},
+        )
+        assert started["interactive_pointer_active"] is True
+        assert mouse_events == [("move", 100.0, 200.0), ("down",)]
+
+        moved = await pool.interactive_action(
+            session.session_id,
+            session.owner,
+            {
+                "type": "pointer_move",
+                "gesture_id": "gesture_stream01",
+                "seq": 1,
+                "points": [{"x": 140, "y": 201}, {"x": 180, "y": 202}],
+            },
+        )
+        assert moved["action_applied"] is True
+        assert mouse_events[-2:] == [("move", 140.0, 201.0), ("move", 180.0, 202.0)]
+
+        duplicate = await pool.interactive_action(
+            session.session_id,
+            session.owner,
+            {
+                "type": "pointer_move",
+                "gesture_id": "gesture_stream01",
+                "seq": 1,
+                "points": [{"x": 200, "y": 202}],
+            },
+        )
+        mismatch = await pool.interactive_action(
+            session.session_id,
+            session.owner,
+            {
+                "type": "pointer_move",
+                "gesture_id": "gesture_other001",
+                "seq": 2,
+                "points": [{"x": 220, "y": 202}],
+            },
+        )
+        assert duplicate["action_duplicate"] is True
+        assert mismatch["interactive_pointer_error_code"] == "interactive_pointer_gesture_mismatch"
+        assert mouse_events[-1] == ("move", 180.0, 202.0)
+
+        ended = await pool.interactive_action(
+            session.session_id,
+            session.owner,
+            {"type": "pointer_end", "gesture_id": "gesture_stream01", "seq": 2, "x": 260, "y": 203},
+        )
+        repeated_end = await pool.interactive_action(
+            session.session_id,
+            session.owner,
+            {"type": "pointer_end", "gesture_id": "gesture_stream01", "seq": 2, "x": 260, "y": 203},
+        )
+        return ended, repeated_end
+
+    ended, repeated_end = asyncio.run(run())
+    assert ended["interactive_pointer_active"] is False
+    assert repeated_end["action_duplicate"] is True
+    assert mouse_events[-2:] == [("move", 260.0, 203.0), ("up",)]
+
+
+def test_webui_interactive_pointer_end_releases_after_move_failure(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    mouse_events: list[tuple] = []
+
+    class FakeMouse:
+        async def move(self, x, y):  # noqa: ANN001, ANN201
+            mouse_events.append(("move", x, y))
+            if x == 999:
+                raise RuntimeError("move failed")
+
+        async def down(self):  # noqa: ANN201
+            mouse_events.append(("down",))
+
+        async def up(self):  # noqa: ANN201
+            mouse_events.append(("up",))
+
+    page = type(
+        "Page",
+        (),
+        {"url": "https://www.douyin.com/", "viewport_size": {"width": 1280, "height": 900}, "mouse": FakeMouse()},
+    )()
+    pool._contexts["douyin"] = type("Context", (), {"pages": [page]})()
+    session = browser_mod.AuthSession(
+        session_id="pointer-failure",
+        platform="douyin",
+        owner="admin:device:douyin",
+        status="manual_verification_required",
+        login_mode="webui_interactive",
+        official_window_open=True,
+        interactive_allowed_hosts=("douyin.com",),
+    )
+    pool._auth[session.session_id] = session
+
+    async def run():
+        await pool.interactive_action(
+            session.session_id,
+            session.owner,
+            {"type": "pointer_start", "gesture_id": "gesture_failure1", "seq": 0, "x": 100, "y": 100},
+        )
+        with pytest.raises(RuntimeError, match="move failed"):
+            await pool.interactive_action(
+                session.session_id,
+                session.owner,
+                {"type": "pointer_end", "gesture_id": "gesture_failure1", "seq": 1, "x": 999, "y": 100},
+            )
+
+    asyncio.run(run())
+    assert mouse_events[-1] == ("up",)
+    assert session.interactive_pointer_down is False
+
+
+def test_webui_interactive_pointer_timeout_and_platform_close_release_mouse(tmp_path: Path, monkeypatch) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    monkeypatch.setattr(browser_mod, "_INTERACTIVE_POINTER_TIMEOUT_SECONDS", 0.02)
+    pool = browser_mod.BrowserPool(tmp_path)
+    mouse_events: list[tuple] = []
+    closed: list[bool] = []
+
+    class FakeMouse:
+        async def move(self, x, y):  # noqa: ANN001, ANN201
+            mouse_events.append(("move", x, y))
+
+        async def down(self):  # noqa: ANN201
+            mouse_events.append(("down",))
+
+        async def up(self):  # noqa: ANN201
+            mouse_events.append(("up",))
+
+    page = type(
+        "Page",
+        (),
+        {"url": "https://www.douyin.com/", "viewport_size": {"width": 1280, "height": 900}, "mouse": FakeMouse()},
+    )()
+
+    class FakeContext:
+        pages = [page]
+
+        async def close(self):  # noqa: ANN201
+            closed.append(True)
+
+    pool._contexts["douyin"] = FakeContext()
+    session = browser_mod.AuthSession(
+        session_id="pointer-timeout",
+        platform="douyin",
+        owner="admin:device:douyin",
+        status="manual_verification_required",
+        login_mode="webui_interactive",
+        official_window_open=True,
+        interactive_allowed_hosts=("douyin.com",),
+    )
+    pool._auth[session.session_id] = session
+
+    async def run():
+        await pool.interactive_action(
+            session.session_id,
+            session.owner,
+            {"type": "pointer_start", "gesture_id": "gesture_timeout1", "seq": 0, "x": 100, "y": 100},
+        )
+        await asyncio.sleep(0.05)
+        assert session.interactive_pointer_down is False
+        assert session.interactive_pointer_error_code == "interactive_pointer_timeout"
+
+        await pool.interactive_action(
+            session.session_id,
+            session.owner,
+            {"type": "pointer_start", "gesture_id": "gesture_timeout2", "seq": 0, "x": 120, "y": 100},
+        )
+        await pool.close_platform("douyin")
+
+    asyncio.run(run())
+    assert mouse_events.count(("up",)) == 2
+    assert closed == [True]
+    assert session.interactive_pointer_down is False
+
+
+def test_webui_interactive_pointer_move_rejects_oversized_batch(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+    pool = browser_mod.BrowserPool(tmp_path)
+    session = browser_mod.AuthSession(
+        session_id="pointer-size",
+        platform="douyin",
+        owner="admin:device:douyin",
+        status="manual_verification_required",
+        login_mode="webui_interactive",
+        official_window_open=True,
+        interactive_allowed_hosts=("douyin.com",),
+    )
+    pool._auth[session.session_id] = session
+
+    with pytest.raises(ValueError, match="pointer points"):
+        asyncio.run(
+            pool.interactive_action(
+                session.session_id,
+                session.owner,
+                {
+                    "type": "pointer_move",
+                    "gesture_id": "gesture_size0001",
+                    "seq": 1,
+                    "points": [{"x": index, "y": 10} for index in range(7)],
+                },
+            )
+        )
+
+
 def test_webui_interactive_auth_starts_page_in_background(tmp_path: Path) -> None:
     browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
     pool = browser_mod.BrowserPool(tmp_path)
