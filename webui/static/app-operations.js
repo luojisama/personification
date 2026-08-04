@@ -1,7 +1,21 @@
 function opsStatus(value) {
-  const map = {online:["ok","在线"],degraded:["warn","降级"],offline:["error","离线"],running:["info","运行中"],stale:["warn","状态陈旧"],finished:["ok","已完成"]};
+  const map = {online:["ok","在线"],degraded:["warn","降级"],offline:["error","离线"],running:["info","运行中"],stale:["warn","状态陈旧"],finished:["ok","已完成"],completed:["ok","已完成"],failed:["error","失败"],cancelled:["disabled","已取消"]};
   const item = map[value] || ["disabled",value||"未知"];
   return `<span class="ops-status ${item[0]}"><span></span>${escapeHtml(item[1])}</span>`;
+}
+
+function opsMegabytes(value) {
+  if(value===null||value===undefined||value==="")return "暂不可用";
+  const bytes=Number(value);
+  return Number.isFinite(bytes)&&bytes>=0?`${(bytes/1024/1024).toFixed(1)} MB`:"暂不可用";
+}
+
+function renderRuntimePerformance() {
+  const data=state.runtimePerformance;
+  if(!data)return `<div class="card"><h2>运行性能</h2><p class="muted">正在读取进程和事件循环指标…</p></div>`;
+  const process=data.process||{},loop=data.event_loop||{},reply=data.reply||{},tasks=data.tasks||{},queue=(data.queues||{}).runtime_logs||{};
+  const cacheRows=(data.caches||[]).map(item=>`<tr><td>${escapeHtml(item.name||"-")}</td><td class="u-tabular">${Number(item.entries||0)} / ${Number(item.limit||0)}</td><td class="u-tabular">${Number(item.evictions||0)}</td></tr>`).join("");
+  return `<div class="card"><div class="between"><h2>运行性能</h2><span class="muted u-atomic">进程内即时采样</span></div><div class="ops-stat-grid"><div class="ops-stat"><span>当前内存</span><strong>${escapeHtml(opsMegabytes(process.rss_bytes))}</strong><small>峰值 ${escapeHtml(opsMegabytes(process.peak_rss_bytes))}</small></div><div class="ops-stat"><span>事件循环 p95</span><strong>${Number(loop.p95_ms||0).toFixed(1)} ms</strong><small>最近 ${Number(loop.samples||0)} 个样本</small></div><div class="ops-stat"><span>回复排队</span><strong>${Number(reply.waiting||0)}</strong><small>${Number(reply.active||0)} 活动 · ${Number(reply.session_gates||0)} 会话 gate</small></div><div class="ops-stat"><span>后台任务</span><strong>${Number(tasks.failed_total||0)} 次失败</strong><small>${Number(tasks.total||0)} 个受监管任务</small></div></div><div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="运行资源使用情况"><table class="data-table"><thead><tr><th scope="col">缓存/容器</th><th scope="col">使用量</th><th scope="col">溢出/淘汰</th></tr></thead><tbody>${cacheRows||'<tr><td colspan="3" class="muted">暂无缓存统计</td></tr>'}<tr><td>运行日志队列</td><td class="u-tabular">${Number(queue.depth||0)} / ${Number(queue.capacity||0)}</td><td class="u-tabular">${Number(queue.dropped||0)}</td></tr></tbody></table></div></div>`;
 }
 
 function opsAgo(seconds) {
@@ -18,10 +32,10 @@ function renderAgentStatus() {
   const rows=(data.recent||[]).map(row=>`<tr><td class="col-status">${opsStatus(row.state)}</td><td class="col-id"><code class="u-ellipsis" title="${escapeAttr(row.trace_id)}">${escapeHtml(row.trace_id)}</code></td><td class="col-id"><span class="u-ellipsis" title="${escapeAttr(row.stage || "-")}">${escapeHtml(row.stage||"-")}</span></td><td class="col-status"><span class="u-ellipsis" title="${escapeAttr(row.outcome || row.diagnosis_code || "-")}">${escapeHtml(row.outcome||row.diagnosis_code||"-")}</span></td><td class="col-time u-atomic u-tabular">${escapeHtml(opsAgo(row.age_seconds))}</td><td class="col-actions"><button class="btn small" aria-label="查看 Trace ${escapeAttr(row.trace_id)}" onclick="openAgentTrace('${escapeAttr(row.trace_id)}')">Trace</button></td></tr>`).join("");
   return `<section class="ops-hero"><div><span class="eyebrow">LIVE RUNTIME</span><h2>Agent 运行脉搏</h2><p>只展示可审计状态，不暴露隐藏推理、画像正文或工具参数。</p></div><div class="ops-hero-state">${opsStatus(data.overall)}<button class="btn small" onclick="refreshAgentStatus()">立即刷新</button></div></section>
   <div class="ops-stat-grid"><div class="ops-stat"><span>连接 Bot</span><strong>${Number((data.bots||{}).connected||0)}</strong></div><div class="ops-stat"><span>正在执行</span><strong>${Number(data.running||0)}</strong></div><div class="ops-stat"><span>陈旧任务</span><strong>${Number(data.stale||0)}</strong></div><div class="ops-stat"><span>内心状态</span><strong>${escapeHtml(inner.mood||"-")} · ${escapeHtml(inner.energy||"-")}</strong><small class="u-atomic u-tabular">${escapeHtml(inner.updated_at||"尚未更新")}</small></div></div>
-  <div class="card"><div class="between"><h2>最近运行</h2><span class="muted u-atomic">5 秒自动刷新</span></div><div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="Agent 最近运行列表"><table class="data-table wide"><thead><tr><th scope="col" class="col-status">状态</th><th scope="col" class="col-id">Trace</th><th scope="col" class="col-id">当前/末阶段</th><th scope="col" class="col-status">结果</th><th scope="col" class="col-time">最后活动</th><th scope="col" class="col-actions"><span class="sr-only">操作</span></th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="muted">暂无运行记录</td></tr>'}</tbody></table></div></div>`;
+  ${renderRuntimePerformance()}<div class="card"><div class="between"><h2>最近运行</h2><span class="muted u-atomic">5 秒自动刷新</span></div><div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="Agent 最近运行列表"><table class="data-table wide"><thead><tr><th scope="col" class="col-status">状态</th><th scope="col" class="col-id">Trace</th><th scope="col" class="col-id">当前/末阶段</th><th scope="col" class="col-status">结果</th><th scope="col" class="col-time">最后活动</th><th scope="col" class="col-actions"><span class="sr-only">操作</span></th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="muted">暂无运行记录</td></tr>'}</tbody></table></div></div>`;
 }
 
-async function refreshAgentStatus(){try{state.agentStatus=await api("/agent-status");render();}catch(e){alertFlash("err","状态刷新失败："+e.message);}}
+async function refreshAgentStatus(){try{const [status,performance]=await Promise.all([api("/agent-status"),api("/performance/runtime")]);state.agentStatus=status;state.runtimePerformance=performance;render();}catch(e){alertFlash("err","状态刷新失败："+e.message);}}
 async function openAgentTrace(traceId){await ensureViewAsset("trace_detail");return openTraceDetail(traceId);}
 setInterval(()=>{if(state.logged&&state.view==="agent_status"&&!state.loading)refreshAgentStatus();},5000);
 

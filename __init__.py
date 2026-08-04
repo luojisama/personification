@@ -62,6 +62,8 @@ from .core.plugin_meta import build_plugin_metadata
 from .core.plugin_runtime import build_plugin_runtime
 from .core.qzone_startup import refresh_qzone_cookie_on_available_bot
 from .core.runtime_state import close_shared_http_client
+from .core.runtime_performance import sample_event_loop_lag
+from .core.runtime_task_supervisor import runtime_task_supervisor
 from .core.ai_routes import (
     build_routed_tool_caller,
     format_provider_summary,
@@ -96,9 +98,6 @@ __plugin_meta__ = build_plugin_metadata(Config)
 
 _sticker_labeler_observer = None
 _knowledge_build_task: asyncio.Task | None = None
-_visual_probe_task: asyncio.Task | None = None
-_llm_warmup_task: asyncio.Task | None = None
-_qzone_cookie_refresh_task: asyncio.Task | None = None
 runtime_bundle = None
 flow_handles: dict[str, object] = {}
 job_handles: dict[str, object] = {}
@@ -192,18 +191,7 @@ async def _run_visual_probe_background() -> None:
 
 
 def _start_visual_probe_background() -> None:
-    global _visual_probe_task
-    if _visual_probe_task is not None and not _visual_probe_task.done():
-        return
-    task = asyncio.create_task(_run_visual_probe_background())
-    _visual_probe_task = task
-
-    def _clear_probe_task(done_task: asyncio.Task) -> None:
-        global _visual_probe_task
-        if _visual_probe_task is done_task:
-            _visual_probe_task = None
-
-    task.add_done_callback(_clear_probe_task)
+    runtime_task_supervisor.start("startup.visual_probe", _run_visual_probe_background)
 
 
 async def _warmup_llm_connection() -> None:
@@ -229,18 +217,7 @@ async def _warmup_llm_connection() -> None:
 
 
 def _start_llm_warmup_background() -> None:
-    global _llm_warmup_task
-    if _llm_warmup_task is not None and not _llm_warmup_task.done():
-        return
-    task = asyncio.create_task(_warmup_llm_connection())
-    _llm_warmup_task = task
-
-    def _clear_warmup_task(done_task: asyncio.Task) -> None:
-        global _llm_warmup_task
-        if _llm_warmup_task is done_task:
-            _llm_warmup_task = None
-
-    task.add_done_callback(_clear_warmup_task)
+    runtime_task_supervisor.start("startup.llm_warmup", _warmup_llm_connection)
 
 
 async def _refresh_qzone_cookie_background() -> None:
@@ -254,18 +231,7 @@ async def _refresh_qzone_cookie_background() -> None:
 
 
 def _start_qzone_cookie_refresh_background() -> None:
-    global _qzone_cookie_refresh_task
-    if _qzone_cookie_refresh_task is not None and not _qzone_cookie_refresh_task.done():
-        return
-    task = asyncio.create_task(_refresh_qzone_cookie_background())
-    _qzone_cookie_refresh_task = task
-
-    def _clear_qzone_cookie_refresh_task(done_task: asyncio.Task) -> None:
-        global _qzone_cookie_refresh_task
-        if _qzone_cookie_refresh_task is done_task:
-            _qzone_cookie_refresh_task = None
-
-    task.add_done_callback(_clear_qzone_cookie_refresh_task)
+    runtime_task_supervisor.start("startup.qzone_cookie_refresh", _refresh_qzone_cookie_background)
 
 
 @get_driver().on_startup
@@ -277,6 +243,8 @@ async def _init_personification_runtime() -> None:
     if runtime_bundle is not None:
         return
 
+    runtime_task_supervisor.configure(logger=logger)
+    runtime_task_supervisor.start("runtime.event_loop_lag", sample_event_loop_lag)
     runtime_bundle = build_plugin_runtime(
         plugin_config=plugin_config,
         superusers=superusers,
@@ -503,8 +471,7 @@ async def _install_personification_webui() -> None:
                 superusers=set(superusers or set()), get_bots=get_bots, logger=logger,
             )
 
-        _t = asyncio.create_task(_warm_health())
-        _t.add_done_callback(lambda _t: None)
+        runtime_task_supervisor.start("startup.health_warmup", _warm_health)
     except Exception as exc:
         logger.debug(f"[webui] 体检预热调度失败：{exc}")
 
@@ -780,7 +747,7 @@ async def _setup_social_intelligence() -> None:
 
 @get_driver().on_shutdown
 async def _close_personification_runtime() -> None:
-    global _sticker_labeler_observer, _knowledge_build_task, _visual_probe_task, _qzone_cookie_refresh_task, runtime_bundle
+    global _sticker_labeler_observer, _knowledge_build_task, runtime_bundle
     if runtime_bundle is not None:
         scoped_profile_service = getattr(runtime_bundle, "scoped_profile_service", None)
         if scoped_profile_service is not None:
@@ -792,20 +759,7 @@ async def _close_personification_runtime() -> None:
         _sticker_labeler_observer.stop()
         _sticker_labeler_observer.join()
         _sticker_labeler_observer = None
-    if _visual_probe_task is not None and not _visual_probe_task.done():
-        _visual_probe_task.cancel()
-        try:
-            await _visual_probe_task
-        except asyncio.CancelledError:
-            pass
-    _visual_probe_task = None
-    if _qzone_cookie_refresh_task is not None and not _qzone_cookie_refresh_task.done():
-        _qzone_cookie_refresh_task.cancel()
-        try:
-            await _qzone_cookie_refresh_task
-        except asyncio.CancelledError:
-            pass
-    _qzone_cookie_refresh_task = None
+    await runtime_task_supervisor.shutdown(timeout=5.0)
     from .core.qzone_auth import qzone_login_manager
 
     await qzone_login_manager.shutdown()

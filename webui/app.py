@@ -35,6 +35,7 @@ from .routes.agent_status_routes import build_agent_status_router
 from .routes.data_transfer_routes import build_data_transfer_router
 from .routes.user_policy_routes import build_user_policy_router
 from .routes.outbound_routes import build_outbound_router
+from .routes.performance_routes import build_performance_router
 
 
 @dataclass
@@ -112,6 +113,7 @@ def build_router() -> APIRouter:
     router.include_router(build_tool_creator_router(runtime=runtime))
     router.include_router(build_user_policy_router(runtime=runtime))
     router.include_router(build_outbound_router(runtime=runtime))
+    router.include_router(build_performance_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
