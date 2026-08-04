@@ -1107,8 +1107,8 @@ function renderShellChrome() {
 function renderLayout() {
   return `<div id="shell-progress">${state.loading ? '<div class="progress-bar"></div>' : ''}</div>
     <div id="operation-live-region" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
-    <div class="layout">
     <div id="shell-scrim">${state.mobileNavOpen ? '<div class="scrim" onclick="toggleMobileNav()"></div>' : ''}</div>
+    <div class="layout">
     ${renderSidebar()}
     <main data-view="${escapeAttr(state.view)}" data-loading="${state.loading?'true':'false'}">
       <div id="shell-topbar">${renderTopbar()}</div>

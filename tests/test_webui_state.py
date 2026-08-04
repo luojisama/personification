@@ -78,6 +78,19 @@ def test_console_uses_stable_shell_and_releases_heavy_view_state() -> None:
     assert 'document.getElementById("agent-status-island")' in operations
 
 
+def test_shell_scrim_does_not_take_a_desktop_grid_column() -> None:
+    core = (STATIC / "app-core.js").read_text(encoding="utf-8")
+    render_layout = core[core.index("function renderLayout() {") : core.index("function renderView() {")]
+
+    layout_start = render_layout.index('<div class="layout">')
+    scrim_start = render_layout.index('id="shell-scrim"')
+    sidebar_start = render_layout.index("${renderSidebar()}")
+    main_start = render_layout.index("<main ")
+
+    assert scrim_start < layout_start < sidebar_start < main_start
+    assert render_layout.count('id="shell-scrim"') == 1
+
+
 def test_admin_pages_are_split_and_browser_metrics_stay_local_and_bounded() -> None:
     core = (STATIC / "app-core.js").read_text(encoding="utf-8")
     operations = (STATIC / "app-operations.js").read_text(encoding="utf-8")
