@@ -626,11 +626,16 @@ function renderBuiltinServiceCard() {
   if (!item) return '<section class="card"><p class="muted">原生 MCP 清单尚未初始化，请重载插件后重试。</p></section>';
   const desired = item.desired_enabled === true;
   const tools = item.tools || [];
+  const browserRuntime=(state.mcpBuiltin||{}).browser_runtime||{};
+  const openContexts=(browserRuntime.open_contexts||[]).map(platform=>MCP_PLATFORM_LABELS[platform]||platform);
+  const activeCount=Object.values(browserRuntime.activity||{}).reduce((sum,value)=>sum+Number(value||0),0);
+  const evictions=(browserRuntime.diagnostics||[]).filter(item=>item.code==="browser_context_idle_evicted").length;
   return `<section class="card mcp-native-service">
     <div class="mcp-section-heading"><div><span class="eyebrow">BUILTIN SERVICE</span><h2>社交平台游戏梗查证</h2><p>登录态只保存在四个平台各自的浏览器 profile；Agent 只能调用三个固定只读工具。</p></div>
       <div class="mcp-runtime-actions"><span class="mcp-state ${mcpStatusTone(item.process_state)}"><i></i>${escapeHtml(item.process_state || "stopped")}</span><button class="btn ${desired ? "danger" : "primary"}" data-mcp-installation-toggle="${MCP_BUILTIN_ID}" data-mcp-enabled="${desired ? "false" : "true"}">${desired ? "停止服务" : "开启服务"}</button><button class="btn" data-mcp-reload>重载并诊断</button></div></div>
     <div class="mcp-native-tool-grid">${tools.map(tool => `<article><div><strong>${escapeHtml(tool.title || tool.remote_name)}</strong><code>${escapeHtml(tool.remote_name || "")}</code><small>source_kind=mcp_builtin · risk_level=low · side_effect=none</small></div><button class="btn small ${tool.authorized ? "danger" : "primary"}" data-mcp-tool-toggle="${escapeAttr(tool.remote_name || "")}" data-mcp-installation="${MCP_BUILTIN_ID}" data-mcp-enabled="${tool.authorized ? "false" : "true"}" data-mcp-risk="builtin">${tool.authorized ? "撤销授权" : "授权给 Agent"}</button></article>`).join("")}</div>
     <p class="muted">实际可用还要求：服务进程存活、工具已授权注册，并且至少一个已开启平台处于已登录且能力健康状态。</p>
+    <p class="muted">浏览器资源：打开 ${escapeHtml(openContexts.join("、")||"无")} · 活动租约 ${activeCount} · 空闲回收 ${evictions} 次 · ${Number(browserRuntime.idle_timeout_seconds||300)} 秒无活动后关闭 context，磁盘登录态保留。</p>
   </section>`;
 }
 

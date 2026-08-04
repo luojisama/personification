@@ -10,6 +10,7 @@ import stat
 import subprocess
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -84,6 +85,8 @@ _INTERACTIVE_KEYS = frozenset(
         "PageDown",
     }
 )
+_BROWSER_CONTEXT_IDLE_SECONDS = 5 * 60.0
+_BROWSER_DIAGNOSTIC_LIMIT = 64
 
 
 def _restrict_private_directory(path: Path) -> None:
@@ -159,7 +162,7 @@ class AuthSession:
 
 
 class BrowserPool:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, idle_timeout_seconds: float = _BROWSER_CONTEXT_IDLE_SECONDS) -> None:
         self.root = root.resolve()
         self.profiles_root = (self.root / "profiles").resolve()
         self.profiles_root.mkdir(parents=True, exist_ok=True)
@@ -170,6 +173,115 @@ class BrowserPool:
         self._browser_channel: dict[str, str] = {}
         self._locks = {platform: asyncio.Lock() for platform in PLATFORMS}
         self._auth: dict[str, AuthSession] = {}
+        self._idle_timeout_seconds = max(0.01, float(idle_timeout_seconds))
+        self._activity_counts = {platform: 0 for platform in PLATFORMS}
+        self._last_activity = {platform: time.monotonic() for platform in PLATFORMS}
+        self._idle_tasks: dict[str, asyncio.Task[None]] = {}
+        self._diagnostics: list[dict[str, Any]] = []
+
+    def _record_diagnostic(self, code: str, platform: str) -> None:
+        self._diagnostics.append(
+            {
+                "code": str(code),
+                "platform": str(platform),
+                "created_at": time.time(),
+            }
+        )
+        if len(self._diagnostics) > _BROWSER_DIAGNOSTIC_LIMIT:
+            del self._diagnostics[: len(self._diagnostics) - _BROWSER_DIAGNOSTIC_LIMIT]
+
+    def runtime_status(self) -> dict[str, Any]:
+        return {
+            "idle_timeout_seconds": self._idle_timeout_seconds,
+            "open_contexts": sorted(self._contexts),
+            "activity": {
+                platform: int(self._activity_counts.get(platform, 0))
+                for platform in PLATFORMS
+            },
+            "diagnostics": [dict(item) for item in self._diagnostics[-10:]],
+        }
+
+    def _cancel_idle_task(self, platform: str) -> None:
+        task = self._idle_tasks.pop(platform, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _platform_session_protected(self, platform: str) -> bool:
+        now = time.time()
+        for session in self._auth.values():
+            if session.platform != platform:
+                continue
+            if self.manual_browser_running(session):
+                return True
+            task = session.interactive_start_task
+            if task is not None and not task.done():
+                return True
+            if session.interactive_lock.locked():
+                return True
+            if (
+                session.expires_at > now
+                and session.status not in {"success", "expired", "cancelled", "error"}
+            ):
+                return True
+        return False
+
+    def _schedule_idle_eviction(self, platform: str) -> None:
+        self._cancel_idle_task(platform)
+        if platform not in self._contexts or self._activity_counts.get(platform, 0) > 0:
+            return
+        task = asyncio.create_task(
+            self._idle_evict_after(platform),
+            name=f"social-browser-idle:{platform}",
+        )
+        self._idle_tasks[platform] = task
+
+        def consume(completed: asyncio.Task[None]) -> None:
+            if self._idle_tasks.get(platform) is completed:
+                self._idle_tasks.pop(platform, None)
+            if completed.cancelled():
+                return
+            try:
+                completed.exception()
+            except Exception:
+                return
+
+        task.add_done_callback(consume)
+
+    async def _idle_evict_after(self, platform: str) -> None:
+        while True:
+            elapsed = time.monotonic() - self._last_activity.get(platform, 0.0)
+            await asyncio.sleep(max(0.01, self._idle_timeout_seconds - elapsed))
+            async with self._locks[platform]:
+                if self._activity_counts.get(platform, 0) > 0:
+                    return
+                if self._platform_session_protected(platform):
+                    self._last_activity[platform] = time.monotonic()
+                    continue
+                context = self._contexts.pop(platform, None)
+                self._context_headless.pop(platform, None)
+                if context is None:
+                    return
+                await context.close()
+                self._record_diagnostic("browser_context_idle_evicted", platform)
+                return
+
+    @asynccontextmanager
+    async def activity(self, platform: str):
+        if platform not in PLATFORMS:
+            raise ValueError("unsupported platform")
+        self._cancel_idle_task(platform)
+        self._activity_counts[platform] = self._activity_counts.get(platform, 0) + 1
+        self._last_activity[platform] = time.monotonic()
+        try:
+            yield
+        finally:
+            self._activity_counts[platform] = max(
+                0,
+                self._activity_counts.get(platform, 0) - 1,
+            )
+            self._last_activity[platform] = time.monotonic()
+            if self._activity_counts[platform] == 0:
+                self._schedule_idle_eviction(platform)
 
     async def _ensure_runtime(self) -> None:
         if self._playwright is not None:
@@ -245,6 +357,7 @@ class BrowserPool:
         return await context.new_page()
 
     async def close_platform(self, platform: str) -> None:
+        self._cancel_idle_task(platform)
         async with self._locks[platform]:
             context = self._contexts.pop(platform, None)
             self._context_headless.pop(platform, None)
@@ -252,6 +365,12 @@ class BrowserPool:
                 await context.close()
 
     async def close(self) -> None:
+        idle_tasks = list(self._idle_tasks.values())
+        self._idle_tasks.clear()
+        for task in idle_tasks:
+            task.cancel()
+        if idle_tasks:
+            await asyncio.gather(*idle_tasks, return_exceptions=True)
         for session in self._auth.values():
             await self._cancel_interactive_start(session)
             await self._stop_manual_browser(session)

@@ -198,6 +198,10 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
     source = _source("app-mcp.js")
     styles = _source("style.css")
 
+    assert "browser_context_idle_evicted" in source
+    assert "空闲回收" in source
+    assert "磁盘登录态保留" in source
+
     for visible_copy in (
             "原生 MCP",
             "扩展 MCP",

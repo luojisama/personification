@@ -39,6 +39,8 @@ def test_social_research_server_exposes_only_read_tools_and_control_is_not_liste
     assert all(tool["annotations"]["readOnlyHint"] is True for tool in tools)
     assert not any("auth" in tool["name"] or "configure" in tool["name"] for tool in tools)
     assert set(status["platforms"]) == {"bilibili", "douyin", "tieba", "xiaoheihe"}
+    assert status["browser_runtime"]["idle_timeout_seconds"] == 300.0
+    assert status["browser_runtime"]["open_contexts"] == []
     assert all(item["state"] == "disabled" for item in status["platforms"].values())
     assert all("enabled" not in item["config"] for item in status["platforms"].values())
 
@@ -47,6 +49,58 @@ def test_social_research_server_exposes_only_read_tools_and_control_is_not_liste
     assert search["inputSchema"]["properties"]["limit"]["default"] == 10
     assert research["inputSchema"]["properties"]["limit"]["default"] == 10
     assert {"aggregation", "source_groups"} <= set(search["outputSchema"]["properties"])
+
+
+def test_browser_pool_evicts_only_idle_unprotected_contexts_and_keeps_profile(tmp_path: Path) -> None:
+    browser_mod = load_personification_module("plugin.personification.native_mcp.social_research.browser")
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    async def run() -> None:
+        pool = browser_mod.BrowserPool(tmp_path, idle_timeout_seconds=0.02)
+        profile = pool.profile_dir("douyin")
+        profile.mkdir(parents=True, exist_ok=True)
+        marker = profile / "Cookies"
+        marker.write_text("persistent", encoding="utf-8")
+        douyin = FakeContext()
+        pool._contexts["douyin"] = douyin
+        pool._context_headless["douyin"] = True
+
+        async with pool.activity("douyin"):
+            await asyncio.sleep(0.04)
+            assert douyin.closed is False
+        await asyncio.sleep(0.06)
+        assert douyin.closed is True
+        assert marker.read_text(encoding="utf-8") == "persistent"
+        assert "douyin" not in pool._contexts
+        assert pool.runtime_status()["diagnostics"][-1]["code"] == "browser_context_idle_evicted"
+
+        tieba = FakeContext()
+        pool._contexts["tieba"] = tieba
+        pool._context_headless["tieba"] = True
+        session = browser_mod.AuthSession(
+            session_id="protected",
+            platform="tieba",
+            owner="admin",
+            status="manual_verification_required",
+            expires_at=time.time() + 60,
+        )
+        pool._auth[session.session_id] = session
+        async with pool.activity("tieba"):
+            pass
+        await asyncio.sleep(0.06)
+        assert tieba.closed is False
+        session.status = "success"
+        await asyncio.sleep(0.08)
+        assert tieba.closed is True
+        await pool.close()
+
+    asyncio.run(run())
 
 
 def test_platform_status_keeps_auth_probe_failure_partial_and_config_control_fields_separate(tmp_path: Path) -> None:

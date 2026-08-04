@@ -5,6 +5,7 @@ import json
 import math
 import os
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -78,10 +79,20 @@ class SocialResearchService:
         self._config_lock = asyncio.Lock()
         self._config = self._load_config()
 
+    @asynccontextmanager
+    async def _browser_activity(self, platform: str):
+        lease = getattr(self.browsers, "activity", None)
+        if not callable(lease):
+            yield
+            return
+        async with lease(platform):
+            yield
+
     async def _authenticated(self, platform: str, *, interactive: bool | None = None) -> bool:
         adapter = self.adapters[platform]
-        probe = adapter.authenticated() if interactive is None else adapter.authenticated(interactive=interactive)
-        return await asyncio.wait_for(probe, timeout=_AUTH_PROBE_TIMEOUT_SECONDS)
+        async with self._browser_activity(platform):
+            probe = adapter.authenticated() if interactive is None else adapter.authenticated(interactive=interactive)
+            return await asyncio.wait_for(probe, timeout=_AUTH_PROBE_TIMEOUT_SECONDS)
 
     def _load_config(self) -> dict[str, dict[str, Any]]:
         try:
@@ -156,7 +167,20 @@ class SocialResearchService:
 
     async def status(self) -> dict[str, Any]:
         results = await asyncio.gather(*(self._platform_status(platform) for platform in PLATFORMS))
-        return {"schema_version": 1, "platforms": {item["platform"]: item for item in results}}
+        return {
+            "schema_version": 1,
+            "platforms": {item["platform"]: item for item in results},
+            "browser_runtime": (
+                self.browsers.runtime_status()
+                if callable(getattr(self.browsers, "runtime_status", None))
+                else {
+                    "idle_timeout_seconds": None,
+                    "open_contexts": [],
+                    "activity": {},
+                    "diagnostics": [],
+                }
+            ),
+        }
 
     async def health(self) -> dict[str, Any]:
         status = await self.status()
@@ -175,7 +199,8 @@ class SocialResearchService:
             "embedded_qr", "manual_browser", "webui_interactive"
         }:
             raise ValueError("platform, owner and a valid auth mode are required")
-        return await self.adapters[platform].start_auth(owner, mode=mode)
+        async with self._browser_activity(platform):
+            return await self.adapters[platform].start_auth(owner, mode=mode)
 
     async def auth_status(self, params: dict[str, Any]) -> dict[str, Any]:
         owner = clean_text(params.get("owner"), 200)
@@ -244,21 +269,29 @@ class SocialResearchService:
         )
 
     async def auth_frame(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self.browsers.interactive_frame(
-            str(params.get("session_id") or ""),
-            clean_text(params.get("owner"), 200),
-            after_revision=params.get("after_revision", 0),
-        )
+        session_id = str(params.get("session_id") or "")
+        owner = clean_text(params.get("owner"), 200)
+        session = self.browsers.get_auth(session_id, owner)
+        async with self._browser_activity(session.platform):
+            return await self.browsers.interactive_frame(
+                session_id,
+                owner,
+                after_revision=params.get("after_revision", 0),
+            )
 
     async def auth_input(self, params: dict[str, Any]) -> dict[str, Any]:
         action = params.get("action")
         if not isinstance(action, dict):
             raise ValueError("interactive action is required")
-        return await self.browsers.interactive_action(
-            str(params.get("session_id") or ""),
-            clean_text(params.get("owner"), 200),
-            action,
-        )
+        session_id = str(params.get("session_id") or "")
+        owner = clean_text(params.get("owner"), 200)
+        session = self.browsers.get_auth(session_id, owner)
+        async with self._browser_activity(session.platform):
+            return await self.browsers.interactive_action(
+                session_id,
+                owner,
+                action,
+            )
 
     async def auth_finish(self, params: dict[str, Any]) -> dict[str, Any]:
         owner = clean_text(params.get("owner"), 200)
@@ -386,12 +419,13 @@ class SocialResearchService:
         config = {**base_config, "quality_mode": quality_mode}
 
         async def collect() -> list[dict[str, Any]]:
-            adapter, _ = await self._ready_adapter(platform)
-            return await adapter.search(
-                query,
-                limit=limit,
-                timeout_seconds=float(config["request_timeout_seconds"]),
-            )
+            async with self._browser_activity(platform):
+                adapter, _ = await self._ready_adapter(platform)
+                return await adapter.search(
+                    query,
+                    limit=limit,
+                    timeout_seconds=float(config["request_timeout_seconds"]),
+                )
 
         rows = await asyncio.wait_for(collect(), timeout=float(config["request_timeout_seconds"]) + 2)
         filtered = [apply_quality_filter(item, config) for item in rows]
@@ -523,33 +557,34 @@ class SocialResearchService:
         platform = str(params.get("platform") or "")
         if platform not in PLATFORMS:
             raise ValueError("unsupported platform")
-        adapter, config = await self._ready_adapter(platform)
-        include = params.get("include") if isinstance(params.get("include"), list) else ["caption", "comments", "replies", "danmaku"]
-        include = [str(item) for item in include]
-        comment_limit = min(200, max(0, int(params.get("comment_limit", config["comment_limit"]) or 0)))
-        danmaku_limit = min(500, max(0, int(params.get("danmaku_limit", config["danmaku_limit"]) or 0)))
-        content_id = clean_text(params.get("content_id"), 300)
-        url = clean_text(params.get("url"), 1000)
-        cache_key = json.dumps(
-            ["read", "opaque_media_v2", platform, content_id, url, include, comment_limit, danmaku_limit],
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        cached = self.cache.get(cache_key)
-        if cached is not None:
-            cached["cache_hit"] = True
-            return cached
-        raw = await asyncio.wait_for(
-            adapter.read(
-                content_id=content_id,
-                url=url,
-                include=include,
-                comment_limit=comment_limit,
-                danmaku_limit=danmaku_limit,
-                timeout_seconds=float(config["request_timeout_seconds"]),
-            ),
-            timeout=float(config["request_timeout_seconds"]) + 3,
-        )
+        async with self._browser_activity(platform):
+            adapter, config = await self._ready_adapter(platform)
+            include = params.get("include") if isinstance(params.get("include"), list) else ["caption", "comments", "replies", "danmaku"]
+            include = [str(item) for item in include]
+            comment_limit = min(200, max(0, int(params.get("comment_limit", config["comment_limit"]) or 0)))
+            danmaku_limit = min(500, max(0, int(params.get("danmaku_limit", config["danmaku_limit"]) or 0)))
+            content_id = clean_text(params.get("content_id"), 300)
+            url = clean_text(params.get("url"), 1000)
+            cache_key = json.dumps(
+                ["read", "opaque_media_v2", platform, content_id, url, include, comment_limit, danmaku_limit],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                cached["cache_hit"] = True
+                return cached
+            raw = await asyncio.wait_for(
+                adapter.read(
+                    content_id=content_id,
+                    url=url,
+                    include=include,
+                    comment_limit=comment_limit,
+                    danmaku_limit=danmaku_limit,
+                    timeout_seconds=float(config["request_timeout_seconds"]),
+                ),
+                timeout=float(config["request_timeout_seconds"]) + 3,
+            )
         item = apply_quality_filter(raw, config)
         self._register_item_media(platform, item)
         packet = ContentPacket(

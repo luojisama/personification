@@ -577,7 +577,33 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
                 "config": {key: value for key, value in merged_config.items() if key in CONFIG_FIELDS},
                 "runtime_state": live.get("state", "service_disabled"),
             }
-        return {"installation": installation, "platforms": platforms}
+        browser_runtime = dict(runtime_status.get("browser_runtime") or {})
+        return {
+            "installation": installation,
+            "platforms": platforms,
+            "browser_runtime": {
+                "idle_timeout_seconds": browser_runtime.get("idle_timeout_seconds"),
+                "open_contexts": [
+                    item for item in list(browser_runtime.get("open_contexts") or [])
+                    if item in PLATFORMS
+                ],
+                "activity": {
+                    platform: int((browser_runtime.get("activity") or {}).get(platform, 0) or 0)
+                    for platform in PLATFORMS
+                },
+                "diagnostics": [
+                    {
+                        "code": str(item.get("code") or ""),
+                        "platform": str(item.get("platform") or ""),
+                        "created_at": float(item.get("created_at") or 0),
+                    }
+                    for item in list(browser_runtime.get("diagnostics") or [])[-10:]
+                    if isinstance(item, dict)
+                    and item.get("code") == "browser_context_idle_evicted"
+                    and item.get("platform") in PLATFORMS
+                ],
+            },
+        }
 
     @router.post("/builtin/social-research/platforms/{platform}/configure")
     async def configure_builtin_platform(
