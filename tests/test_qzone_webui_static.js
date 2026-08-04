@@ -6,7 +6,7 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
 const core = fs.readFileSync(path.join(root, "webui", "static", "app-core.js"), "utf8");
-const admin = fs.readFileSync(path.join(root, "webui", "static", "app-admin.js"), "utf8");
+const admin = fs.readFileSync(path.join(root, "webui", "static", "app-qzone.js"), "utf8");
 const css = fs.readFileSync(path.join(root, "webui", "static", "style.css"), "utf8");
 
 assert.match(core, /personification_qzone_operation_id_v1/);

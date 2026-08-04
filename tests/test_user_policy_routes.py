@@ -202,7 +202,7 @@ def test_blacklist_manager_unblock_sequence_clears_manual_and_auto_state(tmp_pat
 def test_blacklist_manager_frontend_supports_friend_and_manual_sources() -> None:
     root = Path(__file__).resolve().parents[1]
     core_js = (root / "webui" / "static" / "app-core.js").read_text(encoding="utf-8")
-    admin_js = (root / "webui" / "static" / "app-admin.js").read_text(encoding="utf-8")
+    admin_js = (root / "webui" / "static" / "app-identity-policy.js").read_text(encoding="utf-8")
 
     assert 'userPolicyTier: "blocked"' in core_js
     assert 'api("/qq/friends?bot_id="+encodeURIComponent(state.userPolicyBotId)' in core_js

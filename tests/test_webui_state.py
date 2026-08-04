@@ -78,6 +78,36 @@ def test_console_uses_stable_shell_and_releases_heavy_view_state() -> None:
     assert 'document.getElementById("agent-status-island")' in operations
 
 
+def test_admin_pages_are_split_and_browser_metrics_stay_local_and_bounded() -> None:
+    core = (STATIC / "app-core.js").read_text(encoding="utf-8")
+    operations = (STATIC / "app-operations.js").read_text(encoding="utf-8")
+    bundles = (
+        "app-admin-common.js",
+        "app-dashboard.js",
+        "app-health-qq.js",
+        "app-qzone.js",
+        "app-identity-policy.js",
+        "app-persona-builder.js",
+        "app-groups.js",
+    )
+
+    assert not (STATIC / "app-admin.js").exists()
+    assert (STATIC / "app-admin-common.js").stat().st_size < 10_000
+    assert all((STATIC / filename).stat().st_size < 50_000 for filename in bundles[1:])
+    for filename in bundles:
+        assert filename in core
+    assert "function ensureAsset(filename)" in core
+    assert "_BROWSER_METRIC_SERIES_MAX=32" in core
+    assert "_BROWSER_METRIC_SAMPLES_MAX=64" in core
+    assert '.split("?",1)[0]' in core
+    assert 'observe("longtask"' in core
+    assert 'observe("layout-shift"' in core
+    assert 'observe("largest-contentful-paint"' in core
+    assert 'observe("event"' in core
+    assert "browserPerformanceSnapshot" in operations
+    assert "仅保存在本标签页" in operations
+
+
 def test_common_svg_icons_keep_a_fixed_baseline_without_active_translation() -> None:
     core = (STATIC / "app-core.js").read_text(encoding="utf-8")
     css = (STATIC / "style.css").read_text(encoding="utf-8")
@@ -100,7 +130,7 @@ def test_sensitive_memory_and_newer_config_drafts_survive_only_their_owner_sessi
 
     assert "function clearInMemorySensitiveState()" in core
     assert "state.configDrafts = {};" in core
-    assert 'if (res.status === 401) {\n      clearInMemorySensitiveState();' in core
+    assert 'if (res.status === 401) {\n        clearInMemorySensitiveState();' in core
     assert auth.count("clearInMemorySensitiveState();") >= 4
     assert "function clearMcpSensitiveState()" in mcp
     assert "_mcpPendingInstall = null;" in mcp

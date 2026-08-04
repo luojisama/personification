@@ -57,7 +57,7 @@ def test_management_surfaces_keep_stable_operation_codes() -> None:
 def test_management_frontend_does_not_collapse_known_failures_to_message_only() -> None:
     sources = "\n".join(
         (STATIC / filename).read_text(encoding="utf-8")
-        for filename in ("app-admin.js", "app-config.js", "app-content.js", "app-tools.js", "app-mcp.js", "app-auth.js", "app-activity.js", "app-operations.js")
+        for filename in ("app-admin-common.js", "app-dashboard.js", "app-health-qq.js", "app-qzone.js", "app-identity-policy.js", "app-persona-builder.js", "app-groups.js", "app-config.js", "app-content.js", "app-tools.js", "app-mcp.js", "app-auth.js", "app-activity.js", "app-operations.js")
     )
     legacy_patterns = (
         r"(?:切换失败|保存失败|添加失败|审核失败|重载失败|检查失败|更新失败)[：:]?\s*[\"']?\s*\+\s*e\.message",
@@ -79,7 +79,7 @@ def test_operation_histories_are_deduplicated_single_open_accordions() -> None:
     core = (STATIC / "app-core.js").read_text(encoding="utf-8")
     history_surfaces = "\n".join(
         (STATIC / filename).read_text(encoding="utf-8")
-        for filename in ("app-admin.js", "app-auth.js", "app-config.js", "app-content.js")
+        for filename in ("app-admin-common.js", "app-health-qq.js", "app-qzone.js", "app-identity-policy.js", "app-persona-builder.js", "app-groups.js", "app-auth.js", "app-config.js", "app-content.js")
     )
 
     assert "function operationDiagnosticFingerprint" in core

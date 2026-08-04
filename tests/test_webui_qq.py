@@ -226,7 +226,7 @@ def test_qq_call_returns_safe_stable_failure_diagnostics(
 
 def test_qq_frontend_keeps_and_renders_operation_diagnostics(_runtime_context) -> None:
     client = _build_client(_runtime_context)
-    js = client.get("/personification/static/app-admin.js")
+    js = client.get("/personification/static/app-health-qq.js")
     assert js.status_code == 200
     assert "function qqRememberDiagnostic" in js.text
     assert "state.qqDiagnostics = [diagnostic" in js.text

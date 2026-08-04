@@ -12,6 +12,21 @@ def _source(filename: str) -> str:
     return (STATIC / filename).read_text(encoding="utf-8")
 
 
+def _admin_source() -> str:
+    return "\n".join(
+        _source(filename)
+        for filename in (
+            "app-admin-common.js",
+            "app-dashboard.js",
+            "app-health-qq.js",
+            "app-qzone.js",
+            "app-identity-policy.js",
+            "app-persona-builder.js",
+            "app-groups.js",
+        )
+    )
+
+
 def _function(source: str, name: str) -> str:
     start = source.index(f"function {name}(")
     match = re.search(r"\n(?:async\s+)?function\s+\w+\(", source[start + 1 :])
@@ -70,7 +85,7 @@ def test_every_static_table_uses_a_named_focusable_scroll_region() -> None:
 
 
 def test_priority_renderers_keep_field_semantics() -> None:
-    admin = _source("app-admin.js")
+    admin = _admin_source()
     activity = _source("app-activity.js")
     content = _source("app-content.js")
     operations = _source("app-operations.js")
@@ -119,7 +134,7 @@ def test_priority_renderers_keep_field_semantics() -> None:
 
 
 def test_long_technical_values_and_dynamic_buttons_keep_mobile_contracts() -> None:
-    admin = _source("app-admin.js")
+    admin = _admin_source()
     activity = _source("app-activity.js")
     mcp = _source("app-mcp.js")
     creator = _source("app-tool-creator.js")
@@ -185,7 +200,7 @@ def test_rapid_navigation_never_renders_a_stale_lazy_view() -> None:
 def test_persona_prompt_loads_the_asset_that_defines_its_renderer() -> None:
     core = _source("app-core.js")
 
-    assert 'persona_prompt:"app-tools.js"' in core
+    assert 'persona_prompt:["app-tools.js"]' in core
     assert "function renderPersonaPrompt()" in _source("app-tools.js")
 
 

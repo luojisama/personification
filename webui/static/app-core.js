@@ -47,7 +47,7 @@ let state = {
 };
 
 const VIEW_ASSETS = {
-  dashboard:"app-admin.js",health:"app-admin.js",qzone:"app-admin.js",personas:"app-admin.js",groups:"app-admin.js",group_switch:"app-admin.js",persona_prompt:"app-tools.js",persona_builder:"app-admin.js",qq:"app-admin.js",user_policy:"app-admin.js",outbound:"app-admin.js",
+  dashboard:["app-dashboard.js"],health:["app-admin-common.js","app-health-qq.js"],qzone:["app-admin-common.js","app-qzone.js"],personas:["app-admin-common.js","app-identity-policy.js"],groups:["app-admin-common.js","app-groups.js"],group_switch:["app-admin-common.js","app-groups.js"],persona_prompt:["app-tools.js"],persona_builder:["app-admin-common.js","app-persona-builder.js"],qq:["app-health-qq.js"],user_policy:["app-admin-common.js","app-identity-policy.js"],outbound:["app-admin-common.js","app-identity-policy.js"],
   config:"app-config.js",memory:"app-content.js",memory_graph:"app-content.js",stickers:"app-content.js",
   skills:"app-tools.js",mcp:"app-mcp.js",tool_creator:"app-tool-creator.js",plugin_knowledge:"app-tools.js",plugin_manager:"app-tools.js",test:"app-tools.js",
   proactive:"app-activity.js",audit:"app-activity.js",logs:"app-activity.js",traces:"app-activity.js",trace_detail:"app-activity.js",
@@ -119,7 +119,12 @@ function queueScrollStateCapture() {
 }
 
 function ensureViewAsset(view) {
-  const filename=VIEW_ASSETS[view];
+  const value=VIEW_ASSETS[view];
+  const filenames=Array.isArray(value)?value:[value].filter(Boolean);
+  return filenames.reduce((pending,filename)=>pending.then(()=>ensureAsset(filename)),Promise.resolve());
+}
+
+function ensureAsset(filename) {
   if(!filename||_loadedAssets.has(filename))return Promise.resolve();
   if(_assetInflight.has(filename))return _assetInflight.get(filename);
   const promise=new Promise((resolve,reject)=>{const script=document.createElement("script");const version=(window.PERSONIFICATION_ASSET_VERSIONS||{})[filename]||"";script.src=`/personification/static/${filename}${version?`?v=${encodeURIComponent(version)}`:""}`;script.onload=()=>{_loadedAssets.add(filename);resolve();};script.onerror=()=>reject(new Error(`页面资源加载失败：${filename}`));document.head.appendChild(script);});
@@ -141,6 +146,82 @@ function readCookie(name) {
 }
 
 const _apiInflight = new Map();
+const _browserPerformance = {
+  api:new Map(),
+  renders:new Map(),
+  longTasks:[],
+  layoutShift:0,
+  lcpMs:null,
+  interactions:[],
+};
+const _BROWSER_METRIC_SERIES_MAX=32;
+const _BROWSER_METRIC_SAMPLES_MAX=64;
+
+function browserMetricKey(path){
+  const pathname=String(path||"").split("?",1)[0];
+  return pathname.split("/").map(segment=>{
+    if(!segment)return "";
+    if(/^\d{4,}$/.test(segment)||segment.length>24||/^[0-9a-f-]{16,}$/i.test(segment))return ":id";
+    return segment;
+  }).join("/").slice(0,120)||"/unknown";
+}
+
+function recordBrowserSeries(container,key,value){
+  const duration=Math.max(0,Number(value||0));
+  let samples=container.get(key);
+  if(!samples){
+    if(container.size>=_BROWSER_METRIC_SERIES_MAX)key="overflow";
+    samples=container.get(key)||[];
+    container.set(key,samples);
+  }
+  samples.push(duration);
+  if(samples.length>_BROWSER_METRIC_SAMPLES_MAX)samples.splice(0,samples.length-_BROWSER_METRIC_SAMPLES_MAX);
+}
+
+function browserPercentile(values,ratio){
+  if(!values.length)return 0;
+  const ordered=values.slice().sort((a,b)=>a-b);
+  return ordered[Math.min(ordered.length-1,Math.max(0,Math.ceil(ordered.length*ratio)-1))]||0;
+}
+
+function recordBrowserRender(view,startedAt){
+  if(typeof performance==="undefined")return;
+  recordBrowserSeries(_browserPerformance.renders,String(view||"unknown"),performance.now()-Number(startedAt||0));
+}
+
+function browserPerformanceSnapshot(){
+  const apiRows=[..._browserPerformance.api.entries()].map(([key,values])=>({key,count:values.length,p50_ms:browserPercentile(values,.5),p95_ms:browserPercentile(values,.95),max_ms:Math.max(0,...values)})).sort((a,b)=>b.p95_ms-a.p95_ms);
+  const renderValues=[..._browserPerformance.renders.values()].flat();
+  const interactionValues=_browserPerformance.interactions.slice();
+  return {
+    api:apiRows.slice(0,8),
+    render:{count:renderValues.length,p50_ms:browserPercentile(renderValues,.5),p95_ms:browserPercentile(renderValues,.95),max_ms:Math.max(0,...renderValues)},
+    long_tasks:{count:_browserPerformance.longTasks.length,max_ms:Math.max(0,..._browserPerformance.longTasks)},
+    layout_shift:Number(_browserPerformance.layoutShift||0),
+    lcp_ms:_browserPerformance.lcpMs,
+    interaction:{count:interactionValues.length,p75_ms:browserPercentile(interactionValues,.75),max_ms:Math.max(0,...interactionValues)},
+  };
+}
+
+function initBrowserPerformanceObservers(){
+  if(typeof PerformanceObserver==="undefined")return;
+  const observe=(type,handler)=>{
+    try{const observer=new PerformanceObserver(list=>list.getEntries().forEach(handler));observer.observe({type,buffered:true});}catch{}
+  };
+  observe("longtask",entry=>{
+    _browserPerformance.longTasks.push(Number(entry.duration||0));
+    if(_browserPerformance.longTasks.length>100)_browserPerformance.longTasks.splice(0,_browserPerformance.longTasks.length-100);
+  });
+  observe("layout-shift",entry=>{if(!entry.hadRecentInput)_browserPerformance.layoutShift+=Number(entry.value||0);});
+  observe("largest-contentful-paint",entry=>{_browserPerformance.lcpMs=Number(entry.startTime||0);});
+  observe("event",entry=>{
+    if(Number(entry.duration||0)<=0)return;
+    _browserPerformance.interactions.push(Number(entry.duration||0));
+    if(_browserPerformance.interactions.length>100)_browserPerformance.interactions.splice(0,_browserPerformance.interactions.length-100);
+  });
+}
+
+initBrowserPerformanceObservers();
 
 class ApiError extends Error {
   constructor(diagnostic, status=0, path="") {
@@ -428,21 +509,26 @@ async function api(path, opts = {}) {
     return _apiInflight.get(dedupKey);
   }
   const promise = (async () => {
+    const requestStarted=typeof performance!=="undefined"?performance.now():0;
     const requestOpts = { credentials: "include", ...opts, headers };
-    if (method === "GET" && !requestOpts.signal && _viewAbortController) requestOpts.signal = _viewAbortController.signal;
-    const res = await fetch(API + path, requestOpts);
-    if (res.status === 401) {
-      clearInMemorySensitiveState();
-      state.logged = false;
-      refreshEligibleAdmins().finally(() => render());
-      throw new Error("未登录");
+    try{
+      if (method === "GET" && !requestOpts.signal && _viewAbortController) requestOpts.signal = _viewAbortController.signal;
+      const res = await fetch(API + path, requestOpts);
+      if (res.status === 401) {
+        clearInMemorySensitiveState();
+        state.logged = false;
+        refreshEligibleAdmins().finally(() => render());
+        throw new Error("未登录");
+      }
+      if (!res.ok) {
+        let payload = {message:res.statusText || "请求失败"};
+        try { payload = await res.json(); } catch {}
+        throw new ApiError(normalizeApiDiagnostic(payload, res.status), res.status, path);
+      }
+      return res.status === 204 ? null : await res.json();
+    }finally{
+      if(requestStarted)recordBrowserSeries(_browserPerformance.api,browserMetricKey(path),performance.now()-requestStarted);
     }
-    if (!res.ok) {
-      let payload = {message:res.statusText || "请求失败"};
-      try { payload = await res.json(); } catch {}
-      throw new ApiError(normalizeApiDiagnostic(payload, res.status), res.status, path);
-    }
-    return res.status === 204 ? null : await res.json();
   })();
   if (dedupKey) {
     _apiInflight.set(dedupKey, promise);
@@ -841,13 +927,14 @@ function enterViewLifecycle(view) {
 }
 
 function render() {
+  const renderStarted=typeof performance!=="undefined"?performance.now():0;
   const root = document.getElementById("app");
   captureScrollState();
-  if (state.devicePending) { root.dataset.webuiMode="device-pending"; root.innerHTML = renderDevicePending(); return; }
+  if (state.devicePending) { root.dataset.webuiMode="device-pending"; root.innerHTML = renderDevicePending(); recordBrowserRender("device_pending",renderStarted); return; }
   if (!state.logged) {
     if (state.view === "qzone" && typeof stopQzoneViewLifecycle === "function") stopQzoneViewLifecycle();
     if (state.view === "mcp" && typeof stopMcpViewLifecycle === "function") stopMcpViewLifecycle();
-    root.dataset.webuiMode="login"; root.innerHTML = renderLogin(); attachLogin(); return;
+    root.dataset.webuiMode="login"; root.innerHTML = renderLogin(); attachLogin(); recordBrowserRender("login",renderStarted); return;
   }
   const shellMounted=root.dataset.webuiMode==="console"&&Boolean(root.querySelector("#view-content"));
   if(!shellMounted){
@@ -857,6 +944,7 @@ function render() {
     attachLayout();
     prepareDetailState(root);
     flushOperationAnnouncement();
+    recordBrowserRender(state.view,renderStarted);
     return;
   }
   // 活动视图局部重绘仍可能让输入失焦；仅在页面容器内保存并恢复光标。
@@ -888,6 +976,7 @@ function render() {
       } catch (_) { /* number/email inputs 不支持 setSelectionRange，忽略 */ }
     }
   }
+  recordBrowserRender(state.view,renderStarted);
 }
 
 const ICON_PATHS = {
