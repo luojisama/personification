@@ -1481,6 +1481,11 @@ async def process_yaml_response_logic(
 
     user_content: Any = input_text
     tool_image_urls = list(last_images)
+    tool_video_urls = [
+        item.ref
+        for item in turn_media_refs
+        if item.kind == "video" and str(item.ref or "").strip()
+    ][:1]
     image_detail = normalize_image_detail(
         getattr(plugin_config, "personification_image_detail", "auto")
     )
@@ -1740,7 +1745,11 @@ async def process_yaml_response_logic(
                 )
         except Exception as exc:
             logger.debug(f"拟人插件 (YAML)：注册本地表情包发送工具失败: {exc}")
-        image_ctx_token = set_current_image_context(tool_image_urls, input_text)
+        image_ctx_token = set_current_image_context(
+            tool_image_urls,
+            input_text,
+            tool_video_urls,
+        )
         ack_phrase = ""
         if is_direct_mention:
             ack_phrase = pick_ack_phrase(

@@ -389,6 +389,9 @@ def build_plugin_runtime(
         f"primary={route_state['primary']} "
         f"fallback={route_state['fallback']} "
         f"fallback_source={route_state['fallback_source'] or 'none'} "
+        f"video_route={route_state['video_route_mode']} "
+        f"video_frames={route_state['video_frame_preset']} "
+        f"video_asr={route_state['audio_transcription_provider']} "
         f"video_fallback={route_state['video_fallback']} "
         f"video_fallback_source={route_state['video_fallback_source'] or 'none'}"
     )

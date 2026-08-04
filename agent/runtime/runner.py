@@ -410,6 +410,15 @@ async def run_agent(
     user_images = list(current_image_urls or [])
     if not user_images:
         user_images = _extract_latest_user_images(messages)
+    user_video_count = sum(
+        1
+        for item in list(turn_media_context or [])
+        if str(
+            item.get("kind", "") if isinstance(item, dict) else getattr(item, "kind", "")
+        ).strip().lower()
+        == "video"
+    )
+    has_visual_media = bool(user_images or user_video_count)
     preliminary_query_text = _clean_user_query_text(
         contextual_query_text
         or focus_query_text
@@ -467,7 +476,7 @@ async def run_agent(
     chat_intent = intent_decision.chat_intent
     plugin_query_intent = intent_decision.plugin_question_intent if chat_intent == "plugin_question" else ""
     runtime_chat_intent = chat_intent
-    evidence_turn_plan = _plan_for_evidence(turn_plan, intent_decision, has_images=bool(user_images))
+    evidence_turn_plan = _plan_for_evidence(turn_plan, intent_decision, has_images=has_visual_media)
     effective_max_steps = _normalize_agent_max_steps(
         max_steps if max_steps is not None else getattr(plugin_config, "personification_agent_max_steps", DEFAULT_AGENT_MAX_STEPS)
     )
@@ -523,7 +532,7 @@ async def run_agent(
         status="info",
         detail=(
             f"max_steps={effective_max_steps} builtin_search={bool(use_builtin_search)} "
-            f"images={len(user_images)} required={str(bool(reply_required)).lower()} "
+            f"images={len(user_images)} videos={user_video_count} required={str(bool(reply_required)).lower()} "
             f"caller={type(tool_caller).__name__} elapsed_ms=0"
         ),
     )
@@ -557,7 +566,7 @@ async def run_agent(
             primary_query=preliminary_query_text,
             query_candidates=[preliminary_query_text] if preliminary_query_text else [],
             context_clues=[],
-            need_image_understanding=bool(user_images),
+            need_image_understanding=has_visual_media,
             recommended_tools=recommended_tools_for_chat_intent(registry, runtime_chat_intent),
             search_plan=[],
             source="skipped",
@@ -802,7 +811,7 @@ async def run_agent(
         await _append_evidence_guidance_if_needed()
         active_schemas = _select_tool_schemas(
             registry,
-            has_images=bool(user_images),
+            has_images=has_visual_media,
             chat_intent=runtime_chat_intent,
             plugin_question_intent=plugin_query_intent,
         )

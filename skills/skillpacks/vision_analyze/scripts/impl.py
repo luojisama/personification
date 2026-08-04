@@ -11,7 +11,10 @@ from plugin.personification.core.media_understanding import (
     analyze_videos_with_route_or_fallback,
     primary_route_supports_native_video,
 )
-from plugin.personification.skills.skillpacks.sticker_tool.scripts.impl import get_current_image_urls
+from plugin.personification.skills.skillpacks.sticker_tool.scripts.impl import (
+    get_current_image_urls,
+    get_current_video_urls,
+)
 VISION_ANALYZE_PROMPT = """你是 ACG 场景多媒体分析器。
 请基于图片/视频和用户问题，输出一个 JSON 对象，不要输出解释性文字。
 
@@ -62,7 +65,10 @@ async def analyze_images(
     raw_refs = list(images or []) + list(image_urls or [])
     if not raw_refs:
         raw_refs = get_current_image_urls()
-    normalized_media = normalize_media_refs(images=raw_refs, videos=list(videos or []), image_limit=3, video_limit=1)
+    raw_videos = list(videos or [])
+    if not raw_videos:
+        raw_videos = get_current_video_urls()
+    normalized_media = normalize_media_refs(images=raw_refs, videos=raw_videos, image_limit=3, video_limit=1)
     refs = list(normalized_media.get("images") or [])
     invalid_refs = list(normalized_media.get("image_problems") or [])
     video_refs = list(normalized_media.get("videos") or [])
@@ -108,6 +114,7 @@ async def analyze_images(
             runtime=runtime,
             prompt=prompt,
             video_refs=video_refs,
+            context_terms=[str(query or "").strip()],
         )
         if video_output:
             outputs.append((video_output, video_mode))
@@ -132,7 +139,19 @@ async def analyze_images(
         )
 
     if len(outputs) == 1:
-        return outputs[0][0]
+        output, output_mode = outputs[0]
+        try:
+            parsed_output = json.loads(str(output or "").strip())
+        except Exception:
+            parsed_output = None
+        if isinstance(parsed_output, dict):
+            notes = [str(item or "").strip() for item in list(parsed_output.get("ambiguity_notes") or [])]
+            if output_mode and output_mode not in notes:
+                notes.append(output_mode)
+            parsed_output["ambiguity_notes"] = [item for item in notes if item][:8]
+            parsed_output["analysis_route"] = output_mode
+            return json.dumps(parsed_output, ensure_ascii=False)
+        return output
 
     per_image: list[dict[str, Any]] = []
     merged_summaries: list[str] = []
@@ -206,14 +225,15 @@ def build_vision_tool(runtime: Any) -> AgentTool:
         name="vision_analyze",
         description=(
             "分析用户当前发送的图片或视频，适合识别人物、作品、截图界面、画面元素、OCR 文本、视频动作变化和可能的 ACG 候选。"
-            "Gemini 官方路由可直接处理视频。输出候选和证据，不强行给单一结论。"
+            "支持全模态模型原生视频，也支持关键帧分镜与可选音频转写降级；社交 MCP 结果含 video_ref 时可把它作为 videos 输入继续读正文视频。"
+            "输出候选和证据，不强行给单一结论。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "用户问题或分析目标"},
                 "images": {"type": "array", "items": {"type": "string"}, "description": "图片引用列表"},
-                "videos": {"type": "array", "items": {"type": "string"}, "description": "视频引用列表；Gemini 官方路由可原生理解视频"},
+                "videos": {"type": "array", "items": {"type": "string"}, "description": "视频引用列表；省略时自动使用当前消息或引用消息中的视频"},
             },
             "required": ["query"],
         },

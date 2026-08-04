@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -10,6 +11,7 @@ from typing import Any, Sequence
 import httpx
 
 from .ai_routes import resolve_video_fallback_provider
+from .audio_transcription import transcribe_audio_file
 from .gemini_transport import raise_for_gemini_status, request_with_gemini_auth
 from .image_input import is_image_input_unsupported_error, provider_supports_vision
 from .sensitive_data import sanitize_text
@@ -18,6 +20,7 @@ from .message_parts import build_user_message_content
 from .model_router import MODEL_ROLE_STICKER, get_model_override_for_role
 from .llm_context import use_single_attempt_retry_policy
 from .visual_capabilities import VISUAL_ROUTE_AGENT, error_indicates_vision_unavailable, provider_supports_video
+from .video_understanding import prepare_video_storyboard
 
 
 def build_tool_caller(config: Any) -> Any:
@@ -55,6 +58,13 @@ def _normalize_media_api_type(api_type: str) -> str:
     if value == "anthropic":
         return "anthropic"
     return "openai"
+
+
+def normalize_video_route_mode(value: Any) -> str:
+    normalized = str(value or "auto").strip().lower().replace("-", "_")
+    aliases = {"direct": "native", "frames": "storyboard", "frame": "storyboard"}
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in {"auto", "native", "hybrid", "storyboard"} else "auto"
 
 
 def _is_provider_usable(provider: dict[str, Any]) -> bool:
@@ -376,6 +386,16 @@ def _gemini_endpoint(base_url: str, model: str) -> str:
     return f"{root}/models/{model}:generateContent"
 
 
+def _gemini_api_root(base_url: str) -> str:
+    raw = str(base_url or "").strip().rstrip("/") or "https://generativelanguage.googleapis.com"
+    lower = raw.lower()
+    if lower.endswith("/v1beta"):
+        return raw
+    if lower.endswith("/v1"):
+        return f"{raw[:-3]}/v1beta"
+    return f"{raw}/v1beta"
+
+
 def _gemini_headers() -> dict[str, str]:
     return {"Content-Type": "application/json"}
 
@@ -430,6 +450,121 @@ def _gemini_video_part(video_ref: str) -> dict[str, Any]:
     }
 
 
+async def _upload_gemini_video_file(
+    *,
+    client: httpx.AsyncClient,
+    api_key: str,
+    base_url: str,
+    auth_mode: str,
+    path: Path,
+) -> tuple[dict[str, Any], str]:
+    size = path.stat().st_size
+    mime_type, _ = mimetypes.guess_type(str(path))
+    mime = mime_type or "video/mp4"
+    upload_endpoint = f"{_gemini_api_root(base_url).rsplit('/v1beta', 1)[0]}/upload/v1beta/files"
+
+    async def _start(auth):  # noqa: ANN001, ANN202
+        return await client.post(
+            upload_endpoint,
+            headers={
+                **auth.headers,
+                "Content-Type": "application/json",
+                "X-Goog-Upload-Protocol": "resumable",
+                "X-Goog-Upload-Command": "start",
+                "X-Goog-Upload-Header-Content-Length": str(size),
+                "X-Goog-Upload-Header-Content-Type": mime,
+            },
+            params=auth.params,
+            json={"file": {"display_name": path.name}},
+        )
+
+    start_result = await request_with_gemini_auth(
+        endpoint=upload_endpoint,
+        api_key=api_key,
+        auth_mode=auth_mode,
+        send=_start,
+        allow_negotiation=not use_single_attempt_retry_policy(),
+    )
+    start_response = start_result.response
+    raise_for_gemini_status(
+        start_response,
+        auth_mode=start_result.mode,
+        request_count=start_result.request_count,
+    )
+    upload_url = str(start_response.headers.get("x-goog-upload-url") or "").strip()
+    if not upload_url:
+        raise ValueError("gemini_video_upload_url_missing")
+    with path.open("rb") as handle:
+        upload_response = await client.post(
+            upload_url,
+            headers={
+                "Content-Length": str(size),
+                "X-Goog-Upload-Offset": "0",
+                "X-Goog-Upload-Command": "upload, finalize",
+            },
+            content=handle,
+        )
+    upload_response.raise_for_status()
+    payload = dict(upload_response.json() or {})
+    file_info = payload.get("file") if isinstance(payload.get("file"), dict) else payload
+    file_name = str(file_info.get("name") or "").strip()
+    file_uri = str(file_info.get("uri") or "").strip()
+    if not file_name or not file_uri:
+        raise ValueError("gemini_video_upload_result_invalid")
+
+    file_endpoint = f"{_gemini_api_root(base_url)}/{file_name}"
+    deadline = asyncio.get_running_loop().time() + 90.0
+    while str(file_info.get("state") or {}).upper() not in {"ACTIVE", "FAILED"}:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError("gemini_video_file_processing_timeout")
+
+        async def _poll(auth):  # noqa: ANN001, ANN202
+            return await client.get(file_endpoint, headers=auth.headers, params=auth.params)
+
+        poll_result = await request_with_gemini_auth(
+            endpoint=file_endpoint,
+            api_key=api_key,
+            auth_mode=auth_mode,
+            send=_poll,
+            allow_negotiation=not use_single_attempt_retry_policy(),
+        )
+        poll_response = poll_result.response
+        raise_for_gemini_status(
+            poll_response,
+            auth_mode=poll_result.mode,
+            request_count=poll_result.request_count,
+        )
+        file_info = dict(poll_response.json() or {})
+        await asyncio.sleep(1.0)
+    if str(file_info.get("state") or "").upper() != "ACTIVE":
+        raise ValueError("gemini_video_file_processing_failed")
+    return {"fileData": {"mimeType": mime, "fileUri": file_uri}}, file_name
+
+
+async def _delete_gemini_file(
+    *,
+    client: httpx.AsyncClient,
+    api_key: str,
+    base_url: str,
+    auth_mode: str,
+    file_name: str,
+) -> None:
+    endpoint = f"{_gemini_api_root(base_url)}/{str(file_name or '')}"
+
+    async def _delete(auth):  # noqa: ANN001, ANN202
+        return await client.delete(endpoint, headers=auth.headers, params=auth.params)
+
+    result = await request_with_gemini_auth(
+        endpoint=endpoint,
+        api_key=api_key,
+        auth_mode=auth_mode,
+        send=_delete,
+        allow_negotiation=False,
+    )
+    if result.response.status_code not in {200, 204, 404}:
+        raise_for_gemini_status(result.response, auth_mode=result.mode, request_count=result.request_count)
+
+
 async def _call_gemini_media(
     *,
     api_key: str,
@@ -443,36 +578,65 @@ async def _call_gemini_media(
     parts: list[dict[str, Any]] = [{"text": str(prompt or "").strip() or "请分析这段媒体内容"}]
     for ref in image_refs:
         parts.append(_gemini_image_part(str(ref or "").strip()))
-    for ref in video_refs:
-        parts.append(_gemini_video_part(str(ref or "").strip()))
-    payload = {"contents": [{"role": "user", "parts": parts}]}
     endpoint = _gemini_endpoint(base_url, model or _GEMINI_DEFAULT_MODEL)
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(90.0, connect=15.0),
         follow_redirects=False,
     ) as client:
-        async def _send(auth):  # noqa: ANN001, ANN202
-            return await client.post(
-                endpoint,
-                headers={**_gemini_headers(), **auth.headers},
-                params=auth.params,
-                json=payload,
-            )
+        uploaded_files: list[str] = []
+        try:
+            for ref in video_refs:
+                normalized, problem = normalize_video_ref(str(ref or "").strip())
+                if not normalized:
+                    raise ValueError(f"invalid_video_ref:{problem or 'unknown'}")
+                if normalized.startswith(("http://", "https://")) or Path(normalized).stat().st_size <= _VIDEO_INLINE_MAX_BYTES:
+                    parts.append(_gemini_video_part(normalized))
+                else:
+                    part, file_name = await _upload_gemini_video_file(
+                        client=client,
+                        api_key=api_key,
+                        base_url=base_url,
+                        auth_mode=auth_mode,
+                        path=Path(normalized),
+                    )
+                    parts.append(part)
+                    uploaded_files.append(file_name)
+            payload = {"contents": [{"role": "user", "parts": parts}]}
 
-        auth_result = await request_with_gemini_auth(
-            endpoint=endpoint.rsplit("/models/", 1)[0],
-            api_key=api_key,
-            auth_mode=auth_mode,
-            send=_send,
-            allow_negotiation=not use_single_attempt_retry_policy(),
-        )
-        response = auth_result.response
-        raise_for_gemini_status(
-            response,
-            auth_mode=auth_result.mode,
-            request_count=auth_result.request_count,
-        )
-        data = dict(response.json() or {})
+            async def _send(auth):  # noqa: ANN001, ANN202
+                return await client.post(
+                    endpoint,
+                    headers={**_gemini_headers(), **auth.headers},
+                    params=auth.params,
+                    json=payload,
+                )
+
+            auth_result = await request_with_gemini_auth(
+                endpoint=endpoint.rsplit("/models/", 1)[0],
+                api_key=api_key,
+                auth_mode=auth_mode,
+                send=_send,
+                allow_negotiation=not use_single_attempt_retry_policy(),
+            )
+            response = auth_result.response
+            raise_for_gemini_status(
+                response,
+                auth_mode=auth_result.mode,
+                request_count=auth_result.request_count,
+            )
+            data = dict(response.json() or {})
+        finally:
+            for file_name in uploaded_files:
+                try:
+                    await _delete_gemini_file(
+                        client=client,
+                        api_key=api_key,
+                        base_url=base_url,
+                        auth_mode=auth_mode,
+                        file_name=file_name,
+                    )
+                except Exception:
+                    pass
     candidates = list((data.get("candidates") or []))
     if not candidates:
         return ""
@@ -558,6 +722,7 @@ async def analyze_videos_with_route_or_fallback(
     prompt: str,
     video_refs: Sequence[str],
     route_name: str = VISUAL_ROUTE_AGENT,
+    context_terms: Sequence[str] = (),
 ) -> tuple[str, str]:
     refs = [str(item or "").strip() for item in video_refs if str(item or "").strip()]
     if not refs:
@@ -569,33 +734,119 @@ async def analyze_videos_with_route_or_fallback(
     if not video_enabled and not primary_route_supports_native_video(runtime, route_name=route_name):
         return "", "video_disabled"
 
-    primary_result = await _try_primary_video_routes(
-        runtime=runtime,
-        prompt=prompt,
-        refs=refs,
-        route_name=route_name,
+    route_mode = normalize_video_route_mode(
+        getattr(plugin_config, "personification_video_route_mode", "auto")
     )
-    if primary_result:
-        return primary_result, "video_route_direct"
 
-    fallback = _build_video_fallback_provider_config(runtime)
-    if not fallback or not fallback.get("api_key"):
-        return "", "video_unavailable"
-    try:
-        result = await _call_gemini_media(
-            api_key=fallback["api_key"],
-            base_url=fallback.get("api_url", ""),
-            model=fallback.get("model", "") or _GEMINI_DEFAULT_MODEL,
-            auth_mode=fallback.get("gemini_auth_mode", "auto"),
+    async def _native_result() -> tuple[str, str]:
+        primary_result = await _try_primary_video_routes(
+            runtime=runtime,
             prompt=prompt,
-            video_refs=refs,
+            refs=refs,
+            route_name=route_name,
         )
-    except Exception:
-        return "", "video_unavailable"
-    result_text = str(result or "").strip()
-    if _invalid_media_text(result_text):
-        return "", "video_unavailable"
-    return result_text, "video_fallback"
+        if primary_result:
+            return primary_result, "video_route_direct"
+        fallback = _build_video_fallback_provider_config(runtime)
+        if not fallback or not fallback.get("api_key"):
+            return "", "video_unavailable"
+        try:
+            result = await _call_gemini_media(
+                api_key=fallback["api_key"],
+                base_url=fallback.get("api_url", ""),
+                model=fallback.get("model", "") or _GEMINI_DEFAULT_MODEL,
+                auth_mode=fallback.get("gemini_auth_mode", "auto"),
+                prompt=prompt,
+                video_refs=refs,
+            )
+        except Exception as exc:
+            _log_warning(runtime, f"[video] native fallback failed: {sanitize_text(exc)}")
+            return "", "video_unavailable"
+        result_text = str(result or "").strip()
+        if _invalid_media_text(result_text):
+            return "", "video_unavailable"
+        return result_text, "video_fallback"
+
+    native_text = ""
+    native_route = "video_unavailable"
+    if route_mode in {"auto", "native", "hybrid"}:
+        native_text, native_route = await _native_result()
+        if native_text and route_mode in {"auto", "native"}:
+            return native_text, native_route
+        if route_mode == "native":
+            return "", native_route
+
+    async def _storyboard_one(ref: str, native_summary: str) -> str:
+        storyboard = await prepare_video_storyboard(ref, plugin_config)
+        try:
+            transcript = None
+            if not storyboard.subtitle_text:
+                transcript = await transcribe_audio_file(
+                    storyboard.audio_path,
+                    plugin_config,
+                    source_url=storyboard.source_url,
+                    context_terms=context_terms,
+                )
+            metadata = storyboard.summary()
+            transcript_block = storyboard.subtitle_text or (
+                transcript.text if transcript is not None and transcript.available else ""
+            )
+            transcript_kind = "BILIBILI_OR_PLATFORM_SUBTITLE" if storyboard.subtitle_text else "AUDIO_TRANSCRIPT"
+            combined_prompt = (
+                f"{str(prompt or '').strip()}\n\n"
+                "以下是系统从同一视频按时间顺序提取的分镜拼图。请结合每格时间戳理解动作、镜头、字幕和梗的完整演变，"
+                "不要把单帧静态画面当作完整事件。\n"
+                f"分镜元数据：{json.dumps(metadata, ensure_ascii=False, separators=(',', ':'))}\n"
+                f"[UNTRUSTED_DATA_ONLY: {transcript_kind}]\n"
+                f"{transcript_block or '转写不可用；只能依靠分镜和视频原生证据。'}\n"
+                "[/UNTRUSTED_DATA_ONLY]\n"
+            )
+            if native_summary:
+                combined_prompt += (
+                    "[UNTRUSTED_DATA_ONLY: NATIVE_VIDEO_OBSERVATION]\n"
+                    f"{native_summary[:12000]}\n"
+                    "[/UNTRUSTED_DATA_ONLY]\n"
+                    "请把原生视频观察、分镜和转写作为互相校验的证据；冲突时明确保留不确定点。\n"
+                )
+            if not storyboard.contact_sheet_refs:
+                return native_summary
+            result, _route = await analyze_images_with_route_or_fallback(
+                runtime=runtime,
+                prompt=combined_prompt,
+                image_refs=storyboard.contact_sheet_refs,
+                route_name=route_name,
+                image_detail="low",
+            )
+            return str(result or native_summary or "").strip()
+        finally:
+            storyboard.cleanup()
+
+    timeout = max(
+        20.0,
+        min(
+            300.0,
+            float(getattr(plugin_config, "personification_video_analysis_timeout", 120.0) or 120.0),
+        ),
+    )
+    outputs: list[str] = []
+    for index, ref in enumerate(refs):
+        try:
+            output = await asyncio.wait_for(
+                _storyboard_one(ref, native_text if index == 0 else ""),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            _log_warning(runtime, f"[video] storyboard analysis timed out after {timeout:.1f}s")
+            output = native_text if index == 0 else ""
+        except Exception as exc:
+            _log_warning(runtime, f"[video] storyboard analysis failed: {sanitize_text(exc)}")
+            output = native_text if index == 0 else ""
+        if output:
+            outputs.append(output)
+    result_text = "\n".join(outputs).strip()
+    if not result_text or _invalid_media_text(result_text):
+        return "", native_route if native_text else "video_unavailable"
+    return result_text, "video_hybrid" if native_text else "video_storyboard"
 
 
 __all__ = [
@@ -605,5 +856,6 @@ __all__ = [
     "get_primary_image_route_fingerprint",
     "get_primary_provider_config",
     "get_primary_provider_signature",
+    "normalize_video_route_mode",
     "primary_route_supports_native_video",
 ]

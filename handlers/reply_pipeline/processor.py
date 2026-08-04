@@ -1339,6 +1339,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         user_profile_block = ""
 
     tool_image_urls = list(image_urls)
+    tool_video_urls = [
+        item.ref
+        for item in turn_media_context
+        if item.kind == "video" and str(item.ref or "").strip()
+    ][:1]
     # 分类为真实照片的 refs 继续用于 provider 图片输入不兼容时的旧 fallback。
     photo_image_urls = list(image_urls)
     image_input_mode = normalize_image_input_mode(
@@ -2274,11 +2279,15 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             message_intent=message_intent,
             ambiguity_level=intent_decision.ambiguity_level,
             is_direct_mention=is_direct_mention,
-            has_image_input=bool(tool_image_urls),
+            has_image_input=bool(tool_image_urls or tool_video_urls),
         ):
             if getattr(runtime, "user_policy_gate", None) is not None:
                 await runtime.user_policy_gate.ensure_current(event)
-            image_ctx_token = set_current_image_context(tool_image_urls, message_content)
+            image_ctx_token = set_current_image_context(
+                tool_image_urls,
+                message_content,
+                tool_video_urls,
+            )
             try:
                 try:
                     try:
@@ -2289,7 +2298,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             label="Agent 主循环",
                             status="info",
                             detail=(
-                                f"intent={message_intent} images={len(tool_image_urls)} "
+                                f"intent={message_intent} images={len(tool_image_urls)} videos={len(tool_video_urls)} "
                                 f"direct_image={agent_direct_image_input} "
                                 f"elapsed_ms=0 turn_age_ms={int((time.monotonic() - started_at) * 1000)}"
                             ),

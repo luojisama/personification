@@ -825,6 +825,15 @@ def summarize_route_state(plugin_config: Any, logger: Any = None) -> dict[str, s
         "fallback_ignored": ", ".join(global_fallback.ignored_sources) if global_fallback is not None else "",
         "video_fallback": format_provider_summary(video_fallback.provider) if video_fallback is not None else "关闭/未配置",
         "video_fallback_source": video_fallback.source if video_fallback is not None else "",
+        "video_route_mode": str(
+            getattr(plugin_config, "personification_video_route_mode", "auto") or "auto"
+        ).strip(),
+        "video_frame_preset": str(
+            getattr(plugin_config, "personification_video_frame_preset", "balanced") or "balanced"
+        ).strip(),
+        "audio_transcription_provider": str(
+            getattr(plugin_config, "personification_audio_transcription_provider", "auto") or "auto"
+        ).strip(),
     }
 
 
