@@ -563,11 +563,22 @@ async def _run_stop_fallback_tool(
         logger=logger,
         budget_deadline=execution_deadline,
     )
+    fallback_outcome = _tool_result_outcome(fallback_result)
+    fallback_status = (
+        "error"
+        if fallback_outcome == TOOL_RESULT_OPERATIONAL_FAILURE
+        else "warn"
+        if fallback_outcome == TOOL_RESULT_EMPTY_EVIDENCE
+        else "ok"
+    )
     record_trace(
         key="agent_fallback_tool",
         label="fallback 工具执行",
-        status="ok" if str(fallback_result or "").strip() else "warn",
-        detail=f"tool={fallback_name} elapsed_ms={int((time.monotonic() - fallback_tool_started_at) * 1000)}",
+        status=fallback_status,
+        detail=(
+            f"tool={fallback_name} outcome={fallback_outcome} "
+            f"elapsed_ms={int((time.monotonic() - fallback_tool_started_at) * 1000)}"
+        ),
     )
     await _inject_background_tool_result(
         messages=messages,

@@ -217,10 +217,20 @@ async def inject_background_tool_result(
 
 def parse_json_tool_result(text: str) -> dict[str, Any] | None:
     raw = str(text or "").strip()
-    if not raw or not raw.startswith("{"):
+    if not raw:
         return None
+    candidate = raw
+    if not raw.startswith("{"):
+        match = re.search(
+            r"<parallel_research_json>\s*(\{.*\})\s*</parallel_research_json>",
+            raw,
+            flags=re.DOTALL,
+        )
+        if match is None:
+            return None
+        candidate = match.group(1)
     try:
-        data = json.loads(raw)
+        data = json.loads(candidate)
     except Exception:
         return None
     return data if isinstance(data, dict) else None
@@ -245,6 +255,26 @@ def tool_result_outcome(text: str) -> str:
         if raw.startswith("工具调用失败") or normalized.endswith(("_failed", "_timeout")):
             return TOOL_RESULT_OPERATIONAL_FAILURE
         return TOOL_RESULT_USABLE_EVIDENCE
+    research_runtime = payload.get("research_runtime")
+    if isinstance(research_runtime, dict):
+        research_status = str(research_runtime.get("status", "") or "").strip().lower()
+        research_evidence_keys = (
+            "facts",
+            "verified_facts",
+            "single_source_facts",
+            "conflicts",
+            "fact_evidence",
+        )
+        has_research_evidence = any(
+            isinstance(payload.get(key), list) and bool(payload.get(key))
+            for key in research_evidence_keys
+        )
+        if has_research_evidence:
+            return TOOL_RESULT_USABLE_EVIDENCE
+        if research_status in {"failed", "timeout"}:
+            return TOOL_RESULT_OPERATIONAL_FAILURE
+        if research_status in {"complete", "partial"}:
+            return TOOL_RESULT_EMPTY_EVIDENCE
     status = str(payload.get("status", "") or "").strip().lower()
     if status in {"no_result", "no_results"}:
         return TOOL_RESULT_EMPTY_EVIDENCE

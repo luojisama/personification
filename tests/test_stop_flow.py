@@ -538,3 +538,42 @@ def test_usable_evidence_is_not_overridden_by_later_tool_failure() -> None:
     assert decision.action == "return"
     assert decision.result.quality_context == ""
     assert traces[-1]["status"] == "ok"
+
+
+def test_fallback_tool_trace_uses_structured_outcome_without_result_content(monkeypatch) -> None:  # noqa: ANN001
+    results = {
+        "error": json.dumps({"ok": False, "error": "provider_failed", "secret": "do-not-log"}),
+        "warn": json.dumps({"status": "no_results", "items": [], "secret": "do-not-log"}),
+        "ok": json.dumps({"results": [{"title": "可用证据"}], "secret": "do-not-log"}),
+    }
+
+    async def _run(result: str) -> dict:
+        async def _execute(**kwargs):  # noqa: ANN001
+            return dict(kwargs["tool_args"]), result
+
+        monkeypatch.setattr(stop_flow, "_execute_tool_with_retries", _execute)
+        traces: list[dict] = []
+        ran = await stop_flow._run_stop_fallback_tool(
+            state=stop_flow.StopFlowState(),
+            fallback_name="lookup_tool",
+            fallback_args={"query": "问题"},
+            step=1,
+            registry=_Registry(_LookupTool(result, properties={"query": {"type": "string"}})),
+            rewritten_query=None,
+            user_images=[],
+            logger=SimpleNamespace(info=lambda _msg: None),
+            budget_deadline=None,
+            messages=[],
+            tool_caller=SimpleNamespace(),
+            origin_response=_stop_response(""),
+            record_trace=lambda **kwargs: traces.append(kwargs),
+            append_evidence_guidance=_append_evidence_guidance,
+        )
+        assert ran is True
+        return traces[-1]
+
+    for expected_status, result in results.items():
+        trace = asyncio.run(_run(result))
+        assert trace["status"] == expected_status
+        assert f"outcome={'operational_failure' if expected_status == 'error' else 'empty_evidence' if expected_status == 'warn' else 'usable_evidence'}" in trace["detail"]
+        assert "do-not-log" not in trace["detail"]

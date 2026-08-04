@@ -123,6 +123,30 @@ def test_structured_visual_and_avatar_outcomes() -> None:
     assert runner._render_tool_result_for_user("inspect_current_user_avatar", avatar, "头像") == avatar
 
 
+def test_parallel_research_wrapped_outcomes_use_runtime_and_evidence() -> None:
+    def _wrapped(*, status: str, facts: list[str] | None = None) -> str:
+        payload = {
+            "facts": list(facts or []),
+            "verified_facts": [],
+            "single_source_facts": [],
+            "conflicts": [],
+            "fact_evidence": [],
+            "research_runtime": {"status": status},
+        }
+        return (
+            "<parallel_research_json>\n"
+            + json.dumps(payload, ensure_ascii=False)
+            + "\n</parallel_research_json>\n摘要：完成"
+        )
+
+    assert fallbacks.tool_result_outcome(_wrapped(status="timeout")) == "operational_failure"
+    assert fallbacks.tool_result_outcome(_wrapped(status="failed")) == "operational_failure"
+    assert fallbacks.tool_result_outcome(_wrapped(status="partial")) == "empty_evidence"
+    assert fallbacks.tool_result_outcome(
+        _wrapped(status="timeout", facts=["超时前已读取到的事实"])
+    ) == "usable_evidence"
+
+
 def test_render_tool_result_preserves_structured_top_candidates() -> None:
     raw = json.dumps(
         {
