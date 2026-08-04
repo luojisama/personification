@@ -75,6 +75,7 @@ async function revokeDevice(id) {
 async function doLogout() {
   try {
     await api("/auth/logout", { method:"POST" });
+    leaveViewLifecycle(state.view,"");
     clearInMemorySensitiveState();
     state.logged = false;
     await refreshEligibleAdmins();
@@ -90,16 +91,35 @@ async function doLogout() {
   }
 }
 
+let _layoutDelegationAttached = false;
+
 function attachLayout() {
-  document.querySelectorAll(".qq-leave-group").forEach(button => button.addEventListener("click", () => qqLeaveGroup(button.dataset.groupId, button.dataset.groupName)));
-  document.querySelectorAll("aside nav a").forEach(a => {
-    a.addEventListener("click", async (ev) => {
-      ev.preventDefault();
-      await navigateToView(a.getAttribute("href").slice(1));
+  if (!_layoutDelegationAttached) {
+    _layoutDelegationAttached = true;
+    document.addEventListener("click", event => {
+      const target = event.target instanceof Element ? event.target : null;
+      const nav = target?.closest("#console-sidebar nav a[href^='#']");
+      if (nav) {
+        event.preventDefault();
+        navigateToView(nav.getAttribute("href").slice(1));
+        return;
+      }
+      const leave = target?.closest(".qq-leave-group");
+      if (leave && typeof qqLeaveGroup === "function") {
+        qqLeaveGroup(leave.dataset.groupId, leave.dataset.groupName);
+      }
     });
-  });
-  document.querySelector(".layout > main")?.addEventListener("scroll", queueScrollStateCapture, {passive:true});
-  document.querySelector("#console-sidebar nav")?.addEventListener("scroll", queueScrollStateCapture, {passive:true});
+  }
+  const main=document.querySelector(".layout > main");
+  if(main&&!main.dataset.scrollListenerBound){
+    main.dataset.scrollListenerBound="true";
+    main.addEventListener("scroll",queueScrollStateCapture,{passive:true});
+  }
+  const nav=document.querySelector("#console-sidebar nav");
+  if(nav&&!nav.dataset.scrollListenerBound){
+    nav.dataset.scrollListenerBound="true";
+    nav.addEventListener("scroll",queueScrollStateCapture,{passive:true});
+  }
 }
 
 function renderLogin() {
@@ -153,7 +173,7 @@ function renderDevicePending() {
 }
 
 async function recheckDevice() {
-  try { const me = await api("/auth/me"); state.logged = true; state.devicePending = false; state.qq = me.qq; await loadView(); render(); }
+  try { const me = await api("/auth/me"); state.logged = true; state.devicePending = false; state.qq = me.qq; await loadView(); render(); enterViewLifecycle(state.view); }
   catch (e) {
     if (/DEVICE_PENDING/.test(String(e && e.message || ""))) { alertFlash("info", "仍在等待管理员批准"); }
     else { state.devicePending = false; render(); }
@@ -196,7 +216,7 @@ async function doVerify() {
   state.logged = true; state.devicePending = false; state.qq = state.pendingQq;
   try {
     const loaded = await loadView();
-    if (loaded) render();
+    if (loaded) { render(); enterViewLifecycle(state.view); }
   } catch (e) {
     const failedView = state.view;
     state.view = "dashboard";
@@ -205,6 +225,7 @@ async function doVerify() {
     if (loaded) {
       state.alert = {kind:"err", text:`登录成功，但“${failedView}”页面加载失败：${e.message}`};
       render();
+      enterViewLifecycle(state.view);
     }
   }
 }

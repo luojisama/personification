@@ -39,9 +39,43 @@ def test_sidebar_scroll_capture_waits_for_synchronous_restore() -> None:
     assert "nav.scrollTop = sidebarScrollTop;\n    _restoredScrollNodes.add(nav);" in core
     assert "if (main && main.isConnected" in core
     assert "if (nav && nav.isConnected) nav.scrollTop = sidebarScrollTop" in core
-    render_restore = core.index("root.innerHTML = renderLayout();\n  restoreScrollState();")
-    render_attach = core.index("\n  attachLayout();", render_restore)
-    assert render_restore < render_attach
+    render_restore = core.index("root.innerHTML = renderLayout();")
+    restore_call = core.index("restoreScrollState();", render_restore)
+    render_attach = core.index("attachLayout();", restore_call)
+    assert render_restore < restore_call < render_attach
+
+
+def test_console_uses_stable_shell_and_releases_heavy_view_state() -> None:
+    core = (STATIC / "app-core.js").read_text(encoding="utf-8")
+    auth = (STATIC / "app-auth.js").read_text(encoding="utf-8")
+    operations = (STATIC / "app-operations.js").read_text(encoding="utf-8")
+
+    assert core.count("root.innerHTML = renderLayout();") == 1
+    assert 'root.querySelector("#view-content")' in core
+    assert 'const content=document.getElementById("view-content")' in core
+    assert "content.innerHTML=renderView()" in core
+    assert "function renderShellChrome()" in core
+    assert 'id="shell-alert"' in core
+    assert 'id="shell-loading"' in core
+    assert 'id="view-content"' in core
+    assert "function leaveViewLifecycle" in core
+    for cleanup in (
+        "state.groupRawChat=null",
+        "state.traceDetail=null",
+        "state.mcpPreview=null",
+        "state.interactionResult=null",
+        "state.memoryGraph=null",
+    ):
+        assert cleanup in core
+    assert "destroyMemoryGraphCanvas" in core
+    assert "let _layoutDelegationAttached = false" in auth
+    assert 'document.addEventListener("click"' in auth
+    assert "scrollListenerBound" in auth
+    assert "setInterval(" not in operations
+    assert "scheduleAgentStatusPoll" in operations
+    assert "document.hidden" in operations
+    assert "AbortController" in operations
+    assert 'document.getElementById("agent-status-island")' in operations
 
 
 def test_common_svg_icons_keep_a_fixed_baseline_without_active_translation() -> None:

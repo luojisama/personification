@@ -25,7 +25,7 @@ function opsAgo(seconds) {
   return `${Math.round(value/3600)} 小时前`;
 }
 
-function renderAgentStatus() {
+function renderAgentStatusContent() {
   const data=state.agentStatus;
   if(!data)return `<div class="ops-hero skeleton-card"></div>`;
   const inner=data.inner_state||{};
@@ -35,9 +35,85 @@ function renderAgentStatus() {
   ${renderRuntimePerformance()}<div class="card"><div class="between"><h2>最近运行</h2><span class="muted u-atomic">5 秒自动刷新</span></div><div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="Agent 最近运行列表"><table class="data-table wide"><thead><tr><th scope="col" class="col-status">状态</th><th scope="col" class="col-id">Trace</th><th scope="col" class="col-id">当前/末阶段</th><th scope="col" class="col-status">结果</th><th scope="col" class="col-time">最后活动</th><th scope="col" class="col-actions"><span class="sr-only">操作</span></th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="muted">暂无运行记录</td></tr>'}</tbody></table></div></div>`;
 }
 
-async function refreshAgentStatus(){try{const [status,performance]=await Promise.all([api("/agent-status"),api("/performance/runtime")]);state.agentStatus=status;state.runtimePerformance=performance;render();}catch(e){alertFlash("err","状态刷新失败："+e.message);}}
+function renderAgentStatus(){return `<div id="agent-status-island">${renderAgentStatusContent()}</div>`;}
+
+let _agentStatusTimer=null;
+let _agentStatusAbort=null;
+let _agentStatusRunning=false;
+let _agentStatusGeneration=0;
+let _agentStatusFingerprint="";
+
+function agentStatusFingerprint(status,performanceData){
+  try{return JSON.stringify([status||null,performanceData||null]);}catch{return String(Date.now());}
+}
+
+function updateAgentStatusIsland(){
+  const island=document.getElementById("agent-status-island");
+  if(island&&state.view==="agent_status"){
+    island.innerHTML=renderAgentStatusContent();
+    prepareDetailState(island);
+  }
+}
+
+async function refreshAgentStatus({manual=true,generation=_agentStatusGeneration}={}){
+  if(_agentStatusRunning||!state.logged||state.view!=="agent_status"||document.hidden)return false;
+  _agentStatusRunning=true;
+  const controller=new AbortController();
+  _agentStatusAbort=controller;
+  try{
+    const [status,performanceData]=await Promise.all([
+      api("/agent-status",{signal:controller.signal,cache:"no-store"}),
+      api("/performance/runtime",{signal:controller.signal,cache:"no-store"}),
+    ]);
+    if(generation!==_agentStatusGeneration||state.view!=="agent_status")return false;
+    const fingerprint=agentStatusFingerprint(status,performanceData);
+    state.agentStatus=status;
+    state.runtimePerformance=performanceData;
+    if(fingerprint!==_agentStatusFingerprint){
+      _agentStatusFingerprint=fingerprint;
+      updateAgentStatusIsland();
+    }
+    return true;
+  }catch(e){
+    if(e?.name!=="AbortError"&&manual)alertFlash("err","状态刷新失败："+e.message);
+    return false;
+  }finally{
+    if(_agentStatusAbort===controller)_agentStatusAbort=null;
+    _agentStatusRunning=false;
+  }
+}
+
+function scheduleAgentStatusPoll(generation,delay=5000){
+  if(_agentStatusTimer)clearTimeout(_agentStatusTimer);
+  if(generation!==_agentStatusGeneration||!state.logged||state.view!=="agent_status"||document.hidden)return;
+  _agentStatusTimer=setTimeout(async()=>{
+    _agentStatusTimer=null;
+    await refreshAgentStatus({manual:false,generation});
+    scheduleAgentStatusPoll(generation,5000);
+  },delay);
+}
+
+function startAgentStatusPolling(){
+  const generation=++_agentStatusGeneration;
+  _agentStatusFingerprint=agentStatusFingerprint(state.agentStatus,state.runtimePerformance);
+  scheduleAgentStatusPoll(generation,5000);
+}
+
+function stopAgentStatusPolling(){
+  _agentStatusGeneration+=1;
+  if(_agentStatusTimer){clearTimeout(_agentStatusTimer);_agentStatusTimer=null;}
+  if(_agentStatusAbort){try{_agentStatusAbort.abort();}catch{}_agentStatusAbort=null;}
+  _agentStatusRunning=false;
+}
+
+if(!window.__personificationAgentStatusVisibility){
+  window.__personificationAgentStatusVisibility=true;
+  document.addEventListener("visibilitychange",()=>{
+    if(document.hidden)stopAgentStatusPolling();
+    else if(state.logged&&state.view==="agent_status")startAgentStatusPolling();
+  });
+}
 async function openAgentTrace(traceId){await ensureViewAsset("trace_detail");return openTraceDetail(traceId);}
-setInterval(()=>{if(state.logged&&state.view==="agent_status"&&!state.loading)refreshAgentStatus();},5000);
 
 const TRANSFER_DIAGNOSTIC_FIELDS=new Set(["ok","code","phase","title","message","details","steps","warnings","suggestion","retryable","partial","outcome_unknown","operation_id","trace_id","error"]);
 function transferDiagnostic(value){return value&&value.code?value:null;}

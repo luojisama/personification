@@ -19,7 +19,7 @@ let state = {
   skillSourceForm: { source: "", name: "", ref: "", subdir: "", kind: "auto", preferFirst: false, autoApprove: false },
   toolCreatorTasks: [], toolCreatorSelectedId: "", toolCreatorDetail: null, toolCreatorRequest: "", toolCreatorSuggestedName: "", toolCreatorAnswer: "", toolCreatorBusy: false, toolCreatorDiagnostic: null,
   mcpSources: [], mcpSourceId: "official", mcpQuery: "", mcpResults: [], mcpNextCursor: "", mcpSearchLoaded: false, mcpDetail: null, mcpPackageIndex: 0, mcpPrefix: "", mcpInstallations: [], mcpBusy: false, mcpLoadingMore: false,
-  mcpTab: "builtin", mcpBuiltin: null, mcpSenses: [], mcpSenseFilter: "", mcpSelectedSense: null, mcpSelectedSenseIds: [], mcpAuth: {}, mcpPreview: null,
+  mcpTab: "builtin", mcpBuiltin: null, mcpSenses: [], mcpSenseFilter: "", mcpSelectedSense: null, mcpSelectedSenseIds: [], mcpAuth: {}, mcpPreview: null, mcpSensesLoaded: false, mcpSensesHasMore: false, mcpSenseLimit: 50,
   testPrompt: "你好，自我介绍一下", testSystem: "你是测试助手，简洁回复。", testResult: null, testAllResult: null,
   personaTemplateForm: { mode: "source", work_title: "", character_name: "", persona_name: "", gender: "", personality: "", traits: "", hobbies: "", description: "" }, personaTemplateResult: null, personaTemplateBusy: false, personaTemplateTask: null, personaTemplateHistory: [],
   personaAvatarCandidateId: "", personaSignatureCandidateId: "", personaProfileBotId: "",
@@ -40,10 +40,10 @@ let state = {
   logs: null, traces: null, logLevel: "", logQuery: "", logTraceId: "", logLoadingMore: false, logExpandedIds: {}, traceDetail: null, selectedTraceId: "",
   proactiveStats: null, proactiveRecent: null, proactiveScope: "",
   agentStatus: null, transferExport: null, transferImport: null, transferBotInfo: null,
-  userPolicy: null, userPolicyTier: "blocked", selectedUserPolicy: null, userPolicyBusy: false,
+  userPolicy: null, userPolicyTier: "blocked", selectedUserPolicy: null, userPolicyBusy: false, userPolicyLimit: 50,
   userPolicyBotInfo: null, userPolicyBotId: "", userPolicyFriends: [], userPolicyFriendError: "",
   userPolicyDraftUserId: "", userPolicyDurationHours: 0,
-  outbound: null, outboundBotId: "", outboundKind: "", outboundConversationId: "", outboundStatus: "", outboundRecalled: "", outboundBusy: false,
+  outbound: null, outboundBotId: "", outboundKind: "", outboundConversationId: "", outboundStatus: "", outboundRecalled: "", outboundBusy: false, outboundLimit: 50,
 };
 
 const VIEW_ASSETS = {
@@ -456,7 +456,13 @@ function clearInMemorySensitiveState() {
   if (typeof clearMcpSensitiveState === "function") clearMcpSensitiveState();
 }
 
-function alertFlash(kind, text) { state.alert = { kind, text }; render(); setTimeout(() => { state.alert = null; render(); }, 4000); }
+function renderTransientChrome(){
+  const root=document.getElementById("app");
+  if(state.logged&&root?.dataset.webuiMode==="console")renderShellChrome();
+  else render();
+}
+
+function alertFlash(kind, text) { state.alert = { kind, text }; renderTransientChrome(); setTimeout(() => { state.alert = null; renderTransientChrome(); }, 4000); }
 
 function restoreConfigSearchFocus(caret) {
   setTimeout(() => {
@@ -504,6 +510,7 @@ async function bootstrap() {
   if (state.devicePending) { render(); return; }
   if (!state.logged) await refreshEligibleAdmins();
   render();
+  if(state.logged)enterViewLifecycle(state.view);
 }
 
 async function refreshEligibleAdmins() {
@@ -518,17 +525,20 @@ function toggleTheme() {
   state.theme = state.theme === "dark" ? "light" : "dark";
   document.documentElement.setAttribute("data-theme", state.theme);
   localStorage.setItem("personification_theme", state.theme);
-  render();
+  renderTransientChrome();
+  if (state.view === "memory_graph" && typeof renderMemoryGraphCanvas === "function") {
+    setTimeout(() => renderMemoryGraphCanvas().catch(() => {}), 0);
+  }
 }
 
 function toggleMobileNav() {
   state.mobileNavOpen = !state.mobileNavOpen;
-  render();
+  renderShellChrome();
 }
 
 function closeMobileNav() {
   // 点击导航项后关闭抽屉；即便点的是当前视图（hashchange 不触发）也立即收起。
-  if (state.mobileNavOpen) { state.mobileNavOpen = false; render(); }
+  if (state.mobileNavOpen) { state.mobileNavOpen = false; renderShellChrome(); }
 }
 
 document.addEventListener("keydown",event=>{if(event.key==="Escape"&&state.mobileNavOpen)closeMobileNav();});
@@ -567,12 +577,13 @@ async function loadView() {
   const view = state.view;
   _viewAbortController?.abort();
   _viewAbortController = new AbortController();
-  await ensureViewAsset(view);
-  if(navigationId!==_navigationId)return false;
   state.loading = true;
   state.loadingMessage = loadingMessageForView(view);
-  if (state.logged) render();
+  if (state.logged) renderShellChrome();
   try {
+    await ensureViewAsset(view);
+    if(navigationId!==_navigationId)return false;
+    if (state.logged) render();
     if (view === "config") {
       const data = await api("/config/entries");
       state.entries = data.entries; state.groups = data.groups;
@@ -605,16 +616,14 @@ async function loadView() {
       state.skillRemoteSources = data.remote_sources || [];
       state.skillMcpTools = data.mcp_tools || [];
     } else if (view === "mcp") {
-      const [sourceData, installationData, builtinData, senseData] = await Promise.all([
+      const [sourceData, installationData, builtinData] = await Promise.all([
         api("/mcp/sources"),
         api("/mcp/installations"),
         api("/mcp/builtin/social-research/status", {cache:"no-store"}),
-        api("/mcp/builtin/social-research/slang/senses?limit=200", {cache:"no-store"}),
       ]);
       state.mcpSources = sourceData.sources || [];
       state.mcpInstallations = installationData.installations || [];
       state.mcpBuiltin = builtinData || null;
-      state.mcpSenses = senseData.senses || [];
       if (!state.mcpSources.some(source => source.id === state.mcpSourceId)) {
         state.mcpSourceId = state.mcpSources[0]?.id || "official";
       }
@@ -729,11 +738,16 @@ async function loadView() {
         state.groupsAvailable = groupsResp.available;
       }
     } else if (view === "agent_status") {
-      state.agentStatus = await api("/agent-status");
+      const [status, performanceData] = await Promise.all([
+        api("/agent-status"),
+        api("/performance/runtime"),
+      ]);
+      state.agentStatus = status;
+      state.runtimePerformance = performanceData;
     } else if (view === "data_transfer") {
       state.transferBotInfo = await api("/qq/info").catch(() => null);
     } else if (view === "user_policy") {
-      const qs = new URLSearchParams({ limit: "300" });
+      const qs = new URLSearchParams({ limit: String(state.userPolicyLimit || 50) });
       if (state.userPolicyTier) qs.set("tier", state.userPolicyTier);
       const [policy, botInfo] = await Promise.all([
         api("/user-policy/states?" + qs.toString(), {cache:"no-store"}),
@@ -753,7 +767,7 @@ async function loadView() {
         state.userPolicyFriendError="当前没有已连接 Bot，仍可手工输入 QQ。";
       }
     } else if (view === "outbound") {
-      const qs = new URLSearchParams({ limit: "300" });
+      const qs = new URLSearchParams({ limit: String(state.outboundLimit || 50) });
       if (state.outboundBotId) qs.set("bot_id", state.outboundBotId);
       if (state.outboundKind) qs.set("conversation_kind", state.outboundKind);
       if (state.outboundConversationId) qs.set("conversation_id", state.outboundConversationId);
@@ -776,32 +790,76 @@ function viewTitle() {
 
 async function navigateToView(view,{fromHistory=false}={}) {
   const nextView=normalizeView(view);
+  const previousView=state.view;
   captureScrollState();
   if(!fromHistory&&location.hash!==`#${nextView}`)history.pushState({view:nextView},"",`#${nextView}`);
-  if(state.view==="qzone"&&nextView!=="qzone"&&typeof stopQzoneViewLifecycle==="function")stopQzoneViewLifecycle();
-  if(state.view==="tool_creator"&&nextView!=="tool_creator"&&typeof stopToolCreatorPolling==="function")stopToolCreatorPolling();
-  if(state.view==="mcp"&&nextView!=="mcp"&&typeof stopMcpViewLifecycle==="function")stopMcpViewLifecycle();
+  leaveViewLifecycle(previousView,nextView);
   state.view=nextView;
   if(state.mobileNavOpen)state.mobileNavOpen=false;
   try{
     const loaded=await loadView();
-    if(loaded&&state.view===nextView)render();
+    if(loaded&&state.view===nextView){render();enterViewLifecycle(nextView);}
   }catch(e){
     if((e&&e.name==="AbortError")||state.view!==nextView)return;
     alertFlash("err",e.message);
   }
 }
 
+function leaveViewLifecycle(previousView,nextView) {
+  if(previousView===nextView)return;
+  if(previousView==="qzone"&&typeof stopQzoneViewLifecycle==="function")stopQzoneViewLifecycle();
+  if(previousView==="tool_creator"&&typeof stopToolCreatorPolling==="function")stopToolCreatorPolling();
+  if(previousView==="mcp"&&typeof stopMcpViewLifecycle==="function")stopMcpViewLifecycle();
+  if(previousView==="agent_status"&&typeof stopAgentStatusPolling==="function")stopAgentStatusPolling();
+  if(previousView==="memory_graph"){
+    if(typeof destroyMemoryGraphCanvas==="function")destroyMemoryGraphCanvas();
+    state.memoryGraph=null;
+  }
+  if(previousView==="groups")state.groupRawChat=null;
+  if(previousView==="trace_detail")state.traceDetail=null;
+  if(previousView==="mcp"){
+    state.mcpPreview=null;
+    state.mcpSelectedSense=null;
+  }
+  if(previousView==="test"){
+    state.testResult=null;
+    state.testAllResult=null;
+  }
+  if(previousView==="health")state.interactionResult=null;
+  if(previousView==="qzone"){
+    state.qzoneCandidates=null;
+    state.qzoneForwardResult=null;
+    state.qzonePostResult=null;
+    state.qzoneActionResult=null;
+    state.qzoneAuthResult=null;
+    state.qzoneRecoveredOperation=null;
+  }
+}
+
+function enterViewLifecycle(view) {
+  if(view==="agent_status"&&typeof startAgentStatusPolling==="function")startAgentStatusPolling();
+}
+
 function render() {
   const root = document.getElementById("app");
   captureScrollState();
-  if (state.devicePending) { root.innerHTML = renderDevicePending(); return; }
+  if (state.devicePending) { root.dataset.webuiMode="device-pending"; root.innerHTML = renderDevicePending(); return; }
   if (!state.logged) {
     if (state.view === "qzone" && typeof stopQzoneViewLifecycle === "function") stopQzoneViewLifecycle();
     if (state.view === "mcp" && typeof stopMcpViewLifecycle === "function") stopMcpViewLifecycle();
-    root.innerHTML = renderLogin(); attachLogin(); return;
+    root.dataset.webuiMode="login"; root.innerHTML = renderLogin(); attachLogin(); return;
   }
-  // 全量 innerHTML 重绘会让正在输入的搜索框失焦；记下焦点 + 光标位置，重绘后还原。
+  const shellMounted=root.dataset.webuiMode==="console"&&Boolean(root.querySelector("#view-content"));
+  if(!shellMounted){
+    root.dataset.webuiMode="console";
+    root.innerHTML = renderLayout();
+    restoreScrollState();
+    attachLayout();
+    prepareDetailState(root);
+    flushOperationAnnouncement();
+    return;
+  }
+  // 活动视图局部重绘仍可能让输入失焦；仅在页面容器内保存并恢复光标。
   const active = document.activeElement;
   let focusSnap = null;
   if (active && active.id && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
@@ -812,10 +870,11 @@ function render() {
       scrollTop: active.scrollTop,
     };
   }
-  root.innerHTML = renderLayout();
+  renderShellChrome();
+  const content=document.getElementById("view-content");
+  if(content)content.innerHTML=renderView();
   restoreScrollState();
-  attachLayout();
-  prepareDetailState(root);
+  if(content)prepareDetailState(content);
   flushOperationAnnouncement();
   if (focusSnap) {
     const next = document.getElementById(focusSnap.id);
@@ -870,18 +929,9 @@ function renderIcon(name, className="ui-icon") {
   return `<svg class="${escapeAttr(className)}" viewBox="0 0 24 24" aria-hidden="true">${content}</svg>`;
 }
 
-function renderLayout() {
+function renderSidebar() {
   const navItem = (v,label,icon="gauge") => `<a href="#${v}" class="${state.view===v?'active':''}" aria-current="${state.view===v?'page':'false'}">${renderIcon(icon,'nav-icon')}<span>${label}</span></a>`;
-  const themeIcon = state.theme === "dark" ? renderIcon("sun") : renderIcon("moon");
-  const themeLabel = state.theme === "dark" ? "切换到浅色主题" : "切换到深色主题";
-  const loadingHint = state.loading
-    ? `<div class="loading-hint"><span class="spinner"></span><span>${escapeHtml(state.loadingMessage || "正在加载页面...")}</span></div>`
-    : "";
-  return `${state.loading ? '<div class="progress-bar"></div>' : ''}
-    <div id="operation-live-region" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
-    <div class="layout">
-    ${state.mobileNavOpen ? '<div class="scrim" onclick="toggleMobileNav()"></div>' : ''}
-    <aside id="console-sidebar" class="${state.mobileNavOpen?'open':''}">
+  return `<aside id="console-sidebar" class="${state.mobileNavOpen?'open':''}">
       <h1>拟人插件控制台</h1>
       <nav aria-label="控制台导航">
         <div class="nav-group-label">运行</div>
@@ -917,9 +967,13 @@ function renderLayout() {
         ${navItem('qq','QQ 管理','user-cog')}
         ${navItem('devices','设备管理','shield')}
       </nav>
-    </aside>
-    <main data-view="${escapeAttr(state.view)}" data-loading="${state.loading?'true':'false'}">
-      <div class="topbar between">
+    </aside>`;
+}
+
+function renderTopbar() {
+  const themeIcon = state.theme === "dark" ? renderIcon("sun") : renderIcon("moon");
+  const themeLabel = state.theme === "dark" ? "切换到浅色主题" : "切换到深色主题";
+  return `<div class="topbar between">
         <div style="display:flex;align-items:center;min-width:0;flex:1">
            <button class="mobile-nav-toggle" onclick="toggleMobileNav()" aria-label="菜单" aria-controls="console-sidebar" aria-expanded="${state.mobileNavOpen?'true':'false'}">${renderIcon('menu')}</button>
           <div style="min-width:0">
@@ -932,10 +986,46 @@ function renderLayout() {
           <span class="muted" title="登录 QQ">${escapeHtml(state.qq)}</span>
           <button class="btn small" onclick="doLogout()">退出</button>
         </div>
-      </div>
-      ${state.alert ? `<div class="alert ${state.alert.kind}">${escapeHtml(state.alert.text)}</div>` : ''}
-      ${loadingHint}
-      ${renderView()}
+      </div>`;
+}
+
+function renderShellChrome() {
+  const root=document.getElementById("app");
+  if(!state.logged||root?.dataset.webuiMode!=="console")return;
+  const progress=document.getElementById("shell-progress");
+  if(progress)progress.innerHTML=state.loading?'<div class="progress-bar"></div>':'';
+  const scrim=document.getElementById("shell-scrim");
+  if(scrim)scrim.innerHTML=state.mobileNavOpen?'<div class="scrim" onclick="toggleMobileNav()"></div>':'';
+  const sidebar=document.getElementById("console-sidebar");
+  if(sidebar){
+    sidebar.classList.toggle("open",state.mobileNavOpen);
+    sidebar.querySelectorAll("nav a[href^='#']").forEach(link=>{
+      const active=link.getAttribute("href")===`#${state.view}`;
+      link.classList.toggle("active",active);
+      link.setAttribute("aria-current",active?"page":"false");
+    });
+  }
+  const topbar=document.getElementById("shell-topbar");
+  if(topbar)topbar.innerHTML=renderTopbar();
+  const alertMount=document.getElementById("shell-alert");
+  if(alertMount)alertMount.innerHTML=state.alert?`<div class="alert ${escapeAttr(state.alert.kind)}">${escapeHtml(state.alert.text)}</div>`:"";
+  const loadingMount=document.getElementById("shell-loading");
+  if(loadingMount)loadingMount.innerHTML=state.loading?`<div class="loading-hint"><span class="spinner"></span><span>${escapeHtml(state.loadingMessage||"正在加载页面...")}</span></div>`:"";
+  const main=document.querySelector(".layout > main");
+  if(main){main.dataset.view=state.view;main.dataset.loading=state.loading?'true':'false';}
+}
+
+function renderLayout() {
+  return `<div id="shell-progress">${state.loading ? '<div class="progress-bar"></div>' : ''}</div>
+    <div id="operation-live-region" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+    <div class="layout">
+    <div id="shell-scrim">${state.mobileNavOpen ? '<div class="scrim" onclick="toggleMobileNav()"></div>' : ''}</div>
+    ${renderSidebar()}
+    <main data-view="${escapeAttr(state.view)}" data-loading="${state.loading?'true':'false'}">
+      <div id="shell-topbar">${renderTopbar()}</div>
+      <div id="shell-alert">${state.alert ? `<div class="alert ${escapeAttr(state.alert.kind)}">${escapeHtml(state.alert.text)}</div>` : ''}</div>
+      <div id="shell-loading">${state.loading ? `<div class="loading-hint"><span class="spinner"></span><span>${escapeHtml(state.loadingMessage || "正在加载页面...")}</span></div>` : ''}</div>
+      <div id="view-content">${renderView()}</div>
     </main>
   </div>`;
 }

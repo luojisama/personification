@@ -793,11 +793,15 @@ function renderSenseDetail() {
 }
 
 function renderLearningCenter() {
+  if (!state.mcpSensesLoaded) {
+    return `<section class="card mcp-learning-center"><div class="mcp-section-heading"><div><span class="eyebrow">SLANG LEARNING CENTER</span><h2>学习中心</h2><p>词条和证据只在需要时加载，避免每次打开平台状态页都预取大列表。</p></div><button class="btn primary" data-mcp-senses-load ${state.mcpBusy ? "disabled" : ""}>加载学习词条</button></div></section>`;
+  }
   const statuses = ["verified","understand_only","observed","disputed","stale","rejected","manual_locked"];
   const filter = state.mcpSenseFilter || "";
   const senses = (state.mcpSenses || []).filter(item => !filter || item.status === filter);
   const cards = senses.map(sense => `<article class="mcp-sense-card"><label><input type="checkbox" data-mcp-sense-select="${escapeAttr(sense.sense_id)}" ${(state.mcpSelectedSenseIds || []).includes(sense.sense_id) ? "checked" : ""}><span>选择合并</span></label><button data-mcp-sense-open="${escapeAttr(sense.sense_id)}"><header><strong>${escapeHtml(sense.term || "")}</strong><span>${escapeHtml(mcpChineseState(sense.status))}</span></header><p>${escapeHtml(sense.meaning || "")}</p><small>${escapeHtml((sense.game_context || {}).canonical_name || "通用语境")} · sources=${Number(sense.source_count || 0)} · platforms=${Number(sense.platform_count || 0)} · confidence=${Number(sense.confidence || 0).toFixed(2)}</small></button></article>`).join("");
-  return `<section class="card mcp-learning-center"><div class="mcp-section-heading"><div><span class="eyebrow">SLANG LEARNING CENTER</span><h2>学习中心</h2><p>自动收录不需要前置人工确认，但每次升级、冲突、降级和人工操作都有事件记录。</p></div><button class="btn" data-mcp-sense-merge ${(state.mcpSelectedSenseIds || []).length < 2 ? "disabled" : ""}>合并所选 sense</button></div><nav class="mcp-learning-tabs"><button data-mcp-sense-filter="" class="${!filter ? "active" : ""}">全部</button>${statuses.map(status => `<button data-mcp-sense-filter="${status}" class="${filter === status ? "active" : ""}">${escapeHtml(mcpChineseState(status))}</button>`).join("")}</nav><div class="mcp-sense-grid">${cards || '<p class="muted">当前分类没有 sense。</p>'}</div></section>${renderSenseDetail()}`;
+  const more=state.mcpSensesHasMore?`<div class="row" style="justify-content:center;margin-top:14px"><button class="btn" data-mcp-senses-more ${state.mcpBusy?'disabled':''}>再加载 50 条</button></div>`:"";
+  return `<section class="card mcp-learning-center"><div class="mcp-section-heading"><div><span class="eyebrow">SLANG LEARNING CENTER</span><h2>学习中心</h2><p>自动收录不需要前置人工确认，但每次升级、冲突、降级和人工操作都有事件记录。</p></div><button class="btn" data-mcp-sense-merge ${(state.mcpSelectedSenseIds || []).length < 2 ? "disabled" : ""}>合并所选 sense</button></div><nav class="mcp-learning-tabs"><button data-mcp-sense-filter="" class="${!filter ? "active" : ""}">全部</button>${statuses.map(status => `<button data-mcp-sense-filter="${status}" class="${filter === status ? "active" : ""}">${escapeHtml(mcpChineseState(status))}</button>`).join("")}</nav><div class="mcp-sense-grid">${cards || '<p class="muted">当前分类没有 sense。</p>'}</div>${more}</section>${renderSenseDetail()}`;
 }
 
 function renderBuiltinMcp() {
@@ -1058,13 +1062,29 @@ async function reloadMcpRuntime() {
 }
 
 async function refreshBuiltinMcp() {
-  const [builtin, senses] = await Promise.all([
-    api("/mcp/builtin/social-research/status", {cache:"no-store"}),
-    api("/mcp/builtin/social-research/slang/senses?limit=200", {cache:"no-store"}),
-  ]);
+  const builtin = await api("/mcp/builtin/social-research/status", {cache:"no-store"});
   state.mcpBuiltin = builtin;
-  state.mcpSenses = senses.senses || [];
+  if(state.mcpSensesLoaded)await loadMcpSenses({append:false,renderAfter:false});
   if (builtin.installation) replaceMcpInstallation(builtin.installation);
+}
+
+async function loadMcpSenses({append=false,renderAfter=true}={}) {
+  if(state.mcpBusy&&renderAfter)return;
+  const nextLimit=append?Math.min(2000,Number(state.mcpSenseLimit||50)+50):Math.max(50,Number(state.mcpSenseLimit||50));
+  const ownsBusy=renderAfter;
+  if(ownsBusy){state.mcpBusy=true;render();}
+  try{
+    const result=await api(`/mcp/builtin/social-research/slang/senses?limit=${nextLimit}`,{cache:"no-store"});
+    state.mcpSenses=result.senses||[];
+    state.mcpSenseLimit=nextLimit;
+    state.mcpSensesHasMore=result.has_more===true;
+    state.mcpSensesLoaded=true;
+  }catch(error){
+    if(renderAfter)alertFlash("err",operationDiagnosticFromError(error,"学习词条读取失败").message||"学习词条读取失败");
+  }finally{
+    if(ownsBusy)state.mcpBusy=false;
+    if(renderAfter)render();
+  }
 }
 
 function builtinPlatformConfig(platform) {
@@ -1352,7 +1372,7 @@ async function splitSelectedSense(senseId, revision) {
 if (!window.__personificationMcpPageEvents) {
   window.__personificationMcpPageEvents = true;
   document.addEventListener("click", event => {
-    const element = event.target instanceof Element ? event.target.closest("[data-mcp-operation-clear],[data-mcp-search],[data-mcp-load-more],[data-mcp-detail],[data-mcp-detail-close],[data-mcp-install-plan],[data-mcp-install-confirm],[data-mcp-install-cancel],[data-mcp-installation-toggle],[data-mcp-tool-toggle],[data-mcp-delete],[data-mcp-reload],[data-mcp-tab],[data-mcp-platform-toggle],[data-mcp-platform-save],[data-mcp-auth-start],[data-mcp-auth-interactive],[data-mcp-auth-interactive-confirm],[data-mcp-auth-interactive-cancel],[data-mcp-auth-manual],[data-mcp-auth-logout],[data-mcp-interactive-type],[data-mcp-interactive-key],[data-mcp-interactive-scroll],[data-mcp-interactive-refresh],[data-mcp-interactive-finish],[data-mcp-interactive-cancel],[data-mcp-preview-run],[data-mcp-sense-filter],[data-mcp-sense-open],[data-mcp-sense-close],[data-mcp-sense-action],[data-mcp-sense-merge],[data-mcp-sense-split]") : null;
+    const element = event.target instanceof Element ? event.target.closest("[data-mcp-operation-clear],[data-mcp-search],[data-mcp-load-more],[data-mcp-detail],[data-mcp-detail-close],[data-mcp-install-plan],[data-mcp-install-confirm],[data-mcp-install-cancel],[data-mcp-installation-toggle],[data-mcp-tool-toggle],[data-mcp-delete],[data-mcp-reload],[data-mcp-tab],[data-mcp-platform-toggle],[data-mcp-platform-save],[data-mcp-auth-start],[data-mcp-auth-interactive],[data-mcp-auth-interactive-confirm],[data-mcp-auth-interactive-cancel],[data-mcp-auth-manual],[data-mcp-auth-logout],[data-mcp-interactive-type],[data-mcp-interactive-key],[data-mcp-interactive-scroll],[data-mcp-interactive-refresh],[data-mcp-interactive-finish],[data-mcp-interactive-cancel],[data-mcp-preview-run],[data-mcp-senses-load],[data-mcp-senses-more],[data-mcp-sense-filter],[data-mcp-sense-open],[data-mcp-sense-close],[data-mcp-sense-action],[data-mcp-sense-merge],[data-mcp-sense-split]") : null;
     if (!element) return;
     if (element.hasAttribute("data-mcp-operation-clear")) { persistMcpOperationResult(null); render(); return; }
     if (element.hasAttribute("data-mcp-search")) { searchMcpRegistry(); return; }
@@ -1386,6 +1406,8 @@ if (!window.__personificationMcpPageEvents) {
     if (element.hasAttribute("data-mcp-interactive-finish")) { finishBuiltinInteractiveAuth(element.getAttribute("data-mcp-interactive-finish") || "", element.getAttribute("data-session-id") || ""); return; }
     if (element.hasAttribute("data-mcp-interactive-cancel")) { cancelBuiltinInteractiveAuth(element.getAttribute("data-mcp-interactive-cancel") || "", element.getAttribute("data-session-id") || ""); return; }
     if (element.hasAttribute("data-mcp-preview-run")) { runBuiltinPreview(); return; }
+    if (element.hasAttribute("data-mcp-senses-load")) { loadMcpSenses(); return; }
+    if (element.hasAttribute("data-mcp-senses-more")) { loadMcpSenses({append:true}); return; }
     if (element.hasAttribute("data-mcp-sense-filter")) { state.mcpSenseFilter=element.getAttribute("data-mcp-sense-filter") || ""; render(); return; }
     if (element.hasAttribute("data-mcp-sense-open")) { openSlangSense(element.getAttribute("data-mcp-sense-open") || ""); return; }
     if (element.hasAttribute("data-mcp-sense-close")) { state.mcpSelectedSense=null; render(); return; }

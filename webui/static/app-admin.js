@@ -1850,15 +1850,24 @@ async function unblockUserPolicy(userId) {
 }
 
 async function reloadUserPolicyList() {
-  const qs=new URLSearchParams({limit:"300"});
+  const qs=new URLSearchParams({limit:String(state.userPolicyLimit||50)});
   if(state.userPolicyTier)qs.set("tier",state.userPolicyTier);
   state.userPolicy=await api("/user-policy/states?"+qs.toString(),{cache:"no-store"});
 }
 
 async function setUserPolicyTier(value) {
   state.userPolicyTier=String(value||"");
+  state.userPolicyLimit=50;
   state.selectedUserPolicy=null;
   try{await reloadUserPolicyList();render();}catch(e){alertFlash("err",e.message||"用户策略读取失败");}
+}
+
+async function loadMoreUserPolicies(){
+  if(state.userPolicyBusy)return;
+  state.userPolicyLimit=Math.min(500,Number(state.userPolicyLimit||50)+50);
+  state.userPolicyBusy=true;render();
+  try{await reloadUserPolicyList();}catch(e){alertFlash("err",e.message||"用户策略读取失败");}
+  finally{state.userPolicyBusy=false;render();}
 }
 
 async function openUserPolicy(userId) {
@@ -2005,11 +2014,12 @@ function renderUserPolicy() {
   return `${renderUserPolicyAdd()}<div class="card">
     <div class="between" style="gap:12px;flex-wrap:wrap"><div><h2 style="margin:0">用户策略 / Blacklist</h2><p class="muted" style="margin:6px 0 0">全局 QQ 用户策略，跨群、私聊、Bot 身份与 QZone 生效。</p></div><label>tier <select onchange="setUserPolicyTier(this.value)">${options}</select></label></div>
     ${rows?`<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="用户策略列表"><table class="data-table wide" style="margin-top:12px"><thead><tr><th scope="col">用户</th><th scope="col">effective tier</th><th scope="col">到期</th><th scope="col">stage / strikes</th><th scope="col">manual</th><th scope="col">revision</th><th scope="col">更新时间</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody>${rows}</tbody></table></div>`:'<p class="muted">当前筛选下没有已持久化策略状态。</p>'}
+    ${state.userPolicy?.has_more?`<div class="row" style="justify-content:center;margin-top:14px"><button class="btn" onclick="loadMoreUserPolicies()" ${state.userPolicyBusy?'disabled':''}>再加载 50 条</button></div>`:""}
   </div>`;
 }
 
 async function reloadOutbound() {
-  const qs=new URLSearchParams({limit:"300"});
+  const qs=new URLSearchParams({limit:String(state.outboundLimit||50)});
   if(state.outboundBotId)qs.set("bot_id",state.outboundBotId);
   if(state.outboundKind)qs.set("conversation_kind",state.outboundKind);
   if(state.outboundConversationId)qs.set("conversation_id",state.outboundConversationId);
@@ -2024,6 +2034,15 @@ async function applyOutboundFilters() {
   state.outboundConversationId=String(document.getElementById("outbound-conversation")?.value||"").trim();
   state.outboundStatus=String(document.getElementById("outbound-status")?.value||"").trim();
   state.outboundRecalled=String(document.getElementById("outbound-recalled")?.value||"").trim();
+  state.outboundLimit=50;
+  state.outboundBusy=true;render();
+  try{await reloadOutbound();}catch(e){alertFlash("err",e.message||"出站账本读取失败");}
+  finally{state.outboundBusy=false;render();}
+}
+
+async function loadMoreOutbound(){
+  if(state.outboundBusy)return;
+  state.outboundLimit=Math.min(500,Number(state.outboundLimit||50)+50);
   state.outboundBusy=true;render();
   try{await reloadOutbound();}catch(e){alertFlash("err",e.message||"出站账本读取失败");}
   finally{state.outboundBusy=false;render();}
@@ -2088,6 +2107,7 @@ function renderOutbound() {
         <button class="btn small primary" onclick="applyOutboundFilters()" ${state.outboundBusy?'disabled':''}>应用筛选</button>
       </div>
       ${rows?`<div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="近期 Bot 出站消息"><table class="data-table xwide"><thead><tr><th scope="col">时间</th><th scope="col">operation / part</th><th scope="col">Bot</th><th scope="col">会话</th><th scope="col">surface</th><th scope="col">message_id</th><th scope="col">状态</th><th scope="col">脱敏 preview</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody>${rows}</tbody></table></div>`:'<p class="muted">当前筛选下没有出站账本记录。</p>'}
+      ${state.outbound?.has_more?`<div class="row" style="justify-content:center;margin-top:14px"><button class="btn" onclick="loadMoreOutbound()" ${state.outboundBusy?'disabled':''}>再加载 50 条</button></div>`:""}
       <p class="muted" style="font-size:11px">管理员只能选择完整 operation；前端不会提交任意 message_id。unknown/partial/已尝试 operation 会被服务端封存，禁止自动重试。</p>
     </div>`;
 }

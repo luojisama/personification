@@ -511,6 +511,12 @@ function renderMemoryDetail() {
 let _cytoscapeLoaded = false;
 let _cytoscapeInstance = null;
 
+function destroyMemoryGraphCanvas() {
+  if (!_cytoscapeInstance) return;
+  try { _cytoscapeInstance.destroy(); } catch {}
+  _cytoscapeInstance = null;
+}
+
 function ensureCytoscapeLoaded() {
   if (_cytoscapeLoaded) return Promise.resolve();
   if (window.cytoscape) { _cytoscapeLoaded = true; return Promise.resolve(); }
@@ -600,7 +606,7 @@ async function renderMemoryGraphCanvas() {
       thickness: Math.max(1, Math.min(6, Number(e.weight || 1))),
     }
   }));
-  if (_cytoscapeInstance) { try { _cytoscapeInstance.destroy(); } catch {} _cytoscapeInstance = null; }
+  destroyMemoryGraphCanvas();
   const theme = document.documentElement.getAttribute('data-theme') || 'dark';
   const labelColor = theme === 'light' ? '#1f2937' : '#e6e8ef';
   const labelOutline = theme === 'light' ? '#ffffff' : '#0f1115';

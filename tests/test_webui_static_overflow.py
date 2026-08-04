@@ -63,7 +63,7 @@ def test_every_static_table_uses_a_named_focusable_scroll_region() -> None:
         sources,
     )
 
-    assert table_count == 47
+    assert table_count == 48
     assert len(regions) == table_count
     assert len(re.findall(r'<table\b[^>]*class="[^"]*\bdata-table\b', sources)) == table_count
     assert re.findall(r'<th\b(?![^>]*\bscope="(?:col|row)")', sources) == []
@@ -103,7 +103,7 @@ def test_priority_renderers_keep_field_semantics() -> None:
     assert "浏览此页面不会创建好感度档案" in favorability
 
     for source, name in (
-        (operations, "renderAgentStatus"),
+        (operations, "renderAgentStatusContent"),
         (activity, "renderTraceProcess"),
         (activity, "renderTraces"),
         (content, "renderMemory"),
@@ -126,7 +126,7 @@ def test_long_technical_values_and_dynamic_buttons_keep_mobile_contracts() -> No
     css = _source("style.css")
 
     assert 'class="u-ellipsis" title="${escapeAttr(row.trace_id)}"' in _function(
-        _source("app-operations.js"), "renderAgentStatus"
+        _source("app-operations.js"), "renderAgentStatusContent"
     )
     assert 'title="${escapeAttr(e.trace_id || "-")}"' in _function(activity, "renderTraces")
     assert 'title="${escapeAttr(id)}"' in _function(admin, "renderQzoneReconciliation")
@@ -178,7 +178,7 @@ def test_rapid_navigation_never_renders_a_stale_lazy_view() -> None:
     assert 'if (e && e.name === "AbortError") return false;' in load_view
     assert "return navigationId === _navigationId;" in load_view
     assert "const loaded=await loadView();" in navigate
-    assert "if(loaded&&state.view===nextView)render();" in navigate
+    assert "if(loaded&&state.view===nextView){render();enterViewLifecycle(nextView);}" in navigate
     assert 'if((e&&e.name==="AbortError")||state.view!==nextView)return;' in navigate
 
 

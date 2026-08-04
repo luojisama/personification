@@ -22,7 +22,7 @@ def test_mcp_is_a_real_lazy_view_next_to_skill_management() -> None:
     assert 'mcp: "正在读取 MCP Registry 与运行状态..."' in core
     assert '} else if (view === "mcp") {' in core
     assert 'if (state.view === "mcp") return renderMcp();' in core
-    assert 'state.view==="mcp"&&nextView!=="mcp"' in core
+    assert 'previousView==="mcp"&&typeof stopMcpViewLifecycle' in core
     assert '"app-mcp.js",' in app
 
 
@@ -180,6 +180,18 @@ def test_mcp_events_are_single_registration_and_polling_is_bounded() -> None:
     assert "_mcpAuthPollInFlight = true" in source
     assert "_mcpAuthPollInFlight = false" in source
     assert "}, 3000);" in source
+
+
+def test_builtin_learning_senses_are_lazy_and_bounded() -> None:
+    source = _source("app-mcp.js")
+    core = _source("app-core.js")
+
+    assert "mcpSensesLoaded: false" in core
+    assert 'slang/senses?limit=200' not in core
+    assert "function loadMcpSenses" in source
+    assert "data-mcp-senses-load" in source
+    assert "data-mcp-senses-more" in source
+    assert "Number(state.mcpSenseLimit||50)+50" in source
 
 
 def test_builtin_social_research_has_native_controls_and_safe_learning_views() -> None:
