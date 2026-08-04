@@ -168,7 +168,7 @@ def test_mcp_events_are_single_registration_and_polling_is_bounded() -> None:
     assert source.count('document.addEventListener("change"') == 1
     assert source.count('document.addEventListener("keydown"') == 1
     assert source.count("setInterval(") == 1
-    assert source.count("setTimeout(") == 1
+    assert source.count("setTimeout(") == 2
     assert "_mcpInteractiveFrameGeneration" in source
     assert "_mcpInteractiveFrameInFlight" in source
     assert "function stopMcpViewLifecycle" in source
@@ -214,7 +214,8 @@ def test_builtin_social_research_has_native_controls_and_safe_learning_views() -
         "WebUI 人工验证",
         "验证完成，检查登录态",
         "系统不会自动识别或破解验证码",
-            "点击、拖动和输入按顺序发送",
+        "按下、移动与松开会实时转发",
+        "本地圆点只表示操作已经采集",
         "注销并删除 profile",
         "检索预览",
         "一次内容默认提取全部黑话",
@@ -331,6 +332,38 @@ def test_interactive_auth_uses_stable_incremental_frames_and_queued_actions() ->
     assert "render();" not in sender
     assert "builtinAuthRenderSignature" in status_poll
     assert "shouldRender" in status_poll
+
+
+def test_interactive_pointer_stream_is_live_bounded_and_keeps_final_position() -> None:
+    source = _source("app-mcp.js")
+    point_mapper = source.split("function interactivePoint", 1)[1].split("\n}", 1)[0]
+    pointer_drain = source.split("function drainBuiltinInteractivePointer", 1)[1].split("\n}", 1)[0]
+    pointer_down = source.split('document.addEventListener("pointerdown"', 1)[1].split("});", 1)[0]
+    pointer_move = source.split('document.addEventListener("pointermove"', 1)[1].split("});", 1)[0]
+    pointer_up = source.split('document.addEventListener("pointerup"', 1)[1].split("});", 1)[0]
+
+    assert '_MCP_INTERACTIVE_POINTER_MOVE_INTERVAL_MS = 80' in source
+    assert '_MCP_INTERACTIVE_FRAME_ACTIVE_INTERVAL_MS = 180' in source
+    assert '_MCP_INTERACTIVE_POINTER_MOVE_MAX_POINTS = 6' in source
+    assert 'type:"pointer_start"' in pointer_drain
+    assert 'type:"pointer_move"' in pointer_drain
+    assert 'type:"pointer_end"' in pointer_drain
+    assert 'type:"pointer_cancel"' in pointer_drain
+    assert "beginBuiltinInteractivePointer(image, event, point)" in pointer_down
+    assert "getCoalescedEvents" in source
+    assert "appendBuiltinInteractivePointerPoints" in pointer_move
+    assert "current.endPoint = point" in pointer_up
+    assert "current.ending = true" in pointer_up
+    assert "length < 32" not in source
+    assert 'type:"drag"' not in pointer_up
+    assert "naturalWidth" in point_mapper and "renderedWidth" in point_mapper
+    assert "if (!clamp &&" in point_mapper
+    assert "keepalive:true" in source
+    assert 'document.addEventListener("lostpointercapture"' in source
+    assert 'window.addEventListener("pagehide"' in source
+    assert 'data-mcp-interactive-pointer-marker' in source
+    assert "_mcpInteractivePointer ? _MCP_INTERACTIVE_FRAME_ACTIVE_INTERVAL_MS" in source
+    assert ".mcp-interactive-pointer-marker" in _source("style.css")
 
 
 def test_interactive_auth_retries_first_frame_when_server_revision_has_no_local_blob() -> None:

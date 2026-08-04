@@ -302,6 +302,8 @@ main { padding:20px 26px 48px; max-width:none; width:100%; min-width:0; height:1
 .mcp-interactive-screen img.is-loading { opacity:0; }
 .mcp-interactive-frame-placeholder { position:absolute; inset:0; display:none; place-items:center; padding:20px; color:#c9d2df; background:linear-gradient(135deg,#111827,#0b0f16); text-align:center; pointer-events:none; }
 .mcp-interactive-screen img.is-loading + .mcp-interactive-frame-placeholder { display:grid; }
+.mcp-interactive-pointer-marker { position:absolute; z-index:2; display:none; width:18px; height:18px; margin:-9px 0 0 -9px; border:2px solid #fff; border-radius:50%; background:color-mix(in srgb,var(--accent) 65%,transparent); box-shadow:0 0 0 3px rgba(0,0,0,.35); pointer-events:none; transform:translateZ(0); }
+.mcp-interactive-pointer-marker.is-visible { display:block; }
 .mcp-interactive-transport { min-height:20px; color:var(--muted); font-size:.82rem; }
 .mcp-interactive-controls { display:flex; flex-wrap:wrap; align-items:end; gap:8px; }.mcp-interactive-controls label { display:grid; flex:1 1 300px; gap:4px; }.mcp-interactive-controls input { width:100%; box-sizing:border-box; }
 .mcp-platform-config { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; padding-top:12px; }.mcp-platform-config label,.mcp-preview-form label { display:grid; gap:5px; color:var(--muted); font-size:12px; }

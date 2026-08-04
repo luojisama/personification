@@ -28,7 +28,7 @@ function stopMcpViewLifecycle() {
   // Pending confirmation may contain Secret input values and must stay page-local.
   _mcpPendingInstall = null;
   _mcpPendingInteractiveAuth = null;
-  _mcpInteractivePointer = null;
+  cancelActiveBuiltinInteractivePointer({keepalive:true});
   if (_mcpAuthTimer) { clearInterval(_mcpAuthTimer); _mcpAuthTimer = null; }
   stopBuiltinInteractiveFramePolling();
   clearBuiltinInteractiveActionQueue();
@@ -348,6 +348,9 @@ let _mcpInteractiveLifecycleBusy = false;
 const _mcpInteractiveActionQueue = [];
 const _mcpInteractiveFrames = new Map();
 const _MCP_INTERACTIVE_FRAME_INTERVAL_MS = 1200;
+const _MCP_INTERACTIVE_FRAME_ACTIVE_INTERVAL_MS = 180;
+const _MCP_INTERACTIVE_POINTER_MOVE_INTERVAL_MS = 80;
+const _MCP_INTERACTIVE_POINTER_MOVE_MAX_POINTS = 6;
 const _MCP_INTERACTIVE_ACTION_QUEUE_MAX = 32;
 const _MCP_INTERACTIVE_FRAME_PLACEHOLDER_SRC = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 
@@ -375,7 +378,7 @@ function stopBuiltinInteractiveFramePolling() {
 }
 
 function resetBuiltinInteractiveClientState() {
-  _mcpInteractivePointer = null;
+  cancelActiveBuiltinInteractivePointer({keepalive:true});
   clearBuiltinInteractiveActionQueue();
   _mcpInteractiveActionDraining = false;
   _mcpInteractiveDrainPromise = null;
@@ -402,8 +405,12 @@ function updateBuiltinInteractiveTransportStatus(sessionId, message="") {
   const status = panel?.querySelector("[data-mcp-interactive-status]");
   if (!status) return;
   const queued = _mcpInteractiveActionQueue.filter(item => item.sessionId === sessionId).length;
+  const pointer = _mcpInteractivePointer?.sessionId === String(sessionId || "") ? _mcpInteractivePointer : null;
   if (message) status.textContent = message;
   else if (_mcpInteractiveLifecycleBusy) status.textContent = "正在检查或关闭登录会话";
+  else if (pointer?.ending) status.textContent = pointer.cancelRequested ? "正在取消拖动" : "已松开，正在同步最终位置";
+  else if (pointer?.requestInFlight) status.textContent = "正在同步移动";
+  else if (pointer) status.textContent = "正在按住，等待移动";
   else if (_mcpInteractiveActionDraining || queued) status.textContent = `正在发送操作${queued ? ` · 待处理 ${queued}` : ""}`;
   else if (_mcpInteractiveFrameInFlight) status.textContent = "正在更新画面";
   else status.textContent = "画面与操作通道就绪";
@@ -454,7 +461,7 @@ async function refreshVisibleBuiltinInteractiveFrames({force=false, sessionId=""
     _mcpInteractiveFrames.delete(cachedSessionId);
   }
   if (!images.length) return;
-  if (sessionId) {
+  if (sessionId && force) {
     const entry = builtinInteractiveFrameEntry(sessionId);
     entry.force = true;
   }
@@ -566,7 +573,9 @@ function startBuiltinInteractiveFramePolling() {
       if (generation !== _mcpInteractiveFrameGeneration) return;
       _mcpInteractiveFrameTimer = null;
       await refreshVisibleBuiltinInteractiveFrames();
-      if (generation === _mcpInteractiveFrameGeneration && state.view === "mcp" && state.mcpTab === "builtin") schedule(_MCP_INTERACTIVE_FRAME_INTERVAL_MS);
+      if (generation === _mcpInteractiveFrameGeneration && state.view === "mcp" && state.mcpTab === "builtin") {
+        schedule(_mcpInteractivePointer ? _MCP_INTERACTIVE_FRAME_ACTIVE_INTERVAL_MS : _MCP_INTERACTIVE_FRAME_INTERVAL_MS);
+      }
     }, delay);
   };
   schedule(0);
@@ -703,6 +712,7 @@ function renderBuiltinInteractiveAuth(platform, auth) {
     <div class="mcp-interactive-screen" role="application" aria-label="${escapeAttr(MCP_PLATFORM_LABELS[platform] || platform)}官方登录页面人工验证画面">
       <img draggable="false" alt="${escapeAttr(MCP_PLATFORM_LABELS[platform] || platform)}官方登录页面" src="${escapeAttr(frameSource)}" class="${frame.objectUrl ? "" : "is-loading"}" data-mcp-interactive-frame data-platform="${escapeAttr(platform)}" data-session-id="${escapeAttr(sessionId)}" data-viewport-width="${width}" data-viewport-height="${height}">
       <span class="mcp-interactive-frame-placeholder">正在读取官方页面画面…</span>
+      <span class="mcp-interactive-pointer-marker" data-mcp-interactive-pointer-marker aria-hidden="true"></span>
     </div>
     <div class="mcp-interactive-transport" data-mcp-interactive-status role="status">画面与操作通道准备中</div>
     <div class="mcp-interactive-controls">
@@ -715,7 +725,7 @@ function renderBuiltinInteractiveAuth(platform, auth) {
       <button class="btn primary" data-mcp-interactive-finish="${escapeAttr(platform)}" data-session-id="${escapeAttr(sessionId)}">验证完成，检查登录态</button>
       <button class="btn danger" data-mcp-interactive-cancel="${escapeAttr(platform)}" data-session-id="${escapeAttr(sessionId)}">取消接管</button>
     </div>
-    <p class="muted">画面按变化增量刷新，同一时间只保留一个画面请求；点击、拖动和输入按顺序发送，不会因上一项未完成而静默丢失。输入内容不写入审计日志，但会经本机 WebUI 与 MCP 进程发送到官方页面。</p>
+    <p class="muted">按下、移动与松开会实时转发；网络较慢时只合并陈旧中间点，并始终保留最终位置。画面按变化增量刷新，本地圆点只表示操作已经采集，不代表验证已经通过。输入内容不写入审计日志，但会经本机 WebUI 与 MCP 进程发送到官方页面。</p>
   </section>`;
 }
 
@@ -1184,14 +1194,271 @@ async function confirmBuiltinInteractiveAuth(platform) {
   await startBuiltinAuth(platform, "webui_interactive");
 }
 
-function interactivePoint(image, event) {
+function interactivePoint(image, event, {clamp=false}={}) {
   const rect = image.getBoundingClientRect();
   const width = Math.max(1, Number(image.getAttribute("data-viewport-width") || 1280));
   const height = Math.max(1, Number(image.getAttribute("data-viewport-height") || 900));
+  const naturalWidth = Math.max(1, Number(image.naturalWidth || width));
+  const naturalHeight = Math.max(1, Number(image.naturalHeight || height));
+  const scale = Math.min(Math.max(1, rect.width) / naturalWidth, Math.max(1, rect.height) / naturalHeight);
+  const renderedWidth = Math.max(1, naturalWidth * scale);
+  const renderedHeight = Math.max(1, naturalHeight * scale);
+  const left = rect.left + (rect.width - renderedWidth) / 2;
+  const top = rect.top + (rect.height - renderedHeight) / 2;
+  if (!clamp && (event.clientX < left || event.clientX > left + renderedWidth || event.clientY < top || event.clientY > top + renderedHeight)) return null;
+  const clientX = Math.max(left, Math.min(left + renderedWidth, event.clientX));
+  const clientY = Math.max(top, Math.min(top + renderedHeight, event.clientY));
   return {
-    x: Math.max(0, Math.min(width, (event.clientX - rect.left) * width / Math.max(1, rect.width))),
-    y: Math.max(0, Math.min(height, (event.clientY - rect.top) * height / Math.max(1, rect.height))),
+    x: Math.max(0, Math.min(width, (clientX - left) * width / renderedWidth)),
+    y: Math.max(0, Math.min(height, (clientY - top) * height / renderedHeight)),
+    localX:clientX - rect.left,
+    localY:clientY - rect.top,
   };
+}
+
+function interactivePayloadPoint(point) {
+  return {x:Number(point.x), y:Number(point.y)};
+}
+
+function compactBuiltinInteractivePoints(points, limit=_MCP_INTERACTIVE_POINTER_MOVE_MAX_POINTS) {
+  const unique = [];
+  for (const point of points || []) {
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+    const previous = unique[unique.length - 1];
+    if (!previous || previous.x !== point.x || previous.y !== point.y) unique.push(point);
+  }
+  if (unique.length <= limit) return unique;
+  const compacted = [];
+  for (let index = 0; index < limit; index += 1) {
+    const sourceIndex = Math.round(index * (unique.length - 1) / Math.max(1, limit - 1));
+    const point = unique[sourceIndex];
+    if (compacted[compacted.length - 1] !== point) compacted.push(point);
+  }
+  const latest = unique[unique.length - 1];
+  if (compacted[compacted.length - 1] !== latest) compacted[compacted.length - 1] = latest;
+  return compacted;
+}
+
+function createBuiltinInteractiveGestureId() {
+  if (globalThis.crypto?.randomUUID) return `gesture_${globalThis.crypto.randomUUID().replaceAll("-", "")}`;
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
+  else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+  return `gesture_${Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function updateBuiltinInteractivePointerMarker(current, point, visible=true) {
+  if (!current?.image || !point) return;
+  const screen = current.image.closest(".mcp-interactive-screen");
+  const marker = screen?.querySelector("[data-mcp-interactive-pointer-marker]");
+  if (!marker) return;
+  marker.style.left = `${point.localX}px`;
+  marker.style.top = `${point.localY}px`;
+  marker.classList.toggle("is-visible", Boolean(visible));
+}
+
+function hideBuiltinInteractivePointerMarker(current) {
+  const marker = current?.image?.closest(".mcp-interactive-screen")?.querySelector("[data-mcp-interactive-pointer-marker]");
+  if (marker) marker.classList.remove("is-visible");
+}
+
+function builtinInteractivePointerErrorMessage(code) {
+  if (code === "interactive_pointer_timeout") return "拖动已超时，请重新按住滑块";
+  if (["interactive_pointer_not_active","interactive_pointer_gesture_mismatch","interactive_pointer_sequence_invalid"].includes(code)) return "拖动状态已经变化，请重新按住滑块";
+  return code ? "拖动没有同步到官方页面，请重新按住滑块" : "";
+}
+
+async function postBuiltinInteractiveAction(platform, sessionId, action, {quiet=false, keepalive=false}={}) {
+  const path = `/mcp/builtin/social-research/auth/${encodeURIComponent(sessionId)}/input?platform=${encodeURIComponent(platform)}`;
+  const headers = {"content-type":"application/json"};
+  if (keepalive) {
+    return api(path, {
+      method:"POST", headers, keepalive:true,
+      body:JSON.stringify({action}),
+    }).catch(() => null);
+  }
+  const next = await api(path, {method:"POST", headers, body:JSON.stringify({action})});
+  state.mcpAuth = {...state.mcpAuth, [platform]:next};
+  const entry = builtinInteractiveFrameEntry(sessionId);
+  if (!entry.objectUrl) entry.force = true;
+  updateBuiltinAuthDom(platform, next);
+  const pointerCode = action?.type?.startsWith("pointer_") ? String(next?.interactive_pointer_error_code || "") : "";
+  if (pointerCode && next?.action_duplicate !== true) {
+    const message = builtinInteractivePointerErrorMessage(pointerCode);
+    updateBuiltinInteractiveTransportStatus(sessionId, message);
+    if (!quiet) alertFlash("err", message);
+  }
+  return next;
+}
+
+function waitBuiltinInteractivePointer(delay) {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(delay || 0))));
+}
+
+async function refreshBuiltinInteractivePointerFrame(current, {immediate=false}={}) {
+  if (!current || _mcpInteractivePointer !== current || state.view !== "mcp" || state.mcpTab !== "builtin") return;
+  const now = performance.now();
+  if (!immediate && now - current.lastFrameRequestedAt < _MCP_INTERACTIVE_FRAME_ACTIVE_INTERVAL_MS) return;
+  current.lastFrameRequestedAt = now;
+  updateBuiltinInteractiveTransportStatus(current.sessionId, "正在等待最新画面");
+  await refreshVisibleBuiltinInteractiveFrames({sessionId:current.sessionId});
+}
+
+function appendBuiltinInteractivePointerPoints(current, points) {
+  if (!current || current.ending) return;
+  current.pendingPoints = compactBuiltinInteractivePoints([
+    ...(current.pendingPoints || []),
+    ...(points || []),
+  ]);
+  const latest = current.pendingPoints[current.pendingPoints.length - 1];
+  if (latest) {
+    current.latestPoint = latest;
+    updateBuiltinInteractivePointerMarker(current, latest);
+  }
+}
+
+function builtinInteractiveEventPoints(current, event) {
+  let samples = [event];
+  try {
+    const coalesced = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [];
+    if (Array.isArray(coalesced) && coalesced.length) samples = [...coalesced, event];
+  } catch {}
+  const points = [];
+  for (const sample of samples) {
+    const point = interactivePoint(current.image, sample, {clamp:true});
+    if (point) points.push(point);
+  }
+  return compactBuiltinInteractivePoints(points);
+}
+
+async function sendBuiltinInteractivePointerStep(current, action, {quiet=false}={}) {
+  current.requestInFlight = true;
+  updateBuiltinInteractiveTransportStatus(current.sessionId);
+  try {
+    return await postBuiltinInteractiveAction(current.platform, current.sessionId, action, {quiet});
+  } catch (error) {
+    if (!quiet) alertFlash("err", operationDiagnosticFromError(error, "拖动操作未完成").message || "拖动操作未完成");
+    return null;
+  } finally {
+    current.requestInFlight = false;
+  }
+}
+
+function finishBuiltinInteractivePointerClient(current, message="已松开，正在刷新最终画面") {
+  if (!current) return;
+  try {
+    if (current.image?.hasPointerCapture?.(current.pointerId)) current.image.releasePointerCapture(current.pointerId);
+  } catch {}
+  hideBuiltinInteractivePointerMarker(current);
+  if (_mcpInteractivePointer === current) _mcpInteractivePointer = null;
+  updateBuiltinInteractiveTransportStatus(current.sessionId, message);
+}
+
+function drainBuiltinInteractivePointer(current) {
+  if (!current || current.draining) return current?.drainPromise || Promise.resolve();
+  current.draining = true;
+  current.drainPromise = (async () => {
+    if (!current.started) {
+      const next = await sendBuiltinInteractivePointerStep(current, {
+        type:"pointer_start", gesture_id:current.gestureId, seq:0,
+        ...interactivePayloadPoint(current.startPoint),
+      });
+      current.started = true;
+      const pointerError = String(next?.interactive_pointer_error_code || "");
+      if (!next || (pointerError && next.action_duplicate !== true)) {
+        current.cancelRequested = true;
+        current.ending = true;
+        current.pendingPoints = [];
+      }
+    }
+
+    while (_mcpInteractivePointer === current) {
+      if (current.pendingPoints.length && !current.cancelRequested) {
+        const elapsed = performance.now() - current.lastMoveSentAt;
+        if (elapsed < _MCP_INTERACTIVE_POINTER_MOVE_INTERVAL_MS) {
+          await waitBuiltinInteractivePointer(_MCP_INTERACTIVE_POINTER_MOVE_INTERVAL_MS - elapsed);
+        }
+        const batch = compactBuiltinInteractivePoints(current.pendingPoints);
+        current.pendingPoints = [];
+        current.seq += 1;
+        current.lastMoveSentAt = performance.now();
+        const next = await sendBuiltinInteractivePointerStep(current, {
+          type:"pointer_move", gesture_id:current.gestureId, seq:current.seq,
+          points:batch.map(interactivePayloadPoint),
+        });
+        const pointerError = String(next?.interactive_pointer_error_code || "");
+        if (!next || (pointerError && next.action_duplicate !== true)) {
+          current.cancelRequested = true;
+          current.ending = true;
+          current.pendingPoints = [];
+        }
+        await refreshBuiltinInteractivePointerFrame(current);
+        continue;
+      }
+      if (!current.ending) break;
+      current.seq += 1;
+      const finalPoint = current.endPoint || current.latestPoint || current.startPoint;
+      const action = current.cancelRequested
+        ? {type:"pointer_cancel", gesture_id:current.gestureId, seq:current.seq}
+        : {type:"pointer_end", gesture_id:current.gestureId, seq:current.seq, ...interactivePayloadPoint(finalPoint)};
+      await sendBuiltinInteractivePointerStep(current, action, {quiet:current.cancelRequested});
+      await refreshBuiltinInteractivePointerFrame(current, {immediate:true});
+      finishBuiltinInteractivePointerClient(current);
+      break;
+    }
+  })().finally(() => {
+    current.draining = false;
+    current.drainPromise = null;
+    if (_mcpInteractivePointer === current && (current.pendingPoints.length || current.ending)) {
+      Promise.resolve().then(() => drainBuiltinInteractivePointer(current));
+    } else if (_mcpInteractivePointer === current) {
+      updateBuiltinInteractiveTransportStatus(current.sessionId);
+    }
+  });
+  return current.drainPromise;
+}
+
+function beginBuiltinInteractivePointer(image, event, point) {
+  const current = {
+    image,
+    pointerId:event.pointerId,
+    platform:image.getAttribute("data-platform") || "",
+    sessionId:image.getAttribute("data-session-id") || "",
+    gestureId:createBuiltinInteractiveGestureId(),
+    seq:0,
+    startPoint:point,
+    latestPoint:point,
+    endPoint:null,
+    pendingPoints:[],
+    started:false,
+    ending:false,
+    cancelRequested:false,
+    draining:false,
+    drainPromise:null,
+    requestInFlight:false,
+    lastMoveSentAt:performance.now() - _MCP_INTERACTIVE_POINTER_MOVE_INTERVAL_MS,
+    lastFrameRequestedAt:performance.now() - _MCP_INTERACTIVE_FRAME_ACTIVE_INTERVAL_MS,
+  };
+  _mcpInteractivePointer = current;
+  updateBuiltinInteractivePointerMarker(current, point);
+  try { image.setPointerCapture(event.pointerId); } catch {}
+  drainBuiltinInteractivePointer(current);
+  return current;
+}
+
+function cancelActiveBuiltinInteractivePointer({keepalive=false}={}) {
+  const current = _mcpInteractivePointer;
+  if (!current) return Promise.resolve();
+  current.cancelRequested = true;
+  current.ending = true;
+  current.pendingPoints = [];
+  if (!keepalive) return drainBuiltinInteractivePointer(current);
+  current.seq += 1;
+  const request = postBuiltinInteractiveAction(current.platform, current.sessionId, {
+    type:"pointer_cancel", gesture_id:current.gestureId, seq:current.seq,
+  }, {quiet:true, keepalive:true});
+  finishBuiltinInteractivePointerClient(current, "拖动已取消");
+  return request;
 }
 
 function drainBuiltinInteractiveActions() {
@@ -1202,12 +1469,7 @@ function drainBuiltinInteractiveActions() {
       const item = _mcpInteractiveActionQueue.shift();
       updateBuiltinInteractiveTransportStatus(item.sessionId);
       try {
-        const next = await api(`/mcp/builtin/social-research/auth/${encodeURIComponent(item.sessionId)}/input?platform=${encodeURIComponent(item.platform)}`, {
-          method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({action:item.action}),
-        });
-        state.mcpAuth = {...state.mcpAuth, [item.platform]:next};
-        builtinInteractiveFrameEntry(item.sessionId, next.interactive_frame_revision || 0).force = true;
-        updateBuiltinAuthDom(item.platform, next);
+        const next = await postBuiltinInteractiveAction(item.platform, item.sessionId, item.action);
         item.resolve(next);
       } catch (error) {
         alertFlash("err", operationDiagnosticFromError(error, "人工验证操作未完成").message || "人工验证操作未完成");
@@ -1244,6 +1506,7 @@ function sendBuiltinInteractiveAction(platform, sessionId, action) {
 
 async function finishBuiltinInteractiveAuth(platform, sessionId) {
   if (_mcpInteractiveLifecycleBusy) return;
+  if (_mcpInteractivePointer?.sessionId === sessionId) await cancelActiveBuiltinInteractivePointer();
   _mcpInteractiveLifecycleBusy = true;
   try {
     await drainBuiltinInteractiveActions();
@@ -1265,6 +1528,7 @@ async function finishBuiltinInteractiveAuth(platform, sessionId) {
 
 async function cancelBuiltinInteractiveAuth(platform, sessionId) {
   if (_mcpInteractiveLifecycleBusy) return;
+  if (_mcpInteractivePointer?.sessionId === sessionId) await cancelActiveBuiltinInteractivePointer();
   _mcpInteractiveLifecycleBusy = true;
   try {
     await drainBuiltinInteractiveActions();
@@ -1454,42 +1718,42 @@ if (!window.__personificationMcpPageEvents) {
   });
   document.addEventListener("pointerdown", event => {
     const image = event.target instanceof Element ? event.target.closest("[data-mcp-interactive-frame]") : null;
-    if (!image || _mcpInteractiveLifecycleBusy || event.button !== 0) return;
+    if (!image || _mcpInteractivePointer || _mcpInteractiveLifecycleBusy || event.button !== 0 || event.isPrimary === false) return;
     event.preventDefault();
     const point = interactivePoint(image, event);
-    _mcpInteractivePointer = {
-      image,
-      platform:image.getAttribute("data-platform") || "",
-      sessionId:image.getAttribute("data-session-id") || "",
-      started:performance.now(),
-      points:[{...point, t:0}],
-    };
-    try { image.setPointerCapture(event.pointerId); } catch {}
+    if (!point) return;
+    beginBuiltinInteractivePointer(image, event, point);
   });
   document.addEventListener("pointermove", event => {
     const current = _mcpInteractivePointer;
-    if (!current || current.image !== event.target) return;
+    if (!current || current.pointerId !== event.pointerId || current.ending) return;
     event.preventDefault();
-    const point = interactivePoint(current.image, event);
-    const previous = current.points[current.points.length - 1];
-    const elapsed = Math.min(5000, Math.max(0, Math.round(performance.now() - current.started)));
-    if (current.points.length < 32 && (Math.abs(point.x - previous.x) >= 1 || Math.abs(point.y - previous.y) >= 1)) {
-      current.points.push({...point, t:elapsed});
-    }
+    appendBuiltinInteractivePointerPoints(current, builtinInteractiveEventPoints(current, event));
+    drainBuiltinInteractivePointer(current);
   });
   document.addEventListener("pointerup", event => {
     const current = _mcpInteractivePointer;
-    if (!current) return;
+    if (!current || current.pointerId !== event.pointerId || current.ending) return;
     event.preventDefault();
-    const point = interactivePoint(current.image, event);
-    const elapsed = Math.min(5000, Math.max(0, Math.round(performance.now() - current.started)));
-    const previous = current.points[current.points.length - 1];
-    if (current.points.length < 32 && (Math.abs(point.x - previous.x) >= 1 || Math.abs(point.y - previous.y) >= 1)) current.points.push({...point, t:elapsed});
-    _mcpInteractivePointer = null;
-    const first = current.points[0];
-    const last = current.points[current.points.length - 1];
-    const distance = Math.hypot(last.x - first.x, last.y - first.y);
-    sendBuiltinInteractiveAction(current.platform, current.sessionId, distance < 5 ? {type:"click", x:last.x, y:last.y} : {type:"drag", points:current.points});
+    const point = interactivePoint(current.image, event, {clamp:true}) || current.latestPoint;
+    appendBuiltinInteractivePointerPoints(current, [point]);
+    current.endPoint = point;
+    current.ending = true;
+    try { current.image.releasePointerCapture(event.pointerId); } catch {}
+    drainBuiltinInteractivePointer(current);
   });
-  document.addEventListener("pointercancel", () => { _mcpInteractivePointer = null; });
+  document.addEventListener("pointercancel", event => {
+    if (_mcpInteractivePointer?.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    cancelActiveBuiltinInteractivePointer();
+  });
+  document.addEventListener("lostpointercapture", event => {
+    if (_mcpInteractivePointer?.pointerId === event.pointerId && !_mcpInteractivePointer.ending) {
+      cancelActiveBuiltinInteractivePointer();
+    }
+  });
+  document.addEventListener("contextmenu", event => {
+    if (event.target instanceof Element && event.target.closest("[data-mcp-interactive-frame]")) event.preventDefault();
+  });
+  window.addEventListener("pagehide", () => { cancelActiveBuiltinInteractivePointer({keepalive:true}); });
 }
