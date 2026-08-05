@@ -73,6 +73,7 @@ from ...core.turn_media import (
     media_summary_timeout_seconds,
     normalize_safe_visual_summary,
     render_turn_media_grounding,
+    resolve_onebot_audio_refs,
     serialize_turn_media,
 )
 from ...core.user_avatar_insight import schedule_user_avatar_analysis
@@ -1344,6 +1345,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         for item in turn_media_context
         if item.kind == "video" and str(item.ref or "").strip()
     ][:1]
+    tool_audio_urls = [
+        item.ref
+        for item in turn_media_context
+        if item.kind == "audio" and str(item.ref or "").strip()
+    ][:1]
     # 分类为真实照片的 refs 继续用于 provider 图片输入不兼容时的旧 fallback。
     photo_image_urls = list(image_urls)
     image_input_mode = normalize_image_input_mode(
@@ -2279,14 +2285,22 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             message_intent=message_intent,
             ambiguity_level=intent_decision.ambiguity_level,
             is_direct_mention=is_direct_mention,
-            has_image_input=bool(tool_image_urls or tool_video_urls),
+            has_image_input=bool(tool_image_urls or tool_video_urls or tool_audio_urls),
         ):
+            turn_media_context = await resolve_onebot_audio_refs(turn_media_context, bot)
+            state["turn_media_context"] = serialize_turn_media(turn_media_context)
+            tool_audio_urls = [
+                item.ref
+                for item in turn_media_context
+                if item.kind == "audio" and str(item.ref or "").strip()
+            ][:1]
             if getattr(runtime, "user_policy_gate", None) is not None:
                 await runtime.user_policy_gate.ensure_current(event)
             image_ctx_token = set_current_image_context(
                 tool_image_urls,
                 message_content,
                 tool_video_urls,
+                tool_audio_urls,
             )
             try:
                 try:
@@ -2299,6 +2313,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             status="info",
                             detail=(
                                 f"intent={message_intent} images={len(tool_image_urls)} videos={len(tool_video_urls)} "
+                                f"audios={len(tool_audio_urls)} "
                                 f"direct_image={agent_direct_image_input} "
                                 f"elapsed_ms=0 turn_age_ms={int((time.monotonic() - started_at) * 1000)}"
                             ),

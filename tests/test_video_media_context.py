@@ -13,10 +13,13 @@ def test_current_media_context_carries_and_resets_video_refs() -> None:
         ["data:image/png;base64,AA=="],
         "看这个",
         ["https://cdn.example/video.mp4"],
+        ["C:\\tmp\\voice.wav"],
     )
     try:
         assert sticker_impl.get_current_video_urls() == ["https://cdn.example/video.mp4"]
         assert sticker_impl.get_current_image_urls() == ["data:image/png;base64,AA=="]
+        assert sticker_impl.get_current_audio_urls() == ["C:\\tmp\\voice.wav"]
     finally:
         sticker_impl.reset_current_image_context(token)
     assert sticker_impl.get_current_video_urls() == []
+    assert sticker_impl.get_current_audio_urls() == []

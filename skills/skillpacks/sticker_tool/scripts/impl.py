@@ -91,6 +91,10 @@ _CURRENT_VIDEO_URLS: ContextVar[List[str]] = ContextVar(
     "personification_current_video_urls",
     default=[],
 )
+_CURRENT_AUDIO_URLS: ContextVar[List[str]] = ContextVar(
+    "personification_current_audio_urls",
+    default=[],
+)
 
 
 # ---------------------------------------------------------------------------
@@ -213,12 +217,16 @@ def get_current_image_urls() -> List[str]:
 
 
 def set_current_image_context(
-    image_urls: List[str], user_text: str = "", video_urls: List[str] | None = None
-) -> tuple[object, object, object]:
+    image_urls: List[str],
+    user_text: str = "",
+    video_urls: List[str] | None = None,
+    audio_urls: List[str] | None = None,
+) -> tuple[object, object, object, object]:
     urls_token = _CURRENT_IMAGE_URLS.set(list(image_urls))
     text_token = _CURRENT_IMAGE_TEXT.set(str(user_text or "").strip())
     video_token = _CURRENT_VIDEO_URLS.set(list(video_urls or []))
-    return urls_token, text_token, video_token
+    audio_token = _CURRENT_AUDIO_URLS.set(list(audio_urls or []))
+    return urls_token, text_token, video_token, audio_token
 
 
 def reset_current_image_context(tokens: tuple[object, ...]) -> None:
@@ -227,6 +235,8 @@ def reset_current_image_context(tokens: tuple[object, ...]) -> None:
     _CURRENT_IMAGE_TEXT.reset(text_token)
     if rest:
         _CURRENT_VIDEO_URLS.reset(rest[0])
+    if len(rest) > 1:
+        _CURRENT_AUDIO_URLS.reset(rest[1])
 
 
 def get_current_image_text() -> str:
@@ -235,6 +245,10 @@ def get_current_image_text() -> str:
 
 def get_current_video_urls() -> List[str]:
     return list(_CURRENT_VIDEO_URLS.get())
+
+
+def get_current_audio_urls() -> List[str]:
+    return list(_CURRENT_AUDIO_URLS.get())
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,10 @@ def _image(url: str, file_id: str, *, sub_type: int = 0) -> SimpleNamespace:
     )
 
 
+def _record(file_id: str) -> SimpleNamespace:
+    return SimpleNamespace(type="record", data={"file": file_id})
+
+
 def _event(user_id: str, message_id: str, image: SimpleNamespace) -> SimpleNamespace:
     return SimpleNamespace(
         user_id=user_id,
@@ -144,3 +148,47 @@ def test_visual_grounding_separates_image_subjects_from_chat_participants() -> N
     assert "画中主体只是媒体内容，不是聊天参与者" in grounding
     assert "不证明群友在现实中围观、施压" in grounding
     assert "动漫插画里有多人" in grounding
+
+
+def test_record_segment_keeps_audio_provenance_without_eager_conversion() -> None:
+    event = _event("speaker", "record-message", _record("opaque-record-token"))
+
+    refs = turn_media.extract_turn_media_from_event(event)
+
+    assert len(refs) == 1
+    assert refs[0].kind == "audio"
+    assert refs[0].file_id == "opaque-record-token"
+    assert refs[0].ref == "opaque-record-token"
+    assert refs[0].owner_user_id == "speaker"
+    assert refs[0].message_id == "record-message"
+
+
+def test_onebot_record_is_resolved_to_wav_only_on_demand() -> None:
+    event = _event("speaker", "record-message", _record("opaque-record-token"))
+    refs = turn_media.extract_turn_media_from_event(event)
+    calls: list[dict[str, str]] = []
+
+    class _Bot:
+        async def get_record(self, **kwargs):  # noqa: ANN003, ANN201
+            calls.append(dict(kwargs))
+            return {"file": "C:\\tmp\\record.wav"}
+
+    resolved = asyncio.run(turn_media.resolve_onebot_audio_refs(refs, _Bot()))
+
+    assert calls == [{"file": "opaque-record-token", "out_format": "wav"}]
+    assert resolved[0].ref == "C:\\tmp\\record.wav"
+    assert resolved[0].file_id == "opaque-record-token"
+    assert resolved[0].origin == "current"
+
+
+def test_onebot_record_resolution_failure_preserves_original_reference() -> None:
+    event = _event("speaker", "record-message", _record("opaque-record-token"))
+    refs = turn_media.extract_turn_media_from_event(event)
+
+    class _Bot:
+        async def call_api(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN201
+            raise RuntimeError("adapter unavailable")
+
+    resolved = asyncio.run(turn_media.resolve_onebot_audio_refs(refs, _Bot()))
+
+    assert resolved[0] == refs[0]

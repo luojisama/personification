@@ -111,6 +111,7 @@ from ...core.turn_media import (
     media_summary_timeout_seconds,
     normalize_safe_visual_summary,
     render_turn_media_grounding,
+    resolve_onebot_audio_refs,
 )
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_YAML
 from ...core.user_avatar_insight import (
@@ -1486,6 +1487,11 @@ async def process_yaml_response_logic(
         for item in turn_media_refs
         if item.kind == "video" and str(item.ref or "").strip()
     ][:1]
+    tool_audio_urls = [
+        item.ref
+        for item in turn_media_refs
+        if item.kind == "audio" and str(item.ref or "").strip()
+    ][:1]
     image_detail = normalize_image_detail(
         getattr(plugin_config, "personification_image_detail", "auto")
     )
@@ -1642,8 +1648,14 @@ async def process_yaml_response_logic(
         message_intent=message_intent,
         ambiguity_level=str(intent_ambiguity_level or ""),
         is_direct_mention=is_direct_mention,
-        has_image_input=bool(tool_image_urls),
+        has_image_input=bool(tool_image_urls or tool_video_urls or tool_audio_urls),
     ):
+        turn_media_refs = await resolve_onebot_audio_refs(turn_media_refs, bot)
+        tool_audio_urls = [
+            item.ref
+            for item in turn_media_refs
+            if item.kind == "audio" and str(item.ref or "").strip()
+        ][:1]
         executor = ActionExecutor(
             bot,
             event,
@@ -1749,6 +1761,7 @@ async def process_yaml_response_logic(
             tool_image_urls,
             input_text,
             tool_video_urls,
+            tool_audio_urls,
         )
         ack_phrase = ""
         if is_direct_mention:
@@ -1788,7 +1801,8 @@ async def process_yaml_response_logic(
             label="YAML Agent 开始",
             status="info",
             detail=(
-                f"images={len(tool_image_urls)} direct_image={bool(agent_direct_image_input)} "
+                f"images={len(tool_image_urls)} videos={len(tool_video_urls)} audios={len(tool_audio_urls)} "
+                f"direct_image={bool(agent_direct_image_input)} "
                 "elapsed_ms=0"
             ),
         )

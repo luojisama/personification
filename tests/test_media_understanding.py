@@ -8,6 +8,7 @@ from ._loader import load_personification_module
 
 
 media_understanding = load_personification_module("plugin.personification.core.media_understanding")
+qwen_web_service = load_personification_module("plugin.personification.core.qwen_web_service")
 vision_caller = load_personification_module(
     "plugin.personification.skills.skillpacks.vision_caller.scripts.impl"
 )
@@ -337,6 +338,230 @@ def test_video_auto_uses_native_full_modal_route_without_extracting_frames(monke
     )
     assert result == '{"scene_summary":"native video"}'
     assert route == "video_route_direct"
+
+
+def test_video_auto_uses_qwen_web_before_paid_api(monkeypatch) -> None:  # noqa: ANN001
+    attempts: list[dict] = []
+
+    async def _no_primary(**_kwargs):  # noqa: ANN003, ANN202
+        return ""
+
+    class _Service:
+        async def analyze(self, **kwargs):  # noqa: ANN003, ANN202
+            assert kwargs["kind"] == "video"
+            return "[UNTRUSTED_DATA_ONLY: QWEN_WEB_VIDEO_OBSERVATION]\n时间线\n[/UNTRUSTED_DATA_ONLY]", {
+                "status": "ok",
+                "diagnostic_code": "",
+            }
+
+    def _forbidden_api(_runtime):  # noqa: ANN001
+        raise AssertionError("qwen web success must stop the paid API route")
+
+    monkeypatch.setattr(media_understanding, "_try_primary_video_routes", _no_primary)
+    monkeypatch.setattr(qwen_web_service, "get_qwen_web_service", lambda _runtime: _Service())
+    monkeypatch.setattr(media_understanding, "_build_video_fallback_provider_config", _forbidden_api)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_video_understanding_enabled=True,
+            personification_video_route_mode="auto",
+            personification_qwen_web_enabled=True,
+            personification_qwen_web_risk_acknowledged=True,
+            personification_qwen_web_priority="before_api",
+        )
+    )
+
+    result, route = asyncio.run(
+        media_understanding.analyze_videos_with_route_or_fallback(
+            runtime=runtime,
+            prompt="按时间线理解",
+            video_refs=["https://cdn.example/video.mp4"],
+            route_attempts=attempts,
+        )
+    )
+
+    assert "QWEN_WEB_VIDEO_OBSERVATION" in result
+    assert route == "video_qwen_web"
+    assert [item["route"] for item in attempts] == ["video_primary", "video_qwen_web"]
+    assert attempts[-1]["status"] == "ok"
+
+
+def test_video_qwen_network_risk_stops_web_and_falls_through_once(monkeypatch) -> None:  # noqa: ANN001
+    attempts: list[dict] = []
+    calls: list[str] = []
+
+    async def _no_primary(**_kwargs):  # noqa: ANN003, ANN202
+        return ""
+
+    class _Service:
+        async def analyze(self, **_kwargs):  # noqa: ANN003, ANN202
+            calls.append("qwen_web")
+            return "", {
+                "status": "failed",
+                "diagnostic_code": "qwen_web_network_risk_detected",
+            }
+
+    async def _official(**_kwargs):  # noqa: ANN003, ANN202
+        calls.append("official_api")
+        return "paid API result"
+
+    monkeypatch.setattr(media_understanding, "_try_primary_video_routes", _no_primary)
+    monkeypatch.setattr(qwen_web_service, "get_qwen_web_service", lambda _runtime: _Service())
+    monkeypatch.setattr(
+        media_understanding,
+        "_build_video_fallback_provider_config",
+        lambda _runtime: {"api_type": "qwen_omni", "api_key": "key", "model": "qwen"},
+    )
+    monkeypatch.setattr(media_understanding, "_call_qwen_omni_media", _official)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_video_understanding_enabled=True,
+            personification_video_route_mode="auto",
+            personification_video_analysis_timeout=120.0,
+            personification_qwen_web_enabled=True,
+            personification_qwen_web_risk_acknowledged=True,
+            personification_qwen_web_priority="before_api",
+        )
+    )
+
+    result, route = asyncio.run(
+        media_understanding.analyze_videos_with_route_or_fallback(
+            runtime=runtime,
+            prompt="理解视频",
+            video_refs=["https://cdn.example/video.mp4"],
+            route_attempts=attempts,
+        )
+    )
+
+    assert (result, route) == ("paid API result", "video_qwen_omni")
+    assert calls == ["qwen_web", "official_api"]
+    assert attempts[1]["diagnostic_code"] == "qwen_web_network_risk_detected"
+
+
+def test_video_qwen_after_api_does_not_start_when_api_succeeds(monkeypatch) -> None:  # noqa: ANN001
+    async def _no_primary(**_kwargs):  # noqa: ANN003, ANN202
+        return ""
+
+    async def _official(**_kwargs):  # noqa: ANN003, ANN202
+        return "official result"
+
+    class _ForbiddenService:
+        async def analyze(self, **_kwargs):  # noqa: ANN003, ANN202
+            raise AssertionError("after_api must not start when the paid API succeeds")
+
+    monkeypatch.setattr(media_understanding, "_try_primary_video_routes", _no_primary)
+    monkeypatch.setattr(qwen_web_service, "get_qwen_web_service", lambda _runtime: _ForbiddenService())
+    monkeypatch.setattr(
+        media_understanding,
+        "_build_video_fallback_provider_config",
+        lambda _runtime: {"api_type": "qwen_omni", "api_key": "key", "model": "qwen"},
+    )
+    monkeypatch.setattr(media_understanding, "_call_qwen_omni_media", _official)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_video_understanding_enabled=True,
+            personification_video_route_mode="auto",
+            personification_video_analysis_timeout=120.0,
+            personification_qwen_web_enabled=True,
+            personification_qwen_web_risk_acknowledged=True,
+            personification_qwen_web_priority="after_api",
+        )
+    )
+
+    result, route = asyncio.run(
+        media_understanding.analyze_videos_with_route_or_fallback(
+            runtime=runtime,
+            prompt="理解视频",
+            video_refs=["https://cdn.example/video.mp4"],
+        )
+    )
+    assert (result, route) == ("official result", "video_qwen_omni")
+
+
+def test_audio_qwen_web_precedes_asr(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    audio_path = tmp_path / "voice.wav"
+    audio_path.write_bytes(b"RIFFfake")
+    attempts: list[dict] = []
+
+    async def _no_primary(**_kwargs):  # noqa: ANN003, ANN202
+        return ""
+
+    class _Service:
+        async def analyze(self, **kwargs):  # noqa: ANN003, ANN202
+            assert kwargs["kind"] == "audio"
+            return "[UNTRUSTED_DATA_ONLY: QWEN_WEB_AUDIO_OBSERVATION]\n语音内容\n[/UNTRUSTED_DATA_ONLY]", {
+                "status": "ok",
+                "diagnostic_code": "",
+            }
+
+    async def _forbidden_asr(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("qwen web success must stop ASR")
+
+    monkeypatch.setattr(media_understanding, "_try_primary_audio_routes", _no_primary)
+    monkeypatch.setattr(qwen_web_service, "get_qwen_web_service", lambda _runtime: _Service())
+    monkeypatch.setattr(media_understanding, "transcribe_audio_file", _forbidden_asr)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_qwen_web_enabled=True,
+            personification_qwen_web_risk_acknowledged=True,
+            personification_qwen_web_priority="before_api",
+        )
+    )
+
+    result, route = asyncio.run(
+        media_understanding.analyze_audios_with_route_or_fallback(
+            runtime=runtime,
+            prompt="理解语音",
+            audio_refs=[str(audio_path)],
+            route_attempts=attempts,
+        )
+    )
+
+    assert "QWEN_WEB_AUDIO_OBSERVATION" in result
+    assert route == "audio_qwen_web"
+    assert [item["route"] for item in attempts] == ["audio_primary", "audio_qwen_web"]
+
+
+def test_audio_falls_back_to_configured_asr(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    audio_path = tmp_path / "voice.wav"
+    audio_path.write_bytes(b"RIFFfake")
+
+    async def _no_primary(**_kwargs):  # noqa: ANN003, ANN202
+        return ""
+
+    async def _asr(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        return SimpleNamespace(
+            available=True,
+            text="红狼修脚后撤离",
+            provider="qwen_audio",
+            model="qwen-audio-3.0-asr-flash-filetrans",
+            language="zh",
+            confidence=0.93,
+            segments=(),
+            status="ready",
+            error_code="",
+        )
+
+    monkeypatch.setattr(media_understanding, "_try_primary_audio_routes", _no_primary)
+    monkeypatch.setattr(media_understanding, "transcribe_audio_file", _asr)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_qwen_web_enabled=False,
+            personification_qwen_web_risk_acknowledged=False,
+            personification_qwen_web_priority="before_api",
+        )
+    )
+
+    result, route = asyncio.run(
+        media_understanding.analyze_audios_with_route_or_fallback(
+            runtime=runtime,
+            prompt="理解语音",
+            audio_refs=[str(audio_path)],
+        )
+    )
+
+    assert route == "audio_asr"
+    assert "红狼修脚后撤离" in result
+    assert "UNTRUSTED_DATA_ONLY" in result
 
 
 def test_qwen_omni_uses_official_streaming_video_url_contract(monkeypatch) -> None:  # noqa: ANN001

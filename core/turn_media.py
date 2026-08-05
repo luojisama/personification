@@ -4,13 +4,14 @@ import base64
 import hashlib
 import re
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Iterable, Literal
 
 
 MediaOrigin = Literal["current", "quoted", "batch"]
 
 _ALLOWED_ORIGINS = {"current", "quoted", "batch"}
-_ALLOWED_KINDS = {"image", "sticker", "gif", "mface", "video", "unknown"}
+_ALLOWED_KINDS = {"image", "sticker", "gif", "mface", "video", "audio", "unknown"}
 _DATA_URL_RE = re.compile(r"data:[^\s,;]+;base64,[A-Za-z0-9+/=\r\n]+", re.IGNORECASE)
 _SUMMARY_MARKER_RE = re.compile(
     r"\[(?:图片视觉描述|表情包语义|动态表情语义|媒体语义)（系统注入[^）]*）[：:]\s*(.*?)\]",
@@ -103,6 +104,8 @@ def _kind_for_segment(segment_type: str, data: dict[str, Any]) -> str:
         return "gif"
     if segment_type == "video":
         return "video"
+    if segment_type == "record":
+        return "audio"
     if segment_type != "image":
         return "unknown"
     raw_sub_type = data.get("sub_type", data.get("subType", 0))
@@ -221,7 +224,7 @@ def extract_media_from_message(
     refs: list[TurnMediaRef] = []
     for segment in _message_segments(message):
         segment_type = _segment_type(segment)
-        if segment_type not in {"image", "mface", "gif", "video"}:
+        if segment_type not in {"image", "mface", "gif", "video", "record"}:
             continue
         data = _segment_data(segment)
         ref = _media_ref(data)
@@ -311,6 +314,50 @@ def media_from_batched_events(values: Iterable[dict[str, Any]] | None) -> list[T
     return coerce_turn_media(refs)
 
 
+async def resolve_onebot_audio_refs(
+    values: Iterable[TurnMediaRef | dict[str, Any]] | None,
+    bot: Any,
+) -> list[TurnMediaRef]:
+    """Resolve opaque OneBot record tokens only when a reply needs media tools."""
+
+    refs = coerce_turn_media(values)
+    resolved: list[TurnMediaRef] = []
+    for item in refs:
+        if item.kind != "audio":
+            resolved.append(item)
+            continue
+        raw_ref = _text(item.ref)
+        if raw_ref.startswith(("http://", "https://", "file://")):
+            resolved.append(item)
+            continue
+        if raw_ref:
+            try:
+                if Path(raw_ref).is_absolute():
+                    resolved.append(item)
+                    continue
+            except Exception:
+                pass
+        token = _text(item.file_id or raw_ref)
+        if not token:
+            resolved.append(item)
+            continue
+        try:
+            get_record = getattr(bot, "get_record", None)
+            if callable(get_record):
+                payload = await get_record(file=token, out_format="wav")
+            else:
+                call_api = getattr(bot, "call_api", None)
+                if not callable(call_api):
+                    resolved.append(item)
+                    continue
+                payload = await call_api("get_record", file=token, out_format="wav")
+            candidate = _text(payload.get("file") if isinstance(payload, dict) else payload)
+        except Exception:
+            candidate = ""
+        resolved.append(replace(item, ref=candidate) if candidate else item)
+    return resolved
+
+
 def attach_safe_visual_summary(
     values: Iterable[TurnMediaRef | dict[str, Any]],
     summary: Any,
@@ -345,8 +392,8 @@ def render_turn_media_grounding(
     if not refs and not safe_summary:
         return ""
     lines = [
-        "## 聊天媒体 provenance 与视觉 grounding（系统事实）",
-        "- 每个媒体只归属于下列 owner/message/origin；不要把 batch 或 quoted 图片归给当前触发者。",
+        "## 聊天媒体 provenance 与多模态 grounding（系统事实）",
+        "- 每个媒体只归属于下列 owner/message/origin；不要把 batch 或 quoted 媒体归给当前触发者。",
         "- 画中主体只是媒体内容，不是聊天参与者。除非聊天文本或协议事实另有明确证据，不得把画中人物认作发送者、群友或 bot。",
         "- 多人构图、视线、站位、拥挤感或戏剧情绪只说明画面表现，不证明群友在现实中围观、施压、注视或参与该场景。",
     ]
@@ -391,5 +438,6 @@ __all__ = [
     "media_summary_timeout_seconds",
     "normalize_safe_visual_summary",
     "render_turn_media_grounding",
+    "resolve_onebot_audio_refs",
     "serialize_turn_media",
 ]

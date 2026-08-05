@@ -418,7 +418,15 @@ async def run_agent(
         ).strip().lower()
         == "video"
     )
-    has_visual_media = bool(user_images or user_video_count)
+    user_audio_count = sum(
+        1
+        for item in list(turn_media_context or [])
+        if str(
+            item.get("kind", "") if isinstance(item, dict) else getattr(item, "kind", "")
+        ).strip().lower()
+        == "audio"
+    )
+    has_visual_media = bool(user_images or user_video_count or user_audio_count)
     preliminary_query_text = _clean_user_query_text(
         contextual_query_text
         or focus_query_text
