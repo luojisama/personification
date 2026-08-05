@@ -86,8 +86,8 @@ def test_video_config_form_saves_atomically_and_reloads_once(
                 "personification_video_max_bytes": 320 * 1024 * 1024,
                 "personification_audio_transcription_hotwords": ["花来", "红狼"],
                 "personification_audio_transcription_speaker_count": 0,
-                "personification_qwen_web_enabled": True,
-                "personification_qwen_web_risk_acknowledged": True,
+                "personification_gemini_web_enabled": True,
+                "personification_gemini_web_risk_acknowledged": True,
             }
         },
     )
@@ -102,8 +102,8 @@ def test_video_config_form_saves_atomically_and_reloads_once(
     assert captured[0]["personification_video_custom_frame_budgets"]["180"] == 144
     assert captured[0]["personification_video_max_bytes"] == 320 * 1024 * 1024
     assert captured[0]["personification_audio_transcription_speaker_count"] == 0
-    assert captured[0]["personification_qwen_web_enabled"] is True
-    assert captured[0]["personification_qwen_web_risk_acknowledged"] is True
+    assert captured[0]["personification_gemini_web_enabled"] is True
+    assert captured[0]["personification_gemini_web_risk_acknowledged"] is True
     assert runtime.plugin_config.personification_video_fallback_workspace_id == "ws-video"
     assert reload_calls == ["reload"]
 
@@ -125,8 +125,8 @@ def test_video_config_invalid_value_identifies_field_without_echoing_value(
         "/personification/api/config/video-understanding",
         json={
             "values": {
-                "personification_qwen_web_enabled": True,
-                "personification_qwen_web_risk_acknowledged": True,
+                "personification_gemini_web_enabled": True,
+                "personification_gemini_web_risk_acknowledged": True,
                 "personification_audio_transcription_speaker_count": "not-a-number",
             }
         },
@@ -169,7 +169,7 @@ def test_video_config_form_rejects_non_video_fields_without_writing(
     assert writes == []
 
 
-def test_video_config_rejects_qwen_web_enable_without_risk_ack(
+def test_video_config_rejects_gemini_web_enable_without_risk_ack(
     _runtime_context, monkeypatch  # noqa: ANN001
 ) -> None:
     config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
@@ -186,14 +186,14 @@ def test_video_config_rejects_qwen_web_enable_without_risk_ack(
         "/personification/api/config/video-understanding",
         json={
             "values": {
-                "personification_qwen_web_enabled": True,
-                "personification_qwen_web_risk_acknowledged": False,
+                "personification_gemini_web_enabled": True,
+                "personification_gemini_web_risk_acknowledged": False,
             }
         },
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "qwen_web_risk_ack_required"
+    assert response.json()["detail"]["code"] == "gemini_web_risk_ack_required"
     assert writes == []
 
 

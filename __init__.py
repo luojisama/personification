@@ -766,9 +766,9 @@ async def _close_personification_runtime() -> None:
     from .core.mcp_management import shutdown_mcp_managers
 
     await shutdown_mcp_managers()
-    from .core.qwen_web_service import shutdown_qwen_web_services
+    from .core.gemini_web_service import shutdown_gemini_web_services
 
-    await shutdown_qwen_web_services()
+    await shutdown_gemini_web_services()
     await stop_plugin_knowledge_builder(
         logger=logger,
         knowledge_store=(

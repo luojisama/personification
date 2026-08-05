@@ -195,8 +195,8 @@ def test_trace_tool_result_exposes_only_stable_media_route_diagnostics() -> None
     result = (
         '{"scene_summary":"private observation",'
         '"media_routes":[{"kind":"video","selected_route":"",'
-        '"attempts":[{"route":"video_qwen_web","status":"failed",'
-        '"diagnostic_code":"qwen_web_media_ref_invalid",'
+        '"attempts":[{"route":"video_gemini_web","status":"failed",'
+        '"diagnostic_code":"gemini_web_media_ref_invalid",'
         '"diagnostic_stage":"media",'
         '"private_path":"C:/secret/video.mp4"}]}]}'
     )
@@ -212,6 +212,6 @@ def test_trace_tool_result_exposes_only_stable_media_route_diagnostics() -> None
 
     detail = traces[0]["detail"]
     assert "video:selected=none" in detail
-    assert "video_qwen_web:failed:qwen_web_media_ref_invalid@media" in detail
+    assert "video_gemini_web:failed:gemini_web_media_ref_invalid@media" in detail
     assert "private observation" not in detail
     assert "C:/secret/video.mp4" not in detail

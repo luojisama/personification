@@ -410,5 +410,5 @@ def test_qwen_interactive_frames_stop_outside_video_config_group() -> None:
     source = _source("app-mcp.js")
 
     assert '(state.view === "config" && state.activeGroup === "视频理解")' in source
-    assert 'platform === "qwen_web"' in source
-    assert "/media/qwen-web/auth/" in source
+    assert 'platform === "gemini_web"' in source
+    assert "/media/web/gemini/auth/" in source

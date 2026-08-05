@@ -167,14 +167,13 @@ const VIDEO_CONFIG_FIELDS = [
   "personification_fullmodal_provider_timeout",
   "personification_fullmodal_provider_max_bytes",
   "personification_fullmodal_provider_stream",
-  "personification_qwen_web_enabled",
-  "personification_qwen_web_risk_acknowledged",
-  "personification_qwen_web_priority",
-  "personification_qwen_web_job_timeout",
-  "personification_qwen_web_idle_timeout",
-  "personification_qwen_web_video_max_bytes",
-  "personification_qwen_web_audio_max_bytes",
-  "personification_qwen_web_output_max_chars",
+  "personification_gemini_web_enabled",
+  "personification_gemini_web_risk_acknowledged",
+  "personification_gemini_web_job_timeout",
+  "personification_gemini_web_idle_timeout",
+  "personification_gemini_web_video_max_bytes",
+  "personification_gemini_web_audio_max_bytes",
+  "personification_gemini_web_output_max_chars",
   "personification_audio_transcription_enabled",
   "personification_audio_transcription_provider",
   "personification_audio_transcription_workspace_id",
@@ -301,15 +300,15 @@ function videoProviderNote(provider) {
   return "外部全模态 Provider 已关闭；主模型失败后将继续网页路线或最终分镜兜底。";
 }
 
-const QWEN_WEB_STATE_LABELS = {
+const GEMINI_WEB_STATE_LABELS = {
   disabled:"已关闭", starting:"正在启动", ready:"可用", login_required:"需要登录",
   manual_verification_required:"需要人工验证", busy:"任务占用", dom_changed:"页面结构变化",
   unavailable:"不可用",
 };
-let _qwenWebStatusTimer = null;
-let _qwenWebStatusInFlight = false;
+let _geminiWebStatusTimer = null;
+let _geminiWebStatusInFlight = false;
 
-function qwenWebStatusSignature(status, auth) {
+function geminiWebStatusSignature(status, auth) {
   return JSON.stringify([
     status?.state || "", status?.profile_present === true, status?.browser_running === true,
     status?.active_job === true, Number(status?.waiting_jobs || 0), status?.last_diagnostic_code || "",
@@ -318,17 +317,17 @@ function qwenWebStatusSignature(status, auth) {
   ]);
 }
 
-function renderQwenWebStatus(status=state.qwenWebStatus) {
+function renderGeminiWebStatus(status=state.geminiWebStatus) {
   const current = status || {};
   const code = String(current.last_diagnostic_code || "");
   const cooldown = Math.max(0, Number(current.risk_cooldown_seconds || 0));
-  return `<div class="qwen-web-status-island" data-qwen-web-status-island>
-    <div class="mcp-runtime-overview"><span>状态<strong>${escapeHtml(QWEN_WEB_STATE_LABELS[current.state] || current.state || "待检查")}</strong></span><span>页面契约<strong>${escapeHtml(current.page_contract_version || "qianwen_cn_v4")}</strong></span><span>本地 profile<strong>${current.profile_present?"存在":"无"}</strong></span><span>浏览器<strong>${current.browser_running?"运行中":"已回收"}</strong></span><span>任务<strong>${current.active_job?"占用":"空闲"}</strong></span></div>
+  return `<div class="gemini-web-status-island" data-gemini-web-status-island>
+    <div class="mcp-runtime-overview"><span>状态<strong>${escapeHtml(GEMINI_WEB_STATE_LABELS[current.state] || current.state || "待检查")}</strong></span><span>页面契约<strong>${escapeHtml(current.page_contract_version || "gemini_web_v1")}</strong></span><span>本地 profile<strong>${current.profile_present?"存在":"无"}</strong></span><span>浏览器<strong>${current.browser_running?"运行中":"已回收"}</strong></span><span>任务<strong>${current.active_job?"占用":"空闲"}</strong></span></div>
     ${code?`<div class="alert ${code.includes("network_risk")?"warn":""}"><code>${escapeHtml(code)}</code>${cooldown?` · 冷却剩余 ${Math.ceil(cooldown/60)} 分钟`:""}</div>`:""}
   </div>`;
 }
 
-function renderQwenWebInteractiveAuth(auth) {
+function renderGeminiWebInteractiveAuth(auth) {
   if (!auth?.session_id || auth.interactive_available !== true) return "";
   const sessionId = String(auth.session_id || "");
   const viewport = auth.interactive_viewport || {};
@@ -336,145 +335,144 @@ function renderQwenWebInteractiveAuth(auth) {
   const height = Math.max(240, Number(viewport.height || 900));
   const frame = builtinInteractiveFrameEntry(sessionId);
   const frameSource = frame.objectUrl || _MCP_INTERACTIVE_FRAME_PLACEHOLDER_SRC;
-  return `<section class="mcp-interactive-auth" data-mcp-interactive-session="${escapeAttr(sessionId)}" data-platform="qwen_web">
-    <div class="mcp-interactive-heading"><div><strong>千问 Web 人工登录 / 验证</strong><small>当前官方页面：${escapeHtml(auth.interactive_display_url || "https://www.qianwen.com/")}</small></div><span class="tag required">仅管理员</span></div>
-    <div class="mcp-interactive-screen" role="application" aria-label="千问官方页面人工接管画面">
-      <img draggable="false" alt="千问官方页面" src="${escapeAttr(frameSource)}" class="${frame.objectUrl?"":"is-loading"}" data-mcp-interactive-frame data-platform="qwen_web" data-session-id="${escapeAttr(sessionId)}" data-viewport-width="${width}" data-viewport-height="${height}">
-      <span class="mcp-interactive-frame-placeholder">正在读取千问官方页面画面…</span>
+  return `<section class="mcp-interactive-auth" data-mcp-interactive-session="${escapeAttr(sessionId)}" data-platform="gemini_web">
+    <div class="mcp-interactive-heading"><div><strong>Gemini Web 人工登录 / 验证</strong><small>当前官方页面：${escapeHtml(auth.interactive_display_url || "https://gemini.google.com/app")}</small></div><span class="tag required">仅管理员</span></div>
+    <div class="mcp-interactive-screen" role="application" aria-label="Gemini 官方页面人工接管画面">
+      <img draggable="false" alt="Gemini 官方页面" src="${escapeAttr(frameSource)}" class="${frame.objectUrl?"":"is-loading"}" data-mcp-interactive-frame data-platform="gemini_web" data-session-id="${escapeAttr(sessionId)}" data-viewport-width="${width}" data-viewport-height="${height}">
+      <span class="mcp-interactive-frame-placeholder">正在读取 Gemini 官方页面画面…</span>
       <span class="mcp-interactive-pointer-marker" data-mcp-interactive-pointer-marker aria-hidden="true"></span>
     </div>
     <div class="mcp-interactive-transport" data-mcp-interactive-status role="status">画面与操作通道准备中</div>
     <div class="mcp-interactive-controls">
       <label>向当前焦点输入<input type="password" maxlength="200" autocomplete="off" spellcheck="false" data-mcp-interactive-text placeholder="先点击官方输入框，再在此输入"></label>
-      <button class="btn" data-mcp-interactive-type="qwen_web" data-session-id="${escapeAttr(sessionId)}">发送输入</button>
-      ${["Tab","Enter","Backspace","Escape"].map(key=>`<button class="btn small" data-mcp-interactive-key="${key}" data-platform="qwen_web" data-session-id="${escapeAttr(sessionId)}">${key}</button>`).join("")}
-      <button class="btn small" data-mcp-interactive-scroll="-700" data-platform="qwen_web" data-session-id="${escapeAttr(sessionId)}">向上滚动</button>
-      <button class="btn small" data-mcp-interactive-scroll="700" data-platform="qwen_web" data-session-id="${escapeAttr(sessionId)}">向下滚动</button>
-      <button class="btn" data-mcp-interactive-refresh="qwen_web">刷新画面</button>
-      <button class="btn primary" onclick="qwenWebFinishAuth('${escapeAttr(sessionId)}')">验证完成，检查登录态</button>
-      <button class="btn danger" onclick="qwenWebCancelAuth('${escapeAttr(sessionId)}')">取消接管</button>
+      <button class="btn" data-mcp-interactive-type="gemini_web" data-session-id="${escapeAttr(sessionId)}">发送输入</button>
+      ${["Tab","Enter","Backspace","Escape"].map(key=>`<button class="btn small" data-mcp-interactive-key="${key}" data-platform="gemini_web" data-session-id="${escapeAttr(sessionId)}">${key}</button>`).join("")}
+      <button class="btn small" data-mcp-interactive-scroll="-700" data-platform="gemini_web" data-session-id="${escapeAttr(sessionId)}">向上滚动</button>
+      <button class="btn small" data-mcp-interactive-scroll="700" data-platform="gemini_web" data-session-id="${escapeAttr(sessionId)}">向下滚动</button>
+      <button class="btn" data-mcp-interactive-refresh="gemini_web">刷新画面</button>
+      <button class="btn primary" onclick="geminiWebFinishAuth('${escapeAttr(sessionId)}')">验证完成，检查登录态</button>
+      <button class="btn danger" onclick="geminiWebCancelAuth('${escapeAttr(sessionId)}')">取消接管</button>
     </div>
-    <p class="muted">操作通过实时指针协议转发到固定的千问/阿里官方域名。插件不会识别或破解验证码；出现网络安全风险、账号风控或验证页时自动操作立即停止，只保留管理员本人接管。</p>
+    <p class="muted">操作通过实时指针协议转发到固定的 Gemini 与 Google 登录域名。插件不会识别或破解验证码；出现网络安全风险、账号风控或验证页时自动操作立即停止，只保留管理员本人接管。</p>
   </section>`;
 }
 
-function renderQwenWebCard(entries) {
+function renderGeminiWebCard(entries) {
   const value = (field, fallback="") => videoConfigValue(entries, field, fallback);
-  const enabled = value("personification_qwen_web_enabled", false);
-  const acknowledged = value("personification_qwen_web_risk_acknowledged", false);
+  const enabled = value("personification_gemini_web_enabled", false);
+  const acknowledged = value("personification_gemini_web_risk_acknowledged", false);
   const canOperate = enabled && acknowledged;
-  return `<section class="card video-config-card" data-qwen-web-card>
-    <div class="between"><div><h2>千问 Web（实验）</h2><p class="muted">通过消费者网页公开的附件/音视频速读入口上传并读取本次最新助手回复。该路径不依赖社交 MCP。</p></div><span class="tag required">实验能力</span></div>
-    <div class="alert warn">媒体会离开 Bot 服务器，并可能保留在千问账号历史中。插件使用标准 Playwright 和正常页面控件；不隐藏自动化、不导出 Cookie、不重放内部接口、不绕过验证码或网络安全风险。<a href="https://terms.alicdn.com/legal-agreement/terms/c_end_product_protocol/20231011201348415/20231011201348415.html" target="_blank" rel="noopener noreferrer">查看千问用户协议</a></div>
+  return `<section class="card video-config-card" data-gemini-web-card>
+    <div class="between"><div><h2>Gemini Web（实验）</h2><p class="muted">通过 Gemini 消费者网页公开的文件选择器上传音视频并读取本轮最新模型回复。该路径不依赖社交 MCP。</p></div><span class="tag required">实验能力</span></div>
+    <div class="alert warn">媒体会离开 Bot 服务器，并可能保留在 Google 账号历史中。插件使用标准 Playwright 和正常页面控件；不隐藏自动化、不导出 Cookie、不重放内部接口、不绕过验证码或网络安全风险。<a href="https://policies.google.com/terms" target="_blank" rel="noopener noreferrer">查看 Google 服务条款</a></div>
     <div class="video-config-grid">
-      ${videoConfigToggle("personification_qwen_web_enabled", enabled, "启用千问 Web", "未确认风险时服务端拒绝启用。")}
-      ${videoConfigToggle("personification_qwen_web_risk_acknowledged", acknowledged, "我已确认第三方上传与网页自动化风险")}
-      ${videoConfigSelect("personification_qwen_web_priority", value("personification_qwen_web_priority","before_api"), [{value:"before_api",label:"主模型后、正式 API 前"},{value:"after_api",label:"正式 API 失败后"},{value:"manual_only",label:"仅管理员人工诊断"}], "调用优先级")}
-      ${videoConfigInput("personification_qwen_web_video_max_bytes", videoConfigMiB(value("personification_qwen_web_video_max_bytes",268435456),256), "Web 视频上限（MiB）", {kind:"mib",min:8,max:512,step:1})}
-      ${videoConfigInput("personification_qwen_web_audio_max_bytes", videoConfigMiB(value("personification_qwen_web_audio_max_bytes",67108864),64), "Web 音频上限（MiB）", {kind:"mib",min:0.0625,max:256,step:1})}
-      ${videoConfigInput("personification_qwen_web_job_timeout", value("personification_qwen_web_job_timeout",120), "任务超时（秒）", {kind:"float",min:20,max:300,step:1})}
-      ${videoConfigInput("personification_qwen_web_idle_timeout", value("personification_qwen_web_idle_timeout",300), "空闲回收（秒）", {kind:"float",min:60,max:1800,step:10})}
-      ${videoConfigInput("personification_qwen_web_output_max_chars", value("personification_qwen_web_output_max_chars",16000), "输出上限（字符）", {kind:"int",min:1000,max:50000,step:100})}
+      ${videoConfigToggle("personification_gemini_web_enabled", enabled, "启用 Gemini Web", "未确认风险时服务端拒绝启用。")}
+      ${videoConfigToggle("personification_gemini_web_risk_acknowledged", acknowledged, "我已确认第三方上传与网页自动化风险")}
+      ${videoConfigInput("personification_gemini_web_video_max_bytes", videoConfigMiB(value("personification_gemini_web_video_max_bytes",536870912),512), "Web 视频上限（MiB）", {kind:"mib",min:8,max:2048,step:1})}
+      ${videoConfigInput("personification_gemini_web_audio_max_bytes", videoConfigMiB(value("personification_gemini_web_audio_max_bytes",104857600),100), "Web 音频上限（MiB）", {kind:"mib",min:0.0625,max:512,step:1})}
+      ${videoConfigInput("personification_gemini_web_job_timeout", value("personification_gemini_web_job_timeout",600), "任务超时（秒）", {kind:"float",min:20,max:900,step:1})}
+      ${videoConfigInput("personification_gemini_web_idle_timeout", value("personification_gemini_web_idle_timeout",300), "空闲回收（秒）", {kind:"float",min:60,max:1800,step:10})}
+      ${videoConfigInput("personification_gemini_web_output_max_chars", value("personification_gemini_web_output_max_chars",20000), "输出上限（字符）", {kind:"int",min:1000,max:50000,step:100})}
     </div>
-    ${renderQwenWebStatus()}
-    <div class="row"><button class="btn" data-qwen-web-operation onclick="qwenWebProbe()" ${state.qwenWebBusy||!canOperate?"disabled":""}>检查页面兼容性</button><button class="btn primary" data-qwen-web-operation onclick="qwenWebStartAuth()" ${state.qwenWebBusy||!canOperate?"disabled":""}>打开登录 / 人工验证</button><button class="btn" data-qwen-web-operation onclick="qwenWebProbe()" ${state.qwenWebBusy||!canOperate?"disabled":""}>重新检查登录状态</button><button class="btn danger" onclick="qwenWebLogout()" ${state.qwenWebBusy?"disabled":""}>注销并删除本地 profile</button></div>
-    <div data-qwen-web-auth-host>${renderQwenWebInteractiveAuth(state.qwenWebAuth)}</div>
+    ${renderGeminiWebStatus()}
+    <div class="row"><button class="btn" data-gemini-web-operation onclick="geminiWebProbe()" ${state.geminiWebBusy||!canOperate?"disabled":""}>检查页面兼容性</button><button class="btn primary" data-gemini-web-operation onclick="geminiWebStartAuth()" ${state.geminiWebBusy||!canOperate?"disabled":""}>打开登录 / 人工验证</button><button class="btn" data-gemini-web-operation onclick="geminiWebProbe()" ${state.geminiWebBusy||!canOperate?"disabled":""}>重新检查登录状态</button><button class="btn danger" onclick="geminiWebLogout()" ${state.geminiWebBusy?"disabled":""}>注销并删除本地 profile</button></div>
+    <div data-gemini-web-auth-host>${renderGeminiWebInteractiveAuth(state.geminiWebAuth)}</div>
   </section>`;
 }
 
-function updateQwenWebCardDom() {
-  const island = document.querySelector("[data-qwen-web-status-island]");
-  const authHost = document.querySelector("[data-qwen-web-auth-host]");
+function updateGeminiWebCardDom() {
+  const island = document.querySelector("[data-gemini-web-status-island]");
+  const authHost = document.querySelector("[data-gemini-web-auth-host]");
   if (!island || !authHost) return false;
-  island.outerHTML = renderQwenWebStatus();
-  if (!_mcpInteractivePointer) authHost.innerHTML = renderQwenWebInteractiveAuth(state.qwenWebAuth);
-  if (state.qwenWebAuth?.interactive_available) startBuiltinInteractiveFramePolling();
+  island.outerHTML = renderGeminiWebStatus();
+  if (!_mcpInteractivePointer) authHost.innerHTML = renderGeminiWebInteractiveAuth(state.geminiWebAuth);
+  if (state.geminiWebAuth?.interactive_available) startBuiltinInteractiveFramePolling();
   return true;
 }
 
-async function refreshQwenWebStatus({refresh=false, renderAfter=true}={}) {
-  if (_qwenWebStatusInFlight || state.view !== "config" || state.activeGroup !== "视频理解") return;
-  _qwenWebStatusInFlight = true;
-  const before = qwenWebStatusSignature(state.qwenWebStatus, state.qwenWebAuth);
+async function refreshGeminiWebStatus({refresh=false, renderAfter=true}={}) {
+  if (_geminiWebStatusInFlight || state.view !== "config" || state.activeGroup !== "视频理解") return;
+  _geminiWebStatusInFlight = true;
+  const before = geminiWebStatusSignature(state.geminiWebStatus, state.geminiWebAuth);
   try {
-    const next = await api(`/media/qwen-web/status${refresh?"?refresh=true":""}`, {cache:"no-store"});
-    state.qwenWebStatus = next;
-    if (!state.qwenWebAuth && next?.interactive_session) state.qwenWebAuth = next.interactive_session;
-    if (state.qwenWebAuth?.session_id && !document.hidden) {
-      try { state.qwenWebAuth = await api(`/media/qwen-web/auth/${encodeURIComponent(state.qwenWebAuth.session_id)}`, {cache:"no-store"}); } catch {}
+    const next = await api(`/media/web/gemini/status${refresh?"?refresh=true":""}`, {cache:"no-store"});
+    state.geminiWebStatus = next;
+    if (!state.geminiWebAuth && next?.interactive_session) state.geminiWebAuth = next.interactive_session;
+    if (state.geminiWebAuth?.session_id && !document.hidden) {
+      try { state.geminiWebAuth = await api(`/media/web/gemini/auth/${encodeURIComponent(state.geminiWebAuth.session_id)}`, {cache:"no-store"}); } catch {}
     }
   } finally {
-    _qwenWebStatusInFlight = false;
+    _geminiWebStatusInFlight = false;
   }
-  const after = qwenWebStatusSignature(state.qwenWebStatus, state.qwenWebAuth);
-  if (renderAfter && before !== after && !_mcpInteractivePointer && !updateQwenWebCardDom()) render();
-  if (state.qwenWebAuth?.interactive_available) startBuiltinInteractiveFramePolling();
+  const after = geminiWebStatusSignature(state.geminiWebStatus, state.geminiWebAuth);
+  if (renderAfter && before !== after && !_mcpInteractivePointer && !updateGeminiWebCardDom()) render();
+  if (state.geminiWebAuth?.interactive_available) startBuiltinInteractiveFramePolling();
 }
 
-function scheduleQwenWebStatusPoll(delay=3000) {
-  if (_qwenWebStatusTimer) clearTimeout(_qwenWebStatusTimer);
-  _qwenWebStatusTimer = setTimeout(async()=>{
-    _qwenWebStatusTimer = null;
+function scheduleGeminiWebStatusPoll(delay=3000) {
+  if (_geminiWebStatusTimer) clearTimeout(_geminiWebStatusTimer);
+  _geminiWebStatusTimer = setTimeout(async()=>{
+    _geminiWebStatusTimer = null;
     if (state.view !== "config") return;
-    if (!document.hidden && state.activeGroup === "视频理解") await refreshQwenWebStatus();
-    scheduleQwenWebStatusPoll(3000);
+    if (!document.hidden && state.activeGroup === "视频理解") await refreshGeminiWebStatus();
+    scheduleGeminiWebStatusPoll(3000);
   }, Math.max(0, Number(delay||0)));
 }
 
-function startQwenWebConfigLifecycle() { scheduleQwenWebStatusPoll(0); }
+function startGeminiWebConfigLifecycle() { scheduleGeminiWebStatusPoll(0); }
 
-function stopQwenWebConfigLifecycle() {
-  if (_qwenWebStatusTimer) clearTimeout(_qwenWebStatusTimer);
-  _qwenWebStatusTimer = null;
-  if (_mcpInteractivePointer?.platform === "qwen_web") cancelActiveBuiltinInteractivePointer({keepalive:true});
+function stopGeminiWebConfigLifecycle() {
+  if (_geminiWebStatusTimer) clearTimeout(_geminiWebStatusTimer);
+  _geminiWebStatusTimer = null;
+  if (_mcpInteractivePointer?.platform === "gemini_web") cancelActiveBuiltinInteractivePointer({keepalive:true});
   stopBuiltinInteractiveFramePolling();
 }
 
-async function qwenWebProbe() {
-  if (state.qwenWebBusy) return;
-  state.qwenWebBusy = true; render();
-  try { state.qwenWebStatus = await api("/media/qwen-web/probe", {method:"POST"}); const ready=state.qwenWebStatus?.state==="ready"; const login=state.qwenWebStatus?.state==="login_required"; alertFlash(ready||login?"ok":"err", ready?"千问页面与登录态可用":login?"千问公开页面已识别，请先完成登录":"千问页面检查未达到可用状态"); }
-  catch (error) { alertFlash("err", operationDiagnosticFromError(error, "千问页面检查失败").message || "千问页面检查失败"); }
-  finally { state.qwenWebBusy = false; render(); }
+async function geminiWebProbe() {
+  if (state.geminiWebBusy) return;
+  state.geminiWebBusy = true; render();
+  try { state.geminiWebStatus = await api("/media/web/gemini/probe", {method:"POST"}); const ready=state.geminiWebStatus?.state==="ready"; const login=state.geminiWebStatus?.state==="login_required"; alertFlash(ready||login?"ok":"err", ready?"Gemini 页面与登录态可用":login?"Gemini 官方页面已识别，请先完成登录":"Gemini 页面检查未达到可用状态"); }
+  catch (error) { alertFlash("err", operationDiagnosticFromError(error, "Gemini 页面检查失败").message || "Gemini 页面检查失败"); }
+  finally { state.geminiWebBusy = false; render(); }
 }
 
-async function qwenWebStartAuth() {
-  if (state.qwenWebBusy) return;
-  if (!confirm("将打开千问官方页面供管理员本人登录或验证。插件不会绕过验证码、风控或网络安全风险。确认继续？")) return;
-  state.qwenWebBusy = true; render();
+async function geminiWebStartAuth() {
+  if (state.geminiWebBusy) return;
+  if (!confirm("将打开 Gemini 官方页面供管理员本人登录或验证。插件不会绕过验证码、风控或网络安全风险。确认继续？")) return;
+  state.geminiWebBusy = true; render();
   try {
-    state.qwenWebAuth = await api("/media/qwen-web/auth/start", {method:"POST"});
-    const blocked = state.qwenWebAuth?.status === "risk_controlled" || !state.qwenWebAuth?.session_id;
+    state.geminiWebAuth = await api("/media/web/gemini/auth/start", {method:"POST"});
+    const blocked = state.geminiWebAuth?.status === "risk_controlled" || !state.geminiWebAuth?.session_id;
     if (!blocked) startBuiltinInteractiveFramePolling();
-    alertFlash(blocked?"err":"ok", blocked?"网络安全风险冷却尚未结束，未打开官方页面":"千问人工登录会话已创建");
+    alertFlash(blocked?"err":"ok", blocked?"网络安全风险冷却尚未结束，未打开官方页面":"Gemini 人工登录会话已创建");
   }
-  catch (error) { alertFlash("err", operationDiagnosticFromError(error, "千问登录启动失败").message || "千问登录启动失败"); }
-  finally { state.qwenWebBusy = false; render(); }
+  catch (error) { alertFlash("err", operationDiagnosticFromError(error, "Gemini 登录启动失败").message || "Gemini 登录启动失败"); }
+  finally { state.geminiWebBusy = false; render(); }
 }
 
-async function qwenWebFinishAuth(sessionId) {
-  if (state.qwenWebBusy) return;
+async function geminiWebFinishAuth(sessionId) {
+  if (state.geminiWebBusy) return;
   if (_mcpInteractivePointer?.sessionId === sessionId) await cancelActiveBuiltinInteractivePointer();
-  state.qwenWebBusy = true;
-  try { state.qwenWebAuth = await api(`/media/qwen-web/auth/${encodeURIComponent(sessionId)}/finish`, {method:"POST"}); await refreshQwenWebStatus({refresh:false,renderAfter:false}); alertFlash(state.qwenWebAuth?.status==="success"?"ok":"err", state.qwenWebAuth?.status==="success"?"千问登录态已保存":"尚未检测到有效登录态"); }
-  catch (error) { alertFlash("err", operationDiagnosticFromError(error, "千问登录状态检查失败").message || "千问登录状态检查失败"); }
-  finally { state.qwenWebBusy = false; render(); }
+  state.geminiWebBusy = true;
+  try { state.geminiWebAuth = await api(`/media/web/gemini/auth/${encodeURIComponent(sessionId)}/finish`, {method:"POST"}); await refreshGeminiWebStatus({refresh:false,renderAfter:false}); alertFlash(state.geminiWebAuth?.status==="success"?"ok":"err", state.geminiWebAuth?.status==="success"?"Gemini 登录态已保存":"尚未检测到有效登录态"); }
+  catch (error) { alertFlash("err", operationDiagnosticFromError(error, "Gemini 登录状态检查失败").message || "Gemini 登录状态检查失败"); }
+  finally { state.geminiWebBusy = false; render(); }
 }
 
-async function qwenWebCancelAuth(sessionId) {
+async function geminiWebCancelAuth(sessionId) {
   if (_mcpInteractivePointer?.sessionId === sessionId) await cancelActiveBuiltinInteractivePointer();
-  try { await api(`/media/qwen-web/auth/${encodeURIComponent(sessionId)}/cancel`, {method:"POST"}); state.qwenWebAuth = null; alertFlash("ok", "千问人工接管已取消"); }
-  catch (error) { alertFlash("err", operationDiagnosticFromError(error, "取消千问接管失败").message || "取消千问接管失败"); }
+  try { await api(`/media/web/gemini/auth/${encodeURIComponent(sessionId)}/cancel`, {method:"POST"}); state.geminiWebAuth = null; alertFlash("ok", "Gemini 人工接管已取消"); }
+  catch (error) { alertFlash("err", operationDiagnosticFromError(error, "取消 Gemini 接管失败").message || "取消 Gemini 接管失败"); }
   finally { render(); }
 }
 
-async function qwenWebLogout() {
-  const exact = "确认注销千问Web";
-  if ((prompt(`注销会关闭浏览器并删除本地千问 profile，不会删除千问云端历史。\n请输入：${exact}`)||"") !== exact) return;
-  state.qwenWebBusy = true; render();
-  try { state.qwenWebStatus = await api("/media/qwen-web/logout", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({confirm:exact})}); state.qwenWebAuth=null; stopBuiltinInteractiveFramePolling(); alertFlash("ok", "千问本地 profile 已删除"); }
-  catch (error) { alertFlash("err", operationDiagnosticFromError(error, "千问注销失败").message || "千问注销失败"); }
-  finally { state.qwenWebBusy=false; render(); }
+async function geminiWebLogout() {
+  const exact = "确认注销GeminiWeb";
+  if ((prompt(`注销会关闭浏览器并删除本地 Gemini profile，不会删除 Google 账号中的云端历史。\n请输入：${exact}`)||"") !== exact) return;
+  state.geminiWebBusy = true; render();
+  try { state.geminiWebStatus = await api("/media/web/gemini/logout", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({confirm:exact})}); state.geminiWebAuth=null; stopBuiltinInteractiveFramePolling(); alertFlash("ok", "Gemini 本地 profile 已删除"); }
+  catch (error) { alertFlash("err", operationDiagnosticFromError(error, "Gemini 注销失败").message || "Gemini 注销失败"); }
+  finally { state.geminiWebBusy=false; render(); }
 }
 
 function renderVideoUnderstandingEditor(items) {
@@ -523,7 +521,7 @@ function renderVideoUnderstandingEditor(items) {
       </datalist>
       <div class="alert" data-video-provider-note style="margin-top:12px">${escapeHtml(videoProviderNote(provider))}</div>
     </section>
-    ${renderQwenWebCard(entries)}
+    ${renderGeminiWebCard(entries)}
     <section class="card video-config-card" data-video-frame-section>
       <div><h2>分镜抽帧</h2><p class="muted">场景差分与字幕差分先低清扫描，再按时间顺序拼图；不会把 24 FPS 的每一帧全部交给模型。</p></div>
       ${videoConfigToggle("personification_video_storyboard_fallback_enabled", value("personification_video_storyboard_fallback_enabled",true), "启用最终分镜兜底", "所有全模态路线失败后仍尝试抽帧与字幕/ASR。")}

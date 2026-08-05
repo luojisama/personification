@@ -8,7 +8,7 @@ from ._loader import load_personification_module
 
 
 media_understanding = load_personification_module("plugin.personification.core.media_understanding")
-qwen_web_service = load_personification_module("plugin.personification.core.qwen_web_service")
+gemini_web_service = load_personification_module("plugin.personification.core.gemini_web_service")
 vision_caller = load_personification_module(
     "plugin.personification.skills.skillpacks.vision_caller.scripts.impl"
 )
@@ -340,7 +340,7 @@ def test_video_auto_uses_native_full_modal_route_without_extracting_frames(monke
     assert route == "video_route_direct"
 
 
-def test_video_auto_uses_qwen_web_before_paid_api(monkeypatch) -> None:  # noqa: ANN001
+def test_video_auto_uses_gemini_web_before_paid_api(monkeypatch) -> None:  # noqa: ANN001
     attempts: list[dict] = []
 
     async def _no_primary(**_kwargs):  # noqa: ANN003, ANN202
@@ -349,24 +349,23 @@ def test_video_auto_uses_qwen_web_before_paid_api(monkeypatch) -> None:  # noqa:
     class _Service:
         async def analyze(self, **kwargs):  # noqa: ANN003, ANN202
             assert kwargs["kind"] == "video"
-            return "[UNTRUSTED_DATA_ONLY: QWEN_WEB_VIDEO_OBSERVATION]\n时间线\n[/UNTRUSTED_DATA_ONLY]", {
+            return "[UNTRUSTED_DATA_ONLY: GEMINI_WEB_VIDEO_OBSERVATION]\n时间线\n[/UNTRUSTED_DATA_ONLY]", {
                 "status": "ok",
                 "diagnostic_code": "",
             }
 
     def _forbidden_api(_runtime):  # noqa: ANN001
-        raise AssertionError("qwen web success must stop the paid API route")
+        raise AssertionError("Gemini Web success must stop the paid API route")
 
     monkeypatch.setattr(media_understanding, "_try_primary_video_routes", _no_primary)
-    monkeypatch.setattr(qwen_web_service, "get_qwen_web_service", lambda _runtime: _Service())
+    monkeypatch.setattr(gemini_web_service, "get_gemini_web_service", lambda _runtime: _Service())
     monkeypatch.setattr(media_understanding, "_build_video_fallback_provider_config", _forbidden_api)
     runtime = SimpleNamespace(
         plugin_config=SimpleNamespace(
             personification_video_understanding_enabled=True,
             personification_video_route_mode="auto",
-            personification_qwen_web_enabled=True,
-            personification_qwen_web_risk_acknowledged=True,
-            personification_qwen_web_priority="before_api",
+            personification_gemini_web_enabled=True,
+            personification_gemini_web_risk_acknowledged=True,
         )
     )
 
@@ -379,13 +378,13 @@ def test_video_auto_uses_qwen_web_before_paid_api(monkeypatch) -> None:  # noqa:
         )
     )
 
-    assert "QWEN_WEB_VIDEO_OBSERVATION" in result
-    assert route == "video_qwen_web"
-    assert [item["route"] for item in attempts] == ["video_primary", "video_qwen_web"]
+    assert "GEMINI_WEB_VIDEO_OBSERVATION" in result
+    assert route == "video_gemini_web"
+    assert [item["route"] for item in attempts] == ["video_primary", "video_gemini_web"]
     assert attempts[-1]["status"] == "ok"
 
 
-def test_video_qwen_network_risk_stops_web_and_falls_through_once(monkeypatch) -> None:  # noqa: ANN001
+def test_video_gemini_network_risk_stops_web_and_falls_through_once(monkeypatch) -> None:  # noqa: ANN001
     attempts: list[dict] = []
     calls: list[str] = []
 
@@ -394,10 +393,10 @@ def test_video_qwen_network_risk_stops_web_and_falls_through_once(monkeypatch) -
 
     class _Service:
         async def analyze(self, **_kwargs):  # noqa: ANN003, ANN202
-            calls.append("qwen_web")
+            calls.append("gemini_web")
             return "", {
                 "status": "failed",
-                "diagnostic_code": "qwen_web_network_risk_detected",
+                "diagnostic_code": "gemini_web_network_risk_detected",
                 "diagnostic_stage": "browser",
             }
 
@@ -406,7 +405,7 @@ def test_video_qwen_network_risk_stops_web_and_falls_through_once(monkeypatch) -
         return "paid API result"
 
     monkeypatch.setattr(media_understanding, "_try_primary_video_routes", _no_primary)
-    monkeypatch.setattr(qwen_web_service, "get_qwen_web_service", lambda _runtime: _Service())
+    monkeypatch.setattr(gemini_web_service, "get_gemini_web_service", lambda _runtime: _Service())
     monkeypatch.setattr(
         media_understanding,
         "_build_video_fallback_provider_config",
@@ -418,9 +417,8 @@ def test_video_qwen_network_risk_stops_web_and_falls_through_once(monkeypatch) -
             personification_video_understanding_enabled=True,
             personification_video_route_mode="auto",
             personification_video_analysis_timeout=120.0,
-            personification_qwen_web_enabled=True,
-            personification_qwen_web_risk_acknowledged=True,
-            personification_qwen_web_priority="before_api",
+            personification_gemini_web_enabled=True,
+            personification_gemini_web_risk_acknowledged=True,
         )
     )
 
@@ -434,12 +432,12 @@ def test_video_qwen_network_risk_stops_web_and_falls_through_once(monkeypatch) -
     )
 
     assert (result, route) == ("paid API result", "video_external_qwen_omni")
-    assert calls == ["qwen_web", "official_api"]
-    assert attempts[1]["diagnostic_code"] == "qwen_web_network_risk_detected"
+    assert calls == ["gemini_web", "official_api"]
+    assert attempts[1]["diagnostic_code"] == "gemini_web_network_risk_detected"
     assert attempts[1]["diagnostic_stage"] == "browser"
 
 
-def test_video_qwen_after_api_does_not_start_when_api_succeeds(monkeypatch) -> None:  # noqa: ANN001
+def test_disabled_gemini_web_does_not_start_before_api(monkeypatch) -> None:  # noqa: ANN001
     async def _no_primary(**_kwargs):  # noqa: ANN003, ANN202
         return ""
 
@@ -448,10 +446,10 @@ def test_video_qwen_after_api_does_not_start_when_api_succeeds(monkeypatch) -> N
 
     class _ForbiddenService:
         async def analyze(self, **_kwargs):  # noqa: ANN003, ANN202
-            raise AssertionError("after_api must not start when the paid API succeeds")
+            raise AssertionError("disabled Gemini Web must not start")
 
     monkeypatch.setattr(media_understanding, "_try_primary_video_routes", _no_primary)
-    monkeypatch.setattr(qwen_web_service, "get_qwen_web_service", lambda _runtime: _ForbiddenService())
+    monkeypatch.setattr(gemini_web_service, "get_gemini_web_service", lambda _runtime: _ForbiddenService())
     monkeypatch.setattr(
         media_understanding,
         "_build_video_fallback_provider_config",
@@ -463,9 +461,8 @@ def test_video_qwen_after_api_does_not_start_when_api_succeeds(monkeypatch) -> N
             personification_video_understanding_enabled=True,
             personification_video_route_mode="auto",
             personification_video_analysis_timeout=120.0,
-            personification_qwen_web_enabled=True,
-            personification_qwen_web_risk_acknowledged=True,
-            personification_qwen_web_priority="after_api",
+            personification_gemini_web_enabled=False,
+            personification_gemini_web_risk_acknowledged=False,
         )
     )
 
@@ -479,7 +476,7 @@ def test_video_qwen_after_api_does_not_start_when_api_succeeds(monkeypatch) -> N
     assert (result, route) == ("official result", "video_external_qwen_omni")
 
 
-def test_audio_qwen_web_precedes_asr(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+def test_audio_gemini_web_precedes_asr(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
     audio_path = tmp_path / "voice.wav"
     audio_path.write_bytes(b"RIFFfake")
     attempts: list[dict] = []
@@ -490,22 +487,21 @@ def test_audio_qwen_web_precedes_asr(monkeypatch, tmp_path: Path) -> None:  # no
     class _Service:
         async def analyze(self, **kwargs):  # noqa: ANN003, ANN202
             assert kwargs["kind"] == "audio"
-            return "[UNTRUSTED_DATA_ONLY: QWEN_WEB_AUDIO_OBSERVATION]\n语音内容\n[/UNTRUSTED_DATA_ONLY]", {
+            return "[UNTRUSTED_DATA_ONLY: GEMINI_WEB_AUDIO_OBSERVATION]\n语音内容\n[/UNTRUSTED_DATA_ONLY]", {
                 "status": "ok",
                 "diagnostic_code": "",
             }
 
     async def _forbidden_asr(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
-        raise AssertionError("qwen web success must stop ASR")
+        raise AssertionError("Gemini Web success must stop ASR")
 
     monkeypatch.setattr(media_understanding, "_try_primary_audio_routes", _no_primary)
-    monkeypatch.setattr(qwen_web_service, "get_qwen_web_service", lambda _runtime: _Service())
+    monkeypatch.setattr(gemini_web_service, "get_gemini_web_service", lambda _runtime: _Service())
     monkeypatch.setattr(media_understanding, "transcribe_audio_file", _forbidden_asr)
     runtime = SimpleNamespace(
         plugin_config=SimpleNamespace(
-            personification_qwen_web_enabled=True,
-            personification_qwen_web_risk_acknowledged=True,
-            personification_qwen_web_priority="before_api",
+            personification_gemini_web_enabled=True,
+            personification_gemini_web_risk_acknowledged=True,
         )
     )
 
@@ -518,9 +514,9 @@ def test_audio_qwen_web_precedes_asr(monkeypatch, tmp_path: Path) -> None:  # no
         )
     )
 
-    assert "QWEN_WEB_AUDIO_OBSERVATION" in result
-    assert route == "audio_qwen_web"
-    assert [item["route"] for item in attempts] == ["audio_primary", "audio_qwen_web"]
+    assert "GEMINI_WEB_AUDIO_OBSERVATION" in result
+    assert route == "audio_gemini_web"
+    assert [item["route"] for item in attempts] == ["audio_primary", "audio_gemini_web"]
 
 
 def test_audio_falls_back_to_configured_asr(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
@@ -547,9 +543,8 @@ def test_audio_falls_back_to_configured_asr(monkeypatch, tmp_path: Path) -> None
     monkeypatch.setattr(media_understanding, "transcribe_audio_file", _asr)
     runtime = SimpleNamespace(
         plugin_config=SimpleNamespace(
-            personification_qwen_web_enabled=False,
-            personification_qwen_web_risk_acknowledged=False,
-            personification_qwen_web_priority="before_api",
+            personification_gemini_web_enabled=False,
+            personification_gemini_web_risk_acknowledged=False,
         )
     )
 

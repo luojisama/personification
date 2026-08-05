@@ -121,7 +121,7 @@ def test_normalize_value_preserves_numeric_zero() -> None:
 def test_video_understanding_form_defaults_all_normalize() -> None:
     prefixes = (
         "personification_video_",
-        "personification_qwen_web_",
+        "personification_gemini_web_",
         "personification_audio_transcription_",
     )
     for entry in config_registry.get_config_entries("global"):

@@ -7,27 +7,27 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 
 from ...core import webui_audit_log
-from ...core.qwen_web_service import get_qwen_web_service
+from ...core.gemini_web_service import get_gemini_web_service
 from ..deps import AdminIdentity, get_client_ip, require_admin
 
 
 _KNOWN_CODES = {
-    "qwen_web_disabled",
-    "qwen_web_risk_ack_required",
-    "qwen_web_login_required",
-    "qwen_web_manual_verification_required",
-    "qwen_web_network_risk_detected",
-    "qwen_web_network_risk_cooldown",
-    "qwen_web_busy",
-    "qwen_web_dom_changed",
-    "qwen_web_upload_rejected",
-    "qwen_web_generation_timeout",
-    "qwen_web_output_empty",
-    "qwen_web_process_failed",
-    "qwen_web_context_idle_evicted",
-    "qwen_web_media_too_large",
-    "qwen_web_request_invalid",
-    "qwen_web_local_rate_limited",
+    "gemini_web_disabled",
+    "gemini_web_risk_ack_required",
+    "gemini_web_login_required",
+    "gemini_web_manual_verification_required",
+    "gemini_web_network_risk_detected",
+    "gemini_web_network_risk_cooldown",
+    "gemini_web_busy",
+    "gemini_web_dom_changed",
+    "gemini_web_upload_rejected",
+    "gemini_web_generation_timeout",
+    "gemini_web_output_empty",
+    "gemini_web_process_failed",
+    "gemini_web_context_idle_evicted",
+    "gemini_web_media_too_large",
+    "gemini_web_request_invalid",
+    "gemini_web_local_rate_limited",
 }
 
 
@@ -37,29 +37,29 @@ def _private(response: Response) -> None:
 
 
 def _owner(admin: AdminIdentity) -> str:
-    return f"{admin.qq}:{admin.device_id}:qwen_web"
+    return f"{admin.qq}:{admin.device_id}:gemini_web"
 
 
 def _safe_error(exc: Exception, title: str) -> HTTPException:
     raw = str(exc or "").strip()
-    code = raw if raw in _KNOWN_CODES else "qwen_web_operation_failed"
+    code = raw if raw in _KNOWN_CODES else "gemini_web_operation_failed"
     status = (
         409
-        if code in {"qwen_web_busy", "qwen_web_network_risk_cooldown", "qwen_web_local_rate_limited"}
+        if code in {"gemini_web_busy", "gemini_web_network_risk_cooldown", "gemini_web_local_rate_limited"}
         else 400
-        if code in {"qwen_web_risk_ack_required", "qwen_web_request_invalid"}
+        if code in {"gemini_web_risk_ack_required", "gemini_web_request_invalid"}
         else 503
     )
     messages = {
-        "qwen_web_risk_ack_required": "启用或操作千问 Web 前必须先确认第三方上传与消费者网页自动化风险。",
-        "qwen_web_disabled": "千问 Web 当前未启用，请先保存启用与风险确认配置。",
-        "qwen_web_busy": "千问 Web 当前已有分析任务，请等待本次任务结束。",
-        "qwen_web_network_risk_detected": "页面提示网络或账号安全风险，自动操作已立即停止并进入冷却。",
-        "qwen_web_network_risk_cooldown": "网络风险冷却尚未结束；请等待冷却或改用正式 API/分镜。",
-        "qwen_web_local_rate_limited": "千问 Web 本地调用频率已达到安全上限，本次将改用其他媒体路径。",
-        "qwen_web_login_required": "千问登录态不可用，请由管理员打开人工登录。",
-        "qwen_web_manual_verification_required": "官方页面要求人工验证，自动操作已停止。",
-        "qwen_web_dom_changed": "千问页面结构与当前适配器不匹配，已停止自动操作。",
+        "gemini_web_risk_ack_required": "启用或操作Gemini Web 前必须先确认第三方上传与消费者网页自动化风险。",
+        "gemini_web_disabled": "Gemini Web 当前未启用，请先保存启用与风险确认配置。",
+        "gemini_web_busy": "Gemini Web 当前已有分析任务，请等待本次任务结束。",
+        "gemini_web_network_risk_detected": "页面提示网络或账号安全风险，自动操作已立即停止并进入冷却。",
+        "gemini_web_network_risk_cooldown": "网络风险冷却尚未结束；请等待冷却或改用正式 API/分镜。",
+        "gemini_web_local_rate_limited": "Gemini Web 本地调用频率已达到安全上限，本次将改用其他媒体路径。",
+        "gemini_web_login_required": "Gemini登录态不可用，请由管理员打开人工登录。",
+        "gemini_web_manual_verification_required": "官方页面要求人工验证，自动操作已停止。",
+        "gemini_web_dom_changed": "Gemini页面结构与当前适配器不匹配，已停止自动操作。",
     }
     return HTTPException(
         status_code=status,
@@ -67,15 +67,15 @@ def _safe_error(exc: Exception, title: str) -> HTTPException:
             "ok": False,
             "code": code,
             "title": title,
-            "message": messages.get(code, "千问 Web 操作未完成；请查看脱敏诊断后改用人工接管或其他媒体路径。"),
+            "message": messages.get(code, "Gemini Web 操作未完成；请查看脱敏诊断后改用人工接管或其他媒体路径。"),
             "error_type": type(exc).__name__,
         },
     )
 
 
-def build_qwen_web_router(*, runtime: Any) -> APIRouter:
-    router = APIRouter(prefix="/api/media/qwen-web", tags=["qwen-web"])
-    service = get_qwen_web_service(runtime)
+def build_consumer_web_router(*, runtime: Any) -> APIRouter:
+    router = APIRouter(prefix="/api/media/web/gemini", tags=["consumer-media-web"])
+    service = get_gemini_web_service(runtime)
 
     @router.get("/status")
     async def status(
@@ -96,12 +96,12 @@ def build_qwen_web_router(*, runtime: Any) -> APIRouter:
         try:
             result = await service.probe(runtime.plugin_config)
         except Exception as exc:
-            raise _safe_error(exc, "千问页面兼容性检查未完成") from exc
+            raise _safe_error(exc, "Gemini页面兼容性检查未完成") from exc
         webui_audit_log.record(
-            action="qwen_web_probe",
+            action="gemini_web_probe",
             qq=admin.qq,
             device_id=admin.device_id,
-            target="qianwen_cn_v4",
+            target="gemini_web_v1",
             ip_hash=get_client_ip(request),
             detail={"state": str(result.get("state") or "unknown")},
             outcome="success" if result.get("state") == "ready" else "partial",
@@ -118,14 +118,14 @@ def build_qwen_web_router(*, runtime: Any) -> APIRouter:
         try:
             result = await service.auth_start(runtime.plugin_config, _owner(admin))
         except Exception as exc:
-            raise _safe_error(exc, "千问人工登录会话创建失败") from exc
+            raise _safe_error(exc, "Gemini人工登录会话创建失败") from exc
         webui_audit_log.record(
-            action="qwen_web_auth_start",
+            action="gemini_web_auth_start",
             qq=admin.qq,
             device_id=admin.device_id,
-            target="qwen_web",
+            target="gemini_web",
             ip_hash=get_client_ip(request),
-            detail={"page_contract_version": "qianwen_cn_v4"},
+            detail={"page_contract_version": "gemini_web_v1"},
         )
         return result
 
@@ -139,7 +139,7 @@ def build_qwen_web_router(*, runtime: Any) -> APIRouter:
         try:
             return await service.auth_status(runtime.plugin_config, session_id, _owner(admin))
         except Exception as exc:
-            raise _safe_error(exc, "千问人工登录状态读取失败") from exc
+            raise _safe_error(exc, "Gemini人工登录状态读取失败") from exc
 
     @router.get("/auth/{session_id}/frame")
     async def auth_frame(
@@ -168,10 +168,10 @@ def build_qwen_web_router(*, runtime: Any) -> APIRouter:
             image = base64.b64decode(str(result.get("data_base64") or ""), validate=True)
             mime_type = str(result.get("mime_type") or "")
             if mime_type not in {"image/jpeg", "image/png"} or not image or len(image) > 2 * 1024 * 1024:
-                raise ValueError("qwen_web_process_failed")
+                raise ValueError("gemini_web_process_failed")
             return Response(content=image, media_type=mime_type, headers=headers)
         except Exception as exc:
-            raise _safe_error(exc, "千问人工接管画面读取失败") from exc
+            raise _safe_error(exc, "Gemini人工接管画面读取失败") from exc
 
     @router.post("/auth/{session_id}/input")
     async def auth_input(
@@ -185,7 +185,7 @@ def build_qwen_web_router(*, runtime: Any) -> APIRouter:
         if not isinstance(action, dict) or len(
             json.dumps(action, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ) > 16 * 1024:
-            raise _safe_error(ValueError("qwen_web_request_invalid"), "千问人工接管操作无效")
+            raise _safe_error(ValueError("gemini_web_request_invalid"), "Gemini人工接管操作无效")
         try:
             return await service.auth_input(
                 runtime.plugin_config,
@@ -194,7 +194,7 @@ def build_qwen_web_router(*, runtime: Any) -> APIRouter:
                 action,
             )
         except Exception as exc:
-            raise _safe_error(exc, "千问人工接管操作未完成") from exc
+            raise _safe_error(exc, "Gemini人工接管操作未完成") from exc
 
     @router.post("/auth/{session_id}/finish")
     async def auth_finish(
@@ -207,12 +207,12 @@ def build_qwen_web_router(*, runtime: Any) -> APIRouter:
         try:
             result = await service.auth_finish(runtime.plugin_config, session_id, _owner(admin))
         except Exception as exc:
-            raise _safe_error(exc, "千问登录状态确认失败") from exc
+            raise _safe_error(exc, "Gemini登录状态确认失败") from exc
         webui_audit_log.record(
-            action="qwen_web_auth_finish",
+            action="gemini_web_auth_finish",
             qq=admin.qq,
             device_id=admin.device_id,
-            target="qwen_web",
+            target="gemini_web",
             ip_hash=get_client_ip(request),
             detail={"status": str(result.get("status") or "unknown")},
             outcome="success" if result.get("status") == "success" else "partial",
@@ -229,7 +229,7 @@ def build_qwen_web_router(*, runtime: Any) -> APIRouter:
         try:
             return await service.auth_cancel(runtime.plugin_config, session_id, _owner(admin))
         except Exception as exc:
-            raise _safe_error(exc, "千问人工登录会话取消失败") from exc
+            raise _safe_error(exc, "Gemini人工登录会话取消失败") from exc
 
     @router.post("/logout")
     async def logout(
@@ -239,17 +239,17 @@ def build_qwen_web_router(*, runtime: Any) -> APIRouter:
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
-        if str(body.get("confirm") or "") != "确认注销千问Web":
-            raise _safe_error(ValueError("qwen_web_request_invalid"), "请输入精确确认文本：确认注销千问Web")
+        if str(body.get("confirm") or "") != "确认注销GeminiWeb":
+            raise _safe_error(ValueError("gemini_web_request_invalid"), "请输入精确确认文本：确认注销GeminiWeb")
         try:
             result = await service.logout(runtime.plugin_config)
         except Exception as exc:
-            raise _safe_error(exc, "千问本地登录 profile 注销失败") from exc
+            raise _safe_error(exc, "Gemini本地登录 profile 注销失败") from exc
         webui_audit_log.record(
-            action="qwen_web_logout",
+            action="gemini_web_logout",
             qq=admin.qq,
             device_id=admin.device_id,
-            target="qwen_web",
+            target="gemini_web",
             ip_hash=get_client_ip(request),
             detail={"profile_deleted": True},
         )
@@ -258,4 +258,4 @@ def build_qwen_web_router(*, runtime: Any) -> APIRouter:
     return router
 
 
-__all__ = ["build_qwen_web_router"]
+__all__ = ["build_consumer_web_router"]

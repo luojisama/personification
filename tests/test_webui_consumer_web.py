@@ -7,12 +7,12 @@ from .test_webui_smoke import _build_client, _login_as_admin, _runtime_context  
 
 
 def _service(runtime_context):  # noqa: ANN001, ANN202
-    module = load_personification_module("plugin.personification.core.qwen_web_service")
+    module = load_personification_module("plugin.personification.core.gemini_web_service")
     runtime = runtime_context.app_module.get_runtime_context()
-    return module.get_qwen_web_service(runtime)
+    return module.get_gemini_web_service(runtime)
 
 
-def test_qwen_web_status_requires_admin_without_starting_helper(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+def test_gemini_web_status_requires_admin_without_starting_helper(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
     calls: list[bool] = []
     service = _service(_runtime_context)
 
@@ -27,24 +27,24 @@ def test_qwen_web_status_requires_admin_without_starting_helper(_runtime_context
             "browser_running": False,
             "active_job": False,
             "interactive_session": None,
-            "last_diagnostic_code": "qwen_web_disabled",
+            "last_diagnostic_code": "gemini_web_disabled",
             "last_probe_at": 0,
         }
 
     monkeypatch.setattr(service, "status", _status)
     client = _build_client(_runtime_context)
-    assert client.get("/personification/api/media/qwen-web/status").status_code == 401
+    assert client.get("/personification/api/media/web/gemini/status").status_code == 401
     assert calls == []
 
     _login_as_admin(client, _runtime_context)
-    response = client.get("/personification/api/media/qwen-web/status")
+    response = client.get("/personification/api/media/web/gemini/status")
     assert response.status_code == 200
-    assert response.json()["last_diagnostic_code"] == "qwen_web_disabled"
+    assert response.json()["last_diagnostic_code"] == "gemini_web_disabled"
     assert calls == [False]
     assert "no-store" in response.headers.get("cache-control", "")
 
 
-def test_qwen_web_probe_and_auth_use_bound_admin_owner(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+def test_gemini_web_probe_and_auth_use_bound_admin_owner(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
     owners: list[str] = []
     service = _service(_runtime_context)
 
@@ -64,14 +64,14 @@ def test_qwen_web_probe_and_auth_use_bound_admin_owner(_runtime_context, monkeyp
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
 
-    assert client.post("/personification/api/media/qwen-web/probe").status_code == 200
-    response = client.post("/personification/api/media/qwen-web/auth/start")
+    assert client.post("/personification/api/media/web/gemini/probe").status_code == 200
+    response = client.post("/personification/api/media/web/gemini/auth/start")
     assert response.status_code == 200
     assert response.json()["session_id"] == "auth_123"
-    assert owners and owners[0].startswith("10001:") and owners[0].endswith(":qwen_web")
+    assert owners and owners[0].startswith("10001:") and owners[0].endswith(":gemini_web")
 
 
-def test_qwen_web_frame_is_private_and_revisioned(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+def test_gemini_web_frame_is_private_and_revisioned(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
     service = _service(_runtime_context)
     observed: dict[str, object] = {}
 
@@ -88,16 +88,16 @@ def test_qwen_web_frame_is_private_and_revisioned(_runtime_context, monkeypatch)
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
 
-    response = client.get("/personification/api/media/qwen-web/auth/auth_123/frame?revision=6")
+    response = client.get("/personification/api/media/web/gemini/auth/auth_123/frame?revision=6")
     assert response.status_code == 200
     assert response.content == b"jpeg-frame"
     assert response.headers["X-Interactive-Revision"] == "7"
     assert response.headers["Content-Security-Policy"] == "default-src 'none'"
     assert observed["revision"] == 6
-    assert str(observed["owner"]).endswith(":qwen_web")
+    assert str(observed["owner"]).endswith(":gemini_web")
 
 
-def test_qwen_web_input_rejects_oversized_action_before_helper(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+def test_gemini_web_input_rejects_oversized_action_before_helper(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
     calls: list[dict] = []
     service = _service(_runtime_context)
 
@@ -110,27 +110,27 @@ def test_qwen_web_input_rejects_oversized_action_before_helper(_runtime_context,
     _login_as_admin(client, _runtime_context)
 
     response = client.post(
-        "/personification/api/media/qwen-web/auth/auth_123/input",
+        "/personification/api/media/web/gemini/auth/auth_123/input",
         json={"action": {"type": "type", "text": "x" * (17 * 1024)}},
     )
     assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "qwen_web_request_invalid"
+    assert response.json()["detail"]["code"] == "gemini_web_request_invalid"
     assert calls == []
 
 
-def test_qwen_web_network_risk_error_is_stable_and_sanitized(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+def test_gemini_web_network_risk_error_is_stable_and_sanitized(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
     service = _service(_runtime_context)
 
     async def _probe(_config):  # noqa: ANN001, ANN202
-        raise RuntimeError("qwen_web_network_risk_detected")
+        raise RuntimeError("gemini_web_network_risk_detected")
 
     monkeypatch.setattr(service, "probe", _probe)
     client = _build_client(_runtime_context)
     _login_as_admin(client, _runtime_context)
 
-    response = client.post("/personification/api/media/qwen-web/probe")
+    response = client.post("/personification/api/media/web/gemini/probe")
     assert response.status_code == 503
     payload = response.json()["detail"]
-    assert payload["code"] == "qwen_web_network_risk_detected"
+    assert payload["code"] == "gemini_web_network_risk_detected"
     assert "Cookie" not in response.text
     assert "网络或账号安全风险" in payload["message"]

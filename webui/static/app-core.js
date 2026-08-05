@@ -9,7 +9,7 @@ function readStoredQzoneOperationId() {
 let state = {
   logged: false, qq: "", view: "dashboard",
   entries: [], groups: [], activeGroup: null, configSearch: "", configSearchComposing: false, configSearchDraft: "", configDrafts: {},
-  qwenWebStatus: null, qwenWebAuth: null, qwenWebBusy: false,
+  geminiWebStatus: null, geminiWebAuth: null, geminiWebBusy: false,
   devices: [], devicePending: false, alert: null, loading: false, loadingMessage: "",
   dashboard: null, dashboardWindow: "month", dashboardDetail: null,
   personas: [], selectedPersona: null, personaSearch: "", personaScopeBotId: "", personaScopeGroupId: "", personaScopeRequestId: 0, scopedProfileBusy: false,
@@ -897,7 +897,7 @@ function leaveViewLifecycle(previousView,nextView) {
   if(previousView==="qzone"&&typeof stopQzoneViewLifecycle==="function")stopQzoneViewLifecycle();
   if(previousView==="tool_creator"&&typeof stopToolCreatorPolling==="function")stopToolCreatorPolling();
   if(previousView==="mcp"&&typeof stopMcpViewLifecycle==="function")stopMcpViewLifecycle();
-  if(previousView==="config"&&typeof stopQwenWebConfigLifecycle==="function")stopQwenWebConfigLifecycle();
+  if(previousView==="config"&&typeof stopGeminiWebConfigLifecycle==="function")stopGeminiWebConfigLifecycle();
   if(previousView==="agent_status"&&typeof stopAgentStatusPolling==="function")stopAgentStatusPolling();
   if(previousView==="memory_graph"){
     if(typeof destroyMemoryGraphCanvas==="function")destroyMemoryGraphCanvas();
@@ -926,7 +926,7 @@ function leaveViewLifecycle(previousView,nextView) {
 
 function enterViewLifecycle(view) {
   if(view==="agent_status"&&typeof startAgentStatusPolling==="function")startAgentStatusPolling();
-  if(view==="config"&&typeof startQwenWebConfigLifecycle==="function")startQwenWebConfigLifecycle();
+  if(view==="config"&&typeof startGeminiWebConfigLifecycle==="function")startGeminiWebConfigLifecycle();
 }
 
 function render() {

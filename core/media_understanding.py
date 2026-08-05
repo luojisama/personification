@@ -53,17 +53,10 @@ def _record_media_attempt(
     )
 
 
-def _normalize_qwen_web_priority(value: Any) -> str:
-    normalized = str(value or "before_api").strip().lower().replace("-", "_")
-    return normalized if normalized in {"before_api", "after_api", "manual_only"} else "before_api"
-
-
-def _qwen_web_automatic_enabled(config: Any) -> bool:
-    return bool(getattr(config, "personification_qwen_web_enabled", False)) and bool(
-        getattr(config, "personification_qwen_web_risk_acknowledged", False)
-    ) and _normalize_qwen_web_priority(
-        getattr(config, "personification_qwen_web_priority", "before_api")
-    ) != "manual_only"
+def _gemini_web_automatic_enabled(config: Any) -> bool:
+    return bool(getattr(config, "personification_gemini_web_enabled", False)) and bool(
+        getattr(config, "personification_gemini_web_risk_acknowledged", False)
+    )
 
 
 def build_tool_caller(config: Any) -> Any:
@@ -1340,7 +1333,7 @@ async def analyze_videos_with_route_or_fallback(
     video_enabled = bool(getattr(plugin_config, "personification_video_understanding_enabled", False))
     if (
         not video_enabled
-        and not _qwen_web_automatic_enabled(plugin_config)
+        and not _gemini_web_automatic_enabled(plugin_config)
         and not primary_route_supports_native_video(runtime, route_name=route_name)
     ):
         return "", "video_disabled"
@@ -1349,57 +1342,52 @@ async def analyze_videos_with_route_or_fallback(
         getattr(plugin_config, "personification_video_route_mode", "auto")
     )
 
-    async def _qwen_web_result() -> tuple[str, str]:
+    async def _gemini_web_result() -> tuple[str, str]:
         started_at = time.monotonic()
-        enabled = bool(getattr(plugin_config, "personification_qwen_web_enabled", False))
+        enabled = bool(getattr(plugin_config, "personification_gemini_web_enabled", False))
         acknowledged = bool(
-            getattr(plugin_config, "personification_qwen_web_risk_acknowledged", False)
+            getattr(plugin_config, "personification_gemini_web_risk_acknowledged", False)
         )
-        priority = _normalize_qwen_web_priority(
-            getattr(plugin_config, "personification_qwen_web_priority", "before_api")
-        )
-        if not enabled or not acknowledged or priority == "manual_only":
+        if not enabled or not acknowledged:
             code = (
-                "qwen_web_disabled"
+                "gemini_web_disabled"
                 if not enabled
-                else "qwen_web_risk_ack_required"
-                if not acknowledged
-                else "qwen_web_manual_only"
+                else "gemini_web_risk_ack_required"
             )
             _record_media_attempt(
                 route_attempts,
-                route="video_qwen_web",
+                route="video_gemini_web",
                 status="skipped",
                 started_at=started_at,
                 diagnostic_code=code,
             )
             return "", "video_unavailable"
         try:
-            from .qwen_web_service import get_qwen_web_service
+            from .gemini_web_service import get_gemini_web_service
 
-            result, detail = await get_qwen_web_service(runtime).analyze(
+            result, detail = await get_gemini_web_service(runtime).analyze(
                 config=plugin_config,
                 kind="video",
                 media_ref=refs[0],
                 prompt=prompt,
             )
         except Exception as exc:
-            _log_warning(runtime, f"[video] qwen web route failed: {sanitize_text(exc)}")
+            _log_warning(runtime, f"[video] Gemini web route failed: {sanitize_text(exc)}")
             result = ""
-            detail = {"status": "failed", "diagnostic_code": "qwen_web_process_failed"}
+            detail = {"status": "failed", "diagnostic_code": "gemini_web_process_failed"}
         result_text = str(result or "").strip()
         status = "ok" if result_text and not _invalid_media_text(result_text) else str(
             detail.get("status") or "failed"
         )
         _record_media_attempt(
             route_attempts,
-            route="video_qwen_web",
+            route="video_gemini_web",
             status=status,
             started_at=started_at,
             diagnostic_code=str(detail.get("diagnostic_code") or ""),
             diagnostic_stage=str(detail.get("diagnostic_stage") or ""),
         )
-        return (result_text, "video_qwen_web") if status == "ok" else ("", "video_unavailable")
+        return (result_text, "video_gemini_web") if status == "ok" else ("", "video_unavailable")
 
     async def _formal_api_result() -> tuple[str, str]:
         started_at = time.monotonic()
@@ -1532,21 +1520,12 @@ async def analyze_videos_with_route_or_fallback(
         return "", "video_unavailable"
 
     async def _external_result() -> tuple[str, str]:
-
-        priority = _normalize_qwen_web_priority(
-            getattr(plugin_config, "personification_qwen_web_priority", "before_api")
-        )
-        if priority == "before_api":
-            qwen_result = await _qwen_web_result()
-            if qwen_result[0]:
-                return qwen_result
+        gemini_result = await _gemini_web_result()
+        if gemini_result[0]:
+            return gemini_result
         api_result = await _formal_api_result()
         if api_result[0]:
             return api_result
-        if priority == "after_api":
-            qwen_result = await _qwen_web_result()
-            if qwen_result[0]:
-                return qwen_result
         return "", "video_unavailable"
 
     native_text = ""
@@ -1687,7 +1666,7 @@ def audio_route_available(runtime: Any) -> bool:
         return False
     if primary_route_supports_native_audio(runtime):
         return True
-    if _qwen_web_automatic_enabled(plugin_config):
+    if _gemini_web_automatic_enabled(plugin_config):
         return True
     if bool(getattr(plugin_config, "personification_fullmodal_provider_enabled", False)) and str(
         getattr(plugin_config, "personification_fullmodal_provider_api_key", "") or ""
@@ -1822,57 +1801,52 @@ async def analyze_audios_with_route_or_fallback(
         )
         return result_text, "audio_external_fullmodal"
 
-    async def _qwen_web_result() -> tuple[str, str]:
-        qwen_started_at = time.monotonic()
-        enabled = bool(getattr(plugin_config, "personification_qwen_web_enabled", False))
+    async def _gemini_web_result() -> tuple[str, str]:
+        gemini_started_at = time.monotonic()
+        enabled = bool(getattr(plugin_config, "personification_gemini_web_enabled", False))
         acknowledged = bool(
-            getattr(plugin_config, "personification_qwen_web_risk_acknowledged", False)
+            getattr(plugin_config, "personification_gemini_web_risk_acknowledged", False)
         )
-        priority = _normalize_qwen_web_priority(
-            getattr(plugin_config, "personification_qwen_web_priority", "before_api")
-        )
-        if not enabled or not acknowledged or priority == "manual_only":
+        if not enabled or not acknowledged:
             code = (
-                "qwen_web_disabled"
+                "gemini_web_disabled"
                 if not enabled
-                else "qwen_web_risk_ack_required"
-                if not acknowledged
-                else "qwen_web_manual_only"
+                else "gemini_web_risk_ack_required"
             )
             _record_media_attempt(
                 route_attempts,
-                route="audio_qwen_web",
+                route="audio_gemini_web",
                 status="skipped",
-                started_at=qwen_started_at,
+                started_at=gemini_started_at,
                 diagnostic_code=code,
             )
             return "", "audio_unavailable"
         try:
-            from .qwen_web_service import get_qwen_web_service
+            from .gemini_web_service import get_gemini_web_service
 
-            result, detail = await get_qwen_web_service(runtime).analyze(
+            result, detail = await get_gemini_web_service(runtime).analyze(
                 config=plugin_config,
                 kind="audio",
                 media_ref=refs[0],
                 prompt=prompt,
             )
         except Exception as exc:
-            _log_warning(runtime, f"[audio] qwen web route failed: {sanitize_text(exc)}")
+            _log_warning(runtime, f"[audio] Gemini web route failed: {sanitize_text(exc)}")
             result = ""
-            detail = {"status": "failed", "diagnostic_code": "qwen_web_process_failed"}
+            detail = {"status": "failed", "diagnostic_code": "gemini_web_process_failed"}
         result_text = str(result or "").strip()
         status = "ok" if result_text and not _invalid_media_text(result_text) else str(
             detail.get("status") or "failed"
         )
         _record_media_attempt(
             route_attempts,
-            route="audio_qwen_web",
+            route="audio_gemini_web",
             status=status,
-            started_at=qwen_started_at,
+            started_at=gemini_started_at,
             diagnostic_code=str(detail.get("diagnostic_code") or ""),
             diagnostic_stage=str(detail.get("diagnostic_stage") or ""),
         )
-        return (result_text, "audio_qwen_web") if status == "ok" else ("", "audio_unavailable")
+        return (result_text, "audio_gemini_web") if status == "ok" else ("", "audio_unavailable")
 
     async def _asr_result() -> tuple[str, str]:
         asr_started_at = time.monotonic()
@@ -1909,23 +1883,15 @@ async def analyze_audios_with_route_or_fallback(
         )
         return wrapped, "audio_asr"
 
-    priority = _normalize_qwen_web_priority(
-        getattr(plugin_config, "personification_qwen_web_priority", "before_api")
-    )
-    if priority == "before_api":
-        qwen_result = await _qwen_web_result()
-        if qwen_result[0]:
-            return qwen_result
+    gemini_result = await _gemini_web_result()
+    if gemini_result[0]:
+        return gemini_result
     external_result = await _external_api_result()
     if external_result[0]:
         return external_result
     asr_result = await _asr_result()
     if asr_result[0]:
         return asr_result
-    if priority == "after_api":
-        qwen_result = await _qwen_web_result()
-        if qwen_result[0]:
-            return qwen_result
     return "", "audio_unavailable"
 
 

@@ -1095,7 +1095,7 @@ def build_config_router(*, runtime) -> APIRouter:
             field_name
             for field_name in entries
             if field_name.startswith("personification_video_")
-            or field_name.startswith("personification_qwen_web_")
+            or field_name.startswith("personification_gemini_web_")
             or field_name.startswith("personification_fullmodal_provider_")
             or field_name.startswith("personification_audio_transcription_")
         }
@@ -1139,32 +1139,32 @@ def build_config_router(*, runtime) -> APIRouter:
                     retryable=True,
                 ),
             )
-        future_qwen_enabled = bool(
+        future_gemini_enabled = bool(
             normalized_values.get(
-                "personification_qwen_web_enabled",
-                getattr(runtime.plugin_config, "personification_qwen_web_enabled", False),
+                "personification_gemini_web_enabled",
+                getattr(runtime.plugin_config, "personification_gemini_web_enabled", False),
             )
         )
         future_risk_acknowledged = bool(
             normalized_values.get(
-                "personification_qwen_web_risk_acknowledged",
+                "personification_gemini_web_risk_acknowledged",
                 getattr(
                     runtime.plugin_config,
-                    "personification_qwen_web_risk_acknowledged",
+                    "personification_gemini_web_risk_acknowledged",
                     False,
                 ),
             )
         )
-        if future_qwen_enabled and not future_risk_acknowledged:
+        if future_gemini_enabled and not future_risk_acknowledged:
             raise HTTPException(
                 status_code=400,
                 detail=diagnostic(
                     ok=False,
-                    code="qwen_web_risk_ack_required",
+                    code="gemini_web_risk_ack_required",
                     phase="risk_acknowledgement",
-                    title="启用千问 Web 前必须确认风险",
-                    message="请确认媒体第三方上传、账号历史与消费者网页自动化风险后再启用。",
-                    suggestion="勾选风险确认，或保持千问 Web 关闭。",
+                    title="启用 Gemini Web 前必须确认风险",
+                    message="请确认媒体第三方上传、Google 账号历史与消费者网页自动化风险后再启用。",
+                    suggestion="勾选风险确认，或保持 Gemini Web 关闭。",
                     retryable=True,
                 ),
             )

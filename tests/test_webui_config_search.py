@@ -127,13 +127,12 @@ def test_video_understanding_uses_structured_form_instead_of_json_editor() -> No
 
     assert "function renderVideoUnderstandingEditor" in app_config_js
     assert 'activeGroup === "视频理解"' in app_config_js
-    assert "原生音视频 Provider" in app_config_js
-    assert "Qwen-Omni（百炼官方 API）" in app_config_js
+    assert "主模型原生音视频" in app_config_js
+    assert "Qwen3.5-Omni 官方扩展" in app_config_js
     assert "qwen3.5-omni-plus" in app_config_js
     assert "qwen3.5-omni-flash" in app_config_js
-    assert "qwen3-omni-flash" in app_config_js
-    assert "最长 1 小时视频" in app_config_js
-    assert "150 秒以内短视频" in app_config_js
+    assert "Gemini 原生 Files API" in app_config_js
+    assert "MiMo-V2.5 官方扩展" in app_config_js
     assert "function renderVideoBudgetEditor" in app_config_js
     assert '"15":"15 秒"' in app_config_js
     assert '"180":"3 分钟"' in app_config_js
@@ -141,16 +140,16 @@ def test_video_understanding_uses_structured_form_instead_of_json_editor() -> No
     assert "视频下载上限（MiB）" in app_config_js
     assert "固定热词" in app_config_js
     assert "不需要 JSON" in app_config_js
-    assert "千问 Web（实验）" in app_config_js
-    assert "personification_qwen_web_risk_acknowledged" in app_config_js
-    assert "qwenWebStartAuth" in app_config_js
-    assert "/media/qwen-web/auth/start" in app_config_js
+    assert "Gemini Web（实验）" in app_config_js
+    assert "personification_gemini_web_risk_acknowledged" in app_config_js
+    assert "geminiWebStartAuth" in app_config_js
+    assert "/media/web/gemini/auth/start" in app_config_js
     assert "不会识别或破解验证码" in app_config_js
     assert "网络安全风险" in app_config_js
-    assert "qwenWebStatus" in app_config_js
-    assert "qianwen_cn_v4" in app_config_js
-    assert "updateQwenWebCardDom" in app_config_js
-    assert "data-qwen-web-auth-host" in app_config_js
+    assert "geminiWebStatus" in app_config_js
+    assert "gemini_web_v1" in app_config_js
+    assert "updateGeminiWebCardDom" in app_config_js
+    assert "data-gemini-web-auth-host" in app_config_js
     assert 'api("/config/video-understanding"' in app_config_js
     assert "function readVideoUnderstandingForm" in app_config_js
     assert "video-config-grid" in style_css

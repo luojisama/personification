@@ -29,6 +29,6 @@ def _install_namespace() -> None:
 
 if __name__ == "__main__":
     _install_namespace()
-    from plugin.personification.core.qwen_web_helper import main
+    from plugin.personification.core.gemini_web_helper import main
 
     asyncio.run(main())

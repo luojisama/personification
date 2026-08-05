@@ -147,12 +147,12 @@ async def analyze_images(
                 "selected_route": video_mode if video_output else "",
                 "attempts": video_attempts,
                 "diagnostic_codes": [
-                    "qwen_web_route_fallback_used"
+                    "gemini_web_route_fallback_used"
                     for item in video_attempts
-                    if item.get("route") == "video_qwen_web"
+                    if item.get("route") == "video_gemini_web"
                     and item.get("status") not in {"ok", "skipped"}
                     and video_output
-                    and video_mode != "video_qwen_web"
+                    and video_mode != "video_gemini_web"
                 ][:1],
             }
         )
@@ -175,12 +175,12 @@ async def analyze_images(
                 "selected_route": audio_mode if audio_output else "",
                 "attempts": audio_attempts,
                 "diagnostic_codes": [
-                    "qwen_web_route_fallback_used"
+                    "gemini_web_route_fallback_used"
                     for item in audio_attempts
-                    if item.get("route") == "audio_qwen_web"
+                    if item.get("route") == "audio_gemini_web"
                     and item.get("status") not in {"ok", "skipped"}
                     and audio_output
-                    and audio_mode != "audio_qwen_web"
+                    and audio_mode != "audio_gemini_web"
                 ][:1],
             }
         )
@@ -318,7 +318,7 @@ def build_vision_tool(runtime: Any) -> AgentTool:
         name="vision_analyze",
         description=(
             "分析用户当前发送的图片、视频或音频，适合识别人物、作品、截图界面、画面元素、OCR 文本、视频动作变化、语音内容和可能的 ACG 候选。"
-            "支持全模态模型原生音视频、千问 Web 实验路径、关键帧分镜与音频转写降级；社交 MCP 结果含 video_ref 时可把它作为 videos 输入继续读正文视频。"
+            "支持全模态模型原生音视频、Gemini Web 实验路径、外部全模态 API、关键帧分镜与音频转写降级；社交 MCP 结果含 video_ref 时可把它作为 videos 输入继续读正文视频。"
             "输出候选和证据，不强行给单一结论。"
         ),
         parameters={

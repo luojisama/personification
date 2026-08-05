@@ -33,12 +33,12 @@ def test_current_media_context_carries_and_resets_video_refs() -> None:
     assert sticker_impl.get_current_audio_urls() == []
 
 
-def test_vision_result_records_qwen_web_route_fallback(monkeypatch) -> None:  # noqa: ANN001
+def test_vision_result_records_gemini_web_route_fallback(monkeypatch) -> None:  # noqa: ANN001
     async def _video(**kwargs):  # noqa: ANN003, ANN202
         kwargs["route_attempts"].extend(
             [
                 {"route": "video_primary", "status": "unsupported", "elapsed_ms": 1, "diagnostic_code": ""},
-                {"route": "video_qwen_web", "status": "failed", "elapsed_ms": 2, "diagnostic_code": "qwen_web_network_risk_detected"},
+                {"route": "video_gemini_web", "status": "failed", "elapsed_ms": 2, "diagnostic_code": "gemini_web_network_risk_detected"},
                 {"route": "video_official_api", "status": "ok", "elapsed_ms": 3, "diagnostic_code": ""},
             ]
         )
@@ -62,10 +62,10 @@ def test_vision_result_records_qwen_web_route_fallback(monkeypatch) -> None:  # 
 
     route = result["media_routes"][0]
     assert route["selected_route"] == "video_qwen_omni"
-    assert route["diagnostic_codes"] == ["qwen_web_route_fallback_used"]
+    assert route["diagnostic_codes"] == ["gemini_web_route_fallback_used"]
 
 
-def test_onebot_file_video_reaches_qwen_web_after_lazy_resolution(
+def test_onebot_file_video_reaches_gemini_web_after_lazy_resolution(
     monkeypatch,
 ) -> None:  # noqa: ANN001
     refs = turn_media.extract_media_from_message(
@@ -103,13 +103,13 @@ def test_onebot_file_video_reaches_qwen_web_after_lazy_resolution(
         captured.update(kwargs)
         kwargs["route_attempts"].append(
             {
-                "route": "video_qwen_web",
+                "route": "video_gemini_web",
                 "status": "ok",
                 "elapsed_ms": 1000,
                 "diagnostic_code": "",
             }
         )
-        return '{"scene_summary":"千问已理解文件视频"}', "video_qwen_web"
+        return '{"scene_summary":"Gemini已理解文件视频"}', "video_gemini_web"
 
     monkeypatch.setattr(vision_impl, "analyze_videos_with_route_or_fallback", _video)
     runtime = SimpleNamespace(
@@ -137,6 +137,6 @@ def test_onebot_file_video_reaches_qwen_web_after_lazy_resolution(
     assert captured["video_refs"] == [
         "https://multimedia.nt.qq.com.cn/download/qq-file-video"
     ]
-    assert result["scene_summary"] == "千问已理解文件视频"
-    assert result["analysis_route"] == "video_qwen_web"
-    assert result["media_routes"][0]["selected_route"] == "video_qwen_web"
+    assert result["scene_summary"] == "Gemini已理解文件视频"
+    assert result["analysis_route"] == "video_gemini_web"
+    assert result["media_routes"][0]["selected_route"] == "video_gemini_web"
