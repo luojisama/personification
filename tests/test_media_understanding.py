@@ -398,6 +398,7 @@ def test_video_qwen_network_risk_stops_web_and_falls_through_once(monkeypatch) -
             return "", {
                 "status": "failed",
                 "diagnostic_code": "qwen_web_network_risk_detected",
+                "diagnostic_stage": "browser",
             }
 
     async def _official(**_kwargs):  # noqa: ANN003, ANN202
@@ -435,6 +436,7 @@ def test_video_qwen_network_risk_stops_web_and_falls_through_once(monkeypatch) -
     assert (result, route) == ("paid API result", "video_qwen_omni")
     assert calls == ["qwen_web", "official_api"]
     assert attempts[1]["diagnostic_code"] == "qwen_web_network_risk_detected"
+    assert attempts[1]["diagnostic_stage"] == "browser"
 
 
 def test_video_qwen_after_api_does_not_start_when_api_succeeds(monkeypatch) -> None:  # noqa: ANN001

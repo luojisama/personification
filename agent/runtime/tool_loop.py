@@ -289,10 +289,12 @@ def _media_route_trace_detail(result: Any) -> str:
             route = _safe_trace_token(attempt.get("route"))
             status = _safe_trace_token(attempt.get("status"))
             diagnostic = _safe_trace_token(attempt.get("diagnostic_code"))
+            diagnostic_stage = _safe_trace_token(attempt.get("diagnostic_stage"))
             if not route or not status:
                 continue
             attempts.append(
                 f"{route}:{status}" + (f":{diagnostic}" if diagnostic else "")
+                + (f"@{diagnostic_stage}" if diagnostic_stage else "")
             )
         summary = f"{kind}:selected={selected}"
         if attempts:

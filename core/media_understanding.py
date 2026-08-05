@@ -32,6 +32,7 @@ def _record_media_attempt(
     status: str,
     started_at: float,
     diagnostic_code: str = "",
+    diagnostic_stage: str = "",
 ) -> None:
     if attempts is None:
         return
@@ -41,6 +42,7 @@ def _record_media_attempt(
             "status": str(status or ""),
             "elapsed_ms": max(0, int((time.monotonic() - started_at) * 1000)),
             "diagnostic_code": str(diagnostic_code or ""),
+            "diagnostic_stage": str(diagnostic_stage or ""),
         }
     )
 
@@ -1055,6 +1057,7 @@ async def analyze_videos_with_route_or_fallback(
             status=status,
             started_at=started_at,
             diagnostic_code=str(detail.get("diagnostic_code") or ""),
+            diagnostic_stage=str(detail.get("diagnostic_stage") or ""),
         )
         return (result_text, "video_qwen_web") if status == "ok" else ("", "video_unavailable")
 
@@ -1221,6 +1224,7 @@ async def analyze_videos_with_route_or_fallback(
             "video_douyin_download_failed",
             "video_download_failed",
             "video_ffmpeg_unavailable",
+            "video_ffprobe_unavailable",
             "video_storyboard_frame_extract_failed",
             "video_storyboard_probe_failed",
             "video_storyboard_scan_failed",
@@ -1378,6 +1382,7 @@ async def analyze_audios_with_route_or_fallback(
             status=status,
             started_at=qwen_started_at,
             diagnostic_code=str(detail.get("diagnostic_code") or ""),
+            diagnostic_stage=str(detail.get("diagnostic_stage") or ""),
         )
         return (result_text, "audio_qwen_web") if status == "ok" else ("", "audio_unavailable")
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -200,13 +202,180 @@ def resolve_video_frame_budget(duration_seconds: float, config: Any) -> VideoFra
     )
 
 
+def _system_ffmpeg_executable() -> str:
+    configured = str(os.environ.get("IMAGEIO_FFMPEG_EXE") or "").strip()
+    candidates = [configured, "ffmpeg"] if configured else ["ffmpeg"]
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return str(Path(resolved).resolve())
+        path = Path(candidate).expanduser()
+        if path.is_absolute() and path.is_file():
+            return str(path.resolve())
+    raise RuntimeError("video_ffmpeg_unavailable")
+
+
 def _ffmpeg_executable() -> str:
     try:
         import imageio_ffmpeg
 
         return str(imageio_ffmpeg.get_ffmpeg_exe())
-    except Exception as exc:  # pragma: no cover - dependency is part of the host project
-        raise RuntimeError("video_ffmpeg_unavailable") from exc
+    except Exception:
+        return _system_ffmpeg_executable()
+
+
+def _ffprobe_executable(ffmpeg_executable: str) -> str:
+    configured = str(os.environ.get("PERSONIFICATION_FFPROBE_EXE") or "").strip()
+    sibling_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    sibling = Path(ffmpeg_executable).resolve().with_name(sibling_name)
+    candidates = [configured, str(sibling), "ffprobe"] if configured else [str(sibling), "ffprobe"]
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return str(Path(resolved).resolve())
+        path = Path(candidate).expanduser()
+        if path.is_absolute() and path.is_file():
+            return str(path.resolve())
+    raise RuntimeError("video_ffprobe_unavailable")
+
+
+def _fraction(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    if "/" in text:
+        numerator, denominator = text.split("/", 1)
+        try:
+            return float(numerator) / max(0.000001, float(denominator))
+        except (TypeError, ValueError, ZeroDivisionError):
+            return 0.0
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _system_ffmpeg_probe(path: Path, ffmpeg_executable: str) -> dict[str, Any]:
+    command = [
+        _ffprobe_executable(ffmpeg_executable),
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,avg_frame_rate,r_frame_rate,duration:format=duration",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, check=False, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("video_storyboard_probe_failed") from exc
+    if completed.returncode != 0 or not completed.stdout:
+        raise RuntimeError("video_storyboard_probe_failed")
+    try:
+        payload = json.loads(completed.stdout.decode("utf-8", errors="replace"))
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise RuntimeError("video_storyboard_probe_failed") from exc
+    streams = list(payload.get("streams") or []) if isinstance(payload, dict) else []
+    stream = streams[0] if streams and isinstance(streams[0], dict) else {}
+    format_data = payload.get("format") if isinstance(payload, dict) else {}
+    if not isinstance(format_data, dict):
+        format_data = {}
+    try:
+        width = max(0, int(stream.get("width") or 0))
+        height = max(0, int(stream.get("height") or 0))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("video_storyboard_probe_failed") from exc
+    if width <= 0 or height <= 0:
+        raise RuntimeError("video_storyboard_probe_failed")
+    fps = _fraction(stream.get("avg_frame_rate")) or _fraction(stream.get("r_frame_rate"))
+    duration = _fraction(stream.get("duration")) or _fraction(format_data.get("duration"))
+    return {
+        "source_size": (width, height),
+        "size": (width, height),
+        "fps": fps,
+        "duration": duration,
+    }
+
+
+def _read_exact(stream: io.BufferedReader, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = max(0, int(size))
+    while remaining:
+        chunk = stream.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _system_ffmpeg_read_frames(path: Path, *, fps: float, width: int):
+    ffmpeg = _system_ffmpeg_executable()
+    metadata = _system_ffmpeg_probe(path, ffmpeg)
+    source_width, source_height = tuple(metadata["source_size"])
+    output_width = max(2, min(max(2, int(width)), int(source_width)))
+    output_height = max(2, int(round(source_height * output_width / max(1, source_width))))
+    if output_height % 2:
+        output_height += 1
+    frame_size = output_width * output_height * 3
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-i",
+        str(path),
+        "-an",
+        "-sn",
+        "-dn",
+        "-vf",
+        f"fps={float(fps):.6f},scale={output_width}:{output_height}:flags=fast_bilinear",
+        "-pix_fmt",
+        "rgb24",
+        "-f",
+        "rawvideo",
+        "pipe:1",
+    ]
+
+    def _frames():
+        try:
+            process = subprocess.Popen(  # noqa: S603 - argv is passed without a command shell
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            raise RuntimeError("video_storyboard_scan_failed") from exc
+        try:
+            if process.stdout is None:
+                raise RuntimeError("video_storyboard_scan_failed")
+            yield {
+                **metadata,
+                "size": (output_width, output_height),
+                "ffmpeg_backend": "system",
+            }
+            while True:
+                frame = _read_exact(process.stdout, frame_size)
+                if len(frame) != frame_size:
+                    break
+                yield frame
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+
+    return _frames()
 
 
 def _social_video_page(value: str) -> str:
@@ -322,8 +491,9 @@ def _download_social_video_sync(
 def _read_frames(path: Path, *, fps: float, width: int):
     try:
         import imageio_ffmpeg
-    except Exception as exc:  # pragma: no cover - depends on deployment extras
-        raise RuntimeError("video_ffmpeg_unavailable") from exc
+        imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return _system_ffmpeg_read_frames(path, fps=fps, width=width)
 
     vf = f"fps={fps:.6f},scale='min({int(width)},iw)':-2"
     return imageio_ffmpeg.read_frames(
@@ -607,7 +777,7 @@ async def prepare_video_storyboard(video_ref: str, config: Any) -> VideoStoryboa
         try:
             probe = await asyncio.to_thread(_probe_video_sync, video_path)
         except RuntimeError as exc:
-            if str(exc or "").startswith("video_ffmpeg_unavailable"):
+            if str(exc or "").startswith(("video_ffmpeg_unavailable", "video_ffprobe_unavailable")):
                 raise
             raise RuntimeError("video_storyboard_probe_failed") from exc
         except Exception as exc:
@@ -625,7 +795,7 @@ async def prepare_video_storyboard(video_ref: str, config: Any) -> VideoStoryboa
                 max_samples=budget.max_scan_samples,
             )
         except RuntimeError as exc:
-            if str(exc or "").startswith("video_ffmpeg_unavailable"):
+            if str(exc or "").startswith(("video_ffmpeg_unavailable", "video_ffprobe_unavailable")):
                 raise
             raise RuntimeError("video_storyboard_scan_failed") from exc
         except Exception as exc:
@@ -648,7 +818,7 @@ async def prepare_video_storyboard(video_ref: str, config: Any) -> VideoStoryboa
                 output_dir=frames_dir,
             )
         except RuntimeError as exc:
-            if str(exc or "").startswith("video_ffmpeg_unavailable"):
+            if str(exc or "").startswith(("video_ffmpeg_unavailable", "video_ffprobe_unavailable")):
                 raise
             raise RuntimeError("video_storyboard_frame_extract_failed") from exc
         except Exception as exc:

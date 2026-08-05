@@ -735,7 +735,7 @@ class QwenWebRuntime:
         allowed, code = self._automatic_allowed()
         if not allowed:
             self._last_diagnostic_code = code
-            return self._analysis_failure(code)
+            return self._analysis_failure(code, stage="admission")
         token = str(params.get("media_token") or "")
         kind = str(params.get("kind") or "").strip().lower()
         if kind not in {"video", "audio"}:
@@ -763,7 +763,7 @@ class QwenWebRuntime:
                 if state != "ready":
                     self._state = state
                     self._last_diagnostic_code = state_code
-                    return self._analysis_failure(state_code, started=started)
+                    return self._analysis_failure(state_code, started=started, stage=stage)
                 stage = "upload_entry"
                 upload = await self._open_media_upload(page, kind)
                 baseline_count, baseline_text = await self._assistant_snapshot(page)
@@ -796,6 +796,7 @@ class QwenWebRuntime:
                     "kind": kind,
                     "text": result,
                     "diagnostic_code": "",
+                    "diagnostic_stage": "complete",
                     "page_contract_version": QWEN_WEB_PAGE_CONTRACT,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                 }
@@ -826,15 +827,21 @@ class QwenWebRuntime:
         elif code == "qwen_web_dom_changed":
             self._state = "dom_changed"
         self._last_diagnostic_code = code
-        return self._analysis_failure(code, started=started)
+        return self._analysis_failure(code, started=started, stage=stage)
 
     @staticmethod
-    def _analysis_failure(code: str, *, started: float | None = None) -> dict[str, Any]:
+    def _analysis_failure(
+        code: str,
+        *,
+        started: float | None = None,
+        stage: str = "unknown",
+    ) -> dict[str, Any]:
         return {
             "schema_version": 1,
             "status": "failed",
             "text": "",
             "diagnostic_code": str(code or "qwen_web_process_failed"),
+            "diagnostic_stage": str(stage or "unknown"),
             "page_contract_version": QWEN_WEB_PAGE_CONTRACT,
             "elapsed_ms": int((time.monotonic() - started) * 1000) if started is not None else 0,
         }

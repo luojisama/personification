@@ -152,6 +152,18 @@ def test_qwen_runtime_applies_conservative_local_rate_limit(tmp_path: Path) -> N
     assert code == "qwen_web_local_rate_limited"
 
 
+def test_qwen_analysis_failure_exposes_only_stable_stage_metadata(tmp_path: Path) -> None:
+    runtime_mod = load_personification_module("plugin.personification.core.qwen_web_runtime")
+    runtime = runtime_mod.QwenWebRuntime(tmp_path)
+
+    result = runtime._analysis_failure("qwen_web_dom_changed", stage="upload_entry")
+
+    assert result["status"] == "failed"
+    assert result["diagnostic_code"] == "qwen_web_dom_changed"
+    assert result["diagnostic_stage"] == "upload_entry"
+    assert "text" in result and result["text"] == ""
+
+
 def test_qwen_network_risk_cooldown_blocks_manual_reopen(tmp_path: Path) -> None:
     runtime_mod = load_personification_module("plugin.personification.core.qwen_web_runtime")
 
