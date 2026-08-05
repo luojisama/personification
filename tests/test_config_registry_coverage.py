@@ -110,6 +110,25 @@ def test_normalize_value_accepts_parsed_list_and_dict() -> None:
     assert overrides_entry.normalize_value({"intent": "gpt-4o-mini"}) == {"intent": "gpt-4o-mini"}
 
 
+def test_normalize_value_preserves_numeric_zero() -> None:
+    entries = {entry.field_name: entry for entry in config_registry.get_config_entries("global")}
+
+    assert entries["personification_audio_transcription_speaker_count"].normalize_value(0) == 0
+    assert entries["personification_max_output_chars"].normalize_value(0) == 0
+    assert entries["personification_hot_chat_min_pass_rate"].normalize_value(0.0) == 0.0
+
+
+def test_video_understanding_form_defaults_all_normalize() -> None:
+    prefixes = (
+        "personification_video_",
+        "personification_qwen_web_",
+        "personification_audio_transcription_",
+    )
+    for entry in config_registry.get_config_entries("global"):
+        if entry.field_name.startswith(prefixes):
+            entry.normalize_value(entry.default)
+
+
 def test_extra_entries_secret_and_advanced_inference() -> None:
     entries = {entry.key: entry for entry in config_registry.get_config_entries()}
     assert entries["tts_api_key"].secret is True

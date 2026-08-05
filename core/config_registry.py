@@ -216,7 +216,12 @@ class ConfigEntry:
             value = parser(json.dumps(raw, ensure_ascii=False))
         else:
             parser = self.parser or _str_parser
-            value = parser(str(raw or ""))
+            # Numeric zero is a valid configuration value (for example,
+            # ``speaker_count=0`` means automatic detection).  ``raw or ""``
+            # collapsed both ``0`` and ``0.0`` into an empty string, so an
+            # otherwise valid structured WebUI form failed integer/float
+            # normalization before any field could be persisted.
+            value = parser(str(raw if raw is not None else ""))
         if self.choices:
             normalized = str(value).strip().lower()
             allowed = {choice.lower(): choice for choice in self.choices}

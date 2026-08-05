@@ -1110,15 +1110,17 @@ def build_config_router(*, runtime) -> APIRouter:
                 ),
             )
         normalized_values: dict[str, Any] = {}
+        invalid_field = ""
         try:
             for field_name, value in values.items():
+                invalid_field = field_name
                 entry = entries[field_name]
                 normalized_values[field_name] = _restore_masked_config_secrets(
                     field_name,
                     entry.normalize_value(value),
                     runtime.plugin_config,
                 )
-        except (KeyError, ValueError):
+        except (KeyError, TypeError, ValueError):
             raise HTTPException(
                 status_code=400,
                 detail=diagnostic(
@@ -1127,6 +1129,7 @@ def build_config_router(*, runtime) -> APIRouter:
                     phase="value_normalization",
                     title="视频理解配置值无效",
                     message="至少一个表单值未通过类型或范围校验。",
+                    details=(detail("失败字段", invalid_field or "unknown", "error"),),
                     suggestion="根据输入框范围和单位修改后重试。",
                     retryable=True,
                 ),

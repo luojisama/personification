@@ -85,6 +85,9 @@ def test_video_config_form_saves_atomically_and_reloads_once(
                 },
                 "personification_video_max_bytes": 320 * 1024 * 1024,
                 "personification_audio_transcription_hotwords": ["花来", "红狼"],
+                "personification_audio_transcription_speaker_count": 0,
+                "personification_qwen_web_enabled": True,
+                "personification_qwen_web_risk_acknowledged": True,
             }
         },
     )
@@ -98,8 +101,49 @@ def test_video_config_form_saves_atomically_and_reloads_once(
     assert len(captured) == 1
     assert captured[0]["personification_video_custom_frame_budgets"]["180"] == 144
     assert captured[0]["personification_video_max_bytes"] == 320 * 1024 * 1024
+    assert captured[0]["personification_audio_transcription_speaker_count"] == 0
+    assert captured[0]["personification_qwen_web_enabled"] is True
+    assert captured[0]["personification_qwen_web_risk_acknowledged"] is True
     assert runtime.plugin_config.personification_video_fallback_workspace_id == "ws-video"
     assert reload_calls == ["reload"]
+
+
+def test_video_config_invalid_value_identifies_field_without_echoing_value(
+    _runtime_context, monkeypatch  # noqa: ANN001
+) -> None:
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        config_routes.env_writer,
+        "write_many",
+        lambda values, _config: writes.append(dict(values)),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    response = client.post(
+        "/personification/api/config/video-understanding",
+        json={
+            "values": {
+                "personification_qwen_web_enabled": True,
+                "personification_qwen_web_risk_acknowledged": True,
+                "personification_audio_transcription_speaker_count": "not-a-number",
+            }
+        },
+    )
+
+    assert response.status_code == 400
+    diagnostic = response.json()["detail"]
+    assert diagnostic["code"] == "video_config_value_invalid"
+    assert diagnostic["details"] == [
+        {
+            "label": "失败字段",
+            "value": "personification_audio_transcription_speaker_count",
+            "status": "error",
+        }
+    ]
+    assert "not-a-number" not in response.text
+    assert writes == []
 
 
 def test_video_config_form_rejects_non_video_fields_without_writing(
