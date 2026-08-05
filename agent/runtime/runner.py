@@ -297,6 +297,7 @@ async def run_agent(
                     is_direct_mention=is_direct_mention,
                     reply_required=reply_required,
                     current_user_text=user_text,
+                    turn_media_context=turn_media_context,
                     record_trace=_record_reply_trace_stage,
                     logger=logger,
                     reason=reason,

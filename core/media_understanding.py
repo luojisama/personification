@@ -1164,7 +1164,7 @@ async def analyze_videos_with_route_or_fallback(
         if route_mode == "native":
             return "", native_route
 
-    async def _storyboard_one(ref: str, native_summary: str) -> str:
+    async def _storyboard_one(ref: str, native_summary: str) -> tuple[str, str]:
         storyboard = await prepare_video_storyboard(ref, plugin_config)
         try:
             transcript = None
@@ -1199,7 +1199,7 @@ async def analyze_videos_with_route_or_fallback(
                     "请把原生视频观察、分镜和转写作为互相校验的证据；冲突时明确保留不确定点。\n"
                 )
             if not storyboard.contact_sheet_refs:
-                return native_summary
+                return native_summary, "" if native_summary else "video_storyboard_frames_empty"
             result, _route = await analyze_images_with_route_or_fallback(
                 runtime=runtime,
                 prompt=combined_prompt,
@@ -1207,9 +1207,24 @@ async def analyze_videos_with_route_or_fallback(
                 route_name=route_name,
                 image_detail="low",
             )
-            return str(result or native_summary or "").strip()
+            result_text = str(result or native_summary or "").strip()
+            return result_text, "" if result_text else "video_storyboard_vision_unavailable"
         finally:
             storyboard.cleanup()
+
+    def _storyboard_exception_code(exc: Exception) -> str:
+        raw = str(exc or "").strip()
+        stable = raw.split(":", 1)[0]
+        allowed = {
+            "invalid_video_ref",
+            "video_bilibili_download_failed",
+            "video_douyin_download_failed",
+            "video_download_failed",
+            "video_ffmpeg_unavailable",
+            "video_ytdlp_download_failed",
+            "video_ytdlp_unavailable",
+        }
+        return stable if stable in allowed else "video_storyboard_extract_failed"
 
     timeout = max(
         20.0,
@@ -1220,18 +1235,23 @@ async def analyze_videos_with_route_or_fallback(
     )
     storyboard_started_at = time.monotonic()
     outputs: list[str] = []
+    storyboard_failures: list[str] = []
     for index, ref in enumerate(refs):
         try:
-            output = await asyncio.wait_for(
+            output, failure_code = await asyncio.wait_for(
                 _storyboard_one(ref, native_text if index == 0 else ""),
                 timeout=timeout,
             )
+            if failure_code:
+                storyboard_failures.append(failure_code)
         except asyncio.TimeoutError:
             _log_warning(runtime, f"[video] storyboard analysis timed out after {timeout:.1f}s")
             output = native_text if index == 0 else ""
+            storyboard_failures.append("video_storyboard_timeout")
         except Exception as exc:
             _log_warning(runtime, f"[video] storyboard analysis failed: {sanitize_text(exc)}")
             output = native_text if index == 0 else ""
+            storyboard_failures.append(_storyboard_exception_code(exc))
         if output:
             outputs.append(output)
     result_text = "\n".join(outputs).strip()
@@ -1241,7 +1261,7 @@ async def analyze_videos_with_route_or_fallback(
             route="video_storyboard",
             status="failed",
             started_at=storyboard_started_at,
-            diagnostic_code="video_storyboard_unavailable",
+            diagnostic_code=(storyboard_failures[0] if storyboard_failures else "video_storyboard_unavailable"),
         )
         return "", native_route if native_text else "video_unavailable"
     _record_media_attempt(

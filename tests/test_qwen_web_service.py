@@ -389,6 +389,124 @@ def test_qwen_media_upload_uses_dedicated_media_entry_and_hidden_input(tmp_path:
     assert clicks == ['button[aria-label="音视频速读"]']
 
 
+def test_qwen_media_upload_skips_unrelated_image_picker_and_selects_video_input(tmp_path: Path) -> None:
+    runtime_mod = load_personification_module("plugin.personification.core.qwen_web_runtime")
+    clicks: list[str] = []
+
+    class _Input:
+        def __init__(self, accept: str, name: str) -> None:
+            self.accept = accept
+            self.name = name
+
+        async def get_attribute(self, name: str) -> str | None:
+            return self.accept if name == "accept" else None
+
+    class _Collection:
+        def __init__(self, values: list[_Input]) -> None:
+            self.values = values
+            self.first = values[0] if values else self
+
+        async def count(self) -> int:
+            return len(self.values)
+
+        def nth(self, index: int) -> _Input:
+            return self.values[index]
+
+    class _Button:
+        def __init__(self, page: "_Page") -> None:
+            self.page = page
+            self.first = self
+
+        async def is_visible(self, timeout: int = 0) -> bool:
+            del timeout
+            return True
+
+        async def click(self, timeout: int = 0) -> None:
+            del timeout
+            clicks.append("media")
+            self.page.opened = True
+
+    class _Page:
+        opened = False
+
+        def locator(self, selector: str):  # noqa: ANN201
+            if selector == 'button[aria-label="音视频速读"]':
+                return _Button(self)
+            if not selector.startswith('input[type="file"]'):
+                return _Collection([])
+            values = [_Input("image/*", "avatar")]
+            if self.opened:
+                values.append(_Input("video/*,.mp4", "video"))
+            if 'accept*="video"' in selector or 'accept*=".mp4"' in selector:
+                values = [item for item in values if "video" in item.accept or ".mp4" in item.accept]
+            return _Collection(values)
+
+        async def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    runtime = runtime_mod.QwenWebRuntime(tmp_path)
+    upload = asyncio.run(runtime._open_media_upload(_Page(), "video"))
+
+    assert upload.name == "video"
+    assert clicks == ["media"]
+
+
+def test_qwen_media_upload_prefers_newest_ambiguous_input_after_opening(tmp_path: Path) -> None:
+    runtime_mod = load_personification_module("plugin.personification.core.qwen_web_runtime")
+
+    class _Input:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def get_attribute(self, _name: str) -> str:
+            return ""
+
+    class _Collection:
+        def __init__(self, values: list[_Input]) -> None:
+            self.values = values
+            self.first = values[0] if values else self
+
+        async def count(self) -> int:
+            return len(self.values)
+
+        def nth(self, index: int) -> _Input:
+            return self.values[index]
+
+    class _Button:
+        def __init__(self, page: "_Page") -> None:
+            self.page = page
+            self.first = self
+
+        async def is_visible(self, timeout: int = 0) -> bool:
+            del timeout
+            return True
+
+        async def click(self, timeout: int = 0) -> None:
+            del timeout
+            self.page.opened = True
+
+    class _Page:
+        opened = False
+
+        def locator(self, selector: str):  # noqa: ANN201
+            if selector == 'button[aria-label="音视频速读"]':
+                return _Button(self)
+            if selector == 'input[type="file"]':
+                values = [_Input("old-shell-picker")]
+                if self.opened:
+                    values.append(_Input("new-media-picker"))
+                return _Collection(values)
+            return _Collection([])
+
+        async def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    runtime = runtime_mod.QwenWebRuntime(tmp_path)
+    upload = asyncio.run(runtime._open_media_upload(_Page(), "video"))
+
+    assert upload.name == "new-media-picker"
+
+
 def test_qwen_assistant_snapshot_reads_only_latest_assistant_container(tmp_path: Path) -> None:
     runtime_mod = load_personification_module("plugin.personification.core.qwen_web_runtime")
 

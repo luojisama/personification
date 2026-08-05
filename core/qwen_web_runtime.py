@@ -157,23 +157,6 @@ async def _first_visible(page: Any, selectors: Iterable[str]) -> Any | None:
     return None
 
 
-async def _first_attached(page: Any, selectors: Iterable[str]) -> Any | None:
-    """Return an attached locator, including hidden file inputs.
-
-    Consumer sites normally hide ``input[type=file]`` behind a visible button;
-    requiring visibility would make normal Playwright uploads impossible.
-    """
-
-    for selector in selectors:
-        try:
-            locator = page.locator(selector).first
-            if await locator.count():
-                return locator
-        except Exception:
-            continue
-    return None
-
-
 async def _bounded_body_text(page: Any, *, limit: int = 12000) -> str:
     try:
         text = await page.locator("body").inner_text(timeout=2000)
@@ -468,27 +451,63 @@ class QwenWebRuntime:
             'input[type="file"]',
         )
 
-    async def _media_upload_input(self, page: Any, kind: str) -> Any | None:
+    @staticmethod
+    def _upload_accepts_kind(accept: str, kind: str) -> bool | None:
+        """Return whether an input explicitly accepts the requested media kind.
+
+        ``None`` means that the input is generic. Generic inputs are only
+        considered after the dedicated media workflow has been opened, so an
+        unrelated avatar/image picker in the page shell cannot receive a video.
+        """
+
+        normalized = str(accept or "").strip().lower()
+        if not normalized:
+            return None
+        values = {
+            item.strip()
+            for item in re.split(r"[,\s]+", normalized)
+            if item.strip()
+        }
+        if values & {"*", "*/*", "application/octet-stream"}:
+            return None
+        video_extensions = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
+        audio_extensions = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".amr"}
+        if kind == "video":
+            return any(value.startswith("video/") or value in video_extensions for value in values)
+        return any(value.startswith("audio/") or value in audio_extensions for value in values)
+
+    async def _media_upload_input(
+        self,
+        page: Any,
+        kind: str,
+        *,
+        allow_ambiguous: bool = False,
+    ) -> Any | None:
+        ambiguous: list[Any] = []
         for selector in self._upload_input_selectors(kind):
-            locator = await _first_attached(page, (selector,))
-            if locator is None:
-                continue
             try:
-                accept = str(await locator.get_attribute("accept") or "").lower()
+                collection = page.locator(selector)
+                count = int(await collection.count())
             except Exception:
-                accept = ""
-            if accept:
-                has_video = "video" in accept or any(ext in accept for ext in (".mp4", ".mov", ".webm"))
-                has_audio = "audio" in accept or any(ext in accept for ext in (".mp3", ".wav", ".m4a"))
-                if kind == "video" and has_audio and not has_video:
+                continue
+            for index in range(max(0, count)):
+                try:
+                    locator = collection.nth(index) if hasattr(collection, "nth") else collection.first
+                    accept = str(await locator.get_attribute("accept") or "")
+                except Exception:
                     continue
-                if kind == "audio" and has_video and not has_audio:
-                    continue
-            return locator
-        return None
+                compatibility = self._upload_accepts_kind(accept, kind)
+                if compatibility is True:
+                    return locator
+                if compatibility is None:
+                    ambiguous.append(locator)
+        # Dedicated upload workflows commonly append a hidden input without an
+        # accept attribute. The newest generic candidate is safer than an older
+        # shell-level avatar/file picker.
+        return ambiguous[-1] if allow_ambiguous and ambiguous else None
 
     async def _open_media_upload(self, page: Any, kind: str) -> Any:
-        upload = await self._media_upload_input(page, kind)
+        upload = await self._media_upload_input(page, kind, allow_ambiguous=False)
         if upload is not None:
             return upload
 
@@ -512,7 +531,7 @@ class QwenWebRuntime:
                 raise RuntimeError("qwen_web_manual_verification_required")
             if _contains_marker(body, _LOGIN_MARKERS) or await _first_visible(page, _QWEN_LOGIN_TRIGGERS):
                 raise RuntimeError("qwen_web_login_required")
-            upload = await self._media_upload_input(page, kind)
+            upload = await self._media_upload_input(page, kind, allow_ambiguous=True)
             if upload is not None:
                 return upload
             if not upload_action_clicked:
@@ -625,7 +644,6 @@ class QwenWebRuntime:
         kind = str(params.get("kind") or "").strip().lower()
         if kind not in {"video", "audio"}:
             raise ValueError("qwen_web_media_kind_invalid")
-        media_path = self._resolve_media_token(token)
         timeout_seconds = _bounded_float(params.get("timeout_seconds"), 120.0, 20.0, 300.0)
         output_max_chars = _bounded_int(params.get("output_max_chars"), 16000, 1000, 50000)
         caller_prompt = str(params.get("prompt") or "").strip()
@@ -635,8 +653,11 @@ class QwenWebRuntime:
         started = time.monotonic()
         self._active_job = True
         self._recent_jobs.append(time.time())
+        stage = "media"
         try:
+            media_path = self._resolve_media_token(token)
             async with self.browser.activity(QWEN_WEB_PLATFORM):
+                stage = "browser"
                 page = await self.browser.page(QWEN_WEB_PLATFORM, headless=True)
                 page_url = str(getattr(page, "url", "") or "")
                 if not page_url.startswith("https://www.qianwen.com/"):
@@ -647,8 +668,10 @@ class QwenWebRuntime:
                     self._state = state
                     self._last_diagnostic_code = state_code
                     return self._analysis_failure(state_code, started=started)
+                stage = "upload_entry"
                 upload = await self._open_media_upload(page, kind)
                 baseline_count, baseline_text = await self._assistant_snapshot(page)
+                stage = "upload"
                 await self._upload_media(
                     page,
                     media_path,
@@ -656,7 +679,9 @@ class QwenWebRuntime:
                     timeout_seconds=min(90.0, timeout_seconds * 0.6),
                     upload=upload,
                 )
+                stage = "submit"
                 await self._submit_prompt(page, prompt)
+                stage = "generation"
                 result = await self._wait_for_output(
                     page,
                     baseline_count=baseline_count,
@@ -683,8 +708,19 @@ class QwenWebRuntime:
         except RuntimeError as exc:
             raw = str(exc or "")
             code = raw if raw.startswith("qwen_web_") else "qwen_web_process_failed"
+        except ValueError as exc:
+            raw = str(exc or "")
+            code = raw if raw.startswith("qwen_web_") else "qwen_web_request_invalid"
         except Exception:
-            code = "qwen_web_process_failed"
+            code = (
+                "qwen_web_dom_changed"
+                if stage in {"upload_entry", "submit"}
+                else "qwen_web_upload_rejected"
+                if stage == "upload"
+                else "qwen_web_generation_timeout"
+                if stage == "generation"
+                else "qwen_web_process_failed"
+            )
         finally:
             self._active_job = False
         if code in {"qwen_web_network_risk_detected", "qwen_web_manual_verification_required"}:

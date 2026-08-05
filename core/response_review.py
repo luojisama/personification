@@ -313,6 +313,7 @@ async def resolve_uncertain_visible_reply(
     reply_required: bool,
     is_private: bool,
     evidence_unavailable: bool = False,
+    available_media_context: str = "",
     timeout: float = 8.0,
 ) -> ResponseReviewDecision:
     """Resolve a structurally uncertain candidate without phrase matching.
@@ -342,6 +343,7 @@ async def resolve_uncertain_visible_reply(
         return str(raw or "").strip()
 
     scene = "私聊" if is_private else "群聊"
+    supplied_media = str(available_media_context or "").strip()[:300]
     messages: list[dict[str, Any]] = []
     persona_hint = str(persona_system or "").strip()
     if persona_hint:
@@ -360,7 +362,13 @@ async def resolve_uncertain_visible_reply(
                     + (
                         "当前已经确定没有可用证据，禁止 accept，也禁止把查证失败换一种口吻继续发出。"
                         "强交互只能 request_context：向对方索取一个具体、可提供、能推进判断的条件；"
-                        "如果没有合适条件就 silence。"
+                        + (
+                            "系统已经成功取得的媒体会列在下方；不得再次索取同一媒体、同一文件或其下载链接。"
+                            "只有确实缺少另一种不同材料时才可 request_context。"
+                            if supplied_media
+                            else ""
+                        )
+                        + "如果没有合适条件就 silence。"
                         if evidence_unavailable
                         else "高歧义候选若已有实质内容可 accept；否则按是否能提出具体补充条件选择 request_context 或 silence。"
                     )
@@ -383,6 +391,7 @@ async def resolve_uncertain_visible_reply(
                     f"场景：{scene}\n"
                     f"必须回应：{str(bool(reply_required)).lower()}\n"
                     f"结构化空证据：{str(bool(evidence_unavailable)).lower()}\n"
+                    f"系统已取得媒体：{supplied_media or '[NONE]'}\n"
                     f"TurnPlan：{_render_uncertain_turn_plan(turn_plan)}\n"
                     f"当前原话：{str(raw_message_text or '').strip()[:500] or '[EMPTY]'}\n"
                     f"候选回复：{candidate[:500] or '[EMPTY]'}"
@@ -427,7 +436,12 @@ async def resolve_uncertain_visible_reply(
                 "SUBSTANTIVE_REPLY 必须真的回答、给出具体态度或可执行下一步；"
                 "ACTIONABLE_CONTEXT_REQUEST 必须只索取一个明确且对方能提供的必要条件；"
                 "仅仅说明无法确认、没有理解、来源不明或查证没有结果属于 EMPTY_UNCERTAINTY；"
-                "在没有证据时推测出处、群内约定、关系或事实来源属于 UNSUPPORTED_GUESS。"
+                + (
+                    "系统已取得媒体中列明的文件不得再次索取；这种请求属于 EMPTY_UNCERTAINTY。"
+                    if supplied_media
+                    else ""
+                )
+                + "在没有证据时推测出处、群内约定、关系或事实来源属于 UNSUPPORTED_GUESS。"
                 "按语义判断，不要按固定关键词机械匹配。"
             ),
         },
@@ -437,6 +451,7 @@ async def resolve_uncertain_visible_reply(
                 f"场景：{scene}\n"
                 f"必须回应：{str(bool(reply_required)).lower()}\n"
                 f"结构化空证据：{str(bool(evidence_unavailable)).lower()}\n"
+                f"系统已取得媒体：{supplied_media or '[NONE]'}\n"
                 f"当前原话：{str(raw_message_text or '').strip()[:500] or '[EMPTY]'}\n"
                 f"待复核回复：{proposed[:500]}"
             ),

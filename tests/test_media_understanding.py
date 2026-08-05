@@ -784,6 +784,52 @@ def test_video_storyboard_combines_untrusted_transcript_and_always_cleans(monkey
     assert captured["image_refs"] == storyboard.contact_sheet_refs
 
 
+def test_video_storyboard_reports_vision_route_unavailable_separately(monkeypatch) -> None:  # noqa: ANN001
+    attempts: list[dict] = []
+
+    class _Storyboard:
+        audio_path = None
+        source_url = ""
+        contact_sheet_refs = ["data:image/jpeg;base64,AA=="]
+        subtitle_text = ""
+
+        def summary(self):  # noqa: ANN201
+            return {"duration_seconds": 32, "selected_frame_count": 38, "contact_sheet_count": 5}
+
+        def cleanup(self) -> None:
+            return None
+
+    async def _prepare(_ref, _config):  # noqa: ANN001, ANN202
+        return _Storyboard()
+
+    async def _vision(**_kwargs):  # noqa: ANN003, ANN202
+        return "", "vision_unavailable"
+
+    monkeypatch.setattr(media_understanding, "prepare_video_storyboard", _prepare)
+    monkeypatch.setattr(media_understanding, "analyze_images_with_route_or_fallback", _vision)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_video_understanding_enabled=True,
+            personification_video_route_mode="storyboard",
+            personification_video_analysis_timeout=30,
+        )
+    )
+
+    result, route = asyncio.run(
+        media_understanding.analyze_videos_with_route_or_fallback(
+            runtime=runtime,
+            prompt="理解视频",
+            video_refs=["D:/media/video.mp4"],
+            route_attempts=attempts,
+        )
+    )
+
+    assert result == ""
+    assert route == "video_unavailable"
+    assert attempts[-1]["route"] == "video_storyboard"
+    assert attempts[-1]["diagnostic_code"] == "video_storyboard_vision_unavailable"
+
+
 def test_large_local_video_uses_gemini_files_api_and_deletes_remote_file(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
     video = tmp_path / "large.mp4"
     with video.open("wb") as handle:

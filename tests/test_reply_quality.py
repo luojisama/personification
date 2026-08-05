@@ -465,6 +465,46 @@ def test_finalize_agent_reply_quality_rejects_rephrased_empty_evidence() -> None
     assert result.quality_checks[-1]["action"] == "context_request_rejected"
 
 
+def test_finalize_agent_reply_quality_tells_review_that_video_is_already_available(tmp_path) -> None:
+    caller = _SequenceCaller(
+        [
+            '{"action":"request_context","text":"请重新上传可读取的 MP4。","reason":"需要文件"}',
+            "EMPTY_UNCERTAINTY",
+        ]
+    )
+    video = tmp_path / "already-ready.mp4"
+    video.write_bytes(b"video")
+    media = [
+        {
+            "media_id": "media_video",
+            "kind": "video",
+            "origin": "current",
+            "ref": str(video),
+            "resolution_code": "onebot_get_file_local",
+        }
+    ]
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result("视频没读出来。", quality_context="evidence_unavailable"),
+            tool_caller=caller,
+            messages=[{"role": "system", "content": "你是群友。"}],
+            is_group=False,
+            reply_required=True,
+            current_user_text="概括刚上传的视频",
+            turn_media_context=media,
+            reason="model_stop",
+        )
+    )
+
+    assert result.text == "[SILENCE]"
+    assert result.quality_checks[-1]["action"] == "context_request_rejected"
+    first_review = caller.calls[0]["messages"][-1]["content"]
+    validation = caller.calls[1]["messages"][-1]["content"]
+    assert "系统已取得媒体：可读取视频 1 个" in first_review
+    assert "系统已取得媒体：可读取视频 1 个" in validation
+
+
 def test_finalize_agent_reply_quality_rejects_group_context_question() -> None:
     caller = _SequenceCaller(
         [

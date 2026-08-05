@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from ...core.context_policy import strip_response_control_markers
 from ...core.evidence_envelope import EvidenceEnvelope
 from ...core.metrics import record_counter, record_timing
+from ...core.media_refs import normalize_audio_ref
 from ...core.reply_text_policy import (
     looks_like_formulaic_reply_tic,
     looks_like_markdown_reply,
@@ -20,6 +21,7 @@ from ...core.response_review import (
     rewrite_agent_reply_ooc,
 )
 from ...core.social_surface_renderer import SocialSurfaceRenderer
+from ...core.turn_media import coerce_turn_media, summarize_media_resolution
 from ...core.visible_output import assess_visible_text
 from .final_synthesis import AgentResult
 
@@ -378,6 +380,7 @@ async def finalize_agent_reply_quality(
     is_direct_mention: bool = False,
     reply_required: bool = False,
     current_user_text: str = "",
+    turn_media_context: list[Any] | None = None,
     record_trace: Callable[..., None] | None = None,
     logger: Any = None,
     reason: str = "",
@@ -506,6 +509,18 @@ async def finalize_agent_reply_quality(
 
     if quality_context == "evidence_unavailable":
         group_context = _looks_like_group_context(messages, turn_plan) if is_group is None else bool(is_group)
+        media_resolution = summarize_media_resolution(turn_media_context)
+        available_media_parts: list[str] = []
+        if int(media_resolution.get("video_usable", 0) or 0) > 0:
+            available_media_parts.append(f"可读取视频 {int(media_resolution['video_usable'])} 个")
+        usable_audio_count = sum(
+            1
+            for item in coerce_turn_media(turn_media_context)
+            if item.kind == "audio" and normalize_audio_ref(str(item.ref or ""))[0]
+        )
+        if usable_audio_count > 0:
+            available_media_parts.append(f"可读取音频 {usable_audio_count} 个")
+        available_media_context = "，".join(available_media_parts)
 
         async def _call_uncertain_review(review_messages: list[dict[str, Any]]) -> str:
             if tool_caller is None:
@@ -522,6 +537,7 @@ async def finalize_agent_reply_quality(
             reply_required=reply_required,
             is_private=not group_context,
             evidence_unavailable=True,
+            available_media_context=available_media_context,
             timeout=8.0,
         )
         final_text = "[SILENCE]"
