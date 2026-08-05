@@ -320,7 +320,10 @@ def _download_social_video_sync(
 
 
 def _read_frames(path: Path, *, fps: float, width: int):
-    import imageio_ffmpeg
+    try:
+        import imageio_ffmpeg
+    except Exception as exc:  # pragma: no cover - depends on deployment extras
+        raise RuntimeError("video_ffmpeg_unavailable") from exc
 
     vf = f"fps={fps:.6f},scale='min({int(width)},iw)':-2"
     return imageio_ffmpeg.read_frames(
@@ -601,18 +604,32 @@ async def prepare_video_storyboard(video_ref: str, config: Any) -> VideoStoryboa
     temp_dir = Path(tempfile.mkdtemp(prefix="personification-video-"))
     try:
         video_path, source_url, subtitle_text = await _materialize_video(video_ref, temp_dir, config)
-        probe = await asyncio.to_thread(_probe_video_sync, video_path)
+        try:
+            probe = await asyncio.to_thread(_probe_video_sync, video_path)
+        except RuntimeError as exc:
+            if str(exc or "").startswith("video_ffmpeg_unavailable"):
+                raise
+            raise RuntimeError("video_storyboard_probe_failed") from exc
+        except Exception as exc:
+            raise RuntimeError("video_storyboard_probe_failed") from exc
         duration = float(probe.get("duration") or 0.0)
         source_fps = float(probe.get("fps") or 0.0)
         source_size_raw = tuple(probe.get("source_size") or probe.get("size") or (0, 0))
         source_size = (int(source_size_raw[0]), int(source_size_raw[1]))
         budget = resolve_video_frame_budget(duration, config)
-        metadata, scores = await asyncio.to_thread(
-            _scan_video_sync,
-            video_path,
-            scan_fps=budget.scan_fps,
-            max_samples=budget.max_scan_samples,
-        )
+        try:
+            metadata, scores = await asyncio.to_thread(
+                _scan_video_sync,
+                video_path,
+                scan_fps=budget.scan_fps,
+                max_samples=budget.max_scan_samples,
+            )
+        except RuntimeError as exc:
+            if str(exc or "").startswith("video_ffmpeg_unavailable"):
+                raise
+            raise RuntimeError("video_storyboard_scan_failed") from exc
+        except Exception as exc:
+            raise RuntimeError("video_storyboard_scan_failed") from exc
         if not duration:
             duration = float(metadata.get("duration") or (len(scores) / max(0.001, budget.scan_fps)))
         selected = select_storyboard_frames(
@@ -622,22 +639,32 @@ async def prepare_video_storyboard(video_ref: str, config: Any) -> VideoStoryboa
         )
         frames_dir = temp_dir / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
-        frame_paths = await asyncio.to_thread(
-            _extract_selected_frames_sync,
-            video_path,
-            scan_fps=budget.scan_fps,
-            selected=selected,
-            output_dir=frames_dir,
-        )
+        try:
+            frame_paths = await asyncio.to_thread(
+                _extract_selected_frames_sync,
+                video_path,
+                scan_fps=budget.scan_fps,
+                selected=selected,
+                output_dir=frames_dir,
+            )
+        except RuntimeError as exc:
+            if str(exc or "").startswith("video_ffmpeg_unavailable"):
+                raise
+            raise RuntimeError("video_storyboard_frame_extract_failed") from exc
+        except Exception as exc:
+            raise RuntimeError("video_storyboard_frame_extract_failed") from exc
         sheets_dir = temp_dir / "sheets"
         sheets_dir.mkdir(parents=True, exist_ok=True)
-        sheets = await asyncio.to_thread(
-            _build_contact_sheets_sync,
-            frame_paths,
-            selected,
-            frames_per_sheet=budget.contact_sheet_frames,
-            output_dir=sheets_dir,
-        )
+        try:
+            sheets = await asyncio.to_thread(
+                _build_contact_sheets_sync,
+                frame_paths,
+                selected,
+                frames_per_sheet=budget.contact_sheet_frames,
+                output_dir=sheets_dir,
+            )
+        except Exception as exc:
+            raise RuntimeError("video_storyboard_sheet_build_failed") from exc
         max_payload = _bounded_int(
             getattr(config, "personification_video_payload_max_bytes", _DEFAULT_PAYLOAD_BYTES),
             _DEFAULT_PAYLOAD_BYTES,

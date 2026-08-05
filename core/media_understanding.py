@@ -1221,6 +1221,10 @@ async def analyze_videos_with_route_or_fallback(
             "video_douyin_download_failed",
             "video_download_failed",
             "video_ffmpeg_unavailable",
+            "video_storyboard_frame_extract_failed",
+            "video_storyboard_probe_failed",
+            "video_storyboard_scan_failed",
+            "video_storyboard_sheet_build_failed",
             "video_ytdlp_download_failed",
             "video_ytdlp_unavailable",
         }

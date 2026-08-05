@@ -47,7 +47,7 @@ def test_qwen_helper_exposes_no_agent_tools_and_does_not_launch_browser(tmp_path
     assert status["state"] == "login_required"
     assert status["browser_running"] is False
     assert status["active_job"] is False
-    assert status["page_contract_version"] == "qianwen_cn_v2"
+    assert status["page_contract_version"] == "qianwen_cn_v3"
 
 
 def test_qwen_service_disabled_status_never_starts_helper(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
@@ -387,6 +387,104 @@ def test_qwen_media_upload_uses_dedicated_media_entry_and_hidden_input(tmp_path:
 
     assert upload.selector.startswith('input[type="file"]')
     assert clicks == ['button[aria-label="音视频速读"]']
+
+
+def test_qwen_media_upload_opens_more_menu_before_media_entry(tmp_path: Path) -> None:
+    runtime_mod = load_personification_module("plugin.personification.core.qwen_web_runtime")
+    clicks: list[str] = []
+
+    class _Input:
+        async def get_attribute(self, name: str) -> str | None:
+            return "video/*,.mp4" if name == "accept" else None
+
+    class _Collection:
+        def __init__(self, values: list[_Input]) -> None:
+            self.values = values
+            self.first = values[0] if values else self
+
+        async def count(self) -> int:
+            return len(self.values)
+
+        def nth(self, index: int) -> _Input:
+            return self.values[index]
+
+        async def is_visible(self, timeout: int = 0) -> bool:
+            del timeout
+            return False
+
+    class _Button:
+        def __init__(self, page: "_Page", name: str) -> None:
+            self.page = page
+            self.name = name
+            self.first = self
+
+        async def is_visible(self, timeout: int = 0) -> bool:
+            del timeout
+            return self.name == "more" or self.page.more_open
+
+        async def click(self, timeout: int = 0) -> None:
+            del timeout
+            clicks.append(self.name)
+            if self.name == "more":
+                self.page.more_open = True
+            else:
+                self.page.media_open = True
+
+    class _Page:
+        more_open = False
+        media_open = False
+
+        def locator(self, selector: str):  # noqa: ANN201
+            if selector == 'button:text-is("更多")':
+                return _Button(self, "more")
+            if selector == '[role="menuitem"]:has-text("音视频速读")':
+                return _Button(self, "media")
+            if selector.startswith('input[type="file"]'):
+                return _Collection([_Input()] if self.media_open else [])
+            return _Collection([])
+
+        async def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    runtime = runtime_mod.QwenWebRuntime(tmp_path)
+    upload = asyncio.run(runtime._open_media_upload(_Page(), "video"))
+
+    assert isinstance(upload, _Input)
+    assert clicks == ["more", "media"]
+
+
+def test_qwen_dedicated_media_form_uses_enabled_confirm_button(tmp_path: Path) -> None:
+    runtime_mod = load_personification_module("plugin.personification.core.qwen_web_runtime")
+    clicks: list[str] = []
+
+    class _Locator:
+        def __init__(self, *, visible: bool = False) -> None:
+            self.visible = visible
+            self.first = self
+
+        async def is_visible(self, timeout: int = 0) -> bool:
+            del timeout
+            return self.visible
+
+        async def is_enabled(self) -> bool:
+            return True
+
+        async def click(self, timeout: int = 0) -> None:
+            del timeout
+            clicks.append("confirm")
+
+    class _Page:
+        def locator(self, selector: str) -> _Locator:
+            return _Locator(visible=selector == 'button:text-is("确认")')
+
+        async def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    runtime = runtime_mod.QwenWebRuntime(tmp_path)
+    submitted = asyncio.run(runtime._submit_prompt(_Page(), "unused in dedicated workflow"))
+
+    assert submitted is True
+    assert clicks == ["confirm"]
 
 
 def test_qwen_media_upload_skips_unrelated_image_picker_and_selects_video_input(tmp_path: Path) -> None:

@@ -14,7 +14,7 @@ from ..native_mcp.social_research.browser import AuthSession, BrowserPool
 
 QWEN_WEB_PLATFORM = "qwen_web"
 QWEN_WEB_HOME = "https://www.qianwen.com/"
-QWEN_WEB_PAGE_CONTRACT = "qianwen_cn_v2"
+QWEN_WEB_PAGE_CONTRACT = "qianwen_cn_v3"
 
 _QWEN_ALLOWED_HOSTS = (
     "qianwen.com",
@@ -34,6 +34,14 @@ _QWEN_QR_SELECTORS = (
 _QWEN_MEDIA_ENTRY_TRIGGERS = (
     'button[aria-label="音视频速读"]',
     'button:has-text("音视频速读")',
+    '[role="menuitem"]:has-text("音视频速读")',
+    '[role="button"]:has-text("音视频速读")',
+    'li:has-text("音视频速读")',
+)
+_QWEN_MORE_TRIGGERS = (
+    'button[aria-label="更多"]',
+    'button:text-is("更多")',
+    '[role="button"]:has-text("更多")',
 )
 _QWEN_MEDIA_UPLOAD_TRIGGERS = (
     'button[aria-label*="上传音视频"]',
@@ -41,6 +49,10 @@ _QWEN_MEDIA_UPLOAD_TRIGGERS = (
     'button:has-text("本地上传")',
     'button:has-text("点击上传")',
     '[role="button"]:has-text("上传音视频")',
+)
+_QWEN_MEDIA_CONFIRM_TRIGGERS = (
+    'button:text-is("确认")',
+    '[role="button"]:text-is("确认")',
 )
 _QWEN_COMPOSERS = (
     '[contenteditable="true"][role="textbox"]',
@@ -269,7 +281,8 @@ class QwenWebRuntime:
             return "login_required", "qwen_web_login_required"
         composer = await _first_visible(page, _QWEN_COMPOSERS)
         media_entry = await _first_visible(page, _QWEN_MEDIA_ENTRY_TRIGGERS)
-        if composer is not None and media_entry is not None:
+        more_entry = await _first_visible(page, _QWEN_MORE_TRIGGERS)
+        if composer is not None and (media_entry is not None or more_entry is not None):
             return "ready", ""
         return "dom_changed", "qwen_web_dom_changed"
 
@@ -506,12 +519,38 @@ class QwenWebRuntime:
         # shell-level avatar/file picker.
         return ambiguous[-1] if allow_ambiguous and ambiguous else None
 
+    async def _open_media_entry(self, page: Any) -> Any | None:
+        """Expose and return the public ``音视频速读`` entry.
+
+        The 2026-08 consumer shell moved the entry under ``更多``.  Keep the
+        direct button path for older layouts, but only click visible controls
+        and never fall back to coordinates or page-wide text matching.
+        """
+
+        entry = await _first_visible(page, _QWEN_MEDIA_ENTRY_TRIGGERS)
+        if entry is not None:
+            return entry
+        more = await _first_visible(page, _QWEN_MORE_TRIGGERS)
+        if more is None:
+            return None
+        await more.click(timeout=3000)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            try:
+                await page.wait_for_timeout(150)
+            except Exception:
+                break
+            entry = await _first_visible(page, _QWEN_MEDIA_ENTRY_TRIGGERS)
+            if entry is not None:
+                return entry
+        return None
+
     async def _open_media_upload(self, page: Any, kind: str) -> Any:
         upload = await self._media_upload_input(page, kind, allow_ambiguous=False)
         if upload is not None:
             return upload
 
-        entry = await _first_visible(page, _QWEN_MEDIA_ENTRY_TRIGGERS)
+        entry = await self._open_media_entry(page)
         if entry is None:
             raise RuntimeError("qwen_web_dom_changed")
         await entry.click(timeout=3000)
@@ -578,9 +617,25 @@ class QwenWebRuntime:
     async def _submit_prompt(self, page: Any, prompt: str) -> bool:
         composer = await _first_visible(page, _QWEN_COMPOSERS)
         if composer is None:
-            # The dedicated "音视频速读" workflow may start summarising as
-            # soon as a file is accepted.  In that case there is no prompt box
-            # to drive, and the result watcher remains the only safe action.
+            # The dedicated "音视频速读" workflow uses a bounded confirmation
+            # form instead of the chat composer.  Confirm only after the media
+            # token has already populated the workflow's own file input.
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                confirm = await _first_visible(page, _QWEN_MEDIA_CONFIRM_TRIGGERS)
+                if confirm is not None:
+                    try:
+                        if await confirm.is_enabled():
+                            await confirm.click(timeout=3000)
+                            return True
+                    except Exception:
+                        pass
+                try:
+                    await page.wait_for_timeout(250)
+                except Exception:
+                    break
+            # Some Qwen layouts start summarising immediately after upload.
+            # In that case the result watcher remains the only safe action.
             return False
         await composer.fill(prompt)
         deadline = time.monotonic() + 15.0

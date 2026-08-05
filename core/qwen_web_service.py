@@ -205,7 +205,7 @@ class QwenWebService:
             "interactive_session": None,
             "last_diagnostic_code": code,
             "last_probe_at": 0.0,
-            "page_contract_version": "qianwen_cn_v2",
+            "page_contract_version": "qianwen_cn_v3",
         }
         result.update(
             {
