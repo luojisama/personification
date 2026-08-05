@@ -858,6 +858,7 @@ function apiProviderProbeCacheKey(field, index, provider) {
     provider && provider.auth_path,
     provider && provider.project,
     provider && provider.gemini_auth_mode,
+    provider && provider.media_protocol,
   ];
   return parts.map(item => String(item == null ? "" : item)).join("\u001f");
 }
@@ -893,6 +894,7 @@ function defaultApiProvider(index) {
     auth_path: "",
     project: "",
     proxy: "",
+    media_protocol: "auto",
     timeout: 200,
     max_retries: 5,
     priority: index,
@@ -1055,6 +1057,21 @@ function renderApiProviderCard(field, provider, index) {
       <select onchange="syncApiPoolDraft('${escapeAttr(field)}')">${options}</select>
     </div>`;
   };
+  const mediaProtocolFieldHtml = () => {
+    const value = String(provider.media_protocol || "auto");
+    const options = [
+      ["auto", "自动（仅官方已确认模型）"],
+      ["none", "无音视频输入"],
+      ["gemini_native", "Gemini 原生 Files API"],
+      ["openai_qwen_omni", "Qwen3.5-Omni video_url / input_audio"],
+      ["openai_mimo_v25", "MiMo-V2.5 video_url / input_audio"],
+    ].map(([id, label]) => `<option value="${escapeAttr(id)}" ${value===id?'selected':''}>${escapeHtml(label)}</option>`).join("");
+    return `<div class="api-provider-field" data-provider-field="media_protocol">
+      <label>音视频输入协议</label>
+      <select onchange="syncApiPoolDraft('${escapeAttr(field)}')">${options}</select>
+      <div class="muted" style="font-size:11px">API 类型不代表支持视频；代理网关请显式选择其真实协议。</div>
+    </div>`;
+  };
   return `<div class="api-provider-card" data-provider-index="${index}" data-provider-secret-ref="${escapeAttr(provider._secret_ref || "")}">
     <div class="api-provider-head">
       <div class="api-provider-title">Provider ${index + 1}</div>
@@ -1073,6 +1090,7 @@ function renderApiProviderCard(field, provider, index) {
       ${fieldHtml("api_url", "API URL")}
       ${fieldHtml("api_key", "API Key", "password")}
       ${geminiAuthFieldHtml()}
+      ${mediaProtocolFieldHtml()}
       ${modelFieldHtml()}
       ${fieldHtml("auth_path", "Auth Path")}
       ${fieldHtml("project", "Project")}

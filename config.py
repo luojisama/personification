@@ -244,6 +244,7 @@ class Config(BaseModel):
     personification_vision_fallback_enabled: bool = True
     personification_vision_fallback_provider: str = ""
     personification_vision_fallback_model: str = ""
+    personification_media_protocol: str = "auto"
     personification_video_understanding_enabled: bool = False
     personification_video_route_mode: str = "auto"
     personification_video_frame_preset: str = "balanced"

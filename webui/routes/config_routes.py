@@ -656,6 +656,7 @@ def _provider_transport_identity(provider: dict[str, Any]) -> tuple[str, ...]:
     return (
         *(str(provider.get(field) or "").strip() for field in fields),
         str(provider.get("gemini_auth_mode", "auto") or "auto").strip().lower(),
+        str(provider.get("media_protocol", "auto") or "auto").strip().lower(),
     )
 
 
@@ -721,10 +722,13 @@ def _restore_masked_config_secrets(field_name: str, value: Any, plugin_config: A
         if current is None:
             raise ValueError("masked provider secret reference is invalid")
         for field, old_value in zip(
-            ("api_type", "api_url", "auth_path", "project", "proxy", "gemini_auth_mode"),
+            ("api_type", "api_url", "auth_path", "project", "proxy", "gemini_auth_mode", "media_protocol"),
             _provider_transport_identity(current),
         ):
-            new_value = candidate.get(field, "auto" if field == "gemini_auth_mode" else None)
+            new_value = candidate.get(
+                field,
+                "auto" if field in {"gemini_auth_mode", "media_protocol"} else None,
+            )
             if new_value != _MASKED_CONFIG_VALUE and str(new_value or "").strip() != old_value:
                 raise ValueError("provider transport changed while secret remained masked")
         restored.append(_restore_masked_value(candidate, current))

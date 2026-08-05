@@ -291,6 +291,7 @@ def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str,
             "project": project,
             "proxy": str(item.get("proxy", "") or "").strip(),
             "gemini_auth_mode": str(item.get("gemini_auth_mode", "auto") or "auto").strip().lower(),
+            "media_protocol": str(item.get("media_protocol", "auto") or "auto").strip().lower(),
             "enabled": _to_bool(item.get("enabled", True), True),
             "priority": _to_int(item.get("priority", index), index),
             "timeout": _provider_timeout({**item, "api_type": api_type}),
@@ -427,6 +428,9 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
                 "gemini_auth_mode": str(
                     getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto"
                 ).strip().lower(),
+                "media_protocol": str(
+                    getattr(plugin_config, "personification_media_protocol", "auto") or "auto"
+                ).strip().lower(),
                 "enabled": True,
                 "priority": 0,
                 "timeout": _DEFAULT_PROVIDER_TIMEOUT_SECONDS,
@@ -458,6 +462,9 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
             "project": "",
             "gemini_auth_mode": str(
                 getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto"
+            ).strip().lower(),
+            "media_protocol": str(
+                getattr(plugin_config, "personification_media_protocol", "auto") or "auto"
             ).strip().lower(),
             "enabled": True,
             "priority": 0,

@@ -18,10 +18,16 @@ from .gemini_transport import raise_for_gemini_status, request_with_gemini_auth
 from .image_input import is_image_input_unsupported_error, provider_supports_vision
 from .sensitive_data import sanitize_text
 from .media_refs import normalize_audio_ref, normalize_video_ref
+from .media_provider_adapters import (
+    MEDIA_PROTOCOL_GEMINI,
+    MEDIA_PROTOCOL_MIMO,
+    MEDIA_PROTOCOL_QWEN,
+    resolve_media_provider_adapter,
+)
 from .message_parts import build_user_message_content
 from .model_router import MODEL_ROLE_STICKER, get_model_override_for_role
 from .llm_context import use_single_attempt_retry_policy
-from .visual_capabilities import VISUAL_ROUTE_AGENT, error_indicates_vision_unavailable, provider_supports_video
+from .visual_capabilities import VISUAL_ROUTE_AGENT, error_indicates_vision_unavailable
 from .video_understanding import prepare_video_storyboard
 
 
@@ -71,9 +77,15 @@ def _build_tool_caller(config: Any) -> Any:
 
 
 _VIDEO_INLINE_MAX_BYTES = 20 * 1024 * 1024
-_QWEN_INLINE_MAX_BYTES = 8 * 1024 * 1024
+_QWEN_BASE64_MAX_BYTES = 10 * 1024 * 1024
+_QWEN_RAW_INLINE_MAX_BYTES = (_QWEN_BASE64_MAX_BYTES * 3 // 4) - 4
+# Kept as an internal compatibility alias for focused tests and older imports.
+_QWEN_INLINE_MAX_BYTES = _QWEN_RAW_INLINE_MAX_BYTES
+_MIMO_BASE64_MAX_BYTES = 50 * 1024 * 1024
+_MIMO_RAW_INLINE_MAX_BYTES = (_MIMO_BASE64_MAX_BYTES * 3 // 4) - 4
 _GEMINI_DEFAULT_MODEL = "gemini-2.0-flash"
 _QWEN_OMNI_DEFAULT_MODEL = "qwen3.5-omni-plus"
+_MIMO_DEFAULT_MODEL = "mimo-v2.5"
 _GENERIC_REFUSAL_TEXTS = {
     "i can't discuss that.",
     "i cant discuss that.",
@@ -217,6 +229,8 @@ def get_primary_provider_config(runtime: Any) -> dict[str, str]:
             "model": str(primary.get("model", "") or ""),
             "auth_path": str(primary.get("auth_path", "") or ""),
             "project": str(primary.get("project", "") or ""),
+            "gemini_auth_mode": str(primary.get("gemini_auth_mode", "auto") or "auto"),
+            "media_protocol": str(primary.get("media_protocol", "auto") or "auto"),
         }
     plugin_config = getattr(runtime, "plugin_config", None)
     api_type = str(getattr(plugin_config, "personification_api_type", "") or "")
@@ -246,6 +260,12 @@ def get_primary_provider_config(runtime: Any) -> dict[str, str]:
                 "",
             )
             or ""
+        ),
+        "gemini_auth_mode": str(
+            getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto"
+        ),
+        "media_protocol": str(
+            getattr(plugin_config, "personification_media_protocol", "auto") or "auto"
         ),
     }
 
@@ -312,22 +332,42 @@ async def _try_primary_video_routes(
         api_type = str(provider.get("api_type", "") or "")
         model = str(provider.get("model", "") or "")
         provider_name = str(provider.get("name", "") or model or api_type or "primary")
-        normalized_type = _normalize_media_api_type(api_type)
-        if normalized_type != "gemini_official":
+        adapter = resolve_media_provider_adapter(provider)
+        if not adapter.supports_video:
             continue
         if not str(provider.get("api_key", "") or "").strip():
             continue
-        if not provider_supports_video(api_type, model, route_name=route_name):
-            continue
         try:
-            result = await _call_gemini_media(
-                api_key=str(provider.get("api_key", "") or ""),
-                base_url=str(provider.get("api_url", "") or ""),
-                model=model or _GEMINI_DEFAULT_MODEL,
-                auth_mode=str(provider.get("gemini_auth_mode", "auto") or "auto"),
-                prompt=prompt,
-                video_refs=refs,
-            )
+            if adapter.protocol == MEDIA_PROTOCOL_GEMINI:
+                result = await _call_gemini_media(
+                    api_key=str(provider.get("api_key", "") or ""),
+                    base_url=str(provider.get("api_url", "") or ""),
+                    model=model or _GEMINI_DEFAULT_MODEL,
+                    auth_mode=str(provider.get("gemini_auth_mode", "auto") or "auto"),
+                    prompt=prompt,
+                    video_refs=refs,
+                )
+            elif adapter.protocol == MEDIA_PROTOCOL_QWEN:
+                result = await _call_qwen_omni_media(
+                    api_key=str(provider.get("api_key", "") or ""),
+                    base_url=str(provider.get("api_url", "") or ""),
+                    workspace_id=str(provider.get("workspace_id", "") or ""),
+                    model=model or _QWEN_OMNI_DEFAULT_MODEL,
+                    prompt=prompt,
+                    video_refs=refs,
+                )
+            elif adapter.protocol == MEDIA_PROTOCOL_MIMO:
+                result = await _call_mimo_media(
+                    api_key=str(provider.get("api_key", "") or ""),
+                    base_url=str(provider.get("api_url", "") or ""),
+                    model=model or _MIMO_DEFAULT_MODEL,
+                    prompt=prompt,
+                    video_refs=refs,
+                    fps=float(provider.get("video_fps", 2.0) or 2.0),
+                    media_resolution=str(provider.get("media_resolution", "default") or "default"),
+                )
+            else:
+                continue
         except Exception as exc:
             if not error_indicates_vision_unavailable(exc):
                 _log_warning(
@@ -351,21 +391,40 @@ async def _try_primary_audio_routes(
         api_type = str(provider.get("api_type", "") or "")
         model = str(provider.get("model", "") or "")
         provider_name = str(provider.get("name", "") or model or api_type or "primary")
-        if _normalize_media_api_type(api_type) != "gemini_official":
+        adapter = resolve_media_provider_adapter(provider)
+        if not adapter.supports_audio:
             continue
         if not str(provider.get("api_key", "") or "").strip():
             continue
-        if not provider_supports_video(api_type, model, route_name=route_name):
-            continue
         try:
-            result = await _call_gemini_media(
-                api_key=str(provider.get("api_key", "") or ""),
-                base_url=str(provider.get("api_url", "") or ""),
-                model=model or _GEMINI_DEFAULT_MODEL,
-                auth_mode=str(provider.get("gemini_auth_mode", "auto") or "auto"),
-                prompt=prompt,
-                audio_refs=refs,
-            )
+            if adapter.protocol == MEDIA_PROTOCOL_GEMINI:
+                result = await _call_gemini_media(
+                    api_key=str(provider.get("api_key", "") or ""),
+                    base_url=str(provider.get("api_url", "") or ""),
+                    model=model or _GEMINI_DEFAULT_MODEL,
+                    auth_mode=str(provider.get("gemini_auth_mode", "auto") or "auto"),
+                    prompt=prompt,
+                    audio_refs=refs,
+                )
+            elif adapter.protocol == MEDIA_PROTOCOL_QWEN:
+                result = await _call_qwen_omni_media(
+                    api_key=str(provider.get("api_key", "") or ""),
+                    base_url=str(provider.get("api_url", "") or ""),
+                    workspace_id=str(provider.get("workspace_id", "") or ""),
+                    model=model or _QWEN_OMNI_DEFAULT_MODEL,
+                    prompt=prompt,
+                    audio_refs=refs,
+                )
+            elif adapter.protocol == MEDIA_PROTOCOL_MIMO:
+                result = await _call_mimo_media(
+                    api_key=str(provider.get("api_key", "") or ""),
+                    base_url=str(provider.get("api_url", "") or ""),
+                    model=model or _MIMO_DEFAULT_MODEL,
+                    prompt=prompt,
+                    audio_refs=refs,
+                )
+            else:
+                continue
         except Exception as exc:
             if not error_indicates_vision_unavailable(exc):
                 _log_warning(
@@ -384,13 +443,9 @@ def primary_route_supports_native_video(
     route_name: str = VISUAL_ROUTE_AGENT,
 ) -> bool:
     for provider in _primary_provider_candidates(runtime):
-        api_type = str(provider.get("api_type", "") or "")
-        model = str(provider.get("model", "") or "")
-        if _normalize_media_api_type(api_type) != "gemini_official":
-            continue
         if not str(provider.get("api_key", "") or "").strip():
             continue
-        if provider_supports_video(api_type, model, route_name=route_name):
+        if resolve_media_provider_adapter(provider).supports_video:
             return True
     return False
 
@@ -400,9 +455,12 @@ def primary_route_supports_native_audio(
     *,
     route_name: str = VISUAL_ROUTE_AGENT,
 ) -> bool:
-    # Gemini's current native audio support follows the same configured
-    # multimodal capability gate used for native video in this plugin.
-    return primary_route_supports_native_video(runtime, route_name=route_name)
+    for provider in _primary_provider_candidates(runtime):
+        if not str(provider.get("api_key", "") or "").strip():
+            continue
+        if resolve_media_provider_adapter(provider).supports_audio:
+            return True
+    return False
 
 
 def get_primary_provider_signature(runtime: Any) -> tuple[str, str]:
@@ -499,10 +557,42 @@ def _qwen_video_part(video_ref: str) -> dict[str, Any]:
             raise ValueError("qwen_omni_video_url_invalid")
         return {"type": "video_url", "video_url": {"url": normalized}}
     path = Path(normalized)
-    if path.stat().st_size > _QWEN_INLINE_MAX_BYTES:
+    if path.stat().st_size > _QWEN_RAW_INLINE_MAX_BYTES:
         raise ValueError("qwen_omni_local_video_too_large")
     payload = base64.b64encode(path.read_bytes()).decode("ascii")
     return {"type": "video_url", "video_url": {"url": f"data:;base64,{payload}"}}
+
+
+def _audio_format(ref: str, *, default: str = "wav") -> str:
+    suffix = Path(urlsplit(str(ref or "")).path).suffix.lower().lstrip(".")
+    aliases = {"wave": "wav", "oga": "ogg", "opus": "ogg", "m4a": "mp4"}
+    normalized = aliases.get(suffix, suffix)
+    return normalized if normalized in {"wav", "mp3", "mp4", "aac", "ogg", "flac", "amr"} else default
+
+
+def _qwen_audio_part(audio_ref: str) -> dict[str, Any]:
+    normalized, problem = normalize_audio_ref(audio_ref)
+    if not normalized:
+        raise ValueError(f"invalid_audio_ref:{problem or 'unknown'}")
+    audio_format = _audio_format(normalized)
+    if normalized.startswith(("http://", "https://")):
+        parsed = urlsplit(normalized)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("qwen_omni_audio_url_invalid")
+        return {
+            "type": "input_audio",
+            "input_audio": {"data": normalized, "format": audio_format},
+        }
+    path = Path(normalized)
+    if path.stat().st_size > _QWEN_RAW_INLINE_MAX_BYTES:
+        raise ValueError("qwen_omni_local_audio_too_large")
+    return {
+        "type": "input_audio",
+        "input_audio": {
+            "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+            "format": audio_format,
+        },
+    }
 
 
 def _qwen_text_delta(payload: Any) -> str:
@@ -558,7 +648,8 @@ async def _call_qwen_omni_media(
     workspace_id: str,
     model: str,
     prompt: str,
-    video_refs: Sequence[str],
+    video_refs: Sequence[str] = (),
+    audio_refs: Sequence[str] = (),
     timeout: float = 180.0,
 ) -> str:
     key = str(api_key or "").strip()
@@ -567,7 +658,10 @@ async def _call_qwen_omni_media(
     endpoint = _qwen_omni_endpoint(base_url, workspace_id)
     selected_model = str(model or "").strip() or _QWEN_OMNI_DEFAULT_MODEL
     content = [_qwen_video_part(str(ref or "").strip()) for ref in video_refs]
-    content.append({"type": "text", "text": str(prompt or "").strip() or "请分析这段视频内容"})
+    content.extend(_qwen_audio_part(str(ref or "").strip()) for ref in audio_refs)
+    if not content:
+        raise ValueError("qwen_omni_media_missing")
+    content.append({"type": "text", "text": str(prompt or "").strip() or "请分析这段音视频内容"})
     payload: dict[str, Any] = {
         "model": selected_model,
         "messages": [{"role": "user", "content": content}],
@@ -593,6 +687,116 @@ async def _call_qwen_omni_media(
         )
         response.raise_for_status()
     return _parse_qwen_omni_response(response)
+
+
+def _openai_compatible_endpoint(base_url: str, *, default_root: str, error_prefix: str) -> str:
+    raw = str(base_url or "").strip().rstrip("/") or default_root.rstrip("/")
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{error_prefix}_endpoint_invalid")
+    if parsed.path.rstrip("/").endswith("/chat/completions"):
+        return raw
+    return f"{raw}/chat/completions"
+
+
+def _mimo_video_part(video_ref: str, *, fps: float, media_resolution: str) -> dict[str, Any]:
+    normalized, problem = normalize_video_ref(video_ref)
+    if not normalized:
+        raise ValueError(f"invalid_video_ref:{problem or 'unknown'}")
+    if normalized.startswith(("http://", "https://")):
+        parsed = urlsplit(normalized)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("mimo_video_url_invalid")
+        url = normalized
+    else:
+        path = Path(normalized)
+        if path.stat().st_size > _MIMO_RAW_INLINE_MAX_BYTES:
+            raise ValueError("mimo_local_video_too_large")
+        mime_type, _ = mimetypes.guess_type(str(path))
+        payload = base64.b64encode(path.read_bytes()).decode("ascii")
+        url = f"data:{mime_type or 'video/mp4'};base64,{payload}"
+    video_url: dict[str, Any] = {
+        "url": url,
+        "fps": max(0.1, min(10.0, float(fps or 2.0))),
+    }
+    resolution = str(media_resolution or "default").strip().lower()
+    if resolution in {"default", "low", "medium", "high"}:
+        video_url["media_resolution"] = resolution
+    return {"type": "video_url", "video_url": video_url}
+
+
+def _mimo_audio_part(audio_ref: str) -> dict[str, Any]:
+    normalized, problem = normalize_audio_ref(audio_ref)
+    if not normalized:
+        raise ValueError(f"invalid_audio_ref:{problem or 'unknown'}")
+    audio_format = _audio_format(normalized)
+    if normalized.startswith(("http://", "https://")):
+        parsed = urlsplit(normalized)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("mimo_audio_url_invalid")
+        data = normalized
+    else:
+        path = Path(normalized)
+        if path.stat().st_size > _MIMO_RAW_INLINE_MAX_BYTES:
+            raise ValueError("mimo_local_audio_too_large")
+        data = base64.b64encode(path.read_bytes()).decode("ascii")
+    return {"type": "input_audio", "input_audio": {"data": data, "format": audio_format}}
+
+
+async def _call_mimo_media(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    prompt: str,
+    video_refs: Sequence[str] = (),
+    audio_refs: Sequence[str] = (),
+    fps: float = 2.0,
+    media_resolution: str = "default",
+    timeout: float = 300.0,
+) -> str:
+    key = str(api_key or "").strip()
+    if not key:
+        raise ValueError("mimo_api_key_missing")
+    endpoint = _openai_compatible_endpoint(
+        base_url,
+        default_root="https://api.xiaomimimo.com/v1",
+        error_prefix="mimo",
+    )
+    content = [
+        _mimo_video_part(
+            str(ref or "").strip(),
+            fps=fps,
+            media_resolution=media_resolution,
+        )
+        for ref in video_refs
+    ]
+    content.extend(_mimo_audio_part(str(ref or "").strip()) for ref in audio_refs)
+    if not content:
+        raise ValueError("mimo_media_missing")
+    content.append({"type": "text", "text": str(prompt or "").strip() or "请分析这段音视频内容"})
+    bounded_timeout = max(20.0, min(600.0, float(timeout or 300.0)))
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(bounded_timeout, connect=15.0),
+        follow_redirects=False,
+    ) as client:
+        response = await client.post(
+            endpoint,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": str(model or "").strip() or _MIMO_DEFAULT_MODEL,
+                "messages": [{"role": "user", "content": content}],
+            },
+        )
+        response.raise_for_status()
+    return _qwen_text_delta(response.json()).strip()
 
 
 def _gemini_endpoint(base_url: str, model: str) -> str:

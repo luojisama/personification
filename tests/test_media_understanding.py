@@ -672,6 +672,103 @@ def test_qwen_omni_flash_forces_non_thinking_mode(monkeypatch) -> None:  # noqa:
     assert captured["json"]["enable_thinking"] is False  # type: ignore[index]
 
 
+def test_qwen_omni_accepts_audio_with_the_official_input_audio_shape(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 200
+        text = 'data: {"choices":[{"delta":{"content":"转写完成"}}]}\n'
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {}
+
+    class _Client:
+        def __init__(self, **_kwargs):  # noqa: ANN001
+            pass
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def post(self, _url, **kwargs):  # noqa: ANN001, ANN201
+            captured["json"] = kwargs["json"]
+            return _Response()
+
+    monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
+    result = asyncio.run(
+        media_understanding._call_qwen_omni_media(
+            api_key="key",
+            base_url="https://workspace.example/compatible-mode/v1",
+            workspace_id="",
+            model="qwen3.5-omni-plus",
+            prompt="转写并解释音频",
+            audio_refs=["https://cdn.example/voice.wav"],
+        )
+    )
+    assert result == "转写完成"
+    content = captured["json"]["messages"][0]["content"]  # type: ignore[index]
+    assert content[0] == {
+        "type": "input_audio",
+        "input_audio": {"data": "https://cdn.example/voice.wav", "format": "wav"},
+    }
+
+
+def test_mimo_media_uses_video_url_fps_and_resolution(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {"choices": [{"message": {"content": "MiMo 视频结论"}}]}
+
+    class _Client:
+        def __init__(self, **kwargs):  # noqa: ANN001
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def post(self, url, **kwargs):  # noqa: ANN001, ANN201
+            captured.update(url=url, headers=kwargs["headers"], json=kwargs["json"])
+            return _Response()
+
+    monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
+    result = asyncio.run(
+        media_understanding._call_mimo_media(
+            api_key="mimo-key",
+            base_url="",
+            model="mimo-v2.5",
+            prompt="解释视频",
+            video_refs=["https://cdn.example/video.mp4?signature=opaque"],
+            fps=2.5,
+            media_resolution="high",
+        )
+    )
+    assert result == "MiMo 视频结论"
+    assert captured["url"] == "https://api.xiaomimimo.com/v1/chat/completions"
+    content = captured["json"]["messages"][0]["content"]  # type: ignore[index]
+    assert content[0] == {
+        "type": "video_url",
+        "video_url": {
+            "url": "https://cdn.example/video.mp4?signature=opaque",
+            "fps": 2.5,
+            "media_resolution": "high",
+        },
+    }
+
+
 def test_qwen_omni_rejects_insecure_remote_and_large_local_video(tmp_path: Path) -> None:
     try:
         media_understanding._qwen_video_part("http://cdn.example/video.mp4")
