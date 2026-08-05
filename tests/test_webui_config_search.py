@@ -141,6 +141,16 @@ def test_video_understanding_uses_structured_form_instead_of_json_editor() -> No
     assert "视频下载上限（MiB）" in app_config_js
     assert "固定热词" in app_config_js
     assert "不需要 JSON" in app_config_js
+    assert "千问 Web（实验）" in app_config_js
+    assert "personification_qwen_web_risk_acknowledged" in app_config_js
+    assert "qwenWebStartAuth" in app_config_js
+    assert "/media/qwen-web/auth/start" in app_config_js
+    assert "不会识别或破解验证码" in app_config_js
+    assert "网络安全风险" in app_config_js
+    assert "qwenWebStatus" in app_config_js
+    assert "qianwen_cn_v2" in app_config_js
+    assert "updateQwenWebCardDom" in app_config_js
+    assert "data-qwen-web-auth-host" in app_config_js
     assert 'api("/config/video-understanding"' in app_config_js
     assert "function readVideoUnderstandingForm" in app_config_js
     assert "video-config-grid" in style_css

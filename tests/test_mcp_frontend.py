@@ -404,3 +404,11 @@ def test_mcp_external_links_reject_empty_values_before_url_resolution() -> None:
     assert 'const raw = String(url || "").trim()' in helper
     assert 'if (!raw) return ""' in helper
     assert "safeHttpUrl(raw)" in helper
+
+
+def test_qwen_interactive_frames_stop_outside_video_config_group() -> None:
+    source = _source("app-mcp.js")
+
+    assert '(state.view === "config" && state.activeGroup === "视频理解")' in source
+    assert 'platform === "qwen_web"' in source
+    assert "/media/qwen-web/auth/" in source

@@ -146,6 +146,14 @@ async def analyze_images(
                 "kind": "video",
                 "selected_route": video_mode if video_output else "",
                 "attempts": video_attempts,
+                "diagnostic_codes": [
+                    "qwen_web_route_fallback_used"
+                    for item in video_attempts
+                    if item.get("route") == "video_qwen_web"
+                    and item.get("status") not in {"ok", "skipped"}
+                    and video_output
+                    and video_mode != "video_qwen_web"
+                ][:1],
             }
         )
         if video_output:
@@ -166,6 +174,14 @@ async def analyze_images(
                 "kind": "audio",
                 "selected_route": audio_mode if audio_output else "",
                 "attempts": audio_attempts,
+                "diagnostic_codes": [
+                    "qwen_web_route_fallback_used"
+                    for item in audio_attempts
+                    if item.get("route") == "audio_qwen_web"
+                    and item.get("status") not in {"ok", "skipped"}
+                    and audio_output
+                    and audio_mode != "audio_qwen_web"
+                ][:1],
             }
         )
         if audio_output:

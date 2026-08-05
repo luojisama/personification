@@ -157,16 +157,19 @@ class QwenWebService:
     @asynccontextmanager
     async def _admit(self):
         async with self._admission_lock:
-            if self._active > 0 and self._waiting >= 1:
+            if self._active >= 1 and self._waiting >= 1:
                 raise RuntimeError("qwen_web_busy")
             self._waiting += 1
+        acquired = False
         try:
             try:
                 await asyncio.wait_for(self._admission.acquire(), timeout=5.0)
             except asyncio.TimeoutError as exc:
                 raise RuntimeError("qwen_web_busy") from exc
             async with self._admission_lock:
+                self._waiting = max(0, self._waiting - 1)
                 self._active += 1
+            acquired = True
             try:
                 yield
             finally:
@@ -174,8 +177,9 @@ class QwenWebService:
                     self._active = max(0, self._active - 1)
                 self._admission.release()
         finally:
-            async with self._admission_lock:
-                self._waiting = max(0, self._waiting - 1)
+            if not acquired:
+                async with self._admission_lock:
+                    self._waiting = max(0, self._waiting - 1)
 
     def local_status(self, config: Any) -> dict[str, Any]:
         enabled = self.enabled(config)
@@ -201,7 +205,7 @@ class QwenWebService:
             "interactive_session": None,
             "last_diagnostic_code": code,
             "last_probe_at": 0.0,
-            "page_contract_version": "qianwen_cn_v1",
+            "page_contract_version": "qianwen_cn_v2",
         }
         result.update(
             {
@@ -213,6 +217,7 @@ class QwenWebService:
                     "last_probe_at",
                     "page_contract_version",
                     "risk_cooldown_seconds",
+                    "diagnostics",
                 }
             }
         )
@@ -233,8 +238,18 @@ class QwenWebService:
             }
         return self.local_status(config)
 
-    async def _control(self, config: Any, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        if not self.risk_acknowledged(config):
+    async def _control(
+        self,
+        config: Any,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        require_enabled: bool = True,
+        require_acknowledgement: bool = True,
+    ) -> dict[str, Any]:
+        if require_enabled and not self.enabled(config):
+            raise RuntimeError("qwen_web_disabled")
+        if require_acknowledgement and not self.risk_acknowledged(config):
             raise RuntimeError("qwen_web_risk_ack_required")
         client = await self._ensure_client(config)
         result = await client.request(method, dict(params or {}))
@@ -247,18 +262,36 @@ class QwenWebService:
         return self.local_status(config)
 
     async def auth_start(self, config: Any, owner: str) -> dict[str, Any]:
-        return await self._control(
+        result = await self._control(
             config,
             "personification/qwen-web/auth/start",
             {"owner": str(owner or "")},
         )
+        if result.get("session_id"):
+            self._last_status = {**self._last_status, "interactive_session": result}
+        else:
+            self._last_status = {
+                **self._last_status,
+                "state": "manual_verification_required",
+                "last_diagnostic_code": str(result.get("error_code") or "qwen_web_process_failed"),
+                "risk_cooldown_seconds": max(0, int(result.get("remaining_seconds") or 0)),
+                "interactive_session": None,
+            }
+        return result
 
     async def auth_status(self, config: Any, session_id: str, owner: str) -> dict[str, Any]:
-        return await self._control(
+        result = await self._control(
             config,
             "personification/qwen-web/auth/status",
             {"session_id": session_id, "owner": owner},
         )
+        self._last_status = {
+            **self._last_status,
+            "interactive_session": None
+            if result.get("status") in {"success", "expired", "cancelled", "error"}
+            else result,
+        }
+        return result
 
     async def auth_frame(
         self,
@@ -302,14 +335,23 @@ class QwenWebService:
         return result
 
     async def auth_cancel(self, config: Any, session_id: str, owner: str) -> dict[str, Any]:
-        return await self._control(
+        result = await self._control(
             config,
             "personification/qwen-web/auth/cancel",
             {"session_id": session_id, "owner": owner},
+            require_enabled=False,
+            require_acknowledgement=False,
         )
+        self._last_status = {**self._last_status, "interactive_session": None}
+        return result
 
     async def logout(self, config: Any) -> dict[str, Any]:
-        result = await self._control(config, "personification/qwen-web/logout")
+        result = await self._control(
+            config,
+            "personification/qwen-web/logout",
+            require_enabled=False,
+            require_acknowledgement=False,
+        )
         self._last_status = dict(result)
         return self.local_status(config)
 

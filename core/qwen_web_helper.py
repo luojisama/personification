@@ -19,12 +19,15 @@ _SAFE_ERRORS = {
     "interactive_page_unavailable",
     "playwright_unavailable",
     "qwen_web_dom_changed",
+    "qwen_web_disabled",
     "qwen_web_generation_timeout",
     "qwen_web_login_required",
     "qwen_web_manual_verification_required",
     "qwen_web_media_kind_invalid",
     "qwen_web_media_token_invalid",
     "qwen_web_network_risk_detected",
+    "qwen_web_network_risk_cooldown",
+    "qwen_web_local_rate_limited",
     "qwen_web_upload_rejected",
 }
 

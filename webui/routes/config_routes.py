@@ -1070,7 +1070,7 @@ def build_config_router(*, runtime) -> APIRouter:
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
         values = dict(payload.values or {})
-        if not values or len(values) > 40:
+        if not values or len(values) > 50:
             raise HTTPException(
                 status_code=400,
                 detail=diagnostic(
@@ -1078,7 +1078,7 @@ def build_config_router(*, runtime) -> APIRouter:
                     code="video_config_batch_invalid",
                     phase="request_validation",
                     title="视频理解配置表单无效",
-                    message="配置字段数量必须在 1 到 40 之间。",
+                    message="配置字段数量必须在 1 到 50 之间。",
                     suggestion="刷新视频理解配置页后重新填写表单。",
                     retryable=True,
                 ),
@@ -1091,6 +1091,7 @@ def build_config_router(*, runtime) -> APIRouter:
             field_name
             for field_name in entries
             if field_name.startswith("personification_video_")
+            or field_name.startswith("personification_qwen_web_")
             or field_name.startswith("personification_audio_transcription_")
         }
         unknown = sorted(set(values) - allowed)
@@ -1127,6 +1128,35 @@ def build_config_router(*, runtime) -> APIRouter:
                     title="视频理解配置值无效",
                     message="至少一个表单值未通过类型或范围校验。",
                     suggestion="根据输入框范围和单位修改后重试。",
+                    retryable=True,
+                ),
+            )
+        future_qwen_enabled = bool(
+            normalized_values.get(
+                "personification_qwen_web_enabled",
+                getattr(runtime.plugin_config, "personification_qwen_web_enabled", False),
+            )
+        )
+        future_risk_acknowledged = bool(
+            normalized_values.get(
+                "personification_qwen_web_risk_acknowledged",
+                getattr(
+                    runtime.plugin_config,
+                    "personification_qwen_web_risk_acknowledged",
+                    False,
+                ),
+            )
+        )
+        if future_qwen_enabled and not future_risk_acknowledged:
+            raise HTTPException(
+                status_code=400,
+                detail=diagnostic(
+                    ok=False,
+                    code="qwen_web_risk_ack_required",
+                    phase="risk_acknowledgement",
+                    title="启用千问 Web 前必须确认风险",
+                    message="请确认媒体第三方上传、账号历史与消费者网页自动化风险后再启用。",
+                    suggestion="勾选风险确认，或保持千问 Web 关闭。",
                     retryable=True,
                 ),
             )

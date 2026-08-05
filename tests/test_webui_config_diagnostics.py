@@ -125,6 +125,34 @@ def test_video_config_form_rejects_non_video_fields_without_writing(
     assert writes == []
 
 
+def test_video_config_rejects_qwen_web_enable_without_risk_ack(
+    _runtime_context, monkeypatch  # noqa: ANN001
+) -> None:
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        config_routes.env_writer,
+        "write_many",
+        lambda values, _config: writes.append(dict(values)),
+    )
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    response = client.post(
+        "/personification/api/config/video-understanding",
+        json={
+            "values": {
+                "personification_qwen_web_enabled": True,
+                "personification_qwen_web_risk_acknowledged": False,
+            }
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "qwen_web_risk_ack_required"
+    assert writes == []
+
+
 def test_config_value_unexpected_exception_is_structured_and_safe(
     _runtime_context, monkeypatch  # noqa: ANN001
 ) -> None:

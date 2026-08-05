@@ -9,6 +9,7 @@ function readStoredQzoneOperationId() {
 let state = {
   logged: false, qq: "", view: "dashboard",
   entries: [], groups: [], activeGroup: null, configSearch: "", configSearchComposing: false, configSearchDraft: "", configDrafts: {},
+  qwenWebStatus: null, qwenWebAuth: null, qwenWebBusy: false,
   devices: [], devicePending: false, alert: null, loading: false, loadingMessage: "",
   dashboard: null, dashboardWindow: "month", dashboardDetail: null,
   personas: [], selectedPersona: null, personaSearch: "", personaScopeBotId: "", personaScopeGroupId: "", personaScopeRequestId: 0, scopedProfileBusy: false,
@@ -48,7 +49,7 @@ let state = {
 
 const VIEW_ASSETS = {
   dashboard:["app-dashboard.js"],health:["app-admin-common.js","app-health-qq.js"],qzone:["app-admin-common.js","app-qzone.js"],personas:["app-admin-common.js","app-identity-policy.js"],groups:["app-admin-common.js","app-groups.js"],group_switch:["app-admin-common.js","app-groups.js"],persona_prompt:["app-tools.js"],persona_builder:["app-admin-common.js","app-persona-builder.js"],qq:["app-health-qq.js"],user_policy:["app-admin-common.js","app-identity-policy.js"],outbound:["app-admin-common.js","app-identity-policy.js"],
-  config:"app-config.js",memory:"app-content.js",memory_graph:"app-content.js",stickers:"app-content.js",
+  config:["app-mcp.js","app-config.js"],memory:"app-content.js",memory_graph:"app-content.js",stickers:"app-content.js",
   skills:"app-tools.js",mcp:"app-mcp.js",tool_creator:"app-tool-creator.js",plugin_knowledge:"app-tools.js",plugin_manager:"app-tools.js",test:"app-tools.js",
   proactive:"app-activity.js",audit:"app-activity.js",logs:"app-activity.js",traces:"app-activity.js",trace_detail:"app-activity.js",
   agent_status:"app-operations.js",data_transfer:"app-operations.js",
@@ -896,6 +897,7 @@ function leaveViewLifecycle(previousView,nextView) {
   if(previousView==="qzone"&&typeof stopQzoneViewLifecycle==="function")stopQzoneViewLifecycle();
   if(previousView==="tool_creator"&&typeof stopToolCreatorPolling==="function")stopToolCreatorPolling();
   if(previousView==="mcp"&&typeof stopMcpViewLifecycle==="function")stopMcpViewLifecycle();
+  if(previousView==="config"&&typeof stopQwenWebConfigLifecycle==="function")stopQwenWebConfigLifecycle();
   if(previousView==="agent_status"&&typeof stopAgentStatusPolling==="function")stopAgentStatusPolling();
   if(previousView==="memory_graph"){
     if(typeof destroyMemoryGraphCanvas==="function")destroyMemoryGraphCanvas();
@@ -924,6 +926,7 @@ function leaveViewLifecycle(previousView,nextView) {
 
 function enterViewLifecycle(view) {
   if(view==="agent_status"&&typeof startAgentStatusPolling==="function")startAgentStatusPolling();
+  if(view==="config"&&typeof startQwenWebConfigLifecycle==="function")startQwenWebConfigLifecycle();
 }
 
 function render() {
