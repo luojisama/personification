@@ -174,20 +174,38 @@ class AuthSession:
 
 
 class BrowserPool:
-    def __init__(self, root: Path, *, idle_timeout_seconds: float = _BROWSER_CONTEXT_IDLE_SECONDS) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        idle_timeout_seconds: float = _BROWSER_CONTEXT_IDLE_SECONDS,
+        platforms: tuple[str, ...] | None = None,
+        task_name_prefix: str = "social-browser",
+    ) -> None:
         self.root = root.resolve()
         self.profiles_root = (self.root / "profiles").resolve()
         self.profiles_root.mkdir(parents=True, exist_ok=True)
         _restrict_private_directory(self.profiles_root)
+        normalized_platforms = tuple(
+            dict.fromkeys(
+                str(platform or "").strip().lower()
+                for platform in (platforms or tuple(PLATFORMS))
+                if str(platform or "").strip()
+            )
+        )
+        if not normalized_platforms:
+            raise ValueError("browser pool requires at least one platform")
+        self.platforms = normalized_platforms
+        self._task_name_prefix = str(task_name_prefix or "browser").strip() or "browser"
         self._playwright: Any = None
         self._contexts: dict[str, Any] = {}
         self._context_headless: dict[str, bool] = {}
         self._browser_channel: dict[str, str] = {}
-        self._locks = {platform: asyncio.Lock() for platform in PLATFORMS}
+        self._locks = {platform: asyncio.Lock() for platform in self.platforms}
         self._auth: dict[str, AuthSession] = {}
         self._idle_timeout_seconds = max(0.01, float(idle_timeout_seconds))
-        self._activity_counts = {platform: 0 for platform in PLATFORMS}
-        self._last_activity = {platform: time.monotonic() for platform in PLATFORMS}
+        self._activity_counts = {platform: 0 for platform in self.platforms}
+        self._last_activity = {platform: time.monotonic() for platform in self.platforms}
         self._idle_tasks: dict[str, asyncio.Task[None]] = {}
         self._diagnostics: list[dict[str, Any]] = []
 
@@ -208,10 +226,16 @@ class BrowserPool:
             "open_contexts": sorted(self._contexts),
             "activity": {
                 platform: int(self._activity_counts.get(platform, 0))
-                for platform in PLATFORMS
+                for platform in self.platforms
             },
             "diagnostics": [dict(item) for item in self._diagnostics[-10:]],
         }
+
+    def set_idle_timeout_seconds(self, value: float) -> None:
+        self._idle_timeout_seconds = max(0.01, float(value))
+        for platform in self.platforms:
+            if platform in self._contexts and self._activity_counts.get(platform, 0) == 0:
+                self._schedule_idle_eviction(platform)
 
     def _cancel_idle_task(self, platform: str) -> None:
         task = self._idle_tasks.pop(platform, None)
@@ -243,7 +267,7 @@ class BrowserPool:
             return
         task = asyncio.create_task(
             self._idle_evict_after(platform),
-            name=f"social-browser-idle:{platform}",
+            name=f"{self._task_name_prefix}-idle:{platform}",
         )
         self._idle_tasks[platform] = task
 
@@ -279,7 +303,7 @@ class BrowserPool:
 
     @asynccontextmanager
     async def activity(self, platform: str):
-        if platform not in PLATFORMS:
+        if platform not in self.platforms:
             raise ValueError("unsupported platform")
         self._cancel_idle_task(platform)
         self._activity_counts[platform] = self._activity_counts.get(platform, 0) + 1
@@ -305,12 +329,12 @@ class BrowserPool:
         self._playwright = await async_playwright().start()
 
     def profile_dir(self, platform: str) -> Path:
-        if platform not in PLATFORMS:
+        if platform not in self.platforms:
             raise ValueError("unsupported platform")
         return (self.profiles_root / platform).resolve()
 
     async def context(self, platform: str, *, headless: bool = True) -> Any:
-        if platform not in PLATFORMS:
+        if platform not in self.platforms:
             raise ValueError("unsupported platform")
         async with self._locks[platform]:
             existing = self._contexts.get(platform)
@@ -369,6 +393,8 @@ class BrowserPool:
         return await context.new_page()
 
     async def close_platform(self, platform: str) -> None:
+        if platform not in self.platforms:
+            raise ValueError("unsupported platform")
         self._cancel_idle_task(platform)
         for session in self._auth.values():
             if session.platform == platform and (
