@@ -144,6 +144,74 @@ def test_quoted_and_current_media_keep_distinct_owners_and_messages() -> None:
     assert by_origin["quoted"].file_id == "quoted-file"
 
 
+def test_quoted_file_media_is_hydrated_through_get_msg() -> None:
+    event = _event(
+        "current-user",
+        "current-message",
+        SimpleNamespace(type="text", data={"text": "概括引用的视频"}),
+    )
+    event.reply = SimpleNamespace(
+        message_id="42",
+        sender=SimpleNamespace(user_id="quoted-user"),
+        message=[],
+    )
+    calls: list[dict[str, object]] = []
+
+    class _Bot:
+        async def get_msg(self, **kwargs):  # noqa: ANN003, ANN201
+            calls.append(dict(kwargs))
+            return {
+                "message_id": 42,
+                "sender": {"user_id": "quoted-user"},
+                "message": [
+                    {"type": "file", "data": {"file": "quoted-token", "name": "clip.mp4"}},
+                ],
+            }
+
+    refs = asyncio.run(turn_media.resolve_onebot_quoted_media_refs(event, _Bot()))
+
+    assert calls == [{"message_id": 42}]
+    assert len(refs) == 1
+    assert refs[0].kind == "video"
+    assert refs[0].origin == "quoted"
+    assert refs[0].owner_user_id == "quoted-user"
+    assert refs[0].message_id == "42"
+    assert refs[0].file_id == "quoted-token"
+
+
+def test_reply_segment_message_id_can_hydrate_quoted_file_media() -> None:
+    event = SimpleNamespace(
+        user_id="current-user",
+        message_id="current-message",
+        sender=SimpleNamespace(user_id="current-user"),
+        message=[
+            SimpleNamespace(type="reply", data={"id": "77"}),
+            SimpleNamespace(type="text", data={"text": "看这个视频"}),
+        ],
+    )
+
+    class _Bot:
+        async def call_api(self, api: str, **kwargs):  # noqa: ANN003, ANN201
+            assert api == "get_msg"
+            assert kwargs == {"message_id": 77}
+            return {
+                "data": {
+                    "message_id": 77,
+                    "sender": {"user_id": "quoted-user"},
+                    "message": [
+                        {"type": "video", "data": {"file": "video-token"}},
+                    ],
+                }
+            }
+
+    refs = asyncio.run(turn_media.resolve_onebot_quoted_media_refs(event, _Bot()))
+
+    assert len(refs) == 1
+    assert refs[0].origin == "quoted"
+    assert refs[0].message_id == "77"
+    assert refs[0].file_id == "video-token"
+
+
 def test_visual_grounding_separates_image_subjects_from_chat_participants() -> None:
     event = _event("u1", "m1", _image("https://img.example/anime.png", "anime-file"))
     refs = turn_media.attach_safe_visual_summary(

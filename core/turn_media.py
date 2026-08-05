@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, Literal
 
 from .media_refs import is_supported_video_filename, normalize_video_ref
+from .message_relations import extract_reply_message_id
 
 
 MediaOrigin = Literal["current", "quoted", "batch"]
@@ -305,6 +306,77 @@ def extract_turn_media_from_event(
     return refs
 
 
+def _onebot_message_payload(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict) and data.get("message") is not None:
+            return data
+    return payload
+
+
+async def resolve_onebot_quoted_media_refs(
+    event: Any,
+    bot: Any,
+    *,
+    timeout_seconds: float = 15.0,
+) -> list[TurnMediaRef]:
+    """Hydrate quoted media when the adapter only exposes a reply message id.
+
+    NapCat may omit file/video segments from ``event.reply.message`` even though
+    the visible QQ quote points at that file.  Fetching the quoted message keeps
+    the exact message/owner provenance and avoids guessing from chat text.
+    """
+
+    refs = extract_turn_media_from_event(event, current_origin="current")
+    if any(item.origin == "quoted" for item in refs):
+        return refs
+    quoted = (
+        _object_value(event, "reply")
+        or _object_value(event, "quoted")
+        or _object_value(event, "quote")
+    )
+    quoted_segments = _message_segments(_object_value(quoted, "message")) if quoted else []
+    if any(
+        _segment_type(segment) == "text"
+        and _text(_segment_data(segment).get("text"))
+        for segment in quoted_segments
+    ):
+        return refs
+    reply_message_id = extract_reply_message_id(event)
+    if not reply_message_id:
+        return refs
+    request_message_id: str | int = reply_message_id
+    if reply_message_id.isdigit():
+        try:
+            request_message_id = int(reply_message_id)
+        except (TypeError, ValueError, OverflowError):
+            request_message_id = reply_message_id
+    try:
+        get_msg = getattr(bot, "get_msg", None)
+        if callable(get_msg):
+            request = get_msg(message_id=request_message_id)
+        else:
+            call_api = getattr(bot, "call_api", None)
+            if not callable(call_api):
+                return refs
+            request = call_api("get_msg", message_id=request_message_id)
+        payload = _onebot_message_payload(
+            await asyncio.wait_for(
+                request,
+                timeout=max(1.0, float(timeout_seconds or 15.0)),
+            )
+        )
+    except Exception:
+        return refs
+    quoted_refs = extract_media_from_message(
+        _object_value(payload, "message"),
+        origin="quoted",
+        owner_user_id=_sender_user_id(payload),
+        message_id=_message_id(payload) or reply_message_id,
+    )
+    return coerce_turn_media([*refs, *quoted_refs])
+
+
 def serialize_turn_media(values: Iterable[TurnMediaRef | dict[str, Any]]) -> list[dict[str, Any]]:
     serialized: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -542,6 +614,7 @@ __all__ = [
     "coerce_turn_media",
     "extract_media_from_message",
     "extract_turn_media_from_event",
+    "resolve_onebot_quoted_media_refs",
     "media_from_batched_events",
     "media_summary_timeout_seconds",
     "normalize_safe_visual_summary",

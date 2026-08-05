@@ -25,6 +25,12 @@ class _AtSeg:
     type: str = "at"
 
 
+@dataclass
+class _FileSeg:
+    data: dict[str, str]
+    type: str = "file"
+
+
 class _Message(list):
     pass
 
@@ -397,6 +403,88 @@ def test_private_and_group_mention_are_marked_reply_required() -> None:
         assert all(float(state["response_deadline"]) > 0 for state in captured)
 
     asyncio.run(run())
+
+
+def test_private_file_video_is_carried_into_same_sender_followup() -> None:
+    async def run() -> None:
+        reply_buffer._clear_recent_media_for_test()
+        controller = reply_buffer.ReplyConcurrencyController(session_limit=2, global_limit=2)
+        states: list[dict[str, Any]] = []
+
+        async def process_response_logic(_bot: Any, _event: Any, state: dict[str, Any]) -> None:
+            states.append(dict(state))
+
+        file_event = _PrivateEvent(1, "")
+        file_event.message = _Message(
+            [_FileSeg({"file": "opaque-video-token", "name": "gameplay.mp4"})]
+        )
+        prompt_event = _PrivateEvent(2, "概括刚才的视频")
+        msg_buffer: dict[str, dict[str, Any]] = {}
+        common = {
+            "poke_event_cls": type("PokeEvent", (), {}),
+            "message_event_cls": _PrivateEvent,
+            "group_message_event_cls": _GroupEvent,
+            "process_response_logic": process_response_logic,
+            "msg_buffer": msg_buffer,
+            "start_buffer_timer": lambda *_args: None,
+            "logger": _Logger(),
+            "concurrency_controller": controller,
+            "response_timeout_seconds": 30,
+        }
+        try:
+            await reply_buffer.handle_reply_event(_Bot(), file_event, {}, **common)
+            await reply_buffer.handle_reply_event(_Bot(), prompt_event, {}, **common)
+        finally:
+            reply_buffer._clear_recent_media_for_test()
+
+        assert len(states) == 2
+        first_media = states[0]["turn_media_context"]
+        followup_media = states[1]["turn_media_context"]
+        assert len(first_media) == 1
+        assert len(followup_media) == 1
+        assert states[1]["batch_event_count"] == 2
+        assert followup_media[0]["kind"] == "video"
+        assert followup_media[0]["origin"] == "batch"
+        assert followup_media[0]["owner_user_id"] == "123"
+        assert followup_media[0]["message_id"] == "1"
+        assert followup_media[0]["file_id"] == "opaque-video-token"
+        assert reply_buffer._recent_media_for_followup(
+            session_key="999:private_123",
+            user_id="123",
+            now=time.monotonic(),
+        ) == []
+
+    asyncio.run(run())
+
+
+def test_recent_file_media_is_not_shared_with_another_group_sender() -> None:
+    reply_buffer._clear_recent_media_for_test()
+    now = time.monotonic()
+    refs = [
+        {
+            "media_id": "media-owner-a",
+            "ref": "opaque-video-token",
+            "origin": "current",
+            "owner_user_id": "owner-a",
+            "message_id": "file-message",
+            "kind": "video",
+            "file_id": "opaque-video-token",
+        }
+    ]
+    try:
+        reply_buffer._remember_recent_media(
+            session_key="bot:group-1",
+            user_id="owner-a",
+            values=refs,
+            now=now,
+        )
+        assert reply_buffer._recent_media_for_followup(
+            session_key="bot:group-1",
+            user_id="owner-b",
+            now=now + 1,
+        ) == []
+    finally:
+        reply_buffer._clear_recent_media_for_test()
 
 
 def test_random_bot_target_is_not_upgraded_to_required_reply() -> None:

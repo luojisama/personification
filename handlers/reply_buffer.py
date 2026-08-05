@@ -1,6 +1,7 @@
 import asyncio
 import re
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
@@ -8,7 +9,14 @@ from typing import Any, Callable, Dict
 from ..core import metrics
 from ..core.context_cleanup import release_message_buffer_entry_resources
 from ..core.target_inference import normalize_message_target_for_review
-from ..core.turn_media import extract_turn_media_from_event, media_from_batched_events, serialize_turn_media
+from ..core.turn_media import (
+    TurnMediaRef,
+    coerce_turn_media,
+    extract_turn_media_from_event,
+    media_from_batched_events,
+    resolve_onebot_quoted_media_refs,
+    serialize_turn_media,
+)
 from .reply_commit import reply_lifecycle_snapshot
 
 
@@ -18,6 +26,77 @@ _MAX_BATCH_EVENTS = 8
 _PROCESS_RESPONSE_TIMEOUT_SECONDS = 180.0
 _DIRECT_REPLY_PREEMPT_SECONDS = 8.0
 _ADMISSION_TIMEOUT_SECONDS = 15.0
+_RECENT_MEDIA_TTL_SECONDS = 300.0
+_RECENT_MEDIA_MAX_ENTRIES = 256
+_recent_media_by_sender: OrderedDict[str, tuple[float, list[dict[str, Any]]]] = OrderedDict()
+
+
+def _recent_media_key(session_key: str, user_id: str) -> str:
+    return f"{str(session_key or '').strip()}\0{str(user_id or '').strip()}"
+
+
+def _prune_recent_media(*, now: float) -> None:
+    expired = [
+        key
+        for key, (expires_at, _refs) in _recent_media_by_sender.items()
+        if float(expires_at or 0.0) <= now
+    ]
+    for key in expired:
+        _recent_media_by_sender.pop(key, None)
+    while len(_recent_media_by_sender) > _RECENT_MEDIA_MAX_ENTRIES:
+        _recent_media_by_sender.popitem(last=False)
+
+
+def _remember_recent_media(
+    *,
+    session_key: str,
+    user_id: str,
+    values: list[TurnMediaRef] | list[dict[str, Any]],
+    now: float,
+) -> None:
+    normalized_user_id = str(user_id or "").strip()
+    refs = [
+        item
+        for item in coerce_turn_media(values)
+        if item.kind in {"video", "audio"}
+        and item.owner_user_id == normalized_user_id
+    ]
+    if not refs or not normalized_user_id:
+        return
+    serialized = serialize_turn_media(refs)
+    for item in serialized:
+        item["origin"] = "batch"
+    key = _recent_media_key(session_key, normalized_user_id)
+    _recent_media_by_sender[key] = (now + _RECENT_MEDIA_TTL_SECONDS, serialized)
+    _recent_media_by_sender.move_to_end(key)
+    _prune_recent_media(now=now)
+
+
+def _recent_media_for_followup(
+    *,
+    session_key: str,
+    user_id: str,
+    now: float,
+) -> list[TurnMediaRef]:
+    _prune_recent_media(now=now)
+    key = _recent_media_key(session_key, user_id)
+    cached = _recent_media_by_sender.get(key)
+    if cached is None:
+        return []
+    expires_at, values = cached
+    if float(expires_at or 0.0) <= now:
+        _recent_media_by_sender.pop(key, None)
+        return []
+    _recent_media_by_sender.pop(key, None)
+    return [
+        item
+        for item in coerce_turn_media(values)
+        if item.owner_user_id == str(user_id or "").strip()
+    ]
+
+
+def _clear_recent_media_for_test() -> None:
+    _recent_media_by_sender.clear()
 
 
 async def _handle_reply_timeout(
@@ -1026,6 +1105,15 @@ async def handle_reply_event(
     )
     state["reply_required"] = reply_required
     state.setdefault("received_wall_at", time.time())
+    event_plain_text = _extract_plain_text(event)
+    event_media = extract_turn_media_from_event(event, current_origin="current")
+    if event_media and not event_plain_text:
+        _remember_recent_media(
+            session_key=session_key,
+            user_id=str(getattr(event, "user_id", "") or ""),
+            values=event_media,
+            now=time.monotonic(),
+        )
     immediate_flush = reply_required
     if immediate_flush and concurrency_controller is not None:
         entry = msg_buffer.get(session_key)
@@ -1041,11 +1129,40 @@ async def handle_reply_event(
                     active_task.cancel()
         direct_state = dict(state)
         direct_state["batch_session_key"] = session_key
-        direct_state["batch_event_count"] = 1
         direct_state["batched_events"] = []
+        direct_media = await resolve_onebot_quoted_media_refs(event, bot)
+        recent_media: list[TurnMediaRef] = []
+        if not any(item.kind in {"video", "audio"} for item in direct_media) and event_plain_text:
+            recent_media = _recent_media_for_followup(
+                session_key=session_key,
+                user_id=str(getattr(event, "user_id", "") or ""),
+                now=time.monotonic(),
+            )
+            direct_media.extend(recent_media)
+        direct_state["batch_event_count"] = 1 + int(bool(recent_media))
         direct_state["turn_media_context"] = serialize_turn_media(
-            extract_turn_media_from_event(event, current_origin="current")
+            coerce_turn_media(direct_media)
         )
+        try:
+            from ..core import reply_turn_trace
+
+            media_counts = {
+                "current": sum(item.origin == "current" for item in direct_media),
+                "quoted": sum(item.origin == "quoted" for item in direct_media),
+                "recent": len(recent_media),
+                "video": sum(item.kind == "video" for item in direct_media),
+                "audio": sum(item.kind == "audio" for item in direct_media),
+            }
+            if any(media_counts.values()):
+                reply_turn_trace.record_stage(
+                    key="turn_media_resolved",
+                    label="轮次媒体解析",
+                    status="ok",
+                    detail=" ".join(f"{key}={value}" for key, value in media_counts.items()),
+                    hint="引用媒体通过 message_id 回查；近期媒体只在同一会话与同一发送者内承接",
+                )
+        except Exception:
+            pass
         timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
         direct_state["response_deadline"] = time.monotonic() + timeout_seconds
         try:
