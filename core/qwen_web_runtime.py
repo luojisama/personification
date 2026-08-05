@@ -380,7 +380,7 @@ class QwenWebRuntime:
         owner: str,
         action: dict[str, Any],
     ) -> dict[str, Any]:
-        return await self.browser.interactive_input(session_id, owner, action)
+        return await self.browser.interactive_action(session_id, owner, action)
 
     async def auth_finish(self, session_id: str, owner: str) -> dict[str, Any]:
         session = self.browser.get_auth(session_id, owner)

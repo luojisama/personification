@@ -170,6 +170,36 @@ def test_qwen_network_risk_cooldown_blocks_manual_reopen(tmp_path: Path) -> None
     assert result["interactive_available"] is False
 
 
+def test_qwen_runtime_forwards_auth_input_to_shared_interactive_action(tmp_path: Path) -> None:
+    runtime_mod = load_personification_module("plugin.personification.core.qwen_web_runtime")
+    captured: list[tuple[str, str, dict]] = []
+
+    class _Browser:
+        async def interactive_action(
+            self,
+            session_id: str,
+            owner: str,
+            action: dict,
+        ) -> dict:
+            captured.append((session_id, owner, dict(action)))
+            return {"action_applied": True, "interactive_pointer_active": False}
+
+    runtime = runtime_mod.QwenWebRuntime(tmp_path)
+    runtime.browser = _Browser()
+    action = {
+        "type": "pointer_start",
+        "gesture_id": "gesture_test",
+        "seq": 0,
+        "x": 320,
+        "y": 180,
+    }
+
+    result = asyncio.run(runtime.auth_input("session-1", "admin-owner", action))
+
+    assert result["action_applied"] is True
+    assert captured == [("session-1", "admin-owner", action)]
+
+
 def test_qwen_probe_reuses_recent_result_without_page_access(tmp_path: Path) -> None:
     runtime_mod = load_personification_module("plugin.personification.core.qwen_web_runtime")
 
