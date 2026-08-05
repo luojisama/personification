@@ -316,7 +316,7 @@ function renderQwenWebStatus(status=state.qwenWebStatus) {
   const code = String(current.last_diagnostic_code || "");
   const cooldown = Math.max(0, Number(current.risk_cooldown_seconds || 0));
   return `<div class="qwen-web-status-island" data-qwen-web-status-island>
-    <div class="mcp-runtime-overview"><span>状态<strong>${escapeHtml(QWEN_WEB_STATE_LABELS[current.state] || current.state || "待检查")}</strong></span><span>页面契约<strong>${escapeHtml(current.page_contract_version || "qianwen_cn_v3")}</strong></span><span>本地 profile<strong>${current.profile_present?"存在":"无"}</strong></span><span>浏览器<strong>${current.browser_running?"运行中":"已回收"}</strong></span><span>任务<strong>${current.active_job?"占用":"空闲"}</strong></span></div>
+    <div class="mcp-runtime-overview"><span>状态<strong>${escapeHtml(QWEN_WEB_STATE_LABELS[current.state] || current.state || "待检查")}</strong></span><span>页面契约<strong>${escapeHtml(current.page_contract_version || "qianwen_cn_v4")}</strong></span><span>本地 profile<strong>${current.profile_present?"存在":"无"}</strong></span><span>浏览器<strong>${current.browser_running?"运行中":"已回收"}</strong></span><span>任务<strong>${current.active_job?"占用":"空闲"}</strong></span></div>
     ${code?`<div class="alert ${code.includes("network_risk")?"warn":""}"><code>${escapeHtml(code)}</code>${cooldown?` · 冷却剩余 ${Math.ceil(cooldown/60)} 分钟`:""}</div>`:""}
   </div>`;
 }

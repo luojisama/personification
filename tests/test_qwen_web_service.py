@@ -47,7 +47,7 @@ def test_qwen_helper_exposes_no_agent_tools_and_does_not_launch_browser(tmp_path
     assert status["state"] == "login_required"
     assert status["browser_running"] is False
     assert status["active_job"] is False
-    assert status["page_contract_version"] == "qianwen_cn_v3"
+    assert status["page_contract_version"] == "qianwen_cn_v4"
 
 
 def test_qwen_service_disabled_status_never_starts_helper(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
@@ -451,6 +451,121 @@ def test_qwen_media_upload_opens_more_menu_before_media_entry(tmp_path: Path) ->
 
     assert isinstance(upload, _Input)
     assert clicks == ["more", "media"]
+
+
+def test_qwen_media_upload_uses_exact_text_for_roleless_live_menu(tmp_path: Path) -> None:
+    runtime_mod = load_personification_module("plugin.personification.core.qwen_web_runtime")
+    clicks: list[str] = []
+
+    class _Empty:
+        first = None
+
+        def __init__(self) -> None:
+            self.first = self
+
+        async def count(self) -> int:
+            return 0
+
+        async def is_visible(self, timeout: int = 0) -> bool:
+            del timeout
+            return False
+
+    class _Input:
+        async def get_attribute(self, name: str) -> str | None:
+            return "video/*,.mp4" if name == "accept" else None
+
+    class _Inputs(_Empty):
+        def __init__(self, values: list[_Input]) -> None:
+            super().__init__()
+            self.values = values
+
+        async def count(self) -> int:
+            return len(self.values)
+
+        def nth(self, index: int) -> _Input:
+            return self.values[index]
+
+    class _TextControl:
+        def __init__(self, page: "_Page", text: str) -> None:
+            self.page = page
+            self.text = text
+            self.first = self
+
+        async def is_visible(self, timeout: int = 0) -> bool:
+            del timeout
+            return self.text == "更多" or self.page.more_open
+
+        async def click(self, timeout: int = 0) -> None:
+            del timeout
+            clicks.append(self.text)
+            if self.text == "更多":
+                self.page.more_open = True
+            else:
+                self.page.media_open = True
+
+    class _Page:
+        more_open = False
+        media_open = False
+
+        def locator(self, selector: str):  # noqa: ANN201
+            if selector.startswith('input[type="file"]'):
+                return _Inputs([_Input()] if self.media_open else [])
+            return _Empty()
+
+        def get_by_text(self, text: str, *, exact: bool = False) -> _TextControl:
+            assert exact is True
+            return _TextControl(self, text)
+
+        async def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    runtime = runtime_mod.QwenWebRuntime(tmp_path)
+    upload = asyncio.run(runtime._open_media_upload(_Page(), "video"))
+
+    assert isinstance(upload, _Input)
+    assert clicks == ["更多", "音视频速读"]
+
+
+def test_qwen_dedicated_media_form_uses_exact_text_for_roleless_confirm(tmp_path: Path) -> None:
+    runtime_mod = load_personification_module("plugin.personification.core.qwen_web_runtime")
+    clicks: list[str] = []
+
+    class _Empty:
+        def __init__(self) -> None:
+            self.first = self
+
+        async def is_visible(self, timeout: int = 0) -> bool:
+            del timeout
+            return False
+
+    class _Confirm(_Empty):
+        async def is_visible(self, timeout: int = 0) -> bool:
+            del timeout
+            return True
+
+        async def is_enabled(self) -> bool:
+            return True
+
+        async def click(self, timeout: int = 0) -> None:
+            del timeout
+            clicks.append("确认")
+
+    class _Page:
+        def locator(self, _selector: str) -> _Empty:
+            return _Empty()
+
+        def get_by_text(self, text: str, *, exact: bool = False):  # noqa: ANN201
+            assert exact is True
+            return _Confirm() if text == "确认" else _Empty()
+
+        async def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    runtime = runtime_mod.QwenWebRuntime(tmp_path)
+    submitted = asyncio.run(runtime._submit_prompt(_Page(), "unused"))
+
+    assert submitted is True
+    assert clicks == ["确认"]
 
 
 def test_qwen_dedicated_media_form_uses_enabled_confirm_button(tmp_path: Path) -> None:

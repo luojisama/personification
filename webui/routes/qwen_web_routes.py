@@ -101,7 +101,7 @@ def build_qwen_web_router(*, runtime: Any) -> APIRouter:
             action="qwen_web_probe",
             qq=admin.qq,
             device_id=admin.device_id,
-            target="qianwen_cn_v3",
+            target="qianwen_cn_v4",
             ip_hash=get_client_ip(request),
             detail={"state": str(result.get("state") or "unknown")},
             outcome="success" if result.get("state") == "ready" else "partial",
@@ -125,7 +125,7 @@ def build_qwen_web_router(*, runtime: Any) -> APIRouter:
             device_id=admin.device_id,
             target="qwen_web",
             ip_hash=get_client_ip(request),
-            detail={"page_contract_version": "qianwen_cn_v3"},
+            detail={"page_contract_version": "qianwen_cn_v4"},
         )
         return result
 

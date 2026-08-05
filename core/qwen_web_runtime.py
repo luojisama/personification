@@ -14,7 +14,7 @@ from ..native_mcp.social_research.browser import AuthSession, BrowserPool
 
 QWEN_WEB_PLATFORM = "qwen_web"
 QWEN_WEB_HOME = "https://www.qianwen.com/"
-QWEN_WEB_PAGE_CONTRACT = "qianwen_cn_v3"
+QWEN_WEB_PAGE_CONTRACT = "qianwen_cn_v4"
 
 _QWEN_ALLOWED_HOSTS = (
     "qianwen.com",
@@ -169,6 +169,28 @@ async def _first_visible(page: Any, selectors: Iterable[str]) -> Any | None:
     return None
 
 
+async def _first_visible_exact_text(page: Any, values: Iterable[str]) -> Any | None:
+    """Return one visible exact-text locator without scanning page-wide text.
+
+    The current Qianwen consumer shell renders some menu/form actions as plain
+    clickable ``div`` elements without a button/list/menu role.  Playwright's
+    exact text locator keeps this fallback bounded to one visible control and
+    avoids coordinate clicks or fuzzy body-text matching.
+    """
+
+    getter = getattr(page, "get_by_text", None)
+    if not callable(getter):
+        return None
+    for value in values:
+        try:
+            locator = getter(str(value or ""), exact=True).first
+            if await locator.is_visible(timeout=350):
+                return locator
+        except Exception:
+            continue
+    return None
+
+
 async def _bounded_body_text(page: Any, *, limit: int = 12000) -> str:
     try:
         text = await page.locator("body").inner_text(timeout=2000)
@@ -281,7 +303,11 @@ class QwenWebRuntime:
             return "login_required", "qwen_web_login_required"
         composer = await _first_visible(page, _QWEN_COMPOSERS)
         media_entry = await _first_visible(page, _QWEN_MEDIA_ENTRY_TRIGGERS)
+        if media_entry is None:
+            media_entry = await _first_visible_exact_text(page, ("音视频速读",))
         more_entry = await _first_visible(page, _QWEN_MORE_TRIGGERS)
+        if more_entry is None:
+            more_entry = await _first_visible_exact_text(page, ("更多",))
         if composer is not None and (media_entry is not None or more_entry is not None):
             return "ready", ""
         return "dom_changed", "qwen_web_dom_changed"
@@ -528,9 +554,13 @@ class QwenWebRuntime:
         """
 
         entry = await _first_visible(page, _QWEN_MEDIA_ENTRY_TRIGGERS)
+        if entry is None:
+            entry = await _first_visible_exact_text(page, ("音视频速读",))
         if entry is not None:
             return entry
         more = await _first_visible(page, _QWEN_MORE_TRIGGERS)
+        if more is None:
+            more = await _first_visible_exact_text(page, ("更多",))
         if more is None:
             return None
         await more.click(timeout=3000)
@@ -541,6 +571,8 @@ class QwenWebRuntime:
             except Exception:
                 break
             entry = await _first_visible(page, _QWEN_MEDIA_ENTRY_TRIGGERS)
+            if entry is None:
+                entry = await _first_visible_exact_text(page, ("音视频速读",))
             if entry is not None:
                 return entry
         return None
@@ -575,6 +607,11 @@ class QwenWebRuntime:
                 return upload
             if not upload_action_clicked:
                 action = await _first_visible(page, _QWEN_MEDIA_UPLOAD_TRIGGERS)
+                if action is None:
+                    action = await _first_visible_exact_text(
+                        page,
+                        ("上传音视频", "本地上传", "点击上传"),
+                    )
                 if action is not None:
                     await action.click(timeout=3000)
                     upload_action_clicked = True
@@ -623,6 +660,8 @@ class QwenWebRuntime:
             deadline = time.monotonic() + 15.0
             while time.monotonic() < deadline:
                 confirm = await _first_visible(page, _QWEN_MEDIA_CONFIRM_TRIGGERS)
+                if confirm is None:
+                    confirm = await _first_visible_exact_text(page, ("确认",))
                 if confirm is not None:
                     try:
                         if await confirm.is_enabled():
@@ -641,6 +680,8 @@ class QwenWebRuntime:
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             send = await _first_visible(page, _QWEN_SEND_BUTTONS)
+            if send is None:
+                send = await _first_visible_exact_text(page, ("发送",))
             if send is not None:
                 try:
                     if await send.is_enabled():

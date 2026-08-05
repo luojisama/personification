@@ -148,7 +148,7 @@ def test_video_understanding_uses_structured_form_instead_of_json_editor() -> No
     assert "不会识别或破解验证码" in app_config_js
     assert "网络安全风险" in app_config_js
     assert "qwenWebStatus" in app_config_js
-    assert "qianwen_cn_v3" in app_config_js
+    assert "qianwen_cn_v4" in app_config_js
     assert "updateQwenWebCardDom" in app_config_js
     assert "data-qwen-web-auth-host" in app_config_js
     assert 'api("/config/video-understanding"' in app_config_js
