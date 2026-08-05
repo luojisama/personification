@@ -122,6 +122,8 @@ def test_video_understanding_form_defaults_all_normalize() -> None:
     prefixes = (
         "personification_video_",
         "personification_gemini_web_",
+        "personification_mimo_web_asr_",
+        "personification_fullmodal_provider_",
         "personification_audio_transcription_",
     )
     for entry in config_registry.get_config_entries("global"):

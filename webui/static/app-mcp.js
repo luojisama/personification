@@ -483,8 +483,9 @@ async function refreshVisibleBuiltinInteractiveFrames({force=false, sessionId=""
       entry.force = false;
       updateBuiltinInteractiveTransportStatus(currentSessionId);
       const revision = forceCurrent || !entry.objectUrl ? 0 : Math.max(0, Number(entry.revision || 0));
-      const path = platform === "gemini_web"
-        ? `/media/web/gemini/auth/${encodeURIComponent(currentSessionId)}/frame?revision=${encodeURIComponent(String(revision))}`
+      const consumerService = platform === "gemini_web" ? "gemini" : platform === "mimo_asr_web" ? "mimo_asr" : "";
+      const path = consumerService
+        ? `/media/web/${consumerService}/auth/${encodeURIComponent(currentSessionId)}/frame?revision=${encodeURIComponent(String(revision))}`
         : `/mcp/builtin/social-research/auth/${encodeURIComponent(currentSessionId)}/frame?platform=${encodeURIComponent(platform)}&revision=${encodeURIComponent(String(revision))}`;
       const response = await fetch(API + path, {
         method:"GET",
@@ -1273,8 +1274,9 @@ function builtinInteractivePointerErrorMessage(code) {
 }
 
 async function postBuiltinInteractiveAction(platform, sessionId, action, {quiet=false, keepalive=false}={}) {
-  const path = platform === "gemini_web"
-    ? `/media/web/gemini/auth/${encodeURIComponent(sessionId)}/input`
+  const consumerService = platform === "gemini_web" ? "gemini" : platform === "mimo_asr_web" ? "mimo_asr" : "";
+  const path = consumerService
+    ? `/media/web/${consumerService}/auth/${encodeURIComponent(sessionId)}/input`
     : `/mcp/builtin/social-research/auth/${encodeURIComponent(sessionId)}/input?platform=${encodeURIComponent(platform)}`;
   const headers = {"content-type":"application/json"};
   if (keepalive) {
@@ -1285,10 +1287,11 @@ async function postBuiltinInteractiveAction(platform, sessionId, action, {quiet=
   }
   const next = await api(path, {method:"POST", headers, body:JSON.stringify({action})});
   if (platform === "gemini_web") state.geminiWebAuth = next;
+  else if (platform === "mimo_asr_web") state.mimoWebAsrAuth = next;
   else state.mcpAuth = {...state.mcpAuth, [platform]:next};
   const entry = builtinInteractiveFrameEntry(sessionId);
   if (!entry.objectUrl) entry.force = true;
-  if (platform !== "gemini_web") updateBuiltinAuthDom(platform, next);
+  if (!["gemini_web","mimo_asr_web"].includes(platform)) updateBuiltinAuthDom(platform, next);
   const pointerCode = action?.type?.startsWith("pointer_") ? String(next?.interactive_pointer_error_code || "") : "";
   if (pointerCode && next?.action_duplicate !== true) {
     const message = builtinInteractivePointerErrorMessage(pointerCode);

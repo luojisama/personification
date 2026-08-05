@@ -150,8 +150,14 @@ def test_video_understanding_uses_structured_form_instead_of_json_editor() -> No
     assert "gemini_web_v1" in app_config_js
     assert "updateGeminiWebCardDom" in app_config_js
     assert "data-gemini-web-auth-host" in app_config_js
+    assert "MiMo Web ASR（实验）" in app_config_js
+    assert "personification_mimo_web_asr_risk_acknowledged" in app_config_js
+    assert "/media/web/mimo_asr/auth/start" in app_config_js
+    assert "mimo_studio_asr_v1" in app_config_js
     assert 'api("/config/video-understanding"' in app_config_js
     assert "function readVideoUnderstandingForm" in app_config_js
+    video_fields = app_config_js.split("const VIDEO_CONFIG_FIELDS = [", 1)[1].split("];", 1)[0]
+    assert video_fields.count('"personification_') <= 80
     assert "video-config-grid" in style_css
     custom_budget_branch = app_config_js.split(
         'if (e.field_name === "personification_video_custom_frame_budgets")', 1

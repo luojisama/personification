@@ -174,6 +174,12 @@ const VIDEO_CONFIG_FIELDS = [
   "personification_gemini_web_video_max_bytes",
   "personification_gemini_web_audio_max_bytes",
   "personification_gemini_web_output_max_chars",
+  "personification_mimo_web_asr_enabled",
+  "personification_mimo_web_asr_risk_acknowledged",
+  "personification_mimo_web_asr_job_timeout",
+  "personification_mimo_web_asr_idle_timeout",
+  "personification_mimo_web_asr_audio_max_bytes",
+  "personification_mimo_web_asr_output_max_chars",
   "personification_audio_transcription_enabled",
   "personification_audio_transcription_provider",
   "personification_audio_transcription_workspace_id",
@@ -419,12 +425,17 @@ function scheduleGeminiWebStatusPoll(delay=3000) {
   }, Math.max(0, Number(delay||0)));
 }
 
-function startGeminiWebConfigLifecycle() { scheduleGeminiWebStatusPoll(0); }
+function startGeminiWebConfigLifecycle() {
+  scheduleGeminiWebStatusPoll(0);
+  scheduleMimoWebAsrStatusPoll(0);
+}
 
 function stopGeminiWebConfigLifecycle() {
   if (_geminiWebStatusTimer) clearTimeout(_geminiWebStatusTimer);
   _geminiWebStatusTimer = null;
-  if (_mcpInteractivePointer?.platform === "gemini_web") cancelActiveBuiltinInteractivePointer({keepalive:true});
+  if (_mimoWebAsrStatusTimer) clearTimeout(_mimoWebAsrStatusTimer);
+  _mimoWebAsrStatusTimer = null;
+  if (["gemini_web","mimo_asr_web"].includes(_mcpInteractivePointer?.platform)) cancelActiveBuiltinInteractivePointer({keepalive:true});
   stopBuiltinInteractiveFramePolling();
 }
 
@@ -475,6 +486,148 @@ async function geminiWebLogout() {
   finally { state.geminiWebBusy=false; render(); }
 }
 
+let _mimoWebAsrStatusTimer = null;
+let _mimoWebAsrStatusInFlight = false;
+
+function renderMimoWebAsrStatus(status=state.mimoWebAsrStatus) {
+  const current = status || {};
+  const code = String(current.last_diagnostic_code || "");
+  const cooldown = Math.max(0, Number(current.risk_cooldown_seconds || 0));
+  return `<div class="mimo-web-asr-status-island" data-mimo-web-asr-status-island>
+    <div class="mcp-runtime-overview"><span>状态<strong>${escapeHtml(GEMINI_WEB_STATE_LABELS[current.state] || current.state || "待检查")}</strong></span><span>页面契约<strong>${escapeHtml(current.page_contract_version || "mimo_studio_asr_v1")}</strong></span><span>本地 profile<strong>${current.profile_present?"存在":"无"}</strong></span><span>浏览器<strong>${current.browser_running?"运行中":"已回收"}</strong></span><span>任务<strong>${current.active_job?"占用":"空闲"}</strong></span></div>
+    ${code?`<div class="alert ${code.includes("network_risk")?"warn":""}"><code>${escapeHtml(code)}</code>${cooldown?` · 冷却剩余 ${Math.ceil(cooldown/60)} 分钟`:""}</div>`:""}
+  </div>`;
+}
+
+function renderMimoWebAsrInteractiveAuth(auth) {
+  if (!auth?.session_id || auth.interactive_available !== true) return "";
+  const sessionId = String(auth.session_id || "");
+  const viewport = auth.interactive_viewport || {};
+  const width = Math.max(320, Number(viewport.width || 1280));
+  const height = Math.max(240, Number(viewport.height || 900));
+  const frame = builtinInteractiveFrameEntry(sessionId);
+  const frameSource = frame.objectUrl || _MCP_INTERACTIVE_FRAME_PLACEHOLDER_SRC;
+  return `<section class="mcp-interactive-auth" data-mcp-interactive-session="${escapeAttr(sessionId)}" data-platform="mimo_asr_web">
+    <div class="mcp-interactive-heading"><div><strong>MiMo Web ASR 人工登录 / 验证</strong><small>当前官方页面：${escapeHtml(auth.interactive_display_url || "https://aistudio.xiaomimimo.com/#/c")}</small></div><span class="tag required">仅管理员</span></div>
+    <div class="mcp-interactive-screen" role="application" aria-label="MiMo Studio 官方页面人工接管画面">
+      <img draggable="false" alt="MiMo Studio 官方页面" src="${escapeAttr(frameSource)}" class="${frame.objectUrl?"":"is-loading"}" data-mcp-interactive-frame data-platform="mimo_asr_web" data-session-id="${escapeAttr(sessionId)}" data-viewport-width="${width}" data-viewport-height="${height}">
+      <span class="mcp-interactive-frame-placeholder">正在读取 MiMo Studio 官方页面画面…</span>
+      <span class="mcp-interactive-pointer-marker" data-mcp-interactive-pointer-marker aria-hidden="true"></span>
+    </div>
+    <div class="mcp-interactive-transport" data-mcp-interactive-status role="status">画面与操作通道准备中</div>
+    <div class="mcp-interactive-controls">
+      <label>向当前焦点输入<input type="password" maxlength="200" autocomplete="off" spellcheck="false" data-mcp-interactive-text placeholder="先点击官方输入框，再在此输入"></label>
+      <button class="btn" data-mcp-interactive-type="mimo_asr_web" data-session-id="${escapeAttr(sessionId)}">发送输入</button>
+      ${["Tab","Enter","Backspace","Escape"].map(key=>`<button class="btn small" data-mcp-interactive-key="${key}" data-platform="mimo_asr_web" data-session-id="${escapeAttr(sessionId)}">${key}</button>`).join("")}
+      <button class="btn small" data-mcp-interactive-scroll="-700" data-platform="mimo_asr_web" data-session-id="${escapeAttr(sessionId)}">向上滚动</button>
+      <button class="btn small" data-mcp-interactive-scroll="700" data-platform="mimo_asr_web" data-session-id="${escapeAttr(sessionId)}">向下滚动</button>
+      <button class="btn" data-mcp-interactive-refresh="mimo_asr_web">刷新画面</button>
+      <button class="btn primary" onclick="mimoWebAsrFinishAuth('${escapeAttr(sessionId)}')">验证完成，检查登录态</button>
+      <button class="btn danger" onclick="mimoWebAsrCancelAuth('${escapeAttr(sessionId)}')">取消接管</button>
+    </div>
+    <p class="muted">操作只转发到 MiMo Studio 官方域名。插件不会识别或破解验证码，不隐藏自动化特征，不调用网页内部接口；遇到风控立即停止。</p>
+  </section>`;
+}
+
+function renderMimoWebAsrCard(entries) {
+  const value = (field, fallback="") => videoConfigValue(entries, field, fallback);
+  const enabled = value("personification_mimo_web_asr_enabled", false);
+  const acknowledged = value("personification_mimo_web_asr_risk_acknowledged", false);
+  const canOperate = enabled && acknowledged;
+  return `<section class="card video-config-card" data-mimo-web-asr-card>
+    <div class="between"><div><h2>MiMo Web ASR（实验）</h2><p class="muted">仅在没有平台字幕、且全模态模型没有成功听取音轨时，通过 MiMo Studio 公开页面选择 MiMo-V2.5-ASR 做忠实转写。</p></div><span class="tag required">声音兜底</span></div>
+    <div class="alert warn">音频会离开 Bot 服务器并可能保留在 MiMo 账号历史中。页面没有 MiMo-V2.5-ASR、没有音频上传入口或出现验证时会立即降级到已配置的 ASR API。</div>
+    <div class="video-config-grid">
+      ${videoConfigToggle("personification_mimo_web_asr_enabled", enabled, "启用 MiMo Web ASR", "未确认风险时服务端拒绝启用。")}
+      ${videoConfigToggle("personification_mimo_web_asr_risk_acknowledged", acknowledged, "我已确认音频上传与网页自动化风险")}
+      ${videoConfigInput("personification_mimo_web_asr_audio_max_bytes", videoConfigMiB(value("personification_mimo_web_asr_audio_max_bytes",67108864),64), "Web 音频上限（MiB）", {kind:"mib",min:0.0625,max:512,step:1})}
+      ${videoConfigInput("personification_mimo_web_asr_job_timeout", value("personification_mimo_web_asr_job_timeout",300), "任务超时（秒）", {kind:"float",min:20,max:600,step:1})}
+      ${videoConfigInput("personification_mimo_web_asr_idle_timeout", value("personification_mimo_web_asr_idle_timeout",300), "空闲回收（秒）", {kind:"float",min:60,max:1800,step:10})}
+      ${videoConfigInput("personification_mimo_web_asr_output_max_chars", value("personification_mimo_web_asr_output_max_chars",20000), "输出上限（字符）", {kind:"int",min:1000,max:50000,step:100})}
+    </div>
+    ${renderMimoWebAsrStatus()}
+    <div class="row"><button class="btn" onclick="mimoWebAsrProbe()" ${state.mimoWebAsrBusy||!canOperate?"disabled":""}>检查页面与模型</button><button class="btn primary" onclick="mimoWebAsrStartAuth()" ${state.mimoWebAsrBusy||!canOperate?"disabled":""}>打开登录 / 人工验证</button><button class="btn danger" onclick="mimoWebAsrLogout()" ${state.mimoWebAsrBusy?"disabled":""}>注销并删除本地 profile</button></div>
+    <div data-mimo-web-asr-auth-host>${renderMimoWebAsrInteractiveAuth(state.mimoWebAsrAuth)}</div>
+  </section>`;
+}
+
+function updateMimoWebAsrCardDom() {
+  const island = document.querySelector("[data-mimo-web-asr-status-island]");
+  const authHost = document.querySelector("[data-mimo-web-asr-auth-host]");
+  if (!island || !authHost) return false;
+  island.outerHTML = renderMimoWebAsrStatus();
+  if (!_mcpInteractivePointer) authHost.innerHTML = renderMimoWebAsrInteractiveAuth(state.mimoWebAsrAuth);
+  if (state.mimoWebAsrAuth?.interactive_available) startBuiltinInteractiveFramePolling();
+  return true;
+}
+
+async function refreshMimoWebAsrStatus({refresh=false, renderAfter=true}={}) {
+  if (_mimoWebAsrStatusInFlight || state.view !== "config" || state.activeGroup !== "视频理解") return;
+  _mimoWebAsrStatusInFlight = true;
+  const before = geminiWebStatusSignature(state.mimoWebAsrStatus, state.mimoWebAsrAuth);
+  try {
+    const next = await api(`/media/web/mimo_asr/status${refresh?"?refresh=true":""}`, {cache:"no-store"});
+    state.mimoWebAsrStatus = next;
+    if (!state.mimoWebAsrAuth && next?.interactive_session) state.mimoWebAsrAuth = next.interactive_session;
+    if (state.mimoWebAsrAuth?.session_id && !document.hidden) {
+      try { state.mimoWebAsrAuth = await api(`/media/web/mimo_asr/auth/${encodeURIComponent(state.mimoWebAsrAuth.session_id)}`, {cache:"no-store"}); } catch {}
+    }
+  } finally { _mimoWebAsrStatusInFlight = false; }
+  const after = geminiWebStatusSignature(state.mimoWebAsrStatus, state.mimoWebAsrAuth);
+  if (renderAfter && before !== after && !_mcpInteractivePointer && !updateMimoWebAsrCardDom()) render();
+  if (state.mimoWebAsrAuth?.interactive_available) startBuiltinInteractiveFramePolling();
+}
+
+function scheduleMimoWebAsrStatusPoll(delay=3000) {
+  if (_mimoWebAsrStatusTimer) clearTimeout(_mimoWebAsrStatusTimer);
+  _mimoWebAsrStatusTimer = setTimeout(async()=>{
+    _mimoWebAsrStatusTimer = null;
+    if (state.view !== "config") return;
+    if (!document.hidden && state.activeGroup === "视频理解") await refreshMimoWebAsrStatus();
+    scheduleMimoWebAsrStatusPoll(3000);
+  }, Math.max(0, Number(delay||0)));
+}
+
+async function mimoWebAsrProbe() {
+  if (state.mimoWebAsrBusy) return;
+  state.mimoWebAsrBusy=true; render();
+  try { state.mimoWebAsrStatus=await api("/media/web/mimo_asr/probe",{method:"POST"}); alertFlash(state.mimoWebAsrStatus?.state==="ready"?"ok":"err",state.mimoWebAsrStatus?.state==="ready"?"MiMo-V2.5-ASR 页面契约可用":"MiMo Web ASR 页面或模型尚不可用"); }
+  catch(error){alertFlash("err",operationDiagnosticFromError(error,"MiMo Web ASR 检查失败").message||"MiMo Web ASR 检查失败");}
+  finally{state.mimoWebAsrBusy=false;render();}
+}
+
+async function mimoWebAsrStartAuth() {
+  if (state.mimoWebAsrBusy || !confirm("将打开 MiMo Studio 官方页面供管理员本人登录或验证。插件不会绕过验证码、风控或网络安全风险。确认继续？")) return;
+  state.mimoWebAsrBusy=true;render();
+  try { state.mimoWebAsrAuth=await api("/media/web/mimo_asr/auth/start",{method:"POST"}); if(state.mimoWebAsrAuth?.session_id)startBuiltinInteractiveFramePolling(); alertFlash(state.mimoWebAsrAuth?.session_id?"ok":"err",state.mimoWebAsrAuth?.session_id?"MiMo Web ASR 人工登录会话已创建":"未能打开 MiMo Studio 官方页面"); }
+  catch(error){alertFlash("err",operationDiagnosticFromError(error,"MiMo Web ASR 登录启动失败").message||"MiMo Web ASR 登录启动失败");}
+  finally{state.mimoWebAsrBusy=false;render();}
+}
+
+async function mimoWebAsrFinishAuth(sessionId) {
+  if (_mcpInteractivePointer?.sessionId===sessionId) await cancelActiveBuiltinInteractivePointer();
+  state.mimoWebAsrBusy=true;
+  try { state.mimoWebAsrAuth=await api(`/media/web/mimo_asr/auth/${encodeURIComponent(sessionId)}/finish`,{method:"POST"}); await refreshMimoWebAsrStatus({renderAfter:false}); alertFlash(state.mimoWebAsrAuth?.status==="success"?"ok":"err",state.mimoWebAsrAuth?.status==="success"?"MiMo Studio 登录态已保存":"尚未检测到可用登录态和 ASR 页面"); }
+  catch(error){alertFlash("err",operationDiagnosticFromError(error,"MiMo Web ASR 登录检查失败").message||"MiMo Web ASR 登录检查失败");}
+  finally{state.mimoWebAsrBusy=false;render();}
+}
+
+async function mimoWebAsrCancelAuth(sessionId) {
+  if (_mcpInteractivePointer?.sessionId===sessionId) await cancelActiveBuiltinInteractivePointer();
+  try { await api(`/media/web/mimo_asr/auth/${encodeURIComponent(sessionId)}/cancel`,{method:"POST"}); state.mimoWebAsrAuth=null; alertFlash("ok","MiMo Web ASR 人工接管已取消"); }
+  catch(error){alertFlash("err",operationDiagnosticFromError(error,"取消 MiMo Web ASR 接管失败").message||"取消 MiMo Web ASR 接管失败");}
+  finally{render();}
+}
+
+async function mimoWebAsrLogout() {
+  const exact="确认注销MiMoWebASR";
+  if((prompt(`注销会删除本地 MiMo Web ASR profile，不会删除账号云端历史。\n请输入：${exact}`)||"")!==exact)return;
+  state.mimoWebAsrBusy=true;render();
+  try { state.mimoWebAsrStatus=await api("/media/web/mimo_asr/logout",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({confirm:exact})}); state.mimoWebAsrAuth=null; stopBuiltinInteractiveFramePolling(); alertFlash("ok","MiMo Web ASR 本地 profile 已删除"); }
+  catch(error){alertFlash("err",operationDiagnosticFromError(error,"MiMo Web ASR 注销失败").message||"MiMo Web ASR 注销失败");}
+  finally{state.mimoWebAsrBusy=false;render();}
+}
+
 function renderVideoUnderstandingEditor(items) {
   const entries = videoConfigEntries(items);
   const value = (field, fallback="") => videoConfigValue(entries, field, fallback);
@@ -522,6 +675,7 @@ function renderVideoUnderstandingEditor(items) {
       <div class="alert" data-video-provider-note style="margin-top:12px">${escapeHtml(videoProviderNote(provider))}</div>
     </section>
     ${renderGeminiWebCard(entries)}
+    ${renderMimoWebAsrCard(entries)}
     <section class="card video-config-card" data-video-frame-section>
       <div><h2>分镜抽帧</h2><p class="muted">场景差分与字幕差分先低清扫描，再按时间顺序拼图；不会把 24 FPS 的每一帧全部交给模型。</p></div>
       ${videoConfigToggle("personification_video_storyboard_fallback_enabled", value("personification_video_storyboard_fallback_enabled",true), "启用最终分镜兜底", "所有全模态路线失败后仍尝试抽帧与字幕/ASR。")}

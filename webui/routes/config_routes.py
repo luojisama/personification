@@ -1074,7 +1074,7 @@ def build_config_router(*, runtime) -> APIRouter:
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
         values = dict(payload.values or {})
-        if not values or len(values) > 50:
+        if not values or len(values) > 80:
             raise HTTPException(
                 status_code=400,
                 detail=diagnostic(
@@ -1082,7 +1082,7 @@ def build_config_router(*, runtime) -> APIRouter:
                     code="video_config_batch_invalid",
                     phase="request_validation",
                     title="视频理解配置表单无效",
-                    message="配置字段数量必须在 1 到 50 之间。",
+                    message="配置字段数量必须在 1 到 80 之间。",
                     suggestion="刷新视频理解配置页后重新填写表单。",
                     retryable=True,
                 ),
@@ -1096,6 +1096,7 @@ def build_config_router(*, runtime) -> APIRouter:
             for field_name in entries
             if field_name.startswith("personification_video_")
             or field_name.startswith("personification_gemini_web_")
+            or field_name.startswith("personification_mimo_web_asr_")
             or field_name.startswith("personification_fullmodal_provider_")
             or field_name.startswith("personification_audio_transcription_")
         }
@@ -1165,6 +1166,31 @@ def build_config_router(*, runtime) -> APIRouter:
                     title="启用 Gemini Web 前必须确认风险",
                     message="请确认媒体第三方上传、Google 账号历史与消费者网页自动化风险后再启用。",
                     suggestion="勾选风险确认，或保持 Gemini Web 关闭。",
+                    retryable=True,
+                ),
+            )
+        future_mimo_enabled = bool(
+            normalized_values.get(
+                "personification_mimo_web_asr_enabled",
+                getattr(runtime.plugin_config, "personification_mimo_web_asr_enabled", False),
+            )
+        )
+        future_mimo_risk_acknowledged = bool(
+            normalized_values.get(
+                "personification_mimo_web_asr_risk_acknowledged",
+                getattr(runtime.plugin_config, "personification_mimo_web_asr_risk_acknowledged", False),
+            )
+        )
+        if future_mimo_enabled and not future_mimo_risk_acknowledged:
+            raise HTTPException(
+                status_code=400,
+                detail=diagnostic(
+                    ok=False,
+                    code="mimo_web_asr_risk_ack_required",
+                    phase="risk_acknowledgement",
+                    title="启用 MiMo Web ASR 前必须确认风险",
+                    message="请确认音频第三方上传、账号历史与消费者网页自动化风险后再启用。",
+                    suggestion="勾选风险确认，或保持 MiMo Web ASR 关闭。",
                     retryable=True,
                 ),
             )

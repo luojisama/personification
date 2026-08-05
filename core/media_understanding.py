@@ -59,6 +59,12 @@ def _gemini_web_automatic_enabled(config: Any) -> bool:
     )
 
 
+def _mimo_web_asr_automatic_enabled(config: Any) -> bool:
+    return bool(getattr(config, "personification_mimo_web_asr_enabled", False)) and bool(
+        getattr(config, "personification_mimo_web_asr_risk_acknowledged", False)
+    )
+
+
 def build_tool_caller(config: Any) -> Any:
     from ..skills.skillpacks.tool_caller.scripts.impl import build_tool_caller
 
@@ -1550,19 +1556,60 @@ async def analyze_videos_with_route_or_fallback(
         storyboard = await prepare_video_storyboard(ref, plugin_config)
         try:
             transcript = None
+            mimo_transcript = ""
             if not storyboard.subtitle_text:
-                transcript = await transcribe_audio_file(
-                    storyboard.audio_path,
-                    plugin_config,
-                    source_url=storyboard.source_url,
-                    context_terms=context_terms,
-                )
+                mimo_started_at = time.monotonic()
+                if storyboard.audio_path is not None and _mimo_web_asr_automatic_enabled(plugin_config):
+                    try:
+                        from .mimo_web_asr_service import get_mimo_web_asr_service
+
+                        mimo_transcript, detail = await get_mimo_web_asr_service(runtime).transcribe(
+                            config=plugin_config,
+                            media_ref=str(storyboard.audio_path),
+                            prompt="请按时间顺序忠实转写这段视频音轨。" + " ".join(context_terms[:20]),
+                        )
+                    except Exception as exc:
+                        _log_warning(runtime, f"[video] MiMo Web ASR failed: {sanitize_text(exc)}")
+                        detail = {"status": "failed", "diagnostic_code": "mimo_web_asr_process_failed"}
+                    _record_media_attempt(
+                        route_attempts,
+                        route="video_storyboard_mimo_web_asr",
+                        status="ok" if mimo_transcript else str(detail.get("status") or "failed"),
+                        started_at=mimo_started_at,
+                        diagnostic_code=str(detail.get("diagnostic_code") or ""),
+                        diagnostic_stage=str(detail.get("diagnostic_stage") or ""),
+                    )
+                if not mimo_transcript:
+                    asr_started_at = time.monotonic()
+                    transcript = await transcribe_audio_file(
+                        storyboard.audio_path,
+                        plugin_config,
+                        source_url=storyboard.source_url,
+                        context_terms=context_terms,
+                    )
+                    _record_media_attempt(
+                        route_attempts,
+                        route="video_storyboard_asr_api",
+                        status=(
+                            "ok"
+                            if bool(getattr(transcript, "available", False))
+                            else str(getattr(transcript, "status", "unavailable") or "unavailable")
+                        ),
+                        started_at=asr_started_at,
+                        diagnostic_code=str(getattr(transcript, "error_code", "") or ""),
+                    )
             metadata = storyboard.summary()
-            transcript_block = storyboard.subtitle_text or (
-                transcript.text if transcript is not None and transcript.available else ""
+            transcript_block = storyboard.subtitle_text or mimo_transcript or (
+                str(getattr(transcript, "text", "") or "")
+                if transcript is not None and bool(getattr(transcript, "available", False))
+                else ""
             )
             transcript_kind = (
-                "BILIBILI_OR_PLATFORM_SUBTITLE" if storyboard.subtitle_text else "AUDIO_TRANSCRIPT"
+                "BILIBILI_OR_PLATFORM_SUBTITLE"
+                if storyboard.subtitle_text
+                else "MIMO_WEB_ASR_TRANSCRIPT"
+                if mimo_transcript
+                else "AUDIO_TRANSCRIPT"
             )
             combined_prompt = (
                 f"{str(prompt or '').strip()}\n\n"
@@ -1667,6 +1714,8 @@ def audio_route_available(runtime: Any) -> bool:
     if primary_route_supports_native_audio(runtime):
         return True
     if _gemini_web_automatic_enabled(plugin_config):
+        return True
+    if _mimo_web_asr_automatic_enabled(plugin_config):
         return True
     if bool(getattr(plugin_config, "personification_fullmodal_provider_enabled", False)) and str(
         getattr(plugin_config, "personification_fullmodal_provider_api_key", "") or ""
@@ -1861,7 +1910,7 @@ async def analyze_audios_with_route_or_fallback(
         )
         _record_media_attempt(
             route_attempts,
-            route="audio_asr",
+            route="audio_asr_api",
             status="ok" if transcript.available else str(transcript.status or "unavailable"),
             started_at=asr_started_at,
             diagnostic_code=str(transcript.error_code or ""),
@@ -1881,7 +1930,47 @@ async def analyze_audios_with_route_or_fallback(
             f"{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n"
             "[/UNTRUSTED_DATA_ONLY]"
         )
-        return wrapped, "audio_asr"
+        return wrapped, "audio_asr_api"
+
+    async def _mimo_web_asr_result() -> tuple[str, str]:
+        mimo_started_at = time.monotonic()
+        if not _mimo_web_asr_automatic_enabled(plugin_config):
+            code = (
+                "mimo_web_asr_disabled"
+                if not bool(getattr(plugin_config, "personification_mimo_web_asr_enabled", False))
+                else "mimo_web_asr_risk_ack_required"
+            )
+            _record_media_attempt(
+                route_attempts,
+                route="audio_mimo_web_asr",
+                status="skipped",
+                started_at=mimo_started_at,
+                diagnostic_code=code,
+            )
+            return "", "audio_unavailable"
+        try:
+            from .mimo_web_asr_service import get_mimo_web_asr_service
+
+            result, detail = await get_mimo_web_asr_service(runtime).transcribe(
+                config=plugin_config,
+                media_ref=refs[0],
+                prompt=prompt + " " + " ".join(context_terms[:20]),
+            )
+        except Exception as exc:
+            _log_warning(runtime, f"[audio] MiMo Web ASR failed: {sanitize_text(exc)}")
+            result = ""
+            detail = {"status": "failed", "diagnostic_code": "mimo_web_asr_process_failed"}
+        result_text = str(result or "").strip()
+        status = "ok" if result_text else str(detail.get("status") or "failed")
+        _record_media_attempt(
+            route_attempts,
+            route="audio_mimo_web_asr",
+            status=status,
+            started_at=mimo_started_at,
+            diagnostic_code=str(detail.get("diagnostic_code") or ""),
+            diagnostic_stage=str(detail.get("diagnostic_stage") or ""),
+        )
+        return (result_text, "audio_mimo_web_asr") if result_text else ("", "audio_unavailable")
 
     gemini_result = await _gemini_web_result()
     if gemini_result[0]:
@@ -1889,6 +1978,9 @@ async def analyze_audios_with_route_or_fallback(
     external_result = await _external_api_result()
     if external_result[0]:
         return external_result
+    mimo_result = await _mimo_web_asr_result()
+    if mimo_result[0]:
+        return mimo_result
     asr_result = await _asr_result()
     if asr_result[0]:
         return asr_result

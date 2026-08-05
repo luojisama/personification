@@ -770,17 +770,17 @@ def test_qwen_service_allows_only_one_active_and_one_waiting_job(tmp_path: Path)
 
         second_task = asyncio.create_task(second())
         for _ in range(20):
-            if service._waiting == 1:
+            if service_mod.consumer_web_coordinator.snapshot("gemini")["waiting"] == 1:
                 break
             await asyncio.sleep(0)
-        assert service._active == 1
-        assert service._waiting == 1
+        assert service_mod.consumer_web_coordinator.snapshot("gemini")["active"] is True
+        assert service_mod.consumer_web_coordinator.snapshot("gemini")["waiting"] == 1
         with pytest.raises(RuntimeError, match="gemini_web_busy"):
             async with service._admit():
                 pass
         release.set()
         await asyncio.gather(first_task, second_task)
-        assert service._active == 0
-        assert service._waiting == 0
+        assert service_mod.consumer_web_coordinator.snapshot("gemini")["active"] is False
+        assert service_mod.consumer_web_coordinator.snapshot("gemini")["waiting"] == 0
 
     asyncio.run(run())

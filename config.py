@@ -270,6 +270,12 @@ class Config(BaseModel):
     personification_gemini_web_video_max_bytes: int = 536870912
     personification_gemini_web_audio_max_bytes: int = 104857600
     personification_gemini_web_output_max_chars: int = 20000
+    personification_mimo_web_asr_enabled: bool = False
+    personification_mimo_web_asr_risk_acknowledged: bool = False
+    personification_mimo_web_asr_job_timeout: float = 300.0
+    personification_mimo_web_asr_idle_timeout: float = 300.0
+    personification_mimo_web_asr_audio_max_bytes: int = 67108864
+    personification_mimo_web_asr_output_max_chars: int = 20000
     personification_audio_transcription_enabled: bool = True
     personification_audio_transcription_provider: str = "auto"
     personification_audio_transcription_workspace_id: str = ""

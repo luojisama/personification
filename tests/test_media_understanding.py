@@ -9,6 +9,7 @@ from ._loader import load_personification_module
 
 media_understanding = load_personification_module("plugin.personification.core.media_understanding")
 gemini_web_service = load_personification_module("plugin.personification.core.gemini_web_service")
+mimo_web_asr_service = load_personification_module("plugin.personification.core.mimo_web_asr_service")
 vision_caller = load_personification_module(
     "plugin.personification.skills.skillpacks.vision_caller.scripts.impl"
 )
@@ -556,9 +557,60 @@ def test_audio_falls_back_to_configured_asr(monkeypatch, tmp_path: Path) -> None
         )
     )
 
-    assert route == "audio_asr"
+    assert route == "audio_asr_api"
     assert "红狼修脚后撤离" in result
     assert "UNTRUSTED_DATA_ONLY" in result
+
+
+def test_audio_uses_mimo_web_asr_before_configured_asr(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    audio_path = tmp_path / "voice.wav"
+    audio_path.write_bytes(b"RIFFfake")
+    attempts: list[dict] = []
+
+    async def _no_primary(**_kwargs):  # noqa: ANN003, ANN202
+        return ""
+
+    class _Service:
+        async def transcribe(self, **kwargs):  # noqa: ANN003, ANN202
+            assert kwargs["media_ref"] == str(audio_path)
+            return "[UNTRUSTED_DATA_ONLY: MIMO_WEB_ASR_TRANSCRIPT]\n花来\n[/UNTRUSTED_DATA_ONLY]", {
+                "status": "ok",
+                "diagnostic_code": "",
+            }
+
+    async def _forbidden_asr(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("MiMo Web ASR success must stop API ASR")
+
+    monkeypatch.setattr(media_understanding, "_try_primary_audio_routes", _no_primary)
+    monkeypatch.setattr(mimo_web_asr_service, "get_mimo_web_asr_service", lambda _runtime: _Service())
+    monkeypatch.setattr(media_understanding, "transcribe_audio_file", _forbidden_asr)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_gemini_web_enabled=False,
+            personification_gemini_web_risk_acknowledged=False,
+            personification_fullmodal_provider_enabled=False,
+            personification_mimo_web_asr_enabled=True,
+            personification_mimo_web_asr_risk_acknowledged=True,
+        )
+    )
+
+    result, route = asyncio.run(
+        media_understanding.analyze_audios_with_route_or_fallback(
+            runtime=runtime,
+            prompt="转写语音",
+            audio_refs=[str(audio_path)],
+            route_attempts=attempts,
+        )
+    )
+
+    assert "MIMO_WEB_ASR_TRANSCRIPT" in result
+    assert route == "audio_mimo_web_asr"
+    assert [item["route"] for item in attempts] == [
+        "audio_primary",
+        "audio_gemini_web",
+        "audio_external_fullmodal",
+        "audio_mimo_web_asr",
+    ]
 
 
 def test_qwen_omni_uses_official_streaming_video_url_contract(monkeypatch) -> None:  # noqa: ANN001

@@ -10,6 +10,7 @@ let state = {
   logged: false, qq: "", view: "dashboard",
   entries: [], groups: [], activeGroup: null, configSearch: "", configSearchComposing: false, configSearchDraft: "", configDrafts: {},
   geminiWebStatus: null, geminiWebAuth: null, geminiWebBusy: false,
+  mimoWebAsrStatus: null, mimoWebAsrAuth: null, mimoWebAsrBusy: false,
   devices: [], devicePending: false, alert: null, loading: false, loadingMessage: "",
   dashboard: null, dashboardWindow: "month", dashboardDetail: null,
   personas: [], selectedPersona: null, personaSearch: "", personaScopeBotId: "", personaScopeGroupId: "", personaScopeRequestId: 0, scopedProfileBusy: false,
@@ -540,6 +541,8 @@ async function api(path, opts = {}) {
 
 function clearInMemorySensitiveState() {
   state.configDrafts = {};
+  state.geminiWebStatus = null; state.geminiWebAuth = null; state.geminiWebBusy = false;
+  state.mimoWebAsrStatus = null; state.mimoWebAsrAuth = null; state.mimoWebAsrBusy = false;
   if (typeof clearMcpSensitiveState === "function") clearMcpSensitiveState();
 }
 

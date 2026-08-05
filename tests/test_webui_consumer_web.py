@@ -12,6 +12,12 @@ def _service(runtime_context):  # noqa: ANN001, ANN202
     return module.get_gemini_web_service(runtime)
 
 
+def _mimo_service(runtime_context):  # noqa: ANN001, ANN202
+    module = load_personification_module("plugin.personification.core.mimo_web_asr_service")
+    runtime = runtime_context.app_module.get_runtime_context()
+    return module.get_mimo_web_asr_service(runtime)
+
+
 def test_gemini_web_status_requires_admin_without_starting_helper(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
     calls: list[bool] = []
     service = _service(_runtime_context)
@@ -134,3 +140,40 @@ def test_gemini_web_network_risk_error_is_stable_and_sanitized(_runtime_context,
     assert payload["code"] == "gemini_web_network_risk_detected"
     assert "Cookie" not in response.text
     assert "网络或账号安全风险" in payload["message"]
+
+
+def test_mimo_web_asr_status_and_auth_use_generic_consumer_route(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+    service = _mimo_service(_runtime_context)
+    owners: list[str] = []
+
+    async def _status(_config, *, refresh=False):  # noqa: ANN001, ANN202
+        return {
+            "state": "login_required",
+            "profile_present": False,
+            "page_contract_version": "mimo_studio_asr_v1",
+            "refresh": refresh,
+        }
+
+    async def _start(_config, owner):  # noqa: ANN001, ANN202
+        owners.append(owner)
+        return {"session_id": "mimo_auth", "status": "manual_verification_required", "interactive_available": True}
+
+    monkeypatch.setattr(service, "status", _status)
+    monkeypatch.setattr(service, "auth_start", _start)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    status = client.get("/personification/api/media/web/mimo_asr/status")
+    auth = client.post("/personification/api/media/web/mimo_asr/auth/start")
+    assert status.status_code == 200
+    assert status.json()["page_contract_version"] == "mimo_studio_asr_v1"
+    assert auth.status_code == 200
+    assert owners and owners[0].endswith(":mimo_asr_web")
+
+
+def test_unknown_consumer_web_service_is_rejected(_runtime_context) -> None:
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    response = client.get("/personification/api/media/web/not-a-service/status")
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "consumer_web_service_not_found"

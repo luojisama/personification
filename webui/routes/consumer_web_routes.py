@@ -2,32 +2,47 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 
 from ...core import webui_audit_log
 from ...core.gemini_web_service import get_gemini_web_service
+from ...core.mimo_web_asr_service import get_mimo_web_asr_service
 from ..deps import AdminIdentity, get_client_ip, require_admin
 
 
-_KNOWN_CODES = {
-    "gemini_web_disabled",
-    "gemini_web_risk_ack_required",
-    "gemini_web_login_required",
-    "gemini_web_manual_verification_required",
-    "gemini_web_network_risk_detected",
-    "gemini_web_network_risk_cooldown",
-    "gemini_web_busy",
-    "gemini_web_dom_changed",
-    "gemini_web_upload_rejected",
-    "gemini_web_generation_timeout",
-    "gemini_web_output_empty",
-    "gemini_web_process_failed",
-    "gemini_web_context_idle_evicted",
-    "gemini_web_media_too_large",
-    "gemini_web_request_invalid",
-    "gemini_web_local_rate_limited",
+@dataclass(frozen=True)
+class _ServiceSpec:
+    name: str
+    title: str
+    code_prefix: str
+    contract: str
+    platform: str
+    logout_confirm: str
+    factory: Callable[[Any], Any]
+
+
+_SERVICE_SPECS = {
+    "gemini": _ServiceSpec(
+        name="gemini",
+        title="Gemini Web",
+        code_prefix="gemini_web",
+        contract="gemini_web_v1",
+        platform="gemini_web",
+        logout_confirm="确认注销GeminiWeb",
+        factory=get_gemini_web_service,
+    ),
+    "mimo_asr": _ServiceSpec(
+        name="mimo_asr",
+        title="MiMo Web ASR",
+        code_prefix="mimo_web_asr",
+        contract="mimo_studio_asr_v1",
+        platform="mimo_asr_web",
+        logout_confirm="确认注销MiMoWebASR",
+        factory=get_mimo_web_asr_service,
+    ),
 }
 
 
@@ -36,72 +51,106 @@ def _private(response: Response) -> None:
     response.headers["Pragma"] = "no-cache"
 
 
-def _owner(admin: AdminIdentity) -> str:
-    return f"{admin.qq}:{admin.device_id}:gemini_web"
+def _resolve(runtime: Any, service_name: str) -> tuple[Any, _ServiceSpec]:
+    spec = _SERVICE_SPECS.get(str(service_name or "").strip())
+    if spec is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "code": "consumer_web_service_not_found", "message": "未知消费者网页服务。"},
+        )
+    return spec.factory(runtime), spec
 
 
-def _safe_error(exc: Exception, title: str) -> HTTPException:
+def _owner(admin: AdminIdentity, spec: _ServiceSpec) -> str:
+    return f"{admin.qq}:{admin.device_id}:{spec.platform}"
+
+
+def _safe_error(exc: Exception, title: str, spec: _ServiceSpec) -> HTTPException:
     raw = str(exc or "").strip()
-    code = raw if raw in _KNOWN_CODES else "gemini_web_operation_failed"
+    known_suffixes = {
+        "disabled",
+        "risk_ack_required",
+        "login_required",
+        "manual_verification_required",
+        "network_risk_detected",
+        "network_risk_cooldown",
+        "busy",
+        "dom_changed",
+        "upload_rejected",
+        "generation_timeout",
+        "output_empty",
+        "process_failed",
+        "context_idle_evicted",
+        "media_too_large",
+        "request_invalid",
+        "local_rate_limited",
+        "model_unavailable",
+    }
+    code = raw if any(raw == f"{spec.code_prefix}_{suffix}" for suffix in known_suffixes) else f"{spec.code_prefix}_operation_failed"
     status = (
         409
-        if code in {"gemini_web_busy", "gemini_web_network_risk_cooldown", "gemini_web_local_rate_limited"}
+        if code.endswith(("_busy", "_network_risk_cooldown", "_local_rate_limited"))
         else 400
-        if code in {"gemini_web_risk_ack_required", "gemini_web_request_invalid"}
+        if code.endswith(("_risk_ack_required", "_request_invalid"))
         else 503
     )
     messages = {
-        "gemini_web_risk_ack_required": "启用或操作Gemini Web 前必须先确认第三方上传与消费者网页自动化风险。",
-        "gemini_web_disabled": "Gemini Web 当前未启用，请先保存启用与风险确认配置。",
-        "gemini_web_busy": "Gemini Web 当前已有分析任务，请等待本次任务结束。",
-        "gemini_web_network_risk_detected": "页面提示网络或账号安全风险，自动操作已立即停止并进入冷却。",
-        "gemini_web_network_risk_cooldown": "网络风险冷却尚未结束；请等待冷却或改用正式 API/分镜。",
-        "gemini_web_local_rate_limited": "Gemini Web 本地调用频率已达到安全上限，本次将改用其他媒体路径。",
-        "gemini_web_login_required": "Gemini登录态不可用，请由管理员打开人工登录。",
-        "gemini_web_manual_verification_required": "官方页面要求人工验证，自动操作已停止。",
-        "gemini_web_dom_changed": "Gemini页面结构与当前适配器不匹配，已停止自动操作。",
+        "risk_ack_required": f"启用或操作 {spec.title} 前必须先确认第三方上传与消费者网页自动化风险。",
+        "disabled": f"{spec.title} 当前未启用，请先保存启用与风险确认配置。",
+        "busy": "另一个消费者网页媒体任务、登录或人工接管正在运行。",
+        "network_risk_detected": "页面提示网络或账号安全风险，自动操作已立即停止并进入冷却。",
+        "network_risk_cooldown": "网络风险冷却尚未结束；请等待冷却或改用正式 API。",
+        "local_rate_limited": f"{spec.title} 本地调用频率已达到安全上限，本次将改用其他媒体路径。",
+        "login_required": f"{spec.title} 登录态不可用，请由管理员打开人工登录。",
+        "manual_verification_required": "官方页面要求人工验证，自动操作已停止。",
+        "dom_changed": f"{spec.title} 页面结构与当前适配器不匹配，已停止自动操作。",
+        "model_unavailable": "MiMo Studio 当前页面没有可选择的 MiMo-V2.5-ASR，已停止自动操作。",
     }
+    suffix = code.removeprefix(f"{spec.code_prefix}_")
     return HTTPException(
         status_code=status,
         detail={
             "ok": False,
             "code": code,
             "title": title,
-            "message": messages.get(code, "Gemini Web 操作未完成；请查看脱敏诊断后改用人工接管或其他媒体路径。"),
+            "message": messages.get(suffix, f"{spec.title} 操作未完成；请查看脱敏诊断后改用其他媒体路径。"),
             "error_type": type(exc).__name__,
         },
     )
 
 
 def build_consumer_web_router(*, runtime: Any) -> APIRouter:
-    router = APIRouter(prefix="/api/media/web/gemini", tags=["consumer-media-web"])
-    service = get_gemini_web_service(runtime)
+    router = APIRouter(prefix="/api/media/web/{service_name}", tags=["consumer-media-web"])
 
     @router.get("/status")
     async def status(
+        service_name: str,
         response: Response,
         refresh: bool = Query(default=False),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
+        service, _spec = _resolve(runtime, service_name)
         return await service.status(runtime.plugin_config, refresh=refresh)
 
     @router.post("/probe")
     async def probe(
+        service_name: str,
         request: Request,
         response: Response,
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
+        service, spec = _resolve(runtime, service_name)
         try:
             result = await service.probe(runtime.plugin_config)
         except Exception as exc:
-            raise _safe_error(exc, "Gemini页面兼容性检查未完成") from exc
+            raise _safe_error(exc, f"{spec.title} 页面兼容性检查未完成", spec) from exc
         webui_audit_log.record(
-            action="gemini_web_probe",
+            action=f"{spec.code_prefix}_probe",
             qq=admin.qq,
             device_id=admin.device_id,
-            target="gemini_web_v1",
+            target=spec.contract,
             ip_hash=get_client_ip(request),
             detail={"state": str(result.get("state") or "unknown")},
             outcome="success" if result.get("state") == "ready" else "partial",
@@ -110,48 +159,54 @@ def build_consumer_web_router(*, runtime: Any) -> APIRouter:
 
     @router.post("/auth/start")
     async def auth_start(
+        service_name: str,
         request: Request,
         response: Response,
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
+        service, spec = _resolve(runtime, service_name)
         try:
-            result = await service.auth_start(runtime.plugin_config, _owner(admin))
+            result = await service.auth_start(runtime.plugin_config, _owner(admin, spec))
         except Exception as exc:
-            raise _safe_error(exc, "Gemini人工登录会话创建失败") from exc
+            raise _safe_error(exc, f"{spec.title} 人工登录会话创建失败", spec) from exc
         webui_audit_log.record(
-            action="gemini_web_auth_start",
+            action=f"{spec.code_prefix}_auth_start",
             qq=admin.qq,
             device_id=admin.device_id,
-            target="gemini_web",
+            target=spec.platform,
             ip_hash=get_client_ip(request),
-            detail={"page_contract_version": "gemini_web_v1"},
+            detail={"page_contract_version": spec.contract},
         )
         return result
 
     @router.get("/auth/{session_id}")
     async def auth_status(
+        service_name: str,
         session_id: str,
         response: Response,
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
+        service, spec = _resolve(runtime, service_name)
         try:
-            return await service.auth_status(runtime.plugin_config, session_id, _owner(admin))
+            return await service.auth_status(runtime.plugin_config, session_id, _owner(admin, spec))
         except Exception as exc:
-            raise _safe_error(exc, "Gemini人工登录状态读取失败") from exc
+            raise _safe_error(exc, f"{spec.title} 人工登录状态读取失败", spec) from exc
 
     @router.get("/auth/{session_id}/frame")
     async def auth_frame(
+        service_name: str,
         session_id: str,
         revision: int = Query(default=0, ge=0, le=2_147_483_647),
         admin: AdminIdentity = Depends(require_admin),
     ) -> Response:
+        service, spec = _resolve(runtime, service_name)
         try:
             result = await service.auth_frame(
                 runtime.plugin_config,
                 session_id,
-                _owner(admin),
+                _owner(admin, spec),
                 after_revision=revision,
             )
             frame_revision = max(0, int(result.get("interactive_frame_revision") or 0))
@@ -168,51 +223,48 @@ def build_consumer_web_router(*, runtime: Any) -> APIRouter:
             image = base64.b64decode(str(result.get("data_base64") or ""), validate=True)
             mime_type = str(result.get("mime_type") or "")
             if mime_type not in {"image/jpeg", "image/png"} or not image or len(image) > 2 * 1024 * 1024:
-                raise ValueError("gemini_web_process_failed")
+                raise ValueError(f"{spec.code_prefix}_process_failed")
             return Response(content=image, media_type=mime_type, headers=headers)
         except Exception as exc:
-            raise _safe_error(exc, "Gemini人工接管画面读取失败") from exc
+            raise _safe_error(exc, f"{spec.title} 人工接管画面读取失败", spec) from exc
 
     @router.post("/auth/{session_id}/input")
     async def auth_input(
+        service_name: str,
         session_id: str,
         response: Response,
         body: dict[str, Any] = Body(default_factory=dict),
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
+        service, spec = _resolve(runtime, service_name)
         action = body.get("action")
-        if not isinstance(action, dict) or len(
-            json.dumps(action, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        ) > 16 * 1024:
-            raise _safe_error(ValueError("gemini_web_request_invalid"), "Gemini人工接管操作无效")
+        if not isinstance(action, dict) or len(json.dumps(action, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 16 * 1024:
+            raise _safe_error(ValueError(f"{spec.code_prefix}_request_invalid"), f"{spec.title} 人工接管操作无效", spec)
         try:
-            return await service.auth_input(
-                runtime.plugin_config,
-                session_id,
-                _owner(admin),
-                action,
-            )
+            return await service.auth_input(runtime.plugin_config, session_id, _owner(admin, spec), action)
         except Exception as exc:
-            raise _safe_error(exc, "Gemini人工接管操作未完成") from exc
+            raise _safe_error(exc, f"{spec.title} 人工接管操作未完成", spec) from exc
 
     @router.post("/auth/{session_id}/finish")
     async def auth_finish(
+        service_name: str,
         session_id: str,
         request: Request,
         response: Response,
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
+        service, spec = _resolve(runtime, service_name)
         try:
-            result = await service.auth_finish(runtime.plugin_config, session_id, _owner(admin))
+            result = await service.auth_finish(runtime.plugin_config, session_id, _owner(admin, spec))
         except Exception as exc:
-            raise _safe_error(exc, "Gemini登录状态确认失败") from exc
+            raise _safe_error(exc, f"{spec.title} 登录状态确认失败", spec) from exc
         webui_audit_log.record(
-            action="gemini_web_auth_finish",
+            action=f"{spec.code_prefix}_auth_finish",
             qq=admin.qq,
             device_id=admin.device_id,
-            target="gemini_web",
+            target=spec.platform,
             ip_hash=get_client_ip(request),
             detail={"status": str(result.get("status") or "unknown")},
             outcome="success" if result.get("status") == "success" else "partial",
@@ -221,35 +273,43 @@ def build_consumer_web_router(*, runtime: Any) -> APIRouter:
 
     @router.post("/auth/{session_id}/cancel")
     async def auth_cancel(
+        service_name: str,
         session_id: str,
         response: Response,
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
+        service, spec = _resolve(runtime, service_name)
         try:
-            return await service.auth_cancel(runtime.plugin_config, session_id, _owner(admin))
+            return await service.auth_cancel(runtime.plugin_config, session_id, _owner(admin, spec))
         except Exception as exc:
-            raise _safe_error(exc, "Gemini人工登录会话取消失败") from exc
+            raise _safe_error(exc, f"{spec.title} 人工登录会话取消失败", spec) from exc
 
     @router.post("/logout")
     async def logout(
+        service_name: str,
         request: Request,
         response: Response,
         body: dict[str, Any] = Body(default_factory=dict),
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         _private(response)
-        if str(body.get("confirm") or "") != "确认注销GeminiWeb":
-            raise _safe_error(ValueError("gemini_web_request_invalid"), "请输入精确确认文本：确认注销GeminiWeb")
+        service, spec = _resolve(runtime, service_name)
+        if str(body.get("confirm") or "") != spec.logout_confirm:
+            raise _safe_error(
+                ValueError(f"{spec.code_prefix}_request_invalid"),
+                f"请输入精确确认文本：{spec.logout_confirm}",
+                spec,
+            )
         try:
             result = await service.logout(runtime.plugin_config)
         except Exception as exc:
-            raise _safe_error(exc, "Gemini本地登录 profile 注销失败") from exc
+            raise _safe_error(exc, f"{spec.title} 本地登录 profile 注销失败", spec) from exc
         webui_audit_log.record(
-            action="gemini_web_logout",
+            action=f"{spec.code_prefix}_logout",
             qq=admin.qq,
             device_id=admin.device_id,
-            target="gemini_web",
+            target=spec.platform,
             ip_hash=get_client_ip(request),
             detail={"profile_deleted": True},
         )

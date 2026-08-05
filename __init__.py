@@ -767,8 +767,10 @@ async def _close_personification_runtime() -> None:
 
     await shutdown_mcp_managers()
     from .core.gemini_web_service import shutdown_gemini_web_services
+    from .core.mimo_web_asr_service import shutdown_mimo_web_asr_services
 
     await shutdown_gemini_web_services()
+    await shutdown_mimo_web_asr_services()
     await stop_plugin_knowledge_builder(
         logger=logger,
         knowledge_store=(
