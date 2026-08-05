@@ -146,11 +146,18 @@ def test_video_and_audio_presets_are_exposed_as_webui_selects() -> None:
     assert cfg.personification_video_payload_max_bytes == 16 * 1024 * 1024
     assert cfg.personification_video_max_bytes == 256 * 1024 * 1024
     assert cfg.personification_video_download_timeout == 90.0
-    assert cfg.personification_video_analysis_timeout == 180.0
+    assert cfg.personification_video_analysis_timeout == 600.0
     assert entries["video_frame_preset"].choices == ("economy", "balanced", "quality", "custom")
     assert entries["video_visual_hard_limit"].max_value == 256
     assert entries["video_max_bytes"].default == 256 * 1024 * 1024
-    assert entries["video_route_mode"].choices == ("auto", "native", "hybrid", "storyboard")
+    assert entries["video_route_mode"].choices == (
+        "auto",
+        "primary",
+        "external",
+        "storyboard",
+        "native",
+        "hybrid",
+    )
     assert entries["video_fallback_provider"].choices == (
         "",
         "auto",

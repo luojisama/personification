@@ -262,7 +262,7 @@ class Config(BaseModel):
     personification_video_payload_max_bytes: int = 16777216
     personification_video_max_bytes: int = 268435456
     personification_video_download_timeout: float = 90.0
-    personification_video_analysis_timeout: float = 180.0
+    personification_video_analysis_timeout: float = 600.0
     personification_qwen_web_enabled: bool = False
     personification_qwen_web_risk_acknowledged: bool = False
     personification_qwen_web_priority: str = "before_api"
@@ -294,6 +294,19 @@ class Config(BaseModel):
     personification_video_fallback_api_key: str = ""
     personification_video_fallback_model: str = ""
     personification_video_fallback_auth_path: str = ""
+    personification_fullmodal_provider_enabled: bool = False
+    personification_fullmodal_provider_protocol: str = "gemini_native"
+    personification_fullmodal_provider_api_url: str = ""
+    personification_fullmodal_provider_api_key: str = ""
+    personification_fullmodal_provider_model: str = ""
+    personification_fullmodal_provider_workspace_id: str = ""
+    personification_fullmodal_provider_auth_mode: str = "auto"
+    personification_fullmodal_provider_video_fps: float = 2.0
+    personification_fullmodal_provider_media_resolution: str = "default"
+    personification_fullmodal_provider_timeout: float = 600.0
+    personification_fullmodal_provider_max_bytes: int = 536870912
+    personification_fullmodal_provider_stream: bool = False
+    personification_video_storyboard_fallback_enabled: bool = True
     personification_plugin_knowledge_build_enabled: bool = False
     # plugin_invoker：让 bot 代为执行其它已安装插件的命令并转述结果（默认关闭，安全起见）
     personification_plugin_invoker_enabled: bool = False

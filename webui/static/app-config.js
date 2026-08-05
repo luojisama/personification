@@ -154,13 +154,19 @@ const VIDEO_CONFIG_FIELDS = [
   "personification_video_max_bytes",
   "personification_video_download_timeout",
   "personification_video_analysis_timeout",
-  "personification_video_fallback_enabled",
-  "personification_video_fallback_provider",
-  "personification_video_fallback_workspace_id",
-  "personification_video_fallback_api_url",
-  "personification_video_fallback_api_key",
-  "personification_video_fallback_model",
-  "personification_video_fallback_auth_path",
+  "personification_video_storyboard_fallback_enabled",
+  "personification_fullmodal_provider_enabled",
+  "personification_fullmodal_provider_protocol",
+  "personification_fullmodal_provider_workspace_id",
+  "personification_fullmodal_provider_api_url",
+  "personification_fullmodal_provider_api_key",
+  "personification_fullmodal_provider_model",
+  "personification_fullmodal_provider_auth_mode",
+  "personification_fullmodal_provider_video_fps",
+  "personification_fullmodal_provider_media_resolution",
+  "personification_fullmodal_provider_timeout",
+  "personification_fullmodal_provider_max_bytes",
+  "personification_fullmodal_provider_stream",
   "personification_qwen_web_enabled",
   "personification_qwen_web_risk_acknowledged",
   "personification_qwen_web_priority",
@@ -288,10 +294,11 @@ function videoConfigMiB(value, fallback) {
 }
 
 function videoProviderNote(provider) {
-  if (provider === "qwen_omni") return "Qwen3.5-Omni 支持最长 1 小时视频；qwen3-omni-flash 仅适合 150 秒以内短视频。远程 HTTPS 视频直接交给百炼，本地视频仅在 8 MiB 以内 Base64 直传，较大文件自动回退分镜。";
-  if (provider === "gemini") return "Gemini 使用原生视频接口；较大的本地视频沿用 Files API 上传并在完成后删除远端临时文件。";
-  if (provider === "disabled") return "独立原生 Provider 已关闭；仍可使用主模型原生视频或分镜抽帧路线。";
-  return "自动模式沿用现有全局回退配置；若要稳定使用 Qwen 音视频能力，请明确选择 Qwen-Omni。";
+  if (provider === "openai_qwen_omni") return "Qwen 使用官方 video_url / input_audio 扩展并要求流式返回；本地 Base64 编码后必须小于 10 MiB。";
+  if (provider === "openai_mimo_v25") return "MiMo 使用官方 video_url、fps 与媒体分辨率参数；远程 URL 与本地 Base64 受各自官方上限约束。";
+  if (provider === "gemini_native") return "Gemini 使用原生 Files API 与 generateContent；不会把视频伪装成 OpenAI 图片内容块。";
+  if (provider === "openai_custom_video_url") return "自定义协议只发送固定 video_url 内容块，不支持原始 JSON 模板或任意脚本。";
+  return "外部全模态 Provider 已关闭；主模型失败后将继续网页路线或最终分镜兜底。";
 }
 
 const QWEN_WEB_STATE_LABELS = {
@@ -473,12 +480,12 @@ async function qwenWebLogout() {
 function renderVideoUnderstandingEditor(items) {
   const entries = videoConfigEntries(items);
   const value = (field, fallback="") => videoConfigValue(entries, field, fallback);
-  const provider = String(value("personification_video_fallback_provider", "") || "auto");
+  const provider = String(value("personification_fullmodal_provider_protocol", "gemini_native") || "gemini_native");
   const framePreset = String(value("personification_video_frame_preset", "balanced") || "balanced");
   const asrProvider = String(value("personification_audio_transcription_provider", "auto") || "auto");
   const hotwords = strListValue(value("personification_audio_transcription_hotwords", [])).join("，");
-  const providerModel = value("personification_video_fallback_model", "");
-  const providerKeyConfigured = value("personification_video_fallback_api_key", "") === "***";
+  const providerModel = value("personification_fullmodal_provider_model", "");
+  const providerKeyConfigured = value("personification_fullmodal_provider_api_key", "") === "***";
   const asrKeyConfigured = value("personification_audio_transcription_api_key", "") === "***";
   return `<div class="video-config-editor">
     <section class="card video-config-card">
@@ -486,34 +493,40 @@ function renderVideoUnderstandingEditor(items) {
       <div class="video-config-grid">
         ${videoConfigToggle("personification_video_understanding_enabled", value("personification_video_understanding_enabled", false), "启用视频理解", "关闭后不下载、不抽帧，也不调用独立视频 Provider。")}
         ${videoConfigSelect("personification_video_route_mode", value("personification_video_route_mode", "auto"), [
-          {value:"auto",label:"自动：原生优先，失败后分镜"},{value:"native",label:"仅原生音视频模型"},{value:"hybrid",label:"混合：原生 + 分镜/转写互证"},{value:"storyboard",label:"仅分镜抽帧 + 可用转写"}
-        ], "理解路线", "自动适合日常；混合质量最高但会多一次模型调用。")}
+          {value:"auto",label:"自动：主模型原生，否则第三方路线"},{value:"primary",label:"仅主模型原生音视频"},{value:"external",label:"跳过主模型，使用第三方路线"},{value:"storyboard",label:"诊断：仅分镜 + 字幕/ASR"}
+        ], "理解路线", "主模型没有已确认的视频协议时，自动模式会直接进入第三方路线。")}
         ${videoConfigSelect("personification_video_frame_preset", framePreset, [
           {value:"economy",label:"经济：3 分钟约 72 帧"},{value:"balanced",label:"均衡：3 分钟约 120 帧"},{value:"quality",label:"质量：3 分钟约 168 帧"},{value:"custom",label:"自定义帧预算"}
         ], "抽帧预设", "仅分镜或混合路线使用。")}
       </div>
     </section>
     <section class="card video-config-card">
-      <div><h2>原生音视频 Provider</h2><p class="muted">主模型无法原生读取视频时才进入这里。Qwen 使用阿里云百炼官方 HTTP API，不读取个人千问网页版 Cookie，也不自动化网页版登录。</p></div>
+      <div><h2>外部全模态 API</h2><p class="muted">只配置一个正式的第三方全模态 Provider。协议下拉决定真实视频载荷，不能仅凭 OpenAI-compatible 或模型名推断。</p></div>
       <div class="video-config-grid">
-        ${videoConfigToggle("personification_video_fallback_enabled", value("personification_video_fallback_enabled", true), "启用原生视频后备", "主模型原生路线失败后允许使用下方 Provider。")}
-        ${videoConfigSelect("personification_video_fallback_provider", provider, [
-          {value:"auto",label:"自动：继承全局模型回退"},{value:"qwen_omni",label:"Qwen-Omni（百炼官方 API）"},{value:"gemini",label:"Gemini 原生视频"},{value:"disabled",label:"禁用独立 Provider"}
-        ], "Provider")}
-        ${videoConfigInput("personification_video_fallback_model", providerModel, "模型", {list:"video-native-models",placeholder:provider==="qwen_omni"?"qwen3.5-omni-plus":"留空使用 Provider 默认",description:"可从预设选择，也可填写兼容模型 ID。"})}
-        ${videoConfigInput("personification_video_fallback_api_key", providerKeyConfigured?"***":"", "API Key", {kind:"secret"})}
-        <div data-video-provider-only="qwen_omni" style="display:${provider==='qwen_omni'?'block':'none'}">${videoConfigInput("personification_video_fallback_workspace_id", value("personification_video_fallback_workspace_id", ""), "百炼 WorkspaceId", {description:"Base URL 留空时据此生成北京地域 compatible-mode/v1 地址。"})}</div>
-        ${videoConfigInput("personification_video_fallback_api_url", value("personification_video_fallback_api_url", ""), "Base URL", {placeholder:provider==="qwen_omni"?"可留空并填写 WorkspaceId":"https://generativelanguage.googleapis.com",description:"自定义地址必须是 HTTPS；也可直接填写到 /chat/completions。"})}
-        <div data-video-provider-only="gemini" style="display:${provider==='gemini'?'block':'none'}">${videoConfigInput("personification_video_fallback_auth_path", value("personification_video_fallback_auth_path", ""), "Gemini 认证路径", {kind:"secret",description:"仅兼容旧配置；官方 API Key 路线通常留空。"})}</div>
+        ${videoConfigToggle("personification_fullmodal_provider_enabled", value("personification_fullmodal_provider_enabled", false), "启用外部全模态 API", "主模型与消费者网页不可用时允许调用。")}
+        ${videoConfigSelect("personification_fullmodal_provider_protocol", provider, [
+          {value:"gemini_native",label:"Gemini 原生 Files API（推荐）"},{value:"openai_qwen_omni",label:"Qwen3.5-Omni 官方扩展"},{value:"openai_mimo_v25",label:"MiMo-V2.5 官方扩展"},{value:"openai_custom_video_url",label:"自定义 OpenAI video_url"},{value:"disabled",label:"禁用"}
+        ], "协议")}
+        ${videoConfigInput("personification_fullmodal_provider_model", providerModel, "模型", {list:"video-native-models",placeholder:"留空使用协议预设模型",description:"自定义协议必须明确填写模型 ID。"})}
+        ${videoConfigInput("personification_fullmodal_provider_api_key", providerKeyConfigured?"***":"", "API Key", {kind:"secret"})}
+        <div data-fullmodal-provider-only="openai_qwen_omni" style="display:${provider==='openai_qwen_omni'?'block':'none'}">${videoConfigInput("personification_fullmodal_provider_workspace_id", value("personification_fullmodal_provider_workspace_id", ""), "百炼 WorkspaceId", {description:"Base URL 留空时据此生成北京地域 compatible-mode/v1 地址。"})}</div>
+        ${videoConfigInput("personification_fullmodal_provider_api_url", value("personification_fullmodal_provider_api_url", ""), "Base URL", {placeholder:provider==="openai_qwen_omni"?"可留空并填写 WorkspaceId":"HTTPS Base URL",description:"自定义地址必须为 HTTPS。"})}
+        ${videoConfigSelect("personification_fullmodal_provider_auth_mode", value("personification_fullmodal_provider_auth_mode", "auto"), [{value:"auto",label:"自动"},{value:"x-goog-api-key",label:"x-goog-api-key"},{value:"bearer",label:"Bearer"},{value:"api-key",label:"API-Key"}], "鉴权方式")}
+        <div data-fullmodal-provider-only="openai_mimo_v25" style="display:${provider==='openai_mimo_v25'?'block':'none'}">${videoConfigInput("personification_fullmodal_provider_video_fps", value("personification_fullmodal_provider_video_fps",2), "视频 FPS", {kind:"float",min:0.1,max:10,step:0.1})}</div>
+        <div data-fullmodal-provider-only="openai_mimo_v25" style="display:${provider==='openai_mimo_v25'?'block':'none'}">${videoConfigSelect("personification_fullmodal_provider_media_resolution", value("personification_fullmodal_provider_media_resolution","default"), [{value:"default",label:"默认"},{value:"low",label:"低"},{value:"medium",label:"中"},{value:"high",label:"高"}], "媒体分辨率")}</div>
+        <div data-fullmodal-provider-only="openai_custom_video_url" style="display:${provider==='openai_custom_video_url'?'block':'none'}">${videoConfigToggle("personification_fullmodal_provider_stream", value("personification_fullmodal_provider_stream",false), "要求流式返回")}</div>
+        ${videoConfigInput("personification_fullmodal_provider_timeout", value("personification_fullmodal_provider_timeout",600), "调用超时（秒）", {kind:"float",min:20,max:900,step:1})}
+        ${videoConfigInput("personification_fullmodal_provider_max_bytes", videoConfigMiB(value("personification_fullmodal_provider_max_bytes",536870912),512), "媒体上限（MiB）", {kind:"mib",min:1,max:2048,step:1})}
       </div>
       <datalist id="video-native-models">
-        <option value="qwen3.5-omni-plus">Qwen 高能力，最长 1 小时视频</option><option value="qwen3.5-omni-flash">Qwen 轻量长视频</option><option value="qwen3-omni-flash">Qwen 低价短视频，最长 150 秒</option><option value="gemini-2.5-flash">Gemini 2.5 Flash</option><option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+        <option value="qwen3.5-omni-plus">Qwen Omni</option><option value="qwen3.5-omni-flash">Qwen Omni Flash</option><option value="mimo-v2.5">MiMo-V2.5</option><option value="gemini-2.5-flash">Gemini 2.5 Flash</option><option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
       </datalist>
       <div class="alert" data-video-provider-note style="margin-top:12px">${escapeHtml(videoProviderNote(provider))}</div>
     </section>
     ${renderQwenWebCard(entries)}
     <section class="card video-config-card" data-video-frame-section>
       <div><h2>分镜抽帧</h2><p class="muted">场景差分与字幕差分先低清扫描，再按时间顺序拼图；不会把 24 FPS 的每一帧全部交给模型。</p></div>
+      ${videoConfigToggle("personification_video_storyboard_fallback_enabled", value("personification_video_storyboard_fallback_enabled",true), "启用最终分镜兜底", "所有全模态路线失败后仍尝试抽帧与字幕/ASR。")}
       <div data-video-custom-budgets style="display:${framePreset==='custom'?'block':'none'}">${renderVideoBudgetEditor(entries["personification_video_custom_frame_budgets"])}</div>
       <details ${framePreset==='custom'?'open':''}><summary>抽帧高级参数</summary><div class="video-config-grid" style="margin-top:10px">
         ${videoConfigInput("personification_video_custom_scan_fps", value("personification_video_custom_scan_fps", 5), "自定义扫描 FPS", {kind:"float",min:0.5,max:8,step:0.1})}
@@ -529,7 +542,7 @@ function renderVideoUnderstandingEditor(items) {
         ${videoConfigInput("personification_video_max_bytes", videoConfigMiB(value("personification_video_max_bytes", 268435456),256), "视频下载上限（MiB）", {kind:"mib",min:8,max:512,step:1})}
         ${videoConfigInput("personification_video_payload_max_bytes", videoConfigMiB(value("personification_video_payload_max_bytes",16777216),16), "分镜载荷上限（MiB）", {kind:"mib",min:1,max:32,step:1})}
         ${videoConfigInput("personification_video_download_timeout", value("personification_video_download_timeout",90), "下载超时（秒）", {kind:"float",min:8,max:180,step:1})}
-        ${videoConfigInput("personification_video_analysis_timeout", value("personification_video_analysis_timeout",180), "单视频理解总超时（秒）", {kind:"float",min:20,max:300,step:1})}
+        ${videoConfigInput("personification_video_analysis_timeout", value("personification_video_analysis_timeout",600), "单视频理解总超时（秒）", {kind:"float",min:20,max:900,step:1})}
       </div>
     </section>
     <section class="card video-config-card">
@@ -563,10 +576,10 @@ function renderVideoUnderstandingEditor(items) {
 }
 
 function refreshVideoConfigVisibility() {
-  const providerControl = document.querySelector('[data-video-field="personification_video_fallback_provider"]');
-  const provider = providerControl ? providerControl.value : "auto";
-  document.querySelectorAll("[data-video-provider-only]").forEach(element => {
-    element.style.display = element.dataset.videoProviderOnly === provider ? "block" : "none";
+  const providerControl = document.querySelector('[data-video-field="personification_fullmodal_provider_protocol"]');
+  const provider = providerControl ? providerControl.value : "gemini_native";
+  document.querySelectorAll("[data-fullmodal-provider-only]").forEach(element => {
+    element.style.display = element.dataset.fullmodalProviderOnly === provider ? "block" : "none";
   });
   const preset = document.querySelector('[data-video-field="personification_video_frame_preset"]')?.value || "balanced";
   const custom = document.querySelector("[data-video-custom-budgets]");

@@ -1096,6 +1096,7 @@ def build_config_router(*, runtime) -> APIRouter:
             for field_name in entries
             if field_name.startswith("personification_video_")
             or field_name.startswith("personification_qwen_web_")
+            or field_name.startswith("personification_fullmodal_provider_")
             or field_name.startswith("personification_audio_transcription_")
         }
         unknown = sorted(set(values) - allowed)

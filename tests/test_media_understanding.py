@@ -433,7 +433,7 @@ def test_video_qwen_network_risk_stops_web_and_falls_through_once(monkeypatch) -
         )
     )
 
-    assert (result, route) == ("paid API result", "video_qwen_omni")
+    assert (result, route) == ("paid API result", "video_external_qwen_omni")
     assert calls == ["qwen_web", "official_api"]
     assert attempts[1]["diagnostic_code"] == "qwen_web_network_risk_detected"
     assert attempts[1]["diagnostic_stage"] == "browser"
@@ -476,7 +476,7 @@ def test_video_qwen_after_api_does_not_start_when_api_succeeds(monkeypatch) -> N
             video_refs=["https://cdn.example/video.mp4"],
         )
     )
-    assert (result, route) == ("official result", "video_qwen_omni")
+    assert (result, route) == ("official result", "video_external_qwen_omni")
 
 
 def test_audio_qwen_web_precedes_asr(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
@@ -769,6 +769,99 @@ def test_mimo_media_uses_video_url_fps_and_resolution(monkeypatch) -> None:  # n
     }
 
 
+def test_custom_fullmodal_provider_uses_fixed_video_url_contract(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {"choices": [{"message": {"content": "custom result"}}]}
+
+    class _Client:
+        def __init__(self, **_kwargs):  # noqa: ANN001
+            pass
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def post(self, url, **kwargs):  # noqa: ANN001, ANN201
+            captured.update(url=url, headers=kwargs["headers"], json=kwargs["json"])
+            return _Response()
+
+    monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
+    result = asyncio.run(
+        media_understanding._call_custom_video_url_media(
+            api_key="secret",
+            base_url="https://fullmodal.example/v1",
+            model="vendor-video-model",
+            prompt="概括视频",
+            video_refs=["https://cdn.example/video.mp4"],
+            auth_mode="api-key",
+        )
+    )
+    assert result == "custom result"
+    assert captured["headers"] == {"API-Key": "secret", "Content-Type": "application/json"}
+    assert captured["json"]["messages"][0]["content"][0] == {  # type: ignore[index]
+        "type": "video_url",
+        "video_url": {"url": "https://cdn.example/video.mp4"},
+    }
+
+
+def test_new_fullmodal_config_takes_precedence_over_legacy_video_fallback() -> None:
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_fullmodal_provider_enabled=True,
+            personification_fullmodal_provider_protocol="openai_mimo_v25",
+            personification_fullmodal_provider_api_url="https://api.xiaomimimo.com/v1",
+            personification_fullmodal_provider_api_key="new-key",
+            personification_fullmodal_provider_model="mimo-v2.5",
+            personification_fullmodal_provider_video_fps=3.0,
+            personification_fullmodal_provider_media_resolution="high",
+            personification_fullmodal_provider_timeout=600,
+            personification_fullmodal_provider_max_bytes=512 * 1024 * 1024,
+            personification_video_fallback_enabled=True,
+            personification_video_fallback_provider="qwen_omni",
+            personification_video_fallback_api_key="old-key",
+        )
+    )
+    resolved = media_understanding._build_video_fallback_provider_config(runtime)
+    assert resolved is not None
+    assert resolved["api_type"] == "openai_mimo_v25"
+    assert resolved["api_key"] == "new-key"
+    assert resolved["source"] == "fullmodal_provider"
+
+
+def test_primary_mode_never_calls_external_fullmodal(monkeypatch) -> None:  # noqa: ANN001
+    async def _no_primary(**_kwargs):  # noqa: ANN003, ANN202
+        return ""
+
+    def _forbidden(_runtime):  # noqa: ANN001, ANN202
+        raise AssertionError("primary mode must not resolve an external provider")
+
+    monkeypatch.setattr(media_understanding, "_try_primary_video_routes", _no_primary)
+    monkeypatch.setattr(media_understanding, "_build_video_fallback_provider_config", _forbidden)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_video_understanding_enabled=True,
+            personification_video_route_mode="primary",
+        )
+    )
+    assert asyncio.run(
+        media_understanding.analyze_videos_with_route_or_fallback(
+            runtime=runtime,
+            prompt="理解视频",
+            video_refs=["https://cdn.example/video.mp4"],
+        )
+    ) == ("", "video_unavailable")
+
+
 def test_qwen_omni_rejects_insecure_remote_and_large_local_video(tmp_path: Path) -> None:
     try:
         media_understanding._qwen_video_part("http://cdn.example/video.mp4")
@@ -788,7 +881,7 @@ def test_qwen_omni_rejects_insecure_remote_and_large_local_video(tmp_path: Path)
         raise AssertionError("large local video must fall back instead of being base64 encoded")
 
 
-def test_video_native_fallback_can_use_qwen_omni(monkeypatch) -> None:  # noqa: ANN001
+def test_video_external_route_can_use_legacy_qwen_omni_config(monkeypatch) -> None:  # noqa: ANN001
     async def _no_primary(**_kwargs):  # noqa: ANN003, ANN202
         return ""
 
@@ -802,7 +895,7 @@ def test_video_native_fallback_can_use_qwen_omni(monkeypatch) -> None:  # noqa: 
     runtime = SimpleNamespace(
         plugin_config=SimpleNamespace(
             personification_video_understanding_enabled=True,
-            personification_video_route_mode="native",
+            personification_video_route_mode="external",
             personification_video_fallback_enabled=True,
             personification_video_fallback_provider="qwen_omni",
             personification_video_fallback_workspace_id="ws-video",
@@ -820,7 +913,7 @@ def test_video_native_fallback_can_use_qwen_omni(monkeypatch) -> None:  # noqa: 
         )
     )
     assert result == "Qwen 原生音视频结论"
-    assert route == "video_qwen_omni"
+    assert route == "video_external_qwen_omni"
 
 
 def test_video_storyboard_combines_untrusted_transcript_and_always_cleans(monkeypatch) -> None:  # noqa: ANN001

@@ -113,9 +113,15 @@ def _normalize_media_api_type(api_type: str) -> str:
 
 def normalize_video_route_mode(value: Any) -> str:
     normalized = str(value or "auto").strip().lower().replace("-", "_")
-    aliases = {"direct": "native", "frames": "storyboard", "frame": "storyboard"}
+    aliases = {
+        "direct": "primary",
+        "native": "primary",
+        "hybrid": "auto",
+        "frames": "storyboard",
+        "frame": "storyboard",
+    }
     normalized = aliases.get(normalized, normalized)
-    return normalized if normalized in {"auto", "native", "hybrid", "storyboard"} else "auto"
+    return normalized if normalized in {"auto", "primary", "external", "storyboard"} else "auto"
 
 
 def _is_provider_usable(provider: dict[str, Any]) -> bool:
@@ -500,6 +506,57 @@ def _build_video_fallback_provider_config(runtime: Any) -> dict[str, str] | None
     plugin_config = getattr(runtime, "plugin_config", None)
     if plugin_config is None:
         return None
+    if bool(getattr(plugin_config, "personification_fullmodal_provider_enabled", False)):
+        protocol = str(
+            getattr(plugin_config, "personification_fullmodal_provider_protocol", "gemini_native")
+            or "gemini_native"
+        ).strip().lower().replace("-", "_")
+        if protocol not in {
+            "gemini_native",
+            "openai_qwen_omni",
+            "openai_mimo_v25",
+            "openai_custom_video_url",
+        }:
+            return None
+        return {
+            "api_type": protocol,
+            "api_url": str(
+                getattr(plugin_config, "personification_fullmodal_provider_api_url", "") or ""
+            ).strip(),
+            "api_key": str(
+                getattr(plugin_config, "personification_fullmodal_provider_api_key", "") or ""
+            ).strip(),
+            "model": str(
+                getattr(plugin_config, "personification_fullmodal_provider_model", "") or ""
+            ).strip(),
+            "workspace_id": str(
+                getattr(plugin_config, "personification_fullmodal_provider_workspace_id", "") or ""
+            ).strip(),
+            "auth_mode": str(
+                getattr(plugin_config, "personification_fullmodal_provider_auth_mode", "auto") or "auto"
+            ).strip().lower(),
+            "gemini_auth_mode": str(
+                getattr(plugin_config, "personification_fullmodal_provider_auth_mode", "auto") or "auto"
+            ).strip().lower(),
+            "video_fps": str(
+                getattr(plugin_config, "personification_fullmodal_provider_video_fps", 2.0) or 2.0
+            ),
+            "media_resolution": str(
+                getattr(plugin_config, "personification_fullmodal_provider_media_resolution", "default")
+                or "default"
+            ).strip().lower(),
+            "timeout": str(
+                getattr(plugin_config, "personification_fullmodal_provider_timeout", 600.0) or 600.0
+            ),
+            "max_bytes": str(
+                getattr(plugin_config, "personification_fullmodal_provider_max_bytes", 536870912)
+                or 536870912
+            ),
+            "stream": "true"
+            if bool(getattr(plugin_config, "personification_fullmodal_provider_stream", False))
+            else "false",
+            "source": "fullmodal_provider",
+        }
     resolution = resolve_video_fallback_provider(plugin_config, getattr(runtime, "logger", None), warn=True)
     if resolution is None:
         return None
@@ -514,6 +571,7 @@ def _build_video_fallback_provider_config(runtime: Any) -> dict[str, str] | None
             "workspace_id": str(payload.get("workspace_id", "") or "").strip(),
             "auth_path": "",
             "gemini_auth_mode": "auto",
+            "source": "legacy_video_fallback",
         }
     normalized_type = _normalize_media_api_type(str(payload.get("api_type", "") or ""))
     if normalized_type not in {"gemini_official"}:
@@ -525,6 +583,7 @@ def _build_video_fallback_provider_config(runtime: Any) -> dict[str, str] | None
         "model": str(payload.get("model", "") or "").strip() or _GEMINI_DEFAULT_MODEL,
         "auth_path": str(payload.get("auth_path", "") or "").strip(),
         "gemini_auth_mode": str(payload.get("gemini_auth_mode", "auto") or "auto").strip(),
+        "source": "legacy_video_fallback",
     }
 
 
@@ -796,6 +855,83 @@ async def _call_mimo_media(
             },
         )
         response.raise_for_status()
+    return _qwen_text_delta(response.json()).strip()
+
+
+def _custom_video_url_part(video_ref: str) -> dict[str, Any]:
+    normalized, problem = normalize_video_ref(video_ref)
+    if not normalized:
+        raise ValueError(f"invalid_video_ref:{problem or 'unknown'}")
+    if normalized.startswith(("http://", "https://")):
+        parsed = urlsplit(normalized)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("custom_video_url_invalid")
+        url = normalized
+    else:
+        path = Path(normalized)
+        if path.stat().st_size > _MIMO_RAW_INLINE_MAX_BYTES:
+            raise ValueError("custom_local_video_too_large")
+        mime_type, _ = mimetypes.guess_type(str(path))
+        url = (
+            f"data:{mime_type or 'video/mp4'};base64,"
+            f"{base64.b64encode(path.read_bytes()).decode('ascii')}"
+        )
+    return {"type": "video_url", "video_url": {"url": url}}
+
+
+def _custom_openai_auth_headers(api_key: str, auth_mode: str) -> dict[str, str]:
+    key = str(api_key or "").strip()
+    if not key:
+        raise ValueError("custom_fullmodal_api_key_missing")
+    normalized = str(auth_mode or "auto").strip().lower().replace("_", "-")
+    if normalized == "api-key":
+        return {"API-Key": key, "Content-Type": "application/json"}
+    if normalized not in {"auto", "bearer"}:
+        raise ValueError("custom_fullmodal_auth_mode_invalid")
+    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+
+async def _call_custom_video_url_media(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    prompt: str,
+    video_refs: Sequence[str],
+    auth_mode: str = "auto",
+    stream: bool = False,
+    timeout: float = 600.0,
+) -> str:
+    endpoint = _openai_compatible_endpoint(
+        base_url,
+        default_root="",
+        error_prefix="custom_fullmodal",
+    )
+    selected_model = str(model or "").strip()
+    if not selected_model:
+        raise ValueError("custom_fullmodal_model_missing")
+    content = [_custom_video_url_part(str(ref or "").strip()) for ref in video_refs]
+    if not content:
+        raise ValueError("custom_fullmodal_media_missing")
+    content.append({"type": "text", "text": str(prompt or "").strip() or "请分析这段视频内容"})
+    use_stream = bool(stream)
+    bounded_timeout = max(20.0, min(900.0, float(timeout or 600.0)))
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(bounded_timeout, connect=15.0),
+        follow_redirects=False,
+    ) as client:
+        response = await client.post(
+            endpoint,
+            headers=_custom_openai_auth_headers(api_key, auth_mode),
+            json={
+                "model": selected_model,
+                "messages": [{"role": "user", "content": content}],
+                "stream": use_stream,
+            },
+        )
+        response.raise_for_status()
+    if use_stream:
+        return _parse_qwen_omni_response(response)
     return _qwen_text_delta(response.json()).strip()
 
 
@@ -1268,17 +1404,35 @@ async def analyze_videos_with_route_or_fallback(
     async def _formal_api_result() -> tuple[str, str]:
         started_at = time.monotonic()
         fallback = _build_video_fallback_provider_config(runtime)
+        protocol = str((fallback or {}).get("api_type", "") or "").strip().lower()
+        route_by_protocol = {
+            "gemini_native": "video_external_gemini",
+            "gemini_official": "video_external_gemini",
+            "openai_qwen_omni": "video_external_qwen_omni",
+            "qwen_omni": "video_external_qwen_omni",
+            "openai_mimo_v25": "video_external_mimo",
+            "openai_custom_video_url": "video_external_custom",
+        }
+        attempt_route = route_by_protocol.get(protocol, "video_external_fullmodal")
         if not fallback or not fallback.get("api_key"):
             _record_media_attempt(
                 route_attempts,
-                route="video_official_api",
+                route=attempt_route,
                 status="skipped",
                 started_at=started_at,
-                diagnostic_code="video_fallback_unconfigured",
+                diagnostic_code="fullmodal_provider_unconfigured",
             )
             return "", "video_unavailable"
         try:
-            if fallback.get("api_type") == "qwen_omni":
+            max_bytes = max(1, int(float(fallback.get("max_bytes", 536870912) or 536870912)))
+            for ref in refs:
+                normalized, problem = normalize_video_ref(ref)
+                if not normalized:
+                    raise ValueError(f"invalid_video_ref:{problem or 'unknown'}")
+                if not normalized.startswith(("http://", "https://")) and Path(normalized).stat().st_size > max_bytes:
+                    raise ValueError("fullmodal_provider_media_too_large")
+            timeout = float(fallback.get("timeout", 600.0) or 600.0)
+            if protocol in {"qwen_omni", "openai_qwen_omni"}:
                 result = await _call_qwen_omni_media(
                     api_key=fallback["api_key"],
                     base_url=fallback.get("api_url", ""),
@@ -1286,10 +1440,29 @@ async def analyze_videos_with_route_or_fallback(
                     model=fallback.get("model", "") or _QWEN_OMNI_DEFAULT_MODEL,
                     prompt=prompt,
                     video_refs=refs,
-                    timeout=float(
-                        getattr(plugin_config, "personification_video_analysis_timeout", 180.0)
-                        or 180.0
-                    ),
+                    timeout=timeout,
+                )
+            elif protocol == "openai_mimo_v25":
+                result = await _call_mimo_media(
+                    api_key=fallback["api_key"],
+                    base_url=fallback.get("api_url", ""),
+                    model=fallback.get("model", "") or _MIMO_DEFAULT_MODEL,
+                    prompt=prompt,
+                    video_refs=refs,
+                    fps=float(fallback.get("video_fps", 2.0) or 2.0),
+                    media_resolution=fallback.get("media_resolution", "default"),
+                    timeout=timeout,
+                )
+            elif protocol == "openai_custom_video_url":
+                result = await _call_custom_video_url_media(
+                    api_key=fallback["api_key"],
+                    base_url=fallback.get("api_url", ""),
+                    model=fallback.get("model", ""),
+                    prompt=prompt,
+                    video_refs=refs,
+                    auth_mode=fallback.get("auth_mode", "auto"),
+                    stream=str(fallback.get("stream", "false")).lower() == "true",
+                    timeout=timeout,
                 )
             else:
                 result = await _call_gemini_media(
@@ -1302,34 +1475,44 @@ async def analyze_videos_with_route_or_fallback(
                 )
         except Exception as exc:
             _log_warning(runtime, f"[video] official API route failed: {sanitize_text(exc)}")
+            raw_code = str(exc or "").split(":", 1)[0]
+            diagnostic_code = (
+                "media_transport_unavailable"
+                if raw_code in {
+                    "fullmodal_provider_media_too_large",
+                    "qwen_omni_local_video_too_large",
+                    "mimo_local_video_too_large",
+                    "custom_local_video_too_large",
+                }
+                else "fullmodal_provider_request_failed"
+            )
             _record_media_attempt(
                 route_attempts,
-                route="video_official_api",
+                route=attempt_route,
                 status="failed",
                 started_at=started_at,
-                diagnostic_code="video_official_api_failed",
+                diagnostic_code=diagnostic_code,
             )
             return "", "video_unavailable"
         result_text = str(result or "").strip()
         if _invalid_media_text(result_text):
             _record_media_attempt(
                 route_attempts,
-                route="video_official_api",
+                route=attempt_route,
                 status="failed",
                 started_at=started_at,
-                diagnostic_code="video_official_api_output_empty",
+                diagnostic_code="fullmodal_provider_output_empty",
             )
             return "", "video_unavailable"
         _record_media_attempt(
             route_attempts,
-            route="video_official_api",
+            route=attempt_route,
             status="ok",
             started_at=started_at,
         )
-        route = "video_qwen_omni" if fallback.get("api_type") == "qwen_omni" else "video_fallback"
-        return result_text, route
+        return result_text, attempt_route
 
-    async def _native_result() -> tuple[str, str]:
+    async def _primary_result() -> tuple[str, str]:
         started_at = time.monotonic()
         primary_result = await _try_primary_video_routes(
             runtime=runtime,
@@ -1345,6 +1528,10 @@ async def analyze_videos_with_route_or_fallback(
         )
         if primary_result:
             return primary_result, "video_route_direct"
+
+        return "", "video_unavailable"
+
+    async def _external_result() -> tuple[str, str]:
 
         priority = _normalize_qwen_web_priority(
             getattr(plugin_config, "personification_qwen_web_priority", "before_api")
@@ -1364,12 +1551,21 @@ async def analyze_videos_with_route_or_fallback(
 
     native_text = ""
     native_route = "video_unavailable"
-    if route_mode in {"auto", "native", "hybrid"}:
-        native_text, native_route = await _native_result()
-        if native_text and route_mode in {"auto", "native"}:
+    if route_mode in {"auto", "primary"}:
+        native_text, native_route = await _primary_result()
+        if native_text:
             return native_text, native_route
-        if route_mode == "native":
+        if route_mode == "primary":
             return "", native_route
+    if route_mode in {"auto", "external"}:
+        native_text, native_route = await _external_result()
+        if native_text:
+            return native_text, native_route
+
+    if route_mode != "storyboard" and not bool(
+        getattr(plugin_config, "personification_video_storyboard_fallback_enabled", True)
+    ):
+        return "", native_route
 
     async def _storyboard_one(ref: str, native_summary: str) -> tuple[str, str]:
         storyboard = await prepare_video_storyboard(ref, plugin_config)
@@ -1441,8 +1637,8 @@ async def analyze_videos_with_route_or_fallback(
     timeout = max(
         20.0,
         min(
-            300.0,
-            float(getattr(plugin_config, "personification_video_analysis_timeout", 180.0) or 180.0),
+            900.0,
+            float(getattr(plugin_config, "personification_video_analysis_timeout", 600.0) or 600.0),
         ),
     )
     storyboard_started_at = time.monotonic()
@@ -1493,6 +1689,10 @@ def audio_route_available(runtime: Any) -> bool:
         return True
     if _qwen_web_automatic_enabled(plugin_config):
         return True
+    if bool(getattr(plugin_config, "personification_fullmodal_provider_enabled", False)) and str(
+        getattr(plugin_config, "personification_fullmodal_provider_api_key", "") or ""
+    ).strip():
+        return True
     try:
         settings = resolve_transcription_settings(plugin_config)
     except Exception:
@@ -1537,6 +1737,90 @@ async def analyze_audios_with_route_or_fallback(
     )
     if primary_result:
         return primary_result, "audio_route_direct"
+
+    async def _external_api_result() -> tuple[str, str]:
+        external_started_at = time.monotonic()
+        fallback = _build_video_fallback_provider_config(runtime)
+        protocol = str((fallback or {}).get("api_type", "") or "").strip().lower()
+        if not fallback or not fallback.get("api_key") or protocol == "openai_custom_video_url":
+            _record_media_attempt(
+                route_attempts,
+                route="audio_external_fullmodal",
+                status="skipped",
+                started_at=external_started_at,
+                diagnostic_code="fullmodal_provider_unconfigured",
+            )
+            return "", "audio_unavailable"
+        try:
+            max_bytes = max(1, int(float(fallback.get("max_bytes", 536870912) or 536870912)))
+            normalized = refs[0]
+            if not normalized.startswith(("http://", "https://")) and Path(normalized).stat().st_size > max_bytes:
+                raise ValueError("fullmodal_provider_media_too_large")
+            timeout = float(fallback.get("timeout", 600.0) or 600.0)
+            if protocol in {"qwen_omni", "openai_qwen_omni"}:
+                result = await _call_qwen_omni_media(
+                    api_key=fallback["api_key"],
+                    base_url=fallback.get("api_url", ""),
+                    workspace_id=fallback.get("workspace_id", ""),
+                    model=fallback.get("model", "") or _QWEN_OMNI_DEFAULT_MODEL,
+                    prompt=prompt,
+                    audio_refs=refs,
+                    timeout=timeout,
+                )
+            elif protocol == "openai_mimo_v25":
+                result = await _call_mimo_media(
+                    api_key=fallback["api_key"],
+                    base_url=fallback.get("api_url", ""),
+                    model=fallback.get("model", "") or _MIMO_DEFAULT_MODEL,
+                    prompt=prompt,
+                    audio_refs=refs,
+                    timeout=timeout,
+                )
+            else:
+                result = await _call_gemini_media(
+                    api_key=fallback["api_key"],
+                    base_url=fallback.get("api_url", ""),
+                    model=fallback.get("model", "") or _GEMINI_DEFAULT_MODEL,
+                    auth_mode=fallback.get("gemini_auth_mode", "auto"),
+                    prompt=prompt,
+                    audio_refs=refs,
+                )
+        except Exception as exc:
+            _log_warning(runtime, f"[audio] external fullmodal route failed: {sanitize_text(exc)}")
+            code = str(exc or "").split(":", 1)[0]
+            _record_media_attempt(
+                route_attempts,
+                route="audio_external_fullmodal",
+                status="failed",
+                started_at=external_started_at,
+                diagnostic_code=(
+                    "media_transport_unavailable"
+                    if code in {
+                        "fullmodal_provider_media_too_large",
+                        "qwen_omni_local_audio_too_large",
+                        "mimo_local_audio_too_large",
+                    }
+                    else "fullmodal_provider_request_failed"
+                ),
+            )
+            return "", "audio_unavailable"
+        result_text = str(result or "").strip()
+        if _invalid_media_text(result_text):
+            _record_media_attempt(
+                route_attempts,
+                route="audio_external_fullmodal",
+                status="failed",
+                started_at=external_started_at,
+                diagnostic_code="fullmodal_provider_output_empty",
+            )
+            return "", "audio_unavailable"
+        _record_media_attempt(
+            route_attempts,
+            route="audio_external_fullmodal",
+            status="ok",
+            started_at=external_started_at,
+        )
+        return result_text, "audio_external_fullmodal"
 
     async def _qwen_web_result() -> tuple[str, str]:
         qwen_started_at = time.monotonic()
@@ -1632,6 +1916,9 @@ async def analyze_audios_with_route_or_fallback(
         qwen_result = await _qwen_web_result()
         if qwen_result[0]:
             return qwen_result
+    external_result = await _external_api_result()
+    if external_result[0]:
+        return external_result
     asr_result = await _asr_result()
     if asr_result[0]:
         return asr_result
