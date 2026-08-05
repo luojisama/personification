@@ -487,6 +487,49 @@ def test_recent_file_media_is_not_shared_with_another_group_sender() -> None:
         reply_buffer._clear_recent_media_for_test()
 
 
+def test_unresolved_quoted_media_marks_completion_evidence_unavailable() -> None:
+    async def run() -> None:
+        reply_buffer._clear_recent_media_for_test()
+        controller = reply_buffer.ReplyConcurrencyController(session_limit=2, global_limit=2)
+        captured: dict[str, Any] = {}
+
+        async def process_response_logic(_bot: Any, _event: Any, state: dict[str, Any]) -> None:
+            captured.update(state)
+
+        event = _PrivateEvent(9, "概括引用的视频")
+        event.reply = type(
+            "Reply",
+            (),
+            {
+                "message_id": "404",
+                "sender": type("Sender", (), {"user_id": "123"})(),
+                "message": [],
+            },
+        )()
+        try:
+            await reply_buffer.handle_reply_event(
+                _Bot(),
+                event,
+                {},
+                poke_event_cls=type("PokeEvent", (), {}),
+                message_event_cls=_PrivateEvent,
+                group_message_event_cls=_GroupEvent,
+                process_response_logic=process_response_logic,
+                msg_buffer={},
+                start_buffer_timer=lambda *_args: None,
+                logger=_Logger(),
+                concurrency_controller=controller,
+                response_timeout_seconds=30,
+            )
+        finally:
+            reply_buffer._clear_recent_media_for_test()
+
+        assert captured["turn_media_context"] == []
+        assert captured["media_reference_unavailable"] is True
+
+    asyncio.run(run())
+
+
 def test_random_bot_target_is_not_upgraded_to_required_reply() -> None:
     async def run() -> None:
         msg_buffer: dict[str, dict[str, Any]] = {}

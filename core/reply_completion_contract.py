@@ -35,7 +35,10 @@ def resolve_sent_reply_completion(
         if social_tool_execution != "not_used"
         else general_tool_execution
     )
-    evidence_unavailable = bool(values.get("agent_evidence_unavailable", False))
+    evidence_unavailable = bool(
+        values.get("agent_evidence_unavailable", False)
+        or values.get("media_reference_unavailable", False)
+    )
     if evidence_unavailable and evidence_delivery == "not_required":
         evidence_delivery = "incomplete"
     outbound_delivery = (

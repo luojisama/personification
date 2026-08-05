@@ -173,6 +173,13 @@ def test_reply_turn_trace_records_and_finishes(_db_tmp) -> None:
             "partial",
             "evidence_delivery_incomplete",
         ),
+        (
+            {"media_reference_unavailable": True},
+            False,
+            False,
+            "partial",
+            "evidence_delivery_incomplete",
+        ),
         ({}, False, True, "failed", "outbound_send_failed"),
     ],
 )

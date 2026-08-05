@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict
 
 from ..core import metrics
 from ..core.context_cleanup import release_message_buffer_entry_resources
+from ..core.message_relations import extract_reply_message_id
 from ..core.target_inference import normalize_message_target_for_review
 from ..core.turn_media import (
     TurnMediaRef,
@@ -1139,6 +1140,12 @@ async def handle_reply_event(
                 now=time.monotonic(),
             )
             direct_media.extend(recent_media)
+        media_reference_unavailable = bool(
+            event_plain_text
+            and extract_reply_message_id(event)
+            and not direct_media
+        )
+        direct_state["media_reference_unavailable"] = media_reference_unavailable
         direct_state["batch_event_count"] = 1 + int(bool(recent_media))
         direct_state["turn_media_context"] = serialize_turn_media(
             coerce_turn_media(direct_media)
@@ -1153,12 +1160,15 @@ async def handle_reply_event(
                 "video": sum(item.kind == "video" for item in direct_media),
                 "audio": sum(item.kind == "audio" for item in direct_media),
             }
-            if any(media_counts.values()):
+            if any(media_counts.values()) or media_reference_unavailable:
                 reply_turn_trace.record_stage(
                     key="turn_media_resolved",
                     label="轮次媒体解析",
-                    status="ok",
-                    detail=" ".join(f"{key}={value}" for key, value in media_counts.items()),
+                    status="warn" if media_reference_unavailable else "ok",
+                    detail=(
+                        " ".join(f"{key}={value}" for key, value in media_counts.items())
+                        + f" reference_unavailable={str(media_reference_unavailable).lower()}"
+                    ),
                     hint="引用媒体通过 message_id 回查；近期媒体只在同一会话与同一发送者内承接",
                 )
         except Exception:
