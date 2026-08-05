@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Literal
+
+from .media_refs import is_supported_video_filename, normalize_video_ref
 
 
 MediaOrigin = Literal["current", "quoted", "batch"]
@@ -81,7 +84,23 @@ def _file_id(data: dict[str, Any]) -> str:
 
 
 def _media_ref(data: dict[str, Any]) -> str:
-    return _text(data.get("url") or data.get("src") or data.get("file"))
+    return _text(
+        data.get("url")
+        or data.get("src")
+        or data.get("path")
+        or data.get("file")
+    )
+
+
+def _file_name(data: dict[str, Any]) -> str:
+    return _text(
+        data.get("name")
+        or data.get("file_name")
+        or data.get("fileName")
+        or data.get("path")
+        or data.get("url")
+        or data.get("file")
+    )
 
 
 def _content_hash(ref: str, file_id: str) -> str:
@@ -106,6 +125,8 @@ def _kind_for_segment(segment_type: str, data: dict[str, Any]) -> str:
         return "video"
     if segment_type == "record":
         return "audio"
+    if segment_type == "file" and is_supported_video_filename(_file_name(data)):
+        return "video"
     if segment_type != "image":
         return "unknown"
     raw_sub_type = data.get("sub_type", data.get("subType", 0))
@@ -224,9 +245,11 @@ def extract_media_from_message(
     refs: list[TurnMediaRef] = []
     for segment in _message_segments(message):
         segment_type = _segment_type(segment)
-        if segment_type not in {"image", "mface", "gif", "video", "record"}:
+        if segment_type not in {"image", "mface", "gif", "video", "record", "file"}:
             continue
         data = _segment_data(segment)
+        if segment_type == "file" and not is_supported_video_filename(_file_name(data)):
+            continue
         ref = _media_ref(data)
         file_id = _file_id(data)
         if not ref and not file_id:
@@ -358,6 +381,91 @@ async def resolve_onebot_audio_refs(
     return resolved
 
 
+def _onebot_payload_value(payload: Any, *names: str) -> str:
+    if isinstance(payload, dict):
+        for name in names:
+            candidate = _text(payload.get(name))
+            if candidate:
+                return candidate
+        return ""
+    for name in names:
+        candidate = _text(getattr(payload, name, None))
+        if candidate:
+            return candidate
+    return _text(payload) if isinstance(payload, (str, Path)) else ""
+
+
+async def resolve_onebot_video_refs(
+    values: Iterable[TurnMediaRef | dict[str, Any]] | None,
+    bot: Any,
+    *,
+    timeout_seconds: float = 180.0,
+) -> list[TurnMediaRef]:
+    """Resolve opaque OneBot video/file tokens through the adapter on demand."""
+
+    refs = coerce_turn_media(values)
+    resolved: list[TurnMediaRef] = []
+    for item in refs:
+        if item.kind != "video":
+            resolved.append(item)
+            continue
+        raw_ref = _text(item.ref)
+        normalized, _problem = normalize_video_ref(raw_ref)
+        if normalized:
+            resolved.append(replace(item, ref=normalized) if normalized != raw_ref else item)
+            continue
+        token = _text(item.file_id or raw_ref)
+        if not token:
+            resolved.append(item)
+            continue
+        try:
+            get_file = getattr(bot, "get_file", None)
+            if callable(get_file):
+                request = get_file(file=token)
+            else:
+                call_api = getattr(bot, "call_api", None)
+                if not callable(call_api):
+                    resolved.append(item)
+                    continue
+                request = call_api("get_file", file=token)
+            payload = await asyncio.wait_for(
+                request,
+                timeout=max(1.0, float(timeout_seconds or 180.0)),
+            )
+            candidates = (
+                _onebot_payload_value(payload, "url"),
+                _onebot_payload_value(payload, "file", "path"),
+            )
+            candidate = ""
+            for value in candidates:
+                if not value:
+                    continue
+                normalized_candidate, problem = normalize_video_ref(value)
+                if normalized_candidate and not problem:
+                    candidate = normalized_candidate
+                    break
+        except Exception:
+            candidate = ""
+        resolved.append(replace(item, ref=candidate) if candidate else item)
+    return resolved
+
+
+async def resolve_onebot_media_refs(
+    values: Iterable[TurnMediaRef | dict[str, Any]] | None,
+    bot: Any,
+    *,
+    video_timeout_seconds: float = 180.0,
+) -> list[TurnMediaRef]:
+    """Resolve lazy OneBot audio and video refs while preserving provenance."""
+
+    refs = await resolve_onebot_video_refs(
+        values,
+        bot,
+        timeout_seconds=video_timeout_seconds,
+    )
+    return await resolve_onebot_audio_refs(refs, bot)
+
+
 def attach_safe_visual_summary(
     values: Iterable[TurnMediaRef | dict[str, Any]],
     summary: Any,
@@ -439,5 +547,7 @@ __all__ = [
     "normalize_safe_visual_summary",
     "render_turn_media_grounding",
     "resolve_onebot_audio_refs",
+    "resolve_onebot_media_refs",
+    "resolve_onebot_video_refs",
     "serialize_turn_media",
 ]

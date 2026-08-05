@@ -24,7 +24,20 @@ def resolve_sent_reply_completion(
     )
     evidence_recovered = bool(values.get("agent_evidence_recovered", False))
     coverage_status = str(values.get("agent_social_coverage_status", "") or "")
-    tool_execution = str(values.get("agent_social_tool_execution", "not_used") or "not_used")
+    social_tool_execution = str(
+        values.get("agent_social_tool_execution", "not_used") or "not_used"
+    )
+    general_tool_execution = str(
+        values.get("agent_tool_execution", "not_used") or "not_used"
+    )
+    tool_execution = (
+        social_tool_execution
+        if social_tool_execution != "not_used"
+        else general_tool_execution
+    )
+    evidence_unavailable = bool(values.get("agent_evidence_unavailable", False))
+    if evidence_unavailable and evidence_delivery == "not_required":
+        evidence_delivery = "incomplete"
     outbound_delivery = (
         "unconfirmed" if delivery_unknown else "partial" if delivery_partial else "confirmed"
     )
@@ -37,6 +50,9 @@ def resolve_sent_reply_completion(
         outcome = "partial"
         diagnosis_code = "outbound_send_failed"
     elif evidence_required and evidence_delivery not in {"met", "recovered"}:
+        outcome = "partial"
+        diagnosis_code = "evidence_delivery_incomplete"
+    elif evidence_unavailable:
         outcome = "partial"
         diagnosis_code = "evidence_delivery_incomplete"
     elif evidence_recovered or evidence_delivery == "recovered":
@@ -58,6 +74,7 @@ def resolve_sent_reply_completion(
         "coverage_status": coverage_status,
         "evidence_required": evidence_required,
         "evidence_recovered": evidence_recovered,
+        "evidence_unavailable": evidence_unavailable,
     }
 
 

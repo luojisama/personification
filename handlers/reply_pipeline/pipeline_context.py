@@ -1021,6 +1021,14 @@ async def run_agent_if_enabled(
             if bool(getattr(result, "social_evidence", None))
             else "not_used"
         )
+        evidence_unavailable = (
+            str(getattr(result, "quality_context", "") or "")
+            == "evidence_unavailable"
+        )
+        commit_state["agent_evidence_unavailable"] = evidence_unavailable
+        commit_state["agent_tool_execution"] = (
+            "empty" if evidence_unavailable else "not_used"
+        )
     return (
         result.text,
         True,

@@ -73,7 +73,7 @@ from ...core.turn_media import (
     media_summary_timeout_seconds,
     normalize_safe_visual_summary,
     render_turn_media_grounding,
-    resolve_onebot_audio_refs,
+    resolve_onebot_media_refs,
     serialize_turn_media,
 )
 from ...core.user_avatar_insight import schedule_user_avatar_analysis
@@ -2287,8 +2287,20 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             is_direct_mention=is_direct_mention,
             has_image_input=bool(tool_image_urls or tool_video_urls or tool_audio_urls),
         ):
-            turn_media_context = await resolve_onebot_audio_refs(turn_media_context, bot)
+            turn_media_context = await resolve_onebot_media_refs(
+                turn_media_context,
+                bot,
+                video_timeout_seconds=float(
+                    getattr(runtime.plugin_config, "personification_video_analysis_timeout", 180.0)
+                    or 180.0
+                ),
+            )
             state["turn_media_context"] = serialize_turn_media(turn_media_context)
+            tool_video_urls = [
+                item.ref
+                for item in turn_media_context
+                if item.kind == "video" and str(item.ref or "").strip()
+            ][:1]
             tool_audio_urls = [
                 item.ref
                 for item in turn_media_context

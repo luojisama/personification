@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
@@ -19,6 +20,14 @@ def _image(url: str, file_id: str, *, sub_type: int = 0) -> SimpleNamespace:
 
 def _record(file_id: str) -> SimpleNamespace:
     return SimpleNamespace(type="record", data={"file": file_id})
+
+
+def _video(file_id: str, *, url: str = "") -> SimpleNamespace:
+    return SimpleNamespace(type="video", data={"file": file_id, "url": url})
+
+
+def _file(file_id: str, name: str) -> SimpleNamespace:
+    return SimpleNamespace(type="file", data={"file": file_id, "name": name})
 
 
 def _event(user_id: str, message_id: str, image: SimpleNamespace) -> SimpleNamespace:
@@ -192,3 +201,116 @@ def test_onebot_record_resolution_failure_preserves_original_reference() -> None
     resolved = asyncio.run(turn_media.resolve_onebot_audio_refs(refs, _Bot()))
 
     assert resolved[0] == refs[0]
+
+
+def test_file_segment_with_video_extension_enters_video_media_context() -> None:
+    event = _event(
+        "speaker",
+        "file-message",
+        _file("opaque-file-token", "gameplay.MP4"),
+    )
+
+    refs = turn_media.extract_turn_media_from_event(event)
+
+    assert len(refs) == 1
+    assert refs[0].kind == "video"
+    assert refs[0].ref == "opaque-file-token"
+    assert refs[0].file_id == "opaque-file-token"
+    assert refs[0].owner_user_id == "speaker"
+    assert refs[0].message_id == "file-message"
+
+
+def test_non_video_file_segment_is_not_exposed_to_video_understanding() -> None:
+    event = _event(
+        "speaker",
+        "file-message",
+        _file("opaque-file-token", "notes.txt"),
+    )
+
+    assert turn_media.extract_turn_media_from_event(event) == []
+
+
+def test_onebot_video_token_is_resolved_through_get_file_on_demand(tmp_path: Path) -> None:
+    video_path = tmp_path / "gameplay.mp4"
+    video_path.write_bytes(b"video")
+    event = _event(
+        "speaker",
+        "video-message",
+        _video("opaque-video-token"),
+    )
+    refs = turn_media.extract_turn_media_from_event(event)
+    calls: list[dict[str, str]] = []
+
+    class _Bot:
+        async def get_file(self, **kwargs):  # noqa: ANN003, ANN201
+            calls.append(dict(kwargs))
+            return {
+                "file": str(video_path),
+                "url": "",
+                "file_name": "gameplay.mp4",
+            }
+
+    resolved = asyncio.run(turn_media.resolve_onebot_video_refs(refs, _Bot()))
+
+    assert calls == [{"file": "opaque-video-token"}]
+    assert resolved[0].ref == str(video_path.resolve())
+    assert resolved[0].file_id == "opaque-video-token"
+    assert resolved[0].origin == "current"
+    assert resolved[0].content_hash == refs[0].content_hash
+
+
+def test_file_form_video_prefers_adapter_https_url() -> None:
+    event = _event(
+        "speaker",
+        "file-message",
+        _file("opaque-file-token", "clip.mp4"),
+    )
+    refs = turn_media.extract_turn_media_from_event(event)
+
+    class _Bot:
+        async def call_api(self, api: str, **kwargs):  # noqa: ANN003, ANN201
+            assert api == "get_file"
+            assert kwargs == {"file": "opaque-file-token"}
+            return {
+                "file": "C:\\remote-host\\clip.mp4",
+                "url": "https://multimedia.nt.qq.com.cn/download/opaque",
+                "file_name": "clip.mp4",
+            }
+
+    resolved = asyncio.run(turn_media.resolve_onebot_video_refs(refs, _Bot()))
+
+    assert resolved[0].ref == "https://multimedia.nt.qq.com.cn/download/opaque"
+
+
+def test_resolved_video_url_does_not_call_onebot_again() -> None:
+    event = _event(
+        "speaker",
+        "video-message",
+        _video("opaque-token", url="https://cdn.example/video.mp4"),
+    )
+    refs = turn_media.extract_turn_media_from_event(event)
+
+    class _Bot:
+        async def call_api(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN201
+            raise AssertionError("resolved HTTPS video must not call get_file")
+
+    resolved = asyncio.run(turn_media.resolve_onebot_video_refs(refs, _Bot()))
+
+    assert resolved == refs
+
+
+def test_onebot_video_resolution_failure_preserves_original_reference() -> None:
+    event = _event(
+        "speaker",
+        "video-message",
+        _video("opaque-video-token"),
+    )
+    refs = turn_media.extract_turn_media_from_event(event)
+
+    class _Bot:
+        async def call_api(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN201
+            raise RuntimeError("adapter unavailable")
+
+    resolved = asyncio.run(turn_media.resolve_onebot_video_refs(refs, _Bot()))
+
+    assert resolved == refs

@@ -163,6 +163,16 @@ def test_reply_turn_trace_records_and_finishes(_db_tmp) -> None:
             "partial",
             "evidence_delivery_incomplete",
         ),
+        (
+            {
+                "agent_tool_execution": "empty",
+                "agent_evidence_unavailable": True,
+            },
+            False,
+            False,
+            "partial",
+            "evidence_delivery_incomplete",
+        ),
         ({}, False, True, "failed", "outbound_send_failed"),
     ],
 )
@@ -179,6 +189,9 @@ def test_reply_completion_contract_separates_evidence_and_outbound_states(
     assert resolved["outcome"] == outcome
     assert resolved["diagnosis_code"] == diagnosis
     assert resolved["outbound_delivery"] == ("unconfirmed" if delivery_unknown else "confirmed")
+    if state.get("agent_evidence_unavailable"):
+        assert resolved["tool_execution"] == "empty"
+        assert resolved["evidence_delivery"] == "incomplete"
 
 
 def test_reply_turn_trace_builds_safe_process_view(_db_tmp) -> None:

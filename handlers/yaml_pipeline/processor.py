@@ -111,7 +111,7 @@ from ...core.turn_media import (
     media_summary_timeout_seconds,
     normalize_safe_visual_summary,
     render_turn_media_grounding,
-    resolve_onebot_audio_refs,
+    resolve_onebot_media_refs,
 )
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_YAML
 from ...core.user_avatar_insight import (
@@ -1650,7 +1650,19 @@ async def process_yaml_response_logic(
         is_direct_mention=is_direct_mention,
         has_image_input=bool(tool_image_urls or tool_video_urls or tool_audio_urls),
     ):
-        turn_media_refs = await resolve_onebot_audio_refs(turn_media_refs, bot)
+        turn_media_refs = await resolve_onebot_media_refs(
+            turn_media_refs,
+            bot,
+            video_timeout_seconds=float(
+                getattr(plugin_config, "personification_video_analysis_timeout", 180.0)
+                or 180.0
+            ),
+        )
+        tool_video_urls = [
+            item.ref
+            for item in turn_media_refs
+            if item.kind == "video" and str(item.ref or "").strip()
+        ][:1]
         tool_audio_urls = [
             item.ref
             for item in turn_media_refs
@@ -1872,6 +1884,14 @@ async def process_yaml_response_logic(
                 "partial" if bool(social_coverage.get("partial", False)) else "ok"
                 if bool(getattr(agent_result, "social_evidence", None))
                 else "not_used"
+            )
+            evidence_unavailable = (
+                str(getattr(agent_result, "quality_context", "") or "")
+                == "evidence_unavailable"
+            )
+            reply_commit_state["agent_evidence_unavailable"] = evidence_unavailable
+            reply_commit_state["agent_tool_execution"] = (
+                "empty" if evidence_unavailable else "not_used"
             )
             agent_failure_code = str(getattr(agent_result, "failure_code", "") or "").strip()
             if agent_failure_code:

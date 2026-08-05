@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import unquote, urlsplit
 
 from .image_refs import normalize_image_refs
 
@@ -24,6 +25,19 @@ _AUDIO_EXTENSIONS = {
     ".flac",
     ".amr",
 }
+
+
+def is_supported_video_filename(value: str) -> bool:
+    """Return whether a path/URL/name has a supported video suffix."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        path = unquote(urlsplit(raw).path) if "://" in raw else raw
+    except Exception:
+        path = raw
+    return Path(path).suffix.lower() in _VIDEO_EXTENSIONS
 
 
 def normalize_video_ref(value: str) -> tuple[str | None, str | None]:
@@ -125,6 +139,7 @@ def normalize_media_refs(
 
 
 __all__ = [
+    "is_supported_video_filename",
     "normalize_media_refs",
     "normalize_audio_ref",
     "normalize_audio_refs",
