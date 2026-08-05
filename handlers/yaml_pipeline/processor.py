@@ -112,6 +112,7 @@ from ...core.turn_media import (
     normalize_safe_visual_summary,
     render_turn_media_grounding,
     resolve_onebot_media_refs,
+    summarize_media_resolution,
 )
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_YAML
 from ...core.user_avatar_insight import (
@@ -1658,6 +1659,22 @@ async def process_yaml_response_logic(
                 or 180.0
             ),
         )
+        media_resolution = summarize_media_resolution(turn_media_refs)
+        if media_resolution["videos"] or media_resolution["audios"]:
+            _trace_stage(
+                key="turn_media_materialized",
+                label="媒体文件就绪",
+                status="warn" if media_resolution["video_failed"] else "ok",
+                detail=(
+                    f"videos={media_resolution['videos']} "
+                    f"video_usable={media_resolution['video_usable']} "
+                    f"video_failed={media_resolution['video_failed']} "
+                    f"audios={media_resolution['audios']} "
+                    "routes="
+                    + (",".join(media_resolution["resolution_codes"]) or "direct")
+                ),
+                hint="仅记录媒体就绪计数与稳定路由码，不记录文件标识、路径或下载地址",
+            )
         tool_video_urls = [
             item.ref
             for item in turn_media_refs

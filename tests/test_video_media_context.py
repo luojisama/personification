@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
@@ -68,10 +67,7 @@ def test_vision_result_records_qwen_web_route_fallback(monkeypatch) -> None:  # 
 
 def test_onebot_file_video_reaches_qwen_web_after_lazy_resolution(
     monkeypatch,
-    tmp_path: Path,
 ) -> None:  # noqa: ANN001
-    video_path = tmp_path / "qq-file-video.mp4"
-    video_path.write_bytes(b"video")
     refs = turn_media.extract_media_from_message(
         [
             SimpleNamespace(
@@ -85,9 +81,17 @@ def test_onebot_file_video_reaches_qwen_web_after_lazy_resolution(
     )
 
     class _Bot:
-        async def get_file(self, **kwargs):  # noqa: ANN003, ANN201
-            assert kwargs == {"file": "opaque-qq-file"}
-            return {"file": str(video_path), "file_name": video_path.name}
+        async def call_api(self, api: str, **kwargs):  # noqa: ANN003, ANN201
+            if api == "get_file":
+                assert kwargs == {"file": "opaque-qq-file"}
+                return {"file": "C:\\napcat-host\\qq-file-video.mp4"}
+            assert api == "get_private_file_url"
+            assert kwargs == {"file_id": "opaque-qq-file"}
+            return {
+                "data": {
+                    "url": "https://multimedia.nt.qq.com.cn/download/qq-file-video"
+                }
+            }
 
     resolved = asyncio.run(turn_media.resolve_onebot_media_refs(refs, _Bot()))
     assert resolved[0].origin == "quoted"
@@ -130,7 +134,9 @@ def test_onebot_file_video_reaches_qwen_web_after_lazy_resolution(
     finally:
         sticker_impl.reset_current_image_context(token)
 
-    assert captured["video_refs"] == [str(video_path.resolve())]
+    assert captured["video_refs"] == [
+        "https://multimedia.nt.qq.com.cn/download/qq-file-video"
+    ]
     assert result["scene_summary"] == "千问已理解文件视频"
     assert result["analysis_route"] == "video_qwen_web"
     assert result["media_routes"][0]["selected_route"] == "video_qwen_web"

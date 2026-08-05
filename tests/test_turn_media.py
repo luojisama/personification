@@ -49,6 +49,8 @@ def test_turn_media_serialization_never_persists_data_url() -> None:
     assert len(serialized) == 1
     assert serialized[0]["ref"] == ""
     assert serialized[0]["file_id"] == "file-a"
+    assert serialized[0]["group_id"] == "group-1"
+    assert serialized[0]["resolution_code"] == ""
     assert serialized[0]["content_hash"]
     assert "data:image" not in str(serialized)
 
@@ -348,6 +350,70 @@ def test_file_form_video_prefers_adapter_https_url() -> None:
     resolved = asyncio.run(turn_media.resolve_onebot_video_refs(refs, _Bot()))
 
     assert resolved[0].ref == "https://multimedia.nt.qq.com.cn/download/opaque"
+    assert resolved[0].resolution_code == "onebot_get_file_url"
+
+
+def test_private_file_video_falls_back_to_download_url_for_cross_host_path() -> None:
+    event = SimpleNamespace(
+        user_id="speaker",
+        message_id="file-message",
+        sender=SimpleNamespace(user_id="speaker"),
+        message=[_file("opaque-file-token", "clip.mp4")],
+    )
+    refs = turn_media.extract_turn_media_from_event(event)
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class _Bot:
+        async def call_api(self, api: str, **kwargs):  # noqa: ANN003, ANN201
+            calls.append((api, dict(kwargs)))
+            if api == "get_file":
+                return {"data": {"file": "C:\\napcat-host\\clip.mp4"}}
+            assert api == "get_private_file_url"
+            return {
+                "data": {
+                    "url": "https://multimedia.nt.qq.com.cn/download/private-opaque"
+                }
+            }
+
+    resolved = asyncio.run(turn_media.resolve_onebot_video_refs(refs, _Bot()))
+
+    assert calls == [
+        ("get_file", {"file": "opaque-file-token"}),
+        ("get_private_file_url", {"file_id": "opaque-file-token"}),
+    ]
+    assert resolved[0].ref == "https://multimedia.nt.qq.com.cn/download/private-opaque"
+    assert resolved[0].resolution_code == "onebot_private_file_url"
+
+
+def test_group_file_video_uses_group_download_url_with_preserved_group() -> None:
+    event = _event(
+        "speaker",
+        "file-message",
+        _file("opaque-group-file-token", "clip.mp4"),
+    )
+    refs = turn_media.extract_turn_media_from_event(event)
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class _Bot:
+        async def call_api(self, api: str, **kwargs):  # noqa: ANN003, ANN201
+            calls.append((api, dict(kwargs)))
+            if api == "get_file":
+                return {"file": "/napcat-host/clip.mp4"}
+            assert api == "get_group_file_url"
+            return {"url": "https://multimedia.nt.qq.com.cn/download/group-opaque"}
+
+    resolved = asyncio.run(turn_media.resolve_onebot_video_refs(refs, _Bot()))
+
+    assert refs[0].group_id == "group-1"
+    assert calls == [
+        ("get_file", {"file": "opaque-group-file-token"}),
+        (
+            "get_group_file_url",
+            {"file_id": "opaque-group-file-token", "group_id": "group-1"},
+        ),
+    ]
+    assert resolved[0].ref == "https://multimedia.nt.qq.com.cn/download/group-opaque"
+    assert resolved[0].resolution_code == "onebot_group_file_url"
 
 
 def test_resolved_video_url_does_not_call_onebot_again() -> None:
@@ -381,4 +447,15 @@ def test_onebot_video_resolution_failure_preserves_original_reference() -> None:
 
     resolved = asyncio.run(turn_media.resolve_onebot_video_refs(refs, _Bot()))
 
-    assert resolved == refs
+    assert resolved[0].ref == refs[0].ref
+    assert resolved[0].file_id == refs[0].file_id
+    assert resolved[0].resolution_code == "onebot_video_resolve_failed"
+
+    summary = turn_media.summarize_media_resolution(resolved)
+    assert summary == {
+        "videos": 1,
+        "video_usable": 0,
+        "video_failed": 1,
+        "audios": 0,
+        "resolution_codes": ["onebot_video_resolve_failed"],
+    }

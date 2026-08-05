@@ -188,3 +188,29 @@ def test_observe_model_step_records_trace_and_warns_empty_stop() -> None:
     assert "tool_calls=0" in traces[0]["detail"]
     assert logger.warnings
     assert "provider returned empty stop response" in logger.warnings[0]
+
+
+def test_trace_tool_result_exposes_only_stable_media_route_diagnostics() -> None:
+    traces: list[dict] = []
+    result = (
+        '{"scene_summary":"private observation",'
+        '"media_routes":[{"kind":"video","selected_route":"",'
+        '"attempts":[{"route":"video_qwen_web","status":"failed",'
+        '"diagnostic_code":"qwen_web_media_ref_invalid",'
+        '"private_path":"C:/secret/video.mp4"}]}]}'
+    )
+
+    tool_loop.trace_tool_result(
+        tool_name="vision_analyze",
+        result=result,
+        step=1,
+        elapsed_ms=25,
+        record_trace=lambda **kwargs: traces.append(kwargs),
+        status_for_result=lambda _result: "warn",
+    )
+
+    detail = traces[0]["detail"]
+    assert "video:selected=none" in detail
+    assert "video_qwen_web:failed:qwen_web_media_ref_invalid" in detail
+    assert "private observation" not in detail
+    assert "C:/secret/video.mp4" not in detail

@@ -16,6 +16,13 @@ MediaOrigin = Literal["current", "quoted", "batch"]
 
 _ALLOWED_ORIGINS = {"current", "quoted", "batch"}
 _ALLOWED_KINDS = {"image", "sticker", "gif", "mface", "video", "audio", "unknown"}
+_MEDIA_RESOLUTION_CODES = {
+    "onebot_get_file_url",
+    "onebot_get_file_local",
+    "onebot_private_file_url",
+    "onebot_group_file_url",
+    "onebot_video_resolve_failed",
+}
 _DATA_URL_RE = re.compile(r"data:[^\s,;]+;base64,[A-Za-z0-9+/=\r\n]+", re.IGNORECASE)
 _SUMMARY_MARKER_RE = re.compile(
     r"\[(?:图片视觉描述|表情包语义|动态表情语义|媒体语义)（系统注入[^）]*）[：:]\s*(.*?)\]",
@@ -162,6 +169,8 @@ class TurnMediaRef:
     safe_summary: str = ""
     confidence: float = 0.0
     summary_scope: str = ""
+    group_id: str = ""
+    resolution_code: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         ref = _text(self.ref)
@@ -174,6 +183,8 @@ class TurnMediaRef:
             "kind": self.kind if self.kind in _ALLOWED_KINDS else "unknown",
             "content_hash": _text(self.content_hash),
             "file_id": _text(self.file_id),
+            "group_id": _text(self.group_id),
+            "resolution_code": _text(self.resolution_code),
             "safe_summary": normalize_safe_visual_summary(self.safe_summary),
             "confidence": max(0.0, min(1.0, float(self.confidence or 0.0))),
             "summary_scope": _text(self.summary_scope),
@@ -215,6 +226,8 @@ class TurnMediaRef:
             kind=kind,
             content_hash=content_hash,
             file_id=file_id,
+            group_id=_text(value.get("group_id")),
+            resolution_code=_text(value.get("resolution_code")),
             safe_summary=normalize_safe_visual_summary(value.get("safe_summary")),
             confidence=confidence,
             summary_scope=_text(value.get("summary_scope")),
@@ -242,6 +255,7 @@ def extract_media_from_message(
     origin: MediaOrigin,
     owner_user_id: str,
     message_id: str,
+    group_id: str = "",
 ) -> list[TurnMediaRef]:
     refs: list[TurnMediaRef] = []
     for segment in _message_segments(message):
@@ -274,6 +288,7 @@ def extract_media_from_message(
                 kind=kind,
                 content_hash=content_hash,
                 file_id=file_id,
+                group_id=_text(group_id),
             )
         )
     return refs
@@ -290,6 +305,7 @@ def extract_turn_media_from_event(
         origin=current_origin,
         owner_user_id=_sender_user_id(event),
         message_id=_message_id(event),
+        group_id=_text(_object_value(event, "group_id")),
     )
     if not include_quoted:
         return refs
@@ -301,6 +317,10 @@ def extract_turn_media_from_event(
                 origin="quoted",
                 owner_user_id=_sender_user_id(quoted),
                 message_id=_message_id(quoted),
+                group_id=_text(
+                    _object_value(quoted, "group_id")
+                    or _object_value(event, "group_id")
+                ),
             )
         )
     return refs
@@ -373,6 +393,10 @@ async def resolve_onebot_quoted_media_refs(
         origin="quoted",
         owner_user_id=_sender_user_id(payload),
         message_id=_message_id(payload) or reply_message_id,
+        group_id=_text(
+            _object_value(payload, "group_id")
+            or _object_value(event, "group_id")
+        ),
     )
     return coerce_turn_media([*refs, *quoted_refs])
 
@@ -455,6 +479,11 @@ async def resolve_onebot_audio_refs(
 
 def _onebot_payload_value(payload: Any, *names: str) -> str:
     if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            nested = _onebot_payload_value(data, *names)
+            if nested:
+                return nested
         for name in names:
             candidate = _text(payload.get(name))
             if candidate:
@@ -465,6 +494,41 @@ def _onebot_payload_value(payload: Any, *names: str) -> str:
         if candidate:
             return candidate
     return _text(payload) if isinstance(payload, (str, Path)) else ""
+
+
+def _normalize_onebot_video_candidate(value: Any) -> tuple[str, str]:
+    """Accept an adapter URL or a file that is reachable from this process."""
+
+    raw = _text(value)
+    if not raw:
+        return "", ""
+    normalized, problem = normalize_video_ref(raw)
+    if not normalized or problem:
+        return "", ""
+    if normalized.startswith("http://"):
+        return "", ""
+    return normalized, "url" if normalized.startswith("https://") else "local"
+
+
+async def _call_onebot_file_api(
+    bot: Any,
+    api: str,
+    *,
+    timeout_seconds: float,
+    **kwargs: Any,
+) -> Any:
+    direct = getattr(bot, api, None)
+    if callable(direct):
+        request = direct(**kwargs)
+    else:
+        call_api = getattr(bot, "call_api", None)
+        if not callable(call_api):
+            raise RuntimeError("onebot_file_api_unavailable")
+        request = call_api(api, **kwargs)
+    return await asyncio.wait_for(
+        request,
+        timeout=max(0.001, float(timeout_seconds)),
+    )
 
 
 async def resolve_onebot_video_refs(
@@ -488,38 +552,108 @@ async def resolve_onebot_video_refs(
             continue
         token = _text(item.file_id or raw_ref)
         if not token:
-            resolved.append(item)
+            resolved.append(replace(item, resolution_code="onebot_video_resolve_failed"))
             continue
+        deadline = asyncio.get_running_loop().time() + max(
+            1.0,
+            float(timeout_seconds or 180.0),
+        )
+        candidate = ""
+        resolution_code = ""
         try:
-            get_file = getattr(bot, "get_file", None)
-            if callable(get_file):
-                request = get_file(file=token)
+            payload = await _call_onebot_file_api(
+                bot,
+                "get_file",
+                timeout_seconds=max(0.001, deadline - asyncio.get_running_loop().time()),
+                file=token,
+            )
+            candidate, candidate_kind = _normalize_onebot_video_candidate(
+                _onebot_payload_value(payload, "url")
+            )
+            if candidate:
+                resolution_code = "onebot_get_file_url"
             else:
-                call_api = getattr(bot, "call_api", None)
-                if not callable(call_api):
-                    resolved.append(item)
-                    continue
-                request = call_api("get_file", file=token)
-            payload = await asyncio.wait_for(
-                request,
-                timeout=max(1.0, float(timeout_seconds or 180.0)),
-            )
-            candidates = (
-                _onebot_payload_value(payload, "url"),
-                _onebot_payload_value(payload, "file", "path"),
-            )
-            candidate = ""
-            for value in candidates:
-                if not value:
-                    continue
-                normalized_candidate, problem = normalize_video_ref(value)
-                if normalized_candidate and not problem:
-                    candidate = normalized_candidate
-                    break
+                candidate, candidate_kind = _normalize_onebot_video_candidate(
+                    _onebot_payload_value(payload, "file", "path")
+                )
+                if candidate:
+                    resolution_code = (
+                        "onebot_get_file_url"
+                        if candidate_kind == "url"
+                        else "onebot_get_file_local"
+                    )
         except Exception:
-            candidate = ""
-        resolved.append(replace(item, ref=candidate) if candidate else item)
+            pass
+
+        if not candidate:
+            fallback_api = "get_group_file_url" if _text(item.group_id) else "get_private_file_url"
+            fallback_kwargs: dict[str, Any] = {"file_id": token}
+            if fallback_api == "get_group_file_url":
+                fallback_kwargs["group_id"] = item.group_id
+            try:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining > 0:
+                    payload = await _call_onebot_file_api(
+                        bot,
+                        fallback_api,
+                        timeout_seconds=remaining,
+                        **fallback_kwargs,
+                    )
+                    candidate, candidate_kind = _normalize_onebot_video_candidate(
+                        _onebot_payload_value(payload, "url")
+                    )
+                    if candidate and candidate_kind == "url":
+                        resolution_code = (
+                            "onebot_group_file_url"
+                            if fallback_api == "get_group_file_url"
+                            else "onebot_private_file_url"
+                        )
+                    else:
+                        candidate = ""
+            except Exception:
+                pass
+
+        if candidate:
+            resolved.append(
+                replace(
+                    item,
+                    ref=candidate,
+                    resolution_code=resolution_code,
+                )
+            )
+        else:
+            resolved.append(
+                replace(item, resolution_code="onebot_video_resolve_failed")
+            )
     return resolved
+
+
+def summarize_media_resolution(
+    values: Iterable[TurnMediaRef | dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Build a compact, non-sensitive media materialization summary for Trace."""
+
+    refs = coerce_turn_media(values)
+    video_refs = [item for item in refs if item.kind == "video"]
+    usable_videos = 0
+    for item in video_refs:
+        normalized, problem = normalize_video_ref(_text(item.ref))
+        if normalized and not problem:
+            usable_videos += 1
+    resolution_codes = sorted(
+        {
+            _text(item.resolution_code)
+            for item in refs
+            if _text(item.resolution_code) in _MEDIA_RESOLUTION_CODES
+        }
+    )
+    return {
+        "videos": len(video_refs),
+        "video_usable": usable_videos,
+        "video_failed": max(0, len(video_refs) - usable_videos),
+        "audios": sum(item.kind == "audio" for item in refs),
+        "resolution_codes": resolution_codes[:8],
+    }
 
 
 async def resolve_onebot_media_refs(
@@ -623,4 +757,5 @@ __all__ = [
     "resolve_onebot_media_refs",
     "resolve_onebot_video_refs",
     "serialize_turn_media",
+    "summarize_media_resolution",
 ]

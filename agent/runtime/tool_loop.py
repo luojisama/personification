@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable
 
 from ...core.metrics import record_timing
@@ -246,6 +247,7 @@ def trace_tool_result(
     record_trace: Callable[..., None],
     status_for_result: Callable[[Any], str],
 ) -> None:
+    media_route_detail = _media_route_trace_detail(result)
     record_trace(
         key="agent_tool_result",
         label="Agent 工具结果",
@@ -253,8 +255,50 @@ def trace_tool_result(
         detail=(
             f"step={step} tool={tool_name} "
             f"result_len={len(str(result or ''))} elapsed_ms={elapsed_ms}"
+            f"{media_route_detail}"
         ),
     )
+
+
+def _safe_trace_token(value: Any) -> str:
+    token = str(value or "").strip()
+    return token if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", token) else ""
+
+
+def _media_route_trace_detail(result: Any) -> str:
+    """Expose route outcomes without copying media observations into Trace."""
+
+    payload: Any = result
+    if isinstance(result, str):
+        try:
+            payload = json.loads(result)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ""
+    if not isinstance(payload, dict) or not isinstance(payload.get("media_routes"), list):
+        return ""
+    summaries: list[str] = []
+    for media_route in payload["media_routes"][:2]:
+        if not isinstance(media_route, dict):
+            continue
+        kind = _safe_trace_token(media_route.get("kind")) or "media"
+        selected = _safe_trace_token(media_route.get("selected_route")) or "none"
+        attempts: list[str] = []
+        for attempt in list(media_route.get("attempts") or [])[:5]:
+            if not isinstance(attempt, dict):
+                continue
+            route = _safe_trace_token(attempt.get("route"))
+            status = _safe_trace_token(attempt.get("status"))
+            diagnostic = _safe_trace_token(attempt.get("diagnostic_code"))
+            if not route or not status:
+                continue
+            attempts.append(
+                f"{route}:{status}" + (f":{diagnostic}" if diagnostic else "")
+            )
+        summary = f"{kind}:selected={selected}"
+        if attempts:
+            summary += ",attempts=" + ",".join(attempts)
+        summaries.append(summary)
+    return " media_routes=" + "|".join(summaries) if summaries else ""
 
 
 __all__ = [
