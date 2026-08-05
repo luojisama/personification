@@ -332,6 +332,7 @@ async def _try_primary_video_routes(
     prompt: str,
     refs: Sequence[str],
     route_name: str,
+    attempted_routes: list[str] | None = None,
 ) -> str:
     for provider in _primary_provider_candidates(runtime):
         api_type = str(provider.get("api_type", "") or "")
@@ -342,6 +343,13 @@ async def _try_primary_video_routes(
             continue
         if not str(provider.get("api_key", "") or "").strip():
             continue
+        attempt_route = {
+            MEDIA_PROTOCOL_GEMINI: "video_primary_gemini",
+            MEDIA_PROTOCOL_QWEN: "video_primary_qwen_omni",
+            MEDIA_PROTOCOL_MIMO: "video_primary_mimo",
+        }.get(adapter.protocol, "")
+        if attempt_route and attempted_routes is not None:
+            attempted_routes.append(attempt_route)
         try:
             if adapter.protocol == MEDIA_PROTOCOL_GEMINI:
                 result = await _call_gemini_media(
@@ -1508,20 +1516,24 @@ async def analyze_videos_with_route_or_fallback(
 
     async def _primary_result() -> tuple[str, str]:
         started_at = time.monotonic()
+        attempted_primary_routes: list[str] = []
         primary_result = await _try_primary_video_routes(
             runtime=runtime,
             prompt=prompt,
             refs=refs,
             route_name=route_name,
+            attempted_routes=attempted_primary_routes,
         )
+        attempt_route = attempted_primary_routes[-1] if attempted_primary_routes else "video_primary"
         _record_media_attempt(
             route_attempts,
-            route="video_primary",
+            route=attempt_route,
             status="ok" if primary_result else "unsupported",
             started_at=started_at,
+            diagnostic_code="" if primary_result else "primary_video_unsupported",
         )
         if primary_result:
-            return primary_result, "video_route_direct"
+            return primary_result, attempt_route
 
         return "", "video_unavailable"
 
@@ -1759,12 +1771,13 @@ async def analyze_audios_with_route_or_fallback(
     )
     _record_media_attempt(
         route_attempts,
-        route="audio_primary",
+        route="audio_primary_native",
         status="ok" if primary_result else "unsupported",
         started_at=started_at,
+        diagnostic_code="" if primary_result else "primary_audio_unsupported",
     )
     if primary_result:
-        return primary_result, "audio_route_direct"
+        return primary_result, "audio_primary_native"
 
     async def _external_api_result() -> tuple[str, str]:
         external_started_at = time.monotonic()
