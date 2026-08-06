@@ -1013,6 +1013,10 @@ async def run_agent_if_enabled(
         commit_state["agent_evidence_recovered"] = bool(
             getattr(result, "evidence_recovered", False)
         )
+        commit_state["agent_citation_mode"] = str(
+            getattr(result, "citation_mode", getattr(turn_plan, "citation_mode", "none"))
+            or "none"
+        )
         commit_state["agent_social_coverage_status"] = str(
             social_coverage.get("coverage_status", "") or ""
         )

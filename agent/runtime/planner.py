@@ -31,6 +31,7 @@ AmbiguityLevel = Literal["low", "medium", "high"]
 MessageTarget = Literal["bot", "someone_else", "external_plugin", "broadcast", "uncertain"]
 DomainFocus = Literal["general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"]
 EvidencePolicy = Literal["none", "light", "standard", "strict"]
+CitationMode = Literal["none", "urls_on_request"]
 
 
 ALLOWED_REPLY_ACTIONS = {"reply", "silence", "ask_clarify"}
@@ -55,6 +56,7 @@ ALLOWED_AMBIGUITY_LEVELS = {"low", "medium", "high"}
 ALLOWED_MESSAGE_TARGETS = {"bot", "someone_else", "external_plugin", "broadcast", "uncertain"}
 ALLOWED_DOMAIN_FOCUS = {"general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"}
 ALLOWED_EVIDENCE_POLICIES = {"none", "light", "standard", "strict"}
+ALLOWED_CITATION_MODES = {"none", "urls_on_request"}
 
 
 def _normalize_domain_focus(value: Any, fallback: str = "general") -> DomainFocus:
@@ -90,6 +92,7 @@ class TurnPlan:
     session_goal: str = ""
     domain_focus: DomainFocus = "general"
     evidence_policy: EvidencePolicy = "none"
+    citation_mode: CitationMode = "none"
     emotional_support: EmotionalSupport = field(default_factory=EmotionalSupport)
     user_attitude: str = "日常交流"
     bot_emotion: str = "平静"
@@ -211,6 +214,7 @@ def parse_turn_plan_payload(payload: Any) -> TurnPlan | None:
         session_goal=str(payload.get("session_goal", "") or "").strip()[:80],
         domain_focus=_normalize_domain_focus(payload.get("domain_focus"), legacy_domain),
         evidence_policy=_enum_value(payload.get("evidence_policy"), ALLOWED_EVIDENCE_POLICIES, "none"),  # type: ignore[arg-type]
+        citation_mode=_enum_value(payload.get("citation_mode"), ALLOWED_CITATION_MODES, "none"),  # type: ignore[arg-type]
         emotional_support=_parse_emotional_support(payload.get("emotional_support")),
         user_attitude=str(payload.get("user_attitude", "") or "").strip()[:80] or "日常交流",
         bot_emotion=str(payload.get("bot_emotion", "") or "").strip()[:80] or "平静",
@@ -412,6 +416,7 @@ async def plan_turn_with_llm(
         '"session_goal":"一句短中文目标",'
         '"domain_focus":"general|social|technology|science|game_anime|plugin|realtime|emotion",'
         '"evidence_policy":"none|light|standard|strict",'
+        '"citation_mode":"none|urls_on_request",'
         '"emotional_support":{"needed":false,"listen":false,"validate":false,"advice_permission":"not_needed|ask_first|allowed","risk_level":"none|concern|high"},'
         '"user_attitude":"一句短中文", "bot_emotion":"一句短中文", "emotion_intensity":"low|medium|high", "expression_style":"一句短中文",'
         '"group_atmosphere_positive":false,"interaction_interesting":false,'
@@ -447,6 +452,7 @@ async def plan_turn_with_llm(
         "目标是查清对象后用短句参与讨论。\n"
         "6. research_need=high 只给明显需要多源查证、时效或争议的问题。\n"
         "6b. 技术、科学、时效或高影响事实通常 evidence_policy=strict；普通事实 standard，轻背景 light，纯闲聊 none。"
+        "用户没有明确索要出处或链接时 citation_mode=none；只有当前问题明确要求出处或链接时才用 citation_mode=urls_on_request。"
         "情绪支持按倾听、确认、建议权限和风险结构化，不把普通低落自动医疗化。\n"
         "7. output_mode 控制最终回复长度和形态：chat_short 接梗，chat_answer 普通答，structured_help 教程，source_summary 检索摘要，qzone_reply 空间评论。"
         "不要因为出现 @ 就把 chat_short 强行升级成长回答。\n"
@@ -550,6 +556,7 @@ def turn_plan_from_semantic_frame(frame: Any, *, has_images: bool = False, messa
         session_goal="沿用旧语义帧",
         domain_focus=_normalize_domain_focus(getattr(frame, "domain_focus", None), legacy_domain),
         evidence_policy=_enum_value(getattr(frame, "evidence_policy", "none"), ALLOWED_EVIDENCE_POLICIES, "none"),  # type: ignore[arg-type]
+        citation_mode=_enum_value(getattr(frame, "citation_mode", "none"), ALLOWED_CITATION_MODES, "none"),  # type: ignore[arg-type]
         emotional_support=_parse_emotional_support(
             getattr(frame, "emotional_support", None),
             legacy_needed=bool(getattr(frame, "requires_emotional_care", False)),
@@ -616,6 +623,7 @@ def turn_plan_to_semantic_frame(plan: TurnPlan) -> Any:
         frame.speech_act = plan.speech_act
         frame.session_goal = plan.session_goal
         frame.message_target = plan.message_target
+        frame.citation_mode = plan.citation_mode
     except Exception:
         pass
     return frame

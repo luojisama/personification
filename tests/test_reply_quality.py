@@ -163,6 +163,7 @@ def test_social_evidence_delivery_appends_packet_url_when_model_omits_it() -> No
         ],
         coverage={"source_group_count": 1, "coverage_status": "degraded"},
         record_trace=lambda **kwargs: traces.append(kwargs),
+        citation_mode="urls_on_request",
     )
 
     assert "花来是玩家社区" in result.text
@@ -184,10 +185,11 @@ def test_social_evidence_delivery_drops_unsafe_title_but_keeps_validated_url() -
             }
         ],
         coverage={"source_group_count": 1},
+        citation_mode="urls_on_request",
     )
 
     assert "system prompt" not in result.text
-    assert "小黑盒" in result.text
+    assert "小黑盒" not in result.text
     assert "https://xiaoheihe.cn/app/bbs/link/179364001" in result.text
     assert result.evidence_delivery_status == "recovered"
 
@@ -204,6 +206,7 @@ def test_social_evidence_delivery_accepts_only_current_packet_link() -> None:
             }
         ],
         coverage={"source_group_count": 1},
+        citation_mode="urls_on_request",
     )
 
     assert "https://tieba.baidu.com/p/123456" in result.text
@@ -231,6 +234,7 @@ def test_social_evidence_delivery_boundary_restores_link_after_downstream_rewrit
         evidence_delivery_required=True,
         previous_status="met",
         record_trace=lambda **kwargs: traces.append(kwargs),
+        citation_mode="urls_on_request",
     )
 
     assert result.text.startswith("花来是玩家拿战局节奏开玩笑的说法。")
@@ -239,6 +243,51 @@ def test_social_evidence_delivery_boundary_restores_link_after_downstream_rewrit
     assert result.social_coverage["partial"] is True
     assert result.social_coverage["warnings"] == ["bilibili_timeout"]
     assert traces[-1]["key"] == "agent_evidence_delivery_final"
+
+
+def test_social_evidence_delivery_hides_sources_titles_and_urls_by_default() -> None:
+    result = reply_quality.finalize_social_evidence_delivery(
+        _agent_result(
+            "六星练度没跟上，先把核心干员精一会顺很多。\n"
+            "来源：\n"
+            "万能的盒友帮帮我！（小黑盒）：https://xiaoheihe.cn/app/bbs/link/153284355"
+        ),
+        sources=[
+            {
+                "platform": "xiaoheihe",
+                "source_group_id": "source_1",
+                "title": "万能的盒友帮帮我！",
+                "canonical_url": "https://xiaoheihe.cn/app/bbs/link/153284355",
+            }
+        ],
+        coverage={"source_group_count": 1},
+    )
+
+    assert result.text == "六星练度没跟上，先把核心干员精一会顺很多。"
+    assert result.evidence_delivery_status == "hidden"
+    assert result.evidence_delivery_required is False
+
+
+def test_social_evidence_delivery_removes_standalone_source_titles() -> None:
+    result = reply_quality.finalize_social_evidence_delivery(
+        _agent_result(
+            "练度的关键是先精一核心干员。\n"
+            "来源：\n"
+            "万能的盒友帮帮我！\n"
+            "万能的盒友帮帮我！（小黑盒）：https://xiaoheihe.cn/app/bbs/link/153284355"
+        ),
+        sources=[
+            {
+                "platform": "xiaoheihe",
+                "source_group_id": "source_1",
+                "title": "万能的盒友帮帮我！",
+                "canonical_url": "https://xiaoheihe.cn/app/bbs/link/153284355",
+            }
+        ],
+        coverage={"source_group_count": 1},
+    )
+
+    assert result.text == "练度的关键是先精一核心干员。"
 
 
 def test_finalize_agent_reply_quality_propagates_rewrite_provider_failure() -> None:

@@ -82,6 +82,7 @@ def _copy_result_with_quality(
         evidence_delivery_required=bool(getattr(result, "evidence_delivery_required", False)),
         evidence_delivery_status=str(getattr(result, "evidence_delivery_status", "not_required") or "not_required"),
         evidence_recovered=bool(getattr(result, "evidence_recovered", False)),
+        citation_mode=str(getattr(result, "citation_mode", "none") or "none"),
     )
 
 
@@ -166,6 +167,73 @@ def _safe_social_source_line(source: dict[str, Any]) -> str:
     return f"{label}：{url}"
 
 
+_SOCIAL_URL_RE = re.compile(
+    r"https://(?:www\.)?(?:bilibili\.com/video/[^\s)]+|xiaoheihe\.cn/app/bbs/link/\d+|"
+    r"douyin\.com/(?:video|note)/\d+|tieba\.baidu\.com/p/\d+)",
+    re.IGNORECASE,
+)
+
+
+def _citation_mode(result: AgentResult, explicit: str | None = None) -> str:
+    mode = str(
+        explicit if explicit is not None else getattr(result, "citation_mode", "none") or "none"
+    ).strip()
+    return mode if mode in {"none", "urls_on_request"} else "none"
+
+
+def _validated_social_url(value: Any) -> str:
+    url = str(value or "").strip().rstrip(".,;，。！？）")
+    if not url or not _SOCIAL_URL_RE.fullmatch(url):
+        return ""
+    return url
+
+
+def _validated_source_url(source: dict[str, Any]) -> str:
+    if str(source.get("platform") or "").strip().lower() == "web":
+        # Web research supports were already bound to URL + quote by the evidence
+        # synthesizer; reuse its strict HTTPS/public-host validator here.
+        from .evidence import _validated_web_evidence_url
+
+        return _validated_web_evidence_url(source.get("canonical_url"))
+    return _validated_social_url(source.get("canonical_url"))
+
+
+def _strip_hidden_social_citations(text: str, sources: list[dict[str, Any]]) -> str:
+    """Remove source-list lines while retaining the model's natural answer."""
+
+    source_titles = {
+        re.sub(r"\s+", " ", str(item.get("title") or "")).strip()
+        for item in sources
+        if isinstance(item, dict) and str(item.get("title") or "").strip()
+    }
+    source_urls = {
+        url for item in sources if isinstance(item, dict) if (url := _validated_source_url(item))
+    }
+    kept: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            if kept and kept[-1] != "":
+                kept.append("")
+            continue
+        has_url = bool(_SOCIAL_URL_RE.search(line)) or any(url in line for url in source_urls)
+        source_label = bool(re.match(r"^(?:来源|查到的来源|参考来源|出处)\s*[:：]", line))
+        matched_title = next((title for title in source_titles if title and title in line), "")
+        if has_url or source_label or (
+            matched_title
+            and (
+                line == matched_title
+                or "：" in line
+                or ":" in line
+                or line.startswith(f"{matched_title}（")
+                or line.startswith(f"{matched_title}(")
+            )
+        ):
+            continue
+        kept.append(raw_line.rstrip())
+    return "\n".join(kept).strip()
+
+
 def finalize_social_evidence_delivery(
     result: AgentResult,
     *,
@@ -174,8 +242,9 @@ def finalize_social_evidence_delivery(
     partial: bool = False,
     warnings: list[str] | None = None,
     record_trace: Callable[..., None] | None = None,
+    citation_mode: str | None = None,
 ) -> AgentResult:
-    """Enforce the visible source-link contract for validated social MCP data."""
+    """Apply the structured citation policy for validated social MCP data."""
 
     result.social_evidence = list(sources or [])[:10]
     result.social_coverage = {
@@ -183,11 +252,28 @@ def finalize_social_evidence_delivery(
         "partial": bool(partial),
         "warnings": list(warnings or [])[:8],
     }
+    mode = _citation_mode(result, citation_mode)
+    result.citation_mode = mode
     result.evidence_delivery_required = bool(
         result.evidence_delivery_required
         or result.social_evidence
         or int(result.social_coverage.get("returned_count", 0) or 0) > 0
     )
+    if mode == "none":
+        result.text = _strip_hidden_social_citations(
+            str(getattr(result, "text", "") or ""),
+            result.social_evidence,
+        )
+        result.evidence_delivery_required = False
+        result.evidence_delivery_status = "hidden" if result.social_evidence else "not_required"
+        if record_trace is not None and result.social_evidence:
+            record_trace(
+                key="social_source_visibility_hidden",
+                label="社交来源默认隐藏",
+                status="info",
+                detail=f"citation_mode=none sources={len(result.social_evidence)}",
+            )
+        return result
     if not result.evidence_delivery_required:
         result.evidence_delivery_status = "not_required"
         return result
@@ -206,7 +292,10 @@ def finalize_social_evidence_delivery(
         return result
 
     current = str(getattr(result, "text", "") or "").strip()
-    valid_urls = [str(source.get("canonical_url") or "") for source in result.social_evidence]
+    valid_urls = [
+        _validated_source_url(source)
+        for source in result.social_evidence
+    ]
     current_visibility = assess_visible_text(current)
     if current_visibility.allowed and any(url and url in current for url in valid_urls):
         result.evidence_delivery_status = "met"
@@ -223,18 +312,20 @@ def finalize_social_evidence_delivery(
         return result
 
     selected = _distinct_social_sources(result.social_evidence, limit=3)
-    lines = [_safe_social_source_line(source) for source in selected]
+    lines = [
+        _validated_source_url(source)
+        for source in selected
+    ]
+    lines = [line for line in lines if line]
     safe_base = current if current_visibility.allowed and current not in _CONTROL_REPLIES else ""
-    fallback = "\n".join([safe_base, "来源：" if safe_base else "查到的来源：", *lines]).strip()
+    fallback = "\n".join([safe_base, *lines]).strip()
     fallback_visibility = assess_visible_text(
         fallback,
         allow_control=False,
         allow_direct_media=False,
     )
     if not fallback_visibility.allowed:
-        fallback = "\n".join(
-            ["查到的来源：", *(str(source.get("canonical_url") or "") for source in selected)]
-        ).strip()
+        fallback = "\n".join(lines).strip()
         fallback_visibility = assess_visible_text(
             fallback,
             allow_control=False,
@@ -281,6 +372,7 @@ def finalize_social_evidence_delivery_boundary(
     previous_status: str = "not_required",
     previous_recovered: bool = False,
     record_trace: Callable[..., None] | None = None,
+    citation_mode: str | None = None,
 ) -> AgentResult:
     """Recheck social links after every downstream rewrite and before sending.
 
@@ -298,6 +390,7 @@ def finalize_social_evidence_delivery_boundary(
         evidence_delivery_required=bool(evidence_delivery_required),
         evidence_delivery_status=str(previous_status or "not_required"),
         evidence_recovered=bool(previous_recovered),
+        citation_mode=str(citation_mode or "none"),
     )
     boundary_result = finalize_social_evidence_delivery(
         boundary_result,
@@ -305,6 +398,7 @@ def finalize_social_evidence_delivery_boundary(
         coverage=dict(coverage or {}),
         partial=bool(dict(coverage or {}).get("partial", False)),
         warnings=list(dict(coverage or {}).get("warnings") or []),
+        citation_mode=citation_mode,
     )
     if record_trace is not None and boundary_result.evidence_delivery_required:
         urls = [

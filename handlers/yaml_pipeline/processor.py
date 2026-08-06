@@ -1894,6 +1894,10 @@ async def process_yaml_response_logic(
             reply_commit_state["agent_evidence_recovered"] = bool(
                 getattr(agent_result, "evidence_recovered", False)
             )
+            reply_commit_state["agent_citation_mode"] = str(
+                getattr(agent_result, "citation_mode", getattr(turn_plan, "citation_mode", "none"))
+                or "none"
+            )
             reply_commit_state["agent_social_coverage_status"] = str(
                 social_coverage.get("coverage_status", "") or ""
             )
@@ -2594,12 +2598,20 @@ async def process_yaml_response_logic(
             agent_result is not None and getattr(agent_result, "evidence_recovered", False)
         ),
         record_trace=_trace_stage,
+        citation_mode=str(
+            reply_commit_state.get(
+                "agent_citation_mode",
+                getattr(turn_plan, "citation_mode", "none"),
+            )
+            or "none"
+        ),
     )
     assistant_text = str(final_evidence.text or "").strip()
     reply_commit_state["agent_evidence_delivery_status"] = str(
         final_evidence.evidence_delivery_status or "not_required"
     )
     reply_commit_state["agent_evidence_recovered"] = bool(final_evidence.evidence_recovered)
+    reply_commit_state["agent_evidence_delivery_required"] = bool(final_evidence.evidence_delivery_required)
     if final_evidence.failure_code:
         _trace_finish(
             outcome="failed",

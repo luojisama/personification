@@ -20,6 +20,7 @@ AmbiguityLevel = Literal["low", "medium", "high"]
 EmotionIntensity = Literal["low", "medium", "high"]
 DomainFocus = Literal["general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"]
 EvidencePolicy = Literal["none", "light", "standard", "strict"]
+CitationMode = Literal["none", "urls_on_request"]
 AdvicePermission = Literal["not_needed", "ask_first", "allowed"]
 CareRiskLevel = Literal["none", "concern", "high"]
 ConversationScenario = Literal[
@@ -67,6 +68,8 @@ class TurnSemanticFrame:
     meta_question: bool = False
     domain_focus: DomainFocus = "general"
     evidence_policy: EvidencePolicy = "none"
+    # 社交检索来源默认只留在 Trace/WebUI；由规划器按当前请求决定是否展示裸链接。
+    citation_mode: CitationMode = "none"
     emotional_support: EmotionalSupport = field(default_factory=EmotionalSupport)
     user_attitude: str = "日常交流"
     bot_emotion: str = "平静"
@@ -242,6 +245,9 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
     evidence_policy = str(payload.get("evidence_policy", "none") or "none").strip().lower()
     if evidence_policy not in _VALID_EVIDENCE_POLICIES:
         evidence_policy = "none"
+    citation_mode = str(payload.get("citation_mode", "none") or "none").strip().lower()
+    if citation_mode not in {"none", "urls_on_request"}:
+        citation_mode = "none"
     legacy_care = _coerce_bool(payload.get("requires_emotional_care", False))
     emotional_support = _parse_emotional_support(payload.get("emotional_support"), legacy_needed=legacy_care)
     return TurnSemanticFrame(
@@ -254,6 +260,7 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
         meta_question=_coerce_bool(payload.get("meta_question", False)),
         domain_focus=domain_focus,  # type: ignore[arg-type]
         evidence_policy=evidence_policy,  # type: ignore[arg-type]
+        citation_mode=citation_mode,  # type: ignore[arg-type]
         emotional_support=emotional_support,
         user_attitude=str(payload.get("user_attitude", "") or "").strip() or "日常交流",
         bot_emotion=str(payload.get("bot_emotion", "") or "").strip() or "平静",
@@ -355,6 +362,7 @@ async def infer_turn_semantic_frame_with_llm(
         '"meta_question":false,'
         '"domain_focus":"general|social|technology|science|game_anime|plugin|realtime|emotion",'
         '"evidence_policy":"none|light|standard|strict",'
+        '"citation_mode":"none|urls_on_request",'
         '"emotional_support":{"needed":false,"listen":false,"validate":false,"advice_permission":"not_needed|ask_first|allowed","risk_level":"none|concern|high"},'
         '"user_attitude":"一句短中文，描述用户这轮对 bot 的态度",'
         '"bot_emotion":"一句短中文，描述 bot 当前自然产生的情绪",'
@@ -393,6 +401,7 @@ async def infer_turn_semantic_frame_with_llm(
         "4. emotional_support 结构化判断用户是否需要倾听和情绪确认、是否已允许建议、以及是否存在风险；普通吐槽、调侃、玩梗不要滥开。"
         "群聊里如果不确定对方是不是在对你倾诉，needed 优先 false；requires_emotional_care 与 needed 保持一致以兼容旧字段。\n"
         "4b. evidence_policy 按事实要求决定：普通闲聊 none，轻量背景 light，一般事实 standard，技术/科学/时效/高影响结论 strict。"
+        "citation_mode 默认 none；只有当前用户明确要求出处或链接时才使用 urls_on_request。"
         "domain_focus 必须使用给定枚举，不要自造 knowledge 等值。\n"
         "5. sticker_appropriate=false 表示这轮不适合发表情包，例如严肃澄清、情绪安抚、风险话题、直接答疑、明显冷淡/敌意或容易显得轻浮的场景。\n"
         "6. user_attitude 要体现用户这一轮对 bot 的态度，如调侃、求助、冷淡、试探、亲近、挑衅、认真追问。\n"

@@ -10,6 +10,19 @@ EnabledChecker = Callable[[], bool]
 ResultMediaResolver = Callable[[str], Awaitable[list[str]]]
 
 
+@dataclass(frozen=True)
+class ToolArtifact:
+    """A turn-scoped media handoff produced by a trusted runtime adapter."""
+
+    artifact_id: str
+    kind: str
+    media_token: str
+    source_group_id: str
+    platform: str
+    content_id: str
+    provenance: str
+
+
 @dataclass
 class AgentTool:
     name: str

@@ -2172,6 +2172,7 @@ def test_run_agent_stops_equivalent_searches_after_social_coverage_is_satisfied(
         tool_intent=["lookup_web"],
         research_need="high",
         session_goal="解释这个说法",
+        citation_mode="urls_on_request",
     )
 
     result = asyncio.run(
@@ -2407,6 +2408,7 @@ def test_run_agent_allows_one_slang_web_fallback_then_blocks_multi_search() -> N
                 research_need="high",
                 session_goal="解释花来",
                 evidence_policy="strict",
+                citation_mode="urls_on_request",
             ),
         )
     )

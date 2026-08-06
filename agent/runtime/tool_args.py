@@ -102,10 +102,15 @@ def rewrite_tool_args(
             tool_args=tool_args,
         )
     user_images = list(user_images or [])
+    social_search = tool_name in {"social_content_search", "research_game_slang"}
 
     allows_query = registry is None or tool_allows_parameter(registry, tool_name, "query")
     if allows_query:
         current_query = compact_lookup_query(str(args.get("query", "") or ""))
+        if social_search and rewritten_query is not None:
+            # 社交搜索的主查询由上下文规划器确定；模型传入的宽泛 query 只能作为候选，
+            # 避免群聊里刚好出现一个实体名就把无关来源刷进回复。
+            current_query = compact_lookup_query(rewritten_query.primary_query)
         if not current_query:
             variants = query_variants_for_tool(
                 tool_name=tool_name,
@@ -118,6 +123,23 @@ def rewrite_tool_args(
                 current_query = variants[0]
         if current_query:
             args["query"] = current_query
+
+    if social_search and rewritten_query is not None:
+        allows_context = registry is None or tool_allows_parameter(registry, tool_name, "context")
+        if allows_context:
+            clues = [
+                str(item or "").strip()
+                for item in list(rewritten_query.context_clues or [])[:5]
+                if str(item or "").strip()
+            ]
+            plan = [
+                str(item or "").strip()
+                for item in list(rewritten_query.search_plan or [])[:3]
+                if str(item or "").strip()
+            ]
+            context_parts = [*clues, *plan]
+            if context_parts:
+                args["context"] = "；".join(context_parts)[:1000]
 
     if user_images:
         for key in ("images", "image_urls"):

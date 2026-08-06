@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from typing import Any, Awaitable, Callable, List
@@ -62,6 +63,12 @@ from .loop_utils import (
 )
 from .prompting import append_agent_system_prompts
 from .reply_quality import finalize_agent_reply_quality, finalize_social_evidence_delivery
+from .social_video_handoff import (
+    attach_handoff_to_packet,
+    cancel_background_social_video_research,
+    run_social_video_handoff,
+    start_background_social_video_research,
+)
 from .stop_flow import (
     StopFlowState,
     _has_lookup_schema,
@@ -245,6 +252,13 @@ async def run_agent(
     allow_builtin_search: bool = True,
     turn_media_context: list[Any] | None = None,
 ) -> AgentResult:
+    if cancel_background_social_video_research(executor):
+        _record_reply_trace_stage(
+            key="background_media_research_cancelled",
+            label="后台社交视频研究已取消",
+            status="info",
+            detail="reason=newer_turn",
+        )
     use_builtin_search = (
         bool(
             getattr(
@@ -257,6 +271,7 @@ async def run_agent(
         and bool(allow_builtin_search)
     )
     pending_actions: List[dict] = []
+    background_social_job_started = False
     bind_actions = getattr(executor, "bind_pending_actions", None)
     if callable(bind_actions):
         bind_actions(pending_actions)
@@ -277,6 +292,9 @@ async def run_agent(
             "partial": bool(social.get("partial", False)),
             "warnings": list(social.get("warnings") or []),
         }
+        result.citation_mode = str(
+            getattr(turn_plan, "citation_mode", getattr(result, "citation_mode", "none")) or "none"
+        )
         result.evidence_delivery_required = bool(
             result.social_evidence
             or (
@@ -335,6 +353,7 @@ async def run_agent(
             partial=bool(social.get("partial", False)),
             warnings=list(social.get("warnings") or []),
             record_trace=_record_reply_trace_stage,
+            citation_mode=str(getattr(result, "citation_mode", "none") or "none"),
         )
 
     def _mark_social_evidence_satisfied() -> None:
@@ -1014,6 +1033,57 @@ async def run_agent(
                     logger=logger,
                     budget_deadline=budget_deadline,
                 )
+            remote_name = str(
+                (getattr(tool, "metadata", {}) or {}).get("remote_name")
+                if tool is not None
+                else ""
+            ).strip() or str(tool_call.name or "").strip()
+            if (
+                remote_name == "social_content_search"
+                and str(tool_args.get("media_followup") or "none") == "all_videos"
+            ):
+                query = (
+                    str(getattr(rewritten_query, "primary_query", "") or "").strip()
+                    or str(tool_args.get("query") or "").strip()
+                )
+                background_social_job_started = start_background_social_video_research(
+                    registry=registry,
+                    executor=executor,
+                    tool_caller=tool_caller,
+                    messages=messages,
+                    search_result=str(result or ""),
+                    query=query,
+                    citation_mode=str(getattr(turn_plan, "citation_mode", "none") or "none"),
+                    record_trace=_record_reply_trace_stage,
+                )
+                if background_social_job_started:
+                    try:
+                        packet = json.loads(str(result or ""))
+                        if isinstance(packet, dict):
+                            packet["media_followup"] = {
+                                "status": "background_started",
+                                "videos_found": sum(
+                                    1
+                                    for item in list(packet.get("items") or [])
+                                    if isinstance(item, dict)
+                                    and str(item.get("content_type") or "") == "video"
+                                ),
+                            }
+                            result = json.dumps(packet, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        pass
+                else:
+                    handoff_deadline = budget_deadline
+                    if handoff_deadline is not None:
+                        handoff_deadline = max(time.monotonic() + 0.05, handoff_deadline - 15.0)
+                    handoff = await run_social_video_handoff(
+                        registry=registry,
+                        search_result=str(result or ""),
+                        query=query,
+                        deadline=handoff_deadline,
+                        record_trace=_record_reply_trace_stage,
+                    )
+                    result = attach_handoff_to_packet(str(result or ""), handoff)
             tool_elapsed_ms = int((time.monotonic() - tool_started_at) * 1000)
             trace_tool_result(
                 tool_name=str(tool_call.name or "").strip(),
@@ -1085,6 +1155,16 @@ async def run_agent(
                 return await _finalize_result(direct_result, reason="direct_tool_result")
 
             turn_tool_results.append((tool_call, str(result or "")))
+
+        if background_social_job_started:
+            return await _finalize_result(
+                AgentResult(
+                    text="[NO_REPLY]",
+                    pending_actions=pending_actions,
+                    suppress_reply_recovery=True,
+                ),
+                reason="background_social_video_research",
+            )
 
         if turn_tool_results:
             append_tool_result_messages(

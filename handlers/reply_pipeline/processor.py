@@ -2952,12 +2952,20 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             ),
             previous_recovered=bool(state.get("agent_evidence_recovered", False)),
             record_trace=_record_final_social_evidence_trace,
+            citation_mode=str(
+                state.get(
+                    "agent_citation_mode",
+                    getattr(turn_plan, "citation_mode", "none"),
+                )
+                or "none"
+            ),
         )
         final_reply = str(final_evidence.text or "").strip()
         state["agent_evidence_delivery_status"] = str(
             final_evidence.evidence_delivery_status or "not_required"
         )
         state["agent_evidence_recovered"] = bool(final_evidence.evidence_recovered)
+        state["agent_evidence_delivery_required"] = bool(final_evidence.evidence_delivery_required)
         if final_evidence.failure_code:
             try:
                 from ...core import reply_turn_trace

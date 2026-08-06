@@ -22,6 +22,7 @@ def resolve_sent_reply_completion(
     evidence_delivery = str(
         values.get("agent_evidence_delivery_status", "not_required") or "not_required"
     )
+    citation_mode = str(values.get("agent_citation_mode", "none") or "none")
     evidence_recovered = bool(values.get("agent_evidence_recovered", False))
     coverage_status = str(values.get("agent_social_coverage_status", "") or "")
     social_tool_execution = str(
@@ -76,6 +77,7 @@ def resolve_sent_reply_completion(
         "outbound_delivery": outbound_delivery,
         "coverage_status": coverage_status,
         "evidence_required": evidence_required,
+        "citation_mode": citation_mode,
         "evidence_recovered": evidence_recovered,
         "evidence_unavailable": evidence_unavailable,
     }

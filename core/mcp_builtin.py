@@ -54,6 +54,11 @@ _BUILTIN_SOCIAL_TOOLS: tuple[dict[str, Any], ...] = (
             "type": "object",
             "properties": {
                 "query": {"type": "string", "minLength": 1, "maxLength": 200},
+                "context": {
+                    "type": "string",
+                    "maxLength": 1000,
+                    "description": "由当前回合规划器压缩的上下文线索，不是整段群聊历史。",
+                },
                 "platforms": {
                     "type": "array",
                     "items": {"type": "string", "enum": ["bilibili", "douyin", "tieba", "xiaoheihe"]},
@@ -77,6 +82,12 @@ _BUILTIN_SOCIAL_TOOLS: tuple[dict[str, Any], ...] = (
                     "type": "string",
                     "enum": ["balanced", "strict", "ranking_only"],
                     "default": "balanced",
+                },
+                "media_followup": {
+                    "type": "string",
+                    "enum": ["none", "all_videos"],
+                    "default": "none",
+                    "description": "仅在当前问题需要视频证据时请求详情与视频分析。",
                 },
             },
             "required": ["query"],
