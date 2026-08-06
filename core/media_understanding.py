@@ -19,6 +19,7 @@ from .image_input import is_image_input_unsupported_error, provider_supports_vis
 from .sensitive_data import sanitize_text
 from .media_refs import normalize_audio_ref, normalize_video_ref
 from .media_provider_adapters import (
+    MEDIA_PROTOCOL_ANTIGRAVITY,
     MEDIA_PROTOCOL_GEMINI,
     MEDIA_PROTOCOL_MIMO,
     MEDIA_PROTOCOL_QWEN,
@@ -193,6 +194,8 @@ class _ProviderConfigProxy:
             return self._provider.get("auth_path", "")
         if name == "personification_antigravity_cli_project":
             return self._provider.get("project", "")
+        if name == "personification_media_protocol":
+            return self._provider.get("media_protocol", "auto")
         if name == "personification_claude_code_auth_path":
             return self._provider.get("auth_path", "")
         if name == "personification_thinking_mode":
@@ -341,10 +344,11 @@ async def _try_primary_video_routes(
         adapter = resolve_media_provider_adapter(provider)
         if not adapter.supports_video:
             continue
-        if not str(provider.get("api_key", "") or "").strip():
+        if adapter.protocol != MEDIA_PROTOCOL_ANTIGRAVITY and not str(provider.get("api_key", "") or "").strip():
             continue
         attempt_route = {
             MEDIA_PROTOCOL_GEMINI: "video_primary_gemini",
+            MEDIA_PROTOCOL_ANTIGRAVITY: "video_primary_agy",
             MEDIA_PROTOCOL_QWEN: "video_primary_qwen_omni",
             MEDIA_PROTOCOL_MIMO: "video_primary_mimo",
         }.get(adapter.protocol, "")
@@ -379,6 +383,25 @@ async def _try_primary_video_routes(
                     fps=float(provider.get("video_fps", 2.0) or 2.0),
                     media_resolution=str(provider.get("media_resolution", "default") or "default"),
                 )
+            elif adapter.protocol == MEDIA_PROTOCOL_ANTIGRAVITY:
+                caller = _build_tool_caller(_ProviderConfigProxy(runtime.plugin_config, provider))
+                remote_refs = [ref for ref in refs if str(ref).startswith(("http://", "https://"))]
+                local_refs = [ref for ref in refs if ref not in remote_refs]
+                result_response = await caller.chat_with_tools(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": build_user_message_content(
+                                text=prompt,
+                                video_urls=remote_refs,
+                                video_files=local_refs,
+                            ),
+                        }
+                    ],
+                    tools=[],
+                    use_builtin_search=False,
+                )
+                result = str(getattr(result_response, "content", "") or "").strip()
             else:
                 continue
         except Exception as exc:
@@ -407,7 +430,7 @@ async def _try_primary_audio_routes(
         adapter = resolve_media_provider_adapter(provider)
         if not adapter.supports_audio:
             continue
-        if not str(provider.get("api_key", "") or "").strip():
+        if adapter.protocol != MEDIA_PROTOCOL_ANTIGRAVITY and not str(provider.get("api_key", "") or "").strip():
             continue
         try:
             if adapter.protocol == MEDIA_PROTOCOL_GEMINI:
@@ -436,6 +459,25 @@ async def _try_primary_audio_routes(
                     prompt=prompt,
                     audio_refs=refs,
                 )
+            elif adapter.protocol == MEDIA_PROTOCOL_ANTIGRAVITY:
+                caller = _build_tool_caller(_ProviderConfigProxy(runtime.plugin_config, provider))
+                remote_refs = [ref for ref in refs if str(ref).startswith(("http://", "https://"))]
+                local_refs = [ref for ref in refs if ref not in remote_refs]
+                response = await caller.chat_with_tools(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": build_user_message_content(
+                                text=prompt,
+                                audio_urls=remote_refs,
+                                audio_files=local_refs,
+                            ),
+                        }
+                    ],
+                    tools=[],
+                    use_builtin_search=False,
+                )
+                result = str(getattr(response, "content", "") or "").strip()
             else:
                 continue
         except Exception as exc:
@@ -456,9 +498,10 @@ def primary_route_supports_native_video(
     route_name: str = VISUAL_ROUTE_AGENT,
 ) -> bool:
     for provider in _primary_provider_candidates(runtime):
-        if not str(provider.get("api_key", "") or "").strip():
+        adapter = resolve_media_provider_adapter(provider)
+        if adapter.protocol != MEDIA_PROTOCOL_ANTIGRAVITY and not str(provider.get("api_key", "") or "").strip():
             continue
-        if resolve_media_provider_adapter(provider).supports_video:
+        if adapter.supports_video:
             return True
     return False
 
@@ -469,9 +512,10 @@ def primary_route_supports_native_audio(
     route_name: str = VISUAL_ROUTE_AGENT,
 ) -> bool:
     for provider in _primary_provider_candidates(runtime):
-        if not str(provider.get("api_key", "") or "").strip():
+        adapter = resolve_media_provider_adapter(provider)
+        if adapter.protocol != MEDIA_PROTOCOL_ANTIGRAVITY and not str(provider.get("api_key", "") or "").strip():
             continue
-        if resolve_media_provider_adapter(provider).supports_audio:
+        if adapter.supports_audio:
             return True
     return False
 

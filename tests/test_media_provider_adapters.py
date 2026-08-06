@@ -20,6 +20,25 @@ def test_explicit_media_protocol_overrides_model_name() -> None:
     assert disabled.supports_video is False
     assert disabled.source == "explicit"
 
+    agy = adapters.resolve_media_provider_adapter(
+        {
+            "api_type": "antigravity_cli",
+            "model": "custom-fullmodal",
+            "media_protocol": "antigravity_native",
+        }
+    )
+    assert agy.protocol == "antigravity_native"
+    assert agy.supports_video is True
+    assert agy.supports_audio is True
+
+
+def test_antigravity_auto_remains_fail_closed_without_explicit_capability() -> None:
+    adapter = adapters.resolve_media_provider_adapter(
+        {"api_type": "antigravity_cli", "model": "gemini-looking-name", "media_protocol": "auto"}
+    )
+    assert adapter.supports_video is False
+    assert adapter.source == "unsupported"
+
 
 def test_auto_only_accepts_confirmed_official_video_contracts() -> None:
     assert adapters.resolve_media_provider_adapter(

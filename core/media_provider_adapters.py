@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 MEDIA_PROTOCOL_AUTO = "auto"
 MEDIA_PROTOCOL_NONE = "none"
 MEDIA_PROTOCOL_GEMINI = "gemini_native"
+MEDIA_PROTOCOL_ANTIGRAVITY = "antigravity_native"
 MEDIA_PROTOCOL_QWEN = "openai_qwen_omni"
 MEDIA_PROTOCOL_MIMO = "openai_mimo_v25"
 
@@ -15,6 +16,7 @@ _KNOWN_PROTOCOLS = {
     MEDIA_PROTOCOL_AUTO,
     MEDIA_PROTOCOL_NONE,
     MEDIA_PROTOCOL_GEMINI,
+    MEDIA_PROTOCOL_ANTIGRAVITY,
     MEDIA_PROTOCOL_QWEN,
     MEDIA_PROTOCOL_MIMO,
 }
@@ -36,6 +38,9 @@ def normalize_media_protocol(value: Any) -> str:
         "text_only": MEDIA_PROTOCOL_NONE,
         "gemini": MEDIA_PROTOCOL_GEMINI,
         "gemini_official": MEDIA_PROTOCOL_GEMINI,
+        "antigravity": MEDIA_PROTOCOL_ANTIGRAVITY,
+        "agy": MEDIA_PROTOCOL_ANTIGRAVITY,
+        "agy_native": MEDIA_PROTOCOL_ANTIGRAVITY,
         "qwen": MEDIA_PROTOCOL_QWEN,
         "qwen_omni": MEDIA_PROTOCOL_QWEN,
         "mimo": MEDIA_PROTOCOL_MIMO,
@@ -49,6 +54,8 @@ def normalize_media_protocol(value: Any) -> str:
 def _adapter(protocol: str, *, source: str) -> MediaProviderAdapter:
     if protocol == MEDIA_PROTOCOL_GEMINI:
         return MediaProviderAdapter(protocol, True, True, "files_api", source)
+    if protocol == MEDIA_PROTOCOL_ANTIGRAVITY:
+        return MediaProviderAdapter(protocol, True, True, "inlineData_or_fileData", source)
     if protocol in {MEDIA_PROTOCOL_QWEN, MEDIA_PROTOCOL_MIMO}:
         return MediaProviderAdapter(protocol, True, True, "base64_or_url", source)
     return MediaProviderAdapter(MEDIA_PROTOCOL_NONE, False, False, "none", source)
@@ -74,6 +81,7 @@ def _official_protocol(api_type: str, api_url: str, model: str) -> str:
         return MEDIA_PROTOCOL_QWEN
     if model_text == "mimo-v2.5":
         return MEDIA_PROTOCOL_MIMO
+    # AGY 模型目录没有稳定的远程能力探测契约；auto 模式保持 fail-closed。
     if (
         api in {"gemini", "gemini_official"}
         and model_text.startswith("gemini-")
@@ -101,6 +109,7 @@ def resolve_media_provider_adapter(provider: Mapping[str, Any] | None) -> MediaP
 
 __all__ = [
     "MEDIA_PROTOCOL_AUTO",
+    "MEDIA_PROTOCOL_ANTIGRAVITY",
     "MEDIA_PROTOCOL_GEMINI",
     "MEDIA_PROTOCOL_MIMO",
     "MEDIA_PROTOCOL_NONE",

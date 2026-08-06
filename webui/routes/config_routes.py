@@ -738,6 +738,12 @@ def _restore_masked_config_secrets(field_name: str, value: Any, plugin_config: A
 def build_config_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/config", tags=["config"])
 
+    @router.get("/cli-discovery")
+    async def cli_discovery(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
+        from ...core.cli_discovery import discover_clis
+
+        return await discover_clis(getattr(runtime, "plugin_config", None))
+
     @router.get("/entries", response_model=ConfigEntriesResponse)
     async def list_entries(_: AdminIdentity = Depends(require_admin)) -> ConfigEntriesResponse:
         entries = [

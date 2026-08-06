@@ -393,6 +393,50 @@ def test_primary_video_protocols_report_specific_trace_routes(monkeypatch) -> No
         ]
 
 
+def test_primary_antigravity_video_uses_cli_credentials_without_api_key(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict = {}
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            captured["messages"] = messages
+            captured["tools"] = tools
+            captured["builtin"] = use_builtin_search
+            return SimpleNamespace(content='{"scene_summary":"agy native"}')
+
+    monkeypatch.setattr(media_understanding, "_build_tool_caller", lambda _config: _Caller())
+    attempts: list[dict] = []
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_video_understanding_enabled=True,
+            personification_video_route_mode="auto",
+        ),
+        get_configured_api_providers=lambda: [
+            {
+                "name": "agy",
+                "api_type": "antigravity_cli",
+                "api_key": "",
+                "model": "configured-fullmodal",
+                "media_protocol": "antigravity_native",
+            }
+        ],
+    )
+
+    result, route = asyncio.run(
+        media_understanding.analyze_videos_with_route_or_fallback(
+            runtime=runtime,
+            prompt="理解视频",
+            video_refs=["https://cdn.example/video.mp4"],
+            route_attempts=attempts,
+        )
+    )
+
+    assert result == '{"scene_summary":"agy native"}'
+    assert route == "video_primary_agy"
+    content = captured["messages"][0]["content"]
+    assert any(part.get("type") == "video_url" for part in content)
+    assert attempts[0]["route"] == "video_primary_agy"
+
+
 def test_video_auto_uses_gemini_web_before_paid_api(monkeypatch) -> None:  # noqa: ANN001
     attempts: list[dict] = []
 

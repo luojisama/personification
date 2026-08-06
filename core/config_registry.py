@@ -642,7 +642,7 @@ def _build_entries() -> list[ConfigEntry]:
             description="遗留单 Provider 的音视频输入契约。auto 只识别官方已确认组合；代理网关必须显式选择真实协议。API 类型本身不代表支持视频。",
             category="config",
             group="模型路由",
-            choices=("auto", "none", "gemini_native", "openai_qwen_omni", "openai_mimo_v25"),
+            choices=("auto", "none", "gemini_native", "antigravity_native", "openai_qwen_omni", "openai_mimo_v25"),
             help_aliases=("媒体协议", "media_protocol", "音视频协议"),
             parser=_str_parser,
             advanced=True,

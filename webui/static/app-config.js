@@ -306,6 +306,40 @@ function videoProviderNote(provider) {
   return "外部全模态 Provider 已关闭；主模型失败后将继续网页路线或最终分镜兜底。";
 }
 
+let _cliDiscoveryState = null;
+let _cliDiscoveryInFlight = false;
+
+function cliDiscoveryHtml() {
+  const items = Array.isArray(_cliDiscoveryState && _cliDiscoveryState.items) ? _cliDiscoveryState.items : [];
+  if (!items.length) return '<div class="muted">尚未探测。只读取本地安装状态、版本与凭证来源，不执行登录或升级。</div>';
+  const labels = {ready:"可用",missing:"缺少凭证",expired:"已过期",cli_only:"CLI 管理",unreadable:"不可读取"};
+  return '<div class="video-config-grid">' + items.map(item => {
+    const stateLabel = labels[item.credential_state] || item.credential_state || "未知";
+    return '<div class="card" style="padding:10px"><div class="between"><strong>'
+      + escapeHtml(item.provider_type || "CLI") + '</strong><span class="tag">'
+      + (item.installed ? "已安装" : "未安装") + '</span></div><div class="muted" style="font-size:12px">版本：'
+      + escapeHtml(item.version || "-") + ' · 凭证：' + escapeHtml(stateLabel) + ' · 来源：'
+      + escapeHtml(item.credential_source || "none") + '</div>'
+      + (item.diagnostic_code ? '<div class="muted" style="font-size:11px">' + escapeHtml(item.diagnostic_code) + '</div>' : '')
+      + '</div>';
+  }).join("") + '</div>';
+}
+
+async function refreshCliDiscovery() {
+  const island = document.querySelector("[data-cli-discovery-island]");
+  if (!island || _cliDiscoveryInFlight) return;
+  _cliDiscoveryInFlight = true;
+  try {
+    _cliDiscoveryState = await api("/config/cli-discovery");
+  } catch (error) {
+    _cliDiscoveryState = {items:[], error:String(error && error.message || error || "cli_discovery_failed")};
+  } finally {
+    _cliDiscoveryInFlight = false;
+  }
+  const current = document.querySelector("[data-cli-discovery-island]");
+  if (current) current.innerHTML = cliDiscoveryHtml();
+}
+
 const GEMINI_WEB_STATE_LABELS = {
   disabled:"已关闭", starting:"正在启动", ready:"可用", login_required:"需要登录",
   manual_verification_required:"需要人工验证", busy:"任务占用", dom_changed:"页面结构变化",
@@ -629,6 +663,7 @@ async function mimoWebAsrLogout() {
 }
 
 function renderVideoUnderstandingEditor(items) {
+  queueMicrotask(refreshCliDiscovery);
   const entries = videoConfigEntries(items);
   const value = (field, fallback="") => videoConfigValue(entries, field, fallback);
   const provider = String(value("personification_fullmodal_provider_protocol", "gemini_native") || "gemini_native");
@@ -639,6 +674,10 @@ function renderVideoUnderstandingEditor(items) {
   const providerKeyConfigured = value("personification_fullmodal_provider_api_key", "") === "***";
   const asrKeyConfigured = value("personification_audio_transcription_api_key", "") === "***";
   return `<div class="video-config-editor">
+    <section class="card video-config-card">
+      <div class="between"><div><h2>本地 CLI 状态</h2><p class="muted">固定白名单只读探测；不会运行 update、install、登录或任意 WebUI 命令。</p></div><button class="btn small" onclick="refreshCliDiscovery()">重新探测</button></div>
+      <div data-cli-discovery-island>${cliDiscoveryHtml()}</div>
+    </section>
     <section class="card video-config-card">
       <div class="between"><div><h2>视频理解路线</h2><p class="muted">先决定原生音视频与分镜证据如何组合；这里的选择同时作用于群视频和社交平台 MCP 的视频证据。</p></div><span class="tag">结构化表单</span></div>
       <div class="video-config-grid">
@@ -1228,6 +1267,7 @@ function renderApiProviderCard(field, provider, index) {
       ["auto", "自动（仅官方已确认模型）"],
       ["none", "无音视频输入"],
       ["gemini_native", "Gemini 原生 Files API"],
+      ["antigravity_native", "AGY 原生 inlineData / fileData"],
       ["openai_qwen_omni", "Qwen3.5-Omni video_url / input_audio"],
       ["openai_mimo_v25", "MiMo-V2.5 video_url / input_audio"],
     ].map(([id, label]) => `<option value="${escapeAttr(id)}" ${value===id?'selected':''}>${escapeHtml(label)}</option>`).join("");

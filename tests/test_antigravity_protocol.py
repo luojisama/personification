@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import pathlib
@@ -424,7 +425,26 @@ def test_read_keyring_token_returns_none_when_missing() -> None:
             sys.modules["keyring"] = saved
 
 
-def test_sync_keyring_writes_file_with_full_scope(tmp_path_root: Any = None) -> None:
+def test_antigravity_gemini_parts_accept_video_and_audio_files(tmp_path) -> None:  # noqa: ANN001
+    video = tmp_path / "clip.mp4"
+    audio = tmp_path / "voice.wav"
+    video.write_bytes(b"video-bytes")
+    audio.write_bytes(b"audio-bytes")
+
+    video_part = impl._gemini_part_from_dict(
+        {"type": "video_file", "video_file": {"path": str(video)}}
+    )
+    audio_part = impl._gemini_part_from_dict(
+        {"type": "audio_file", "audio_file": {"path": str(audio)}}
+    )
+
+    assert video_part["inlineData"]["mimeType"] == "video/mp4"
+    assert base64.b64decode(video_part["inlineData"]["data"]) == b"video-bytes"
+    assert audio_part["inlineData"]["mimeType"] in {"audio/x-wav", "audio/wav"}
+    assert base64.b64decode(audio_part["inlineData"]["data"]) == b"audio-bytes"
+
+
+def test_keyring_credentials_are_used_in_memory_without_plaintext_copy(tmp_path_root: Any = None) -> None:
     raw_json = json.dumps({
         "token": {
             "access_token": "ya29.fake-AT",
@@ -444,15 +464,11 @@ def test_sync_keyring_writes_file_with_full_scope(tmp_path_root: Any = None) -> 
     saved_home = impl._Path.home
     impl._Path.home = staticmethod(lambda: tmp_home)
     try:
-        target = impl._sync_antigravity_keyring_to_file()
-        assert target is not None
-        assert target.exists()
-        d = json.loads(target.read_text(encoding="utf-8"))
-        assert d["access_token"] == "ya29.fake-AT"
-        assert d["refresh_token"] == "1//rf"
-        assert "cclog" in d["scope"]
-        assert "experimentsandconfigs" in d["scope"]
-        assert d["expiry_date"] > 0
+        caller = impl.AntigravityCliToolCaller(model="gemini-test")
+        token, project_hint = asyncio.run(caller._get_access_token())
+        assert token == "ya29.fake-AT"
+        assert project_hint.name == "settings.json"
+        assert not (tmp_home / ".gemini" / "antigravity-cli" / "oauth_creds.json").exists()
     finally:
         if saved_kr is None:
             sys.modules.pop("keyring", None)

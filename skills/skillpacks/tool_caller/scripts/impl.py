@@ -4,6 +4,7 @@ import asyncio
 import base64
 import copy
 import json
+import mimetypes
 import re
 import time
 import uuid
@@ -23,6 +24,7 @@ from plugin.personification.core.gemini_transport import (
 )
 from plugin.personification.core.llm_context import current_llm_context, use_single_attempt_retry_policy
 from plugin.personification.core.message_parts import extract_text_from_parts, normalize_message_parts
+from plugin.personification.core.media_refs import normalize_audio_ref, normalize_video_ref
 from plugin.personification.core.time_ctx import build_current_time_context_block, inject_current_time_context
 
 
@@ -350,7 +352,14 @@ def _messages_contain_images(messages: List[dict]) -> bool:
         if str(message.get("role", "") or "").strip() not in {"user", "assistant"}:
             continue
         for part in normalize_message_parts(message.get("content", "")):
-            if part.get("type") in {"image_url", "image_file"}:
+            if part.get("type") in {
+                "image_url",
+                "image_file",
+                "video_url",
+                "video_file",
+                "audio_url",
+                "audio_file",
+            }:
                 return True
     return False
 
@@ -743,6 +752,41 @@ def _gemini_part_from_dict(item: dict) -> dict:
             part = {"inlineData": {"mimeType": mime_type, "data": base64_data}}
         else:
             part = {"fileData": {"mimeType": "image/*", "fileUri": image_url}}
+    elif item.get("type") in {"video_url", "audio_url"}:
+        kind = "video" if item.get("type") == "video_url" else "audio"
+        value = item.get(f"{kind}_url", {})
+        raw_url = str(_obj_get(value, "url", "") or "").strip()
+        normalized, problem = (
+            normalize_video_ref(raw_url) if kind == "video" else normalize_audio_ref(raw_url)
+        )
+        if not normalized or not normalized.startswith(("https://", "http://")):
+            raise ValueError(f"invalid_{kind}_ref:{problem or 'remote_url_required'}")
+        guessed, _ = mimetypes.guess_type(normalized)
+        part = {
+            "fileData": {
+                "mimeType": guessed or ("video/mp4" if kind == "video" else "audio/mpeg"),
+                "fileUri": normalized,
+            }
+        }
+    elif item.get("type") in {"video_file", "audio_file"}:
+        kind = "video" if item.get("type") == "video_file" else "audio"
+        value = item.get(f"{kind}_file", {})
+        raw_path = str(_obj_get(value, "path", "") or "").strip()
+        normalized, problem = (
+            normalize_video_ref(raw_path) if kind == "video" else normalize_audio_ref(raw_path)
+        )
+        if not normalized or normalized.startswith(("https://", "http://")):
+            raise ValueError(f"invalid_{kind}_file:{problem or 'local_file_required'}")
+        path = Path(normalized)
+        if path.stat().st_size > 64 * 1024 * 1024:
+            raise ValueError("agy_media_transport_unavailable")
+        guessed, _ = mimetypes.guess_type(path.name)
+        part = {
+            "inlineData": {
+                "mimeType": guessed or ("video/mp4" if kind == "video" else "audio/wav"),
+                "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+            }
+        }
     elif "text" in item:
         part = {"text": str(item["text"])}
     else:
@@ -2778,15 +2822,6 @@ def _find_gemini_cli_auth_file_with_log(override_path: str = "") -> tuple[_Path 
 
 _ANTIGRAVITY_KEYRING_SERVICE = "gemini:antigravity"
 _ANTIGRAVITY_KEYRING_USER = "antigravity"
-_ANTIGRAVITY_FULL_SCOPE = (
-    "https://www.googleapis.com/auth/cloud-platform openid "
-    "https://www.googleapis.com/auth/userinfo.profile "
-    "https://www.googleapis.com/auth/userinfo.email "
-    "https://www.googleapis.com/auth/cclog "
-    "https://www.googleapis.com/auth/experimentsandconfigs"
-)
-
-
 def _read_antigravity_keyring_token() -> dict | None:
     """从系统 keyring 读 agy 存储的 OAuth token blob。
 
@@ -2828,51 +2863,6 @@ def _read_antigravity_keyring_token() -> dict | None:
     return token if isinstance(token, dict) else None
 
 
-def _sync_antigravity_keyring_to_file() -> _Path | None:
-    """从系统 keyring 同步 agy 最新凭证到 ~/.gemini/antigravity-cli/oauth_creds.json。
-
-    agy 后台会自己刷新 keyring 中的 access_token；bot 每次读 keyring 取到
-    最新值再写入磁盘，便于现有 _find_antigravity_cli_auth_file_with_log
-    流程定位。失败返回 None，由文件搜索逻辑兜底。
-    """
-    token = _read_antigravity_keyring_token()
-    if not token:
-        return None
-    access_token = str(token.get("access_token", "") or "").strip()
-    if not access_token:
-        return None
-    refresh_token = str(token.get("refresh_token", "") or "").strip()
-    token_type = str(token.get("token_type", "Bearer") or "Bearer")
-    expiry_ms = 0
-    expiry_str = str(token.get("expiry", "") or "").strip()
-    if expiry_str:
-        try:
-            from datetime import datetime as _dt_mod
-
-            iso = expiry_str.replace("Z", "+00:00")
-            expiry_ms = int(_dt_mod.fromisoformat(iso).timestamp() * 1000)
-        except Exception:
-            pass
-    payload_for_disk = {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": token_type,
-        "scope": _ANTIGRAVITY_FULL_SCOPE,
-        "expiry_date": expiry_ms,
-    }
-    target_dir = _user_home_path() / ".gemini" / "antigravity-cli"
-    try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        return None
-    target = target_dir / "oauth_creds.json"
-    try:
-        target.write_text(json.dumps(payload_for_disk, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        return None
-    return target
-
-
 def _find_antigravity_cli_auth_file(override_path: str = "") -> _Path | None:
     return _find_antigravity_cli_auth_file_with_log(override_path)[0]
 
@@ -2909,14 +2899,10 @@ def _find_antigravity_cli_auth_file_with_source(
 ) -> tuple[_Path | None, list[str], str]:
     """查找 Antigravity CLI OAuth 文件；没有专用文件时兼容 gemini-cli 凭证。
 
-    入口先尝试从系统 keyring 把 agy 最新凭证同步写到 ~/.gemini/antigravity-cli/
-    oauth_creds.json，再走原有文件搜索路径。这样首次启动或 token 被 agy
-    后台刷新后，bot 都能拿到最新的 access_token。
+    这里只查用户明确配置的文件。系统 keyring 凭证由调用方在内存中读取，
+    不再复制 access_token/refresh_token 到 oauth_creds.json。
     """
     searched: list[str] = []
-    synced = _sync_antigravity_keyring_to_file()
-    if synced is not None:
-        searched.append(f"synced from system keyring → {synced}")
     if override_path:
         p = _expand_user_path(override_path)
         searched.append(f"override={p}")
@@ -4315,12 +4301,12 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
         bot 每次重读 keyring，避免用 gemini-cli 的 OAuth client_id 去 refresh
         agy 的 refresh_token（必然 invalid_grant）。
         """
-        synced = _sync_antigravity_keyring_to_file()
-        if synced is None:
+        auth = _read_antigravity_keyring_token()
+        if auth is None:
             # keyring 不可用（库未安装 / agy 未登录），回退父类逻辑作兜底
             return await super()._get_access_token(force_refresh=force_refresh)
         try:
-            auth = _load_gemini_cli_auth(synced)
+            # keyring payload is parsed in memory and is never copied to a file.
             token = _get_gemini_cli_access_token(auth)
         except Exception as exc:
             raise RuntimeError(
@@ -4332,7 +4318,8 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                 "Antigravity 凭证 access_token 为空。"
                 "请重新运行 agy 完成 Google OAuth 登录。"
             )
-        return token, synced
+        project_hint = _user_home_path() / ".gemini" / "antigravity-cli" / "settings.json"
+        return token, project_hint
 
     def _resolve_local_project(self, auth_file: _Path | None = None) -> str:
         return _resolve_local_antigravity_cli_project(auth_file)
