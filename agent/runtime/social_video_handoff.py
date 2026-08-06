@@ -40,7 +40,13 @@ class SocialMediaResearchJobManager:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._global = asyncio.Semaphore(1)
 
-    def start(self, session_key: str, factory: Callable[[], Any]) -> bool:
+    def start(
+        self,
+        session_key: str,
+        factory: Callable[[], Any],
+        *,
+        on_admission_timeout: Callable[[], None] | None = None,
+    ) -> bool:
         key = str(session_key or "").strip()
         if not key:
             return False
@@ -63,6 +69,11 @@ class SocialMediaResearchJobManager:
             try:
                 await asyncio.wait_for(self._global.acquire(), timeout=5.0)
             except asyncio.TimeoutError:
+                if on_admission_timeout is not None:
+                    try:
+                        on_admission_timeout()
+                    except Exception:
+                        pass
                 return
             try:
                 await factory()
@@ -489,7 +500,20 @@ def start_background_social_video_research(
                 detail=f"analyses={len(handoff.analyses)} outbound=confirmed",
             )
 
-    return _BACKGROUND_JOBS.start(session_key, _job)
+    return _BACKGROUND_JOBS.start(
+        session_key,
+        _job,
+        on_admission_timeout=(
+            lambda: record_trace(
+                key="background_media_research_failed",
+                label="后台社交视频研究",
+                status="warn",
+                detail="status=admission_timeout silent=true",
+            )
+            if record_trace is not None
+            else None
+        ),
+    )
 
 
 def cancel_background_social_video_research(executor: Any) -> bool:
