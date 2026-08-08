@@ -140,3 +140,45 @@ def test_onebot_file_video_reaches_gemini_web_after_lazy_resolution(
     assert result["scene_summary"] == "Gemini已理解文件视频"
     assert result["analysis_route"] == "video_gemini_web"
     assert result["media_routes"][0]["selected_route"] == "video_gemini_web"
+
+
+def test_invalid_explicit_video_token_does_not_mask_resolved_current_video(
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+
+    async def _video(**kwargs):  # noqa: ANN003, ANN202
+        captured.update(kwargs)
+        kwargs["route_attempts"].append(
+            {"route": "video_test", "status": "ok", "elapsed_ms": 1, "diagnostic_code": ""}
+        )
+        return '{"scene_summary":"当前视频已送入视觉路由"}', "video_test"
+
+    monkeypatch.setattr(vision_impl, "analyze_videos_with_route_or_fallback", _video)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+        vision_caller=None,
+    )
+    token = sticker_impl.set_current_image_context(
+        [],
+        "概括视频",
+        ["https://cdn.example/resolved-video.mp4"],
+        [],
+    )
+    try:
+        result = json.loads(
+            asyncio.run(
+                vision_impl.analyze_images(
+                    runtime=runtime,
+                    query="概括视频",
+                    videos=["media_opaque_provenance_token"],
+                )
+            )
+        )
+    finally:
+        sticker_impl.reset_current_image_context(token)
+
+    assert captured["video_refs"] == [
+        "https://cdn.example/resolved-video.mp4",
+    ]
+    assert result["scene_summary"] == "当前视频已送入视觉路由"

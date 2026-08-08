@@ -57,6 +57,26 @@ def _normalize_images(images: list[str] | None, image_urls: list[str] | None = N
     return list(normalized.get("images") or [])[:3]
 
 
+def _merge_explicit_and_current_refs(
+    explicit_refs: list[str] | None,
+    current_refs: list[str],
+) -> list[str]:
+    """Keep resolved turn media when a model supplies an opaque tool argument.
+
+    The Agent can echo a provenance token in ``videos``/``audios`` even though
+    the processor has already materialized the current turn to a usable URL or
+    absolute path.  Explicit refs remain first, but must not mask the trusted
+    current-media context when they fail normalization.
+    """
+
+    merged: list[str] = []
+    for item in list(explicit_refs or []) + list(current_refs or []):
+        value = str(item or "").strip()
+        if value and value not in merged:
+            merged.append(value)
+    return merged
+
+
 async def analyze_images(
     *,
     runtime: Any,
@@ -70,12 +90,8 @@ async def analyze_images(
     raw_refs = list(images or []) + list(image_urls or [])
     if not raw_refs:
         raw_refs = get_current_image_urls()
-    raw_videos = list(videos or [])
-    if not raw_videos:
-        raw_videos = get_current_video_urls()
-    raw_audios = list(audios or [])
-    if not raw_audios:
-        raw_audios = get_current_audio_urls()
+    raw_videos = _merge_explicit_and_current_refs(videos, get_current_video_urls())
+    raw_audios = _merge_explicit_and_current_refs(audios, get_current_audio_urls())
     normalized_media = normalize_media_refs(
         images=raw_refs,
         videos=raw_videos,
