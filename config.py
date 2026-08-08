@@ -213,6 +213,11 @@ class Config(BaseModel):
     personification_background_max_llm_tasks_per_hour: int = 6
     personification_background_max_llm_tasks_per_day: int = 24
     personification_background_debounce_seconds: int = 90
+    # 按结构化轮次区分日常闲聊与需要工具/媒体证据的回复；旧版
+    # personification_max_output_chars 仍可作为更严格的全局上限。
+    personification_chat_max_output_chars: int = 60
+    personification_tool_max_output_chars: int = 600
+    personification_health_probe_dir: str = ""
     personification_max_output_chars: int = 0
     personification_max_segment_chars: int = 0
     personification_skills_path: Optional[str] = None

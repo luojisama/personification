@@ -6,6 +6,7 @@ import re
 from typing import Any, List
 
 from ...core.reply_text_policy import normalize_visible_reply_text
+from ...core.reply_length_policy import render_reply_length_prompt_hint, resolve_reply_length_policy
 from .fallbacks import TOOL_RESULT_USABLE_EVIDENCE, _parse_json_tool_result, _tool_result_outcome
 from .intent import _clean_user_query_text, _render_message_text
 
@@ -88,13 +89,13 @@ async def _wrap_tool_result_in_persona(
     fallback_text = str(rendered_tool_result or "").strip()
     if not fallback_text:
         return ""
-    length_hint = "控制在短句范围内"
-    if turn_plan is not None:
-        try:
-            bounds = turn_plan.length_bounds
-            length_hint = f"控制在 {bounds[0]}-{bounds[1]} 字以内"
-        except Exception:
-            pass
+    length_hint = render_reply_length_prompt_hint(
+        resolve_reply_length_policy(
+            None,
+            turn_plan=turn_plan,
+            tool_calls=True,
+        )
+    )
     wrap_messages: list[dict[str, Any]] = []
     if persona_system:
         wrap_messages.append({"role": "system", "content": persona_system})
@@ -113,7 +114,7 @@ async def _wrap_tool_result_in_persona(
                 )
                 + "头像视觉配套只能复述图像层结论，禁止改写成两位用户现实中的情侣、朋友、认识或同一人关系。"
                 "最终只输出纯文本，不要 markdown、标题、项目符号列表或编号列表。"
-                f"{length_hint}。"
+                f"{length_hint}"
             ),
         }
     )

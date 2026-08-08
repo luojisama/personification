@@ -15,6 +15,7 @@ from ...core.reply_style_policy import (
     build_media_understanding_output_policy_prompt,
     build_speech_act_policy_prompt,
 )
+from ...core.reply_length_policy import render_reply_length_prompt_hint, resolve_reply_length_policy
 from ...core.turn_media import render_turn_media_grounding
 from .tool_selection import _semantic_tool_guidance
 
@@ -34,6 +35,8 @@ def append_agent_system_prompts(
     reply_required: bool = False,
     surface: str = "",
     turn_media_context: list[Any] | None = None,
+    plugin_config: Any = None,
+    budget_profile: Any = None,
 ) -> None:
     if not any(
         isinstance(message, dict)
@@ -94,6 +97,13 @@ def append_agent_system_prompts(
                 }
             )
         return
+    length_policy = resolve_reply_length_policy(
+        plugin_config,
+        turn_plan=turn_plan,
+        budget_profile=budget_profile,
+        media_context=turn_media_context,
+    )
+    messages.append({"role": "system", "content": render_reply_length_prompt_hint(length_policy)})
     messages.append(
         {
             "role": "system",

@@ -82,6 +82,7 @@ from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.target_inference import normalize_message_target_for_plan, normalize_message_target_for_review
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_completion_contract import resolve_sent_reply_completion
+from ...core.reply_length_policy import render_reply_length_trace, resolve_reply_length_policy, truncate_reply_text
 from ...core.prompt_loader import pick_ack_phrase
 from ...core.qq_outbound import QQOutboundLedger, SendReceipt, build_outbound_context
 from ...core.qq_recall import register_qq_recall_tool
@@ -1912,6 +1913,7 @@ async def process_yaml_response_logic(
                 == "evidence_unavailable"
             )
             reply_commit_state["agent_evidence_unavailable"] = evidence_unavailable
+            reply_commit_state["agent_tool_calls"] = bool(getattr(agent_result, "tool_calls_made", False))
             reply_commit_state["agent_tool_execution"] = (
                 "empty" if evidence_unavailable else "not_used"
             )
@@ -1990,6 +1992,16 @@ async def process_yaml_response_logic(
                         is_direct_mention
                         and str(getattr(turn_plan_for_prompt, "speech_act", "") or "") in {"", "participate", "tease"}
                     ),
+                    max_chars_override=resolve_reply_length_policy(
+                        plugin_config,
+                        turn_plan=turn_plan,
+                        media_context=turn_media_refs,
+                        tool_calls=reply_commit_state.get("agent_tool_calls"),
+                        evidence_delivery_required=bool(
+                            reply_commit_state.get("agent_evidence_delivery_required", False)
+                        ),
+                        bypass_length_limits=bool(getattr(agent_result, "bypass_length_limits", False)),
+                    ).max_chars,
                 )
                 if rewritten_ooc:
                     reply_content = rewritten_ooc
@@ -2631,6 +2643,54 @@ async def process_yaml_response_logic(
     if not assistant_text:
         _trace_no_reply("unsafe_visible_output", diagnosis_code="blocked", detail="最终可见输出被安全门拦截")
         return
+    length_policy = resolve_reply_length_policy(
+        plugin_config,
+        turn_plan=turn_plan,
+        media_context=turn_media_refs,
+        tool_calls=reply_commit_state.get("agent_tool_calls"),
+        evidence_delivery_required=bool(reply_commit_state.get("agent_evidence_delivery_required", False)),
+        bypass_length_limits=bool(
+            getattr(agent_result, "bypass_length_limits", False)
+            or _IMAGE_B64_RE.search(assistant_text or "")
+        ),
+    )
+    before_length_chars = len(assistant_text)
+    messages = list(parsed.get("messages") or [])
+    if length_policy.max_chars > 0 and len(assistant_text) > length_policy.max_chars:
+        assistant_text = truncate_reply_text(assistant_text, length_policy.max_chars)
+        # YAML may contain multiple logical messages. Keep their sticker fields,
+        # but place the capped visible text in the first text-bearing message so
+        # the sum of all outgoing text cannot exceed the turn-level cap.
+        text_slot = next(
+            (
+                index
+                for index, item in enumerate(messages)
+                if isinstance(item, dict) and str(item.get("text", "") or "").strip()
+            ),
+            None,
+        )
+        if text_slot is None:
+            messages = [{"text": assistant_text, "sticker": ""}, *messages]
+        else:
+            for index, item in enumerate(messages):
+                if isinstance(item, dict):
+                    item["text"] = assistant_text if index == text_slot else ""
+    parsed["messages"] = messages
+    try:
+        _trace_stage(
+            key="reply_length_policy",
+            label="回复字数策略",
+            status="info",
+            detail=render_reply_length_trace(
+                length_policy,
+                before_chars=before_length_chars,
+                after_chars=len(assistant_text),
+            ),
+            hint="normal 与 YAML 共用结构化日常/证据回复上限",
+        )
+    except Exception:
+        pass
+
     qq_auto_marker = maybe_choose_auto_qq_expression_marker(
         plugin_config=plugin_config,
         semantic_frame=semantic_frame,
@@ -2648,7 +2708,9 @@ async def process_yaml_response_logic(
             assistant_text = qq_auto_marker
             parsed = {"messages": [{"text": qq_auto_marker, "sticker": ""}], "think": "", "status": "", "action": ""}
         elif parsed.get("messages"):
-            parsed["messages"][-1]["text"] = f"{str(parsed['messages'][-1].get('text', '') or '').strip()}{qq_auto_marker}"
+            last_message = parsed["messages"][-1]
+            if isinstance(last_message, dict):
+                last_message["text"] = f"{str(last_message.get('text', '') or '').strip()}{qq_auto_marker}"
             assistant_text = f"{assistant_text}{qq_auto_marker}".strip()
         else:
             assistant_text = f"{assistant_text}{qq_auto_marker}".strip()

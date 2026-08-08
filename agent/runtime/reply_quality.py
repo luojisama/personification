@@ -17,6 +17,7 @@ from ...core.reply_text_policy import (
     looks_like_question_reply,
     normalize_visible_reply_text,
 )
+from ...core.reply_length_policy import render_reply_length_prompt_hint, resolve_reply_length_policy
 from ...core.response_review import (
     is_agent_reply_ooc,
     resolve_uncertain_visible_reply,
@@ -146,6 +147,7 @@ async def _rewrite_with_video_evidence(
     current_user_text: str,
     persona_system: str,
     output_mode: str,
+    length_hint: str = "",
     timeout: float = 8.0,
 ) -> str:
     """Recover a visible, evidence-grounded answer after structural loss."""
@@ -162,7 +164,7 @@ async def _rewrite_with_video_evidence(
             "content": (
                 "本轮视频视觉工具已经返回结构化证据，但上一版候选的可见正文在安全归一化后丢失了大部分内容。"
                 "请只依据下方不可信证据和当前用户问题，按当前人设直接写出最终可见回复。"
-                f"输出模式为 {output_mode}；只输出纯文本短句，不要 Markdown、标题、项目符号、编号、XML、"
+                f"输出模式为 {output_mode}；{length_hint}只输出纯文本，不要 Markdown、标题、项目符号、编号、XML、"
                 "<think>/<status>/<action> 或改写说明；不要说视频无法查看，也不要要求重复上传。"
                 "证据没有支持的细节不要补猜。"
             ),
@@ -213,6 +215,7 @@ def _copy_result_with_quality(
         evidence_delivery_status=str(getattr(result, "evidence_delivery_status", "not_required") or "not_required"),
         evidence_recovered=bool(getattr(result, "evidence_recovered", False)),
         citation_mode=str(getattr(result, "citation_mode", "none") or "none"),
+        tool_calls_made=bool(getattr(result, "tool_calls_made", False)),
     )
 
 
@@ -829,6 +832,14 @@ async def finalize_agent_reply_quality(
     revision_attempted = False
     media_recovery_attempted = False
     media_evidence_context = _extract_vision_evidence_for_quality(messages)
+    quality_length_policy = resolve_reply_length_policy(
+        None,
+        turn_plan=turn_plan,
+        media_context=turn_media_context,
+        tool_calls=bool(getattr(result, "tool_calls_made", False)),
+        evidence_delivery_required=bool(getattr(result, "evidence_delivery_required", False)),
+        bypass_length_limits=bool(getattr(result, "bypass_length_limits", False)),
+    )
 
     # A normal Markdown candidate is already handled structurally and should not
     # pay for a second LLM call.  The production failure was different: a usable
@@ -861,6 +872,7 @@ async def finalize_agent_reply_quality(
             current_user_text=current_user_text,
             persona_system=_persona_system_from_messages(messages),
             output_mode=_turn_plan_output_mode(turn_plan),
+            length_hint=render_reply_length_prompt_hint(quality_length_policy),
             timeout=8.0,
         )
         candidate_visibility = assess_visible_text(recovered) if recovered else None
@@ -897,6 +909,7 @@ async def finalize_agent_reply_quality(
             avoid_questions=group_context,
             allow_rhetorical_banter=allow_rhetorical_banter,
             rewrite_reason=quality_context,
+            max_chars_override=quality_length_policy.max_chars,
         )
         candidate = normalize_visible_reply_text(strip_response_control_markers(rewritten)) if rewritten else ""
         candidate_visibility = assess_visible_text(candidate) if candidate else None

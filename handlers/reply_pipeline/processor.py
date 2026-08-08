@@ -102,6 +102,12 @@ from ...core.response_review import (
 from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_completion_contract import resolve_sent_reply_completion
+from ...core.reply_length_policy import (
+    render_reply_length_prompt_hint,
+    render_reply_length_trace,
+    resolve_reply_length_policy,
+    truncate_reply_text,
+)
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_PLAIN
 from ...skills.skillpacks.sticker_tool.scripts.impl import (
     reset_current_image_context,
@@ -165,7 +171,6 @@ from .pipeline_context import (
     should_use_agent_for_reply as _should_use_agent_for_reply,
     stale_reply_abort_reason as _stale_reply_abort_reason,
     strip_injected_visual_summary as _strip_injected_visual_summary,
-    truncate_at_punctuation as _truncate_at_punctuation,
 )
 from .pipeline_emotion import (
     persist_reply_emotion_state,
@@ -2181,6 +2186,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             message_text=raw_message_text or message_text or message_content,
             lorebook_enabled=bool(getattr(runtime.plugin_config, "personification_lorebook_enabled", False)),
             memory_store=getattr(runtime, "memory_store", None),
+            reply_length_hint=render_reply_length_prompt_hint(
+                resolve_reply_length_policy(
+                    runtime.plugin_config,
+                    turn_plan=turn_plan,
+                    media_context=turn_media_context,
+                    tool_calls=state.get("agent_tool_calls"),
+                )
+            ),
         )
         raw = await _call_text_model_with_retry(json_messages)
         parsed = parse_persona_response(raw)
@@ -2639,6 +2652,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     is_direct_mention
                     and str(getattr(turn_plan, "speech_act", "") or "") in {"", "participate", "tease"}
                 ),
+                max_chars_override=resolve_reply_length_policy(
+                    runtime.plugin_config,
+                    turn_plan=turn_plan,
+                    media_context=turn_media_context,
+                    tool_calls=state.get("agent_tool_calls"),
+                    evidence_delivery_required=bool(state.get("agent_evidence_delivery_required", False)),
+                    bypass_length_limits=bool(bypass_length_limits),
+                ).max_chars,
             )
             if rewritten_ooc:
                 reply_content = rewritten_ooc
@@ -3026,6 +3047,35 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         final_reply = guard_visible_text(final_reply, logger=runtime.logger, surface="normal_reply")
         if not final_reply and not _IMAGE_B64_RE.search(str(reply_content or "")):
             return
+        length_policy = resolve_reply_length_policy(
+            runtime.plugin_config,
+            turn_plan=turn_plan,
+            media_context=turn_media_context,
+            tool_calls=state.get("agent_tool_calls"),
+            evidence_delivery_required=bool(state.get("agent_evidence_delivery_required", False)),
+            bypass_length_limits=bypass_length_limits,
+        )
+        max_chars = length_policy.max_chars
+        final_reply, image_b64_payloads = _extract_image_b64_markers(final_reply)
+        before_length_chars = len(final_reply)
+        if max_chars and max_chars > 0 and len(final_reply) > max_chars:
+            final_reply = truncate_reply_text(final_reply, max_chars)
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.record_stage(
+                key="reply_length_policy",
+                label="回复字数策略",
+                status="info",
+                detail=render_reply_length_trace(
+                    length_policy,
+                    before_chars=before_length_chars,
+                    after_chars=len(final_reply),
+                ),
+                hint="按结构化语义、工具和媒体状态选择日常或证据回复上限",
+            )
+        except Exception:
+            pass
         qq_auto_marker = maybe_choose_auto_qq_expression_marker(
             plugin_config=runtime.plugin_config,
             semantic_frame=semantic_frame,
@@ -3044,14 +3094,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 final_reply = qq_auto_marker
             else:
                 final_reply = f"{final_reply}{qq_auto_marker}".strip()
-        max_chars = (
-            0
-            if bypass_length_limits or bool(state.get("agent_evidence_delivery_required", False))
-            else getattr(runtime.plugin_config, "personification_max_output_chars", 0)
-        )
-        final_reply, image_b64_payloads = _extract_image_b64_markers(final_reply)
-        if max_chars and max_chars > 0 and len(final_reply) > max_chars:
-            final_reply = _truncate_at_punctuation(final_reply, max_chars)
         # session/history 只记录最终对用户生效的文本，避免原始长回复与实际可见内容漂移。
         final_visible_reply_text = _build_final_visible_reply_text(
             history_text_for_qq_expression(final_reply) or ("[发送了一张图片]" if image_b64_payloads else ""),

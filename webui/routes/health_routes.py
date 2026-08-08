@@ -837,6 +837,7 @@ def build_health_router(*, runtime) -> APIRouter:
                 get_bots=getattr(runtime, "get_bots", None),
                 logger=getattr(runtime, "logger", None),
                 only=category,
+                probe_video=category == "视频理解",
             )
         except Exception as exc:
             report = _unexpected_diagnostic(

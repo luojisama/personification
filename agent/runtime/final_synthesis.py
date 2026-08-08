@@ -30,6 +30,7 @@ class AgentResult:
     evidence_delivery_status: str = "not_required"
     evidence_recovered: bool = False
     citation_mode: str = "none"
+    tool_calls_made: bool = False
 
 
 def direct_tool_result_agent_result(

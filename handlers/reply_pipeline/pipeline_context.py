@@ -1064,6 +1064,7 @@ async def run_agent_if_enabled(
             == "evidence_unavailable"
         )
         commit_state["agent_evidence_unavailable"] = evidence_unavailable
+        commit_state["agent_tool_calls"] = bool(getattr(result, "tool_calls_made", False))
         commit_state["agent_tool_execution"] = (
             "empty" if evidence_unavailable else "not_used"
         )

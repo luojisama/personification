@@ -987,10 +987,18 @@ async def rewrite_agent_reply_ooc(
     avoid_questions: bool = False,
     allow_rhetorical_banter: bool = False,
     rewrite_reason: str = "",
+    max_chars_override: int = 0,
 ) -> str:
     if tool_caller is None:
         return ""
     min_chars, max_chars = OUTPUT_MODE_LENGTHS.get(output_mode, OUTPUT_MODE_LENGTHS["chat_short"])
+    try:
+        configured_max = max(0, int(max_chars_override or 0))
+    except (TypeError, ValueError):
+        configured_max = 0
+    if configured_max > 0:
+        max_chars = configured_max
+        min_chars = min(min_chars, max_chars)
     messages: list[dict[str, Any]] = []
     persona_hint = str(persona_system or "").strip()
     if persona_hint:

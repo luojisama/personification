@@ -293,6 +293,7 @@ async def run_agent(
     )
 
     async def _finalize_result(result: AgentResult, *, reason: str) -> AgentResult:
+        result.tool_calls_made = bool(stop_state.has_tool_call)
         social = social_evidence_from_records(stop_state.tool_result_records)
         result.social_evidence = list(social.get("sources") or [])
         result.social_coverage = {
@@ -742,6 +743,8 @@ async def run_agent(
         reply_required=reply_required,
         surface=surface,
         turn_media_context=turn_media_context,
+        plugin_config=plugin_config,
+        budget_profile=budget_profile,
     )
 
     async def _append_evidence_guidance_if_needed(*, draft_answer_text: str = "") -> EvidenceSynthesis | None:

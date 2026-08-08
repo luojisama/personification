@@ -84,6 +84,7 @@ def with_persona_responder_instruction(
     message_text: str = "",
     lorebook_enabled: bool = False,
     memory_store: Any = None,
+    reply_length_hint: str = "",
 ) -> list[dict[str, Any]]:
     lorebook_section = ""
     if lorebook_enabled and message_text and memory_store:
@@ -102,6 +103,7 @@ def with_persona_responder_instruction(
         recent_bot_replies=recent_bot_replies,
         emotional_climate=emotional_climate,
         lorebook_section=lorebook_section,
+        reply_length_hint=reply_length_hint,
     )
     copied = [dict(item) for item in list(messages or [])]
     if copied and copied[0].get("role") == "system":
@@ -130,6 +132,7 @@ def _build_persona_responder_instruction(
     recent_bot_replies: list[str] | None = None,
     emotional_climate: str = "",
     lorebook_section: str = "",
+    reply_length_hint: str = "",
 ) -> str:
     output_mode = str(getattr(semantic_frame, "output_mode", "") or "").strip() or "chat_short"
     min_chars, max_chars = OUTPUT_MODE_LENGTHS.get(output_mode, OUTPUT_MODE_LENGTHS["chat_short"])
@@ -181,7 +184,8 @@ def _build_persona_responder_instruction(
         )
         + "\n"
         f"reply_text 按 output_mode={output_mode} 控制在 {min_chars}-{max_chars} 字附近。"
-        "如果只是在复述用户语义，把 info_added 标为 tone_only；如果复用了用户原话连续片段，把 echoed_user_phrase 标为 true。"
+        + (f"\n{reply_length_hint}" if reply_length_hint else "")
+        + "如果只是在复述用户语义，把 info_added 标为 tone_only；如果复用了用户原话连续片段，把 echoed_user_phrase 标为 true。"
         f"{no_reply_rule}\n"
         "## 事实与不确定性硬约束（拟人优先于装懂）\n"
         "- 涉及具体事实、数字、时间、人名、新闻、产品参数、专有名词、角色/作品/游戏/动漫/卡牌术语、外号、缩写或梗的问题，"
