@@ -175,6 +175,7 @@ def test_semantic_frame_prompt_includes_media_context_discipline() -> None:
     assert "相邻图片、表情或截图不能覆盖直接 cue 的文字问题" in system_prompt
     assert "其它插件 interaction episode" in system_prompt
     assert "不要因为插件结果包含专业名词" in system_prompt
+    assert "‘尚未分析’不等于‘无法查看’" in system_prompt
     assert frame.recommend_silence is True
 
 
