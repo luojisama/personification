@@ -1791,6 +1791,16 @@ class MemoryStore:
         group_id: str,
         user_id: str,
     ) -> bool:
+        # Expiration is a storage-level visibility rule, not merely a ranking
+        # penalty.  This keeps stale social summaries out of both hybrid and
+        # fallback recall paths while leaving explicit permission handling below
+        # unchanged for private/direct memory tools.
+        try:
+            expires_at = float(payload.get("expires_at", 0) or 0)
+        except (TypeError, ValueError):
+            expires_at = 0.0
+        if expires_at > 0 and expires_at <= time.time():
+            return False
         requested_group_id = str(group_id or "")
         requested_user_id = str(user_id or "")
         payload_group_id = str(payload.get("group_id") or "")

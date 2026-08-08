@@ -18,6 +18,7 @@ from ...core.error_utils import log_exception
 from ...core.image_input import provider_supports_vision
 from ...core.image_result_cache import image_fingerprint
 from ...core.memory_defaults import DEFAULT_PRIVATE_HISTORY_TURNS, MAX_PRIVATE_HISTORY_TURNS
+from ...core.memory_recall_gate import gate_memory_candidates
 from ...core.message_parts import build_user_message_content
 from ...core.message_relations import build_event_relation_metadata
 from ...core.persona_profile import load_persona_profile, render_persona_snapshot
@@ -224,15 +225,42 @@ async def _recall_agent_candidate_memories(
     user_id = str(getattr(event, "user_id", "") or "").strip()
     mode = "deep" if memory_need == "deep" else "auto"
     try:
-        return await asyncio.to_thread(
+        candidates = await asyncio.to_thread(
             memory_store.recall_memories,
             query=query,
             scope="auto",
             user_id=user_id,
             group_id=group_id,
-            limit=12,
+            # Broad candidate pool; the second-stage gate below owns the
+            # automatic-context limit and never exposes all candidates.
+            limit=24,
             mode=mode,
             context_type="group" if group_id else "private",
+        )
+        caller = getattr(runtime, "lite_tool_caller", None) or getattr(runtime, "agent_tool_caller", None)
+        max_inject = max(
+            0,
+            min(3, int(getattr(runtime.plugin_config, "personification_social_memory_auto_inject_top_k", 3) or 3)),
+        )
+        minimum_score = max(
+            0.0,
+            min(1.0, float(getattr(runtime.plugin_config, "personification_social_memory_auto_min_score", 0.72) or 0.72)),
+        )
+        gate_timeout = max(
+            0.2,
+            min(10.0, float(getattr(runtime.plugin_config, "personification_social_memory_semantic_gate_timeout", 1.5) or 1.5)),
+        )
+        return await gate_memory_candidates(
+            candidates=candidates,
+            query=query,
+            turn_plan=turn_plan,
+            tool_caller=caller,
+            maximum=max_inject,
+            minimum_score=minimum_score,
+            timeout_seconds=gate_timeout,
+            on_diagnostic=lambda code, detail: runtime.logger.debug(
+                f"[memory] {code} {detail}"
+            ),
         )
     except Exception as exc:
         runtime.logger.debug(f"[agent] evidence memory recall failed: {exc}")
@@ -985,6 +1013,8 @@ async def run_agent_if_enabled(
         precomputed_intent=precomputed_intent,
         turn_plan=turn_plan,
         candidate_memories=candidate_memories,
+        memory_store=getattr(runtime, "memory_store", None),
+        memory_curator=getattr(runtime, "memory_curator", None),
         time_budget_seconds=compute_agent_time_budget(
             started_at=started_at,
             total_timeout_seconds=response_timeout_seconds,
