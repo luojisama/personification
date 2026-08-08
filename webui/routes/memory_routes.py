@@ -434,7 +434,25 @@ def build_memory_router(*, runtime) -> APIRouter:
             _raise_operation(500, report)
         rendered = []
         hidden = 0
+        cfg = getattr(runtime, "plugin_config", None)
+        social_candidate_count = 0
+        social_verified_count = 0
+        social_expired_count = 0
+        now = time.time()
         for item in items:
+            if str(item.get("source_kind", "") or "").strip() == "social_mcp_summary":
+                try:
+                    expires_at = float(item.get("expires_at", 0) or 0)
+                except (TypeError, ValueError):
+                    expires_at = 0.0
+                if expires_at > 0 and expires_at <= now:
+                    social_expired_count += 1
+                else:
+                    status = str(item.get("summary_status", "candidate") or "candidate").strip().lower()
+                    if status == "verified":
+                        social_verified_count += 1
+                    else:
+                        social_candidate_count += 1
             if not include_self and _looks_like_bot_self_entry(item):
                 hidden += 1
                 continue
@@ -458,6 +476,19 @@ def build_memory_router(*, runtime) -> APIRouter:
             "palace_enabled": True,
             "hidden_self_count": hidden,
             "include_self": bool(include_self),
+            "memory_recall_policy": {
+                "auto_inject_top_k": max(0, min(3, int(getattr(cfg, "personification_social_memory_auto_inject_top_k", 3) or 3))),
+                "auto_min_score": max(0.0, min(1.0, float(getattr(cfg, "personification_social_memory_auto_min_score", 0.72) or 0.72))),
+                "semantic_gate_timeout": max(0.2, float(getattr(cfg, "personification_social_memory_semantic_gate_timeout", 1.5) or 1.5)),
+                "semantic_gate": "fail_closed",
+            },
+            "social_memory": {
+                "enabled": bool(getattr(cfg, "personification_social_memory_enabled", True)),
+                "summary_ttl_days": max(1, int(getattr(cfg, "personification_social_memory_summary_ttl_days", 14) or 14)),
+                "candidate_count": social_candidate_count,
+                "verified_count": social_verified_count,
+                "expired_count": social_expired_count,
+            },
         }
 
     @router.get("/raw-chat")

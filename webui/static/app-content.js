@@ -247,6 +247,24 @@ function renderMemoryDiagnosticsCard() {
     : "";
 }
 
+function renderMemoryRecallPolicyCard(memory) {
+  const policy = memory && memory.memory_recall_policy ? memory.memory_recall_policy : null;
+  const social = memory && memory.social_memory ? memory.social_memory : null;
+  if (!policy && !social) return "";
+  const p = policy || {};
+  const s = social || {};
+  return `<div class="card"><h2>记忆召回闸门</h2>
+    <div class="row" style="gap:22px;flex-wrap:wrap;font-size:13px">
+      <div><span class="muted">自动注入上限</span><strong style="margin-left:6px">${Number(p.auto_inject_top_k || 0)}</strong></div>
+      <div><span class="muted">最低相关分</span><strong style="margin-left:6px">${Number(p.auto_min_score || 0).toFixed(2)}</strong></div>
+      <div><span class="muted">语义闸门</span><strong style="margin-left:6px">${escapeHtml(p.semantic_gate || 'fail_closed')}</strong></div>
+      <div><span class="muted">社交摘要</span><strong style="margin-left:6px">${s.enabled === false ? '关闭' : '开启'}</strong></div>
+      <div><span class="muted">候选/verified/过期</span><strong style="margin-left:6px">${Number(s.candidate_count || 0)}/${Number(s.verified_count || 0)}/${Number(s.expired_count || 0)}</strong></div>
+    </div>
+    <p class="muted" style="font-size:12px;margin-bottom:0">向量、全文和实体只负责扩大候选；自动上下文最多保留三条，并在模型闸门不可用时不注入。</p>
+  </div>`;
+}
+
 function reportMemoryError(error, title) {
   const diagnostic = rememberMemoryDiagnostic(operationDiagnosticFromError(error, title));
   alertFlash("err", diagnostic?.message || title);
@@ -291,10 +309,11 @@ function renderMemory() {
   const mem = state.memory;
   const inner = state.memoryInnerState;
   const diagnosticCard = renderMemoryDiagnosticsCard();
-  if (state.selectedMemory) return `${diagnosticCard}${renderMemoryDetail()}`;
-  if (!mem) return `${diagnosticCard}<div class="card muted">加载中…</div>`;
+  const policyCard = renderMemoryRecallPolicyCard(mem);
+  if (state.selectedMemory) return `${diagnosticCard}${policyCard}${renderMemoryDetail()}`;
+  if (!mem) return `${diagnosticCard}${policyCard}<div class="card muted">加载中…</div>`;
   if (!mem.palace_enabled) {
-    return `${diagnosticCard}<div class="card"><h2>Agent 记忆</h2>
+    return `${diagnosticCard}${policyCard}<div class="card"><h2>Agent 记忆</h2>
       <p class="muted">memory palace 未启用。要查看长期记忆，需在配置中开启 <code>personification_memory_palace_enabled</code>。</p></div>`;
   }
   const filters = ["", "group_knowledge", "user_persona", "fact"].map(t =>
@@ -328,7 +347,7 @@ function renderMemory() {
       ${warmRows ? `<h3 style="margin-top:14px;margin-bottom:6px;font-size:13px">用户好感度</h3><div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="Inner State 用户好感度"><table class="data-table compact" style="max-width:420px"><thead><tr><th scope="col" class="col-id">用户</th><th scope="col" class="col-number">好感</th></tr></thead><tbody>${warmRows}</tbody></table></div>`:''}</div>`;
   }
   const vectorPanel = renderMemoryVectorPanel();
-  return `${diagnosticCard}${innerBlock}
+  return `${diagnosticCard}${policyCard}${innerBlock}
     ${vectorPanel}
     <div class="toolbar">
       <div class="group-bar" style="margin-bottom:0">${filters}</div>
