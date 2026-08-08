@@ -58,3 +58,15 @@ def test_multi_user_batch_sticker_collection_does_not_use_selected_user_as_owner
 
     assert not processor._batch_media_owner_matches_selected_user(batched_events, "user_b")
     assert processor._batch_media_owner_matches_selected_user(batched_events, "user_a")
+
+
+def test_video_only_turn_is_not_discarded_as_empty_text() -> None:
+    assert processor._has_turn_media_input(
+        [],
+        [{"kind": "video", "file_id": "opaque-video-token"}],
+    ) is True
+    assert processor._has_turn_media_input(
+        [],
+        [{"kind": "audio", "file_id": "opaque-audio-token"}],
+    ) is True
+    assert processor._has_turn_media_input([], [{"kind": "unknown"}]) is False

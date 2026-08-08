@@ -705,6 +705,28 @@ def _batch_media_owner_matches_selected_user(
     return not media_owners or media_owners == {str(selected_user_id or "").strip()}
 
 
+def _has_turn_media_input(
+    image_urls: List[str],
+    turn_media_context: List[Any],
+) -> bool:
+    """Return whether the turn contains media that can drive Agent processing.
+
+    Images already have a separate URL pipeline. Video/audio refs live only in
+    ``turn_media_context`` until their lazy OneBot resolution happens, so a
+    video-only message must not be treated as an empty-text turn and discarded.
+    """
+
+    if image_urls:
+        return True
+    return any(
+        str(
+            item.get("kind", "") if isinstance(item, dict) else getattr(item, "kind", "")
+        ).strip().lower()
+        in {"video", "audio"}
+        for item in list(turn_media_context or [])
+    )
+
+
 async def _capture_user_protocol_profile(
     *,
     runtime: Any,
@@ -1180,7 +1202,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         return
 
     user_name = sender_name
-    if not message_content and not is_poke and not image_urls:
+    if not message_content and not is_poke and not _has_turn_media_input(
+        image_urls,
+        turn_media_context,
+    ):
         return
 
     if (
