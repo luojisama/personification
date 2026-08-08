@@ -324,12 +324,19 @@ def build_plugin_runtime(
         model_override_field_name="personification_lite_model",
         model_role=MODEL_ROLE_REVIEW,
     )
+    observer_call_ai_api = lite_call_ai_api
+    if str(getattr(plugin_config, "personification_favorability_observer_model", "") or "").strip():
+        observer_call_ai_api = build_ai_api_caller(
+            plugin_config=plugin_config,
+            logger=logger,
+            model_override_field_name="personification_favorability_observer_model",
+        )
     favorability_observer = None
     if favorability_service is not None:
         favorability_observer = FavorabilityObserver(
             service=favorability_service,
             plugin_config=plugin_config,
-            call_ai_api=lite_call_ai_api,
+            call_ai_api=observer_call_ai_api,
             logger=logger,
             relation_signal_handler=(
                 lambda **kwargs: apply_relation_signal(memory_store=memory_store, **kwargs)
@@ -719,7 +726,7 @@ def build_plugin_runtime(
             return default_caller
 
     def _reload_runtime_services() -> None:
-        nonlocal yaml_response_processor
+        nonlocal yaml_response_processor, observer_call_ai_api
         new_agent_tool_caller = build_routed_tool_caller(
             plugin_config=plugin_config,
             logger=logger,
@@ -816,7 +823,15 @@ def build_plugin_runtime(
         reply_processor_deps.runtime.review_call_ai_api = response_review_call_ai_api
         policy_classifier.caller = new_lite_tool_caller or new_agent_tool_caller
         if favorability_observer is not None:
-            favorability_observer.set_call_ai_api(new_lite_tool_caller or new_agent_tool_caller)
+            if str(getattr(plugin_config, "personification_favorability_observer_model", "") or "").strip():
+                observer_call_ai_api = build_ai_api_caller(
+                    plugin_config=plugin_config,
+                    logger=logger,
+                    model_override_field_name="personification_favorability_observer_model",
+                )
+            else:
+                observer_call_ai_api = new_lite_tool_caller or new_agent_tool_caller
+            favorability_observer.set_call_ai_api(observer_call_ai_api)
         if persona_store is not None:
             try:
                 refreshed_persona_caller = build_routed_tool_caller(
