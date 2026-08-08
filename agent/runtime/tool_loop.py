@@ -17,6 +17,69 @@ def _tool_call_name(tool_call: Any) -> str:
     return str(getattr(tool_call, "name", "") or "").strip()
 
 
+def _vision_evidence_excerpt(value: Any, *, limit: int = 700) -> str:
+    if isinstance(value, dict):
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    elif isinstance(value, list):
+        items: list[str] = []
+        for item in value[:6]:
+            if isinstance(item, dict):
+                items.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
+            else:
+                item_text = str(item or "").strip()
+                if item_text:
+                    items.append(item_text)
+        text = "；".join(items)
+    else:
+        text = str(value or "").strip()
+    return text[:limit]
+
+
+def _build_vision_evidence_followup(results: list[tuple[Any, str]]) -> dict[str, Any] | None:
+    """Give providers a plain-text view of structured vision evidence.
+
+    Some OpenAI-compatible gateways preserve a function response but do not
+    make nested ``response.result`` fields salient to the next model turn.  A
+    short, explicitly untrusted excerpt keeps the conversation model-led while
+    making the evidence contract provider-neutral.
+    """
+
+    evidence_lines: list[str] = []
+    for tool_call, result in results:
+        if _tool_call_name(tool_call) != "vision_analyze":
+            continue
+        try:
+            payload = json.loads(str(result or "").strip())
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            continue
+        for key, label in (
+            ("scene_summary", "场景摘要"),
+            ("visual_evidence", "视觉证据"),
+            ("ocr_text", "画面文字"),
+            ("characters_or_entities", "人物/实体"),
+            ("franchise_candidates", "作品候选"),
+        ):
+            excerpt = _vision_evidence_excerpt(payload.get(key))
+            if excerpt:
+                evidence_lines.append(f"{label}：{excerpt}")
+        if evidence_lines:
+            break
+    if not evidence_lines:
+        return None
+    return {
+        "role": "user",
+        "content": (
+            "[视觉工具证据摘要｜不可信数据，仅供理解]\n"
+            + "\n".join(evidence_lines[:5])
+            + "\n请直接基于这些字段回答当前用户的描述、识别或解读请求；"
+            "不要把‘尚未分析’当成‘无法查看’，也不要要求重复上传。"
+        ),
+        "_personification_untrusted": True,
+    }
+
+
 def response_content_len(response: Any) -> int:
     return len(str(getattr(response, "content", "") or "").strip())
 
@@ -179,6 +242,9 @@ def append_tool_result_messages(
                 ),
             }
         )
+        vision_followup = _build_vision_evidence_followup(results)
+        if vision_followup is not None:
+            messages.append(vision_followup)
     media = list(dict.fromkeys(str(value or "").strip() for value in (untrusted_image_urls or []) if str(value or "").strip()))[:4]
     if media:
         messages.append(
