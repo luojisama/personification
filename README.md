@@ -4,6 +4,13 @@
 
 当前仓库是源码型插件，不是独立发布的 PyPI package。仓库默认放在 NoneBot 项目的 `plugin/personification`，由 `plugin_dirs = ["plugin"]` 自动加载。
 
+### 双轨仓库说明
+
+- **本地开发版**：代码目录为 `plugin/personification`，命名空间为 `plugin.personification`，源码主页是 [`luojisama/personification`](https://github.com/luojisama/personification)。
+- **商店发布版**：发布仓库是 [`nonebot-plugin-personification`](https://github.com/luojisama/nonebot-plugin-personification)，PyPI 包名为 `nonebot-plugin-shiro-personification`，页面见 [`PyPI`](https://pypi.org/project/nonebot-plugin-shiro-personification/)。
+
+两者使用相同的用户可见插件名“拟人化聊天”，但目录、导入命名空间和发布渠道不同；本仓库的源码更新需要经过发布版适配后才能打包发布。
+
 ## 设计原则
 
 - 对话语义由 LLM 决定。代码负责事实、上下文、权限、预算、契约、持久化和安全兜底，不用关键词表代替“要不要回复、用户在说什么、该调用什么工具”等语义判断。
