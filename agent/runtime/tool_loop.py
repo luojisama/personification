@@ -331,6 +331,11 @@ def trace_tool_result(
     status_for_result: Callable[[Any], str],
 ) -> None:
     media_route_detail = _media_route_trace_detail(result)
+    evidence_detail = (
+        _vision_evidence_trace_detail(result)
+        if str(tool_name or "").strip() == "vision_analyze"
+        else ""
+    )
     record_trace(
         key="agent_tool_result",
         label="Agent 工具结果",
@@ -338,7 +343,7 @@ def trace_tool_result(
         detail=(
             f"step={step} tool={tool_name} "
             f"result_len={len(str(result or ''))} elapsed_ms={elapsed_ms}"
-            f"{media_route_detail}"
+            f"{media_route_detail}{evidence_detail}"
         ),
     )
 
@@ -384,6 +389,27 @@ def _media_route_trace_detail(result: Any) -> str:
             summary += ",attempts=" + ",".join(attempts)
         summaries.append(summary)
     return " media_routes=" + "|".join(summaries) if summaries else ""
+
+
+def _vision_evidence_trace_detail(result: Any) -> str:
+    payload: Any = result
+    if isinstance(result, str):
+        try:
+            payload = json.loads(result)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return " evidence=opaque"
+    if not isinstance(payload, dict):
+        return " evidence=opaque"
+    keys = ("scene_summary", "visual_evidence", "ocr_text", "characters_or_entities")
+    has_field = any(key in payload for key in keys)
+    if not has_field:
+        return " evidence=opaque"
+    has_value = any(
+        (isinstance(payload.get(key), (list, dict)) and bool(payload.get(key)))
+        or (isinstance(payload.get(key), str) and payload.get(key).strip())
+        for key in keys
+    )
+    return " evidence=structured" if has_value else " evidence=empty"
 
 
 __all__ = [

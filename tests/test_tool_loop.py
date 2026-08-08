@@ -213,6 +213,7 @@ def test_trace_tool_result_exposes_only_stable_media_route_diagnostics() -> None
     detail = traces[0]["detail"]
     assert "video:selected=none" in detail
     assert "video_gemini_web:failed:gemini_web_media_ref_invalid@media" in detail
+    assert "evidence=structured" in detail
     assert "private observation" not in detail
     assert "C:/secret/video.mp4" not in detail
 
