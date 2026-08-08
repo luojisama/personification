@@ -60,15 +60,21 @@ def build_favorability_context_block(
     user_attitude: str,
     group_attitude: str = "",
     is_private: bool,
+    behavior_policy: dict[str, Any] | None = None,
 ) -> str:
     level = str(user_level or "").strip()
     attitude = str(user_attitude or "").strip() or "态度普通，像平常一样交流。"
+    policy = dict(behavior_policy or {})
+    band = str(policy.get("band", "") or "")
     relation_style = "用自然平衡语气回应。"
     preferred_length = "默认回复 1-2 句。"
-    if level in {"挚友", "亲密"}:
+    if band in {"75-91", "92-100"} or level in {"挚友", "亲密"}:
         relation_style = "适度使用更亲近的称呼或语气词，体现熟悉感。"
         preferred_length = "可以扩展到 2-4 句，增加情感反馈。"
-    elif level in {"陌生", "路人", "初见"}:
+    elif band == "50-74":
+        relation_style = "语气温和，可以使用已知称呼并适度延展，但仍保持人格边界。"
+        preferred_length = "通常回复 1-3 句，视语境适度补充。"
+    elif band == "0-19" or level in {"陌生", "路人", "初见"}:
         relation_style = "保持礼貌和边界感，避免过度亲昵。"
         preferred_length = "优先 1-2 句，直接回答重点。"
     if is_private:
@@ -79,6 +85,10 @@ def build_favorability_context_block(
         f"- 关系表达策略：{relation_style}",
         f"- 长度偏好：{preferred_length}",
     ]
+    if band:
+        lines.append(
+            f"- 行为带：{band}；温度={policy.get('warmth', 'neutral')}；称呼={policy.get('address_mode', 'neutral')}"
+        )
     group_text = str(group_attitude or "").strip()
     if group_text and not is_private:
         lines.append(f"- 当前群聊整体氛围带给你的感受：{group_text}")
@@ -132,7 +142,19 @@ def commit_favorability_turn(
                 event_id=f"{turn_id}:group-atmosphere" if turn_id else "",
             )
         )
-    if signals.interaction_interesting and hasattr(service, "apply_user_interesting_chat"):
+    observer_mode = str(
+        getattr(
+            getattr(service, "plugin_config", None),
+            "personification_favorability_observer_mode",
+            "off",
+        )
+        or "off"
+    ).strip().lower()
+    if (
+        signals.interaction_interesting
+        and observer_mode != "apply"
+        and hasattr(service, "apply_user_interesting_chat")
+    ):
         results.append(
             service.apply_user_interesting_chat(
                 uid,

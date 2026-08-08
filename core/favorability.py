@@ -22,6 +22,55 @@ DEFAULT_FAVORABILITY_EVENT_DELTAS: dict[str, float] = {
     "user_perm_blacklist_removed": 0.0,
     "manual_adjust": 0.0,
     "daily_decay": -0.20,
+    "user_behavior_observed": 0.0,
+}
+
+DEFAULT_FAVORABILITY_BEHAVIOR_BANDS: dict[str, dict[str, Any]] = {
+    "0-19": {
+        "warmth": "reserved",
+        "address_mode": "neutral",
+        "reply_length": "short",
+        "initiative_bias": 0.00,
+        "random_reply_add": 0.00,
+        "group_idle_add": 0.00,
+        "sticker_tts_hint": "none",
+    },
+    "20-49": {
+        "warmth": "neutral",
+        "address_mode": "neutral",
+        "reply_length": "normal",
+        "initiative_bias": 0.03,
+        "random_reply_add": 0.03,
+        "group_idle_add": 0.02,
+        "sticker_tts_hint": "light",
+    },
+    "50-74": {
+        "warmth": "warm",
+        "address_mode": "known_name",
+        "reply_length": "normal",
+        "initiative_bias": 0.08,
+        "random_reply_add": 0.07,
+        "group_idle_add": 0.05,
+        "sticker_tts_hint": "light",
+    },
+    "75-91": {
+        "warmth": "close",
+        "address_mode": "friendly",
+        "reply_length": "extended",
+        "initiative_bias": 0.12,
+        "random_reply_add": 0.11,
+        "group_idle_add": 0.09,
+        "sticker_tts_hint": "available",
+    },
+    "92-100": {
+        "warmth": "intimate",
+        "address_mode": "close",
+        "reply_length": "extended",
+        "initiative_bias": 0.16,
+        "random_reply_add": 0.15,
+        "group_idle_add": 0.12,
+        "sticker_tts_hint": "available",
+    },
 }
 
 DEFAULT_FAVORABILITY_LEVELS: dict[str, float] = {
@@ -52,10 +101,12 @@ DEFAULT_FAVORABILITY_ATTITUDES: dict[str, str] = {
 
 _STORE_NAME = "favorability_profiles"
 _STORE_META_KEY = "__favorability_store_meta__"
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _EXTERNAL_MIGRATION_VERSION = 1
 _RECENT_EVENT_IDS_LIMIT = 256
 _GROUP_BASELINE_SCORE = 35.0
+_OBSERVER_TAG_LIMIT = 3
+_SHADOW_EVENT_LOG_LIMIT = 100
 _MAINTENANCE_EVENT_TYPES = frozenset({"daily_decay", "baseline_migration"})
 _EXTERNAL_MIGRATION_FIELDS = (
     "favorability",
@@ -152,7 +203,43 @@ def _timestamp(now: Any = None) -> int:
 
 def _is_group_key(user_id: str) -> bool:
     text = str(user_id or "").strip()
-    return text.startswith("group_") and not text.startswith("group_private_")
+    return (
+        text.startswith("group_")
+        and not text.startswith("group_private_")
+        and not text.startswith("group_user_")
+    )
+
+
+def _is_group_user_key(user_id: str) -> bool:
+    return str(user_id or "").strip().startswith("group_user_")
+
+
+def favorability_scope_key(user_id: Any, group_id: Any = "", *, scope: str = "global") -> str:
+    uid = str(user_id or "").strip()
+    gid = str(group_id or "").strip()
+    normalized_scope = str(scope or "global").strip().lower()
+    if normalized_scope == "group_user" and uid and gid:
+        return f"group_user_{gid}_{uid}"
+    return uid
+
+
+def favorability_scope_for_key(user_id: Any) -> str:
+    key = str(user_id or "").strip()
+    if _is_group_user_key(key):
+        return "group_user"
+    if _is_group_key(key):
+        return "group"
+    return "global"
+
+
+def favorability_group_id_for_key(user_id: Any) -> str:
+    key = str(user_id or "").strip()
+    if _is_group_user_key(key):
+        rest = key.removeprefix("group_user_")
+        return rest.split("_", 1)[0] if "_" in rest else rest
+    if _is_group_key(key):
+        return key.removeprefix("group_")
+    return ""
 
 
 def _event_log_limit(plugin_config: Any = None) -> int:
@@ -215,6 +302,12 @@ def normalize_favorability_profile(
     relationship_activity_at = _legacy_relationship_activity_at(profile)
     default_score = default_favorability_for_id(user_id, plugin_config)
     profile["favorability"] = _clamp_score(profile.get("favorability", default_score), default_score)
+    profile["scope"] = str(profile.get("scope", "") or favorability_scope_for_key(user_id)).strip()
+    if profile["scope"] not in {"global", "group", "group_user"}:
+        profile["scope"] = favorability_scope_for_key(user_id)
+    profile["group_id"] = str(
+        profile.get("group_id", "") or favorability_group_id_for_key(user_id)
+    ).strip()
 
     for key in (
         "daily_fav_count",
@@ -256,18 +349,76 @@ def normalize_favorability_profile(
                 _safe_float(event.get("requested_delta", event["delta"]), event["delta"]),
                 2,
             )
+            event["projected_delta"] = round(
+                _safe_float(event.get("projected_delta", event.get("requested_delta", event["delta"])), event["delta"]),
+                2,
+            )
+            event["applied_delta"] = round(
+                _safe_float(event.get("applied_delta", event["delta"]), event["delta"]),
+                2,
+            )
             event["old"] = _clamp_score(event.get("old", 0.0), 0.0)
             event["new"] = _clamp_score(event.get("new", event["old"]), event["old"])
             event["timestamp"] = max(0, _safe_int(event.get("timestamp", 0) or 0, 0))
             event["capped"] = bool(event.get("capped", False))
-            for text_key in ("reason", "actor", "group_id", "status", "event_id"):
+            for text_key in (
+                "reason",
+                "actor",
+                "group_id",
+                "status",
+                "event_id",
+                "source",
+                "mode",
+                "scope",
+                "trace_id",
+                "evidence_summary",
+            ):
                 if text_key in event:
                     event[text_key] = str(event.get(text_key, "") or "").strip()
+            event["source"] = str(event.get("source", "legacy") or "legacy").strip()[:64]
+            event["mode"] = str(event.get("mode", "legacy") or "legacy").strip()[:32]
+            event["scope"] = str(event.get("scope", profile.get("scope", "global")) or "global").strip()[:32]
+            event["confidence"] = round(max(0.0, min(1.0, _safe_float(event.get("confidence", 0.0), 0.0))), 3)
+            tags = event.get("behavior_tags")
+            event["behavior_tags"] = [str(item or "").strip()[:40] for item in tags[:_OBSERVER_TAG_LIMIT]] if isinstance(tags, list) else []
+            message_ids = event.get("message_ids")
+            event["message_ids"] = [str(item or "").strip()[:128] for item in message_ids[:8]] if isinstance(message_ids, list) else []
             if isinstance(event.get("metadata"), dict):
                 event["metadata"] = copy.deepcopy(event["metadata"])
             events.append(event)
     limit = _event_log_limit(plugin_config)
     profile["favorability_events"] = events[-limit:] if limit else []
+    shadow_events_raw = profile.get("favorability_shadow_events")
+    shadow_events: list[dict[str, Any]] = []
+    if isinstance(shadow_events_raw, list):
+        for item in shadow_events_raw:
+            if not isinstance(item, dict):
+                continue
+            shadow = dict(item)
+            shadow["type"] = str(shadow.get("type", "user_behavior_observed") or "user_behavior_observed").strip()
+            shadow["mode"] = "shadow"
+            shadow["status"] = str(shadow.get("status", "projected") or "projected").strip()
+            shadow["delta"] = round(_safe_float(shadow.get("delta", 0.0), 0.0), 2)
+            shadow["requested_delta"] = round(_safe_float(shadow.get("requested_delta", shadow["delta"]), shadow["delta"]), 2)
+            shadow["projected_delta"] = round(_safe_float(shadow.get("projected_delta", shadow["delta"]), shadow["delta"]), 2)
+            shadow["old"] = _clamp_score(shadow.get("old", profile["favorability"]), profile["favorability"])
+            shadow["new"] = _clamp_score(shadow.get("new", shadow["old"]), shadow["old"])
+            shadow["timestamp"] = max(0, _safe_int(shadow.get("timestamp", 0), 0))
+            shadow["date"] = str(shadow.get("date", "") or "").strip()
+            shadow["reason"] = str(shadow.get("reason", "") or "").strip()[:200]
+            shadow["evidence_summary"] = str(shadow.get("evidence_summary", "") or "").strip()[:120]
+            shadow["source"] = "observer"
+            shadow["scope"] = str(shadow.get("scope", profile.get("scope", "global")) or "global").strip()[:32]
+            shadow["trace_id"] = str(shadow.get("trace_id", "") or "").strip()[:128]
+            shadow["event_id"] = str(shadow.get("event_id", "") or "").strip()[:128]
+            shadow["confidence"] = round(max(0.0, min(1.0, _safe_float(shadow.get("confidence", 0.0), 0.0))), 3)
+            tags = shadow.get("behavior_tags")
+            shadow["behavior_tags"] = [str(item or "").strip()[:40] for item in tags[:_OBSERVER_TAG_LIMIT]] if isinstance(tags, list) else []
+            message_ids = shadow.get("message_ids")
+            shadow["message_ids"] = [str(item or "").strip()[:128] for item in message_ids[:8]] if isinstance(message_ids, list) else []
+            shadow_events.append(shadow)
+    shadow_limit = max(0, min(500, _safe_int(getattr(plugin_config, "personification_favorability_shadow_log_limit", _SHADOW_EVENT_LOG_LIMIT), _SHADOW_EVENT_LOG_LIMIT)))
+    profile["favorability_shadow_events"] = shadow_events[-shadow_limit:] if shadow_limit else []
     recent_ids_raw = profile.get("recent_event_ids")
     recent_ids: list[str] = []
     if isinstance(recent_ids_raw, list):
@@ -276,6 +427,15 @@ def normalize_favorability_profile(
             if event_id and event_id not in recent_ids:
                 recent_ids.append(event_id)
     profile["recent_event_ids"] = recent_ids[-_RECENT_EVENT_IDS_LIMIT:]
+    observer_ids_raw = profile.get("recent_observer_ids")
+    observer_ids: list[str] = []
+    if isinstance(observer_ids_raw, list):
+        for item in observer_ids_raw:
+            event_id = str(item or "").strip()[:128]
+            if event_id and event_id not in observer_ids:
+                observer_ids.append(event_id)
+    profile["recent_observer_ids"] = observer_ids[-_RECENT_EVENT_IDS_LIMIT:]
+    profile["last_observer_at"] = max(0, _safe_int(profile.get("last_observer_at", 0), 0))
     profile["is_perm_blacklisted"] = bool(profile.get("is_perm_blacklisted", False))
     profile["created_at"] = max(
         0,
@@ -318,6 +478,42 @@ def normalize_favorability_levels(value: Any) -> dict[str, float]:
     if not levels:
         levels = dict(DEFAULT_FAVORABILITY_LEVELS)
     return dict(sorted(levels.items(), key=lambda item: item[1]))
+
+
+def normalize_favorability_behavior_bands(value: Any) -> dict[str, dict[str, Any]]:
+    raw = value if isinstance(value, dict) and value else DEFAULT_FAVORABILITY_BEHAVIOR_BANDS
+    result: dict[str, dict[str, Any]] = {}
+    for key, default in DEFAULT_FAVORABILITY_BEHAVIOR_BANDS.items():
+        candidate = raw.get(key, {}) if isinstance(raw, dict) else {}
+        merged = dict(default)
+        if isinstance(candidate, dict):
+            merged.update(candidate)
+        merged["warmth"] = str(merged.get("warmth", default["warmth"]) or default["warmth"])[:32]
+        merged["address_mode"] = str(merged.get("address_mode", default["address_mode"]) or default["address_mode"])[:32]
+        merged["reply_length"] = str(merged.get("reply_length", default["reply_length"]) or default["reply_length"])[:32]
+        merged["sticker_tts_hint"] = str(merged.get("sticker_tts_hint", default["sticker_tts_hint"]) or default["sticker_tts_hint"])[:32]
+        for field, low, high in (
+            ("initiative_bias", -0.5, 0.5),
+            ("random_reply_add", 0.0, 0.2),
+            ("group_idle_add", 0.0, 0.2),
+        ):
+            merged[field] = round(max(low, min(high, _safe_float(merged.get(field, default[field]), default[field]))), 3)
+        result[key] = merged
+    return result
+
+
+def favorability_behavior_band_for_score(score: Any) -> str:
+    value = _clamp_score(score, 0.0)
+    for band, (low, high) in (
+        ("0-19", (0.0, 19.999)),
+        ("20-49", (20.0, 49.999)),
+        ("50-74", (50.0, 74.999)),
+        ("75-91", (75.0, 91.999)),
+        ("92-100", (92.0, 100.0)),
+    ):
+        if low <= value <= high:
+            return band
+    return "0-19" if value < 20 else "92-100"
 
 
 def level_name_for_score(score: Any, levels: Any = None) -> str:
@@ -368,6 +564,28 @@ class FavorabilityService:
         )
         self.logger = logger
         self._mirror_lock = RLock()
+        self.observer: Any = None
+
+    def set_observer(self, observer: Any) -> None:
+        self.observer = observer
+
+    def observer_status(self) -> dict[str, Any]:
+        observer = self.observer
+        if observer is None or not hasattr(observer, "snapshot_stats"):
+            return {
+                "mode": str(getattr(self.plugin_config, "personification_favorability_observer_mode", "shadow") or "shadow"),
+                "queued": 0,
+                "evaluated": 0,
+                "projected": 0,
+                "applied": 0,
+                "skipped": 0,
+                "failed": 0,
+                "pending": 0,
+            }
+        try:
+            return dict(observer.snapshot_stats())
+        except Exception:
+            return {"mode": "shadow", "queued": 0, "evaluated": 0, "projected": 0, "applied": 0, "skipped": 0, "failed": 0, "pending": 0}
 
     @property
     def enabled(self) -> bool:
@@ -784,6 +1002,8 @@ class FavorabilityService:
             "date": now_date,
             "status": status,
             "capped": bool(capped),
+            "level_before": self.get_level_name(old_score),
+            "level_after": self.get_level_name(new_score),
         }
         if event_id:
             event["event_id"] = str(event_id)[:128]
@@ -795,6 +1015,24 @@ class FavorabilityService:
             event["group_id"] = str(group_id)[:64]
         if metadata:
             event["metadata"] = copy.deepcopy(metadata)
+            for key in (
+                "source",
+                "mode",
+                "scope",
+                "confidence",
+                "behavior_tags",
+                "evidence_summary",
+                "trace_id",
+                "message_ids",
+                "projected_delta",
+                "applied_delta",
+            ):
+                if key in metadata:
+                    event[key] = copy.deepcopy(metadata[key])
+            if "projected_delta" not in event:
+                event["projected_delta"] = round(requested_delta, 2)
+            if "applied_delta" not in event:
+                event["applied_delta"] = round(applied_delta, 2)
         events_raw = profile.get("favorability_events")
         events = list(events_raw) if isinstance(events_raw, list) else []
         events.append(event)
@@ -1032,6 +1270,9 @@ class FavorabilityService:
             if prepared_changed or event_changed:
                 profile = self._commit_profile(profile, latest, now_ts=now_ts)
                 data[user_id] = profile
+                meta = dict(self._store_meta(data))
+                meta["schema_version"] = _SCHEMA_VERSION
+                data[_STORE_META_KEY] = meta
                 changed = True
             return data
 
@@ -1113,6 +1354,9 @@ class FavorabilityService:
                 now_ts=now_ts,
             )
             data[key] = self._commit_profile(profile, latest, now_ts=now_ts)
+            meta = dict(self._store_meta(data))
+            meta["schema_version"] = _SCHEMA_VERSION
+            data[_STORE_META_KEY] = meta
             return data
 
         get_data_store().mutate_sync(_STORE_NAME, _mutate)
@@ -1223,6 +1467,305 @@ class FavorabilityService:
     def get_level_name(self, value: float) -> str:
         levels = getattr(self.plugin_config, "personification_favorability_levels", None)
         return level_name_for_score(value, levels)
+
+    def behavior_policy_for_score(self, score: Any) -> dict[str, Any]:
+        bands = normalize_favorability_behavior_bands(
+            getattr(self.plugin_config, "personification_favorability_behavior_bands", None)
+        )
+        band = favorability_behavior_band_for_score(score)
+        policy = dict(bands.get(band, bands["0-19"]))
+        policy["band"] = band
+        policy["score"] = round(_clamp_score(score, 0.0), 2)
+        return policy
+
+    @staticmethod
+    def _profile_view(profile: dict[str, Any] | None, *, default_score: float, service: "FavorabilityService") -> dict[str, Any]:
+        data = dict(profile) if isinstance(profile, dict) else {}
+        score = round(_clamp_score(data.get("favorability", default_score), default_score), 2)
+        return {
+            "exists": bool(profile),
+            "score": score,
+            "level": service.get_level_name(score),
+            "scope": str(data.get("scope", "global") or "global"),
+            "group_id": str(data.get("group_id", "") or ""),
+            "last_event_at": max(0, _safe_int(data.get("last_favorability_event_at", 0), 0)),
+            "latest_event": (
+                dict(data.get("favorability_events", [])[-1])
+                if isinstance(data.get("favorability_events"), list) and data.get("favorability_events")
+                and isinstance(data.get("favorability_events", [])[-1], dict)
+                else None
+            ),
+        }
+
+    def get_effective_profile(self, user_id: Any, group_id: Any = "") -> dict[str, Any]:
+        uid = str(user_id or "").strip()
+        gid = str(group_id or "").strip()
+        global_profile = self.peek_user_data(uid) if uid else None
+        global_view = self._profile_view(
+            global_profile,
+            default_score=self.default_score(uid),
+            service=self,
+        )
+        group_profile = None
+        group_view = None
+        if gid:
+            group_key = favorability_scope_key(uid, gid, scope="group_user")
+            group_profile = self.peek_user_data(group_key)
+            group_view = self._profile_view(
+                group_profile,
+                default_score=self.default_score(group_key),
+                service=self,
+            )
+            group_view["group_id"] = gid
+        effective = group_view if group_profile is not None else global_view
+        effective = dict(effective)
+        effective["scope_used"] = "group_user" if group_profile is not None else "global"
+        effective["fallback_used"] = bool(gid and group_profile is None)
+        effective["behavior_policy"] = self.behavior_policy_for_score(effective["score"])
+        return {
+            "user_id": uid,
+            "group_id": gid,
+            "global": global_view,
+            "group": group_view,
+            "effective": effective,
+        }
+
+    def get_group_behavior_policy(self, group_id: Any) -> dict[str, Any]:
+        gid = str(group_id or "").strip()
+        profile = self.peek_user_data(f"group_{gid}") if gid else None
+        score = self.default_score(f"group_{gid}") if profile is None else _safe_float(profile.get("favorability", 35.0), 35.0)
+        policy = self.behavior_policy_for_score(score)
+        policy["scope"] = "group"
+        policy["group_id"] = gid
+        return policy
+
+    @staticmethod
+    def _normalized_observer_delta(assessment: Any, *, cap: float = 1.5) -> float:
+        if isinstance(assessment, dict):
+            decision = str(assessment.get("decision", "") or "").strip().lower()
+            raw = assessment.get("requested_delta")
+        else:
+            decision = str(getattr(assessment, "decision", "") or "").strip().lower()
+            raw = getattr(assessment, "requested_delta", None)
+        limit = max(0.0, min(10.0, _safe_float(cap, 1.5)))
+        delta = max(-limit, min(limit, _safe_float(raw, 0.0)))
+        if decision == "increase":
+            return round(abs(delta), 2)
+        if decision == "decrease":
+            return round(-abs(delta), 2)
+        return 0.0
+
+    def _observer_shadow_event(
+        self,
+        *,
+        key: str,
+        group_id: str,
+        scope: str,
+        assessment: Any,
+        observation_id: str,
+        trace_id: str,
+        message_ids: list[str],
+        now: Any = None,
+    ) -> dict[str, Any]:
+        now_ts = _timestamp(now)
+        now_date = self.current_date(now)
+        requested_delta = self._normalized_observer_delta(
+            assessment,
+            cap=getattr(self.plugin_config, "personification_favorability_observer_delta_cap", 1.5),
+        )
+        confidence = max(0.0, min(1.0, _safe_float(getattr(assessment, "confidence", 0.0), 0.0)))
+        reason = str(getattr(assessment, "reason", "") or "").strip()[:200]
+        evidence_summary = str(getattr(assessment, "evidence_summary", "") or "").strip()[:120]
+        tags = [str(item or "").strip()[:40] for item in (getattr(assessment, "behavior_tags", ()) or ())][: _OBSERVER_TAG_LIMIT]
+        result: dict[str, Any] = {}
+        changed = False
+
+        def _mutate(current: Any) -> dict[str, Any]:
+            nonlocal result, changed
+            data = dict(current) if isinstance(current, dict) else {}
+            latest = data.get(key)
+            profile = self._prepare_profile(
+                key,
+                latest,
+                now_ts=now_ts,
+                now_date=now_date,
+                store_meta=self._store_meta(data),
+            )
+            recent = list(profile.get("recent_observer_ids") or [])
+            if observation_id and observation_id in recent:
+                result = {
+                    "applied": False,
+                    "status": "duplicate",
+                    "old": _clamp_score(profile.get("favorability", 0.0), 0.0),
+                    "new": _clamp_score(profile.get("favorability", 0.0), 0.0),
+                    "delta": 0.0,
+                    "requested_delta": requested_delta,
+                    "event_id": observation_id,
+                }
+                return data
+            old_score = _clamp_score(profile.get("favorability", self.default_score(key)), self.default_score(key))
+            preview = copy.deepcopy(profile)
+            projected_delta, capped, _bucket, _used, _cap = self._apply_daily_cap(
+                preview,
+                user_id=key,
+                event_type="user_behavior_observed",
+                delta=requested_delta,
+                now_date=now_date,
+                daily_cap=None,
+            )
+            new_score = _clamp_score(old_score + projected_delta, old_score)
+            event = {
+                "type": "user_behavior_observed",
+                "mode": "shadow",
+                "status": "projected" if confidence >= float(getattr(self.plugin_config, "personification_favorability_observer_confidence_threshold", 0.65) or 0.65) else "skipped_low_confidence",
+                "delta": round(projected_delta, 2),
+                "requested_delta": requested_delta,
+                "projected_delta": round(projected_delta, 2),
+                "applied_delta": 0.0,
+                "old": old_score,
+                "new": new_score,
+                "timestamp": now_ts,
+                "date": now_date,
+                "reason": reason,
+                "evidence_summary": evidence_summary,
+                "behavior_tags": tags,
+                "confidence": round(confidence, 3),
+                "source": "observer",
+                "scope": scope,
+                "group_id": group_id,
+                "trace_id": str(trace_id or "")[:128],
+                "message_ids": [str(item or "")[:128] for item in message_ids[:8]],
+                "event_id": str(observation_id or "")[:128],
+                "capped": bool(capped),
+            }
+            shadow_events = list(profile.get("favorability_shadow_events") or [])
+            shadow_events.append(event)
+            shadow_limit = max(0, min(500, _safe_int(getattr(self.plugin_config, "personification_favorability_shadow_log_limit", _SHADOW_EVENT_LOG_LIMIT), _SHADOW_EVENT_LOG_LIMIT)))
+            profile["favorability_shadow_events"] = shadow_events[-shadow_limit:] if shadow_limit else []
+            if observation_id:
+                recent.append(observation_id)
+                profile["recent_observer_ids"] = recent[-_RECENT_EVENT_IDS_LIMIT:]
+            profile["last_observer_at"] = now_ts
+            profile["observer_mode"] = "shadow"
+            profile = normalize_favorability_profile(key, profile, plugin_config=self.plugin_config, now_ts=now_ts)
+            profile = self._commit_profile(profile, latest, now_ts=now_ts)
+            data[key] = profile
+            meta = dict(self._store_meta(data))
+            meta["schema_version"] = _SCHEMA_VERSION
+            data[_STORE_META_KEY] = meta
+            changed = True
+            result = {
+                "applied": False,
+                "status": event["status"],
+                "old": old_score,
+                "new": new_score,
+                "delta": 0.0,
+                "requested_delta": requested_delta,
+                "projected_delta": round(projected_delta, 2),
+                "capped": bool(capped),
+                "event_id": observation_id,
+            }
+            return data
+
+        get_data_store().mutate_sync(_STORE_NAME, _mutate)
+        if changed:
+            self._mirror_latest(key)
+        return result
+
+    def apply_observer_assessment(
+        self,
+        *,
+        user_id: str,
+        group_id: str = "",
+        is_private: bool,
+        assessment: Any,
+        observation_id: str,
+        trace_id: str = "",
+        message_ids: list[str] | None = None,
+        now: Any = None,
+    ) -> dict[str, Any]:
+        uid = str(user_id or "").strip()
+        gid = "" if is_private else str(group_id or "").strip()
+        scope = "global" if is_private else "group_user"
+        key = favorability_scope_key(uid, gid, scope=scope)
+        if not uid or not key:
+            return {"applied": False, "status": "invalid", "delta": 0.0, "requested_delta": 0.0}
+        if scope == "group_user" and self.peek_user_data(key) is None:
+            # 首次建立群内覆盖时继承当前全局分数，但不复制全局事件历史。
+            global_profile = self.peek_user_data(uid)
+            if isinstance(global_profile, dict):
+                self.update_user_data(
+                    key,
+                    favorability=_clamp_score(global_profile.get("favorability", self.default_score(uid)), self.default_score(uid)),
+                    source="personification",
+                    scope="group_user",
+                    group_id=gid,
+                )
+        threshold = max(0.0, min(1.0, _safe_float(getattr(self.plugin_config, "personification_favorability_observer_confidence_threshold", 0.65), 0.65)))
+        confidence = max(0.0, min(1.0, _safe_float(getattr(assessment, "confidence", 0.0), 0.0)))
+        requested_delta = self._normalized_observer_delta(
+            assessment,
+            cap=getattr(self.plugin_config, "personification_favorability_observer_delta_cap", 1.5),
+        )
+        metadata = {
+            "source": "observer",
+            "mode": str(getattr(self.plugin_config, "personification_favorability_observer_mode", "shadow") or "shadow"),
+            "scope": scope,
+            "confidence": round(confidence, 3),
+            "behavior_tags": [str(item or "")[:40] for item in (getattr(assessment, "behavior_tags", ()) or ())][: _OBSERVER_TAG_LIMIT],
+            "evidence_summary": str(getattr(assessment, "evidence_summary", "") or "")[:120],
+            "trace_id": str(trace_id or "")[:128],
+            "message_ids": [str(item or "")[:128] for item in (message_ids or [])[:8]],
+        }
+        reason = str(getattr(assessment, "reason", "") or "").strip()[:200]
+        mode = str(getattr(self.plugin_config, "personification_favorability_observer_mode", "shadow") or "shadow").strip().lower()
+        if mode not in {"shadow", "apply", "off"}:
+            mode = "shadow"
+        if mode == "off":
+            return {"applied": False, "status": "disabled", "delta": 0.0, "requested_delta": requested_delta}
+        if confidence < threshold:
+            if mode == "shadow":
+                assessment_result = self._observer_shadow_event(
+                    key=key,
+                    group_id=gid,
+                    scope=scope,
+                    assessment=assessment,
+                    observation_id=observation_id,
+                    trace_id=trace_id,
+                    message_ids=list(message_ids or []),
+                    now=now,
+                )
+                assessment_result["status"] = "skipped_low_confidence"
+                return assessment_result
+            return {
+                "applied": False,
+                "status": "skipped_low_confidence",
+                "delta": 0.0,
+                "requested_delta": requested_delta,
+                "event_id": observation_id,
+            }
+        if mode == "shadow":
+            return self._observer_shadow_event(
+                key=key,
+                group_id=gid,
+                scope=scope,
+                assessment=assessment,
+                observation_id=observation_id,
+                trace_id=trace_id,
+                message_ids=list(message_ids or []),
+                now=now,
+            )
+        return self.apply_event(
+            key,
+            "user_behavior_observed",
+            delta=requested_delta,
+            reason=reason,
+            actor="favorability_observer",
+            group_id=gid,
+            now=now,
+            metadata=metadata,
+            event_id=observation_id,
+        )
 
     def apply_group_good_atmosphere(
         self,
@@ -1444,13 +1987,18 @@ def build_external_sign_in_adapter() -> ExternalFavorabilityAdapter:
 
 __all__ = [
     "DEFAULT_FAVORABILITY_ATTITUDES",
+    "DEFAULT_FAVORABILITY_BEHAVIOR_BANDS",
     "DEFAULT_FAVORABILITY_EVENT_DELTAS",
     "DEFAULT_FAVORABILITY_LEVELS",
     "ExternalFavorabilityAdapter",
     "FavorabilityService",
     "build_external_sign_in_adapter",
     "default_favorability_for_id",
+    "favorability_behavior_band_for_score",
+    "favorability_scope_for_key",
+    "favorability_scope_key",
     "normalize_favorability_event_deltas",
+    "normalize_favorability_behavior_bands",
     "level_name_for_score",
     "normalize_favorability_levels",
     "normalize_favorability_profile",

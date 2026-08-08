@@ -547,7 +547,7 @@ def test_peek_and_snapshot_are_pure_local_reads(monkeypatch) -> None:  # noqa: A
     profile = service.peek_user_data("10001")
     snapshot = service.snapshot_profiles()
 
-    assert profile is not None and profile["schema_version"] == 3
+    assert profile is not None and profile["schema_version"] == 4
     assert snapshot["10001"]["favorability"] == 7.0
     assert service.peek_user_data("missing") is None
     assert store.payload == before

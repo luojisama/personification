@@ -17,6 +17,47 @@ _RELATION_EVOLUTION_PROMPT = (
 _RELATION_EVOLUTION_DAILY_QUOTA = 30
 
 
+def apply_relation_signal(
+    *,
+    memory_store: Any,
+    group_id: str,
+    user_id: str,
+    signal: dict[str, Any],
+    source_kind: str = "favorability_observer",
+) -> dict[str, Any]:
+    """Apply an already validated relation signal without a second model call."""
+    if memory_store is None or not isinstance(signal, dict):
+        return {"action": "no_change", "reason": "缺少关系存储"}
+    action = str(signal.get("action", "no_change") or "no_change").strip()
+    if action not in {"tag_add", "tag_remove", "adjust_weight", "no_change"}:
+        action = "no_change"
+    tag = str(signal.get("tag", "") or "").strip()[:30]
+    if action != "no_change" and not tag:
+        return {"action": "no_change", "reason": "缺少关系标签"}
+    try:
+        weight_delta = max(-1.0, min(1.0, float(signal.get("weight_delta", 0.0) or 0.0)))
+    except (TypeError, ValueError, OverflowError):
+        weight_delta = 0.0
+    reason = str(signal.get("reason", "") or "").strip()[:80]
+    if action == "no_change":
+        return {"action": action, "reason": reason or "无需变化"}
+    memory_store.write_memory_item({
+        "memory_id": f"gr_obs_{group_id}_{user_id}_{int(time.time() * 1000)}",
+        "memory_type": "group_relation",
+        "summary": f"{action}:{tag} delta={weight_delta:.2f}",
+        "group_id": str(group_id),
+        "user_id": str(user_id),
+        "action": action,
+        "tag": tag,
+        "weight_delta": weight_delta,
+        "reason": reason,
+        "source_kind": source_kind,
+        "confidence": 0.0,
+        "salience": 0.4,
+    })
+    return {"action": action, "tag": tag, "weight_delta": weight_delta, "reason": reason}
+
+
 def _read_quota(memory_store: Any, key: str) -> int:
     try:
         item = memory_store.get_memory_item(key)
@@ -140,4 +181,4 @@ def list_group_relations(memory_store: Any, group_id: str) -> list[dict[str, Any
     )
 
 
-__all__ = ["evolve_group_relations", "list_group_relations"]
+__all__ = ["apply_relation_signal", "evolve_group_relations", "list_group_relations"]

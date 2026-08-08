@@ -16,6 +16,7 @@ from .core.memory_defaults import (
 )
 from .core.favorability import (
     DEFAULT_FAVORABILITY_ATTITUDES,
+    DEFAULT_FAVORABILITY_BEHAVIOR_BANDS,
     DEFAULT_FAVORABILITY_EVENT_DELTAS,
     DEFAULT_FAVORABILITY_LEVELS,
 )
@@ -469,6 +470,20 @@ class Config(BaseModel):
     personification_favorability_decay_enabled: bool = False
     personification_favorability_decay_idle_days: int = 14
     personification_favorability_decay_delta: float = -0.20
+    # 用户发言表现的异步关系观察器：先 shadow 记录拟议变化，再由管理员切换 apply。
+    personification_favorability_observer_mode: str = "shadow"
+    personification_favorability_observer_debounce_seconds: int = 45
+    personification_favorability_observer_min_interval_seconds: int = 60
+    personification_favorability_observer_batch_max_messages: int = 8
+    personification_favorability_observer_batch_max_chars: int = 1200
+    personification_favorability_observer_daily_quota: int = 500
+    personification_favorability_observer_delta_cap: float = 1.5
+    personification_favorability_observer_confidence_threshold: float = 0.65
+    personification_favorability_observer_timeout_seconds: float = 15.0
+    personification_favorability_shadow_log_limit: int = 100
+    personification_favorability_observer_model: str = ""
+    personification_favorability_behavior_bands: Dict[str, Dict[str, Any]] = DEFAULT_FAVORABILITY_BEHAVIOR_BANDS.copy()
+    personification_favorability_frequency_adaptive_enabled: bool = False
 
     personification_history_len: int = DEFAULT_HISTORY_LEN
     # 滚动窗口：触发压缩的条数阈值（达到此数量时压缩）
