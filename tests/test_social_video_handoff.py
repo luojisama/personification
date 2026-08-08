@@ -46,6 +46,8 @@ def test_social_video_handoff_reads_and_analyzes_every_video() -> None:
                     "content_type": "video",
                     "source_group_id": f"source_{content_id}",
                     "video_ref": f"https://cdn{content_id}.bilivideo.com/video.mp4",
+                    "caption_or_body": "视频正文和字幕上下文",
+                    "discussion": [{"type": "subtitle", "text": "字幕证据"}],
                 }
             ]
         )
@@ -107,6 +109,8 @@ def test_social_video_handoff_reads_and_analyzes_every_video() -> None:
     assert [item["source_group_id"] for item in result.analyses] == ["source_1", "source_2"]
     assert all(item["trust"] == "untrusted_data_only" for item in result.analyses)
     assert all("media_token" not in item for item in result.analyses)
+    assert [item["source_group_id"] for item in result.detail_evidence] == ["source_1", "source_2"]
+    assert all(item["trust"] == "untrusted_data_only" for item in result.detail_evidence)
 
 
 def test_social_video_handoff_rejects_untrusted_video_ref() -> None:

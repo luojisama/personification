@@ -30,6 +30,14 @@ _INTERNAL_OUTPUT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"(?:finish[_ ]?reason|block[_ ]?reason|content[_ ]?filter)\s*[:=]", re.IGNORECASE),
     ),
     ("internal_tag", re.compile(r"(?:system|developer)\s+(?:prompt|message)\s*[:=]", re.IGNORECASE)),
+    (
+        "tool_process_leak",
+        re.compile(r"(?:我刚刚|本轮|后台)?(?:调用了|执行了|运行了)\s*(?:MCP|工具|搜索工具|vision_analyze|social_content_search)", re.IGNORECASE),
+    ),
+    (
+        "social_source_leak",
+        re.compile(r"^(?:来源|查到的来源|参考来源|出处)\s*[:：]", re.IGNORECASE | re.MULTILINE),
+    ),
     ("internal_error", re.compile(r"(?:traceback|stack trace|internal server error)\b", re.IGNORECASE)),
     (
         "credential_like_text",

@@ -239,6 +239,8 @@ async def run_agent(
     precomputed_intent: Any = None,
     turn_plan: Any = None,
     candidate_memories: list[dict[str, Any]] | None = None,
+    memory_store: Any = None,
+    memory_curator: Any = None,
     url_summaries: list[str] | None = None,
     quote_chain: list[dict[str, Any]] | None = None,
     time_budget_seconds: float | None = None,
@@ -1054,6 +1056,13 @@ async def run_agent(
                     search_result=str(result or ""),
                     query=query,
                     citation_mode=str(getattr(turn_plan, "citation_mode", "none") or "none"),
+                    turn_plan=turn_plan,
+                    memory_store=memory_store,
+                    memory_curator=memory_curator,
+                    is_group=bool(is_group),
+                    is_direct_mention=is_direct_mention,
+                    reply_required=reply_required,
+                    current_user_text=user_text,
                     record_trace=_record_reply_trace_stage,
                 )
                 if background_social_job_started:
@@ -1084,6 +1093,39 @@ async def run_agent(
                         record_trace=_record_reply_trace_stage,
                     )
                     result = attach_handoff_to_packet(str(result or ""), handoff)
+                    if memory_store is not None and handoff.status in {"complete", "partial"}:
+                        try:
+                            from ...core.social_memory import project_social_evidence
+
+                            await project_social_evidence(
+                                memory_store=memory_store,
+                                packet=result,
+                                group_id=str(getattr(getattr(executor, "event", None), "group_id", "") or ""),
+                                user_id=str(getattr(getattr(executor, "event", None), "user_id", "") or ""),
+                                turn_plan=turn_plan,
+                                handoff=handoff,
+                                record_trace=_record_reply_trace_stage,
+                            )
+                        except Exception as exc:
+                            logger.debug(f"[memory] social evidence projection skipped: {type(exc).__name__}")
+            if (
+                memory_store is not None
+                and remote_name == "research_game_slang"
+                and not background_social_job_started
+            ):
+                try:
+                    from ...core.social_memory import project_social_evidence
+
+                    await project_social_evidence(
+                        memory_store=memory_store,
+                        packet=str(result or ""),
+                        group_id=str(getattr(getattr(executor, "event", None), "group_id", "") or ""),
+                        user_id=str(getattr(getattr(executor, "event", None), "user_id", "") or ""),
+                        turn_plan=turn_plan,
+                        record_trace=_record_reply_trace_stage,
+                    )
+                except Exception as exc:
+                    logger.debug(f"[memory] slang evidence projection skipped: {type(exc).__name__}")
             tool_elapsed_ms = int((time.monotonic() - tool_started_at) * 1000)
             trace_tool_result(
                 tool_name=str(tool_call.name or "").strip(),
