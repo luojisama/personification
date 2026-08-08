@@ -239,6 +239,7 @@ def build_persona_router(*, runtime) -> APIRouter:
                 str(user_id),
                 scope="user",
                 include_events=True,
+                group_id=group_id,
             ),
             "core_profile": {
                 "profile_text": core.profile_text if core else "",

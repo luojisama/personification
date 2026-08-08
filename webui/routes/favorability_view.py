@@ -12,6 +12,7 @@ _EVENT_LABELS: dict[str, str] = {
     "user_perm_blacklist_removed": "移出永久黑名单",
     "manual_adjust": "管理员手动调整",
     "daily_decay": "每日关系衰减",
+    "user_behavior_observed": "模型观察用户表现",
     "baseline_migration": "默认基线迁移",
 }
 
@@ -22,6 +23,9 @@ _STATUS_LABELS: dict[str, str] = {
     "disabled": "功能关闭",
     "invalid": "无效事件",
     "duplicate": "重复事件已忽略",
+    "projected": "拟议变化（影子）",
+    "skipped_low_confidence": "置信度不足，未应用",
+    "failed": "观察失败",
 }
 
 
@@ -52,6 +56,16 @@ def _event_view(event: dict[str, Any]) -> dict[str, Any]:
     status = str(event.get("status", "") or "").strip()
     delta = round(_safe_float(event.get("delta", 0.0), 0.0), 2)
     requested_delta = round(_safe_float(event.get("requested_delta", delta), delta), 2)
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    source = str(event.get("source", "") or metadata.get("source", "") or "legacy")[:64]
+    mode = str(event.get("mode", "") or metadata.get("mode", "") or "legacy")[:32]
+    scope = str(event.get("scope", "") or metadata.get("scope", "") or "global")[:32]
+    behavior_tags = event.get("behavior_tags", metadata.get("behavior_tags", []))
+    if not isinstance(behavior_tags, list):
+        behavior_tags = []
+    message_ids = event.get("message_ids", metadata.get("message_ids", []))
+    if not isinstance(message_ids, list):
+        message_ids = []
     return {
         "type": event_type,
         "label": _EVENT_LABELS.get(event_type, "其他好感事件"),
@@ -59,6 +73,8 @@ def _event_view(event: dict[str, Any]) -> dict[str, Any]:
         "status_label": _STATUS_LABELS.get(status, "未知状态"),
         "delta": delta,
         "requested_delta": requested_delta,
+        "projected_delta": round(_safe_float(event.get("projected_delta", requested_delta), requested_delta), 2),
+        "applied_delta": round(_safe_float(event.get("applied_delta", delta), delta), 2),
         "old": round(_safe_float(event.get("old", 0.0), 0.0), 2),
         "new": round(_safe_float(event.get("new", 0.0), 0.0), 2),
         "timestamp": _safe_int(event.get("timestamp", 0), 0),
@@ -67,6 +83,17 @@ def _event_view(event: dict[str, Any]) -> dict[str, Any]:
         "actor": str(event.get("actor", "") or ""),
         "group_id": str(event.get("group_id", "") or ""),
         "capped": bool(event.get("capped", False)),
+        "source": source,
+        "source_label": {"observer": "模型观察", "turn_reply_interaction": "回复互动", "manual": "管理员", "legacy": "旧事件"}.get(source, source),
+        "mode": mode,
+        "scope": scope,
+        "confidence": round(max(0.0, min(1.0, _safe_float(event.get("confidence", metadata.get("confidence", 0.0)), 0.0))), 3),
+        "behavior_tags": [str(item or "")[:40] for item in behavior_tags[:3]],
+        "evidence_summary": str(event.get("evidence_summary", metadata.get("evidence_summary", "")) or "")[:120],
+        "trace_id": str(event.get("trace_id", metadata.get("trace_id", "")) or "")[:128],
+        "message_ids": [str(item or "")[:128] for item in message_ids[:8]],
+        "level_before": str(event.get("level_before", "") or "")[:32],
+        "level_after": str(event.get("level_after", "") or "")[:32],
     }
 
 
@@ -76,6 +103,7 @@ def serialize_favorability(
     *,
     scope: str,
     include_events: bool = True,
+    group_id: str = "",
 ) -> dict[str, Any]:
     service = _favorability_service(runtime)
     profile_key = str(key or "").strip()
@@ -128,7 +156,31 @@ def serialize_favorability(
         level = ""
     events_raw = profile.get("favorability_events")
     events = [_event_view(e) for e in events_raw if isinstance(e, dict)] if isinstance(events_raw, list) else []
+    shadow_raw = profile.get("favorability_shadow_events")
+    if isinstance(shadow_raw, list):
+        events.extend(_event_view(e) for e in shadow_raw if isinstance(e, dict))
+    events.sort(key=lambda item: (_safe_int(item.get("timestamp", 0), 0), str(item.get("trace_id", ""))))
     latest_event = events[-1] if events else None
+    try:
+        behavior_policy = service.behavior_policy_for_score(score)
+    except Exception:
+        behavior_policy = {"band": "", "score": score}
+    try:
+        configured_bands = getattr(service.plugin_config, "personification_favorability_behavior_bands", {})
+        behavior_bands = configured_bands if isinstance(configured_bands, dict) else {}
+    except Exception:
+        behavior_bands = {}
+    effective_payload: dict[str, Any] | None = None
+    if scope in {"user", "global", "group_user"} and hasattr(service, "get_effective_profile"):
+        try:
+            effective_payload = service.get_effective_profile(profile_key, group_id)
+        except Exception:
+            effective_payload = None
+    observer = {}
+    try:
+        observer = service.observer_status()
+    except Exception:
+        observer = {}
     try:
         today = str(service.current_date() or "")
     except Exception:
@@ -143,6 +195,8 @@ def serialize_favorability(
         "exists": exists,
         "key": profile_key,
         "scope": scope,
+        "scope_used": str((effective_payload or {}).get("effective", {}).get("scope_used", scope)),
+        "fallback_used": bool((effective_payload or {}).get("effective", {}).get("fallback_used", False)),
         "score": score,
         "level": level,
         "is_perm_blacklisted": bool(profile.get("is_perm_blacklisted", False)),
@@ -174,6 +228,13 @@ def serialize_favorability(
         "revision": _safe_int(profile.get("revision", 0), 0),
         "updated_at": _safe_int(profile.get("updated_at", 0), 0),
         "source": str(profile.get("source", "") or ("personification" if exists else "virtual_default")),
+        "behavior_policy": behavior_policy,
+        "behavior_bands": behavior_bands,
+        "observer": observer,
+        "global": (effective_payload or {}).get("global"),
+        "group": (effective_payload or {}).get("group"),
+        "effective": (effective_payload or {}).get("effective"),
         "latest_event": latest_event,
+        "latest_change": latest_event,
         "events": list(reversed(events[-12:])) if include_events else [],
     }

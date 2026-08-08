@@ -728,6 +728,7 @@ def build_group_router(*, runtime) -> APIRouter:
                         str(uid),
                         scope="user",
                         include_events=False,
+                        group_id=group_id,
                     ),
                     "relationship_edges": relationship_edges.get(str(uid), []),
                 }
