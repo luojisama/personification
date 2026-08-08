@@ -267,7 +267,9 @@ async function recheckCategory(name) {
       input.style.display = "none";
       document.body.appendChild(input);
       const file = await new Promise(resolve => {
-        input.addEventListener("change", () => resolve(input.files && input.files[0] ? input.files[0] : null), { once:true });
+        const finish = value => resolve(value);
+        input.addEventListener("change", () => finish(input.files && input.files[0] ? input.files[0] : null), { once:true });
+        input.addEventListener("cancel", () => finish(null), { once:true });
         input.click();
       });
       input.remove();
