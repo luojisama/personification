@@ -7,7 +7,7 @@ import time
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from ...core.context_policy import strip_response_control_markers
+from ...core.context_policy import build_prompt_injection_guard, strip_response_control_markers
 from ...core.evidence_envelope import EvidenceEnvelope
 from ...core.metrics import record_counter, record_timing
 from ...core.media_refs import normalize_audio_ref
@@ -155,6 +155,7 @@ async def _rewrite_with_video_evidence(
     messages: list[dict[str, Any]] = []
     if persona_system:
         messages.append({"role": "system", "content": persona_system})
+    messages.append({"role": "system", "content": build_prompt_injection_guard()})
     messages.append(
         {
             "role": "system",

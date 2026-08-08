@@ -153,7 +153,11 @@ def test_finalize_agent_reply_quality_recovers_video_evidence_after_control_bloc
     assert result.quality_checks[-1]["media_evidence_recovery"] == "succeeded"
     assert "media_evidence_recovery" in result.quality_checks[-1]["flags"]
     assert len(caller.calls) == 1
-    assert "视觉工具结构化证据" in caller.calls[0]["messages"][1]["content"]
+    assert any(
+        "视觉工具结构化证据" in str(message.get("content", ""))
+        for message in caller.calls[0]["messages"]
+        if isinstance(message, dict)
+    )
 
 
 def test_finalize_agent_reply_quality_keeps_visible_video_markdown_without_recovery() -> None:
