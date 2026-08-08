@@ -22,6 +22,7 @@ def test_structured_empty_video_result_is_not_treated_as_evidence() -> None:
     assert not media_understanding._media_result_has_evidence(
         '{"scene_summary":"我这边看不了这个视频，加载不出来。","visual_evidence":[]}'
     )
+    assert not media_understanding._media_result_has_evidence("我这边看不了这个视频，加载不出来。")
     assert media_understanding._media_result_has_evidence(
         '{"scene_summary":"第一人称游戏画面，角色在楼梯间移动",'
         '"visual_evidence":["画面有游戏 HUD"]}'

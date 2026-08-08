@@ -262,7 +262,7 @@ def _media_result_has_evidence(text: str) -> bool:
     try:
         payload = json.loads(raw)
     except Exception:
-        return True
+        return not _looks_like_media_unavailable_text(raw)
     if not isinstance(payload, dict):
         return True
 
