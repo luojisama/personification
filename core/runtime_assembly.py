@@ -197,6 +197,7 @@ class PluginRuntimeBundle:
             record_group_msg=record_group_msg,
             build_grounding_context=self.reply_processor_deps.runtime.build_grounding_context,
             qq_outbound_ledger=self.qq_outbound_ledger,
+            favorability_service=self.favorability_service,
         )
 
     def _get_whitelisted_groups(self) -> list[str]:

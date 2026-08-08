@@ -90,6 +90,7 @@ async def personification_rule(
     looks_like_private_command: Callable[[str], bool],
     get_recent_group_msgs: Optional[Callable[[str, int], list[dict]]] = None,
     user_policy_gate: Any = None,
+    favorability_service: Any = None,
 ) -> bool:
     # plugin_invoker 代为执行其它插件命令时会用 handle_event 重新分发合成事件，
     # 这里短路，避免合成事件再次进入拟人回复流程造成递归。
@@ -211,6 +212,39 @@ async def personification_rule(
             state["message_target"] = TARGET_OTHERS
             return False
         msg_len = len(plain_text)
+        adaptive_enabled = bool(
+            favorability_service is not None
+            and getattr(
+                getattr(favorability_service, "plugin_config", None),
+                "personification_favorability_frequency_adaptive_enabled",
+                False,
+            )
+        )
+
+        def _random_probability_with_relation(base: float) -> float:
+            resolved = max(0.0, min(1.0, float(base)))
+            bias = 0.0
+            band = ""
+            score = None
+            if adaptive_enabled:
+                try:
+                    profile = favorability_service.get_effective_profile(user_id, group_id)
+                    policy = profile.get("effective", {}).get("behavior_policy", {})
+                    bias = max(0.0, min(0.2, float(policy.get("random_reply_add", 0.0) or 0.0)))
+                    band = str(policy.get("band", "") or "")
+                    score = policy.get("score")
+                except Exception:
+                    bias = 0.0
+            effective = min(1.0, resolved + bias)
+            state["favorability_frequency"] = {
+                "base_probability": round(resolved, 4),
+                "favorability_score": score,
+                "behavior_band": band,
+                "favorability_bias": round(bias, 4),
+                "effective_probability": round(effective, 4),
+                "gate_result": "pending",
+            }
+            return effective
         if get_recent_group_msgs is not None:
             try:
                 recent_msgs = get_recent_group_msgs(group_id, 8)
@@ -278,8 +312,10 @@ async def personification_rule(
                 current_prob = max(current_prob, 0.70)
             elif msg_len >= 18:
                 current_prob = max(current_prob, 0.84)
-            if random.random() < current_prob:
+            effective_prob = _random_probability_with_relation(current_prob)
+            if random.random() < effective_prob:
                 state["is_random_chat"] = True
+                state.get("favorability_frequency", {})["gate_result"] = "pass"
                 return True
 
         is_unsuitable_time = not is_rest_time(allow_unsuitable_prob=0.0)
@@ -294,9 +330,12 @@ async def personification_rule(
             current_prob *= 1.2
         if idle_active_state:
             current_prob = min(1.0, max(current_prob, probability * 0.9))
-        if random.random() < min(1.0, current_prob):
+        effective_prob = _random_probability_with_relation(min(1.0, current_prob))
+        if random.random() < effective_prob:
             state["is_random_chat"] = True
+            state.get("favorability_frequency", {})["gate_result"] = "pass"
             return True
+        state.get("favorability_frequency", {})["gate_result"] = "fail"
         return False
 
     if isinstance(event, private_event_cls):

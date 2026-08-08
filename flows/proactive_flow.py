@@ -144,6 +144,7 @@ GROUP_IDLE_TOPIC_PROMPT = """[角色设定]
 距上次有人说话：{idle_minutes} 分钟
 近期群聊话题：{context_hint}
 当前时段氛围：{time_flavor}
+关系行为倾向：{relationship_policy}
 
 {superuser_context}
 [任务]
@@ -1233,6 +1234,7 @@ async def run_group_idle_topic(
     get_user_data: Optional[Callable[[str], Any]] = None,
     build_grounding_context: Optional[Callable[[str, str], Awaitable[str]]] = None,
     qq_outbound_ledger: Any = None,
+    favorability_service: Any = None,
 ) -> int:
     """
     扫描所有白名单群，对空闲群主动发起话题。
@@ -1364,6 +1366,16 @@ async def run_group_idle_topic(
 
             datetime_info = get_current_datetime_info(timezone_name, now)
             group_emotion_memory = describe_group_emotion_memory(emotion_state, group_id) or "暂无明显群情绪记忆"
+            relationship_policy = "保持自然、克制的群友语气"
+            if favorability_service is not None:
+                try:
+                    policy = favorability_service.get_group_behavior_policy(group_id)
+                    relationship_policy = (
+                        f"行为带 {policy.get('band', '')}，温度 {policy.get('warmth', 'neutral')}，"
+                        f"回复长度 {policy.get('reply_length', 'short')}；只作为软倾向"
+                    )
+                except Exception:
+                    pass
             user_prompt = GROUP_IDLE_TOPIC_PROMPT.format(
                 system_prompt=system_prompt,
                 mood=str(inner_state.get("mood", DEFAULT_STATE["mood"])),
@@ -1376,6 +1388,7 @@ async def run_group_idle_topic(
                 idle_minutes=elapsed_minutes,
                 context_hint=context_hint,
                 time_flavor=time_flavor,
+                relationship_policy=relationship_policy,
                 superuser_context=superuser_context,
             )
 
@@ -1440,6 +1453,23 @@ async def run_group_idle_topic(
             proactive_probability = float(
                 max(0.0, min(1.0, getattr(plugin_config, "personification_proactive_probability", 0.15)))
             )
+            if bool(getattr(plugin_config, "personification_favorability_frequency_adaptive_enabled", False)) and favorability_service is not None:
+                try:
+                    policy = favorability_service.get_group_behavior_policy(group_id)
+                    bias = max(0.0, min(0.2, float(policy.get("group_idle_add", 0.0) or 0.0)))
+                    base_probability = proactive_probability
+                    proactive_probability = min(0.45, max(0.0, min(1.0, base_probability + bias)))
+                    logger.debug(
+                        "[group_idle] favorability bias group=%s score=%s band=%s base=%.3f bias=%.3f effective=%.3f",
+                        group_id,
+                        policy.get("score"),
+                        policy.get("band", ""),
+                        base_probability,
+                        bias,
+                        proactive_probability,
+                    )
+                except Exception:
+                    pass
             if random.random() > proactive_probability:
                 continue
 
@@ -1670,6 +1700,7 @@ def build_group_idle_checker(
     get_user_data: Optional[Callable[[str], Any]] = None,
     build_grounding_context: Optional[Callable[[str, str], Awaitable[str]]] = None,
     qq_outbound_ledger: Any = None,
+    favorability_service: Any = None,
 ) -> Callable[[], Awaitable[int]]:
     async def _check_group_idle_topic() -> int:
         return await run_group_idle_topic(
@@ -1693,6 +1724,7 @@ def build_group_idle_checker(
             get_user_data=get_user_data,
             build_grounding_context=build_grounding_context,
             qq_outbound_ledger=qq_outbound_ledger,
+            favorability_service=favorability_service,
         )
 
     return _check_group_idle_topic

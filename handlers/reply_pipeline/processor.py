@@ -531,6 +531,21 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
         return
     if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
         return
+    # 私聊无需等待回复，用户自然发言在通过现有策略门后进入异步关系观察。
+    if not str(getattr(event, "group_id", "") or "").strip():
+        try:
+            observer = getattr(getattr(deps.persona, "favorability_service", None), "observer", None)
+            if observer is not None:
+                observer.enqueue_event(
+                    event,
+                    source="private_message",
+                    trace_id=str(state.get("reply_trace_id", "") or ""),
+                )
+        except Exception as exc:
+            try:
+                deps.runtime.logger.debug(f"拟人插件：排队私聊好感度观察失败: {exc}")
+            except Exception:
+                pass
     begin_reply_lifecycle(state)
 
     token = None
@@ -1310,6 +1325,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     attitude_desc = "态度普通，像平常一样交流。"
     level_name = "未知"
     group_attitude = ""
+    behavior_policy: dict[str, Any] = {}
 
     if persona.sign_in_available:
         try:
@@ -1318,8 +1334,19 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 "personification_favorability_attitudes",
                 None,
             ) or persona.favorability_attitudes
+            favorability_service = getattr(persona, "favorability_service", None)
+            effective_profile = (
+                favorability_service.get_effective_profile(user_id, str(group_id))
+                if favorability_service is not None and hasattr(favorability_service, "get_effective_profile")
+                else None
+            )
             user_data = persona.get_user_data(user_id)
-            favorability = user_data.get("favorability", 0.0)
+            if isinstance(effective_profile, dict):
+                effective = effective_profile.get("effective", {})
+                favorability = effective.get("score", user_data.get("favorability", 0.0))
+                behavior_policy = dict(effective.get("behavior_policy", {}) or {})
+            else:
+                favorability = user_data.get("favorability", 0.0)
             level_name = persona.get_level_name(favorability)
             attitude_desc = current_attitudes.get(level_name, attitude_desc)
 
@@ -1336,6 +1363,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         user_attitude=attitude_desc,
         group_attitude=group_attitude,
         is_private=is_private_session,
+        behavior_policy=behavior_policy,
     )
 
     now = runtime.get_current_time()

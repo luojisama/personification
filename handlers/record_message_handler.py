@@ -13,6 +13,7 @@ async def handle_record_message_event(
     create_summary_task: Optional[Callable[[str], None]] = None,
     user_policy_gate: Any = None,
     create_scoped_profile_task: Optional[Callable[[str, str], None]] = None,
+    favorability_observer: Any = None,
 ) -> None:
     if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
         return
@@ -24,6 +25,11 @@ async def handle_record_message_event(
         should_trigger_auto_analyze=should_trigger_auto_analyze,
     )
     if group_id:
+        if favorability_observer is not None:
+            try:
+                favorability_observer.enqueue_event(event, source="group_message")
+            except Exception as exc:
+                logger.debug(f"拟人插件：排队好感度观察失败: {exc}")
         try:
             from ..core.group_directory import record_observed_group
 

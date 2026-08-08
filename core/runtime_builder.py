@@ -122,6 +122,8 @@ from .ai_routes import (
 from .memory_curator import MemoryCurator
 from .memory_decay import MemoryDecayScheduler
 from .memory_store import init_memory_store
+from .favorability_observer import FavorabilityObserver
+from .evolve_group_relations import apply_relation_signal
 from .time_ctx import init_time_context
 from .builtin_hooks import register_all_builtin_hooks
 from .plugin_meta import build_plugin_metadata, build_plugin_usage_text
@@ -322,6 +324,18 @@ def build_plugin_runtime(
         model_override_field_name="personification_lite_model",
         model_role=MODEL_ROLE_REVIEW,
     )
+    favorability_observer = None
+    if favorability_service is not None:
+        favorability_observer = FavorabilityObserver(
+            service=favorability_service,
+            plugin_config=plugin_config,
+            call_ai_api=lite_call_ai_api,
+            logger=logger,
+            relation_signal_handler=(
+                lambda **kwargs: apply_relation_signal(memory_store=memory_store, **kwargs)
+            ),
+        )
+        favorability_service.set_observer(favorability_observer)
     sticker_call_ai_api = build_ai_api_caller(
         plugin_config=plugin_config,
         logger=logger,
@@ -526,6 +540,7 @@ def build_plugin_runtime(
         looks_like_private_command=looks_like_private_command,
         get_recent_group_msgs=get_recent_group_msgs,
         user_policy_gate=qq_user_policy_gate,
+        favorability_service=favorability_service,
     )
     poke_rule = build_poke_rule(
         poke_rule_core=poke_rule_core,
@@ -800,6 +815,8 @@ def build_plugin_runtime(
         reply_processor_deps.runtime.vision_caller = new_vision_caller
         reply_processor_deps.runtime.review_call_ai_api = response_review_call_ai_api
         policy_classifier.caller = new_lite_tool_caller or new_agent_tool_caller
+        if favorability_observer is not None:
+            favorability_observer.set_call_ai_api(new_lite_tool_caller or new_agent_tool_caller)
         if persona_store is not None:
             try:
                 refreshed_persona_caller = build_routed_tool_caller(

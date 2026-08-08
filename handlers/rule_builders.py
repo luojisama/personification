@@ -27,6 +27,7 @@ def build_personification_rule(
     looks_like_private_command: Callable[[str], bool],
     get_recent_group_msgs: Callable[[str, int], list[dict]] | None = None,
     user_policy_gate: Any = None,
+    favorability_service: Any = None,
 ) -> Callable[[Event, T_State], Awaitable[bool]]:
     async def _rule(event: Event, state: T_State) -> bool:
         return await personification_rule_core(
@@ -48,6 +49,7 @@ def build_personification_rule(
             looks_like_private_command=looks_like_private_command,
             get_recent_group_msgs=get_recent_group_msgs,
             user_policy_gate=user_policy_gate,
+            favorability_service=favorability_service,
         )
 
     return _rule

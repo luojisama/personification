@@ -54,6 +54,7 @@ class FlowSetupDeps:
     record_group_msg: Any = None
     build_grounding_context: Any = None
     qq_outbound_ledger: Any = None
+    favorability_service: Any = None
 
 
 def setup_flows(*, deps: FlowSetupDeps) -> Dict[str, Any]:
@@ -79,6 +80,7 @@ def setup_flows(*, deps: FlowSetupDeps) -> Dict[str, Any]:
         agent_data_dir=deps.agent_data_dir,
         persona_store=deps.persona_store,
         qq_outbound_ledger=deps.qq_outbound_ledger,
+        favorability_service=deps.favorability_service,
     )
     check_group_idle_topic = build_group_idle_checker(
         plugin_config=deps.plugin_config,
