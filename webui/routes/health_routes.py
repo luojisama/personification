@@ -4,11 +4,13 @@ import asyncio
 import hashlib
 import random
 import re
+import shutil
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from ...core.admin_acl import is_plugin_admin, is_superuser
 from ...core.operation_diagnostics import (
@@ -29,6 +31,39 @@ _STAGE_LOG_LEVEL = {
     "ok": "INFO",
     "info": "INFO",
 }
+_HEALTH_VIDEO_MAX_UPLOAD_BYTES = 256 * 1024 * 1024
+_HEALTH_VIDEO_MIME_SUFFIXES = {
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "video/x-matroska": ".mkv",
+    "video/x-msvideo": ".avi",
+    "video/x-m4v": ".m4v",
+}
+
+
+def _health_video_upload_report(
+    *,
+    code: str,
+    title: str,
+    message: str,
+    suggestion: str,
+    operation_id: str,
+    details: tuple = (),
+    steps: tuple = (),
+) -> dict[str, Any]:
+    return operation_diagnostic(
+        ok=False,
+        code=code,
+        phase="video_probe_upload",
+        title=title,
+        message=message,
+        details=details,
+        steps=steps,
+        suggestion=suggestion,
+        retryable=True,
+        operation_id=operation_id,
+    )
 
 
 def _diagnostic_step_status(status: Any) -> str:
@@ -853,6 +888,130 @@ def build_health_router(*, runtime) -> APIRouter:
             )
             raise HTTPException(status_code=500, detail=report) from exc
         return _health_check_diagnostic(result, only=category)
+
+    @router.post("/video-probe")
+    async def video_probe(
+        request: Request,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        """接收管理员选择的视频并执行一次真实的视频理解体检。
+
+        这里故意读取原始请求流，而不是使用 ``UploadFile``：Starlette 的
+        multipart 解析可能把大文件 spool 到系统临时目录（用户机器上的 C 盘）。
+        文件只会落到 ``_video_probe_root`` 返回的插件/配置数据目录，并在
+        ``finally`` 中删除。
+        """
+        from ...core.diagnostics import _video_probe_root, run_diagnostics
+        from ...core.media_refs import is_supported_video_filename
+
+        cfg = getattr(runtime, "plugin_config", None)
+        operation_id = uuid.uuid4().hex
+        original_name = str(request.headers.get("x-personification-video-filename", "") or "").strip()
+        content_type = str(request.headers.get("content-type", "") or "").split(";", 1)[0].strip().lower()
+        safe_name = Path(original_name).name if original_name else ""
+        suffix = Path(safe_name).suffix.lower() if safe_name == original_name else ""
+        if not is_supported_video_filename(safe_name):
+            suffix = _HEALTH_VIDEO_MIME_SUFFIXES.get(content_type, "")
+        if suffix not in _HEALTH_VIDEO_MIME_SUFFIXES.values():
+            report = _health_video_upload_report(
+                code="video_probe_invalid_type",
+                title="视频文件类型不受支持",
+                message="未识别到支持的视频格式，未写入文件，也未调用模型。",
+                suggestion="选择 MP4、MOV、M4V、WEBM、MKV 或 AVI 视频后重试。",
+                operation_id=operation_id,
+                details=(operation_detail("输入校验", "文件扩展名或 MIME 类型不受支持", "error"),),
+                steps=(operation_step("validate_video", "校验视频格式", "error", "未通过格式校验。"),),
+            )
+            raise HTTPException(status_code=400, detail=report)
+
+        max_bytes = _HEALTH_VIDEO_MAX_UPLOAD_BYTES
+        try:
+            configured_max = int(getattr(cfg, "personification_health_probe_max_upload_bytes", 0) or 0)
+        except Exception:
+            configured_max = 0
+        if configured_max > 0:
+            max_bytes = min(max_bytes, configured_max)
+        content_length = str(request.headers.get("content-length", "") or "").strip()
+        if content_length.isdigit() and int(content_length) > max_bytes:
+            report = _health_video_upload_report(
+                code="video_probe_payload_too_large",
+                title="视频文件过大",
+                message="视频超过体检接口允许的大小，未调用模型。",
+                suggestion=f"选择不超过 {max_bytes // (1024 * 1024)} MB 的视频后重试。",
+                operation_id=operation_id,
+                details=(operation_detail("大小校验", f"超过 {max_bytes // (1024 * 1024)} MB", "error"),),
+                steps=(operation_step("validate_size", "校验视频大小", "error", "请求体超过上限。"),),
+            )
+            raise HTTPException(status_code=413, detail=report)
+
+        root = _video_probe_root(cfg).resolve()
+        probe_dir = root / f"upload-{operation_id}"
+        target = probe_dir / f"video{suffix}"
+        total = 0
+        try:
+            probe_dir.mkdir(parents=True, exist_ok=False)
+            with target.open("wb") as sink:
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        report = _health_video_upload_report(
+                            code="video_probe_payload_too_large",
+                            title="视频文件过大",
+                            message="视频超过体检接口允许的大小，未调用模型。",
+                            suggestion=f"选择不超过 {max_bytes // (1024 * 1024)} MB 的视频后重试。",
+                            operation_id=operation_id,
+                            details=(operation_detail("已接收大小", f"超过 {max_bytes // (1024 * 1024)} MB", "error"),),
+                            steps=(operation_step("stream_upload", "流式接收视频", "error", "接收过程中超过大小上限。"),),
+                        )
+                        raise HTTPException(status_code=413, detail=report)
+                    sink.write(chunk)
+            if total <= 0:
+                report = _health_video_upload_report(
+                    code="video_probe_empty_upload",
+                    title="没有收到视频内容",
+                    message="上传内容为空，未调用模型。",
+                    suggestion="重新选择视频后重试。",
+                    operation_id=operation_id,
+                    details=(operation_detail("已接收大小", "0 字节", "error"),),
+                    steps=(operation_step("stream_upload", "流式接收视频", "error", "请求体为空。"),),
+                )
+                raise HTTPException(status_code=400, detail=report)
+            result = await run_diagnostics(
+                plugin_config=cfg,
+                bundle=getattr(runtime, "runtime_bundle", None),
+                superusers=getattr(runtime, "superusers", set()),
+                get_bots=getattr(runtime, "get_bots", None),
+                logger=getattr(runtime, "logger", None),
+                only="视频理解",
+                probe_video=True,
+                video_path=target,
+            )
+            return _health_check_diagnostic(result, only="视频理解")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            report = _unexpected_diagnostic(
+                runtime,
+                exc,
+                code="video_probe_upload_failed",
+                phase="video_probe_upload",
+                title="视频理解上传探测失败",
+                message="视频已接收，但探测流程未完成；原始异常内容未向 WebUI 返回。",
+                suggestion="根据 Trace ID 检查视频路线和模型配置后重试。",
+                steps=(operation_step("run_video_probe", "执行视频理解探测", "error", "探测流程异常中断。"),),
+                details=(operation_detail("已接收大小", f"{total} 字节", "info"),),
+                operation_id=operation_id,
+            )
+            raise HTTPException(status_code=500, detail=report) from exc
+        finally:
+            shutil.rmtree(probe_dir, ignore_errors=True)
+            try:
+                if root.exists() and not any(root.iterdir()):
+                    root.rmdir()
+            except Exception:
+                pass
 
     @router.post("/interaction-test")
     async def interaction_test(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from plugin.personification.agent.tool_registry import AgentTool
@@ -33,12 +34,43 @@ VISION_ANALYZE_PROMPT = """你是 ACG 场景多媒体分析器。
 }
 
 要求：
+- 只输出 JSON 对象本身；禁止 Markdown 标题、列表、加粗、代码围栏、XML 或解释性前后缀
+- JSON 字段值必须是纯文本，不要把 Markdown 或 <think>/<status>/<action> 等控制块放进字段
 - 候选可以多个，不要武断唯一结论
 - ACG 场景尽量区分角色、作品、组织、道具、界面元素
 - 视频要按时间顺序关注动作变化、字幕/OCR、镜头切换和关键帧线索
 - 音频要区分直接听到的语音、音效、音乐作用与模型推断；不要凭声音猜真实身份
 - 看不准就明确写 uncertain 或留空
 - confidence 取 0 到 1"""
+
+
+_VISION_FENCE_RE = re.compile(r"```(?:[^\n]*)\n?(.*?)```", re.DOTALL)
+_VISION_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+", re.MULTILINE)
+_VISION_LIST_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", re.MULTILINE)
+_VISION_BOLD_RE = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1", re.DOTALL)
+_VISION_XML_RE = re.compile(r"</?(?:think|status|action|output|message|tool|analysis)(?:\s[^>]*)?>", re.IGNORECASE)
+
+
+def _strip_vision_markdown(value: str) -> str:
+    """Keep tool evidence readable while removing presentation/control wrappers."""
+
+    cleaned = str(value or "")
+    cleaned = _VISION_FENCE_RE.sub(lambda match: match.group(1), cleaned)
+    cleaned = _VISION_HEADING_RE.sub("", cleaned)
+    cleaned = _VISION_LIST_RE.sub("", cleaned)
+    cleaned = _VISION_BOLD_RE.sub(r"\2", cleaned)
+    cleaned = _VISION_XML_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def _plain_vision_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _strip_vision_markdown(value)
+    if isinstance(value, list):
+        return [_plain_vision_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _plain_vision_value(item) for key, item in value.items()}
+    return value
 
 
 def _build_fallback_vision_caller(plugin_config: Any):
@@ -231,6 +263,7 @@ async def analyze_images(
         except Exception:
             parsed_output = None
         if isinstance(parsed_output, dict):
+            parsed_output = _plain_vision_value(parsed_output)
             notes = [str(item or "").strip() for item in list(parsed_output.get("ambiguity_notes") or [])]
             if output_mode and output_mode not in notes:
                 notes.append(output_mode)
@@ -240,11 +273,11 @@ async def analyze_images(
             return json.dumps(parsed_output, ensure_ascii=False)
         return json.dumps(
             {
-                "scene_summary": str(output or "").strip()[:16000],
+                "scene_summary": _strip_vision_markdown(str(output or ""))[:16000],
                 "ocr_text": [],
                 "characters_or_entities": [],
                 "franchise_candidates": [],
-                "visual_evidence": [{"kind": output_kind, "analysis": str(output or "").strip()}],
+                "visual_evidence": [{"kind": output_kind, "analysis": _strip_vision_markdown(str(output or ""))}],
                 "ambiguity_notes": [output_mode] if output_mode else [],
                 "confidence": 0.5,
                 "analysis_route": output_mode,
@@ -276,10 +309,11 @@ async def analyze_images(
             {
                 "index": index,
                 "kind": output_kind,
-                "analysis": parsed if isinstance(parsed, dict) else str(output or "").strip(),
+                "analysis": _plain_vision_value(parsed) if isinstance(parsed, dict) else _strip_vision_markdown(str(output or "")),
             }
         )
         if isinstance(parsed, dict):
+            parsed = _plain_vision_value(parsed)
             summary = str(parsed.get("scene_summary", "") or "").strip()
             if summary:
                 merged_summaries.append(f"图{index}：{summary}")
@@ -335,7 +369,7 @@ def build_vision_tool(runtime: Any) -> AgentTool:
         description=(
             "分析用户当前发送的图片、视频或音频，适合识别人物、作品、截图界面、画面元素、OCR 文本、视频动作变化、语音内容和可能的 ACG 候选。"
             "支持全模态模型原生音视频、Gemini Web 实验路径、外部全模态 API、关键帧分镜与音频转写降级；社交 MCP 结果含 video_ref 时可把它作为 videos 输入继续读正文视频。"
-            "输出候选和证据，不强行给单一结论。"
+            "输出候选和证据，不强行给单一结论。工具结果必须保持为 JSON 字符串，禁止 Markdown 标题、列表、加粗、代码围栏、XML 和解释性前后缀。"
         ),
         parameters={
             "type": "object",

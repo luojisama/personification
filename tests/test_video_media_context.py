@@ -182,3 +182,34 @@ def test_invalid_explicit_video_token_does_not_mask_resolved_current_video(
         "https://cdn.example/resolved-video.mp4",
     ]
     assert result["scene_summary"] == "当前视频已送入视觉路由"
+
+
+def test_vision_tool_strips_markdown_from_model_evidence(monkeypatch) -> None:  # noqa: ANN001
+    async def _video(**kwargs):  # noqa: ANN003, ANN202
+        return (
+            '{"scene_summary":"## 场景\\n- **楼梯战斗**",'
+            '"visual_evidence":["1. **角色拿着弓**"],'
+            '"ambiguity_notes":["<think>hidden</think>低"]}',
+            "video_primary",
+        )
+
+    monkeypatch.setattr(vision_impl, "analyze_videos_with_route_or_fallback", _video)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+        vision_caller=None,
+    )
+    result = json.loads(
+        asyncio.run(
+            vision_impl.analyze_images(
+                runtime=runtime,
+                query="描述视频",
+                videos=["https://cdn.example/video.mp4"],
+            )
+        )
+    )
+
+    visible = json.dumps(result, ensure_ascii=False)
+    assert "##" not in visible
+    assert "**" not in visible
+    assert "<think>" not in visible
+    assert "楼梯战斗" in result["scene_summary"]

@@ -131,6 +131,8 @@ def test_static_frontend_assets_are_served(_runtime_context) -> None:
     assert health_js.status_code == 200
     assert "renderHealth" in health_js.text
     assert "runQzoneForwardTest" in health_js.text
+    assert "上传视频并重测" in health_js.text
+    assert "/health/video-probe" in health_js.text
     persona_js = client.get("/personification/static/app-persona-builder.js")
     assert persona_js.status_code == 200
     assert 'item.safety_status==="pass"&&item.vision_status==="verified"' in persona_js.text

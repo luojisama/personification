@@ -90,17 +90,13 @@ def test_full_diagnostics_does_not_probe_video(monkeypatch) -> None:
     assert seen == [False, True]
 
 
-def test_video_probe_uses_configured_d_drive_workspace_and_cleans_it(monkeypatch, tmp_path: Path) -> None:
+def test_video_probe_uses_uploaded_video_in_configured_workspace(monkeypatch, tmp_path: Path) -> None:
     async def _fake_analyze(**kwargs):
         kwargs["route_attempts"].append(
             {"route": "video_primary_gemini", "status": "ok", "elapsed_ms": 3}
         )
         return '{"scene_summary":"红色方块","visual_evidence":["red"]}', "video_primary_gemini"
 
-    def _fake_create(path: Path) -> None:
-        path.write_bytes(b"fixed-test-video")
-
-    monkeypatch.setattr(diagnostics, "_create_video_probe_file", _fake_create)
     monkeypatch.setattr(media_understanding, "analyze_videos_with_route_or_fallback", _fake_analyze)
     monkeypatch.setattr(
         diagnostics,
@@ -125,12 +121,16 @@ def test_video_probe_uses_configured_d_drive_workspace_and_cleans_it(monkeypatch
 
     configured_probe_root = tmp_path / "configured-health-probes"
     cfg = _cfg(personification_health_probe_dir=str(configured_probe_root))
+    uploaded_video = configured_probe_root / "upload-test" / "video.mp4"
+    uploaded_video.parent.mkdir(parents=True)
+    uploaded_video.write_bytes(b"uploaded-test-video")
     checks = asyncio.run(
         diagnostics._video_checks(
             cfg,
             SimpleNamespace(reply_processor_deps=SimpleNamespace(runtime=SimpleNamespace())),
             None,
             probe_video=True,
+            video_path=uploaded_video,
         )
     )
 
@@ -139,12 +139,35 @@ def test_video_probe_uses_configured_d_drive_workspace_and_cleans_it(monkeypatch
     assert probe["diagnostic_code"] == "video_probe_ok"
     assert "selected_route=video_primary_gemini" in probe["detail"]
     assert "configured-but-never-displayed" not in str(checks)
-    assert not configured_probe_root.exists()
+    assert uploaded_video.exists()
 
 
-def test_video_probe_uses_packaged_fixed_mp4_asset(tmp_path: Path) -> None:
-    path = tmp_path / "fixed.mp4"
-    diagnostics._create_video_probe_file(path)
+def test_video_probe_without_upload_does_not_call_model(monkeypatch) -> None:
+    async def _fail(**_kwargs):
+        raise AssertionError("missing upload must not call the model")
 
-    assert path.read_bytes()[4:8] == b"ftyp"
-    assert path.stat().st_size > 1000
+    monkeypatch.setattr(diagnostics, "_probe_video_understanding", _fail)
+    ai_routes = load_personification_module("plugin.personification.core.ai_routes")
+    monkeypatch.setattr(
+        ai_routes,
+        "list_primary_providers",
+        lambda cfg, logger: [{
+            "name": "video-main",
+            "api_type": "gemini_official",
+            "api_key": "configured",
+            "model": "gemini-2.0-flash",
+            "media_protocol": "gemini_native",
+        }],
+    )
+    cfg = _cfg()
+    checks = asyncio.run(
+        diagnostics._video_checks(
+            cfg,
+            SimpleNamespace(reply_processor_deps=SimpleNamespace(runtime=None)),
+            None,
+            probe_video=True,
+            video_path=None,
+        )
+    )
+    probe = next(item for item in checks if item["key"] == "video_probe")
+    assert probe["diagnostic_code"] == "video_probe_upload_required"

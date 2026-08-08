@@ -241,6 +241,67 @@ def test_health_visual_probe_refreshes_stale_negative_cache(_runtime_context) ->
     ) is True
 
 
+def test_video_probe_accepts_raw_uploaded_video_and_cleans_workspace(_runtime_context, monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    probe_root = tmp_path / "health-probes"
+    _runtime_context.plugin_config.personification_health_probe_dir = str(probe_root)
+
+    async def _fake_run_diagnostics(**kwargs):
+        path = Path(kwargs["video_path"])
+        captured["path"] = path
+        assert path.is_file()
+        assert path.read_bytes() == b"fake-mp4-content"
+        return {
+            "generated_at": 1,
+            "overall": "ok",
+            "summary": {"ok": 1, "warn": 0, "error": 0, "disabled": 0, "info": 0},
+            "categories": [{
+                "name": "视频理解",
+                "checks": [{"key": "video_probe", "label": "视频理解真实探测", "status": "ok", "detail": "video_probe_status=ok", "hint": ""}],
+            }],
+        }
+
+    monkeypatch.setattr(diagnostics, "run_diagnostics", _fake_run_diagnostics)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    response = client.post(
+        "/personification/api/health/video-probe",
+        content=b"fake-mp4-content",
+        headers={
+            "content-type": "video/mp4",
+            "x-personification-video-filename": "uploaded.mp4",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["path"]
+    assert not Path(captured["path"]).exists()
+    assert not probe_root.exists()
+    assert "fake-mp4-content" not in response.text
+
+
+def test_video_probe_rejects_unsupported_upload_without_model_call(_runtime_context, monkeypatch) -> None:
+    called = False
+
+    async def _fail(**_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("invalid upload must not call diagnostics")
+
+    monkeypatch.setattr(diagnostics, "run_diagnostics", _fail)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    response = client.post(
+        "/personification/api/health/video-probe",
+        content=b"not-video",
+        headers={"content-type": "application/octet-stream", "x-personification-video-filename": "notes.txt"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "video_probe_invalid_type"
+    assert not called
+
+
 def test_interaction_test_requires_configured_target(_runtime_context) -> None:
     cfg = _runtime_context.plugin_config
     cfg.personification_webui_test_group_id = ""

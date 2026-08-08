@@ -13,10 +13,7 @@ status：ok 绿 / warn 黄 / error 红 / disabled 灰 / info 中性。
 from __future__ import annotations
 
 import asyncio
-import base64
-import shutil
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -357,49 +354,52 @@ def _video_probe_runtime(runtime: Any, cfg: Any, providers: list[dict[str, Any]]
     return _RuntimeProxy(runtime)
 
 
-def _create_video_probe_file(path: Path) -> None:
-    asset = Path(__file__).resolve().parents[1] / "assets" / "health_probe.mp4.b64"
-    try:
-        payload = base64.b64decode("".join(asset.read_text(encoding="ascii").split()), validate=True)
-    except Exception as exc:
-        raise RuntimeError("video_probe_media_build_failed") from exc
-    if len(payload) < 12 or payload[4:8] != b"ftyp":
-        raise RuntimeError("video_probe_media_build_failed")
-    path.write_bytes(payload)
-    if not path.is_file() or path.stat().st_size <= 0:
-        raise RuntimeError("video_probe_media_build_failed")
-
-
 async def _probe_video_understanding(
     cfg: Any,
     *,
     runtime: Any,
     providers: list[dict[str, Any]],
     logger: Any,
+    video_path: Path,
 ) -> dict[str, Any]:
     from .media_understanding import _media_result_has_evidence, analyze_videos_with_route_or_fallback
     from .visual_capabilities import VISUAL_ROUTE_AGENT
 
     root = _video_probe_root(cfg).resolve()
-    probe_dir = root / f"probe-{uuid.uuid4().hex[:12]}"
-    video_path = probe_dir / "probe.mp4"
-    root_created = False
+    candidate = Path(video_path).resolve()
     started = time.monotonic()
     attempts: list[dict[str, Any]] = []
     try:
-        root_created = not root.exists()
-        root.mkdir(parents=True, exist_ok=True)
-        probe_dir.mkdir(parents=False, exist_ok=False)
-        await asyncio.to_thread(_create_video_probe_file, video_path)
+        candidate.relative_to(root)
+    except ValueError:
+        return _check(
+            "video_probe",
+            "视频理解真实探测",
+            _ERROR,
+            detail="video_probe_status=failed selected_route=unknown attempted_routes=unknown evidence=empty elapsed_ms=unknown diagnostic_code=video_probe_path_invalid",
+            hint="上传视频必须通过当前体检入口写入插件或配置数据目录。",
+            diagnostic_code="video_probe_path_invalid",
+        )
+    if not candidate.is_file() or candidate.stat().st_size <= 0:
+        return _check(
+            "video_probe",
+            "视频理解真实探测",
+            _ERROR,
+            detail="video_probe_status=failed selected_route=unknown attempted_routes=unknown evidence=empty elapsed_ms=unknown diagnostic_code=video_probe_media_missing",
+            hint="重新选择有效视频文件后再测。",
+            diagnostic_code="video_probe_media_missing",
+        )
+    try:
         probe_runtime = _video_probe_runtime(runtime, cfg, providers, logger)
         result, route = await asyncio.wait_for(
             analyze_videos_with_route_or_fallback(
                 runtime=probe_runtime,
                 prompt=(
-                    "这是视频能力体检。请只返回 JSON，包含非空 scene_summary 和 visual_evidence，"
-                    "描述这段固定测试视频看到的主要颜色或画面。不要输出 Markdown。"
+                    "这是管理员上传的视频能力体检。请只返回 JSON，包含非空 scene_summary 和 visual_evidence，"
+                    "忠实描述这段视频看到的主要画面或动作。禁止 Markdown 标题、列表、加粗、代码围栏、"
+                    "XML 和解释性前后缀；JSON 字段值也使用纯文本，不要夹带 Markdown。"
                 ),
-                video_refs=[str(video_path)],
+                video_refs=[str(candidate)],
                 route_name=VISUAL_ROUTE_AGENT,
                 route_attempts=attempts,
             ),
@@ -465,16 +465,14 @@ async def _probe_video_understanding(
             hint="检查视频 Provider、媒体协议和本地视频处理依赖。",
             diagnostic_code=stable_code,
         )
-    finally:
-        shutil.rmtree(probe_dir, ignore_errors=True)
-        if root_created:
-            try:
-                root.rmdir()
-            except OSError:
-                pass
-
-
-async def _video_checks(cfg: Any, bundle: Any, logger: Any, *, probe_video: bool = False) -> list[dict[str, Any]]:
+async def _video_checks(
+    cfg: Any,
+    bundle: Any,
+    logger: Any,
+    *,
+    probe_video: bool = False,
+    video_path: Path | None = None,
+) -> list[dict[str, Any]]:
     from .ai_routes import list_primary_providers
     from .media_provider_adapters import MEDIA_PROTOCOL_ANTIGRAVITY, resolve_media_provider_adapter
     from .media_understanding import normalize_video_route_mode
@@ -608,6 +606,17 @@ async def _video_checks(cfg: Any, bundle: Any, logger: Any, *, probe_video: bool
             checks.append(_check("video_probe", "视频理解真实探测", _DISABLED, detail="视频理解未启用，跳过模型调用"))
         elif not video_providers:
             checks.append(_check("video_probe", "视频理解真实探测", _ERROR, detail="没有可用的视频媒体 Provider，未执行模型调用"))
+        elif video_path is None:
+            checks.append(
+                _check(
+                    "video_probe",
+                    "视频理解真实探测",
+                    _WARN,
+                    detail="未提供用户上传的视频，未执行模型调用",
+                    hint="点击“上传视频并重测”，选择一段本机视频后再进行真实探测。",
+                    diagnostic_code="video_probe_upload_required",
+                )
+            )
         else:
             runtime_inner = None
             deps = getattr(bundle, "reply_processor_deps", None) if bundle is not None else None
@@ -619,6 +628,7 @@ async def _video_checks(cfg: Any, bundle: Any, logger: Any, *, probe_video: bool
                     runtime=runtime_inner,
                     providers=providers,
                     logger=logger,
+                    video_path=video_path,
                 )
             )
     return checks
@@ -876,7 +886,17 @@ def _webui_checks(cfg: Any) -> list[dict[str, Any]]:
     )]
 
 
-async def _run_category(name: str, *, cfg, bundle, su, get_bots, logger, probe_video: bool = False) -> list[dict[str, Any]]:
+async def _run_category(
+    name: str,
+    *,
+    cfg,
+    bundle,
+    su,
+    get_bots,
+    logger,
+    probe_video: bool = False,
+    video_path: Path | None = None,
+) -> list[dict[str, Any]]:
     if name == "核心":
         return _safe_list(lambda: _core_checks(cfg, su))
     if name == "模型调用":
@@ -886,7 +906,7 @@ async def _run_category(name: str, *, cfg, bundle, su, get_bots, logger, probe_v
     if name == "视觉能力":
         return await _vision_checks(cfg, bundle, logger)
     if name == "视频理解":
-        return await _video_checks(cfg, bundle, logger, probe_video=probe_video)
+        return await _video_checks(cfg, bundle, logger, probe_video=probe_video, video_path=video_path)
     if name == "存储":
         return _safe_list(lambda: _db_checks(cfg))
     if name == "记忆":
@@ -939,6 +959,7 @@ async def run_diagnostics(
     logger: Any = None,
     only: str = "",
     probe_video: bool = False,
+    video_path: Path | None = None,
 ) -> dict[str, Any]:
     """运行全部体检；only 指定单个分类名时只跑该项（逐项自检用）。"""
     cfg = plugin_config
@@ -952,6 +973,7 @@ async def run_diagnostics(
         get_bots=get_bots,
         logger=logger,
         probe_video=bool(probe_video and only == "视频理解"),
+        video_path=video_path if only == "视频理解" else None,
     )
     results = await asyncio.gather(*[_run_category(n, **kwargs) for n in names])
     categories = [{"name": n, "checks": r} for n, r in zip(names, results)]

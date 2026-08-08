@@ -88,9 +88,10 @@ function renderHealth() {
       </div>`;
     }).join("");
     const busy = state.healthBusyCat === cat.name;
+    const isVideo = cat.name === "视频理解";
     return `<div class="health-cat">
       <h3>${escapeHtml(cat.name)}
-        <button class="btn small" style="margin-left:auto" onclick="recheckCategory('${escapeAttr(cat.name)}')">${busy?'检测中…':'重测'}</button>
+        <button class="btn small" style="margin-left:auto" onclick="recheckCategory('${escapeAttr(cat.name)}')">${busy?'检测中…':(isVideo?'上传视频并重测':'重测')}</button>
       </h3>${items||'<div class="muted">无</div>'}</div>`;
   }).join("");
   const ir = state.interactionResult;
@@ -120,7 +121,7 @@ function renderHealth() {
       <h2 style="margin:0">功能体检 <span class="health-badge ${overall.cls}" title="${overall.label}"></span> <span class="muted" style="font-size:13px">${overall.label}</span></h2>
       <button class="btn small" onclick="refreshHealth()">${state.loading?'检测中…':'全部重新检测'}</button>
     </div>
-    <p class="muted" style="font-size:12px;margin:8px 0 0">对各模块做<b>真实调用探测</b>（含画像/风格/视觉打标等子模型）。结果缓存展示、秒开；启动与配置变更后自动重跑，也可点「全部重新检测」或单项「重测」。视频理解只在单项「重测」时真实调用一次视频模型，不会向 QQ 发消息。红=异常，黄=会影响行为，灰=未启用。</p>
+    <p class="muted" style="font-size:12px;margin:8px 0 0">对各模块做<b>真实调用探测</b>（含画像/风格/视觉打标等子模型）。结果缓存展示、秒开；启动与配置变更后自动重跑，也可点「全部重新检测」或单项「重测」。视频理解需要点击“上传视频并重测”选择本机视频，单项重测会真实调用一次视频模型，不会向 QQ 发消息；视频只临时写入插件/配置数据目录，完成后自动清理。红=异常，黄=会影响行为，灰=未启用。</p>
     <p class="muted" style="font-size:11px;margin:4px 0 0">${h.generated_at?('上次检测：'+new Date(h.generated_at*1000).toLocaleString()+(h.cached?'（缓存）':'')):''}</p>
     <div class="health-summary" style="margin-top:14px">
       ${pill('error')}${pill('warn')}${pill('ok')}${pill('disabled')}
@@ -258,7 +259,34 @@ async function qqDeleteFriend(uid, name) {
 async function recheckCategory(name) {
   state.healthBusyCat = name; render();
   try {
-    const r = await api("/health/check?only=" + encodeURIComponent(name));
+    let r;
+    if (name === "视频理解") {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "video/*,.mp4,.mov,.m4v,.webm,.mkv,.avi";
+      input.style.display = "none";
+      document.body.appendChild(input);
+      const file = await new Promise(resolve => {
+        input.addEventListener("change", () => resolve(input.files && input.files[0] ? input.files[0] : null), { once:true });
+        input.click();
+      });
+      input.remove();
+      if (!file) {
+        state.healthBusyCat = "";
+        render();
+        return;
+      }
+      r = await api("/health/video-probe", {
+        method: "POST",
+        headers: {
+          "content-type": file.type || "application/octet-stream",
+          "X-Personification-Video-Filename": file.name || "video.mp4",
+        },
+        body: file,
+      });
+    } else {
+      r = await api("/health/check?only=" + encodeURIComponent(name));
+    }
     const diagnostic = rememberAdminOperation("health", r, "功能分类重测未完成");
     const fresh = (r.categories || [])[0];
     if (fresh && state.health) {
