@@ -201,6 +201,12 @@ class Config(BaseModel):
     personification_memory_search_scan_limit: int = 800
     personification_memory_capture_policy: str = "balanced"
     personification_agent_memory_write_enabled: bool = True
+    # 社交证据只在显式研究回合投影为受限记忆；默认短摘要留在原群 14 天。
+    personification_social_memory_enabled: bool = True
+    personification_social_memory_summary_ttl_days: int = 14
+    personification_social_memory_auto_inject_top_k: int = 3
+    personification_social_memory_auto_min_score: float = 0.72
+    personification_social_memory_semantic_gate_timeout: float = 1.5
     personification_background_intelligence_enabled: bool = True
     personification_background_evolves_enabled: bool = True
     personification_background_crystals_enabled: bool = True
