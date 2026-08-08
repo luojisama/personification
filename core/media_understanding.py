@@ -210,6 +210,93 @@ def _invalid_media_text(text: str) -> bool:
     return " ".join(value.lower().split()) in _GENERIC_REFUSAL_TEXTS
 
 
+_MEDIA_EVIDENCE_LIST_KEYS = (
+    "visual_evidence",
+    "ocr_text",
+    "characters_or_entities",
+    "franchise_candidates",
+)
+_MEDIA_EVIDENCE_SCALAR_KEYS = ("scene_summary", "analysis", "safe_summary")
+_MEDIA_UNAVAILABLE_MARKERS = (
+    "missing_media",
+    "vision_unavailable",
+    "video unavailable",
+    "can't view",
+    "cannot view",
+    "unable to view",
+    "couldn't load",
+    "unable to load",
+    "无法查看视频",
+    "无法查看",
+    "看不了视频",
+    "看不了",
+    "看不到视频",
+    "看不到",
+    "视频加载不出来",
+    "加载不出来",
+    "无法加载视频",
+    "无法加载",
+    "无法分析视频",
+    "无法分析",
+)
+
+
+def _looks_like_media_unavailable_text(value: Any) -> bool:
+    normalized = " ".join(str(value or "").strip().lower().split())
+    return bool(normalized) and any(marker in normalized for marker in _MEDIA_UNAVAILABLE_MARKERS)
+
+
+def _media_result_has_evidence(text: str) -> bool:
+    """Reject structured empty/refusal results before marking a video route usable.
+
+    Vision providers are allowed to return plain text, but the built-in vision
+    prompt asks for a structured object.  A JSON object containing only
+    ``ambiguity_notes`` (for example ``vision_unavailable``) is an operational
+    failure, not evidence.  Treating it as success prevents storyboard or
+    another configured route from getting a chance to inspect the media.
+    """
+
+    raw = str(text or "").strip()
+    if _invalid_media_text(raw):
+        return False
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return True
+    if not isinstance(payload, dict):
+        return True
+
+    notes = payload.get("ambiguity_notes")
+    if isinstance(notes, list):
+        note_items = notes
+    elif notes:
+        note_items = [notes]
+    else:
+        note_items = []
+    note_text = " ".join(str(item or "").strip().lower() for item in note_items)
+    notes_indicate_unavailable = any(marker in note_text for marker in _MEDIA_UNAVAILABLE_MARKERS)
+    known_keys = set(_MEDIA_EVIDENCE_LIST_KEYS) | set(_MEDIA_EVIDENCE_SCALAR_KEYS)
+    if not known_keys.intersection(payload):
+        return not notes_indicate_unavailable
+    for key in _MEDIA_EVIDENCE_LIST_KEYS:
+        items = payload.get(key)
+        if isinstance(items, list) and any(
+            (isinstance(item, dict) and bool(item))
+            or (str(item or "").strip() and not _looks_like_media_unavailable_text(item))
+            for item in items
+        ):
+            return True
+    for key in _MEDIA_EVIDENCE_SCALAR_KEYS:
+        value = payload.get(key)
+        if isinstance(value, dict) and value:
+            return True
+        if isinstance(value, list) and any(str(item or "").strip() for item in value):
+            return True
+        if isinstance(value, str) and value.strip() and not _looks_like_media_unavailable_text(value):
+            return True
+    return False
+
+
 def _log_warning(runtime: Any, message: str) -> None:
     logger = getattr(runtime, "logger", None)
     if logger is None:
@@ -411,7 +498,7 @@ async def _try_primary_video_routes(
                     f"[video] primary route failed provider={provider_name}: {sanitize_text(exc)}",
                 )
             continue
-        if not _invalid_media_text(result):
+        if _media_result_has_evidence(result):
             return str(result or "").strip()
     return ""
 
@@ -1434,7 +1521,7 @@ async def analyze_videos_with_route_or_fallback(
             result = ""
             detail = {"status": "failed", "diagnostic_code": "gemini_web_process_failed"}
         result_text = str(result or "").strip()
-        status = "ok" if result_text and not _invalid_media_text(result_text) else str(
+        status = "ok" if _media_result_has_evidence(result_text) else str(
             detail.get("status") or "failed"
         )
         _record_media_attempt(
@@ -1541,7 +1628,7 @@ async def analyze_videos_with_route_or_fallback(
             )
             return "", "video_unavailable"
         result_text = str(result or "").strip()
-        if _invalid_media_text(result_text):
+        if not _media_result_has_evidence(result_text):
             _record_media_attempt(
                 route_attempts,
                 route=attempt_route,

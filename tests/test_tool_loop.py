@@ -215,3 +215,24 @@ def test_trace_tool_result_exposes_only_stable_media_route_diagnostics() -> None
     assert "video_gemini_web:failed:gemini_web_media_ref_invalid@media" in detail
     assert "private observation" not in detail
     assert "C:/secret/video.mp4" not in detail
+
+
+def test_append_tool_result_messages_guides_agent_to_use_video_evidence() -> None:
+    messages: list[dict] = []
+    tool_call = SimpleNamespace(id="call-video", name="vision_analyze")
+
+    class _Caller:
+        def build_tool_result_message(self, call_id: str, name: str, result: str) -> dict:
+            return {"role": "tool", "tool_call_id": call_id, "name": name, "content": result}
+
+    tool_loop.append_tool_result_messages(
+        messages=messages,
+        tool_caller=_Caller(),
+        response=SimpleNamespace(),
+        results=[(tool_call, '{"scene_summary":"游戏画面"}')],
+    )
+
+    assert messages[0]["role"] == "tool"
+    assert messages[-1]["role"] == "system"
+    assert "必须基于这些字段回答" in messages[-1]["content"]
+    assert "不得再声称视频没有加载" in messages[-1]["content"]

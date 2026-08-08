@@ -147,6 +147,8 @@ def test_media_understanding_policy_allows_internal_distinction_only() -> None:
     assert "表情包、梗图、截图还是真实照片" in prompt
     assert "不要把判断过程说给用户" in prompt
     assert "没有证据时按空证据纪律保持沉默或只索取一个必要条件" in prompt
+    assert "vision_analyze 工具返回了非空" in prompt
+    assert "不要再说视频没有加载、看不到" in prompt
 
 
 def test_empty_evidence_policy_prefers_silence_or_one_concrete_condition() -> None:

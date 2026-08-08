@@ -15,6 +15,53 @@ vision_caller = load_personification_module(
 )
 
 
+def test_structured_empty_video_result_is_not_treated_as_evidence() -> None:
+    assert not media_understanding._media_result_has_evidence(
+        '{"scene_summary":"","visual_evidence":[],"ambiguity_notes":["vision_unavailable"]}'
+    )
+    assert not media_understanding._media_result_has_evidence(
+        '{"scene_summary":"我这边看不了这个视频，加载不出来。","visual_evidence":[]}'
+    )
+    assert media_understanding._media_result_has_evidence(
+        '{"scene_summary":"第一人称游戏画面，角色在楼梯间移动",'
+        '"visual_evidence":["画面有游戏 HUD"]}'
+    )
+    assert media_understanding._media_result_has_evidence("普通的视觉分析文本")
+
+
+def test_primary_video_route_skips_structured_empty_provider_response(monkeypatch) -> None:  # noqa: ANN001
+    async def _empty(**_kwargs):  # noqa: ANN003, ANN202
+        return '{"scene_summary":"","visual_evidence":[],"ambiguity_notes":["vision_unavailable"]}'
+
+    monkeypatch.setattr(media_understanding, "_call_gemini_media", _empty)
+    attempts: list[str] = []
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(personification_thinking_mode="none"),
+        get_configured_api_providers=lambda: [
+            {
+                "name": "gemini",
+                "api_type": "gemini",
+                "api_key": "key",
+                "model": "gemini-2.0-flash",
+                "media_protocol": "gemini_native",
+            }
+        ],
+    )
+
+    result = asyncio.run(
+        media_understanding._try_primary_video_routes(
+            runtime=runtime,
+            prompt="描述视频",
+            refs=["https://cdn.example/video.mp4"],
+            route_name="agent",
+            attempted_routes=attempts,
+        )
+    )
+
+    assert result == ""
+    assert attempts == ["video_primary_gemini"]
+
+
 def test_analyze_images_tries_primary_routes_before_fallback(monkeypatch) -> None:
     calls: list[str] = []
 
