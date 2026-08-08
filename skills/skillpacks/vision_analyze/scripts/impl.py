@@ -48,7 +48,7 @@ _VISION_FENCE_RE = re.compile(r"```(?:[^\n]*)\n?(.*?)```", re.DOTALL)
 _VISION_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+", re.MULTILINE)
 _VISION_LIST_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", re.MULTILINE)
 _VISION_BOLD_RE = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1", re.DOTALL)
-_VISION_XML_RE = re.compile(r"</?(?:think|status|action|output|message|tool|analysis)(?:\s[^>]*)?>", re.IGNORECASE)
+_VISION_XML_RE = re.compile(r"</?[A-Za-z][^>]{0,200}>", re.IGNORECASE)
 
 
 def _strip_vision_markdown(value: str) -> str:
