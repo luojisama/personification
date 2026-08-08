@@ -151,6 +151,7 @@ def test_finalize_agent_reply_quality_recovers_video_evidence_after_control_bloc
     assert "楼梯" in result.text
     assert result.quality_checks[-1]["action"] == "rewritten"
     assert result.quality_checks[-1]["media_evidence_recovery"] == "succeeded"
+    assert result.quality_checks[-1]["media_evidence_recovery_method"] == "model_rewrite"
     assert "media_evidence_recovery" in result.quality_checks[-1]["flags"]
     assert len(caller.calls) == 1
     assert any(
@@ -158,6 +159,87 @@ def test_finalize_agent_reply_quality_recovers_video_evidence_after_control_bloc
         for message in caller.calls[0]["messages"]
         if isinstance(message, dict)
     )
+
+
+def test_finalize_agent_reply_quality_uses_structured_video_fallback_when_recovery_fails() -> None:
+    class _FailingCaller:
+        async def chat_with_tools(self, *_args, **_kwargs):  # noqa: ANN001
+            raise RuntimeError("quality caller unavailable")
+
+    raw = (
+        "<think>## 视频内容\n"
+        "- 这是第一人称射击游戏画面\n"
+        "- 玩家站在楼梯上，手里拿着弓\n"
+        "- 画面右侧能看到完整的游戏 HUD 和准星，镜头正在向前移动</think>\n"
+        "<output><message>我这边看不了视频画面，方便截张图吗？</message></output>"
+    )
+    messages = [
+        {
+            "role": "tool",
+            "name": "vision_analyze",
+            "content": (
+                '{"scene_summary":"第一人称射击游戏画面",'
+                '"visual_evidence":["玩家站在楼梯上","手持弓形武器"],'
+                '"ocr_text":"","characters_or_entities":[]}'
+            ),
+        }
+    ]
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result(raw),
+            tool_caller=_FailingCaller(),
+            messages=messages,
+            current_user_text="简单描述一下上面这个视频",
+            turn_media_context=[{"kind": "video", "ref": "https://cdn.example/video.mp4"}],
+            reason="model_stop",
+        )
+    )
+
+    assert "第一人称射击游戏画面" in result.text
+    assert "楼梯上" in result.text
+    assert "看不了视频" not in result.text
+    assert result.quality_checks[-1]["action"] == "rewritten"
+    assert result.quality_checks[-1]["media_evidence_recovery"] == "succeeded"
+    assert result.quality_checks[-1]["media_evidence_recovery_method"] == "structured_fallback"
+
+
+def test_finalize_agent_reply_quality_rejects_generic_video_recovery_candidate() -> None:
+    caller = _RewriteCaller("我这边看不了视频，方便截张图或者说下大概内容吗？")
+    raw = (
+        "<think>## 视频内容\n"
+        "- 这是第一人称射击游戏画面\n"
+        "- 玩家站在楼梯上，手里拿着弓\n"
+        "- 画面右侧能看到完整的游戏 HUD 和准星，镜头正在向前移动</think>\n"
+        "<output><message>看不了</message></output>"
+    )
+    messages = [
+        {
+            "role": "tool",
+            "name": "vision_analyze",
+            "content": (
+                '{"scene_summary":"第一人称射击游戏画面",'
+                '"visual_evidence":["玩家站在楼梯上","手持弓形武器"],'
+                '"ocr_text":"","characters_or_entities":[]}'
+            ),
+        }
+    ]
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result(raw),
+            tool_caller=caller,
+            messages=messages,
+            current_user_text="简单描述一下上面这个视频",
+            turn_media_context=[{"kind": "video", "ref": "https://cdn.example/video.mp4"}],
+            reason="model_stop",
+        )
+    )
+
+    assert "第一人称射击游戏画面" in result.text
+    assert "楼梯上" in result.text
+    assert "看不了视频" not in result.text
+    assert result.quality_checks[-1]["media_evidence_recovery_method"] == "structured_fallback"
 
 
 def test_finalize_agent_reply_quality_keeps_visible_video_markdown_without_recovery() -> None:

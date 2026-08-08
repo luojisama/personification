@@ -17,7 +17,11 @@ from ...core.reply_text_policy import (
     looks_like_question_reply,
     normalize_visible_reply_text,
 )
-from ...core.reply_length_policy import render_reply_length_prompt_hint, resolve_reply_length_policy
+from ...core.reply_length_policy import (
+    render_reply_length_prompt_hint,
+    resolve_reply_length_policy,
+    truncate_reply_text,
+)
 from ...core.response_review import (
     is_agent_reply_ooc,
     resolve_uncertain_visible_reply,
@@ -40,6 +44,7 @@ _VISION_EVIDENCE_FIELDS = (
     ("characters_or_entities", "人物/实体"),
     ("franchise_candidates", "作品候选"),
 )
+_VIDEO_RECOVERY_TIMEOUT_SECONDS = 3.0
 
 
 def _is_control_reply(text: str) -> bool:
@@ -112,6 +117,87 @@ def _extract_vision_evidence_for_quality(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _video_evidence_lines(evidence_context: str) -> list[tuple[str, str]]:
+    """Parse the already-whitelisted vision summary into displayable fields.
+
+    This is intentionally a schema/display operation only.  It does not inspect
+    the user message or infer a topic; the caller has already established that
+    the current turn contains usable video evidence.
+    """
+
+    allowed_labels = {label for _key, label in _VISION_EVIDENCE_FIELDS}
+    lines: list[tuple[str, str]] = []
+    for raw_line in str(evidence_context or "").splitlines():
+        line = str(raw_line or "").strip()
+        if not line or line.startswith("["):
+            continue
+        if "：" in line:
+            label, value = line.split("：", 1)
+        elif ":" in line:
+            label, value = line.split(":", 1)
+        else:
+            continue
+        label = label.strip()
+        if label not in allowed_labels:
+            continue
+        value = normalize_visible_reply_text(strip_response_control_markers(value))
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            decoded = None
+        if isinstance(decoded, list):
+            items = [normalize_visible_reply_text(item) for item in decoded]
+            value = "、".join(item for item in items if item)
+        elif isinstance(decoded, dict):
+            value = normalize_visible_reply_text(
+                "；".join(f"{key}：{item}" for key, item in decoded.items())
+            )
+        if value:
+            lines.append((label, value))
+    return lines
+
+
+def _render_video_evidence_fallback(evidence_context: str, *, max_chars: int = 600) -> str:
+    """Render a safe visible answer when the secondary recovery model is slow.
+
+    The primary Agent has already received a structured ``vision_analyze``
+    result.  Keeping this fallback deterministic means a slow/failed quality
+    caller cannot erase valid video facts or turn them into a request for a
+    screenshot.  Only the five whitelisted evidence fields are rendered.
+    """
+
+    prefixes = {
+        "场景摘要": "视频画面显示",
+        "视觉证据": "画面细节",
+        "画面文字": "画面文字",
+        "人物/实体": "人物或实体",
+        "作品候选": "作品候选",
+    }
+    parts: list[str] = []
+    for label, value in _video_evidence_lines(evidence_context):
+        prefix = prefixes.get(label, label)
+        value = value.rstrip("。！？!?.")
+        if value:
+            parts.append(f"{prefix}：{value}")
+    if not parts:
+        return ""
+    return truncate_reply_text("；".join(parts) + "。", max_chars)
+
+
+def _video_recovery_candidate_has_evidence(candidate: str, evidence_context: str) -> bool:
+    """Require a recovery-model answer to retain a concrete evidence anchor."""
+
+    candidate_text = normalize_visible_reply_text(candidate)
+    if not candidate_text:
+        return False
+    evidence_text = " ".join(value for _label, value in _video_evidence_lines(evidence_context))
+    terms = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z][A-Za-z0-9_-]{2,}", evidence_text)
+    # Ignore single-character fragments and common structural labels.  At least
+    # one multi-character evidence span must survive the model rewrite.
+    terms = [term for term in terms if term not in {"视频画面", "画面细节", "当前视频"}]
+    return any(term in candidate_text for term in terms[:80])
+
+
 def _needs_video_evidence_recovery(
     *,
     raw_text: str,
@@ -148,12 +234,15 @@ async def _rewrite_with_video_evidence(
     persona_system: str,
     output_mode: str,
     length_hint: str = "",
-    timeout: float = 8.0,
+    timeout: float = _VIDEO_RECOVERY_TIMEOUT_SECONDS,
 ) -> str:
     """Recover a visible, evidence-grounded answer after structural loss."""
 
-    if tool_caller is None or not evidence_context:
+    fallback_text = _render_video_evidence_fallback(evidence_context)
+    if not evidence_context:
         return ""
+    if tool_caller is None:
+        return fallback_text
     messages: list[dict[str, Any]] = []
     if persona_system:
         messages.append({"role": "system", "content": persona_system})
@@ -183,8 +272,11 @@ async def _rewrite_with_video_evidence(
             timeout=max(0.1, float(timeout or 0.0)),
         )
     except Exception:
-        return ""
-    return normalize_visible_reply_text(strip_response_control_markers(getattr(response, "content", "") or ""))
+        return fallback_text
+    candidate = normalize_visible_reply_text(strip_response_control_markers(getattr(response, "content", "") or ""))
+    if candidate and _video_recovery_candidate_has_evidence(candidate, evidence_context):
+        return candidate
+    return fallback_text
 
 
 def _copy_result_with_quality(
@@ -831,6 +923,7 @@ async def finalize_agent_reply_quality(
     final_text = visible_text or raw_text
     revision_attempted = False
     media_recovery_attempted = False
+    media_recovery_method = "not_used"
     media_evidence_context = _extract_vision_evidence_for_quality(messages)
     quality_length_policy = resolve_reply_length_policy(
         None,
@@ -862,9 +955,10 @@ async def finalize_agent_reply_quality(
                 status="warn",
                 detail=(
                     f"video_usable={int(summarize_media_resolution(turn_media_context).get('video_usable', 0) or 0)} "
-                    f"evidence=structured chars={len(raw_text)}->{len(visible_text)} timeout_ms=8000"
+                    f"evidence=structured chars={len(raw_text)}->{len(visible_text)} "
+                    f"timeout_ms={int(_VIDEO_RECOVERY_TIMEOUT_SECONDS * 1000)}"
                 ),
-                hint="可用视频证据在结构清理后大幅丢失，交给轻量模型按白名单字段重写可见正文。",
+                hint="可用视频证据在结构清理后大幅丢失；优先快速改写，超时或空泛时直接渲染白名单字段。",
             )
         recovered = await _rewrite_with_video_evidence(
             tool_caller=tool_caller,
@@ -873,8 +967,16 @@ async def finalize_agent_reply_quality(
             persona_system=_persona_system_from_messages(messages),
             output_mode=_turn_plan_output_mode(turn_plan),
             length_hint=render_reply_length_prompt_hint(quality_length_policy),
-            timeout=8.0,
+            timeout=_VIDEO_RECOVERY_TIMEOUT_SECONDS,
         )
+        if recovered:
+            media_recovery_method = (
+                "structured_fallback"
+                if recovered == _render_video_evidence_fallback(media_evidence_context)
+                else "model_rewrite"
+            )
+        else:
+            media_recovery_method = "failed"
         candidate_visibility = assess_visible_text(recovered) if recovered else None
         if recovered and candidate_visibility is not None and candidate_visibility.allowed:
             final_text = recovered
@@ -956,6 +1058,7 @@ async def finalize_agent_reply_quality(
         "flags": flags,
         "revision_attempted": revision_attempted,
         "media_evidence_recovery": recovery_status,
+        "media_evidence_recovery_method": media_recovery_method,
         "elapsed_ms": elapsed_ms,
         "original_chars": len(raw_text),
         "final_chars": len(final_text),
@@ -968,7 +1071,8 @@ async def finalize_agent_reply_quality(
             status=status,
             detail=(
                 f"action={action} source={reason or '-'} flags={flags_text} "
-                f"revision={str(revision_attempted).lower()} recovery={recovery_status} elapsed_ms={elapsed_ms} "
+                f"revision={str(revision_attempted).lower()} recovery={recovery_status} "
+                f"recovery_method={media_recovery_method} elapsed_ms={elapsed_ms} "
                 f"chars={len(raw_text)}->{len(final_text)}"
             ),
             hint=(
