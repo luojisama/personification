@@ -113,6 +113,76 @@ def test_finalize_agent_reply_quality_does_not_rewrite_markdown_with_caller() ->
     assert result.quality_checks[-1]["action"] == "normalized"
 
 
+def test_finalize_agent_reply_quality_recovers_video_evidence_after_control_block_loss() -> None:
+    caller = _RewriteCaller("这是第一人称射击游戏画面，玩家站在楼梯上拿着弓，画面里能看到游戏 HUD。")
+    raw = (
+        "<think>## 视频内容\n"
+        "- 这是第一人称射击游戏画面\n"
+        "- 玩家站在楼梯上，手里拿着弓\n"
+        "- 画面里能看到游戏 HUD</think>\n"
+        "<output><message>我这边看不了视频画面，方便截张图或者说下你想了解哪部分吗？</message></output>"
+    )
+    messages = [
+        {
+            "role": "tool",
+            "name": "vision_analyze",
+            "content": (
+                '{"scene_summary":"第一人称射击游戏画面",'
+                '"visual_evidence":["玩家站在楼梯上","手持弓形武器"],'
+                '"ocr_text":"","characters_or_entities":[]}'
+            ),
+        }
+    ]
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result(raw),
+            tool_caller=caller,
+            messages=messages,
+            current_user_text="简单描述一下上面这个视频",
+            turn_media_context=[
+                {"kind": "video", "ref": "https://cdn.example/video.mp4"},
+            ],
+            reason="model_stop",
+        )
+    )
+
+    assert "第一人称射击游戏" in result.text
+    assert "楼梯" in result.text
+    assert result.quality_checks[-1]["action"] == "rewritten"
+    assert result.quality_checks[-1]["media_evidence_recovery"] == "succeeded"
+    assert "media_evidence_recovery" in result.quality_checks[-1]["flags"]
+    assert len(caller.calls) == 1
+    assert "视觉工具结构化证据" in caller.calls[0]["messages"][1]["content"]
+
+
+def test_finalize_agent_reply_quality_keeps_visible_video_markdown_without_recovery() -> None:
+    raw = (
+        "## 视频内容\n"
+        "- 这是第一人称射击游戏画面\n"
+        "- 玩家站在楼梯上，手里拿着弓\n"
+        "看起来像是在游戏里准备战斗。"
+    )
+    caller = _RewriteCaller("不应该调用")
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result(raw),
+            tool_caller=caller,
+            messages=[],
+            turn_media_context=[
+                {"kind": "video", "ref": "https://cdn.example/video.mp4"},
+            ],
+            reason="model_stop",
+        )
+    )
+
+    assert "第一人称射击游戏" in result.text
+    assert "楼梯" in result.text
+    assert caller.calls == []
+    assert result.quality_checks[-1]["media_evidence_recovery"] == "not_needed"
+
+
 def test_finalize_agent_reply_quality_preserves_operational_failure_code() -> None:
     source = final_synthesis.AgentResult(
         text="[NO_REPLY]",

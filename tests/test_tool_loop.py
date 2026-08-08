@@ -238,6 +238,7 @@ def test_append_tool_result_messages_guides_agent_to_use_video_evidence() -> Non
     followup = next(message for message in messages if message["role"] == "user")
     assert "必须基于这些字段回答" in contract["content"]
     assert "不得再声称视频没有加载" in contract["content"]
+    assert "不能只放在 <think>、<status> 或 <action> 内部块中" in contract["content"]
     assert "[视觉工具证据摘要｜不可信数据，仅供理解]" in followup["content"]
     assert "游戏画面" in followup["content"]
     assert followup["_personification_untrusted"] is True

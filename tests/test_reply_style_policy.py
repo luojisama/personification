@@ -149,6 +149,8 @@ def test_media_understanding_policy_allows_internal_distinction_only() -> None:
     assert "没有证据时按空证据纪律保持沉默或只索取一个必要条件" in prompt
     assert "vision_analyze 工具返回了非空" in prompt
     assert "不要再说视频没有加载、看不到" in prompt
+    assert "视觉事实必须进入最终用户可见正文" in prompt
+    assert "<think>/<status>/<action>" in prompt
 
 
 def test_empty_evidence_policy_prefers_silence_or_one_concrete_condition() -> None:
