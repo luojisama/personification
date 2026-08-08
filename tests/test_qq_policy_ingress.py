@@ -24,13 +24,14 @@ class _Gate:
         return self.allowed
 
 
-def test_reply_processor_silences_classifier_unavailable_without_entering_lifecycle() -> None:
+def test_reply_processor_allows_classifier_unavailable_into_normal_lifecycle(monkeypatch) -> None:  # noqa: ANN001
     gate = _Gate(True)
-    sent: list[str] = []
+    entered: list[object] = []
 
-    class _Bot:
-        async def send(self, _event, payload) -> None:  # noqa: ANN001
-            sent.append(str(payload))
+    async def fake_impl(bot, event, state, deps) -> None:  # noqa: ANN001
+        entered.append((bot, event, state, deps))
+
+    monkeypatch.setattr(processor, "_process_response_logic_impl", fake_impl)
 
     deps = SimpleNamespace(
         runtime=SimpleNamespace(
@@ -41,16 +42,19 @@ def test_reply_processor_silences_classifier_unavailable_without_entering_lifecy
     )
     state = {
         "user_policy_decision": {
-            "disposition": "direct_closure",
+            "disposition": "allow",
             "reason_code": "classifier_unavailable",
         }
     }
 
-    asyncio.run(processor.process_response_logic(_Bot(), object(), state, deps))
+    bot = object()
+    event = object()
+    asyncio.run(processor.process_response_logic(bot, event, state, deps))
 
     assert gate.calls == 1
-    assert sent == []
-    assert "_reply_lifecycle_started_at" not in state
+    assert len(entered) == 1
+    assert entered[0][:2] == (bot, event)
+    assert "_reply_lifecycle_started_at" in state
 
 
 def test_reply_processor_rechecks_active_blacklist_before_lifecycle() -> None:

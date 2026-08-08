@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from dataclasses import dataclass
 
 from ._loader import load_personification_module
@@ -179,28 +180,32 @@ def test_unaddressed_boundary_is_silent_and_direct_closure_is_one_shot(tmp_path)
     asyncio.run(run())
 
 
-def test_classifier_unavailable_closure_uses_separate_short_cooldown(tmp_path) -> None:  # noqa: ANN001
+def test_classifier_unavailable_fails_open_without_persisting_quarantine(tmp_path) -> None:  # noqa: ANN001
     async def run() -> None:
         unavailable = user_policy.PolicyAssessment(
             reason_code="classifier_unavailable",
             confirmed=False,
         )
         gate, service, _classifier = _gate(tmp_path, unavailable)
-        captured: list[dict] = []
-        original = service.claim_direct_closure
 
-        def claim(**kwargs):  # noqa: ANN003, ANN202
-            captured.append(dict(kwargs))
-            return original(**kwargs)
-
-        service.claim_direct_closure = claim
-        decision = await gate.claim_direct_closure(
-            await gate.evaluate(_Event(50, "分类服务超时", group_id=None), bot_self_id="bot-1")
+        private_decision = await gate.evaluate(
+            _Event(50, "分类服务超时", group_id=None),
+            bot_self_id="bot-1",
+        )
+        group_decision = await gate.evaluate(
+            _Event(51, "分类服务仍不可用"),
+            bot_self_id="bot-1",
         )
 
-        assert decision.disposition == qq_policy.QQ_POLICY_DIRECT_CLOSURE
-        assert captured[0]["channel_key"].endswith(":classifier_unavailable")
-        assert captured[0]["cooldown_seconds"] == 60.0
+        assert private_decision.disposition == qq_policy.QQ_POLICY_ALLOW
+        assert group_decision.disposition == qq_policy.QQ_POLICY_ALLOW
+        assert private_decision.allow_normal_processing is True
+        assert group_decision.allow_normal_processing is True
+        assert private_decision.assessment.reason_code == "classifier_unavailable"
+        assert group_decision.assessment.reason_code == "classifier_unavailable"
+
+        with sqlite3.connect(service.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM user_policy_events").fetchone()[0] == 0
 
     asyncio.run(run())
 

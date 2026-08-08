@@ -446,6 +446,23 @@ class QQUserPolicyGate:
                     )
                 assessment = PolicyAssessment(reason_code="classifier_unavailable", confirmed=False)
 
+        # 分类器不可用只表示策略基础设施暂时失效，不代表用户内容越过边界。
+        # 如果继续按默认的 boundary_topic 评估，会把普通消息送进 direct_closure
+        # 或 silent 分支，导致私聊消息无回复且没有进入正常 Trace/Agent 链路。
+        # 保留 assessment.reason_code 供上层 Trace/诊断使用，但不要把这次故障
+        # 写成用户策略事件，也不要污染自动违规计数。
+        if assessment.reason_code == "classifier_unavailable":
+            return QQPolicyDecision(
+                user_id=user_id,
+                event_key=event_key,
+                surface=surface,
+                channel_key=channel_key,
+                direct=direct,
+                disposition=QQ_POLICY_ALLOW,
+                assessment=assessment,
+                authorization=authorization,
+            )
+
         try:
             result = await asyncio.to_thread(
                 self.service.apply_assessment,

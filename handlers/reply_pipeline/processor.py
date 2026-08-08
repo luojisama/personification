@@ -549,6 +549,16 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
 
         runtime = deps.runtime
         if bool(getattr(runtime.plugin_config, "personification_turn_trace_enabled", True)):
+            policy_disposition = str(
+                policy_decision.get("disposition", "")
+                if isinstance(policy_decision, dict)
+                else ""
+            ).strip()
+            policy_reason_code = str(
+                policy_decision.get("reason_code", "")
+                if isinstance(policy_decision, dict)
+                else ""
+            ).strip()
             trace_id = trace_mod.current_trace_id()
             session_type = "group" if hasattr(event, "group_id") else "private"
             group_id = str(getattr(event, "group_id", "") or "")
@@ -558,7 +568,12 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                 session_type=session_type,
                 group_id=group_id,
                 user_id=user_id,
-                detail={"source": "reply_pipeline", "message_id": str(getattr(event, "message_id", "") or "")},
+                detail={
+                    "source": "reply_pipeline",
+                    "message_id": str(getattr(event, "message_id", "") or ""),
+                    "policy_disposition": policy_disposition,
+                    "policy_reason_code": policy_reason_code,
+                },
             )
             state["reply_trace_id"] = trace_id
             trace_token = trace_mod.set_current_trace_id(trace_id)
@@ -566,8 +581,11 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                 trace_id=trace_id,
                 key="ingress",
                 label="进入回复链路",
-                status="info",
-                detail=f"session={session_type} user={user_id} group={group_id or '-'}",
+                status="warn" if policy_reason_code == "classifier_unavailable" else "info",
+                detail=(
+                    f"session={session_type} user={user_id} group={group_id or '-'} "
+                    f"policy={policy_disposition or '-'} reason={policy_reason_code or '-'}"
+                ),
             )
     except Exception:
         trace_id = ""
