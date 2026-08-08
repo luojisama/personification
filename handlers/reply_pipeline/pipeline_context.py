@@ -997,6 +997,10 @@ async def run_agent_if_enabled(
         messages=messages,
         registry=runtime_registry,
         tool_caller=runtime.agent_tool_caller,
+        quality_tool_caller=(
+            getattr(runtime, "lite_tool_caller", None)
+            or runtime.agent_tool_caller
+        ),
         executor=executor,
         plugin_config=runtime.plugin_config,
         logger=runtime.logger,

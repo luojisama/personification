@@ -450,7 +450,11 @@ def _quality_flags(
         flags.append("markdown_or_trace")
     if looks_like_formulaic_reply_tic(raw_text):
         flags.append("formulaic_tic")
-    if is_agent_reply_ooc(raw_text):
+    # Markdown/control wrappers are already handled by ``visible_text`` above;
+    # do not send a second LLM rewrite merely because the raw candidate used a
+    # presentation wrapper.  Re-check the normalized surface so real OOC
+    # phrases (search/source/observer tics) still receive model-led revision.
+    if is_agent_reply_ooc(visible_text or raw_text):
         flags.append("style_risk")
     if is_group and looks_like_question_reply(
         visible_text or raw_text,
@@ -695,6 +699,17 @@ async def finalize_agent_reply_quality(
     revision_attempted = False
 
     if flags and tool_caller is not None and any(flag in _REVISION_FLAGS for flag in flags):
+        if record_trace is not None:
+            record_trace(
+                key="agent_reply_quality_start",
+                label="Agent 回复质量复写开始",
+                status="warn",
+                detail=(
+                    f"flags={','.join(flags)} timeout_ms=8000 "
+                    f"chars={len(raw_text)}"
+                ),
+                hint="候选回复命中可见风格风险，开始一次受限人设改写；仅记录结构化标记，不记录正文。",
+            )
         revision_attempted = True
         rewritten = await rewrite_agent_reply_ooc(
             tool_caller=tool_caller,

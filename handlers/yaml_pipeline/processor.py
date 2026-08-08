@@ -1841,6 +1841,7 @@ async def process_yaml_response_logic(
                     messages=agent_messages,
                     registry=agent_tool_registry,
                     tool_caller=agent_tool_caller,
+                    quality_tool_caller=lite_tool_caller or agent_tool_caller,
                     executor=executor,
                     plugin_config=plugin_config,
                     logger=logger,

@@ -229,6 +229,7 @@ async def run_agent(
     executor: Any,
     plugin_config: Any,
     logger: Any,
+    quality_tool_caller: Any = None,
     max_steps: int | None = None,
     current_image_urls: List[str] | None = None,
     direct_image_input: bool = False,
@@ -254,6 +255,11 @@ async def run_agent(
     allow_builtin_search: bool = True,
     turn_media_context: list[Any] | None = None,
 ) -> AgentResult:
+    # The main caller may be a vision-capable route whose first response is
+    # intentionally expensive.  Keep the final visible-text hygiene pass on
+    # the lightweight caller when one is available, while retaining the main
+    # caller for the Agent loop and media tools.
+    quality_caller = quality_tool_caller or tool_caller
     if cancel_background_social_video_research(executor):
         _record_reply_trace_stage(
             key="background_media_research_cancelled",
@@ -310,7 +316,7 @@ async def run_agent(
             finalized = await _await_with_deadline(
                 lambda: finalize_agent_reply_quality(
                     result,
-                    tool_caller=tool_caller,
+                    tool_caller=quality_caller,
                     messages=messages,
                     turn_plan=turn_plan,
                     is_group=is_group,

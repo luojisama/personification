@@ -96,6 +96,23 @@ def test_finalize_agent_reply_quality_does_not_rewrite_local_normalization() -> 
     assert result.quality_checks[-1]["action"] == "normalized"
 
 
+def test_finalize_agent_reply_quality_does_not_rewrite_markdown_with_caller() -> None:
+    caller = _RewriteCaller("[NO_REPLY]")
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result("**广州** 接下来雨不少"),
+            tool_caller=caller,
+            messages=[],
+            reason="unit",
+        )
+    )
+
+    assert result.text == "广州 接下来雨不少"
+    assert caller.calls == []
+    assert result.quality_checks[-1]["action"] == "normalized"
+
+
 def test_finalize_agent_reply_quality_preserves_operational_failure_code() -> None:
     source = final_synthesis.AgentResult(
         text="[NO_REPLY]",

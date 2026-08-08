@@ -600,6 +600,54 @@ def test_run_agent_passes_required_interaction_and_current_text_to_quality_gate(
     assert captured["is_group"] is True
 
 
+def test_run_agent_uses_separate_quality_tool_caller(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+
+    async def _capture_quality(result, **kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        return result
+
+    monkeypatch.setattr(runner, "finalize_agent_reply_quality", _capture_quality)
+    agent_caller = _FakeToolCaller([
+        tool_impl.ToolCallerResponse(
+            finish_reason="stop",
+            content="候选回复",
+            tool_calls=[],
+            raw={},
+        )
+    ])
+    quality_caller = _FakeToolCaller([])
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[
+                {"role": "system", "content": "你是群里的普通成员。"},
+                {"role": "user", "content": "说句话"},
+            ],
+            registry=tool_registry.ToolRegistry(),
+            tool_caller=agent_caller,
+            quality_tool_caller=quality_caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=1,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+        )
+    )
+
+    assert result.text == "候选回复"
+    assert captured["tool_caller"] is quality_caller
+
+
 def test_run_agent_final_quality_rewrites_observer_reply(monkeypatch) -> None:  # noqa: ANN001
     stages: list[dict[str, object]] = []
 
@@ -651,10 +699,12 @@ def test_run_agent_final_quality_rewrites_observer_reply(monkeypatch) -> None:  
     )
 
     quality_stage = next(stage for stage in stages if stage["key"] == "agent_reply_quality")
+    quality_start_stage = next(stage for stage in stages if stage["key"] == "agent_reply_quality_start")
     assert result.text == "那先别绕远，卡在哪个点了"
     assert result.quality_checks[-1]["action"] == "rewritten"
     assert len(caller.calls) == 2
     assert caller.calls[1]["tools"] == []
+    assert "timeout_ms=8000" in quality_start_stage["detail"]
     assert "action=rewritten" in quality_stage["detail"]
 
 
