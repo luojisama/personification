@@ -1649,6 +1649,7 @@ def build_proactive_checker(
     agent_data_dir: Optional[Path] = None,
     persona_store: Any = None,
     qq_outbound_ledger: Any = None,
+    favorability_service: Any = None,
 ) -> Callable[[], Awaitable[bool]]:
     async def _check_proactive_messaging() -> bool:
         return await run_proactive_messaging(

@@ -315,7 +315,7 @@ async def personification_rule(
             effective_prob = _random_probability_with_relation(current_prob)
             if random.random() < effective_prob:
                 state["is_random_chat"] = True
-                state.get("favorability_frequency", {})["gate_result"] = "pass"
+                state.setdefault("favorability_frequency", {})["gate_result"] = "pass"
                 return True
 
         is_unsuitable_time = not is_rest_time(allow_unsuitable_prob=0.0)
@@ -333,9 +333,9 @@ async def personification_rule(
         effective_prob = _random_probability_with_relation(min(1.0, current_prob))
         if random.random() < effective_prob:
             state["is_random_chat"] = True
-            state.get("favorability_frequency", {})["gate_result"] = "pass"
+            state.setdefault("favorability_frequency", {})["gate_result"] = "pass"
             return True
-        state.get("favorability_frequency", {})["gate_result"] = "fail"
+        state.setdefault("favorability_frequency", {})["gate_result"] = "fail"
         return False
 
     if isinstance(event, private_event_cls):

@@ -323,9 +323,9 @@ def setup_all_matchers(*, deps: MatcherSetupDeps) -> Dict[str, Any]:
         handle_reply=handle_reply,
         user_policy_gate=deps.user_policy_gate,
         create_scoped_profile_task=(
-                deps.runtime_bundle.scoped_profile_service.observe_group_message
-                if getattr(deps.runtime_bundle, "scoped_profile_service", None) is not None
-                else None
+            deps.runtime_bundle.scoped_profile_service.observe_group_message
+            if getattr(deps.runtime_bundle, "scoped_profile_service", None) is not None
+            else None
         ),
         favorability_observer=getattr(
             getattr(deps.runtime_bundle, "favorability_service", None),
