@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from ..skills.skillpacks.friend_request_tool.scripts.impl import check_friend_request_gate
 from ..utils import build_group_context_window, get_group_topic_summary
+from .absence_awareness import register_absence_awareness_hook
 from .chat_intent import infer_turn_semantic_frame_with_llm
 from .context_policy import sanitize_history_text
 from .group_context import build_group_conversation_context, render_group_conversation_context
@@ -671,4 +672,5 @@ def register_all_builtin_hooks() -> None:
     register_prompt_hook("grounding", _grounding_hook, priority=35, phase="system_postlude")
     register_prompt_hook("friend_request", _friend_request_hook, priority=50, phase="message")
     register_prompt_hook("pending_topic_extract", _pending_topic_extract_hook, priority=55, phase="message")
+    register_absence_awareness_hook()
     _REGISTERED = True
