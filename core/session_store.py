@@ -399,3 +399,27 @@ async def clear_all_session_histories() -> int:
         conn.execute("DELETE FROM session_messages")
         conn.commit()
     return count
+
+
+def clear_session_history(session_id: str, legacy_session_id: Optional[str] = None) -> int:
+    task = _compress_tasks.pop(session_id, None)
+    if task is not None:
+        task.cancel()
+    if legacy_session_id and legacy_session_id in _compress_tasks:
+        leg_task = _compress_tasks.pop(legacy_session_id, None)
+        if leg_task is not None:
+            leg_task.cancel()
+    with connect_sync() as conn:
+        if legacy_session_id and legacy_session_id != session_id:
+            cursor = conn.execute(
+                "DELETE FROM session_messages WHERE session_id IN (?, ?)",
+                (session_id, legacy_session_id),
+            )
+        else:
+            cursor = conn.execute(
+                "DELETE FROM session_messages WHERE session_id=?",
+                (session_id,),
+            )
+        conn.commit()
+        return int(cursor.rowcount if cursor is not None else 0)
+

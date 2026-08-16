@@ -623,6 +623,22 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
     except Exception as exc:
         if trace_mod is not None and trace_id and not cancelled:
             provider_code = _provider_diagnosis_code(exc)
+            if provider_code == "provider_safety_block":
+                try:
+                    from ...core.session_store import (
+                        build_group_session_id,
+                        build_private_session_id,
+                        clear_session_history,
+                    )
+                    from ...utils import clear_group_msgs
+
+                    if group_id:
+                        clear_group_msgs(str(group_id))
+                        clear_session_history(build_group_session_id(str(group_id)), legacy_session_id=str(group_id))
+                    elif user_id:
+                        clear_session_history(build_private_session_id(str(user_id)), legacy_session_id=str(user_id))
+                except Exception:
+                    pass
             is_provider_failure = bool(provider_code)
             route_summary = summarize_provider_route_attempts(exc) if is_provider_failure else ""
             trace_mod.record_stage(
@@ -650,6 +666,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                 diagnosis_code=provider_code if is_provider_failure else "internal_exception",
             )
         raise
+
     finally:
         release_reply_commit(state)
         if trace_mod is not None and trace_id and not cancelled:
@@ -3609,6 +3626,35 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     except Exception as e:
         record_counter("reply_processor.error_total")
         provider_code = _provider_diagnosis_code(e)
+        if provider_code == "provider_safety_block":
+            try:
+                from ...core.session_store import (
+                    build_group_session_id,
+                    build_private_session_id,
+                    clear_session_history,
+                )
+                from ...utils import clear_group_msgs
+
+                if not is_private_session and group_id:
+                    clear_group_msgs(str(group_id))
+                    clear_session_history(
+                        session_id or build_group_session_id(str(group_id)),
+                        legacy_session_id=legacy_session_id or str(group_id),
+                    )
+                    runtime.logger.warning(
+                        f"拟人插件：检测到上游安全策略拦截 (provider_safety_block)，已自动清空群 {group_id} 的短期历史上下文以阻断持续污染。"
+                    )
+                elif user_id:
+                    clear_session_history(
+                        session_id or build_private_session_id(str(user_id)),
+                        legacy_session_id=legacy_session_id or str(user_id),
+                    )
+                    runtime.logger.warning(
+                        f"拟人插件：检测到上游安全策略拦截 (provider_safety_block)，已自动清空用户 {user_id} 的私聊上下文历史以阻断持续污染。"
+                    )
+            except Exception as clean_exc:
+                runtime.logger.warning(f"拟人插件：安全拦截自动清理上下文失败: {clean_exc}")
+
         delivery_started = bool(state.get("reply_delivery_started", False))
         delivery_confirmed = bool(state.get("reply_delivery_confirmed", False))
         delivery_complete = bool(state.get("reply_delivery_complete", False))
@@ -3645,6 +3691,15 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         try:
             from ...core import reply_turn_trace
 
+            if provider_code == "provider_safety_block":
+                target_desc = f"群 {group_id}" if not is_private_session and group_id else f"用户 {user_id}"
+                reply_turn_trace.record_stage(
+                    key="safety_auto_clean",
+                    label="安全拦截自动清理",
+                    status="warn",
+                    detail=f"已自动清空{target_desc}的短期上下文历史以阻断持续污染",
+                )
+
             reply_turn_trace.record_stage(
                 key="provider_failure" if provider_code else "reply_failed",
                 label="Provider 调用失败" if provider_code else "回复异常",
@@ -3665,3 +3720,4 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             )
         except Exception:
             pass
+

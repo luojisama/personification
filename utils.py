@@ -238,6 +238,11 @@ def clear_group_msgs(group_id: str):
         conn.execute("DELETE FROM conversation_threads WHERE group_id=?", (str(group_id),))
         conn.commit()
 
+    def _mutator(group_data: dict[str, Any]) -> None:
+        group_data["message_total_count"] = 0
+
+    _upsert_chat_meta(str(group_id), _mutator)
+
 
 def get_group_msg_by_message_id(group_id: str, message_id: str) -> Optional[Dict[str, Any]]:
     normalized_group_id = str(group_id)
