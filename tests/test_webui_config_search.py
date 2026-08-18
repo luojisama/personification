@@ -164,3 +164,31 @@ def test_video_understanding_uses_structured_form_instead_of_json_editor() -> No
     )[1].split('if (e.kind === "json")', 1)[0]
     assert "renderVideoBudgetEditor" in custom_budget_branch
     assert "textarea" not in custom_budget_branch
+
+
+def test_search_engines_speed_test_endpoint() -> None:
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+    from plugin.personification.webui.routes.config_routes import build_config_router
+    from plugin.personification.webui.deps import AdminIdentity
+
+    app = FastAPI()
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(personification_free_search_proxy=None),
+        logger=None,
+    )
+    router = build_config_router(runtime=runtime)
+    app.include_router(router, prefix="/personification")
+
+    # override admin auth
+    from plugin.personification.webui.deps import require_admin
+    app.dependency_overrides[require_admin] = lambda: AdminIdentity(qq="123456", role="admin", device_id="d1", label="admin")
+
+    client = TestClient(app)
+    res = client.post("/personification/api/config/search-engines/speed-test")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["success"] is True
+    assert "probes" in body
+    assert "recommended_order" in body

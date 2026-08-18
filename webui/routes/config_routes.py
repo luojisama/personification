@@ -1388,7 +1388,7 @@ def build_config_router(*, runtime) -> APIRouter:
             _provider_probe_diagnostic(api_type=api_type, models=sorted_models, source="remote_models"),
         )
 
-    @router.post("/config/search-engines/speed-test")
+    @router.post("/search-engines/speed-test")
     async def search_engines_speed_test(
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
@@ -1404,7 +1404,7 @@ def build_config_router(*, runtime) -> APIRouter:
             "timestamp": res["timestamp"],
         }
 
-    @router.post("/config/search-engines/apply-speed-sort")
+    @router.post("/search-engines/apply-speed-sort")
     async def apply_search_engines_speed_sort(
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
