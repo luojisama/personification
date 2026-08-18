@@ -18,12 +18,17 @@
 ## core
 
 - 作用：把配置、ToolCaller、ToolRegistry、会话与处理器组装成运行时。
-- 示例：`service_factory.py` 在启动时注册 `news/weather/web_search` 等工具并注入到 Agent。
+- 示例：
+  - `service_factory.py` 在启动时注册 `news/weather/web_search` 等工具并注入到 Agent。
+  - `bot_avatar_context.py` 从画像服务提取 Bot 自身头像洞察，在视觉交互中注入二创感知。
+  - `message_splitter.py` 提供轻量级大模型消息分段器，支持独立模型路由与超时安全降级。
 
 ## handlers
 
 - 作用：承接 NoneBot 事件，拼接上下文，进入 Agent 或 YAML 流程，最终发送消息。
-- 示例：群消息进入 `reply_processor.py` 后生成 `messages`，交由 Agent 进行工具决策。
+- 示例：
+  - 群消息进入 `reply_processor.py` 后生成 `messages`，交由 Agent 进行工具决策。
+  - `event_rules.py` 的 `split_segment_if_long` 按标点语义边界切分超长回复，杜绝词语硬截断。
 
 ## flows
 

@@ -17,6 +17,7 @@ from ...core.reply_style_policy import (
 )
 from ...core.reply_length_policy import render_reply_length_prompt_hint, resolve_reply_length_policy
 from ...core.turn_media import render_turn_media_grounding
+from ...core.bot_avatar_context import render_bot_avatar_vision_prompt
 from .tool_selection import _semantic_tool_guidance
 
 
@@ -37,6 +38,7 @@ def append_agent_system_prompts(
     turn_media_context: list[Any] | None = None,
     plugin_config: Any = None,
     budget_profile: Any = None,
+    bot_avatar_context: Any = None,
 ) -> None:
     if not any(
         isinstance(message, dict)
@@ -316,6 +318,14 @@ def append_agent_system_prompts(
             {
                 "role": "system",
                 "content": image_prompt,
+            }
+        )
+    bot_avatar_prompt = render_bot_avatar_vision_prompt(bot_avatar_context)
+    if bot_avatar_prompt:
+        messages.append(
+            {
+                "role": "system",
+                "content": bot_avatar_prompt,
             }
         )
 

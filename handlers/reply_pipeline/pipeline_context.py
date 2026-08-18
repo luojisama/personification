@@ -993,6 +993,16 @@ async def run_agent_if_enabled(
                 })
     except Exception:
         pass
+    bot_self_id = str(getattr(bot, "self_id", "") or "").strip()
+    bot_avatar_context = None
+    if bot_self_id and getattr(runtime, "profile_service", None) is not None:
+        try:
+            from ...core.bot_avatar_context import get_bot_avatar_insight_context
+
+            bot_avatar_context = get_bot_avatar_insight_context(runtime.profile_service, bot_self_id)
+        except Exception:
+            bot_avatar_context = None
+
     result = await run_agent(
         messages=messages,
         registry=runtime_registry,
@@ -1029,6 +1039,7 @@ async def run_agent_if_enabled(
         is_direct_mention=is_direct_mention,
         reply_required=reply_required,
         turn_media_context=turn_media_context,
+        bot_avatar_context=bot_avatar_context,
     )
     social_coverage = dict(getattr(result, "social_coverage", {}) or {})
     if isinstance(commit_state, dict):

@@ -3226,13 +3226,18 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     runtime.logger.warning(f"[tts] 自动语音发送失败，回退文字: {e}")
         if final_reply:
             if not sent_as_tts:
-                segments = runtime.split_text_into_segments(final_reply)
-                max_seg = getattr(runtime.plugin_config, "personification_max_segment_chars", 0)
-                if max_seg and max_seg > 0:
-                    expanded: List[str] = []
-                    for seg in segments:
-                        expanded.extend(split_segment_if_long(seg, max_seg))
-                    segments = expanded
+                if bool(getattr(runtime.plugin_config, "personification_enable_llm_splitter", False)):
+                    from ...core.message_splitter import split_reply_with_llm
+
+                    segments = await split_reply_with_llm(final_reply, runtime)
+                else:
+                    segments = runtime.split_text_into_segments(final_reply)
+                    max_seg = getattr(runtime.plugin_config, "personification_max_segment_chars", 0)
+                    if max_seg and max_seg > 0:
+                        expanded: List[str] = []
+                        for seg in segments:
+                            expanded.extend(split_segment_if_long(seg, max_seg))
+                        segments = expanded
                 if not segments:
                     segments = [final_reply]
 

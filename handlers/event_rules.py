@@ -612,37 +612,68 @@ def split_text_into_segments(text: str) -> list[str]:
 
 
 def split_segment_if_long(segment: str, max_chars: int) -> list[str]:
-    if max_chars <= 0 or len(segment) <= max_chars:
-        return [segment]
+    text = str(segment or "").strip()
+    if max_chars <= 0 or len(text) <= max_chars:
+        return [text] if text else []
 
-    sub_pattern = r"([，；,;]+)"
-    sub_parts = re.split(sub_pattern, segment)
+    # 1. 优先按主要断句标点（句号、感叹号、问号、省略号、换行）切分子句并保留标点
+    major_delims = r"([。！？!?…~～\n]+)"
+    parts = [p for p in re.split(major_delims, text) if p]
+
+    clauses: list[str] = []
+    i = 0
+    while i < len(parts):
+        current = parts[i]
+        if i + 1 < len(parts) and re.match(major_delims, parts[i + 1]):
+            clauses.append(current + parts[i + 1])
+            i += 2
+        else:
+            clauses.append(current)
+            i += 1
+
+    # 2. 对仍然超过 max_chars 的较长子句，按次级标点（逗号、顿号、分号）进一步切分
+    fine_clauses: list[str] = []
+    minor_delims = r"([，、；,;]+)"
+    for clause in clauses:
+        if len(clause) <= max_chars:
+            fine_clauses.append(clause)
+        else:
+            sub_parts = [p for p in re.split(minor_delims, clause) if p]
+            j = 0
+            while j < len(sub_parts):
+                cur = sub_parts[j]
+                if j + 1 < len(sub_parts) and re.match(minor_delims, sub_parts[j + 1]):
+                    fine_clauses.append(cur + sub_parts[j + 1])
+                    j += 2
+                else:
+                    fine_clauses.append(cur)
+                    j += 1
+
+    # 3. 贪心合并短子句，组装成不超过 max_chars 的自然消息
     result: list[str] = []
     buffer = ""
 
-    for part in sub_parts:
-        if not part:
+    for item in fine_clauses:
+        if not item:
             continue
-        if re.match(sub_pattern, part):
-            buffer += part
-            if len(buffer) >= max_chars // 2:
-                result.append(buffer)
-                buffer = ""
+        if not buffer:
+            buffer = item
+        elif len(buffer) + len(item) <= max_chars:
+            buffer += item
         else:
-            if buffer and len(buffer) + len(part) > max_chars:
-                result.append(buffer)
-                buffer = part
-            else:
-                buffer += part
+            result.append(buffer)
+            buffer = item
 
     if buffer:
         result.append(buffer)
 
+    # 4. 保底：对极少数无任何标点的超长纯文本块做拆分
     final: list[str] = []
-    for text in result:
-        while len(text) > max_chars:
-            final.append(text[:max_chars])
-            text = text[max_chars:]
-        if text:
-            final.append(text)
-    return final if final else [segment]
+    for chunk in result:
+        while len(chunk) > max_chars:
+            final.append(chunk[:max_chars])
+            chunk = chunk[max_chars:]
+        if chunk:
+            final.append(chunk)
+
+    return [s.strip() for s in final if s.strip()] or ([text] if text else [])

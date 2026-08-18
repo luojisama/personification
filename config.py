@@ -221,6 +221,11 @@ class Config(BaseModel):
     personification_health_probe_dir: str = ""
     personification_max_output_chars: int = 0
     personification_max_segment_chars: int = 0
+    personification_enable_llm_splitter: bool = False
+    personification_splitter_provider: str = ""
+    personification_splitter_model: str = ""
+    personification_splitter_min_chars: int = 35
+    personification_splitter_max_segments: int = 3
     personification_skills_path: Optional[str] = None
     personification_skill_sources: Optional[Union[str, List[Any]]] = None
     personification_skill_remote_enabled: bool = False

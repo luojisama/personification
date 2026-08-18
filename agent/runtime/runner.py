@@ -254,6 +254,7 @@ async def run_agent(
     structured_output: bool = False,
     allow_builtin_search: bool = True,
     turn_media_context: list[Any] | None = None,
+    bot_avatar_context: Any = None,
 ) -> AgentResult:
     # The main caller may be a vision-capable route whose first response is
     # intentionally expensive.  Keep the final visible-text hygiene pass on
@@ -745,6 +746,7 @@ async def run_agent(
         turn_media_context=turn_media_context,
         plugin_config=plugin_config,
         budget_profile=budget_profile,
+        bot_avatar_context=bot_avatar_context,
     )
 
     async def _append_evidence_guidance_if_needed(*, draft_answer_text: str = "") -> EvidenceSynthesis | None:
