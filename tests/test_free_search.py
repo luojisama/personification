@@ -331,3 +331,27 @@ def test_free_search_empty_engines_uses_default(monkeypatch) -> None:
 def test_free_search_empty_query_returns_empty() -> None:
     out = asyncio.run(fs.free_search("   ", engines=["wikipedia"]))
     assert out == []
+
+
+# ──────────── 测速与延迟探测 ────────────
+
+def test_probe_all_search_engines_ranks_by_latency(monkeypatch) -> None:
+    async def fake_probe(engine, **kw):
+        if engine == "moegirl":
+            return {"engine": "moegirl", "label": "萌娘百科", "ok": True, "latency_ms": 150, "error": None}
+        elif engine == "bing":
+            return {"engine": "bing", "label": "必应国内版", "ok": True, "latency_ms": 280, "error": None}
+        elif engine == "wikipedia":
+            return {"engine": "wikipedia", "label": "维基百科", "ok": False, "latency_ms": 3000, "error": "timeout"}
+        return {"engine": engine, "label": engine, "ok": True, "latency_ms": 500, "error": None}
+
+    monkeypatch.setattr(fs, "probe_single_engine", fake_probe)
+    res = asyncio.run(fs.probe_all_search_engines(["wikipedia", "bing", "moegirl"]))
+    assert "probes" in res
+    assert "recommended_order" in res
+    # 萌娘百科（150ms）应该排在第 1，必应（280ms）第 2，维基（不可用）排在最后
+    assert res["recommended_order"] == ["moegirl", "bing", "wikipedia"]
+    assert res["probes"][0]["engine"] == "moegirl"
+    assert res["probes"][0]["ok"] is True
+    assert res["probes"][-1]["engine"] == "wikipedia"
+    assert res["probes"][-1]["ok"] is False

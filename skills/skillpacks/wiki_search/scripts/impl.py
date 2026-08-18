@@ -18,8 +18,8 @@ _DEFAULT_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
     )
 }
-_FETCH_TIMEOUT = 12.0
-_FANDOM_TIMEOUT = 7.0
+_FETCH_TIMEOUT = 3.5
+_FANDOM_TIMEOUT = 3.0
 _MAX_CONTENT_CHARS = 600
 _MAX_COMBINED_CHARS = 1200
 _DEFAULT_FANDOM_WIKIS = {
@@ -37,8 +37,8 @@ _DEFAULT_FANDOM_WIKIS = {
     "崩坏3": "honkaiimpact3",
 }
 _SOURCE_WEIGHTS = {
-    "萌娘百科": 0.6,
-    "维基百科": 0.5,
+    "萌娘百科": 0.8,
+    "维基百科": 0.4,
     "Fandom": 0.25,
 }
 
@@ -427,27 +427,36 @@ async def wiki_lookup_candidates(
         if len(selected) >= target_count:
             break
 
-    snippets: list[_WikiSnippet] = []
-    for candidate in selected:
+    async def _fetch_snippet_safe(cand: _WikiCandidate) -> _WikiSnippet | None:
         try:
-            snippet = await _fetch_candidate_extract(candidate, http_client=http_client)
+            snip = await _fetch_candidate_extract(cand, http_client=http_client)
         except Exception as e:
             logger.debug(f"wiki_search fetch extract failed: {e}")
-            snippet = None
-        if snippet is None:
-            fallback_text = _clip_text(candidate.snippet)
+            snip = None
+        if snip is None:
+            fallback_text = _clip_text(cand.snippet)
             if fallback_text:
-                snippet = _WikiSnippet(
-                    source=candidate.source,
-                    title=candidate.title,
+                snip = _WikiSnippet(
+                    source=cand.source,
+                    title=cand.title,
                     text=fallback_text,
-                    url=candidate.url,
+                    url=cand.url,
                 )
-        if snippet is not None:
-            snippets.append(snippet)
+        return snip
+
+    snippet_results = await asyncio.gather(
+        *[_fetch_snippet_safe(c) for c in selected],
+        return_exceptions=True,
+    )
+    snippets: list[_WikiSnippet] = []
+    valid_selected: list[_WikiCandidate] = []
+    for cand, snip in zip(selected, snippet_results):
+        if isinstance(snip, _WikiSnippet):
+            snippets.append(snip)
+            valid_selected.append(cand)
 
     top_candidates: list[dict[str, Any]] = []
-    for candidate, snippet in zip(selected, snippets):
+    for candidate, snippet in zip(valid_selected, snippets):
         top_candidates.append(
             {
                 "title": snippet.title,
@@ -477,12 +486,26 @@ async def wiki_lookup(
     http_client: httpx.AsyncClient | None = None,
     logger: Any = None,
 ) -> str:
-    payload = await wiki_lookup_candidates(
-        query,
-        extra_fandom_wikis=extra_fandom_wikis,
-        http_client=http_client,
-        logger=logger,
-    )
+    try:
+        payload = await asyncio.wait_for(
+            wiki_lookup_candidates(
+                query,
+                extra_fandom_wikis=extra_fandom_wikis,
+                http_client=http_client,
+                logger=logger,
+            ),
+            timeout=5.0,
+        )
+    except Exception as exc:
+        if logger:
+            logger.debug(f"wiki_lookup timed out or failed: {exc}")
+        return json.dumps({
+            "query": str(query or "").strip(),
+            "top_candidates": [],
+            "recommended_interpretation": "",
+            "ambiguity_level": "high",
+            "summary": "",
+        }, ensure_ascii=False)
     if not payload.get("top_candidates"):
         return "未找到足够可靠的 Wiki 条目。"
     return json.dumps(payload, ensure_ascii=False)

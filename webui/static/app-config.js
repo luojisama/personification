@@ -1000,20 +1000,33 @@ function renderStrListEditor(e) {
   let presetsHtml = "";
   if (isSearchEngineField) {
     const currentKeys = new Set(items.map(x => String(x || "").toLowerCase().trim()));
+    const probes = state._searchEngineProbes || {};
     const presetButtons = SEARCH_ENGINE_PRESETS.map(p => {
       const active = currentKeys.has(p.key);
+      const probe = probes[p.key];
+      let latencyBadge = "";
+      if (probe) {
+        latencyBadge = probe.ok 
+          ? `<span class="latency-pill latency-ok">${probe.latency_ms}ms</span>` 
+          : `<span class="latency-pill latency-err">超时/不可用</span>`;
+      }
       return `<button type="button" class="btn small preset-btn ${active ? 'tag-active' : ''}" 
         onclick="toggleSearchEnginePreset('${field}', '${p.key}')" 
         title="${p.label}">
-        ${active ? '✓ ' : '+ '}${p.label} <small class="preset-badge ${p.fast ? 'fast' : ''}">${p.badge}</small>
+        ${active ? '✓ ' : '+ '}${p.label} ${latencyBadge || `<small class="preset-badge ${p.fast ? 'fast' : ''}">${p.badge}</small>`}
       </button>`;
     }).join("");
     presetsHtml = `<div class="search-engine-presets">
       <div class="preset-label-row">
-        <span class="preset-title">⚡ 快速选择搜索引擎：</span>
-        <button type="button" class="btn small primary domestic-btn" onclick="applyDomesticSearchPreset('${field}')">
-          🇨🇳 一键国内优先排序（秒级响应）
-        </button>
+        <span class="preset-title">⚡ 搜索引擎测速与排序：</span>
+        <div class="preset-actions-wrap">
+          <button type="button" class="btn small speed-test-btn" onclick="runSearchEnginesSpeedTest('${field}', this)">
+            ⚡ 一键网络测速并自动排序
+          </button>
+          <button type="button" class="btn small primary domestic-btn" onclick="applyDomesticSearchPreset('${field}')">
+            🇨🇳 国内优先预设
+          </button>
+        </div>
       </div>
       <div class="preset-buttons">${presetButtons}</div>
     </div>`;
@@ -1027,6 +1040,41 @@ function renderStrListEditor(e) {
       <button type="button" class="btn small primary" onclick="saveStrList('${field}')">💾 保存顺序与配置</button>
     </div>
   </div>`;
+}
+
+async function runSearchEnginesSpeedTest(field, btn) {
+  const oldText = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner-inline"></span> 并发测速中...`;
+  try {
+    const result = await api("/config/search-engines/speed-test", { method: "POST" });
+    if (result.success) {
+      const probeMap = {};
+      (result.probes || []).forEach(p => { probeMap[p.engine] = p; });
+      state._searchEngineProbes = probeMap;
+
+      const order = result.recommended_order || [];
+      setConfigValueDraft(field, order, "strlist");
+
+      const fieldEntry = (state.configEntries || []).find(x => x.field_name === field) || { field_name: field };
+      const root = document.querySelector(`[data-strlist-field="${CSS.escape(field)}"]`);
+      if (root) {
+        root.outerHTML = renderStrListEditor(fieldEntry);
+      }
+      const fastest = result.probes?.find(p => p.ok);
+      const msg = fastest 
+        ? `测速完成！已按延迟最优自动重排（首选：${fastest.label || fastest.engine}，${fastest.latency_ms}ms）`
+        : "测速完成！未检测到可直连的免配置搜索引擎";
+      alertFlash(fastest ? "ok" : "warn", msg);
+    } else {
+      alertFlash("err", "搜索引擎测速失败");
+    }
+  } catch (err) {
+    alertFlash("err", `测速失败: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = oldText;
+  }
 }
 
 function addStrListRow(field) {

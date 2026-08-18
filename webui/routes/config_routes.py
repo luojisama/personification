@@ -1388,4 +1388,43 @@ def build_config_router(*, runtime) -> APIRouter:
             _provider_probe_diagnostic(api_type=api_type, models=sorted_models, source="remote_models"),
         )
 
+    @router.post("/config/search-engines/speed-test")
+    async def search_engines_speed_test(
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        """对所有支持的免 key 搜索引擎进行并发测速与延迟排序。"""
+        from ...core.free_search import probe_all_search_engines
+        cfg = getattr(runtime, "plugin_config", None)
+        proxy = getattr(cfg, "personification_free_search_proxy", None) if cfg else None
+        res = await probe_all_search_engines(proxy=proxy, timeout=3.5, logger=getattr(runtime, "logger", None))
+        return {
+            "success": True,
+            "probes": res["probes"],
+            "recommended_order": res["recommended_order"],
+            "timestamp": res["timestamp"],
+        }
+
+    @router.post("/config/search-engines/apply-speed-sort")
+    async def apply_search_engines_speed_sort(
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        """一键测速并将最低延迟顺序持久化至配置。"""
+        from ...core.free_search import probe_all_search_engines
+        cfg = getattr(runtime, "plugin_config", None)
+        proxy = getattr(cfg, "personification_free_search_proxy", None) if cfg else None
+        res = await probe_all_search_engines(proxy=proxy, timeout=3.5, logger=getattr(runtime, "logger", None))
+        new_order = res["recommended_order"]
+        
+        # 写入 env.json 并热重载
+        writer = getattr(runtime, "env_writer", None) or env_writer
+        writer.set_config_value("personification_free_search_engines", new_order)
+        if hasattr(runtime, "reload_config"):
+            await runtime.reload_config()
+        _schedule_diagnostics_warm(runtime)
+        return {
+            "success": True,
+            "updated_order": new_order,
+            "probes": res["probes"],
+        }
+
     return router

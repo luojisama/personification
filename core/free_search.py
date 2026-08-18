@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 from urllib.parse import quote, urlparse
@@ -669,14 +670,127 @@ async def free_search(
     return flat[: max(1, max_results * 2)]
 
 
+# ──────────────────── 测速与健康探测 ────────────────────
+
+ENGINE_LABELS: dict[str, str] = {
+    "moegirl": "萌娘百科 (Moegirl)",
+    "bing": "必应国内版 (Bing CN)",
+    "duckduckgo": "DuckDuckGo",
+    "searxng": "SearXNG",
+    "wikipedia": "维基百科 (Wikipedia)",
+}
+
+ENGINE_LATENCY_CACHE: dict[str, dict[str, Any]] = {}
+
+
+async def probe_single_engine(
+    engine: str,
+    *,
+    proxy: Optional[str] = None,
+    timeout: float = 3.0,
+    logger: Any = None,
+) -> dict[str, Any]:
+    """单引擎连通性与延迟探测。"""
+    canonical = "moegirl" if engine in ("moegirl", "萌娘百科", "moe") else (
+        "bing" if engine in ("bing", "必应") else (
+            "duckduckgo" if engine in ("duckduckgo", "ddg") else (
+                "wikipedia" if engine in ("wikipedia", "wiki") else (
+                    "searxng" if engine == "searxng" else engine.strip().lower()
+                )
+            )
+        )
+    )
+    label = ENGINE_LABELS.get(canonical, canonical)
+    start = time.perf_counter()
+    ok = False
+    error: Optional[str] = None
+    count = 0
+    try:
+        if canonical == "moegirl":
+            res = await asyncio.wait_for(moegirl_search("绪山真寻", max_results=2, proxy=proxy, logger=logger), timeout=timeout)
+        elif canonical == "bing":
+            res = await asyncio.wait_for(bing_search("绪山真寻", max_results=2, proxy=proxy, logger=logger), timeout=timeout)
+        elif canonical == "duckduckgo":
+            res = await asyncio.wait_for(duckduckgo_search("test", max_results=2, proxy=proxy, logger=logger), timeout=timeout)
+        elif canonical == "searxng":
+            res = await asyncio.wait_for(searxng_search("test", max_results=2, proxy=proxy, logger=logger), timeout=timeout)
+        elif canonical == "wikipedia":
+            res = await asyncio.wait_for(wikipedia_search("绪山真寻", max_results=2, proxy=proxy, logger=logger), timeout=timeout)
+        else:
+            return {"engine": canonical, "label": label, "ok": False, "latency_ms": 0, "error": "unknown_engine"}
+        
+        count = len(res)
+        ok = count > 0
+        if not ok:
+            error = "empty_result"
+    except asyncio.TimeoutError:
+        error = "timeout"
+    except Exception as exc:
+        error = str(exc) or type(exc).__name__
+
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    info = {
+        "engine": canonical,
+        "label": label,
+        "ok": ok,
+        "latency_ms": latency_ms,
+        "error": error,
+        "count": count,
+        "probed_at": time.time(),
+    }
+    ENGINE_LATENCY_CACHE[canonical] = info
+    return info
+
+
+async def probe_all_search_engines(
+    engines: Optional[List[str]] = None,
+    *,
+    proxy: Optional[str] = None,
+    timeout: float = 3.0,
+    logger: Any = None,
+) -> dict[str, Any]:
+    """并发测速所有已知或指定搜索引擎，并按延迟最优排序。"""
+    targets = list(engines or DEFAULT_FREE_SEARCH_ENGINES)
+    tasks = [
+        asyncio.create_task(probe_single_engine(eng, proxy=proxy, timeout=timeout, logger=logger))
+        for eng in targets
+    ]
+    results: list[dict[str, Any]] = await asyncio.gather(*tasks)
+
+    # 排序：可用者按延迟升序在前，不可用者在后
+    sorted_results = sorted(
+        results,
+        key=lambda item: (
+            0 if item.get("ok") else 1,
+            item.get("latency_ms", 99999),
+        ),
+    )
+    recommended_order = [item["engine"] for item in sorted_results]
+    return {
+        "probes": sorted_results,
+        "recommended_order": recommended_order,
+        "timestamp": time.time(),
+    }
+
+
+def get_engine_latency_cache() -> dict[str, dict[str, Any]]:
+    """获取所有引擎的最新测速缓存。"""
+    return dict(ENGINE_LATENCY_CACHE)
+
+
 __all__ = [
     "SearchResult",
     "DEFAULT_FREE_SEARCH_ENGINES",
     "DEFAULT_SEARXNG_INSTANCES",
+    "ENGINE_LABELS",
+    "ENGINE_LATENCY_CACHE",
     "moegirl_search",
     "bing_search",
     "wikipedia_search",
     "searxng_search",
     "duckduckgo_search",
     "free_search",
+    "probe_single_engine",
+    "probe_all_search_engines",
+    "get_engine_latency_cache",
 ]

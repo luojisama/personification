@@ -86,13 +86,21 @@ main { padding:22px 28px 48px; max-width:none; width:100%; min-width:0; height:1
 .strlist-actions .btn.danger:hover:not(:disabled) { border-color:var(--danger); background:color-mix(in srgb,var(--danger) 15%,transparent); color:var(--danger); }
 .search-engine-presets { margin-bottom:12px; padding:10px 12px; border:1px solid color-mix(in srgb,var(--accent) 30%,var(--line)); border-radius:8px; background:color-mix(in srgb,var(--accent) 5%,var(--panel)); display:grid; gap:8px; }
 .preset-label-row { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px; }
+.preset-actions-wrap { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
 .preset-title { font-size:12px; font-weight:700; color:var(--text); }
 .preset-buttons { display:flex; flex-wrap:wrap; gap:6px; }
-.preset-btn { border-radius:6px; transition:all .15s; }
+.preset-btn { border-radius:6px; transition:all .15s; display:inline-flex; align-items:center; gap:4px; }
 .preset-btn.tag-active { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 22%,transparent); color:var(--text); font-weight:600; }
 .preset-badge { font-size:10px; opacity:0.75; margin-left:2px; }
 .preset-badge.fast { color:var(--ok); font-weight:600; opacity:1; }
+.speed-test-btn { font-size:11.5px; font-weight:600; padding:4px 10px; border-radius:6px; border-color:var(--accent); color:var(--accent); background:color-mix(in srgb,var(--accent) 10%,transparent); }
+.speed-test-btn:hover:not(:disabled) { background:color-mix(in srgb,var(--accent) 20%,transparent); }
 .domestic-btn { font-size:11.5px; font-weight:600; padding:4px 10px; border-radius:6px; }
+.latency-pill { font-size:10px; font-weight:700; padding:1px 5px; border-radius:4px; font-family:ui-monospace,Consolas,monospace; }
+.latency-pill.latency-ok { background:rgba(16,185,129,0.18); color:var(--ok); border:1px solid rgba(16,185,129,0.3); }
+.latency-pill.latency-err { background:rgba(239,68,68,0.18); color:var(--danger); border:1px solid rgba(239,68,68,0.3); }
+.spinner-inline { display:inline-block; width:10px; height:10px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:spin .6s linear infinite; vertical-align:middle; margin-right:3px; }
+@keyframes spin { to { transform:rotate(360deg); } }
 
 .btn { padding:7px 15px; border-radius:7px; border:1px solid var(--line); background:var(--panel); color:var(--text); white-space:nowrap; transition:border-color .15s, background .15s, transform .08s, box-shadow .15s; box-shadow:0 1px 2px rgba(0,0,0,0.1); }
 .btn--wrap { white-space:normal; overflow-wrap:anywhere; }

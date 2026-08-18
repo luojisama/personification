@@ -754,7 +754,18 @@ async def do_web_search(
         if intent in {"knowledge", "recommend"}:
             baike_task = asyncio.create_task(fetch_baike_summary(topic, logger=logger))
 
-        results_lists = await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            results_lists = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=8.0)
+        except asyncio.TimeoutError:
+            results_lists = []
+            for t in tasks:
+                if t.done() and not t.cancelled():
+                    try:
+                        r = t.result()
+                        if isinstance(r, list):
+                            results_lists.append(r)
+                    except Exception:
+                        pass
         merged: list = []
         for res in results_lists:
             if isinstance(res, list):
