@@ -101,6 +101,7 @@ from ...core.sticker_feedback import (
     mark_pending_sticker_reaction,
     record_sticker_sent,
 )
+from ..event_rules import split_segment_if_long, split_text_into_segments
 from ...core.target_inference import TARGET_OTHERS
 from ...core.tts_service import extract_persona_tts_config
 from ...core.visible_output import guard_visible_text
@@ -2870,19 +2871,25 @@ async def process_yaml_response_logic(
                     text = _strip_control_markers(text)
 
                 if text:
-                    segments = re.split(r"([。！？\n])", text)
-                    merged_segments = []
-                    current_seg = ""
-                    for s in segments:
-                        if s in "。！？\n":
-                            current_seg += s
-                            if current_seg.strip():
-                                merged_segments.append(current_seg)
-                            current_seg = ""
+                    if bool(getattr(plugin_config, "personification_enable_llm_splitter", False)):
+                        from ...core.message_splitter import split_reply_with_llm
+
+                        splitter_runtime = SimpleNamespace(
+                            plugin_config=plugin_config,
+                            logger=logger,
+                            lite_tool_caller=lite_tool_caller,
+                            agent_tool_caller=agent_tool_caller,
+                        )
+                        merged_segments = await split_reply_with_llm(text, splitter_runtime)
+                    else:
+                        raw_segs = split_text_into_segments(text)
+                        max_seg = getattr(plugin_config, "personification_max_segment_chars", 0)
+                        if max_seg and max_seg > 0:
+                            merged_segments = []
+                            for s in raw_segs:
+                                merged_segments.extend(split_segment_if_long(s, max_seg))
                         else:
-                            current_seg += s
-                    if current_seg.strip():
-                        merged_segments.append(current_seg)
+                            merged_segments = raw_segs
                     if not merged_segments and text.strip():
                         merged_segments = [text]
 
