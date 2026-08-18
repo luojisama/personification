@@ -571,7 +571,8 @@ function onConfigSearchCompositionStart(input) {
 
 function onConfigSearchCompositionEnd(input) {
   state.configSearchComposing = false;
-  state.configSearch = input ? input.value : state.configSearchDraft;
+  const val = input ? input.value : (state.configSearchDraft || "");
+  state.configSearch = val;
   state.configSearchDraft = "";
   const caret = input ? input.selectionStart : undefined;
   render();
@@ -580,11 +581,13 @@ function onConfigSearchCompositionEnd(input) {
 
 function onConfigSearchInput(input, event) {
   if (!input) return;
-  if ((event && event.isComposing) || state.configSearchComposing) {
+  if (event && event.isComposing) {
     state.configSearchDraft = input.value;
     return;
   }
+  state.configSearchComposing = false;
   state.configSearch = input.value;
+  state.configSearchDraft = "";
   const caret = input.selectionStart;
   render();
   restoreConfigSearchFocus(caret);

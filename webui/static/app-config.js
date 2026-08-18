@@ -957,7 +957,7 @@ function renderConfig() {
 
   return `<div class="toolbar">
       <div class="search-wrap" style="flex:1;max-width:380px;position:relative;">
-        <input id="config-search-input" type="search" placeholder="搜索字段名 / 标签 / 描述…" value="${escapeAttr(state.configSearch)}" oncompositionstart="onConfigSearchCompositionStart(this)" oncompositionend="onConfigSearchCompositionEnd(this)" oninput="onConfigSearchInput(this,event)" style="width:100%;padding-right:28px;">
+        <input id="config-search-input" type="search" placeholder="搜索字段名 / 标签 / 描述…" value="${escapeAttr(state.configSearch)}" oncompositionstart="onConfigSearchCompositionStart(this)" oncompositionend="onConfigSearchCompositionEnd(this)" oninput="onConfigSearchInput(this,event)" onchange="onConfigSearchInput(this,event)" onsearch="onConfigSearchInput(this,event)" style="width:100%;padding-right:28px;">
         ${search ? `<button type="button" class="search-clear-btn" onclick="clearConfigSearch()" title="清空搜索">×</button>` : ''}
       </div>
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
