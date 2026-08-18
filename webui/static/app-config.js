@@ -864,6 +864,11 @@ function clearConfigSearch() {
   render();
 }
 
+function pickSearchFilterGroup(g) {
+  state._searchFilterGroup = g;
+  render();
+}
+
 function renderConfig() {
   const search = normalizeConfigSearchText(state.configSearch || "");
   const searchTokens = search ? search.split(/\s+/).filter(Boolean) : [];
@@ -872,11 +877,13 @@ function renderConfig() {
 
   // 预先计算各分组在搜索条件下的命中数
   const groupMatchCounts = {};
+  let totalMatchCount = 0;
   if (searchTokens.length) {
     (state.groups || []).forEach(g => {
       const gEntries = (state.entries || []).filter(e => e.group === g);
       const matchEntries = gEntries.filter(e => configSearchEntryScore(e, searchTokens) >= 0);
       groupMatchCounts[g] = matchEntries.length;
+      totalMatchCount += matchEntries.length;
     });
 
     items = items
@@ -885,11 +892,15 @@ function renderConfig() {
       .sort((a, b) => b.score - a.score || String(a.entry.group).localeCompare(String(b.entry.group), "zh-CN") || String(a.entry.label).localeCompare(String(b.entry.label), "zh-CN"))
       .map(item => item.entry);
 
+    // 搜索模式下：默认全局搜索展示所有分组匹配项；仅当用户主动在搜索栏点击了某个分组胶囊时才做二次子筛选
+    if (state._searchFilterGroup) {
+      items = items.filter(e => e.group === state._searchFilterGroup);
+    }
+  } else {
+    state._searchFilterGroup = null;
     if (activeGroup) {
       items = items.filter(e => e.group === activeGroup);
     }
-  } else if (activeGroup) {
-    items = items.filter(e => e.group === activeGroup);
   }
 
   const renderVideoEditor = !search && activeGroup === "视频理解";
@@ -902,28 +913,38 @@ function renderConfig() {
   }
   const hiddenAdvanced = totalBeforeAdvanced - items.length;
 
-  const groupBar = state.groups.map(g => {
-    const groupEntries = state.entries.filter(e => e.group === g);
-    const visibleCount = state.showAdvancedConfig ? groupEntries.length : groupEntries.filter(e => !e.advanced).length;
-    const isCurrentActive = g === activeGroup;
-    if (searchTokens.length) {
+  let groupBar = "";
+  if (searchTokens.length) {
+    const isAllActive = !state._searchFilterGroup;
+    const allButton = `<button class="${isAllActive ? 'active' : ''} group-has-match" onclick="pickSearchFilterGroup(null)">
+      🌟 全部分组匹配 <span class="search-match-badge">${totalMatchCount}项</span>
+    </button>`;
+    const groupButtons = state.groups.map(g => {
       const matchCount = groupMatchCounts[g] || 0;
+      const isCurrentActive = state._searchFilterGroup === g;
       const matchBadge = matchCount > 0 
-        ? `<span class="search-match-badge">${matchCount}项匹配</span>` 
+        ? `<span class="search-match-badge">${matchCount}</span>` 
         : `<span class="muted" style="font-size:10.5px">0</span>`;
       return `<button class="${isCurrentActive ? 'active' : ''} ${matchCount === 0 ? 'group-no-match' : 'group-has-match'}" 
-        onclick="pickGroup('${escapeAttr(g)}')" 
+        onclick="pickSearchFilterGroup('${escapeAttr(g)}')" 
         title="${escapeAttr(g)}: 匹配 ${matchCount} 项">
         ${escapeHtml(g)} ${matchBadge}
       </button>`;
-    }
-    return `<button class="${isCurrentActive ? 'active' : ''}" onclick="pickGroup('${escapeAttr(g)}')">
-      ${escapeHtml(g)} <span class="muted" style="font-size:11px">${visibleCount}/${groupEntries.length}</span>
-    </button>`;
-  }).join("");
+    }).join("");
+    groupBar = allButton + groupButtons;
+  } else {
+    groupBar = state.groups.map(g => {
+      const groupEntries = state.entries.filter(e => e.group === g);
+      const visibleCount = state.showAdvancedConfig ? groupEntries.length : groupEntries.filter(e => !e.advanced).length;
+      const isCurrentActive = g === activeGroup;
+      return `<button class="${isCurrentActive ? 'active' : ''}" onclick="pickGroup('${escapeAttr(g)}')">
+        ${escapeHtml(g)} <span class="muted" style="font-size:11px">${visibleCount}/${groupEntries.length}</span>
+      </button>`;
+    }).join("");
+  }
 
   const heading = search 
-    ? (activeGroup ? `搜索“${escapeHtml(state.configSearch)}” · ${activeGroup}（${items.length}）` : `搜索“${escapeHtml(state.configSearch)}”结果（${items.length}）`)
+    ? (state._searchFilterGroup ? `全局搜索“${escapeHtml(state.configSearch)}” · 筛选【${escapeHtml(state._searchFilterGroup)}】（${items.length}）` : `全局搜索“${escapeHtml(state.configSearch)}”匹配结果（${items.length}）`)
     : (activeGroup || '配置');
 
   const diagnostics = renderOperationHistory(

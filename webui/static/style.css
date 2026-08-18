@@ -67,6 +67,14 @@ main { padding:22px 28px 48px; max-width:none; width:100%; min-width:0; height:1
 .config-search-hit { background:rgba(255,193,7,0.28); color:inherit; font-weight:700; padding:0 2px; border-radius:3px; border-bottom:1.5px solid #ffb020; }
 .search-clear-btn { position:absolute; right:8px; top:50%; transform:translateY(-50%); border:none; background:transparent; color:var(--muted); font-size:16px; width:20px; height:20px; border-radius:50%; display:grid; place-items:center; cursor:pointer; padding:0; line-height:1; }
 .search-clear-btn:hover { color:var(--text); background:rgba(255,255,255,0.1); }
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-decoration,
+input[type="search"]::-webkit-search-results-button,
+input[type="search"]::-webkit-search-results-decoration {
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  display: none !important;
+}
 .config-group-bar.is-searching { border-color:color-mix(in srgb,var(--accent) 30%,var(--line)); background:color-mix(in srgb,var(--accent) 3%,var(--panel)); }
 .group-has-match { font-weight:600; border-color:color-mix(in srgb,var(--accent) 40%,transparent); }
 .group-no-match { opacity:0.42; }
