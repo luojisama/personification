@@ -1364,6 +1364,18 @@ async def process_yaml_response_logic(
             plugin_summary = ""
         if plugin_summary:
             system_prompt += f"\n\n[已安装插件摘要（仅供参考）]\n{plugin_summary}"
+    try:
+        from ...core.bot_avatar_context import (
+            get_bot_avatar_insight_context,
+            render_bot_avatar_vision_prompt,
+        )
+
+        bot_avatar_context = get_bot_avatar_insight_context(profile_service, bot_self_id)
+        bot_avatar_prompt = render_bot_avatar_vision_prompt(bot_avatar_context)
+        if bot_avatar_prompt:
+            system_prompt += f"\n\n{bot_avatar_prompt}"
+    except Exception as exc:
+        logger.debug(f"[bot_avatar] YAML avatar prompt unavailable: {exc}")
     system_prompt = ensure_prompt_injection_guard(system_prompt)
 
     group_config = get_group_config(group_id)
