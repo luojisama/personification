@@ -812,10 +812,12 @@ async function saveVideoUnderstandingConfig() {
     const result = await api("/config/video-understanding", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({values})});
     const operation = configRememberDiagnostic(result, "视频理解配置保存未完成");
     if (result.success) {
-      (result.updated || []).forEach(clearConfigDraft);
+      (result.updated || []).forEach(field => clearConfigDraft(field));
       alertFlash("ok", operation?.title || `已保存 ${result.updated.length} 项视频理解配置`);
       await loadView(); render(); queueMicrotask(refreshVideoConfigVisibility);
-    } else alertFlash("err", operation?.title || "视频理解配置保存未完成");
+    } else {
+      alertFlash("err", operation?.title || "视频理解配置保存未完成");
+    }
   } catch (error) {
     const operation = configRememberDiagnostic(error, "视频理解配置保存未完成");
     alertFlash("err", operation?.title || "视频理解配置保存未完成");
@@ -966,18 +968,63 @@ function strListValue(cur) {
   return [];
 }
 
+const SEARCH_ENGINE_PRESETS = [
+  { key: "moegirl", label: "萌娘百科 (moegirl)", badge: "国内推荐·ACG/梗", fast: true },
+  { key: "bing", label: "必应国内 (bing)", badge: "国内通用·极速", fast: true },
+  { key: "duckduckgo", label: "DuckDuckGo", badge: "海外兜底", fast: false },
+  { key: "searxng", label: "SearXNG", badge: "海外聚合", fast: false },
+  { key: "wikipedia", label: "维基百科 (wikipedia)", badge: "国外·需代理", fast: false },
+];
+
+function renderSingleStrListRow(field, val, idx, total) {
+  const safeVal = escapeAttr(val || "");
+  const num = idx + 1;
+  return `<div class="strlist-row" data-strlist-row>
+    <span class="strlist-idx">#${num}</span>
+    <input type="text" value="${safeVal}" oninput="syncStrListDraft('${field}')" placeholder="输入项名称">
+    <div class="strlist-actions">
+      <button type="button" class="btn small icon-btn" title="上移" onclick="moveStrListRow(this, -1, '${field}')" ${idx === 0 ? 'disabled' : ''}>↑</button>
+      <button type="button" class="btn small icon-btn" title="下移" onclick="moveStrListRow(this, 1, '${field}')" ${idx === total - 1 ? 'disabled' : ''}>↓</button>
+      <button type="button" class="btn small danger icon-btn" title="删除" onclick="deleteStrListRow(this, '${field}')">✕</button>
+    </div>
+  </div>`;
+}
+
 function renderStrListEditor(e) {
   const items = strListValue(configDraftValue(e));
   const field = escapeAttr(e.field_name);
-  const rows = items.map(v => `<div class="strlist-row" data-strlist-row>
-      <input type="text" value="${escapeAttr(v)}" oninput="syncStrListDraft('${field}')">
-      <button class="btn small danger" onclick="this.closest('[data-strlist-row]').remove();syncStrListDraft('${field}')">删</button>
-    </div>`).join("");
+  const isSearchEngineField = e.field_name === "personification_free_search_engines";
+
+  const rows = items.map((v, idx) => renderSingleStrListRow(field, v, idx, items.length)).join("");
+
+  let presetsHtml = "";
+  if (isSearchEngineField) {
+    const currentKeys = new Set(items.map(x => String(x || "").toLowerCase().trim()));
+    const presetButtons = SEARCH_ENGINE_PRESETS.map(p => {
+      const active = currentKeys.has(p.key);
+      return `<button type="button" class="btn small preset-btn ${active ? 'tag-active' : ''}" 
+        onclick="toggleSearchEnginePreset('${field}', '${p.key}')" 
+        title="${p.label}">
+        ${active ? '✓ ' : '+ '}${p.label} <small class="preset-badge ${p.fast ? 'fast' : ''}">${p.badge}</small>
+      </button>`;
+    }).join("");
+    presetsHtml = `<div class="search-engine-presets">
+      <div class="preset-label-row">
+        <span class="preset-title">⚡ 快速选择搜索引擎：</span>
+        <button type="button" class="btn small primary domestic-btn" onclick="applyDomesticSearchPreset('${field}')">
+          🇨🇳 一键国内优先排序（秒级响应）
+        </button>
+      </div>
+      <div class="preset-buttons">${presetButtons}</div>
+    </div>`;
+  }
+
   return `<div class="strlist-editor" data-strlist-field="${field}">
-    <div class="strlist-rows">${rows || '<div class="muted" style="font-size:12px">（空）</div>'}</div>
-    <div class="row" style="margin-top:6px">
-      <button class="btn small" onclick="addStrListRow('${field}')">+ 添加一项</button>
-      <button class="btn small primary" onclick="saveStrList('${field}')">保存</button>
+    ${presetsHtml}
+    <div class="strlist-rows">${rows || '<div class="muted strlist-empty">（列表为空，请点击下方添加）</div>'}</div>
+    <div class="row" style="margin-top:8px; gap:8px;">
+      <button type="button" class="btn small" onclick="addStrListRow('${field}')">+ 添加自定义项</button>
+      <button type="button" class="btn small primary" onclick="saveStrList('${field}')">💾 保存顺序与配置</button>
     </div>
   </div>`;
 }
@@ -985,13 +1032,95 @@ function renderStrListEditor(e) {
 function addStrListRow(field) {
   const root = document.querySelector(`[data-strlist-field="${CSS.escape(field)}"] .strlist-rows`);
   if (!root) return;
-  const empty = root.querySelector(".muted"); if (empty) empty.remove();
+  const empty = root.querySelector(".strlist-empty"); if (empty) empty.remove();
+  const rows = Array.from(root.querySelectorAll('[data-strlist-row]'));
+  const newIdx = rows.length;
   const div = document.createElement("div");
-  div.className = "strlist-row"; div.setAttribute("data-strlist-row", "");
-  div.innerHTML = `<input type="text" value="" oninput="syncStrListDraft('${escapeAttr(field)}')"><button class="btn small danger" onclick="this.closest('[data-strlist-row]').remove();syncStrListDraft('${escapeAttr(field)}')">删</button>`;
+  div.className = "strlist-row";
+  div.setAttribute("data-strlist-row", "");
+  div.innerHTML = `<span class="strlist-idx">#${newIdx + 1}</span>
+    <input type="text" value="" oninput="syncStrListDraft('${escapeAttr(field)}')" placeholder="输入项名称">
+    <div class="strlist-actions">
+      <button type="button" class="btn small icon-btn" title="上移" onclick="moveStrListRow(this, -1, '${escapeAttr(field)}')">↑</button>
+      <button type="button" class="btn small icon-btn" title="下移" onclick="moveStrListRow(this, 1, '${escapeAttr(field)}')">↓</button>
+      <button type="button" class="btn small danger icon-btn" title="删除" onclick="deleteStrListRow(this, '${escapeAttr(field)}')">✕</button>
+    </div>`;
   root.appendChild(div);
+  refreshStrListUi(field);
   syncStrListDraft(field);
-  div.querySelector("input").focus();
+  const input = div.querySelector("input");
+  if (input) input.focus();
+}
+
+function moveStrListRow(btn, direction, field) {
+  const row = btn.closest('[data-strlist-row]');
+  if (!row) return;
+  const container = row.parentElement;
+  const rows = Array.from(container.querySelectorAll('[data-strlist-row]'));
+  const currentIndex = rows.indexOf(row);
+  const targetIndex = currentIndex + direction;
+  if (targetIndex < 0 || targetIndex >= rows.length) return;
+
+  if (direction < 0) {
+    container.insertBefore(row, rows[targetIndex]);
+  } else {
+    container.insertBefore(row, rows[targetIndex].nextSibling);
+  }
+  refreshStrListUi(field);
+  syncStrListDraft(field);
+}
+
+function deleteStrListRow(btn, field) {
+  const row = btn.closest('[data-strlist-row]');
+  if (!row) return;
+  const container = row.parentElement;
+  row.remove();
+  if (!container.querySelector('[data-strlist-row]')) {
+    container.innerHTML = '<div class="muted strlist-empty">（列表为空，请点击下方添加）</div>';
+  } else {
+    refreshStrListUi(field);
+  }
+  syncStrListDraft(field);
+}
+
+function refreshStrListUi(field) {
+  const root = document.querySelector(`[data-strlist-field="${CSS.escape(field)}"]`);
+  if (!root) return;
+  const rows = Array.from(root.querySelectorAll('[data-strlist-row]'));
+  rows.forEach((r, idx) => {
+    const idxSpan = r.querySelector('.strlist-idx');
+    if (idxSpan) idxSpan.textContent = `#${idx + 1}`;
+    const upBtn = r.querySelector('[title="上移"]');
+    if (upBtn) upBtn.disabled = (idx === 0);
+    const downBtn = r.querySelector('[title="下移"]');
+    if (downBtn) downBtn.disabled = (idx === rows.length - 1);
+  });
+}
+
+function toggleSearchEnginePreset(field, key) {
+  const root = document.querySelector(`[data-strlist-field="${CSS.escape(field)}"]`);
+  if (!root) return;
+  let values = syncStrListDraft(field).map(x => String(x || "").trim()).filter(Boolean);
+  const lowerKey = key.toLowerCase();
+  const existingIdx = values.findIndex(x => x.toLowerCase() === lowerKey);
+  if (existingIdx >= 0) {
+    values.splice(existingIdx, 1);
+  } else {
+    values.push(key);
+  }
+  setConfigValueDraft(field, values, "strlist");
+  const fieldEntry = (state.configEntries || []).find(x => x.field_name === field) || { field_name: field };
+  root.outerHTML = renderStrListEditor(fieldEntry);
+}
+
+function applyDomesticSearchPreset(field) {
+  const domesticList = ["moegirl", "bing", "duckduckgo", "searxng", "wikipedia"];
+  setConfigValueDraft(field, domesticList, "strlist");
+  const fieldEntry = (state.configEntries || []).find(x => x.field_name === field) || { field_name: field };
+  const root = document.querySelector(`[data-strlist-field="${CSS.escape(field)}"]`);
+  if (root) {
+    root.outerHTML = renderStrListEditor(fieldEntry);
+  }
 }
 
 function syncStrListDraft(field) {

@@ -459,7 +459,145 @@ def _resolve_ddg_redirect(raw_url: str) -> str:
     return raw_url
 
 
+# ──────────────────── 萌娘百科（Moegirl）────────────────────
+
+async def moegirl_search(
+    query: str,
+    *,
+    max_results: int = 5,
+    proxy: Optional[str] = None,
+    logger: Any = None,
+) -> List[SearchResult]:
+    """萌娘百科 OpenSearch 检索，精准直达 ACG 角色、作品、梗与二创。国内直连秒级响应。"""
+    query = (query or "").strip()
+    if not query:
+        return []
+    headers = {
+        "User-Agent": _BROWSER_UA,
+        "Accept": "application/json",
+    }
+    params = {
+        "action": "opensearch",
+        "search": query,
+        "format": "json",
+        "limit": max(1, min(int(max_results or 5), 10)),
+    }
+    try:
+        async with httpx.AsyncClient(
+            **_client_kwargs(timeout=6.0, proxy=proxy, headers=headers, follow_redirects=True)
+        ) as client:
+            resp = await client.get("https://zh.moegirl.org.cn/api.php", params=params)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            if not isinstance(data, list) or len(data) < 4:
+                return []
+            titles = data[1] if isinstance(data[1], list) else []
+            descriptions = data[2] if isinstance(data[2], list) else []
+            urls = data[3] if isinstance(data[3], list) else []
+
+            out: List[SearchResult] = []
+            for idx, (title, url) in enumerate(zip(titles, urls)):
+                t = str(title or "").strip()
+                u = str(url or "").strip()
+                if not t or not u:
+                    continue
+                snip = descriptions[idx] if idx < len(descriptions) and descriptions[idx] else f"萌娘百科关于「{t}」的条目内容。"
+                out.append(
+                    SearchResult(
+                        title=t,
+                        url=u,
+                        domain="zh.moegirl.org.cn",
+                        snippet=_clip_snippet(snip),
+                        source="moegirl",
+                        score=max(0.0, 1.0 - idx * 0.08),
+                    )
+                )
+                if len(out) >= max_results:
+                    break
+            return out
+    except Exception as exc:
+        if logger:
+            logger.debug(f"拟人插件：萌娘百科检索失败: {exc}")
+        return []
+
+
+# ──────────────────── 必应国内版（Bing CN）────────────────────
+
+async def bing_search(
+    query: str,
+    *,
+    max_results: int = 6,
+    proxy: Optional[str] = None,
+    logger: Any = None,
+) -> List[SearchResult]:
+    """必应国内版（cn.bing.com）免 key 检索，国内直连极速稳定。"""
+    query = (query or "").strip()
+    if not query:
+        return []
+    headers = {
+        "User-Agent": _BROWSER_UA,
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    params = {"q": query}
+    try:
+        async with httpx.AsyncClient(
+            **_client_kwargs(timeout=6.0, proxy=proxy, headers=headers, follow_redirects=True)
+        ) as client:
+            resp = await client.get("https://cn.bing.com/search", params=params)
+            if resp.status_code != 200:
+                return []
+            html = resp.text
+            return _parse_bing_html(html, max_results=max_results)
+    except Exception as exc:
+        if logger:
+            logger.debug(f"拟人插件：Bing 检索失败: {exc}")
+        return []
+
+
+def _parse_bing_html(html: str, *, max_results: int = 6) -> List[SearchResult]:
+    out: List[SearchResult] = []
+    items = re.findall(r'<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>', html, flags=re.IGNORECASE | re.DOTALL)
+    for idx, item in enumerate(items[: max_results * 2]):
+        title_match = re.search(r'<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', item, flags=re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            continue
+        url = title_match.group(1).strip()
+        title_raw = title_match.group(2).strip()
+        title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", title_raw)).strip()
+
+        snippet_match = re.search(r'<div[^>]*class="[^"]*b_caption[^"]*"[^>]*>\s*<p[^>]*>(.*?)</p>', item, flags=re.IGNORECASE | re.DOTALL)
+        snippet_raw = snippet_match.group(1) if snippet_match else ""
+        snippet = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", snippet_raw)).strip()
+
+        if not title or not url:
+            continue
+        out.append(
+            SearchResult(
+                title=title[:120],
+                url=url,
+                domain=_domain_of(url),
+                snippet=_clip_snippet(snippet) or _clip_snippet(title),
+                source="bing",
+                score=max(0.0, 0.95 - idx * 0.05),
+            )
+        )
+        if len(out) >= max_results:
+            break
+    return out
+
+
 # ──────────────────── 统一调度 ────────────────────
+
+DEFAULT_FREE_SEARCH_ENGINES: tuple[str, ...] = (
+    "moegirl",
+    "bing",
+    "duckduckgo",
+    "searxng",
+    "wikipedia",
+)
+
 
 async def free_search(
     query: str,
@@ -470,49 +608,73 @@ async def free_search(
     searxng_instances: Optional[List[str]] = None,
     logger: Any = None,
 ) -> List[SearchResult]:
-    """按 engines 顺序并行调用各免 key 引擎，合并去重。"""
+    """按 engines 顺序并行调用各免 key 引擎，并按优先级合并去重。"""
     query = (query or "").strip()
     if not query:
         return []
-    enabled = [str(e).strip().lower() for e in (engines or []) if e]
-    tasks: List[asyncio.Task] = []
-    if "wikipedia" in enabled:
-        tasks.append(
-            asyncio.create_task(
-                wikipedia_search(query, max_results=max_results, proxy=proxy, logger=logger)
-            )
+    enabled = [str(e).strip().lower() for e in (engines or DEFAULT_FREE_SEARCH_ENGINES) if e]
+    tasks_map: dict[str, asyncio.Task] = {}
+    if "moegirl" in enabled or "萌娘百科" in enabled or "moe" in enabled:
+        tasks_map["moegirl"] = asyncio.create_task(
+            moegirl_search(query, max_results=max_results, proxy=proxy, logger=logger)
+        )
+    if "bing" in enabled or "必应" in enabled:
+        tasks_map["bing"] = asyncio.create_task(
+            bing_search(query, max_results=max_results, proxy=proxy, logger=logger)
+        )
+    if "duckduckgo" in enabled or "ddg" in enabled:
+        tasks_map["duckduckgo"] = asyncio.create_task(
+            duckduckgo_search(query, max_results=max_results, proxy=proxy, logger=logger)
         )
     if "searxng" in enabled:
-        tasks.append(
-            asyncio.create_task(
-                searxng_search(
-                    query,
-                    instances=searxng_instances,
-                    max_results=max_results,
-                    proxy=proxy,
-                    logger=logger,
+        tasks_map["searxng"] = asyncio.create_task(
+            searxng_search(
+                query,
+                instances=searxng_instances,
+                max_results=max_results,
+                proxy=proxy,
+                logger=logger,
+            )
+        )
+    if "wikipedia" in enabled or "wiki" in enabled:
+        tasks_map["wikipedia"] = asyncio.create_task(
+            wikipedia_search(query, max_results=max_results, proxy=proxy, logger=logger)
+        )
+    if not tasks_map:
+        return []
+
+    await asyncio.gather(*tasks_map.values(), return_exceptions=True)
+
+    flat: List[SearchResult] = []
+    seen_urls: set[str] = set()
+    for eng in enabled:
+        alias = "moegirl" if eng in ("moegirl", "萌娘百科", "moe") else (
+            "bing" if eng in ("bing", "必应") else (
+                "duckduckgo" if eng in ("duckduckgo", "ddg") else (
+                    "wikipedia" if eng in ("wikipedia", "wiki") else eng
                 )
             )
         )
-    if "duckduckgo" in enabled:
-        tasks.append(
-            asyncio.create_task(
-                duckduckgo_search(query, max_results=max_results, proxy=proxy, logger=logger)
-            )
-        )
-    if not tasks:
-        return []
-    results_lists = await asyncio.gather(*tasks, return_exceptions=True)
-    flat: List[SearchResult] = []
-    for res in results_lists:
-        if isinstance(res, list):
-            flat.extend(res)
-    return flat
+        task = tasks_map.get(alias)
+        if task and task.done() and not task.cancelled():
+            try:
+                res = task.result()
+                if isinstance(res, list):
+                    for item in res:
+                        if item.url not in seen_urls:
+                            seen_urls.add(item.url)
+                            flat.append(item)
+            except Exception:
+                pass
+    return flat[: max(1, max_results * 2)]
 
 
 __all__ = [
     "SearchResult",
+    "DEFAULT_FREE_SEARCH_ENGINES",
     "DEFAULT_SEARXNG_INSTANCES",
+    "moegirl_search",
+    "bing_search",
     "wikipedia_search",
     "searxng_search",
     "duckduckgo_search",

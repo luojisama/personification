@@ -77,8 +77,8 @@ class Config(BaseModel):
     personification_tool_web_search_mode: str = "enabled"
     personification_tool_web_fetch_enabled: bool = True
     personification_tool_web_fetch_timeout: int = 60
-    # 免配置联网搜索引擎链（按顺序并行调用，合并去重）。可选项：wikipedia / searxng / duckduckgo。
-    personification_free_search_engines: List[str] = ["wikipedia", "searxng", "duckduckgo"]
+    # 免配置联网搜索引擎链（按顺序并行调用，按优先级合并去重）。可选项：moegirl（萌娘百科） / bing（必应国内） / duckduckgo / searxng / wikipedia。
+    personification_free_search_engines: List[str] = ["moegirl", "bing", "duckduckgo", "searxng", "wikipedia"]
     # SearXNG 公共实例池，留空则用 core/free_search.py:DEFAULT_SEARXNG_INSTANCES。
     personification_searxng_instances: List[str] = []
     # web_search 返回给 LLM 的结果上限（top-N 渲染）与单条 snippet 字符上限。

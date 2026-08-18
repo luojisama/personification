@@ -769,11 +769,11 @@ def _build_entries() -> list[ConfigEntry]:
             field_name="personification_free_search_engines",
             display_name="免配置搜索引擎链",
             value_type="list",
-            default=["wikipedia", "searxng", "duckduckgo"],
+            default=["moegirl", "bing", "duckduckgo", "searxng", "wikipedia"],
             scope=GLOBAL_SCOPE,
             description=(
                 "外部 web_search 兜底用的免 key 搜索引擎，按顺序并行调用并合并去重。"
-                "可选：wikipedia / searxng / duckduckgo。"
+                "可选：moegirl（萌娘百科） / bing（必应国内） / duckduckgo / searxng / wikipedia。"
             ),
             category="config",
             help_aliases=("免key搜索", "免配置搜索", "search_engines"),

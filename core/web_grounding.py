@@ -631,7 +631,7 @@ def _get_web_search_config() -> dict:
     def g(name, default):
         return getattr(cfg, name, default) if cfg is not None else default
     return {
-        "engines": list(g("personification_free_search_engines", ["wikipedia", "searxng", "duckduckgo"]) or []),
+        "engines": list(g("personification_free_search_engines", ["moegirl", "bing", "duckduckgo", "searxng", "wikipedia"]) or []),
         "instances": list(g("personification_searxng_instances", []) or []),
         "max_results": int(g("personification_web_search_max_results", 6) or 6),
         "snippet_chars": int(g("personification_web_search_snippet_chars", 400) or 400),

@@ -244,35 +244,88 @@ def test_ddg_html_scrape_parses_results(monkeypatch) -> None:
     assert "snippet" in r.snippet
 
 
+# ──────────── 萌娘百科 & 必应 ────────────
+
+def test_moegirl_search_returns_structured(monkeypatch) -> None:
+    opensearch_resp = [
+        "绪山真寻",
+        ["绪山真寻", "绪山美寻"],
+        ["《别当欧尼酱了！》主人公。", "《别当欧尼酱了！》登场人物。"],
+        ["https://zh.moegirl.org.cn/%E7%BB%AA%E5%B1%B1%E7%9C%9F%E5%AF%BB", "https://zh.moegirl.org.cn/%E7%BB%AA%E5%B1%B1%E7%BE%8E%E5%AF%BB"],
+    ]
+
+    def route(method, url, params):
+        if "moegirl" in url and params.get("action") == "opensearch":
+            return _FakeResponse(200, json_data=opensearch_resp)
+        return _FakeResponse(404)
+
+    monkeypatch.setattr(fs.httpx, "AsyncClient", lambda **kw: _FakeClient(route_handler=route))
+    results = asyncio.run(fs.moegirl_search("绪山真寻"))
+    assert len(results) == 2
+    assert results[0].title == "绪山真寻"
+    assert results[0].domain == "zh.moegirl.org.cn"
+    assert results[0].source == "moegirl"
+    assert "别当欧尼酱了" in results[0].snippet
+
+
+def test_bing_search_parses_html(monkeypatch) -> None:
+    html = """
+    <li class="b_algo">
+      <h2><a href="https://baike.baidu.com/item/绪山真寻">绪山真寻_百度百科</a></h2>
+      <div class="b_caption"><p>绪山真寻是漫画《别当欧尼酱了！》的主人公。</p></div>
+    </li>
+    """
+
+    def route(method, url, params):
+        if "cn.bing.com/search" in url:
+            return _FakeResponse(200, text=html)
+        return _FakeResponse(404)
+
+    monkeypatch.setattr(fs.httpx, "AsyncClient", lambda **kw: _FakeClient(route_handler=route))
+    results = asyncio.run(fs.bing_search("绪山真寻"))
+    assert len(results) == 1
+    assert "百度百科" in results[0].title
+    assert results[0].source == "bing"
+    assert "别当欧尼酱了" in results[0].snippet
+
+
 # ──────────── free_search 调度 ────────────
 
-def test_free_search_respects_engines_list(monkeypatch) -> None:
+def test_free_search_respects_engines_list_and_priority(monkeypatch) -> None:
     called: list[str] = []
+
+    async def fake_moe(q, **kw):
+        called.append("moe")
+        return [fs.SearchResult(title="Moe", url="https://moe.com", domain="moe.com", snippet="moe", source="moegirl", score=0.95)]
+
+    async def fake_bing(q, **kw):
+        called.append("bing")
+        return [fs.SearchResult(title="Bing", url="https://bing.com", domain="bing.com", snippet="bing", source="bing", score=0.9)]
 
     async def fake_wiki(q, **kw):
         called.append("wiki")
-        return [fs.SearchResult(title="W", url="https://w.com", domain="w.com", snippet="w", source="wikipedia.zh", score=0.9)]
+        return [fs.SearchResult(title="Wiki", url="https://wiki.com", domain="wiki.com", snippet="wiki", source="wikipedia", score=0.7)]
 
-    async def fake_searx(q, **kw):
-        called.append("searx")
-        return []
-
-    async def fake_ddg(q, **kw):
-        called.append("ddg")
-        return [fs.SearchResult(title="D", url="https://d.com", domain="d.com", snippet="d", source="duckduckgo.html", score=0.5)]
-
+    monkeypatch.setattr(fs, "moegirl_search", fake_moe)
+    monkeypatch.setattr(fs, "bing_search", fake_bing)
     monkeypatch.setattr(fs, "wikipedia_search", fake_wiki)
-    monkeypatch.setattr(fs, "searxng_search", fake_searx)
-    monkeypatch.setattr(fs, "duckduckgo_search", fake_ddg)
 
-    out = asyncio.run(fs.free_search("q", engines=["wikipedia", "duckduckgo"]))
-    assert "wiki" in called and "ddg" in called and "searx" not in called
+    out = asyncio.run(fs.free_search("q", engines=["moegirl", "bing"]))
+    assert "moe" in called and "bing" in called and "wiki" not in called
     assert len(out) == 2
+    assert out[0].source == "moegirl"
+    assert out[1].source == "bing"
 
 
-def test_free_search_empty_engines_returns_empty() -> None:
+def test_free_search_empty_engines_uses_default(monkeypatch) -> None:
+    async def fake_moe(q, **kw):
+        return [fs.SearchResult(title="M", url="https://m.com", domain="m.com", snippet="m", source="moegirl", score=0.9)]
+
+    monkeypatch.setattr(fs, "moegirl_search", fake_moe)
     out = asyncio.run(fs.free_search("q", engines=[]))
-    assert out == []
+    # 默认空或缺省时使用 DEFAULT_FREE_SEARCH_ENGINES，包含 moegirl
+    assert len(out) >= 1
+    assert out[0].source == "moegirl"
 
 
 def test_free_search_empty_query_returns_empty() -> None:
