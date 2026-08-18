@@ -21,6 +21,11 @@ def test_config_search_is_ime_aware_and_searches_aliases() -> None:
     assert "configSearchHaystack" in app_config_js
     assert "configSearchEntryScore" in app_config_js
     assert "configEditDistanceWithin" in app_config_js
+    assert "tag--group-pill" in app_config_js
+    assert "pickGroupFromSearch" in app_config_js
+    assert "highlightSearchKeywords" in app_config_js
+    assert "search-match-badge" in app_config_js
+    assert "clearConfigSearch" in app_config_js
 
 
 def test_config_api_pool_model_probe_dropdown_is_present() -> None:

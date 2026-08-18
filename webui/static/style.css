@@ -62,6 +62,17 @@ main { padding:22px 28px 48px; max-width:none; width:100%; min-width:0; height:1
 .tag.source-env_json { background:rgba(16,185,129,0.18); color:var(--ok); border-color:rgba(16,185,129,0.25); }
 .tag.source-runtime_config { background:rgba(245,158,11,0.18); color:var(--warn); }
 .tag.source-default { background:var(--tag-bg); color:var(--muted); }
+.tag--group-pill { cursor:pointer; background:color-mix(in srgb,var(--accent) 18%,transparent); color:var(--accent); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent); font-weight:600; padding:2px 8px; border-radius:6px; transition:all .15s; vertical-align:middle; margin-right:6px; font-size:11.5px; }
+.tag--group-pill:hover { background:var(--accent); color:var(--on-accent); transform:translateY(-1px); box-shadow:0 2px 6px var(--accent-glow); }
+.config-search-hit { background:rgba(255,193,7,0.28); color:inherit; font-weight:700; padding:0 2px; border-radius:3px; border-bottom:1.5px solid #ffb020; }
+.search-clear-btn { position:absolute; right:8px; top:50%; transform:translateY(-50%); border:none; background:transparent; color:var(--muted); font-size:16px; width:20px; height:20px; border-radius:50%; display:grid; place-items:center; cursor:pointer; padding:0; line-height:1; }
+.search-clear-btn:hover { color:var(--text); background:rgba(255,255,255,0.1); }
+.config-group-bar.is-searching { border-color:color-mix(in srgb,var(--accent) 30%,var(--line)); background:color-mix(in srgb,var(--accent) 3%,var(--panel)); }
+.group-has-match { font-weight:600; border-color:color-mix(in srgb,var(--accent) 40%,transparent); }
+.group-no-match { opacity:0.42; }
+.group-no-match:hover { opacity:0.85; }
+.search-match-badge { font-size:10px; font-weight:700; padding:1px 5px; border-radius:99px; background:rgba(16,185,129,0.2); color:var(--ok); border:1px solid rgba(16,185,129,0.35); margin-left:3px; font-family:ui-monospace,Consolas,monospace; }
+.config-empty-search { text-align:center; padding:38px 20px; display:flex; flex-direction:column; align-items:center; }
 .field { padding:16px 0; border-top:1px solid var(--line); }
 .field:first-child { border-top:none; padding-top:4px; }
 .field-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:5px; }

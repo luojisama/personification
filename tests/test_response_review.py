@@ -662,3 +662,25 @@ def test_review_consumes_safe_visual_evidence_for_social_attribution() -> None:
 
     assert decision.action == "rewrite"
     assert decision.flags == ("unsupported_visual_social_attribution",)
+
+
+def test_review_response_text_outputs_segments() -> None:
+    async def _fake_call(messages):  # noqa: ANN001
+        system_prompt = messages[0]["content"]
+        assert "分段契约" in system_prompt
+        assert "segments" in system_prompt
+        return (
+            '{"action":"accept","text":"这是绪山真寻。她是《别当欧尼酱了！》里的主角。",'
+            '"reason":"合理","flags":[],"segments":["这是绪山真寻。","她是《别当欧尼酱了！》里的主角。"]}'
+        )
+
+    decision = asyncio.run(
+        response_review.review_response_text(
+            _fake_call,
+            candidate_text="这是绪山真寻。她是《别当欧尼酱了！》里的主角。",
+            raw_message_text="这图里是谁？",
+        )
+    )
+
+    assert decision.action == "accept"
+    assert decision.segments == ("这是绪山真寻。", "她是《别当欧尼酱了！》里的主角。")

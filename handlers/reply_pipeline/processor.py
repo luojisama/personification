@@ -3226,7 +3226,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     runtime.logger.warning(f"[tts] 自动语音发送失败，回退文字: {e}")
         if final_reply:
             if not sent_as_tts:
-                if bool(getattr(runtime.plugin_config, "personification_enable_llm_splitter", False)):
+                if review_decision and getattr(review_decision, "segments", None):
+                    segments = [s.strip() for s in review_decision.segments if s.strip()]
+                elif bool(getattr(runtime.plugin_config, "personification_enable_llm_splitter", False)):
                     from ...core.message_splitter import split_reply_with_llm
 
                     segments = await split_reply_with_llm(final_reply, runtime)

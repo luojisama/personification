@@ -830,35 +830,102 @@ function resetVideoUnderstandingDrafts() {
   queueMicrotask(refreshVideoConfigVisibility);
 }
 
+function highlightSearchKeywords(text, tokens) {
+  const raw = String(text || "");
+  if (!raw || !tokens || !tokens.length) return escapeHtml(raw);
+  const escapedTokens = tokens.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).filter(Boolean);
+  if (!escapedTokens.length) return escapeHtml(raw);
+  const regex = new RegExp(`(${escapedTokens.join("|")})`, "gi");
+  const parts = raw.split(regex);
+  return parts.map((part, idx) => {
+    if (idx % 2 === 1) {
+      return `<mark class="config-search-hit">${escapeHtml(part)}</mark>`;
+    }
+    return escapeHtml(part);
+  }).join("");
+}
+
+function pickGroupFromSearch(group) {
+  state.configSearch = "";
+  state.configSearchDraft = "";
+  state.activeGroup = group;
+  const input = document.getElementById("config-search-input");
+  if (input) input.value = "";
+  render();
+  const main = document.querySelector(".layout > main");
+  if (main) main.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function clearConfigSearch() {
+  state.configSearch = "";
+  state.configSearchDraft = "";
+  const input = document.getElementById("config-search-input");
+  if (input) input.value = "";
+  render();
+}
+
 function renderConfig() {
   const search = normalizeConfigSearchText(state.configSearch || "");
   const searchTokens = search ? search.split(/\s+/).filter(Boolean) : [];
   let items = state.entries;
   let activeGroup = state.activeGroup;
+
+  // 预先计算各分组在搜索条件下的命中数
+  const groupMatchCounts = {};
   if (searchTokens.length) {
+    (state.groups || []).forEach(g => {
+      const gEntries = (state.entries || []).filter(e => e.group === g);
+      const matchEntries = gEntries.filter(e => configSearchEntryScore(e, searchTokens) >= 0);
+      groupMatchCounts[g] = matchEntries.length;
+    });
+
     items = items
       .map(e => ({ entry: e, score: configSearchEntryScore(e, searchTokens) }))
       .filter(item => item.score >= 0)
       .sort((a, b) => b.score - a.score || String(a.entry.group).localeCompare(String(b.entry.group), "zh-CN") || String(a.entry.label).localeCompare(String(b.entry.label), "zh-CN"))
       .map(item => item.entry);
-    activeGroup = null;
+
+    if (activeGroup) {
+      items = items.filter(e => e.group === activeGroup);
+    }
   } else if (activeGroup) {
     items = items.filter(e => e.group === activeGroup);
   }
+
   const renderVideoEditor = !search && activeGroup === "视频理解";
   const videoEditorItems = renderVideoEditor ? state.entries.filter(entry => entry.group === "视频理解") : [];
+  
   // advanced 折叠：默认隐藏 advanced=true 字段；视频理解使用自己的分区与高级折叠。
   const totalBeforeAdvanced = items.length;
   if (!state.showAdvancedConfig && !renderVideoEditor) {
     items = items.filter(e => !e.advanced);
   }
   const hiddenAdvanced = totalBeforeAdvanced - items.length;
-  const groupBar = !search ? state.groups.map(g => {
+
+  const groupBar = state.groups.map(g => {
     const groupEntries = state.entries.filter(e => e.group === g);
     const visibleCount = state.showAdvancedConfig ? groupEntries.length : groupEntries.filter(e => !e.advanced).length;
-    return `<button class="${g===activeGroup?'active':''}" onclick="pickGroup('${escapeAttr(g)}')">${escapeHtml(g)} <span class="muted" style="font-size:11px">${visibleCount}/${groupEntries.length}</span></button>`;
-  }).join("") : "";
-  const heading = search ? `搜索结果（${items.length}）` : (activeGroup || '配置');
+    const isCurrentActive = g === activeGroup;
+    if (searchTokens.length) {
+      const matchCount = groupMatchCounts[g] || 0;
+      const matchBadge = matchCount > 0 
+        ? `<span class="search-match-badge">${matchCount}项匹配</span>` 
+        : `<span class="muted" style="font-size:10.5px">0</span>`;
+      return `<button class="${isCurrentActive ? 'active' : ''} ${matchCount === 0 ? 'group-no-match' : 'group-has-match'}" 
+        onclick="pickGroup('${escapeAttr(g)}')" 
+        title="${escapeAttr(g)}: 匹配 ${matchCount} 项">
+        ${escapeHtml(g)} ${matchBadge}
+      </button>`;
+    }
+    return `<button class="${isCurrentActive ? 'active' : ''}" onclick="pickGroup('${escapeAttr(g)}')">
+      ${escapeHtml(g)} <span class="muted" style="font-size:11px">${visibleCount}/${groupEntries.length}</span>
+    </button>`;
+  }).join("");
+
+  const heading = search 
+    ? (activeGroup ? `搜索“${escapeHtml(state.configSearch)}” · ${activeGroup}（${items.length}）` : `搜索“${escapeHtml(state.configSearch)}”结果（${items.length}）`)
+    : (activeGroup || '配置');
+
   const diagnostics = renderOperationHistory(
     Array.isArray(state.configDiagnostics) ? state.configDiagnostics : [],
     {group:`view-${state.view}`},
@@ -866,8 +933,12 @@ function renderConfig() {
   const diagnosticCard = diagnostics
     ? `<div class="card"><div class="between"><h2>配置操作诊断</h2><button class="btn small" onclick="configClearDiagnostics()">清空</button></div>${diagnostics}</div>`
     : "";
+
   return `<div class="toolbar">
-      <input id="config-search-input" type="search" placeholder="搜索字段名 / 标签 / 描述…" value="${escapeAttr(state.configSearch)}" oncompositionstart="onConfigSearchCompositionStart(this)" oncompositionend="onConfigSearchCompositionEnd(this)" oninput="onConfigSearchInput(this,event)" style="flex:1;max-width:340px">
+      <div class="search-wrap" style="flex:1;max-width:380px;position:relative;">
+        <input id="config-search-input" type="search" placeholder="搜索字段名 / 标签 / 描述…" value="${escapeAttr(state.configSearch)}" oncompositionstart="onConfigSearchCompositionStart(this)" oncompositionend="onConfigSearchCompositionEnd(this)" oninput="onConfigSearchInput(this,event)" style="width:100%;padding-right:28px;">
+        ${search ? `<button type="button" class="search-clear-btn" onclick="clearConfigSearch()" title="清空搜索">×</button>` : ''}
+      </div>
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
         <input type="checkbox" ${state.showAdvancedConfig?'checked':''} onchange="state.showAdvancedConfig=this.checked;render()" style="width:auto">
         显示高级配置
@@ -878,10 +949,20 @@ function renderConfig() {
       插件配置由数据目录下的 <code>env.json</code> 持久化；<code>.env.prod</code> 仅在首次启用时导入插件字段，后续 WebUI 保存不会改写它。<code>SUPERUSERS</code> 等 NoneBot 基础配置仍放在 <code>.env.prod</code>。
     </div>
     ${diagnosticCard}
-    ${groupBar ? `<div class="group-bar">${groupBar}</div>` : ''}
+    ${groupBar ? `<div class="group-bar config-group-bar ${search ? 'is-searching' : ''}">${groupBar}</div>` : ''}
     ${renderVideoEditor ? renderVideoUnderstandingEditor(videoEditorItems) : `<div class="card">
-      <h2>${escapeHtml(heading)} ${hiddenAdvanced ? `<span class="muted" style="font-size:12px;font-weight:normal">（已折叠 ${hiddenAdvanced} 项高级配置）</span>` : ''}</h2>
-      ${items.length ? items.map(renderField).join("") : '<p class="muted">无匹配字段</p>'}
+      <div class="between" style="margin-bottom:12px;">
+        <h2 style="margin:0;">${heading} ${hiddenAdvanced ? `<span class="muted" style="font-size:12px;font-weight:normal">（已折叠 ${hiddenAdvanced} 项高级配置）</span>` : ''}</h2>
+        ${search ? `<button class="btn small" onclick="clearConfigSearch()">清空搜索返回全部分组</button>` : ''}
+      </div>
+      ${items.length ? items.map(e => renderField(e, searchTokens)).join("") : `
+        <div class="config-empty-search">
+          <div style="font-size:36px;margin-bottom:10px;line-height:1;">🔍</div>
+          <div style="font-size:15px;font-weight:600;margin-bottom:6px;">未找到与“${escapeHtml(state.configSearch)}”匹配的配置项</div>
+          <div class="muted" style="font-size:13px;margin-bottom:14px;">建议尝试更简短的关键词，或勾选上方「显示高级配置」</div>
+          <button type="button" class="btn primary small" onclick="clearConfigSearch()">清空搜索条件</button>
+        </div>
+      `}
     </div>`}`;
 }
 
@@ -897,8 +978,12 @@ async function applyRecommended() {
   } catch (e) { const operation = configRememberDiagnostic(e, "推荐默认值应用未完成"); alertFlash("err", operation?.title || "推荐默认值应用未完成"); }
 }
 
-function renderField(e) {
+function renderField(e, searchTokens=[]) {
+  const isSearching = Boolean(state.configSearch && state.configSearch.trim());
   const tags = [];
+  if (isSearching && e.group) {
+    tags.push(`<button type="button" class="tag tag--group-pill" onclick="pickGroupFromSearch('${escapeAttr(e.group)}')" title="点击直达【${escapeAttr(e.group)}】配置分组">📁 所属模块：${escapeHtml(e.group)}</button>`);
+  }
   if (e.required) tags.push(`<span class="tag required">必填</span>`);
   if (e.secret) tags.push(`<span class="tag secret">敏感</span>`);
   if (e.advanced) tags.push(`<span class="tag">高级</span>`);
@@ -906,9 +991,13 @@ function renderField(e) {
   const inputHtml = renderInput(e);
   const defaultLine = e.default !== null && e.default !== "" && !e.secret ? `<div class="muted" style="font-size:12px;margin-top:6px">默认值：<code>${escapeHtml(JSON.stringify(e.default))}</code></div>` : '';
   const exampleLine = e.example ? `<div class="muted" style="font-size:12px;margin-top:4px">示例：<code>${escapeHtml(e.example)}</code></div>` : '';
+  const labelHtml = isSearching ? highlightSearchKeywords(e.label, searchTokens) : escapeHtml(e.label);
+  const fieldNameHtml = isSearching ? highlightSearchKeywords(e.field_name, searchTokens) : escapeHtml(e.field_name);
+  const descHtml = isSearching ? highlightSearchKeywords(e.description, searchTokens) : escapeHtml(e.description);
+
   return `<div class="field" data-field="${escapeAttr(e.field_name)}">
-    <div class="field-head"><strong>${escapeHtml(e.label)}</strong><code>${escapeHtml(e.field_name)}</code>${tags.join("")}</div>
-    <div class="field-desc">${escapeHtml(e.description)}</div>
+    <div class="field-head"><strong>${labelHtml}</strong><code>${fieldNameHtml}</code>${tags.join("")}</div>
+    <div class="field-desc">${descHtml}</div>
     <div class="field-input">${inputHtml}</div>
     ${defaultLine}
     ${exampleLine}

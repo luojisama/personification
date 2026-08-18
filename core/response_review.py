@@ -27,6 +27,7 @@ class ResponseReviewDecision:
     text: str
     reason: str = ""
     flags: tuple[str, ...] = field(default_factory=tuple)
+    segments: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -67,11 +68,13 @@ def make_passthrough_review_decision(
     candidate_text: str,
     *,
     reason: str = "passthrough",
+    segments: Iterable[str] = (),
 ) -> ResponseReviewDecision:
     return ResponseReviewDecision(
         action="accept",
         text=str(candidate_text or "").strip(),
         reason=reason,
+        segments=tuple(str(s).strip() for s in segments if str(s).strip()),
     )
 
 
@@ -280,7 +283,13 @@ def _parse_review_payload(raw: str) -> ResponseReviewDecision | None:
             if str(item or "").strip()
         )
     )[:8]
-    return ResponseReviewDecision(action=action, text=revised, reason=reason, flags=flags)
+    raw_segments = payload.get("segments", [])
+    segments = tuple(
+        str(item).strip()
+        for item in (raw_segments if isinstance(raw_segments, list) else [])
+        if str(item).strip()
+    )
+    return ResponseReviewDecision(action=action, text=revised, reason=reason, flags=flags, segments=segments)
 
 
 def _parse_uncertain_reply_payload(raw: str) -> ResponseReviewDecision | None:
@@ -808,11 +817,12 @@ async def review_response_text(
         {
             "role": "system",
             "content": (
-                "你是回复审阅器。检查候选回复是否自然、贴题、像正常群友/私聊对象会说的话。"
-                "如果合理，输出 JSON：{\"action\":\"accept\",\"text\":\"\",\"reason\":\"...\",\"flags\":[]}。"
+                "你是回复审阅与拟人分段器。检查候选回复是否自然、贴题、像正常群友/私聊对象会说的话。"
+                "如果合理，输出 JSON：{\"action\":\"accept\",\"text\":\"\",\"reason\":\"...\",\"flags\":[],\"segments\":[\"短句气泡1\",\"短句气泡2\"]}。"
                 "如果内容偏解释腔、AI味重、误解对象、和当前话题不贴，输出 "
-                "{\"action\":\"rewrite\",\"text\":\"改写后的最终回复\",\"reason\":\"...\"}。"
+                "{\"action\":\"rewrite\",\"text\":\"改写后的最终完整回复\",\"reason\":\"...\",\"segments\":[\"改写后的气泡1\",\"改写后的气泡2\"]}。"
                 "如果这轮更适合沉默，输出 {\"action\":\"no_reply\",\"text\":\"\",\"reason\":\"...\"}。"
+                "\n分段契约：若最终回复较长（>35字或包含多个完整子句），请在 segments 数组中顺便输出按真人聊天节奏切好的 1~3 条短气泡（每条 1~2 句话，保护《书名号！》和引号完整），避免大长段压迫感；若本身就是一句简短回复，segments 包含该整句即可。"
                 f"{'当前是强交互消息，禁止输出 no_reply。' if must_reply else ''}"
                 f"{'当前是群聊，改写时不要用追问、澄清问句或征询式结尾索要信息；信息不足就给保守短反应或 no_reply。' if not is_private else ''}"
                 f"{'当前又是明确点名后的互动；如果原话是在调侃、甩锅或轻挑衅，可以保留一句不索要信息的反问式回击，再给出自己的立场。' if is_direct_mention and not is_private else ''}"
@@ -943,7 +953,7 @@ async def review_response_text(
                     reason="plugin_episode_rewrite_unverified",
                     flags=remaining_flags or plugin_reject_flags or ("plugin_context_literalization",),
                 )
-        return ResponseReviewDecision(action="rewrite", text=parsed.text, reason=parsed.reason, flags=parsed.flags)
+        return ResponseReviewDecision(action="rewrite", text=parsed.text, reason=parsed.reason, flags=parsed.flags, segments=parsed.segments)
     if identity_risk or role_reject_flags:
         return _protected_review_failure(
             must_reply=must_reply,
@@ -972,9 +982,9 @@ async def review_response_text(
                     reason=parsed.reason or "care_no_reply_blocked",
                     flags=parsed.flags,
                 )
-            return ResponseReviewDecision(action="accept", text=candidate, reason=parsed.reason or "direct_mention_no_reply_blocked", flags=parsed.flags)
+            return ResponseReviewDecision(action="accept", text=candidate, reason=parsed.reason or "direct_mention_no_reply_blocked", flags=parsed.flags, segments=parsed.segments)
         return ResponseReviewDecision(action="no_reply", text="", reason=parsed.reason, flags=parsed.flags)
-    return ResponseReviewDecision(action="accept", text=candidate, reason=parsed.reason, flags=parsed.flags)
+    return ResponseReviewDecision(action="accept", text=candidate, reason=parsed.reason, flags=parsed.flags, segments=parsed.segments)
 
 
 async def rewrite_agent_reply_ooc(

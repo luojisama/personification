@@ -2871,7 +2871,9 @@ async def process_yaml_response_logic(
                     text = _strip_control_markers(text)
 
                 if text:
-                    if bool(getattr(plugin_config, "personification_enable_llm_splitter", False)):
+                    if review_decision and getattr(review_decision, "segments", None):
+                        merged_segments = [s.strip() for s in review_decision.segments if s.strip()]
+                    elif bool(getattr(plugin_config, "personification_enable_llm_splitter", False)):
                         from ...core.message_splitter import split_reply_with_llm
 
                         splitter_runtime = SimpleNamespace(
