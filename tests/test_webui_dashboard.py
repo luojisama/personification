@@ -324,7 +324,7 @@ def test_personas_list_and_detail(_runtime_with_data) -> None:
     listed = next(p for p in body["profiles"] if p["user_id"] == "u_alpha")
     assert listed["favorability"]["available"] is True
     assert listed["favorability"]["score"] == 66.0
-    assert listed["avatar_url"].endswith("dst_uin=u_alpha&spec=640")
+    assert listed["avatar_url"].endswith("nk=u_alpha&s=640")
     assert listed["homepage_url"] == "https://user.qzone.qq.com/u_alpha"
     assert listed["qq_profile"]["signature"] == "这里是 Alpha 的签名"
 
@@ -332,7 +332,7 @@ def test_personas_list_and_detail(_runtime_with_data) -> None:
     assert res2.status_code == 200
     detail = res2.json()
     assert detail["core_profile"]["profile_text"] == "全局画像 Alpha"
-    assert detail["core_profile"]["qq_profile"]["avatar_url"].endswith("dst_uin=u_alpha&spec=640")
+    assert detail["core_profile"]["qq_profile"]["avatar_url"].endswith("nk=u_alpha&s=640")
     assert detail["core_profile"]["qq_profile"]["homepage_url"] == "https://user.qzone.qq.com/u_alpha"
     assert detail["core_profile"]["qq_profile"]["signature"] == "这里是 Alpha 的签名"
     assert detail["favorability"]["score"] == 66.0

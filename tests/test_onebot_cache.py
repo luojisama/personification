@@ -90,7 +90,7 @@ def test_get_user_profile_normalizes_extended_fields_and_caches() -> None:
     assert profile1["qid"] == "q123"
     assert profile1["signature"] == "今天也在写代码"
     assert profile1["level"] == "42"
-    assert profile1["avatar_url"].endswith("dst_uin=12345&spec=640")
+    assert profile1["avatar_url"].endswith("nk=12345&s=640")
     assert profile1["homepage_url"] == "https://user.qzone.qq.com/12345"
     assert profile2 == profile1
     assert bot.stranger_calls == 1
@@ -100,7 +100,7 @@ def test_get_user_profile_for_nonnumeric_id_uses_deterministic_urls_without_prot
     bot = _FakeBot(nickname="不应调用")
     profile = asyncio.run(onebot_cache.get_user_profile(bot, "u_alpha"))
     assert profile["user_id"] == "u_alpha"
-    assert profile["avatar_url"].endswith("dst_uin=u_alpha&spec=640")
+    assert profile["avatar_url"].endswith("nk=u_alpha&s=640")
     assert profile["homepage_url"] == "https://user.qzone.qq.com/u_alpha"
     assert bot.stranger_calls == 0
 

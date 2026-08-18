@@ -134,6 +134,11 @@ async def analyze_images(
     )
     refs = list(normalized_media.get("images") or [])
     invalid_refs = list(normalized_media.get("image_problems") or [])
+    if not refs:
+        current_images = get_current_image_urls()
+        if current_images:
+            fallback_norm = normalize_media_refs(images=current_images, image_limit=3)
+            refs = list(fallback_norm.get("images") or [])
     video_refs = list(normalized_media.get("videos") or [])
     invalid_video_refs = list(normalized_media.get("video_problems") or [])
     audio_refs = list(normalized_media.get("audios") or [])

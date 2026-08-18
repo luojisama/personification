@@ -896,4 +896,4 @@ def test_profile_prompt_uses_safe_avatar_insight_without_raw_url(tmp_path: Path)
     assert "蓝发动画角色" in block
     assert "不用于推断真实身份、性别、年龄、性格" in block
     assert "[头像URL]" not in block
-    assert "q.qlogo.cn" not in block
+    assert "qlogo.cn" not in block

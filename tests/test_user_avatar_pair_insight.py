@@ -311,7 +311,7 @@ def test_exact_sanitized_bytes_skip_vision_and_use_only_deterministic_avatar_url
         "natural_fallback",
     }
     serialized = json.dumps(result, ensure_ascii=False)
-    for forbidden in ("10001", "10002", "q.qlogo.cn", "sha256", "raw", "relation"):
+    for forbidden in ("10001", "10002", "qlogo.cn", "sha256", "raw", "relation"):
         assert forbidden not in serialized
 
 
@@ -392,7 +392,7 @@ def test_cache_is_order_canonical_and_invalidates_on_hash_prompt_and_provider(mo
         return {"user_id": int(user_id)}
 
     async def _download(url: str, **_kwargs):  # noqa: ANN202
-        user_id = "10001" if "dst_uin=10001" in url else "10002"
+        user_id = "10001" if "nk=10001" in url else "10002"
         return SimpleNamespace(content=payloads[user_id], content_type="image/png")
 
     def _sanitize(content: bytes, _content_type: str):  # noqa: ANN202
@@ -448,7 +448,7 @@ def test_pair_analysis_persists_visual_evidence_only_after_policy_recheck(monkey
         return {"user_id": int(user_id)}
 
     async def _download(url: str, **_kwargs):  # noqa: ANN202
-        content = b"left" if "dst_uin=10001" in url else b"right"
+        content = b"left" if "nk=10001" in url else b"right"
         return SimpleNamespace(content=content, content_type="image/png")
 
     def _sanitize(content: bytes, _content_type: str):  # noqa: ANN202
@@ -499,7 +499,7 @@ def test_pair_analysis_drops_result_if_target_becomes_blocked_before_persist(mon
         return {"user_id": int(user_id)}
 
     async def _download(url: str, **_kwargs):  # noqa: ANN202
-        content = b"left" if "dst_uin=10001" in url else b"right"
+        content = b"left" if "nk=10001" in url else b"right"
         return SimpleNamespace(content=content, content_type="image/png")
 
     async def _authorize(user_id: str):
@@ -556,7 +556,7 @@ def test_failure_cooldown_inflight_dedup_and_clear_generation_guard(monkeypatch)
         return {"user_id": int(user_id)}
 
     async def _download(url: str, **_kwargs):  # noqa: ANN202
-        value = b"left" if "dst_uin=10001" in url else b"right"
+        value = b"left" if "nk=10001" in url else b"right"
         return SimpleNamespace(content=value, content_type="image/png")
 
     def _sanitize(content: bytes, _content_type: str):  # noqa: ANN202

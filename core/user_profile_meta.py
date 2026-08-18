@@ -31,7 +31,7 @@ def qq_avatar_url(user_id: str) -> str:
     uid = _norm_id(user_id)
     if not uid:
         return ""
-    return f"https://q.qlogo.cn/headimg_dl?dst_uin={uid}&spec=640"
+    return f"https://q1.qlogo.cn/g?b=qq&nk={uid}&s=640"
 
 
 def qq_homepage_url(user_id: str) -> str:
