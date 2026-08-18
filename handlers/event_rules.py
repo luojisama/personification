@@ -611,43 +611,90 @@ def split_text_into_segments(text: str) -> list[str]:
     return segments
 
 
+_PAIR_OPEN_CLOSE: dict[str, str] = {
+    "《": "》",
+    "“": "”",
+    "‘": "’",
+    "「": "」",
+    "『": "』",
+    "（": "）",
+    "(": ")",
+    "【": "】",
+    "[": "]",
+    "{": "}",
+    "〈": "〉",
+}
+_OPEN_CHARS = set(_PAIR_OPEN_CLOSE.keys())
+_CLOSE_CHARS = set(_PAIR_OPEN_CLOSE.values())
+_CLOSE_TO_OPEN = {v: k for k, v in _PAIR_OPEN_CLOSE.items()}
+
+
+def _split_with_pair_protection(text: str, delimiter_regex: str) -> list[str]:
+    """在保护成对标点（如《书名！》、“引号！？”）不被切开的前提下按标点切分并保留标点。"""
+    if not text:
+        return []
+    delims_pattern = re.compile(delimiter_regex)
+    clauses: list[str] = []
+    stack: list[str] = []
+    current_clause: list[str] = []
+    i = 0
+    chars = list(text)
+    n = len(chars)
+
+    while i < n:
+        ch = chars[i]
+        if ch in _OPEN_CHARS:
+            stack.append(ch)
+            current_clause.append(ch)
+            i += 1
+            continue
+        elif ch in _CLOSE_CHARS:
+            if stack and stack[-1] == _CLOSE_TO_OPEN.get(ch):
+                stack.pop()
+            current_clause.append(ch)
+            i += 1
+            continue
+
+        if not stack:
+            match = delims_pattern.match(text, i)
+            if match:
+                delim_str = match.group(0)
+                current_clause.append(delim_str)
+                clause_text = "".join(current_clause).strip()
+                if clause_text:
+                    clauses.append(clause_text)
+                current_clause = []
+                i += len(delim_str)
+                continue
+
+        current_clause.append(ch)
+        i += 1
+
+    if current_clause:
+        clause_text = "".join(current_clause).strip()
+        if clause_text:
+            clauses.append(clause_text)
+    return clauses
+
+
 def split_segment_if_long(segment: str, max_chars: int) -> list[str]:
     text = str(segment or "").strip()
     if max_chars <= 0 or len(text) <= max_chars:
         return [text] if text else []
 
-    # 1. 优先按主要断句标点（句号、感叹号、问号、省略号、换行）切分子句并保留标点
-    major_delims = r"([。！？!?…~～\n]+)"
-    parts = [p for p in re.split(major_delims, text) if p]
-
-    clauses: list[str] = []
-    i = 0
-    while i < len(parts):
-        current = parts[i]
-        if i + 1 < len(parts) and re.match(major_delims, parts[i + 1]):
-            clauses.append(current + parts[i + 1])
-            i += 2
-        else:
-            clauses.append(current)
-            i += 1
+    # 1. 优先按主要断句标点（句号、感叹号、问号、省略号、换行）切分子句并保留成对符号完整性
+    major_delims = r"[。！？!?…~～\n]+"
+    clauses = _split_with_pair_protection(text, major_delims)
 
     # 2. 对仍然超过 max_chars 的较长子句，按次级标点（逗号、顿号、分号）进一步切分
     fine_clauses: list[str] = []
-    minor_delims = r"([，、；,;]+)"
+    minor_delims = r"[，、；,;]+"
     for clause in clauses:
         if len(clause) <= max_chars:
             fine_clauses.append(clause)
         else:
-            sub_parts = [p for p in re.split(minor_delims, clause) if p]
-            j = 0
-            while j < len(sub_parts):
-                cur = sub_parts[j]
-                if j + 1 < len(sub_parts) and re.match(minor_delims, sub_parts[j + 1]):
-                    fine_clauses.append(cur + sub_parts[j + 1])
-                    j += 2
-                else:
-                    fine_clauses.append(cur)
-                    j += 1
+            sub_clauses = _split_with_pair_protection(clause, minor_delims)
+            fine_clauses.extend(sub_clauses or [clause])
 
     # 3. 贪心合并短子句，组装成不超过 max_chars 的自然消息
     result: list[str] = []

@@ -22,6 +22,16 @@ def test_split_segment_if_long_no_hard_cut():
     assert "开开心心地吃着甜点" in combined
 
 
+def test_split_segment_if_long_protects_paired_brackets():
+    # 测试书名号、引号内的感叹号/问号不会切断书名号
+    text = "这是《别当欧尼酱了！》里的角色，从左到右分别是绪山真寻、穗月椛和樱花朝日。"
+    segments = split_segment_if_long(text, max_chars=40)
+    # 确保《别当欧尼酱了！》在同一个分段中，绝对不会被切成 "这是《别当欧尼酱了！" 和 "》里的角色"
+    assert not any(s.startswith("》") for s in segments)
+    assert not any(s.endswith("《别当欧尼酱了！") for s in segments)
+    assert any("《别当欧尼酱了！》" in s for s in segments)
+
+
 def test_parse_splitter_json_output():
     # 正常 JSON 数组
     assert _parse_splitter_json_output('["消息一", "消息二"]') == ["消息一", "消息二"]
