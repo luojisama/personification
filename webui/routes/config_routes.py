@@ -428,7 +428,7 @@ def _provider_probe_diagnostic(
     )
 
 
-def _provider_probe_failure(exc: BaseException, *, api_type: str) -> tuple[int, dict[str, Any]]:
+def _provider_probe_failure(exc: BaseException, *, api_type: str, provider: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
     status_code = 502
     status = None
     auth_mode = str(getattr(exc, "auth_mode", "") or "").strip().lower()
@@ -472,8 +472,26 @@ def _provider_probe_failure(exc: BaseException, *, api_type: str) -> tuple[int, 
         code = "provider_model_probe_network_failed"
         phase = "model_list_request"
         title = "Provider 网络连接失败"
+        
+        # 构建更详细的诊断消息
+        api_url = provider.get("api_url", "") if provider else ""
+        proxy_config = provider.get("proxy", "") if provider else ""
+        
         message = "无法连接 Provider 的模型列表服务。"
-        suggestion = "检查 DNS、代理、TLS 与服务器出站网络后重试。"
+        
+        # 根据是否配置了代理给出不同的建议
+        if proxy_config:
+            suggestion = f"已配置代理 ({proxy_config})。请检查：1) 代理服务器可达性；2) 代理认证配置；3) 目标 API 服务状态。"
+        else:
+            # 检测是否是已知需要代理的域名
+            needs_proxy_domains = ["googleapis.com", "anthropic.com", "openai.com"]
+            needs_proxy = any(domain in str(api_url).lower() for domain in needs_proxy_domains)
+            
+            if needs_proxy:
+                suggestion = "检测到国际 API 服务地址。建议：1) 配置 HTTP/HTTPS 代理；2) 检查 DNS 解析；3) 验证服务端出站网络策略；4) 检查防火墙规则。"
+            else:
+                suggestion = "检查 DNS、代理、TLS 证书与服务器出站网络后重试。如需代理，请在 Provider 配置中填写 proxy 字段。"
+        
         retryable = True
     elif isinstance(exc, ValueError):
         code = "provider_model_probe_parse_failed"
@@ -1372,7 +1390,7 @@ def build_config_router(*, runtime) -> APIRouter:
         try:
             models, _source_url = await asyncio.wait_for(_probe_http_models(provider), timeout=_provider_timeout(provider) + 2.0)
         except Exception as exc:
-            response_status, failure = _provider_probe_failure(exc, api_type=api_type)
+            response_status, failure = _provider_probe_failure(exc, api_type=api_type, provider=provider)
             if failure.get("code") == "provider_model_probe_exception":
                 _log_operation_exception(runtime, exc, failure, "provider model probe")
             raise HTTPException(status_code=response_status, detail=failure) from exc

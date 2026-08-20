@@ -1564,6 +1564,29 @@ function renderApiProviderCard(field, provider, index) {
       <div class="muted" style="font-size:11px">API 类型不代表支持视频；代理网关请显式选择其真实协议。</div>
     </div>`;
   };
+  const proxyFieldHtml = () => {
+    if (!apiProviderFieldVisible(apiType, "proxy")) return "";
+    const value = provider.proxy || "";
+    const apiUrl = String(provider.api_url || "").toLowerCase();
+    
+    // 检测是否需要代理提示
+    const needsProxyDomains = ["googleapis.com", "anthropic.com", "openai.com"];
+    const needsProxy = needsProxyDomains.some(domain => apiUrl.includes(domain));
+    const hasProxy = Boolean(value);
+    
+    let hint = "";
+    if (needsProxy && !hasProxy) {
+      hint = `<div class="muted" style="font-size:11px;color:var(--warn)">⚠️ 检测到国际 API 地址，如服务端网络受限，请配置代理（如 http://127.0.0.1:7890）</div>`;
+    } else if (hasProxy) {
+      hint = `<div class="muted" style="font-size:11px;color:var(--ok)">✓ 已配置代理</div>`;
+    }
+    
+    return `<div class="api-provider-field" data-provider-field="proxy">
+      <label>代理</label>
+      <input type="text" value="${escapeAttr(value)}" placeholder="http://127.0.0.1:7890" oninput="syncApiPoolDraft('${escapeAttr(field)}')">
+      ${hint}
+    </div>`;
+  };
   return `<div class="api-provider-card" data-provider-index="${index}" data-provider-secret-ref="${escapeAttr(provider._secret_ref || "")}">
     <div class="api-provider-head">
       <div class="api-provider-title">Provider ${index + 1}</div>
@@ -1586,7 +1609,7 @@ function renderApiProviderCard(field, provider, index) {
       ${modelFieldHtml()}
       ${fieldHtml("auth_path", "Auth Path")}
       ${fieldHtml("project", "Project")}
-      ${fieldHtml("proxy", "代理")}
+      ${proxyFieldHtml()}
       ${fieldHtml("timeout", "单次超时（秒）", "number", 'min="5" max="600" step="1"')}
       ${fieldHtml("max_retries", "总尝试次数", "number", 'min="1" max="10" step="1" title="包含首次请求；5 表示首次加 4 次重试"')}
       <div class="api-provider-field" data-provider-field="enabled">
@@ -1808,10 +1831,24 @@ async function probeApiProviderModels(field, index, btn) {
       rawVisible:Boolean(previousDraft && previousDraft.rawVisible),
     });
     writeApiPoolEditor(field, latestProviders);
-    alertFlash(models.length ? "ok" : "err", operation?.title || (models.length ? `已探测 ${models.length} 个模型` : "未探测到模型，请手动填写"));
+    alertFlash(models.length ? "ok" : "warn", operation?.title || (models.length ? `已探测 ${models.length} 个模型` : "未探测到模型，请手动填写"));
   } catch (e) {
     const operation = configRememberDiagnostic(e, "Provider 模型探测未完成");
-    alertFlash("err", operation?.title || "Provider 模型探测未完成");
+    const errorTitle = operation?.title || "Provider 模型探测未完成";
+    const errorCode = operation?.code || "";
+    
+    // 为网络连接失败提供更具体的诊断提示
+    let errorMsg = errorTitle;
+    if (errorCode === "provider_model_probe_network_failed") {
+      errorMsg += " - 检查服务端网络连接、代理配置或防火墙设置";
+    } else if (errorCode === "provider_model_probe_auth_failed") {
+      errorMsg += " - 请检查 API Key 是否正确";
+    } else if (errorCode === "provider_model_probe_timeout") {
+      errorMsg += " - 请求超时，检查网络连接或增加超时时间";
+    }
+    
+    alertFlash("err", errorMsg);
+    console.error("Provider 模型探测失败:", operation);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = oldText || "探测模型"; }
   }

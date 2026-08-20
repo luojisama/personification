@@ -623,6 +623,30 @@ tbody tr:hover td { background:var(--hover-bg); }
 .strlist-row { display:flex; gap:6px; margin-bottom:6px; }
 .strlist-row input { flex:1; min-width:0; }
 
+/* API Provider 配置编辑器 */
+.api-pool-editor { width:100%; max-width:100%; }
+.api-provider-actions { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+.api-provider-list { display:grid; gap:14px; }
+.api-pool-empty { padding:28px 20px; text-align:center; color:var(--muted); border:1px dashed var(--line); border-radius:10px; background:var(--bg); }
+
+.api-provider-card { position:relative; border:1px solid var(--line); border-radius:10px; padding:16px 18px; background:var(--panel); box-shadow:var(--card-shadow); transition:border-color .15s; }
+.api-provider-card:hover { border-color:color-mix(in srgb,var(--accent) 35%,var(--line)); }
+
+.api-provider-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--line); }
+.api-provider-title { font-size:14px; font-weight:600; color:var(--text); }
+
+.api-provider-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px 14px; }
+.api-provider-field { display:grid; gap:4px; min-width:0; }
+.api-provider-field label { font-size:12px; font-weight:500; color:var(--muted); }
+.api-provider-field input,
+.api-provider-field select { width:100%; min-width:0; }
+
+.api-provider-model-field { grid-column:1/-1; }
+.api-provider-model-row { display:grid; grid-template-columns:minmax(0,2fr) minmax(0,1.5fr) auto; gap:8px; align-items:center; }
+.api-provider-model-row input { min-width:0; }
+.api-provider-model-row select { min-width:0; }
+.api-provider-model-row button { white-space:nowrap; }
+
 .ops-hero { position:relative; display:flex; justify-content:space-between; align-items:flex-end; gap:24px; padding:28px; margin-bottom:16px; overflow:hidden; border:1px solid var(--line); border-radius:14px; background:linear-gradient(135deg,var(--panel),color-mix(in srgb,var(--accent) 12%,var(--panel))); }
 .ops-hero::after { content:""; position:absolute; width:260px; height:260px; right:-100px; top:-150px; border:1px solid color-mix(in srgb,var(--accent) 35%,transparent); border-radius:50%; box-shadow:0 0 80px color-mix(in srgb,var(--accent) 12%,transparent); }
 .ops-hero h2 { margin:4px 0; font-size:25px; letter-spacing:-.03em; }.ops-hero p { margin:0; color:var(--muted); max-width:720px; }
