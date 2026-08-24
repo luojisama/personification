@@ -97,6 +97,11 @@ from .budgeting import apply_agent_budget_profile, derive_agent_budget_profile, 
 from .final_synthesis import AgentResult, direct_tool_result_agent_result, synthesize_max_steps_result
 from .tool_catalog import tool_runtime_metadata
 from .tool_contracts import recommended_tools_for_chat_intent
+from .tool_discovery import (
+    TOOL_SEARCH_NAME,
+    ToolDisclosureSession,
+    resolve_tool_disclosure_mode,
+)
 from .tool_selection import (
     _normalize_agent_max_steps,
     _schema_tool_name,
@@ -279,6 +284,11 @@ async def run_agent(
         and _caller_supports_builtin_search(tool_caller)
         and bool(allow_builtin_search)
     )
+    disclosure_mode = resolve_tool_disclosure_mode(
+        getattr(plugin_config, "personification_tool_disclosure_mode", "off"),
+        tool_caller,
+    )
+    tool_disclosure = ToolDisclosureSession(registry, mode=disclosure_mode)
     pending_actions: List[dict] = []
     background_social_job_started = False
     bind_actions = getattr(executor, "bind_pending_actions", None)
@@ -850,18 +860,28 @@ async def run_agent(
                 reason="time_budget_empty",
             )
         await _append_evidence_guidance_if_needed()
-        active_schemas = _select_tool_schemas(
+        base_schemas = _select_tool_schemas(
             registry,
             has_images=has_visual_media,
             chat_intent=runtime_chat_intent,
             plugin_question_intent=plugin_query_intent,
         )
+        if disclosure_mode == "native":
+            active_schemas = base_schemas
+            wire_schemas = tool_disclosure.native_payload(base_schemas)
+        else:
+            active_schemas = tool_disclosure.client_schemas(base_schemas)
+            wire_schemas = active_schemas
         if _research_lookup_complete():
             active_schemas = [
                 schema
                 for schema in active_schemas
                 if _schema_tool_name(schema) not in SOCIAL_SEARCH_EQUIVALENT_TOOL_NAMES
             ]
+            if disclosure_mode == "native":
+                wire_schemas = tool_disclosure.native_payload(active_schemas)
+            else:
+                wire_schemas = active_schemas
             if stop_state.social_evidence_satisfied:
                 _mark_social_evidence_satisfied()
         _append_research_closure_guidance()
@@ -870,14 +890,24 @@ async def run_agent(
         logger.info(f"[agent] selected tools: {', '.join(selected_names) if selected_names else 'none'}")
         model_started_at = time.monotonic()
         try:
-            response = await _await_with_deadline(
-                lambda: tool_caller.chat_with_tools(
-                    messages,
-                    active_schemas,
-                    use_builtin_search and not _research_lookup_complete(),
-                ),
-                budget_deadline,
-            )
+            if disclosure_mode == "native":
+                response = await _await_with_deadline(
+                    lambda: tool_caller.chat_with_deferred_tools(
+                        messages,
+                        wire_schemas,
+                        use_builtin_search and not _research_lookup_complete(),
+                    ),
+                    budget_deadline,
+                )
+            else:
+                response = await _await_with_deadline(
+                    lambda: tool_caller.chat_with_tools(
+                        messages,
+                        wire_schemas,
+                        use_builtin_search and not _research_lookup_complete(),
+                    ),
+                    budget_deadline,
+                )
         except asyncio.TimeoutError:
             _record_reply_trace_stage(
                 key="agent_model_timeout",
@@ -965,7 +995,8 @@ async def run_agent(
 
         if response.tool_calls:
             suppress_first_ack = any(
-                str(
+                str(tool_call.name or "").strip() == TOOL_SEARCH_NAME
+                or str(
                     tool_runtime_metadata(registry, tool_call.name).get("ack_behavior", "")
                     or ""
                 ).strip().lower()
@@ -1031,7 +1062,23 @@ async def run_agent(
                 turn_tool_results.append((tool_call, result))
                 continue
             tool_started_at = time.monotonic()
-            if tool is None:
+            if str(tool_call.name or "").strip() == TOOL_SEARCH_NAME and disclosure_mode != "native":
+                result = tool_disclosure.search(**tool_args)
+                _record_reply_trace_stage(
+                    key="agent_tool_discovery",
+                    label="工具目录发现",
+                    status="info",
+                    detail=(
+                        f"mode=client candidates={len(tool_disclosure.loaded_names)} "
+                        "executed=false"
+                    ),
+                )
+            elif not tool_disclosure.is_call_allowed(tool_call.name):
+                result = (
+                    '{"status":"blocked","error_code":"tool_not_disclosed",'
+                    '"message":"The tool schema was not disclosed for this model step."}'
+                )
+            elif tool is None:
                 result = f"工具 {tool_call.name} 不存在"
             else:
                 tool_args, result = await _execute_tool_with_retries(
@@ -1150,6 +1197,9 @@ async def run_agent(
                 f"[agent] tool_result name={tool_call.name} "
                 f"result_len={len(str(result or ''))}"
             )
+            if str(tool_call.name or "").strip() == TOOL_SEARCH_NAME:
+                turn_tool_results.append((tool_call, str(result or "")))
+                continue
             update_stop_flow_tool_result(
                 state=stop_state,
                 registry=registry,

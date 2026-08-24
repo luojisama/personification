@@ -356,6 +356,96 @@ def test_run_agent_max_steps_uses_earlier_usable_result_after_empty_result() -> 
     assert "真实检索结果" in str(caller.calls[1]["messages"])
 
 
+def test_run_agent_client_tool_disclosure_loads_full_schema_on_next_step() -> None:
+    registry = tool_registry.ToolRegistry()
+    executed = {"calls": 0}
+
+    for index in range(8):
+        name = f"catalog_tool_{index}"
+
+        async def _handler(*, _index=index, **_kwargs):  # noqa: ANN001
+            if _index == 7:
+                executed["calls"] += 1
+            return f"tool-{_index}-result"
+
+        registry.register(
+            tool_registry.AgentTool(
+                name=name,
+                description=f"目录能力 {index}",
+                parameters={"type": "object", "properties": {}, "required": []},
+                handler=_handler,
+                metadata={
+                    "risk_level": "low",
+                    "side_effect": "none",
+                    "intent_tags": ["game_slang"],
+                },
+            )
+        )
+
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(
+                        id="call-discovery",
+                        name="tool_search",
+                        arguments={"query": "catalog_tool_7"},
+                    )
+                ],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(id="call-selected", name="catalog_tool_7", arguments={})
+                ],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="已使用发现后的工具完成。",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "使用目录里的第七个能力"}],
+            registry=registry,
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=3,
+                personification_tool_disclosure_mode="client",
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+            finalize_quality=False,
+        )
+    )
+
+    first_names = {item["function"]["name"] for item in caller.calls[0]["tools"]}
+    second_names = {item["function"]["name"] for item in caller.calls[1]["tools"]}
+    assert "tool_search" in first_names
+    assert "catalog_tool_7" not in first_names
+    assert "catalog_tool_7" in second_names
+    assert executed["calls"] == 1
+    assert result.text == "已使用发现后的工具完成。"
+
+
 def test_execute_tool_with_retries_records_failure_metrics() -> None:
     async def _handler(**_kwargs):  # noqa: ANN001
         raise RuntimeError("boom")

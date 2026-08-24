@@ -1070,6 +1070,24 @@ def _build_entries() -> list[ConfigEntry]:
             advanced=True,
         ),
         ConfigEntry(
+            key="tool_disclosure_mode",
+            field_name="personification_tool_disclosure_mode",
+            display_name="渐进式工具披露",
+            value_type="str",
+            default="off",
+            scope=GLOBAL_SCOPE,
+            description=(
+                "off 保留旧工具目录；client 使用本地 tool_search 索引并在下一步加载完整 Schema；"
+                "auto 仅在 caller 显式支持 Responses Tool Search 时使用原生模式，否则回落 client。"
+            ),
+            category="config",
+            choices=("off", "client", "auto"),
+            help_aliases=("渐进工具", "tool_search", "tool_disclosure"),
+            parser=_str_parser,
+            group="Agent",
+            advanced=True,
+        ),
+        ConfigEntry(
             key="real_embedding_enabled",
             field_name="personification_real_embedding_enabled",
             display_name="真实向量记忆",
