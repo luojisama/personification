@@ -125,6 +125,16 @@ def test_reply_turn_trace_records_and_finishes(_db_tmp) -> None:
     recent = traces.query_recent(session_type="group", group_id="123", user_id="456")
     assert recent and recent[0]["trace_id"] == trace_id
 
+    page, total = traces.query_page(
+        limit=1,
+        offset=0,
+        session_type="group",
+        group_id="123",
+        user_id="456",
+    )
+    assert total >= 1
+    assert page and page[0]["trace_id"] == trace_id
+
 
 @pytest.mark.parametrize(
     ("state", "delivery_partial", "delivery_unknown", "outcome", "diagnosis"),

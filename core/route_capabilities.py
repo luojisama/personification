@@ -463,6 +463,19 @@ class RouteCapabilityRegistry:
             self._evidence.clear()
             self._route_bindings.clear()
 
+    def snapshot(self, *, now: float | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            bindings = tuple(sorted(self._route_bindings.items()))
+        return [
+            {
+                "route_name": name,
+                "route": key.to_safe_dict(),
+                "route_fingerprint": key.fingerprint,
+                "capabilities": self.get_capabilities(key, now=now).to_dict(),
+            }
+            for name, key in bindings
+        ]
+
 
 DEFAULT_ROUTE_CAPABILITY_REGISTRY = RouteCapabilityRegistry()
 

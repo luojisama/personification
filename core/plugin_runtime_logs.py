@@ -96,6 +96,20 @@ def record(
         )
         _ensure_writer()
         _WRITE_QUEUE.put_nowait(entry)
+        try:
+            from .runtime_events import publish_runtime_event
+
+            publish_runtime_event(
+                "log.appended",
+                trace_id=entry[5],
+                payload={
+                    "ts": entry[0],
+                    "level": entry[1],
+                    "source": entry[2],
+                },
+            )
+        except Exception:
+            pass
     except queue.Full:
         with _DROP_LOCK:
             _DROPPED_ENTRIES += 1

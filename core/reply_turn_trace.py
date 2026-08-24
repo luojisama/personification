@@ -97,6 +97,20 @@ def start_trace(
             conn.commit()
     except Exception:
         pass
+    try:
+        from .runtime_events import publish_runtime_event
+
+        publish_runtime_event(
+            "turn.started",
+            trace_id=trace,
+            payload={
+                "session_type": str(session_type or "")[:24],
+                "group_id": str(group_id or "")[:32],
+                "user_id": str(user_id or "")[:32],
+            },
+        )
+    except Exception:
+        pass
     return trace
 
 
@@ -143,6 +157,21 @@ def record_stage(
             conn.commit()
     except Exception:
         pass
+    try:
+        from .runtime_events import publish_runtime_event
+
+        publish_runtime_event(
+            "turn.stage",
+            trace_id=trace,
+            payload={
+                "key": stage["key"],
+                "label": stage["label"],
+                "status": stage["status"],
+                "elapsed_ms": stage.get("elapsed_ms"),
+            },
+        )
+    except Exception:
+        pass
 
 
 def finish_trace(
@@ -172,6 +201,19 @@ def finish_trace(
                 ),
             )
             conn.commit()
+    except Exception:
+        pass
+    try:
+        from .runtime_events import publish_runtime_event
+
+        publish_runtime_event(
+            "turn.finished",
+            trace_id=trace,
+            payload={
+                "outcome": str(outcome or "")[:32],
+                "diagnosis_code": str(diagnosis_code or "")[:64],
+            },
+        )
     except Exception:
         pass
 
@@ -227,6 +269,45 @@ def query_recent(
             tuple(params),
         ).fetchall()
     return [_row_to_dict(row) for row in rows]
+
+
+def query_page(
+    *,
+    limit: int = 20,
+    offset: int = 0,
+    session_type: str = "",
+    group_id: str = "",
+    user_id: str = "",
+) -> tuple[list[dict[str, Any]], int]:
+    clauses = ["1=1"]
+    params: list[Any] = []
+    if session_type:
+        clauses.append("session_type = ?")
+        params.append(str(session_type)[:24])
+    if group_id:
+        clauses.append("group_id = ?")
+        params.append(str(group_id)[:32])
+    if user_id:
+        clauses.append("user_id = ?")
+        params.append(str(user_id)[:32])
+    where = " AND ".join(clauses)
+    with connect_sync() as conn:
+        total_row = conn.execute(
+            f"SELECT COUNT(*) AS count FROM reply_turn_traces WHERE {where}",
+            tuple(params),
+        ).fetchone()
+        rows = conn.execute(
+            f"""
+            SELECT trace_id, ts, session_type, group_id, user_id, stages,
+                   outcome, diagnosis_code, detail
+            FROM reply_turn_traces
+            WHERE {where}
+            ORDER BY ts DESC
+            LIMIT ? OFFSET ?
+            """,
+            (*params, max(1, min(int(limit or 20), 100)), max(0, int(offset))),
+        ).fetchall()
+    return [_row_to_dict(row) for row in rows], int(total_row["count"] if total_row else 0)
 
 
 def _stage_category(stage: dict[str, Any]) -> str:
@@ -505,6 +586,7 @@ __all__ = [
     "new_trace_id",
     "prune_old_entries",
     "query_recent",
+    "query_page",
     "record_stage",
     "reset_current_trace_id",
     "set_current_trace_id",
