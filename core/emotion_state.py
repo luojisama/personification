@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 from .data_store import get_data_store
 
@@ -21,6 +21,15 @@ DEFAULT_EMOTION_STATE: dict[str, Any] = {
     "per_group": {},
     "updated_at": "",
 }
+
+_EMOTION_V2_MODES = {"off", "shadow", "on"}
+
+
+def emotion_v2_mode(plugin_config: Any = None) -> str:
+    mode = str(
+        getattr(plugin_config, "personification_emotion_v2_mode", "off") or "off"
+    ).strip().lower()
+    return mode if mode in _EMOTION_V2_MODES else "off"
 
 
 def _parse_updated_at(value: Any) -> datetime | None:
@@ -154,7 +163,61 @@ def render_emotion_memory_hint(
         group_hint = describe_group_emotion_memory(state, group_id)
         if group_hint:
             parts.append(f"当前群的近期情绪记忆：{group_hint}")
+    if str((state or {}).get("_v2_mode", "") or "") == "on":
+        v2_hint = render_emotion_v2_hint(
+            (state or {}).get("_v2"),
+            user_id=user_id,
+            group_id=group_id,
+        )
+        if v2_hint:
+            parts.append(v2_hint)
     return "\n".join(parts).strip()
+
+
+def render_emotion_v2_hint(
+    raw: Any,
+    *,
+    user_id: str = "",
+    group_id: str = "",
+) -> str:
+    """Render only auditable v2 state; action tendency never grants authority."""
+
+    if not isinstance(raw, Mapping):
+        return ""
+    records: list[tuple[str, Any]] = [("全局", raw.get("global"))]
+    per_user = raw.get("per_user") if isinstance(raw.get("per_user"), Mapping) else {}
+    per_group = raw.get("per_group") if isinstance(raw.get("per_group"), Mapping) else {}
+    if user_id:
+        records.append(("当前用户", per_user.get(str(user_id))))
+    if group_id:
+        records.append(("当前群", per_group.get(str(group_id))))
+    rendered: list[str] = []
+    for label, candidate in records:
+        if not isinstance(candidate, Mapping):
+            continue
+        vad = candidate.get("vad") if isinstance(candidate.get("vad"), Mapping) else {}
+        try:
+            valence = float(vad.get("valence", 0.0) or 0.0)
+            arousal = float(vad.get("arousal", 0.5) or 0.5)
+            dominance = float(vad.get("dominance", 0.0) or 0.0)
+            confidence = float(candidate.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        category = _trim_text(candidate.get("category", "平静"), limit=20) or "平静"
+        tendency = str(candidate.get("action_tendency", "observe") or "observe").strip()
+        if tendency not in {"approach", "avoid", "support", "observe"}:
+            tendency = "observe"
+        rendered.append(
+            f"{label}={category} "
+            f"VAD({valence:.2f},{arousal:.2f},{dominance:.2f}) "
+            f"置信度={max(0.0, min(1.0, confidence)):.2f} 倾向={tendency}"
+        )
+    if not rendered:
+        return ""
+    return (
+        "情绪状态 v2（仅影响表达与参与意愿提示，不得越过权限、概率或发送边界）："
+        + "；".join(rendered)
+    )
 
 
 def build_turn_emotion_prompt_block(
@@ -194,6 +257,7 @@ async def update_emotion_state_after_turn(
     semantic_frame: TurnSemanticFrame | Any,
     assistant_text: str = "",
     is_private: bool = False,
+    plugin_config: Any = None,
 ) -> dict[str, Any]:
     _ = data_dir
     store = get_data_store()
@@ -243,7 +307,20 @@ async def update_emotion_state_after_turn(
         return state
 
     updated = await store.mutate(_STORE_NAME, _mutate)
-    return _normalize_state(updated)
+    normalized = _normalize_state(updated)
+    if emotion_v2_mode(plugin_config) in {"shadow", "on"}:
+        from .emotion_state_v2 import record_turn_emotion_state_v2
+
+        await record_turn_emotion_state_v2(
+            data_dir,
+            user_id=user_id,
+            group_id=group_id,
+            semantic_frame=semantic_frame,
+            assistant_text=assistant_text,
+            is_private=is_private,
+            emotion_updates=getattr(semantic_frame, "emotion_updates", []),
+        )
+    return normalized
 
 
 __all__ = [
@@ -251,8 +328,10 @@ __all__ = [
     "build_turn_emotion_prompt_block",
     "describe_group_emotion_memory",
     "describe_user_emotion_memory",
+    "emotion_v2_mode",
     "load_emotion_state",
     "render_emotion_memory_hint",
+    "render_emotion_v2_hint",
     "render_inner_state_hint",
     "update_emotion_state_after_turn",
 ]

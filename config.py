@@ -56,6 +56,7 @@ class Config(BaseModel):
     personification_agent_budget_mode: str = "shadow"
     personification_tool_disclosure_mode: str = "off"
     personification_participation_v2_mode: str = "shadow"
+    personification_emotion_v2_mode: str = "shadow"
     personification_attention_microbatch_seconds: float = 1.0
     personification_attention_timeout_seconds: float = 12.0
     personification_response_timeout: int = 180

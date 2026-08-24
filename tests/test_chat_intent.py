@@ -44,6 +44,18 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
             "user_attitude": "认真追问",
             "bot_emotion": "平静",
             "emotion_intensity": "high",
+            "emotion_updates": [
+                {
+                    "scope": "user",
+                    "scope_id": "模型不应控制这个字段",
+                    "vad": {"valence": 0.4, "arousal": 0.6},
+                    "category": "期待",
+                    "confidence": 0.8,
+                    "action_tendency": "approach",
+                },
+                {"scope": "user", "category": "重复作用域应忽略"},
+                {"scope": "unknown", "category": "平静"},
+            ],
             "expression_style": "直接一点",
             "tts_style_hint": "自然",
             "sticker_mood_hint": "淡定|表达疑惑",
@@ -68,6 +80,15 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
     assert valid.group_atmosphere_positive is True
     assert valid.interaction_interesting is True
     assert valid.future_commitment_candidate is True
+    assert valid.emotion_updates == [
+        {
+            "scope": "user",
+            "vad": {"valence": 0.4, "arousal": 0.6},
+            "category": "期待",
+            "confidence": 0.8,
+            "action_tendency": "approach",
+        }
+    ]
     assert invalid is None
 
 

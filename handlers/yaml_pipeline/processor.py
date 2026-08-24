@@ -1022,6 +1022,7 @@ async def process_yaml_response_logic(
         inner_state, emotion_state = await load_reply_states_with_timeout(
             data_dir,
             logger,
+            plugin_config=plugin_config,
             trace_key="yaml_state_load",
             trace_label="YAML 状态加载",
         )
@@ -3089,6 +3090,7 @@ async def process_yaml_response_logic(
             semantic_frame=semantic_frame,
             assistant_text=assistant_history_text,
             is_private=is_private_session,
+            plugin_config=plugin_config,
         )
     except Exception as e:
         logger.debug(f"[emotion] YAML update after reply failed: {e}")

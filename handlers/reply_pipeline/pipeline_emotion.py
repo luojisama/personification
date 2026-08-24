@@ -20,6 +20,7 @@ from ...core.chat_intent import (
 )
 from ...core.emotion_state import (
     build_turn_emotion_prompt_block,
+    emotion_v2_mode,
     load_emotion_state,
     render_emotion_memory_hint,
     render_inner_state_hint,
@@ -68,6 +69,7 @@ async def load_reply_states_with_timeout(
     data_dir: Any,
     logger: Any,
     *,
+    plugin_config: Any = None,
     trace_key: str = "reply_state_load",
     trace_label: str = "回复状态加载",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -76,18 +78,23 @@ async def load_reply_states_with_timeout(
     state_load_started_at = time.monotonic()
     state_load_timed_out = False
     try:
-        inner_result, emotion_result = await asyncio.wait_for(
-            asyncio.gather(
-                load_inner_state(data_dir),
-                load_emotion_state(data_dir),
-                return_exceptions=True,
-            ),
+        mode = emotion_v2_mode(plugin_config)
+        state_tasks = [load_inner_state(data_dir), load_emotion_state(data_dir)]
+        if mode in {"shadow", "on"}:
+            from ...core.emotion_state_v2 import load_emotion_state_v2
+
+            state_tasks.append(load_emotion_state_v2(data_dir))
+        state_results = await asyncio.wait_for(
+            asyncio.gather(*state_tasks, return_exceptions=True),
             timeout=_REPLY_STATE_LOAD_TIMEOUT_SECONDS,
         )
+        inner_result, emotion_result = state_results[:2]
+        emotion_v2_result = state_results[2] if len(state_results) > 2 else None
     except asyncio.TimeoutError:
         state_load_timed_out = True
         inner_result = asyncio.TimeoutError("inner_state_load_timeout")
         emotion_result = asyncio.TimeoutError("emotion_state_load_timeout")
+        emotion_v2_result = asyncio.TimeoutError("emotion_state_v2_load_timeout")
     state_load_elapsed_ms = int((time.monotonic() - state_load_started_at) * 1000)
     if isinstance(inner_result, BaseException):
         logger.debug(f"[emotion] load inner_state failed: {inner_result}")
@@ -97,10 +104,18 @@ async def load_reply_states_with_timeout(
         logger.debug(f"[emotion] load emotion_state failed: {emotion_result}")
     elif isinstance(emotion_result, dict):
         emotion_state = emotion_result
+    mode = emotion_v2_mode(plugin_config)
+    if mode in {"shadow", "on"} and isinstance(emotion_v2_result, dict):
+        emotion_state = dict(emotion_state)
+        emotion_state["_v2"] = emotion_v2_result
+        emotion_state["_v2_mode"] = mode
+    elif mode in {"shadow", "on"} and isinstance(emotion_v2_result, BaseException):
+        logger.debug(f"[emotion] load emotion_state_v2 failed: {emotion_v2_result}")
     state_load_failed = (
         state_load_timed_out
         or isinstance(inner_result, BaseException)
         or isinstance(emotion_result, BaseException)
+        or (mode in {"shadow", "on"} and isinstance(emotion_v2_result, BaseException))
     )
     _record_reply_trace_stage(
         key=trace_key,
@@ -110,6 +125,7 @@ async def load_reply_states_with_timeout(
             f"elapsed_ms={state_load_elapsed_ms} "
             f"inner={'fallback' if isinstance(inner_result, BaseException) else 'ok'} "
             f"emotion={'fallback' if isinstance(emotion_result, BaseException) else 'ok'} "
+            f"emotion_v2={mode}:{'fallback' if isinstance(emotion_v2_result, BaseException) else ('ok' if mode != 'off' else 'disabled')} "
             f"timeout={str(state_load_timed_out).lower()}"
         ),
         hint="状态读取超时后使用默认值继续回复，不等待后台 inner-state LLM" if state_load_failed else "",
@@ -433,6 +449,7 @@ async def prepare_reply_semantics(
     inner_state, emotion_state = await load_reply_states_with_timeout(
         data_dir,
         runtime.logger,
+        plugin_config=runtime.plugin_config,
     )
     emotion_memory_hint = render_emotion_memory_hint(
         emotion_state,
@@ -710,6 +727,7 @@ async def persist_reply_emotion_state(
             semantic_frame=semantic_frame,
             assistant_text=assistant_text,
             is_private=is_private,
+            plugin_config=runtime.plugin_config,
         )
     except Exception as e:
         runtime.logger.debug(f"[emotion] update after reply failed: {e}")

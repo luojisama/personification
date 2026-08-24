@@ -74,6 +74,9 @@ class TurnSemanticFrame:
     user_attitude: str = "日常交流"
     bot_emotion: str = "平静"
     emotion_intensity: EmotionIntensity = "medium"
+    # 由语义模型给出的结构化 v2 情绪更新。持久化层会重新验证 Schema，
+    # 并把 user/group 作用域绑定到当前可信会话，不能由用户文本指定任意对象。
+    emotion_updates: list[dict[str, Any]] = field(default_factory=list)
     expression_style: str = "自然简短"
     tts_style_hint: str = "自然"
     sticker_mood_hint: str = DEFAULT_STICKER_SEMANTIC_HINT
@@ -265,6 +268,7 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
         user_attitude=str(payload.get("user_attitude", "") or "").strip() or "日常交流",
         bot_emotion=str(payload.get("bot_emotion", "") or "").strip() or "平静",
         emotion_intensity=emotion_intensity,  # type: ignore[arg-type]
+        emotion_updates=_parse_emotion_updates(payload.get("emotion_updates")),
         expression_style=str(payload.get("expression_style", "") or "").strip() or "自然简短",
         tts_style_hint=str(payload.get("tts_style_hint", "") or "").strip() or "自然",
         sticker_mood_hint=normalize_sticker_semantic_hint(payload.get("sticker_mood_hint")),
@@ -278,6 +282,34 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
         confidence=max(0.0, min(1.0, confidence)),
         reason=str(payload.get("reason", "") or "").strip(),
     )
+
+
+def _parse_emotion_updates(value: Any) -> list[dict[str, Any]]:
+    """Keep only the bounded structured shape; semantic validation happens at write time."""
+
+    if not isinstance(value, list):
+        return []
+    allowed = {
+        "scope",
+        "vad",
+        "category",
+        "confidence",
+        "appraisal",
+        "action_tendency",
+    }
+    normalized: list[dict[str, Any]] = []
+    seen_scopes: set[str] = set()
+    for item in value[:3]:
+        if not isinstance(item, Mapping):
+            continue
+        scope = str(item.get("scope", "") or "").strip().lower()
+        if scope not in {"global", "user", "group"} or scope in seen_scopes:
+            continue
+        update = {str(key): item[key] for key in item if str(key) in allowed}
+        update["scope"] = scope
+        normalized.append(update)
+        seen_scopes.add(scope)
+    return normalized
 
 
 def _parse_scenario(value: Any) -> ConversationScenario:
@@ -367,6 +399,7 @@ async def infer_turn_semantic_frame_with_llm(
         '"user_attitude":"一句短中文，描述用户这轮对 bot 的态度",'
         '"bot_emotion":"一句短中文，描述 bot 当前自然产生的情绪",'
         '"emotion_intensity":"low|medium|high",'
+        '"emotion_updates":[{"scope":"global|user|group","vad":{"valence":0.0,"arousal":0.5,"dominance":0.0},"category":"平静|开心|疲惫|困倦|烦躁|低落|期待|紧张|放松|无语|好奇","confidence":0.0,"appraisal":{"reason":"短摘要","goal":"短摘要","certainty":"短摘要","controllability":"短摘要"},"action_tendency":"approach|avoid|support|observe"}],'
         '"expression_style":"一句短中文，描述本轮该如何表达",'
         '"tts_style_hint":"给 TTS 的简短风格词",'
         '"sticker_mood_hint":"给表情包选择的结构化标签，格式固定为 情绪标签|场景标签",'
@@ -410,6 +443,9 @@ async def infer_turn_semantic_frame_with_llm(
         "5. sticker_appropriate=false 表示这轮不适合发表情包，例如严肃澄清、情绪安抚、风险话题、直接答疑、明显冷淡/敌意或容易显得轻浮的场景。\n"
         "6. user_attitude 要体现用户这一轮对 bot 的态度，如调侃、求助、冷淡、试探、亲近、挑衅、认真追问。\n"
         "7. bot_emotion 要结合当前内心状态、关系线索和最近互动，自然给出，不要机械复制用户情绪。\n"
+        "7a. emotion_updates 最多各包含一条 global、user、group 更新；只描述 bot 自身的即时状态、对当前用户的互动姿态和当前群氛围。"
+        "连续值和类别必须基于完整语境判断，不能按关键词词典映射；不要推断用户的心理疾病、人格、政治立场或其他敏感属性。"
+        "没有足够依据时返回空数组。action_tendency 只表达倾向，不能改变权限、发送策略或回复概率。\n"
         "8. expression_style 要指导本轮说话方式，偏行为策略，不要写长句。\n"
         "8b. group_atmosphere_positive 只在群聊整体互动明确友好、融洽或共同参与感很强时为 true；普通无冲突聊天不能机械设为 true，私聊必须 false。"
         "interaction_interesting 只在 bot 与当前用户这轮确实有明显趣味、默契或高质量互动时为 true；成功回复本身不等于有趣。\n"
