@@ -11,6 +11,9 @@ from ._loader import load_personification_module
 
 
 reply_buffer = load_personification_module("plugin.personification.handlers.reply_buffer")
+reply_recovery_queue = load_personification_module(
+    "plugin.personification.core.reply_recovery_queue"
+)
 
 
 @dataclass
@@ -86,6 +89,55 @@ class _Logger:
 
     def error(self, message: str, *_args: Any, **_kwargs: Any) -> None:
         self.errors.append(str(message))
+
+
+def test_recovery_projection_stores_each_inbound_message_without_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[dict[str, Any]] = []
+
+    class _Queue:
+        def record_failure(self, **kwargs: Any) -> None:
+            recorded.append(dict(kwargs))
+
+    monkeypatch.setattr(reply_recovery_queue, "ReplyRecoveryQueue", _Queue)
+    state = {
+        "reply_trace_id": "trace-safe",
+        "provider_route_fingerprint": "route-safe",
+        "batched_events": [
+            {
+                "message_id": "11",
+                "user_id": "123",
+                "group_id": "456",
+                "text": "第一条",
+                "media": [],
+            },
+            {
+                "message_id": "12",
+                "user_id": "124",
+                "group_id": "456",
+                "text": "第二条",
+                "media": [],
+            },
+        ],
+        "generated_reply": "绝不能进入恢复队列",
+    }
+
+    count = reply_buffer._record_recovery_failure(
+        bot=_Bot(),
+        event=_GroupEvent(12, "第二条"),
+        state=state,
+        failure_stage="reply_timeout",
+        failure_class="generation_failed_before_send",
+    )
+
+    assert count == 2
+    assert [item["original_message_id"] for item in recorded] == ["11", "12"]
+    assert all(item["conversation_kind"] == "group" for item in recorded)
+    assert all(item["conversation_id"] == "456" for item in recorded)
+    assert all(item["route_fingerprint"] == "route-safe" for item in recorded)
+    assert all(item["trace_id"] == "trace-safe" for item in recorded)
+    assert all("generated_reply" not in item for item in recorded)
 
 
 class _PolicyGate:

@@ -115,6 +115,64 @@ def _clear_recent_media_for_test() -> None:
     _recent_media_by_sender.clear()
 
 
+def _record_recovery_failure(
+    *,
+    bot: Any,
+    event: Any,
+    state: dict[str, Any],
+    failure_stage: str,
+    failure_class: str,
+) -> int:
+    """Persist only failed inbound messages; never store a generated reply."""
+
+    from ..core.reply_recovery_queue import ReplyRecoveryQueue
+
+    bot_id = str(getattr(bot, "self_id", "") or "").strip()
+    if not bot_id:
+        return 0
+    fallback_group_id = str(getattr(event, "group_id", "") or "").strip()
+    fallback_user_id = str(getattr(event, "user_id", "") or "").strip()
+    batched = state.get("batched_events")
+    entries = [item for item in batched if isinstance(item, dict)] if isinstance(batched, list) else []
+    if not entries:
+        entries = [
+            {
+                "message_id": str(getattr(event, "message_id", "") or "").strip(),
+                "user_id": fallback_user_id,
+                "group_id": fallback_group_id,
+                "text": _extract_plain_text(event),
+                "media": list(state.get("turn_media_context") or []),
+            }
+        ]
+    queue = ReplyRecoveryQueue()
+    recorded = 0
+    for item in entries:
+        message_id = str(item.get("message_id") or "").strip()
+        group_id = str(item.get("group_id") or fallback_group_id).strip()
+        user_id = str(item.get("user_id") or fallback_user_id).strip()
+        conversation_kind = "group" if group_id else "private"
+        conversation_id = group_id or user_id
+        text = str(item.get("text") or "").strip()
+        media = item.get("media") if isinstance(item.get("media"), list) else []
+        if not message_id or not conversation_id or (not text and not media):
+            continue
+        queue.record_failure(
+            bot_id=bot_id,
+            conversation_kind=conversation_kind,
+            conversation_id=conversation_id,
+            original_message_id=message_id,
+            normalized_text=text,
+            media_refs=media,
+            failure_stage=failure_stage,
+            failure_class=failure_class,
+            route_fingerprint=str(state.get("provider_route_fingerprint", "") or ""),
+            trace_id=str(state.get("reply_trace_id", "") or ""),
+            missing_part_indexes=state.get("delivery_missing_part_indexes") or (),
+        )
+        recorded += 1
+    return recorded
+
+
 async def _handle_reply_timeout(
     *,
     bot: Any,
@@ -125,7 +183,7 @@ async def _handle_reply_timeout(
     logger: Any,
     commit_lock: asyncio.Lock | None = None,
 ) -> None:
-    del bot, event, logger, commit_lock
+    del logger, commit_lock
     delivery_started = bool(state.get("reply_delivery_started", False))
     delivery_confirmed = bool(state.get("reply_delivery_confirmed", False))
     delivery_complete = bool(state.get("reply_delivery_complete", False))
@@ -146,6 +204,25 @@ async def _handle_reply_timeout(
         delivery_state = "not_started"
         outcome = "failed"
         diagnosis_code = "reply_timeout"
+    if not delivery_complete:
+        failure_class = (
+            "delivery_partial"
+            if delivery_confirmed
+            else "delivery_unknown"
+            if delivery_started
+            else "generation_failed_before_send"
+        )
+        try:
+            await asyncio.to_thread(
+                _record_recovery_failure,
+                bot=bot,
+                event=event,
+                state=state,
+                failure_stage=diagnosis_code,
+                failure_class=failure_class,
+            )
+        except Exception:
+            pass
     try:
         from ..core import reply_turn_trace
 
@@ -1099,6 +1176,24 @@ async def run_buffer_timer(
                 f"拟人插件：处理拼接消息失败，保持静默: "
                 f"type={type(exc).__name__} delivery_state={delivery_state}"
             )
+            try:
+                failure_class = (
+                    "delivery_partial"
+                    if state.get("reply_delivery_confirmed")
+                    else "delivery_unknown"
+                    if state.get("reply_delivery_started")
+                    else "generation_failed_before_send"
+                )
+                await asyncio.to_thread(
+                    _record_recovery_failure,
+                    bot=bot,
+                    event=selected_event,
+                    state=state,
+                    failure_stage="reply_processing_failed",
+                    failure_class=failure_class,
+                )
+            except Exception:
+                pass
     finally:
         entry["processing"] = False
         entry["active_task"] = None
@@ -1422,6 +1517,24 @@ async def handle_reply_event(
                     f"拟人插件：会话 {session_key} direct turn 处理失败，保持静默: "
                     f"type={type(exc).__name__} delivery_state={delivery_state}"
                 )
+                try:
+                    failure_class = (
+                        "delivery_partial"
+                        if direct_state.get("reply_delivery_confirmed")
+                        else "delivery_unknown"
+                        if direct_state.get("reply_delivery_started")
+                        else "generation_failed_before_send"
+                    )
+                    await asyncio.to_thread(
+                        _record_recovery_failure,
+                        bot=bot,
+                        event=event,
+                        state=direct_state,
+                        failure_stage="reply_processing_failed",
+                        failure_class=failure_class,
+                    )
+                except Exception:
+                    pass
         if is_private_session and bool(direct_state.get("reply_delivery_started", False)):
             _note_session_reply(session_key)
         return
