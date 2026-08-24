@@ -28,6 +28,27 @@ def test_v2_router_exposes_paged_trace_recovery_capability_and_sse_routes() -> N
     } <= paths
 
 
+def test_whole_backup_router_exposes_step_up_and_fail_closed_restore_routes() -> None:
+    routes = load_personification_module(
+        "plugin.personification.webui.routes.whole_backup_routes"
+    )
+    router = routes.build_whole_backup_router(
+        runtime=SimpleNamespace(get_bots=lambda: {})
+    )
+    paths = {route.path for route in router.routes}
+    assert {
+        "/api/v2/step-up/start",
+        "/api/v2/step-up/verify",
+        "/api/v2/backups/export/state",
+        "/api/v2/backups/export/secret",
+        "/api/v2/backups/inspect",
+        "/api/v2/backups/{artifact_id}/dry-run",
+        "/api/v2/backups/{artifact_id}/apply",
+        "/api/v2/backups/rollback/{journal_id}",
+        "/api/v2/backups/download/{artifact_id}",
+    } <= paths
+
+
 def test_react_production_build_is_served_with_spa_fallback() -> None:
     index = webui_app._serve_frontend_asset("")
     nested = webui_app._serve_frontend_asset("traces/example")
