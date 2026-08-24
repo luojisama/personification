@@ -117,9 +117,12 @@ def register_reply_matchers(
     finished_exception_cls: Any = None,
     user_policy_gate: Any = None,
 ) -> Dict[str, Any]:
-    response_timeout_seconds = max(
-        30.0,
-        float(getattr(plugin_config, "personification_response_timeout", 180) or 180),
+    response_timeout_seconds = min(
+        600.0,
+        max(
+            30.0,
+            float(getattr(plugin_config, "personification_response_timeout", 180) or 180),
+        ),
     )
     batch_timing = resolve_reply_buffer_timing(plugin_config)
     concurrency_controller = ReplyConcurrencyController(

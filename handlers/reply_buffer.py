@@ -10,6 +10,7 @@ from ..core import metrics
 from ..core.context_cleanup import release_message_buffer_entry_resources
 from ..core.message_relations import extract_reply_message_id
 from ..core.target_inference import normalize_message_target_for_review
+from ..core.turn_deadline import HARD_TURN_TIMEOUT_SECONDS, attach_turn_deadline
 from ..core.turn_media import (
     TurnMediaRef,
     coerce_turn_media,
@@ -1005,8 +1006,23 @@ async def run_buffer_timer(
     state["turn_generation_id"] = _next_turn_generation(key)
     entry["current_trigger_type"] = trigger_type
     entry["current_is_random_chat"] = bool(state.get("is_random_chat", False))
-    timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
-    state["response_deadline"] = time.monotonic() + timeout_seconds
+    timeout_seconds = min(
+        HARD_TURN_TIMEOUT_SECONDS,
+        max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS)),
+    )
+    first_received_at = min(
+        (
+            float(item.get("received_at", 0.0) or 0.0)
+            for item in items
+            if float(item.get("received_at", 0.0) or 0.0) > 0
+        ),
+        default=time.monotonic(),
+    )
+    turn_deadline = attach_turn_deadline(
+        state,
+        timeout_seconds=timeout_seconds,
+        started_at=first_received_at,
+    )
     try:
         from ..core import reply_turn_trace
 
@@ -1017,7 +1033,7 @@ async def run_buffer_timer(
             detail=(
                 f"session={key} trigger={trigger_type} events={len(events)} "
                 f"elapsed_ms={int((time.monotonic() - started_at) * 1000)} "
-                f"timeout={timeout_seconds:.0f}s"
+                f"timeout={timeout_seconds:.0f}s remaining={turn_deadline.remaining():.3f}s"
             ),
         )
     except Exception:
@@ -1199,8 +1215,15 @@ async def handle_reply_event(
         direct_state = dict(state)
         direct_state["batch_session_key"] = session_key
         direct_state["reply_required"] = True
-        timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
-        direct_state["response_deadline"] = time.monotonic() + timeout_seconds
+        timeout_seconds = min(
+            HARD_TURN_TIMEOUT_SECONDS,
+            max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS)),
+        )
+        attach_turn_deadline(
+            direct_state,
+            timeout_seconds=timeout_seconds,
+            started_at=time.monotonic(),
+        )
         try:
             async with concurrency_controller.direct_turn(
                 session_key,
@@ -1248,6 +1271,7 @@ async def handle_reply_event(
     )
     delay = _batch_delay(event, group_message_event_cls=group_message_event_cls)
     is_private_session = not isinstance(event, group_message_event_cls)
+    received_monotonic_at = time.monotonic()
     is_direct_mention = _is_direct_mention(event, bot_self_id)
     is_reply_to_bot = _is_reply_to_bot(
         event,
@@ -1336,8 +1360,15 @@ async def handle_reply_event(
                 max_wait_seconds=batch_max_wait_seconds,
                 backoff_seconds=float(legacy_reply_backoff_seconds or 0.0),
             )
-        timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
-        direct_state["response_deadline"] = time.monotonic() + timeout_seconds
+        timeout_seconds = min(
+            HARD_TURN_TIMEOUT_SECONDS,
+            max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS)),
+        )
+        attach_turn_deadline(
+            direct_state,
+            timeout_seconds=timeout_seconds,
+            started_at=received_monotonic_at,
+        )
         try:
             async with concurrency_controller.direct_turn(
                 session_key,
@@ -1401,7 +1432,7 @@ async def handle_reply_event(
         concurrency_controller=concurrency_controller,
     )
     entry["delay"] = delay
-    now_ts = time.monotonic()
+    now_ts = received_monotonic_at
     item = {
         "event": event,
         "state": dict(state),
