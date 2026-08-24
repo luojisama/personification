@@ -1371,6 +1371,95 @@ class MemoryStore:
                 items.append(payload)
         return items
 
+    def list_recent_memories_page(
+        self,
+        *,
+        group_id: str = "",
+        user_id: str = "",
+        palace_zone: str = "",
+        limit: int = 20,
+        offset: int = 0,
+        min_confidence: float = 0.0,
+        source_kind: str = "",
+        memory_type: str = "",
+        include_self: bool = False,
+    ) -> tuple[list[dict[str, Any]], int, int]:
+        """Return a database-paged memory catalog and hidden self-log count."""
+
+        if not self.palace_enabled():
+            return [], 0, 0
+        base_clauses = ["1=1"]
+        base_params: list[Any] = []
+        if group_id:
+            base_clauses.append("(group_id=? OR group_id='')")
+            base_params.append(str(group_id))
+        if user_id:
+            base_clauses.append("user_id = ?")
+            base_params.append(str(user_id))
+        if palace_zone:
+            base_clauses.append("palace_zone = ?")
+            base_params.append(str(palace_zone))
+        if source_kind:
+            base_clauses.append("json_extract(payload, '$.source_kind') = ?")
+            base_params.append(str(source_kind))
+        if memory_type:
+            base_clauses.append("memory_type = ?")
+            base_params.append(str(memory_type))
+        base_clauses.append("confidence >= ?")
+        base_params.append(float(min_confidence))
+
+        visible_clauses = list(base_clauses)
+        visible_params = list(base_params)
+        if not include_self:
+            hidden_source_kinds = (
+                "self_log",
+                "self_reply",
+                "self_say",
+                "bot_say",
+                "assistant_reply",
+            )
+            visible_clauses.append(
+                "COALESCE(json_extract(payload, '$.source_kind'), '') "
+                f"NOT IN ({','.join('?' for _ in hidden_source_kinds)})"
+            )
+            visible_params.extend(hidden_source_kinds)
+            visible_clauses.append("memory_type NOT IN (?)")
+            visible_params.append("episodic")
+
+        base_where = " AND ".join(base_clauses)
+        visible_where = " AND ".join(visible_clauses)
+        page_limit = max(1, min(int(limit or 20), 100))
+        page_offset = max(0, int(offset or 0))
+        with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
+            all_count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM memory_items WHERE {base_where}",
+                    tuple(base_params),
+                ).fetchone()[0]
+            )
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM memory_items WHERE {visible_where}",
+                    tuple(visible_params),
+                ).fetchone()[0]
+            )
+            rows = conn.execute(
+                f"""
+                SELECT payload
+                FROM memory_items
+                WHERE {visible_where}
+                ORDER BY updated_at DESC, memory_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*visible_params, page_limit, page_offset),
+            ).fetchall()
+        items = []
+        for row in rows:
+            payload = _json_loads(row["payload"], {})
+            if isinstance(payload, dict):
+                items.append(payload)
+        return items, total, max(0, all_count - total)
+
     def list_related_memory_candidates(
         self,
         *,

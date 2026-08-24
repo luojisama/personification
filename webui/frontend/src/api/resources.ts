@@ -7,6 +7,8 @@ import type {
   GroupListItem,
   StickerPage,
   ConfigListItem,
+  CatalogItem,
+  CursorPage,
   MultimodalRouteSnapshot,
   RecoveryItem,
   RouteCapabilityItem,
@@ -160,6 +162,18 @@ export const resources = {
   },
   config(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<Page<ConfigListItem>> {
     return api.get("/config", { page, page_size: pageSize, search }, signal);
+  },
+  catalog(
+    dataset: "plugin-knowledge" | "mcp" | "skills" | "tool-tasks" | "memories",
+    page = 1,
+    pageSize = 20,
+    search = "",
+    signal?: AbortSignal,
+  ): Promise<Page<CatalogItem>> {
+    return api.get(`/${dataset}`, { page, page_size: pageSize, search }, signal);
+  },
+  logs(limit = 100, cursor = 0, search = "", signal?: AbortSignal): Promise<CursorPage<CatalogItem>> {
+    return api.get("/logs", { limit, cursor, search }, signal);
   },
   multimodalRoutes(signal?: AbortSignal): Promise<MultimodalRouteSnapshot> {
     return api.get("/multimodal/routes", undefined, signal);

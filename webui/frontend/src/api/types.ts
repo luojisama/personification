@@ -6,6 +6,16 @@ export interface Page<T> {
   total_pages: number;
 }
 
+export type CatalogItem = Record<string, unknown>;
+
+export interface CursorPage<T> {
+  items: T[];
+  next_cursor: number;
+  has_more: boolean;
+  limit: number;
+  filters: Record<string, unknown>;
+}
+
 export type CapabilityState = "supported" | "unsupported" | "unknown";
 export type CapabilitySource =
   | "manual"

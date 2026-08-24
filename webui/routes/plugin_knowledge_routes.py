@@ -177,6 +177,48 @@ def _source_coverage_payload(
     }
 
 
+def list_plugin_knowledge_items(runtime: Any) -> list[dict[str, Any]]:
+    """Read the normalized plugin-knowledge catalog without WebUI response wrapping."""
+
+    store = _knowledge_store(runtime)
+    if store is None:
+        return []
+    index = store.load_index_sync()
+    plugins_map = index.get("plugins", {}) if isinstance(index, dict) else {}
+    items: list[dict[str, Any]] = []
+    for name, meta in plugins_map.items():
+        if not isinstance(meta, dict):
+            continue
+        coverage = _source_coverage_payload(meta=meta)
+        items.append(
+            {
+                "plugin_name": str(name),
+                "display_name": str(meta.get("display_name", "") or ""),
+                "summary": str(meta.get("summary", "") or "")[:200],
+                "keywords": list(meta.get("keywords", []) or [])[:8],
+                "category": str(meta.get("category", "") or ""),
+                "has_runtime_data": bool(meta.get("has_runtime_data", False)),
+                "has_source_data": bool(meta.get("has_source_data", False)),
+                "source_file_count": _as_int(meta.get("source_file_count")),
+                "source_chunk_count": _as_int(meta.get("source_chunk_count")),
+                "source_chars": _as_int(meta.get("source_chars")),
+                "analysis_strategy": str(meta.get("analysis_strategy", "") or ""),
+                "analysis_mode": str(meta.get("analysis_mode", "") or ""),
+                "analysis_scope": str(meta.get("analysis_scope", "") or coverage.get("analysis_scope", "")),
+                "source_complete": bool(meta.get("source_complete", coverage.get("source_complete", True))),
+                "source_truncated": bool(meta.get("source_truncated", coverage.get("source_truncated", False))),
+                "source_coverage": coverage,
+                "updated_at": str(meta.get("updated_at", "") or ""),
+            }
+        )
+    items.sort(key=lambda item: (item["category"] or "~", item["plugin_name"]))
+    return items
+
+
+def plugin_knowledge_available(runtime: Any) -> bool:
+    return _knowledge_store(runtime) is not None
+
+
 def build_plugin_knowledge_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/plugin-knowledge", tags=["plugin_knowledge"])
 
@@ -189,35 +231,7 @@ def build_plugin_knowledge_router(*, runtime) -> APIRouter:
                 _store_unavailable_report(operation="插件知识索引"),
             )
         try:
-            index = store.load_index_sync()
-            plugins_map = index.get("plugins", {}) if isinstance(index, dict) else {}
-            items: list[dict[str, Any]] = []
-            for name, meta in plugins_map.items():
-                if not isinstance(meta, dict):
-                    continue
-                coverage = _source_coverage_payload(meta=meta)
-                items.append(
-                    {
-                        "plugin_name": str(name),
-                        "display_name": str(meta.get("display_name", "") or ""),
-                        "summary": str(meta.get("summary", "") or "")[:200],
-                        "keywords": list(meta.get("keywords", []) or [])[:8],
-                        "category": str(meta.get("category", "") or ""),
-                        "has_runtime_data": bool(meta.get("has_runtime_data", False)),
-                        "has_source_data": bool(meta.get("has_source_data", False)),
-                        "source_file_count": _as_int(meta.get("source_file_count")),
-                        "source_chunk_count": _as_int(meta.get("source_chunk_count")),
-                        "source_chars": _as_int(meta.get("source_chars")),
-                        "analysis_strategy": str(meta.get("analysis_strategy", "") or ""),
-                        "analysis_mode": str(meta.get("analysis_mode", "") or ""),
-                        "analysis_scope": str(meta.get("analysis_scope", "") or coverage.get("analysis_scope", "")),
-                        "source_complete": bool(meta.get("source_complete", coverage.get("source_complete", True))),
-                        "source_truncated": bool(meta.get("source_truncated", coverage.get("source_truncated", False))),
-                        "source_coverage": coverage,
-                        "updated_at": str(meta.get("updated_at", "") or ""),
-                    }
-                )
-            items.sort(key=lambda x: (x["category"] or "~", x["plugin_name"]))
+            items = list_plugin_knowledge_items(runtime)
         except Exception as exc:
             raise _read_failure(
                 runtime,

@@ -917,6 +917,221 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             "steps": [],
         }
 
+    @router.get("/plugin-knowledge")
+    async def plugin_knowledge(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        search: str = Query(default="", max_length=120),
+        category: str = Query(default="", max_length=80),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from .plugin_knowledge_routes import list_plugin_knowledge_items, plugin_knowledge_available
+
+        params = normalize_pagination(page=page, page_size=page_size)
+        needle = str(search or "").strip().casefold()
+        category_filter = str(category or "").strip()
+        try:
+            source_rows = await run_in_threadpool(list_plugin_knowledge_items, runtime)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "plugin_knowledge_catalog_unavailable", "message": "插件知识索引暂时不可用。"},
+            ) from exc
+        rows = []
+        for item in source_rows:
+            if category_filter and str(item.get("category") or "") != category_filter:
+                continue
+            haystack = " ".join(
+                (
+                    str(item.get("plugin_name") or ""),
+                    str(item.get("display_name") or ""),
+                    str(item.get("summary") or ""),
+                    " ".join(str(value or "") for value in item.get("keywords") or []),
+                )
+            ).casefold()
+            if not needle or needle in haystack:
+                rows.append(item)
+        payload = build_page(
+            rows[params.offset : params.offset + params.page_size],
+            total=len(rows),
+            params=params,
+        ).to_dict()
+        payload["available"] = plugin_knowledge_available(runtime)
+        return payload
+
+    @router.get("/mcp")
+    async def mcp_installations(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        search: str = Query(default="", max_length=120),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from .mcp_routes import list_mcp_installations
+
+        params = normalize_pagination(page=page, page_size=page_size)
+        try:
+            source_rows = await list_mcp_installations(runtime)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "mcp_catalog_unavailable", "message": "MCP 安装目录暂时不可用。"},
+            ) from exc
+        needle = str(search or "").strip().casefold()
+        rows = [
+            item
+            for item in source_rows
+            if not needle
+            or needle
+            in " ".join(
+                str(item.get(key) or "")
+                for key in ("installation_id", "name", "server_name", "source_id", "status")
+            ).casefold()
+        ]
+        return build_page(
+            rows[params.offset : params.offset + params.page_size],
+            total=len(rows),
+            params=params,
+        ).to_dict()
+
+    @router.get("/skills")
+    async def skills(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        search: str = Query(default="", max_length=120),
+        category: str = Query(default="", max_length=80),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from .skill_routes import skill_catalog_payload
+
+        params = normalize_pagination(page=page, page_size=page_size)
+        catalog = await run_in_threadpool(skill_catalog_payload, runtime)
+        needle = str(search or "").strip().casefold()
+        category_filter = str(category or "").strip()
+        rows = []
+        for item in catalog.get("skills") or []:
+            if category_filter and str(item.get("category") or "") != category_filter:
+                continue
+            haystack = " ".join(
+                str(item.get(key) or "") for key in ("name", "description", "category", "source_kind")
+            ).casefold()
+            if not needle or needle in haystack:
+                rows.append(item)
+        payload = build_page(
+            rows[params.offset : params.offset + params.page_size],
+            total=len(rows),
+            params=params,
+        ).to_dict()
+        payload.update(
+            {
+                "available": bool(catalog.get("available", False)),
+                "summary": catalog.get("summary") or {},
+            }
+        )
+        return payload
+
+    @router.get("/tool-tasks")
+    async def tool_tasks(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        search: str = Query(default="", max_length=120),
+        status: str = Query(default="", max_length=40),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from ...core.tool_creator import get_tool_creator_service
+
+        params = normalize_pagination(page=page, page_size=page_size)
+        service = get_tool_creator_service(runtime)
+        rows, total = await run_in_threadpool(
+            service.list_page,
+            limit=params.page_size,
+            offset=params.offset,
+            status=status,
+            search=search,
+        )
+        return build_page(rows, total=total, params=params).to_dict()
+
+    @router.get("/memories")
+    async def memories(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        memory_type: str = Query(default="", max_length=64),
+        group_id: str = Query(default="", max_length=64),
+        user_id: str = Query(default="", max_length=64),
+        palace_zone: str = Query(default="", max_length=64),
+        source_kind: str = Query(default="", max_length=64),
+        include_self: bool = Query(default=False),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        params = normalize_pagination(page=page, page_size=page_size)
+        store = _runtime_service(runtime, "memory_store")
+        if store is None or not callable(getattr(store, "list_recent_memories_page", None)):
+            payload = build_page([], total=0, params=params).to_dict()
+            payload.update({"available": False, "hidden_self_count": 0})
+            return payload
+        rows, total, hidden = await run_in_threadpool(
+            store.list_recent_memories_page,
+            group_id=group_id,
+            user_id=user_id,
+            palace_zone=palace_zone,
+            limit=params.page_size,
+            offset=params.offset,
+            source_kind=source_kind,
+            memory_type=memory_type,
+            include_self=include_self,
+        )
+        safe_rows = [
+            {
+                "memory_id": str(item.get("memory_id") or ""),
+                "memory_type": str(item.get("memory_type") or ""),
+                "group_id": str(item.get("group_id") or ""),
+                "user_id": str(item.get("user_id") or ""),
+                "summary": guard_visible_text(
+                    item.get("summary", ""),
+                    surface="webui_v2_memory_summary",
+                    allow_direct_media=False,
+                    enforce_role_integrity=False,
+                )[:300],
+                "source_kind": str(item.get("source_kind") or ""),
+                "tier": str(item.get("tier") or ""),
+                "palace_zone": str(item.get("palace_zone") or ""),
+                "confidence": float(item.get("confidence") or 0),
+                "salience": float(item.get("salience") or 0),
+                "updated_at": float(item.get("updated_at") or 0),
+            }
+            for item in rows
+            if isinstance(item, dict)
+        ]
+        payload = build_page(safe_rows, total=total, params=params).to_dict()
+        payload.update({"available": True, "hidden_self_count": hidden, "include_self": include_self})
+        return payload
+
+    @router.get("/logs")
+    async def logs(
+        limit: int = Query(default=100, ge=1, le=500),
+        cursor: int = Query(default=0, ge=0),
+        level: str = Query(default="", max_length=16),
+        search: str = Query(default="", max_length=120),
+        trace_id: str = Query(default="", max_length=64),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from ...core import plugin_runtime_logs
+
+        result = await run_in_threadpool(
+            plugin_runtime_logs.query_page,
+            limit=limit,
+            cursor=cursor,
+            level=level,
+            q=search,
+            trace_id=trace_id,
+        )
+        return {
+            "items": result.get("entries") or [],
+            "next_cursor": int(result.get("next_cursor") or 0),
+            "has_more": bool(result.get("has_more", False)),
+            "limit": int(result.get("limit") or limit),
+            "filters": result.get("filters") or {},
+        }
+
     @router.get("/overview")
     async def overview(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
         traces, _ = await run_in_threadpool(reply_turn_trace.query_page, limit=8, offset=0)

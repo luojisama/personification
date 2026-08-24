@@ -9,6 +9,7 @@ import { RouteCapabilitiesPage } from "../pages/RouteCapabilitiesPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { TracesPage } from "../pages/TracesPage";
 import { SystemDiagnosticsPage } from "../pages/SystemDiagnosticsPage";
+import { RuntimeCatalogPage } from "../pages/RuntimeCatalogPage";
 
 export const router = createBrowserRouter(
   [
@@ -22,6 +23,7 @@ export const router = createBrowserRouter(
         { path: "traces/:traceId", element: <TracesPage /> },
         { path: "recovery", element: <RecoveryPage /> },
         { path: "data", element: <ManagementDataPage /> },
+        { path: "catalog", element: <RuntimeCatalogPage /> },
         { path: "systems", element: <SystemDiagnosticsPage /> },
         { path: "settings", element: <SettingsPage /> },
         { path: "*", element: <NotFoundPage /> },

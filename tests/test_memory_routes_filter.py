@@ -138,6 +138,23 @@ def test_include_self_returns_all(_runtime_with_memory) -> None:
     assert len(body["items"]) == 5
 
 
+def test_v2_memory_page_uses_database_pagination_and_self_filter(_runtime_with_memory) -> None:
+    client = _build_client(_runtime_with_memory)
+    _login(client, _runtime_with_memory)
+    first = client.get("/personification/api/v2/memories?page=1&page_size=1&group_id=g1")
+    second = client.get("/personification/api/v2/memories?page=2&page_size=1&group_id=g1")
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    first_body = first.json()
+    second_body = second.json()
+    assert first_body["total"] == 2
+    assert first_body["total_pages"] == 2
+    assert first_body["hidden_self_count"] == 3
+    assert len(first_body["items"]) == len(second_body["items"]) == 1
+    assert first_body["items"][0]["memory_id"] != second_body["items"][0]["memory_id"]
+
+
 def test_source_kind_filter(_runtime_with_memory) -> None:
     client = _build_client(_runtime_with_memory)
     _login(client, _runtime_with_memory)

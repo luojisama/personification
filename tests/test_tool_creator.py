@@ -176,3 +176,22 @@ def test_tool_creator_retry_requeues_failed_task(tmp_path: Path, monkeypatch) ->
     retried = service.retry(task_id=task["task_id"], creator="10001", expected_version=failed["version"])
     assert retried["status"] == "queued"
     assert retried["error"] == ""
+
+
+def test_tool_creator_list_page_filters_and_counts(tmp_path: Path, monkeypatch) -> None:
+    _init_store(tmp_path, monkeypatch)
+    service_mod = load_personification_module("plugin.personification.core.tool_creator")
+    monkeypatch.setattr(service_mod, "get_data_dir", lambda _cfg=None: tmp_path)
+    service = service_mod.ToolCreatorService(_runtime(tmp_path, _Caller([])))
+    first = service.create(creator="10001", request_text="创建天气工具", suggested_name="weather_tool")
+    second = service.create(creator="10001", request_text="创建日历工具", suggested_name="calendar_tool")
+    service._set(second["task_id"], status="failed", phase="failed", progress=100, error="ValueError")
+
+    rows, total = service.list_page(limit=1, offset=0, status="failed", search="日历")
+
+    assert total == 1
+    assert [item["task_id"] for item in rows] == [second["task_id"]]
+    all_rows, all_total = service.list_page(limit=1, offset=1)
+    assert all_total == 2
+    assert len(all_rows) == 1
+    assert all_rows[0]["task_id"] == first["task_id"]

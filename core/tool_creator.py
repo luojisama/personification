@@ -81,12 +81,44 @@ class ToolCreatorService:
         return _public_task(row) if row is not None else None
 
     def list(self, limit: int = 30) -> list[dict[str, Any]]:
+        rows, _total = self.list_page(limit=limit)
+        return rows
+
+    def list_page(
+        self,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        status: str = "",
+        search: str = "",
+    ) -> tuple[list[dict[str, Any]], int]:
+        clauses = ["1=1"]
+        params: list[Any] = []
+        normalized_status = str(status or "").strip()
+        if normalized_status:
+            clauses.append("status = ?")
+            params.append(normalized_status)
+        normalized_search = str(search or "").strip()[:120]
+        if normalized_search:
+            clauses.append("(task_id LIKE ? OR request_text LIKE ? OR suggested_name LIKE ?)")
+            like = f"%{normalized_search}%"
+            params.extend((like, like, like))
+        page_limit = max(1, min(int(limit or 30), 100))
+        page_offset = max(0, int(offset or 0))
+        where_sql = " AND ".join(clauses)
         with connect_sync() as conn:
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM tool_creator_tasks WHERE {where_sql}",
+                    tuple(params),
+                ).fetchone()[0]
+            )
             rows = conn.execute(
-                "SELECT * FROM tool_creator_tasks ORDER BY created_at DESC LIMIT ?",
-                (max(1, min(int(limit or 30), 100)),),
+                f"SELECT * FROM tool_creator_tasks WHERE {where_sql} "
+                "ORDER BY created_at DESC, task_id DESC LIMIT ? OFFSET ?",
+                (*params, page_limit, page_offset),
             ).fetchall()
-        return [_public_task(row) for row in rows]
+        return [_public_task(row) for row in rows], total
 
     def events(self, task_id: str, after_seq: int = 0) -> list[dict[str, Any]]:
         with connect_sync() as conn:

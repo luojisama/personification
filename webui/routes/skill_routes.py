@@ -377,93 +377,99 @@ def _normalize_remote_source_body(body: dict[str, Any]) -> dict[str, Any]:
     return parsed[0]
 
 
+def skill_catalog_payload(runtime: Any) -> dict[str, Any]:
+    """Build the shared, side-effect-free Skill catalog used by v1 and v2."""
+
+    registry = _tool_registry(runtime)
+    remote_sources, review_stats = _remote_sources_payload(runtime)
+    mcp_tools = _mcp_tools_payload()
+    cfg = _plugin_config(runtime)
+    summary = {
+        "total": 0,
+        "active": 0,
+        "disabled_by_config": 0,
+        "user_disabled": 0,
+        "mcp_tools": len(mcp_tools),
+        "remote_enabled": bool(getattr(cfg, "personification_skill_remote_enabled", False)),
+        "remote_sources": len(remote_sources),
+        "remote_sources_enabled": len([item for item in remote_sources if item.get("enabled")]),
+        "remote_pending": int(review_stats.get("pending", 0)),
+        "remote_approved": int(review_stats.get("approved", 0)),
+        "remote_rejected": int(review_stats.get("rejected", 0)),
+        "require_admin_review": bool(getattr(cfg, "personification_skill_require_admin_review", True)),
+        "allow_unsafe_external": bool(getattr(cfg, "personification_skill_allow_unsafe_external", False)),
+        "use_skillpacks": bool(getattr(cfg, "personification_use_skillpacks", False)),
+        "reload_available": _runtime_reload_available(runtime),
+    }
+    if registry is None:
+        return {
+            "skills": [],
+            "available": False,
+            "summary": summary,
+            "remote_sources": remote_sources,
+            "mcp_tools": mcp_tools,
+        }
+    overrides = skill_overrides.list_overrides()
+    try:
+        from ...core.tool_health import get_tool_health_statuses
+
+        health_by_name = {item.get("name"): item for item in get_tool_health_statuses()}
+    except Exception:
+        health_by_name = {}
+    skills = []
+    mcp_names = {item["name"] for item in mcp_tools}
+    for tool in registry.all():
+        override = overrides.get(tool.name, {})
+        try:
+            enabled_by_config = bool(tool.enabled())
+        except Exception:
+            enabled_by_config = False
+        user_disabled = bool(override.get("disabled", False))
+        metadata = dict(tool.metadata or {})
+        is_mcp = tool.name in mcp_names or str(metadata.get("category") or "").lower() == "mcp"
+        health = health_by_name.get(tool.name) or {}
+        health_disabled = bool(health and not health.get("available", True))
+        skills.append(
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "category": metadata.get("category", ""),
+                "source_kind": metadata.get("source_kind", "mcp" if is_mcp else ""),
+                "local": bool(getattr(tool, "local", True)),
+                "mcp": bool(is_mcp),
+                "enabled_by_config": enabled_by_config,
+                "user_disabled": user_disabled,
+                "health_disabled": health_disabled,
+                "health": health,
+                "reason": override.get("reason", ""),
+            }
+        )
+        summary["total"] += 1
+        if not enabled_by_config:
+            summary["disabled_by_config"] += 1
+        if user_disabled:
+            summary["user_disabled"] += 1
+        if health_disabled:
+            summary["health_disabled"] = int(summary.get("health_disabled", 0) or 0) + 1
+        if enabled_by_config and not user_disabled and not health_disabled:
+            summary["active"] += 1
+    skills.sort(key=lambda item: (item["category"], item["name"]))
+    summary["mcp_tools"] = len(mcp_names | {str(item["name"]) for item in skills if item.get("mcp")})
+    return {
+        "skills": skills,
+        "available": True,
+        "summary": summary,
+        "remote_sources": remote_sources,
+        "mcp_tools": mcp_tools,
+    }
+
+
 def build_skill_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/skills", tags=["skills"])
 
     @router.get("")
     async def list_skills(_: AdminIdentity = Depends(require_admin)) -> dict:
-        registry = _tool_registry(runtime)
-        remote_sources, review_stats = _remote_sources_payload(runtime)
-        mcp_tools = _mcp_tools_payload()
-        cfg = _plugin_config(runtime)
-        summary = {
-            "total": 0,
-            "active": 0,
-            "disabled_by_config": 0,
-            "user_disabled": 0,
-            "mcp_tools": len(mcp_tools),
-            "remote_enabled": bool(getattr(cfg, "personification_skill_remote_enabled", False)),
-            "remote_sources": len(remote_sources),
-            "remote_sources_enabled": len([item for item in remote_sources if item.get("enabled")]),
-            "remote_pending": int(review_stats.get("pending", 0)),
-            "remote_approved": int(review_stats.get("approved", 0)),
-            "remote_rejected": int(review_stats.get("rejected", 0)),
-            "require_admin_review": bool(getattr(cfg, "personification_skill_require_admin_review", True)),
-            "allow_unsafe_external": bool(getattr(cfg, "personification_skill_allow_unsafe_external", False)),
-            "use_skillpacks": bool(getattr(cfg, "personification_use_skillpacks", False)),
-            "reload_available": _runtime_reload_available(runtime),
-        }
-        if registry is None:
-            return {
-                "skills": [],
-                "available": False,
-                "summary": summary,
-                "remote_sources": remote_sources,
-                "mcp_tools": mcp_tools,
-            }
-        overrides = skill_overrides.list_overrides()
-        try:
-            from ...core.tool_health import get_tool_health_statuses
-
-            health_by_name = {item.get("name"): item for item in get_tool_health_statuses()}
-        except Exception:
-            health_by_name = {}
-        skills = []
-        mcp_names = {item["name"] for item in mcp_tools}
-        for tool in registry.all():
-            override = overrides.get(tool.name, {})
-            try:
-                enabled_by_config = bool(tool.enabled())
-            except Exception:
-                enabled_by_config = False
-            user_disabled = bool(override.get("disabled", False))
-            metadata = dict(tool.metadata or {})
-            is_mcp = tool.name in mcp_names or str(metadata.get("category") or "").lower() == "mcp"
-            health = health_by_name.get(tool.name) or {}
-            health_disabled = bool(health and not health.get("available", True))
-            skills.append(
-                {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "category": (tool.metadata or {}).get("category", ""),
-                    "source_kind": metadata.get("source_kind", "mcp" if is_mcp else ""),
-                    "local": bool(getattr(tool, "local", True)),
-                    "mcp": bool(is_mcp),
-                    "enabled_by_config": enabled_by_config,
-                    "user_disabled": user_disabled,
-                    "health_disabled": health_disabled,
-                    "health": health,
-                    "reason": override.get("reason", ""),
-                }
-            )
-            summary["total"] += 1
-            if not enabled_by_config:
-                summary["disabled_by_config"] += 1
-            if user_disabled:
-                summary["user_disabled"] += 1
-            if health_disabled:
-                summary["health_disabled"] = int(summary.get("health_disabled", 0) or 0) + 1
-            if enabled_by_config and not user_disabled and not health_disabled:
-                summary["active"] += 1
-        skills.sort(key=lambda x: (x["category"], x["name"]))
-        summary["mcp_tools"] = len(mcp_names | {str(item["name"]) for item in skills if item.get("mcp")})
-        return {
-            "skills": skills,
-            "available": True,
-            "summary": summary,
-            "remote_sources": remote_sources,
-            "mcp_tools": mcp_tools,
-        }
+        return skill_catalog_payload(runtime)
 
     @router.post("/remote/toggle")
     async def toggle_remote_loading(

@@ -108,6 +108,14 @@ def _failure(
     )
 
 
+async def list_mcp_installations(runtime: Any) -> list[dict[str, Any]]:
+    """Return the shared, refreshed MCP installation catalog for WebUI adapters."""
+
+    current_manager = get_mcp_manager(runtime)
+    await current_manager.refresh_process_states()
+    return list(current_manager.list_public())
+
+
 def _strict_bool(body: dict[str, Any], key: str, *, title: str, default: Any = None) -> bool:
     value = body.get(key, default)
     if type(value) is not bool:
@@ -279,9 +287,7 @@ def build_mcp_router(*, runtime: Any) -> APIRouter:
 
     @router.get("/installations")
     async def installations(_: AdminIdentity = Depends(require_admin)) -> dict:
-        current_manager = manager()
-        await current_manager.refresh_process_states()
-        items = current_manager.list_public()
+        items = await list_mcp_installations(runtime)
         return {"installations": items, "total": len(items)}
 
     @router.post("/install")
