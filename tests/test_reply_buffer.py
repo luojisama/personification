@@ -34,6 +34,12 @@ class _FileSeg:
     type: str = "file"
 
 
+@dataclass
+class _JsonSeg:
+    data: dict[str, str]
+    type: str = "json"
+
+
 class _Message(list):
     pass
 
@@ -138,6 +144,23 @@ def test_recovery_projection_stores_each_inbound_message_without_reply(
     assert all(item["route_fingerprint"] == "route-safe" for item in recorded)
     assert all(item["trace_id"] == "trace-safe" for item in recorded)
     assert all("generated_reply" not in item for item in recorded)
+
+
+def test_share_card_context_is_structured_and_untrusted() -> None:
+    event = _GroupEvent(99, "看看这个")
+    event.message.append(
+        _JsonSeg(
+            {
+                "data": '{"prompt":"[链接] 示例","meta":{"news":{"jumpUrl":"https://example.com/a","desc":"摘要"}}}'
+            }
+        )
+    )
+    shared, forward = reply_buffer._extract_shared_content_context(event)
+    assert forward is None
+    assert len(shared) == 1
+    assert shared[0]["canonical_url"] == "https://example.com/a"
+    assert shared[0]["trust"] == "untrusted_data_only"
+    assert shared[0]["evidence_state"] == "metadata_only"
 
 
 class _PolicyGate:

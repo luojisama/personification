@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict
 from ..core import metrics
 from ..core.context_cleanup import release_message_buffer_entry_resources
 from ..core.message_relations import extract_reply_message_id
+from ..core.shared_content import normalize_merged_forward, parse_onebot_share_card
 from ..core.target_inference import normalize_message_target_for_review
 from ..core.turn_deadline import HARD_TURN_TIMEOUT_SECONDS, attach_turn_deadline
 from ..core.turn_media import (
@@ -555,6 +556,27 @@ def _extract_plain_text(event: Any) -> str:
     except Exception:
         return ""
     return "".join(parts).strip()
+
+
+def _extract_shared_content_context(event: Any) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    shared: list[dict[str, Any]] = []
+    forward_bundle: dict[str, Any] | None = None
+    try:
+        for segment in getattr(event, "message", None) or []:
+            segment_type = str(getattr(segment, "type", "") or "").strip().lower()
+            data = getattr(segment, "data", {}) or {}
+            if segment_type in {"json", "xml", "share"}:
+                item = parse_onebot_share_card(
+                    {"type": segment_type, "data": dict(data)},
+                    segment_type=segment_type,
+                )
+                shared.append(item.to_dict())
+            elif segment_type in {"forward", "node"}:
+                payload = data.get("content") or data.get("nodes") or data
+                forward_bundle = normalize_merged_forward(payload).to_dict()
+    except Exception:
+        return shared[:12], forward_bundle
+    return shared[:12], forward_bundle
 
 
 def _is_sticker_only_event(event: Any) -> bool:
@@ -1394,6 +1416,13 @@ async def handle_reply_event(
     state["reply_required"] = reply_required
     state.setdefault("received_wall_at", time.time())
     event_plain_text = _extract_plain_text(event)
+    shared_contents, forward_bundle = _extract_shared_content_context(event)
+    if shared_contents:
+        state["shared_contents"] = shared_contents
+        state["shared_content_trust"] = "untrusted_data_only"
+    if forward_bundle is not None:
+        state["forward_bundle"] = forward_bundle
+        state["forward_content_unavailable"] = bool(forward_bundle.get("unavailable_nodes"))
     event_media = extract_turn_media_from_event(event, current_origin="current")
     if event_media and not event_plain_text:
         _remember_recent_media(

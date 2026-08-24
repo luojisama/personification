@@ -1,4 +1,3 @@
-import json
 import random
 import re
 import time
@@ -15,6 +14,7 @@ from ..core.message_provenance import (
 )
 from ..core.group_roles import extract_sender_role
 from ..core.group_mute import is_group_muted
+from ..core.shared_content import parse_onebot_share_card
 from ..core.target_inference import (
     MessageTargetDecision,
     TARGET_BOT,
@@ -364,38 +364,18 @@ async def record_msg_rule(_event: Event, *, user_policy_gate: Any = None) -> boo
 
 
 def _extract_share_card_token(seg_type: str, data: dict) -> str:
-    """从 QQ 分享卡片（json/xml 段）抽出标题，渲染成 [分享:标题]。
+    """将 QQ 卡片的已验证元数据投影成短文本，不声称已经访问网页。"""
 
-    让群里转发的视频/链接/小程序卡片的标题进入消息文本与上下文，
-    使 agent 能据此判断意图、按需联网查证（而不是只看到一个空卡片）。
-    """
-    raw = str((data or {}).get("data", "") or "").strip()
-    if not raw:
-        return "[分享]"
-    title = ""
-    try:
-        if seg_type == "json":
-            obj = json.loads(raw)
-            if isinstance(obj, dict):
-                title = str(obj.get("prompt", "") or "").strip()
-                if not title:
-                    meta = obj.get("meta")
-                    if isinstance(meta, dict):
-                        for value in meta.values():
-                            if isinstance(value, dict):
-                                title = str(value.get("title", "") or value.get("desc", "") or "").strip()
-                                if title:
-                                    break
-        else:  # xml
-            match = re.search(r'(?:brief|title)="([^"]+)"', raw)
-            if match:
-                title = match.group(1).strip()
-    except Exception:
-        title = ""
-    # QQ 的 prompt 常带 [QQ小程序]/[链接] 之类前缀标签，去掉它只留真正标题。
-    title = re.sub(r"^\s*\[[^\]]*\]\s*", "", str(title or ""))
-    title = re.sub(r"\s+", " ", title).strip().strip("[]").strip()[:40]
-    return f"[分享:{title}]" if title else "[分享]"
+    shared = parse_onebot_share_card(
+        {"type": seg_type, "data": dict(data or {})},
+        segment_type=seg_type,
+    )
+    if not shared.available:
+        return "[分享:内容不可用]"
+    label = shared.title or shared.summary or shared.canonical_url
+    label = re.sub(r"\s+", " ", str(label or "")).strip()[:80]
+    platform = shared.platform if shared.platform != "unknown" else "分享"
+    return f"[{platform}:{label}]" if label else f"[{platform}:仅元数据]"
 
 
 def _extract_recordable_group_message(event: Any) -> tuple[str, int, str]:
@@ -432,7 +412,7 @@ def _extract_recordable_group_message(event: Any) -> tuple[str, int, str]:
                 token = "[图片]"
                 text_parts.append(token)
                 visual_parts.append(token)
-            elif seg_type in ("json", "xml"):
+            elif seg_type in ("json", "xml", "share"):
                 token = _extract_share_card_token(seg_type, data)
                 text_parts.append(token)
                 visual_parts.append(token)

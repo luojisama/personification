@@ -27,5 +27,5 @@ def test_xml_share_card_extracts_brief() -> None:
 
 
 def test_share_card_empty_or_bad_payload() -> None:
-    assert event_rules._extract_share_card_token("json", {"data": ""}) == "[分享]"
-    assert event_rules._extract_share_card_token("json", {"data": "not-json"}) == "[分享]"
+    assert event_rules._extract_share_card_token("json", {"data": ""}) == "[分享:内容不可用]"
+    assert event_rules._extract_share_card_token("json", {"data": "not-json"}) == "[分享:内容不可用]"
