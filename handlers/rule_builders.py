@@ -28,9 +28,10 @@ def build_personification_rule(
     get_recent_group_msgs: Callable[[str, int], list[dict]] | None = None,
     user_policy_gate: Any = None,
     favorability_service: Any = None,
+    attention_service: Any = None,
 ) -> Callable[[Event, T_State], Awaitable[bool]]:
     async def _rule(event: Event, state: T_State) -> bool:
-        return await personification_rule_core(
+        legacy_should_reply = await personification_rule_core(
             event,
             state,
             sign_in_available=sign_in_available,
@@ -51,6 +52,53 @@ def build_personification_rule(
             user_policy_gate=user_policy_gate,
             favorability_service=favorability_service,
         )
+        if attention_service is None or not bool(state.get("attention_admitted", False)):
+            return legacy_should_reply
+        is_group = isinstance(event, group_event_cls)
+        target = str(state.get("message_target", "") or "").strip().lower()
+        is_at_bot = bool(
+            getattr(event, "to_me", False)
+            or str(state.get("message_target_reason", "") or "")
+            in {"explicit_persona_mention", "persona_name_mention"}
+        )
+        is_reply_to_bot = bool(
+            getattr(event, "reply", None)
+            and target == "bot"
+        )
+        is_continuation = bool(
+            state.get("active_followup")
+            or state.get("solo_speaker_follow")
+            or state.get("group_idle_active")
+        )
+        group_id = str(getattr(event, "group_id", "") or "").strip()
+        user_id = str(getattr(event, "user_id", "") or "").strip()
+        bot_id = str(getattr(event, "self_id", "") or "").strip()
+        session_key = f"{bot_id}:{group_id or f'private_{user_id}'}"
+        recent_context: list[dict[str, Any]] = []
+        if is_group and get_recent_group_msgs is not None:
+            try:
+                recent_context = list(get_recent_group_msgs(group_id, 8) or [])
+            except Exception:
+                recent_context = []
+        evaluation = await attention_service.evaluate(
+            session_key=session_key,
+            user_text=str(event.get_plaintext() or ""),
+            legacy_should_reply=bool(legacy_should_reply),
+            is_private=not is_group,
+            is_at_bot=is_at_bot,
+            is_reply_to_bot=is_reply_to_bot,
+            is_continuation=is_continuation,
+            recent_context=recent_context,
+        )
+        state["attention_decision"] = evaluation.decision.to_dict()
+        state["attention_metrics"] = evaluation.to_metrics()
+        state["attention_wait_seconds"] = evaluation.decision.wait_seconds
+        state["_attention_participation_service"] = attention_service
+        if evaluation.mode.value == "on" and evaluation.actual_should_reply:
+            state["is_random_chat"] = bool(
+                is_group and not is_at_bot and not is_reply_to_bot and not is_continuation
+            )
+        return evaluation.actual_should_reply
 
     return _rule
 

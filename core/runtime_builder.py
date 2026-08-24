@@ -119,6 +119,7 @@ from .ai_routes import (
     build_routed_tool_caller,
     summarize_route_state,
 )
+from .attention_service import AttentionParticipationService
 from .memory_curator import MemoryCurator
 from .memory_decay import MemoryDecayScheduler
 from .memory_store import init_memory_store
@@ -343,6 +344,17 @@ def build_plugin_runtime(
             ),
         )
         favorability_service.set_observer(favorability_observer)
+    attention_service = AttentionParticipationService(
+        call_ai_api=intent_call_ai_api,
+        logger=logger,
+        mode=str(getattr(plugin_config, "personification_participation_v2_mode", "shadow") or "shadow"),
+        microbatch_seconds=float(
+            getattr(plugin_config, "personification_attention_microbatch_seconds", 1.0) or 0.0
+        ),
+        timeout_seconds=float(
+            getattr(plugin_config, "personification_attention_timeout_seconds", 12.0) or 12.0
+        ),
+    )
     sticker_call_ai_api = build_ai_api_caller(
         plugin_config=plugin_config,
         logger=logger,
@@ -548,6 +560,7 @@ def build_plugin_runtime(
         get_recent_group_msgs=get_recent_group_msgs,
         user_policy_gate=qq_user_policy_gate,
         favorability_service=favorability_service,
+        attention_service=attention_service,
     )
     poke_rule = build_poke_rule(
         poke_rule_core=poke_rule_core,

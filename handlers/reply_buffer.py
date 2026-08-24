@@ -115,6 +115,18 @@ def _clear_recent_media_for_test() -> None:
     _recent_media_by_sender.clear()
 
 
+async def _reset_attention_after_confirmed(state: dict[str, Any], session_key: str) -> None:
+    if not bool(state.get("reply_delivery_complete", False)):
+        return
+    service = state.get("_attention_participation_service")
+    reset = getattr(service, "reset_confirmed", None)
+    if callable(reset):
+        try:
+            await reset(session_key)
+        except Exception:
+            pass
+
+
 def _record_recovery_failure(
     *,
     bot: Any,
@@ -1202,6 +1214,7 @@ async def run_buffer_timer(
         entry["current_is_random_chat"] = False
         if bool(state.get("reply_delivery_started", False)):
             _note_session_reply(key)
+        await _reset_attention_after_confirmed(state, key)
         if entry.get("pending_items"):
             if entry.get("pending_ready"):
                 _promote_pending_batch(entry)
@@ -1537,6 +1550,7 @@ async def handle_reply_event(
                     pass
         if is_private_session and bool(direct_state.get("reply_delivery_started", False)):
             _note_session_reply(session_key)
+        await _reset_attention_after_confirmed(direct_state, session_key)
         return
     entry = msg_buffer.setdefault(session_key, _new_entry(delay))
     _retain_buffer_entry(
@@ -1575,11 +1589,18 @@ async def handle_reply_event(
                 if active_task and not active_task.done():
                     active_task.cancel()
                     logger.info(f"拟人插件：会话 {session_key} 收到新的直呼消息，抢占当前旧批次。")
+        dynamic_base_wait = max(
+            batch_min_wait_seconds,
+            min(
+                batch_max_wait_seconds,
+                float(state.get("attention_wait_seconds", batch_base_wait_seconds) or batch_base_wait_seconds),
+            ),
+        )
         wait_seconds = _schedule_debounce_wait(
             first_at=float(entry.get("pending_started_at", now_ts) or now_ts),
             last_at=now_ts,
             last_reply_at=_session_last_reply_at(session_key),
-            base_wait_seconds=batch_base_wait_seconds,
+            base_wait_seconds=dynamic_base_wait,
             min_wait_seconds=batch_min_wait_seconds,
             max_wait_seconds=batch_max_wait_seconds,
             legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
@@ -1604,11 +1625,18 @@ async def handle_reply_event(
         entry["batch_started_at"] = now_ts
     entry["last_item_at"] = now_ts
 
+    dynamic_base_wait = max(
+        batch_min_wait_seconds,
+        min(
+            batch_max_wait_seconds,
+            float(state.get("attention_wait_seconds", batch_base_wait_seconds) or batch_base_wait_seconds),
+        ),
+    )
     wait_seconds = _schedule_debounce_wait(
         first_at=float(entry.get("batch_started_at", now_ts) or now_ts),
         last_at=now_ts,
         last_reply_at=_session_last_reply_at(session_key),
-        base_wait_seconds=batch_base_wait_seconds,
+        base_wait_seconds=dynamic_base_wait,
         min_wait_seconds=batch_min_wait_seconds,
         max_wait_seconds=batch_max_wait_seconds,
         legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,

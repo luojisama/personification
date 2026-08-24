@@ -593,6 +593,18 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                     "message_id": str(getattr(event, "message_id", "") or ""),
                     "policy_disposition": policy_disposition,
                     "policy_reason_code": policy_reason_code,
+                    "attention_tier": (state.get("attention_decision") or {}).get("tier")
+                    if isinstance(state.get("attention_decision"), dict)
+                    else None,
+                    "attention_wait_seconds": (state.get("attention_decision") or {}).get("wait_seconds")
+                    if isinstance(state.get("attention_decision"), dict)
+                    else None,
+                    "attention_interest": (state.get("attention_decision") or {}).get("interest")
+                    if isinstance(state.get("attention_decision"), dict)
+                    else None,
+                    "attention_reason_code": (state.get("attention_decision") or {}).get("reason_code")
+                    if isinstance(state.get("attention_decision"), dict)
+                    else "",
                 },
             )
             state["reply_trace_id"] = trace_id
@@ -607,6 +619,27 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                     f"policy={policy_disposition or '-'} reason={policy_reason_code or '-'}"
                 ),
             )
+            attention_metrics = state.get("attention_metrics")
+            if isinstance(attention_metrics, dict):
+                trace_mod.record_stage(
+                    trace_id=trace_id,
+                    key="attention_decision",
+                    label="Agent 参与决策",
+                    status="info",
+                    detail=(
+                        f"mode={attention_metrics.get('mode') or '-'} "
+                        f"source={attention_metrics.get('decision_source') or '-'} "
+                        f"action={attention_metrics.get('action') or '-'} "
+                        f"tier={attention_metrics.get('tier') or '-'} "
+                        f"wait_seconds={attention_metrics.get('wait_seconds') or '-'} "
+                        f"interest={attention_metrics.get('interest') or '-'} "
+                        f"reason={attention_metrics.get('reason_code') or '-'} "
+                        f"legacy={str(bool(attention_metrics.get('legacy_should_reply'))).lower()} "
+                        f"v2={attention_metrics.get('v2_should_reply')} "
+                        f"actual={str(bool(attention_metrics.get('actual_should_reply'))).lower()}"
+                    ),
+                    hint="仅记录结构化、低基数决策；不记录用户原文或隐藏推理。",
+                )
     except Exception:
         trace_id = ""
         trace_token = None
@@ -3727,4 +3760,3 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             )
         except Exception:
             pass
-

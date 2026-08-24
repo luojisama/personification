@@ -138,6 +138,7 @@ async def personification_rule(
         if is_group_muted(group_id):
             logger.debug(f"拟人插件：群 {group_id} 处于 bot 禁言期，本轮不进入回复流程。")
             return False
+        state["attention_admitted"] = True
 
         idle_active_state: dict[str, Any] = {}
         try:
@@ -341,6 +342,7 @@ async def personification_rule(
     if isinstance(event, private_event_cls):
         if looks_like_private_command(event.get_plaintext()):
             return False
+        state["attention_admitted"] = True
         state["message_target"] = TARGET_BOT
         return True
 

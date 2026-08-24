@@ -54,6 +54,9 @@ class Config(BaseModel):
     personification_agent_enabled: bool = True
     personification_agent_max_steps: int = 10
     personification_agent_budget_mode: str = "shadow"
+    personification_participation_v2_mode: str = "shadow"
+    personification_attention_microbatch_seconds: float = 1.0
+    personification_attention_timeout_seconds: float = 12.0
     personification_response_timeout: int = 180
     personification_reply_session_concurrency: int = 3
     personification_reply_global_concurrency: int = 12
