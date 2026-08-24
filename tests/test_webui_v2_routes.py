@@ -8,6 +8,7 @@ from ._loader import load_personification_module
 v2_routes = load_personification_module(
     "plugin.personification.webui.routes.v2_routes"
 )
+webui_app = load_personification_module("plugin.personification.webui.app")
 recovery = load_personification_module(
     "plugin.personification.core.reply_recovery_queue"
 )
@@ -24,6 +25,14 @@ def test_v2_router_exposes_paged_trace_recovery_capability_and_sse_routes() -> N
         "/api/v2/model-routes/capabilities",
         "/api/v2/events",
     } <= paths
+
+
+def test_react_production_build_is_served_with_spa_fallback() -> None:
+    index = webui_app._serve_frontend_asset("")
+    nested = webui_app._serve_frontend_asset("traces/example")
+    assert str(index.path).replace("\\", "/").endswith("frontend_dist/index.html")
+    assert nested.path == index.path
+    assert index.headers["cache-control"] == "no-store, max-age=0"
 
 
 def test_recovery_summary_does_not_expose_claims_or_media_references(tmp_path) -> None:

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="minimal">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#eceae3" />
+    <meta
+      name="description"
+      content="Personification 拟人插件管理员事件取证台"
+    />
+    <script>
+      (() => {
+        const key = "personification.console.theme";
+        const allowed = new Set(["minimal", "schale", "prts"]);
+        let theme = "minimal";
+        try {
+          const stored = window.localStorage.getItem(key);
+          if (stored && allowed.has(stored)) theme = stored;
+        } catch (_) {
+          /* 本地存储不可用时使用可预测的默认主题。 */
+        }
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme === "prts" ? "dark" : "light";
+      })();
+    </script>
+    <title>Personification · 事件取证台</title>
+    <script type="module" crossorigin src="/personification/frontend/assets/index-Cn6Yj7DM.js"></script>
+    <link rel="stylesheet" crossorigin href="/personification/frontend/assets/index-C5-5EagX.css">
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>此管理台需要启用 JavaScript。</noscript>
+  </body>
+</html>

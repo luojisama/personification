@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from .routes.audit_routes import build_audit_router
 from .routes.auth_routes import build_auth_router
@@ -142,6 +142,14 @@ def build_router() -> APIRouter:
             if_none_match=str(request.headers.get("if-none-match", "") or ""),
         )
 
+    @router.get("/frontend")
+    async def frontend_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/personification/frontend/", status_code=307)
+
+    @router.get("/frontend/{asset_path:path}")
+    async def frontend_asset(asset_path: str) -> Response:
+        return await asyncio.to_thread(_serve_frontend_asset, asset_path)
+
     @router.get("/health")
     async def health() -> dict:
         return {"status": "ok"}
@@ -151,6 +159,7 @@ def build_router() -> APIRouter:
 
 _STATIC_INDEX_PATH = Path(__file__).resolve().parent / "static" / "index.html"
 _STATIC_ROOT = _STATIC_INDEX_PATH.parent
+_FRONTEND_DIST_ROOT = Path(__file__).resolve().parent / "frontend_dist"
 _STATIC_CONTENT_TYPES = {
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -301,3 +310,41 @@ def _serve_static_asset(
             headers=headers,
         )
     return FileResponse(target, media_type=media_type, headers=headers)
+
+
+def _serve_frontend_asset(asset_path: str) -> Response:
+    root = _FRONTEND_DIST_ROOT.resolve()
+    relative = str(asset_path or "").replace("\\", "/").lstrip("/")
+    candidate = (root / relative).resolve() if relative else root / "index.html"
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="frontend asset not found") from exc
+    if candidate.is_file():
+        target = candidate
+    elif not Path(relative).suffix and (root / "index.html").is_file():
+        target = root / "index.html"
+    else:
+        raise HTTPException(status_code=404, detail="frontend asset not found")
+    content_types = {
+        ".html": "text/html; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".js": "text/javascript; charset=utf-8",
+        ".svg": "image/svg+xml",
+        ".png": "image/png",
+        ".ico": "image/x-icon",
+        ".woff2": "font/woff2",
+    }
+    media_type = content_types.get(target.suffix.lower())
+    if media_type is None:
+        raise HTTPException(status_code=404, detail="frontend asset not found")
+    is_index = target.name == "index.html"
+    return FileResponse(
+        target,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store, max-age=0"
+            if is_index
+            else "public, max-age=31536000, immutable"
+        },
+    )
