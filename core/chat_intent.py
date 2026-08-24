@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .reply_style_policy import build_context_continuity_policy_prompt
+from .turn_media import MediaAvailability, coerce_media_availability
 from .sticker_semantics import (
     DEFAULT_STICKER_SEMANTIC_HINT,
     default_sticker_semantic_hint,
@@ -21,6 +22,7 @@ EmotionIntensity = Literal["low", "medium", "high"]
 DomainFocus = Literal["general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"]
 EvidencePolicy = Literal["none", "light", "standard", "strict"]
 CitationMode = Literal["none", "urls_on_request"]
+VisionNeed = Literal["none", "summary", "native"]
 AdvicePermission = Literal["not_needed", "ask_first", "allowed"]
 CareRiskLevel = Literal["none", "concern", "high"]
 ConversationScenario = Literal[
@@ -68,6 +70,8 @@ class TurnSemanticFrame:
     meta_question: bool = False
     domain_focus: DomainFocus = "general"
     evidence_policy: EvidencePolicy = "none"
+    vision_need: VisionNeed = "none"
+    media_reason_code: str = "media_not_needed"
     # 社交检索来源默认只留在 Trace/WebUI；由规划器按当前请求决定是否展示裸链接。
     citation_mode: CitationMode = "none"
     emotional_support: EmotionalSupport = field(default_factory=EmotionalSupport)
@@ -129,7 +133,15 @@ def _metadata_fallback_turn_semantic_frame(
     *,
     is_group: bool,
     is_random_chat: bool,
+    media_availability: MediaAvailability | dict[str, Any] | None = None,
 ) -> TurnSemanticFrame:
+    availability = coerce_media_availability(media_availability)
+    fallback_vision_need: VisionNeed = "summary" if availability.has_usable_media else "none"
+    fallback_media_reason = (
+        "metadata_media_evidence_required"
+        if fallback_vision_need != "none"
+        else "media_not_available"
+    )
     if is_group and is_random_chat:
         return TurnSemanticFrame(
             chat_intent="banter",
@@ -140,6 +152,8 @@ def _metadata_fallback_turn_semantic_frame(
             sticker_appropriate=False,
             meta_question=False,
             domain_focus="social",
+            vision_need=fallback_vision_need,
+            media_reason_code=fallback_media_reason,
             user_attitude="群里随口聊天",
             bot_emotion="轻松观察",
             emotion_intensity="low",
@@ -158,6 +172,8 @@ def _metadata_fallback_turn_semantic_frame(
         sticker_appropriate=True,
         meta_question=False,
         domain_focus="general" if not is_group else "social",
+        vision_need=fallback_vision_need,
+        media_reason_code=fallback_media_reason,
         user_attitude="日常交流",
         bot_emotion="平静",
         emotion_intensity="medium",
@@ -173,10 +189,12 @@ def metadata_fallback_turn_semantic_frame_for_session(
     *,
     is_group: bool = False,
     is_random_chat: bool = False,
+    media_availability: MediaAvailability | dict[str, Any] | None = None,
 ) -> TurnSemanticFrame:
     return _metadata_fallback_turn_semantic_frame(
         is_group=is_group,
         is_random_chat=is_random_chat,
+        media_availability=media_availability,
     )
 
 
@@ -192,6 +210,7 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
 
 _VALID_DOMAIN_FOCUS = {"general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"}
 _VALID_EVIDENCE_POLICIES = {"none", "light", "standard", "strict"}
+_VALID_VISION_NEEDS = {"none", "summary", "native"}
 _VALID_ADVICE_PERMISSIONS = {"not_needed", "ask_first", "allowed"}
 _VALID_CARE_RISKS = {"none", "concern", "high"}
 
@@ -248,6 +267,16 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
     evidence_policy = str(payload.get("evidence_policy", "none") or "none").strip().lower()
     if evidence_policy not in _VALID_EVIDENCE_POLICIES:
         evidence_policy = "none"
+    vision_need = str(payload.get("vision_need", "none") or "none").strip().lower()
+    if vision_need not in _VALID_VISION_NEEDS:
+        vision_need = "none"
+    media_reason_code = re.sub(
+        r"[^a-z0-9_-]+",
+        "_",
+        str(payload.get("media_reason_code", "media_not_needed") or "media_not_needed")
+        .strip()
+        .lower(),
+    ).strip("_")[:64] or "media_not_needed"
     citation_mode = str(payload.get("citation_mode", "none") or "none").strip().lower()
     if citation_mode not in {"none", "urls_on_request"}:
         citation_mode = "none"
@@ -263,6 +292,8 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
         meta_question=_coerce_bool(payload.get("meta_question", False)),
         domain_focus=domain_focus,  # type: ignore[arg-type]
         evidence_policy=evidence_policy,  # type: ignore[arg-type]
+        vision_need=vision_need,  # type: ignore[arg-type]
+        media_reason_code=media_reason_code,
         citation_mode=citation_mode,  # type: ignore[arg-type]
         emotional_support=emotional_support,
         user_attitude=str(payload.get("user_attitude", "") or "").strip() or "日常交流",
@@ -365,14 +396,18 @@ async def infer_turn_semantic_frame_with_llm(
     current_inner_state: str = "",
     current_emotion_state: str = "",
     media_grounding: str = "",
+    media_availability: MediaAvailability | dict[str, Any] | None = None,
 ) -> TurnSemanticFrame:
+    availability = coerce_media_availability(media_availability)
     fallback = _metadata_fallback_turn_semantic_frame(
         is_group=is_group,
         is_random_chat=is_random_chat,
+        media_availability=availability,
     )
     normalized = normalize_intent_text(text)
-    if not normalized or tool_caller is None:
+    if (not normalized and not availability.has_media) or tool_caller is None:
         return fallback
+    semantic_text = normalized or "[仅媒体消息，无附加文字]"
 
     repeat_lines: list[str] = []
     for cluster in list(repeat_clusters or [])[:3]:
@@ -394,6 +429,8 @@ async def infer_turn_semantic_frame_with_llm(
         '"meta_question":false,'
         '"domain_focus":"general|social|technology|science|game_anime|plugin|realtime|emotion",'
         '"evidence_policy":"none|light|standard|strict",'
+        '"vision_need":"none|summary|native",'
+        '"media_reason_code":"稳定英文短码",'
         '"citation_mode":"none|urls_on_request",'
         '"emotional_support":{"needed":false,"listen":false,"validate":false,"advice_permission":"not_needed|ask_first|allowed","risk_level":"none|concern|high"},'
         '"user_attitude":"一句短中文，描述用户这轮对 bot 的态度",'
@@ -423,6 +460,11 @@ async def infer_turn_semantic_frame_with_llm(
         "不要预设 bot_emotion 或 reason 为‘准备说明看不到/加载失败’，也不要因为还没有安全视觉摘要就否定媒体。"
         "明确要求描述、识别或解读时保持对应的 explanation/lookup 意图，具体能否形成结论交给 vision_analyze 和后续证据结果；"
         "只有工具明确返回 missing_media、vision_unavailable 或空证据，才允许按无法理解收口。\n"
+        "1b-2. vision_need 是本轮是否需要媒体证据的结构化决定：与回复内容无关时为 none；"
+        "需要调用媒体理解工具取得摘要时为 summary；只有系统 grounding 明确说明当前主路由已验证原生支持时才可为 native。"
+        "仅媒体消息、要求解读附件或回复内容依赖附件事实时不得选择 none。"
+        "media_reason_code 使用 media_not_needed、media_summary_required、native_media_preferred、media_unavailable 等稳定英文短码，"
+        "不要写解释或思维过程。\n"
         "1c. 如果最新消息说“这个动画/这段动画/这个角色/这张图/这个场面”等指代词，且最近上下文刚出现 ACG 角色、作品、抽卡结果、图片或卡面，"
         "要把它当成在评价那个具体对象；优先 chat_intent=lookup、domain_focus=game_anime，查清角色/作品/剧情或动画出处后再参与讨论。"
         "不要只回“确实挺强/有那味了”这类空泛附和。\n"
@@ -494,7 +536,8 @@ async def infer_turn_semantic_frame_with_llm(
         f"是否随机插话：{'是' if is_random_chat else '否'}\n"
         f"是否明确 @/直呼 bot：{'是' if is_direct_mention else '否'}\n"
         f"结构化消息目标：{str(message_target or '').strip() or 'uncertain'}\n"
-        f"最新消息：{normalized}\n"
+        f"最新消息：{semantic_text}\n"
+        f"媒体可用性：{json.dumps(availability.to_dict(), ensure_ascii=False, sort_keys=True)}\n"
         f"最近上下文：{str(recent_context or '').strip()[:700] or '无'}\n"
         f"互动关系：{str(relationship_hint or '').strip()[:500] or '无'}\n"
         f"全局内心状态：{str(current_inner_state or '').strip()[:260] or '无'}\n"

@@ -80,6 +80,7 @@ class StopFlowState:
     semantic_target_game: str = ""
     semantic_validation_status: str = ""
     research_closure_guidance_injected: bool = False
+    media_evidence_gate_attempted: bool = False
 
 
 @dataclass(frozen=True)
@@ -223,6 +224,7 @@ async def _try_inject_vision_fallback(
     logger: Any,
     query: str,
     user_images: list[str],
+    has_media: bool = False,
     step: int,
     warning_message: str,
     success_message: str,
@@ -230,7 +232,7 @@ async def _try_inject_vision_fallback(
     if (
         not _vision_fallback_enabled(plugin_config)
         or registry.get("vision_analyze") is None
-        or not user_images
+        or not (user_images or has_media)
     ):
         return False
     try:
@@ -238,6 +240,7 @@ async def _try_inject_vision_fallback(
             registry=registry,
             query=query,
             images=user_images,
+            allow_current_media=has_media,
         )
     except Exception as exc:
         logger.warning(f"{warning_message}: {exc}")
@@ -628,6 +631,9 @@ async def handle_model_stop(
     user_query_text: str,
     user_text: str,
     user_images: list[str],
+    has_media: bool = False,
+    turn_plan: Any = None,
+    reply_required: bool = False,
     rewritten_query: Any,
     context_hint: str,
     plugin_query_intent: str,
@@ -662,6 +668,61 @@ async def handle_model_stop(
                 bypass_length_limits=True,
             )
         )
+    vision_need = str(getattr(turn_plan, "vision_need", "none") or "none").strip().lower()
+    media_evidence_required = bool(has_media and vision_need in {"summary", "native"})
+    if media_evidence_required and not state.has_usable_evidence:
+        if not state.media_evidence_gate_attempted:
+            state.media_evidence_gate_attempted = True
+            record_trace(
+                key="media_evidence_gate",
+                label="媒体证据门",
+                status="warn",
+                detail=(
+                    f"required=true vision_need={vision_need} evidence=false "
+                    "action=inject_vision_analyze"
+                ),
+                hint="LLM 已决定本轮回复依赖媒体证据；零工具草稿不会直接发送",
+            )
+            injected = await _try_inject_vision_fallback(
+                state=state,
+                messages=messages,
+                tool_caller=tool_caller,
+                origin_response=response,
+                registry=registry,
+                plugin_config=plugin_config,
+                logger=logger,
+                query=user_query_text or user_text or "请分析本轮媒体",
+                user_images=user_images,
+                has_media=True,
+                step=step,
+                warning_message="[agent] required media evidence failed",
+                success_message="[agent] injected required media evidence",
+            )
+            if injected:
+                return StopFlowDecision.continue_loop()
+        record_trace(
+            key="media_evidence_gate",
+            label="媒体证据门",
+            status="warn",
+            detail=(
+                f"required=true vision_need={vision_need} evidence=false "
+                f"action={'direct_failure_notice' if reply_required else 'silence'}"
+            ),
+            hint="媒体证据仍不可用，禁止发送对附件内容的猜测",
+        )
+        return StopFlowDecision.return_result(
+            AgentResult(
+                text=(
+                    "这段媒体我这次没读出来，重发一下或者换个文件格式试试。"
+                    if reply_required
+                    else "[SILENCE]"
+                ),
+                pending_actions=pending_actions,
+                quality_context="media_evidence_unavailable",
+                suppress_reply_recovery=True,
+            )
+        )
+
     banter_requires_lookup_retry = await _classify_banter_lookup_retry(
         state=state,
         response=response,
@@ -707,6 +768,7 @@ async def handle_model_stop(
             logger=logger,
             query=user_query_text or user_text or "请分析图片",
             user_images=user_images,
+            has_media=has_media,
             step=step,
             warning_message="[agent] vision fallback failed",
             success_message="[agent] injected background vision fallback result",
@@ -778,6 +840,7 @@ async def handle_model_stop(
             logger=logger,
             query=user_query_text or user_text or "请分析图片",
             user_images=user_images,
+            has_media=has_media,
             step=step,
             warning_message="[agent] deferred vision fallback failed",
             success_message="[agent] awaited background vision fallback result",

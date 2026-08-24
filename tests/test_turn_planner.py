@@ -24,6 +24,22 @@ def test_metadata_fallback_turn_plan_silences_uncertain_random_group() -> None:
     assert plan.tool_intent == ["none"]
 
 
+def test_metadata_fallback_turn_plan_requires_video_evidence_for_direct_turn() -> None:
+    plan = planner.metadata_fallback_turn_plan(
+        is_group=False,
+        media_availability={
+            "video_count": 1,
+            "usable_video_count": 1,
+            "media_only_turn": True,
+        },
+    )
+
+    assert plan.reply_action == "reply"
+    assert plan.vision_need == "summary"
+    assert plan.media_reason_code == "metadata_media_evidence_required"
+    assert plan.tool_intent == ["vision"]
+
+
 def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
     plan = planner.parse_turn_plan_payload(
         {
@@ -31,6 +47,7 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
             "memory_need": "deep",
             "research_need": "high",
             "vision_need": "native",
+            "media_reason_code": "native_media_preferred",
             "qzone_continue": "true",
             "output_mode": "source_summary",
             "speech_act": "source_summary",
@@ -62,6 +79,8 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
     assert plan is not None
     assert plan.memory_need == "deep"
     assert plan.research_need == "high"
+    assert plan.vision_need == "native"
+    assert plan.media_reason_code == "native_media_preferred"
     assert plan.speech_act == "source_summary"
     assert plan.qzone_continue is True
     assert plan.tool_intent == ["lookup_web", "memory"]

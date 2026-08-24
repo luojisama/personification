@@ -22,6 +22,20 @@ def test_metadata_fallback_turn_semantic_frame_respects_group_metadata() -> None
     assert private_frame.recommend_silence is False
 
 
+def test_metadata_fallback_semantic_frame_requires_video_evidence() -> None:
+    frame = chat_intent.metadata_fallback_turn_semantic_frame_for_session(
+        is_group=False,
+        media_availability={
+            "video_count": 1,
+            "usable_video_count": 1,
+            "media_only_turn": True,
+        },
+    )
+
+    assert frame.vision_need == "summary"
+    assert frame.media_reason_code == "metadata_media_evidence_required"
+
+
 def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> None:
     valid = chat_intent._parse_turn_semantic_frame_payload(
         {

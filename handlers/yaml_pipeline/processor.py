@@ -108,6 +108,7 @@ from ...core.tts_service import extract_persona_tts_config
 from ...core.visible_output import guard_visible_text
 from ...core.turn_media import (
     attach_safe_visual_summary,
+    build_media_availability,
     coerce_turn_media,
     extract_media_from_message,
     extract_turn_media_from_event,
@@ -935,6 +936,11 @@ async def process_yaml_response_logic(
         turn_media_refs,
         summary=safe_visual_summary,
     ) or str(media_grounding or "").strip()
+    media_availability = build_media_availability(
+        turn_media_refs,
+        image_refs=last_images,
+        text=raw_message_text,
+    )
     photo_like = "[图片·照片]" in (history_last_text or raw_message_text or trigger_reason)
 
     conversation_context = None
@@ -1056,6 +1062,7 @@ async def process_yaml_response_logic(
                 is_random_chat=is_random_chat,
                 is_direct_mention=is_direct_mention,
                 has_images=bool(last_images),
+                media_availability=media_availability,
                 message_target=planner_message_target,
                 tool_caller=lite_tool_caller,
                 fallback_tool_caller=agent_tool_caller,
@@ -1112,6 +1119,7 @@ async def process_yaml_response_logic(
                     current_inner_state=render_inner_state_hint(inner_state),
                     current_emotion_state=emotion_memory_hint,
                     media_grounding=media_grounding,
+                    media_availability=media_availability,
                     logger=logger,
                     metric_scene="yaml_private" if is_private_session else "yaml_group",
                 )
@@ -1124,6 +1132,7 @@ async def process_yaml_response_logic(
             turn_plan = turn_plan_from_semantic_frame(
                 semantic_frame,
                 has_images=bool(last_images),
+                media_availability=media_availability,
                 message_target=planner_message_target,
             )
             attach_turn_plan_to_semantic_frame(semantic_frame, turn_plan)
@@ -1153,6 +1162,7 @@ async def process_yaml_response_logic(
                     is_random_chat=is_random_chat,
                     is_direct_mention=is_direct_mention,
                     has_images=bool(last_images),
+                    media_availability=media_availability,
                     message_target=planner_message_target,
                     tool_caller=lite_tool_caller,
                     fallback_tool_caller=agent_tool_caller,
@@ -1198,6 +1208,7 @@ async def process_yaml_response_logic(
         turn_plan = turn_plan_from_semantic_frame(
             semantic_frame,
             has_images=bool(last_images),
+            media_availability=media_availability,
             message_target=planner_message_target,
         )
         attach_turn_plan_to_semantic_frame(semantic_frame, turn_plan)

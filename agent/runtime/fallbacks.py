@@ -170,16 +170,19 @@ async def run_background_vision_fallback(
     registry: ToolRegistry,
     query: str,
     images: list[str],
+    allow_current_media: bool = False,
 ) -> tuple[str, dict[str, Any], str] | None:
     tool = registry.get("vision_analyze")
-    if tool is None or not images:
+    if tool is None or (not images and not allow_current_media):
         return None
     try:
         if not tool.enabled():
             return None
     except Exception:
         return None
-    args = {"query": query, "images": list(images)}
+    args: dict[str, Any] = {"query": query}
+    if images:
+        args["images"] = list(images)
     result = await tool.handler(**args)
     return "vision_analyze", args, str(result or "")
 

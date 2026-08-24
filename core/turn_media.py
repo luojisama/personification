@@ -234,6 +234,47 @@ class TurnMediaRef:
         )
 
 
+@dataclass(frozen=True)
+class MediaAvailability:
+    """Bounded structural facts about media attached to the current turn.
+
+    The object deliberately contains counts only.  It is safe to give to the
+    semantic/planning model and avoids making chat semantics depend on file
+    names, URLs, local paths, or user-authored descriptions.
+    """
+
+    image_count: int = 0
+    video_count: int = 0
+    audio_count: int = 0
+    usable_image_count: int = 0
+    usable_video_count: int = 0
+    usable_audio_count: int = 0
+    media_only_turn: bool = False
+
+    @property
+    def has_media(self) -> bool:
+        return bool(self.image_count or self.video_count or self.audio_count)
+
+    @property
+    def has_usable_media(self) -> bool:
+        return bool(
+            self.usable_image_count
+            or self.usable_video_count
+            or self.usable_audio_count
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "image_count": max(0, int(self.image_count)),
+            "video_count": max(0, int(self.video_count)),
+            "audio_count": max(0, int(self.audio_count)),
+            "usable_image_count": max(0, int(self.usable_image_count)),
+            "usable_video_count": max(0, int(self.usable_video_count)),
+            "usable_audio_count": max(0, int(self.usable_audio_count)),
+            "media_only_turn": bool(self.media_only_turn),
+        }
+
+
 def _build_media_id(
     *,
     owner_user_id: str,
@@ -423,6 +464,84 @@ def coerce_turn_media(values: Iterable[TurnMediaRef | dict[str, Any]] | None) ->
         seen.add(item.media_id)
         refs.append(item)
     return refs
+
+
+def coerce_media_availability(
+    value: MediaAvailability | dict[str, Any] | None,
+    *,
+    has_images: bool = False,
+) -> MediaAvailability:
+    if isinstance(value, MediaAvailability):
+        base = value
+    elif isinstance(value, dict):
+        def _count(name: str) -> int:
+            try:
+                return max(0, int(value.get(name, 0) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        base = MediaAvailability(
+            image_count=_count("image_count"),
+            video_count=_count("video_count"),
+            audio_count=_count("audio_count"),
+            usable_image_count=_count("usable_image_count"),
+            usable_video_count=_count("usable_video_count"),
+            usable_audio_count=_count("usable_audio_count"),
+            media_only_turn=bool(value.get("media_only_turn", False)),
+        )
+    else:
+        base = MediaAvailability()
+    if not has_images or base.image_count > 0:
+        return base
+    return replace(
+        base,
+        image_count=1,
+        usable_image_count=max(1, base.usable_image_count),
+    )
+
+
+def build_media_availability(
+    values: Iterable[TurnMediaRef | dict[str, Any]] | None,
+    *,
+    image_refs: Iterable[Any] | None = None,
+    text: Any = "",
+) -> MediaAvailability:
+    refs = coerce_turn_media(values)
+    image_keys: set[str] = set()
+    usable_image_keys: set[str] = set()
+    video_refs: list[TurnMediaRef] = []
+    audio_refs: list[TurnMediaRef] = []
+    for item in refs:
+        if item.kind in {"image", "sticker", "gif", "mface"}:
+            key = item.media_id or item.content_hash or item.ref or item.file_id
+            if key:
+                image_keys.add(key)
+                if _text(item.ref) or _text(item.file_id):
+                    usable_image_keys.add(key)
+        elif item.kind == "video":
+            video_refs.append(item)
+        elif item.kind == "audio":
+            audio_refs.append(item)
+    for raw in image_refs or []:
+        value = _text(raw)
+        if value:
+            key = hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest()
+            image_keys.add(key)
+            usable_image_keys.add(key)
+
+    def _potentially_usable(item: TurnMediaRef) -> bool:
+        return bool(_text(item.ref) or _text(item.file_id))
+
+    normalized_text = re.sub(r"\s+", " ", _text(text)).strip()
+    return MediaAvailability(
+        image_count=len(image_keys),
+        video_count=len(video_refs),
+        audio_count=len(audio_refs),
+        usable_image_count=len(usable_image_keys),
+        usable_video_count=sum(_potentially_usable(item) for item in video_refs),
+        usable_audio_count=sum(_potentially_usable(item) for item in audio_refs),
+        media_only_turn=bool((image_keys or video_refs or audio_refs) and not normalized_text),
+    )
 
 
 def media_from_batched_events(values: Iterable[dict[str, Any]] | None) -> list[TurnMediaRef]:
@@ -742,9 +861,12 @@ def media_summary_timeout_seconds(
 
 
 __all__ = [
+    "MediaAvailability",
     "MediaOrigin",
     "TurnMediaRef",
     "attach_safe_visual_summary",
+    "build_media_availability",
+    "coerce_media_availability",
     "coerce_turn_media",
     "extract_media_from_message",
     "extract_turn_media_from_event",

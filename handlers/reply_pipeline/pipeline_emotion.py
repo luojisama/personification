@@ -33,6 +33,7 @@ from ...core.response_review import (
     extract_recent_bot_reply_texts,
 )
 from ...core.target_inference import normalize_message_target_for_plan, normalize_message_target_for_review
+from ...core.turn_media import MediaAvailability, coerce_media_availability
 from ...core.user_avatar_insight import add_current_user_avatar_planner_metadata
 from .pipeline_context import batch_has_newer_messages
 
@@ -221,7 +222,9 @@ async def infer_turn_semantic_frame_with_timeout(
     logger: Any = None,
     metric_scene: str = "group",
     media_grounding: str = "",
+    media_availability: MediaAvailability | dict[str, Any] | None = None,
 ) -> tuple[Any, float, str, float, str]:
+    availability = coerce_media_availability(media_availability)
     timeout_s = semantic_frame_timeout_seconds(plugin_config)
     started_at = time.monotonic()
     primary_caller, secondary_caller = _effective_callers(tool_caller, fallback_tool_caller)
@@ -229,6 +232,7 @@ async def infer_turn_semantic_frame_with_timeout(
         semantic_frame = metadata_fallback_turn_semantic_frame_for_session(
             is_group=is_group,
             is_random_chat=is_random_chat,
+            media_availability=availability,
         )
         _mark_fallback_reason(semantic_frame, "semantic_frame_no_caller")
         return semantic_frame, (time.monotonic() - started_at) * 1000.0, "semantic_frame_no_caller", timeout_s, "metadata"
@@ -249,6 +253,7 @@ async def infer_turn_semantic_frame_with_timeout(
                     current_inner_state=current_inner_state,
                     current_emotion_state=current_emotion_state,
                     media_grounding=media_grounding,
+                    media_availability=availability,
                 ),
                 timeout=max(0.1, timeout),
             )
@@ -279,6 +284,7 @@ async def infer_turn_semantic_frame_with_timeout(
     semantic_frame = metadata_fallback_turn_semantic_frame_for_session(
         is_group=is_group,
         is_random_chat=is_random_chat,
+        media_availability=availability,
     )
     _mark_fallback_reason(semantic_frame, fallback_reason)
     record_counter("reply.semantic_frame_fallback_total", scene=metric_scene, reason=fallback_reason)
@@ -295,6 +301,7 @@ async def plan_turn_with_timeout(
     is_random_chat: bool = False,
     is_direct_mention: bool = False,
     has_images: bool = False,
+    media_availability: MediaAvailability | dict[str, Any] | None = None,
     message_target: str = "",
     qzone_event_type: str = "",
     tool_caller: Any = None,
@@ -310,6 +317,7 @@ async def plan_turn_with_timeout(
     metric_mode: str = "enabled",
     media_grounding: str = "",
 ) -> tuple[Any, float, str, float, str]:
+    availability = coerce_media_availability(media_availability, has_images=has_images)
     timeout_s = semantic_frame_timeout_seconds(plugin_config)
     started_at = time.monotonic()
     planner_message_target = normalize_message_target_for_plan(message_target)
@@ -320,6 +328,7 @@ async def plan_turn_with_timeout(
             is_random_chat=is_random_chat,
             is_direct_mention=is_direct_mention,
             has_images=has_images,
+            media_availability=availability,
             message_target=planner_message_target,
             qzone_event_type=qzone_event_type,
         )
@@ -335,6 +344,7 @@ async def plan_turn_with_timeout(
                     is_random_chat=is_random_chat,
                     is_direct_mention=is_direct_mention,
                     has_images=has_images,
+                    media_availability=availability,
                     message_target=planner_message_target,
                     qzone_event_type=qzone_event_type,
                     tool_caller=caller,
@@ -378,6 +388,7 @@ async def plan_turn_with_timeout(
         is_random_chat=is_random_chat,
         is_direct_mention=is_direct_mention,
         has_images=has_images,
+        media_availability=availability,
         message_target=planner_message_target,
         qzone_event_type=qzone_event_type,
     )
@@ -442,8 +453,10 @@ async def prepare_reply_semantics(
     message_target: str,
     solo_speaker_follow: bool,
     has_images: bool = False,
+    media_availability: MediaAvailability | dict[str, Any] | None = None,
     media_grounding: str = "",
 ) -> PreparedReplySemantics:
+    availability = coerce_media_availability(media_availability, has_images=has_images)
     recent_bot_replies = extract_recent_bot_reply_texts(recent_window if not is_private_session else [])
     data_dir = get_personification_data_dir(runtime.plugin_config)
     inner_state, emotion_state = await load_reply_states_with_timeout(
@@ -495,6 +508,7 @@ async def prepare_reply_semantics(
             is_random_chat=is_random_chat,
             is_direct_mention=is_direct_mention,
             has_images=has_images,
+            media_availability=availability,
             message_target=message_target,
             tool_caller=runtime.lite_tool_caller or runtime.agent_tool_caller,
             fallback_tool_caller=runtime.agent_tool_caller,
@@ -565,6 +579,7 @@ async def prepare_reply_semantics(
                 current_inner_state=render_inner_state_hint(inner_state),
                 current_emotion_state=emotion_memory_hint,
                 media_grounding=media_grounding,
+                media_availability=availability,
                 logger=runtime.logger,
                 metric_scene="private" if is_private_session else "group",
             )
@@ -577,6 +592,7 @@ async def prepare_reply_semantics(
         turn_plan = turn_plan_from_semantic_frame(
             semantic_frame,
             has_images=has_images,
+            media_availability=availability,
             message_target=normalize_message_target_for_plan(message_target),
         )
         attach_turn_plan_to_semantic_frame(semantic_frame, turn_plan)
@@ -621,6 +637,7 @@ async def prepare_reply_semantics(
                 is_random_chat=is_random_chat,
                 is_direct_mention=is_direct_mention,
                 has_images=has_images,
+                media_availability=availability,
                 message_target=message_target,
                 tool_caller=runtime.lite_tool_caller or runtime.agent_tool_caller,
                 fallback_tool_caller=runtime.agent_tool_caller,

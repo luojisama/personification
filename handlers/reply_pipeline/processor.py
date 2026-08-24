@@ -68,6 +68,7 @@ from ...core.target_inference import (
 from ...core.tts_service import extract_persona_tts_config
 from ...core.turn_media import (
     attach_safe_visual_summary,
+    build_media_availability,
     coerce_turn_media,
     extract_turn_media_from_event,
     media_from_batched_events,
@@ -1690,6 +1691,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             message_target=str(state.get("message_target", "") or ""),
             solo_speaker_follow=is_solo_speaker_follow,
             has_images=bool(tool_image_urls),
+            media_availability=media_availability,
             media_grounding=media_grounding,
         )
         return prepared, int((time.monotonic() - semantic_started_at) * 1000)
@@ -1719,6 +1721,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     media_grounding = render_turn_media_grounding(
         turn_media_context,
         summary=safe_visual_summary,
+    )
+    media_availability = build_media_availability(
+        turn_media_context,
+        image_refs=tool_image_urls,
+        text=raw_message_text or current_agent_message_content,
     )
     prepared_semantics, semantic_prepare_elapsed_ms = await _prepare_semantics_timed()
     if image_summary_suffix and tool_image_urls:

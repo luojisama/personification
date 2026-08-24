@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from ...core.reply_style_policy import build_context_continuity_policy_prompt, build_group_no_question_policy_prompt
 from ...core.chat_intent import EmotionalSupport, _parse_emotional_support
+from ...core.turn_media import MediaAvailability, coerce_media_availability
 
 
 ReplyAction = Literal["reply", "silence", "ask_clarify"]
@@ -82,6 +83,7 @@ class TurnPlan:
     memory_need: MemoryNeed = "none"
     research_need: ResearchNeed = "none"
     vision_need: VisionNeed = "none"
+    media_reason_code: str = "media_not_needed"
     qzone_continue: bool = False
     output_mode: OutputMode = "chat_short"
     tool_intent: list[ToolIntent] = field(default_factory=lambda: ["none"])
@@ -204,6 +206,13 @@ def parse_turn_plan_payload(payload: Any) -> TurnPlan | None:
         memory_need=_enum_value(payload.get("memory_need"), ALLOWED_MEMORY_NEEDS, "none"),  # type: ignore[arg-type]
         research_need=_enum_value(payload.get("research_need"), ALLOWED_RESEARCH_NEEDS, "none"),  # type: ignore[arg-type]
         vision_need=_enum_value(payload.get("vision_need"), ALLOWED_VISION_NEEDS, "none"),  # type: ignore[arg-type]
+        media_reason_code=re.sub(
+            r"[^a-z0-9_-]+",
+            "_",
+            str(payload.get("media_reason_code", "media_not_needed") or "media_not_needed")
+            .strip()
+            .lower(),
+        ).strip("_")[:64] or "media_not_needed",
         qzone_continue=_coerce_bool(payload.get("qzone_continue"), False),
         output_mode=output_mode,  # type: ignore[arg-type]
         tool_intent=tool_intent,
@@ -260,9 +269,17 @@ def metadata_fallback_turn_plan(
     is_random_chat: bool = False,
     is_direct_mention: bool = False,
     has_images: bool = False,
+    media_availability: MediaAvailability | dict[str, Any] | None = None,
     message_target: str = "",
     qzone_event_type: str = "",
 ) -> TurnPlan:
+    availability = coerce_media_availability(media_availability, has_images=has_images)
+    fallback_vision_need: VisionNeed = "summary" if availability.has_usable_media else "none"
+    fallback_media_reason = (
+        "metadata_media_evidence_required"
+        if fallback_vision_need != "none"
+        else "media_not_available"
+    )
     target = str(message_target or "").strip()
     qzone_event = str(qzone_event_type or "").strip()
     if qzone_event:
@@ -271,10 +288,11 @@ def metadata_fallback_turn_plan(
             speech_act="participate",
             memory_need="light",
             research_need="none",
-            vision_need="none",
+            vision_need=fallback_vision_need,
+            media_reason_code=fallback_media_reason,
             qzone_continue=True,
             output_mode="qzone_reply",
-            tool_intent=["none"],
+            tool_intent=["vision"] if fallback_vision_need != "none" else ["none"],
             ambiguity_level="low",
             confidence=0.22,
             reason="metadata_fallback_qzone",
@@ -287,10 +305,11 @@ def metadata_fallback_turn_plan(
             speech_act="silence",
             memory_need="none",
             research_need="none",
-            vision_need="summary" if has_images else "none",
+            vision_need=fallback_vision_need,
+            media_reason_code=fallback_media_reason,
             qzone_continue=False,
             output_mode="chat_short",
-            tool_intent=["vision"] if has_images else ["none"],
+            tool_intent=["vision"] if fallback_vision_need != "none" else ["none"],
             ambiguity_level="high",
             confidence=0.18,
             reason="metadata_fallback_random_group",
@@ -302,10 +321,11 @@ def metadata_fallback_turn_plan(
         speech_act="participate",
         memory_need="light" if is_group else "none",
         research_need="none",
-        vision_need="summary" if has_images else "none",
+        vision_need=fallback_vision_need,
+        media_reason_code=fallback_media_reason,
         qzone_continue=False,
         output_mode="chat_short",
-        tool_intent=["vision"] if has_images else ["none"],
+        tool_intent=["vision"] if fallback_vision_need != "none" else ["none"],
         ambiguity_level="low",
         confidence=0.18,
         reason="metadata_fallback",
@@ -368,6 +388,7 @@ async def plan_turn_with_llm(
     is_random_chat: bool = False,
     is_direct_mention: bool = False,
     has_images: bool = False,
+    media_availability: MediaAvailability | dict[str, Any] | None = None,
     message_target: str = "",
     qzone_event_type: str = "",
     tool_caller: Any = None,
@@ -380,17 +401,20 @@ async def plan_turn_with_llm(
     group_knowledge_hint: str = "",
     media_grounding: str = "",
 ) -> TurnPlan:
+    availability = coerce_media_availability(media_availability, has_images=has_images)
     fallback = metadata_fallback_turn_plan(
         is_group=is_group,
         is_random_chat=is_random_chat,
         is_direct_mention=is_direct_mention,
         has_images=has_images,
+        media_availability=availability,
         message_target=message_target,
         qzone_event_type=qzone_event_type,
     )
     normalized = normalize_plan_text(text)
-    if not normalized or tool_caller is None:
+    if (not normalized and not availability.has_media) or tool_caller is None:
         return fallback
+    semantic_text = normalized or "[仅媒体消息，无附加文字]"
 
     repeat_lines: list[str] = []
     for cluster in list(repeat_clusters or [])[:3]:
@@ -408,6 +432,7 @@ async def plan_turn_with_llm(
         '"memory_need":"none|light|deep",'
         '"research_need":"none|low|medium|high",'
         '"vision_need":"none|summary|native",'
+        '"media_reason_code":"稳定英文短码",'
         '"qzone_continue":false,'
         '"output_mode":"chat_short|chat_answer|structured_help|source_summary|qzone_reply",'
         '"tool_intent":["lookup_web|lookup_plugin|runtime_capability|vision|image_gen|memory|expression|none"],'
@@ -443,6 +468,10 @@ async def plan_turn_with_llm(
         "4c. future_commitment_candidate 只在私聊用户明确表达带时间线索的未来承诺、计划或待办时为 true；"
         "已完成事件、无时间的愿望和普通闲聊必须为 false。\n"
         "5. 工具意图只给候选方向，不要因为工具存在就强行使用。\n"
+        "5-0. vision_need 决定可见回复是否依赖本轮媒体证据：无关时为 none，需要 vision_analyze 摘要时为 summary；"
+        "只有系统 grounding 明确声明当前主路由已验证原生支持时才为 native。"
+        "仅媒体消息或最终回复会描述附件内容时不得为 none，tool_intent 必须包含 vision。"
+        "media_reason_code 只用稳定英文短码，不写推理过程。\n"
         "5a. 当前可用工具 metadata 中的 runtime_capability 只表示当前发送者头像画面事实的第一方只读能力。"
         "当对方询问 bot 能否读取或理解自己的头像画面时，tool_intent 必须包含 runtime_capability，"
         "规划为调用该工具核实后回答，不能用插件静态说明代替运行时证据。\n"
@@ -465,9 +494,9 @@ async def plan_turn_with_llm(
         f"是否随机插话：{'是' if is_random_chat else '否'}\n"
         f"是否直呼/提及 bot：{'是' if is_direct_mention else '否'}\n"
         f"代码侧 message_target：{str(message_target or '').strip() or '无'}\n"
-        f"是否有图片：{'是' if has_images else '否'}\n"
+        f"媒体可用性：{json.dumps(availability.to_dict(), ensure_ascii=False, sort_keys=True)}\n"
         f"QZone事件：{str(qzone_event_type or '').strip() or '无'}\n"
-        f"最新消息：{normalized}\n"
+        f"最新消息：{semantic_text}\n"
         f"最近上下文：{str(recent_context or '').strip()[:900] or '无'}\n"
         f"互动关系：{str(relationship_hint or '').strip()[:600] or '无'}\n"
         f"全局内心状态：{str(current_inner_state or '').strip()[:260] or '无'}\n"
@@ -501,7 +530,14 @@ async def plan_turn_with_llm(
         return fallback
 
 
-def turn_plan_from_semantic_frame(frame: Any, *, has_images: bool = False, message_target: str = "") -> TurnPlan:
+def turn_plan_from_semantic_frame(
+    frame: Any,
+    *,
+    has_images: bool = False,
+    media_availability: MediaAvailability | dict[str, Any] | None = None,
+    message_target: str = "",
+) -> TurnPlan:
+    availability = coerce_media_availability(media_availability, has_images=has_images)
     chat_intent = str(getattr(frame, "chat_intent", "banter") or "banter").strip()
     plugin_intent = str(getattr(frame, "plugin_question_intent", "capability") or "capability").strip()
     recommend_silence = bool(getattr(frame, "recommend_silence", False))
@@ -533,7 +569,18 @@ def turn_plan_from_semantic_frame(frame: Any, *, has_images: bool = False, messa
         output_mode=output_mode,
         tool_intents=list(tool_intent),
     )
-    if has_images and "vision" not in tool_intent:
+    vision_need = _enum_value(
+        getattr(frame, "vision_need", "none"),
+        ALLOWED_VISION_NEEDS,
+        "none",
+    )
+    if (
+        vision_need == "none"
+        and availability.has_usable_media
+        and str(getattr(frame, "reason", "") or "").startswith("metadata_fallback")
+    ):
+        vision_need = "summary"
+    if vision_need != "none" and "vision" not in tool_intent:
         tool_intent = [item for item in tool_intent if item != "none"] + ["vision"]
     ambiguity = str(getattr(frame, "ambiguity_level", "low") or "low").strip()
     if ambiguity not in ALLOWED_AMBIGUITY_LEVELS:
@@ -545,7 +592,11 @@ def turn_plan_from_semantic_frame(frame: Any, *, has_images: bool = False, messa
         speech_act=speech_act,
         memory_need="light" if chat_intent in {"banter", "explanation"} else "none",
         research_need=research_need,
-        vision_need="summary" if has_images else "none",
+        vision_need=vision_need,  # type: ignore[arg-type]
+        media_reason_code=str(
+            getattr(frame, "media_reason_code", "media_not_needed")
+            or "media_not_needed"
+        )[:64],
         qzone_continue=False,
         output_mode=output_mode,
         tool_intent=tool_intent,
@@ -604,6 +655,8 @@ def turn_plan_to_semantic_frame(plan: TurnPlan) -> Any:
         meta_question=False,
         domain_focus=plan.domain_focus,
         evidence_policy=plan.evidence_policy,
+        vision_need=plan.vision_need,
+        media_reason_code=plan.media_reason_code,
         emotional_support=plan.emotional_support,
         user_attitude=plan.user_attitude,
         bot_emotion=plan.bot_emotion,

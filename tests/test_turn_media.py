@@ -459,3 +459,31 @@ def test_onebot_video_resolution_failure_preserves_original_reference() -> None:
         "audios": 0,
         "resolution_codes": ["onebot_video_resolve_failed"],
     }
+
+
+def test_media_availability_counts_video_audio_and_media_only_turn() -> None:
+    event = SimpleNamespace(
+        user_id="speaker",
+        message_id="media-only",
+        group_id="group-1",
+        sender=SimpleNamespace(user_id="speaker"),
+        message=[
+            _video("opaque-video-token"),
+            _record("opaque-audio-token"),
+        ],
+    )
+
+    availability = turn_media.build_media_availability(
+        turn_media.extract_turn_media_from_event(event),
+        text="",
+    )
+
+    assert availability.to_dict() == {
+        "image_count": 0,
+        "video_count": 1,
+        "audio_count": 1,
+        "usable_image_count": 0,
+        "usable_video_count": 1,
+        "usable_audio_count": 1,
+        "media_only_turn": True,
+    }

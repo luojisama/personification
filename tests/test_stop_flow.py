@@ -77,6 +77,10 @@ def _run_stop_handler(
     runtime_chat_intent: str = "lookup",
     registry=None,
     select_semantic_fallback_tool=_no_lookup,
+    has_media: bool = False,
+    turn_plan=None,
+    reply_required: bool = False,
+    plugin_config=None,
 ):
     traces: list[dict] = []
     decision = asyncio.run(
@@ -92,10 +96,13 @@ def _run_stop_handler(
             logger=SimpleNamespace(info=lambda _msg: None, warning=lambda _msg: None),
             messages=[],
             pending_actions=[],
-            plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+            plugin_config=plugin_config or SimpleNamespace(personification_fallback_enabled=False),
             user_query_text="问题",
             user_text="问题",
             user_images=[],
+            has_media=has_media,
+            turn_plan=turn_plan,
+            reply_required=reply_required,
             rewritten_query=None,
             context_hint="",
             plugin_query_intent="",
@@ -108,6 +115,65 @@ def _run_stop_handler(
         )
     )
     return decision, traces
+
+
+def test_media_evidence_gate_injects_vision_before_zero_tool_draft() -> None:
+    class _VisionTool:
+        metadata = {
+            "category": "retrieval",
+            "intent_tags": ["lookup"],
+            "evidence_kind": "visual_summary",
+            "side_effect": "none",
+        }
+
+        @staticmethod
+        def enabled() -> bool:
+            return True
+
+        @staticmethod
+        async def handler(**_kwargs):  # noqa: ANN003, ANN201
+            return json.dumps(
+                {
+                    "scene_summary": "游戏仓库界面里展示了多件装备",
+                    "visual_evidence": ["角色站在仓库界面中央"],
+                },
+                ensure_ascii=False,
+            )
+
+    state = stop_flow.StopFlowState()
+    decision, traces = _run_stop_handler(
+        state=state,
+        response=_stop_response("这是发了个什么视频呀？"),
+        content_len=12,
+        runtime_chat_intent="banter",
+        registry=_Registry(_VisionTool()),
+        has_media=True,
+        turn_plan=SimpleNamespace(vision_need="summary"),
+        plugin_config=SimpleNamespace(personification_fallback_enabled=True),
+    )
+
+    assert decision.action == "continue"
+    assert state.media_evidence_gate_attempted is True
+    assert state.has_usable_evidence is True
+    assert any(item["key"] == "media_evidence_gate" for item in traces)
+
+
+def test_media_evidence_gate_never_returns_unverified_video_draft() -> None:
+    state = stop_flow.StopFlowState(media_evidence_gate_attempted=True)
+    decision, traces = _run_stop_handler(
+        state=state,
+        response=_stop_response("这是发了个什么视频呀？"),
+        content_len=12,
+        runtime_chat_intent="banter",
+        has_media=True,
+        turn_plan=SimpleNamespace(vision_need="summary"),
+        reply_required=False,
+    )
+
+    assert decision.action == "return"
+    assert decision.result.text == "[SILENCE]"
+    assert decision.result.quality_context == "media_evidence_unavailable"
+    assert traces[-1]["key"] == "media_evidence_gate"
 
 
 def _select_fallback(
