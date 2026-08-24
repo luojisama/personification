@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -25,12 +26,33 @@ def _safe_stat(path: Path) -> tuple[int, float]:
     return max(0, int(stat.st_size)), max(0.0, float(stat.st_mtime))
 
 
-def _source_fingerprint(sticker_dir: Path) -> dict[str, float]:
-    _size, directory_mtime = _safe_stat(sticker_dir)
-    _manifest_size, manifest_mtime = _safe_stat(sticker_metadata_path(sticker_dir))
+def _source_fingerprint(sticker_dir: Path) -> dict[str, int]:
+    try:
+        directory_stat = sticker_dir.stat()
+        directory_mtime_ns = int(directory_stat.st_mtime_ns)
+        directory_ctime_ns = int(directory_stat.st_ctime_ns)
+    except OSError:
+        directory_mtime_ns = 0
+        directory_ctime_ns = 0
+    try:
+        with os.scandir(sticker_dir) as entries:
+            directory_entry_count = sum(1 for _entry in entries)
+    except OSError:
+        directory_entry_count = 0
+    manifest = sticker_metadata_path(sticker_dir)
+    try:
+        manifest_stat = manifest.stat()
+        manifest_mtime_ns = int(manifest_stat.st_mtime_ns)
+        manifest_size = max(0, int(manifest_stat.st_size))
+    except OSError:
+        manifest_mtime_ns = 0
+        manifest_size = 0
     return {
-        "directory_mtime": directory_mtime,
-        "manifest_mtime": manifest_mtime,
+        "directory_mtime_ns": directory_mtime_ns,
+        "directory_ctime_ns": directory_ctime_ns,
+        "directory_entry_count": directory_entry_count,
+        "manifest_mtime_ns": manifest_mtime_ns,
+        "manifest_size": manifest_size,
     }
 
 

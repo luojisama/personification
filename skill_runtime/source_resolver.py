@@ -294,7 +294,10 @@ def _materialize_content_snapshot(
         return target
 
     snapshots_root.mkdir(parents=True, exist_ok=True)
-    temporary = snapshots_root / f".{content_digest}.{uuid.uuid4().hex}.tmp"
+    # Keep staging names short: on Windows the final content-addressed path is
+    # already 64 characters, and repeating that digest in the temporary name
+    # can push otherwise valid configured data directories past MAX_PATH.
+    temporary = snapshots_root / f".tmp-{uuid.uuid4().hex}"
     try:
         shutil.copytree(
             source_root,
