@@ -15,6 +15,7 @@ from ...agent.runtime.tool_catalog import registry_planner_metadata
 from ...core.chat_intent import (
     looks_like_explanatory_output,
 )
+from ...core.command_runtime_context import render_command_runtime_prompt
 from ...core.current_group_context_tool import register_current_group_context_tool
 from ...core.group_member_avatar_insight import register_group_member_avatar_insight_tool
 from ...core.emotion_state import (
@@ -1341,6 +1342,7 @@ async def process_yaml_response_logic(
         system_prompt += "\n\n" + build_plugin_interaction_policy_prompt(
             is_direct_mention=is_direct_mention,
         )
+    system_prompt += "\n\n" + render_command_runtime_prompt()
     primary_api_type, primary_model = primary_route_signature(
         plugin_config,
         get_configured_api_providers=get_configured_api_providers,

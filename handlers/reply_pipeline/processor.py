@@ -12,6 +12,7 @@ from nonebot.exception import FinishedException
 
 from ...core.ai_routes import summarize_provider_route_attempts
 from ...core.chat_intent import looks_like_explanatory_output
+from ...core.command_runtime_context import render_command_runtime_prompt
 from ...core.error_utils import log_exception
 from ...core.favorability_turn import (
     build_favorability_context_block,
@@ -2027,6 +2028,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             get_configured_api_providers=runtime.get_configured_api_providers,
         ),
     )
+    system_prompt += "\n\n" + render_command_runtime_prompt()
     if user_profile_block:
         system_prompt += f"\n\n{user_profile_block}"
     if media_grounding:

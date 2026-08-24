@@ -8,8 +8,8 @@
 
 ## 工具
 
-- `invoke_plugin(plugin_name, command_text)`：在内部以当前用户的身份把 `command_text`（如
-  `/天气 北京`）分发给目标插件，捕获其输出并返回。返回文本会作为 tool 结果进入 Agent 上下文，
+- `invoke_plugin(plugin_name, command_text)`：在内部以当前用户的身份把符合本轮 NoneBot 运行时前缀的完整 `command_text`（如
+  `<当前前缀>天气 北京`）分发给目标插件，捕获其输出并返回。返回文本会作为 tool 结果进入 Agent 上下文，
   由 Agent 用人设语气转述。
 
 ## 机制

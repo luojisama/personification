@@ -15,6 +15,7 @@ from ..core.message_provenance import (
 from ..core.group_roles import extract_sender_role
 from ..core.group_mute import is_group_muted
 from ..core.shared_content import parse_onebot_share_card
+from ..core.command_runtime_context import has_runtime_command_prefix
 from ..core.target_inference import (
     MessageTargetDecision,
     TARGET_BOT,
@@ -428,7 +429,7 @@ def _extract_recordable_group_message(event: Any) -> tuple[str, int, str]:
 
 def _looks_like_plugin_command_interaction(text: str) -> bool:
     """Structural command marker used only to label/skip command interactions."""
-    return str(text or "").lstrip().startswith("/")
+    return has_runtime_command_prefix(text)
 
 
 def _render_plugin_command_interaction(text: str) -> str:

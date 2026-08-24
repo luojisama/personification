@@ -5,12 +5,16 @@ import re
 from typing import Any, Callable
 
 from plugin.personification.agent.tool_registry import AgentTool
+from plugin.personification.core.command_runtime_context import (
+    build_command_runtime_context,
+    ensure_runtime_command_prefix,
+)
 
 
 INVOKE_PLUGIN_DESCRIPTION = """代为执行同一 bot 上其它已安装插件的命令，并返回该插件的输出。
 适合场景：用户不是在问插件原理，而是想直接用某个插件功能（查天气、签到、点歌、查询等）。
 使用前请先用 search_plugin_knowledge / list_plugin_features 定位目标插件以及它的命令触发方式，
-再把【完整命令文本】传给本工具，例如 plugin_name="weather", command_text="/天气 北京"。
+再按本轮受信任的 NoneBot 运行时命令配置传入【完整命令文本】。
 返回的是插件本来要发给用户的内容；拿到后请用你自己的人设语气转述，不要让用户自己去敲命令。
 注意：本工具会以当前用户的身份在内部实际执行该命令，等同于用户亲自发送，请只在用户确有此需求时使用。
 不能用本工具执行管理员/危险命令（封禁、踢人、删除、关机、全局开关、发奖、充值等），也不能调用我自己的命令。"""
@@ -345,7 +349,7 @@ def build_invoke_plugin_tool(
             return "插件知识库不可用，无法定位插件。"
 
         plugin_name = str(plugin_name or "").strip()
-        command_text = str(command_text or "").strip()
+        command_text = ensure_runtime_command_prefix(command_text)
         if not plugin_name or not command_text:
             return "需要同时提供 plugin_name 和完整的 command_text。"
 
@@ -391,9 +395,11 @@ def build_invoke_plugin_tool(
             logger=logger,
         )
 
+    command_context = build_command_runtime_context()
+    example = command_context.example()
     return AgentTool(
         name="invoke_plugin",
-        description=INVOKE_PLUGIN_DESCRIPTION,
+        description=f"{INVOKE_PLUGIN_DESCRIPTION}\n当前完整命令示例：{example}",
         parameters={
             "type": "object",
             "properties": {
@@ -403,7 +409,7 @@ def build_invoke_plugin_tool(
                 },
                 "command_text": {
                     "type": "string",
-                    "description": "要执行的完整命令文本，例如 /天气 北京。",
+                    "description": f"要执行的完整命令文本；当前运行配置示例：{example}。",
                 },
             },
             "required": ["plugin_name", "command_text"],

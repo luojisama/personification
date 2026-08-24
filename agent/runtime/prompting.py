@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...core.command_runtime_context import render_command_runtime_prompt
+
 from ...core.meme_reply_policy import format_meme_turn_prompt
 from ...core.context_policy import (
     PROMPT_INJECTION_GUARD_MARKER,
@@ -59,6 +61,7 @@ def append_agent_system_prompts(
             "content": _semantic_tool_guidance(),
         }
     )
+    messages.append({"role": "system", "content": render_command_runtime_prompt()})
     if reply_required:
         messages.append(
             {
@@ -234,7 +237,7 @@ def append_agent_system_prompts(
             plugin_hint += (
                 "如果对方不是在问插件原理，而是想直接用某个插件功能（查天气、签到、点歌、查询等），"
                 "先用 search_plugin_knowledge / list_plugin_features 定位插件和它的命令触发方式，"
-                "确认后用 invoke_plugin 传入完整命令文本（如 /天气 北京）代为执行，再用你自己的语气转述结果，"
+                "确认后按本轮受信任运行时命令配置，用 invoke_plugin 传入完整命令文本代为执行，再用你自己的语气转述结果，"
                 "不要让用户自己去发命令。"
             )
         messages.append(
