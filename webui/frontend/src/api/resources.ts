@@ -3,6 +3,11 @@ import type {
   OperationDiagnostic,
   OverviewSnapshot,
   Page,
+  PersonaListItem,
+  GroupListItem,
+  StickerPage,
+  ConfigListItem,
+  MultimodalRouteSnapshot,
   RecoveryItem,
   RouteCapabilityItem,
   TraceDetail,
@@ -140,5 +145,26 @@ export const resources = {
   },
   runtimeSettings(signal?: AbortSignal): Promise<Record<string, unknown>> {
     return api.get("/settings", undefined, signal);
+  },
+  personas(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<Page<PersonaListItem>> {
+    return api.get("/personas", { page, page_size: pageSize, search }, signal);
+  },
+  groups(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<Page<GroupListItem>> {
+    return api.get("/groups", { page, page_size: pageSize, search }, signal);
+  },
+  stickers(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<StickerPage> {
+    return api.get("/stickers", { page, page_size: pageSize, search }, signal);
+  },
+  rebuildStickerIndex(): Promise<OperationDiagnostic> {
+    return api.post("/stickers/index/rebuild");
+  },
+  config(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<Page<ConfigListItem>> {
+    return api.get("/config", { page, page_size: pageSize, search }, signal);
+  },
+  multimodalRoutes(signal?: AbortSignal): Promise<MultimodalRouteSnapshot> {
+    return api.get("/multimodal/routes", undefined, signal);
+  },
+  qzoneCapabilities(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get("/qzone/capabilities", undefined, signal);
   },
 };

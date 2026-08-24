@@ -15,7 +15,7 @@ export function SettingsPage() {
 
   return (
     <div className="page-stack">
-      <PageHeader index="05" title="设置" description="控制浏览器侧主题与动效偏好；服务端配置只展示安全状态，不在本页回显 Secret 或原始配置包。" />
+      <PageHeader index="07" title="设置" description="控制浏览器侧主题与动效偏好；服务端配置只展示安全状态，不在本页回显 Secret 或原始配置包。" />
       <div className="settings-grid">
         <Panel className="wide-panel" eyebrow="APPEARANCE / LOCAL" title="取证台主题">
           <div className="theme-grid">

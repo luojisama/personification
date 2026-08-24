@@ -10,7 +10,9 @@ const NAV_ITEMS: Array<{ to: string; label: string; short: string; icon: IconNam
   { to: "/routes", label: "路由能力", short: "路由", icon: "route", index: "02" },
   { to: "/traces", label: "Trace 取证", short: "Trace", icon: "trace", index: "03" },
   { to: "/recovery", label: "恢复队列", short: "恢复", icon: "recovery", index: "04" },
-  { to: "/settings", label: "设置", short: "设置", icon: "settings", index: "05" },
+  { to: "/data", label: "管理数据", short: "数据", icon: "data", index: "05" },
+  { to: "/systems", label: "系统诊断", short: "诊断", icon: "system", index: "06" },
+  { to: "/settings", label: "设置", short: "设置", icon: "settings", index: "07" },
 ];
 
 function nextTheme(current: (typeof THEMES)[number]) {

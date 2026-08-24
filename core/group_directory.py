@@ -215,4 +215,51 @@ async def discover_group_union(runtime: Any, *, probe_limit: int = _DEFAULT_PROB
     return sorted(rows.values(), key=lambda item: str(item.get("group_id", "")))
 
 
-__all__ = ["discover_group_union", "normalize_group_list", "record_observed_group"]
+def list_cached_group_union(runtime: Any) -> list[dict[str, Any]]:
+    """Return the persisted/configured group union without any OneBot call."""
+
+    sources = _known_sources(runtime)
+    persisted = _load_directory()
+    rows: list[dict[str, Any]] = []
+    for gid in sorted(sources):
+        scoped = [
+            value
+            for value in persisted.values()
+            if isinstance(value, dict) and str(value.get("group_id", "") or "") == gid
+        ]
+        group_name = next(
+            (str(item.get("group_name", "") or "") for item in scoped if item.get("group_name")),
+            "",
+        )
+        memberships = [
+            {
+                "bot_id": str(item.get("bot_self_id", "") or ""),
+                "group_id": gid,
+                "provenance": dict(item.get("provenance", {}) or {}),
+                "last_seen_at": float(item.get("last_seen_at", 0) or 0),
+            }
+            for item in scoped
+            if str(item.get("bot_self_id", "") or "") not in {"", "unknown"}
+        ]
+        rows.append(
+            {
+                "group_id": gid,
+                "group_name": group_name,
+                "sources": sorted(sources.get(gid, set())),
+                "memberships": memberships,
+                "bot_self_ids": sorted({item["bot_id"] for item in memberships}),
+                "freshness": max(
+                    (float(item.get("last_seen_at", 0) or 0) for item in scoped),
+                    default=0.0,
+                ),
+            }
+        )
+    return rows
+
+
+__all__ = [
+    "discover_group_union",
+    "list_cached_group_union",
+    "normalize_group_list",
+    "record_observed_group",
+]

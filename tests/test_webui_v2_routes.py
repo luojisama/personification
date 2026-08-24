@@ -18,6 +18,12 @@ def test_v2_router_exposes_paged_trace_recovery_capability_and_sse_routes() -> N
     router = v2_routes.build_v2_router(runtime=SimpleNamespace())
     paths = {route.path for route in router.routes}
     assert {
+        "/api/v2/personas",
+        "/api/v2/groups",
+        "/api/v2/stickers",
+        "/api/v2/stickers/index/rebuild",
+        "/api/v2/config",
+        "/api/v2/multimodal/routes",
         "/api/v2/traces",
         "/api/v2/traces/{trace_id}",
         "/api/v2/recovery",
@@ -86,3 +92,69 @@ def test_recovery_summary_does_not_expose_claims_or_media_references(tmp_path) -
     assert "claim_token" not in summary
     assert "claimed_by" not in summary
     assert "ref" not in summary["media"][0]
+
+
+def test_cached_persona_rows_filter_and_sort_without_onebot_calls() -> None:
+    class _Profiles:
+        def list_core_profiles(self):
+            return [
+                {
+                    "user_id": "2",
+                    "profile_text": "乙的画像",
+                    "profile_json": {"qq_profile": {"nickname": "乙", "avatar_url": "https://avatar/2"}},
+                    "source": "cache",
+                    "updated_at": 20,
+                },
+                {
+                    "user_id": "1",
+                    "profile_text": "甲的画像",
+                    "profile_json": {"qq_profile": {"nickname": "甲"}},
+                    "source": "cache",
+                    "updated_at": 10,
+                },
+            ]
+
+        def list_local_profiles(self, group_id):  # noqa: ANN001
+            assert group_id == "100"
+            return [{"user_id": "2"}]
+
+    class _Favorability:
+        def snapshot_profiles(self):
+            return {"1": {"favorability": 20}, "2": {"favorability": 80}}
+
+        def get_level_name(self, score):  # noqa: ANN001
+            return "亲近" if score >= 50 else "普通"
+
+    runtime = SimpleNamespace(
+        runtime_bundle=SimpleNamespace(
+            profile_service=_Profiles(),
+            favorability_service=_Favorability(),
+        )
+    )
+
+    rows = v2_routes._cached_persona_rows(
+        runtime,
+        search="乙",
+        group_id="100",
+        favorability_level="亲近",
+        sort_by="favorability",
+        direction="desc",
+    )
+
+    assert [row["user_id"] for row in rows] == ["2"]
+    assert rows[0]["cache_only"] is True
+    assert rows[0]["favorability"] == {"score": 80.0, "level": "亲近"}
+
+
+def test_v2_config_rows_mask_secret_values() -> None:
+    config = load_personification_module("plugin.personification.config").Config(
+        personification_api_key="secret-must-not-leak"
+    )
+    runtime = SimpleNamespace(plugin_config=config)
+
+    rows = v2_routes._config_rows(runtime, search="主模型 API 密钥", group="")
+    target = next(row for row in rows if row["field_name"] == "personification_api_key")
+
+    assert target["secret"] is True
+    assert target["value"] == "***"
+    assert "secret-must-not-leak" not in repr(rows)

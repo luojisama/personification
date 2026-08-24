@@ -142,3 +142,41 @@ def test_union_preserves_membership_without_copying_global_sources(store, monkey
     assert by_id["100"]["memberships"][0]["bot_id"] == "10"
     assert by_id["200"]["bot_self_ids"] == []
     assert by_id["200"]["memberships"] == []
+
+
+def test_cached_union_never_calls_onebot(store, monkeypatch) -> None:
+    monkeypatch.setattr(utils, "load_group_configs", lambda: {"100": {"enabled": True}})
+    directory.record_observed_group(
+        "10",
+        "100",
+        source="event",
+        group_name="缓存群",
+        observed_at=20,
+    )
+    bot = _Bot("10", RuntimeError("must not be called"))
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(personification_whitelist=[]),
+        get_bots=lambda: {"10": bot},
+        runtime_bundle=None,
+    )
+
+    rows = directory.list_cached_group_union(runtime)
+
+    assert bot.list_calls == 0
+    assert rows == [
+        {
+            "group_id": "100",
+            "group_name": "缓存群",
+            "sources": ["directory", "group_config"],
+            "memberships": [
+                {
+                    "bot_id": "10",
+                    "group_id": "100",
+                    "provenance": {"event": 20.0},
+                    "last_seen_at": 20.0,
+                }
+            ],
+            "bot_self_ids": ["10"],
+            "freshness": 20.0,
+        }
+    ]

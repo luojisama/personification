@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from ...core.pagination import build_page, normalize_pagination
+from ...core.pagination import build_page, normalize_pagination, resolve_sort
 from ...core.reply_recovery_queue import ReplyRecoveryQueue, RecoveryItem
 from ...core import reply_turn_trace
 from ...core.route_capabilities import DEFAULT_ROUTE_CAPABILITY_REGISTRY
@@ -21,6 +21,7 @@ from ..deps import AdminIdentity, require_admin
 
 
 _ROUTE_PROBE_TASKS: dict[str, dict[str, Any]] = {}
+_STICKER_INDEX_TASKS: dict[str, dict[str, Any]] = {}
 
 
 def _iso(value: Any) -> str | None:
@@ -130,6 +131,190 @@ def _trace_detail(trace: dict[str, Any]) -> dict[str, Any]:
         "warning": "warn",
         "failed": "error",
     }
+
+
+def _runtime_service(runtime: Any, name: str) -> Any:
+    bundle = getattr(runtime, "runtime_bundle", None)
+    return getattr(bundle, name, None) if bundle is not None else None
+
+
+def _cached_persona_rows(
+    runtime: Any,
+    *,
+    search: str,
+    group_id: str,
+    favorability_level: str,
+    sort_by: str,
+    direction: str,
+) -> list[dict[str, Any]]:
+    """Build cached profile summaries without any OneBot request."""
+
+    service = _runtime_service(runtime, "profile_service")
+    if service is None:
+        return []
+    profiles = service.list_core_profiles()
+    group_users: set[str] | None = None
+    normalized_group = str(group_id or "").strip()
+    if normalized_group:
+        group_users = {
+            str(item.get("user_id", "") or "")
+            for item in service.list_local_profiles(normalized_group)
+            if isinstance(item, dict)
+        }
+    favorability = _runtime_service(runtime, "favorability_service")
+    try:
+        favorability_snapshot = favorability.snapshot_profiles() if favorability is not None else {}
+    except Exception:
+        favorability_snapshot = {}
+    needle = str(search or "").strip().casefold()
+    level_filter = str(favorability_level or "").strip()
+    rows: list[dict[str, Any]] = []
+    for raw in profiles:
+        if not isinstance(raw, dict):
+            continue
+        user_id = str(raw.get("user_id", "") or "")
+        if group_users is not None and user_id not in group_users:
+            continue
+        profile_json = raw.get("profile_json") if isinstance(raw.get("profile_json"), dict) else {}
+        qq_profile = profile_json.get("qq_profile") if isinstance(profile_json.get("qq_profile"), dict) else {}
+        nickname = next(
+            (
+                str(qq_profile.get(key, "") or "").strip()
+                for key in ("remark", "card", "nickname")
+                if str(qq_profile.get(key, "") or "").strip()
+            ),
+            user_id,
+        )
+        if needle and needle not in user_id.casefold() and needle not in nickname.casefold():
+            continue
+        fav_profile = favorability_snapshot.get(user_id)
+        try:
+            score = float((fav_profile or {}).get("favorability", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        try:
+            level = str(favorability.get_level_name(score) or "") if favorability is not None else ""
+        except Exception:
+            level = ""
+        if level_filter and level != level_filter:
+            continue
+        profile_text = str(raw.get("profile_text", "") or "").strip()
+        rows.append(
+            {
+                "user_id": user_id,
+                "nickname": nickname,
+                "avatar_url": str(qq_profile.get("avatar_url", "") or ""),
+                "recent_group_id": str(qq_profile.get("last_group_id", "") or ""),
+                "snippet": profile_text[:240],
+                "favorability": {"score": round(score, 2), "level": level},
+                "updated_at": float(raw.get("updated_at", 0) or 0),
+                "source": str(raw.get("source", "") or ""),
+                "cache_only": True,
+            }
+        )
+    selection = resolve_sort(
+        sort_by,
+        allowed={
+            "updated_at": lambda item: float(item.get("updated_at", 0) or 0),
+            "favorability": lambda item: float((item.get("favorability") or {}).get("score", 0) or 0),
+            "user_id": lambda item: str(item.get("user_id", "") or ""),
+            "nickname": lambda item: str(item.get("nickname", "") or "").casefold(),
+        },
+        default="updated_at",
+        direction=direction,
+    )
+    rows.sort(key=selection.value, reverse=selection.direction == "desc")
+    return rows
+
+
+def _cached_group_rows(
+    runtime: Any,
+    *,
+    search: str,
+    sort_by: str,
+    direction: str,
+) -> list[dict[str, Any]]:
+    from ...core.group_directory import list_cached_group_union
+    from ...utils import is_group_whitelisted
+
+    config_whitelist = list(getattr(runtime.plugin_config, "personification_whitelist", []) or [])
+    needle = str(search or "").strip().casefold()
+    rows: list[dict[str, Any]] = []
+    for raw in list_cached_group_union(runtime):
+        group_id = str(raw.get("group_id", "") or "")
+        group_name = str(raw.get("group_name", "") or "")
+        if needle and needle not in group_id.casefold() and needle not in group_name.casefold():
+            continue
+        rows.append(
+            {
+                **raw,
+                "enabled": bool(is_group_whitelisted(group_id, config_whitelist)),
+                "cache_only": True,
+            }
+        )
+    selection = resolve_sort(
+        sort_by,
+        allowed={
+            "group_id": lambda item: str(item.get("group_id", "") or ""),
+            "group_name": lambda item: str(item.get("group_name", "") or "").casefold(),
+            "freshness": lambda item: float(item.get("freshness", 0) or 0),
+        },
+        default="group_id",
+        direction=direction,
+    )
+    rows.sort(key=selection.value, reverse=selection.direction == "desc")
+    return rows
+
+
+def _config_rows(runtime: Any, *, search: str, group: str) -> list[dict[str, Any]]:
+    from ...core import config_registry
+    from ...core.sensitive_data import sanitize_object
+
+    needle = str(search or "").strip().casefold()
+    group_filter = str(group or "").strip()
+    rows: list[dict[str, Any]] = []
+    for entry in config_registry.get_config_entries():
+        if group_filter and entry.group != group_filter:
+            continue
+        haystack = " ".join(
+            (entry.field_name, entry.display_name, entry.description, entry.group)
+        ).casefold()
+        if needle and needle not in haystack:
+            continue
+        value = config_registry.read_config_value(
+            entry,
+            plugin_config=runtime.plugin_config,
+        )
+        if entry.secret:
+            safe_value: Any = "***" if value not in (None, "", [], {}) else ""
+        else:
+            safe_value = sanitize_object(value)
+        rows.append(
+            {
+                "key": entry.key,
+                "field_name": entry.field_name,
+                "display_name": entry.display_name,
+                "description": entry.description,
+                "group": entry.group,
+                "scope": entry.scope,
+                "value_type": entry.value_type,
+                "value": safe_value,
+                "default": "***" if entry.secret and entry.default else sanitize_object(entry.default),
+                "secret": bool(entry.secret),
+                "advanced": bool(entry.advanced),
+                "hot_reloadable": bool(entry.hot_reloadable),
+                "choices": list(entry.choices),
+            }
+        )
+    rows.sort(key=lambda item: (str(item["group"]), str(item["display_name"]), str(item["field_name"])))
+    return rows
+
+
+def _sticker_root(runtime: Any) -> Any:
+    from ...core.sticker_library import resolve_sticker_dir
+
+    configured = getattr(runtime.plugin_config, "personification_sticker_path", None)
+    return resolve_sticker_dir(configured or "data/stickers", create=True)
     return {
         **base,
         "bot_id": str(raw_detail.get("bot_id") or ""),
@@ -179,6 +364,242 @@ def _trace_detail(trace: dict[str, Any]) -> dict[str, Any]:
 
 def build_v2_router(*, runtime: Any) -> APIRouter:
     router = APIRouter(prefix="/api/v2", tags=["v2"])
+
+    @router.get("/personas")
+    async def personas(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        search: str = Query(default="", max_length=120),
+        group_id: str = Query(default="", max_length=64),
+        favorability_level: str = Query(default="", max_length=64),
+        sort_by: str = Query(default="updated_at", max_length=32),
+        direction: str = Query(default="desc", pattern="^(asc|desc)$"),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        params = normalize_pagination(page=page, page_size=page_size)
+        try:
+            rows = await run_in_threadpool(
+                _cached_persona_rows,
+                runtime,
+                search=search,
+                group_id=group_id,
+                favorability_level=favorability_level,
+                sort_by=sort_by,
+                direction=direction,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "persona_sort_invalid", "message": "画像排序字段无效。"},
+            ) from exc
+        return build_page(
+            rows[params.offset : params.offset + params.page_size],
+            total=len(rows),
+            params=params,
+        ).to_dict()
+
+    @router.get("/groups")
+    async def groups(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        search: str = Query(default="", max_length=120),
+        sort_by: str = Query(default="group_id", max_length=32),
+        direction: str = Query(default="asc", pattern="^(asc|desc)$"),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        params = normalize_pagination(page=page, page_size=page_size)
+        try:
+            rows = await run_in_threadpool(
+                _cached_group_rows,
+                runtime,
+                search=search,
+                sort_by=sort_by,
+                direction=direction,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "group_sort_invalid", "message": "群列表排序字段无效。"},
+            ) from exc
+        return build_page(
+            rows[params.offset : params.offset + params.page_size],
+            total=len(rows),
+            params=params,
+        ).to_dict()
+
+    async def _finish_sticker_index_rebuild(root_key: str, root: Any) -> None:
+        from ...core.sticker_catalog_index import rebuild_sticker_catalog_index
+
+        task = _STICKER_INDEX_TASKS.setdefault(root_key, {})
+        task.update({"status": "running", "started_at": time.time()})
+        try:
+            snapshot = await run_in_threadpool(rebuild_sticker_catalog_index, root)
+        except Exception as exc:
+            task.update(
+                {
+                    "status": "failed",
+                    "finished_at": time.time(),
+                    "detail_code": f"sticker_index_rebuild_failed:{type(exc).__name__}",
+                }
+            )
+            return
+        task.update(
+            {
+                "status": "finished",
+                "finished_at": time.time(),
+                "detail_code": "sticker_index_ready",
+                "item_count": len(snapshot.get("items") or []),
+            }
+        )
+
+    def _queue_sticker_rebuild(root: Any) -> dict[str, Any]:
+        root_key = str(root.resolve())
+        current = _STICKER_INDEX_TASKS.get(root_key)
+        if not current or current.get("status") not in {"queued", "running"}:
+            _STICKER_INDEX_TASKS[root_key] = {
+                "status": "queued",
+                "queued_at": time.time(),
+                "detail_code": "sticker_index_queued",
+            }
+            asyncio.create_task(_finish_sticker_index_rebuild(root_key, root))
+        return dict(_STICKER_INDEX_TASKS[root_key])
+
+    @router.get("/stickers")
+    async def stickers(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        search: str = Query(default="", max_length=120),
+        labeled: bool | None = Query(default=None),
+        sort_by: str = Query(default="filename", max_length=32),
+        direction: str = Query(default="asc", pattern="^(asc|desc)$"),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from ...core.sticker_catalog_index import load_sticker_catalog_index
+
+        params = normalize_pagination(page=page, page_size=page_size)
+        root = _sticker_root(runtime)
+        snapshot = await run_in_threadpool(load_sticker_catalog_index, root)
+        task = _STICKER_INDEX_TASKS.get(str(root.resolve()), {"status": "idle"})
+        if bool(snapshot.get("stale", True)):
+            task = _queue_sticker_rebuild(root)
+        needle = str(search or "").strip().casefold()
+        rows = []
+        for item in snapshot.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if labeled is not None and bool(item.get("labeled", False)) != labeled:
+                continue
+            searchable = " ".join(
+                [
+                    str(item.get("filename", "") or ""),
+                    str(item.get("description", "") or ""),
+                    *[str(value or "") for value in item.get("mood_tags") or []],
+                    *[str(value or "") for value in item.get("scene_tags") or []],
+                ]
+            ).casefold()
+            if not needle or needle in searchable:
+                rows.append(dict(item))
+        try:
+            selection = resolve_sort(
+                sort_by,
+                allowed={
+                    "filename": lambda item: str(item.get("filename", "") or "").casefold(),
+                    "size_bytes": lambda item: int(item.get("size_bytes", 0) or 0),
+                    "modified_at": lambda item: float(item.get("modified_at", 0) or 0),
+                },
+                default="filename",
+                direction=direction,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "sticker_sort_invalid", "message": "贴纸排序字段无效。"},
+            ) from exc
+        rows.sort(key=selection.value, reverse=selection.direction == "desc")
+        payload = build_page(
+            rows[params.offset : params.offset + params.page_size],
+            total=len(rows),
+            params=params,
+        ).to_dict()
+        payload.update(
+            {
+                "index_status": task.get("status", "idle"),
+                "index_detail_code": task.get("detail_code", "sticker_index_idle"),
+                "index_updated_at": snapshot.get("updated_at", 0.0),
+                "index_stale": bool(snapshot.get("stale", True)),
+            }
+        )
+        return payload
+
+    @router.post("/stickers/index/rebuild")
+    async def rebuild_sticker_index(
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        task = _queue_sticker_rebuild(_sticker_root(runtime))
+        return {
+            "ok": True,
+            "code": "sticker_index_queued",
+            "phase": task.get("status", "queued"),
+            "title": "贴纸索引重建已排队",
+            "message": "目录扫描在后台管理任务中执行，列表请求继续读取上一个已知索引。",
+            "retryable": False,
+            "partial": False,
+            "outcome_unknown": False,
+            "warnings": [],
+            "steps": [],
+        }
+
+    @router.get("/config")
+    async def config_entries(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        search: str = Query(default="", max_length=120),
+        group: str = Query(default="", max_length=80),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        params = normalize_pagination(page=page, page_size=page_size)
+        rows = await run_in_threadpool(_config_rows, runtime, search=search, group=group)
+        return build_page(
+            rows[params.offset : params.offset + params.page_size],
+            total=len(rows),
+            params=params,
+        ).to_dict()
+
+    @router.get("/multimodal/routes")
+    async def multimodal_routes(
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        config = runtime.plugin_config
+        from ...core.media_understanding import (
+            audio_route_available,
+            normalize_video_route_mode,
+            primary_route_supports_native_audio,
+            primary_route_supports_native_video,
+        )
+
+        return {
+            "audio": {
+                "enabled": bool(getattr(config, "personification_audio_transcription_enabled", True)),
+                "primary_native": bool(primary_route_supports_native_audio(runtime)),
+                "route_available": bool(audio_route_available(runtime)),
+                "asr_provider": str(getattr(config, "personification_audio_transcription_provider", "auto") or "auto"),
+                "asr_model": str(getattr(config, "personification_audio_transcription_model", "") or ""),
+                "fallback_order": ["primary_native", "external_fullmodal", "gemini_web", "configured_asr"],
+            },
+            "video": {
+                "enabled": bool(getattr(config, "personification_video_understanding_enabled", False)),
+                "route_mode": normalize_video_route_mode(
+                    getattr(config, "personification_video_route_mode", "auto")
+                ),
+                "primary_native": bool(primary_route_supports_native_video(runtime)),
+                "gemini_web_enabled": bool(getattr(config, "personification_gemini_web_enabled", False)),
+                "external_fallback_enabled": bool(getattr(config, "personification_video_fallback_enabled", True)),
+                "storyboard_fallback_enabled": bool(getattr(config, "personification_video_storyboard_fallback_enabled", True)),
+                "fallback_order": ["primary_native", "gemini_web", "external_fullmodal", "storyboard", "subtitle_asr"],
+            },
+            "diagnostic_code": "multimodal_route_snapshot_local_only",
+            "production_verified": False,
+        }
 
     @router.get("/traces")
     async def traces(
@@ -405,9 +826,30 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
 
     @router.get("/settings")
     async def settings(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
+        config = getattr(runtime, "plugin_config", None)
         return {
-            "revision": "api_v2_r2",
-            "participation_v2_mode": "shadow",
+            "revision": "api_v2_r4",
+            "participation_v2_mode": str(
+                getattr(config, "personification_participation_v2_mode", "shadow") or "shadow"
+            ),
+            "tool_disclosure_mode": str(
+                getattr(config, "personification_tool_disclosure_mode", "off") or "off"
+            ),
+            "emotion_v2_mode": str(
+                getattr(config, "personification_emotion_v2_mode", "shadow") or "shadow"
+            ),
+            "reply_wait_contract": {
+                "min_seconds": float(getattr(config, "personification_batch_min_wait_seconds", 10.0) or 10.0),
+                "base_seconds": float(getattr(config, "personification_batch_base_wait_seconds", 30.0) or 30.0),
+                "max_seconds": float(getattr(config, "personification_batch_max_wait_seconds", 60.0) or 60.0),
+            },
+            "whole_backup": {
+                "state_export_available": callable(getattr(runtime, "whole_plugin_export_datasets", None)),
+                "secret_export_available": callable(getattr(runtime, "whole_plugin_export_secrets", None)),
+                "restore_available": getattr(runtime, "whole_plugin_restore_backend", None) is not None,
+                "step_up_required": True,
+                "secret_https_required": True,
+            },
         }
 
     @router.get("/qzone/capabilities")

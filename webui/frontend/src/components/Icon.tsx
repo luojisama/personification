@@ -6,6 +6,8 @@ export type IconName =
   | "trace"
   | "recovery"
   | "settings"
+  | "data"
+  | "system"
   | "signal"
   | "search"
   | "refresh"
@@ -23,6 +25,8 @@ const paths: Record<IconName, React.ReactNode> = {
   trace: <><path d="M5 3v18M5 7h6l2 3h6M5 14h5l2 3h7" /><circle cx="19" cy="10" r="1.5" /><circle cx="19" cy="17" r="1.5" /></>,
   recovery: <><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6" /><path d="M4 4v4.6h4.6M12 8v5l3 2" /></>,
   settings: <><path d="M9.3 3.6 10 2h4l.7 1.6 1.7.7 1.6-.6 2.3 2.3-.6 1.6.7 1.7L22 10v4l-1.6.7-.7 1.7.6 1.6-2.3 2.3-1.6-.6-1.7.7L14 22h-4l-.7-1.6-1.7-.7-1.6.6L3.7 18l.6-1.6-.7-1.7L2 14v-4l1.6-.7.7-1.7L3.7 6 6 3.7l1.6.6z" /><circle cx="12" cy="12" r="3" /></>,
+  data: <><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" /></>,
+  system: <><rect x="3" y="4" width="18" height="12" rx="1" /><path d="M8 20h8M12 16v4M7 9h3M14 9h3" /></>,
   signal: <><path d="M4 18V13M9.3 18V9M14.7 18V5M20 18V2" /></>,
   search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m15.5 15.5 5 5" /></>,
   refresh: <><path d="M20 7V3l-2 2a8 8 0 1 0 1.2 11" /></>,

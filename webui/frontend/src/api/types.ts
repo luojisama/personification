@@ -181,3 +181,81 @@ export interface OperationDiagnostic {
   suggestion?: string;
   steps: OperationStep[];
 }
+
+export interface PersonaListItem {
+  user_id: string;
+  nickname: string;
+  avatar_url: string;
+  recent_group_id: string;
+  snippet: string;
+  favorability: { score: number; level: string };
+  updated_at: number;
+  source: string;
+  cache_only: boolean;
+}
+
+export interface GroupListItem {
+  group_id: string;
+  group_name: string;
+  enabled: boolean;
+  sources: string[];
+  bot_self_ids: string[];
+  freshness: number;
+  cache_only: boolean;
+}
+
+export interface StickerListItem {
+  filename: string;
+  size_bytes: number;
+  modified_at: number;
+  thumbnail_url: string;
+  description: string;
+  mood_tags: string[];
+  scene_tags: string[];
+  labeled: boolean;
+}
+
+export interface StickerPage extends Page<StickerListItem> {
+  index_status: string;
+  index_detail_code: string;
+  index_updated_at: number;
+  index_stale: boolean;
+}
+
+export interface ConfigListItem {
+  key: string;
+  field_name: string;
+  display_name: string;
+  description: string;
+  group: string;
+  scope: string;
+  value_type: string;
+  value: unknown;
+  default: unknown;
+  secret: boolean;
+  advanced: boolean;
+  hot_reloadable: boolean;
+  choices: string[];
+}
+
+export interface MultimodalRouteSnapshot {
+  audio: {
+    enabled: boolean;
+    primary_native: boolean;
+    route_available: boolean;
+    asr_provider: string;
+    asr_model: string;
+    fallback_order: string[];
+  };
+  video: {
+    enabled: boolean;
+    route_mode: string;
+    primary_native: boolean;
+    gemini_web_enabled: boolean;
+    external_fallback_enabled: boolean;
+    storyboard_fallback_enabled: boolean;
+    fallback_order: string[];
+  };
+  diagnostic_code: string;
+  production_verified: boolean;
+}
