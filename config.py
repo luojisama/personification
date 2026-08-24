@@ -64,6 +64,7 @@ class Config(BaseModel):
     personification_reply_global_concurrency: int = 12
     personification_image_input_mode: str = "auto"
     personification_image_detail: str = "auto"
+    personification_visual_probe_timeout_seconds: float = 45.0
     personification_sticker_vision_max: int = 3
     personification_gif_understanding_enabled: bool = False
     personification_gif_understanding_timeout: float = 12.0

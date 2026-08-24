@@ -80,7 +80,7 @@ function RouteDossier({ route }: { route: RouteCapabilityItem }) {
       title={route.model}
       action={
         <button className="button button-secondary" type="button" disabled={probe.isPending} onClick={() => probe.mutate()}>
-          <Icon name="refresh" /> {probe.isPending ? "正在排队" : "异步重测"}
+          <Icon name="refresh" /> {probe.isPending ? "正在排队" : "视觉重测"}
         </button>
       }
     >

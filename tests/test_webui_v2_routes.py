@@ -12,6 +12,9 @@ webui_app = load_personification_module("plugin.personification.webui.app")
 recovery = load_personification_module(
     "plugin.personification.core.reply_recovery_queue"
 )
+route_capabilities = load_personification_module(
+    "plugin.personification.core.route_capabilities"
+)
 
 
 def test_v2_router_exposes_paged_trace_recovery_capability_and_sse_routes() -> None:
@@ -158,3 +161,36 @@ def test_v2_config_rows_mask_secret_values() -> None:
     assert target["secret"] is True
     assert target["value"] == "***"
     assert "secret-must-not-leak" not in repr(rows)
+
+
+def test_route_probe_target_matches_full_route_fingerprint(monkeypatch) -> None:  # noqa: ANN001
+    registry = route_capabilities.RouteCapabilityRegistry()
+    provider = {
+        "name": "compatible-gateway",
+        "api_type": "openai",
+        "api_url": "https://example.test/v1",
+        "api_key": "must-not-be-logged",
+        "model": "vision-model",
+        "media_protocol": "openai",
+    }
+    key = route_capabilities.RouteKey.from_config(
+        provider=provider["name"],
+        api_type=provider["api_type"],
+        api_url=provider["api_url"],
+        model=provider["model"],
+        media_protocol=provider["media_protocol"],
+    )
+    registry.bind_route("0:FakeCaller", key)
+    monkeypatch.setattr(v2_routes, "DEFAULT_ROUTE_CAPABILITY_REGISTRY", registry)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(),
+        runtime_bundle=SimpleNamespace(get_configured_api_providers=lambda: [provider]),
+    )
+
+    target = v2_routes._route_probe_target(runtime, key.fingerprint)
+
+    assert target is not None
+    assert target[0] == "0:fakecaller"
+    assert target[1] == key
+    assert target[2]["model"] == "vision-model"
+    assert v2_routes._route_probe_target(runtime, "unknown") is None

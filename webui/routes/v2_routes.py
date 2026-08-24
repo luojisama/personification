@@ -13,6 +13,7 @@ from ...core.pagination import build_page, normalize_pagination, resolve_sort
 from ...core.reply_recovery_queue import ReplyRecoveryQueue, RecoveryItem
 from ...core import reply_turn_trace
 from ...core.route_capabilities import DEFAULT_ROUTE_CAPABILITY_REGISTRY
+from ...core.route_capabilities import CapabilityObservation, RouteKey
 from ...core.qzone_capability_matrix import DEFAULT_QZONE_CAPABILITY_MATRIX
 from ...core.runtime_events import get_runtime_event_bus
 from ...core.runtime_events import publish_runtime_event
@@ -130,6 +131,51 @@ def _trace_detail(trace: dict[str, Any]) -> dict[str, Any]:
         "info": "ok",
         "warning": "warn",
         "failed": "error",
+    }
+    return {
+        **base,
+        "bot_id": str(raw_detail.get("bot_id") or ""),
+        "media_summary": [],
+        "decision": {
+            "summary": "；".join(f"{key}={value}" for key, value in list(understanding.items())[:6]),
+            "action": str(understanding.get("action") or understanding.get("output") or "unknown"),
+            "tier": raw_detail.get("attention_tier") if isinstance(raw_detail.get("attention_tier"), int) else None,
+            "wait_seconds": raw_detail.get("attention_wait_seconds") if isinstance(raw_detail.get("attention_wait_seconds"), (int, float)) else None,
+            "interest": raw_detail.get("attention_interest") if isinstance(raw_detail.get("attention_interest"), (int, float)) else None,
+            "reason_code": str(raw_detail.get("attention_reason_code") or "decision_unavailable")[:96],
+        },
+        "stages": [
+            {
+                "key": str(item.get("key") or "unknown"),
+                "label": str(item.get("label") or "未命名阶段"),
+                "status": status_map.get(str(item.get("status") or ""), str(item.get("status") or "unknown")),
+                "started_at": _iso(item.get("ts")),
+                "finished_at": None,
+                "duration_ms": item.get("duration_ms") if isinstance(item.get("duration_ms"), int) else None,
+                "summary": str(item.get("detail") or "")[:1000],
+                "detail_code": str(item.get("key") or "stage_unclassified")[:96],
+                "remaining_ms": None,
+            }
+            for item in items[:200]
+        ],
+        "tools": [
+            {
+                "name": str(tool.get("tool") or "unknown_tool")[:96],
+                "namespace": "runtime",
+                "status": str(tool.get("status") or "unknown")[:32],
+                "duration_ms": tool.get("duration_ms") if isinstance(tool.get("duration_ms"), int) else None,
+                "argument_summary": "",
+                "result_summary": str(tool.get("detail") or "")[:1000],
+                "schema_hash": "",
+                "detail_code": str(tool.get("stage") or "tool_unclassified")[:96],
+            }
+            for tool in tools[:100]
+            if isinstance(tool, dict)
+        ],
+        "final_reply": outgoing[:6000],
+        "send_status": str(raw_detail.get("outbound_delivery") or trace.get("outcome") or "unknown"),
+        "history_status": str(raw_detail.get("history_status") or "unknown"),
+        "recovery_ids": [],
     }
 
 
@@ -315,51 +361,107 @@ def _sticker_root(runtime: Any) -> Any:
 
     configured = getattr(runtime.plugin_config, "personification_sticker_path", None)
     return resolve_sticker_dir(configured or "data/stickers", create=True)
-    return {
-        **base,
-        "bot_id": str(raw_detail.get("bot_id") or ""),
-        "media_summary": [],
-        "decision": {
-            "summary": "；".join(f"{key}={value}" for key, value in list(understanding.items())[:6]),
-            "action": str(understanding.get("action") or understanding.get("output") or "unknown"),
-            "tier": raw_detail.get("attention_tier") if isinstance(raw_detail.get("attention_tier"), int) else None,
-            "wait_seconds": raw_detail.get("attention_wait_seconds") if isinstance(raw_detail.get("attention_wait_seconds"), (int, float)) else None,
-            "interest": raw_detail.get("attention_interest") if isinstance(raw_detail.get("attention_interest"), (int, float)) else None,
-            "reason_code": str(raw_detail.get("attention_reason_code") or "decision_unavailable")[:96],
-        },
-        "stages": [
+
+
+def _route_probe_target(runtime: Any, route_fingerprint: str) -> tuple[str, RouteKey, dict[str, Any]] | None:
+    bundle = getattr(runtime, "runtime_bundle", None)
+    getter = getattr(bundle, "get_configured_api_providers", None)
+    try:
+        providers = list(getter() or []) if callable(getter) else []
+    except Exception:
+        providers = []
+    config = getattr(runtime, "plugin_config", None)
+    if not providers and config is not None:
+        providers = [
             {
-                "key": str(item.get("key") or "unknown"),
-                "label": str(item.get("label") or "未命名阶段"),
-                "status": status_map.get(str(item.get("status") or ""), str(item.get("status") or "unknown")),
-                "started_at": _iso(item.get("ts")),
-                "finished_at": None,
-                "duration_ms": item.get("duration_ms") if isinstance(item.get("duration_ms"), int) else None,
-                "summary": str(item.get("detail") or "")[:1000],
-                "detail_code": str(item.get("key") or "stage_unclassified")[:96],
-                "remaining_ms": None,
+                "name": "legacy_primary",
+                "api_type": getattr(config, "personification_api_type", ""),
+                "api_url": getattr(config, "personification_api_url", ""),
+                "api_key": getattr(config, "personification_api_key", ""),
+                "model": getattr(config, "personification_model", ""),
+                "media_protocol": getattr(config, "personification_media_protocol", "auto"),
             }
-            for item in items[:200]
-        ],
-        "tools": [
-            {
-                "name": str(tool.get("tool") or "unknown_tool")[:96],
-                "namespace": "runtime",
-                "status": str(tool.get("status") or "unknown")[:32],
-                "duration_ms": tool.get("duration_ms") if isinstance(tool.get("duration_ms"), int) else None,
-                "argument_summary": "",
-                "result_summary": str(tool.get("detail") or "")[:1000],
-                "schema_hash": "",
-                "detail_code": str(tool.get("stage") or "tool_unclassified")[:96],
-            }
-            for tool in tools[:100]
-            if isinstance(tool, dict)
-        ],
-        "final_reply": outgoing[:6000],
-        "send_status": str(raw_detail.get("outbound_delivery") or trace.get("outcome") or "unknown"),
-        "history_status": str(raw_detail.get("history_status") or "unknown"),
-        "recovery_ids": [],
-    }
+        ]
+    snapshots = DEFAULT_ROUTE_CAPABILITY_REGISTRY.snapshot()
+    route_name = next(
+        (
+            str(item.get("route_name", "") or "")
+            for item in snapshots
+            if str(item.get("route_fingerprint", "") or "") == route_fingerprint
+        ),
+        "",
+    )
+    if not route_name:
+        return None
+    route_key = DEFAULT_ROUTE_CAPABILITY_REGISTRY.route_key(route_name)
+    if route_key is None:
+        return None
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        candidate = RouteKey.from_config(
+            provider=provider.get("name") or "legacy_primary",
+            api_type=provider.get("api_type"),
+            api_url=provider.get("api_url"),
+            model=provider.get("model"),
+            media_protocol=provider.get("media_protocol") or "auto",
+        )
+        if candidate.fingerprint == route_fingerprint:
+            return route_name, route_key, dict(provider)
+    return None
+
+
+async def _run_route_visual_probe(runtime: Any, route_fingerprint: str) -> tuple[str, str]:
+    target = _route_probe_target(runtime, route_fingerprint)
+    if target is None:
+        return "unknown", "probe_route_caller_unavailable"
+    route_name, route_key, provider = target
+    from ...core.ai_routes import build_single_provider_caller
+    from ...core.visual_capabilities import probe_tool_caller_vision
+
+    try:
+        caller = build_single_provider_caller(runtime.plugin_config, provider)
+    except Exception as exc:
+        DEFAULT_ROUTE_CAPABILITY_REGISTRY.record_observation(
+            route_key,
+            "image_input",
+            CapabilityObservation.NETWORK_ERROR,
+            detail_code=f"probe_caller_build_failed:{type(exc).__name__}",
+        )
+        return "unknown", "probe_caller_build_failed"
+    result = await probe_tool_caller_vision(
+        route_name=route_name,
+        caller=caller,
+        api_type=str(provider.get("api_type", "") or ""),
+        model=str(provider.get("model", "") or ""),
+        logger=getattr(runtime, "logger", None) or _SilentProbeLogger(),
+        timeout_seconds=getattr(
+            runtime.plugin_config,
+            "personification_visual_probe_timeout_seconds",
+            45.0,
+        ),
+    )
+    if result is True:
+        observation = CapabilityObservation.SUCCESS
+        state, code = "supported", "probe_visual_succeeded"
+    elif result is False:
+        observation = CapabilityObservation.EXPLICIT_UNSUPPORTED
+        state, code = "unsupported", "probe_visual_explicitly_unsupported"
+    else:
+        observation = CapabilityObservation.PARSE_ERROR
+        state, code = "unknown", "probe_visual_unknown"
+    DEFAULT_ROUTE_CAPABILITY_REGISTRY.record_observation(
+        route_key,
+        "image_input",
+        observation,
+        detail_code=code,
+    )
+    return state, code
+
+
+class _SilentProbeLogger:
+    def warning(self, _message: str) -> None:
+        return None
 
 
 def build_v2_router(*, runtime: Any) -> APIRouter:
@@ -765,17 +867,30 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         ).to_dict()
 
     async def _finish_probe(route_fingerprint: str) -> None:
-        await asyncio.sleep(0)
         task = _ROUTE_PROBE_TASKS.get(route_fingerprint)
         if task is None:
             return
-        task.update({"status": "finished", "finished_at": time.time(), "detail_code": "probe_caller_unavailable"})
+        task.update({"status": "running", "started_at": time.time()})
+        try:
+            capability_state, detail_code = await _run_route_visual_probe(runtime, route_fingerprint)
+        except Exception as exc:
+            capability_state = "unknown"
+            detail_code = f"probe_internal_failed:{type(exc).__name__}"
+        task.update(
+            {
+                "status": "finished",
+                "finished_at": time.time(),
+                "capability_state": capability_state,
+                "detail_code": detail_code,
+            }
+        )
         publish_runtime_event(
             "provider.status_changed",
             payload={
                 "route_fingerprint": route_fingerprint,
                 "probe_status": "finished",
-                "detail_code": "probe_caller_unavailable",
+                "capability_state": capability_state,
+                "detail_code": detail_code,
             },
         )
 
@@ -793,8 +908,8 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             "ok": True,
             "code": "route_probe_queued",
             "phase": "queued",
-            "title": "能力探针已排队",
-            "message": "探针在管理任务中异步执行，不占聊天回合预算。当前进程未保留可调用路由时会保持未知。",
+            "title": "视觉能力探针已排队",
+            "message": "视觉探针在管理任务中异步执行，不占聊天回合预算。当前进程未保留该路由调用器时会保持未知。",
             "retryable": False,
             "partial": False,
             "outcome_unknown": False,
