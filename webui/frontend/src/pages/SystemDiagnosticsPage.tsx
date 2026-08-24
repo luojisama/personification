@@ -19,13 +19,14 @@ export function SystemDiagnosticsPage() {
   const settings = useQuery({ queryKey: ["settings"], queryFn: ({ signal }) => resources.runtimeSettings(signal) });
   return (
     <div className="page-stack">
-      <PageHeader index="06" title="系统诊断" description="只读展示多模态路由、QZone 分项能力、渐进工具、参与策略、情绪 v2 与完整备份边界。存在本地代码不等于生产可用。" />
+      <PageHeader index="32" title="系统诊断" description="只读展示多模态路由、QZone 分项能力、渐进工具、参与策略、情绪 v2 与完整备份边界。存在本地代码不等于生产可用。" />
       <div className="systems-grid">
         <Panel eyebrow="MEDIA / ROUTES" title="音频与视频路由">
           <QueryBoundary isPending={multimodal.isPending} error={multimodal.error}>
             {multimodal.data && <div className="systems-ledger">
               <section><h3>音频</h3><p>{booleanBadge(multimodal.data.audio.route_available, "存在可用路线", "未确认可用路线")}</p><dl><div><dt>主模型原生</dt><dd>{String(multimodal.data.audio.primary_native)}</dd></div><div><dt>ASR Provider</dt><dd><code>{multimodal.data.audio.asr_provider}</code></dd></div><div><dt>回退顺序</dt><dd>{multimodal.data.audio.fallback_order.join(" → ")}</dd></div></dl></section>
               <section><h3>视频</h3><p>{booleanBadge(multimodal.data.video.enabled, "视频理解已启用", "视频理解配置关闭")}</p><dl><div><dt>路线模式</dt><dd><code>{multimodal.data.video.route_mode}</code></dd></div><div><dt>主模型原生</dt><dd>{String(multimodal.data.video.primary_native)}</dd></div><div><dt>回退顺序</dt><dd>{multimodal.data.video.fallback_order.join(" → ")}</dd></div></dl></section>
+              <section><h3>服务器媒体依赖</h3><p>{booleanBadge(multimodal.data.dependencies.ffmpeg.available && multimodal.data.dependencies.ffprobe.available, "ffmpeg / ffprobe 已就绪", "媒体依赖未就绪")}</p><dl><div><dt>ffmpeg</dt><dd><code>{multimodal.data.dependencies.ffmpeg.version || multimodal.data.dependencies.ffmpeg.diagnostic_code}</code></dd></div><div><dt>ffprobe</dt><dd><code>{multimodal.data.dependencies.ffprobe.version || multimodal.data.dependencies.ffprobe.diagnostic_code}</code></dd></div></dl></section>
               <div className="unknown-warning">{multimodal.data.production_verified ? "已完成生产验证" : "仅本地路线快照；真实 QQ、Gemini 与生产部署尚需管理员联调。"} <code>{multimodal.data.diagnostic_code}</code></div>
             </div>}
           </QueryBoundary>

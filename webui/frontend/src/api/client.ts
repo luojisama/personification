@@ -1,4 +1,5 @@
 const API_BASE = "/personification/api/v2";
+const LEGACY_API_BASE = "/personification/api";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 type JsonRecord = Record<string, unknown>;
@@ -47,9 +48,9 @@ export class ApiError extends Error {
   }
 }
 
-function buildUrl(path: string, query?: Record<string, string | number | boolean | null | undefined>): string {
+function buildUrlAt(base: string, path: string, query?: Record<string, string | number | boolean | null | undefined>): string {
   const normalized = path.startsWith("/") ? path : `/${path}`;
-  const url = new URL(`${API_BASE}${normalized}`, window.location.origin);
+  const url = new URL(`${base}${normalized}`, window.location.origin);
   Object.entries(query ?? {}).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") {
       url.searchParams.set(key, String(value));
@@ -58,12 +59,16 @@ function buildUrl(path: string, query?: Record<string, string | number | boolean
   return `${url.pathname}${url.search}`;
 }
 
+function buildUrl(path: string, query?: Record<string, string | number | boolean | null | undefined>): string {
+  return buildUrlAt(API_BASE, path, query);
+}
+
 export interface ApiRequestOptions extends Omit<RequestInit, "body"> {
   body?: unknown;
   query?: Record<string, string | number | boolean | null | undefined>;
 }
 
-export async function apiRequest<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+async function apiRequestAt<T>(base: string, path: string, options: ApiRequestOptions = {}): Promise<T> {
   const method = (options.method ?? "GET").toUpperCase();
   const headers = new Headers(options.headers);
   if (options.body !== undefined && !(options.body instanceof FormData)) {
@@ -74,7 +79,7 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
     if (csrf) headers.set("X-Personification-CSRF", csrf);
   }
 
-  const response = await fetch(buildUrl(path, options.query), {
+  const response = await fetch(buildUrlAt(base, path, options.query), {
     ...options,
     method,
     credentials: "include",
@@ -96,6 +101,21 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
   return payload as T;
 }
 
+export async function rawApiRequest<T>(base: string, path: string, body: BodyInit, headers: Record<string, string>, signal?: AbortSignal): Promise<T> {
+  const requestHeaders = new Headers(headers);
+  const csrf = readCookie("personification_webui_csrf");
+  if (csrf) requestHeaders.set("X-Personification-CSRF", csrf);
+  const response = await fetch(buildUrlAt(base, path), { method: "POST", body, headers: requestHeaders, credentials: "include", signal });
+  const contentType = response.headers.get("content-type") ?? "";
+  const payload: unknown = contentType.includes("application/json") ? await response.json() : await response.text();
+  if (!response.ok) throw new ApiError(response.status, payload);
+  return payload as T;
+}
+
+export async function apiRequest<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+  return apiRequestAt(API_BASE, path, options);
+}
+
 export const api = {
   get<T>(path: string, query?: ApiRequestOptions["query"], signal?: AbortSignal): Promise<T> {
     return apiRequest<T>(path, { query, signal });
@@ -106,6 +126,33 @@ export const api = {
   patch<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     return apiRequest<T>(path, { method: "PATCH", body, signal });
   },
+  upload<T>(path: string, file: File, signal?: AbortSignal): Promise<T> {
+    return rawApiRequest<T>(API_BASE, path, file, {
+      "Content-Type": file.type || "application/octet-stream",
+      "X-Personification-Video-Filename": file.name,
+    }, signal);
+  },
 };
 
-export { API_BASE, buildUrl };
+export const legacyApi = {
+  get<T>(path: string, query?: ApiRequestOptions["query"], signal?: AbortSignal): Promise<T> {
+    return apiRequestAt<T>(LEGACY_API_BASE, path, { query, signal });
+  },
+  post<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    return apiRequestAt<T>(LEGACY_API_BASE, path, { method: "POST", body, signal });
+  },
+  put<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    return apiRequestAt<T>(LEGACY_API_BASE, path, { method: "PUT", body, signal });
+  },
+  delete<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    return apiRequestAt<T>(LEGACY_API_BASE, path, { method: "DELETE", body, signal });
+  },
+  upload<T>(path: string, file: File, signal?: AbortSignal): Promise<T> {
+    return rawApiRequest<T>(LEGACY_API_BASE, path, file, {
+      "Content-Type": file.type || "application/octet-stream",
+      "X-Personification-Video-Filename": file.name,
+    }, signal);
+  },
+};
+
+export { API_BASE, LEGACY_API_BASE, buildUrl, buildUrlAt };

@@ -52,7 +52,7 @@ export function TracesPage() {
   return (
     <div className="page-stack trace-page">
       <PageHeader
-        index="03"
+        index="08"
         title="Trace 取证"
         description="只展示可审计决策摘要、状态机、阶段预算和脱敏工具证据；不请求、不存储也不渲染模型隐藏思维链。"
         actions={<SearchField value={search} onChange={(value) => { setSearch(value); setPage(1); }} placeholder="搜索 Trace、用户或诊断码" />}

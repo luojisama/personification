@@ -34,6 +34,8 @@ def test_v2_router_exposes_paged_trace_recovery_capability_and_sse_routes() -> N
         "/api/v2/test-runs/prepare",
         "/api/v2/test-runs/{operation_id}/confirm",
         "/api/v2/test-runs/{operation_id}",
+        "/api/v2/tests/video-route",
+        "/api/v2/tests/video-turn",
         "/api/v2/stickers",
         "/api/v2/stickers/index/rebuild",
         "/api/v2/config",
@@ -62,6 +64,27 @@ def test_functional_test_catalog_keeps_three_risk_levels_and_eighteen_categories
     assert v2_routes._functional_test_definition("core")["risk"] == "local_read"
     assert v2_routes._functional_test_definition("model")["risk"] == "external_read"
     assert v2_routes._functional_test_definition("qzone")["risk"] == "external_write"
+
+
+def test_video_turn_capture_bot_never_calls_real_send_api() -> None:
+    class _RealBot:
+        self_id = "12345"
+
+        async def send(self, *_args, **_kwargs):
+            raise AssertionError("real send must not run")
+
+        async def call_api(self, api, **_data):  # noqa: ANN001
+            if api.startswith("send"):
+                raise AssertionError("real send API must not run")
+            return {"ok": True}
+
+    bot = v2_routes._NoSendCaptureBot(_RealBot(), trace_id="missing-trace")
+    result = asyncio.run(bot.send(None, "可见回复"))
+    api_result = asyncio.run(bot.call_api("send_private_msg", message="第二段"))
+
+    assert result["not_sent"] is True
+    assert api_result["not_sent"] is True
+    assert bot.captured == ["可见回复", "第二段"]
 
 
 def test_whole_backup_router_exposes_step_up_and_fail_closed_restore_routes() -> None:

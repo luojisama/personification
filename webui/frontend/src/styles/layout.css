@@ -1,6 +1,6 @@
 .app-frame {
   display: grid;
-  grid-template-columns: 16rem minmax(0, 1fr);
+  grid-template-columns: 18rem minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -15,6 +15,7 @@
   background: color-mix(in srgb, var(--surface) 94%, transparent);
   border-right: 1px solid var(--line-strong);
   backdrop-filter: blur(18px);
+  overflow: hidden;
 }
 
 .evidence-rail::after {
@@ -29,25 +30,11 @@
 
 .brand-plate {
   display: flex;
-  min-height: 7.3rem;
+  min-height: 6.4rem;
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-5);
   border-bottom: 1px solid var(--line);
-}
-
-.brand-sigil {
-  display: grid;
-  width: 3rem;
-  height: 3rem;
-  place-items: center;
-  color: var(--signal-ink);
-  border: 1px solid var(--signal);
-  font-family: var(--font-display);
-  font-size: 1.05rem;
-  font-weight: 800;
-  letter-spacing: -0.04em;
-  transform: rotate(-2deg);
 }
 
 .brand-plate strong,
@@ -69,19 +56,36 @@
 }
 
 .primary-nav {
-  display: grid;
-  gap: 1px;
-  padding: var(--space-4) 0;
+  display: block;
+  padding: var(--space-2) 0 var(--space-5);
+  overflow: auto;
 }
+
+.nav-group summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.55rem var(--space-5);
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  list-style: none;
+}
+
+.nav-group summary span { color: var(--signal-ink); }
+.nav-group summary::-webkit-details-marker { display: none; }
+.nav-group > div { display: grid; }
 
 .primary-nav a {
   position: relative;
   display: grid;
-  min-height: 3.85rem;
-  grid-template-columns: 2rem 1.25rem 1fr;
+  min-height: 2.55rem;
+  grid-template-columns: 1.25rem 1fr;
   align-items: center;
   gap: var(--space-3);
-  padding: 0 var(--space-5);
+  padding: 0 var(--space-5) 0 calc(var(--space-5) + 0.45rem);
   color: var(--ink-muted);
   text-decoration: none;
   transition:
@@ -121,19 +125,23 @@
   height: 1.2rem;
 }
 
-.nav-index {
-  color: var(--ink-muted);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-}
-
 .nav-label {
   font-weight: 650;
 }
 
-.nav-short {
-  display: none;
-}
+.global-page-search { position: relative; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: var(--space-2); margin: var(--space-3); padding: 0.55rem 0.7rem; background: var(--surface-sunken); border: 1px solid var(--line); }
+.global-page-search input { min-width: 0; padding: 0; background: transparent; border: 0; }
+.page-search-results { position: absolute; z-index: 30; top: calc(100% + 0.3rem); right: 0; left: 0; display: grid; padding: 0.25rem; background: var(--surface); border: 1px solid var(--line-strong); box-shadow: var(--shadow); }
+.page-search-results button { display: grid; grid-template-columns: 1.2rem 1fr auto; align-items: center; gap: var(--space-2); padding: 0.6rem; color: var(--ink); text-align: left; background: transparent; border: 0; cursor: pointer; }
+.page-search-results button:hover { background: var(--surface-sunken); }
+.page-search-results small { color: var(--ink-muted); }
+.bot-selector { grid-column: 1 / -1; width: 100%; }
+.brand-copy { min-width: 0; }
+.brand-copy strong,
+.brand-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.legacy-entry { color: var(--signal-ink); font-size: var(--text-xs); }
+.mobile-nav-trigger,
+.drawer-scrim { display: none; }
 
 .rail-foot {
   display: grid;
@@ -245,89 +253,32 @@
   gap: var(--space-2);
 }
 
-@media (max-width: 1050px) {
+@media (max-width: 1100px) {
   .app-frame {
-    grid-template-columns: 5.2rem minmax(0, 1fr);
-  }
-
-  .brand-plate {
-    justify-content: center;
-    padding-inline: var(--space-2);
-  }
-
-  .brand-plate > div,
-  .nav-index,
-  .nav-label,
-  .rail-foot .state-badge,
-  .theme-cycle span:last-child {
-    display: none;
-  }
-
-  .primary-nav a {
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 0.2rem;
-    padding: var(--space-2);
-    font-size: var(--text-xs);
-  }
-
-  .nav-short {
-    display: inline;
-  }
-
-  .theme-cycle {
-    justify-content: center;
+    grid-template-columns: 16rem minmax(0, 1fr);
   }
 }
 
-@media (max-width: 700px) {
+@media (max-width: 760px) {
   .app-frame {
     display: block;
-    padding-bottom: 4.8rem;
   }
 
   .evidence-rail {
     position: fixed;
-    top: auto;
-    right: 0;
+    z-index: 60;
+    top: 0;
     bottom: 0;
     left: 0;
-    display: block;
-    width: auto;
-    height: 4.5rem;
-    border-top: 1px solid var(--line-strong);
-    border-right: 0;
+    width: min(19rem, 88vw);
+    height: 100vh;
+    border-right: 1px solid var(--line-strong);
+    transform: translateX(-105%);
+    transition: transform var(--duration-base) var(--ease-out);
   }
-
-  .evidence-rail::after,
-  .brand-plate,
-  .rail-foot {
-    display: none;
-  }
-
-  .primary-nav {
-    display: grid;
-    height: 100%;
-    grid-template-columns: repeat(5, 1fr);
-    padding: 0;
-  }
-
-  .primary-nav a {
-    min-height: 0;
-    border-right: 1px solid var(--line);
-  }
-
-  .primary-nav a::before {
-    top: 0;
-    width: 100%;
-    height: 3px;
-    transform: scaleX(0);
-  }
-
-  .primary-nav a.active::before {
-    transform: scaleX(1);
-  }
+  .evidence-rail.is-open { transform: translateX(0); }
+  .mobile-nav-trigger { position: fixed; z-index: 55; right: 0.75rem; bottom: 0.75rem; display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.75rem 1rem; color: var(--canvas); background: var(--signal); border: 0; box-shadow: var(--shadow); }
+  .drawer-scrim { position: fixed; z-index: 50; inset: 0; display: block; background: rgb(0 0 0 / 45%); border: 0; }
 
   .top-status-line {
     min-height: 2.5rem;
@@ -340,7 +291,7 @@
   }
 
   .main-workspace {
-    min-height: calc(100vh - 7rem);
+    min-height: calc(100vh - 2.5rem);
     padding: var(--space-5) var(--space-4);
   }
 
@@ -358,4 +309,8 @@
     grid-column: 1 / -1;
     justify-content: stretch;
   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .evidence-rail { transition: none; }
 }

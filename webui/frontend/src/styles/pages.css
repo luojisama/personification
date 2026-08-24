@@ -147,6 +147,90 @@ dd { margin: 0.2rem 0 0; overflow-wrap: anywhere; }
 .rollout-ledger > div { display: grid; gap: var(--space-2); padding: var(--space-3); background: var(--surface-sunken); border-top: 2px solid var(--signal); }
 .rollout-ledger small { color: var(--ink-muted); }
 
+.identity-avatar { display: inline-grid; width: 2.6rem; height: 2.6rem; flex: 0 0 auto; place-items: center; overflow: hidden; color: var(--signal-ink); background: var(--signal-soft); border: 1px solid var(--line-strong); border-radius: 50%; font-family: var(--font-display); font-weight: 800; }
+.identity-avatar-small { width: 2rem; height: 2rem; }
+.identity-avatar-large { width: 3.4rem; height: 3.4rem; }
+.identity-avatar-square { border-radius: 0.7rem; transform: rotate(-1deg); }
+.identity-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.table-identity,
+.agent-identity-line { display: flex; align-items: center; gap: var(--space-3); }
+.agent-identity-line { flex-wrap: wrap; }
+.agent-identity-line > div { display: grid; gap: 0.2rem; }
+.agent-identity-line > span:last-child { margin-left: auto; color: var(--ink-muted); }
+.copy-id { margin-left: 0.35rem; color: var(--signal-ink); background: transparent; border: 0; cursor: pointer; font-size: var(--text-xs); }
+
+.segmented-control { display: flex; flex-wrap: wrap; gap: 1px; }
+.segmented-control button,
+.filter-chips button { padding: 0.55rem 0.8rem; color: var(--ink-muted); background: var(--surface-sunken); border: 1px solid var(--line); cursor: pointer; }
+.segmented-control button[aria-selected="true"],
+.filter-chips button[aria-pressed="true"] { color: var(--signal-ink); background: var(--signal-soft); border-color: var(--signal); }
+.token-chart { position: relative; display: flex; height: 18rem; align-items: end; gap: clamp(1px, 0.3vw, 5px); padding: 2rem 0 2.4rem; border-bottom: 1px solid var(--line-strong); }
+.token-bar { position: relative; display: flex; min-width: 3px; height: 100%; flex: 1; align-items: end; outline-offset: 2px; }
+.token-bar i { display: block; width: 50%; min-height: 1px; }
+.token-bar-prompt { background: var(--signal); }
+.token-bar-completion { background: var(--success); }
+.token-bar span { position: absolute; top: calc(100% + 0.35rem); left: 50%; color: var(--ink-muted); font-family: var(--font-mono); font-size: 0.62rem; transform: translateX(-50%) rotate(-35deg); transform-origin: center; white-space: nowrap; }
+.token-chart-legend { position: absolute; top: 0; right: 0; display: flex; gap: var(--space-3); }
+.token-chart-legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+.token-chart-legend i { width: 0.8rem; height: 0.8rem; }
+.legend-prompt { background: var(--signal); }
+.legend-completion { background: var(--success); }
+.inline-controls { display: flex; gap: var(--space-2); }
+.filter-control-row { flex-wrap: wrap; }
+.checkbox-label { display: inline-flex; align-items: center; gap: var(--space-2); padding: 0.45rem; }
+.billing-notice { padding: var(--space-4); margin-top: 0; color: var(--signal-ink); background: var(--signal-soft); font-family: var(--font-display); font-size: 1.25rem; }
+.muted-copy { color: var(--ink-muted); }
+.quota-list { display: grid; gap: var(--space-2); }
+.quota-list > div { display: grid; grid-template-columns: 1fr auto; gap: 0.2rem var(--space-3); padding: var(--space-3); background: var(--surface-sunken); }
+.quota-list small { grid-column: 1 / -1; color: var(--ink-muted); }
+
+.health-test-grid,
+.qzone-capability-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
+.health-test-card,
+.qzone-capability-grid article { display: grid; gap: var(--space-3); padding: var(--space-4); background: var(--surface-sunken); border-top: 2px solid var(--signal); }
+.health-test-card header,
+.qzone-capability-grid header { display: flex; align-items: start; justify-content: space-between; gap: var(--space-2); }
+.health-test-card header div { display: grid; }
+.health-test-card small { color: var(--ink-muted); }
+.health-test-card label { display: grid; gap: var(--space-2); }
+.test-run-result { display: grid; gap: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--line); }
+.test-run-result pre { max-height: 12rem; overflow: auto; }
+.qzone-capability-grid dl { display: grid; gap: var(--space-2); margin: 0; }
+.qzone-capability-grid dl div { padding-top: var(--space-2); border-top: 1px solid var(--line); }
+
+.config-layout { display: grid; grid-template-columns: 16rem minmax(0, 1fr); align-items: start; gap: var(--space-4); }
+.config-category-rail { position: sticky; top: 3.4rem; display: grid; max-height: calc(100vh - 4rem); overflow: auto; background: var(--surface); border: 1px solid var(--line); }
+.config-category-rail button { display: grid; grid-template-columns: 1fr auto; gap: 0.1rem var(--space-2); padding: 0.7rem; color: var(--ink); text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+.config-category-rail button.active { background: var(--signal-soft); box-shadow: inset 3px 0 var(--signal); }
+.config-category-rail small { grid-column: 1 / -1; color: var(--ink-muted); }
+.config-main,
+.config-entry-list { display: grid; gap: var(--space-4); min-width: 0; }
+.config-search-row { display: grid; gap: var(--space-3); }
+.config-search-row input { width: 100%; }
+.filter-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.config-save-actions { display: flex; align-items: center; gap: var(--space-2); }
+.config-entry { display: grid; gap: var(--space-3); padding: var(--space-4); background: var(--surface-raised); border: 1px solid var(--line); border-left: 3px solid transparent; box-shadow: var(--shadow); }
+.config-entry.is-dirty { border-left-color: var(--signal); }
+.config-entry header { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: var(--space-3); }
+.config-entry header > div { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.config-entry header > div:first-child { display: grid; }
+.config-entry label { font-family: var(--font-display); font-weight: 700; }
+.config-entry p { margin: 0; color: var(--ink-muted); }
+.config-entry mark { color: inherit; background: color-mix(in srgb, var(--warning) 35%, transparent); }
+.config-editor-control { display: flex; align-items: start; gap: var(--space-2); }
+.config-editor-control > input:not([type="checkbox"]),
+.config-editor-control > select,
+.config-editor-control > textarea { width: min(100%, 56rem); }
+.config-editor-control textarea { resize: vertical; font-family: var(--font-mono); }
+.safe-json { max-height: 32rem; padding: var(--space-3); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface-sunken); }
+.stacked-field { display: grid; gap: var(--space-2); }
+.key-value-table td:first-child { width: 34%; }
+
+@media (max-width: 1200px) {
+  .health-test-grid,
+  .qzone-capability-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 @media (max-width: 1350px) {
   .capability-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .trace-workbench { grid-template-columns: minmax(14rem, 0.7fr) minmax(24rem, 1.3fr); }
@@ -167,6 +251,9 @@ dd { margin: 0.2rem 0 0; overflow-wrap: anywhere; }
   .theme-grid { grid-template-columns: 1fr; }
   .systems-ledger { grid-template-columns: 1fr; }
   .systems-ledger .unknown-warning { grid-column: 1; }
+  .config-layout { grid-template-columns: 1fr; }
+  .config-category-rail { position: static; display: flex; max-height: none; overflow-x: auto; }
+  .config-category-rail button { min-width: 10rem; border-right: 1px solid var(--line); border-bottom: 0; }
 }
 
 @media (max-width: 520px) {
@@ -181,6 +268,10 @@ dd { margin: 0.2rem 0 0; overflow-wrap: anywhere; }
   .capability-object { grid-template-columns: 1fr; }
   .sticker-grid article { grid-template-columns: 4rem 1fr; }
   .sticker-grid img { width: 4rem; height: 4rem; }
+  .health-test-grid,
+  .qzone-capability-grid { grid-template-columns: 1fr; }
+  .agent-identity-line > span:last-child { width: 100%; margin-left: 0; }
+  .config-editor-control { display: grid; }
   .panel-body,
   .panel-heading { padding: var(--space-3); }
 }

@@ -3,17 +3,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { diagnosticFromError } from "../api/diagnostics";
 import { resources } from "../api/resources";
-import type { ConfigListItem, GroupListItem, Page, PersonaListItem, StickerListItem } from "../api/types";
+import { useBot } from "../app/BotContext";
+import type { GroupListItem, Page, PersonaListItem, StickerListItem } from "../api/types";
 import { DiagnosticPanel, useDiagnosticHistory } from "../components/DiagnosticPanel";
 import { EmptyState, PageHeader, Panel } from "../components/Panel";
 import { Pagination } from "../components/Pagination";
 import { QueryBoundary } from "../components/QueryBoundary";
 import { SearchField } from "../components/SearchField";
 import { StateBadge } from "../components/StateBadge";
+import { IdentityAvatar } from "../components/IdentityAvatar";
 import { formatDateTime, formatInteger } from "../lib/format";
 
-type Dataset = "personas" | "groups" | "stickers" | "config";
-type ManagementRow = PersonaListItem | GroupListItem | StickerListItem | ConfigListItem;
+type Dataset = "personas" | "groups" | "stickers";
+type ManagementRow = PersonaListItem | GroupListItem | StickerListItem;
 type ManagementPage = Page<ManagementRow> & Partial<{
   index_status: string;
   index_detail_code: string;
@@ -25,24 +27,30 @@ const DATASETS: Array<{ value: Dataset; label: string }> = [
   { value: "personas", label: "用户画像" },
   { value: "groups", label: "群目录" },
   { value: "stickers", label: "贴纸索引" },
-  { value: "config", label: "配置注册表" },
 ];
 
-export function ManagementDataPage() {
-  const [dataset, setDataset] = useState<Dataset>("personas");
+export function ManagementDataPage({ dataset: fixedDataset }: { dataset?: Dataset } = {}) {
+  const { botId } = useBot();
+  const [selectedDataset, setSelectedDataset] = useState<Dataset>(fixedDataset ?? "personas");
+  const dataset = fixedDataset ?? selectedDataset;
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  const [groupId, setGroupId] = useState("");
+  const [favorabilityLevel, setFavorabilityLevel] = useState("");
+  const [sortBy, setSortBy] = useState("updated_at");
+  const [membershipState, setMembershipState] = useState("");
+  const [includeUnconfirmed, setIncludeUnconfirmed] = useState(false);
+  const [enabled, setEnabled] = useState("");
   const query = useQuery<ManagementPage>({
-    queryKey: ["management-data", dataset, page, search],
+    queryKey: ["management-data", dataset, page, search, groupId, favorabilityLevel, sortBy, membershipState, includeUnconfirmed, enabled, botId],
     queryFn: async ({ signal }) => {
-      if (dataset === "personas") return await resources.personas(page, 20, search, signal) as ManagementPage;
-      if (dataset === "groups") return await resources.groups(page, 20, search, signal) as ManagementPage;
-      if (dataset === "stickers") return await resources.stickers(page, 20, search, signal) as ManagementPage;
-      return await resources.config(page, 20, search, signal) as ManagementPage;
+      if (dataset === "personas") return await resources.personasFiltered(page, 20, { search, group_id: groupId, favorability_level: favorabilityLevel, sort_by: sortBy, direction: sortBy === "user_id" ? "asc" : "desc" }, signal) as ManagementPage;
+      if (dataset === "groups") return await resources.groupsFiltered(page, 20, { search, membership_state: membershipState, include_unconfirmed: includeUnconfirmed, enabled, bot_id: botId, sort_by: sortBy === "updated_at" ? "group_id" : sortBy, direction: "asc" }, signal) as ManagementPage;
+      return await resources.stickers(page, 20, search, signal) as ManagementPage;
     },
   });
   const selectDataset = (value: Dataset) => {
-    setDataset(value);
+    setSelectedDataset(value);
     setPage(1);
     setSearch("");
   };
@@ -50,18 +58,20 @@ export function ManagementDataPage() {
   return (
     <div className="page-stack">
       <PageHeader
-        index="05"
-        title="管理数据"
-        description="统一分页读取画像、群、贴纸和配置。首屏只使用本地缓存；QQ 资料刷新与贴纸目录扫描不会阻塞列表请求。"
+        index={dataset === "personas" ? "11" : dataset === "groups" ? "12" : "16"}
+        title={dataset === "personas" ? "用户画像" : dataset === "groups" ? "群信息" : "表情包"}
+        description={dataset === "personas" ? "头像、昵称、QQ ID 与好感度摘要来自本地缓存；列表不会逐行调用 OneBot，也不会暴露原始画像正文。" : dataset === "groups" ? "展示群头像、群 ID、关联 Bot 与成员关系来源；默认不把历史画像候选伪装成当前已加入群。" : "读取持久化贴纸索引，支持分页、标签与后台增量重建。"}
         actions={<SearchField value={search} onChange={(value) => { setSearch(value); setPage(1); }} placeholder="搜索当前数据集" />}
       />
-      <div className="data-tabs" role="tablist" aria-label="管理数据集">
+      {!fixedDataset && <div className="data-tabs" role="tablist" aria-label="管理数据集">
         {DATASETS.map((item) => (
           <button key={item.value} type="button" role="tab" aria-selected={dataset === item.value} onClick={() => selectDataset(item.value)}>
             {item.label}
           </button>
         ))}
-      </div>
+      </div>}
+      {dataset === "personas" && <Panel eyebrow="FILTER / PERSONAS" title="画像筛选"><div className="inline-controls filter-control-row"><input value={groupId} onChange={(event) => { setGroupId(event.target.value); setPage(1); }} placeholder="群 ID" aria-label="按群筛选" /><input value={favorabilityLevel} onChange={(event) => { setFavorabilityLevel(event.target.value); setPage(1); }} placeholder="好感等级" aria-label="按好感等级筛选" /><select value={sortBy} onChange={(event) => { setSortBy(event.target.value); setPage(1); }} aria-label="画像排序"><option value="updated_at">更新时间降序</option><option value="favorability">好感度降序</option><option value="user_id">QQ 号升序</option></select></div></Panel>}
+      {dataset === "groups" && <Panel eyebrow="FILTER / GROUPS" title="群目录筛选"><div className="inline-controls filter-control-row"><select value={membershipState} onChange={(event) => { setMembershipState(event.target.value); if (event.target.value === "unconfirmed") setIncludeUnconfirmed(true); setPage(1); }} aria-label="关系来源"><option value="">确认与配置</option><option value="confirmed">仅已确认</option><option value="configured">仅配置</option><option value="unconfirmed">仅未确认候选</option></select><select value={enabled} onChange={(event) => { setEnabled(event.target.value); setPage(1); }} aria-label="群开关状态"><option value="">全部开关</option><option value="true">已启用</option><option value="false">已停用</option></select><label className="checkbox-label"><input type="checkbox" checked={includeUnconfirmed} onChange={(event) => { setIncludeUnconfirmed(event.target.checked); setPage(1); }} />显示未确认候选</label></div></Panel>}
       <QueryBoundary isPending={query.isPending} error={query.error}>
         {query.data && query.data.items.length === 0 ? (
           <EmptyState code={`${dataset}_list_empty`}>当前筛选条件下没有记录。</EmptyState>
@@ -70,7 +80,6 @@ export function ManagementDataPage() {
             {dataset === "personas" && <PersonaTable rows={(query.data?.items ?? []) as PersonaListItem[]} />}
             {dataset === "groups" && <GroupTable rows={(query.data?.items ?? []) as GroupListItem[]} />}
             {dataset === "stickers" && <StickerTable rows={(query.data?.items ?? []) as StickerListItem[]} meta={query.data} />}
-            {dataset === "config" && <ConfigTable rows={(query.data?.items ?? []) as ConfigListItem[]} />}
           </>
         )}
       </QueryBoundary>
@@ -82,8 +91,8 @@ export function ManagementDataPage() {
 function PersonaTable({ rows }: { rows: PersonaListItem[] }) {
   return (
     <Panel eyebrow="CACHE / PERSONAS" title="画像摘要索引">
-      <div className="trace-table-wrap"><table className="forensic-table"><thead><tr><th>用户</th><th>画像摘要</th><th>好感</th><th>更新时间</th><th>来源</th></tr></thead><tbody>
-        {rows.map((item) => <tr key={item.user_id}><td><strong>{item.nickname || item.user_id}</strong><br /><code>{item.user_id}</code></td><td className="wrap-cell">{item.snippet || "暂无可见摘要"}</td><td>{item.favorability.level || "未分级"} · {item.favorability.score}</td><td>{formatDateTime(item.updated_at)}</td><td><StateBadge tone="info">缓存</StateBadge> {item.source}</td></tr>)}
+      <div className="trace-table-wrap"><table className="forensic-table"><thead><tr><th>用户</th><th>QQ ID</th><th>好感</th><th>最近群</th><th>更新时间</th><th>来源</th></tr></thead><tbody>
+        {rows.map((item) => <tr key={item.user_id}><td><div className="table-identity"><IdentityAvatar src={item.avatar_url} label={item.nickname || item.user_id} /><strong>{item.nickname || "未缓存昵称"}</strong></div></td><td><code>{item.qq_id || item.user_id}</code><button className="copy-id" type="button" onClick={() => void navigator.clipboard.writeText(item.qq_id || item.user_id)}>复制</button></td><td>{item.favorability_level || item.favorability.level || "未分级"} · {item.favorability_score ?? item.favorability.score}</td><td><code>{item.recent_group_id || "—"}</code></td><td>{formatDateTime(item.updated_at)}</td><td><StateBadge tone="info">缓存</StateBadge> {item.source}</td></tr>)}
       </tbody></table></div>
     </Panel>
   );
@@ -92,8 +101,8 @@ function PersonaTable({ rows }: { rows: PersonaListItem[] }) {
 function GroupTable({ rows }: { rows: GroupListItem[] }) {
   return (
     <Panel eyebrow="CACHE / GROUPS" title="群目录快照">
-      <div className="trace-table-wrap"><table className="forensic-table"><thead><tr><th>群</th><th>开关</th><th>已确认 Bot</th><th>来源</th><th>最近观察</th></tr></thead><tbody>
-        {rows.map((item) => <tr key={item.group_id}><td><strong>{item.group_name || "未缓存群名"}</strong><br /><code>{item.group_id}</code></td><td><StateBadge tone={item.enabled ? "ok" : "unknown"}>{item.enabled ? "启用" : "停用"}</StateBadge></td><td>{item.bot_self_ids.join("、") || "未确认"}</td><td className="wrap-cell">{item.sources.join("、")}</td><td>{formatDateTime(item.freshness)}</td></tr>)}
+      <div className="trace-table-wrap"><table className="forensic-table"><thead><tr><th>群</th><th>群 ID</th><th>关系</th><th>开关</th><th>关联 Bot</th><th>成员</th><th>最近观察</th></tr></thead><tbody>
+        {rows.map((item) => <tr key={item.group_id}><td><div className="table-identity"><IdentityAvatar src={item.avatar_url} label={item.group_name || item.group_id} /><strong>{item.group_name || "未缓存群名"}</strong></div></td><td><code>{item.group_id}</code></td><td><StateBadge tone={item.membership_state === "confirmed" ? "ok" : item.membership_state === "configured" ? "info" : "warn"} raw={item.membership_state}>{item.membership_state === "confirmed" ? "已确认" : item.membership_state === "configured" ? "仅配置" : "未确认候选"}</StateBadge></td><td><StateBadge tone={item.enabled ? "ok" : "unknown"}>{item.enabled ? "启用" : "停用"}</StateBadge></td><td>{(item.bot_ids || item.bot_self_ids).join("、") || "未确认"}</td><td>{item.member_count ?? "—"}</td><td>{formatDateTime(item.last_active_at ?? item.freshness)}</td></tr>)}
       </tbody></table></div>
     </Panel>
   );
@@ -115,15 +124,5 @@ function StickerTable({ rows, meta }: { rows: StickerListItem[]; meta?: Manageme
       </Panel>
       {history.diagnostics.map((diagnostic, index) => <DiagnosticPanel key={`${diagnostic.code}:${index}`} diagnostic={diagnostic} defaultOpen={index === 0} />)}
     </div>
-  );
-}
-
-function ConfigTable({ rows }: { rows: ConfigListItem[] }) {
-  return (
-    <Panel eyebrow="REGISTRY / CONFIG" title="配置注册表安全视图">
-      <div className="trace-table-wrap"><table className="forensic-table"><thead><tr><th>配置</th><th>当前值</th><th>类型</th><th>分组</th><th>生效方式</th></tr></thead><tbody>
-        {rows.map((item) => <tr key={item.field_name}><td><strong>{item.display_name}</strong><br /><code>{item.field_name}</code></td><td className="wrap-cell"><code>{typeof item.value === "string" ? item.value : JSON.stringify(item.value)}</code></td><td>{item.value_type}{item.secret && <StateBadge tone="warn">秘密已掩码</StateBadge>}</td><td>{item.group}</td><td>{item.hot_reloadable ? "热更新" : "需重启"}</td></tr>)}
-      </tbody></table></div>
-    </Panel>
   );
 }

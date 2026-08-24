@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import shutil
+import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from ...core.pagination import build_page, normalize_pagination, resolve_sort
@@ -349,7 +353,7 @@ def _cached_group_rows(
         if state_filter and relationship != state_filter:
             continue
         bot_ids = [str(value or "") for value in raw.get("bot_self_ids") or [] if str(value or "")]
-        if bot_filter and bot_filter not in bot_ids:
+        if bot_filter and bot_ids and bot_filter not in bot_ids:
             continue
         is_enabled = bool(is_group_whitelisted(group_id, config_whitelist))
         if enabled_filter in {"true", "1", "enabled"} and not is_enabled:
@@ -446,6 +450,28 @@ def _sticker_root(runtime: Any) -> Any:
 
     configured = getattr(runtime.plugin_config, "personification_sticker_path", None)
     return resolve_sticker_dir(configured or "data/stickers", create=True)
+
+
+def _binary_dependency(name: str) -> dict[str, Any]:
+    executable = shutil.which(name)
+    if not executable:
+        return {"available": False, "version": "", "diagnostic_code": f"{name}_missing"}
+    try:
+        completed = subprocess.run(
+            [executable, "-version"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        first_line = str(completed.stdout or completed.stderr or "").splitlines()[0][:240]
+        return {
+            "available": completed.returncode == 0,
+            "version": first_line,
+            "diagnostic_code": f"{name}_ready" if completed.returncode == 0 else f"{name}_version_failed",
+        }
+    except Exception as exc:
+        return {"available": False, "version": "", "diagnostic_code": f"{name}_check_failed:{type(exc).__name__}"}
 
 
 def _route_probe_target(runtime: Any, route_fingerprint: str) -> tuple[str, RouteKey, dict[str, Any]] | None:
@@ -547,6 +573,55 @@ async def _run_route_visual_probe(runtime: Any, route_fingerprint: str) -> tuple
 class _SilentProbeLogger:
     def warning(self, _message: str) -> None:
         return None
+
+
+class _NoSendCaptureBot:
+    """Delegate read APIs but capture every send API without touching QQ."""
+
+    def __init__(self, real: Any, *, trace_id: str) -> None:
+        self._real = real
+        self.self_id = getattr(real, "self_id", "")
+        self.trace_id = trace_id
+        self.captured: list[str] = []
+
+    def _capture(self, message: Any) -> dict[str, Any]:
+        visible = guard_visible_text(
+            str(message or ""),
+            surface="webui_video_turn_capture",
+            allow_direct_media=True,
+        )[:6000]
+        if visible:
+            self.captured.append(visible)
+        reply_turn_trace.record_stage(
+            trace_id=self.trace_id,
+            key="send_suppressed",
+            label="无发送测试捕获",
+            status="ok",
+            detail="可见回复已捕获，未调用 OneBot 发送接口。",
+        )
+        return {"message_id": 0, "captured": True, "not_sent": True}
+
+    async def send(self, _event: Any, message: Any, **_kwargs: Any) -> dict[str, Any]:
+        return self._capture(message)
+
+    async def call_api(self, api: str, **data: Any) -> Any:
+        from .health_routes import _SEND_API_ACTIONS
+
+        if str(api or "").strip() in _SEND_API_ACTIONS:
+            return self._capture(data.get("message", ""))
+        return await self._real.call_api(api, **data)
+
+    async def send_msg(self, *, message: Any = "", **_data: Any) -> dict[str, Any]:
+        return self._capture(message)
+
+    async def send_group_msg(self, *, message: Any = "", **_data: Any) -> dict[str, Any]:
+        return self._capture(message)
+
+    async def send_private_msg(self, *, message: Any = "", **_data: Any) -> dict[str, Any]:
+        return self._capture(message)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
 
 
 def _functional_test_definition(test_id: str) -> dict[str, str] | None:
@@ -757,6 +832,166 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 detail={"code": "functional_test_run_not_found", "message": "测试任务不存在或已失效。"},
             )
         return _functional_test_view(run)
+
+    @router.post("/tests/video-turn")
+    async def full_video_turn_test(
+        request: Request,
+        text: str = Query(default="请根据视频内容做简短说明。", max_length=1000),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        """Run an uploaded video through the production turn chain without sending QQ."""
+
+        from ...core.diagnostics import _video_probe_root
+        from ...core.media_refs import is_supported_video_filename
+        from .health_routes import (
+            _HEALTH_VIDEO_MAX_UPLOAD_BYTES,
+            _HEALTH_VIDEO_MIME_SUFFIXES,
+            _build_probe_event,
+            _dispatch_via_plugin_path,
+            _first_bot,
+            _interaction_wait_seconds,
+            _response_timeout_seconds,
+            _stage,
+        )
+
+        cfg = getattr(runtime, "plugin_config", None)
+        bot = _first_bot(runtime)
+        if cfg is None or bot is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "video_turn_runtime_unavailable", "message": "Bot 或回复运行时尚未就绪。"},
+            )
+        filename = Path(str(request.headers.get("x-personification-video-filename") or "video.bin")).name
+        content_type = str(request.headers.get("content-type") or "").split(";", 1)[0].lower()
+        suffix = Path(filename).suffix.lower() if is_supported_video_filename(filename) else _HEALTH_VIDEO_MIME_SUFFIXES.get(content_type, "")
+        if suffix not in _HEALTH_VIDEO_MIME_SUFFIXES.values():
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "video_turn_invalid_type", "message": "仅支持 MP4、MOV、M4V、WEBM、MKV 或 AVI。"},
+            )
+        operation_id = uuid.uuid4().hex
+        root = _video_probe_root(cfg).resolve()
+        probe_dir = root / f"turn-{operation_id}"
+        target = probe_dir / f"video{suffix}"
+        total = 0
+        trace_id = ""
+        try:
+            probe_dir.mkdir(parents=True, exist_ok=False)
+            with target.open("wb") as sink:
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > _HEALTH_VIDEO_MAX_UPLOAD_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail={"code": "video_turn_payload_too_large", "message": "视频超过完整回合测试大小上限。"},
+                        )
+                    sink.write(chunk)
+            if total <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "video_turn_empty_upload", "message": "没有收到视频内容。"},
+                )
+            user_id = str(admin.qq or "")
+            if not user_id.isdigit():
+                raise HTTPException(
+                    status_code=403,
+                    detail={"code": "video_turn_admin_identity_invalid", "message": "当前管理员身份不能用于构造受控回合。"},
+                )
+            trace_id = reply_turn_trace.start_trace(
+                session_type="private",
+                group_id="",
+                user_id=user_id,
+                detail={
+                    "source": "webui_video_turn_test",
+                    "operator_qq": user_id,
+                    "media_kind": "video",
+                    "media_size_bytes": total,
+                    "text_length": len(text),
+                    "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+                    "outbound_mode": "capture_only",
+                },
+            )
+            stages: list[dict[str, Any]] = []
+            event = _build_probe_event(bot, group_id="", user_id=user_id, text=text)
+            from nonebot.adapters.onebot.v11 import MessageSegment
+
+            segment = MessageSegment.video(file=target.as_uri())
+            event.message += segment
+            event.original_message = event.message
+            event.raw_message = f"{text}[CQ:video,file=controlled-upload]"
+            _stage(stages, trace_id, "video_turn_upload", "受控视频上传", "ok", f"kind=video size_bytes={total}")
+            proxy = _NoSendCaptureBot(bot, trace_id=trace_id)
+            started = time.monotonic()
+            token = reply_turn_trace.set_current_trace_id(trace_id)
+            try:
+                result = await _dispatch_via_plugin_path(
+                    runtime=runtime,
+                    bot=bot,
+                    proxy=proxy,
+                    event=event,
+                    trace_id=trace_id,
+                    stages=stages,
+                    target_label="private",
+                    target_detail={"group_id": "", "user_id": user_id},
+                    started=started,
+                    interaction_wait_seconds=_interaction_wait_seconds(cfg),
+                    response_timeout_seconds=_response_timeout_seconds(cfg),
+                )
+            finally:
+                reply_turn_trace.reset_current_trace_id(token)
+            if result is None:
+                reply_turn_trace.finish_trace(
+                    trace_id=trace_id,
+                    outcome="failed",
+                    diagnosis_code="video_turn_plugin_path_unavailable",
+                    detail={"outbound_mode": "capture_only"},
+                )
+                result = {
+                    "replied": False,
+                    "reply": "",
+                    "trace_id": trace_id,
+                    "diagnosis_code": "video_turn_plugin_path_unavailable",
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                }
+            trace = reply_turn_trace.get_trace(trace_id) or {}
+            process = reply_turn_trace.build_process_view(trace, logs=[])
+            inspection = process.get("agent_inspection") if isinstance(process, dict) else {}
+            tools = inspection.get("tools") if isinstance(inspection, dict) and isinstance(inspection.get("tools"), list) else []
+            video_evidence = [
+                {
+                    "tool": str(item.get("tool") or ""),
+                    "status": str(item.get("status") or ""),
+                    "detail": str(item.get("detail") or "")[:240],
+                }
+                for item in tools
+                if isinstance(item, dict) and str(item.get("tool") or "") == "vision_analyze"
+            ]
+            return {
+                "ok": bool(result.get("replied")) and bool(video_evidence),
+                "code": "video_turn_evidence_complete" if result.get("replied") and video_evidence else "video_turn_evidence_incomplete",
+                "operation_id": operation_id,
+                "trace_id": trace_id,
+                "reply": str(result.get("reply") or "")[:6000],
+                "duration_ms": result.get("duration_ms"),
+                "diagnosis_code": str(result.get("diagnosis_code") or ""),
+                "media_evidence": video_evidence,
+                "outbound": "captured_not_sent",
+            }
+        finally:
+            shutil.rmtree(probe_dir, ignore_errors=True)
+            try:
+                if root.exists() and not any(root.iterdir()):
+                    root.rmdir()
+            except Exception:
+                pass
+
+    @router.post("/tests/video-route")
+    async def video_route_probe(
+        _: AdminIdentity = Depends(require_admin),
+    ) -> RedirectResponse:
+        return RedirectResponse(url="/personification/api/health/video-probe", status_code=307)
 
     @router.get("/personas")
     async def personas(
@@ -1065,6 +1300,10 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             },
             "diagnostic_code": "multimodal_route_snapshot_local_only",
             "production_verified": False,
+            "dependencies": {
+                "ffmpeg": await run_in_threadpool(_binary_dependency, "ffmpeg"),
+                "ffprobe": await run_in_threadpool(_binary_dependency, "ffprobe"),
+            },
         }
 
     @router.get("/traces")

@@ -35,7 +35,7 @@ export function RouteCapabilitiesPage() {
   return (
     <div className="page-stack">
       <PageHeader
-        index="02"
+        index="06"
         title="路由能力"
         description="能力绑定 Provider、API 类型、URL 指纹、模型和媒体协议。超时与上游故障保持“未知”，不会伪装成“不支持”。"
         actions={<SearchField value={search} onChange={(value) => { setSearch(value); setPage(1); }} placeholder="搜索 Provider、模型或指纹" />}

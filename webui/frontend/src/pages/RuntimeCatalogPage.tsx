@@ -75,8 +75,9 @@ function isCursorPage(value: Page<CatalogItem> | CursorPage<CatalogItem>): value
   return "has_more" in value;
 }
 
-export function RuntimeCatalogPage() {
-  const [dataset, setDataset] = useState<Dataset>("plugin-knowledge");
+export function RuntimeCatalogPage({ dataset: fixedDataset }: { dataset?: Dataset } = {}) {
+  const [selectedDataset, setSelectedDataset] = useState<Dataset>(fixedDataset ?? "plugin-knowledge");
+  const dataset = fixedDataset ?? selectedDataset;
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [logCursors, setLogCursors] = useState([0]);
@@ -93,7 +94,7 @@ export function RuntimeCatalogPage() {
   const title = useMemo(() => DATASETS.find((item) => item.value === dataset)?.label ?? "运行目录", [dataset]);
 
   const selectDataset = (value: Dataset) => {
-    setDataset(value);
+    setSelectedDataset(value);
     setPage(1);
     setSearch("");
     setLogCursors([0]);
@@ -102,18 +103,18 @@ export function RuntimeCatalogPage() {
   return (
     <div className="page-stack">
       <PageHeader
-        index="06"
-        title="运行目录"
-        description="统一查看插件知识、MCP、Skill、工具任务、记忆与日志。增长型日志使用游标翻页，其余目录使用服务端页码分页。"
+        index={dataset === "plugin-knowledge" ? "22" : dataset === "mcp" ? "20" : dataset === "skills" ? "19" : dataset === "tool-tasks" ? "21" : dataset === "memories" ? "14" : "29"}
+        title={title}
+        description="服务端分页读取业务目录，支持安全摘要、状态、时间与快速筛选。增长型日志使用游标翻页，其余目录使用页码分页。"
         actions={<SearchField value={search} onChange={(value) => { setSearch(value); setPage(1); setLogCursors([0]); }} placeholder="搜索当前目录" />}
       />
-      <div className="data-tabs" role="tablist" aria-label="运行目录数据集">
+      {!fixedDataset && <div className="data-tabs" role="tablist" aria-label="运行目录数据集">
         {DATASETS.map((item) => (
           <button key={item.value} type="button" role="tab" aria-selected={dataset === item.value} onClick={() => selectDataset(item.value)}>
             {item.label}
           </button>
         ))}
-      </div>
+      </div>}
       <QueryBoundary isPending={query.isPending} error={query.error}>
         {rows.length === 0 ? (
           <EmptyState code={`${dataset}_catalog_empty`}>当前筛选条件下没有记录。</EmptyState>

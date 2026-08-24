@@ -1,12 +1,17 @@
-import { api } from "./client";
+import { api, legacyApi } from "./client";
 import type {
+  AgentRuntimeSnapshot,
+  BotIdentity,
+  ConfigPage,
+  ConfigPatchResult,
+  FunctionalTestRun,
+  HealthCatalog,
   OperationDiagnostic,
   OverviewSnapshot,
   Page,
   PersonaListItem,
   GroupListItem,
   StickerPage,
-  ConfigListItem,
   CatalogItem,
   CursorPage,
   MultimodalRouteSnapshot,
@@ -14,6 +19,7 @@ import type {
   RouteCapabilityItem,
   TraceDetail,
   TraceListItem,
+  TokenSummary,
 } from "./types";
 
 type UnknownRecord = Record<string, unknown>;
@@ -113,6 +119,27 @@ export function sanitizeTraceDetail(raw: unknown): TraceDetail {
 }
 
 export const resources = {
+  bots(signal?: AbortSignal): Promise<{ items: BotIdentity[]; total: number; diagnostic_code: string }> {
+    return api.get("/bots", undefined, signal);
+  },
+  metrics(window: "24h" | "7d" | "30d" | "all", botId = "", signal?: AbortSignal): Promise<TokenSummary> {
+    return api.get("/metrics/summary", { window, bot_id: botId }, signal);
+  },
+  agentRuntime(botId = "", signal?: AbortSignal): Promise<AgentRuntimeSnapshot> {
+    return api.get("/runtime/agent", { bot_id: botId }, signal);
+  },
+  health(signal?: AbortSignal): Promise<HealthCatalog> {
+    return api.get("/health", undefined, signal);
+  },
+  prepareTestRun(testId: string, targetSummary = "", routeFingerprint = ""): Promise<FunctionalTestRun> {
+    return api.post("/test-runs/prepare", { test_id: testId, target_summary: targetSummary, route_fingerprint: routeFingerprint });
+  },
+  confirmTestRun(id: string, targetConfirmation = ""): Promise<FunctionalTestRun> {
+    return api.post(`/test-runs/${encodeURIComponent(id)}/confirm`, { confirmed: true, target_confirmation: targetConfirmation });
+  },
+  testRun(id: string, signal?: AbortSignal): Promise<FunctionalTestRun> {
+    return api.get(`/test-runs/${encodeURIComponent(id)}`, undefined, signal);
+  },
   overview(signal?: AbortSignal): Promise<OverviewSnapshot> {
     return api.get("/overview", undefined, signal);
   },
@@ -151,8 +178,14 @@ export const resources = {
   personas(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<Page<PersonaListItem>> {
     return api.get("/personas", { page, page_size: pageSize, search }, signal);
   },
+  personasFiltered(page: number, pageSize: number, filters: { search?: string; group_id?: string; favorability_level?: string; sort_by?: string; direction?: string }, signal?: AbortSignal): Promise<Page<PersonaListItem>> {
+    return api.get("/personas", { page, page_size: pageSize, ...filters }, signal);
+  },
   groups(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<Page<GroupListItem>> {
     return api.get("/groups", { page, page_size: pageSize, search }, signal);
+  },
+  groupsFiltered(page: number, pageSize: number, filters: { search?: string; membership_state?: string; include_unconfirmed?: boolean; enabled?: string; bot_id?: string; sort_by?: string; direction?: string }, signal?: AbortSignal): Promise<Page<GroupListItem>> {
+    return api.get("/groups", { page, page_size: pageSize, ...filters }, signal);
   },
   stickers(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<StickerPage> {
     return api.get("/stickers", { page, page_size: pageSize, search }, signal);
@@ -160,8 +193,17 @@ export const resources = {
   rebuildStickerIndex(): Promise<OperationDiagnostic> {
     return api.post("/stickers/index/rebuild");
   },
-  config(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<Page<ConfigListItem>> {
-    return api.get("/config", { page, page_size: pageSize, search }, signal);
+  config(page = 1, pageSize = 20, search = "", group = "", signal?: AbortSignal): Promise<ConfigPage> {
+    return api.get("/config", { page, page_size: pageSize, search, group }, signal);
+  },
+  async configAll(search = "", group = "", signal?: AbortSignal): Promise<ConfigPage> {
+    const first = await api.get<ConfigPage>("/config", { page: 1, page_size: 100, search, group }, signal);
+    if (first.total_pages <= 1) return first;
+    const rest = await Promise.all(Array.from({ length: first.total_pages - 1 }, (_, index) => api.get<ConfigPage>("/config", { page: index + 2, page_size: 100, search, group }, signal)));
+    return { ...first, items: [first, ...rest].flatMap((page) => page.items), page_size: first.total };
+  },
+  patchConfig(revision: string, values: Record<string, unknown>): Promise<ConfigPatchResult> {
+    return api.patch("/config/values", { revision, values });
   },
   catalog(
     dataset: "plugin-knowledge" | "mcp" | "skills" | "tool-tasks" | "memories",
@@ -178,7 +220,27 @@ export const resources = {
   multimodalRoutes(signal?: AbortSignal): Promise<MultimodalRouteSnapshot> {
     return api.get("/multimodal/routes", undefined, signal);
   },
-  qzoneCapabilities(signal?: AbortSignal): Promise<Record<string, unknown>> {
-    return api.get("/qzone/capabilities", undefined, signal);
+  qzoneCapabilities(signal?: AbortSignal, botId = ""): Promise<Record<string, unknown>> {
+    return api.get("/qzone/capabilities", { bot_id: botId }, signal);
+  },
+  legacy<T = Record<string, unknown>>(
+    path: string,
+    query?: Record<string, string | number | boolean | null | undefined>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return legacyApi.get(path, query, signal);
+  },
+  legacyPost<T = Record<string, unknown>>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    return legacyApi.post(path, body, signal);
+  },
+  uploadLegacy<T = Record<string, unknown>>(path: string, file: File, signal?: AbortSignal): Promise<T> {
+    return legacyApi.upload(path, file, signal);
+  },
+  videoRouteProbe(file: File, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.upload("/tests/video-route", file, signal);
+  },
+  videoTurnTest(file: File, text = "", signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const query = text ? `?text=${encodeURIComponent(text)}` : "";
+    return api.upload(`/tests/video-turn${query}`, file, signal);
   },
 };

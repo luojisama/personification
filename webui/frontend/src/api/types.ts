@@ -193,11 +193,13 @@ export interface OperationDiagnostic {
 }
 
 export interface PersonaListItem {
+  qq_id: string;
   user_id: string;
   nickname: string;
-  avatar_url: string;
+  avatar_url: string | null;
   recent_group_id: string;
-  snippet: string;
+  favorability_score: number;
+  favorability_level: string;
   favorability: { score: number; level: string };
   updated_at: number;
   source: string;
@@ -207,9 +209,14 @@ export interface PersonaListItem {
 export interface GroupListItem {
   group_id: string;
   group_name: string;
+  avatar_url: string | null;
   enabled: boolean;
+  membership_state: "confirmed" | "configured" | "unconfirmed";
+  bot_ids: string[];
   sources: string[];
   bot_self_ids: string[];
+  member_count: number | null;
+  last_active_at: number | null;
   freshness: number;
   cache_only: boolean;
 }
@@ -238,14 +245,146 @@ export interface ConfigListItem {
   display_name: string;
   description: string;
   group: string;
+  category: string;
   scope: string;
+  kind: string;
   value_type: string;
   value: unknown;
   default: unknown;
   secret: boolean;
   advanced: boolean;
   hot_reloadable: boolean;
+  restart_required: boolean;
+  required: boolean;
+  modified: boolean;
+  aliases: string[];
   choices: string[];
+  min_value: number | null;
+  max_value: number | null;
+}
+
+export interface ConfigPage extends Page<ConfigListItem> {
+  revision: string;
+  groups: string[];
+  group_counts: Record<string, number>;
+  modified_counts: Record<string, number>;
+}
+
+export interface ConfigPatchResult {
+  revision: string;
+  updated_keys: string[];
+  hot_reloaded_keys: string[];
+  restart_required_keys: string[];
+  warnings: Array<{ code: string; message: string }>;
+}
+
+export interface BotIdentity {
+  bot_id: string;
+  nickname: string;
+  avatar_url: string | null;
+  online: boolean;
+  is_default: boolean;
+  last_seen_at: number | string | null;
+}
+
+export interface AgentRuntimeSnapshot {
+  bot: BotIdentity;
+  connected_bots: BotIdentity[];
+  enabled: boolean;
+  running: boolean;
+  last_active_at: number | null;
+  waiting_turns: number;
+  active_turns: number;
+  sending_turns: number;
+  gated_turns: number;
+  cancelled_turns: number;
+  stale_turns: number;
+  event_loop_p50_ms: number | null;
+  event_loop_p95_ms: number | null;
+  turn_p50_ms: number | null;
+  turn_p95_ms: number | null;
+  rss_bytes: number | null;
+  peak_rss_bytes: number | null;
+  background_tasks: number;
+  background_failures: number;
+  cache_entries: number;
+  inner_state: { mood: string; energy: string; pending_count: number; updated_at: string };
+  recent_traces: Array<{
+    trace_id: string;
+    state: string;
+    outcome: string;
+    updated_at: number;
+    elapsed_ms: number | null;
+    model: string;
+    tool_count: number;
+    session_type: string;
+    group_id: string;
+    diagnosis_code: string;
+  }>;
+  generated_at: number;
+}
+
+export interface TokenUsageRow {
+  bucket?: string;
+  label?: string;
+  model?: string;
+  provider?: string;
+  purpose?: string;
+  purpose_label?: string;
+  group_id?: string;
+  group_label?: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  call_count: number;
+  percent?: number;
+}
+
+export interface TokenSummary {
+  window: "day" | "week" | "month" | "all";
+  generated_at: number;
+  total: TokenUsageRow;
+  series: TokenUsageRow[];
+  by_model: TokenUsageRow[];
+  by_group: TokenUsageRow[];
+  by_purpose: TokenUsageRow[];
+  provider_usage: Array<TokenUsageRow & { label: string; monthly_limit: number; usage_ratio: number; unlimited: boolean }>;
+  billing: {
+    cost_configured: boolean;
+    currency: string;
+    request_cost: number;
+    note: string;
+  };
+  dashboard_overview?: Record<string, unknown>;
+}
+
+export type FunctionalTestRisk = "local_read" | "external_read" | "external_write";
+export interface FunctionalTestDefinition {
+  id: string;
+  label: string;
+  category: string;
+  risk: FunctionalTestRisk;
+}
+export interface FunctionalTestRun {
+  id: string;
+  test_id: string;
+  label: string;
+  risk: FunctionalTestRisk;
+  state: "prepared" | "awaiting_confirmation" | "running" | "succeeded" | "failed" | "unknown";
+  target_summary: string | null;
+  route_fingerprint: string | null;
+  trace_id: string | null;
+  diagnostic_code: string;
+  created_at: string | null;
+  finished_at: string | null;
+  duration_ms: number | null;
+  result_summary: Record<string, unknown>;
+}
+
+export interface HealthCatalog {
+  tests: FunctionalTestDefinition[];
+  cached: Record<string, unknown> | null;
+  diagnostic_code: string;
 }
 
 export interface MultimodalRouteSnapshot {
@@ -268,4 +407,8 @@ export interface MultimodalRouteSnapshot {
   };
   diagnostic_code: string;
   production_verified: boolean;
+  dependencies: {
+    ffmpeg: { available: boolean; version: string; diagnostic_code: string };
+    ffprobe: { available: boolean; version: string; diagnostic_code: string };
+  };
 }
