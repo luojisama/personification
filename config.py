@@ -584,6 +584,13 @@ class Config(BaseModel):
     personification_humanize_typing_enabled: bool = True
     personification_humanize_typing_cps: float = 7.0
     personification_humanize_typing_max_delay: float = 5.0
+    # ──────────── 回复缓冲（动态等待合同）────────────
+    personification_batch_base_wait_seconds: float = 30.0
+    personification_batch_min_wait_seconds: float = 10.0
+    personification_batch_max_wait_seconds: float = 60.0
+    # 旧版兼容字段只在配置中显式提供时生效；None 表示不继承旧 3/15 秒默认值。
+    personification_batch_debounce_seconds: Optional[float] = None
+    personification_reply_backoff_seconds: Optional[float] = None
     # 碎片化输出：off=不干预；prompt=提示词引导拆成 1-3 条群聊短消息
     personification_humanize_fragment_style: str = "prompt"
     # 跨楼回复时带引用（OneBot v11 标准 reply 段，全端可用）

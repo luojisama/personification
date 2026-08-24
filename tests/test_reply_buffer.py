@@ -98,15 +98,16 @@ class _PolicyGate:
         return self.allowed
 
 
-def test_private_message_preempts_processing_batch() -> None:
-    asyncio.run(_run_private_message_preempts_processing_batch())
+def test_private_direct_message_does_not_cancel_nonrandom_generation() -> None:
+    asyncio.run(_run_private_direct_message_does_not_cancel_nonrandom_generation())
 
 
-async def _run_private_message_preempts_processing_batch() -> None:
+async def _run_private_direct_message_does_not_cancel_nonrandom_generation() -> None:
     msg_buffer: dict[str, dict[str, Any]] = {}
     tasks: list[asyncio.Task[Any]] = []
     first_started = asyncio.Event()
     first_cancelled = asyncio.Event()
+    release_first = asyncio.Event()
     second_processed = asyncio.Event()
     processed_ids: list[int] = []
 
@@ -115,7 +116,7 @@ async def _run_private_message_preempts_processing_batch() -> None:
         if int(event.message_id) == 1:
             first_started.set()
             try:
-                await asyncio.sleep(10)
+                await release_first.wait()
             except asyncio.CancelledError:
                 first_cancelled.set()
                 raise
@@ -135,6 +136,9 @@ async def _run_private_message_preempts_processing_batch() -> None:
                 logger=_Logger(),
                 delay=wait_seconds,
                 response_timeout_seconds=30,
+                batch_base_wait_seconds=0.03,
+                batch_min_wait_seconds=0.01,
+                batch_max_wait_seconds=0.06,
             )
         )
         tasks.append(task)
@@ -152,6 +156,9 @@ async def _run_private_message_preempts_processing_batch() -> None:
             msg_buffer=msg_buffer,
             start_buffer_timer=start_buffer_timer,
             logger=_Logger(),
+            batch_base_wait_seconds=0.03,
+            batch_min_wait_seconds=0.01,
+            batch_max_wait_seconds=0.06,
         )
         await asyncio.wait_for(first_started.wait(), timeout=1)
 
@@ -166,9 +173,15 @@ async def _run_private_message_preempts_processing_batch() -> None:
             msg_buffer=msg_buffer,
             start_buffer_timer=start_buffer_timer,
             logger=_Logger(),
+            batch_base_wait_seconds=0.03,
+            batch_min_wait_seconds=0.01,
+            batch_max_wait_seconds=0.06,
         )
 
-        await asyncio.wait_for(first_cancelled.wait(), timeout=1)
+        await asyncio.sleep(0.02)
+        assert not first_cancelled.is_set()
+        assert not second_processed.is_set()
+        release_first.set()
         await asyncio.wait_for(second_processed.wait(), timeout=1)
 
         assert processed_ids == [1, 2]
@@ -646,6 +659,11 @@ def test_buffer_dequeue_drops_user_blocked_after_enqueue() -> None:
 
 def test_direct_turn_cancels_active_random_turn_only() -> None:
     async def run() -> None:
+        timing = {
+            "batch_base_wait_seconds": 0.03,
+            "batch_min_wait_seconds": 0.01,
+            "batch_max_wait_seconds": 0.06,
+        }
         controller = reply_buffer.ReplyConcurrencyController(session_limit=3, global_limit=3)
         msg_buffer: dict[str, dict[str, Any]] = {}
         timer_tasks: list[asyncio.Task[Any]] = []
@@ -653,8 +671,10 @@ def test_direct_turn_cancels_active_random_turn_only() -> None:
         random_cancelled = asyncio.Event()
         pending_finished = asyncio.Event()
         direct_finished = asyncio.Event()
+        generations: dict[int, int] = {}
 
         async def process_response_logic(_bot: Any, event: Any, _state: dict[str, Any]) -> None:
+            generations[int(event.message_id)] = int(_state["turn_generation_id"])
             if int(event.message_id) == 1:
                 random_started.set()
                 try:
@@ -667,7 +687,7 @@ def test_direct_turn_cancels_active_random_turn_only() -> None:
             else:
                 direct_finished.set()
 
-        def start_buffer_timer(key: str, bot: Any, _wait_seconds: float) -> asyncio.Task[Any]:
+        def start_buffer_timer(key: str, bot: Any, wait_seconds: float) -> asyncio.Task[Any]:
             task = asyncio.create_task(
                 reply_buffer.run_buffer_timer(
                     key,
@@ -678,9 +698,10 @@ def test_direct_turn_cancels_active_random_turn_only() -> None:
                     message_cls=_Message,
                     message_segment_cls=_MessageSegment,
                     logger=_Logger(),
-                    delay=0,
+                    delay=wait_seconds,
                     response_timeout_seconds=30,
                     concurrency_controller=controller,
+                    **timing,
                 )
             )
             timer_tasks.append(task)
@@ -699,6 +720,7 @@ def test_direct_turn_cancels_active_random_turn_only() -> None:
             logger=_Logger(),
             concurrency_controller=controller,
             response_timeout_seconds=30,
+            **timing,
         )
         await asyncio.wait_for(random_started.wait(), timeout=1)
 
@@ -715,6 +737,7 @@ def test_direct_turn_cancels_active_random_turn_only() -> None:
             logger=_Logger(),
             concurrency_controller=controller,
             response_timeout_seconds=30,
+            **timing,
         )
 
         await reply_buffer.handle_reply_event(
@@ -730,12 +753,14 @@ def test_direct_turn_cancels_active_random_turn_only() -> None:
             logger=_Logger(),
             concurrency_controller=controller,
             response_timeout_seconds=30,
+            **timing,
         )
 
         await asyncio.wait_for(random_cancelled.wait(), timeout=1)
         await asyncio.wait_for(direct_finished.wait(), timeout=1)
-        await asyncio.wait_for(pending_finished.wait(), timeout=2)
+        await asyncio.wait_for(pending_finished.wait(), timeout=1)
         await asyncio.gather(*timer_tasks, return_exceptions=True)
+        assert generations[1] != generations[2] != generations[3]
 
     asyncio.run(run())
 
@@ -834,6 +859,128 @@ def test_processing_timeout_is_not_reclassified_as_admission_timeout() -> None:
         assert controller.snapshot() == {"active": 0, "waiting": 0, "session_gates": 0}
 
     asyncio.run(run())
+
+
+def test_compute_batch_fire_at_single_message_uses_thirty_second_baseline() -> None:
+    wait = reply_buffer._schedule_debounce_wait(
+        first_at=1000.0,
+        last_at=1000.0,
+        last_reply_at=0.0,
+        base_wait_seconds=30.0,
+        min_wait_seconds=10.0,
+        max_wait_seconds=60.0,
+        legacy_reply_backoff_seconds=None,
+        immediate=False,
+        now=1000.0,
+    )
+    assert wait == pytest.approx(30.0)
+
+
+def test_compute_batch_fire_at_new_message_recomputes_from_last_item() -> None:
+    wait = reply_buffer._schedule_debounce_wait(
+        first_at=1000.0,
+        last_at=1002.0,
+        last_reply_at=0.0,
+        base_wait_seconds=30.0,
+        min_wait_seconds=10.0,
+        max_wait_seconds=60.0,
+        legacy_reply_backoff_seconds=None,
+        immediate=False,
+        now=1002.0,
+    )
+    assert wait == pytest.approx(30.0)
+
+
+def test_compute_batch_fire_at_clamps_requested_wait_to_minimum() -> None:
+    wait = reply_buffer._schedule_debounce_wait(
+        first_at=1000.0,
+        last_at=1001.0,
+        last_reply_at=0.0,
+        base_wait_seconds=3.0,
+        min_wait_seconds=10.0,
+        max_wait_seconds=60.0,
+        legacy_reply_backoff_seconds=None,
+        immediate=False,
+        now=1001.0,
+    )
+    assert wait == pytest.approx(10.0)
+
+
+def test_compute_batch_fire_at_capped_by_max_wait() -> None:
+    wait = reply_buffer._schedule_debounce_wait(
+        first_at=1000.0,
+        last_at=1059.0,
+        last_reply_at=0.0,
+        base_wait_seconds=30.0,
+        min_wait_seconds=10.0,
+        max_wait_seconds=60.0,
+        legacy_reply_backoff_seconds=None,
+        immediate=False,
+        now=1059.0,
+    )
+    assert wait == pytest.approx(1.0)
+
+
+def test_compute_batch_fire_at_immediate_always_zero() -> None:
+    wait = reply_buffer._schedule_debounce_wait(
+        first_at=1000.0,
+        last_at=1000.0,
+        last_reply_at=0.0,
+        base_wait_seconds=30.0,
+        min_wait_seconds=10.0,
+        max_wait_seconds=60.0,
+        legacy_reply_backoff_seconds=None,
+        immediate=True,
+        now=1000.0,
+    )
+    assert wait == 0.0
+
+
+def test_await_private_direct_backoff_skips_without_recent_reply() -> None:
+    async def run() -> None:
+        key = "bot:private_987"
+        start = time.monotonic()
+        await reply_buffer._await_private_direct_backoff(
+            key,
+            debounce_seconds=0.1,
+            max_wait_seconds=1.0,
+            backoff_seconds=0.2,
+        )
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.08
+
+    asyncio.run(run())
+
+
+def test_await_private_direct_backoff_waits_in_burst_after_reply() -> None:
+    async def run() -> None:
+        key = "bot:private_987"
+        reply_buffer._note_session_reply(key)
+        start = time.monotonic()
+        await reply_buffer._await_private_direct_backoff(
+            key,
+            debounce_seconds=0.1,
+            max_wait_seconds=1.0,
+            backoff_seconds=0.3,
+        )
+        elapsed = time.monotonic() - start
+        # 退避下限是「上次回复 + backoff=0.3s」：必须等到，且不得退化成等满 max_wait
+        assert elapsed >= 0.28
+        assert elapsed < 0.8
+        reply_buffer._PRIVATE_DIRECT_STATE.pop(key, None)
+        reply_buffer._SESSION_LAST_REPLY_AT.pop(key, None)
+
+    asyncio.run(run())
+
+
+def test_session_last_reply_at_persists_and_prunes_stale() -> None:
+    reply_buffer._note_session_reply("bot:private_555")
+    assert reply_buffer._session_last_reply_at("bot:private_555") > 0
+    reply_buffer._SESSION_LAST_REPLY_AT["bot:stale"] = time.monotonic() - 10_000
+    reply_buffer._note_session_reply("bot:private_556")
+    assert "bot:stale" not in reply_buffer._SESSION_LAST_REPLY_AT
+    reply_buffer._SESSION_LAST_REPLY_AT.pop("bot:private_555", None)
+    reply_buffer._SESSION_LAST_REPLY_AT.pop("bot:private_556", None)
 
 
 def test_reply_concurrency_limits_hold_under_fifty_turn_burst() -> None:

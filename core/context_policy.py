@@ -41,6 +41,11 @@ _SILENCE_LEADING_LINE_PATTERN = re.compile(
 )
 _PRIVATE_COMMAND_PREFIXES = ("/", "!", "！", "#", "＃", ".", "。")
 _PRIVATE_COMMAND_KEYWORDS: Set[str] = set()
+# 模型格式漂移时可能把 <status> 状态块以裸文本漏出（心情/状态/记忆/动作 键值行）。
+_PLAIN_STATE_BLOCK_KEY_LINE = re.compile(
+    r"^\s*(?:心情|状态|记忆|动作)\s*[:：]\s*\"?[^\n\r]*\"?\s*$"
+)
+_PLAIN_STATE_BLOCK_HEADER_LINE = re.compile(r"^\s*状态\s*[:：]\s*$")
 
 
 def clear_private_command_keywords() -> None:
@@ -167,25 +172,74 @@ def has_silence_control_marker(text: Any) -> bool:
     return False
 
 
-def strip_response_control_markers(text: Any) -> str:
+def strip_plain_state_block(text: Any) -> str:
+    """剥离模型格式漂移时以裸文本漏出的状态块（无 <status> 标签包裹）。
+
+    形态为「状态:\n心情: ...\n状态: ...\n记忆: ...\n动作: ...」连续键值行；
+    同一文本中键值行 ≥3 行才判为状态块，避免误伤正常聊天内容。
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return raw
+    lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    stripped_indices: set[int] = set()
+    cursor = 0
+    while cursor < len(lines):
+        if not _PLAIN_STATE_BLOCK_KEY_LINE.fullmatch(lines[cursor].strip()):
+            cursor += 1
+            continue
+        run_start = cursor
+        while cursor < len(lines) and _PLAIN_STATE_BLOCK_KEY_LINE.fullmatch(lines[cursor].strip()):
+            cursor += 1
+        if cursor - run_start < 3:
+            continue
+        block_start = run_start
+        if run_start > 0 and _PLAIN_STATE_BLOCK_HEADER_LINE.fullmatch(lines[run_start - 1].strip()):
+            block_start -= 1
+        stripped_indices.update(range(block_start, cursor))
+    if not stripped_indices:
+        return raw
+    kept = [line for idx, line in enumerate(lines) if idx not in stripped_indices]
+    cleaned = "\n".join(kept).strip()
+    return re.sub(r"\n{3,}", "\n\n", cleaned)
+
+
+def strip_internal_state_artifacts(text: Any) -> str:
+    """Remove private think/status/action artifacts while preserving public wrappers.
+
+    Unlike :func:`strip_response_control_markers`, this helper deliberately does
+    not consume ``<output>/<message>`` or silence controls. Final surface guards
+    can therefore keep rejecting those controls while safely removing state
+    leakage from otherwise valid text.
+    """
+
     cleaned = str(text or "")
-    # 1) 完整闭合的思维链块，连同内容一并删除
     cleaned = re.sub(
         r"<\s*(?:think|status|action)\b[^>]*>.*?</\s*(?:think|status|action)\s*>",
         "",
         cleaned,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    # 2) 未闭合的 think/status/action：从开标签吃到下一个标签或文本结尾，避免内部内容漏出
     cleaned = re.sub(
         r"<\s*(?:think|status|action)\b[^>]*>[\s\S]*?(?=<\s*[A-Za-z/]|\Z)",
         "",
         cleaned,
         flags=re.IGNORECASE,
     )
-    # 3) 单独的 output/message/think/status/action 残留标签
     cleaned = re.sub(
-        r"</?\s*(?:output|message|think|status|action)\b[^>]*>",
+        r"</?\s*(?:think|status|action)\b[^>]*>",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return strip_plain_state_block(cleaned)
+
+
+def strip_response_control_markers(text: Any) -> str:
+    cleaned = strip_internal_state_artifacts(text)
+    # output/message 是公开回复的格式包装，只删除标签并保留正文。
+    cleaned = re.sub(
+        r"</?\s*(?:output|message)\b[^>]*>",
         "",
         cleaned,
         flags=re.IGNORECASE,

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+from .context_policy import strip_internal_state_artifacts
 from .role_integrity import detect_persona_identity_leak
 
 _CONTROL_OUTPUTS = frozenset({"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"})
@@ -104,13 +105,16 @@ def assess_visible_text(
     enforce_role_integrity: bool = True,
     identity_context: Any = None,
 ) -> VisibleOutputDecision:
-    candidate = str(text or "").strip()
-    if not candidate:
-        return _blocked_decision(candidate, "empty", "empty_output")
-    if candidate in _CONTROL_OUTPUTS:
+    raw_candidate = str(text or "").strip()
+    if not raw_candidate:
+        return _blocked_decision(raw_candidate, "empty", "empty_output")
+    if raw_candidate in _CONTROL_OUTPUTS:
         if allow_control:
-            return VisibleOutputDecision(True, candidate)
-        return _blocked_decision(candidate, "control_not_allowed", "control_output")
+            return VisibleOutputDecision(True, raw_candidate)
+        return _blocked_decision(raw_candidate, "control_not_allowed", "control_output")
+    candidate = strip_internal_state_artifacts(raw_candidate).strip()
+    if not candidate:
+        return _blocked_decision(raw_candidate, "empty_after_sanitization", "internal_state_output")
     if not allow_control and _CONTROL_OUTPUT_RE.search(candidate):
         return _blocked_decision(candidate, "control_not_allowed", "control_output")
     residual, media_error = _visible_residual(candidate, allow_direct_media=allow_direct_media)

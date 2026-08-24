@@ -1,6 +1,8 @@
 """Tests for the cleanup path that prevents thinking-chain XML from leaking to users."""
 from __future__ import annotations
 
+import pytest
+
 from ._loader import load_personification_module
 
 context_policy = load_personification_module("plugin.personification.core.context_policy")
@@ -8,6 +10,8 @@ yaml_parser = load_personification_module("plugin.personification.flows.yaml_par
 
 has_silence_control_marker = context_policy.has_silence_control_marker
 strip_response_control_markers = context_policy.strip_response_control_markers
+sanitize_history_text = context_policy.sanitize_history_text
+visible_output = load_personification_module("plugin.personification.core.visible_output")
 parse_yaml_response = yaml_parser.parse_yaml_response
 
 
@@ -110,3 +114,65 @@ def test_strip_extra_attributes_on_tags() -> None:
     assert "嗨" in cleaned
     assert "type" not in cleaned
     assert "quote" not in cleaned
+
+
+def test_strip_plain_state_block_leak_sample() -> None:
+    # 用户抓到的真实泄露样本：模型格式漂移，裸文本状态块无 <status> 包裹
+    raw = (
+        "状态:\n"
+        "心情: 嫌弃\n"
+        "状态: 在家\n"
+        "记忆: AG man喜欢乱赖人\n"
+        "动作:\n"
+    )
+    cleaned = strip_response_control_markers(raw)
+    assert cleaned == ""
+    assert "心情" not in cleaned
+    assert "记忆" not in cleaned
+
+
+def test_strip_plain_state_block_inside_reply_keeps_reply() -> None:
+    raw = (
+        "别乱赖我啊\n"
+        "心情: \"平静\"\n状态: \"在家\"\n记忆: \"\"\n动作: \"发呆\"\n"
+        "你自己看啊"
+    )
+    cleaned = strip_response_control_markers(raw)
+    assert "心情" not in cleaned, cleaned
+    assert "别乱赖我啊" in cleaned
+    assert "你自己看啊" in cleaned
+
+
+def test_strip_plain_state_block_quoted_and_fullwidth() -> None:
+    raw = '心情: "平静"\n状态: "在家"\n记忆: ""\n动作: "看手机"'
+    assert strip_response_control_markers(raw) == ""
+    raw_fw = "状态：\n心情：嫌弃\n状态：在家\n记忆：空\n动作："
+    assert strip_response_control_markers(raw_fw) == ""
+
+
+def test_strip_keeps_normal_chat_mentioning_state_keywords() -> None:
+    raw = "我现在状态不太好，心情: 有点烦"
+    assert strip_response_control_markers(raw) == raw
+    only_two = "状态:\n心情: 不错"
+    assert strip_response_control_markers(only_two) == only_two.strip()
+    with_reply = "刚才在工作，状态还在线\n"  # 只有一行状态键值，保留
+    assert strip_response_control_markers(with_reply) == with_reply.strip()
+
+
+def test_strip_keeps_non_contiguous_normal_state_lines() -> None:
+    raw = "心情: 有点烦\n但我还是会把事情做完\n状态: 慢慢恢复\n今天早点睡\n动作: 先去洗澡"
+    assert strip_response_control_markers(raw) == raw
+
+
+@pytest.mark.parametrize(
+    "surface",
+    ["normal_reply", "yaml_reply", "agent_action_text", "qzone_post", "qzone_comment", "qzone_forward"],
+)
+def test_shared_visible_output_gate_strips_plain_state_blocks(surface: str) -> None:
+    raw = "能看到的回复\n心情: 平静\n状态: 在家\n记忆: 无\n动作: 看手机"
+    assert visible_output.guard_visible_text(raw, surface=surface) == "能看到的回复"
+
+
+def test_history_gate_strips_plain_state_blocks() -> None:
+    raw = "会写入历史的回复\n心情: 平静\n状态: 在家\n记忆: 无\n动作: 看手机"
+    assert sanitize_history_text(raw) == "会写入历史的回复"

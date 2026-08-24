@@ -23,13 +23,27 @@ from .reply_commit import reply_lifecycle_snapshot
 
 _GROUP_BATCH_DELAY_SECONDS = 1.2
 _PRIVATE_BATCH_DELAY_SECONDS = 0.8
+_BATCH_BASE_WAIT_SECONDS = 30.0
+_BATCH_MIN_WAIT_SECONDS = 10.0
+_BATCH_MAX_WAIT_SECONDS = 60.0
 _MAX_BATCH_EVENTS = 8
 _PROCESS_RESPONSE_TIMEOUT_SECONDS = 180.0
-_DIRECT_REPLY_PREEMPT_SECONDS = 8.0
 _ADMISSION_TIMEOUT_SECONDS = 15.0
 _RECENT_MEDIA_TTL_SECONDS = 300.0
 _RECENT_MEDIA_MAX_ENTRIES = 256
 _recent_media_by_sender: OrderedDict[str, tuple[float, list[dict[str, Any]]]] = OrderedDict()
+_SESSION_GENERATION_MAX_ENTRIES = 2048
+_session_generation_ids: OrderedDict[str, int] = OrderedDict()
+
+
+def _next_turn_generation(session_key: str) -> int:
+    key = str(session_key or "")
+    generation = int(_session_generation_ids.get(key, 0) or 0) + 1
+    _session_generation_ids[key] = generation
+    _session_generation_ids.move_to_end(key)
+    while len(_session_generation_ids) > _SESSION_GENERATION_MAX_ENTRIES:
+        _session_generation_ids.popitem(last=False)
+    return generation
 
 
 def _recent_media_key(session_key: str, user_id: str) -> str:
@@ -665,6 +679,7 @@ def _new_entry(delay: float) -> dict[str, Any]:
         "delay": delay,
         "batch_started_at": 0.0,
         "pending_started_at": 0.0,
+        "last_item_at": 0.0,
         "pending_ready": False,
         "current_generation": 0,
         "superseded_generation": 0,
@@ -683,6 +698,128 @@ def _schedule_delay(started_at: float, delay: float, *, immediate: bool = False)
         return 0.0
     elapsed = max(0.0, time.monotonic() - started_at)
     return max(0.0, float(delay) - elapsed)
+
+
+def _compute_batch_fire_at(
+    *,
+    first_at: float,
+    last_at: float,
+    last_reply_at: float,
+    base_wait_seconds: float,
+    min_wait_seconds: float,
+    max_wait_seconds: float,
+    legacy_reply_backoff_seconds: float | None,
+    now: float,
+) -> float:
+    """计算该批应回复的绝对时间点。
+
+    每次新消息都从最后一条重新计算动态等待，同时以首条消息后的
+    ``max_wait_seconds`` 为硬截止。生产配置会把等待限制在 10–60 秒；
+    测试可注入同比缩短后的数值，不需要真实等待 30 秒。
+
+    ``legacy_reply_backoff_seconds`` 只兼容旧配置中显式提供的值，新安装
+    不再继承旧版 15 秒默认值。
+    """
+    lower = max(0.0, float(min_wait_seconds or 0.0))
+    upper = max(lower, float(max_wait_seconds or lower))
+    requested = min(upper, max(lower, float(base_wait_seconds or lower)))
+    fire_at = last_at + requested
+    legacy_backoff = max(0.0, float(legacy_reply_backoff_seconds or 0.0))
+    if legacy_backoff > 0 and last_reply_at > 0 and now - last_reply_at < legacy_backoff:
+        fire_at = max(fire_at, last_reply_at + legacy_backoff)
+    return min(first_at + upper, fire_at)
+
+
+def _schedule_debounce_wait(
+    *,
+    first_at: float,
+    last_at: float,
+    last_reply_at: float,
+    base_wait_seconds: float,
+    min_wait_seconds: float,
+    max_wait_seconds: float,
+    legacy_reply_backoff_seconds: float | None,
+    immediate: bool,
+    now: float | None = None,
+) -> float:
+    if immediate:
+        return 0.0
+    if first_at <= 0 or last_at <= 0:
+        return max(0.0, float(base_wait_seconds or 0.0))
+    now = time.monotonic() if now is None else now
+    target = _compute_batch_fire_at(
+        first_at=first_at,
+        last_at=last_at,
+        last_reply_at=last_reply_at,
+        base_wait_seconds=base_wait_seconds,
+        min_wait_seconds=min_wait_seconds,
+        max_wait_seconds=max_wait_seconds,
+        legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
+        now=now,
+    )
+    return max(0.0, target - now)
+
+
+_SESSION_LAST_REPLY_AT: Dict[str, float] = {}
+_SESSION_REPLY_TTL_SECONDS = 600.0
+_PRIVATE_DIRECT_STATE: Dict[str, dict[str, Any]] = {}
+
+
+def _note_session_reply(session_key: str) -> None:
+    key = str(session_key or "")
+    if not key:
+        return
+    now = time.monotonic()
+    _SESSION_LAST_REPLY_AT[key] = now
+    expired = [
+        k for k, ts in _SESSION_LAST_REPLY_AT.items() if now - ts > _SESSION_REPLY_TTL_SECONDS
+    ]
+    for k in expired:
+        _SESSION_LAST_REPLY_AT.pop(k, None)
+
+
+def _session_last_reply_at(session_key: str) -> float:
+    return float(_SESSION_LAST_REPLY_AT.get(str(session_key or ""), 0.0) or 0.0)
+
+
+async def _await_private_direct_backoff(
+    session_key: str,
+    *,
+    debounce_seconds: float,
+    max_wait_seconds: float,
+    backoff_seconds: float,
+) -> None:
+    """私聊刚回复完对方又连发时，推迟本轮处理到「安静 debounce 秒」之后。
+
+    只影响刚回过话后的连发；距上次回复较久的首条消息直接正常处理，不打断原有直连节奏。
+    不丢弃消息，只是统一推迟处理，避免 bot 对每条连发私聊都秒回。
+    触发点取「最后一条消息 + debounce」与「上次回复 + backoff」的较晚者，
+    并以本轮首条消息 + max_wait 封顶；两者都是固定时点，循环必然收敛。
+    """
+    if debounce_seconds <= 0 or max_wait_seconds <= 0 or backoff_seconds <= 0:
+        return
+    key = str(session_key or "")
+    now = time.monotonic()
+    last_reply = _session_last_reply_at(key)
+    if last_reply <= 0 or now - last_reply >= backoff_seconds:
+        return
+    st = _PRIVATE_DIRECT_STATE.setdefault(key, {})
+    st["last_message_at"] = now
+    if float(st.get("burst_start", 0.0) or 0.0) <= last_reply:
+        st["burst_start"] = now
+    while True:
+        now = time.monotonic()
+        last_message_at = float(st.get("last_message_at", now) or now)
+        fire_at = min(
+            float(st.get("burst_start", now) or now) + max_wait_seconds,
+            max(last_message_at + debounce_seconds, last_reply + backoff_seconds),
+        )
+        wait = fire_at - now
+        if wait <= 0:
+            break
+        await asyncio.sleep(min(wait, 0.1))
+    if now - last_reply > max(max_wait_seconds, backoff_seconds) + 60:
+        _PRIVATE_DIRECT_STATE.pop(key, None)
 
 
 def _cancel_timer(entry: dict[str, Any]) -> None:
@@ -712,21 +849,10 @@ def _promote_pending_batch(entry: dict[str, Any]) -> None:
     entry["pending_ready"] = False
 
 
-def _processing_age_seconds(entry: dict[str, Any]) -> float:
-    started_at = float(entry.get("processing_started_at", 0.0) or 0.0)
-    if started_at <= 0:
-        return 0.0
-    return max(0.0, time.monotonic() - started_at)
-
-
 def _should_preempt_current_batch(entry: dict[str, Any], *, immediate_flush: bool) -> bool:
     if not immediate_flush or not bool(entry.get("processing")):
         return False
-    if bool(entry.get("current_is_random_chat")):
-        return True
-    if bool(entry.get("newer_batch_for_current")):
-        return True
-    return _processing_age_seconds(entry) >= _DIRECT_REPLY_PREEMPT_SECONDS
+    return bool(entry.get("current_is_random_chat"))
 
 
 async def run_buffer_timer(
@@ -742,6 +868,10 @@ async def run_buffer_timer(
     finished_exception_cls: Any = None,
     delay: float = 0.0,
     response_timeout_seconds: float = _PROCESS_RESPONSE_TIMEOUT_SECONDS,
+    batch_base_wait_seconds: float = _BATCH_BASE_WAIT_SECONDS,
+    batch_min_wait_seconds: float = _BATCH_MIN_WAIT_SECONDS,
+    batch_max_wait_seconds: float = _BATCH_MAX_WAIT_SECONDS,
+    legacy_reply_backoff_seconds: float | None = None,
     concurrency_controller: ReplyConcurrencyController | None = None,
     user_policy_gate: Any = None,
 ) -> None:
@@ -800,6 +930,10 @@ async def run_buffer_timer(
                         finished_exception_cls=finished_exception_cls,
                         delay=_delay,
                         response_timeout_seconds=response_timeout_seconds,
+                        batch_base_wait_seconds=batch_base_wait_seconds,
+                        batch_min_wait_seconds=batch_min_wait_seconds,
+                        batch_max_wait_seconds=batch_max_wait_seconds,
+                        legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
                         concurrency_controller=concurrency_controller,
                         user_policy_gate=user_policy_gate,
                     )
@@ -868,6 +1002,7 @@ async def run_buffer_timer(
         "entry": entry,
         "generation": current_generation,
     }
+    state["turn_generation_id"] = _next_turn_generation(key)
     entry["current_trigger_type"] = trigger_type
     entry["current_is_random_chat"] = bool(state.get("is_random_chat", False))
     timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
@@ -954,6 +1089,8 @@ async def run_buffer_timer(
         entry["processing_started_at"] = 0.0
         entry["current_trigger_type"] = ""
         entry["current_is_random_chat"] = False
+        if bool(state.get("reply_delivery_started", False)):
+            _note_session_reply(key)
         if entry.get("pending_items"):
             if entry.get("pending_ready"):
                 _promote_pending_batch(entry)
@@ -975,15 +1112,25 @@ async def run_buffer_timer(
                             finished_exception_cls=finished_exception_cls,
                             delay=_delay,
                             response_timeout_seconds=response_timeout_seconds,
+                            batch_base_wait_seconds=batch_base_wait_seconds,
+                            batch_min_wait_seconds=batch_min_wait_seconds,
+                            batch_max_wait_seconds=batch_max_wait_seconds,
+                            legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
                             concurrency_controller=concurrency_controller,
                             user_policy_gate=user_policy_gate,
                         )
                     ),
                 )
             else:
-                remaining = _schedule_delay(
-                    float(entry.get("pending_started_at", 0.0) or time.monotonic()),
-                    float(entry.get("delay", _GROUP_BATCH_DELAY_SECONDS) or _GROUP_BATCH_DELAY_SECONDS),
+                remaining = _schedule_debounce_wait(
+                    first_at=float(entry.get("pending_started_at", 0.0) or 0.0),
+                    last_at=float(entry.get("last_item_at", 0.0) or 0.0),
+                    last_reply_at=_session_last_reply_at(key),
+                    base_wait_seconds=batch_base_wait_seconds,
+                    min_wait_seconds=batch_min_wait_seconds,
+                    max_wait_seconds=batch_max_wait_seconds,
+                    legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
+                    immediate=False,
                 )
                 _promote_pending_batch(entry)
                 _schedule_timer(
@@ -1004,6 +1151,10 @@ async def run_buffer_timer(
                             finished_exception_cls=finished_exception_cls,
                             delay=_delay,
                             response_timeout_seconds=response_timeout_seconds,
+                            batch_base_wait_seconds=batch_base_wait_seconds,
+                            batch_min_wait_seconds=batch_min_wait_seconds,
+                            batch_max_wait_seconds=batch_max_wait_seconds,
+                            legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
                             concurrency_controller=concurrency_controller,
                             user_policy_gate=user_policy_gate,
                         )
@@ -1027,6 +1178,10 @@ async def handle_reply_event(
     logger: Any,
     concurrency_controller: ReplyConcurrencyController | None = None,
     response_timeout_seconds: float = _PROCESS_RESPONSE_TIMEOUT_SECONDS,
+    batch_base_wait_seconds: float = _BATCH_BASE_WAIT_SECONDS,
+    batch_min_wait_seconds: float = _BATCH_MIN_WAIT_SECONDS,
+    batch_max_wait_seconds: float = _BATCH_MAX_WAIT_SECONDS,
+    legacy_reply_backoff_seconds: float | None = None,
     finished_exception_cls: Any = None,
     user_policy_gate: Any = None,
 ) -> None:
@@ -1119,7 +1274,7 @@ async def handle_reply_event(
     if immediate_flush and concurrency_controller is not None:
         entry = msg_buffer.get(session_key)
         if isinstance(entry, dict):
-            if entry.get("processing"):
+            if entry.get("processing") and bool(entry.get("current_is_random_chat")):
                 entry["newer_batch_for_current"] = True
                 entry["superseded_generation"] = max(
                     int(entry.get("superseded_generation", 0) or 0),
@@ -1130,6 +1285,7 @@ async def handle_reply_event(
                     active_task.cancel()
         direct_state = dict(state)
         direct_state["batch_session_key"] = session_key
+        direct_state["turn_generation_id"] = _next_turn_generation(session_key)
         direct_state["batched_events"] = []
         direct_media = await resolve_onebot_quoted_media_refs(event, bot)
         recent_media: list[TurnMediaRef] = []
@@ -1173,6 +1329,13 @@ async def handle_reply_event(
                 )
         except Exception:
             pass
+        if is_private_session:
+            await _await_private_direct_backoff(
+                session_key,
+                debounce_seconds=batch_base_wait_seconds,
+                max_wait_seconds=batch_max_wait_seconds,
+                backoff_seconds=float(legacy_reply_backoff_seconds or 0.0),
+            )
         timeout_seconds = max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS))
         direct_state["response_deadline"] = time.monotonic() + timeout_seconds
         try:
@@ -1228,6 +1391,8 @@ async def handle_reply_event(
                     f"拟人插件：会话 {session_key} direct turn 处理失败，保持静默: "
                     f"type={type(exc).__name__} delivery_state={delivery_state}"
                 )
+        if is_private_session and bool(direct_state.get("reply_delivery_started", False)):
+            _note_session_reply(session_key)
         return
     entry = msg_buffer.setdefault(session_key, _new_entry(delay))
     _retain_buffer_entry(
@@ -1254,6 +1419,7 @@ async def handle_reply_event(
         entry["newer_batch_for_current"] = True
         if not float(entry.get("pending_started_at", 0.0) or 0.0):
             entry["pending_started_at"] = now_ts
+        entry["last_item_at"] = now_ts
         if immediate_flush:
             entry["pending_ready"] = True
             if _should_preempt_current_batch(entry, immediate_flush=True):
@@ -1265,10 +1431,16 @@ async def handle_reply_event(
                 if active_task and not active_task.done():
                     active_task.cancel()
                     logger.info(f"拟人插件：会话 {session_key} 收到新的直呼消息，抢占当前旧批次。")
-        wait_seconds = _schedule_delay(
-            float(entry.get("pending_started_at", now_ts) or now_ts),
-            delay,
+        wait_seconds = _schedule_debounce_wait(
+            first_at=float(entry.get("pending_started_at", now_ts) or now_ts),
+            last_at=now_ts,
+            last_reply_at=_session_last_reply_at(session_key),
+            base_wait_seconds=batch_base_wait_seconds,
+            min_wait_seconds=batch_min_wait_seconds,
+            max_wait_seconds=batch_max_wait_seconds,
+            legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
             immediate=bool(entry.get("pending_ready")),
+            now=now_ts,
         )
         _schedule_timer(
             entry=entry,
@@ -1281,15 +1453,23 @@ async def handle_reply_event(
         return
 
     current_items = list(entry.get("items") or [])
+    first_in_batch = not float(entry.get("batch_started_at", 0.0) or 0.0)
     current_items.append(item)
     entry["items"] = _trim_items(current_items)
-    if not float(entry.get("batch_started_at", 0.0) or 0.0):
+    if first_in_batch:
         entry["batch_started_at"] = now_ts
+    entry["last_item_at"] = now_ts
 
-    wait_seconds = _schedule_delay(
-        float(entry.get("batch_started_at", now_ts) or now_ts),
-        delay,
+    wait_seconds = _schedule_debounce_wait(
+        first_at=float(entry.get("batch_started_at", now_ts) or now_ts),
+        last_at=now_ts,
+        last_reply_at=_session_last_reply_at(session_key),
+        base_wait_seconds=batch_base_wait_seconds,
+        min_wait_seconds=batch_min_wait_seconds,
+        max_wait_seconds=batch_max_wait_seconds,
+        legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
         immediate=immediate_flush,
+        now=now_ts,
     )
     _schedule_timer(
         entry=entry,
