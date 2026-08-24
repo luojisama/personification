@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import threading
 import time
@@ -26,7 +27,9 @@ _PROBE_IMAGE_DATA_URL = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAACgAAAAoCAIAAAADnC86AAAAWUlEQVR4nO3WIQ4AMQwDQcf//3MOpzAnbUG93Brqau2rH2PrUg5MZUw6CoxljpoFxjJHzQJjmaNeh0vaH6fuWm+tSzkwlTHpKDCWOWoWGMscNQuMZY7S4/AHSyEFTD7iBgAAAAAASUVORK5CYII="
 )
-_PROBE_TIMEOUT_SECONDS = 12.0
+_PROBE_TIMEOUT_SECONDS = 45.0
+_PROBE_TIMEOUT_MIN_SECONDS = 5.0
+_PROBE_TIMEOUT_MAX_SECONDS = 120.0
 _PROBE_EXPECTED_COLOR_ORDER = "红绿蓝黄"
 _VIDEO_CAPABILITY_CACHE: Dict[tuple[str, str, str], VisualCapabilityRecord] = {}
 
@@ -173,6 +176,16 @@ def _probe_response_matches_expected(content: str) -> bool:
     return normalized == _PROBE_EXPECTED_COLOR_ORDER
 
 
+def _normalize_probe_timeout_seconds(value: Any = None) -> float:
+    try:
+        timeout = float(_PROBE_TIMEOUT_SECONDS if value is None else value)
+    except (TypeError, ValueError):
+        timeout = _PROBE_TIMEOUT_SECONDS
+    if not math.isfinite(timeout):
+        timeout = _PROBE_TIMEOUT_SECONDS
+    return max(_PROBE_TIMEOUT_MIN_SECONDS, min(_PROBE_TIMEOUT_MAX_SECONDS, timeout))
+
+
 def heuristic_supports_video(api_type: str, model: str | None = None) -> bool:
     from .media_provider_adapters import resolve_media_provider_adapter
 
@@ -271,6 +284,7 @@ async def probe_tool_caller_vision(
     api_type: str,
     model: str,
     logger: Any,
+    timeout_seconds: float | None = None,
 ) -> bool | None:
     if caller is None or not api_type:
         return None
@@ -294,7 +308,7 @@ async def probe_tool_caller_vision(
     try:
         response = await asyncio.wait_for(
             caller.chat_with_tools(messages, [], False),
-            timeout=_PROBE_TIMEOUT_SECONDS,
+            timeout=_normalize_probe_timeout_seconds(timeout_seconds),
         )
     except Exception as exc:
         if error_indicates_vision_unavailable(exc):
@@ -304,26 +318,41 @@ async def probe_tool_caller_vision(
                 model,
                 False,
                 source="startup_probe",
-                detail=str(exc),
+                detail="vision_input_explicitly_unsupported",
             )
             return False
-        logger.warning(f"[vision] startup probe failed route={route_name} type={api_type} model={model}: {exc}")
+        logger.warning(
+            f"[vision] startup probe failed route={route_name} type={api_type} "
+            f"model={model} error_type={type(exc).__name__}"
+        )
         return None
 
     content = str(getattr(response, "content", "") or "").strip()
-    supported = (
-        not bool(getattr(response, "vision_unavailable", False))
-        and _probe_response_matches_expected(content)
+    if bool(getattr(response, "vision_unavailable", False)):
+        set_visual_capability(
+            route_name,
+            api_type,
+            model,
+            False,
+            source="startup_probe",
+            detail="vision_unavailable",
+        )
+        return False
+    if _probe_response_matches_expected(content):
+        set_visual_capability(
+            route_name,
+            api_type,
+            model,
+            True,
+            source="startup_probe",
+            detail=content[:80],
+        )
+        return True
+    logger.warning(
+        f"[vision] startup probe returned an unverified response "
+        f"route={route_name} type={api_type} model={model}"
     )
-    set_visual_capability(
-        route_name,
-        api_type,
-        model,
-        supported,
-        source="startup_probe",
-        detail=content[:80] or str(getattr(response, "finish_reason", "") or ""),
-    )
-    return supported
+    return None
 
 
 async def probe_vision_caller(
@@ -333,13 +362,14 @@ async def probe_vision_caller(
     api_type: str,
     model: str,
     logger: Any,
+    timeout_seconds: float | None = None,
 ) -> bool | None:
     if caller is None or not api_type:
         return None
     try:
         result = await asyncio.wait_for(
             caller.describe("请直接回答 ok", _PROBE_IMAGE_DATA_URL),
-            timeout=_PROBE_TIMEOUT_SECONDS,
+            timeout=_normalize_probe_timeout_seconds(timeout_seconds),
         )
     except Exception as exc:
         if error_indicates_vision_unavailable(exc):
@@ -349,18 +379,28 @@ async def probe_vision_caller(
                 model,
                 False,
                 source="startup_probe",
-                detail=str(exc),
+                detail="vision_input_explicitly_unsupported",
             )
             return False
-        logger.warning(f"[vision] startup probe failed route={route_name} type={api_type} model={model}: {exc}")
+        logger.warning(
+            f"[vision] startup probe failed route={route_name} type={api_type} "
+            f"model={model} error_type={type(exc).__name__}"
+        )
         return None
 
+    detail = str(result or "").strip()
+    if not detail:
+        logger.warning(
+            f"[vision] startup probe returned an empty response "
+            f"route={route_name} type={api_type} model={model}"
+        )
+        return None
     set_visual_capability(
         route_name,
         api_type,
         model,
         True,
         source="startup_probe",
-        detail=str(result or "").strip()[:80],
+        detail=detail[:80],
     )
     return True

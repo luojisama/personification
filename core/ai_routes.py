@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from .llm_context import current_llm_context, use_single_attempt_retry_policy
+from .route_capabilities import DEFAULT_ROUTE_CAPABILITY_REGISTRY, RouteKey
 from .safety_filter import build_safe_reframe_messages, detect_route_safety_issue
+from .tool_schema_compat import classify_schema_rejection, prepare_tools_for_provider
 
 
 _EMITTED_ROUTE_WARNINGS: set[str] = set()
@@ -954,18 +956,31 @@ class RoutedToolCaller:
         self._caller_route_keys: dict[int, str] = {}
         self._caller_by_route_key: dict[str, ToolCaller] = {}
         self._caller_route_descriptors: dict[int, dict[str, Any]] = {}
+        self._caller_capability_keys: dict[int, RouteKey] = {}
+        self._caller_schema_profiles_enabled: dict[int, bool] = {}
         descriptors = list(route_descriptors or [])
         for index, caller in enumerate([*self._primary_callers, *([self._fallback_caller] if self._fallback_caller else [])]):
             key = f"{index}:{type(caller).__name__}"
             self._caller_route_keys[id(caller)] = key
             self._caller_by_route_key[key] = caller
             source = descriptors[index] if index < len(descriptors) else {}
+            self._caller_schema_profiles_enabled[id(caller)] = bool(source)
+            capability_key = RouteKey.from_config(
+                provider=source.get("name") or f"route-{index + 1}",
+                api_type=source.get("api_type") or "unknown",
+                api_url=source.get("api_url") or "",
+                model=source.get("model") or "",
+                media_protocol=source.get("media_protocol") or "auto",
+            )
+            self._caller_capability_keys[id(caller)] = capability_key
+            DEFAULT_ROUTE_CAPABILITY_REGISTRY.bind_route(key, capability_key)
             self._caller_route_descriptors[id(caller)] = {
                 "provider": str(source.get("name") or f"route-{index + 1}")[:80],
                 "api_type": str(source.get("api_type") or "")[:48],
                 "model": str(source.get("model") or "")[:120],
                 "auth_mode": str(source.get("gemini_auth_mode") or "")[:48],
                 "caller": type(caller).__name__[:80],
+                "route_fingerprint": capability_key.fingerprint,
             }
 
     def _route_attempt(
@@ -980,6 +995,7 @@ class RoutedToolCaller:
         )
         descriptor = self._caller_route_descriptors.get(id(caller), {"caller": type(caller).__name__[:80]})
         shape = dict(request_shape or {})
+        schema_rejection = classify_schema_rejection(exc)
         wire_tools_count = _exception_wire_tools_count(exc)
         if wire_tools_count is None:
             wire_tools_count = max(0, int(shape.get("tools_count") or 0))
@@ -995,7 +1011,84 @@ class RoutedToolCaller:
             "code": code,
             "retryable": retryable,
             "exception_type": type(exc).__name__[:80],
+            "schema_rejection_code": schema_rejection.reason_code,
+            "schema_rejection_field": schema_rejection.field_path,
         }
+
+    def _prepare_route_tools(
+        self,
+        caller: ToolCaller,
+        tools: list[dict],
+        messages: list[dict],
+        use_builtin_search: bool,
+    ) -> tuple[list[dict], dict[str, Any]]:
+        descriptor = self._caller_route_descriptors.get(id(caller), {})
+        if not self._caller_schema_profiles_enabled.get(id(caller), False):
+            return list(tools or []), _safe_request_shape(messages, tools, use_builtin_search)
+        prepared = prepare_tools_for_provider(
+            tools,
+            provider=descriptor.get("provider", ""),
+            api_type=descriptor.get("api_type", ""),
+            model=descriptor.get("model", ""),
+            route_fingerprint=descriptor.get("route_fingerprint", ""),
+        )
+        diagnostics = prepared.diagnostics.to_safe_dict()
+        shape = _safe_request_shape(messages, list(prepared.tools), use_builtin_search)
+        shape.update(
+            {
+                "input_tools_count": diagnostics["input_tool_count"],
+                "schema_chars": diagnostics["schema_chars"],
+                "schema_bytes": diagnostics["schema_bytes"],
+                "schema_profile": diagnostics["profile"],
+                "schema_excluded_count": diagnostics["excluded_count"],
+                "schema_excluded": diagnostics["excluded_tools"],
+                "schema_downgraded": diagnostics["downgraded_tools"],
+            }
+        )
+        try:
+            from .reply_turn_trace import record_stage
+
+            record_stage(
+                key="tool_schema_prepare",
+                label="工具 Schema 兼容处理",
+                status="warn" if diagnostics["excluded_count"] else "ok",
+                detail=(
+                    f"provider={diagnostics['provider']} api={diagnostics['api_type']} "
+                    f"model={diagnostics['model']} route={diagnostics['route_fingerprint']} "
+                    f"tools={diagnostics['tool_count']}/{diagnostics['input_tool_count']} "
+                    f"chars={diagnostics['schema_chars']} bytes={diagnostics['schema_bytes']} "
+                    f"names_hash={diagnostics['tool_names_hash']} "
+                    f"schema_hash={diagnostics['tool_schema_hash']} "
+                    f"excluded={diagnostics['excluded_count']}"
+                ),
+                hint="完整参数、工具结果和凭据不会写入追踪。",
+            )
+        except Exception:
+            pass
+        return list(prepared.tools), shape
+
+    def _record_route_success(
+        self,
+        caller: ToolCaller,
+        *,
+        tools_declared: bool,
+        builtin_search: bool,
+    ) -> None:
+        route_key = self._caller_capability_keys.get(id(caller))
+        if route_key is None:
+            return
+        if tools_declared:
+            DEFAULT_ROUTE_CAPABILITY_REGISTRY.record_runtime_success(
+                route_key,
+                "function_call",
+                detail_code="runtime_tool_schema_accepted",
+            )
+        if builtin_search:
+            DEFAULT_ROUTE_CAPABILITY_REGISTRY.record_runtime_success(
+                route_key,
+                "native_web_search",
+                detail_code="runtime_native_search_succeeded",
+            )
 
     def _caller_from_tool_result_markers(self, messages: list[dict]) -> ToolCaller | None:
         for message in reversed(list(messages or [])):
@@ -1042,7 +1135,6 @@ class RoutedToolCaller:
     ) -> ToolCallerResponse:
         last_error: Exception | None = None
         route_attempts: list[dict[str, Any]] = []
-        request_shape = _safe_request_shape(messages, tools, use_builtin_search)
         saw_vision_unavailable = False
         pinned_caller = self._caller_from_tool_result_markers(messages)
         if pinned_caller is not None:
@@ -1052,10 +1144,16 @@ class RoutedToolCaller:
             if self._fallback_caller is not None:
                 call_chain.append(self._fallback_caller)
         for caller in call_chain:
+            wire_tools, request_shape = self._prepare_route_tools(
+                caller,
+                tools,
+                messages,
+                use_builtin_search,
+            )
             try:
                 response = await caller.chat_with_tools(
                     self._strip_route_markers(messages),
-                    tools,
+                    wire_tools,
                     use_builtin_search,
                 )
             except asyncio.CancelledError:
@@ -1064,19 +1162,19 @@ class RoutedToolCaller:
                 last_error = exc
                 route_attempts.append(self._route_attempt(caller, exc, request_shape=request_shape))
                 continue
-            _response_wire_tools_count(response, len(list(tools or [])))
+            _response_wire_tools_count(response, len(wire_tools))
             safety_issue = detect_route_safety_issue(response)
             if safety_issue:
                 if use_single_attempt_retry_policy():
                     last_error = RuntimeError("provider safety block")
                     last_error.code = "provider_safety_block"
-                    _attach_response_wire_tools_count(last_error, response, len(list(tools or [])))
+                    _attach_response_wire_tools_count(last_error, response, len(wire_tools))
                     route_attempts.append(self._route_attempt(caller, last_error, request_shape=request_shape))
                     continue
                 try:
                     response = await caller.chat_with_tools(
                         self._strip_route_markers(build_safe_reframe_messages(messages)),
-                        tools,
+                        wire_tools,
                         use_builtin_search,
                     )
                 except asyncio.CancelledError:
@@ -1085,11 +1183,11 @@ class RoutedToolCaller:
                     last_error = exc
                     route_attempts.append(self._route_attempt(caller, exc, request_shape=request_shape))
                     continue
-                _response_wire_tools_count(response, len(list(tools or [])))
+                _response_wire_tools_count(response, len(wire_tools))
                 if detect_route_safety_issue(response):
                     last_error = RuntimeError("provider safety block")
                     last_error.code = "provider_safety_block"
-                    _attach_response_wire_tools_count(last_error, response, len(list(tools or [])))
+                    _attach_response_wire_tools_count(last_error, response, len(wire_tools))
                     route_attempts.append(self._route_attempt(caller, last_error, request_shape=request_shape))
                     continue
             if response.vision_unavailable:
@@ -1099,13 +1197,18 @@ class RoutedToolCaller:
                 last_error = RuntimeError("provider returned an empty or invalid response")
                 last_error.code = "provider_invalid_response"
                 last_error.retryable = True
-                _attach_response_wire_tools_count(last_error, response, len(list(tools or [])))
+                _attach_response_wire_tools_count(last_error, response, len(wire_tools))
                 route_attempts.append(self._route_attempt(caller, last_error, request_shape=request_shape))
                 continue
             try:
                 response.route_key = str(self._caller_route_keys.get(id(caller), "") or "")
             except Exception:
                 pass
+            self._record_route_success(
+                caller,
+                tools_declared=bool(wire_tools),
+                builtin_search=bool(use_builtin_search),
+            )
             return response
         if saw_vision_unavailable:
             return _tool_caller_response_cls()(
@@ -1119,7 +1222,7 @@ class RoutedToolCaller:
             raise RoutedToolCallerError(route_attempts) from last_error
         raise RoutedToolCallerError([
             {
-                **request_shape,
+                **_safe_request_shape(messages, tools, use_builtin_search),
                 "provider": "routed",
                 "api_type": "",
                 "model": "",
