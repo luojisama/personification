@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -19,10 +20,41 @@ from ...core.runtime_events import get_runtime_event_bus
 from ...core.runtime_events import publish_runtime_event
 from ...core.visible_output import guard_visible_text
 from ..deps import AdminIdentity, require_admin
+from ..v2_services import (
+    apply_config_patch,
+    build_agent_runtime_snapshot,
+    config_revision,
+    group_avatar_url,
+    list_bot_identities,
+    qq_avatar_url,
+)
+from .metrics_routes import build_metrics_summary
 
 
 _ROUTE_PROBE_TASKS: dict[str, dict[str, Any]] = {}
 _STICKER_INDEX_TASKS: dict[str, dict[str, Any]] = {}
+_FUNCTIONAL_TEST_RUNS: dict[str, dict[str, Any]] = {}
+
+_FUNCTIONAL_TEST_CATALOG: tuple[dict[str, str], ...] = (
+    {"id": "core", "label": "核心运行", "category": "核心", "risk": "local_read"},
+    {"id": "model", "label": "主模型", "category": "模型", "risk": "external_read"},
+    {"id": "submodels", "label": "子模型", "category": "子模型", "risk": "external_read"},
+    {"id": "vision", "label": "图片理解", "category": "视觉", "risk": "external_read"},
+    {"id": "video", "label": "视频理解", "category": "视频理解", "risk": "external_read"},
+    {"id": "storage", "label": "存储", "category": "存储", "risk": "local_read"},
+    {"id": "memory", "label": "记忆", "category": "记忆", "risk": "local_read"},
+    {"id": "personas", "label": "画像", "category": "画像", "risk": "local_read"},
+    {"id": "groups", "label": "群聊", "category": "群聊", "risk": "local_read"},
+    {"id": "stickers", "label": "表情包", "category": "表情包", "risk": "local_read"},
+    {"id": "tts", "label": "TTS", "category": "TTS", "risk": "external_read"},
+    {"id": "qzone", "label": "QQ 空间", "category": "QQ 空间", "risk": "external_write"},
+    {"id": "web_search", "label": "联网搜索", "category": "联网搜索", "risk": "external_read"},
+    {"id": "skills", "label": "Skill", "category": "Skill", "risk": "local_read"},
+    {"id": "proactive", "label": "主动社交", "category": "主动社交", "risk": "external_write"},
+    {"id": "persona", "label": "人设", "category": "人设", "risk": "local_read"},
+    {"id": "protocol", "label": "协议端", "category": "协议端", "risk": "external_read"},
+    {"id": "webui_security", "label": "WebUI 安全", "category": "WebUI 安全", "risk": "local_read"},
+)
 
 
 def _iso(value: Any) -> str | None:
@@ -244,14 +276,15 @@ def _cached_persona_rows(
             level = ""
         if level_filter and level != level_filter:
             continue
-        profile_text = str(raw.get("profile_text", "") or "").strip()
         rows.append(
             {
+                "qq_id": user_id,
                 "user_id": user_id,
                 "nickname": nickname,
-                "avatar_url": str(qq_profile.get("avatar_url", "") or ""),
+                "avatar_url": qq_avatar_url(user_id),
                 "recent_group_id": str(qq_profile.get("last_group_id", "") or ""),
-                "snippet": profile_text[:240],
+                "favorability_score": round(score, 2),
+                "favorability_level": level,
                 "favorability": {"score": round(score, 2), "level": level},
                 "updated_at": float(raw.get("updated_at", 0) or 0),
                 "source": str(raw.get("source", "") or ""),
@@ -277,6 +310,10 @@ def _cached_group_rows(
     runtime: Any,
     *,
     search: str,
+    membership_state: str,
+    include_unconfirmed: bool,
+    enabled: str,
+    bot_id: str,
     sort_by: str,
     direction: str,
 ) -> list[dict[str, Any]]:
@@ -285,16 +322,49 @@ def _cached_group_rows(
 
     config_whitelist = list(getattr(runtime.plugin_config, "personification_whitelist", []) or [])
     needle = str(search or "").strip().casefold()
+    state_filter = str(membership_state or "").strip()
+    bot_filter = str(bot_id or "").strip()
+    enabled_filter = str(enabled or "").strip().lower()
     rows: list[dict[str, Any]] = []
     for raw in list_cached_group_union(runtime):
         group_id = str(raw.get("group_id", "") or "")
         group_name = str(raw.get("group_name", "") or "")
         if needle and needle not in group_id.casefold() and needle not in group_name.casefold():
             continue
+        sources = {str(value or "") for value in raw.get("sources") or []}
+        memberships = [item for item in raw.get("memberships") or [] if isinstance(item, dict)]
+        provenance = {
+            str(key or "")
+            for item in memberships
+            for key in (item.get("provenance") or {})
+        }
+        if provenance.intersection({"onebot_group_list", "onebot_group_info_probe", "message_event"}):
+            relationship = "confirmed"
+        elif sources.intersection({"config_whitelist", "dynamic_whitelist", "group_config"}):
+            relationship = "configured"
+        else:
+            relationship = "unconfirmed"
+        if relationship == "unconfirmed" and not include_unconfirmed:
+            continue
+        if state_filter and relationship != state_filter:
+            continue
+        bot_ids = [str(value or "") for value in raw.get("bot_self_ids") or [] if str(value or "")]
+        if bot_filter and bot_filter not in bot_ids:
+            continue
+        is_enabled = bool(is_group_whitelisted(group_id, config_whitelist))
+        if enabled_filter in {"true", "1", "enabled"} and not is_enabled:
+            continue
+        if enabled_filter in {"false", "0", "disabled"} and is_enabled:
+            continue
         rows.append(
             {
                 **raw,
-                "enabled": bool(is_group_whitelisted(group_id, config_whitelist)),
+                "avatar_url": group_avatar_url(group_id),
+                "bot_ids": bot_ids,
+                "membership_state": relationship,
+                "enabled": is_enabled,
+                "member_count": raw.get("member_count") if isinstance(raw.get("member_count"), int) else None,
+                "last_active_at": float(raw.get("freshness", 0) or 0) or None,
                 "cache_only": True,
             }
         )
@@ -323,7 +393,14 @@ def _config_rows(runtime: Any, *, search: str, group: str) -> list[dict[str, Any
         if group_filter and entry.group != group_filter:
             continue
         haystack = " ".join(
-            (entry.field_name, entry.display_name, entry.description, entry.group)
+            (
+                entry.field_name,
+                entry.display_name,
+                entry.description,
+                entry.group,
+                entry.category,
+                " ".join(entry.help_aliases),
+            )
         ).casefold()
         if needle and needle not in haystack:
             continue
@@ -342,14 +419,22 @@ def _config_rows(runtime: Any, *, search: str, group: str) -> list[dict[str, Any
                 "display_name": entry.display_name,
                 "description": entry.description,
                 "group": entry.group,
+                "category": entry.category,
                 "scope": entry.scope,
+                "kind": entry.kind,
                 "value_type": entry.value_type,
                 "value": safe_value,
                 "default": "***" if entry.secret and entry.default else sanitize_object(entry.default),
                 "secret": bool(entry.secret),
                 "advanced": bool(entry.advanced),
                 "hot_reloadable": bool(entry.hot_reloadable),
+                "restart_required": not bool(entry.hot_reloadable),
+                "required": bool(entry.required),
+                "modified": value != entry.default,
+                "aliases": list(entry.help_aliases),
                 "choices": list(entry.choices),
+                "min_value": entry.min_value,
+                "max_value": entry.max_value,
             }
         )
     rows.sort(key=lambda item: (str(item["group"]), str(item["display_name"]), str(item["field_name"])))
@@ -464,8 +549,214 @@ class _SilentProbeLogger:
         return None
 
 
+def _functional_test_definition(test_id: str) -> dict[str, str] | None:
+    normalized = str(test_id or "").strip()
+    return next((dict(item) for item in _FUNCTIONAL_TEST_CATALOG if item["id"] == normalized), None)
+
+
+def _functional_test_view(run: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(run.get("id") or ""),
+        "test_id": str(run.get("test_id") or ""),
+        "label": str(run.get("label") or ""),
+        "risk": str(run.get("risk") or "local_read"),
+        "state": str(run.get("state") or "prepared"),
+        "target_summary": str(run.get("target_summary") or "") or None,
+        "route_fingerprint": str(run.get("route_fingerprint") or "") or None,
+        "trace_id": str(run.get("trace_id") or "") or None,
+        "diagnostic_code": str(run.get("diagnostic_code") or "test_prepared"),
+        "created_at": _iso(run.get("created_at")),
+        "finished_at": _iso(run.get("finished_at")),
+        "duration_ms": run.get("duration_ms") if isinstance(run.get("duration_ms"), int) else None,
+        "result_summary": run.get("result_summary") if isinstance(run.get("result_summary"), dict) else {},
+    }
+
+
+async def _execute_functional_test(runtime: Any, operation_id: str) -> None:
+    from ...core.diagnostics import run_diagnostics
+
+    run = _FUNCTIONAL_TEST_RUNS.get(operation_id)
+    if run is None:
+        return
+    started = time.monotonic()
+    run.update({"state": "running", "diagnostic_code": "test_running"})
+    publish_runtime_event(
+        "test_run.updated",
+        payload={"operation_id": operation_id, "state": "running", "test_id": run["test_id"]},
+    )
+    try:
+        result = await run_diagnostics(
+            plugin_config=getattr(runtime, "plugin_config", None),
+            bundle=getattr(runtime, "runtime_bundle", None),
+            superusers=getattr(runtime, "superusers", set()),
+            get_bots=getattr(runtime, "get_bots", None),
+            logger=getattr(runtime, "logger", None),
+            only=str(run.get("category") or ""),
+            probe_video=False,
+        )
+        status = str(result.get("overall") or result.get("status") or "unknown") if isinstance(result, dict) else "unknown"
+        ok = status not in {"error", "failed", "unknown"}
+        categories = result.get("categories") if isinstance(result, dict) and isinstance(result.get("categories"), list) else []
+        checks = [
+            check
+            for category in categories
+            if isinstance(category, dict)
+            for check in category.get("checks") or []
+            if isinstance(check, dict)
+        ]
+        run.update(
+            {
+                "state": "succeeded" if ok else "failed",
+                "diagnostic_code": (
+                    "functional_test_warning" if status == "warn" else "functional_test_succeeded"
+                ) if ok else "functional_test_failed",
+                "result_summary": {
+                    "overall": status,
+                    "check_count": len(checks),
+                    "failed_count": sum(
+                        1
+                        for item in checks
+                        if isinstance(item, dict) and str(item.get("status") or "") not in {"ok", "healthy", "passed", "success"}
+                    ),
+                },
+            }
+        )
+    except Exception as exc:
+        run.update(
+            {
+                "state": "failed",
+                "diagnostic_code": f"functional_test_exception:{type(exc).__name__}",
+                "result_summary": {},
+            }
+        )
+    finally:
+        run["finished_at"] = time.time()
+        run["duration_ms"] = int(max(0.0, time.monotonic() - started) * 1000)
+        publish_runtime_event(
+            "test_run.updated",
+            payload={
+                "operation_id": operation_id,
+                "state": run["state"],
+                "test_id": run["test_id"],
+                "diagnostic_code": run["diagnostic_code"],
+            },
+        )
+
+
 def build_v2_router(*, runtime: Any) -> APIRouter:
     router = APIRouter(prefix="/api/v2", tags=["v2"])
+
+    @router.get("/bots")
+    async def bots(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
+        items = await list_bot_identities(runtime)
+        return {"items": items, "total": len(items), "diagnostic_code": "bot_identity_snapshot"}
+
+    @router.get("/health")
+    async def health(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
+        from ...core.diagnostics import get_cached_diagnostics
+
+        cached = get_cached_diagnostics()
+        return {
+            "tests": [dict(item) for item in _FUNCTIONAL_TEST_CATALOG],
+            "cached": cached if isinstance(cached, dict) else None,
+            "diagnostic_code": "functional_test_catalog_ready",
+        }
+
+    @router.post("/test-runs/prepare")
+    async def prepare_test_run(
+        body: dict[str, Any] = Body(default_factory=dict),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        definition = _functional_test_definition(str(body.get("test_id") or ""))
+        if definition is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "functional_test_not_found", "message": "未找到该体检项目。"},
+            )
+        operation_id = uuid.uuid4().hex
+        risk = definition["risk"]
+        run = {
+            "id": operation_id,
+            "test_id": definition["id"],
+            "label": definition["label"],
+            "category": definition["category"],
+            "risk": risk,
+            "state": "prepared" if risk == "local_read" else "awaiting_confirmation",
+            "target_summary": str(body.get("target_summary") or "")[:240],
+            "route_fingerprint": str(body.get("route_fingerprint") or "")[:128],
+            "trace_id": "",
+            "diagnostic_code": "test_prepared" if risk == "local_read" else "test_confirmation_required",
+            "created_at": time.time(),
+            "finished_at": 0.0,
+            "result_summary": {},
+        }
+        _FUNCTIONAL_TEST_RUNS[operation_id] = run
+        if risk == "local_read":
+            asyncio.create_task(_execute_functional_test(runtime, operation_id))
+        return _functional_test_view(run)
+
+    @router.post("/test-runs/{operation_id}/confirm")
+    async def confirm_test_run(
+        operation_id: str,
+        request: Request,
+        body: dict[str, Any] = Body(default_factory=dict),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        run = _FUNCTIONAL_TEST_RUNS.get(str(operation_id or ""))
+        if run is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "functional_test_run_not_found", "message": "测试任务不存在或已失效。"},
+            )
+        if run.get("state") != "awaiting_confirmation":
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "functional_test_state_conflict", "message": "该测试任务当前不等待确认。"},
+            )
+        if body.get("confirmed") is not True:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "functional_test_confirmation_missing", "message": "必须明确确认本次外部调用。"},
+            )
+        if run.get("risk") == "external_write":
+            host = str(request.client.host if request.client else "")
+            secure = request.url.scheme == "https" or host in {"127.0.0.1", "::1", "localhost", "testclient"}
+            if not secure:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"code": "external_write_https_required", "message": "公网 HTTP 连接禁止执行外部写测试。"},
+                )
+            expected = str(run.get("target_summary") or "")
+            if not expected or str(body.get("target_confirmation") or "") != expected:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": "external_write_target_mismatch", "message": "目标复核文本不匹配，未执行写操作。"},
+                )
+            run.update(
+                {
+                    "state": "failed",
+                    "finished_at": time.time(),
+                    "diagnostic_code": "external_write_dedicated_canary_required",
+                    "result_summary": {"message": "请在对应 QQ/QZone 专用页面完成带目标字段的单次 canary。"},
+                }
+            )
+            return _functional_test_view(run)
+        run.update({"state": "prepared", "diagnostic_code": "test_confirmed"})
+        asyncio.create_task(_execute_functional_test(runtime, operation_id))
+        return _functional_test_view(run)
+
+    @router.get("/test-runs/{operation_id}")
+    async def get_test_run(
+        operation_id: str,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        run = _FUNCTIONAL_TEST_RUNS.get(str(operation_id or ""))
+        if run is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "functional_test_run_not_found", "message": "测试任务不存在或已失效。"},
+            )
+        return _functional_test_view(run)
 
     @router.get("/personas")
     async def personas(
@@ -505,6 +796,10 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=100),
         search: str = Query(default="", max_length=120),
+        membership_state: str = Query(default="", pattern="^(|confirmed|configured|unconfirmed)$"),
+        include_unconfirmed: bool = Query(default=False),
+        enabled: str = Query(default="", pattern="^(|true|false|1|0|enabled|disabled)$"),
+        bot_id: str = Query(default="", max_length=64),
         sort_by: str = Query(default="group_id", max_length=32),
         direction: str = Query(default="asc", pattern="^(asc|desc)$"),
         _: AdminIdentity = Depends(require_admin),
@@ -515,6 +810,10 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 _cached_group_rows,
                 runtime,
                 search=search,
+                membership_state=membership_state,
+                include_unconfirmed=include_unconfirmed,
+                enabled=enabled,
+                bot_id=bot_id,
                 sort_by=sort_by,
                 direction=direction,
             )
@@ -661,11 +960,76 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
     ) -> dict[str, Any]:
         params = normalize_pagination(page=page, page_size=page_size)
         rows = await run_in_threadpool(_config_rows, runtime, search=search, group=group)
-        return build_page(
+        payload = build_page(
             rows[params.offset : params.offset + params.page_size],
             total=len(rows),
             params=params,
         ).to_dict()
+        all_rows = await run_in_threadpool(_config_rows, runtime, search="", group="")
+        counts: dict[str, int] = {}
+        modified_counts: dict[str, int] = {}
+        for item in all_rows:
+            category = str(item.get("group") or "其他")
+            counts[category] = counts.get(category, 0) + 1
+            if item.get("modified"):
+                modified_counts[category] = modified_counts.get(category, 0) + 1
+        payload.update(
+            {
+                "revision": config_revision(runtime.plugin_config),
+                "groups": sorted(counts),
+                "group_counts": counts,
+                "modified_counts": modified_counts,
+            }
+        )
+        return payload
+
+    @router.patch("/config/values")
+    async def patch_config_values(
+        body: dict[str, Any] = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        revision = str(body.get("revision") or "")
+        values = body.get("values") if isinstance(body.get("values"), dict) else None
+        if values is None:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "config_patch_values_invalid", "message": "values 必须是配置键值对象。"},
+            )
+        try:
+            result = await apply_config_patch(runtime, revision=revision, values=values)
+        except RuntimeError as exc:
+            if str(exc) == "config_revision_conflict":
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "config_revision_conflict", "message": "配置已被其他操作更新，请刷新后重试。"},
+                ) from exc
+            raise
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "config_key_unknown", "message": "提交中包含未注册配置键。"},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "config_value_invalid", "message": f"配置 {exc} 未通过类型或范围校验。"},
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"code": "config_batch_persist_failed", "message": "配置未能原子写入，运行时未修改。"},
+            ) from exc
+        from ...core import webui_audit_log
+
+        webui_audit_log.record(
+            action="config_batch_update_v2",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            target=",".join(result["updated_keys"])[:128],
+            detail={"keys": result["updated_keys"], "warning_codes": [item["code"] for item in result["warnings"]]},
+            outcome="ok" if not result["warnings"] else "partial",
+        )
+        return result
 
     @router.get("/multimodal/routes")
     async def multimodal_routes(
@@ -1132,9 +1496,35 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             "filters": result.get("filters") or {},
         }
 
+    @router.get("/metrics/summary")
+    async def metrics_summary(
+        window: str = Query(default="24h", pattern="^(24h|7d|30d|all)$"),
+        bot_id: str = Query(default="", max_length=64),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        data = await build_metrics_summary(runtime, "30d" if window == "all" else window)
+        if window == "all":
+            cumulative = dict(data.get("total_consumption") or {})
+            cumulative["provider_usage"] = data.get("provider_usage") or []
+            cumulative["billing"] = data.get("billing") or {}
+            cumulative["dashboard_overview"] = data.get("dashboard_overview") or {}
+            cumulative["window"] = "all"
+            cumulative["generated_at"] = data.get("generated_at")
+            data = cumulative
+        data["bot_id"] = str(bot_id or "")
+        return data
+
+    @router.get("/runtime/agent")
+    async def agent_runtime(
+        bot_id: str = Query(default="", max_length=64),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        return await build_agent_runtime_snapshot(runtime, bot_id)
+
     @router.get("/overview")
     async def overview(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
         traces, _ = await run_in_threadpool(reply_turn_trace.query_page, limit=8, offset=0)
+        agent = await build_agent_runtime_snapshot(runtime)
         queue = await run_in_threadpool(ReplyRecoveryQueue)
         route_counts = {"supported": 0, "unsupported": 0, "unknown": 0}
         for route in DEFAULT_ROUTE_CAPABILITY_REGISTRY.snapshot():
@@ -1144,14 +1534,24 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         bus = get_runtime_event_bus()
         return {
             "generated_at": datetime.now(tz=timezone.utc).isoformat(),
-            "runtime_status": "healthy",
-            "active_turns": 0,
+            "runtime_status": (
+                "offline"
+                if not agent["running"]
+                else "degraded"
+                if not agent["enabled"] or agent["stale_turns"] or agent["background_failures"]
+                else "healthy"
+            ),
+            "active_turns": agent["active_turns"],
             "events_last_hour": len(bus),
-            "p95_turn_ms": None,
+            "p95_turn_ms": agent["turn_p95_ms"],
             "route_counts": route_counts,
             "recovery_counts": await run_in_threadpool(queue.status_counts),
             "latest_traces": [_trace_summary(trace) for trace in traces],
-            "diagnostics": [],
+            "diagnostics": (
+                [{"code": "runtime_background_failures", "title": "存在失败的后台任务", "level": "warn"}]
+                if agent["background_failures"]
+                else []
+            ),
         }
 
     @router.get("/settings")

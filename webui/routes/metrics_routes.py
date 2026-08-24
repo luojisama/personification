@@ -306,6 +306,44 @@ def _query_dashboard_bundle(window: str) -> dict[str, Any]:
     return result
 
 
+async def build_metrics_summary(runtime: Any, window: str) -> dict[str, Any]:
+    """Build the shared token dashboard DTO used by both WebUI generations."""
+
+    window_key = token_ledger.normalize_window(window)
+    bundle = await asyncio.to_thread(_query_dashboard_bundle, window_key)
+    data = dict(bundle["selected"])
+    plugin_config = getattr(runtime, "plugin_config", None)
+    provider_usage = _provider_usage(
+        plugin_config=plugin_config,
+        window=window_key,
+        data=bundle["provider"],
+    )
+    data["by_group"] = await _annotate_group_rows(runtime, list(data.get("by_group") or []))
+    data["by_purpose"] = _annotate_purpose_rows(
+        list(data.get("by_purpose") or []),
+        total_tokens=int((data.get("total") or {}).get("total_tokens", 0) or 0),
+    )
+    data["provider_usage"] = provider_usage
+    data["billing"] = _billing_summary(data, provider_usage)
+    total_consumption = dict(bundle["total_consumption"])
+    total_consumption["by_group"] = await _annotate_group_rows(
+        runtime,
+        list(total_consumption.get("by_group") or []),
+    )
+    total_consumption["by_purpose"] = _annotate_purpose_rows(
+        list(total_consumption.get("by_purpose") or []),
+        total_tokens=int((total_consumption.get("total") or {}).get("total_tokens", 0) or 0),
+    )
+    data["total_consumption"] = total_consumption
+    data["dashboard_overview"] = _dashboard_overview(
+        total_consumption,
+        bundle["summaries"],
+    )
+    data["window"] = window_key
+    data["generated_at"] = time.time()
+    return data
+
+
 def build_metrics_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
@@ -314,37 +352,7 @@ def build_metrics_router(*, runtime) -> APIRouter:
         window: str = Query(default="month", pattern=_WINDOW_PATTERN),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict:
-        window_key = token_ledger.normalize_window(window)
-        bundle = await asyncio.to_thread(_query_dashboard_bundle, window_key)
-        data = dict(bundle["selected"])
-        plugin_config = getattr(runtime, "plugin_config", None)
-        provider_usage = _provider_usage(
-            plugin_config=plugin_config,
-            window=window_key,
-            data=bundle["provider"],
-        )
-        data["by_group"] = await _annotate_group_rows(runtime, list(data.get("by_group") or []))
-        data["by_purpose"] = _annotate_purpose_rows(
-            list(data.get("by_purpose") or []),
-            total_tokens=int((data.get("total") or {}).get("total_tokens", 0) or 0),
-        )
-        data["provider_usage"] = provider_usage
-        data["billing"] = _billing_summary(data, provider_usage)
-        total_consumption = dict(bundle["total_consumption"])
-        total_consumption["by_group"] = await _annotate_group_rows(
-            runtime,
-            list(total_consumption.get("by_group") or []),
-        )
-        total_consumption["by_purpose"] = _annotate_purpose_rows(
-            list(total_consumption.get("by_purpose") or []),
-            total_tokens=int((total_consumption.get("total") or {}).get("total_tokens", 0) or 0),
-        )
-        data["total_consumption"] = total_consumption
-        data["dashboard_overview"] = _dashboard_overview(
-            total_consumption,
-            bundle["summaries"],
-        )
-        return data
+        return await build_metrics_summary(runtime, window)
 
     @router.get("/group/{group_id}")
     async def group_detail(
@@ -367,3 +375,6 @@ def build_metrics_router(*, runtime) -> APIRouter:
         }
 
     return router
+
+
+__all__ = ["build_metrics_router", "build_metrics_summary"]

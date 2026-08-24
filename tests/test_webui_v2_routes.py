@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
@@ -15,6 +16,9 @@ recovery = load_personification_module(
 route_capabilities = load_personification_module(
     "plugin.personification.core.route_capabilities"
 )
+v2_services = load_personification_module(
+    "plugin.personification.webui.v2_services"
+)
 
 
 def test_v2_router_exposes_paged_trace_recovery_capability_and_sse_routes() -> None:
@@ -23,9 +27,17 @@ def test_v2_router_exposes_paged_trace_recovery_capability_and_sse_routes() -> N
     assert {
         "/api/v2/personas",
         "/api/v2/groups",
+        "/api/v2/bots",
+        "/api/v2/metrics/summary",
+        "/api/v2/runtime/agent",
+        "/api/v2/health",
+        "/api/v2/test-runs/prepare",
+        "/api/v2/test-runs/{operation_id}/confirm",
+        "/api/v2/test-runs/{operation_id}",
         "/api/v2/stickers",
         "/api/v2/stickers/index/rebuild",
         "/api/v2/config",
+        "/api/v2/config/values",
         "/api/v2/multimodal/routes",
         "/api/v2/traces",
         "/api/v2/traces/{trace_id}",
@@ -41,6 +53,15 @@ def test_v2_router_exposes_paged_trace_recovery_capability_and_sse_routes() -> N
         "/api/v2/memories",
         "/api/v2/logs",
     } <= paths
+
+
+def test_functional_test_catalog_keeps_three_risk_levels_and_eighteen_categories() -> None:
+    catalog = list(v2_routes._FUNCTIONAL_TEST_CATALOG)
+    assert len(catalog) == 18
+    assert {item["risk"] for item in catalog} == {"local_read", "external_read", "external_write"}
+    assert v2_routes._functional_test_definition("core")["risk"] == "local_read"
+    assert v2_routes._functional_test_definition("model")["risk"] == "external_read"
+    assert v2_routes._functional_test_definition("qzone")["risk"] == "external_write"
 
 
 def test_whole_backup_router_exposes_step_up_and_fail_closed_restore_routes() -> None:
@@ -153,6 +174,95 @@ def test_cached_persona_rows_filter_and_sort_without_onebot_calls() -> None:
     assert [row["user_id"] for row in rows] == ["2"]
     assert rows[0]["cache_only"] is True
     assert rows[0]["favorability"] == {"score": 80.0, "level": "亲近"}
+    assert rows[0]["qq_id"] == "2"
+    assert rows[0]["avatar_url"] == "https://q1.qlogo.cn/g?b=qq&nk=2&s=640"
+    assert "snippet" not in rows[0]
+    assert "profile_text" not in repr(rows)
+
+
+def test_webui_avatar_urls_accept_numeric_ids_only() -> None:
+    assert v2_services.qq_avatar_url("12345") == "https://q1.qlogo.cn/g?b=qq&nk=12345&s=640"
+    assert v2_services.group_avatar_url("67890") == "https://p.qlogo.cn/gh/67890/67890/640"
+    assert v2_services.qq_avatar_url("https://attacker.invalid/x") is None
+    assert v2_services.group_avatar_url("12/../../x") is None
+
+
+def test_bot_identity_uses_controlled_avatar_and_connected_runtime() -> None:
+    class _Bot:
+        self_id = "12345"
+
+        async def get_login_info(self):
+            return {"user_id": 12345, "nickname": "测试 Bot"}
+
+    runtime = SimpleNamespace(get_bots=lambda: {"12345": _Bot()})
+    rows = asyncio.run(v2_services.list_bot_identities(runtime))
+
+    assert rows == [
+        {
+            "bot_id": "12345",
+            "nickname": "测试 Bot",
+            "avatar_url": "https://q1.qlogo.cn/g?b=qq&nk=12345&s=640",
+            "online": True,
+            "is_default": True,
+            "last_seen_at": rows[0]["last_seen_at"],
+        }
+    ]
+
+
+def test_cached_group_rows_hide_unconfirmed_profile_candidates(monkeypatch) -> None:  # noqa: ANN001
+    group_directory = load_personification_module("plugin.personification.core.group_directory")
+    utils = load_personification_module("plugin.personification.utils")
+    monkeypatch.setattr(
+        group_directory,
+        "list_cached_group_union",
+        lambda _runtime: [
+            {
+                "group_id": "100",
+                "group_name": "已配置群",
+                "sources": ["group_config"],
+                "memberships": [],
+                "bot_self_ids": [],
+                "freshness": 0,
+            },
+            {
+                "group_id": "200",
+                "group_name": "历史候选",
+                "sources": ["profile_memory"],
+                "memberships": [],
+                "bot_self_ids": [],
+                "freshness": 0,
+            },
+        ],
+    )
+    monkeypatch.setattr(utils, "is_group_whitelisted", lambda _group_id, _whitelist: False)
+    runtime = SimpleNamespace(plugin_config=SimpleNamespace(personification_whitelist=[]))
+
+    visible = v2_routes._cached_group_rows(
+        runtime,
+        search="",
+        membership_state="",
+        include_unconfirmed=False,
+        enabled="",
+        bot_id="",
+        sort_by="group_id",
+        direction="asc",
+    )
+    all_rows = v2_routes._cached_group_rows(
+        runtime,
+        search="",
+        membership_state="",
+        include_unconfirmed=True,
+        enabled="",
+        bot_id="",
+        sort_by="group_id",
+        direction="asc",
+    )
+
+    assert [(row["group_id"], row["membership_state"]) for row in visible] == [("100", "configured")]
+    assert [(row["group_id"], row["membership_state"]) for row in all_rows] == [
+        ("100", "configured"),
+        ("200", "unconfirmed"),
+    ]
 
 
 def test_v2_config_rows_mask_secret_values() -> None:
@@ -167,6 +277,58 @@ def test_v2_config_rows_mask_secret_values() -> None:
     assert target["secret"] is True
     assert target["value"] == "***"
     assert "secret-must-not-leak" not in repr(rows)
+
+
+def test_v2_config_patch_uses_revision_and_atomic_batch_writer(monkeypatch) -> None:  # noqa: ANN001
+    config = load_personification_module("plugin.personification.config").Config()
+    env_writer = load_personification_module("plugin.personification.core.env_writer")
+    captured: dict[str, object] = {}
+
+    def _write_many(values, plugin_config):  # noqa: ANN001
+        captured["values"] = dict(values)
+        captured["config"] = plugin_config
+        return {"env_json_path": "test/env.json", "errors": []}
+
+    monkeypatch.setattr(env_writer, "write_many", _write_many)
+    runtime = SimpleNamespace(plugin_config=config, runtime_bundle=None)
+    before = v2_services.config_revision(config)
+
+    result = asyncio.run(
+        v2_services.apply_config_patch(
+            runtime,
+            revision=before,
+            values={"personification_global_enabled": False},
+        )
+    )
+
+    assert captured["values"] == {"personification_global_enabled": False}
+    assert config.personification_global_enabled is False
+    assert result["updated_keys"] == ["personification_global_enabled"]
+    assert result["revision"] != before
+
+
+def test_v2_config_patch_rejects_stale_revision_before_writing(monkeypatch) -> None:  # noqa: ANN001
+    config = load_personification_module("plugin.personification.config").Config()
+    env_writer = load_personification_module("plugin.personification.core.env_writer")
+    monkeypatch.setattr(
+        env_writer,
+        "write_many",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not persist")),
+    )
+    runtime = SimpleNamespace(plugin_config=config)
+
+    try:
+        asyncio.run(
+            v2_services.apply_config_patch(
+                runtime,
+                revision="stale",
+                values={"personification_global_enabled": False},
+            )
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "config_revision_conflict"
+    else:
+        raise AssertionError("stale revision must be rejected")
 
 
 def test_route_probe_target_matches_full_route_fingerprint(monkeypatch) -> None:  # noqa: ANN001
