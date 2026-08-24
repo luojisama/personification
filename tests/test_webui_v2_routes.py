@@ -23,6 +23,7 @@ def test_v2_router_exposes_paged_trace_recovery_capability_and_sse_routes() -> N
         "/api/v2/recovery",
         "/api/v2/recovery/counts",
         "/api/v2/model-routes/capabilities",
+        "/api/v2/qzone/capabilities",
         "/api/v2/events",
     } <= paths
 

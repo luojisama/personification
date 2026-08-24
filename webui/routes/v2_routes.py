@@ -13,6 +13,7 @@ from ...core.pagination import build_page, normalize_pagination
 from ...core.reply_recovery_queue import ReplyRecoveryQueue, RecoveryItem
 from ...core import reply_turn_trace
 from ...core.route_capabilities import DEFAULT_ROUTE_CAPABILITY_REGISTRY
+from ...core.qzone_capability_matrix import DEFAULT_QZONE_CAPABILITY_MATRIX
 from ...core.runtime_events import get_runtime_event_bus
 from ...core.runtime_events import publish_runtime_event
 from ...core.visible_output import guard_visible_text
@@ -177,7 +178,6 @@ def _trace_detail(trace: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_v2_router(*, runtime: Any) -> APIRouter:
-    del runtime
     router = APIRouter(prefix="/api/v2", tags=["v2"])
 
     @router.get("/traces")
@@ -409,6 +409,22 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             "revision": "api_v2_r2",
             "participation_v2_mode": "shadow",
         }
+
+    @router.get("/qzone/capabilities")
+    async def qzone_capabilities(
+        bot_id: str = Query(default="", max_length=64),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from ...core.qzone_service import get_qzone_auth_status, get_qzone_capability_status
+
+        plugin_config = getattr(runtime, "plugin_config", None)
+        enabled = bool(getattr(plugin_config, "personification_qzone_enabled", True))
+        return DEFAULT_QZONE_CAPABILITY_MATRIX.snapshot(
+            bot_id,
+            enabled=enabled,
+            auth_status=get_qzone_auth_status(bot_id),
+            aggregate_status=get_qzone_capability_status(bot_id, enabled=enabled),
+        )
 
     @router.get("/events")
     async def events(

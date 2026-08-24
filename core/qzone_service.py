@@ -15,6 +15,8 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from .config_manager import _restrict_sensitive_file_permissions
+from .qzone_capability_matrix import DEFAULT_QZONE_CAPABILITY_MATRIX
+from .runtime_events import publish_runtime_event
 
 
 _AUTH_STATE_LOCK = threading.Lock()
@@ -92,6 +94,42 @@ def _set_qzone_capability(
             ).strip("_") or "observed",
             "updated_at": time.time(),
         }
+
+
+def _observe_qzone_action(
+    bot_id: Any,
+    action: str,
+    *,
+    state: str,
+    interface: str = "",
+    http_status: int | None = None,
+    business_code: Any = "",
+    missing_fields: tuple[str, ...] | list[str] = (),
+    detail_code: Any = "observed",
+) -> None:
+    auth_state = str(get_qzone_auth_status(bot_id).get("status", "unknown") or "unknown")
+    observation = DEFAULT_QZONE_CAPABILITY_MATRIX.observe(
+        bot_id,
+        action,
+        state=state,
+        interface=interface,
+        http_status=http_status,
+        business_code=business_code,
+        missing_fields=missing_fields,
+        auth_state=auth_state,
+        detail_code=detail_code,
+    )
+    publish_runtime_event(
+        "qzone.capability_changed",
+        payload={
+            "bot_id": str(bot_id or "")[:64],
+            "action": action,
+            "state": observation.state,
+            "http_status": observation.http_status,
+            "business_code": observation.business_code,
+            "detail_code": observation.detail_code,
+        },
+    )
 
 
 def get_qzone_capability_status(
@@ -1148,6 +1186,7 @@ class QzoneSocialService:
         if not ok:
             return False, msg, []
         url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
+        capability_action = "own_feed_read" if target == str(ctx.get("qq") or "") else "friend_feed_read"
         params = {
             "uin": target,
             "ftype": "0",
@@ -1172,6 +1211,13 @@ class QzoneSocialService:
                 "degraded",
                 f"transport_{type(exc).__name__}",
             )
+            _observe_qzone_action(
+                bot_id,
+                capability_action,
+                state="degraded",
+                interface=url,
+                detail_code=f"transport_{type(exc).__name__}",
+            )
             return False, f"读取动态失败：{exc}", []
         if resp.status_code != 200:
             _set_qzone_capability(
@@ -1179,6 +1225,14 @@ class QzoneSocialService:
                 "qzone.web_read",
                 "unavailable" if resp.status_code in {401, 403} else "degraded",
                 f"http_{resp.status_code}",
+            )
+            _observe_qzone_action(
+                bot_id,
+                capability_action,
+                state="unavailable" if resp.status_code in {401, 403} else "degraded",
+                interface=url,
+                http_status=resp.status_code,
+                detail_code=f"http_{resp.status_code}",
             )
             return False, f"读取动态失败，状态码：{resp.status_code}", []
         payload = _parse_qzone_jsonp(resp.text)
@@ -1190,6 +1244,15 @@ class QzoneSocialService:
                 "qzone.web_read",
                 "unavailable" if auth_status == "login_required" else "degraded",
                 auth_status or "read_rejected",
+            )
+            _observe_qzone_action(
+                bot_id,
+                capability_action,
+                state="unavailable" if auth_status == "login_required" else "degraded",
+                interface=url,
+                http_status=resp.status_code,
+                business_code=_qzone_payload_result_code(payload),
+                detail_code=auth_status or "read_rejected",
             )
             return False, payload_msg, []
         feeds: list[dict[str, Any]] = []
@@ -1203,12 +1266,32 @@ class QzoneSocialService:
             "available",
             "feed_read_succeeded",
         )
+        _observe_qzone_action(
+            bot_id,
+            capability_action,
+            state="available",
+            interface=url,
+            http_status=resp.status_code,
+            business_code=_qzone_payload_result_code(payload),
+            detail_code="feed_read_succeeded",
+        )
         return True, "ok", feeds
 
     async def like_feed(self, *, feed: dict[str, Any], bot_id: str) -> tuple[bool, str]:
         owner = str(feed.get("owner_uin", "") or "").strip()
         unikey = str(feed.get("unikey", "") or "").strip()
         if not owner or not unikey:
+            _observe_qzone_action(
+                bot_id,
+                "like",
+                state="unavailable",
+                missing_fields=[
+                    field_name
+                    for field_name, value in (("owner_uin", owner), ("unikey", unikey))
+                    if not value
+                ],
+                detail_code="preflight_missing_fields",
+            )
             return False, "动态缺少点赞所需字段"
         if not await self._user_policy_allows(
             user_id=owner,
@@ -1240,11 +1323,37 @@ class QzoneSocialService:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, params={"g_tk": str(ctx["g_tk"])}, data=data, headers=headers)
         except Exception as exc:
-            return False, f"点赞失败：{exc}"
+            _observe_qzone_action(
+                bot_id,
+                "like",
+                state="degraded",
+                interface=url,
+                detail_code=f"dispatch_{type(exc).__name__}",
+            )
+            return False, f"outcome_unknown: 点赞请求异常：{type(exc).__name__}"
         if resp.status_code != 200:
+            _observe_qzone_action(
+                bot_id,
+                "like",
+                state="unavailable" if resp.status_code in {401, 403} else "degraded",
+                interface=url,
+                http_status=resp.status_code,
+                detail_code=f"http_{resp.status_code}",
+            )
             return False, f"点赞失败，状态码：{resp.status_code}"
         payload = _parse_qzone_jsonp(resp.text)
-        return _qzone_payload_success(payload, resp.text, bot_id=ctx["qq"])
+        success, message = _qzone_payload_success(payload, resp.text, bot_id=ctx["qq"])
+        result_code = _qzone_payload_result_code(payload)
+        _observe_qzone_action(
+            bot_id,
+            "like",
+            state="available" if success else "unavailable",
+            interface=url,
+            http_status=resp.status_code,
+            business_code=result_code,
+            detail_code="like_succeeded" if success else (result_code or "like_rejected"),
+        )
+        return success, message
 
     async def forward_feed(
         self,
@@ -1260,6 +1369,17 @@ class QzoneSocialService:
         appid = feed_identity["appid"] or "311"
         unikey = str(feed.get("unikey", "") or feed.get("curkey", "") or "").strip()
         if not owner or not feed_id or not topic_id:
+            _observe_qzone_action(
+                bot_id,
+                "forward",
+                state="unavailable",
+                missing_fields=[
+                    field_name
+                    for field_name, value in (("owner", owner), ("feed_id", feed_id), ("topic_id", topic_id))
+                    if not value
+                ],
+                detail_code="preflight_missing_fields",
+            )
             return QzoneWriteResult("definite_failure", "动态缺少转发所需字段", "preflight_feed_identity")
         if not await self._user_policy_allows(
             user_id=owner,
@@ -1322,6 +1442,13 @@ class QzoneSocialService:
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     resp = await client.post(url, params={"g_tk": str(ctx["g_tk"])}, data=data, headers=headers)
             except Exception as exc:
+                _observe_qzone_action(
+                    bot_id,
+                    "forward",
+                    state="degraded",
+                    interface=url,
+                    detail_code=f"dispatch_{type(exc).__name__}",
+                )
                 return QzoneWriteResult(
                     "unknown",
                     f"outcome_unknown: 转发请求异常：{type(exc).__name__}",
@@ -1333,7 +1460,25 @@ class QzoneSocialService:
                 last_msg = classified.message
                 if attempt_index == 0 and classified.result_code in {"http_404", "http_405"}:
                     continue
+                _observe_qzone_action(
+                    bot_id,
+                    "forward",
+                    state="unavailable" if classified.status == "definite_failure" else "degraded",
+                    interface=url,
+                    http_status=resp.status_code,
+                    business_code=classified.result_code,
+                    detail_code=classified.result_code or classified.status,
+                )
                 return classified
+            _observe_qzone_action(
+                bot_id,
+                "forward",
+                state="available",
+                interface=url,
+                http_status=resp.status_code,
+                business_code=classified.result_code,
+                detail_code="forward_succeeded",
+            )
             return classified
         return QzoneWriteResult("definite_failure", last_msg or "转发失败", "fallback_exhausted")
 
@@ -1369,6 +1514,13 @@ class QzoneSocialService:
             if not reply_uin:
                 missing.append("replyUin")
             self.logger.warning(f"[qzone] 子评论回复缺少字段: {missing}，feed={feed_identity}，target={target}")
+            _observe_qzone_action(
+                ctx.get("qq", ""),
+                "child_comment_reply",
+                state="unavailable",
+                missing_fields=missing,
+                detail_code="preflight_missing_fields",
+            )
             return False, f"缺少回复留言所需字段: {missing}"
 
         appid = feed_identity["appid"] or "311"
@@ -1428,14 +1580,43 @@ class QzoneSocialService:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, params={"g_tk": str(ctx["g_tk"])}, data=base_data, headers=headers)
         except Exception as exc:
-            self.logger.warning(f"[qzone] 子评论回复请求失败: {exc}")
-            return False, f"子评论回复请求异常：{exc}"
-        if callable(log_info):
-            log_info(f"[qzone] subreply re_feeds 状态码={resp.status_code} 响应={resp.text[:400]}")
+            self.logger.warning(f"[qzone] 子评论回复请求失败: {type(exc).__name__}")
+            _observe_qzone_action(
+                ctx.get("qq", ""),
+                "child_comment_reply",
+                state="degraded",
+                interface=url,
+                detail_code=f"dispatch_{type(exc).__name__}",
+            )
+            return False, f"outcome_unknown: 子评论回复请求异常：{type(exc).__name__}"
         if resp.status_code != 200:
+            _observe_qzone_action(
+                ctx.get("qq", ""),
+                "child_comment_reply",
+                state="unavailable" if resp.status_code in {401, 403} else "degraded",
+                interface=url,
+                http_status=resp.status_code,
+                detail_code=f"http_{resp.status_code}",
+            )
             return False, f"子评论回复失败，状态码：{resp.status_code}"
         payload = _parse_qzone_jsonp(resp.text)
-        return _qzone_payload_success(payload, resp.text, bot_id=ctx["qq"])
+        success, message = _qzone_payload_success(payload, resp.text, bot_id=ctx["qq"])
+        result_code = _qzone_payload_result_code(payload)
+        if callable(log_info):
+            log_info(
+                f"[qzone] subreply re_feeds status={resp.status_code} "
+                f"result={result_code or 'unknown'}"
+            )
+        _observe_qzone_action(
+            ctx.get("qq", ""),
+            "child_comment_reply",
+            state="available" if success else "unavailable",
+            interface=url,
+            http_status=resp.status_code,
+            business_code=result_code,
+            detail_code="child_comment_reply_succeeded" if success else (result_code or "reply_rejected"),
+        )
+        return success, message
 
     async def comment_feed(
         self,
@@ -1451,6 +1632,17 @@ class QzoneSocialService:
         owner = str(feed.get("owner_uin", "") or "").strip()
         topic_id = str(feed.get("topic_id", "") or "").strip()
         if not owner or not topic_id:
+            _observe_qzone_action(
+                bot_id,
+                "top_level_comment",
+                state="unavailable",
+                missing_fields=[
+                    field_name
+                    for field_name, value in (("owner_uin", owner), ("topic_id", topic_id))
+                    if not value
+                ],
+                detail_code="preflight_missing_fields",
+            )
             return False, "动态缺少评论所需字段"
         if not await self._user_policy_allows(
             user_id=owner,
@@ -1542,11 +1734,37 @@ class QzoneSocialService:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, params={"g_tk": str(ctx["g_tk"])}, data=data, headers=headers)
         except Exception as exc:
-            return False, f"评论失败：{exc}"
+            _observe_qzone_action(
+                bot_id,
+                "top_level_comment",
+                state="degraded",
+                interface=url,
+                detail_code=f"dispatch_{type(exc).__name__}",
+            )
+            return False, f"outcome_unknown: 评论请求异常：{type(exc).__name__}"
         if resp.status_code != 200:
+            _observe_qzone_action(
+                bot_id,
+                "top_level_comment",
+                state="unavailable" if resp.status_code in {401, 403} else "degraded",
+                interface=url,
+                http_status=resp.status_code,
+                detail_code=f"http_{resp.status_code}",
+            )
             return False, f"评论失败，状态码：{resp.status_code}"
         payload = _parse_qzone_jsonp(resp.text)
-        return _qzone_payload_success(payload, resp.text, bot_id=ctx["qq"])
+        success, message = _qzone_payload_success(payload, resp.text, bot_id=ctx["qq"])
+        result_code = _qzone_payload_result_code(payload)
+        _observe_qzone_action(
+            bot_id,
+            "top_level_comment",
+            state="available" if success else "unavailable",
+            interface=url,
+            http_status=resp.status_code,
+            business_code=result_code,
+            detail_code="top_level_comment_succeeded" if success else (result_code or "comment_rejected"),
+        )
+        return success, message
 
 
 _QZONE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
@@ -1854,6 +2072,12 @@ def build_qzone_services(
         allow_unknown_write: bool = False,
     ) -> QzoneWriteResult:
         if not qzone_enabled:
+            _observe_qzone_action(
+                bot_id,
+                "publish",
+                state="disabled",
+                detail_code="preflight_disabled",
+            )
             return QzoneWriteResult("definite_failure", "Qzone 功能未启用", "preflight_disabled")
         write_state = get_qzone_capability_status(
             bot_id,
@@ -1870,6 +2094,13 @@ def build_qzone_services(
             )
         cookie = _get_cookie_from_config(plugin_config)
         if not cookie:
+            _observe_qzone_action(
+                bot_id,
+                "publish",
+                state="unavailable",
+                missing_fields=["cookie"],
+                detail_code="preflight_cookie_missing",
+            )
             return QzoneWriteResult("definite_failure", "未配置 Qzone Cookie", "preflight_cookie_missing")
 
         post_started = False
@@ -2005,6 +2236,15 @@ def build_qzone_services(
                     "available",
                     "write_succeeded",
                 )
+                _observe_qzone_action(
+                    bot_id,
+                    "publish",
+                    state="available",
+                    interface=url,
+                    http_status=resp.status_code,
+                    business_code=classified.result_code,
+                    detail_code="publish_succeeded",
+                )
                 return result
             result = QzoneWriteResult(
                 classified.status,
@@ -2017,6 +2257,15 @@ def build_qzone_services(
                 "qzone.web_write",
                 "unavailable" if classified.status == "definite_failure" else "degraded",
                 classified.result_code or classified.status,
+            )
+            _observe_qzone_action(
+                bot_id,
+                "publish",
+                state="unavailable" if classified.status == "definite_failure" else "degraded",
+                interface=url,
+                http_status=resp.status_code,
+                business_code=classified.result_code,
+                detail_code=classified.result_code or classified.status,
             )
             return result
         except Exception as e:
@@ -2032,6 +2281,13 @@ def build_qzone_services(
                     "qzone.web_write",
                     "degraded",
                     "dispatch_exception",
+                )
+                _observe_qzone_action(
+                    bot_id,
+                    "publish",
+                    state="degraded",
+                    interface=locals().get("url", ""),
+                    detail_code="dispatch_exception",
                 )
                 return result
             return QzoneWriteResult(
