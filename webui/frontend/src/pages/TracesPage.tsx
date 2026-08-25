@@ -45,7 +45,7 @@ export function TracesPage() {
 
   useEffect(() => {
     if (!traceId && list.data?.items[0]?.trace_id) {
-      void navigate(`/traces/${list.data.items[0].trace_id}`, { replace: true });
+      void navigate(`/runtime/traces/timeline/${list.data.items[0].trace_id}`, { replace: true });
     }
   }, [list.data, navigate, traceId]);
 
@@ -65,7 +65,7 @@ export function TracesPage() {
             ) : (
               <div className="trace-index-list">
                 {list.data?.items.map((trace) => (
-                  <Link className={trace.trace_id === traceId ? "active" : ""} to={`/traces/${trace.trace_id}`} key={trace.trace_id}>
+                  <Link className={trace.trace_id === traceId ? "active" : ""} to={`/runtime/traces/timeline/${trace.trace_id}`} key={trace.trace_id}>
                     <div className="trace-index-head">
                       <code>{shortId(trace.trace_id, 6)}</code>
                       <time>{formatDateTime(trace.started_at)}</time>

@@ -89,7 +89,7 @@ function OverviewContent({ data }: { data: Awaited<ReturnType<typeof resources.o
                   {data.latest_traces.slice(0, 8).map((trace) => (
                     <tr key={trace.trace_id}>
                       <td>{formatDateTime(trace.started_at)}</td>
-                      <td><Link to={`/traces/${trace.trace_id}`}><code>{shortId(trace.trace_id, 6)}</code></Link></td>
+                      <td><Link to={`/runtime/traces/timeline/${trace.trace_id}`}><code>{shortId(trace.trace_id, 6)}</code></Link></td>
                       <td>{trace.user_name || trace.user_id}</td>
                       <td>{traceOutcomeLabel(trace.outcome)}</td>
                       <td>{formatDuration(trace.elapsed_ms)}</td>

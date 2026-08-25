@@ -1,1 +1,0 @@
-import{A as e,s as t}from"./index-BY42l0jm.js";var n=e();function r({value:e,onChange:r,placeholder:i=`搜索`}){return(0,n.jsxs)(`label`,{className:`search-field`,children:[(0,n.jsx)(`span`,{className:`sr-only`,children:i}),(0,n.jsx)(t,{name:`search`}),(0,n.jsx)(`input`,{value:e,onChange:e=>r(e.target.value),placeholder:i,type:`search`})]})}export{r as t};

@@ -1,5 +1,5 @@
 import { lazy, Suspense, type ComponentType, type LazyExoticComponent } from "react";
-import { createBrowserRouter, Navigate, useLocation } from "react-router-dom";
+import { createBrowserRouter, Navigate, useLocation, useParams } from "react-router-dom";
 
 import { AppShell } from "../components/AppShell";
 import { NotFoundPage } from "../pages/NotFoundPage";
@@ -52,6 +52,12 @@ function RedirectWithQuery({ to }: { to: string }) {
   return <Navigate replace to={`${to}${location.search}`} />;
 }
 
+function LegacyTraceRedirect() {
+  const location = useLocation();
+  const { traceId = "" } = useParams();
+  return <Navigate replace to={`/runtime/traces/timeline/${encodeURIComponent(traceId)}${location.search}`} />;
+}
+
 const flatRedirects = Object.entries(FLAT_ROUTE_REDIRECTS).map(([path, to]) => ({ path: path.slice(1), element: <RedirectWithQuery to={to} /> }));
 
 export const router = createBrowserRouter(
@@ -71,6 +77,7 @@ export const router = createBrowserRouter(
         { path: "runtime/traces/index", element: pageElement(TracesPage) },
         { path: "runtime/traces/timeline", element: pageElement(TracesPage) },
         { path: "runtime/traces/timeline/:traceId", element: pageElement(TracesPage) },
+        { path: "traces/:traceId", element: <LegacyTraceRedirect /> },
         { path: "runtime/recovery/:section", element: pageElement(RecoveryPage) },
         { path: "runtime/qzone/:section", element: pageElement(QzoneCapabilitiesPage) },
         { path: "persona/personas/:section", element: pageElement(PersonasPage) },

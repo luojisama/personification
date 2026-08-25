@@ -67,4 +67,18 @@ describe("新版分层导航与行为对齐合同", () => {
       expect(routerSource, `${contract.legacy_view_id} must use ${contract.component}`).toContain(contract.component);
     }
   });
+
+  it("Trace 详情链接保持在分层路由内并兼容旧深链", () => {
+    const root = resolve(process.cwd(), "src");
+    const routerSource = readFileSync(resolve(root, "app/router.tsx"), "utf8");
+    const tracePage = readFileSync(resolve(root, "pages/TracesPage.tsx"), "utf8");
+    const overviewPage = readFileSync(resolve(root, "pages/OverviewPage.tsx"), "utf8");
+    const agentPage = readFileSync(resolve(root, "pages/AgentStatusPage.tsx"), "utf8");
+    for (const source of [tracePage, overviewPage, agentPage]) {
+      expect(source).not.toContain("`/traces/${");
+      expect(source).toContain("/runtime/traces/timeline/");
+    }
+    expect(routerSource).toContain('path: "traces/:traceId"');
+    expect(routerSource).toContain("LegacyTraceRedirect");
+  });
 });
