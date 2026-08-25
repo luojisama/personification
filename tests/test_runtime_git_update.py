@@ -6,51 +6,44 @@ from ._loader import load_personification_module
 
 
 runtime_commands = load_personification_module("plugin.personification.handlers.runtime_commands")
+plugin_update_manager = load_personification_module("plugin.personification.core.plugin_update_manager")
 
 
-def test_runtime_git_update_prefers_configured_mirror(tmp_path, monkeypatch) -> None:
-    calls: list[dict] = []
+def test_runtime_git_update_compatibility_calls_shared_manager(tmp_path, monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
 
-    async def _fake_run_git(args, *, cwd, extra_config=None):  # noqa: ANN001, ANN003
-        calls.append({"args": args, "extra_config": list(extra_config or [])})
-        if args == ["fetch", "--prune"] and extra_config:
-            return 0, "mirror ok", ""
-        if args == ["fetch", "--prune"]:
-            return -1, "", "direct should not run"
-        return 1, "", "unexpected git args: " + " ".join(args)
-
-    async def _fake_origin(_cwd):  # noqa: ANN001
-        return "https://github.com/example/personification.git"
-
-    async def _fake_probe(_mirror, _repo_url, *, timeout=4.0):  # noqa: ANN001
-        return True
-
-    monkeypatch.setattr(runtime_commands, "_git_mirror_prefixes", lambda: ["https://mirror.example"])
-    monkeypatch.setattr(runtime_commands, "_get_origin_https_url", _fake_origin)
-    monkeypatch.setattr(runtime_commands, "_probe_mirror", _fake_probe)
-    monkeypatch.setattr(runtime_commands, "_run_git_command", _fake_run_git)
-
-    rc, out, err, used_mirror, probes = asyncio.run(
-        runtime_commands._run_git_with_mirror_fallback(
-            ["fetch", "--prune"],
-            cwd=str(tmp_path),
-        )
-    )
-
-    assert rc == 0
-    assert out == "mirror ok"
-    assert err == ""
-    assert used_mirror == "https://mirror.example"
-    assert probes == [("https://mirror.example", True)]
-    assert calls == [
-        {
-            "args": ["fetch", "--prune"],
-            "extra_config": [
-                "url.https://mirror.example/https://github.com/.insteadOf=https://github.com/"
-            ],
+    async def fake_status(*, plugin_root=None, plugin_config=None, refresh=False, history_limit=12):  # noqa: ANN001
+        calls.append(("status", str(plugin_root)))
+        assert refresh is True
+        return {
+            "ok": True,
+            "available": True,
+            "update_available": True,
+            "local": {"hash": "a" * 40},
+            "remote": {"hash": "b" * 40},
         }
-    ]
+
+    async def fake_update(*, plugin_root=None, plugin_config=None):  # noqa: ANN001
+        calls.append(("update", str(plugin_root)))
+        return {"ok": True, "updated": True, "message": "已完成本地 fast-forward"}
+
+    monkeypatch.setattr(plugin_update_manager, "get_plugin_update_status", fake_status)
+    monkeypatch.setattr(plugin_update_manager, "perform_plugin_update", fake_update)
+
+    available, local_hash, remote_hash = asyncio.run(
+        runtime_commands.check_git_update_available(plugin_dir=str(tmp_path))
+    )
+    updated, message = asyncio.run(runtime_commands.perform_git_pull(plugin_dir=str(tmp_path)))
+
+    assert available is True
+    assert local_hash == "a" * 40
+    assert remote_hash == "b" * 40
+    assert updated is True
+    assert "fast-forward" in message
+    assert calls == [("status", str(tmp_path)), ("update", str(tmp_path))]
 
 
-def test_runtime_git_update_treats_git_timeout_as_network_failure() -> None:
-    assert runtime_commands._looks_like_network_failure("git 命令超时（60s）")
+def test_runtime_commands_have_no_second_mirror_or_pull_implementation() -> None:
+    assert not hasattr(runtime_commands, "_probe_mirror")
+    assert not hasattr(runtime_commands, "_run_git_with_mirror_fallback")
+    assert not hasattr(runtime_commands, "_looks_like_network_failure")

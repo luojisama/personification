@@ -821,8 +821,10 @@ EXTRA_CONFIG_SPECS: tuple[dict[str, Any], ...] = (
     _s("personification_git_mirror_prefixes", "list",
        ["https://ghproxy.com", "https://gh-proxy.com", "https://mirror.ghproxy.com", "https://hub.gitmirror.com"],
        "Git 镜像列表",
-       "/拟人更新 与 WebUI 插件更新优先按顺序探测的镜像反代前缀（JSON 数组）；留空关闭镜像优先，只走直连。",
+       "/拟人更新 与 WebUI 插件更新并发测速的镜像反代前缀（JSON 数组）；官方源始终参加排名，留空时只测速官方源。",
        group="运维", advanced=True),
     _s("personification_git_mirror_prefix", "str", "", "Git 单镜像（兼容）",
        "单个镜像前缀（向后兼容）；非空时自动并入镜像列表末尾。", group="运维", advanced=True),
+    _s("personification_git_probe_timeout_seconds", "float", 8.0, "Git 更新源测速超时（秒）",
+       "四镜像和官方源并发执行 git ls-remote 的单源超时，范围 2-30 秒。", group="运维", min=2, max=30, advanced=True),
 )

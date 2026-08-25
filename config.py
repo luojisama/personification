@@ -101,10 +101,9 @@ class Config(BaseModel):
     # 不依赖 HTTPS_PROXY / HTTP_PROXY 环境变量（bot 进程未必继承终端 env）。
     # 留空 = 沿用 httpx 的环境变量解析（trust_env 默认 True）。
     personification_antigravity_cli_proxy: str = ""
-    # /拟人更新 与 WebUI 插件更新走的 git 镜像反代列表（GitHub 在国内不稳时按顺序探测）。
-    # 有配置时：并行 HEAD 探测每一项的联通性，按列表顺序选第一个能通的，
-    # 用 -c url.X.insteadOf 临时改写重试 fetch/pull，不污染全局 git config。
-    # 留空 = 关闭镜像优先，只走直连。
+    # /拟人更新 与 WebUI 插件更新共用的 Git 镜像反代列表。
+    # 四镜像与官方源并发执行 git ls-remote，按真实延迟选择；
+    # 用 -c url.X.insteadOf 临时改写 fetch，不污染全局或仓库 git config。
     personification_git_mirror_prefixes: List[str] = [
         "https://ghproxy.com",
         "https://gh-proxy.com",
@@ -113,6 +112,7 @@ class Config(BaseModel):
     ]
     # 单个镜像配置（向后兼容；非空时会自动并入 prefixes 末尾）
     personification_git_mirror_prefix: str = ""
+    personification_git_probe_timeout_seconds: float = 8.0
     # Provider 动态优先级（基于真实请求 latency / success_rate 自动调整排序）
     personification_provider_dynamic_priority_enabled: bool = True
     # 样本数 < min_samples 时仍用配置的 base priority，避免冷启动 fluke

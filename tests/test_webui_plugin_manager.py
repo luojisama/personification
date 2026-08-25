@@ -68,17 +68,15 @@ def test_plugin_update_manager_prefers_configured_mirror(tmp_path, monkeypatch) 
         calls.append({"args": args, "extra_config": list(extra_config or [])})
         if args == ["remote", "get-url", "origin"]:
             return 0, "https://github.com/example/personification.git", ""
+        if args == ["ls-remote", "https://github.com/example/personification.git", "HEAD"]:
+            return 0, f"{'a' * 40}\tHEAD", ""
         if args == ["fetch", "--prune"] and extra_config:
             return 0, "mirror ok", ""
         if args == ["fetch", "--prune"]:
             return -1, "", "direct should not run"
         return 1, "", "unexpected git args: " + " ".join(args)
 
-    async def _fake_probe(_mirror, _repo_url, *, timeout=4.0):  # noqa: ANN001
-        return True
-
     monkeypatch.setattr(plugin_update_manager, "_run_git_command", _fake_run_git)
-    monkeypatch.setattr(plugin_update_manager, "_probe_mirror", _fake_probe)
 
     rc, out, err, used_mirror, probes = asyncio.run(
         plugin_update_manager._run_git_with_mirror_fallback(
@@ -93,7 +91,8 @@ def test_plugin_update_manager_prefers_configured_mirror(tmp_path, monkeypatch) 
     assert out == "mirror ok"
     assert err == ""
     assert used_mirror == "https://mirror.example"
-    assert probes == [{"mirror": "https://mirror.example", "ok": True}]
+    assert [item["kind"] for item in probes] == ["mirror", "official"]
+    assert all(item["state"] == "succeeded" for item in probes)
     assert fetch_calls == [
         {
             "args": ["fetch", "--prune"],
