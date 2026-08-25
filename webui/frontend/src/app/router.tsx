@@ -1,12 +1,25 @@
 import { lazy, Suspense, type ComponentType, type LazyExoticComponent } from "react";
-import { createBrowserRouter, Navigate, useLocation, useParams } from "react-router-dom";
+import { createBrowserRouter, Navigate, useLocation, useParams, useRouteError } from "react-router-dom";
 
 import { AppShell } from "../components/AppShell";
 import { NotFoundPage } from "../pages/NotFoundPage";
 import { FLAT_ROUTE_REDIRECTS } from "./navigation";
 
 function lazyPage<T extends Record<string, unknown>, K extends keyof T>(loader: () => Promise<T>, name: K) {
-  return lazy(async () => ({ default: (await loader())[name] as ComponentType }));
+  return lazy(async () => {
+    try {
+      return { default: (await loader())[name] as ComponentType };
+    } catch (error) {
+      // 公网管理台可能偶发丢失单个静态分块；只做一次短退避读取，
+      // 仍失败时交给中文错误边界，不进行无限刷新。
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+      try {
+        return { default: (await loader())[name] as ComponentType };
+      } catch {
+        throw error;
+      }
+    }
+  });
 }
 
 const OverviewPage = lazyPage(() => import("../pages/OverviewPage"), "OverviewPage");
@@ -58,6 +71,33 @@ function LegacyTraceRedirect() {
   return <Navigate replace to={`/runtime/traces/timeline/${encodeURIComponent(traceId)}${location.search}`} />;
 }
 
+function RouteErrorPage() {
+  const error = useRouteError();
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const chunkFailed = /dynamically imported module|failed to fetch/i.test(message);
+  return (
+    <main className="main-workspace" id="main-content">
+      <div className="page-stack">
+        <header className="page-heading">
+          <div className="page-title-block">
+            <span className="page-kicker">ADMIN / ERROR</span>
+            <h1>{chunkFailed ? "页面资源加载失败" : "页面暂时无法显示"}</h1>
+            <p>{chunkFailed ? "公网连接未能取得当前页面分块，可安全刷新后重试。" : "页面渲染遇到异常，写操作没有因此自动重试。"}</p>
+          </div>
+          <div className="page-actions">
+            <button className="button button-primary" type="button" onClick={() => window.location.reload()}>刷新当前页面</button>
+          </div>
+        </header>
+        <div className="empty-state">
+          <span className="empty-mark" aria-hidden="true">!</span>
+          <p>若刷新后仍失败，请核对服务状态和浏览器网络。</p>
+          <code>{chunkFailed ? "frontend_chunk_load_failed" : "frontend_route_render_failed"}</code>
+        </div>
+      </div>
+    </main>
+  );
+}
+
 const flatRedirects = Object.entries(FLAT_ROUTE_REDIRECTS).map(([path, to]) => ({ path: path.slice(1), element: <RedirectWithQuery to={to} /> }));
 
 export const router = createBrowserRouter(
@@ -65,6 +105,7 @@ export const router = createBrowserRouter(
     {
       path: "/",
       element: <AppShell />,
+      errorElement: <RouteErrorPage />,
       children: [
         { index: true, element: <Navigate replace to="/runtime/overview/summary" /> },
         { path: "runtime/overview/summary", element: pageElement(OverviewPage) },

@@ -58,6 +58,8 @@ describe("新版分层导航与行为对齐合同", () => {
     expect(routerSource).not.toContain("FeatureWorkbenchPage");
     expect(routerSource).not.toContain("RuntimeCatalogPage");
     expect(routerSource).not.toContain("ManagementDataPage");
+    expect(routerSource).toContain("errorElement: <RouteErrorPage />");
+    expect(routerSource).toContain("frontend_chunk_load_failed");
     expect(resourcesSource).not.toContain("resources.legacy");
     expect(resourcesSource).not.toContain("configAll(");
     expect(configSource).not.toContain("JSON.stringify");
