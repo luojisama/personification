@@ -25,6 +25,9 @@ const CODE_LABELS: Record<string, string> = {
   plugin_update_dirty: "工作区存在未提交修改",
   plugin_update_diverged: "本地与远端提交已分叉",
   plugin_update_verification_unknown: "插件更新结果需要人工核对",
+  health_category_rechecked: "视频路由探针完成",
+  video_turn_evidence_complete: "完整视频回合证据闭环完成",
+  video_turn_evidence_incomplete: "完整视频回合缺少证据",
 };
 
 export function diagnosticCodeLabel(code: string): string {

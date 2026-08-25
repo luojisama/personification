@@ -9,6 +9,7 @@ import { AppShell } from "../components/AppShell";
 import { GroupSwitchesPage } from "./GroupSwitchesPage";
 import { PluginManagementPage } from "./CapabilityBusinessPages";
 import { ConfigCenterPage } from "./ConfigCenterPage";
+import { ModelTestsPage } from "./ModelTestsPage";
 
 function client() {
   return new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -91,5 +92,27 @@ describe("新版业务页面", () => {
     expect(screen.getByDisplayValue("***")).toHaveAttribute("type", "password");
     expect(screen.queryByDisplayValue("opaque-ref")).not.toBeInTheDocument();
     expect(screen.queryByText(/\{\s*"name"/)).not.toBeInTheDocument();
+  });
+
+  it("视频探针结果使用业务表格和诊断组件，不输出整段 JSON", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(resources, "videoRouteProbe").mockResolvedValue({
+      ok: true,
+      code: "health_category_rechecked",
+      phase: "health_recheck",
+      title: "视频路由探针完成",
+      message: "探针完成。",
+      overall: "error",
+      summary: { ok: 3, warn: 1, error: 1 },
+      categories: [{ name: "视频理解", checks: [{ key: "video_probe", label: "视频理解真实探测", status: "error", detail: "没有可用的视频媒体 Provider", hint: "配置视频路由后重试。" }] }],
+      warnings: [], steps: [], retryable: false, partial: true, outcome_unknown: false,
+    });
+    render(<QueryClientProvider client={client()}><MemoryRouter><ModelTestsPage /></MemoryRouter></QueryClientProvider>);
+    const file = new File(["video"], "sample.mp4", { type: "video/mp4" });
+    fireEvent.change(document.querySelector('input[type="file"]') as HTMLInputElement, { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: "确认并运行路由探针" }));
+    expect(await screen.findByText("视频理解真实探测")).toBeInTheDocument();
+    expect(screen.getByText(/没有可用的视频媒体 Provider/)).toBeInTheDocument();
+    expect(document.querySelector("pre.safe-json")).toBeNull();
   });
 });
