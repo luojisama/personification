@@ -1,9 +1,10 @@
-import { api, legacyApi } from "./client";
+import { api } from "./client";
 import type {
   AgentRuntimeSnapshot,
   BotIdentity,
   ConfigPage,
   ConfigPatchResult,
+  ConfigMetadata,
   FunctionalTestRun,
   HealthCatalog,
   OperationDiagnostic,
@@ -11,6 +12,7 @@ import type {
   Page,
   PersonaListItem,
   GroupListItem,
+  GroupSwitchPage,
   StickerPage,
   CatalogItem,
   CursorPage,
@@ -20,6 +22,11 @@ import type {
   TraceDetail,
   TraceListItem,
   TokenSummary,
+  ProactiveNextEligible,
+  ProactiveRecord,
+  ProactiveStats,
+  PluginUpdateOperation,
+  PluginUpdateStatus,
 } from "./types";
 
 type UnknownRecord = Record<string, unknown>;
@@ -187,23 +194,41 @@ export const resources = {
   groupsFiltered(page: number, pageSize: number, filters: { search?: string; membership_state?: string; include_unconfirmed?: boolean; enabled?: string; bot_id?: string; sort_by?: string; direction?: string }, signal?: AbortSignal): Promise<Page<GroupListItem>> {
     return api.get("/groups", { page, page_size: pageSize, ...filters }, signal);
   },
+  groupSwitches(page: number, pageSize: number, filters: { search?: string; enabled?: string; membership_state?: string; bot_id?: string }, signal?: AbortSignal): Promise<GroupSwitchPage> {
+    return api.get("/group-switches", { page, page_size: pageSize, ...filters }, signal);
+  },
+  updateGroupSwitch(groupId: string, enabled: boolean): Promise<OperationDiagnostic> {
+    return api.post(`/group-switches/${encodeURIComponent(groupId)}`, { enabled });
+  },
+  proactiveStats(scope = "", signal?: AbortSignal): Promise<ProactiveStats> {
+    return api.get("/proactive/stats", { scope, since_hours: 72 }, signal);
+  },
+  proactiveRecent(filters: { scope?: string; outcome?: string; target?: string; cursor?: number; limit?: number }, signal?: AbortSignal): Promise<CursorPage<ProactiveRecord>> {
+    return api.get("/proactive/recent", filters, signal);
+  },
+  proactiveNextEligible(scope = "", signal?: AbortSignal): Promise<{ items: ProactiveNextEligible[]; total: number; diagnostic_code: string }> {
+    return api.get("/proactive/next-eligible", { scope }, signal);
+  },
   stickers(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<StickerPage> {
     return api.get("/stickers", { page, page_size: pageSize, search }, signal);
   },
   rebuildStickerIndex(): Promise<OperationDiagnostic> {
     return api.post("/stickers/index/rebuild");
   },
-  config(page = 1, pageSize = 20, search = "", group = "", signal?: AbortSignal): Promise<ConfigPage> {
-    return api.get("/config", { page, page_size: pageSize, search, group }, signal);
+  config(page = 1, pageSize = 20, filters: { search?: string; group?: string; modified?: boolean; restart_required?: boolean; hot_reloadable?: boolean; advanced?: boolean; secret?: boolean; invalid?: boolean } = {}, signal?: AbortSignal): Promise<ConfigPage> {
+    return api.get("/config", { page, page_size: pageSize, ...filters }, signal);
   },
-  async configAll(search = "", group = "", signal?: AbortSignal): Promise<ConfigPage> {
-    const first = await api.get<ConfigPage>("/config", { page: 1, page_size: 100, search, group }, signal);
-    if (first.total_pages <= 1) return first;
-    const rest = await Promise.all(Array.from({ length: first.total_pages - 1 }, (_, index) => api.get<ConfigPage>("/config", { page: index + 2, page_size: 100, search, group }, signal)));
-    return { ...first, items: [first, ...rest].flatMap((page) => page.items), page_size: first.total };
+  configMetadata(signal?: AbortSignal): Promise<ConfigMetadata> {
+    return api.get("/config/meta", undefined, signal);
   },
   patchConfig(revision: string, values: Record<string, unknown>): Promise<ConfigPatchResult> {
     return api.patch("/config/values", { revision, values });
+  },
+  searchEngineSpeedTest(): Promise<OperationDiagnostic> {
+    return api.post("/config-tools/search-engines/speed-test", {});
+  },
+  applyRecommendedConfig(): Promise<OperationDiagnostic> {
+    return api.post("/config-tools/apply-recommended", {});
   },
   catalog(
     dataset: "plugin-knowledge" | "mcp" | "skills" | "tool-tasks" | "memories",
@@ -223,24 +248,190 @@ export const resources = {
   qzoneCapabilities(signal?: AbortSignal, botId = ""): Promise<Record<string, unknown>> {
     return api.get("/qzone/capabilities", { bot_id: botId }, signal);
   },
-  legacy<T = Record<string, unknown>>(
-    path: string,
-    query?: Record<string, string | number | boolean | null | undefined>,
-    signal?: AbortSignal,
-  ): Promise<T> {
-    return legacyApi.get(path, query, signal);
-  },
-  legacyPost<T = Record<string, unknown>>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-    return legacyApi.post(path, body, signal);
-  },
-  uploadLegacy<T = Record<string, unknown>>(path: string, file: File, signal?: AbortSignal): Promise<T> {
-    return legacyApi.upload(path, file, signal);
-  },
   videoRouteProbe(file: File, signal?: AbortSignal): Promise<Record<string, unknown>> {
     return api.upload("/tests/video-route", file, signal);
   },
   videoTurnTest(file: File, text = "", signal?: AbortSignal): Promise<Record<string, unknown>> {
     const query = text ? `?text=${encodeURIComponent(text)}` : "";
     return api.upload(`/tests/video-turn${query}`, file, signal);
+  },
+  personaPromptPreview(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get("/model-tests/persona-prompt", undefined, signal);
+  },
+  modelChat(mode: "single" | "all", prompt: string): Promise<Record<string, unknown>> {
+    return api.post(mode === "single" ? "/model-tests/chat" : "/model-tests/chat-all", { prompt, system: "你是管理台连通性测试助手，请简洁回复。" });
+  },
+  personaDetail(userId: string, groupId = "", signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/persona-details/${encodeURIComponent(userId)}`, { group_id: groupId }, signal);
+  },
+  refreshPersona(userId: string, groupId: string, botId: string): Promise<Record<string, unknown>> {
+    return api.post(`/persona-details/${encodeURIComponent(userId)}/group-refresh`, { group_id: groupId, bot_id: botId });
+  },
+  correctPersona(userId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return api.post(`/persona-details/${encodeURIComponent(userId)}/correction`, body);
+  },
+  refreshPersonaAvatar(userId: string): Promise<Record<string, unknown>> {
+    return api.post(`/persona-details/${encodeURIComponent(userId)}/avatar-analysis/refresh`, {});
+  },
+  clearPersonaAvatar(userId: string): Promise<Record<string, unknown>> {
+    return api.delete(`/persona-details/${encodeURIComponent(userId)}/avatar-analysis`);
+  },
+  groupBusiness(groupId: string, section: "personas" | "aliases" | "schedule" | "style" | "agent-state" | "knowledge" | "memes", signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/group-management/${encodeURIComponent(groupId)}/${section}`, undefined, signal);
+  },
+  rebuildGroup(groupId: string, kind: "style" | "knowledge"): Promise<Record<string, unknown>> {
+    return api.post(`/group-management/${encodeURIComponent(groupId)}/${kind}/rebuild`, { confirm: true });
+  },
+  saveGroupAliases(groupId: string, userId: string, aliases: string, note = ""): Promise<Record<string, unknown>> {
+    return api.put(`/group-management/${encodeURIComponent(groupId)}/aliases/${encodeURIComponent(userId)}`, { alias_text: aliases, note });
+  },
+  deleteGroupAliases(groupId: string, userId: string): Promise<Record<string, unknown>> {
+    return api.delete(`/group-management/${encodeURIComponent(groupId)}/aliases/${encodeURIComponent(userId)}`);
+  },
+  saveGroupSchedule(groupId: string, enabled: boolean, schedulePrompt: string): Promise<Record<string, unknown>> {
+    return api.put(`/group-management/${encodeURIComponent(groupId)}/schedule`, { enabled, schedule_prompt: schedulePrompt });
+  },
+  generateGroupSchedule(groupId: string, personaHint = ""): Promise<Record<string, unknown>> {
+    return api.post(`/group-management/${encodeURIComponent(groupId)}/schedule/auto-generate`, { persona_hint: personaHint });
+  },
+  saveGroupMeme(groupId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return api.post(`/group-management/${encodeURIComponent(groupId)}/memes`, body);
+  },
+  deleteGroupMeme(groupId: string, term: string): Promise<Record<string, unknown>> {
+    return api.delete(`/group-management/${encodeURIComponent(groupId)}/memes/${encodeURIComponent(term)}`);
+  },
+  updateSticker(name: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return api.patch(`/sticker-management/${encodeURIComponent(name)}`, body);
+  },
+  deleteSticker(name: string): Promise<Record<string, unknown>> {
+    return api.delete(`/sticker-management/${encodeURIComponent(name)}`);
+  },
+  uploadSticker(file: File, description = ""): Promise<Record<string, unknown>> {
+    const form = new FormData();
+    form.set("file", file, file.name);
+    form.set("description", description);
+    return api.post("/sticker-management/upload", form);
+  },
+  rescanStickers(): Promise<Record<string, unknown>> {
+    return api.post("/sticker-management/rescan", { confirm: true });
+  },
+  qzoneGet(path: string, query: Record<string, string | number | boolean> = {}, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/qzone-management/${path.replace(/^\/+/, "")}`, query, signal);
+  },
+  qzonePost(path: string, body: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    return api.post(`/qzone-management/${path.replace(/^\/+/, "")}`, body);
+  },
+  memoryBusiness(section: "recent" | "inner-state" | "graph" | "palace-zones" | "vector-index", signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/memory/${section}`, undefined, signal);
+  },
+  memorySearch(query: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get("/memory/search-test", { query }, signal);
+  },
+  rebuildMemoryIndex(): Promise<Record<string, unknown>> {
+    return api.post("/memory/vector-index/rebuild", { confirm: true });
+  },
+  skillAction(path: string, body: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    return api.post(`/skill-management/${path.replace(/^\/+/, "")}`, body);
+  },
+  mcpGet(path: string, query: Record<string, string | number | boolean> = {}, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/mcp-management/${path.replace(/^\/+/, "")}`, query, signal);
+  },
+  mcpPost(path: string, body: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    return api.post(`/mcp-management/${path.replace(/^\/+/, "")}`, body);
+  },
+  toolCreatorGet(path = "tasks", signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/tool-creator/${path.replace(/^\/+/, "")}`, undefined, signal);
+  },
+  toolCreatorPost(path: string, body: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    return api.post(`/tool-creator/${path.replace(/^\/+/, "")}`, body);
+  },
+  pluginKnowledgeDetail(name: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/plugin-knowledge-management/detail/${encodeURIComponent(name)}`, undefined, signal);
+  },
+  pluginKnowledgeSearch(query: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get("/plugin-knowledge-management/search", { q: query }, signal);
+  },
+  personaBuilderGet(path: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/persona-builder/${path.replace(/^\/+/, "")}`, undefined, signal);
+  },
+  personaBuilderPost(path: string, body: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    return api.post(`/persona-builder/${path.replace(/^\/+/, "")}`, body);
+  },
+  pluginUpdateStatus(signal?: AbortSignal): Promise<PluginUpdateStatus> {
+    return api.get("/plugin-update/status", undefined, signal);
+  },
+  pluginUpdateBenchmark(): Promise<{ operation: PluginUpdateOperation; status: PluginUpdateStatus }> {
+    return api.post("/plugin-update/benchmark", {});
+  },
+  pluginUpdateCheck(): Promise<{ operation: PluginUpdateOperation; status: PluginUpdateStatus }> {
+    return api.post("/plugin-update/check", {});
+  },
+  pluginUpdateApply(): Promise<{ ok: boolean; updated: boolean; operation: PluginUpdateOperation; status: PluginUpdateStatus; message?: string; error?: string }> {
+    return api.post("/plugin-update/apply", { confirmation: "UPDATE" });
+  },
+  pluginUpdateHistory(signal?: AbortSignal): Promise<{ items: PluginUpdateOperation[]; total: number }> {
+    return api.get("/plugin-update/history", undefined, signal);
+  },
+  userPolicyStates(tier = "", signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get("/user-policies/states", { tier, limit: 100 }, signal);
+  },
+  userPolicyEvents(userId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/user-policies/${encodeURIComponent(userId)}/events`, { include_evidence: true, limit: 100 }, signal);
+  },
+  updateUserPolicy(userId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return api.post(`/user-policies/${encodeURIComponent(userId)}/override`, body);
+  },
+  outboundRecent(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get("/outbound/recent", { limit: 100 }, signal);
+  },
+  recallOutbound(operationId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return api.post(`/outbound/${encodeURIComponent(operationId)}/recall`, body);
+  },
+  auditRecent(action = "", signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get("/audit/recent", { action, limit: 100 }, signal);
+  },
+  auditActions(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get("/audit/actions", undefined, signal);
+  },
+  clearLogs(): Promise<Record<string, unknown>> {
+    return api.delete("/log-management/clear", { confirm: "CLEAR LOGS" });
+  },
+  qqGet(path: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/qq-management/${path.replace(/^\/+/, "")}`, undefined, signal);
+  },
+  qqPost(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return api.post(`/qq-management/${path.replace(/^\/+/, "")}`, body);
+  },
+  deviceGet(path: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/device-management/${path.replace(/^\/+/, "")}`, undefined, signal);
+  },
+  devicePost(path: string, body: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    return api.post(`/device-management/${path.replace(/^\/+/, "")}`, body);
+  },
+  deviceDelete(path: string, body: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    return api.delete(`/device-management/${path.replace(/^\/+/, "")}`, body);
+  },
+  createStateExport(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return api.post("/data-transfer/exports/create", body);
+  },
+  uploadStateImport(file: File): Promise<Record<string, unknown>> {
+    const form = new FormData();
+    form.set("file", file, file.name);
+    return api.post("/data-transfer/imports/upload", form);
+  },
+  inspectImport(taskId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/data-transfer/imports/${encodeURIComponent(taskId)}/inspect`, undefined, signal);
+  },
+  dryRunImport(taskId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return api.post(`/data-transfer/imports/${encodeURIComponent(taskId)}/dry-run`, body);
+  },
+  applyImport(taskId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return api.post(`/data-transfer/imports/${encodeURIComponent(taskId)}/apply`, body);
+  },
+  rollbackImport(journalId: string): Promise<Record<string, unknown>> {
+    return api.post(`/data-transfer/imports/${encodeURIComponent(journalId)}/rollback`, {});
+  },
+  qqDelete(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return api.delete(`/qq-management/${path.replace(/^\/+/, "")}`, body);
   },
 };

@@ -65,7 +65,7 @@ function OverviewContent({ data }: { data: Awaited<ReturnType<typeof resources.o
             <div><span>未知</span><b>{formatInteger(data.route_counts.unknown)}</b><i style={{ "--bar": `${data.route_counts.unknown}` } as React.CSSProperties} /></div>
             <div><span>不支持</span><b>{formatInteger(data.route_counts.unsupported)}</b><i style={{ "--bar": `${data.route_counts.unsupported}` } as React.CSSProperties} /></div>
           </div>
-          <Link className="text-link" to="/routes">核对每条路由的证据来源 →</Link>
+          <Link className="text-link" to="/runtime/routes/capabilities">核对每条路由的证据来源 →</Link>
         </Panel>
 
         <Panel eyebrow="RECOVERY / INBOUND" title="失败恢复队列">
@@ -75,7 +75,7 @@ function OverviewContent({ data }: { data: Awaited<ReturnType<typeof resources.o
             <div><dt>人工核对区</dt><dd>{formatInteger(data.recovery_counts.quarantined)}</dd></div>
             <div><dt>已过期</dt><dd>{formatInteger(data.recovery_counts.expired)}</dd></div>
           </dl>
-          <Link className="text-link" to="/recovery">进入恢复卷宗 →</Link>
+          <Link className="text-link" to="/runtime/recovery/pending">进入恢复卷宗 →</Link>
         </Panel>
 
         <Panel className="wide-panel" eyebrow="TRACE / LATEST" title="最近回合">

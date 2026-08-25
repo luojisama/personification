@@ -8,6 +8,52 @@ export interface Page<T> {
 
 export type CatalogItem = Record<string, unknown>;
 
+export interface UpdateSourceProbe {
+  source_id: string;
+  kind: "mirror" | "official";
+  display_name: string;
+  base_url: string;
+  state: "succeeded" | "failed" | "timeout" | "inapplicable";
+  latency_ms: number | null;
+  rank: number | null;
+  checked_at: string | number;
+  expires_at: string | number;
+  diagnostic_code: string;
+}
+
+export interface PluginUpdateOperation {
+  operation_id: string;
+  state: "probing" | "fetching" | "ready" | "applying" | "succeeded" | "failed" | "unknown";
+  local_commit: string;
+  remote_commit: string | null;
+  dirty: boolean;
+  probes: UpdateSourceProbe[];
+  selected_source_id: string | null;
+  attempts: Array<{ source_id?: string; state?: string; diagnostic_code?: string; message?: string }>;
+  diagnostic_code: string;
+  started_at: string | number;
+  finished_at: string | number | null;
+}
+
+export interface PluginUpdateStatus {
+  ok?: boolean;
+  available: boolean;
+  update_supported: boolean;
+  source_type: string;
+  dirty: boolean;
+  dirty_count: number;
+  update_available: boolean;
+  ahead: number;
+  behind: number;
+  source: { remote_name?: string; remote_url?: string; branch?: string; upstream?: string };
+  local: { hash?: string; short_hash?: string; branch?: string };
+  remote: { hash?: string; short_hash?: string; upstream?: string; error?: string };
+  pending_history: Array<{ hash?: string; short_hash?: string; subject?: string; author?: string; timestamp?: number }>;
+  operation?: PluginUpdateOperation;
+  diagnostic_code?: string;
+  error?: string;
+}
+
 export interface CursorPage<T> {
   items: T[];
   next_cursor: number;
@@ -221,6 +267,43 @@ export interface GroupListItem {
   cache_only: boolean;
 }
 
+export interface GroupSwitchItem extends GroupListItem {
+  source: "group_config" | "config_file" | "dynamic" | "none";
+  static_config_readonly: boolean;
+}
+
+export interface GroupSwitchPage extends Page<GroupSwitchItem> {
+  enabled_total: number;
+  disabled_total: number;
+  diagnostic_code: string;
+}
+
+export interface ProactiveRecord {
+  id: number;
+  ts: number;
+  scope: string;
+  target: string;
+  outcome: string;
+  detail: Record<string, unknown>;
+  next_eligible_at: number | null;
+}
+
+export interface ProactiveStats {
+  scope: string;
+  since_hours: number;
+  counts: Record<string, number>;
+  sent: number;
+  skip: number;
+  total: number;
+}
+
+export interface ProactiveNextEligible {
+  scope: string;
+  target: string;
+  latest_ts: number;
+  next_eligible_at: number;
+}
+
 export interface StickerListItem {
   filename: string;
   size_bytes: number;
@@ -268,6 +351,15 @@ export interface ConfigPage extends Page<ConfigListItem> {
   groups: string[];
   group_counts: Record<string, number>;
   modified_counts: Record<string, number>;
+}
+
+export interface ConfigMetadata {
+  revision: string;
+  groups: string[];
+  group_counts: Record<string, number>;
+  modified_counts: Record<string, number>;
+  total: number;
+  diagnostic_code: string;
 }
 
 export interface ConfigPatchResult {

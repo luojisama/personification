@@ -1,5 +1,4 @@
 const API_BASE = "/personification/api/v2";
-const LEGACY_API_BASE = "/personification/api";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 type JsonRecord = Record<string, unknown>;
@@ -126,6 +125,12 @@ export const api = {
   patch<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     return apiRequest<T>(path, { method: "PATCH", body, signal });
   },
+  put<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    return apiRequest<T>(path, { method: "PUT", body, signal });
+  },
+  delete<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    return apiRequest<T>(path, { method: "DELETE", body, signal });
+  },
   upload<T>(path: string, file: File, signal?: AbortSignal): Promise<T> {
     return rawApiRequest<T>(API_BASE, path, file, {
       "Content-Type": file.type || "application/octet-stream",
@@ -134,25 +139,4 @@ export const api = {
   },
 };
 
-export const legacyApi = {
-  get<T>(path: string, query?: ApiRequestOptions["query"], signal?: AbortSignal): Promise<T> {
-    return apiRequestAt<T>(LEGACY_API_BASE, path, { query, signal });
-  },
-  post<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-    return apiRequestAt<T>(LEGACY_API_BASE, path, { method: "POST", body, signal });
-  },
-  put<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-    return apiRequestAt<T>(LEGACY_API_BASE, path, { method: "PUT", body, signal });
-  },
-  delete<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-    return apiRequestAt<T>(LEGACY_API_BASE, path, { method: "DELETE", body, signal });
-  },
-  upload<T>(path: string, file: File, signal?: AbortSignal): Promise<T> {
-    return rawApiRequest<T>(LEGACY_API_BASE, path, file, {
-      "Content-Type": file.type || "application/octet-stream",
-      "X-Personification-Video-Filename": file.name,
-    }, signal);
-  },
-};
-
-export { API_BASE, LEGACY_API_BASE, buildUrl, buildUrlAt };
+export { API_BASE, buildUrl, buildUrlAt };

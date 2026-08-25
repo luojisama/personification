@@ -27,9 +27,8 @@ export function Panel({ eyebrow, title, action, as: Tag = "section", className =
 export function PageHeader({ index, title, description, actions }: { index: string; title: string; description: string; actions?: ReactNode }) {
   return (
     <header className="page-heading">
-      <div className="page-index" aria-hidden="true">{index}</div>
       <div className="page-title-block">
-        <span className="page-kicker">PERSONIFICATION / ADMIN EVIDENCE DESK</span>
+        <span className="page-kicker">ADMIN / {index}</span>
         <h1>{title}</h1>
         <p>{description}</p>
       </div>

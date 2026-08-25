@@ -222,6 +222,18 @@ dd { margin: 0.2rem 0 0; overflow-wrap: anywhere; }
 .config-editor-control > select,
 .config-editor-control > textarea { width: min(100%, 56rem); }
 .config-editor-control textarea { resize: vertical; font-family: var(--font-mono); }
+.structured-editor { width: min(100%, 64rem); display: grid; gap: var(--space-3); margin: 0; padding: var(--space-3); border: 1px solid var(--line); background: var(--surface-soft); }
+.structured-editor > legend { padding: 0 var(--space-2); color: var(--ink-muted); font-size: var(--text-sm); }
+.structured-item { display: grid; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--line); background: var(--surface-raised); }
+.structured-item > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.structured-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.structured-object { display: grid; gap: var(--space-2); min-width: 0; }
+.structured-field { display: grid; grid-template-columns: minmax(9rem, .45fr) minmax(12rem, 1fr) auto; align-items: start; gap: var(--space-2); }
+.structured-field > input:not([type="checkbox"]),
+.structured-field > select,
+.structured-field > .structured-editor,
+.structured-field > .structured-object { width: 100%; min-width: 0; }
+.structured-key { font-family: var(--font-mono); color: var(--ink-muted); }
 .safe-json { max-height: 32rem; padding: var(--space-3); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface-sunken); }
 .stacked-field { display: grid; gap: var(--space-2); }
 .key-value-table td:first-child { width: 34%; }
@@ -272,6 +284,7 @@ dd { margin: 0.2rem 0 0; overflow-wrap: anywhere; }
   .qzone-capability-grid { grid-template-columns: 1fr; }
   .agent-identity-line > span:last-child { width: 100%; margin-left: 0; }
   .config-editor-control { display: grid; }
+  .structured-field { grid-template-columns: 1fr; }
   .panel-body,
   .panel-heading { padding: var(--space-3); }
 }

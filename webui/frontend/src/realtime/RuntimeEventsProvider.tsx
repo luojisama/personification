@@ -27,6 +27,9 @@ const TOPIC_QUERY_MAP: Record<string, string[]> = {
   "log.appended": ["overview"],
   "qzone.capability_changed": ["overview"],
   "test_run.updated": ["functional-health"],
+  "admin_index.updated": ["management-data", "group-switches"],
+  "group_switch.updated": ["management-data", "group-switches"],
+  "plugin_update.updated": ["plugin-update-status", "plugin-update-history"],
 };
 
 export function RuntimeEventsProvider({ children }: { children: ReactNode }) {

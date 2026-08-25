@@ -12,10 +12,10 @@ export function ModelTestsPage() {
   const [video, setVideo] = useState<File | null>(null);
   const [result, setResult] = useState<unknown>(null);
   const [error, setError] = useState<unknown>(null);
-  const persona = useQuery({ queryKey: ["persona-prompt-preview"], queryFn: ({ signal }) => resources.legacy("/test/persona-prompt", undefined, signal), enabled: false });
+  const persona = useQuery({ queryKey: ["persona-prompt-preview"], queryFn: ({ signal }) => resources.personaPromptPreview(signal), enabled: false });
   const run = useMutation({ mutationFn: async (mode: "single" | "all") => {
     if (!window.confirm(`将向${mode === "single" ? "当前模型" : "全部已配置模型"}发起真实外部调用并产生额度消耗，确认继续吗？`)) return null;
-    return resources.legacyPost(mode === "single" ? "/test/chat" : "/test/chat-all", { prompt, system: "你是管理台连通性测试助手，请简洁回复。" });
+    return resources.modelChat(mode, prompt);
   }, onSuccess: (value) => { if (value != null) setResult(value); setError(null); }, onError: setError });
   const probeVideo = useMutation({ mutationFn: async () => {
     if (!video) throw new Error("请先选择视频文件");
