@@ -17,6 +17,13 @@ const CODE_LABELS: Record<string, string> = {
   recovery_abandoned: "恢复项已放弃",
   resync_required: "实时游标已过期，需要重新同步",
   sse_connection_failed: "实时事件流连接失败",
+  git_source_benchmark_ready: "更新源测速完成",
+  git_source_benchmark_all_failed: "所有更新源测速失败",
+  plugin_update_already_current: "插件已经是最新版本",
+  plugin_update_applied: "插件更新完成",
+  plugin_update_dirty: "工作区存在未提交修改",
+  plugin_update_diverged: "本地与远端提交已分叉",
+  plugin_update_verification_unknown: "插件更新结果需要人工核对",
 };
 
 export function diagnosticCodeLabel(code: string): string {

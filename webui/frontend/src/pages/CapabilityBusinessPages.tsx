@@ -18,7 +18,30 @@ function diagnostics(value: unknown) {
   if (!value) return null;
   const row = asRecord(value);
   const diagnostic = asRecord(row.diagnostic);
-  return safeDiagnostic(Object.keys(diagnostic).length ? diagnostic : row);
+  if (Object.keys(diagnostic).length) return safeDiagnostic(diagnostic);
+
+  const operation = asRecord(row.operation);
+  const code = textAt(row, "code", "diagnostic_code") !== "—"
+    ? textAt(row, "code", "diagnostic_code")
+    : textAt(operation, "diagnostic_code");
+  if (code === "—") return null;
+
+  const state = textAt(operation, "state");
+  const ok = row.ok === true || ["ready", "succeeded"].includes(state);
+  return safeDiagnostic({
+    ok,
+    code,
+    phase: textAt(row, "phase") === "—" ? "operation_complete" : textAt(row, "phase"),
+    message: textAt(row, "message", "error") === "—"
+      ? ok ? "服务端已确认操作结果。" : "操作未完成，请依据诊断码核对。"
+      : textAt(row, "message", "error"),
+    operation_id: textAt(operation, "operation_id") === "—" ? undefined : textAt(operation, "operation_id"),
+    retryable: false,
+    partial: false,
+    outcome_unknown: state === "unknown",
+    warnings: [],
+    steps: [],
+  });
 }
 
 function ResultPanel({ value }: { value: unknown }) {

@@ -59,6 +59,8 @@ describe("新版业务页面", () => {
     fireEvent.click(await screen.findByRole("button", { name: "重新测速" }));
     expect(await screen.findByText("镜像 1")).toBeInTheDocument();
     expect(screen.getByText("官方源")).toBeInTheDocument();
+    expect(screen.getByText("更新源测速完成")).toBeInTheDocument();
+    expect(screen.queryByText("API 请求失败")).not.toBeInTheDocument();
     const applyButton = screen.getByRole("button", { name: "执行更新" });
     expect(applyButton).toBeDisabled();
     fireEvent.change(screen.getByLabelText("插件更新确认"), { target: { value: "UPDATE" } });
