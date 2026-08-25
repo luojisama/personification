@@ -46,6 +46,30 @@ def get_user_agent(request: Request) -> str:
     return request.headers.get("user-agent", "")[:512]
 
 
+def is_https_or_loopback(request: Request) -> bool:
+    peer = str(getattr(request.client, "host", "") or "").strip().lower()
+    trusted_proxy = peer in {"localhost", "testclient"}
+    try:
+        trusted_proxy = trusted_proxy or ipaddress.ip_address(peer).is_loopback or ipaddress.ip_address(peer).is_private
+    except ValueError:
+        pass
+    forwarded_proto = str(request.headers.get("x-forwarded-proto", "") or "").split(",", 1)[0].strip().lower()
+    if request.url.scheme.lower() == "https" or (trusted_proxy and forwarded_proto == "https"):
+        return True
+    client_ip = get_client_ip(request)
+    if client_ip.lower() in {"localhost", "testclient"}:
+        return True
+    try:
+        return ipaddress.ip_address(client_ip).is_loopback
+    except ValueError:
+        return False
+
+
+def require_https_or_loopback(request: Request, *, code: str, message: str) -> None:
+    if not is_https_or_loopback(request):
+        raise HTTPException(status_code=403, detail={"code": code, "message": message})
+
+
 def require_admin(request: Request) -> AdminIdentity:
     """FastAPI Depends：要求合法 device token + CSRF token（非 safe method）。"""
     token = request.cookies.get(_COOKIE_NAME, "")

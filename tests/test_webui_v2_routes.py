@@ -302,6 +302,51 @@ def test_v2_config_rows_mask_secret_values() -> None:
     assert "secret-must-not-leak" not in repr(rows)
 
 
+def test_v2_config_rows_mask_nested_provider_secret_and_preserve_it_on_patch(monkeypatch) -> None:  # noqa: ANN001
+    config = load_personification_module("plugin.personification.config").Config(
+        personification_api_pools=[
+            {
+                "name": "primary",
+                "provider": "gemini",
+                "api_type": "gemini",
+                "api_url": "https://example.test/v1beta",
+                "api_key": "nested-secret-must-not-leak",
+                "model": "before-model",
+            }
+        ]
+    )
+    runtime = SimpleNamespace(plugin_config=config, runtime_bundle=None)
+    rows = v2_routes._config_rows(runtime, search="API Provider 池", group="")
+    target = next(row for row in rows if row["field_name"] == "personification_api_pools")
+    provider = dict(target["value"][0])
+
+    assert provider["api_key"] == "***"
+    assert provider["_secret_ref"]
+    assert "nested-secret-must-not-leak" not in repr(target)
+
+    provider["model"] = "after-model"
+    env_writer = load_personification_module("plugin.personification.core.env_writer")
+    captured: dict[str, object] = {}
+
+    def _write_many(values, plugin_config):  # noqa: ANN001
+        captured.update(values)
+        return {"env_json_path": "test/env.json", "errors": []}
+
+    monkeypatch.setattr(env_writer, "write_many", _write_many)
+    asyncio.run(
+        v2_services.apply_config_patch(
+            runtime,
+            revision=v2_services.config_revision(config),
+            values={"personification_api_pools": [provider]},
+        )
+    )
+
+    saved = captured["personification_api_pools"]
+    assert isinstance(saved, list)
+    assert saved[0]["api_key"] == "nested-secret-must-not-leak"
+    assert saved[0]["model"] == "after-model"
+
+
 def test_v2_config_patch_uses_revision_and_atomic_batch_writer(monkeypatch) -> None:  # noqa: ANN001
     config = load_personification_module("plugin.personification.config").Config()
     env_writer = load_personification_module("plugin.personification.core.env_writer")

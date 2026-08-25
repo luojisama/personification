@@ -102,6 +102,71 @@ def query_recent(
     return out
 
 
+def query_page(
+    *,
+    scope: str = "",
+    outcome: str = "",
+    target: str = "",
+    cursor: int = 0,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """按稳定递减 ID 返回主动行为记录，供持续追加型管理页使用。"""
+    clauses = ["1=1"]
+    params: list[Any] = []
+    if scope:
+        clauses.append("scope = ?")
+        params.append(str(scope))
+    if outcome:
+        clauses.append("outcome = ?")
+        params.append(str(outcome))
+    if target:
+        clauses.append("target LIKE ? ESCAPE '\\'")
+        escaped = str(target).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params.append(f"%{escaped}%")
+    if int(cursor or 0) > 0:
+        clauses.append("id < ?")
+        params.append(int(cursor))
+    safe_limit = max(1, min(int(limit), 100))
+    params.append(safe_limit + 1)
+    with connect_sync() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, ts, scope, target, outcome, detail, next_eligible_at
+            FROM proactive_diagnostics
+            WHERE {' AND '.join(clauses)}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    has_more = len(rows) > safe_limit
+    selected = rows[:safe_limit]
+    items: list[dict[str, Any]] = []
+    for row in selected:
+        try:
+            detail = json.loads(row["detail"] or "{}")
+        except Exception:
+            detail = {}
+        items.append(
+            {
+                "id": int(row["id"]),
+                "ts": float(row["ts"] or 0),
+                "scope": str(row["scope"] or ""),
+                "target": str(row["target"] or ""),
+                "outcome": str(row["outcome"] or ""),
+                "detail": detail if isinstance(detail, dict) else {},
+                "next_eligible_at": float(row["next_eligible_at"] or 0) or None,
+            }
+        )
+    return {
+        "items": items,
+        "next_cursor": int(selected[-1]["id"]) if has_more and selected else 0,
+        "has_more": has_more,
+        "limit": safe_limit,
+        "filters": {"scope": scope, "outcome": outcome, "target": target},
+    }
+
+
 def query_skip_reason_stats(
     *,
     scope: str = "",
@@ -172,6 +237,7 @@ def prune_old_entries(*, retention_days: int = _RETENTION_DAYS) -> int:
 __all__ = [
     "record",
     "query_recent",
+    "query_page",
     "query_skip_reason_stats",
     "query_next_eligible",
     "prune_old_entries",

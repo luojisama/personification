@@ -43,6 +43,7 @@ from .routes.user_policy_routes import build_user_policy_router
 from .routes.outbound_routes import build_outbound_router
 from .routes.performance_routes import build_performance_router
 from .routes.v2_routes import build_v2_router
+from .routes.v2_compat_routes import build_v2_business_router
 from .routes.whole_backup_routes import build_whole_backup_router
 from ..core.runtime_performance import register_cache_reporter
 
@@ -126,6 +127,7 @@ def build_router() -> APIRouter:
     router.include_router(build_performance_router(runtime=runtime))
     router.include_router(build_v2_router(runtime=runtime))
     router.include_router(build_whole_backup_router(runtime=runtime))
+    router.include_router(build_v2_business_router(runtime=runtime))
 
     @router.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:

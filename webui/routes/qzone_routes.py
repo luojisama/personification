@@ -14,7 +14,7 @@ from ...core import webui_audit_log
 from ...core.operation_diagnostics import detail, diagnostic, exception_diagnostic, normalize_diagnostic, step
 from ...core.runtime_identity import get_runtime_identity
 from ...core.sensitive_data import sanitize_object, sanitize_text
-from ..deps import AdminIdentity, get_client_ip, require_admin
+from ..deps import AdminIdentity, get_client_ip, require_admin, require_https_or_loopback
 
 
 _DIAGNOSTIC_FIELDS = (
@@ -582,6 +582,11 @@ def build_qzone_router(*, runtime) -> APIRouter:
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
         """管理员手动强制发一条说说（绕过额度/间隔/agent 决策，但仍计入月度额度）。"""
+        require_https_or_loopback(
+            request,
+            code="qzone_write_https_required",
+            message="远程 QZone 写操作必须使用 HTTPS；仅本机 loopback 允许开发例外。",
+        )
         from ...core.time_ctx import get_configured_now
         from ...core.qzone_publish import qzone_content_preview
         from ...core.qzone_service import get_qzone_auth_status, get_qzone_capability_status
@@ -1486,6 +1491,12 @@ def build_qzone_router(*, runtime) -> APIRouter:
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
         from ...core.qzone_service import install_qzone_cookie
+
+        require_https_or_loopback(
+            request,
+            code="qzone_cookie_https_required",
+            message="远程 Cookie 安装必须使用 HTTPS；仅本机 loopback 允许开发例外。",
+        )
 
         cookie = str(body.get("cookie") or "").strip()
         if not cookie or len(cookie) > 16_384:

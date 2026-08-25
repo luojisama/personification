@@ -12,6 +12,8 @@ from fastapi.responses import FileResponse
 import json
 
 from ...core import webui_audit_log
+from ...core.runtime_events import publish_runtime_event
+from ...core.webui_admin_index import WebUIAdminIndex
 from ...core.operation_diagnostics import (
     OperationDetail,
     OperationStep,
@@ -215,6 +217,47 @@ def _resolve_safe_file(name: str, sticker_dir: Path) -> Path:
     return candidate
 
 
+def _project_sticker(runtime: Any, path: Path, entry: dict[str, Any], *, labeled: bool) -> None:
+    """Best-effort update of the rebuildable admin projection after a confirmed write."""
+    try:
+        stat = path.stat()
+        WebUIAdminIndex(getattr(runtime, "plugin_config", None)).upsert_sticker({
+            "filename": path.name,
+            "description": str(entry.get("description", "") or ""),
+            "mood_tags": list(entry.get("mood_tags") or []),
+            "scene_tags": list(entry.get("scene_tags") or []),
+            "size_bytes": stat.st_size,
+            "modified_at": stat.st_mtime,
+            "labeled": labeled,
+        })
+        publish_runtime_event("admin_index.updated", payload={"state": "ready", "dataset": "stickers", "diagnostic_code": "admin_index_incremental_sticker"})
+    except Exception:
+        # The projection is non-authoritative; a later rebuild reconciles it.
+        try:
+            WebUIAdminIndex(getattr(runtime, "plugin_config", None)).mark_stale("admin_index_incremental_sticker_failed")
+        except Exception:
+            pass
+
+
+def _remove_projected_sticker(runtime: Any, name: str) -> None:
+    try:
+        WebUIAdminIndex(getattr(runtime, "plugin_config", None)).delete_sticker(name)
+        publish_runtime_event("admin_index.updated", payload={"state": "ready", "dataset": "stickers", "diagnostic_code": "admin_index_incremental_sticker_delete"})
+    except Exception:
+        try:
+            WebUIAdminIndex(getattr(runtime, "plugin_config", None)).mark_stale("admin_index_incremental_sticker_delete_failed")
+        except Exception:
+            pass
+
+
+def _mark_sticker_projection_stale(runtime: Any, detail_code: str) -> None:
+    try:
+        WebUIAdminIndex(getattr(runtime, "plugin_config", None)).mark_stale(detail_code)
+        publish_runtime_event("admin_index.updated", payload={"state": "stale", "dataset": "stickers", "diagnostic_code": detail_code})
+    except Exception:
+        pass
+
+
 def build_sticker_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/stickers", tags=["stickers"])
 
@@ -391,6 +434,7 @@ def build_sticker_router(*, runtime) -> APIRouter:
             suggestion="无需重复保存。",
             operation_id=operation_id,
         )
+        _project_sticker(runtime, path, merged, labeled=bool(str(merged.get("description", "") or "").strip()))
         return _operation_result(report, success=True, filename=name, entry=merged)
 
     @router.delete("/{name}")
@@ -560,6 +604,7 @@ def build_sticker_router(*, runtime) -> APIRouter:
             suggestion="如需恢复，请从显示的库内相对位置手动恢复文件。",
             operation_id=operation_id,
         )
+        _remove_projected_sticker(runtime, name)
         return _operation_result(report, success=True, trash_path=safe_trash_path)
 
     if _multipart_available():
@@ -758,6 +803,7 @@ def build_sticker_router(*, runtime) -> APIRouter:
                 suggestion="等待 labeler 处理待打标文件；已有描述的文件无需重复上传。",
                 operation_id=operation_id,
             )
+            _project_sticker(runtime, target, metadata[target.name], labeled=bool(description))
             return _operation_result(
                 report,
                 success=True,
@@ -911,6 +957,7 @@ def build_sticker_router(*, runtime) -> APIRouter:
             suggestion="等待 labeler 执行，不要重复触发同一范围的扫描。",
             operation_id=operation_id,
         )
+        _mark_sticker_projection_stale(runtime, "sticker_manifest_rescan_pending")
         return _operation_result(
             report,
             success=True,

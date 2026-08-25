@@ -22,8 +22,9 @@ from ...core.route_capabilities import CapabilityObservation, RouteKey
 from ...core.qzone_capability_matrix import DEFAULT_QZONE_CAPABILITY_MATRIX
 from ...core.runtime_events import get_runtime_event_bus
 from ...core.runtime_events import publish_runtime_event
+from ...core import proactive_diagnostics, webui_audit_log
 from ...core.visible_output import guard_visible_text
-from ..deps import AdminIdentity, require_admin
+from ..deps import AdminIdentity, get_client_ip, require_admin
 from ..v2_services import (
     apply_config_patch,
     build_agent_runtime_snapshot,
@@ -38,6 +39,8 @@ from .metrics_routes import build_metrics_summary
 _ROUTE_PROBE_TASKS: dict[str, dict[str, Any]] = {}
 _STICKER_INDEX_TASKS: dict[str, dict[str, Any]] = {}
 _FUNCTIONAL_TEST_RUNS: dict[str, dict[str, Any]] = {}
+_ADMIN_INDEX_TASKS: dict[str, dict[str, Any]] = {}
+_CONFIG_SNAPSHOT_CACHE: dict[str, list[dict[str, Any]]] = {}
 
 _FUNCTIONAL_TEST_CATALOG: tuple[dict[str, str], ...] = (
     {"id": "core", "label": "核心运行", "category": "核心", "risk": "local_read"},
@@ -386,9 +389,99 @@ def _cached_group_rows(
     return rows
 
 
+def _rebuild_admin_index(runtime: Any) -> dict[str, Any]:
+    from ...core.sticker_catalog_index import load_sticker_catalog_index
+    from ...core.webui_admin_index import get_webui_admin_index
+    from ...utils import load_group_configs, load_whitelist
+
+    personas = _cached_persona_rows(
+        runtime,
+        search="",
+        group_id="",
+        favorability_level="",
+        sort_by="updated_at",
+        direction="desc",
+    )
+    groups = _cached_group_rows(
+        runtime,
+        search="",
+        membership_state="",
+        include_unconfirmed=True,
+        enabled="",
+        bot_id="",
+        sort_by="group_id",
+        direction="asc",
+    )
+    configured = {str(value or "") for value in getattr(runtime.plugin_config, "personification_whitelist", []) or []}
+    dynamic = {str(value or "") for value in load_whitelist()}
+    group_configs = load_group_configs()
+    for row in groups:
+        group_id = str(row.get("group_id") or "")
+        config = group_configs.get(group_id, {}) if isinstance(group_configs, dict) else {}
+        if isinstance(config, dict) and "enabled" in config:
+            source = "group_config"
+        elif group_id in configured:
+            source = "config_file"
+        elif group_id in dynamic:
+            source = "dynamic"
+        else:
+            source = "none"
+        row["source"] = source
+        row["static_config_readonly"] = group_id in configured
+    snapshot = load_sticker_catalog_index(_sticker_root(runtime))
+    stickers = [dict(item) for item in snapshot.get("items") or [] if isinstance(item, dict)]
+    index = get_webui_admin_index(getattr(runtime, "plugin_config", None))
+    return index.rebuild(personas=personas, groups=groups, stickers=stickers)
+
+
+def _get_admin_index(runtime: Any) -> Any:
+    from ...core.webui_admin_index import get_webui_admin_index
+
+    return get_webui_admin_index(getattr(runtime, "plugin_config", None))
+
+
+async def _queue_admin_index_rebuild(runtime: Any, *, force: bool = False) -> dict[str, Any]:
+    index = _get_admin_index(runtime)
+    key = str(index.path.resolve())
+    current = _ADMIN_INDEX_TASKS.get(key)
+    if current and current.get("state") in {"queued", "running"} and not force:
+        return dict(current)
+    task = {
+        "state": "queued",
+        "queued_at": time.time(),
+        "finished_at": None,
+        "diagnostic_code": "admin_index_rebuild_queued",
+    }
+    _ADMIN_INDEX_TASKS[key] = task
+
+    async def runner() -> None:
+        task.update({"state": "running", "started_at": time.time(), "diagnostic_code": "admin_index_rebuilding"})
+        publish_runtime_event("admin_index.updated", payload={"state": "running", "diagnostic_code": task["diagnostic_code"]})
+        try:
+            status = await run_in_threadpool(_rebuild_admin_index, runtime)
+        except Exception as exc:
+            task.update({"state": "failed", "finished_at": time.time(), "diagnostic_code": f"admin_index_rebuild_failed:{type(exc).__name__}"})
+        else:
+            task.update({"state": "succeeded", "finished_at": time.time(), "diagnostic_code": "admin_index_ready", "index": status})
+        publish_runtime_event("admin_index.updated", payload={"state": task["state"], "diagnostic_code": task["diagnostic_code"]})
+
+    asyncio.create_task(runner())
+    return dict(task)
+
+
+async def _admin_index(runtime: Any) -> Any:
+    index = _get_admin_index(runtime)
+    status = await run_in_threadpool(index.status)
+    indexed_at = float(status.get("indexed_at", 0) or 0)
+    if str(status.get("state") or "") != "ready" or indexed_at <= 0 or time.time() - indexed_at > 300:
+        await _queue_admin_index_rebuild(runtime)
+    return index
+
+
 def _config_rows(runtime: Any, *, search: str, group: str) -> list[dict[str, Any]]:
     from ...core import config_registry
     from ...core.sensitive_data import sanitize_object
+    from .config_routes import _mask_api_pool_config
 
     needle = str(search or "").strip().casefold()
     group_filter = str(group or "").strip()
@@ -414,6 +507,8 @@ def _config_rows(runtime: Any, *, search: str, group: str) -> list[dict[str, Any
         )
         if entry.secret:
             safe_value: Any = "***" if value not in (None, "", [], {}) else ""
+        elif entry.field_name == "personification_api_pools":
+            safe_value = _mask_api_pool_config(value)
         else:
             safe_value = sanitize_object(value)
         rows.append(
@@ -443,6 +538,17 @@ def _config_rows(runtime: Any, *, search: str, group: str) -> list[dict[str, Any
         )
     rows.sort(key=lambda item: (str(item["group"]), str(item["display_name"]), str(item["field_name"])))
     return rows
+
+
+def _config_snapshot(runtime: Any) -> tuple[str, list[dict[str, Any]]]:
+    revision = config_revision(runtime.plugin_config)
+    cached = _CONFIG_SNAPSHOT_CACHE.get(revision)
+    if cached is not None:
+        return revision, [dict(item) for item in cached]
+    rows = _config_rows(runtime, search="", group="")
+    _CONFIG_SNAPSHOT_CACHE.clear()
+    _CONFIG_SNAPSHOT_CACHE[revision] = [dict(item) for item in rows]
+    return revision, rows
 
 
 def _sticker_root(runtime: Any) -> Any:
@@ -726,6 +832,40 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         items = await list_bot_identities(runtime)
         return {"items": items, "total": len(items), "diagnostic_code": "bot_identity_snapshot"}
 
+    @router.get("/admin-index/status")
+    async def admin_index_status(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
+        index = _get_admin_index(runtime)
+        status = await run_in_threadpool(index.status)
+        task = _ADMIN_INDEX_TASKS.get(str(index.path.resolve()), {"state": "idle", "diagnostic_code": "admin_index_task_idle"})
+        return {"index": status, "task": dict(task), "diagnostic_code": "admin_index_status_ready"}
+
+    @router.post("/admin-index/rebuild")
+    async def rebuild_admin_index(
+        request: Request,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        task = await _queue_admin_index_rebuild(runtime)
+        webui_audit_log.record(
+            action="admin_index_rebuild",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            ip_hash=get_client_ip(request),
+            detail={"state": task.get("state"), "diagnostic_code": task.get("diagnostic_code")},
+            outcome="ok",
+        )
+        return {
+            "ok": True,
+            "code": str(task.get("diagnostic_code") or "admin_index_rebuild_queued"),
+            "phase": str(task.get("state") or "queued"),
+            "title": "管理投影重建已排队",
+            "message": "页面继续读取上一个已知投影；后台完成后通过 SSE 发布索引状态。",
+            "retryable": False,
+            "partial": False,
+            "outcome_unknown": False,
+            "warnings": [],
+            "steps": [],
+        }
+
     @router.get("/health")
     async def health(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
         from ...core.diagnostics import get_cached_diagnostics
@@ -1004,11 +1144,12 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         direction: str = Query(default="desc", pattern="^(asc|desc)$"),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
-        params = normalize_pagination(page=page, page_size=page_size)
         try:
-            rows = await run_in_threadpool(
-                _cached_persona_rows,
-                runtime,
+            index = await _admin_index(runtime)
+            payload = await run_in_threadpool(
+                index.personas_page,
+                page=page,
+                page_size=page_size,
                 search=search,
                 group_id=group_id,
                 favorability_level=favorability_level,
@@ -1020,11 +1161,10 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 status_code=422,
                 detail={"code": "persona_sort_invalid", "message": "画像排序字段无效。"},
             ) from exc
-        return build_page(
-            rows[params.offset : params.offset + params.page_size],
-            total=len(rows),
-            params=params,
-        ).to_dict()
+        for item in payload["items"]:
+            item["avatar_url"] = qq_avatar_url(str(item.get("qq_id") or ""))
+        payload["index"] = index.status()
+        return payload
 
     @router.get("/groups")
     async def groups(
@@ -1039,11 +1179,12 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         direction: str = Query(default="asc", pattern="^(asc|desc)$"),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
-        params = normalize_pagination(page=page, page_size=page_size)
         try:
-            rows = await run_in_threadpool(
-                _cached_group_rows,
-                runtime,
+            index = await _admin_index(runtime)
+            payload = await run_in_threadpool(
+                index.groups_page,
+                page=page,
+                page_size=page_size,
                 search=search,
                 membership_state=membership_state,
                 include_unconfirmed=include_unconfirmed,
@@ -1057,11 +1198,121 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 status_code=422,
                 detail={"code": "group_sort_invalid", "message": "群列表排序字段无效。"},
             ) from exc
-        return build_page(
-            rows[params.offset : params.offset + params.page_size],
-            total=len(rows),
-            params=params,
-        ).to_dict()
+        for item in payload["items"]:
+            item["avatar_url"] = group_avatar_url(str(item.get("group_id") or ""))
+        payload["index"] = index.status()
+        return payload
+
+    @router.get("/group-switches")
+    async def group_switches(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        search: str = Query(default="", max_length=120),
+        enabled: str = Query(default="", max_length=16),
+        membership_state: str = Query(default="", max_length=24),
+        bot_id: str = Query(default="", max_length=32),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        index = await _admin_index(runtime)
+        payload = await run_in_threadpool(
+            index.groups_page,
+            page=page,
+            page_size=page_size,
+            search=search,
+            membership_state=membership_state,
+            include_unconfirmed=False,
+            enabled=enabled,
+            bot_id=bot_id,
+            sort_by="group_id",
+            direction="asc",
+        )
+        for item in payload["items"]:
+            item["avatar_url"] = group_avatar_url(str(item.get("group_id") or ""))
+        counts = await run_in_threadpool(index.group_switch_counts, bot_id=bot_id)
+        payload["enabled_total"] = counts["enabled"]
+        payload["disabled_total"] = counts["disabled"]
+        payload["diagnostic_code"] = "group_switch_page_ready"
+        payload["index"] = index.status()
+        return payload
+
+    @router.post("/group-switches/{group_id}")
+    async def update_group_switch(
+        group_id: str,
+        request: Request,
+        body: dict[str, Any] = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from ...utils import is_group_whitelisted, set_group_enabled
+
+        normalized = str(group_id or "").strip()
+        if not normalized.isdigit():
+            raise HTTPException(status_code=422, detail={"code": "group_id_invalid", "message": "群号必须为纯数字。"})
+        if not isinstance(body.get("enabled"), bool):
+            raise HTTPException(status_code=422, detail={"code": "group_switch_value_invalid", "message": "enabled 必须是布尔值。"})
+        target = bool(body["enabled"])
+        try:
+            await run_in_threadpool(set_group_enabled, normalized, target)
+            confirmed = bool(is_group_whitelisted(normalized, list(getattr(runtime.plugin_config, "personification_whitelist", []) or [])))
+        except Exception as exc:
+            webui_audit_log.record(action="group_switch_update", qq=admin.qq, device_id=admin.device_id, target=normalized, ip_hash=get_client_ip(request), detail={"enabled": target, "code": type(exc).__name__}, outcome="unknown")
+            raise HTTPException(status_code=500, detail={"code": "group_switch_update_unknown", "phase": "persistence", "message": "群开关写入结果未知，请刷新状态后再决定是否重试。", "outcome_unknown": True, "retryable": False}) from exc
+        if confirmed != target:
+            raise HTTPException(status_code=409, detail={"code": "group_switch_confirmation_mismatch", "phase": "verification", "message": "写入后的群开关状态与目标不一致。", "outcome_unknown": True, "retryable": False})
+        index = await _admin_index(runtime)
+        await run_in_threadpool(index.update_group_enabled, normalized, target, source="group_config")
+        webui_audit_log.record(action="group_switch_update", qq=admin.qq, device_id=admin.device_id, target=normalized, ip_hash=get_client_ip(request), detail={"enabled": target}, outcome="ok")
+        publish_runtime_event("group_switch.updated", payload={"group_id": normalized, "enabled": target})
+        return {
+            "ok": True,
+            "code": "group_switch_enabled" if target else "group_switch_disabled",
+            "phase": "operation_complete",
+            "title": "群功能已启用" if target else "群功能已停用",
+            "message": "权威群配置已保存并重新读取确认。",
+            "retryable": False,
+            "partial": False,
+            "outcome_unknown": False,
+            "warnings": [],
+            "steps": [
+                {"key": "persist", "label": "保存群配置", "status": "ok", "message": "group_config.enabled 已更新。"},
+                {"key": "verify", "label": "重新读取确认", "status": "ok", "message": "读取结果与目标状态一致。"},
+                {"key": "audit", "label": "记录管理员操作", "status": "ok", "message": "审计记录已写入。"},
+            ],
+        }
+
+    @router.get("/proactive/stats")
+    async def proactive_stats(
+        scope: str = Query(default="", max_length=24),
+        since_hours: float = Query(default=72.0, ge=1.0, le=720.0),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        counts = await run_in_threadpool(proactive_diagnostics.query_skip_reason_stats, scope=scope, since_seconds=since_hours * 3600)
+        return {
+            "scope": scope or "all",
+            "since_hours": since_hours,
+            "counts": counts,
+            "sent": int(counts.get("sent", 0)),
+            "skip": sum(int(value) for key, value in counts.items() if str(key).startswith("skip_")),
+            "total": sum(int(value) for value in counts.values()),
+        }
+
+    @router.get("/proactive/recent")
+    async def proactive_recent(
+        scope: str = Query(default="", max_length=24),
+        outcome: str = Query(default="", max_length=32),
+        target: str = Query(default="", max_length=64),
+        cursor: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=100),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(proactive_diagnostics.query_page, scope=scope, outcome=outcome, target=target, cursor=cursor, limit=limit)
+
+    @router.get("/proactive/next-eligible")
+    async def proactive_next_eligible(
+        scope: str = Query(default="", max_length=24),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        items = await run_in_threadpool(proactive_diagnostics.query_next_eligible, scope=scope)
+        return {"items": items, "total": len(items), "diagnostic_code": "proactive_next_eligible_ready"}
 
     async def _finish_sticker_index_rebuild(root_key: str, root: Any) -> None:
         from ...core.sticker_catalog_index import rebuild_sticker_catalog_index
@@ -1087,6 +1338,10 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 "item_count": len(snapshot.get("items") or []),
             }
         )
+        try:
+            await run_in_threadpool(_rebuild_admin_index, runtime)
+        except Exception as exc:
+            task.update({"detail_code": f"sticker_index_ready_admin_projection_failed:{type(exc).__name__}"})
 
     def _queue_sticker_rebuild(root: Any) -> dict[str, Any]:
         root_key = str(root.resolve())
@@ -1112,38 +1367,20 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
     ) -> dict[str, Any]:
         from ...core.sticker_catalog_index import load_sticker_catalog_index
 
-        params = normalize_pagination(page=page, page_size=page_size)
         root = _sticker_root(runtime)
         snapshot = await run_in_threadpool(load_sticker_catalog_index, root)
         task = _STICKER_INDEX_TASKS.get(str(root.resolve()), {"status": "idle"})
         if bool(snapshot.get("stale", True)):
             task = _queue_sticker_rebuild(root)
-        needle = str(search or "").strip().casefold()
-        rows = []
-        for item in snapshot.get("items") or []:
-            if not isinstance(item, dict):
-                continue
-            if labeled is not None and bool(item.get("labeled", False)) != labeled:
-                continue
-            searchable = " ".join(
-                [
-                    str(item.get("filename", "") or ""),
-                    str(item.get("description", "") or ""),
-                    *[str(value or "") for value in item.get("mood_tags") or []],
-                    *[str(value or "") for value in item.get("scene_tags") or []],
-                ]
-            ).casefold()
-            if not needle or needle in searchable:
-                rows.append(dict(item))
         try:
-            selection = resolve_sort(
-                sort_by,
-                allowed={
-                    "filename": lambda item: str(item.get("filename", "") or "").casefold(),
-                    "size_bytes": lambda item: int(item.get("size_bytes", 0) or 0),
-                    "modified_at": lambda item: float(item.get("modified_at", 0) or 0),
-                },
-                default="filename",
+            index = await _admin_index(runtime)
+            payload = await run_in_threadpool(
+                index.stickers_page,
+                page=page,
+                page_size=page_size,
+                search=search,
+                labeled=labeled,
+                sort_by=sort_by,
                 direction=direction,
             )
         except ValueError as exc:
@@ -1151,18 +1388,13 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 status_code=422,
                 detail={"code": "sticker_sort_invalid", "message": "贴纸排序字段无效。"},
             ) from exc
-        rows.sort(key=selection.value, reverse=selection.direction == "desc")
-        payload = build_page(
-            rows[params.offset : params.offset + params.page_size],
-            total=len(rows),
-            params=params,
-        ).to_dict()
         payload.update(
             {
                 "index_status": task.get("status", "idle"),
                 "index_detail_code": task.get("detail_code", "sticker_index_idle"),
                 "index_updated_at": snapshot.get("updated_at", 0.0),
                 "index_stale": bool(snapshot.get("stale", True)),
+                "admin_index": index.status(),
             }
         )
         return payload
@@ -1191,32 +1423,86 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         page_size: int = Query(default=20, ge=1, le=100),
         search: str = Query(default="", max_length=120),
         group: str = Query(default="", max_length=80),
+        modified: bool = Query(default=False),
+        restart_required: bool = Query(default=False),
+        hot_reloadable: bool = Query(default=False),
+        advanced: bool = Query(default=False),
+        secret: bool = Query(default=False),
+        invalid: bool = Query(default=False),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         params = normalize_pagination(page=page, page_size=page_size)
-        rows = await run_in_threadpool(_config_rows, runtime, search=search, group=group)
+        revision, snapshot = await run_in_threadpool(_config_snapshot, runtime)
+        needle_tokens = [token for token in str(search or "").strip().casefold().split() if token]
+        rows: list[dict[str, Any]] = []
+        for item in snapshot:
+            if group and str(item.get("group") or "") != group:
+                continue
+            haystack = " ".join(
+                [
+                    str(item.get("field_name") or ""),
+                    str(item.get("display_name") or ""),
+                    str(item.get("description") or ""),
+                    str(item.get("group") or ""),
+                    " ".join(str(value or "") for value in item.get("aliases") or []),
+                    str(item.get("value") or "") if not item.get("secret") else "",
+                ]
+            ).casefold()
+            if needle_tokens and not all(token in haystack for token in needle_tokens):
+                continue
+            if modified and not item.get("modified"):
+                continue
+            if restart_required and not item.get("restart_required"):
+                continue
+            if hot_reloadable and not item.get("hot_reloadable"):
+                continue
+            if advanced and not item.get("advanced"):
+                continue
+            if secret and not item.get("secret"):
+                continue
+            if invalid and not item.get("validation_error"):
+                continue
+            rows.append(item)
         payload = build_page(
             rows[params.offset : params.offset + params.page_size],
             total=len(rows),
             params=params,
         ).to_dict()
-        all_rows = await run_in_threadpool(_config_rows, runtime, search="", group="")
         counts: dict[str, int] = {}
         modified_counts: dict[str, int] = {}
-        for item in all_rows:
+        for item in snapshot:
             category = str(item.get("group") or "其他")
             counts[category] = counts.get(category, 0) + 1
             if item.get("modified"):
                 modified_counts[category] = modified_counts.get(category, 0) + 1
         payload.update(
             {
-                "revision": config_revision(runtime.plugin_config),
+                "revision": revision,
                 "groups": sorted(counts),
                 "group_counts": counts,
                 "modified_counts": modified_counts,
             }
         )
         return payload
+
+    @router.get("/config/meta")
+    async def config_meta(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
+        revision, snapshot = await run_in_threadpool(_config_snapshot, runtime)
+        counts: dict[str, int] = {}
+        modified_counts: dict[str, int] = {}
+        for item in snapshot:
+            category = str(item.get("group") or "其他")
+            counts[category] = counts.get(category, 0) + 1
+            if item.get("modified"):
+                modified_counts[category] = modified_counts.get(category, 0) + 1
+        return {
+            "revision": revision,
+            "groups": sorted(counts),
+            "group_counts": counts,
+            "modified_counts": modified_counts,
+            "total": len(snapshot),
+            "diagnostic_code": "config_metadata_ready",
+        }
 
     @router.patch("/config/values")
     async def patch_config_values(
@@ -1819,6 +2105,139 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 "step_up_required": True,
                 "secret_https_required": True,
             },
+        }
+
+    @router.get("/plugin-update/status")
+    async def plugin_update_status(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
+        from ...core import plugin_update_manager
+
+        return await plugin_update_manager.get_plugin_update_status(
+            plugin_config=getattr(runtime, "plugin_config", None),
+            refresh=False,
+        )
+
+    @router.post("/plugin-update/benchmark")
+    async def plugin_update_benchmark(
+        request: Request,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from ...core import plugin_update_manager
+
+        result = await plugin_update_manager.benchmark_update_operation(
+            plugin_config=getattr(runtime, "plugin_config", None),
+        )
+        operation = result.get("operation") if isinstance(result.get("operation"), dict) else {}
+        webui_audit_log.record(
+            action="plugin_update_benchmark",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            ip_hash=get_client_ip(request),
+            detail={"operation_id": operation.get("operation_id"), "diagnostic_code": result.get("diagnostic_code"), "selected_source_id": operation.get("selected_source_id")},
+            outcome="ok" if result.get("ok") else "error",
+        )
+        publish_runtime_event(
+            "plugin_update.updated",
+            payload={
+                "operation_id": operation.get("operation_id"),
+                "state": operation.get("state"),
+                "diagnostic_code": operation.get("diagnostic_code"),
+            },
+        )
+        return result
+
+    @router.post("/plugin-update/check")
+    async def plugin_update_check(
+        request: Request,
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from ...core import plugin_update_manager
+
+        result = await plugin_update_manager.check_plugin_update(
+            plugin_config=getattr(runtime, "plugin_config", None),
+        )
+        operation = result.get("operation") if isinstance(result.get("operation"), dict) else {}
+        status = result.get("status") if isinstance(result.get("status"), dict) else {}
+        webui_audit_log.record(
+            action="plugin_update_check",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            ip_hash=get_client_ip(request),
+            detail={"operation_id": operation.get("operation_id"), "diagnostic_code": result.get("diagnostic_code"), "selected_source_id": operation.get("selected_source_id"), "update_available": status.get("update_available")},
+            outcome="ok" if result.get("ok") else "error",
+        )
+        publish_runtime_event(
+            "plugin_update.updated",
+            payload={
+                "operation_id": operation.get("operation_id"),
+                "state": operation.get("state"),
+                "diagnostic_code": operation.get("diagnostic_code"),
+            },
+        )
+        return result
+
+    @router.post("/plugin-update/apply")
+    async def plugin_update_apply(
+        request: Request,
+        body: dict[str, Any] = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from ...core import plugin_update_manager
+
+        if str(body.get("confirmation") or "") != "UPDATE":
+            raise HTTPException(status_code=422, detail={"code": "plugin_update_confirmation_required", "message": "确认串必须精确等于 UPDATE。"})
+        result = await plugin_update_manager.perform_plugin_update(plugin_config=getattr(runtime, "plugin_config", None))
+        operation = result.get("operation") if isinstance(result.get("operation"), dict) else {}
+        state = str(operation.get("state") or "failed")
+        webui_audit_log.record(
+            action="plugin_update_apply",
+            qq=admin.qq,
+            device_id=admin.device_id,
+            ip_hash=get_client_ip(request),
+            detail={"operation_id": operation.get("operation_id"), "diagnostic_code": operation.get("diagnostic_code"), "selected_source_id": operation.get("selected_source_id")},
+            outcome="ok" if state == "succeeded" else "unknown" if state == "unknown" else "error",
+        )
+        publish_runtime_event(
+            "plugin_update.updated",
+            payload={
+                "operation_id": operation.get("operation_id"),
+                "state": state,
+                "diagnostic_code": operation.get("diagnostic_code"),
+            },
+        )
+        return result
+
+    @router.get("/plugin-update/operations/{operation_id}")
+    async def plugin_update_operation(
+        operation_id: str,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from ...core import plugin_update_manager
+
+        operation = plugin_update_manager.get_update_operation(operation_id)
+        if operation is None:
+            raise HTTPException(status_code=404, detail={"code": "plugin_update_operation_not_found", "message": "未找到该更新操作。"})
+        return operation
+
+    @router.get("/plugin-update/history")
+    async def plugin_update_history(
+        limit: int = Query(default=30, ge=1, le=100),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        from ...core import plugin_update_manager
+
+        result = await plugin_update_manager.get_plugin_update_history(
+            plugin_config=getattr(runtime, "plugin_config", None),
+            limit=limit,
+            refresh=False,
+        )
+        operations = list(result.get("operations") or [])
+        return {
+            "items": operations,
+            "total": len(operations),
+            "commits": list(result.get("history") or []),
+            "pending_commits": list(result.get("pending_history") or []),
+            "source": result.get("source") if isinstance(result.get("source"), dict) else {},
+            "diagnostic_code": "plugin_update_history_ready",
         }
 
     @router.get("/qzone/capabilities")
