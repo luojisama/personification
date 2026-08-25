@@ -30,6 +30,11 @@ describe("新版业务页面", () => {
     expect(within(primary).getAllByRole("button").map((button) => button.textContent?.trim())).toEqual(["运行", "拟人与记忆", "能力", "运维"]);
     expect(screen.getByRole("navigation", { name: "运行二级导航" })).toHaveTextContent("主动诊断");
     expect(screen.getByRole("navigation", { name: "主动诊断三级导航" })).toHaveTextContent("概览最近记录下一可用窗口");
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索页面或功能" }), { target: { value: "插件更新" } });
+    const updateResult = screen.getByRole("option", { name: /更新与测速/ });
+    expect(updateResult).toBeInTheDocument();
+    fireEvent.click(updateResult);
+    expect(screen.getByRole("navigation", { name: "插件管理三级导航" })).toHaveTextContent("更新与测速");
     fireEvent.click(screen.getByTitle("收起一级导航"));
     expect(window.localStorage.getItem("personification.nav.collapsed")).toBe("1");
     expect(await screen.findByText("Shiro")).toBeInTheDocument();

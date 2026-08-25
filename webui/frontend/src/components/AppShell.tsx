@@ -13,6 +13,26 @@ function nextTheme(current: (typeof THEMES)[number]) {
   return THEMES[(THEMES.indexOf(current) + 1) % THEMES.length] ?? "minimal";
 }
 
+function compactSearchText(value: string) {
+  return value.toLocaleLowerCase("zh-CN").replace(/[\s/·_-]+/g, "");
+}
+
+function includesInOrder(haystack: string, needle: string) {
+  let cursor = 0;
+  for (const character of haystack) {
+    if (character === needle[cursor]) cursor += 1;
+    if (cursor === needle.length) return true;
+  }
+  return needle.length === 0;
+}
+
+function navigationSearchText(item: (typeof NAVIGATION_ITEMS)[number]) {
+  const parent = NAVIGATION_ITEMS.find((candidate) => candidate.children.some((child) => child.id === item.id));
+  const page = parent ?? item;
+  const group = NAVIGATION_GROUPS.find((candidate) => candidate.id === page.parent_id);
+  return [group?.label ?? "", page.label, item.label, ...page.aliases, ...item.aliases].join(" ");
+}
+
 export function AppShell() {
   return <BotProvider><ShellContent /></BotProvider>;
 }
@@ -29,10 +49,13 @@ function ShellContent() {
   const context = navigationContext(location.pathname);
   const targetTheme = nextTheme(theme);
   const results = useMemo(() => {
-    const needle = search.trim().toLocaleLowerCase("zh-CN");
+    const needle = compactSearchText(search.trim());
     if (!needle) return [];
     return [...NAVIGATION_ITEMS, ...NAVIGATION_LEAVES]
-      .filter((item) => [item.label, ...item.aliases].join(" ").toLocaleLowerCase("zh-CN").includes(needle))
+      .filter((item) => {
+        const haystack = compactSearchText(navigationSearchText(item));
+        return haystack.includes(needle) || includesInOrder(haystack, needle);
+      })
       .slice(0, 10);
   }, [search]);
   const visit = (path: string) => {
