@@ -167,13 +167,17 @@ export function PluginKnowledgePage() {
 
 function UpdateSourceTable({ operation }: { operation: PluginUpdateOperation | undefined }) {
   const probes = operation?.probes ?? [];
-  return <BusinessTable rows={probes as unknown as BusinessRecord[]} rowKey={(row, index) => textAt(row, "source_id") + index} emptyCode="plugin_update_probes_empty" emptyText="尚未执行五源真实 Git 测速。" columns={[
-    { key: "rank", label: "排名", render: (row) => row.rank ? `#${String(row.rank)}` : "—" },
-    { key: "display_name", label: "更新源", render: (row) => <><strong>{textAt(row, "display_name")}</strong><br /><code>{textAt(row, "kind")}</code></> },
-    { key: "latency_ms", label: "延迟", render: (row) => row.latency_ms == null ? "—" : `${String(row.latency_ms)} ms` },
-    { key: "state", label: "Git 探测", render: (row) => <SafeStatus row={row} /> },
-    { key: "diagnostic_code", label: "诊断码", render: (row) => <code>{textAt(row, "diagnostic_code")}</code> },
-  ]} />;
+  const selected = probes.find((probe) => probe.source_id === operation?.selected_source_id);
+  return <>
+    <BusinessTable rows={probes as unknown as BusinessRecord[]} rowKey={(row, index) => textAt(row, "source_id") + index} emptyCode="plugin_update_probes_empty" emptyText="尚未执行五源真实 Git 测速。" columns={[
+      { key: "rank", label: "排名", render: (row) => row.rank ? `#${String(row.rank)}` : "—" },
+      { key: "display_name", label: "更新源", render: (row) => <><strong>{textAt(row, "display_name")}</strong><br /><code>{textAt(row, "kind")}</code></> },
+      { key: "latency_ms", label: "延迟", render: (row) => row.latency_ms == null ? "—" : `${String(row.latency_ms)} ms` },
+      { key: "state", label: "Git 探测", render: (row) => <SafeStatus row={row} /> },
+      { key: "diagnostic_code", label: "诊断码", render: (row) => <code>{textAt(row, "diagnostic_code")}</code> },
+    ]} />
+    {operation?.selected_source_id && <p className="muted">本次选中源：<strong>{selected?.display_name ?? operation.selected_source_id}</strong> · <code>{operation.selected_source_id}</code></p>}
+  </>;
 }
 
 export function PluginManagementPage() {

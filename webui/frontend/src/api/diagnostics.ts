@@ -19,6 +19,7 @@ const CODE_LABELS: Record<string, string> = {
   sse_connection_failed: "实时事件流连接失败",
   git_source_benchmark_ready: "更新源测速完成",
   git_source_benchmark_all_failed: "所有更新源测速失败",
+  plugin_update_status_ready: "更新检查完成",
   plugin_update_already_current: "插件已经是最新版本",
   plugin_update_applied: "插件更新完成",
   plugin_update_dirty: "工作区存在未提交修改",

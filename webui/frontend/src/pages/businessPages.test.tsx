@@ -57,8 +57,9 @@ describe("新版业务页面", () => {
     const apply = vi.spyOn(resources, "pluginUpdateApply").mockResolvedValue({ ok: true, updated: true, operation: { ...operation, state: "succeeded" }, status: await resources.pluginUpdateStatus(), message: "已更新" });
     render(<QueryClientProvider client={client()}><MemoryRouter initialEntries={["/capability/plugins/update"]}><Routes><Route path="/capability/plugins/:section" element={<PluginManagementPage />} /></Routes></MemoryRouter></QueryClientProvider>);
     fireEvent.click(await screen.findByRole("button", { name: "重新测速" }));
-    expect(await screen.findByText("镜像 1")).toBeInTheDocument();
+    expect((await screen.findAllByText("镜像 1")).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("官方源")).toBeInTheDocument();
+    expect(screen.getByText(/本次选中源/)).toBeInTheDocument();
     expect(screen.getByText("更新源测速完成")).toBeInTheDocument();
     expect(screen.queryByText("API 请求失败")).not.toBeInTheDocument();
     const applyButton = screen.getByRole("button", { name: "执行更新" });
