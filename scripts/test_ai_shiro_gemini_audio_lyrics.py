@@ -1,8 +1,13 @@
-"""只用音频测试 ai.shiro.team Gemini 的日文歌词理解。
+"""分别测试 ai.shiro.team Gemini 的纯音频与视频容器歌词理解。
 
-此脚本的边界刻意严格：它只允许 ffprobe 检查音轨、ffmpeg 抽取首条音轨，
-再以 Gemini ``inlineData(audio/mpeg)`` 上传临时音频。它不会抽帧、读取图像、
-上传视频容器，也不会把文件名提供给模型。
+``--input-mode audio`` 是严格的纯音频测试：它只允许 ffprobe 检查音轨、
+ffmpeg 抽取首条音轨，再以 Gemini ``inlineData(audio/mp3)`` 上传临时 MP3；
+不会抽帧、读取图像或上传视频容器。
+
+``--input-mode video`` 上传同一来源窗口转码得到的 ``inlineData(video/mp4)``，
+允许模型使用画面与音轨，只验证视频容器媒体路线，不能作为纯音频理解证明。
+默认 ``--input-mode both`` 按顺序分别执行 A（audio）和 B（video）。无论哪一种
+模式，本地文件名都不会提供给模型。
 
 用法（密钥不会写入命令行）：
 
@@ -670,7 +675,9 @@ def read_api_key(environment_name: str, *, no_prompt: bool) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="仅上传音频的 ai.shiro.team Gemini 歌词测试")
+    parser = argparse.ArgumentParser(
+        description="ai.shiro.team Gemini 歌词测试：A 纯音频、B 视频容器，默认两者都执行"
+    )
     parser.add_argument("--video-dir", type=Path, default=DEFAULT_VIDEO_DIRECTORY, help="仅用于本地定位目标视频")
     parser.add_argument("--video-name", default=DEFAULT_VIDEO_NAME, help="精确目标文件名；不会发送给模型")
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help="Gemini API 根地址")
@@ -684,7 +691,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-audio-bytes", type=int, default=DEFAULT_MAX_AUDIO_BYTES, help="允许上传的临时音频上限")
     parser.add_argument("--max-video-bytes", type=int, default=DEFAULT_MAX_VIDEO_BYTES, help="允许上传的临时 MP4 上限")
     parser.add_argument("--window-seconds", type=float, default=DEFAULT_WINDOW_SECONDS, help="从 MV 开头截取的共同窗口秒数（最大 90）")
-    parser.add_argument("--input-mode", choices=("audio", "video", "both"), default="both", help="默认依次执行纯音频 A 与视频容器 B")
+    parser.add_argument(
+        "--input-mode",
+        choices=("audio", "video", "both"),
+        default="both",
+        help="audio 只上传 audio/mp3；video 上传 video/mp4；both 默认依次执行 A/B",
+    )
     parser.add_argument("--no-prompt", action="store_true", help="密钥缺失时直接失败，适用于自动化")
     return parser
 

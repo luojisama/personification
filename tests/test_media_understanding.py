@@ -1380,7 +1380,7 @@ def test_large_local_video_uses_gemini_files_api_and_deletes_remote_file(monkeyp
     video = tmp_path / "large.mp4"
     with video.open("wb") as handle:
         handle.truncate(media_understanding._VIDEO_INLINE_MAX_BYTES + 1)
-    captured: dict[str, object] = {"deleted": False}
+    captured: dict[str, object] = {"requests": []}
 
     class _Response:
         status_code = 200
@@ -1405,18 +1405,25 @@ def test_large_local_video_uses_gemini_files_api_and_deletes_remote_file(monkeyp
         async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
             return None
 
-        async def post(self, url, json=None, content=None, **_kwargs):  # noqa: ANN001, ANN201
+        async def post(self, url, json=None, content=None, **kwargs):  # noqa: ANN001, ANN201
+            captured["requests"].append(("post", url, kwargs))  # type: ignore[index]
             if "/upload/v1beta/files" in url:
                 return _Response(headers={"x-goog-upload-url": "https://upload.example/session"})
             if url == "https://upload.example/session":
                 assert hasattr(content, "read")
                 return _Response(
-                    {"file": {"name": "files/file-1", "uri": "https://files.example/file-1", "state": "ACTIVE"}}
+                    {"file": {"name": "files/file-1", "uri": "https://files.example/file-1", "state": "PROCESSING"}}
                 )
             captured["generate_payload"] = json
             return _Response({"candidates": [{"content": {"parts": [{"text": "large video ok"}]}}]})
 
-        async def delete(self, url, **_kwargs):  # noqa: ANN001, ANN201
+        async def get(self, url, **kwargs):  # noqa: ANN001, ANN201
+            captured["requests"].append(("get", url, kwargs))  # type: ignore[index]
+            assert url.endswith("/v1beta/files/file-1")
+            return _Response({"name": "files/file-1", "uri": "https://files.example/file-1", "state": "ACTIVE"})
+
+        async def delete(self, url, **kwargs):  # noqa: ANN001, ANN201
+            captured["requests"].append(("delete", url, kwargs))  # type: ignore[index]
             captured["deleted"] = url.endswith("/v1beta/files/file-1")
             return _Response()
 
@@ -1428,6 +1435,7 @@ def test_large_local_video_uses_gemini_files_api_and_deletes_remote_file(monkeyp
             model="gemini-test",
             prompt="understand",
             video_refs=[str(video)],
+            auth_mode="bearer",
         )
     )
     assert result == "large video ok"
@@ -1436,3 +1444,16 @@ def test_large_local_video_uses_gemini_files_api_and_deletes_remote_file(monkeyp
     assert parts[-1] == {"text": "understand"}
     assert captured["generate_payload"]["generationConfig"] == {"temperature": 0.2}
     assert captured["deleted"] is True
+    requests = captured["requests"]  # type: ignore[assignment]
+    assert [item[0] for item in requests] == ["post", "post", "get", "post", "delete"]
+    for _method, _url, kwargs in requests:
+        assert kwargs["headers"]["User-Agent"] == media_understanding._GEMINI_COMPATIBILITY_USER_AGENT
+    start_headers = requests[0][2]["headers"]
+    assert start_headers["Authorization"] == "Bearer key"
+    session_headers = requests[1][2]["headers"]
+    assert "Authorization" not in session_headers
+    assert "x-goog-api-key" not in session_headers
+    assert requests[1][2].get("params") is None
+    assert requests[1][2]["headers"]["X-Goog-Upload-Command"] == "upload, finalize"
+    assert requests[2][2]["headers"]["Authorization"] == "Bearer key"
+    assert requests[4][2]["headers"]["Authorization"] == "Bearer key"

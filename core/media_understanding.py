@@ -1215,8 +1215,8 @@ async def _upload_gemini_video_file(
         return await client.post(
             upload_endpoint,
             headers={
+                **_gemini_headers(),
                 **auth.headers,
-                "Content-Type": "application/json",
                 "X-Goog-Upload-Protocol": "resumable",
                 "X-Goog-Upload-Command": "start",
                 "X-Goog-Upload-Header-Content-Length": str(size),
@@ -1246,6 +1246,7 @@ async def _upload_gemini_video_file(
         upload_response = await client.post(
             upload_url,
             headers={
+                "User-Agent": _GEMINI_COMPATIBILITY_USER_AGENT,
                 "Content-Length": str(size),
                 "X-Goog-Upload-Offset": "0",
                 "X-Goog-Upload-Command": "upload, finalize",
@@ -1267,7 +1268,11 @@ async def _upload_gemini_video_file(
             raise TimeoutError("gemini_video_file_processing_timeout")
 
         async def _poll(auth):  # noqa: ANN001, ANN202
-            return await client.get(file_endpoint, headers=auth.headers, params=auth.params)
+            return await client.get(
+                file_endpoint,
+                headers={"User-Agent": _GEMINI_COMPATIBILITY_USER_AGENT, **auth.headers},
+                params=auth.params,
+            )
 
         poll_result = await request_with_gemini_auth(
             endpoint=file_endpoint,
@@ -1300,7 +1305,11 @@ async def _delete_gemini_file(
     endpoint = f"{_gemini_api_root(base_url)}/{str(file_name or '')}"
 
     async def _delete(auth):  # noqa: ANN001, ANN202
-        return await client.delete(endpoint, headers=auth.headers, params=auth.params)
+        return await client.delete(
+            endpoint,
+            headers={"User-Agent": _GEMINI_COMPATIBILITY_USER_AGENT, **auth.headers},
+            params=auth.params,
+        )
 
     result = await request_with_gemini_auth(
         endpoint=endpoint,
