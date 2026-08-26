@@ -217,7 +217,105 @@ def test_gemini_media_uses_only_google_api_key_header(monkeypatch) -> None:  # n
     assert result == "ok"
     assert captured["headers"]["x-goog-api-key"] == "media-secret"
     assert "Authorization" not in captured["headers"]
+    assert captured["headers"]["User-Agent"] == media_understanding._GEMINI_COMPATIBILITY_USER_AGENT
     assert captured["params"] == {}
+    assert captured["json"]["generationConfig"] == {"temperature": 0.2}
+
+
+def test_gemini_media_compatibility_payload_orders_local_media_before_text_and_propagates_timeout(
+    monkeypatch, tmp_path: Path
+) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+    audio = tmp_path / "sample.mp3"
+    audio.write_bytes(b"mp3-bytes")
+    video = tmp_path / "sample.mp4"
+    video.write_bytes(b"mp4-bytes")
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):  # noqa: ANN201
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+    class _Client:
+        def __init__(self, **kwargs):  # noqa: ANN001
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def post(self, url, headers=None, params=None, json=None):  # noqa: ANN001, ANN201
+            captured.update(headers=headers or {}, params=params or {}, json=json or {})
+            return _Resp()
+
+    monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
+    result = asyncio.run(
+        media_understanding._call_gemini_media(
+            api_key="media-secret",
+            base_url="https://gemini-media.example",
+            model="gemini-test",
+            auth_mode="bearer",
+            prompt="understand",
+            audio_refs=[str(audio)],
+            video_refs=[str(video)],
+            timeout=177.0,
+        )
+    )
+
+    assert result == "ok"
+    assert captured["headers"]["Authorization"] == "Bearer media-secret"
+    assert "x-goog-api-key" not in captured["headers"]
+    assert captured["headers"]["User-Agent"] == media_understanding._GEMINI_COMPATIBILITY_USER_AGENT
+    payload = captured["json"]
+    assert payload["generationConfig"] == {"temperature": 0.2}
+    parts = payload["contents"][0]["parts"]
+    assert parts[0]["inlineData"]["mimeType"] == "video/mp4"
+    assert parts[1]["inlineData"]["mimeType"] == "audio/mp3"
+    assert parts[-1] == {"text": "understand"}
+    assert captured["client_kwargs"]["follow_redirects"] is False
+    assert captured["client_kwargs"]["timeout"].read == 177.0
+
+
+def test_primary_gemini_audio_route_passes_provider_timeout(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+
+    async def _fake_gemini(**kwargs):  # noqa: ANN003, ANN202
+        captured.update(kwargs)
+        return "audio evidence"
+
+    monkeypatch.setattr(media_understanding, "_call_gemini_media", _fake_gemini)
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(),
+        logger=SimpleNamespace(),
+        get_configured_api_providers=lambda: [
+            {
+                "name": "gemini",
+                "api_type": "gemini",
+                "api_key": "key",
+                "model": "gemini-test",
+                "media_protocol": "gemini_native",
+                "gemini_auth_mode": "bearer",
+                "timeout": 177,
+            }
+        ],
+    )
+    result = asyncio.run(
+        media_understanding._try_primary_audio_routes(
+            runtime=runtime,
+            prompt="理解音频",
+            refs=["https://cdn.example/audio.mp3"],
+            route_name="agent",
+        )
+    )
+    assert result == "audio evidence"
+    assert captured["timeout"] == 177.0
+    assert captured["auth_mode"] == "bearer"
 
 
 def test_gemini_vision_uses_only_google_api_key_header(monkeypatch) -> None:  # noqa: ANN001
@@ -1334,5 +1432,7 @@ def test_large_local_video_uses_gemini_files_api_and_deletes_remote_file(monkeyp
     )
     assert result == "large video ok"
     parts = captured["generate_payload"]["contents"][0]["parts"]  # type: ignore[index]
-    assert parts[1]["fileData"]["fileUri"] == "https://files.example/file-1"
+    assert parts[0]["fileData"]["fileUri"] == "https://files.example/file-1"
+    assert parts[-1] == {"text": "understand"}
+    assert captured["generate_payload"]["generationConfig"] == {"temperature": 0.2}
     assert captured["deleted"] is True

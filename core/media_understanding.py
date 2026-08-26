@@ -84,6 +84,10 @@ _QWEN_INLINE_MAX_BYTES = _QWEN_RAW_INLINE_MAX_BYTES
 _MIMO_BASE64_MAX_BYTES = 50 * 1024 * 1024
 _MIMO_RAW_INLINE_MAX_BYTES = (_MIMO_BASE64_MAX_BYTES * 3 // 4) - 4
 _GEMINI_DEFAULT_MODEL = "gemini-2.0-flash"
+_GEMINI_COMPATIBILITY_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 _QWEN_OMNI_DEFAULT_MODEL = "qwen3.5-omni-plus"
 _MIMO_DEFAULT_MODEL = "mimo-v2.5"
 _GENERIC_REFUSAL_TEXTS = {
@@ -132,6 +136,16 @@ def _is_provider_usable(provider: dict[str, Any]) -> bool:
     if api_type in {"openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}:
         return True
     return bool(str(provider.get("api_key", "") or "").strip())
+
+
+def _media_request_timeout(provider: dict[str, Any], default: float = 200.0) -> float:
+    """读取 Provider 的单次超时，避免媒体请求被固定短超时截断。"""
+
+    try:
+        configured = float(provider.get("timeout", default) or default)
+    except (TypeError, ValueError):
+        configured = default
+    return max(20.0, min(configured, 600.0))
 
 
 def _primary_provider_candidates(runtime: Any) -> list[dict[str, Any]]:
@@ -450,6 +464,7 @@ async def _try_primary_video_routes(
                     auth_mode=str(provider.get("gemini_auth_mode", "auto") or "auto"),
                     prompt=prompt,
                     video_refs=refs,
+                    timeout=_media_request_timeout(provider),
                 )
             elif adapter.protocol == MEDIA_PROTOCOL_QWEN:
                 result = await _call_qwen_omni_media(
@@ -528,6 +543,7 @@ async def _try_primary_audio_routes(
                     auth_mode=str(provider.get("gemini_auth_mode", "auto") or "auto"),
                     prompt=prompt,
                     audio_refs=refs,
+                    timeout=_media_request_timeout(provider),
                 )
             elif adapter.protocol == MEDIA_PROTOCOL_QWEN:
                 result = await _call_qwen_omni_media(
@@ -1098,7 +1114,10 @@ def _gemini_api_root(base_url: str) -> str:
 
 
 def _gemini_headers() -> dict[str, str]:
-    return {"Content-Type": "application/json"}
+    return {
+        "Content-Type": "application/json",
+        "User-Agent": _GEMINI_COMPATIBILITY_USER_AGENT,
+    }
 
 
 def _gemini_image_part(image_ref: str) -> dict[str, Any]:
@@ -1169,6 +1188,8 @@ def _gemini_audio_part(audio_ref: str) -> dict[str, Any]:
     if len(payload) > _VIDEO_INLINE_MAX_BYTES:
         raise ValueError("audio_file_too_large_for_inline_data")
     mime_type, _ = mimetypes.guess_type(str(path))
+    if path.suffix.lower() == ".mp3":
+        mime_type = "audio/mp3"
     return {
         "inlineData": {
             "mimeType": mime_type or "audio/wav",
@@ -1302,13 +1323,14 @@ async def _call_gemini_media(
     video_refs: Sequence[str] = (),
     audio_refs: Sequence[str] = (),
     auth_mode: str = "auto",
+    timeout: float = 200.0,
 ) -> str:
-    parts: list[dict[str, Any]] = [{"text": str(prompt or "").strip() or "请分析这段媒体内容"}]
+    parts: list[dict[str, Any]] = []
     for ref in image_refs:
         parts.append(_gemini_image_part(str(ref or "").strip()))
     endpoint = _gemini_endpoint(base_url, model or _GEMINI_DEFAULT_MODEL)
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(90.0, connect=15.0),
+        timeout=httpx.Timeout(max(20.0, min(float(timeout or 200.0), 600.0)), connect=15.0),
         follow_redirects=False,
     ) as client:
         uploaded_files: list[str] = []
@@ -1345,7 +1367,11 @@ async def _call_gemini_media(
                     )
                     parts.append(part)
                     uploaded_files.append(file_name)
-            payload = {"contents": [{"role": "user", "parts": parts}]}
+            parts.append({"text": str(prompt or "").strip() or "请分析这段媒体内容"})
+            payload = {
+                "contents": [{"role": "user", "parts": parts}],
+                "generationConfig": {"temperature": 0.2},
+            }
 
             async def _send(auth):  # noqa: ANN001, ANN202
                 return await client.post(
@@ -1605,6 +1631,7 @@ async def analyze_videos_with_route_or_fallback(
                     auth_mode=fallback.get("gemini_auth_mode", "auto"),
                     prompt=prompt,
                     video_refs=refs,
+                    timeout=timeout,
                 )
         except Exception as exc:
             _log_warning(runtime, f"[video] official API route failed: {sanitize_text(exc)}")
@@ -1956,6 +1983,7 @@ async def analyze_audios_with_route_or_fallback(
                     auth_mode=fallback.get("gemini_auth_mode", "auto"),
                     prompt=prompt,
                     audio_refs=refs,
+                    timeout=timeout,
                 )
         except Exception as exc:
             _log_warning(runtime, f"[audio] external fullmodal route failed: {sanitize_text(exc)}")
