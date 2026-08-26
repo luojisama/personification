@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from plugin.personification.agent.tool_registry import AgentTool
@@ -49,6 +50,7 @@ _VISION_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+", re.MULTILINE)
 _VISION_LIST_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", re.MULTILINE)
 _VISION_BOLD_RE = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1", re.DOTALL)
 _VISION_XML_RE = re.compile(r"</?[A-Za-z][^>]{0,200}>", re.IGNORECASE)
+_GEMINI_INLINE_MAX_BYTES = 20 * 1024 * 1024
 
 
 def _strip_vision_markdown(value: str) -> str:
@@ -107,6 +109,45 @@ def _merge_explicit_and_current_refs(
         if value and value not in merged:
             merged.append(value)
     return merged
+
+
+def _safe_transport_diagnostic(refs: list[str], selected_route: str) -> dict[str, Any]:
+    """Describe transport without retaining a URL, token, or local path."""
+
+    if not refs:
+        return {
+            "source_kind": "local",
+            "provider_transport": "none",
+            "size_bytes": None,
+            "diagnostic_code": "media_missing",
+        }
+    if any(str(ref).startswith(("http://", "https://")) for ref in refs):
+        return {
+            "source_kind": "explicit_public",
+            "provider_transport": "external_url",
+            "size_bytes": None,
+            "diagnostic_code": "explicit_public_media",
+        }
+    size = 0
+    size_known = True
+    for ref in refs:
+        try:
+            size += Path(ref).stat().st_size
+        except OSError:
+            size_known = False
+    route = str(selected_route or "")
+    if route in {"video_primary_gemini", "audio_primary_gemini"}:
+        transport = "files_api" if size_known and size > _GEMINI_INLINE_MAX_BYTES else "inline_data"
+    elif route in {"video_primary_agy", "audio_primary_agy"}:
+        transport = "inline_data"
+    else:
+        transport = "local_file"
+    return {
+        "source_kind": "local",
+        "provider_transport": transport,
+        "size_bytes": size if size_known else None,
+        "diagnostic_code": "provider_media_ready" if selected_route else "provider_media_unavailable",
+    }
 
 
 async def analyze_images(
@@ -199,6 +240,7 @@ async def analyze_images(
                 "kind": "video",
                 "selected_route": video_mode if video_output else "",
                 "attempts": video_attempts,
+                **_safe_transport_diagnostic(video_refs, video_mode if video_output else ""),
                 "diagnostic_codes": [
                     "gemini_web_route_fallback_used"
                     for item in video_attempts
@@ -227,6 +269,7 @@ async def analyze_images(
                 "kind": "audio",
                 "selected_route": audio_mode if audio_output else "",
                 "attempts": audio_attempts,
+                **_safe_transport_diagnostic(audio_refs, audio_mode if audio_output else ""),
                 "diagnostic_codes": [
                     "gemini_web_route_fallback_used"
                     for item in audio_attempts

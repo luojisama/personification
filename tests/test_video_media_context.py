@@ -65,8 +65,9 @@ def test_vision_result_records_gemini_web_route_fallback(monkeypatch) -> None:  
     assert route["diagnostic_codes"] == ["gemini_web_route_fallback_used"]
 
 
-def test_onebot_file_video_reaches_gemini_web_after_lazy_resolution(
+def test_onebot_file_video_reaches_vision_route_only_after_local_materialization(
     monkeypatch,
+    tmp_path,
 ) -> None:  # noqa: ANN001
     refs = turn_media.extract_media_from_message(
         [
@@ -93,9 +94,35 @@ def test_onebot_file_video_reaches_gemini_web_after_lazy_resolution(
                 }
             }
 
-    resolved = asyncio.run(turn_media.resolve_onebot_media_refs(refs, _Bot()))
+    async def _download(_url, destination, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        path = type(tmp_path)(destination)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"qq-video")
+        return SimpleNamespace(
+            path=path,
+            content_type="video/mp4",
+            final_url="",
+            size=len(b"qq-video"),
+        )
+
+    monkeypatch.setattr(turn_media, "download_public_media_to_path", _download)
+    lease = asyncio.run(
+        turn_media.materialize_onebot_media_refs(
+            refs,
+            _Bot(),
+            SimpleNamespace(
+                personification_data_dir=str(tmp_path / "data"),
+                personification_video_max_bytes=1024 * 1024,
+                personification_video_download_timeout=30,
+            ),
+            None,
+            30,
+        )
+    )
+    resolved = lease.refs
     assert resolved[0].origin == "quoted"
     assert resolved[0].owner_user_id == "sender"
+    assert not resolved[0].ref.startswith("http")
 
     captured: dict[str, object] = {}
 
@@ -134,12 +161,16 @@ def test_onebot_file_video_reaches_gemini_web_after_lazy_resolution(
     finally:
         sticker_impl.reset_current_image_context(token)
 
-    assert captured["video_refs"] == [
-        "https://multimedia.nt.qq.com.cn/download/qq-file-video"
-    ]
+    assert captured["video_refs"] == [resolved[0].ref]
     assert result["scene_summary"] == "Gemini已理解文件视频"
     assert result["analysis_route"] == "video_gemini_web"
     assert result["media_routes"][0]["selected_route"] == "video_gemini_web"
+    assert result["media_routes"][0]["source_kind"] == "local"
+    assert result["media_routes"][0]["provider_transport"] == "local_file"
+    assert result["media_routes"][0]["size_bytes"] == len(b"qq-video")
+    runtime_dir = lease.runtime_dir
+    lease.cleanup()
+    assert runtime_dir is not None and not runtime_dir.exists()
 
 
 def test_invalid_explicit_video_token_does_not_mask_resolved_current_video(

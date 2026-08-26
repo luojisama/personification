@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -280,6 +281,21 @@ def test_gemini_media_compatibility_payload_orders_local_media_before_text_and_p
     assert parts[-1] == {"text": "understand"}
     assert captured["client_kwargs"]["follow_redirects"] is False
     assert captured["client_kwargs"]["timeout"].read == 177.0
+
+
+def test_qq_sized_local_mp4_is_inline_data_without_transient_url(tmp_path: Path) -> None:
+    video = tmp_path / "qq-materialized.mp4"
+    with video.open("wb") as handle:
+        handle.truncate(3_189_592)
+
+    part = media_understanding._gemini_video_part(str(video))
+
+    assert set(part) == {"inlineData"}
+    assert part["inlineData"]["mimeType"] == "video/mp4"
+    decoded = base64.b64decode(part["inlineData"]["data"])
+    assert len(decoded) == 3_189_592
+    assert "fileData" not in part
+    assert "multimedia.nt.qq.com.cn" not in str(part)
 
 
 def test_primary_gemini_audio_route_passes_provider_timeout(monkeypatch) -> None:  # noqa: ANN001

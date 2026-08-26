@@ -69,13 +69,15 @@ from ...core.tts_service import extract_persona_tts_config
 from ...core.turn_media import (
     attach_safe_visual_summary,
     build_media_availability,
+    cleanup_turn_media_lease,
     coerce_turn_media,
     extract_turn_media_from_event,
     media_from_batched_events,
     media_summary_timeout_seconds,
+    materialize_onebot_media_refs,
     normalize_safe_visual_summary,
+    register_turn_media_lease,
     render_turn_media_grounding,
-    resolve_onebot_media_refs,
     serialize_turn_media,
     summarize_media_resolution,
 )
@@ -703,6 +705,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
         raise
 
     finally:
+        cleanup_turn_media_lease(state)
         release_reply_commit(state)
         if trace_mod is not None and trace_id and not cancelled:
             try:
@@ -2431,15 +2434,18 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             is_direct_mention=is_direct_mention,
             has_image_input=bool(tool_image_urls or tool_video_urls or tool_audio_urls),
         ):
-            turn_media_context = await resolve_onebot_media_refs(
+            media_lease = await materialize_onebot_media_refs(
                 turn_media_context,
                 bot,
-                video_timeout_seconds=float(
+                runtime.plugin_config,
+                response_deadline if isinstance(response_deadline, (int, float)) else None,
+                float(
                     getattr(runtime.plugin_config, "personification_video_analysis_timeout", 180.0)
                     or 180.0
                 ),
             )
-            state["turn_media_context"] = serialize_turn_media(turn_media_context)
+            register_turn_media_lease(state, media_lease)
+            turn_media_context = media_lease.refs
             media_resolution = summarize_media_resolution(turn_media_context)
             if media_resolution["videos"] or media_resolution["audios"]:
                 try:
@@ -2448,14 +2454,16 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     reply_turn_trace.record_stage(
                         key="turn_media_materialized",
                         label="媒体文件就绪",
-                        status="warn" if media_resolution["video_failed"] else "ok",
+                        status="warn" if media_lease.summary.get("failed") else "ok",
                         detail=(
                             f"videos={media_resolution['videos']} "
                             f"video_usable={media_resolution['video_usable']} "
                             f"video_failed={media_resolution['video_failed']} "
                             f"audios={media_resolution['audios']} "
+                            f"materialized={media_lease.summary.get('materialized', 0)} "
+                            f"failed={media_lease.summary.get('failed', 0)} "
                             "routes="
-                            + (",".join(media_resolution["resolution_codes"]) or "direct")
+                            + (",".join(media_resolution["resolution_codes"]) or "unknown")
                         ),
                         hint="仅记录媒体就绪计数与稳定路由码，不记录文件标识、路径或下载地址",
                     )

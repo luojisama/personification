@@ -428,7 +428,8 @@ def test_read_keyring_token_returns_none_when_missing() -> None:
 def test_antigravity_gemini_parts_accept_video_and_audio_files(tmp_path) -> None:  # noqa: ANN001
     video = tmp_path / "clip.mp4"
     audio = tmp_path / "voice.wav"
-    video.write_bytes(b"video-bytes")
+    with video.open("wb") as handle:
+        handle.truncate(3_189_592)
     audio.write_bytes(b"audio-bytes")
 
     video_part = impl._gemini_part_from_dict(
@@ -439,7 +440,9 @@ def test_antigravity_gemini_parts_accept_video_and_audio_files(tmp_path) -> None
     )
 
     assert video_part["inlineData"]["mimeType"] == "video/mp4"
-    assert base64.b64decode(video_part["inlineData"]["data"]) == b"video-bytes"
+    assert len(base64.b64decode(video_part["inlineData"]["data"])) == 3_189_592
+    assert "fileData" not in video_part
+    assert "multimedia.nt.qq.com.cn" not in str(video_part)
     assert audio_part["inlineData"]["mimeType"] in {"audio/x-wav", "audio/wav"}
     assert base64.b64decode(audio_part["inlineData"]["data"]) == b"audio-bytes"
 

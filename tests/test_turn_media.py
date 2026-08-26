@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 
@@ -242,20 +244,22 @@ def test_record_segment_keeps_audio_provenance_without_eager_conversion() -> Non
     assert refs[0].message_id == "record-message"
 
 
-def test_onebot_record_is_resolved_to_wav_only_on_demand() -> None:
+def test_onebot_record_is_resolved_to_wav_only_on_demand(tmp_path: Path) -> None:
     event = _event("speaker", "record-message", _record("opaque-record-token"))
     refs = turn_media.extract_turn_media_from_event(event)
     calls: list[dict[str, str]] = []
+    record_path = tmp_path / "record.wav"
+    record_path.write_bytes(b"audio")
 
     class _Bot:
         async def get_record(self, **kwargs):  # noqa: ANN003, ANN201
             calls.append(dict(kwargs))
-            return {"file": "C:\\tmp\\record.wav"}
+            return {"file": str(record_path)}
 
     resolved = asyncio.run(turn_media.resolve_onebot_audio_refs(refs, _Bot()))
 
     assert calls == [{"file": "opaque-record-token", "out_format": "wav"}]
-    assert resolved[0].ref == "C:\\tmp\\record.wav"
+    assert resolved[0].ref == str(record_path.resolve())
     assert resolved[0].file_id == "opaque-record-token"
     assert resolved[0].origin == "current"
 
@@ -416,21 +420,270 @@ def test_group_file_video_uses_group_download_url_with_preserved_group() -> None
     assert resolved[0].resolution_code == "onebot_group_file_url"
 
 
-def test_resolved_video_url_does_not_call_onebot_again() -> None:
+def test_video_with_file_id_and_url_still_prefers_onebot_local_file(tmp_path: Path) -> None:
     event = _event(
         "speaker",
         "video-message",
         _video("opaque-token", url="https://cdn.example/video.mp4"),
     )
     refs = turn_media.extract_turn_media_from_event(event)
+    video_path = tmp_path / "local.mp4"
+    video_path.write_bytes(b"video")
+    calls: list[dict[str, str]] = []
 
     class _Bot:
-        async def call_api(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN201
-            raise AssertionError("resolved HTTPS video must not call get_file")
+        async def get_file(self, **kwargs):  # noqa: ANN003, ANN201
+            calls.append(dict(kwargs))
+            return {
+                "file": str(video_path),
+                "url": "https://cdn.example/video.mp4",
+            }
 
     resolved = asyncio.run(turn_media.resolve_onebot_video_refs(refs, _Bot()))
 
-    assert resolved == refs
+    assert calls == [{"file": "opaque-token"}]
+    assert resolved[0].ref == str(video_path.resolve())
+    assert resolved[0].resolution_code == "onebot_get_file_local"
+
+
+def _media_config(tmp_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        personification_data_dir=str(tmp_path / "data"),
+        personification_video_max_bytes=16 * 1024 * 1024,
+        personification_video_download_timeout=30.0,
+    )
+
+
+def test_materialize_video_uses_onebot_local_before_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_path = tmp_path / "onebot.mp4"
+    video_path.write_bytes(b"local-video")
+    refs = turn_media.extract_turn_media_from_event(
+        _event(
+            "speaker",
+            "video-message",
+            _video("opaque-token", url="https://cdn.example/transient.mp4"),
+        )
+    )
+    calls: list[dict[str, str]] = []
+
+    class _Bot:
+        async def get_file(self, **kwargs):  # noqa: ANN003, ANN201
+            calls.append(dict(kwargs))
+            return {
+                "file": str(video_path),
+                "url": "https://cdn.example/transient.mp4",
+            }
+
+    async def _no_download(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("readable OneBot file must bypass download")
+
+    monkeypatch.setattr(turn_media, "download_public_media_to_path", _no_download)
+    lease = asyncio.run(
+        turn_media.materialize_onebot_media_refs(
+            refs,
+            _Bot(),
+            _media_config(tmp_path),
+            None,
+            30.0,
+        )
+    )
+
+    assert calls == [{"file": "opaque-token"}]
+    assert lease.refs[0].ref == str(video_path.resolve())
+    assert lease.refs[0].resolution_code == "onebot_get_file_local"
+    assert lease.runtime_dir is None
+    assert lease.summary["media"][0] == {
+        "kind": "video",
+        "source_kind": "onebot_local",
+        "materialization": "onebot_get_file",
+        "provider_transport": "local_file",
+        "size_bytes": len(b"local-video"),
+        "diagnostic_code": "onebot_get_file_local",
+    }
+
+
+def test_materialize_remote_video_downloads_into_lease_and_cleans_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refs = turn_media.extract_turn_media_from_event(
+        _event(
+            "speaker",
+            "video-message",
+            _video("opaque-token", url="https://cdn.example/transient"),
+        )
+    )
+    seen_urls: list[str] = []
+
+    class _Bot:
+        async def get_file(self, **_kwargs):  # noqa: ANN003, ANN201
+            return {
+                "file": "C:\\napcat-host\\clip.mp4",
+                "url": "https://cdn.example/transient",
+            }
+
+    async def _download(url, destination, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        seen_urls.append(url)
+        path = Path(destination)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"downloaded-video")
+        return SimpleNamespace(
+            path=path,
+            content_type="video/mp4",
+            final_url=url,
+            size=len(b"downloaded-video"),
+        )
+
+    monkeypatch.setattr(turn_media, "download_public_media_to_path", _download)
+    lease = asyncio.run(
+        turn_media.materialize_onebot_media_refs(
+            refs,
+            _Bot(),
+            _media_config(tmp_path),
+            None,
+            30.0,
+        )
+    )
+    materialized_path = Path(lease.refs[0].ref)
+    runtime_dir = lease.runtime_dir
+
+    assert seen_urls == ["https://cdn.example/transient"]
+    assert materialized_path.is_file()
+    assert materialized_path.suffix == ".mp4"
+    assert materialized_path.read_bytes() == b"downloaded-video"
+    assert lease.refs[0].resolution_code == "onebot_video_safe_download"
+    assert runtime_dir is not None and runtime_dir.is_dir()
+
+    lease.cleanup()
+    lease.cleanup()
+    assert not runtime_dir.exists()
+
+
+def test_materialize_download_failure_removes_provider_usable_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refs = turn_media.extract_turn_media_from_event(
+        _event(
+            "speaker",
+            "video-message",
+            _video("opaque-token", url="https://cdn.example/transient.mp4"),
+        )
+    )
+
+    class _Bot:
+        async def get_file(self, **_kwargs):  # noqa: ANN003, ANN201
+            return {"url": "https://cdn.example/transient.mp4"}
+
+    async def _reject(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise turn_media.SafeMediaDownloadError("response MIME is not an allowed media type")
+
+    monkeypatch.setattr(turn_media, "download_public_media_to_path", _reject)
+    lease = asyncio.run(
+        turn_media.materialize_onebot_media_refs(
+            refs,
+            _Bot(),
+            _media_config(tmp_path),
+            None,
+            30.0,
+        )
+    )
+
+    assert lease.refs[0].ref == ""
+    assert lease.refs[0].resolution_code == "onebot_media_mime_rejected"
+    assert lease.summary["failed"] == 1
+    assert turn_media.build_media_availability(lease.refs).usable_video_count == 0
+    runtime_dir = lease.runtime_dir
+    lease.cleanup()
+    assert runtime_dir is not None and not runtime_dir.exists()
+
+
+def test_materialize_record_uses_same_safe_download_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refs = turn_media.extract_turn_media_from_event(
+        _event("speaker", "record-message", _record("opaque-record-token"))
+    )
+
+    class _Bot:
+        async def get_record(self, **kwargs):  # noqa: ANN003, ANN201
+            assert kwargs == {"file": "opaque-record-token", "out_format": "wav"}
+            return {"url": "https://cdn.example/voice"}
+
+    async def _download(url, destination, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        assert url == "https://cdn.example/voice"
+        path = Path(destination)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"voice")
+        return SimpleNamespace(
+            path=path,
+            content_type="audio/mpeg",
+            final_url=url,
+            size=5,
+        )
+
+    monkeypatch.setattr(turn_media, "download_public_media_to_path", _download)
+    lease = asyncio.run(
+        turn_media.materialize_onebot_media_refs(
+            refs,
+            _Bot(),
+            _media_config(tmp_path),
+            None,
+            30.0,
+        )
+    )
+    path = Path(lease.refs[0].ref)
+    runtime_dir = lease.runtime_dir
+
+    assert path.suffix == ".mp3"
+    assert path.read_bytes() == b"voice"
+    assert lease.refs[0].resolution_code == "onebot_audio_safe_download"
+    lease.cleanup()
+    assert runtime_dir is not None and not runtime_dir.exists()
+
+
+def test_materialize_cancellation_cleans_partial_runtime_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refs = turn_media.extract_turn_media_from_event(
+        _event(
+            "speaker",
+            "video-message",
+            _video("opaque-token", url="https://cdn.example/transient.mp4"),
+        )
+    )
+    config = _media_config(tmp_path)
+
+    class _Bot:
+        async def get_file(self, **_kwargs):  # noqa: ANN003, ANN201
+            return {"url": "https://cdn.example/transient.mp4"}
+
+    async def _cancel(_url, destination, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        path = Path(destination)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"partial")
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(turn_media, "download_public_media_to_path", _cancel)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            turn_media.materialize_onebot_media_refs(
+                refs,
+                _Bot(),
+                config,
+                None,
+                30.0,
+            )
+        )
+
+    runtime_root = Path(config.personification_data_dir) / "runtime-media"
+    assert not runtime_root.exists() or list(runtime_root.iterdir()) == []
 
 
 def test_onebot_video_resolution_failure_preserves_original_reference() -> None:

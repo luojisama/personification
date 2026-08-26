@@ -2,6 +2,7 @@ import asyncio
 import random
 import re
 import time
+from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List
@@ -109,13 +110,15 @@ from ...core.visible_output import guard_visible_text
 from ...core.turn_media import (
     attach_safe_visual_summary,
     build_media_availability,
+    cleanup_turn_media_lease,
     coerce_turn_media,
     extract_media_from_message,
     extract_turn_media_from_event,
     media_summary_timeout_seconds,
+    materialize_onebot_media_refs,
     normalize_safe_visual_summary,
+    register_turn_media_lease,
     render_turn_media_grounding,
-    resolve_onebot_media_refs,
     summarize_media_resolution,
 )
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_YAML
@@ -1679,27 +1682,33 @@ async def process_yaml_response_logic(
         is_direct_mention=is_direct_mention,
         has_image_input=bool(tool_image_urls or tool_video_urls or tool_audio_urls),
     ):
-        turn_media_refs = await resolve_onebot_media_refs(
+        media_lease = await materialize_onebot_media_refs(
             turn_media_refs,
             bot,
-            video_timeout_seconds=float(
+            plugin_config,
+            response_deadline,
+            float(
                 getattr(plugin_config, "personification_video_analysis_timeout", 180.0)
                 or 180.0
             ),
         )
+        register_turn_media_lease(reply_commit_state, media_lease)
+        turn_media_refs = media_lease.refs
         media_resolution = summarize_media_resolution(turn_media_refs)
         if media_resolution["videos"] or media_resolution["audios"]:
             _trace_stage(
                 key="turn_media_materialized",
                 label="媒体文件就绪",
-                status="warn" if media_resolution["video_failed"] else "ok",
+                status="warn" if media_lease.summary.get("failed") else "ok",
                 detail=(
                     f"videos={media_resolution['videos']} "
                     f"video_usable={media_resolution['video_usable']} "
                     f"video_failed={media_resolution['video_failed']} "
                     f"audios={media_resolution['audios']} "
+                    f"materialized={media_lease.summary.get('materialized', 0)} "
+                    f"failed={media_lease.summary.get('failed', 0)} "
                     "routes="
-                    + (",".join(media_resolution["resolution_codes"]) or "direct")
+                    + (",".join(media_resolution["resolution_codes"]) or "unknown")
                 ),
                 hint="仅记录媒体就绪计数与稳定路由码，不记录文件标识、路径或下载地址",
             )
@@ -3188,6 +3197,23 @@ async def process_yaml_response_logic(
             "outgoing_text": str(assistant_history_text or "")[:500],
         },
     )
+
+
+_process_yaml_response_logic_impl = process_yaml_response_logic
+
+
+@wraps(_process_yaml_response_logic_impl)
+async def process_yaml_response_logic(*args: Any, **kwargs: Any) -> None:
+    """Run the complete YAML turn under the shared media-lease boundary."""
+
+    holder = kwargs.get("reply_commit_state")
+    if not isinstance(holder, dict):
+        holder = {}
+        kwargs["reply_commit_state"] = holder
+    try:
+        await _process_yaml_response_logic_impl(*args, **kwargs)
+    finally:
+        cleanup_turn_media_lease(holder)
 
 
 def build_yaml_response_processor(

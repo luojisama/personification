@@ -4,12 +4,20 @@ import asyncio
 import base64
 import hashlib
 import re
+import shutil
+import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
-from .media_refs import is_supported_video_filename, normalize_video_ref
+from .media_refs import (
+    is_supported_video_filename,
+    normalize_audio_ref,
+    normalize_video_ref,
+)
 from .message_relations import extract_reply_message_id
+from .paths import get_data_dir
+from .safe_media_download import SafeMediaDownloadError, download_public_media_to_path
 
 
 MediaOrigin = Literal["current", "quoted", "batch"]
@@ -19,15 +27,46 @@ _ALLOWED_KINDS = {"image", "sticker", "gif", "mface", "video", "audio", "unknown
 _MEDIA_RESOLUTION_CODES = {
     "onebot_get_file_url",
     "onebot_get_file_local",
+    "onebot_audio_get_record_local",
+    "onebot_audio_safe_download",
+    "onebot_video_safe_download",
     "onebot_private_file_url",
     "onebot_group_file_url",
     "onebot_video_resolve_failed",
+    "onebot_audio_download_failed",
+    "onebot_video_download_failed",
+    "onebot_media_too_large",
+    "onebot_media_mime_rejected",
+    "onebot_media_budget_exhausted",
+    "onebot_media_download_timeout",
+}
+_VIDEO_DOWNLOAD_MIMES = {
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/x-m4v": ".m4v",
+    "video/webm": ".webm",
+    "video/x-matroska": ".mkv",
+    "video/x-msvideo": ".avi",
+}
+_AUDIO_DOWNLOAD_MIMES = {
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/aac": ".aac",
+    "audio/ogg": ".ogg",
+    "audio/opus": ".opus",
+    "audio/flac": ".flac",
+    "audio/x-flac": ".flac",
+    "audio/amr": ".amr",
 }
 _DATA_URL_RE = re.compile(r"data:[^\s,;]+;base64,[A-Za-z0-9+/=\r\n]+", re.IGNORECASE)
 _SUMMARY_MARKER_RE = re.compile(
     r"\[(?:图片视觉描述|表情包语义|动态表情语义|媒体语义)（系统注入[^）]*）[：:]\s*(.*?)\]",
     re.DOTALL,
 )
+_LEASE_STATE_KEY = "_personification_turn_media_lease"
 
 
 def _text(value: Any) -> str:
@@ -232,6 +271,48 @@ class TurnMediaRef:
             confidence=confidence,
             summary_scope=_text(value.get("summary_scope")),
         )
+
+
+@dataclass
+class ResolvedTurnMediaLease:
+    """Process-local media refs plus an idempotent cleanup boundary.
+
+    ``refs`` may contain controlled absolute paths and therefore must never be
+    persisted as Trace or history data.  ``summary`` is deliberately limited
+    to low-cardinality enums, counts, and byte sizes.
+    """
+
+    refs: list[TurnMediaRef]
+    summary: dict[str, Any]
+    runtime_dir: Path | None = None
+    _cleaned: bool = False
+
+    def cleanup(self) -> None:
+        if self._cleaned:
+            return
+        self._cleaned = True
+        runtime_dir = self.runtime_dir
+        self.runtime_dir = None
+        if runtime_dir is not None:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
+def register_turn_media_lease(
+    holder: dict[str, Any],
+    lease: ResolvedTurnMediaLease,
+) -> None:
+    previous = holder.get(_LEASE_STATE_KEY)
+    if previous is not lease and isinstance(previous, ResolvedTurnMediaLease):
+        previous.cleanup()
+    holder[_LEASE_STATE_KEY] = lease
+
+
+def cleanup_turn_media_lease(holder: dict[str, Any] | None) -> None:
+    if not isinstance(holder, dict):
+        return
+    lease = holder.pop(_LEASE_STATE_KEY, None)
+    if isinstance(lease, ResolvedTurnMediaLease):
+        lease.cleanup()
 
 
 @dataclass(frozen=True)
@@ -530,6 +611,16 @@ def build_media_availability(
             usable_image_keys.add(key)
 
     def _potentially_usable(item: TurnMediaRef) -> bool:
+        if _text(item.resolution_code) in {
+            "onebot_video_resolve_failed",
+            "onebot_audio_download_failed",
+            "onebot_video_download_failed",
+            "onebot_media_too_large",
+            "onebot_media_mime_rejected",
+            "onebot_media_budget_exhausted",
+            "onebot_media_download_timeout",
+        }:
+            return False
         return bool(_text(item.ref) or _text(item.file_id))
 
     normalized_text = re.sub(r"\s+", " ", _text(text)).strip()
@@ -565,34 +656,27 @@ async def resolve_onebot_audio_refs(
             resolved.append(item)
             continue
         raw_ref = _text(item.ref)
-        if raw_ref.startswith(("http://", "https://", "file://")):
-            resolved.append(item)
-            continue
-        if raw_ref:
-            try:
-                if Path(raw_ref).is_absolute():
-                    resolved.append(item)
-                    continue
-            except Exception:
-                pass
         token = _text(item.file_id or raw_ref)
         if not token:
             resolved.append(item)
             continue
         try:
-            get_record = getattr(bot, "get_record", None)
-            if callable(get_record):
-                payload = await get_record(file=token, out_format="wav")
-            else:
-                call_api = getattr(bot, "call_api", None)
-                if not callable(call_api):
-                    resolved.append(item)
-                    continue
-                payload = await call_api("get_record", file=token, out_format="wav")
-            candidate = _text(payload.get("file") if isinstance(payload, dict) else payload)
+            local, remote, code = await _onebot_media_candidates(
+                item,
+                bot,
+                response_deadline=None,
+                timeout_seconds=180.0,
+            )
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            candidate = ""
-        resolved.append(replace(item, ref=candidate) if candidate else item)
+            local, remote, code = "", "", ""
+        candidate = local or remote
+        resolved.append(
+            replace(item, ref=candidate, resolution_code=code)
+            if candidate
+            else item
+        )
     return resolved
 
 
@@ -613,6 +697,343 @@ def _onebot_payload_value(payload: Any, *names: str) -> str:
         if candidate:
             return candidate
     return _text(payload) if isinstance(payload, (str, Path)) else ""
+
+
+def _normalize_local_media_candidate(value: Any, *, kind: str) -> str:
+    raw = _text(value)
+    if not raw or raw.startswith(("http://", "https://")):
+        return ""
+    normalized, problem = (
+        normalize_audio_ref(raw) if kind == "audio" else normalize_video_ref(raw)
+    )
+    if not normalized or problem or normalized.startswith(("http://", "https://")):
+        return ""
+    return normalized
+
+
+def _normalize_remote_media_candidate(value: Any) -> str:
+    raw = _text(value)
+    return raw if raw.startswith("https://") else ""
+
+
+def _remaining_seconds(response_deadline: float | None) -> float | None:
+    if not isinstance(response_deadline, (int, float)):
+        return None
+    return float(response_deadline) - asyncio.get_running_loop().time()
+
+
+def _bounded_media_timeout(
+    *,
+    configured_timeout: float,
+    response_deadline: float | None,
+) -> float:
+    timeout = max(0.0, float(configured_timeout or 0.0))
+    remaining = _remaining_seconds(response_deadline)
+    if remaining is not None:
+        timeout = min(timeout, max(0.0, remaining))
+    return timeout
+
+
+async def _onebot_media_candidates(
+    item: TurnMediaRef,
+    bot: Any,
+    *,
+    response_deadline: float | None,
+    timeout_seconds: float,
+) -> tuple[str, str, str]:
+    """Return ``(local_path, remote_url, materialization_code)`` safely."""
+
+    raw_ref = _text(item.ref)
+    token = _text(item.file_id or ("" if raw_ref.startswith("https://") else raw_ref))
+    fallback_url = _normalize_remote_media_candidate(raw_ref)
+    existing_local = _normalize_local_media_candidate(raw_ref, kind=item.kind)
+    if existing_local and not token:
+        return existing_local, "", "existing_local"
+    if not token:
+        return "", fallback_url, ""
+
+    loop = asyncio.get_running_loop()
+    operation_deadline = loop.time() + max(0.0, float(timeout_seconds or 0.0))
+    if isinstance(response_deadline, (int, float)):
+        operation_deadline = min(operation_deadline, float(response_deadline))
+    timeout = _bounded_media_timeout(
+        configured_timeout=timeout_seconds,
+        response_deadline=operation_deadline,
+    )
+    if timeout <= 0:
+        return "", "", "onebot_media_budget_exhausted"
+
+    if item.kind == "audio":
+        try:
+            payload = await _call_onebot_file_api(
+                bot,
+                "get_record",
+                timeout_seconds=timeout,
+                file=token,
+                out_format="wav",
+            )
+            local = _normalize_local_media_candidate(
+                _onebot_payload_value(payload, "file", "path"),
+                kind="audio",
+            )
+            if local:
+                return local, "", "onebot_audio_get_record_local"
+            payload_url = _normalize_remote_media_candidate(
+                _onebot_payload_value(payload, "url", "file")
+            )
+            if existing_local:
+                return existing_local, "", "existing_local"
+            return "", payload_url or fallback_url, ""
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if existing_local:
+                return existing_local, "", "existing_local"
+            return "", fallback_url, ""
+
+    try:
+        payload = await _call_onebot_file_api(
+            bot,
+            "get_file",
+            timeout_seconds=timeout,
+            file=token,
+        )
+        # A NapCat path may belong to another host.  It is accepted only when
+        # it resolves to a readable local file in this process.
+        local = _normalize_local_media_candidate(
+            _onebot_payload_value(payload, "file", "path"),
+            kind="video",
+        )
+        if local:
+            return local, "", "onebot_get_file_local"
+        payload_url = _normalize_remote_media_candidate(
+            _onebot_payload_value(payload, "url")
+        )
+        if payload_url:
+            return "", payload_url, ""
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        if existing_local:
+            return existing_local, "", "existing_local"
+
+    fallback_api = "get_group_file_url" if _text(item.group_id) else "get_private_file_url"
+    fallback_kwargs: dict[str, Any] = {"file_id": token}
+    if fallback_api == "get_group_file_url":
+        fallback_kwargs["group_id"] = item.group_id
+    timeout = _bounded_media_timeout(
+        configured_timeout=timeout_seconds,
+        response_deadline=operation_deadline,
+    )
+    if timeout <= 0:
+        return "", "", "onebot_media_budget_exhausted"
+    try:
+        payload = await _call_onebot_file_api(
+            bot,
+            fallback_api,
+            timeout_seconds=timeout,
+            **fallback_kwargs,
+        )
+        payload_url = _normalize_remote_media_candidate(
+            _onebot_payload_value(payload, "url")
+        )
+        return "", payload_url or fallback_url, ""
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        if existing_local:
+            return existing_local, "", "existing_local"
+        return "", fallback_url, ""
+
+
+def _download_failure_code(kind: str, exc: BaseException) -> str:
+    message = str(exc or "").lower()
+    if "too large" in message or "size limit" in message or "exceeded" in message:
+        return "onebot_media_too_large"
+    if "mime" in message or "media type" in message:
+        return "onebot_media_mime_rejected"
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timeout" in message:
+        return "onebot_media_download_timeout"
+    return f"onebot_{kind}_download_failed"
+
+
+async def materialize_onebot_media_refs(
+    values: Iterable[TurnMediaRef | dict[str, Any]] | None,
+    bot: Any,
+    plugin_config: Any,
+    response_deadline: float | None,
+    video_timeout_seconds: float,
+) -> ResolvedTurnMediaLease:
+    """Turn transient OneBot audio/video references into controlled files."""
+
+    refs = coerce_turn_media(values)
+    resolved: list[TurnMediaRef] = []
+    diagnostics: list[dict[str, Any]] = []
+    runtime_dir: Path | None = None
+
+    def _ensure_runtime_dir() -> Path:
+        nonlocal runtime_dir
+        if runtime_dir is None:
+            runtime_dir = (
+                get_data_dir(plugin_config)
+                / "runtime-media"
+                / uuid.uuid4().hex
+            )
+            runtime_dir.mkdir(parents=True, exist_ok=False)
+        return runtime_dir
+
+    max_bytes = max(
+        1,
+        int(getattr(plugin_config, "personification_video_max_bytes", 268435456) or 268435456),
+    )
+    download_timeout = max(
+        0.0,
+        float(
+            getattr(plugin_config, "personification_video_download_timeout", 90.0)
+            or 90.0
+        ),
+    )
+    lease = ResolvedTurnMediaLease(refs=resolved, summary={}, runtime_dir=None)
+    try:
+        for index, item in enumerate(refs):
+            if item.kind not in {"video", "audio"}:
+                resolved.append(item)
+                continue
+            local, remote, code = await _onebot_media_candidates(
+                item,
+                bot,
+                response_deadline=response_deadline,
+                timeout_seconds=video_timeout_seconds,
+            )
+            if local:
+                size = None
+                try:
+                    size = Path(local).stat().st_size
+                except OSError:
+                    pass
+                resolved.append(replace(item, ref=local, resolution_code=code))
+                from_onebot = code in {
+                    "onebot_get_file_local",
+                    "onebot_audio_get_record_local",
+                }
+                diagnostics.append(
+                    {
+                        "kind": item.kind,
+                        "source_kind": "onebot_local" if from_onebot else "local",
+                        "materialization": "onebot_get_file" if from_onebot else "existing_local",
+                        "provider_transport": "local_file",
+                        "size_bytes": size,
+                        "diagnostic_code": code or "media_local_ready",
+                    }
+                )
+                continue
+            if code == "onebot_media_budget_exhausted":
+                resolved.append(replace(item, ref="", resolution_code=code))
+                diagnostics.append(
+                    {
+                        "kind": item.kind,
+                        "source_kind": "onebot_remote",
+                        "materialization": "failed",
+                        "provider_transport": "none",
+                        "size_bytes": None,
+                        "diagnostic_code": code,
+                    }
+                )
+                continue
+            if not remote:
+                failure_code = f"onebot_{item.kind}_download_failed"
+                resolved.append(replace(item, ref="", resolution_code=failure_code))
+                diagnostics.append(
+                    {
+                        "kind": item.kind,
+                        "source_kind": "onebot_remote",
+                        "materialization": "failed",
+                        "provider_transport": "none",
+                        "size_bytes": None,
+                        "diagnostic_code": failure_code,
+                    }
+                )
+                continue
+
+            timeout = _bounded_media_timeout(
+                configured_timeout=min(download_timeout, float(video_timeout_seconds or download_timeout)),
+                response_deadline=response_deadline,
+            )
+            if timeout <= 0:
+                failure_code = "onebot_media_budget_exhausted"
+                resolved.append(replace(item, ref="", resolution_code=failure_code))
+                diagnostics.append(
+                    {
+                        "kind": item.kind,
+                        "source_kind": "onebot_remote",
+                        "materialization": "failed",
+                        "provider_transport": "none",
+                        "size_bytes": None,
+                        "diagnostic_code": failure_code,
+                    }
+                )
+                continue
+
+            mime_map = _VIDEO_DOWNLOAD_MIMES if item.kind == "video" else _AUDIO_DOWNLOAD_MIMES
+            destination = _ensure_runtime_dir() / f"media-{index:02d}.part"
+            try:
+                downloaded = await asyncio.wait_for(
+                    download_public_media_to_path(
+                        remote,
+                        destination,
+                        timeout=timeout,
+                        max_bytes=max_bytes,
+                        allowed_mimes=set(mime_map),
+                    ),
+                    timeout=timeout,
+                )
+                suffix = mime_map[downloaded.content_type]
+                final_path = destination.with_suffix(suffix)
+                destination.replace(final_path)
+                resolution_code = f"onebot_{item.kind}_safe_download"
+                resolved.append(
+                    replace(item, ref=str(final_path.resolve()), resolution_code=resolution_code)
+                )
+                diagnostics.append(
+                    {
+                        "kind": item.kind,
+                        "source_kind": "onebot_remote",
+                        "materialization": "safe_download",
+                        "provider_transport": "local_file",
+                        "size_bytes": int(downloaded.size),
+                        "diagnostic_code": resolution_code,
+                    }
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                destination.unlink(missing_ok=True)
+                failure_code = _download_failure_code(item.kind, exc)
+                resolved.append(replace(item, ref="", resolution_code=failure_code))
+                diagnostics.append(
+                    {
+                        "kind": item.kind,
+                        "source_kind": "onebot_remote",
+                        "materialization": "failed",
+                        "provider_transport": "none",
+                        "size_bytes": None,
+                        "diagnostic_code": failure_code,
+                    }
+                )
+        lease.runtime_dir = runtime_dir
+        lease.summary = {
+            "media": diagnostics[:8],
+            "materialized": sum(
+                item.get("materialization") in {"existing_local", "onebot_get_file", "safe_download"}
+                for item in diagnostics
+            ),
+            "failed": sum(item.get("materialization") == "failed" for item in diagnostics),
+        }
+        return lease
+    except BaseException:
+        lease.runtime_dir = runtime_dir
+        lease.cleanup()
+        raise
 
 
 def _normalize_onebot_video_candidate(value: Any) -> tuple[str, str]:
@@ -666,7 +1087,7 @@ async def resolve_onebot_video_refs(
             continue
         raw_ref = _text(item.ref)
         normalized, _problem = normalize_video_ref(raw_ref)
-        if normalized:
+        if normalized and not _text(item.file_id):
             resolved.append(replace(item, ref=normalized) if normalized != raw_ref else item)
             continue
         token = _text(item.file_id or raw_ref)
@@ -687,20 +1108,20 @@ async def resolve_onebot_video_refs(
                 file=token,
             )
             candidate, candidate_kind = _normalize_onebot_video_candidate(
-                _onebot_payload_value(payload, "url")
+                _onebot_payload_value(payload, "file", "path")
             )
             if candidate:
-                resolution_code = "onebot_get_file_url"
+                resolution_code = (
+                    "onebot_get_file_url"
+                    if candidate_kind == "url"
+                    else "onebot_get_file_local"
+                )
             else:
                 candidate, candidate_kind = _normalize_onebot_video_candidate(
-                    _onebot_payload_value(payload, "file", "path")
+                    _onebot_payload_value(payload, "url")
                 )
                 if candidate:
-                    resolution_code = (
-                        "onebot_get_file_url"
-                        if candidate_kind == "url"
-                        else "onebot_get_file_local"
-                    )
+                    resolution_code = "onebot_get_file_url"
         except Exception:
             pass
 
@@ -863,9 +1284,11 @@ def media_summary_timeout_seconds(
 __all__ = [
     "MediaAvailability",
     "MediaOrigin",
+    "ResolvedTurnMediaLease",
     "TurnMediaRef",
     "attach_safe_visual_summary",
     "build_media_availability",
+    "cleanup_turn_media_lease",
     "coerce_media_availability",
     "coerce_turn_media",
     "extract_media_from_message",
@@ -873,8 +1296,10 @@ __all__ = [
     "resolve_onebot_quoted_media_refs",
     "media_from_batched_events",
     "media_summary_timeout_seconds",
+    "materialize_onebot_media_refs",
     "normalize_safe_visual_summary",
     "render_turn_media_grounding",
+    "register_turn_media_lease",
     "resolve_onebot_audio_refs",
     "resolve_onebot_media_refs",
     "resolve_onebot_video_refs",
