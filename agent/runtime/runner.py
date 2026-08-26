@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, List
 
 from ..query_rewriter import (
@@ -123,6 +124,39 @@ _TIME_SENSITIVE_RE = re.compile("\u6700\u65b0|\u8fd1\u671f|\u73b0\u5728|\u4eca\u
 _QUERY_REWRITE_TIMEOUT_SECONDS = 3.0
 _SOCIAL_MEDIA_RESOLVE_TIMEOUT_SECONDS = 4.0
 _SEMANTIC_RESEARCH_TARGET_SECONDS = 45.0
+_AGENT_SYNTHESIS_RESERVE_SECONDS = 15.0
+_AGENT_QUALITY_RESERVE_SECONDS = 5.0
+_AGENT_TOOL_MIN_START_SECONDS = 1.0
+
+
+@dataclass(frozen=True)
+class AgentPhaseDeadlines:
+    agent_budget_deadline: float | None
+    tool_deadline: float | None
+    synthesis_deadline: float | None
+    quality_deadline: float | None
+
+
+def _derive_agent_phase_deadlines(
+    agent_budget_deadline: float | None,
+) -> AgentPhaseDeadlines:
+    if agent_budget_deadline is None:
+        return AgentPhaseDeadlines(None, None, None, None)
+    quality_deadline = float(agent_budget_deadline)
+    synthesis_deadline = quality_deadline - _AGENT_QUALITY_RESERVE_SECONDS
+    tool_deadline = synthesis_deadline - _AGENT_SYNTHESIS_RESERVE_SECONDS
+    return AgentPhaseDeadlines(
+        agent_budget_deadline=quality_deadline,
+        tool_deadline=tool_deadline,
+        synthesis_deadline=synthesis_deadline,
+        quality_deadline=quality_deadline,
+    )
+
+
+def _phase_remaining_ms(deadline: float | None) -> int | None:
+    if deadline is None:
+        return None
+    return max(0, int((float(deadline) - time.monotonic()) * 1000))
 
 
 async def _await_with_deadline(
@@ -302,6 +336,7 @@ async def run_agent(
         if time_budget_seconds is not None
         else None
     )
+    phase_deadlines = _derive_agent_phase_deadlines(budget_deadline)
 
     async def _finalize_result(result: AgentResult, *, reason: str) -> AgentResult:
         result.tool_calls_made = bool(stop_state.has_tool_call)
@@ -340,7 +375,7 @@ async def run_agent(
                     logger=logger,
                     reason=reason,
                 ),
-                budget_deadline,
+                phase_deadlines.quality_deadline,
             )
         except asyncio.TimeoutError:
             _record_reply_trace_stage(
@@ -496,7 +531,7 @@ async def run_agent(
                     relationship_hint=relationship_hint,
                     recent_bot_replies=recent_bot_replies,
                 ),
-                budget_deadline,
+                phase_deadlines.tool_deadline,
             )
         except asyncio.TimeoutError:
             intent_decision = metadata_fallback_turn_semantic_frame_for_session(
@@ -548,6 +583,7 @@ async def run_agent(
     )
     if profile_deadline is not None:
         budget_deadline = profile_deadline if budget_deadline is None else min(budget_deadline, profile_deadline)
+    phase_deadlines = _derive_agent_phase_deadlines(budget_deadline)
     record_counter(
         "agent.budget_profile_total",
         mode=budget_profile.mode,
@@ -573,6 +609,19 @@ async def run_agent(
             if budget_applied
             else "当前仅 shadow 观测，不直接改变生产超时或工具步数"
         ),
+    )
+    _record_reply_trace_stage(
+        key="agent_phase_budget",
+        label="Agent 分层截止时间",
+        status="info",
+        detail=(
+            f"tool_available_ms={_phase_remaining_ms(phase_deadlines.tool_deadline)} "
+            f"synthesis_reserve_ms={int(_AGENT_SYNTHESIS_RESERVE_SECONDS * 1000)} "
+            f"quality_reserve_ms={int(_AGENT_QUALITY_RESERVE_SECONDS * 1000)} "
+            f"elapsed_ms={int((time.monotonic() - agent_started_at) * 1000)} "
+            "reason=initialized"
+        ),
+        hint="工具、工具后回复合成与最终质量检查共享同一总预算，但使用分层截止时间",
     )
     _record_reply_trace_stage(
         key="agent_start",
@@ -631,7 +680,7 @@ async def run_agent(
         )
     else:
         rewrite_started_at = time.monotonic()
-        remaining_budget = _remaining_time_budget_seconds(budget_deadline)
+        remaining_budget = _remaining_time_budget_seconds(phase_deadlines.tool_deadline)
         rewrite_timeout = _QUERY_REWRITE_TIMEOUT_SECONDS
         if remaining_budget is not None:
             rewrite_timeout = min(rewrite_timeout, max(0.0, remaining_budget))
@@ -708,7 +757,7 @@ async def run_agent(
                     user_request=background_image_request,
                     logger=logger,
                 ),
-                budget_deadline,
+                phase_deadlines.synthesis_deadline,
             )
         except asyncio.TimeoutError:
             return await _finalize_result(
@@ -783,7 +832,7 @@ async def run_agent(
                         getattr(plugin_config, "personification_cross_verify_enabled", False)
                     ),
                 ),
-                budget_deadline,
+                phase_deadlines.synthesis_deadline,
             )
         except asyncio.TimeoutError:
             _record_reply_trace_stage(
@@ -846,10 +895,25 @@ async def run_agent(
         return evidence
 
     for _step in range(effective_max_steps):
-        if budget_deadline is not None and time.monotonic() >= budget_deadline:
+        if (
+            phase_deadlines.synthesis_deadline is not None
+            and time.monotonic() >= phase_deadlines.synthesis_deadline
+        ):
             logger.warning(
-                f"[agent] time budget exhausted at step={_step + 1}, "
+                f"[agent] synthesis budget exhausted at step={_step + 1}, "
                 f"forcing answer from last_tool_result={bool(stop_state.last_tool_result_text)}"
+            )
+            _record_reply_trace_stage(
+                key="agent_phase_budget",
+                label="Agent 分层截止时间",
+                status="warn",
+                detail=(
+                    f"tool_available_ms={_phase_remaining_ms(phase_deadlines.tool_deadline)} "
+                    f"synthesis_remaining_ms=0 quality_remaining_ms="
+                    f"{_phase_remaining_ms(phase_deadlines.quality_deadline)} "
+                    f"elapsed_ms={int((time.monotonic() - agent_started_at) * 1000)} "
+                    "reason=synthesis_deadline_reached"
+                ),
             )
             return await _finalize_result(
                 AgentResult(
@@ -886,8 +950,30 @@ async def run_agent(
                 _mark_social_evidence_satisfied()
         _append_research_closure_guidance()
         selected_names = selected_tool_names(active_schemas, _schema_tool_name)
+        tool_remaining = _remaining_time_budget_seconds(phase_deadlines.tool_deadline)
+        if tool_remaining is not None and tool_remaining < _AGENT_TOOL_MIN_START_SECONDS:
+            if active_schemas:
+                _record_reply_trace_stage(
+                    key="agent_tool_budget",
+                    label="Agent 工具预算",
+                    status="warn",
+                    detail=(
+                        f"step={_step + 1} tool_available_ms={max(0, int(tool_remaining * 1000))} "
+                        f"synthesis_remaining_ms={_phase_remaining_ms(phase_deadlines.synthesis_deadline)} "
+                        f"quality_remaining_ms={_phase_remaining_ms(phase_deadlines.quality_deadline)} "
+                        "elapsed_ms=0 reason=minimum_start_budget"
+                    ),
+                )
+            active_schemas = []
+            wire_schemas = []
+            selected_names = []
         logger.debug(f"[agent] exposed {len(active_schemas)} tools to model")
         logger.info(f"[agent] selected tools: {', '.join(selected_names) if selected_names else 'none'}")
+        model_deadline = (
+            phase_deadlines.tool_deadline
+            if active_schemas and not stop_state.has_tool_call
+            else phase_deadlines.synthesis_deadline
+        )
         model_started_at = time.monotonic()
         try:
             if disclosure_mode == "native":
@@ -897,7 +983,7 @@ async def run_agent(
                         wire_schemas,
                         use_builtin_search and not _research_lookup_complete(),
                     ),
-                    budget_deadline,
+                    model_deadline,
                 )
             else:
                 response = await _await_with_deadline(
@@ -906,7 +992,7 @@ async def run_agent(
                         wire_schemas,
                         use_builtin_search and not _research_lookup_complete(),
                     ),
-                    budget_deadline,
+                    model_deadline,
                 )
         except asyncio.TimeoutError:
             _record_reply_trace_stage(
@@ -962,7 +1048,8 @@ async def run_agent(
                         rewritten_query=rewritten_query,
                         context_hint=context_hint,
                         plugin_query_intent=plugin_query_intent,
-                        budget_deadline=budget_deadline,
+                        budget_deadline=phase_deadlines.synthesis_deadline,
+                        tool_deadline=phase_deadlines.tool_deadline,
                         step=_step + 1,
                         record_trace=_record_reply_trace_stage,
                         append_evidence_guidance=_append_evidence_guidance_if_needed,
@@ -971,7 +1058,7 @@ async def run_agent(
                         structured_output=structured_output,
                         semantic_research_target_deadline=semantic_research_target_deadline,
                     ),
-                    budget_deadline,
+                    phase_deadlines.synthesis_deadline,
                 )
             except asyncio.TimeoutError:
                 return await _finalize_result(
@@ -992,6 +1079,7 @@ async def run_agent(
                         if budget_deadline is None
                         else min(budget_deadline, semantic_research_target_deadline)
                     )
+                    phase_deadlines = _derive_agent_phase_deadlines(budget_deadline)
                 continue
             if stop_decision.result is not None:
                 return await _finalize_result(stop_decision.result, reason="model_stop")
@@ -1016,7 +1104,7 @@ async def run_agent(
                 try:
                     await _await_with_deadline(
                         lambda: _safe_ack(ack_sender, "", logger),
-                        budget_deadline,
+                        phase_deadlines.tool_deadline,
                     )
                 except asyncio.TimeoutError:
                     pass
@@ -1094,8 +1182,24 @@ async def run_agent(
                     previous_tool_result_text=stop_state.last_tool_result_text,
                     unavailable_tool_signatures=stop_state.unavailable_tool_signatures,
                     logger=logger,
-                    budget_deadline=budget_deadline,
+                    budget_deadline=phase_deadlines.tool_deadline,
+                    minimum_start_seconds=_AGENT_TOOL_MIN_START_SECONDS,
+                    safe_failures=True,
                 )
+            tool_elapsed_ms = int((time.monotonic() - tool_started_at) * 1000)
+            _record_reply_trace_stage(
+                key="agent_tool_budget",
+                label="Agent 工具预算",
+                status="warn" if str(result or "") == _tool_timeout_result(tool_call.name) else "info",
+                detail=(
+                    f"step={_step + 1} tool={str(tool_call.name or '').strip()[:80]} "
+                    f"tool_available_ms={_phase_remaining_ms(phase_deadlines.tool_deadline)} "
+                    f"synthesis_remaining_ms={_phase_remaining_ms(phase_deadlines.synthesis_deadline)} "
+                    f"quality_remaining_ms={_phase_remaining_ms(phase_deadlines.quality_deadline)} "
+                    f"elapsed_ms={tool_elapsed_ms} "
+                    f"reason={'tool_deadline_reached' if str(result or '') == _tool_timeout_result(tool_call.name) else 'tool_completed'}"
+                ),
+            )
             remote_name = str(
                 (getattr(tool, "metadata", {}) or {}).get("remote_name")
                 if tool is not None
@@ -1143,9 +1247,7 @@ async def run_agent(
                     except (TypeError, ValueError):
                         pass
                 else:
-                    handoff_deadline = budget_deadline
-                    if handoff_deadline is not None:
-                        handoff_deadline = max(time.monotonic() + 0.05, handoff_deadline - 15.0)
+                    handoff_deadline = phase_deadlines.tool_deadline
                     handoff = await run_social_video_handoff(
                         registry=registry,
                         search_result=str(result or ""),
@@ -1223,8 +1325,8 @@ async def run_agent(
             if callable(media_resolver) and len(turn_tool_media_urls) < 4:
                 try:
                     media_deadline = time.monotonic() + _SOCIAL_MEDIA_RESOLVE_TIMEOUT_SECONDS
-                    if budget_deadline is not None:
-                        media_deadline = min(media_deadline, budget_deadline)
+                    if phase_deadlines.tool_deadline is not None:
+                        media_deadline = min(media_deadline, phase_deadlines.tool_deadline)
                     resolved_media = await _await_with_deadline(
                         lambda: media_resolver(str(result or "")),
                         media_deadline,
@@ -1301,7 +1403,7 @@ async def run_agent(
                     record_trace=_record_reply_trace_stage,
                     logger=logger,
                     select_semantic_fallback_tool=_select_semantic_fallback_tool,
-                    budget_deadline=budget_deadline,
+                    budget_deadline=phase_deadlines.tool_deadline,
                     semantic_research_target_deadline=semantic_research_target_deadline,
                 )
                 if fallback_lookup is not None:
@@ -1315,7 +1417,7 @@ async def run_agent(
                         rewritten_query=rewritten_query,
                         user_images=user_images,
                         logger=logger,
-                        budget_deadline=budget_deadline,
+                        budget_deadline=phase_deadlines.tool_deadline,
                         messages=messages,
                         tool_caller=tool_caller,
                         origin_response=response,
@@ -1329,6 +1431,7 @@ async def run_agent(
                             if budget_deadline is None
                             else min(budget_deadline, semantic_research_target_deadline)
                         )
+                        phase_deadlines = _derive_agent_phase_deadlines(budget_deadline)
 
     logger.warning("[agent] MAX_STEPS reached")
     _record_reply_trace_stage(
@@ -1361,7 +1464,7 @@ async def run_agent(
                     tool_caller=tool_caller,
                     turn_plan=turn_plan,
                 ),
-                budget_deadline,
+                phase_deadlines.synthesis_deadline,
             )
             return await _finalize_result(synthesized, reason="max_steps_last_tool")
         except asyncio.TimeoutError:

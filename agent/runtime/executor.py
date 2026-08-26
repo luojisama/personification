@@ -76,6 +76,18 @@ def _tool_timeout_result(tool_name: str) -> str:
     return "工具调用失败：超时"
 
 
+def _configured_tool_timeout_seconds(tool: Any) -> float | None:
+    metadata = getattr(tool, "metadata", {}) or {}
+    for key in ("timeout_seconds", "timeout"):
+        try:
+            value = float(metadata.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0.0:
+            return value
+    return None
+
+
 async def _execute_tool_with_retries(
     *,
     registry: ToolRegistry,
@@ -88,6 +100,7 @@ async def _execute_tool_with_retries(
     unavailable_tool_signatures: set[str] | None = None,
     logger: Any,
     budget_deadline: float | None = None,
+    minimum_start_seconds: float = 1.0,
     safe_failures: bool = False,
 ) -> tuple[dict[str, Any], str]:
     tool = registry.get(tool_name)
@@ -151,15 +164,29 @@ async def _execute_tool_with_retries(
             continue
         attempted_any = True
         last_args = attempt_args
-        remaining_timeout = _remaining_time_budget_seconds(budget_deadline)
-        if remaining_timeout is not None and remaining_timeout <= 0.0:
+        budget_remaining = _remaining_time_budget_seconds(budget_deadline)
+        min_start = max(0.0, float(minimum_start_seconds or 0.0))
+        if budget_remaining is not None and (
+            budget_remaining <= 0.0 or budget_remaining < min_start
+        ):
             record_counter("agent.tool_fail_total", tool=tool_name, reason="timeout")
             record_timing("agent.tool_exec_ms", 0, tool=tool_name, status="timeout")
-            logger.warning(f"[agent] tool {tool_name} skipped because time budget was exhausted")
+            logger.warning(
+                f"[agent] tool {tool_name} skipped because remaining budget "
+                f"was below the {min_start:.3f}s start threshold"
+            )
             last_result = _tool_timeout_result(tool_name)
             if retryable_evidence:
                 unavailable_signatures.add(attempt_signature)
             break
+        configured_timeout = _configured_tool_timeout_seconds(tool)
+        remaining_timeout = budget_remaining
+        if configured_timeout is not None:
+            remaining_timeout = (
+                configured_timeout
+                if remaining_timeout is None
+                else min(remaining_timeout, configured_timeout)
+            )
         started_at = time.monotonic()
         try:
             invoke_coro = _invoke_tool_handler(

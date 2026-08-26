@@ -506,6 +506,152 @@ def test_execute_tool_with_retries_records_timeout_metrics() -> None:
         metrics.reset_metrics()
 
 
+def test_agent_phase_deadlines_reserve_synthesis_and_quality_time(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(runner, "_AGENT_SYNTHESIS_RESERVE_SECONDS", 15.0)
+    monkeypatch.setattr(runner, "_AGENT_QUALITY_RESERVE_SECONDS", 5.0)
+
+    deadlines = runner._derive_agent_phase_deadlines(247.0)
+
+    assert deadlines.tool_deadline == 227.0
+    assert deadlines.synthesis_deadline == 242.0
+    assert deadlines.quality_deadline == 247.0
+    assert deadlines.tool_deadline - 100.0 == 127.0
+
+
+def test_execute_tool_with_retries_does_not_start_below_one_second_budget() -> None:
+    calls = 0
+
+    async def _handler(**_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        return "不应执行"
+
+    _tool_args, result = asyncio.run(
+        runner._execute_tool_with_retries(
+            registry=_register_query_tool(_handler),
+            tool_name="search_web",
+            tool_args={"query": "天气"},
+            rewritten_query=None,
+            user_images=[],
+            logger=_FakeLogger(),
+            budget_deadline=time.monotonic() + 0.5,
+        )
+    )
+
+    assert calls == 0
+    assert result == "工具调用失败：超时"
+
+
+def test_execute_tool_with_retries_tool_timeout_only_shortens_deadline() -> None:
+    calls = 0
+
+    async def _handler(**_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        return "过晚"
+
+    _tool_args, result = asyncio.run(
+        runner._execute_tool_with_retries(
+            registry=_register_query_tool(_handler, metadata={"timeout_seconds": 0.01}),
+            tool_name="search_web",
+            tool_args={"query": "天气"},
+            rewritten_query=None,
+            user_images=[],
+            logger=_FakeLogger(),
+            budget_deadline=time.monotonic() + 2.0,
+        )
+    )
+
+    assert calls == 1
+    assert result == "工具调用失败：超时"
+
+
+def test_run_agent_tool_timeout_preserves_synthesis_and_quality_budget(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(runner, "_AGENT_SYNTHESIS_RESERVE_SECONDS", 0.10)
+    monkeypatch.setattr(runner, "_AGENT_QUALITY_RESERVE_SECONDS", 0.05)
+    monkeypatch.setattr(runner, "_AGENT_TOOL_MIN_START_SECONDS", 0.005)
+    stages: list[dict[str, object]] = []
+    monkeypatch.setattr(runner, "_record_reply_trace_stage", lambda **kwargs: stages.append(kwargs))
+    quality_called_at: list[float] = []
+
+    async def _quality(result, **_kwargs):  # noqa: ANN001
+        quality_called_at.append(time.monotonic())
+        return result
+
+    monkeypatch.setattr(runner, "finalize_agent_reply_quality", _quality)
+
+    async def _fast_evidence(**_kwargs):  # noqa: ANN001
+        return "已取得的结构化证据"
+
+    async def _stuck_tool() -> str:
+        await asyncio.sleep(0.5)
+        return "不应返回"
+
+    registry = _register_query_tool(_fast_evidence)
+    registry.register(
+        tool_registry.AgentTool(
+            name="get_ai_news",
+            description="",
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=_stuck_tool,
+        )
+    )
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls",
+                content="",
+                tool_calls=[
+                    tool_impl.ToolCall(id="call-fast", name="search_web", arguments={"query": "问题"}),
+                    tool_impl.ToolCall(id="call-stuck", name="get_ai_news", arguments={}),
+                ],
+                raw={},
+            ),
+            tool_impl.ToolCallerResponse(
+                finish_reason="stop",
+                content="根据已经取得的证据收束回答。",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+    )
+
+    started_at = time.monotonic()
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "问题"}],
+            registry=registry,
+            tool_caller=caller,
+            executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=SimpleNamespace(
+                personification_agent_max_steps=2,
+                personification_model_builtin_search_enabled=False,
+                personification_builtin_search=False,
+                personification_fallback_enabled=False,
+                personification_vision_fallback_enabled=False,
+            ),
+            logger=_FakeLogger(),
+            precomputed_intent=SimpleNamespace(
+                chat_intent="banter",
+                plugin_question_intent="",
+                ambiguity_level="low",
+            ),
+            time_budget_seconds=0.35,
+        )
+    )
+
+    assert result.text == "根据已经取得的证据收束回答。"
+    assert len(caller.calls) == 2
+    assert quality_called_at
+    assert quality_called_at[0] - started_at < 0.35
+    assert any(
+        stage.get("key") == "agent_tool_budget"
+        and "reason=tool_deadline_reached" in str(stage.get("detail") or "")
+        for stage in stages
+    )
+
+
 def test_wrap_tool_result_in_persona_rewrites_search_style_output() -> None:
     caller = _FakeToolCaller(
         [
@@ -1288,7 +1434,7 @@ def test_run_agent_query_rewrite_consumes_agent_deadline(monkeypatch) -> None:  
 
     assert result.text == "[NO_REPLY]"
     assert result.failure_code == "agent_time_budget_exhausted"
-    assert len(caller.calls) == 1
+    assert len(caller.calls) == 0
 
 
 def test_run_agent_invalid_query_rewrite_is_traced_as_structural_fallback(monkeypatch) -> None:  # noqa: ANN001
@@ -1368,8 +1514,8 @@ def test_run_agent_main_model_call_is_bounded_by_agent_deadline(monkeypatch) -> 
     )
 
     assert result.text == "[NO_REPLY]"
-    assert result.failure_code == "agent_model_timeout"
-    assert len(caller.calls) == 1
+    assert result.failure_code == "agent_time_budget_exhausted"
+    assert len(caller.calls) == 0
 
 
 def test_run_agent_uses_tool_metadata_contract_for_queued_action_silence() -> None:
@@ -2705,7 +2851,7 @@ def test_run_agent_returns_image_generation_failure_without_rewrite(monkeypatch)
     assert len(caller.calls) == 1
 
 
-def test_run_agent_returns_image_generation_timeout_without_rewrite(monkeypatch) -> None:  # noqa: ANN001
+def test_run_agent_does_not_start_image_generation_without_phase_budget(monkeypatch) -> None:  # noqa: ANN001
     async def _handler(**kwargs):  # noqa: ANN001
         assert kwargs["prompt"] == "Kobe Bryant iced tea poster"
         await asyncio.sleep(0.2)
@@ -2767,9 +2913,9 @@ def test_run_agent_returns_image_generation_timeout_without_rewrite(monkeypatch)
     elapsed = time.monotonic() - started_at
 
     assert result.text == "[NO_REPLY]"
-    assert result.failure_code == "agent_image_generation_failed"
+    assert result.failure_code == "agent_time_budget_exhausted"
     assert result.bypass_length_limits is False
-    assert len(caller.calls) == 1
+    assert len(caller.calls) == 0
     assert elapsed < 0.18
 
 

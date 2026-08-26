@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -228,6 +229,7 @@ async def _try_inject_vision_fallback(
     step: int,
     warning_message: str,
     success_message: str,
+    tool_deadline: float | None = None,
 ) -> bool:
     if (
         not _vision_fallback_enabled(plugin_config)
@@ -235,15 +237,31 @@ async def _try_inject_vision_fallback(
         or not (user_images or has_media)
     ):
         return False
+    remaining_timeout = (
+        None
+        if tool_deadline is None
+        else max(0.0, float(tool_deadline) - time.monotonic())
+    )
+    if remaining_timeout is not None and remaining_timeout < 1.0:
+        logger.warning(f"{warning_message}: tool_budget_exhausted")
+        return False
     try:
-        background = await _run_background_vision_fallback(
+        background_coro = _run_background_vision_fallback(
             registry=registry,
             query=query,
             images=user_images,
             allow_current_media=has_media,
         )
+        background = (
+            await background_coro
+            if remaining_timeout is None
+            else await asyncio.wait_for(background_coro, timeout=remaining_timeout)
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"{warning_message}: tool_timeout")
+        background = None
     except Exception as exc:
-        logger.warning(f"{warning_message}: {exc}")
+        logger.warning(f"{warning_message}: type={type(exc).__name__}")
         background = None
     if background is None:
         return False
@@ -565,6 +583,8 @@ async def _run_stop_fallback_tool(
         unavailable_tool_signatures=state.unavailable_tool_signatures,
         logger=logger,
         budget_deadline=execution_deadline,
+        minimum_start_seconds=1.0,
+        safe_failures=True,
     )
     fallback_outcome = _tool_result_outcome(fallback_result)
     fallback_status = (
@@ -645,7 +665,9 @@ async def handle_model_stop(
     select_semantic_fallback_tool: Callable[..., Awaitable[tuple[str, dict] | None]],
     structured_output: bool = False,
     semantic_research_target_deadline: float | None = None,
+    tool_deadline: float | None = None,
 ) -> StopFlowDecision:
+    effective_tool_deadline = tool_deadline if tool_deadline is not None else budget_deadline
     if structured_output and not response.tool_calls:
         if content_len <= 0:
             return StopFlowDecision.return_result(
@@ -697,6 +719,7 @@ async def handle_model_stop(
                 step=step,
                 warning_message="[agent] required media evidence failed",
                 success_message="[agent] injected required media evidence",
+                tool_deadline=effective_tool_deadline,
             )
             if injected:
                 return StopFlowDecision.continue_loop()
@@ -772,6 +795,7 @@ async def handle_model_stop(
             step=step,
             warning_message="[agent] vision fallback failed",
             success_message="[agent] injected background vision fallback result",
+            tool_deadline=effective_tool_deadline,
         )
         if injected:
             return StopFlowDecision.continue_loop()
@@ -791,7 +815,7 @@ async def handle_model_stop(
         record_trace=record_trace,
         logger=logger,
         select_semantic_fallback_tool=select_semantic_fallback_tool,
-        budget_deadline=budget_deadline,
+        budget_deadline=effective_tool_deadline,
         semantic_research_target_deadline=semantic_research_target_deadline,
     )
     if fallback_lookup is not None:
@@ -805,7 +829,7 @@ async def handle_model_stop(
             rewritten_query=rewritten_query,
             user_images=user_images,
             logger=logger,
-            budget_deadline=budget_deadline,
+            budget_deadline=effective_tool_deadline,
             messages=messages,
             tool_caller=tool_caller,
             origin_response=response,
@@ -844,6 +868,7 @@ async def handle_model_stop(
             step=step,
             warning_message="[agent] deferred vision fallback failed",
             success_message="[agent] awaited background vision fallback result",
+            tool_deadline=effective_tool_deadline,
         )
         if injected:
             return StopFlowDecision.continue_loop()
