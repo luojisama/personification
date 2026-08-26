@@ -30,6 +30,12 @@ def test_ffmpeg_command_is_audio_only(tmp_path: Path) -> None:
     assert command[-1].endswith("audio.mp3")
 
 
+def test_full_audio_command_has_no_time_cutoff_and_default_timeout_is_compatible() -> None:
+    command = audio_lyrics.build_ffmpeg_audio_command("ffmpeg", Path("source.mp4"), Path("audio.mp3"), 128)
+    assert "-t" not in command
+    assert audio_lyrics.DEFAULT_TIMEOUT_SECONDS == 180.0
+
+
 def test_ffprobe_command_selects_only_the_first_audio_stream(tmp_path: Path) -> None:
     command = audio_lyrics.build_ffprobe_audio_command("ffprobe", tmp_path / "source.mp4")
     assert command[command.index("-select_streams") + 1] == "a:0"
@@ -96,20 +102,43 @@ def test_payload_is_audio_only_and_excludes_reference_lyrics(tmp_path: Path) -> 
     audio.write_bytes(b"audio-only")
     payload = audio_lyrics.build_payload(audio)
     parts = payload["contents"][0]["parts"]
-    assert [set(part) for part in parts] == [{"text"}, {"inlineData"}]
-    assert parts[1]["inlineData"]["mimeType"] == "audio/mpeg"
-    assert base64.b64decode(parts[1]["inlineData"]["data"]) == b"audio-only"
+    assert [set(part) for part in parts] == [{"inlineData"}, {"text"}]
+    assert parts[0]["inlineData"]["mimeType"] == "audio/mp3"
+    assert base64.b64decode(parts[0]["inlineData"]["data"]) == b"audio-only"
+    assert payload["generationConfig"] == {"temperature": 0.2}
     rendered = json.dumps(payload, ensure_ascii=False)
     assert all(line not in rendered for line in audio_lyrics.AGY_REFERENCE_LYRICS)
     assert "video" not in rendered.lower()
     assert "image" not in rendered.lower()
 
 
+def test_video_payload_is_native_mp4_and_does_not_contaminate_audio_payload(tmp_path: Path) -> None:
+    audio = tmp_path / "audio.mp3"
+    video = tmp_path / "video.mp4"
+    audio.write_bytes(b"audio-only")
+    video.write_bytes(b"video-with-audio")
+    audio_payload = audio_lyrics.build_media_payload(audio, input_mode="audio")
+    video_payload = audio_lyrics.build_media_payload(video, input_mode="video")
+    audio_part = audio_payload["contents"][0]["parts"][0]["inlineData"]
+    video_part = video_payload["contents"][0]["parts"][0]["inlineData"]
+    assert audio_part["mimeType"] == "audio/mp3"
+    assert video_part["mimeType"] == "video/mp4"
+    assert base64.b64decode(audio_part["data"]) == b"audio-only"
+    assert base64.b64decode(video_part["data"]) == b"video-with-audio"
+    assert "video" not in audio_lyrics.build_prompt("audio").lower()
+    assert "视频容器" in audio_lyrics.build_prompt("video")
+    assert all(line not in json.dumps(video_payload, ensure_ascii=False) for line in audio_lyrics.AGY_REFERENCE_LYRICS)
+    assert audio_payload["generationConfig"] == {"temperature": 0.2}
+    assert video_payload["generationConfig"] == {"temperature": 0.2}
+
+
 def test_error_redaction_removes_key_and_authorization_value() -> None:
-    source = "HTTP 401 x-goog-api-key: sk-abcdef123456 Authorization: Bearer secret-token"
+    fake_key = "sk-" + "abcdef123456"
+    source = f"HTTP 401 x-goog-api-key: {fake_key} Authorization: Bearer secret-token https://example.test/v1beta/models?key=query-secret"
     redacted = audio_lyrics.redact_sensitive_text(source)
-    assert "sk-abcdef123456" not in redacted
+    assert fake_key not in redacted
     assert "secret-token" not in redacted
+    assert "query-secret" not in redacted
     assert "[REDACTED]" in redacted
 
 
@@ -199,6 +228,7 @@ def test_explicit_bearer_sends_one_bearer_request_only(tmp_path: Path) -> None:
     assert len(headers) == 1
     assert headers[0]["Authorization"] == "Bearer test-key"
     assert "X-goog-api-key" not in headers[0]
+    assert headers[0]["User-agent"] == audio_lyrics.COMPATIBILITY_USER_AGENT
 
 
 def test_auto_403_does_not_retry_with_bearer(tmp_path: Path) -> None:
@@ -231,3 +261,12 @@ def test_auto_403_does_not_retry_with_bearer(tmp_path: Path) -> None:
     assert len(headers) == 1
     assert "X-goog-api-key" in headers[0]
     assert "Authorization" not in headers[0]
+
+
+def test_video_transcode_command_preserves_one_video_and_one_audio_stream(tmp_path: Path) -> None:
+    command = audio_lyrics.build_ffmpeg_video_command("ffmpeg", tmp_path / "source.mp4", tmp_path / "video.mp4")
+    assert command[command.index("-map") + 1] == "0:v:0?"
+    second_map = command.index("-map", command.index("-map") + 1)
+    assert command[second_map + 1] == "0:a:0?"
+    assert "-vn" not in command
+    assert command[command.index("-t") + 1] == "90.0"
