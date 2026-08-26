@@ -112,6 +112,29 @@ def test_payload_is_audio_only_and_excludes_reference_lyrics(tmp_path: Path) -> 
     assert "image" not in rendered.lower()
 
 
+def test_audio_compatibility_text_and_failure_report_use_audio_mp3(capsys: pytest.CaptureFixture[str]) -> None:
+    artifact = audio_lyrics.MediaArtifact(
+        input_mode="audio",
+        mime_type="audio/mp3",
+        codec_summary="mp3",
+        duration_seconds=1.0,
+        size_bytes=1,
+        sha256="0" * 64,
+    )
+    audio_lyrics.print_failure_report(
+        input_mode="audio",
+        api_url="https://example.test",
+        model="gemini-test",
+        artifact=artifact,
+        elapsed_seconds=None,
+        diagnostic_code="test_failure",
+    )
+    rendered = capsys.readouterr().out
+    assert "audio/mp3" in str(audio_lyrics.request_gemini_audio.__doc__)
+    assert "inlineData(audio/mp3)" in rendered
+    assert "audio/mpeg" not in rendered
+
+
 def test_video_payload_is_native_mp4_and_does_not_contaminate_audio_payload(tmp_path: Path) -> None:
     audio = tmp_path / "audio.mp3"
     video = tmp_path / "video.mp4"

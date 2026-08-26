@@ -557,7 +557,7 @@ def request_gemini_media(
 
 
 def request_gemini_audio(**kwargs: Any) -> GeminiResult:
-    """兼容旧调用：严格构造 audio/mpeg payload。"""
+    """兼容旧调用：严格构造 audio/mp3 payload。"""
 
     audio_path = Path(kwargs.pop("audio_path"))
     return request_gemini_media(media_path=audio_path, input_mode="audio", **kwargs)
@@ -656,7 +656,7 @@ def print_failure_report(
         print(f"媒体大小: {artifact.size_bytes} bytes")
         print(f"媒体 SHA-256: {artifact.sha256}")
         if input_mode == "audio":
-            print("媒体边界: PASS（只允许 inlineData(audio/mpeg)）")
+            print("媒体边界: PASS（只允许 inlineData(audio/mp3)）")
         else:
             print("媒体边界: video/mp4（允许画面与原音轨）")
     if elapsed_seconds is not None:
