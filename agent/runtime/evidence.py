@@ -684,6 +684,7 @@ def _render_turn_plan(plan: TurnPlan | Any) -> str:
         "memory_need": str(getattr(plan, "memory_need", "") or ""),
         "research_need": str(getattr(plan, "research_need", "") or ""),
         "vision_need": str(getattr(plan, "vision_need", "") or ""),
+        "media_only_turn": bool(getattr(plan, "media_only_turn", False)),
         "output_mode": str(getattr(plan, "output_mode", "") or ""),
         "tool_intent": list(getattr(plan, "tool_intent", []) or []),
         "ambiguity_level": str(getattr(plan, "ambiguity_level", "") or ""),

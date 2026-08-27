@@ -84,6 +84,10 @@ class TurnPlan:
     research_need: ResearchNeed = "none"
     vision_need: VisionNeed = "none"
     media_reason_code: str = "media_not_needed"
+    # This is a trusted transport fact, never a field that the planning model
+    # gets to decide.  It keeps the normal and YAML planning paths aligned when
+    # a reply has to account for an attachment without accompanying text.
+    media_only_turn: bool = False
     qzone_continue: bool = False
     output_mode: OutputMode = "chat_short"
     tool_intent: list[ToolIntent] = field(default_factory=lambda: ["none"])
@@ -158,6 +162,22 @@ def _coerce_tool_intents(value: Any) -> list[ToolIntent]:
     if len(items) > 1 and "none" in items:
         items = [item for item in items if item != "none"]
     return items[:5]
+
+
+def _apply_trusted_media_only_turn(
+    plan: TurnPlan,
+    availability: MediaAvailability,
+) -> TurnPlan:
+    """Stamp the planner result with the code-owned media-only fact.
+
+    ``media_only_turn`` is derived while normalizing the incoming segments.  It
+    deliberately never participates in ``parse_turn_plan_payload``: model JSON
+    and legacy semantic frames must not be able to turn a media-only turn into a
+    normal text turn (or vice versa).
+    """
+
+    plan.media_only_turn = bool(availability.media_only_turn)
+    return plan
 
 
 def default_speech_act(
@@ -283,7 +303,7 @@ def metadata_fallback_turn_plan(
     target = str(message_target or "").strip()
     qzone_event = str(qzone_event_type or "").strip()
     if qzone_event:
-        return TurnPlan(
+        return _apply_trusted_media_only_turn(TurnPlan(
             reply_action="reply",
             speech_act="participate",
             memory_need="light",
@@ -298,9 +318,9 @@ def metadata_fallback_turn_plan(
             reason="metadata_fallback_qzone",
             message_target="bot",
             session_goal="延续空间互动",
-        )
+        ), availability)
     if is_group and is_random_chat and not is_direct_mention and target not in {"bot", "broadcast"}:
-        return TurnPlan(
+        return _apply_trusted_media_only_turn(TurnPlan(
             reply_action="silence",
             speech_act="silence",
             memory_need="none",
@@ -315,8 +335,8 @@ def metadata_fallback_turn_plan(
             reason="metadata_fallback_random_group",
             message_target="uncertain",
             session_goal="避免误插话",
-        )
-    return TurnPlan(
+        ), availability)
+    return _apply_trusted_media_only_turn(TurnPlan(
         reply_action="reply",
         speech_act="participate",
         memory_need="light" if is_group else "none",
@@ -331,7 +351,7 @@ def metadata_fallback_turn_plan(
         reason="metadata_fallback",
         message_target="bot" if (not is_group or is_direct_mention or target == "bot") else "broadcast",
         session_goal="自然回应当前轮次",
-    )
+    ), availability)
 
 
 def apply_group_no_question_turn_policy(
@@ -471,6 +491,9 @@ async def plan_turn_with_llm(
         "5-0. vision_need 决定可见回复是否依赖本轮媒体证据：无关时为 none，需要 vision_analyze 摘要时为 summary；"
         "只有系统 grounding 明确声明当前主路由已验证原生支持时才为 native。"
         "仅媒体消息或最终回复会描述附件内容时不得为 none，tool_intent 必须包含 vision。"
+        "当可信媒体可用性中的 media_only_turn=true 且 vision_need=summary/native 时，"
+        "最终可见回复必须先交付一个由媒体证据支持的具体场景、对象、动作或画面文字事实，"
+        "之后才可以自然评论或提问；output_mode=chat_short 只限制长度和风格，不能覆盖该事实交付要求。"
         "media_reason_code 只用稳定英文短码，不写推理过程。\n"
         "5a. 当前可用工具 metadata 中的 runtime_capability 只表示当前发送者头像画面事实的第一方只读能力。"
         "当对方询问 bot 能否读取或理解自己的头像画面时，tool_intent 必须包含 runtime_capability，"
@@ -521,11 +544,11 @@ async def plan_turn_with_llm(
         )
         payload = extract_json_payload(str(getattr(response, "content", "") or ""))
         plan = parse_turn_plan_payload(payload) if payload is not None else None
-        return apply_group_no_question_turn_policy(
+        return _apply_trusted_media_only_turn(apply_group_no_question_turn_policy(
             plan or fallback,
             is_group=is_group,
             is_direct_mention=is_direct_mention,
-        )
+        ), availability)
     except Exception:
         return fallback
 
@@ -597,6 +620,7 @@ def turn_plan_from_semantic_frame(
             getattr(frame, "media_reason_code", "media_not_needed")
             or "media_not_needed"
         )[:64],
+        media_only_turn=bool(availability.media_only_turn),
         qzone_continue=False,
         output_mode=output_mode,
         tool_intent=tool_intent,
@@ -677,6 +701,7 @@ def turn_plan_to_semantic_frame(plan: TurnPlan) -> Any:
         frame.session_goal = plan.session_goal
         frame.message_target = plan.message_target
         frame.citation_mode = plan.citation_mode
+        frame.media_only_turn = plan.media_only_turn
     except Exception:
         pass
     return frame

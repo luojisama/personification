@@ -7,6 +7,7 @@ import asyncio
 from ._loader import load_personification_module
 
 planner = load_personification_module("plugin.personification.agent.runtime.planner")
+evidence = load_personification_module("plugin.personification.agent.runtime.evidence")
 
 
 def test_metadata_fallback_turn_plan_silences_uncertain_random_group() -> None:
@@ -38,6 +39,76 @@ def test_metadata_fallback_turn_plan_requires_video_evidence_for_direct_turn() -
     assert plan.vision_need == "summary"
     assert plan.media_reason_code == "metadata_media_evidence_required"
     assert plan.tool_intent == ["vision"]
+    assert plan.media_only_turn is True
+
+
+def test_planner_stamps_code_owned_media_only_fact_over_model_json() -> None:
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"reply_action":"reply","speech_act":"participate",'
+                        '"memory_need":"none","research_need":"none",'
+                        '"vision_need":"summary","media_only_turn":false,'
+                        '"qzone_continue":false,"output_mode":"chat_short",'
+                        '"tool_intent":["vision"],"ambiguity_level":"low",'
+                        '"message_target":"bot","session_goal":"回应媒体",'
+                        '"confidence":0.9,"reason":"媒体"}'
+                    )
+                },
+            )()
+
+    plan = asyncio.run(
+        planner.plan_turn_with_llm(
+            "",
+            media_availability={
+                "video_count": 1,
+                "usable_video_count": 1,
+                "media_only_turn": True,
+            },
+            tool_caller=_Caller(),
+        )
+    )
+
+    assert plan.vision_need == "summary"
+    assert plan.media_only_turn is True
+
+
+def test_semantic_frame_adapter_derives_media_only_from_availability_not_frame() -> None:
+    frame = SimpleNamespace(
+        chat_intent="banter",
+        vision_need="summary",
+        media_only_turn=False,
+        reason="semantic",
+    )
+
+    plan = planner.turn_plan_from_semantic_frame(
+        frame,
+        media_availability={
+            "video_count": 1,
+            "usable_video_count": 1,
+            "media_only_turn": True,
+        },
+    )
+    restored = planner.turn_plan_to_semantic_frame(plan)
+
+    assert plan.media_only_turn is True
+    assert restored.media_only_turn is True
+
+
+def test_evidence_context_exposes_trusted_media_only_fact_to_agent() -> None:
+    rendered = evidence._render_turn_plan(  # noqa: SLF001 - internal contract coverage
+        planner.TurnPlan(
+            vision_need="summary",
+            media_only_turn=True,
+            tool_intent=["vision"],
+        )
+    )
+
+    assert '"media_only_turn": true' in rendered
 
 
 def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
