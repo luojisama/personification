@@ -83,7 +83,10 @@ from ...core.response_review import (
 from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.target_inference import normalize_message_target_for_plan, normalize_message_target_for_review
 from ...core.reply_text_policy import normalize_visible_reply_text
-from ...core.reply_completion_contract import resolve_sent_reply_completion
+from ...core.reply_completion_contract import (
+    apply_agent_result_completion_state,
+    resolve_sent_reply_completion,
+)
 from ...core.reply_length_policy import render_reply_length_trace, resolve_reply_length_policy, truncate_reply_text
 from ...core.prompt_loader import pick_ack_phrase
 from ...core.qq_outbound import QQOutboundLedger, SendReceipt, build_outbound_context
@@ -1922,36 +1925,12 @@ async def process_yaml_response_logic(
         finally:
             reset_current_image_context(image_ctx_token)
         if agent_result is not None:
-            social_coverage = dict(getattr(agent_result, "social_coverage", {}) or {})
-            reply_commit_state["agent_evidence_delivery_required"] = bool(
-                getattr(agent_result, "evidence_delivery_required", False)
-            )
-            reply_commit_state["agent_evidence_delivery_status"] = str(
-                getattr(agent_result, "evidence_delivery_status", "not_required") or "not_required"
-            )
-            reply_commit_state["agent_evidence_recovered"] = bool(
-                getattr(agent_result, "evidence_recovered", False)
-            )
-            reply_commit_state["agent_citation_mode"] = str(
-                getattr(agent_result, "citation_mode", getattr(turn_plan, "citation_mode", "none"))
-                or "none"
-            )
-            reply_commit_state["agent_social_coverage_status"] = str(
-                social_coverage.get("coverage_status", "") or ""
-            )
-            reply_commit_state["agent_social_tool_execution"] = (
-                "partial" if bool(social_coverage.get("partial", False)) else "ok"
-                if bool(getattr(agent_result, "social_evidence", None))
-                else "not_used"
-            )
-            evidence_unavailable = (
-                str(getattr(agent_result, "quality_context", "") or "")
-                == "evidence_unavailable"
-            )
-            reply_commit_state["agent_evidence_unavailable"] = evidence_unavailable
-            reply_commit_state["agent_tool_calls"] = bool(getattr(agent_result, "tool_calls_made", False))
-            reply_commit_state["agent_tool_execution"] = (
-                "empty" if evidence_unavailable else "not_used"
+            apply_agent_result_completion_state(
+                state=reply_commit_state,
+                agent_result=agent_result,
+                default_citation_mode=str(
+                    getattr(turn_plan, "citation_mode", "none") or "none"
+                ),
             )
             agent_failure_code = str(getattr(agent_result, "failure_code", "") or "").strip()
             if agent_failure_code:
@@ -2182,10 +2161,22 @@ async def process_yaml_response_logic(
                 mark_reply_delivery_complete(reply_commit_state)
                 release_reply_commit(reply_commit_state)
                 mark_reply_phase(reply_commit_state, "reply_complete")
+                completion = resolve_sent_reply_completion(
+                    state=reply_commit_state,
+                    visible_text=raw_direct_output,
+                    delivery_partial=delivery_partial,
+                    delivery_unknown=delivery_unknown,
+                )
                 _trace_finish(
-                    outcome="ok",
-                    diagnosis_code="ok",
-                    detail={"direct_output": True, "segments": direct_segments_sent},
+                    outcome=completion["outcome"],
+                    diagnosis_code=completion["diagnosis_code"],
+                    detail={
+                        "direct_output": True,
+                        "segments": direct_segments_sent,
+                        "tool_execution": completion["tool_execution"],
+                        "evidence_delivery": completion["evidence_delivery"],
+                        "outbound_delivery": completion["outbound_delivery"],
+                    },
                 )
                 return
     async def _resolve_operational_empty_reply(reason_code: str) -> str:

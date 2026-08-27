@@ -211,6 +211,61 @@ def test_reply_completion_contract_separates_evidence_and_outbound_states(
         assert resolved["evidence_delivery"] == "incomplete"
 
 
+def test_shared_agent_completion_state_marks_direct_media_failure_as_partial() -> None:
+    state: dict[str, object] = {}
+    agent_result = SimpleNamespace(
+        quality_context="evidence_unavailable",
+        tool_calls_made=True,
+        social_evidence=[],
+        social_coverage={},
+        evidence_delivery_required=False,
+        evidence_delivery_status="not_required",
+        evidence_recovered=False,
+        citation_mode="none",
+    )
+
+    completion_contract.apply_agent_result_completion_state(
+        state=state,
+        agent_result=agent_result,
+        default_citation_mode="none",
+    )
+    resolved = completion_contract.resolve_sent_reply_completion(
+        state=state,
+        visible_text="媒体文件已经收到了，但这次内容分析失败了，我不能在没看清的情况下乱猜。",
+    )
+
+    assert state["agent_evidence_unavailable"] is True
+    assert state["agent_tool_execution"] == "empty"
+    assert state["agent_tool_calls"] is True
+    assert resolved["outcome"] == "partial"
+    assert resolved["diagnosis_code"] == "evidence_delivery_incomplete"
+    assert resolved["tool_execution"] == "empty"
+    assert resolved["evidence_delivery"] == "incomplete"
+    assert resolved["outbound_delivery"] == "confirmed"
+
+
+def test_shared_agent_completion_state_marks_successful_general_tool_execution() -> None:
+    state: dict[str, object] = {}
+    agent_result = SimpleNamespace(
+        quality_context="",
+        tool_calls_made=True,
+        social_evidence=[],
+        social_coverage={},
+        evidence_delivery_required=False,
+        evidence_delivery_status="not_required",
+        evidence_recovered=False,
+        citation_mode="none",
+    )
+
+    completion_contract.apply_agent_result_completion_state(
+        state=state,
+        agent_result=agent_result,
+    )
+
+    assert state["agent_tool_calls"] is True
+    assert state["agent_tool_execution"] == "ok"
+
+
 def test_reply_turn_trace_builds_safe_process_view(_db_tmp) -> None:
     traces = load_personification_module("plugin.personification.core.reply_turn_trace")
     logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")

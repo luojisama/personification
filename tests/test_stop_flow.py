@@ -4,6 +4,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 stop_flow = load_personification_module("plugin.personification.agent.runtime.stop_flow")
@@ -48,6 +50,31 @@ class _LookupTool:
         return self._result
 
 
+class _VisionTool:
+    local = True
+    metadata = {
+        "category": "retrieval",
+        "intent_tags": ["lookup"],
+        "evidence_kind": "visual_summary",
+        "side_effect": "none",
+    }
+
+    def __init__(self, result: str, *, enabled: bool = True, raises: bool = False):
+        self._result = result
+        self._enabled = enabled
+        self._raises = raises
+        self.calls = 0
+
+    def enabled(self) -> bool:
+        return self._enabled
+
+    async def handler(self, **_kwargs):  # noqa: ANN003, ANN201
+        self.calls += 1
+        if self._raises:
+            raise RuntimeError("provider details must not enter the trace")
+        return self._result
+
+
 async def _no_lookup(**_kwargs):  # noqa: ANN001
     return None
 
@@ -81,6 +108,8 @@ def _run_stop_handler(
     turn_plan=None,
     reply_required: bool = False,
     plugin_config=None,
+    user_images=None,
+    tool_deadline=None,
 ):
     traces: list[dict] = []
     decision = asyncio.run(
@@ -99,7 +128,7 @@ def _run_stop_handler(
             plugin_config=plugin_config or SimpleNamespace(personification_fallback_enabled=False),
             user_query_text="问题",
             user_text="问题",
-            user_images=[],
+            user_images=list(user_images or []),
             has_media=has_media,
             turn_plan=turn_plan,
             reply_required=reply_required,
@@ -112,50 +141,119 @@ def _run_stop_handler(
             append_evidence_guidance=_append_evidence_guidance,
             classify_deferred_lookup_reply=_unused_classifier,
             select_semantic_fallback_tool=select_semantic_fallback_tool,
+            tool_deadline=tool_deadline,
         )
     )
     return decision, traces
 
 
-def test_media_evidence_gate_injects_vision_before_zero_tool_draft() -> None:
-    class _VisionTool:
-        metadata = {
-            "category": "retrieval",
-            "intent_tags": ["lookup"],
-            "evidence_kind": "visual_summary",
-            "side_effect": "none",
-        }
-
-        @staticmethod
-        def enabled() -> bool:
-            return True
-
-        @staticmethod
-        async def handler(**_kwargs):  # noqa: ANN003, ANN201
-            return json.dumps(
-                {
-                    "scene_summary": "游戏仓库界面里展示了多件装备",
-                    "visual_evidence": ["角色站在仓库界面中央"],
-                },
-                ensure_ascii=False,
-            )
-
+@pytest.mark.parametrize("vision_need", ["summary", "native"])
+def test_media_evidence_gate_injects_vision_before_zero_tool_draft(vision_need: str) -> None:
+    vision = _VisionTool(
+        json.dumps(
+            {
+                "scene_summary": "游戏仓库界面里展示了多件装备",
+                "visual_evidence": ["角色站在仓库界面中央"],
+            },
+            ensure_ascii=False,
+        )
+    )
     state = stop_flow.StopFlowState()
     decision, traces = _run_stop_handler(
         state=state,
         response=_stop_response("这是发了个什么视频呀？"),
         content_len=12,
         runtime_chat_intent="banter",
-        registry=_Registry(_VisionTool()),
+        registry=_Registry(vision),
         has_media=True,
-        turn_plan=SimpleNamespace(vision_need="summary"),
-        plugin_config=SimpleNamespace(personification_fallback_enabled=True),
+        turn_plan=SimpleNamespace(vision_need=vision_need),
+        plugin_config=SimpleNamespace(personification_fallback_enabled=False),
     )
 
     assert decision.action == "continue"
     assert state.media_evidence_gate_attempted is True
+    assert state.has_tool_call is True
     assert state.has_usable_evidence is True
-    assert any(item["key"] == "media_evidence_gate" for item in traces)
+    assert state.social_evidence_satisfied is False
+    assert state.tool_result_records[-1]["tool_name"] == "vision_analyze"
+    assert vision.calls == 1
+    evidence_trace = next(item for item in traces if item["key"] == "media_evidence_tool")
+    assert "tool=vision_analyze required=true outcome=usable_evidence" in evidence_trace["detail"]
+    assert "reason=result" in evidence_trace["detail"]
+    assert "游戏仓库" not in evidence_trace["detail"]
+
+
+def test_required_media_evidence_appends_usage_guidance_after_injection() -> None:
+    guidance_calls = 0
+
+    async def _record_guidance(**_kwargs):  # noqa: ANN001
+        nonlocal guidance_calls
+        guidance_calls += 1
+
+    vision = _VisionTool(
+        json.dumps(
+            {
+                "scene_summary": "游戏仓库界面里展示了多件装备",
+                "visual_evidence": ["角色站在仓库界面中央"],
+            },
+            ensure_ascii=False,
+        )
+    )
+    traces: list[dict] = []
+    decision = asyncio.run(
+        stop_flow.handle_model_stop(
+            state=stop_flow.StopFlowState(),
+            response=_stop_response("这是未经证据的旧草稿。"),
+            content_len=12,
+            active_schemas=[],
+            runtime_chat_intent="banter",
+            intent_decision=SimpleNamespace(ambiguity_level="low"),
+            registry=_Registry(vision),
+            tool_caller=SimpleNamespace(),
+            logger=SimpleNamespace(info=lambda _msg: None, warning=lambda _msg: None),
+            messages=[],
+            pending_actions=[],
+            plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+            user_query_text="问题",
+            user_text="问题",
+            user_images=[],
+            has_media=True,
+            turn_plan=SimpleNamespace(vision_need="summary"),
+            reply_required=True,
+            rewritten_query=None,
+            context_hint="",
+            plugin_query_intent="",
+            budget_deadline=None,
+            step=1,
+            record_trace=lambda **kwargs: traces.append(kwargs),
+            append_evidence_guidance=_record_guidance,
+            classify_deferred_lookup_reply=_unused_classifier,
+            select_semantic_fallback_tool=_no_lookup,
+        )
+    )
+
+    assert decision.action == "continue"
+    assert guidance_calls == 1
+
+
+def test_optional_vision_fallback_stays_disabled_when_optional_fallback_is_off() -> None:
+    vision = _VisionTool('{"scene_summary":"不应执行"}')
+    response = _stop_response("")
+    response.vision_unavailable = True
+
+    decision, traces = _run_stop_handler(
+        state=stop_flow.StopFlowState(),
+        response=response,
+        content_len=0,
+        registry=_Registry(vision),
+        user_images=["https://example.invalid/image.jpg"],
+        plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+    )
+
+    assert decision.action == "return"
+    assert decision.result.text == "[NO_REPLY]"
+    assert vision.calls == 0
+    assert not any(item["key"] == "media_evidence_tool" for item in traces)
 
 
 def test_media_evidence_gate_never_returns_unverified_video_draft() -> None:
@@ -172,8 +270,134 @@ def test_media_evidence_gate_never_returns_unverified_video_draft() -> None:
 
     assert decision.action == "return"
     assert decision.result.text == "[SILENCE]"
-    assert decision.result.quality_context == "media_evidence_unavailable"
+    assert decision.result.quality_context == "evidence_unavailable"
+    assert decision.result.direct_output is False
     assert traces[-1]["key"] == "media_evidence_gate"
+
+
+@pytest.mark.parametrize(
+    ("tool", "reason"),
+    [
+        (None, "tool_unavailable"),
+        (_VisionTool("", enabled=False), "tool_disabled"),
+    ],
+)
+def test_required_media_evidence_unavailable_uses_safe_direct_notice_or_silence(tool, reason) -> None:  # noqa: ANN001
+    direct_draft = "这是未经证据的旧草稿。"
+    decision, traces = _run_stop_handler(
+        state=stop_flow.StopFlowState(),
+        response=_stop_response(direct_draft),
+        content_len=len(direct_draft),
+        registry=_Registry(tool),
+        has_media=True,
+        turn_plan=SimpleNamespace(vision_need="summary"),
+        reply_required=True,
+        plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+    )
+
+    assert decision.action == "return"
+    assert decision.result.text == "媒体文件已经收到了，但这次内容分析失败了，我不能在没看清的情况下乱猜。"
+    assert direct_draft not in decision.result.text
+    assert decision.result.direct_output is True
+    assert decision.result.quality_context == "evidence_unavailable"
+    assert decision.result.suppress_reply_recovery is True
+    evidence_trace = next(item for item in traces if item["key"] == "media_evidence_tool")
+    assert f"reason={reason}" in evidence_trace["detail"]
+
+    group_decision, _ = _run_stop_handler(
+        state=stop_flow.StopFlowState(),
+        response=_stop_response(direct_draft),
+        content_len=len(direct_draft),
+        registry=_Registry(tool),
+        has_media=True,
+        turn_plan=SimpleNamespace(vision_need="summary"),
+        reply_required=False,
+        plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+    )
+    assert group_decision.action == "return"
+    assert group_decision.result.text == "[SILENCE]"
+    assert group_decision.result.direct_output is False
+
+
+@pytest.mark.parametrize(
+    ("tool_result", "expected_outcome"),
+    [
+        (
+            json.dumps(
+                {
+                    "scene_summary": "",
+                    "visual_evidence": [],
+                    "ambiguity_notes": ["vision_unavailable"],
+                },
+                ensure_ascii=False,
+            ),
+            "empty_evidence",
+        ),
+        (json.dumps({"status": "failed", "error_code": "vision_failed"}), "operational_failure"),
+    ],
+)
+def test_required_media_evidence_empty_or_failed_result_continues_once_then_fails_closed(
+    tool_result, expected_outcome
+) -> None:  # noqa: ANN001
+    vision = _VisionTool(tool_result)
+    state = stop_flow.StopFlowState()
+    first, first_traces = _run_stop_handler(
+        state=state,
+        response=_stop_response("这是未经证据的旧草稿。"),
+        content_len=12,
+        registry=_Registry(vision),
+        has_media=True,
+        turn_plan=SimpleNamespace(vision_need="summary"),
+        reply_required=True,
+        plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+    )
+
+    assert first.action == "continue"
+    assert state.has_tool_call is True
+    assert state.has_usable_evidence is False
+    assert state.tool_result_records[-1]["tool_name"] == "vision_analyze"
+    evidence_trace = next(item for item in first_traces if item["key"] == "media_evidence_tool")
+    assert f"outcome={expected_outcome}" in evidence_trace["detail"]
+
+    second_draft = "第二次也不能返回这个草稿。"
+    second, second_traces = _run_stop_handler(
+        state=state,
+        response=_stop_response(second_draft),
+        content_len=len(second_draft),
+        registry=_Registry(vision),
+        has_media=True,
+        turn_plan=SimpleNamespace(vision_need="summary"),
+        reply_required=True,
+        plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+    )
+
+    assert second.action == "return"
+    assert second.result.direct_output is True
+    assert second.result.quality_context == "evidence_unavailable"
+    assert second_draft not in second.result.text
+    assert vision.calls == 1
+    assert second_traces[-1]["key"] == "media_evidence_gate"
+
+
+def test_required_media_evidence_tool_exception_is_safe_and_does_not_leak() -> None:
+    vision = _VisionTool("", raises=True)
+    decision, traces = _run_stop_handler(
+        state=stop_flow.StopFlowState(),
+        response=_stop_response("这是未经证据的旧草稿。"),
+        content_len=12,
+        registry=_Registry(vision),
+        has_media=True,
+        turn_plan=SimpleNamespace(vision_need="summary"),
+        reply_required=True,
+        plugin_config=SimpleNamespace(personification_fallback_enabled=False),
+    )
+
+    assert decision.action == "return"
+    assert decision.result.direct_output is True
+    evidence_trace = next(item for item in traces if item["key"] == "media_evidence_tool")
+    assert "outcome=operational_failure" in evidence_trace["detail"]
+    assert "reason=tool_exception" in evidence_trace["detail"]
+    assert "provider details" not in evidence_trace["detail"]
 
 
 def _select_fallback(

@@ -1,6 +1,62 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, MutableMapping
+
+
+def apply_agent_result_completion_state(
+    *,
+    state: MutableMapping[str, Any],
+    agent_result: Any,
+    default_citation_mode: str = "none",
+) -> None:
+    """Project one Agent result into the shared visible-delivery contract.
+
+    Normal and YAML reply flows must expose the same final completion state.
+    Keep the projection here so a new quality context cannot silently become a
+    success in only one flow.
+    """
+
+    social_coverage = dict(getattr(agent_result, "social_coverage", {}) or {})
+    state["agent_social_evidence"] = [
+        dict(item)
+        for item in list(getattr(agent_result, "social_evidence", []) or [])[:10]
+        if isinstance(item, dict)
+    ]
+    state["agent_social_coverage"] = dict(social_coverage)
+    state["agent_evidence_delivery_required"] = bool(
+        getattr(agent_result, "evidence_delivery_required", False)
+    )
+    state["agent_evidence_delivery_status"] = str(
+        getattr(agent_result, "evidence_delivery_status", "not_required") or "not_required"
+    )
+    state["agent_evidence_recovered"] = bool(
+        getattr(agent_result, "evidence_recovered", False)
+    )
+    state["agent_citation_mode"] = str(
+        getattr(agent_result, "citation_mode", default_citation_mode)
+        or default_citation_mode
+        or "none"
+    )
+    state["agent_social_coverage_status"] = str(
+        social_coverage.get("coverage_status", "") or ""
+    )
+    state["agent_social_tool_execution"] = (
+        "partial"
+        if bool(social_coverage.get("partial", False))
+        else "ok"
+        if bool(getattr(agent_result, "social_evidence", None))
+        else "not_used"
+    )
+    evidence_unavailable = (
+        str(getattr(agent_result, "quality_context", "") or "")
+        == "evidence_unavailable"
+    )
+    state["agent_evidence_unavailable"] = evidence_unavailable
+    tool_calls_made = bool(getattr(agent_result, "tool_calls_made", False))
+    state["agent_tool_calls"] = tool_calls_made
+    state["agent_tool_execution"] = (
+        "empty" if evidence_unavailable else "ok" if tool_calls_made else "not_used"
+    )
 
 
 def resolve_sent_reply_completion(
@@ -83,4 +139,4 @@ def resolve_sent_reply_completion(
     }
 
 
-__all__ = ["resolve_sent_reply_completion"]
+__all__ = ["apply_agent_result_completion_state", "resolve_sent_reply_completion"]

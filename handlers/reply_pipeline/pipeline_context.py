@@ -30,6 +30,7 @@ from ...core.gemini_profile import build_gemini_route_policy_prompt
 from ...core.group_member_avatar_insight import register_group_member_avatar_insight_tool
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_style_policy import build_reply_style_policy_prompt
+from ...core.reply_completion_contract import apply_agent_result_completion_state
 from ...core.visible_output import guard_visible_text
 from ..reply_commit import (
     acquire_reply_commit,
@@ -1041,43 +1042,13 @@ async def run_agent_if_enabled(
         turn_media_context=turn_media_context,
         bot_avatar_context=bot_avatar_context,
     )
-    social_coverage = dict(getattr(result, "social_coverage", {}) or {})
     if isinstance(commit_state, dict):
-        commit_state["agent_social_evidence"] = [
-            dict(item)
-            for item in list(getattr(result, "social_evidence", []) or [])[:10]
-            if isinstance(item, dict)
-        ]
-        commit_state["agent_social_coverage"] = dict(social_coverage)
-        commit_state["agent_evidence_delivery_required"] = bool(
-            getattr(result, "evidence_delivery_required", False)
-        )
-        commit_state["agent_evidence_delivery_status"] = str(
-            getattr(result, "evidence_delivery_status", "not_required") or "not_required"
-        )
-        commit_state["agent_evidence_recovered"] = bool(
-            getattr(result, "evidence_recovered", False)
-        )
-        commit_state["agent_citation_mode"] = str(
-            getattr(result, "citation_mode", getattr(turn_plan, "citation_mode", "none"))
-            or "none"
-        )
-        commit_state["agent_social_coverage_status"] = str(
-            social_coverage.get("coverage_status", "") or ""
-        )
-        commit_state["agent_social_tool_execution"] = (
-            "partial" if bool(social_coverage.get("partial", False)) else "ok"
-            if bool(getattr(result, "social_evidence", None))
-            else "not_used"
-        )
-        evidence_unavailable = (
-            str(getattr(result, "quality_context", "") or "")
-            == "evidence_unavailable"
-        )
-        commit_state["agent_evidence_unavailable"] = evidence_unavailable
-        commit_state["agent_tool_calls"] = bool(getattr(result, "tool_calls_made", False))
-        commit_state["agent_tool_execution"] = (
-            "empty" if evidence_unavailable else "not_used"
+        apply_agent_result_completion_state(
+            state=commit_state,
+            agent_result=result,
+            default_citation_mode=str(
+                getattr(turn_plan, "citation_mode", "none") or "none"
+            ),
         )
     return (
         result.text,

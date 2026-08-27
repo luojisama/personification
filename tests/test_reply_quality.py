@@ -113,6 +113,29 @@ def test_finalize_agent_reply_quality_does_not_rewrite_markdown_with_caller() ->
     assert result.quality_checks[-1]["action"] == "normalized"
 
 
+def test_finalize_agent_reply_quality_preserves_direct_media_failure_notice() -> None:
+    caller = _RewriteCaller("发了什么好玩的？")
+    notice = "媒体文件已经收到了，但这次内容分析失败了，我不能在没看清的情况下乱猜。"
+
+    result = asyncio.run(
+        reply_quality.finalize_agent_reply_quality(
+            _agent_result(
+                notice,
+                direct_output=True,
+                quality_context="evidence_unavailable",
+            ),
+            tool_caller=caller,
+            messages=[],
+            reply_required=True,
+            reason="media_evidence_gate",
+        )
+    )
+
+    assert result.text == notice
+    assert caller.calls == []
+    assert result.quality_checks[-1]["action"] == "skipped"
+
+
 def test_finalize_agent_reply_quality_recovers_video_evidence_after_control_block_loss() -> None:
     caller = _RewriteCaller("这是第一人称射击游戏画面，玩家站在楼梯上拿着弓，画面里能看到游戏 HUD。")
     raw = (

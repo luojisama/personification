@@ -214,6 +214,38 @@ def _vision_fallback_enabled(plugin_config: Any) -> bool:
     )
 
 
+def _record_media_evidence_tool_trace(
+    record_trace: Callable[..., None] | None,
+    *,
+    required_media_evidence: bool,
+    outcome: str,
+    elapsed_ms: int,
+    reason: str,
+) -> None:
+    """Record only the safe execution shape of the synthetic vision tool.
+
+    This deliberately does not include the media reference, tool arguments,
+    result text, or a caught exception. The media evidence gate is an
+    operational guard, so its trace must remain useful without turning into a
+    second transport or provider log.
+    """
+
+    if record_trace is None:
+        return
+    status = "ok" if outcome == TOOL_RESULT_USABLE_EVIDENCE else "warn"
+    record_trace(
+        key="media_evidence_tool",
+        label="媒体证据工具",
+        status=status,
+        detail=(
+            "tool=vision_analyze "
+            f"required={str(bool(required_media_evidence)).lower()} "
+            f"outcome={outcome} elapsed_ms={max(0, int(elapsed_ms))} "
+            f"reason={reason}"
+        ),
+    )
+
+
 async def _try_inject_vision_fallback(
     *,
     state: StopFlowState,
@@ -230,12 +262,45 @@ async def _try_inject_vision_fallback(
     warning_message: str,
     success_message: str,
     tool_deadline: float | None = None,
+    required_media_evidence: bool = False,
+    record_trace: Callable[..., None] | None = None,
 ) -> bool:
-    if (
-        not _vision_fallback_enabled(plugin_config)
-        or registry.get("vision_analyze") is None
-        or not (user_images or has_media)
-    ):
+    if not (user_images or has_media):
+        if required_media_evidence:
+            _record_media_evidence_tool_trace(
+                record_trace,
+                required_media_evidence=True,
+                outcome=TOOL_RESULT_OPERATIONAL_FAILURE,
+                elapsed_ms=0,
+                reason="media_unavailable",
+            )
+        return False
+    if not required_media_evidence and not _vision_fallback_enabled(plugin_config):
+        return False
+    tool = registry.get("vision_analyze")
+    if tool is None:
+        if required_media_evidence:
+            _record_media_evidence_tool_trace(
+                record_trace,
+                required_media_evidence=True,
+                outcome=TOOL_RESULT_OPERATIONAL_FAILURE,
+                elapsed_ms=0,
+                reason="tool_unavailable",
+            )
+        return False
+    try:
+        tool_enabled = bool(tool.enabled())
+    except Exception:
+        tool_enabled = False
+    if not tool_enabled:
+        if required_media_evidence:
+            _record_media_evidence_tool_trace(
+                record_trace,
+                required_media_evidence=True,
+                outcome=TOOL_RESULT_OPERATIONAL_FAILURE,
+                elapsed_ms=0,
+                reason="tool_disabled",
+            )
         return False
     remaining_timeout = (
         None
@@ -244,7 +309,16 @@ async def _try_inject_vision_fallback(
     )
     if remaining_timeout is not None and remaining_timeout < 1.0:
         logger.warning(f"{warning_message}: tool_budget_exhausted")
+        if required_media_evidence:
+            _record_media_evidence_tool_trace(
+                record_trace,
+                required_media_evidence=True,
+                outcome=TOOL_RESULT_OPERATIONAL_FAILURE,
+                elapsed_ms=0,
+                reason="tool_budget_exhausted",
+            )
         return False
+    started_at = time.monotonic()
     try:
         background_coro = _run_background_vision_fallback(
             registry=registry,
@@ -259,11 +333,35 @@ async def _try_inject_vision_fallback(
         )
     except asyncio.TimeoutError:
         logger.warning(f"{warning_message}: tool_timeout")
-        background = None
-    except Exception as exc:
-        logger.warning(f"{warning_message}: type={type(exc).__name__}")
-        background = None
+        if required_media_evidence:
+            _record_media_evidence_tool_trace(
+                record_trace,
+                required_media_evidence=True,
+                outcome=TOOL_RESULT_OPERATIONAL_FAILURE,
+                elapsed_ms=int((time.monotonic() - started_at) * 1000),
+                reason="tool_timeout",
+            )
+        return False
+    except Exception:
+        logger.warning(f"{warning_message}: tool_exception")
+        if required_media_evidence:
+            _record_media_evidence_tool_trace(
+                record_trace,
+                required_media_evidence=True,
+                outcome=TOOL_RESULT_OPERATIONAL_FAILURE,
+                elapsed_ms=int((time.monotonic() - started_at) * 1000),
+                reason="tool_exception",
+            )
+        return False
     if background is None:
+        if required_media_evidence:
+            _record_media_evidence_tool_trace(
+                record_trace,
+                required_media_evidence=True,
+                outcome=TOOL_RESULT_OPERATIONAL_FAILURE,
+                elapsed_ms=int((time.monotonic() - started_at) * 1000),
+                reason="tool_no_result",
+            )
         return False
     bg_name, bg_args, bg_result = background
     await _inject_background_tool_result(
@@ -282,6 +380,27 @@ async def _try_inject_vision_fallback(
         tool_name=bg_name,
         tool_args=bg_args,
         result=bg_result,
+    )
+    state.tool_result_records.append(
+        build_tool_result_record(
+            tool_name=bg_name,
+            tool_args=bg_args,
+            result=bg_result,
+        )
+    )
+    outcome = _tool_result_outcome(bg_result)
+    _record_media_evidence_tool_trace(
+        record_trace,
+        required_media_evidence=required_media_evidence,
+        outcome=outcome,
+        elapsed_ms=int((time.monotonic() - started_at) * 1000),
+        reason=(
+            "result"
+            if outcome == TOOL_RESULT_USABLE_EVIDENCE
+            else "empty_result"
+            if outcome == TOOL_RESULT_EMPTY_EVIDENCE
+            else "tool_result_failed"
+        ),
     )
     logger.info(success_message)
     return True
@@ -720,8 +839,11 @@ async def handle_model_stop(
                 warning_message="[agent] required media evidence failed",
                 success_message="[agent] injected required media evidence",
                 tool_deadline=effective_tool_deadline,
+                required_media_evidence=True,
+                record_trace=record_trace,
             )
             if injected:
+                await append_evidence_guidance()
                 return StopFlowDecision.continue_loop()
         record_trace(
             key="media_evidence_gate",
@@ -736,12 +858,13 @@ async def handle_model_stop(
         return StopFlowDecision.return_result(
             AgentResult(
                 text=(
-                    "这段媒体我这次没读出来，重发一下或者换个文件格式试试。"
+                    "媒体文件已经收到了，但这次内容分析失败了，我不能在没看清的情况下乱猜。"
                     if reply_required
                     else "[SILENCE]"
                 ),
                 pending_actions=pending_actions,
-                quality_context="media_evidence_unavailable",
+                direct_output=bool(reply_required),
+                quality_context="evidence_unavailable",
                 suppress_reply_recovery=True,
             )
         )
@@ -796,6 +919,7 @@ async def handle_model_stop(
             warning_message="[agent] vision fallback failed",
             success_message="[agent] injected background vision fallback result",
             tool_deadline=effective_tool_deadline,
+            record_trace=record_trace,
         )
         if injected:
             return StopFlowDecision.continue_loop()
@@ -869,6 +993,7 @@ async def handle_model_stop(
             warning_message="[agent] deferred vision fallback failed",
             success_message="[agent] awaited background vision fallback result",
             tool_deadline=effective_tool_deadline,
+            record_trace=record_trace,
         )
         if injected:
             return StopFlowDecision.continue_loop()
