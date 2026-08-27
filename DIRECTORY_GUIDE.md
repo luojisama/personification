@@ -176,3 +176,12 @@ WebUI Skill 页面另有托管 MCP 工作流：
 - 设为 `true` 时，每轮回复前都会强制先走一次联网检索，再组织最终答复。
 - 适合高时效群聊，例如游戏更新、新闻、热搜、价格、比赛结果。
 - 代价是每轮延迟和 token 消耗都会上升，默认值保持 `false`。
+
+## 测试与临时产物隔离规范
+
+- **严禁在插件目录内存放测试产物**：测试临时目录（如 pytest `--basetemp`、临时 SQLite 文件、缓存目录等）严禁建在 `plugin/personification/` 及其任何子目录下。
+- **严禁写入 C 盘系统盘**：禁止将大体积音视频测试数据、测试数据库倾倒到 C 盘。
+- **统一使用 D 盘专用分类目录**：
+  - 测试临时根目录统一指向 `D:\test_artifacts\personification\`（子分类：`pytest/`、`sim/`、`coverage/`）。
+  - 执行 `pytest` 时指定示例：`pytest plugin/personification/tests --basetemp=D:\test_artifacts\personification\pytest`。
+- **运行后清理**：测试运行产生的临时数据需在测试 teardown / finally 中主动销毁，严禁将测试数据长期遗留在磁盘中。详细规范参见知识库 `D:\aiknow\shared\conventions\test-artifacts-management.md`。

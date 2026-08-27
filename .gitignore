@@ -4,6 +4,10 @@ __pycache__/
 
 .pytest_cache/
 .pytest-tmp-*/
+.pytest_tmp*/
+.ptarget*/
+.pfinal*/
+.pt-*/
 .playwright-cli/
 .mypy_cache/
 .ruff_cache/
