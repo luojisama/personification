@@ -32,6 +32,27 @@ def apply_agent_result_completion_state(
     state["agent_evidence_recovered"] = bool(
         getattr(agent_result, "evidence_recovered", False)
     )
+    # Video fact delivery is separate from social links.  Never let a successful
+    # tool call turn an ungrounded visible answer into an overall ``ok`` turn.
+    state["agent_media_only"] = bool(getattr(agent_result, "media_only", False))
+    state["agent_media_grounding"] = str(
+        getattr(agent_result, "media_grounding", "not_required") or "not_required"
+    )
+    state["agent_available_evidence_fields"] = max(
+        0, int(getattr(agent_result, "available_evidence_fields", 0) or 0)
+    )
+    state["agent_grounded_evidence_fields"] = max(
+        0, int(getattr(agent_result, "grounded_evidence_fields", 0) or 0)
+    )
+    state["agent_grounded_anchor_count"] = max(
+        0, int(getattr(agent_result, "grounded_anchor_count", 0) or 0)
+    )
+    state["agent_media_recovery_method"] = str(
+        getattr(agent_result, "media_recovery_method", "not_needed") or "not_needed"
+    )
+    state["agent_media_delivery"] = str(
+        getattr(agent_result, "media_delivery", "not_required") or "not_required"
+    )
     state["agent_citation_mode"] = str(
         getattr(agent_result, "citation_mode", default_citation_mode)
         or default_citation_mode
@@ -54,9 +75,22 @@ def apply_agent_result_completion_state(
     state["agent_evidence_unavailable"] = evidence_unavailable
     tool_calls_made = bool(getattr(agent_result, "tool_calls_made", False))
     state["agent_tool_calls"] = tool_calls_made
-    state["agent_tool_execution"] = (
-        "empty" if evidence_unavailable else "ok" if tool_calls_made else "not_used"
+    structured_media_evidence_seen = bool(
+        int(getattr(agent_result, "available_evidence_fields", 0) or 0) > 0
+        and str(getattr(agent_result, "media_delivery", "not_required") or "not_required")
+        == "incomplete"
     )
+    # A vision tool may have successfully produced safe structured fields even
+    # if the final fact-delivery gate cannot form a sendable answer. Preserve
+    # that operational fact, while ``media_delivery=incomplete`` still makes
+    # the overall completion partial below.
+    if tool_calls_made and structured_media_evidence_seen:
+        tool_execution = "ok"
+    elif evidence_unavailable:
+        tool_execution = "empty"
+    else:
+        tool_execution = "ok" if tool_calls_made else "not_used"
+    state["agent_tool_execution"] = tool_execution
 
 
 def resolve_sent_reply_completion(
@@ -80,6 +114,7 @@ def resolve_sent_reply_completion(
     )
     citation_mode = str(values.get("agent_citation_mode", "none") or "none")
     evidence_recovered = bool(values.get("agent_evidence_recovered", False))
+    media_delivery = str(values.get("agent_media_delivery", "not_required") or "not_required")
     coverage_status = str(values.get("agent_social_coverage_status", "") or "")
     social_tool_execution = str(
         values.get("agent_social_tool_execution", "not_used") or "not_used"
@@ -115,6 +150,9 @@ def resolve_sent_reply_completion(
     elif evidence_unavailable:
         outcome = "partial"
         diagnosis_code = "evidence_delivery_incomplete"
+    elif media_delivery == "incomplete":
+        outcome = "partial"
+        diagnosis_code = "evidence_delivery_incomplete"
     elif evidence_recovered or evidence_delivery == "recovered":
         outcome = "partial"
         diagnosis_code = "visible_output_recovered"
@@ -136,6 +174,7 @@ def resolve_sent_reply_completion(
         "citation_mode": citation_mode,
         "evidence_recovered": evidence_recovered,
         "evidence_unavailable": evidence_unavailable,
+        "media_delivery": media_delivery,
     }
 
 

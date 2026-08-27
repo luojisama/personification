@@ -31,6 +31,15 @@ class AgentResult:
     evidence_recovered: bool = False
     citation_mode: str = "none"
     tool_calls_made: bool = False
+    # Media grounding is independent from social/source delivery.  These values
+    # are enum/count-only so they are safe to project into the turn Trace.
+    media_only: bool = False
+    media_grounding: str = "not_required"
+    available_evidence_fields: int = 0
+    grounded_evidence_fields: int = 0
+    grounded_anchor_count: int = 0
+    media_recovery_method: str = "not_needed"
+    media_delivery: str = "not_required"
 
 
 def direct_tool_result_agent_result(

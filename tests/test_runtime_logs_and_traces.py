@@ -190,6 +190,16 @@ def test_reply_turn_trace_records_and_finishes(_db_tmp) -> None:
             "partial",
             "evidence_delivery_incomplete",
         ),
+        (
+            {
+                "agent_media_delivery": "incomplete",
+                "agent_tool_execution": "ok",
+            },
+            False,
+            False,
+            "partial",
+            "evidence_delivery_incomplete",
+        ),
         ({}, False, True, "failed", "outbound_send_failed"),
     ],
 )
@@ -264,6 +274,61 @@ def test_shared_agent_completion_state_marks_successful_general_tool_execution()
 
     assert state["agent_tool_calls"] is True
     assert state["agent_tool_execution"] == "ok"
+
+
+def test_normal_and_yaml_share_media_completion_projection() -> None:
+    """Both pipelines must expose the exact shared completion state."""
+
+    normal_context = load_personification_module(
+        "plugin.personification.handlers.reply_pipeline.pipeline_context"
+    )
+    yaml_processor = load_personification_module(
+        "plugin.personification.handlers.yaml_pipeline.processor"
+    )
+    assert normal_context.apply_agent_result_completion_state is completion_contract.apply_agent_result_completion_state
+    assert yaml_processor.apply_agent_result_completion_state is completion_contract.apply_agent_result_completion_state
+
+    agent_result = SimpleNamespace(
+        quality_context="",
+        tool_calls_made=True,
+        social_evidence=[],
+        social_coverage={},
+        evidence_delivery_required=False,
+        evidence_delivery_status="not_required",
+        evidence_recovered=False,
+        citation_mode="none",
+        media_only=True,
+        media_grounding="unavailable",
+        available_evidence_fields=2,
+        grounded_evidence_fields=0,
+        grounded_anchor_count=0,
+        media_recovery_method="failed",
+        media_delivery="incomplete",
+    )
+    normal_state: dict[str, object] = {}
+    yaml_state: dict[str, object] = {}
+    normal_context.apply_agent_result_completion_state(
+        state=normal_state,
+        agent_result=agent_result,
+    )
+    yaml_processor.apply_agent_result_completion_state(
+        state=yaml_state,
+        agent_result=agent_result,
+    )
+
+    assert normal_state == yaml_state
+    assert normal_state["agent_media_delivery"] == "incomplete"
+    assert normal_state["agent_media_grounding"] == "unavailable"
+    assert normal_state["agent_available_evidence_fields"] == 2
+    assert normal_state["agent_tool_execution"] == "ok"
+    for state in (normal_state, yaml_state):
+        resolved = completion_contract.resolve_sent_reply_completion(
+            state=state,
+            visible_text="媒体内容这次无法形成可验证的事实回复。",
+        )
+        assert resolved["outcome"] == "partial"
+        assert resolved["diagnosis_code"] == "evidence_delivery_incomplete"
+        assert resolved["media_delivery"] == "incomplete"
 
 
 def test_reply_turn_trace_builds_safe_process_view(_db_tmp) -> None:

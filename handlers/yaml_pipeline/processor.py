@@ -3167,6 +3167,7 @@ async def process_yaml_response_logic(
             f"chars={len(assistant_history_text)} tts={bool(sent_as_tts)} "
             f"sticker={bool(stickers_sent)} tool_execution={completion['tool_execution']} "
             f"evidence_delivery={completion['evidence_delivery']} "
+            f"media_delivery={completion['media_delivery']} "
             f"outbound_delivery={completion['outbound_delivery']}"
         ),
     )
@@ -3181,9 +3182,16 @@ async def process_yaml_response_logic(
             "delivery_unknown": delivery_unknown,
             "tool_execution": completion["tool_execution"],
             "evidence_delivery": completion["evidence_delivery"],
+            "media_delivery": completion["media_delivery"],
             "outbound_delivery": completion["outbound_delivery"],
             "social_coverage_status": completion["coverage_status"],
             "evidence_recovered": completion["evidence_recovered"],
+            "media_grounding": str(reply_commit_state.get("agent_media_grounding", "not_required") or "not_required"),
+            "media_only": bool(reply_commit_state.get("agent_media_only", False)),
+            "available_evidence_fields": int(reply_commit_state.get("agent_available_evidence_fields", 0) or 0),
+            "grounded_evidence_fields": int(reply_commit_state.get("agent_grounded_evidence_fields", 0) or 0),
+            "grounded_anchor_count": int(reply_commit_state.get("agent_grounded_anchor_count", 0) or 0),
+            "recovery_method": str(reply_commit_state.get("agent_media_recovery_method", "not_needed") or "not_needed"),
             "incoming_text": str(raw_message_text or history_last_text or trigger_reason or "")[:500],
             "outgoing_text": str(assistant_history_text or "")[:500],
         },

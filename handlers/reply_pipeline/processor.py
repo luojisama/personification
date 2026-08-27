@@ -3643,6 +3643,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     f"chars={len(final_visible_reply_text)} tts={bool(sent_as_tts)} "
                     f"sticker={bool(sticker_name)} tool_execution={completion['tool_execution']} "
                     f"evidence_delivery={completion['evidence_delivery']} "
+                    f"media_delivery={completion['media_delivery']} "
                     f"outbound_delivery={completion['outbound_delivery']}"
                 ),
             )
@@ -3657,9 +3658,16 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     "delivery_unknown": delivery_unknown,
                     "tool_execution": completion["tool_execution"],
                     "evidence_delivery": completion["evidence_delivery"],
+                    "media_delivery": completion["media_delivery"],
                     "outbound_delivery": completion["outbound_delivery"],
                     "social_coverage_status": completion["coverage_status"],
                     "evidence_recovered": completion["evidence_recovered"],
+                    "media_grounding": str(state.get("agent_media_grounding", "not_required") or "not_required"),
+                    "media_only": bool(state.get("agent_media_only", False)),
+                    "available_evidence_fields": int(state.get("agent_available_evidence_fields", 0) or 0),
+                    "grounded_evidence_fields": int(state.get("agent_grounded_evidence_fields", 0) or 0),
+                    "grounded_anchor_count": int(state.get("agent_grounded_anchor_count", 0) or 0),
+                    "recovery_method": str(state.get("agent_media_recovery_method", "not_needed") or "not_needed"),
                     "incoming_text": str(raw_message_text or message_text or message_content or "")[:500],
                     "outgoing_text": str(final_visible_reply_text or "")[:500],
                 },
