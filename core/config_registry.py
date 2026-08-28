@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable
@@ -58,9 +59,12 @@ def _int_parser(raw: str) -> int:
 
 def _float_parser(raw: str) -> float:
     try:
-        return float(str(raw or "").strip())
-    except (TypeError, ValueError) as exc:
+        value = float(str(raw or "").strip())
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("需要数字值") from exc
+    if not math.isfinite(value):
+        raise ValueError("需要有限数字值")
+    return value
 
 
 def _str_parser(raw: str) -> str:
@@ -78,6 +82,52 @@ def _json_object_parser(raw: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("需要 JSON 对象")
     return parsed
+
+
+def _finite_object_number(value: Any, *, label: str, low: float, high: float) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} 必须为有限数字")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{label} 必须为有限数字") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{label} 必须为有限数字")
+    if not low <= number <= high:
+        raise ValueError(f"{label} 必须在 {low:g} 到 {high:g} 之间")
+    return number
+
+
+def _favorability_levels_parser(raw: str) -> dict[str, float]:
+    parsed = _json_object_parser(raw)
+    result: dict[str, float] = {}
+    for raw_name, raw_threshold in parsed.items():
+        name = str(raw_name or "").strip()
+        if not name:
+            raise ValueError("好感等级名称不能为空")
+        result[name] = _finite_object_number(
+            raw_threshold, label=f"等级「{name}」阈值", low=-100.0, high=100.0
+        )
+    return result
+
+
+def _favorability_behavior_bands_parser(raw: str) -> dict[str, Any]:
+    parsed = _json_object_parser(raw)
+    result: dict[str, Any] = {}
+    for raw_band, raw_policy in parsed.items():
+        band = str(raw_band or "").strip()
+        if not band:
+            raise ValueError("关系行为分段名称不能为空")
+        if not isinstance(raw_policy, dict):
+            raise ValueError(f"关系行为分段「{band}」必须为 JSON 对象")
+        policy = dict(raw_policy)
+        for field in ("random_reply_add", "group_idle_add"):
+            if field in policy:
+                policy[field] = _finite_object_number(
+                    policy[field], label=f"{band}.{field}", low=-0.20, high=0.20
+                )
+        result[band] = policy
+    return result
 
 
 def _json_array_parser(raw: str) -> list[Any]:
@@ -2938,7 +2988,13 @@ def _build_extra_entries() -> list[ConfigEntry]:
                 max_value=spec.get("max"),
                 help_aliases=tuple(spec.get("aliases", ())),
                 risk_note=str(spec.get("risk", "")),
-                parser=_EXTRA_SPEC_PARSERS[value_type],
+                parser=(
+                    _favorability_levels_parser
+                    if field_name == "personification_favorability_levels"
+                    else _favorability_behavior_bands_parser
+                    if field_name == "personification_favorability_behavior_bands"
+                    else _EXTRA_SPEC_PARSERS[value_type]
+                ),
                 kind=str(spec.get("kind", "")),
                 group=str(spec.get("group", "其他")),
                 advanced=bool(spec.get("advanced", False)),

@@ -11,6 +11,7 @@ function renderFavorabilityBadge(fav) {
   let style = 'background:rgba(106,168,255,0.18);color:var(--accent)';
   if (fav.enabled === false) style = 'background:var(--tag-bg);color:var(--muted)';
   else if (score >= 85) style = 'background:rgba(52,211,153,0.18);color:var(--ok)';
+  else if (score < 0) style = 'background:rgba(248,113,113,0.16);color:var(--danger)';
   else if (score < 20) style = 'background:rgba(245,158,11,0.16);color:var(--warn)';
   if (fav.is_perm_blacklisted) style = 'background:rgba(248,113,113,0.16);color:var(--danger)';
   const text = favorabilityScoreText(fav);
@@ -45,9 +46,10 @@ function renderFavorabilityCard(fav, title) {
     : "暂无事件";
   const policy = fav.behavior_policy || {};
   const policyLine = policy.band ? `行为带：${policy.band} · 温度：${policy.warmth || "neutral"} · 回复长度：${policy.reply_length || "normal"}` : "行为策略未就绪";
+  const signed = (value) => `${Number(value || 0) >= 0 ? "+" : ""}${Number(value || 0).toFixed(2)}`;
   const bandRows = Object.entries(fav.behavior_bands || {}).map(([band, item]) => {
     const value = item && typeof item === "object" ? item : {};
-    return `<tr><td>${escapeHtml(band)}</td><td>${escapeHtml(value.warmth || "")}</td><td>${escapeHtml(value.reply_length || "")}</td><td class="u-tabular">${Number(value.random_reply_add || 0).toFixed(2)}</td><td class="u-tabular">${Number(value.group_idle_add || 0).toFixed(2)}</td></tr>`;
+  return `<tr><td>${escapeHtml(band)}</td><td>${escapeHtml(value.warmth || "")}</td><td>${escapeHtml(value.reply_length || "")}</td><td class="u-tabular">${signed(value.random_reply_add)}</td><td class="u-tabular">${signed(value.group_idle_add)}</td></tr>`;
   }).join("");
   const changeLine = last
     ? `${last.mode === "shadow" ? "拟议变化" : "最近变化"}：<span style="color:${Number(last.delta || 0) >= 0 ? "var(--ok)" : "var(--danger)"};font-weight:700">${escapeHtml((Number(last.delta || 0) > 0 ? "+" : "") + Number(last.delta || 0).toFixed(2))}</span> · ${escapeHtml(last.source_label || last.source || "旧事件")} · ${escapeHtml(last.reason || "无原因说明")}`
@@ -59,8 +61,9 @@ function renderFavorabilityCard(fav, title) {
     </div>
     ${fav.exists === false ? `<p class="muted">${fav.enabled === false ? '好感度功能当前已关闭；' : ''}下方展示配置中的虚拟默认值，尚未持久化；浏览此页面不会创建好感度档案。</p>` : (fav.enabled === false ? '<p class="muted">好感度功能当前已关闭，不会记录新的关系事件。</p>' : '')}
     <div class="row" style="gap:24px;margin-top:12px">
-      <div><div class="muted">${fav.exists === false ? '默认分值（未建档）' : '当前分值'}</div><div class="u-atomic u-tabular" style="font-size:22px;font-weight:700">${Number(fav.score || 0).toFixed(2)}</div></div>
-      <div><div class="muted">等级</div><div class="u-atomic" style="font-size:18px">${escapeHtml(fav.level || "—")}</div></div>
+      <div><div class="muted">${fav.exists === false ? '默认分值（未建档）' : '当前分值'}（${Number(fav.score_min ?? -100).toFixed(0)}..${Number(fav.score_max ?? 100).toFixed(0)}）</div><div class="u-atomic u-tabular" style="font-size:22px;font-weight:700;color:${Number(fav.score || 0) < 0 ? 'var(--danger)' : 'inherit'}">${Number(fav.score || 0).toFixed(2)}</div></div>
+      <div><div class="muted">等级</div><div class="u-atomic" style="font-size:18px;color:${Number(fav.score || 0) < 0 ? '#d65a5a' : 'inherit'}">${escapeHtml(fav.level || "—")}</div></div>
+      <div><div class="muted">今日净变化</div><div class="u-atomic u-tabular">${signed(fav.daily_net_count)}</div></div>
       <div><div class="muted">今日加分</div><div class="u-atomic u-tabular">${Number(fav.daily_positive_count || 0).toFixed(2)}</div></div>
       <div><div class="muted">今日扣分</div><div class="u-atomic u-tabular">${Number(fav.daily_negative_count || 0).toFixed(2)}</div></div>
       <div><div class="muted">最近事件</div><div>${escapeHtml(lastLine)}</div></div>
@@ -69,7 +72,7 @@ function renderFavorabilityCard(fav, title) {
     <p class="muted" style="margin:10px 0 0">${escapeHtml(policyLine)}</p>
     <p style="margin:6px 0 0">${changeLine}</p>
     ${fav.observer ? `<p class="muted" style="margin:6px 0 0">观察器：${escapeHtml(fav.observer.mode || "shadow")} · 排队 ${Number(fav.observer.queued || 0)} · 拟议 ${Number(fav.observer.projected || 0)} · 已应用 ${Number(fav.observer.applied || 0)} · 跳过 ${Number(fav.observer.skipped || 0)}</p>` : ''}
-    ${bandRows ? `<details style="margin-top:8px"><summary class="muted" style="cursor:pointer">五档关系行为策略</summary><div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="五档关系行为策略"><table class="data-table" style="margin-top:8px"><thead><tr><th scope="col">行为带</th><th scope="col">温度</th><th scope="col">长度</th><th scope="col">群随机偏置</th><th scope="col">群闲偏置</th></tr></thead><tbody>${bandRows}</tbody></table></div></details>` : ''}
+    ${bandRows ? `<details style="margin-top:8px"><summary class="muted" style="cursor:pointer">正负关系行为策略</summary><div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="正负关系行为策略"><table class="data-table" style="margin-top:8px"><thead><tr><th scope="col">行为带</th><th scope="col">温度</th><th scope="col">长度</th><th scope="col">群随机偏置</th><th scope="col">群闲偏置</th></tr></thead><tbody>${bandRows}</tbody></table></div></details>` : ''}
     ${events.length ? `<details style="margin-top:12px"><summary class="muted" style="cursor:pointer">最近好感事件</summary>
       <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="最近好感事件"><table class="data-table wide" style="margin-top:8px"><thead><tr><th scope="col" class="col-time">时间</th><th scope="col" class="col-summary">事件</th><th scope="col" class="col-number">变化</th><th scope="col" class="col-status">状态</th><th scope="col" class="col-description">原因</th></tr></thead><tbody>${eventRows}</tbody></table></div>
     </details>` : ''}

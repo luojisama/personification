@@ -167,7 +167,8 @@ def serialize_favorability(
         behavior_policy = {"band": "", "score": score}
     try:
         configured_bands = getattr(service.plugin_config, "personification_favorability_behavior_bands", {})
-        behavior_bands = configured_bands if isinstance(configured_bands, dict) else {}
+        from ...core.favorability import normalize_favorability_behavior_bands
+        behavior_bands = normalize_favorability_behavior_bands(configured_bands)
     except Exception:
         behavior_bands = {}
     effective_payload: dict[str, Any] | None = None
@@ -198,6 +199,8 @@ def serialize_favorability(
         "scope_used": str((effective_payload or {}).get("effective", {}).get("scope_used", scope)),
         "fallback_used": bool((effective_payload or {}).get("effective", {}).get("fallback_used", False)),
         "score": score,
+        "score_min": -100,
+        "score_max": 100,
         "level": level,
         "is_perm_blacklisted": bool(profile.get("is_perm_blacklisted", False)),
         "blacklist_count": _safe_int(profile.get("blacklist_count", 0), 0),
@@ -207,6 +210,11 @@ def serialize_favorability(
         ),
         "daily_negative_count": round(
             _safe_float(profile.get("daily_negative_count", 0.0), 0.0) if negative_date == today else 0.0,
+            2,
+        ),
+        "daily_net_count": round(
+            (_safe_float(profile.get("daily_positive_count", 0.0), 0.0) if positive_date == today else 0.0)
+            - (_safe_float(profile.get("daily_negative_count", 0.0), 0.0) if negative_date == today else 0.0),
             2,
         ),
         "daily_fav_count": round(

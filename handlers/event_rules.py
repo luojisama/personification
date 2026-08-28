@@ -232,12 +232,12 @@ async def personification_rule(
                 try:
                     profile = favorability_service.get_effective_profile(user_id, group_id)
                     policy = profile.get("effective", {}).get("behavior_policy", {})
-                    bias = max(0.0, min(0.2, float(policy.get("random_reply_add", 0.0) or 0.0)))
+                    bias = max(-0.20, min(0.20, float(policy.get("random_reply_add", 0.0) or 0.0)))
                     band = str(policy.get("band", "") or "")
                     score = policy.get("score")
                 except Exception:
                     bias = 0.0
-            effective = min(1.0, resolved + bias)
+            effective = max(0.0, min(1.0, resolved + bias))
             state["favorability_frequency"] = {
                 "base_probability": round(resolved, 4),
                 "favorability_score": score,
@@ -265,6 +265,13 @@ async def personification_rule(
                 state["message_target"] = message_target
         else:
             message_target = state.get("message_target", "")
+
+        # Inferred Bot targeting is an explicit conversational cue, not an
+        # optional random participation candidate.  It must bypass any signed
+        # favorability probability reduction just like @/name mentions.
+        if message_target == TARGET_BOT:
+            state["is_random_chat"] = False
+            return True
 
         solo_speaker_follow: dict[str, Any] = {}
         if get_recent_group_msgs is not None:

@@ -26,6 +26,11 @@ DEFAULT_FAVORABILITY_EVENT_DELTAS: dict[str, float] = {
 }
 
 DEFAULT_FAVORABILITY_BEHAVIOR_BANDS: dict[str, dict[str, Any]] = {
+    "-100--80": {"warmth": "boundary", "address_mode": "formal", "reply_length": "short", "initiative_bias": -0.20, "random_reply_add": -0.20, "group_idle_add": -0.20, "sticker_tts_hint": "none"},
+    "-80--60": {"warmth": "cold", "address_mode": "formal", "reply_length": "short", "initiative_bias": -0.16, "random_reply_add": -0.16, "group_idle_add": -0.16, "sticker_tts_hint": "none"},
+    "-60--40": {"warmth": "distant", "address_mode": "formal", "reply_length": "short", "initiative_bias": -0.12, "random_reply_add": -0.12, "group_idle_add": -0.12, "sticker_tts_hint": "none"},
+    "-40--20": {"warmth": "reserved", "address_mode": "formal", "reply_length": "short", "initiative_bias": -0.08, "random_reply_add": -0.08, "group_idle_add": -0.08, "sticker_tts_hint": "none"},
+    "-20--0": {"warmth": "cautious", "address_mode": "neutral", "reply_length": "short", "initiative_bias": -0.04, "random_reply_add": -0.04, "group_idle_add": -0.04, "sticker_tts_hint": "none"},
     "0-19": {
         "warmth": "reserved",
         "address_mode": "neutral",
@@ -74,6 +79,11 @@ DEFAULT_FAVORABILITY_BEHAVIOR_BANDS: dict[str, dict[str, Any]] = {
 }
 
 DEFAULT_FAVORABILITY_LEVELS: dict[str, float] = {
+    "极度厌恶": -100.0,
+    "厌恶": -80.0,
+    "反感": -60.0,
+    "疏远": -40.0,
+    "警惕": -20.0,
     "初见": 0.0,
     "面熟": 10.0,
     "初识": 20.0,
@@ -87,6 +97,11 @@ DEFAULT_FAVORABILITY_LEVELS: dict[str, float] = {
 }
 
 DEFAULT_FAVORABILITY_ATTITUDES: dict[str, str] = {
+    "极度厌恶": "明确保持边界，只处理必要内容，不侮辱、威胁或主动攻击。",
+    "厌恶": "明显冷淡、克制、简短，不使用亲昵称呼或主动延展。",
+    "反感": "疏冷直接，只回应当前问题。",
+    "疏远": "保持距离和正式感，减少情绪投入。",
+    "警惕": "保持基本礼貌但谨慎观察，避免过度热情。",
     "初见": "保持基本礼貌，态度温和但不过于亲热。",
     "面熟": "表现得比较客气，愿意倾听并给出简单回应。",
     "初识": "态度随和，偶尔会分享一些有趣的小事，语气活泼。",
@@ -101,7 +116,7 @@ DEFAULT_FAVORABILITY_ATTITUDES: dict[str, str] = {
 
 _STORE_NAME = "favorability_profiles"
 _STORE_META_KEY = "__favorability_store_meta__"
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _EXTERNAL_MIGRATION_VERSION = 1
 _RECENT_EVENT_IDS_LIMIT = 256
 _GROUP_BASELINE_SCORE = 35.0
@@ -159,7 +174,7 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 def _clamp_score(value: Any, default: float = 0.0) -> float:
     fallback = _safe_float(default, 0.0)
-    return round(max(0.0, min(100.0, _safe_float(value, fallback))), 2)
+    return round(max(-100.0, min(100.0, _safe_float(value, fallback))), 2)
 
 
 def _configured_timezone(plugin_config: Any = None) -> Any:
@@ -469,6 +484,10 @@ def normalize_favorability_event_deltas(value: Any) -> dict[str, float]:
 
 def normalize_favorability_levels(value: Any) -> dict[str, float]:
     raw = value if isinstance(value, dict) and value else DEFAULT_FAVORABILITY_LEVELS
+    # A legacy custom table only named positive levels.  Keep it authoritative
+    # for those names while supplying the new negative boundary vocabulary.
+    if isinstance(raw, dict) and raw and not any(_safe_float(v, 0.0) < 0 for v in raw.values()):
+        raw = {**{k: v for k, v in DEFAULT_FAVORABILITY_LEVELS.items() if v < 0}, **raw}
     levels: dict[str, float] = {}
     for name, threshold in raw.items():
         label = str(name or "").strip()
@@ -478,6 +497,26 @@ def normalize_favorability_levels(value: Any) -> dict[str, float]:
     if not levels:
         levels = dict(DEFAULT_FAVORABILITY_LEVELS)
     return dict(sorted(levels.items(), key=lambda item: item[1]))
+
+
+def normalize_favorability_attitudes(value: Any, levels: Any = None) -> dict[str, str]:
+    """Preserve custom wording while making every configured level safe.
+
+    Old installations commonly configured positive labels only.  Default
+    negative boundaries are added in that case; a custom negative label keeps
+    its name and receives a restrained fallback rather than an empty prompt.
+    """
+    raw = value if isinstance(value, dict) else {}
+    resolved_levels = normalize_favorability_levels(levels)
+    result = {str(key): str(text) for key, text in raw.items() if str(key).strip() and str(text).strip()}
+    for name, threshold in resolved_levels.items():
+        if name in result:
+            continue
+        if name in DEFAULT_FAVORABILITY_ATTITUDES:
+            result[name] = DEFAULT_FAVORABILITY_ATTITUDES[name]
+        elif threshold < 0:
+            result[name] = "保持基本礼貌和清晰边界，只处理必要内容，不主动延展。"
+    return result
 
 
 def normalize_favorability_behavior_bands(value: Any) -> dict[str, dict[str, Any]]:
@@ -494,8 +533,8 @@ def normalize_favorability_behavior_bands(value: Any) -> dict[str, dict[str, Any
         merged["sticker_tts_hint"] = str(merged.get("sticker_tts_hint", default["sticker_tts_hint"]) or default["sticker_tts_hint"])[:32]
         for field, low, high in (
             ("initiative_bias", -0.5, 0.5),
-            ("random_reply_add", 0.0, 0.2),
-            ("group_idle_add", 0.0, 0.2),
+            ("random_reply_add", -0.2, 0.2),
+            ("group_idle_add", -0.2, 0.2),
         ):
             merged[field] = round(max(low, min(high, _safe_float(merged.get(field, default[field]), default[field]))), 3)
         result[key] = merged
@@ -505,6 +544,11 @@ def normalize_favorability_behavior_bands(value: Any) -> dict[str, dict[str, Any
 def favorability_behavior_band_for_score(score: Any) -> str:
     value = _clamp_score(score, 0.0)
     for band, (low, high) in (
+        ("-100--80", (-100.0, -80.001)),
+        ("-80--60", (-80.0, -60.001)),
+        ("-60--40", (-60.0, -40.001)),
+        ("-40--20", (-40.0, -20.001)),
+        ("-20--0", (-20.0, -0.001)),
         ("0-19", (0.0, 19.999)),
         ("20-49", (20.0, 49.999)),
         ("50-74", (50.0, 74.999)),
@@ -513,7 +557,7 @@ def favorability_behavior_band_for_score(score: Any) -> str:
     ):
         if low <= value <= high:
             return band
-    return "0-19" if value < 20 else "92-100"
+    return "-100--80" if value < -80 else ("0-19" if value < 20 else "92-100")
 
 
 def level_name_for_score(score: Any, levels: Any = None) -> str:
@@ -1375,7 +1419,10 @@ class FavorabilityService:
         ) < _EXTERNAL_MIGRATION_VERSION:
             bulk_attempted, external_profiles = self._external_all_data()
 
-        local_needs_migration = False
+        # Store metadata is part of the on-disk v5 contract as well.  A fully
+        # normalized profile document with stale v4 metadata must still take
+        # the write path once, even when external import is disabled.
+        local_needs_migration = _safe_int(meta.get("schema_version", 0), 0) < _SCHEMA_VERSION
         for raw_key, raw_profile in document.items():
             key = str(raw_key or "").strip()
             if raw_key == _STORE_META_KEY:
@@ -1433,14 +1480,17 @@ class FavorabilityService:
                     profile = self._commit_profile(profile, latest, now_ts=now_ts)
                 normalized[key] = profile
             next_document: dict[str, Any] = dict(normalized)
+            # Even an empty local document gets an explicit schema marker.  It
+            # makes the v5 persistence contract unambiguous and avoids retrying
+            # a fictitious migration on every load.
+            next_meta = dict(current_meta)
+            next_meta["schema_version"] = _SCHEMA_VERSION
             if bulk_attempted:
-                next_meta = dict(current_meta)
-                next_meta["schema_version"] = _SCHEMA_VERSION
                 next_meta["external_load_migration_version"] = _EXTERNAL_MIGRATION_VERSION
                 next_meta["external_load_migration_at"] = now_ts
                 next_document[_STORE_META_KEY] = next_meta
-            elif current_meta:
-                next_document[_STORE_META_KEY] = current_meta
+            else:
+                next_document[_STORE_META_KEY] = next_meta
             result = copy.deepcopy(normalized)
             return next_document
 
@@ -1460,6 +1510,18 @@ class FavorabilityService:
                     for key in _EXTERNAL_MIGRATION_FIELDS
                     if key in profile
                 }
+                if "favorability" in projection:
+                    local_score = float(projection["favorability"])
+                    projection["favorability"] = max(0.0, min(100.0, local_score))
+                    if local_score < 0:
+                        # External legacy stores accept only 0..100.  This is
+                        # observability, not a write-back: local negative data
+                        # remains authoritative.
+                        metrics = getattr(self, "compatibility_metrics", None)
+                        if not isinstance(metrics, dict):
+                            metrics = {}
+                            self.compatibility_metrics = metrics
+                        metrics["external_negative_projection_clipped"] = int(metrics.get("external_negative_projection_clipped", 0) or 0) + 1
                 self.external.update_user_data(user_id, **projection)
             except Exception as exc:
                 self._log_external_failure(f"拟人插件：同步外部签到好感度失败 user={user_id}: {exc}")
@@ -1547,7 +1609,9 @@ class FavorabilityService:
         else:
             decision = str(getattr(assessment, "decision", "") or "").strip().lower()
             raw = getattr(assessment, "requested_delta", None)
-        limit = max(0.0, min(10.0, _safe_float(cap, 1.5)))
+        # Model observation has a non-negotiable one-turn safety ceiling;
+        # configuration may narrow it but can never widen it.
+        limit = max(0.0, min(1.5, _safe_float(cap, 1.5)))
         delta = max(-limit, min(limit, _safe_float(raw, 0.0)))
         if decision == "increase":
             return round(abs(delta), 2)
@@ -1926,8 +1990,13 @@ class FavorabilityService:
                     idle_elapsed = not activity_at or now_ts - activity_at >= idle_days * 86400
                     floor = default_favorability_for_id(key, self.plugin_config)
                     current_score = _clamp_score(profile.get("favorability", floor), floor)
-                    if not already_decayed and idle_elapsed and current_score > floor:
-                        applied_delta = max(delta, floor - current_score)
+                    # Decay only reduces a positive score.  Negative/default
+                    # negative profiles must neither be punished further nor
+                    # auto-healed; when floor is negative, positive scores
+                    # still stop at zero.
+                    decay_floor = max(0.0, floor)
+                    if not already_decayed and idle_elapsed and current_score > decay_floor:
+                        applied_delta = max(delta, decay_floor - current_score)
                         profile, result, event_changed = self._apply_event_to_profile(
                             profile,
                             user_id=key,
@@ -2001,5 +2070,6 @@ __all__ = [
     "normalize_favorability_behavior_bands",
     "level_name_for_score",
     "normalize_favorability_levels",
+    "normalize_favorability_attitudes",
     "normalize_favorability_profile",
 ]

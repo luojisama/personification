@@ -95,3 +95,37 @@ def test_serialize_missing_profile_uses_virtual_default_without_creation(monkeyp
     assert view["source"] == "virtual_default"
     assert store.payload == {}
     assert store.write_count == 0
+
+
+def test_serialize_negative_score_keeps_signed_bands_events_and_daily_net(monkeypatch) -> None:  # noqa: ANN001
+    store = _FakeStore(
+        {
+            "group_9": {
+                "favorability": -80,
+                "daily_positive_count": 2,
+                "daily_positive_date": "2026-08-28",
+                "daily_negative_count": 3,
+                "daily_negative_date": "2026-08-28",
+                "favorability_events": [{"old": -79, "new": -80, "delta": -1, "timestamp": 1}],
+            }
+        }
+    )
+    monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    service = favorability.FavorabilityService(
+        plugin_config=SimpleNamespace(
+            personification_favorability_enabled=True,
+            personification_favorability_default_score=0,
+            personification_favorability_group_default_score=35,
+            personification_favorability_behavior_bands={"-100--80": {"random_reply_add": -0.2, "group_idle_add": -0.2}},
+        )
+    )
+    service.current_date = lambda now=None: "2026-08-28"
+
+    view = favorability_view.serialize_favorability(_runtime(service), "group_9", scope="group")
+
+    assert (view["score"], view["level"], view["score_min"], view["score_max"]) == (-80.0, "厌恶", -100, 100)
+    assert (view["daily_positive_count"], view["daily_negative_count"], view["daily_net_count"]) == (2.0, 3.0, -1.0)
+    assert (view["events"][0]["old"], view["events"][0]["new"]) == (-79.0, -80.0)
+    # -80 属于 -80--60 档；序列化既保留生效档，也返回完整的归一化 signed bands。
+    assert view["behavior_policy"]["random_reply_add"] == -0.16
+    assert view["behavior_bands"]["-100--80"]["group_idle_add"] == -0.2

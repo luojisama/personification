@@ -547,7 +547,7 @@ def test_peek_and_snapshot_are_pure_local_reads(monkeypatch) -> None:  # noqa: A
     profile = service.peek_user_data("10001")
     snapshot = service.snapshot_profiles()
 
-    assert profile is not None and profile["schema_version"] == 4
+    assert profile is not None and profile["schema_version"] == 5
     assert snapshot["10001"]["favorability"] == 7.0
     assert service.peek_user_data("missing") is None
     assert store.payload == before
@@ -721,3 +721,109 @@ def test_external_mirror_failure_does_not_break_committed_local_write(monkeypatc
 
     assert result["delta"] == 1.0
     assert service.peek_user_data("10001")["favorability"] == 1.0
+
+
+def test_negative_levels_boundaries_cross_zero_and_custom_attitudes(monkeypatch) -> None:  # noqa: ANN001
+    store = _FakeStore()
+    monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    levels = favorability.normalize_favorability_levels({"初见": 0, "普通": 35})
+    assert [favorability.level_name_for_score(value, levels) for value in (-100, -80, -60, -40, -20, -0.01, 0, 100)] == [
+        "极度厌恶", "厌恶", "反感", "疏远", "警惕", "警惕", "初见", "普通",
+    ]
+    attitudes = favorability.normalize_favorability_attitudes({"初见": "自定义"}, levels)
+    assert attitudes["初见"] == "自定义"
+    assert all(attitudes[name] for name in ("极度厌恶", "厌恶", "反感", "疏远", "警惕"))
+    service = favorability.FavorabilityService(plugin_config=_config(personification_favorability_default_score=-1.0))
+    assert service.apply_event("u", "cross", delta=2, daily_cap=-1)["new"] == 1.0
+    service.set_score("u", -999, actor="admin")
+    assert service.peek_user_data("u")["favorability"] == -100.0
+    service.set_score("u", 999, actor="admin")
+    assert service.peek_user_data("u")["favorability"] == 100.0
+
+
+def test_negative_mirror_is_clipped_but_local_score_and_metric_remain(monkeypatch) -> None:  # noqa: ANN001
+    store = _FakeStore()
+    monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    calls: list[float] = []
+    external = favorability.ExternalFavorabilityAdapter(True, lambda _id: {}, lambda _id, **patch: calls.append(patch["favorability"]), lambda: {}, lambda value: str(value))
+    service = favorability.FavorabilityService(plugin_config=_config(), external=external)
+    service.set_score("u", -12, actor="admin")
+    assert service.peek_user_data("u")["favorability"] == -12.0
+    assert calls[-1] == 0.0
+    assert service.compatibility_metrics["external_negative_projection_clipped"] == 1
+
+
+def test_decay_never_punishes_or_heals_nonpositive_scores_with_negative_default(monkeypatch) -> None:  # noqa: ANN001
+    store = _FakeStore()
+    monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.payload = {
+        "negative": {"favorability": -5, "created_at": int(old.timestamp()), "updated_at": int(old.timestamp())},
+        "zero": {"favorability": 0, "created_at": int(old.timestamp()), "updated_at": int(old.timestamp())},
+        "positive": {"favorability": 0.1, "created_at": int(old.timestamp()), "updated_at": int(old.timestamp())},
+    }
+    service = favorability.FavorabilityService(plugin_config=_config(
+        personification_favorability_default_score=-20,
+        personification_favorability_decay_enabled=True,
+        personification_favorability_decay_idle_days=1,
+        personification_favorability_decay_delta=-1,
+    ))
+    service.run_decay_once(now=old + timedelta(days=3))
+    assert service.peek_user_data("negative")["favorability"] == -5
+    assert service.peek_user_data("zero")["favorability"] == 0
+    assert service.peek_user_data("positive")["favorability"] == 0
+
+
+def test_v4_upgrade_preserves_nonnegative_event_and_custom_levels(monkeypatch) -> None:
+    store = _FakeStore(); monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    store.payload = {"u": {"schema_version": 4, "favorability": 12, "favorability_events": [{"old": 10, "new": 12, "event_id": "legacy"}]}}
+    service = favorability.FavorabilityService(plugin_config=_config(personification_favorability_levels={"熟人": 10, "挚友": 90}))
+    profile = service.peek_user_data("u")
+    levels = favorability.normalize_favorability_levels({"熟人": 10, "挚友": 90})
+    assert profile["schema_version"] == 5 and profile["favorability"] == 12 and profile["favorability_events"][0]["new"] == 12
+    assert all(levels[name] == threshold for name, threshold in {"熟人": 10, "挚友": 90}.items())
+    assert all(name in levels for name in ("极度厌恶", "厌恶", "反感", "疏远", "警惕"))
+
+
+def test_load_data_persists_v5_meta_without_external_import(monkeypatch) -> None:
+    store = _FakeStore(); monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    store.payload = {
+        "__favorability_store_meta__": {"schema_version": 4},
+        "u": {"schema_version": 4, "favorability": 12, "favorability_events": [{"old": 10, "new": 12, "event_id": "legacy"}]},
+    }
+    service = favorability.FavorabilityService(plugin_config=_config(personification_favorability_levels={"熟人": 10, "挚友": 90}))
+    data = service.load_data()
+    assert data["u"]["favorability"] == 12
+    assert data["u"]["favorability_events"][0]["old"] == 10
+    assert data["u"]["favorability_events"][0]["new"] == 12
+    assert store.payload["__favorability_store_meta__"]["schema_version"] == 5
+    assert store.payload["u"]["schema_version"] == 5
+
+
+def test_load_data_marks_empty_store_as_schema_v5(monkeypatch) -> None:
+    store = _FakeStore(); monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    service = favorability.FavorabilityService(plugin_config=_config())
+    assert service.load_data() == {}
+    assert store.payload["__favorability_store_meta__"]["schema_version"] == 5
+
+
+def test_cross_zero_clamps_caps_and_event_idempotency(monkeypatch) -> None:
+    store = _FakeStore(); monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    service = favorability.FavorabilityService(plugin_config=_config(personification_favorability_daily_positive_cap=5, personification_favorability_group_daily_positive_cap=10, personification_favorability_daily_negative_cap=30))
+    service.set_score("u", -1, actor="admin"); assert service.apply_event("u", "up", delta=2, event_id="up") ["new"] == 1
+    assert service.apply_event("u", "up", delta=2, event_id="up")["status"] == "duplicate"
+    assert service.apply_event("u", "down", delta=-3, event_id="down")["new"] == -2
+    service.set_score("u", 999, actor="admin"); assert service.peek_user_data("u")["favorability"] == 100
+    service.set_score("u", -999, actor="admin"); assert service.peek_user_data("u")["favorability"] == -100
+
+
+def test_daily_positive_group_positive_and_negative_caps_are_consumed(monkeypatch) -> None:
+    store = _FakeStore(); monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    service = favorability.FavorabilityService(plugin_config=_config(personification_favorability_daily_positive_cap=5, personification_favorability_group_daily_positive_cap=10, personification_favorability_daily_negative_cap=30))
+    user = service.apply_event("user", "pos", delta=9, event_id="user-pos")
+    group = service.apply_event("group_x", "pos", delta=20, event_id="group-pos")
+    negative = service.apply_event("negative", "neg", delta=-50, event_id="neg")
+    assert (user["delta"], user["new"], service.peek_user_data("user")["daily_positive_count"]) == (5.0, 5.0, 5.0)
+    assert (group["delta"], group["new"], service.peek_user_data("group_x")["daily_positive_count"]) == (10.0, 45.0, 10.0)
+    assert (negative["delta"], negative["new"], service.peek_user_data("negative")["daily_negative_count"]) == (-30.0, -30.0, 30.0)
+    assert service.apply_event("user", "pos", delta=9, event_id="user-pos")["status"] == "duplicate"

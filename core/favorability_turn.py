@@ -68,7 +68,13 @@ def build_favorability_context_block(
     band = str(policy.get("band", "") or "")
     relation_style = "用自然平衡语气回应。"
     preferred_length = "默认回复 1-2 句。"
-    if band in {"75-91", "92-100"} or level in {"挚友", "亲密"}:
+    if band in {"-100--80", "-80--60"}:
+        relation_style = "明确保持边界，只处理必要内容；仍保持安全、礼貌和事实准确。"
+        preferred_length = "优先简短直接地回应当前问题。"
+    elif band in {"-60--40", "-40--20", "-20--0"}:
+        relation_style = "保持基本礼貌但谨慎、正式，不过度热情；明确提问仍应正常回答。"
+        preferred_length = "优先 1-2 句，直接回答重点。"
+    elif band in {"75-91", "92-100"} or level in {"挚友", "亲密"}:
         relation_style = "适度使用更亲近的称呼或语气词，体现熟悉感。"
         preferred_length = "可以扩展到 2-4 句，增加情感反馈。"
     elif band == "50-74":

@@ -14,6 +14,8 @@ async def handle_group_fav_query_command(
     message_segment_cls: Any,
     finished_exception_cls: Optional[type[BaseException]],
     logger: Any,
+    current_date: Optional[Callable[[], str]] = None,
+    favorability_service: Any = None,
 ) -> None:
     if not sign_in_available:
         await matcher.finish("插件内好感度体系未启用，无法查询好感度。")
@@ -21,9 +23,12 @@ async def handle_group_fav_query_command(
     group_key = f"group_{group_id}"
     data = get_user_data(group_key)
     favorability = float(data.get("favorability", 100.0))
-    daily_count = float(data.get("daily_fav_count", 0.0))
+    date_source = current_date or getattr(favorability_service, "current_date", None)
+    today = str(date_source() if callable(date_source) else __import__("datetime").datetime.now().strftime("%Y-%m-%d"))
+    daily_count = float(data.get("daily_positive_count", data.get("daily_fav_count", 0.0)) or 0.0) if str(data.get("daily_positive_date", "") or "") == today else 0.0
+    daily_negative = float(data.get("daily_negative_count", 0.0) or 0.0) if str(data.get("daily_negative_date", "") or "") == today else 0.0
     status = get_level_name(favorability) if sign_in_available else "普通"
-    md = build_group_fav_markdown(group_id, favorability, daily_count, status)
+    md = build_group_fav_markdown(group_id, favorability, daily_count, status, daily_negative)
 
     pic = None
     if md_to_pic:
@@ -36,7 +41,7 @@ async def handle_group_fav_query_command(
 
     if pic:
         await matcher.finish(message_segment_cls.image(pic))
-    await matcher.finish(build_group_fav_text(group_id, favorability, daily_count, status))
+    await matcher.finish(build_group_fav_text(group_id, favorability, daily_count, status, daily_negative))
 
 
 async def handle_set_group_fav_command(

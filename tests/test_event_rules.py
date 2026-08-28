@@ -177,7 +177,7 @@ def test_two_person_dialogue_replay_is_structurally_silent(monkeypatch) -> None:
     assert provider_calls == []
 
 
-def test_reply_to_bot_target_gets_structural_probability_boost(monkeypatch) -> None:  # noqa: ANN001
+def test_reply_to_bot_target_is_must_reply_not_random_probability(monkeypatch) -> None:  # noqa: ANN001
     event = _GroupEvent("那我接着问一句", user_id="10002")
     state: dict = {}
 
@@ -193,8 +193,20 @@ def test_reply_to_bot_target_gets_structural_probability_boost(monkeypatch) -> N
     )
 
     assert result is True
-    assert state["is_random_chat"] is True
+    assert state["is_random_chat"] is False
     assert state["message_target"] == target_inference.TARGET_BOT
+
+
+def test_negative_adaptive_bias_only_blocks_optional_not_target_bot(monkeypatch) -> None:  # noqa: ANN001
+    service = SimpleNamespace(plugin_config=SimpleNamespace(personification_favorability_frequency_adaptive_enabled=True), get_effective_profile=lambda *_a: {"effective": {"behavior_policy": {"random_reply_add": -.20, "band": "-20--0", "score": -1}}})
+    monkeypatch.setattr(event_rules, "infer_message_target", lambda *_a, **_k: target_inference.TARGET_BOT)
+    state: dict = {}; monkeypatch.setattr(event_rules.random, "random", lambda: .999)
+    assert asyncio.run(event_rules.personification_rule(_GroupEvent("普通话"), state, **_base_kwargs(probability=.15, favorability_service=service))) is True
+    assert state["is_random_chat"] is False
+    monkeypatch.setattr(event_rules, "infer_message_target", lambda *_a, **_k: target_inference.TARGET_UNCLEAR)
+    state = {}; monkeypatch.setattr(event_rules.random, "random", lambda: 0)
+    assert asyncio.run(event_rules.personification_rule(_GroupEvent("普通话"), state, **_base_kwargs(probability=.15, favorability_service=service))) is False
+    assert state["favorability_frequency"]["favorability_bias"] == -.2 and state["favorability_frequency"]["effective_probability"] == 0 and state["favorability_frequency"]["gate_result"] == "fail"
 
 
 def test_group_plugin_command_is_record_only_not_random_reply(monkeypatch) -> None:  # noqa: ANN001

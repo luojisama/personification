@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from ._loader import load_personification_module
 
 config_registry = load_personification_module("plugin.personification.core.config_registry")
@@ -72,6 +74,42 @@ def test_extra_entries_normalize_roundtrip() -> None:
     assert entries["favorability_decay_enabled"].normalize_value("关") is False
     assert entries["favorability_decay_idle_days"].normalize_value("21") == 21
     assert entries["favorability_decay_delta"].normalize_value("-0.1") == -0.1
+
+
+def test_favorability_registry_validates_nested_negative_ranges() -> None:
+    entries = {entry.key: entry for entry in config_registry.get_config_entries()}
+    levels = entries["favorability_levels"]
+    bands = entries["favorability_behavior_bands"]
+    observer_cap = entries["favorability_observer_delta_cap"]
+
+    assert (levels.min_value, levels.max_value) == (-100, 100)
+    assert levels.normalize_value({"警惕": -20, "初见": 0}) == {"警惕": -20.0, "初见": 0.0}
+    assert levels.normalize_value('{"厌恶":-80,"初见":0}') == {"厌恶": -80.0, "初见": 0.0}
+    assert bands.normalize_value({"-20--0": {"random_reply_add": -0.2, "group_idle_add": 0.2, "custom": "keep"}})["-20--0"]["custom"] == "keep"
+    assert observer_cap.max_value == 1.5
+
+    for raw in ({"": 0}, {"初见": "nan"}, {"初见": float("inf")}, {"初见": -101}):
+        with pytest.raises(ValueError):
+            levels.normalize_value(raw)
+    for raw in (
+        {"-20--0": {"random_reply_add": -0.21}},
+        {"-20--0": {"group_idle_add": float("nan")}},
+    ):
+        with pytest.raises(ValueError):
+            bands.normalize_value(raw)
+
+
+@pytest.mark.parametrize("raw", ("nan", "inf", "-inf"))
+def test_float_entries_reject_non_finite_numbers(raw: str) -> None:
+    entries = {entry.key: entry for entry in config_registry.get_config_entries()}
+
+    for key in (
+        "favorability_default_score",
+        "favorability_group_default_score",
+        "qzone_probability",
+    ):
+        with pytest.raises(ValueError, match="需要有限数字值"):
+            entries[key].normalize_value(raw)
 
 
 def test_favorability_registry_defaults_match_runtime_defaults() -> None:

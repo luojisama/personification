@@ -1012,6 +1012,7 @@ function renderField(e, searchTokens=[]) {
   const inputHtml = renderInput(e);
   const defaultLine = e.default !== null && e.default !== "" && !e.secret ? `<div class="muted" style="font-size:12px;margin-top:6px">默认值：<code>${escapeHtml(JSON.stringify(e.default))}</code></div>` : '';
   const exampleLine = e.example ? `<div class="muted" style="font-size:12px;margin-top:4px">示例：<code>${escapeHtml(e.example)}</code></div>` : '';
+  const rangeLine = e.min_value != null || e.max_value != null ? `<div class="muted" style="font-size:12px;margin-top:4px">允许范围：${escapeHtml(String(e.min_value ?? "−∞"))} .. ${escapeHtml(String(e.max_value ?? "+∞"))}</div>` : '';
   const labelHtml = isSearching ? highlightSearchKeywords(e.label, searchTokens) : escapeHtml(e.label);
   const fieldNameHtml = isSearching ? highlightSearchKeywords(e.field_name, searchTokens) : escapeHtml(e.field_name);
   const descHtml = isSearching ? highlightSearchKeywords(e.description, searchTokens) : escapeHtml(e.description);
@@ -1021,6 +1022,7 @@ function renderField(e, searchTokens=[]) {
     <div class="field-desc">${descHtml}</div>
     <div class="field-input">${inputHtml}</div>
     ${defaultLine}
+    ${rangeLine}
     ${exampleLine}
   </div>`;
 }
@@ -1053,11 +1055,11 @@ function renderInput(e) {
       <button class="btn small primary" onclick="commitTextField('${escapeAttr(e.field_name)}', this, 'json')">保存</button>`;
   }
   if (e.kind === "int") {
-    return `<input type="number" step="1" value="${escapeAttr(cur==null?'':cur)}" oninput="updateConfigDraft('${escapeAttr(e.field_name)}',this)">
+    return `<input type="number" step="1" min="${escapeAttr(e.min_value ?? '')}" max="${escapeAttr(e.max_value ?? '')}" value="${escapeAttr(cur==null?'':cur)}" oninput="updateConfigDraft('${escapeAttr(e.field_name)}',this)">
       <button class="btn small primary" onclick="commitTextField('${escapeAttr(e.field_name)}', this, 'int')">保存</button>`;
   }
   if (e.kind === "float") {
-    return `<input type="number" step="0.01" value="${escapeAttr(cur==null?'':cur)}" oninput="updateConfigDraft('${escapeAttr(e.field_name)}',this)">
+    return `<input type="number" step="0.01" min="${escapeAttr(e.min_value ?? '')}" max="${escapeAttr(e.max_value ?? '')}" value="${escapeAttr(cur==null?'':cur)}" oninput="updateConfigDraft('${escapeAttr(e.field_name)}',this)">
       <button class="btn small primary" onclick="commitTextField('${escapeAttr(e.field_name)}', this, 'float')">保存</button>`;
   }
   if (e.kind === "secret") {

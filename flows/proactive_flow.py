@@ -897,6 +897,13 @@ async def _try_send_idle_sticker(
         return False
 
 
+def resolve_group_idle_probability(base_probability: Any, signed_bias: Any = 0.0) -> float:
+    """Optional group-idle participation probability with signed policy bias."""
+    base = max(0.0, min(1.0, float(base_probability or 0.0)))
+    bias = max(-0.20, min(0.20, float(signed_bias or 0.0)))
+    return min(0.45, max(0.0, base + bias))
+
+
 async def run_proactive_messaging(
     *,
     plugin_config: Any,
@@ -1456,9 +1463,9 @@ async def run_group_idle_topic(
             if bool(getattr(plugin_config, "personification_favorability_frequency_adaptive_enabled", False)) and favorability_service is not None:
                 try:
                     policy = favorability_service.get_group_behavior_policy(group_id)
-                    bias = max(0.0, min(0.2, float(policy.get("group_idle_add", 0.0) or 0.0)))
+                    bias = max(-0.20, min(0.20, float(policy.get("group_idle_add", 0.0) or 0.0)))
                     base_probability = proactive_probability
-                    proactive_probability = min(0.45, max(0.0, min(1.0, base_probability + bias)))
+                    proactive_probability = resolve_group_idle_probability(base_probability, bias)
                     logger.debug(
                         "[group_idle] favorability bias group=%s score=%s band=%s base=%.3f bias=%.3f effective=%.3f",
                         group_id,

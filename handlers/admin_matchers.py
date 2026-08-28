@@ -72,6 +72,7 @@ def register_admin_matchers(
             message_segment_cls=message_segment_cls,
             finished_exception_cls=finished_exception_cls,
             logger=logger,
+            favorability_service=favorability_service,
         )
 
     set_group_fav = _register_command("设置群好感", permission=superuser_permission, priority=5, block=True)

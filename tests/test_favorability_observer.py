@@ -127,6 +127,27 @@ def test_apply_uses_group_override_and_configured_cap(monkeypatch) -> None:
     assert event["scope"] == "group_user"
 
 
+def test_observer_delta_has_hard_cap_even_if_configuration_is_wider() -> None:
+    assessment = observer_module.FavorabilityAssessment(decision="decrease", requested_delta=9, confidence=.9, behavior_tags=(), reason="x", evidence_summary="x")
+    assert favorability.FavorabilityService._normalized_observer_delta(assessment, cap=9) == -1.5
+
+
+def test_shadow_negative_projection_apply_cross_zero_and_low_confidence(monkeypatch) -> None:
+    store = _Store(); monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    decrease = observer_module.FavorabilityAssessment(decision="decrease", requested_delta=1.2, confidence=.9, behavior_tags=(), reason="x", evidence_summary="x")
+    shadow = favorability.FavorabilityService(plugin_config=_config())
+    result = shadow.apply_observer_assessment(user_id="u", group_id="", is_private=True, assessment=decrease, observation_id="shadow")
+    profile = shadow.peek_user_data("u")
+    assert result["status"] == "projected" and result["new"] == -1.2 and profile["favorability"] == 0
+    assert not profile["favorability_events"] and profile["favorability_shadow_events"][-1]["new"] == -1.2
+    apply = favorability.FavorabilityService(plugin_config=_config(personification_favorability_observer_mode="apply"))
+    apply.update_user_data("v", favorability=.5)
+    cross = apply.apply_observer_assessment(user_id="v", group_id="", is_private=True, assessment=observer_module.FavorabilityAssessment(decision="decrease", requested_delta=1, confidence=.9, behavior_tags=(), reason="x", evidence_summary="x"), observation_id="cross")
+    assert cross["old"] == .5 and cross["new"] == -.5
+    low = apply.apply_observer_assessment(user_id="w", group_id="", is_private=True, assessment=observer_module.FavorabilityAssessment(decision="decrease", requested_delta=1, confidence=.1, behavior_tags=(), reason="x", evidence_summary="x"), observation_id="low")
+    assert low["status"] != "applied" and apply.peek_user_data("w") is None
+
+
 def test_effective_profile_prefers_group_override_then_global(monkeypatch) -> None:
     store = _Store()
     monkeypatch.setattr(favorability, "get_data_store", lambda: store)

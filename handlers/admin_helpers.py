@@ -4,7 +4,7 @@ from ..core.ai_routes import summarize_route_state
 from ..core.runtime_config import get_runtime_load_info
 
 
-def build_group_fav_markdown(group_id: str, favorability: float, daily_count: float, status: str) -> str:
+def build_group_fav_markdown(group_id: str, favorability: float, daily_count: float, status: str, daily_negative: float = 0.0) -> str:
     title_color = "#ff69b4"
     text_color = "#d147a3"
     border_color = "#ffb6c1"
@@ -24,26 +24,28 @@ def build_group_fav_markdown(group_id: str, favorability: float, daily_count: fl
             <div style="font-size: 1.4em; font-weight: bold; color: {text_color};">{favorability:.2f}</div>
         </div>
         <div style="flex: 1; background: white; padding: 10px; border-radius: 10px; border: 1px solid {border_color}; text-align: center;">
-            <div style="font-size: 0.8em; color: #999;">今日增长</div>
-            <div style="font-size: 1.4em; font-weight: bold; color: {text_color};">{daily_count:.2f}/10.00</div>
+            <div style="font-size: 0.8em; color: #999;">今日加分 / 扣分 / 净变化</div>
+            <div style="font-size: 1.1em; font-weight: bold; color: {text_color};">+{daily_count:.2f} / -{daily_negative:.2f} / {daily_count - daily_negative:+.2f}</div>
         </div>
     </div>
 
     <div style="font-size: 0.9em; color: #888; background: rgba(255,255,255,0.5); padding: 10px; border-radius: 8px; line-height: 1.4;">
-        ✨ 良好的聊天氛围会增加好感，触发拉黑行为则会扣除。群好感度越高，AI 就会表现得越热情哦~
+        关系分数用于提示互动边界及可选群聊参与倾向；明确提问和 @Bot 仍会正常、礼貌地回应。
     </div>
 </div>
 """
 
 
-def build_group_fav_text(group_id: str, favorability: float, daily_count: float, status: str) -> str:
+def build_group_fav_text(group_id: str, favorability: float, daily_count: float, status: str, daily_negative: float = 0.0) -> str:
     return (
         f"📊 群聊好感度详情\n"
         f"群号：{group_id}\n"
         f"当前好感：{favorability:.2f}\n"
         f"当前等级：{status}\n"
-        f"今日增长：{daily_count:.2f} / 10.00\n"
-        f"✨ 你的热情会让 AI 更有温度~"
+        f"今日加分：+{daily_count:.2f}\n"
+        f"今日扣分：-{daily_negative:.2f}\n"
+        f"今日净变化：{daily_count - daily_negative:+.2f}\n"
+        "关系分数影响边界与可选参与倾向；明确提问仍正常回应。"
     )
 
 
@@ -56,12 +58,18 @@ def parse_group_fav_update_args(arg_str: str, event_group_id: Optional[str]) -> 
         if not event_group_id:
             return None, None, "私聊设置请指定群号：设置群好感 [群号] [分值]"
         try:
-            return event_group_id, float(parts[0]), None
+            value = float(parts[0])
+            if not -100.0 <= value <= 100.0:
+                return None, None, "分值必须在 -100 到 100 之间。"
+            return event_group_id, value, None
         except ValueError:
             return None, None, "分值必须为数字。"
 
     try:
-        return parts[0], float(parts[1]), None
+        value = float(parts[1])
+        if not -100.0 <= value <= 100.0:
+            return None, None, "分值必须在 -100 到 100 之间。"
+        return parts[0], value, None
     except (ValueError, IndexError):
         return None, None, "分值必须为数字。"
 
