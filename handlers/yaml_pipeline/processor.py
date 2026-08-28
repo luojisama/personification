@@ -46,9 +46,11 @@ from ...core.image_input import (
     normalize_image_input_mode,
 )
 from ...core.sticker_library import (
+    load_sticker_metadata,
     resolve_sticker_dir,
 )
 from ...core.message_parts import build_user_message_content, clone_messages_with_text_suffix
+from ...core.history_projection import build_confirmed_outbound_history, build_group_batch_history, is_confirmed_send_result, lookup_sticker_history_metadata
 from ...core.context_policy import (
     ensure_prompt_injection_guard,
     has_silence_control_marker,
@@ -872,16 +874,23 @@ async def process_yaml_response_logic(
     if not history_new_text:
         history_new_text = "(无最近消息)"
 
+    # Render the exact same bounded/untrusted envelope as normal replies.
+    # YAML owns no second hand-written batch format.
+    batch_envelope = ""
+    if not is_private_session and int(batch_event_count or 1) > 1:
+        batch_envelope, _batch_metadata = build_group_batch_history(batched_events)
+        history_last_text = batch_envelope
+
     last_msg = chat_history[-1] if chat_history else {"content": raw_message_text or ""}
-    history_last_text = ""
-    if isinstance(last_msg["content"], list):
+    history_last_text = batch_envelope
+    if not history_last_text and isinstance(last_msg["content"], list):
         for item in last_msg["content"]:
             if item["type"] == "text":
                 history_last_text += item["text"]
             elif item["type"] == "image_url":
                 if "[图片" not in history_last_text:
                     history_last_text += "[图片]"
-    else:
+    elif not history_last_text:
         history_last_text = str(last_msg["content"])
 
     last_images = list(current_image_urls or [])
@@ -1486,24 +1495,6 @@ async def process_yaml_response_logic(
     )
     if emotion_block:
         input_text = f"{input_text}\n\n{emotion_block}\n"
-    if batch_event_count > 1:
-        input_text = (
-            f"{input_text}\n\n"
-            f"## 当前批次消息\n"
-            f"- 本轮合并消息数：{int(batch_event_count or 1)}\n"
-        )
-        for item in list(batched_events or [])[:8]:
-            if not isinstance(item, dict):
-                continue
-            sender = str(item.get('sender_name', '') or item.get('user_id', '') or '未知').strip()
-            text = str(item.get("text", "") or "").strip() or "[图片/非文本消息]"
-            marker = []
-            if item.get("is_direct_mention"):
-                marker.append("@你")
-            if item.get("is_reply_to_bot"):
-                marker.append("回复你")
-            suffix = f"（{'、'.join(marker)}）" if marker else ""
-            input_text += f"- {sender}{suffix}: {text}\n"
     if repeat_clusters:
         input_text += "\n## 复读/接龙线索\n"
         for cluster in list(repeat_clusters or [])[:3]:
@@ -2746,8 +2737,6 @@ async def process_yaml_response_logic(
     assistant_text, history_image_payloads = _extract_image_b64_markers(assistant_text)
     has_generated_image = bool(history_image_payloads)
     assistant_history_text = history_text_for_qq_expression(assistant_text)
-    if history_image_payloads and not assistant_history_text:
-        assistant_history_text = "[发送了一张图片]"
 
     sticker_dir = resolve_sticker_dir(getattr(plugin_config, "personification_sticker_path", None))
     chosen_sticker_paths: list[Path | None] = []
@@ -2786,6 +2775,7 @@ async def process_yaml_response_logic(
     elif parsed["messages"]:
         chosen_sticker_paths = [None for _ in parsed["messages"]]
     delivered_sticker_names: list[str] = []
+    confirmed_image_parts = 0
 
     if _has_newer_batch_now():
         logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
@@ -2958,6 +2948,7 @@ async def process_yaml_response_logic(
                         _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="图片发送前出现更新批次")
                         return
                     send_result = await _send_reply(message_segment_cls.image(f"base64://{image_b64}"))
+                    confirmed_image_parts += int(is_confirmed_send_result(send_result))
                     if not sent_message_id:
                         sent_message_id = _message_id_from_send_result(send_result)
                     await asyncio.sleep(random.uniform(0.4, 1.0))
@@ -2974,15 +2965,16 @@ async def process_yaml_response_logic(
                         )
                         if not sent_message_id:
                             sent_message_id = _message_id_from_send_result(send_result)
-                        delivered_sticker_names.append(chosen_sticker_path.stem)
-                        mark_pending_sticker_reaction(
-                            build_sticker_feedback_scene_key(
-                                group_id=group_id,
-                                user_id=user_id,
-                                is_private=is_private_session,
-                            ),
-                            chosen_sticker_path.stem,
-                        )
+                        if is_confirmed_send_result(send_result):
+                            delivered_sticker_names.append(chosen_sticker_path.stem)
+                            mark_pending_sticker_reaction(
+                                build_sticker_feedback_scene_key(
+                                    group_id=group_id,
+                                    user_id=user_id,
+                                    is_private=is_private_session,
+                                ),
+                                chosen_sticker_path.stem,
+                            )
                     except Exception as e:
                         logger.error(f"发送表情包失败: {e}")
         else:
@@ -3026,6 +3018,7 @@ async def process_yaml_response_logic(
                     _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="生成图片发送前出现更新批次")
                     return
                 send_result = await _send_reply(message_segment_cls.image(f"base64://{image_b64}"))
+                confirmed_image_parts += int(is_confirmed_send_result(send_result))
                 if not sent_message_id:
                     sent_message_id = _message_id_from_send_result(send_result)
 
@@ -3037,13 +3030,21 @@ async def process_yaml_response_logic(
     session_id = build_private_session_id(user_id) if is_private_session else build_group_session_id(group_id)
     legacy_session_id = None if is_private_session else group_id
     # 可见发送与有序历史投影共用同一个提交门，避免并发直达轮次写回顺序反转。
+    confirmed_history_text = build_confirmed_outbound_history(
+        assistant_history_text,
+        confirmed_sticker_metadata=[
+            lookup_sticker_history_metadata(load_sticker_metadata(sticker_dir), name)
+            for name in delivered_sticker_names
+        ],
+        image_confirmed=confirmed_image_parts > 0,
+    )
     append_session_message(
         session_id,
         "assistant",
-        assistant_history_text,
+        confirmed_history_text,
         legacy_session_id=legacy_session_id,
         scene="reply",
-        sticker_sent=", ".join(stickers_sent) if stickers_sent else None,
+        sticker_sent=", ".join(delivered_sticker_names) if delivered_sticker_names else None,
         speaker=str(getattr(bot, "self_id", "") or "bot"),
         user_id=str(getattr(bot, "self_id", "") or "") or None,
         source_kind="bot_reply",
@@ -3058,7 +3059,7 @@ async def process_yaml_response_logic(
         record_group_msg(
             group_id,
             str(getattr(bot, "self_id", "") or "bot"),
-            assistant_history_text,
+            confirmed_history_text,
             is_bot=True,
             user_id=str(getattr(bot, "self_id", "") or ""),
             message_id=sent_message_id or None,

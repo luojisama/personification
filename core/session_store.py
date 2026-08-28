@@ -26,6 +26,10 @@ PRIVATE_SESSION_PREFIX = "private_"
 _plugin_config: Any = None
 _compress_tool_caller: Any = None
 _compress_tasks: Dict[str, asyncio.Task[None]] = {}
+_compress_failures: Dict[str, int] = {}
+_compress_retry_tasks: Dict[str, asyncio.Task[None]] = {}
+_COMPRESS_RETRY_DELAYS = (30.0, 120.0, 600.0)
+_compress_sleep: Any = asyncio.sleep
 
 # 向后兼容导出，历史已不再保存在内存 dict 中。
 chat_histories: Dict[str, List[Dict[str, Any]]] = {}
@@ -63,6 +67,11 @@ def _get_history_max_len() -> int:
         value = int(getattr(_plugin_config, "personification_history_len", DEFAULT_HISTORY_LEN))
         return max(40, min(value, 800))
     return DEFAULT_HISTORY_LEN
+
+
+def _get_compress_trigger() -> int:
+    """Start compaction at the earlier configured threshold/target bound."""
+    return min(_get_compress_threshold(), _get_history_max_len())
 
 
 def _get_message_expire_hours() -> float:
@@ -236,9 +245,52 @@ def _build_compress_prompt(messages: List[Dict]) -> str:
     )
 
 
-def _replace_history_with_summary_sync(session_id: str, summary_text: str, recent: List[Dict[str, Any]]) -> None:
+def _replace_history_with_summary_sync(
+    session_id: str,
+    summary_text: str,
+    *,
+    candidate_ids: list[int],
+    cutoff_id: int,
+    keep_boundary_timestamp: float,
+) -> bool:
+    """Commit a summary only when the original snapshot still exists.
+
+    The summary call runs outside SQLite.  This short IMMEDIATE transaction
+    therefore cannot delete arrivals made after the snapshot or resurrect a
+    session an administrator cleared while the model was running.
+    """
+    if not candidate_ids:
+        return False
     with connect_sync() as conn:
-        conn.execute("DELETE FROM session_messages WHERE session_id=?", (session_id,))
+        conn.execute("BEGIN IMMEDIATE")
+        placeholders = ",".join("?" for _ in candidate_ids)
+        rows = conn.execute(
+            f"SELECT id,is_summary,metadata FROM session_messages WHERE session_id=? AND id IN ({placeholders})",
+            (session_id, *candidate_ids),
+        ).fetchall()
+        if {int(row["id"]) for row in rows} != set(candidate_ids):
+            conn.rollback()
+            return False
+        snapshot_summary_ids = {int(row["id"]) for row in rows if bool(row["is_summary"])}
+        current_summary_ids = {int(row["id"]) for row in conn.execute("SELECT id FROM session_messages WHERE session_id=? AND is_summary=1", (session_id,)).fetchall()}
+        if current_summary_ids != snapshot_summary_ids:
+            conn.rollback()
+            return False
+        previous_covered = 0
+        previous_cutoff = 0
+        for row in rows:
+            if not bool(row["is_summary"]):
+                continue
+            try:
+                meta = json.loads(row["metadata"] or "{}")
+                previous_covered += int(meta.get("covered_count", 0) or 0)
+                previous_cutoff = max(previous_cutoff, int(meta.get("compacted_through_id", 0) or 0))
+            except Exception:
+                pass
+        conn.execute(
+            f"DELETE FROM session_messages WHERE session_id=? AND id IN ({placeholders})",
+            (session_id, *candidate_ids),
+        )
         conn.execute(
             """
             INSERT INTO session_messages(session_id, role, content, is_summary, timestamp, metadata)
@@ -248,38 +300,38 @@ def _replace_history_with_summary_sync(session_id: str, summary_text: str, recen
                 session_id,
                 "system",
                 json.dumps(f"【对话历史摘要】{summary_text}", ensure_ascii=False),
-                time.time(),
-                json.dumps({}, ensure_ascii=False),
+                keep_boundary_timestamp - 0.000001,
+                json.dumps({"compacted_through_id": max(previous_cutoff, cutoff_id), "covered_count": previous_covered + sum(not bool(row["is_summary"]) for row in rows), "summary_version": 2}, ensure_ascii=False),
             ),
         )
-        for msg in recent:
-            metadata = {k: v for k, v in msg.items() if k not in {"id", "role", "content", "timestamp", "is_summary"}}
-            conn.execute(
-                """
-                INSERT INTO session_messages(session_id, role, content, is_summary, timestamp, metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    session_id,
-                    str(msg.get("role", "") or ""),
-                    json.dumps(msg.get("content", ""), ensure_ascii=False),
-                    1 if bool(msg.get("is_summary")) else 0,
-                    float(msg.get("timestamp", time.time()) or time.time()),
-                    json.dumps(metadata, ensure_ascii=False),
-                ),
-            )
         conn.commit()
+        return True
 
 
 async def _run_compress(session_id: str) -> None:
+    committed_successfully = False
     try:
         history = _fetch_session_messages_sync(session_id)
-        threshold = _get_compress_threshold()
-        keep = _get_keep_recent()
+        threshold = _get_compress_trigger()
+        # A successful summary counts as one history entry.  Preserve no more
+        # raw rows than the configured post-summary target permits.
+        keep = min(_get_keep_recent(), max(0, _get_history_max_len() - 1))
         if len(history) < threshold:
             return
-        to_compress = history[:-keep] if keep > 0 else history
-        recent = history[-keep:] if keep > 0 else []
+        # Keep the newest *raw* conversation rows.  Old summaries always
+        # participate, even if a legacy timestamp made one appear newer than
+        # a raw row, otherwise a second compaction can leave multiple valid
+        # summaries forever.
+        raw_history = [item for item in history if not bool(item.get("is_summary"))]
+        retained_raw_ids = {
+            int(item["id"])
+            for item in (raw_history[-keep:] if keep > 0 else [])
+            if item.get("id") is not None
+        }
+        to_compress = [
+            item for item in history
+            if bool(item.get("is_summary")) or int(item.get("id") or 0) not in retained_raw_ids
+        ]
         if not to_compress:
             return
 
@@ -288,31 +340,82 @@ async def _run_compress(session_id: str) -> None:
         if caller is not None:
             try:
                 prompt = _build_compress_prompt(to_compress)
-                response = await caller.chat_with_tools(
-                    messages=[{"role": "user", "content": prompt}],
-                    tools=[],
-                    use_builtin_search=False,
+                timeout_seconds = float(getattr(_plugin_config, "personification_compress_timeout_seconds", 30.0) if _plugin_config is not None else 30.0)
+                response = await asyncio.wait_for(
+                    caller.chat_with_tools(
+                        messages=[{"role": "user", "content": prompt}],
+                        tools=[],
+                        use_builtin_search=False,
+                    ),
+                    timeout=max(0.1, timeout_seconds),
                 )
                 summary_text = str(response.content or "").strip()
             except Exception as exc:
                 logger.warning(f"[session_store] compress LLM call failed for {session_id}: {exc}")
         if not summary_text:
-            summary_text = f"（此前 {len(to_compress)} 条历史已省略）"
-        await asyncio.to_thread(_replace_history_with_summary_sync, session_id, summary_text, recent)
+            failures = _compress_failures.get(session_id, 0) + 1
+            _compress_failures[session_id] = failures
+            logger.warning("[session_store] compress_empty_or_failed code=session_compress_summary_unavailable attempt=%s", failures)
+            _schedule_compress_retry(session_id, failures)
+            return
+        candidate_ids = [int(item["id"]) for item in to_compress if item.get("id") is not None]
+        committed = await asyncio.to_thread(
+            _replace_history_with_summary_sync,
+            session_id,
+            summary_text,
+            candidate_ids=candidate_ids,
+            cutoff_id=max((int(item["id"]) for item in to_compress if not item.get("is_summary") and item.get("id") is not None), default=0),
+            keep_boundary_timestamp=(
+                float(next(item["timestamp"] for item in raw_history if int(item.get("id") or 0) in retained_raw_ids))
+                if retained_raw_ids
+                else float(max((item["timestamp"] for item in to_compress if not bool(item.get("is_summary"))), default=time.time()))
+            ),
+        )
+        if committed:
+            _compress_failures.pop(session_id, None)
+            committed_successfully = True
+        else:
+            logger.warning("[session_store] compress conditional commit abandoned code=session_compress_snapshot_conflict")
     except Exception as exc:
         logger.warning(f"[session_store] compress error for {session_id}: {exc}")
+        failures = _compress_failures.get(session_id, 0) + 1
+        _compress_failures[session_id] = failures
+        _schedule_compress_retry(session_id, failures)
     finally:
-        _compress_tasks.pop(session_id, None)
+        if _compress_tasks.get(session_id) is asyncio.current_task():
+            _compress_tasks.pop(session_id, None)
+            # A concurrent append is never deleted by this commit.  Schedule
+            # another bounded pass only if it left the post-summary target
+            # strictly exceeded; equality must not create a loop.
+            if committed_successfully and len(_fetch_session_messages_sync(session_id)) > _get_history_max_len():
+                _schedule_compress(session_id)
 
 
 def _schedule_compress(session_id: str) -> None:
     if session_id in _compress_tasks:
         return
     try:
-        task = asyncio.create_task(_run_compress(session_id))
+        loop = asyncio.get_running_loop()
     except RuntimeError:
         return
+    task = loop.create_task(_run_compress(session_id))
     _compress_tasks[session_id] = task
+
+
+def _schedule_compress_retry(session_id: str, attempt: int) -> None:
+    if attempt > len(_COMPRESS_RETRY_DELAYS) or session_id in _compress_retry_tasks:
+        return
+    async def _retry() -> None:
+        try:
+            await _compress_sleep(_COMPRESS_RETRY_DELAYS[attempt - 1])
+            _schedule_compress(session_id)
+        finally:
+            if _compress_retry_tasks.get(session_id) is asyncio.current_task():
+                _compress_retry_tasks.pop(session_id, None)
+    try:
+        _compress_retry_tasks[session_id] = asyncio.get_running_loop().create_task(_retry())
+    except RuntimeError:
+        return
 
 
 def append_session_message(
@@ -342,18 +445,8 @@ def append_session_message(
                 json.dumps(safe_metadata, ensure_ascii=False),
             ),
         )
-        rows = conn.execute(
-            "SELECT id FROM session_messages WHERE session_id=? ORDER BY timestamp ASC, id ASC",
-            (session_id,),
-        ).fetchall()
-        max_len = _get_history_max_len()
-        if len(rows) > max_len:
-            stale_ids = [int(row["id"]) for row in rows[:-max_len]]
-            placeholders = ",".join("?" for _ in stale_ids)
-            conn.execute(
-                f"DELETE FROM session_messages WHERE id IN ({placeholders})",
-                tuple(stale_ids),
-            )
+        # The configured history length is a post-summary target.  Deleting
+        # before a summary commits loses concurrent conversation permanently.
         conn.commit()
 
     try:
@@ -376,8 +469,13 @@ def append_session_message(
     except Exception:
         pass
 
+    # After all bounded automatic retries were exhausted, a *new* inbound
+    # message starts a fresh 30/120/600 retry cycle.  No timer is resurrected
+    # merely because the previous cycle failed.
+    if _compress_failures.get(session_id, 0) > len(_COMPRESS_RETRY_DELAYS):
+        _compress_failures.pop(session_id, None)
     current = get_session_messages(session_id)
-    if len(current) >= _get_compress_threshold():
+    if len(current) >= _get_compress_trigger() and session_id not in _compress_retry_tasks:
         _schedule_compress(session_id)
     return current
 
@@ -393,6 +491,13 @@ async def clear_all_session_histories() -> int:
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     _compress_tasks.clear()
+    retry_tasks = list(_compress_retry_tasks.values())
+    for task in retry_tasks:
+        task.cancel()
+    if retry_tasks:
+        await asyncio.gather(*retry_tasks, return_exceptions=True)
+    _compress_retry_tasks.clear()
+    _compress_failures.clear()
     with connect_sync() as conn:
         row = conn.execute("SELECT COUNT(DISTINCT session_id) AS cnt FROM session_messages").fetchone()
         count = int(row["cnt"] if row else 0)
@@ -405,6 +510,12 @@ def clear_session_history(session_id: str, legacy_session_id: Optional[str] = No
     task = _compress_tasks.pop(session_id, None)
     if task is not None:
         task.cancel()
+    retry = _compress_retry_tasks.pop(session_id, None)
+    if retry is not None:
+        retry.cancel()
+    _compress_failures.pop(session_id, None)
+    if legacy_session_id:
+        _compress_failures.pop(legacy_session_id, None)
     if legacy_session_id and legacy_session_id in _compress_tasks:
         leg_task = _compress_tasks.pop(legacy_session_id, None)
         if leg_task is not None:
@@ -422,4 +533,3 @@ def clear_session_history(session_id: str, legacy_session_id: Optional[str] = No
             )
         conn.commit()
         return int(cursor.rowcount if cursor is not None else 0)
-

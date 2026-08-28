@@ -21,6 +21,7 @@ from ...core.favorability_turn import (
     extract_legacy_favorability_markers,
     signals_from_semantic_frame,
 )
+from ...core.favorability import normalize_favorability_attitudes
 from ...core.image_input import (
     is_image_input_unsupported_error,
     normalize_image_detail,
@@ -29,6 +30,8 @@ from ...core.image_input import (
 from ...core.metrics import record_counter, record_timing
 from ...core.meme_reply_policy import format_meme_turn_prompt, prepare_meme_turn_context
 from ...core.message_parts import build_user_message_content, clone_messages_with_text_suffix
+from ...core.history_projection import build_confirmed_outbound_history, build_group_batch_history, is_confirmed_send_result, lookup_sticker_history_metadata
+from ...core.sticker_library import load_sticker_metadata, resolve_sticker_dir
 from ...core.message_relations import extract_send_message_id
 from ...core.context_policy import (
     compress_context_if_needed,
@@ -106,6 +109,55 @@ from ...core.response_review import (
 from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_completion_contract import resolve_sent_reply_completion
+
+
+def _flush_buffer_trace_diagnostics(state: Dict[str, Any], trace_mod: Any, trace_id: str) -> None:
+    """Attach buffer aggregates only after the owning turn trace exists."""
+    for diagnostic in list(state.pop("buffer_trace_diagnostics", []) or []):
+        if not isinstance(diagnostic, dict):
+            continue
+        detail = " ".join(f"{key}={diagnostic.get(key, 0)}" for key in ("code", "count", "generation", "wait_ms"))
+        trace_mod.record_stage(trace_id=trace_id, key="buffer_diagnostic", label="缓冲诊断", status="info", detail=detail)
+
+
+def prepare_incoming_history_record(
+    *,
+    is_private_session: bool,
+    batched_events: list[dict[str, Any]],
+    fallback_content: Any,
+    fallback_speaker: str,
+    image_urls: list[str],
+    image_detail: str,
+    trigger_user_id: str,
+    trigger_message_id: str,
+    trigger_group_id: str,
+    message_target: Any = "",
+) -> tuple[Any, str, dict[str, Any]]:
+    """Build one recoverable history row without inventing a batch speaker."""
+    if is_private_session or len(batched_events) <= 1:
+        return fallback_content, fallback_speaker, {}
+    envelope, metadata = build_group_batch_history(batched_events)
+    content = build_user_message_content(
+        text=envelope, image_urls=image_urls, image_detail=image_detail,
+    )
+    metadata = dict(metadata)
+    speaker = str(metadata.pop("speaker", "多人群聊批次") or "多人群聊批次")
+    # Trigger identity is metadata, never a fictitious user_id for the batch.
+    metadata.update({
+        "source_kind": "user_batch",
+        "trigger_user_id": str(trigger_user_id or ""),
+        "trigger_message_id": str(trigger_message_id or ""),
+        "trigger_group_id": str(trigger_group_id or ""),
+        "message_target": message_target or "",
+    })
+    metadata.pop("user_id", None)
+    return content, speaker, metadata
+
+
+def prepare_agent_incoming_content(**kwargs: Any) -> Any:
+    """Build the Agent-visible current user record through the same envelope."""
+    content, _, _ = prepare_incoming_history_record(**kwargs)
+    return content
 from ...core.reply_length_policy import (
     render_reply_length_prompt_hint,
     render_reply_length_trace,
@@ -613,6 +665,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             )
             state["reply_trace_id"] = trace_id
             trace_token = trace_mod.set_current_trace_id(trace_id)
+            _flush_buffer_trace_diagnostics(state, trace_mod, trace_id)
             trace_mod.record_stage(
                 trace_id=trace_id,
                 key="ingress",
@@ -1389,6 +1442,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 "personification_favorability_attitudes",
                 None,
             ) or persona.favorability_attitudes
+            current_attitudes = normalize_favorability_attitudes(
+                current_attitudes,
+                getattr(runtime.plugin_config, "personification_favorability_levels", None),
+            )
             favorability_service = getattr(persona, "favorability_service", None)
             effective_profile = (
                 favorability_service.get_effective_profile(user_id, str(group_id))
@@ -1852,23 +1909,52 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         image_urls=tool_image_urls if agent_direct_image_input else [],
         image_detail=image_detail,
     )
+    incoming_history_content, incoming_speaker, incoming_append_metadata = prepare_incoming_history_record(
+        is_private_session=is_private_session,
+        batched_events=batched_events,
+        fallback_content=current_user_content,
+        fallback_speaker=safe_user_name,
+        image_urls=image_urls_for_text_model,
+        image_detail=image_detail,
+        trigger_user_id=user_id,
+        trigger_message_id=str(getattr(event, "message_id", "") or "").strip(),
+        trigger_group_id=str(group_id or ""),
+        message_target=state.get("message_target", ""),
+    )
+    if incoming_append_metadata.get("source_kind") == "user_batch":
+        # Agent/tool input must see the same bounded, untrusted multi-speaker
+        # envelope as ordinary history; only its image transport differs.
+        agent_current_user_content = prepare_agent_incoming_content(
+            is_private_session=False,
+            batched_events=batched_events,
+            fallback_content=agent_current_user_content,
+            fallback_speaker=safe_user_name,
+            image_urls=tool_image_urls if agent_direct_image_input else [],
+            image_detail=image_detail,
+            trigger_user_id=user_id,
+            trigger_message_id=str(getattr(event, "message_id", "") or "").strip(),
+            trigger_group_id=str(group_id or ""),
+            message_target=state.get("message_target", ""),
+        )
     session.append_session_message(
         session_id,
         "user",
-        current_user_content,
+        incoming_history_content,
         legacy_session_id=legacy_session_id,
         is_direct=not is_random_chat,
         scene="private" if is_private_session else ("direct" if not is_random_chat else "observe"),
-        speaker=safe_user_name,
-        **incoming_relation_metadata,
+        speaker=incoming_speaker,
+        **incoming_append_metadata,
+        **({} if incoming_append_metadata.get("source_kind") == "user_batch" else incoming_relation_metadata),
     )
 
     session_messages = session.sanitize_session_messages(session.get_session_messages(session_id))
     if is_private_session:
         session_messages = session_messages[-_private_history_window_limit(runtime.plugin_config):]
-    session_messages_for_model = _restore_current_user_message_content(
-        session_messages,
-        current_user_content,
+    session_messages_for_model = (
+        session_messages
+        if incoming_append_metadata or (not is_private_session and len(batched_events) > 1)
+        else _restore_current_user_message_content(session_messages, current_user_content)
     )
 
     def _record_pending_action_history_if_any() -> bool:
@@ -3191,7 +3277,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 final_reply = f"{final_reply}{qq_auto_marker}".strip()
         # session/history 只记录最终对用户生效的文本，避免原始长回复与实际可见内容漂移。
         final_visible_reply_text = _build_final_visible_reply_text(
-            history_text_for_qq_expression(final_reply) or ("[发送了一张图片]" if image_b64_payloads else ""),
+            # Media placeholders are produced only from confirmed send
+            # receipts below; pre-seeding one here duplicates success and
+            # falsely records unknown/failed image delivery.
+            history_text_for_qq_expression(final_reply),
             max_chars=max_chars,
             sanitize_history_text=session.sanitize_history_text,
         )
@@ -3432,12 +3521,15 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     except Exception as exc:
                         runtime.logger.debug(f"[humanize] 修正消息发送失败: {exc}")
 
+        confirmed_image_parts = 0
+        confirmed_sticker_parts = 0
         for image_b64 in image_b64_payloads:
             stale_reason = _stale_reply_abort_reason(state)
             if stale_reason:
                 runtime.logger.info(f"拟人插件：{stale_reason}")
                 return
             send_result = await _send_reply(runtime.message_segment_cls.image(f"base64://{image_b64}"))
+            confirmed_image_parts += int(is_confirmed_send_result(send_result))
             if not sent_message_id:
                 sent_message_id = _message_id_from_send_result(send_result)
             if sticker_segment:
@@ -3449,9 +3541,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 runtime.logger.info(f"拟人插件：{stale_reason}")
                 return
             send_result = await _send_reply(sticker_segment)
+            confirmed_sticker_parts += int(is_confirmed_send_result(send_result))
             if not sent_message_id:
                 sent_message_id = _message_id_from_send_result(send_result)
-            if sticker_name:
+            if sticker_name and is_confirmed_send_result(send_result):
                 mark_pending_sticker_reaction(
                     build_sticker_feedback_scene_key(
                         group_id=str(group_id),
@@ -3466,9 +3559,20 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         if getattr(runtime, "user_policy_gate", None) is not None:
             await runtime.user_policy_gate.ensure_current(event)
         mark_reply_phase(state, "delivery_history_commit")
+        confirmed_history_text = build_confirmed_outbound_history(
+            final_visible_reply_text,
+            sticker_metadata=(
+                lookup_sticker_history_metadata(
+                    load_sticker_metadata(resolve_sticker_dir(getattr(runtime.plugin_config, "personification_sticker_path", None))),
+                    sticker_name,
+                ) if sticker_name else None
+            ),
+            image_confirmed=confirmed_image_parts > 0,
+            sticker_confirmed=bool(sticker_name and confirmed_sticker_parts > 0),
+        )
         assistant_metadata = {
             "scene": "reply",
-            "sticker_sent": sticker_name if sticker_name else None,
+            "sticker_sent": sticker_name if sticker_name and confirmed_sticker_parts > 0 else None,
             "speaker": bot_nickname,
             "user_id": bot_self_id or None,
             "source_kind": "bot_reply",
@@ -3487,7 +3591,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         session.append_session_message(
             session_id,
             "assistant",
-            final_visible_reply_text,
+            confirmed_history_text,
             legacy_session_id=legacy_session_id,
             **assistant_metadata,
         )
@@ -3495,7 +3599,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             runtime.record_group_msg(
                 str(event.group_id),
                 bot_nickname,
-                final_visible_reply_text,
+                confirmed_history_text,
                 is_bot=True,
                 user_id=bot_self_id,
                 message_id=sent_message_id or None,
@@ -3529,7 +3633,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             )
         except Exception:
             pass
-        if sticker_name:
+        if sticker_name and confirmed_sticker_parts > 0:
             await record_sticker_sent(sticker_name)
         await persist_reply_emotion_state(
             runtime=runtime,
