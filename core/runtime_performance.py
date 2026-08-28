@@ -182,11 +182,15 @@ def _reply_snapshot() -> dict[str, int]:
     with _REPORTER_LOCK:
         reporter = _REPLY_REPORTER
     value = _safe_report(reporter)
-    return {
+    snapshot = {
         "active": max(0, int(value.get("active", 0) or 0)),
         "waiting": max(0, int(value.get("waiting", 0) or 0)),
         "session_gates": max(0, int(value.get("session_gates", 0) or 0)),
     }
+    for key in ("buffered_sessions", "buffered_messages", "processing_buffer_sessions", "oldest_buffer_age_ms", "next_buffer_fire_ms"):
+        snapshot[key] = max(0, int(value.get(key, 0) or 0))
+    snapshot["admission_waiting_turns"] = max(0, int(value.get("admission_waiting_turns", value.get("waiting", 0)) or 0))
+    return snapshot
 
 
 def _cache_snapshots() -> list[dict[str, Any]]:

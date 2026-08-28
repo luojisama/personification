@@ -36,7 +36,8 @@ export function AgentStatusPage() {
             </div>
           </Panel>
           <section className="metric-rack" aria-label="回合状态">
-            <article><span>等待缓冲</span><strong>{data.waiting_turns}</strong><small>等待动态截止时间</small></article>
+            <article><span>并发排队</span><strong>{data.admission_waiting_turns}</strong><small>等待并发准入</small></article>
+            <article><span>缓冲会话 / 消息</span><strong>{data.buffered_sessions} / {data.buffered_messages}</strong><small>最久等待 {formatDuration(data.oldest_buffer_age_ms)}</small></article>
             <article><span>正在生成</span><strong>{data.active_turns}</strong><small>当前活动回复任务</small></article>
             <article><span>正在发送</span><strong>{data.sending_turns}</strong><small>进入发送/确认阶段</small></article>
             <article><span>停滞回合</span><strong>{data.stale_turns}</strong><small>{data.cancelled_turns} 次取消 · {data.gated_turns} 个 gate</small></article>

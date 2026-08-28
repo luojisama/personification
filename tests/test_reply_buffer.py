@@ -11,8 +11,14 @@ from ._loader import load_personification_module
 
 
 reply_buffer = load_personification_module("plugin.personification.handlers.reply_buffer")
+pipeline_context = load_personification_module(
+    "plugin.personification.handlers.reply_pipeline.pipeline_context"
+)
 reply_recovery_queue = load_personification_module(
     "plugin.personification.core.reply_recovery_queue"
+)
+yaml_processor = load_personification_module(
+    "plugin.personification.handlers.yaml_pipeline.processor"
 )
 
 
@@ -32,6 +38,12 @@ class _AtSeg:
 class _FileSeg:
     data: dict[str, str]
     type: str = "file"
+
+
+@dataclass
+class _ImageSeg:
+    data: dict[str, str]
+    type: str = "image"
 
 
 @dataclass
@@ -97,6 +109,219 @@ class _Logger:
         self.errors.append(str(message))
 
 
+def test_stable_item_key_is_deduplicable_and_never_contains_body() -> None:
+    first = _GroupEvent(9, "绝不能泄漏到状态正文")
+    assert reply_buffer._stable_item_key("group", first, 1.0) == "id:9"
+    first.message_id = ""
+    first.time = 123.0
+    same = reply_buffer._stable_item_key("group", first, 1.0)
+    assert same == reply_buffer._stable_item_key("group", first, 1.0)
+    assert "正文" not in same
+    other_user = _GroupEvent(0, "绝不能泄漏到状态正文")
+    other_user.user_id = 999
+    assert same != reply_buffer._stable_item_key("group", other_user, 1.0)
+    assert same == reply_buffer._stable_item_key("group", first, 2.0)
+    first.time = 124.0
+    assert same != reply_buffer._stable_item_key("group", first, 2.0)
+    long = _GroupEvent(0, "x" * 120 + "甲"); long.time = 1
+    other = _GroupEvent(0, "x" * 120 + "乙"); other.time = 1
+    assert reply_buffer._stable_item_key("g", long, 0) != reply_buffer._stable_item_key("g", other, 0)
+    first_media = _GroupEvent(0, ""); first_media.time = 1; first_media.message = _Message([_FileSeg({"file": "a", "name": "a.png"})])
+    same_media = _GroupEvent(0, ""); same_media.time = 1; same_media.message = _Message([_FileSeg({"name": "a.png", "file": "a"})])
+    other_media = _GroupEvent(0, ""); other_media.time = 1; other_media.message = _Message([_FileSeg({"file": "b", "name": "b.png"})])
+    assert reply_buffer._stable_item_key("g", first_media, 0) == reply_buffer._stable_item_key("g", same_media, 0)
+    assert reply_buffer._stable_item_key("g", first_media, 0) != reply_buffer._stable_item_key("g", other_media, 0)
+
+
+def test_active_random_preemption_requires_no_delivery_but_must_reply_never_preempts() -> None:
+    entry = {"processing": True, "current_is_random_chat": True, "active_state": {}}
+    assert reply_buffer._should_preempt_current_batch(entry, immediate_flush=True)
+    for field in ("reply_delivery_started", "reply_delivery_confirmed", "reply_delivery_complete", "delivery_unknown"):
+        entry["active_state"] = {field: True}
+        assert not reply_buffer._should_preempt_current_batch(entry, immediate_flush=True)
+    entry["current_is_random_chat"] = False
+    entry["active_state"] = {}
+    assert not reply_buffer._should_preempt_current_batch(entry, immediate_flush=True)
+
+
+def test_fifo_chunking_runs_two_real_timer_generations_without_loss() -> None:
+    async def run() -> None:
+        key, bot, seen = "456:123", _Bot(), []
+        entry = reply_buffer._new_entry(0.0)
+        base = time.monotonic()
+        entry["items"] = [{"event": _GroupEvent(100 + index, str(index)), "state": {}, "received_at": base + index * .0001, "dedupe_key": f"id:{100 + index}"} for index in range(10)]
+        buffer = {key: entry}
+        async def process(_bot: Any, _event: Any, state: dict[str, Any]) -> None:
+            seen.append([int(row["message_id"]) - 100 for row in state["batched_events"]])
+        common = dict(msg_buffer=buffer, process_response_logic=process, message_event_cls=_GroupEvent, message_cls=_Message, message_segment_cls=_MessageSegment, logger=_Logger(), delay=0, response_timeout_seconds=30)
+        await reply_buffer.run_buffer_timer(key, bot, **common)
+        await asyncio.sleep(0.05)
+        assert seen == [list(range(8)), [8, 9]]
+    asyncio.run(run())
+
+
+def test_gate_wait_reorder_keeps_overflow_fifo_without_duplicates() -> None:
+    async def run() -> None:
+        key, bot, seen, tasks = "999:456", _Bot(), [], []
+        entry = reply_buffer._new_entry(time.monotonic())
+        base = time.monotonic()
+        entry["items"] = [
+            {
+                "event": _GroupEvent(index, str(index)),
+                "state": {"is_random_chat": True},
+                "received_at": base + index * 0.0001,
+                "dedupe_key": f"id:{index}",
+            }
+            for index in range(1, 11)
+        ]
+        buffer = {key: entry}
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class Gate:
+            calls = 0
+
+            async def allows_current(self, _event: Any) -> bool:
+                self.calls += 1
+                if self.calls == 1:
+                    entered.set()
+                    await release.wait()
+                return True
+
+        gate = Gate()
+
+        async def process(_bot: Any, _event: Any, state: dict[str, Any]) -> None:
+            seen.append([int(row["message_id"]) for row in state["batched_events"]])
+
+        common = {
+            "msg_buffer": buffer,
+            "process_response_logic": process,
+            "message_event_cls": _GroupEvent,
+            "message_cls": _Message,
+            "message_segment_cls": _MessageSegment,
+            "logger": _Logger(),
+            "response_timeout_seconds": 30,
+        }
+        old = asyncio.create_task(
+            reply_buffer.run_buffer_timer(
+                key,
+                bot,
+                user_policy_gate=gate,
+                **common,
+                delay=0,
+            )
+        )
+        entry["timer_task"] = old
+        await entered.wait()
+
+        def start_timer(timer_key: str, timer_bot: Any, wait: float):
+            task = asyncio.create_task(
+                reply_buffer.run_buffer_timer(timer_key, timer_bot, **common, delay=wait)
+            )
+            tasks.append(task)
+            return task
+
+        await reply_buffer.handle_reply_event(
+            bot,
+            _GroupEvent(11, "11"),
+            {"is_random_chat": True},
+            poke_event_cls=type("P", (), {}),
+            message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent,
+            process_response_logic=process,
+            msg_buffer=buffer,
+            start_buffer_timer=start_timer,
+            logger=_Logger(),
+            batch_base_wait_seconds=0,
+            batch_min_wait_seconds=0,
+            batch_max_wait_seconds=0,
+        )
+        release.set()
+        await asyncio.gather(old, *tasks, return_exceptions=True)
+        await asyncio.sleep(0.05)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert seen == [list(range(1, 9)), [9, 10, 11]]
+        assert sorted(value for batch in seen for value in batch) == list(range(1, 12))
+        assert key not in buffer
+
+    asyncio.run(run())
+
+
+def test_rejected_first_chunk_recovers_eight_and_keeps_overflow_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> None:
+        key, base, seen, recovered = "456:123", time.monotonic(), [], []
+        entry = reply_buffer._new_entry(0.0)
+        entry["items"] = [{"event": _GroupEvent(100 + index, str(index)), "state": {}, "received_at": base + index * .0001, "dedupe_key": f"id:{100 + index}"} for index in range(10)]
+        buffer = {key: entry}
+        class Gate:
+            calls: list[int] = []
+            async def allows_current(self, event: Any) -> bool:
+                self.calls.append(int(event.message_id)); return int(event.message_id) >= 108
+        gate = Gate()
+        monkeypatch.setattr(reply_buffer, "_record_recovery_failure", lambda **kw: recovered.append(int(kw["event"].message_id)) or 1)
+        async def process(_bot: Any, _event: Any, state: dict[str, Any]) -> None:
+            seen.append([int(row["message_id"]) for row in state["batched_events"]])
+        common = dict(msg_buffer=buffer, process_response_logic=process, message_event_cls=_GroupEvent, message_cls=_Message, message_segment_cls=_MessageSegment, logger=_Logger(), delay=0, response_timeout_seconds=30, user_policy_gate=gate)
+        await reply_buffer.run_buffer_timer(key, _Bot(), **common)
+        await asyncio.sleep(.05)
+        assert seen == [[108, 109]]
+        assert recovered == list(range(100, 108))
+        assert gate.calls == list(range(100, 110))
+    asyncio.run(run())
+
+
+def test_timing_resolver_is_called_only_when_new_message_is_enqueued() -> None:
+    async def run() -> None:
+        calls: list[int] = []
+        class Timing:
+            base_wait_seconds = 0.01
+            min_wait_seconds = 0.01
+            max_wait_seconds = 0.02
+            legacy_reply_backoff_seconds = None
+        def resolver() -> Timing:
+            calls.append(1)
+            return Timing()
+        await reply_buffer.handle_reply_event(_Bot(), _GroupEvent(77, "x"), {"is_random_chat": True}, poke_event_cls=type("P", (), {}), message_event_cls=_PrivateEvent, group_message_event_cls=_GroupEvent, process_response_logic=lambda *_: None, msg_buffer={}, start_buffer_timer=lambda *_: None, logger=_Logger(), timing_resolver=resolver)
+        assert calls == [1]
+    asyncio.run(run())
+
+
+def test_timing_resolver_replaces_deadline_only_after_a_new_message() -> None:
+    async def run() -> None:
+        class Timing:
+            def __init__(self, base: float) -> None:
+                self.base_wait_seconds = base
+                self.min_wait_seconds = base
+                self.max_wait_seconds = base
+                self.legacy_reply_backoff_seconds = None
+
+        timings = iter([Timing(0.5), Timing(0.01)])
+        calls: list[int] = []
+        scheduled: list[float] = []
+
+        def resolver() -> Timing:
+            calls.append(1)
+            return next(timings)
+
+        def start(_key: str, _bot: Any, delay: float) -> None:
+            scheduled.append(delay)
+
+        common = dict(
+            poke_event_cls=type("P", (), {}), message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent, process_response_logic=lambda *_: None,
+            msg_buffer={}, start_buffer_timer=start, logger=_Logger(),
+            timing_resolver=resolver,
+        )
+        await reply_buffer.handle_reply_event(_Bot(), _GroupEvent(71, "first"), {"is_random_chat": True}, **common)
+        await reply_buffer.handle_reply_event(_Bot(), _GroupEvent(72, "new message"), {"is_random_chat": True}, **common)
+        assert calls == [1, 1]
+        assert scheduled[0] >= 0.45
+        assert scheduled[-1] <= 0.02
+
+    asyncio.run(run())
+
+
 def test_recovery_projection_stores_each_inbound_message_without_reply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -144,6 +369,262 @@ def test_recovery_projection_stores_each_inbound_message_without_reply(
     assert all(item["route_fingerprint"] == "route-safe" for item in recorded)
     assert all(item["trace_id"] == "trace-safe" for item in recorded)
     assert all("generated_reply" not in item for item in recorded)
+
+
+def test_buffer_snapshot_counts_active_once_and_is_data_free() -> None:
+    now = time.monotonic()
+    snapshot = reply_buffer.buffer_runtime_snapshot({
+        "private-do-not-leak": {
+            "items": [{"text": "正文不能泄漏"}],
+            "pending_items": [{"text": "下一批正文"}],
+            "queued_items": [{"text": "镜像不能重复"}],
+            "active_items": [{"text": "活动正文"}],
+            "processing": True,
+            "processing_started_at": now - 0.02,
+            "next_fire_at": now + 1,
+        }
+    })
+    assert snapshot["buffered_sessions"] == 1
+    assert snapshot["buffered_messages"] == 3
+    assert snapshot["processing_buffer_sessions"] == 1
+    assert snapshot["oldest_buffer_age_ms"] >= 1
+    assert snapshot["next_buffer_fire_ms"] >= 0
+    assert "正文" not in repr(snapshot)
+
+
+def test_buffer_snapshot_ignores_processing_stale_fire_for_future_waiter() -> None:
+    now = time.monotonic()
+    snapshot = reply_buffer.buffer_runtime_snapshot({
+        "active": {"processing": True, "active_items": [{"dedupe_key": "a", "received_at": now - 1}], "next_fire_at": now - 10},
+        "waiting": {"items": [{"dedupe_key": "b", "received_at": now}], "next_fire_at": now + .2},
+    })
+    assert 0 < snapshot["next_buffer_fire_ms"] <= 250
+
+
+def test_policy_revocation_records_complete_inbound_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: list[dict[str, str]] = []
+
+    def record(**kwargs: Any) -> int:
+        recorded.append({"stage": kwargs["failure_stage"], "kind": kwargs["failure_class"]})
+        return 1
+
+    monkeypatch.setattr(reply_buffer, "_record_recovery_failure", record)
+
+    class Gate:
+        async def allows_current(self, _event: Any) -> bool:
+            return False
+
+    async def run() -> None:
+        await reply_buffer.handle_reply_event(
+            _Bot(), _GroupEvent(51, "被撤销"), {"batched_events": [{"message_id": "51", "text": "被撤销"}]},
+            poke_event_cls=type("P", (), {}), message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent, process_response_logic=lambda *_: None,
+            msg_buffer={}, start_buffer_timer=lambda *_: None, logger=_Logger(), user_policy_gate=Gate(),
+        )
+
+    asyncio.run(run())
+    assert recorded == [{"stage": "permission_revoked", "kind": "delivery_unknown"}]
+
+
+def test_policy_gate_exception_fails_closed_and_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: list[dict[str, str]] = []
+    monkeypatch.setattr(reply_buffer, "_record_recovery_failure", lambda **kw: recorded.append({"stage": kw["failure_stage"], "kind": kw["failure_class"]}) or 1)
+    class Gate:
+        async def allows_current(self, _event: Any) -> bool:
+            raise RuntimeError("gate unavailable")
+    async def run() -> None:
+        await reply_buffer.handle_reply_event(
+            _Bot(), _GroupEvent(53, "gate error"), {"batched_events": [{"message_id": "53", "text": "gate error"}]},
+            poke_event_cls=type("P", (), {}), message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent, process_response_logic=lambda *_: None,
+            msg_buffer={}, start_buffer_timer=lambda *_: None, logger=_Logger(), user_policy_gate=Gate(),
+        )
+    asyncio.run(run())
+    assert recorded == [{"stage": "permission_revoked", "kind": "delivery_unknown"}]
+
+
+def test_enqueue_policy_rejection_recovers_media_only_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: list[dict[str, Any]] = []
+
+    class Queue:
+        def record_failure(self, **kwargs: Any) -> None:
+            recorded.append(kwargs)
+
+    class Gate:
+        async def allows_current(self, _event: Any) -> bool:
+            return False
+
+    monkeypatch.setattr(reply_recovery_queue, "ReplyRecoveryQueue", Queue)
+    event = _GroupEvent(701, "")
+    event.message = _Message([_ImageSeg({"file": "opaque-image-token"})])
+    processed: list[int] = []
+
+    async def process(_bot: Any, current: Any, _state: dict[str, Any]) -> None:
+        processed.append(int(current.message_id))
+
+    async def run() -> None:
+        await reply_buffer.handle_reply_event(
+            _Bot(),
+            event,
+            {},
+            poke_event_cls=type("PokeEvent", (), {}),
+            message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent,
+            process_response_logic=process,
+            msg_buffer={},
+            start_buffer_timer=lambda *_args: None,
+            logger=_Logger(),
+            user_policy_gate=Gate(),
+        )
+
+    asyncio.run(run())
+    assert processed == []
+    assert len(recorded) == 1
+    assert recorded[0]["original_message_id"] == "701"
+    assert recorded[0]["failure_stage"] == "permission_revoked"
+    assert recorded[0]["failure_class"] == "delivery_unknown"
+    assert recorded[0]["media_refs"] and recorded[0]["media_refs"][0]["kind"] == "image"
+
+
+def test_timer_policy_rejection_recovers_enqueued_media_only_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[dict[str, Any]] = []
+
+    class Queue:
+        def record_failure(self, **kwargs: Any) -> None:
+            recorded.append(kwargs)
+
+    class Gate:
+        allowed = True
+
+        async def allows_current(self, _event: Any) -> bool:
+            return self.allowed
+
+    monkeypatch.setattr(reply_recovery_queue, "ReplyRecoveryQueue", Queue)
+    event = _GroupEvent(702, "")
+    event.message = _Message([_ImageSeg({"file": "opaque-image-token"})])
+    gate = Gate()
+    processed: list[int] = []
+    msg_buffer: dict[str, dict[str, Any]] = {}
+
+    async def process(_bot: Any, current: Any, _state: dict[str, Any]) -> None:
+        processed.append(int(current.message_id))
+
+    async def run() -> None:
+        await reply_buffer.handle_reply_event(
+            _Bot(),
+            event,
+            {"is_random_chat": True},
+            poke_event_cls=type("PokeEvent", (), {}),
+            message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent,
+            process_response_logic=process,
+            msg_buffer=msg_buffer,
+            start_buffer_timer=lambda *_args: None,
+            logger=_Logger(),
+            user_policy_gate=gate,
+        )
+        gate.allowed = False
+        await reply_buffer.run_buffer_timer(
+            "999:456",
+            _Bot(),
+            msg_buffer=msg_buffer,
+            process_response_logic=process,
+            message_event_cls=_PrivateEvent,
+            message_cls=_Message,
+            message_segment_cls=_MessageSegment,
+            logger=_Logger(),
+            user_policy_gate=gate,
+        )
+
+    asyncio.run(run())
+    assert processed == []
+    assert msg_buffer == {}
+    assert len(recorded) == 1
+    assert recorded[0]["original_message_id"] == "702"
+    assert recorded[0]["failure_stage"] == "permission_revoked"
+    assert recorded[0]["failure_class"] == "delivery_unknown"
+    assert recorded[0]["media_refs"] and recorded[0]["media_refs"][0]["kind"] == "image"
+
+
+def test_policy_rejection_is_quarantined_and_never_auto_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    queue = reply_recovery_queue.ReplyRecoveryQueue(tmp_path / "policy-rejected.sqlite3")
+    monkeypatch.setattr(reply_recovery_queue, "ReplyRecoveryQueue", lambda: queue)
+
+    class Gate:
+        async def allows_current(self, _event: Any) -> bool:
+            return False
+
+    event = _GroupEvent(703, "")
+    event.message = _Message([_ImageSeg({"file": "opaque-image-token"})])
+    processed: list[int] = []
+
+    async def process(_bot: Any, current: Any, _state: dict[str, Any]) -> None:
+        processed.append(int(current.message_id))
+
+    async def run() -> None:
+        await reply_buffer.handle_reply_event(
+            _Bot(),
+            event,
+            {},
+            poke_event_cls=type("PokeEvent", (), {}),
+            message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent,
+            process_response_logic=process,
+            msg_buffer={},
+            start_buffer_timer=lambda *_args: None,
+            logger=_Logger(),
+            user_policy_gate=Gate(),
+        )
+
+    asyncio.run(run())
+    item = queue.get(1)
+    assert processed == []
+    assert item is not None
+    assert item.status == "quarantined"
+    assert item.failure_class == "delivery_unknown"
+    assert item.failure_stage == "permission_revoked"
+    assert item.media_refs and item.media_refs[0]["kind"] == "image"
+    assert queue.claim_next_batch(worker_id="policy-worker") is None
+
+
+def test_recovery_synthetic_id_includes_stable_media_and_event_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: list[dict[str, Any]] = []
+    class Queue:
+        def record_failure(self, **kwargs: Any) -> None:
+            recorded.append(kwargs)
+    monkeypatch.setattr(reply_recovery_queue, "ReplyRecoveryQueue", Queue)
+    base = {"user_id": "u", "group_id": "g", "event_time": "42", "text": "", "media": [{"kind": "image", "data": {"id": "a"}}]}
+    reply_buffer._record_recovery_failure(bot=_Bot(), event=_GroupEvent(0, ""), state={"batched_events": [base]}, failure_stage="x", failure_class="generation_failed_before_send")
+    same = {**base, "media": [{"data": {"id": "a"}, "kind": "image"}]}
+    other = {**base, "media": [{"kind": "image", "data": {"id": "b"}}]}
+    reply_buffer._record_recovery_failure(bot=_Bot(), event=_GroupEvent(0, ""), state={"batched_events": [same]}, failure_stage="x", failure_class="generation_failed_before_send")
+    reply_buffer._record_recovery_failure(bot=_Bot(), event=_GroupEvent(0, ""), state={"batched_events": [other]}, failure_stage="x", failure_class="generation_failed_before_send")
+    assert recorded[0]["original_message_id"] == recorded[1]["original_message_id"]
+    assert recorded[0]["original_message_id"] != recorded[2]["original_message_id"]
+
+
+def test_admission_timeout_records_safe_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: list[dict[str, str]] = []
+    monkeypatch.setattr(reply_buffer, "_record_recovery_failure", lambda **kw: recorded.append({"stage": kw["failure_stage"], "kind": kw["failure_class"]}) or 1)
+    reply_buffer._record_reply_admission_timeout(
+        bot=_Bot(), event=_GroupEvent(52, "排队"), state={"batched_events": [{"message_id": "52", "text": "排队"}]},
+        session_key="secret-session", wait_ms=1, mode="buffered",
+    )
+    assert recorded == [{"stage": "reply_admission_timeout", "kind": "generation_failed_before_send"}]
+
+
+def test_buffer_diagnostics_are_aggregate_and_do_not_emit_identifiers(monkeypatch: pytest.MonkeyPatch) -> None:
+    entry = reply_buffer._new_entry(1.0)
+    reply_buffer._note_buffer_diagnostic(entry, "enqueue", count=3)
+    reply_buffer._note_buffer_diagnostic(entry, "failure_send", count=1)
+    payload = repr(reply_buffer._take_buffer_diagnostics(entry, generation=7))
+    assert "'code': 'enqueue'" in payload and "'generation': 7" in payload
+    assert "QQ" not in payload and "secret" not in payload and "正文" not in payload
 
 
 def test_share_card_context_is_structured_and_untrusted() -> None:
@@ -425,17 +906,13 @@ def test_batched_failure_stays_silent_without_replaying_delivery() -> None:
     asyncio.run(run())
 
 
-def test_group_mentions_each_start_an_independent_direct_turn() -> None:
+def test_group_mentions_enter_buffers_instead_of_direct_turns() -> None:
     async def run() -> None:
         controller = reply_buffer.ReplyConcurrencyController(session_limit=3, global_limit=3)
         started: list[int] = []
-        release = asyncio.Event()
 
         async def process_response_logic(_bot: Any, event: Any, _state: dict[str, Any]) -> None:
             started.append(int(event.message_id))
-            if len(started) == 3:
-                release.set()
-            await release.wait()
 
         async def dispatch(message_id: int) -> None:
             await reply_buffer.handle_reply_event(
@@ -453,11 +930,10 @@ def test_group_mentions_each_start_an_independent_direct_turn() -> None:
                 response_timeout_seconds=30,
             )
 
-        await asyncio.wait_for(
-            asyncio.gather(*(dispatch(index) for index in range(1, 4))),
-            timeout=1,
-        )
-        assert sorted(started) == [1, 2, 3]
+        await asyncio.wait_for(asyncio.gather(*(dispatch(index) for index in range(1, 4))), timeout=1)
+        # Each isolated first group turn was scheduled into its own supplied
+        # buffer, not executed by the private direct lane.
+        assert started == []
 
     asyncio.run(run())
 
@@ -470,6 +946,7 @@ def test_private_and_group_mention_are_marked_reply_required() -> None:
         async def process_response_logic(_bot: Any, _event: Any, state: dict[str, Any]) -> None:
             captured.append(dict(state))
 
+        msg_buffer: dict[str, dict[str, Any]] = {}
         for event in (_PrivateEvent(1, "private"), _MentionEvent(2, "mention")):
             await reply_buffer.handle_reply_event(
                 _Bot(),
@@ -479,16 +956,17 @@ def test_private_and_group_mention_are_marked_reply_required() -> None:
                 message_event_cls=_PrivateEvent,
                 group_message_event_cls=_GroupEvent,
                 process_response_logic=process_response_logic,
-                msg_buffer={},
+                msg_buffer=msg_buffer,
                 start_buffer_timer=lambda *_args: None,
                 logger=_Logger(),
                 concurrency_controller=controller,
                 response_timeout_seconds=30,
             )
 
-        assert len(captured) == 2
+        assert len(captured) == 1
         assert all(state["reply_required"] is True for state in captured)
         assert all(float(state["response_deadline"]) > 0 for state in captured)
+        assert any(entry.get("items") for entry in msg_buffer.values())
 
     asyncio.run(run())
 
@@ -744,23 +1222,24 @@ def test_direct_turn_cancels_active_random_turn_only() -> None:
         timer_tasks: list[asyncio.Task[Any]] = []
         random_started = asyncio.Event()
         random_cancelled = asyncio.Event()
-        pending_finished = asyncio.Event()
+        second_batch_seen = asyncio.Event()
         direct_finished = asyncio.Event()
         generations: dict[int, int] = {}
 
         async def process_response_logic(_bot: Any, event: Any, _state: dict[str, Any]) -> None:
+            first_run = int(event.message_id) not in generations
             generations[int(event.message_id)] = int(_state["turn_generation_id"])
-            if int(event.message_id) == 1:
+            if int(event.message_id) == 1 and first_run:
                 random_started.set()
                 try:
                     await asyncio.sleep(10)
                 except asyncio.CancelledError:
                     random_cancelled.set()
                     raise
-            elif int(event.message_id) == 2:
-                pending_finished.set()
-            else:
+            elif int(event.message_id) == 3:
+                assert [item["message_id"] for item in _state["batched_events"]] == ["1", "2", "3"]
                 direct_finished.set()
+                second_batch_seen.set()
 
         def start_buffer_timer(key: str, bot: Any, wait_seconds: float) -> asyncio.Task[Any]:
             task = asyncio.create_task(
@@ -833,9 +1312,190 @@ def test_direct_turn_cancels_active_random_turn_only() -> None:
 
         await asyncio.wait_for(random_cancelled.wait(), timeout=1)
         await asyncio.wait_for(direct_finished.wait(), timeout=1)
-        await asyncio.wait_for(pending_finished.wait(), timeout=1)
+        await asyncio.wait_for(second_batch_seen.wait(), timeout=1)
         await asyncio.gather(*timer_tasks, return_exceptions=True)
-        assert generations[1] != generations[2] != generations[3]
+        assert generations[1] != generations[3]
+
+    asyncio.run(run())
+
+
+def test_waiting_group_batch_merges_direct_cue_and_fires_immediately_in_order() -> None:
+    async def run() -> None:
+        controller = reply_buffer.ReplyConcurrencyController(session_limit=2, global_limit=2)
+        msg_buffer: dict[str, dict[str, Any]] = {}
+        processed = asyncio.Event()
+        observed: list[list[str]] = []
+        tasks: list[asyncio.Task[Any]] = []
+
+        async def process(_bot: Any, _event: Any, state: dict[str, Any]) -> None:
+            observed.append([item["message_id"] for item in state["batched_events"]])
+            processed.set()
+
+        def start(key: str, bot: Any, wait: float) -> asyncio.Task[Any]:
+            task = asyncio.create_task(reply_buffer.run_buffer_timer(
+                key, bot, msg_buffer=msg_buffer, process_response_logic=process,
+                message_event_cls=_PrivateEvent, message_cls=_Message,
+                message_segment_cls=_MessageSegment, logger=_Logger(), delay=wait,
+                concurrency_controller=controller,
+                batch_base_wait_seconds=1, batch_min_wait_seconds=0.01,
+                batch_max_wait_seconds=1,
+            ))
+            tasks.append(task)
+            return task
+
+        common = dict(
+            poke_event_cls=type("PokeEvent", (), {}), message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent, process_response_logic=process,
+            msg_buffer=msg_buffer, start_buffer_timer=start, logger=_Logger(),
+            concurrency_controller=controller, batch_base_wait_seconds=1,
+            batch_min_wait_seconds=0.01, batch_max_wait_seconds=1,
+        )
+        await reply_buffer.handle_reply_event(_Bot(), _GroupEvent(1, "queued"), {"is_random_chat": True}, **common)
+        await reply_buffer.handle_reply_event(_Bot(), _MentionEvent(2, "direct"), {}, **common)
+        await asyncio.wait_for(processed.wait(), timeout=1)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        assert observed == [["1", "2"]]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "delivery_flag",
+    ["reply_delivery_started", "reply_delivery_confirmed", "reply_delivery_complete", "delivery_unknown"],
+)
+def test_direct_cue_after_delivery_state_waits_for_next_generation(delivery_flag: str) -> None:
+    async def run() -> None:
+        controller = reply_buffer.ReplyConcurrencyController(session_limit=2, global_limit=2)
+        msg_buffer: dict[str, dict[str, Any]] = {}
+        started = asyncio.Event()
+        release = asyncio.Event()
+        second_done = asyncio.Event()
+        cancelled = False
+        batches: list[list[str]] = []
+        tasks: list[asyncio.Task[Any]] = []
+        active_state: dict[str, Any] = {}
+
+        async def process(_bot: Any, event: Any, state: dict[str, Any]) -> None:
+            nonlocal cancelled
+            batches.append([item["message_id"] for item in state["batched_events"]])
+            if int(event.message_id) == 1:
+                active_state.update(state)
+                state[delivery_flag] = True
+                started.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
+            else:
+                second_done.set()
+
+        def start(key: str, bot: Any, wait: float) -> asyncio.Task[Any]:
+            task = asyncio.create_task(reply_buffer.run_buffer_timer(
+                key, bot, msg_buffer=msg_buffer, process_response_logic=process,
+                message_event_cls=_PrivateEvent, message_cls=_Message,
+                message_segment_cls=_MessageSegment, logger=_Logger(), delay=wait,
+                concurrency_controller=controller, batch_base_wait_seconds=.01,
+                batch_min_wait_seconds=.01, batch_max_wait_seconds=.05,
+            ))
+            tasks.append(task)
+            return task
+
+        common = dict(
+            poke_event_cls=type("PokeEvent", (), {}), message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent, process_response_logic=process,
+            msg_buffer=msg_buffer, start_buffer_timer=start, logger=_Logger(),
+            concurrency_controller=controller, batch_base_wait_seconds=.01,
+            batch_min_wait_seconds=.01, batch_max_wait_seconds=.05,
+        )
+        first_event = _GroupEvent(1, "random")
+        key = reply_buffer._session_key(
+            first_event,
+            group_message_event_cls=_GroupEvent,
+            bot_self_id="999",
+        )
+        await reply_buffer.handle_reply_event(
+            _Bot(),
+            first_event,
+            {"is_random_chat": True},
+            **common,
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await reply_buffer.handle_reply_event(_Bot(), _MentionEvent(2, "direct"), {}, **common)
+        assert not cancelled
+        assert msg_buffer[key]["pending_items"]
+        assert pipeline_context.stale_reply_abort_reason(active_state) == ""
+        assert not yaml_processor._batch_ref_has_newer_messages(active_state["batch_runtime_ref"])
+        release.set()
+        await asyncio.wait_for(second_done.wait(), timeout=1)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        assert batches == [["1"], ["2"]]
+        assert not cancelled
+
+    asyncio.run(run())
+
+
+def test_active_must_reply_turn_is_not_cancelled_and_direct_queues_next_generation() -> None:
+    async def run() -> None:
+        controller = reply_buffer.ReplyConcurrencyController(session_limit=2, global_limit=2)
+        event = _GroupEvent(1, "must reply")
+        key = reply_buffer._session_key(event, group_message_event_cls=_GroupEvent, bot_self_id="999")
+        msg_buffer: dict[str, dict[str, Any]] = {
+            key: reply_buffer._new_entry(0.0),
+        }
+        msg_buffer[key]["items"] = [{"event": event, "state": {}, "received_at": time.monotonic(), "dedupe_key": "id:1"}]
+        started = asyncio.Event()
+        release = asyncio.Event()
+        second_done = asyncio.Event()
+        cancelled = False
+        tasks: list[asyncio.Task[Any]] = []
+        batches: list[list[str]] = []
+        active_state: dict[str, Any] = {}
+
+        async def process(_bot: Any, selected: Any, state: dict[str, Any]) -> None:
+            nonlocal cancelled
+            batches.append([item["message_id"] for item in state["batched_events"]])
+            if int(selected.message_id) == 1:
+                active_state.update(state)
+                started.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
+            else:
+                second_done.set()
+
+        def start(timer_key: str, bot: Any, wait: float) -> asyncio.Task[Any]:
+            task = asyncio.create_task(reply_buffer.run_buffer_timer(
+                timer_key, bot, msg_buffer=msg_buffer, process_response_logic=process,
+                message_event_cls=_PrivateEvent, message_cls=_Message,
+                message_segment_cls=_MessageSegment, logger=_Logger(), delay=wait,
+                concurrency_controller=controller, batch_base_wait_seconds=.01,
+                batch_min_wait_seconds=.01, batch_max_wait_seconds=.05,
+            ))
+            tasks.append(task)
+            return task
+
+        active = start(key, _Bot(), 0.0)
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await reply_buffer.handle_reply_event(
+            _Bot(), _MentionEvent(2, "new direct"), {},
+            poke_event_cls=type("PokeEvent", (), {}), message_event_cls=_PrivateEvent,
+            group_message_event_cls=_GroupEvent, process_response_logic=process,
+            msg_buffer=msg_buffer, start_buffer_timer=start, logger=_Logger(),
+            concurrency_controller=controller, batch_base_wait_seconds=.01,
+            batch_min_wait_seconds=.01, batch_max_wait_seconds=.05,
+        )
+        assert not cancelled
+        assert msg_buffer[key]["pending_items"]
+        assert pipeline_context.stale_reply_abort_reason(active_state) == ""
+        assert not yaml_processor._batch_ref_has_newer_messages(active_state["batch_runtime_ref"])
+        release.set()
+        await asyncio.wait_for(second_done.wait(), timeout=1)
+        await asyncio.gather(active, *tasks, return_exceptions=True)
+        assert batches == [["1"], ["2"]]
+        assert not cancelled
 
     asyncio.run(run())
 

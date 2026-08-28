@@ -246,7 +246,16 @@ export interface PersonaListItem {
   recent_group_id: string;
   favorability_score: number;
   favorability_level: string;
-  favorability: { score: number; level: string };
+  favorability: {
+    score: number;
+    level: string;
+    score_min?: number;
+    score_max?: number;
+    daily_positive_count?: number;
+    daily_negative_count?: number;
+    daily_net_count?: number;
+    behavior_policy?: { random_reply_add?: number; group_idle_add?: number };
+  };
   updated_at: number;
   source: string;
   cache_only: boolean;
@@ -386,6 +395,12 @@ export interface AgentRuntimeSnapshot {
   running: boolean;
   last_active_at: number | null;
   waiting_turns: number;
+  admission_waiting_turns: number;
+  buffered_sessions: number;
+  buffered_messages: number;
+  processing_buffer_sessions: number;
+  oldest_buffer_age_ms: number;
+  next_buffer_fire_ms: number;
   active_turns: number;
   sending_turns: number;
   gated_turns: number;

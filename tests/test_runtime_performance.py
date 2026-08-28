@@ -15,6 +15,7 @@ runtime_performance = load_personification_module("plugin.personification.core.r
 task_supervisor_module = load_personification_module(
     "plugin.personification.core.runtime_task_supervisor"
 )
+v2_services = load_personification_module("plugin.personification.webui.v2_services")
 
 
 @pytest.fixture(autouse=True)
@@ -111,7 +112,17 @@ def test_event_loop_sampler_and_runtime_snapshot_are_bounded() -> None:
     snapshot = runtime_performance.snapshot()
     assert snapshot["schema_version"] == 1
     assert snapshot["event_loop"]["samples"] > 0
-    assert snapshot["reply"] == {"active": 2, "waiting": 3, "session_gates": 4}
+    assert snapshot["reply"] == {
+        "active": 2,
+        "waiting": 3,
+        "session_gates": 4,
+        "admission_waiting_turns": 3,
+        "buffered_sessions": 0,
+        "buffered_messages": 0,
+        "processing_buffer_sessions": 0,
+        "oldest_buffer_age_ms": 0,
+        "next_buffer_fire_ms": 0,
+    }
     assert next(item for item in snapshot["caches"] if item["name"] == "test_cache") == {
         "name": "test_cache",
         "entries": 5,
@@ -130,3 +141,23 @@ def test_performance_runtime_route_requires_admin(_runtime_context) -> None:
     response = client.get("/personification/api/performance/runtime")
     assert response.status_code == 200
     assert response.json()["schema_version"] == 1
+
+
+def test_agent_snapshot_maps_buffer_and_admission_fields_without_reporter_leaks(monkeypatch) -> None:
+    monkeypatch.setattr(v2_services.runtime_performance, "snapshot", lambda: {"reply": {
+        "waiting": 7, "buffered_sessions": 2, "buffered_messages": 5,
+        "processing_buffer_sessions": 1, "oldest_buffer_age_ms": 99,
+        "next_buffer_fire_ms": 123, "body": "聊天正文", "qq": "123456",
+        "path": r"C:\secret\x", "secret": "token",
+    }, "event_loop": {}, "process": {}, "tasks": {}, "caches": []})
+    monkeypatch.setattr(v2_services.reply_turn_trace, "query_recent", lambda **_kwargs: [])
+    monkeypatch.setattr(v2_services, "list_bot_identities", lambda *_args, **_kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(v2_services, "load_inner_state", lambda *_args, **_kwargs: asyncio.sleep(0, result={}))
+    runtime = SimpleNamespace(plugin_config=SimpleNamespace(personification_response_timeout=120, personification_agent_enabled=True))
+    snapshot = asyncio.run(v2_services.build_agent_runtime_snapshot(runtime))
+    assert snapshot["waiting_turns"] == 7
+    assert snapshot["admission_waiting_turns"] == 7
+    assert {key: snapshot[key] for key in ("buffered_sessions", "buffered_messages", "processing_buffer_sessions", "oldest_buffer_age_ms", "next_buffer_fire_ms")} == {"buffered_sessions": 2, "buffered_messages": 5, "processing_buffer_sessions": 1, "oldest_buffer_age_ms": 99, "next_buffer_fire_ms": 123}
+    rendered = repr(snapshot)
+    for forbidden in ("聊天正文", "123456", r"C:\secret", "token"):
+        assert forbidden not in rendered

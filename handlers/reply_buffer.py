@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import re
 import time
 from collections import OrderedDict
@@ -8,7 +10,7 @@ from typing import Any, Callable, Dict
 
 from ..core import metrics
 from ..core.context_cleanup import release_message_buffer_entry_resources
-from ..core.message_relations import extract_reply_message_id
+from ..core.message_relations import extract_mentioned_ids, extract_reply_message_id, extract_reply_sender_id
 from ..core.shared_content import normalize_merged_forward, parse_onebot_share_card
 from ..core.target_inference import normalize_message_target_for_review
 from ..core.turn_deadline import HARD_TURN_TIMEOUT_SECONDS, attach_turn_deadline
@@ -148,13 +150,27 @@ def _record_recovery_failure(
     batched = state.get("batched_events")
     entries = [item for item in batched if isinstance(item, dict)] if isinstance(batched, list) else []
     if not entries:
+        state_media = state.get("turn_media_context")
+        current_media = serialize_turn_media(
+            extract_turn_media_from_event(event, current_origin="current")
+        )
+        # Policy gates run before normal batch serialization.  Merge any
+        # already controlled state refs with event-derived refs so a media-only
+        # inbound event is still recoverable, while serializing again gives us
+        # the same media-id dedupe boundary as ordinary batch construction.
+        recovered_media = serialize_turn_media(
+            [
+                *(state_media if isinstance(state_media, list) else []),
+                *current_media,
+            ]
+        )
         entries = [
             {
                 "message_id": str(getattr(event, "message_id", "") or "").strip(),
                 "user_id": fallback_user_id,
                 "group_id": fallback_group_id,
                 "text": _extract_plain_text(event),
-                "media": list(state.get("turn_media_context") or []),
+                "media": recovered_media,
             }
         ]
     queue = ReplyRecoveryQueue()
@@ -167,8 +183,20 @@ def _record_recovery_failure(
         conversation_id = group_id or user_id
         text = str(item.get("text") or "").strip()
         media = item.get("media") if isinstance(item.get("media"), list) else []
-        if not message_id or not conversation_id or (not text and not media):
+        if not conversation_id or (not text and not media):
             continue
+        if not message_id:
+            # Stable synthetic id preserves a no-message-id inbound failure
+            # without embedding its body or session identifier in the queue.
+            event_time = str(item.get("event_time", item.get("timestamp", getattr(event, "time", "missing"))) or "missing")
+            try:
+                media_digest = hashlib.sha256(
+                    json.dumps(media, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest()[:16]
+            except Exception:
+                media_digest = "invalid-media"
+            fingerprint = "\x1f".join((bot_id, conversation_kind, conversation_id, user_id, event_time, _normalize_repeat_key(text), media_digest))
+            message_id = "synthetic:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
         queue.record_failure(
             bot_id=bot_id,
             conversation_kind=conversation_kind,
@@ -263,7 +291,6 @@ async def _handle_reply_timeout(
             diagnosis_code=diagnosis_code,
             detail={
                 "timeout_seconds": timeout_seconds,
-                "session": session_key,
                 "reply_required": bool(state.get("reply_required", False)),
                 "delivery_started": delivery_started,
                 "delivery_confirmed": delivery_confirmed,
@@ -281,20 +308,35 @@ async def _handle_reply_timeout(
 
 def _record_reply_admission_timeout(
     *,
+    bot: Any | None = None,
     event: Any,
     state: dict[str, Any],
     session_key: str,
     wait_ms: int,
     mode: str,
 ) -> None:
+    if bot is not None:
+        # Admission has not started delivery, so this is a safe inbound-only
+        # recovery record.  It is diagnostic only; the queue never replays an
+        # unknown/partial outbound send automatically.
+        try:
+            _record_recovery_failure(
+                bot=bot,
+                event=event,
+                state=state,
+                failure_stage="reply_admission_timeout",
+                failure_class="generation_failed_before_send",
+            )
+        except Exception:
+            pass
     try:
         from ..core import reply_turn_trace
 
         trace_id = reply_turn_trace.start_trace(
             trace_id=str(state.get("reply_trace_id", "") or ""),
             session_type="group" if getattr(event, "group_id", None) else "private",
-            group_id=str(getattr(event, "group_id", "") or ""),
-            user_id=str(getattr(event, "user_id", "") or ""),
+            group_id="",
+            user_id="",
             detail={"source": "reply_admission", "mode": mode},
         )
         state["reply_trace_id"] = trace_id
@@ -314,7 +356,6 @@ def _record_reply_admission_timeout(
             outcome="failed" if state.get("reply_required") else "no_reply",
             diagnosis_code="reply_admission_timeout",
             detail={
-                "session": session_key,
                 "mode": mode,
                 "wait_ms": max(0, int(wait_ms)),
                 "reply_required": bool(state.get("reply_required", False)),
@@ -432,6 +473,7 @@ class ReplyConcurrencyController:
             "session_gates": len(self._session_gates),
         }
 
+
     @staticmethod
     def _admission_deadline(deadline: float | None) -> float:
         now = time.monotonic()
@@ -510,6 +552,43 @@ class ReplyConcurrencyController:
     async def buffered_turn(self, key: str, *, deadline: float | None = None):
         async with self._turn(key, direct=False, deadline=deadline) as commit_lock:
             yield commit_lock
+
+
+def buffer_runtime_snapshot(msg_buffer: Dict[str, Dict[str, Any]]) -> dict[str, int]:
+    """Counts only queue state; no session key or message data leaves this API."""
+    now = time.monotonic()
+    entries = [entry for entry in msg_buffer.values() if isinstance(entry, dict)]
+    buffered_sessions = sum(
+        bool(entry.get("items") or entry.get("pending_items") or entry.get("active_items") or entry.get("processing"))
+        for entry in entries
+    )
+    # queued_items mirrors pending_items for observability, so never count it
+    # twice.  active_items are owned by an in-flight generation and must be
+    # included in the real buffer total.
+    def _entry_items(entry: dict[str, Any]) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        result: list[dict[str, Any]] = []
+        for field in ("items", "pending_items", "active_items"):
+            for item in entry.get(field) or []:
+                if not isinstance(item, dict):
+                    continue
+                identity = str(item.get("dedupe_key") or f"object:{id(item)}")
+                if identity not in seen:
+                    seen.add(identity)
+                    result.append(item)
+        return result
+    all_items = [_entry_items(entry) for entry in entries]
+    buffered_messages = sum(len(items) for items in all_items)
+    processing = sum(bool(entry.get("processing")) for entry in entries)
+    ages = []
+    for entry, items in zip(entries, all_items):
+        received = [float(item.get("received_at", 0.0) or 0.0) for item in items]
+        received = [value for value in received if value > 0]
+        fallback = float(entry.get("batch_started_at", 0.0) or entry.get("pending_started_at", 0.0) or entry.get("processing_started_at", 0.0) or now)
+        if items:
+            ages.append(now - min(received, default=fallback))
+    fire_times = [float(entry.get("next_fire_at", 0.0) or 0.0) for entry in entries if not entry.get("processing") and float(entry.get("next_fire_at", 0.0) or 0.0) > now]
+    return {"buffered_sessions": buffered_sessions, "buffered_messages": buffered_messages, "processing_buffer_sessions": processing, "oldest_buffer_age_ms": int(max(ages, default=0.0) * 1000), "next_buffer_fire_ms": int(max(0.0, min(fire_times) - now) * 1000) if fire_times else 0}
 
 
 def _has_reply_semantics(event: Any) -> bool:
@@ -613,6 +692,30 @@ def _normalize_repeat_key(text: str) -> str:
     return normalized[:120]
 
 
+def _stable_item_key(session_key: str, event: Any, received_at: float) -> str:
+    message_id = str(getattr(event, "message_id", "") or "").strip()
+    if message_id:
+        return f"id:{message_id}"
+    event_time = getattr(event, "time", None)
+    if event_time is None:
+        event_time = getattr(event, "timestamp", None)
+    try:
+        stable_time = f"{float(event_time):.3f}"
+    except (TypeError, ValueError):
+        # Absence is itself a stable bucket; never use handler-local monotonic
+        # receive time or duplicate redelivery becomes a fresh event.
+        stable_time = "missing"
+    body = re.sub(r"\s+", " ", _extract_plain_text(event)).strip().lower()
+    body = re.sub(r"[\x00-\x1f\x7f]+", " ", body)
+    media_kinds = ",".join(sorted(
+        str(getattr(segment, "type", "") or "").strip().lower() + ":" + re.sub(r"\s+", " ", json.dumps(getattr(segment, "data", {}) or {}, sort_keys=True, ensure_ascii=False, default=str)).strip()
+        for segment in (getattr(event, "message", None) or [])
+        if str(getattr(segment, "type", "") or "").strip().lower() not in {"text", "at", "reply"}
+    ))
+    raw = "\x1f".join((str(session_key), str(getattr(event, "user_id", "") or ""), stable_time, body, media_kinds))
+    return "fallback:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
 def _is_direct_mention(event: Any, bot_self_id: str) -> bool:
     if not bot_self_id:
         return False
@@ -668,15 +771,33 @@ def _serialize_batched_event(
 ) -> dict[str, Any]:
     event = item.get("event")
     current_origin = "current" if event is selected_event else "batch"
+    reply_message_id = extract_reply_message_id(event)
+    reply = getattr(event, "reply", None)
+    mentioned_ids, is_at_bot = extract_mentioned_ids(
+        getattr(event, "message", None) or [],
+        bot_self_id=str(getattr(getattr(event, "bot", None), "self_id", "") or ""),
+    )
+    sender = getattr(event, "sender", None)
+    sender_role = str(
+        getattr(sender, "role", "") if sender is not None else ""
+    ).strip()
     return {
         "message_id": str(getattr(event, "message_id", "") or "").strip(),
         "user_id": str(getattr(event, "user_id", "") or "").strip(),
         "group_id": str(getattr(event, "group_id", "") or "").strip(),
+        "event_time": str(getattr(event, "time", None) or getattr(event, "timestamp", None) or "").strip(),
         "sender_name": _extract_sender_name(event),
-        "text": _extract_plain_text(event)[:200],
-        "is_direct_mention": bool(item.get("is_direct_mention")),
+        # The shared envelope performs the explicit 2,000-char boundary and
+        # records truncation diagnostics.  Do not silently narrow it here.
+        "text": _extract_plain_text(event),
+        "reply_to_msg_id": str(reply_message_id or "").strip(),
+        "reply_to_user_id": extract_reply_sender_id(reply),
+        "mentioned_ids": mentioned_ids,
+        "is_direct_mention": bool(item.get("is_direct_mention") or is_at_bot),
         "is_reply_to_bot": bool(item.get("is_reply_to_bot")),
         "has_reply_semantics": _has_reply_semantics(event),
+        "is_current_trigger": event is selected_event,
+        "sender_role": sender_role,
         "media": serialize_turn_media(
             extract_turn_media_from_event(
                 event,
@@ -782,6 +903,11 @@ def _new_entry(delay: float) -> dict[str, Any]:
     return {
         "items": [],
         "pending_items": [],
+        # Explicit names for observability/state-machine contracts.  Existing
+        # callers retain items/pending_items compatibility during migration.
+        "active_items": [],
+        "queued_items": [],
+        "delivery_state": "not_started",
         "processing": False,
         "active_task": None,
         "processing_started_at": 0.0,
@@ -794,15 +920,50 @@ def _new_entry(delay: float) -> dict[str, Any]:
         "last_item_at": 0.0,
         "pending_ready": False,
         "current_generation": 0,
+        # The owner token protects a replacement generation from an older
+        # cancelled task's finally block.
+        "active_generation_token": 0,
         "superseded_generation": 0,
         "newer_batch_for_current": False,
+        # Delayed until an actual turn starts.  Values are deliberately
+        # aggregate-only: no session key, sender, message id or message body.
+        "buffer_diagnostics": [],
     }
 
 
+def _note_buffer_diagnostic(entry: dict[str, Any], code: str, *, count: int = 0) -> None:
+    values = entry.setdefault("buffer_diagnostics", [])
+    if not isinstance(values, list):
+        return
+    values.append({"code": str(code), "count": max(0, int(count)), "at": time.monotonic()})
+    del values[:-24]
+
+
+def _record_buffer_failure_trace(state: dict[str, Any], code: str, *, count: int, generation: int, wait_ms: int) -> None:
+    trace_id = str(state.get("reply_trace_id", "") or "")
+    if not trace_id:
+        return
+    try:
+        from ..core import reply_turn_trace
+        reply_turn_trace.record_stage(trace_id=trace_id, key="buffer_failure", label="缓冲失败", status="error", detail=f"code={code} count={max(0, count)} generation={max(0, generation)} wait_ms={max(0, wait_ms)}")
+    except Exception:
+        pass
+
+
+def _take_buffer_diagnostics(entry: dict[str, Any], *, generation: int, wait_ms: int = 0, dequeue_count: int = 0, queued_count: int = 0) -> list[dict[str, int | str]]:
+    values = list(entry.get("buffer_diagnostics") or [])
+    entry["buffer_diagnostics"] = []
+    now = time.monotonic()
+    result = [{"code": str(item.get("code") or "buffer_event"), "count": max(0, int(item.get("count") or 0)), "generation": max(0, int(generation)), "wait_ms": max(0, int((now - float(item.get("at") or now)) * 1000))} for item in values]
+    result.append({"code": "dequeue", "count": max(0, int(dequeue_count)), "generation": max(0, int(generation)), "wait_ms": max(0, int(wait_ms))})
+    if queued_count:
+        result.append({"code": "chunk", "count": max(0, int(queued_count)), "generation": max(0, int(generation)), "wait_ms": max(0, int(wait_ms))})
+    return result
+
+
 def _trim_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if len(items) <= _MAX_BATCH_EVENTS:
-        return items
-    return items[-_MAX_BATCH_EVENTS:]
+    """Compatibility name: keep FIFO data intact; batching happens at dequeue."""
+    return list(items)
 
 
 def _schedule_delay(started_at: float, delay: float, *, immediate: bool = False) -> float:
@@ -950,6 +1111,8 @@ def _schedule_timer(
     start_buffer_timer: Callable[[str, Any, float], Any],
 ) -> None:
     _cancel_timer(entry)
+    _note_buffer_diagnostic(entry, "reschedule", count=len(entry.get("items") or []) + len(entry.get("pending_items") or []))
+    entry["next_fire_at"] = time.monotonic() + max(0.0, wait_seconds)
     entry["timer_task"] = start_buffer_timer(key, bot, wait_seconds)
 
 
@@ -959,10 +1122,37 @@ def _promote_pending_batch(entry: dict[str, Any]) -> None:
     entry["batch_started_at"] = float(entry.get("pending_started_at", 0.0) or time.monotonic())
     entry["pending_started_at"] = 0.0
     entry["pending_ready"] = False
+    _note_buffer_diagnostic(entry, "promote_next_generation", count=len(entry.get("items") or []))
+
+
+def _entry_timing(
+    entry: dict[str, Any],
+    *,
+    base_wait_seconds: float,
+    min_wait_seconds: float,
+    max_wait_seconds: float,
+    legacy_reply_backoff_seconds: float | None,
+) -> tuple[float, float, float, float | None]:
+    """Use timing captured by the most recent enqueue/reorder.
+
+    A sleeping timer deliberately keeps its old deadline; when a new arrival
+    causes a requeue, ``handle_reply_event`` records the freshly resolved
+    values here and the following generation consumes those values.
+    """
+    values = entry.get("timing") if isinstance(entry.get("timing"), dict) else {}
+    return (
+        float(values.get("base", base_wait_seconds)),
+        float(values.get("min", min_wait_seconds)),
+        float(values.get("max", max_wait_seconds)),
+        values.get("legacy", legacy_reply_backoff_seconds),
+    )
 
 
 def _should_preempt_current_batch(entry: dict[str, Any], *, immediate_flush: bool) -> bool:
     if not immediate_flush or not bool(entry.get("processing")):
+        return False
+    state = entry.get("active_state") if isinstance(entry.get("active_state"), dict) else {}
+    if any(bool(state.get(key, False)) for key in ("reply_delivery_started", "reply_delivery_confirmed", "reply_delivery_complete", "delivery_unknown")):
         return False
     return bool(entry.get("current_is_random_chat"))
 
@@ -986,22 +1176,14 @@ async def run_buffer_timer(
     legacy_reply_backoff_seconds: float | None = None,
     concurrency_controller: ReplyConcurrencyController | None = None,
     user_policy_gate: Any = None,
+    timing_resolver: Callable[[], Any] | None = None,
 ) -> None:
     started_at = time.monotonic()
     await asyncio.sleep(max(0.0, float(delay or 0.0)))
-    try:
-        from ..core import reply_turn_trace
-
-        if float(delay or 0.0) > 0.01:
-            reply_turn_trace.record_stage(
-                key="buffer_wait",
-                label="缓冲等待",
-                status="info",
-                detail=f"delay_ms={int(float(delay or 0.0) * 1000)}",
-            )
-    except Exception:
-        pass
-
+    # Cancellation is normally a lifecycle/shutdown signal.  It becomes a
+    # replay signal only when this exact generation was explicitly superseded
+    # by the direct-turn preemption path below.
+    cancelled_without_preempt = False
     entry = msg_buffer.get(key)
     if not isinstance(entry, dict):
         return
@@ -1012,15 +1194,50 @@ async def run_buffer_timer(
         entry["timer_task"] = None
         return
 
-    items = list(entry.get("items") or [])
+    all_items = list(entry.get("items") or [])
+    # A generation owns at most eight arrivals.  Later arrivals remain FIFO in
+    # the next generation instead of silently evicting the earliest speakers.
+    items = all_items[:_MAX_BATCH_EVENTS]
+    overflow_items = all_items[_MAX_BATCH_EVENTS:]
     if user_policy_gate is not None and items:
         allowed = await asyncio.gather(
             *(
                 user_policy_gate.allows_current(item.get("event"))
                 for item in items
-            )
+            ),
+            return_exceptions=True,
         )
+        allowed = [value if isinstance(value, bool) else False for value in allowed]
+        for item, is_allowed in zip(items, allowed):
+            if is_allowed:
+                continue
+            try:
+                await asyncio.to_thread(
+                    _record_recovery_failure,
+                    bot=bot,
+                    event=item.get("event"),
+                    state=dict(item.get("state") or {}),
+                    failure_stage="permission_revoked",
+                    # A policy revocation is not evidence that delivery began,
+                    # but this queue has no dedicated policy class.  Reuse the
+                    # existing quarantine/manual-confirm boundary so an
+                    # operator must explicitly confirm it was not sent before
+                    # any recovery can be claimed.
+                    failure_class="delivery_unknown",
+                )
+            except Exception:
+                pass
         items = [item for item, is_allowed in zip(items, allowed) if is_allowed]
+    # Do not mutate overflow ownership before an awaitable policy check: a
+    # new direct arrival may cancel/reorder this generation while the gate is
+    # pending.  Once it returns, derive the tail from the live FIFO source.
+    live_items = list(entry.get("items") or [])
+    overflow_items = live_items[_MAX_BATCH_EVENTS:]
+    if overflow_items:
+        entry["pending_items"] = overflow_items + list(entry.get("pending_items") or [])
+        entry["queued_items"] = list(entry["pending_items"])
+        entry["pending_started_at"] = float(overflow_items[0].get("received_at", time.monotonic()) or time.monotonic())
+        entry["pending_ready"] = True
     if not items:
         if entry.get("pending_items"):
             _promote_pending_batch(entry)
@@ -1056,11 +1273,15 @@ async def run_buffer_timer(
         return
 
     entry["processing"] = True
+    entry["active_items"] = list(items)
+    entry["delivery_state"] = "generating"
     entry["active_task"] = asyncio.current_task()
     entry["processing_started_at"] = time.monotonic()
     entry["timer_task"] = None
+    entry["next_fire_at"] = 0.0
     entry["current_generation"] = int(entry.get("current_generation", 0) or 0) + 1
     current_generation = int(entry["current_generation"])
+    entry["active_generation_token"] = current_generation
     entry["newer_batch_for_current"] = False
     entry["items"] = []
     entry["batch_started_at"] = 0.0
@@ -1073,7 +1294,9 @@ async def run_buffer_timer(
         return
 
     state = dict(trigger_item.get("state") or {})
+    entry["active_state"] = state
     events = [item.get("event") for item in items if isinstance(item.get("event"), message_event_cls)]
+    state["buffer_trace_diagnostics"] = _take_buffer_diagnostics(entry, generation=current_generation, wait_ms=int((time.monotonic() - started_at) * 1000), dequeue_count=len(events), queued_count=len(overflow_items))
     if not events:
         entry["processing"] = False
         _pop_buffer_entry(msg_buffer, key)
@@ -1134,21 +1357,6 @@ async def run_buffer_timer(
         timeout_seconds=timeout_seconds,
         started_at=first_received_at,
     )
-    try:
-        from ..core import reply_turn_trace
-
-        reply_turn_trace.record_stage(
-            key="buffer_dequeue",
-            label="缓冲出队",
-            status="info",
-            detail=(
-                f"session={key} trigger={trigger_type} events={len(events)} "
-                f"elapsed_ms={int((time.monotonic() - started_at) * 1000)} "
-                f"timeout={timeout_seconds:.0f}s remaining={turn_deadline.remaining():.3f}s"
-            ),
-        )
-    except Exception:
-        pass
 
     try:
         if concurrency_controller is None:
@@ -1171,12 +1379,15 @@ async def run_buffer_timer(
             f"拟人插件：会话 {key} 缓冲回复排队超时，已静默放弃。"
         )
         _record_reply_admission_timeout(
+            bot=bot,
             event=selected_event,
             state=state,
             session_key=key,
             wait_ms=exc.wait_ms,
             mode="buffered",
         )
+        _note_buffer_diagnostic(entry, "failure_admission_timeout", count=len(items))
+        _record_buffer_failure_trace(state, "admission_timeout", count=len(items), generation=current_generation, wait_ms=exc.wait_ms)
     except asyncio.TimeoutError:
         logger.warning(
             f"拟人插件：会话 {key} 单轮回复超时（>{timeout_seconds:.0f}s），已放弃旧批次。"
@@ -1189,9 +1400,13 @@ async def run_buffer_timer(
             timeout_seconds=timeout_seconds,
             logger=logger,
         )
+        _note_buffer_diagnostic(entry, "failure_generation_timeout", count=len(items))
+        _record_buffer_failure_trace(state, "generation_timeout", count=len(items), generation=current_generation, wait_ms=int((time.monotonic() - started_at) * 1000))
     except asyncio.CancelledError:
         if int(entry.get("superseded_generation", 0) or 0) >= current_generation:
             logger.info(f"拟人插件：会话 {key} 当前批次已被新的直呼消息抢占。")
+        else:
+            cancelled_without_preempt = True
         raise
     except Exception as exc:
         if finished_exception_cls and isinstance(exc, finished_exception_cls):
@@ -1226,18 +1441,50 @@ async def run_buffer_timer(
                     failure_stage="reply_processing_failed",
                     failure_class=failure_class,
                 )
+                _note_buffer_diagnostic(entry, "failure_processing", count=len(items))
             except Exception:
                 pass
+            _record_buffer_failure_trace(state, "processing_failure", count=len(items), generation=current_generation, wait_ms=int((time.monotonic() - started_at) * 1000))
     finally:
+        # A superseded task must not erase queue state prepared by a newer
+        # generation.  The owning task still performs the one safe hand-off
+        # from a pre-send random batch to its replay queue.
+        if int(entry.get("active_generation_token", 0) or 0) != current_generation:
+            if (
+                int(entry.get("superseded_generation", 0) or 0) >= current_generation
+                and entry.get("pending_items")
+            ):
+                # This is the one cancellation that has a proven no-send
+                # boundary.  The cancelled owner hands its FIFO snapshot to a
+                # fresh timer; ordinary shutdown cancellation never reaches
+                # this branch.
+                entry["processing"] = False
+                entry["active_task"] = None
+                entry["active_items"] = []
+                _promote_pending_batch(entry)
+                _schedule_timer(entry=entry, key=key, bot=bot, wait_seconds=0.0, start_buffer_timer=start_buffer_timer)
+            return
         entry["processing"] = False
         entry["active_task"] = None
+        entry["active_items"] = []
+        entry["delivery_state"] = (
+            "complete" if state.get("reply_delivery_complete") else
+            "partial" if state.get("reply_delivery_confirmed") else
+            "unknown" if state.get("reply_delivery_started") else "not_started"
+        )
         entry["processing_started_at"] = 0.0
         entry["current_trigger_type"] = ""
         entry["current_is_random_chat"] = False
         if bool(state.get("reply_delivery_started", False)):
             _note_session_reply(key)
         await _reset_attention_after_confirmed(state, key)
+        if cancelled_without_preempt:
+            # Shutdown/task cancellation is not a delivery-safe replay
+            # signal.  Keep current entry state for lifecycle cleanup but do
+            # not schedule a new generation from pending/overflow items.
+            return
         if entry.get("pending_items"):
+            entry["queued_items"] = list(entry.get("pending_items") or [])
             if entry.get("pending_ready"):
                 _promote_pending_batch(entry)
                 _schedule_timer(
@@ -1268,14 +1515,21 @@ async def run_buffer_timer(
                     ),
                 )
             else:
-                remaining = _schedule_debounce_wait(
-                    first_at=float(entry.get("pending_started_at", 0.0) or 0.0),
-                    last_at=float(entry.get("last_item_at", 0.0) or 0.0),
-                    last_reply_at=_session_last_reply_at(key),
+                effective_base, effective_min, effective_max, effective_legacy = _entry_timing(
+                    entry,
                     base_wait_seconds=batch_base_wait_seconds,
                     min_wait_seconds=batch_min_wait_seconds,
                     max_wait_seconds=batch_max_wait_seconds,
                     legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
+                )
+                remaining = _schedule_debounce_wait(
+                    first_at=float(entry.get("pending_started_at", 0.0) or 0.0),
+                    last_at=float(entry.get("last_item_at", 0.0) or 0.0),
+                    last_reply_at=_session_last_reply_at(key),
+                    base_wait_seconds=effective_base,
+                    min_wait_seconds=effective_min,
+                    max_wait_seconds=effective_max,
+                    legacy_reply_backoff_seconds=effective_legacy,
                     immediate=False,
                 )
                 _promote_pending_batch(entry)
@@ -1330,8 +1584,30 @@ async def handle_reply_event(
     legacy_reply_backoff_seconds: float | None = None,
     finished_exception_cls: Any = None,
     user_policy_gate: Any = None,
+    timing_resolver: Callable[[], Any] | None = None,
 ) -> None:
-    if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
+    policy_allowed = True
+    if user_policy_gate is not None:
+        try:
+            policy_allowed = bool(await user_policy_gate.allows_current(event))
+        except Exception:
+            policy_allowed = False
+    if not policy_allowed:
+        # The policy can change after enqueue.  Preserve the inbound event for
+        # operator diagnosis/recovery, but never invent a replay of any reply.
+        try:
+            await asyncio.to_thread(
+                _record_recovery_failure,
+                bot=bot,
+                event=event,
+                state=state,
+                failure_stage="permission_revoked",
+                # See the per-item buffered gate above: revoked policy input
+                # is quarantined rather than replayed automatically.
+                failure_class="delivery_unknown",
+            )
+        except Exception:
+            pass
         return
     if isinstance(event, poke_event_cls):
         if concurrency_controller is None:
@@ -1370,6 +1646,7 @@ async def handle_reply_event(
         except ReplyAdmissionTimeout as exc:
             logger.warning(f"拟人插件：会话 {session_key} poke turn 排队超时，已静默放弃。")
             _record_reply_admission_timeout(
+                bot=bot,
                 event=event,
                 state=direct_state,
                 session_key=session_key,
@@ -1392,6 +1669,18 @@ async def handle_reply_event(
 
     if not isinstance(event, message_event_cls):
         return
+
+    # A config hot update affects a newly enqueued/reordered generation only;
+    # an already sleeping timer is intentionally left alone until new input.
+    if callable(timing_resolver):
+        try:
+            timing = timing_resolver()
+            batch_base_wait_seconds = float(getattr(timing, "base_wait_seconds", batch_base_wait_seconds))
+            batch_min_wait_seconds = float(getattr(timing, "min_wait_seconds", batch_min_wait_seconds))
+            batch_max_wait_seconds = float(getattr(timing, "max_wait_seconds", batch_max_wait_seconds))
+            legacy_reply_backoff_seconds = getattr(timing, "legacy_reply_backoff_seconds", legacy_reply_backoff_seconds)
+        except Exception:
+            pass
 
     bot_self_id = str(getattr(bot, "self_id", "") or "")
     session_key = _session_key(
@@ -1432,18 +1721,79 @@ async def handle_reply_event(
             now=time.monotonic(),
         )
     immediate_flush = reply_required
-    if immediate_flush and concurrency_controller is not None:
+    # Group turns, including the very first @/reply cue, always share the
+    # session buffer lane.  Private messages retain the direct-turn path.
+    if immediate_flush and is_private_session and concurrency_controller is not None:
         entry = msg_buffer.get(session_key)
         if isinstance(entry, dict):
-            if entry.get("processing") and bool(entry.get("current_is_random_chat")):
-                entry["newer_batch_for_current"] = True
-                entry["superseded_generation"] = max(
-                    int(entry.get("superseded_generation", 0) or 0),
-                    int(entry.get("current_generation", 0) or 0),
-                )
-                active_task = entry.get("active_task")
-                if active_task and not active_task.done():
-                    active_task.cancel()
+            entry["timing"] = {
+                "base": batch_base_wait_seconds,
+                "min": batch_min_wait_seconds,
+                "max": batch_max_wait_seconds,
+                "legacy": legacy_reply_backoff_seconds,
+            }
+            # A waiting group batch and an explicit cue form one ordered turn.
+            # Do not bypass it through the private/direct lane.
+            if not entry.get("processing") and entry.get("items"):
+                queued = {
+                    "event": event,
+                    "state": dict(state),
+                    "is_direct_mention": is_direct_mention,
+                    "is_reply_to_bot": is_reply_to_bot,
+                    "received_at": received_monotonic_at,
+                    "dedupe_key": _stable_item_key(session_key, event, received_monotonic_at),
+                }
+                if not any(item.get("dedupe_key") == queued["dedupe_key"] for item in entry.get("items", []) if isinstance(item, dict)):
+                    entry["items"].append(queued)
+                    _note_buffer_diagnostic(entry, "enqueue_direct", count=1)
+                entry["queued_items"] = list(entry["items"])
+                entry["pending_ready"] = True
+                _schedule_timer(entry=entry, key=session_key, bot=bot, wait_seconds=0.0, start_buffer_timer=start_buffer_timer)
+                return
+            if entry.get("processing"):
+                direct_item = {
+                    "event": event,
+                    "state": dict(state),
+                    "is_direct_mention": is_direct_mention,
+                    "is_reply_to_bot": is_reply_to_bot,
+                    "received_at": received_monotonic_at,
+                    "dedupe_key": _stable_item_key(session_key, event, received_monotonic_at),
+                }
+                if _should_preempt_current_batch(entry, immediate_flush=True):
+                    # Return the pre-send snapshot exactly once, followed by
+                    # already queued arrivals and the explicit cue.
+                    # This is the sole replayable case: random generation is
+                    # known pre-send.  Requeue the full inbound snapshot in
+                    # arrival order; no delivery can be duplicated.
+                    replay = [*list(entry.get("active_items") or []), *list(entry.get("pending_items") or []), direct_item]
+                    seen: set[str] = set()
+                    entry["pending_items"] = [item for item in replay if isinstance(item, dict) and not (item.get("dedupe_key") in seen or seen.add(str(item.get("dedupe_key") or "")))]
+                    entry["queued_items"] = list(entry["pending_items"])
+                    entry["pending_ready"] = True
+                    _note_buffer_diagnostic(entry, "preempt_requeue", count=len(entry["pending_items"]))
+                    entry["newer_batch_for_current"] = True
+                    entry["superseded_generation"] = max(int(entry.get("superseded_generation", 0) or 0), int(entry.get("current_generation", 0) or 0))
+                    active_task = entry.get("active_task")
+                    if active_task and not active_task.done():
+                        active_task.cancel()
+                    return
+                # Once dispatch has begun (or the current turn is itself a
+                # must-reply turn), it is unsafe to cancel: send outcome may
+                # already be partial or unknown.  Keep the direct cue FIFO in
+                # the next generation and let the active turn finalize it.
+                queued_keys = {
+                    str(item.get("dedupe_key") or "")
+                    for item in [*(entry.get("active_items") or []), *(entry.get("pending_items") or [])]
+                    if isinstance(item, dict)
+                }
+                if direct_item["dedupe_key"] not in queued_keys:
+                    entry.setdefault("pending_items", []).append(direct_item)
+                    entry["queued_items"] = list(entry.get("pending_items") or [])
+                entry["pending_ready"] = True
+                if not float(entry.get("pending_started_at", 0.0) or 0.0):
+                    entry["pending_started_at"] = received_monotonic_at
+                entry["last_item_at"] = received_monotonic_at
+                return
         direct_state = dict(state)
         direct_state["batch_session_key"] = session_key
         direct_state["turn_generation_id"] = _next_turn_generation(session_key)
@@ -1522,6 +1872,7 @@ async def handle_reply_event(
         except ReplyAdmissionTimeout as exc:
             logger.warning(f"拟人插件：会话 {session_key} direct turn 排队超时，已静默放弃。")
             _record_reply_admission_timeout(
+                bot=bot,
                 event=event,
                 state=direct_state,
                 session_key=session_key,
@@ -1588,6 +1939,12 @@ async def handle_reply_event(
         concurrency_controller=concurrency_controller,
     )
     entry["delay"] = delay
+    entry["timing"] = {
+        "base": batch_base_wait_seconds,
+        "min": batch_min_wait_seconds,
+        "max": batch_max_wait_seconds,
+        "legacy": legacy_reply_backoff_seconds,
+    }
     now_ts = received_monotonic_at
     item = {
         "event": event,
@@ -1596,28 +1953,46 @@ async def handle_reply_event(
         "is_reply_to_bot": is_reply_to_bot,
         "received_at": now_ts,
     }
+    item["dedupe_key"] = _stable_item_key(session_key, event, now_ts)
+    if any(existing.get("dedupe_key") == item["dedupe_key"] for existing in [*(entry.get("items") or []), *(entry.get("pending_items") or [])] if isinstance(existing, dict)):
+        return
     if concurrency_controller is not None:
         item["state"]["reply_commit_lock"] = concurrency_controller.commit_lock(session_key)
 
+    _note_buffer_diagnostic(entry, "enqueue", count=1)
+
     if entry.get("processing"):
+        # The buffered lane owns every group turn.  Only a demonstrably
+        # pre-send random generation may be superseded; return its snapshot
+        # before queued arrivals and the new explicit cue, exactly once.
+        if immediate_flush and _should_preempt_current_batch(entry, immediate_flush=True):
+            replay = [*list(entry.get("active_items") or []), *list(entry.get("pending_items") or []), item]
+            seen: set[str] = set()
+            entry["pending_items"] = [
+                candidate for candidate in replay
+                if isinstance(candidate, dict)
+                and not (str(candidate.get("dedupe_key") or "") in seen or seen.add(str(candidate.get("dedupe_key") or "")))
+            ]
+            entry["queued_items"] = list(entry["pending_items"])
+            entry["pending_ready"] = True
+            entry["newer_batch_for_current"] = True
+            entry["superseded_generation"] = max(
+                int(entry.get("superseded_generation", 0) or 0),
+                int(entry.get("current_generation", 0) or 0),
+            )
+            _note_buffer_diagnostic(entry, "preempt_requeue", count=len(entry["pending_items"]))
+            active_task = entry.get("active_task")
+            if active_task and not active_task.done():
+                active_task.cancel()
+            return
         pending_items = list(entry.get("pending_items") or [])
         pending_items.append(item)
         entry["pending_items"] = _trim_items(pending_items)
-        entry["newer_batch_for_current"] = True
         if not float(entry.get("pending_started_at", 0.0) or 0.0):
             entry["pending_started_at"] = now_ts
         entry["last_item_at"] = now_ts
         if immediate_flush:
             entry["pending_ready"] = True
-            if _should_preempt_current_batch(entry, immediate_flush=True):
-                entry["superseded_generation"] = max(
-                    int(entry.get("superseded_generation", 0) or 0),
-                    int(entry.get("current_generation", 0) or 0),
-                )
-                active_task = entry.get("active_task")
-                if active_task and not active_task.done():
-                    active_task.cancel()
-                    logger.info(f"拟人插件：会话 {session_key} 收到新的直呼消息，抢占当前旧批次。")
         dynamic_base_wait = max(
             batch_min_wait_seconds,
             min(
@@ -1669,7 +2044,7 @@ async def handle_reply_event(
         min_wait_seconds=batch_min_wait_seconds,
         max_wait_seconds=batch_max_wait_seconds,
         legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
-        immediate=immediate_flush,
+        immediate=bool(immediate_flush or len(entry["items"]) >= _MAX_BATCH_EVENTS),
         now=now_ts,
     )
     _schedule_timer(

@@ -8,7 +8,7 @@ from nonebot.rule import Rule
 from ..core.group_mute import update_group_mute_from_notice
 from ..core.reply_buffer_timing import resolve_reply_buffer_timing
 from ..core.runtime_performance import register_reply_reporter
-from .reply_buffer import ReplyConcurrencyController
+from .reply_buffer import ReplyConcurrencyController, buffer_runtime_snapshot
 
 try:
     from nonebot.typing import T_State
@@ -129,7 +129,12 @@ def register_reply_matchers(
         session_limit=int(getattr(plugin_config, "personification_reply_session_concurrency", 3) or 3),
         global_limit=int(getattr(plugin_config, "personification_reply_global_concurrency", 12) or 12),
     )
-    register_reply_reporter(concurrency_controller.snapshot)
+    def _reply_runtime_reporter() -> dict[str, int]:
+        value = concurrency_controller.snapshot()
+        value.update(buffer_runtime_snapshot(msg_buffer))
+        value["admission_waiting_turns"] = value["waiting"]
+        return value
+    register_reply_reporter(_reply_runtime_reporter)
 
     async def _direct_reply_rule(event: Event, state: T_State) -> bool:
         result = await _evaluate_personification_rule(
@@ -183,6 +188,7 @@ def register_reply_matchers(
             legacy_reply_backoff_seconds=batch_timing.legacy_reply_backoff_seconds,
             concurrency_controller=concurrency_controller,
             user_policy_gate=user_policy_gate,
+            timing_resolver=lambda: resolve_reply_buffer_timing(plugin_config),
         )
 
     @direct_reply_matcher.handle()
@@ -210,6 +216,7 @@ def register_reply_matchers(
             legacy_reply_backoff_seconds=batch_timing.legacy_reply_backoff_seconds,
             finished_exception_cls=finished_exception_cls,
             user_policy_gate=user_policy_gate,
+            timing_resolver=lambda: resolve_reply_buffer_timing(plugin_config),
         )
 
     return {
