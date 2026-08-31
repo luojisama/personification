@@ -415,6 +415,61 @@ def test_gemini_status_error_redacts_legacy_query_key() -> None:
     assert error.request_count == 2
 
 
+def test_gemini_status_error_exposes_only_allowlisted_upstream_diagnostics() -> None:
+    request = httpx.Request(
+        "POST",
+        "https://gateway.example/v1beta/models/gemini-test:generateContent",
+    )
+    response = httpx.Response(
+        400,
+        request=request,
+        json={
+            "error": {
+                "code": 400,
+                "status": "INVALID_ARGUMENT",
+                "message": (
+                    "Function response id does not match the function call id; "
+                    "Authorization: Bearer top-secret"
+                ),
+                "details": [{"reason": "ARBITRARY_PROVIDER_TEXT_top-secret"}],
+            }
+        },
+    )
+
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        gemini_transport.raise_for_gemini_status(response)
+
+    error = exc_info.value
+    assert error.upstream_status == "INVALID_ARGUMENT"
+    assert error.upstream_reason == ""
+    assert error.upstream_detail_code == "function_response_mismatch"
+    assert "top-secret" not in str(error)
+    assert "top-secret" not in str(error.response.headers)
+    assert error.response.content == b""
+
+
+def test_gemini_status_error_does_not_parse_oversized_diagnostic_body() -> None:
+    request = httpx.Request(
+        "POST",
+        "https://gateway.example/v1beta/models/gemini-test:generateContent",
+    )
+    oversized = {
+        "error": {
+            "status": "INVALID_ARGUMENT",
+            "message": "Function response mismatch " + ("x" * (65 * 1024)),
+        }
+    }
+    response = httpx.Response(400, request=request, json=oversized)
+
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        gemini_transport.raise_for_gemini_status(response)
+
+    error = exc_info.value
+    assert error.upstream_status == ""
+    assert error.upstream_detail_code == "upstream_rejected"
+    assert error.response.content == b""
+
+
 def test_single_provider_caller_receives_gemini_auth_mode_and_timeout() -> None:
     caller = ai_routes.build_single_provider_caller(
         _DummyConfig(personification_api_type="gemini"),

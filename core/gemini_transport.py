@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import threading
 import time
@@ -25,6 +26,45 @@ _AUTH_CACHE_TTL_SECONDS = 12 * 60 * 60
 _AUTH_CACHE_HMAC_KEY = os.urandom(32)
 _AUTH_CACHE: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
 _AUTH_CACHE_LOCK = threading.RLock()
+_ERROR_DIAGNOSTIC_BODY_LIMIT = 64 * 1024
+
+_UPSTREAM_STATUS_ALLOWLIST = {
+    "ABORTED",
+    "ALREADY_EXISTS",
+    "CANCELLED",
+    "DATA_LOSS",
+    "DEADLINE_EXCEEDED",
+    "FAILED_PRECONDITION",
+    "INTERNAL",
+    "INVALID_ARGUMENT",
+    "NOT_FOUND",
+    "OUT_OF_RANGE",
+    "PERMISSION_DENIED",
+    "RESOURCE_EXHAUSTED",
+    "UNAUTHENTICATED",
+    "UNAVAILABLE",
+    "UNIMPLEMENTED",
+    "UNKNOWN",
+}
+_UPSTREAM_REASON_ALLOWLIST = {
+    "API_KEY_INVALID",
+    "ACCESS_TOKEN_EXPIRED",
+    "BILLING_DISABLED",
+    "MODEL_NOT_FOUND",
+    "RATE_LIMIT_EXCEEDED",
+    "SERVICE_DISABLED",
+}
+_UPSTREAM_DETAIL_CODES = {
+    "context_limit_exceeded",
+    "function_response_count_mismatch",
+    "function_response_mismatch",
+    "function_response_order_invalid",
+    "invalid_argument",
+    "request_too_large",
+    "thought_signature_invalid",
+    "tool_schema_rejected",
+    "upstream_rejected",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +79,82 @@ class GeminiAuthResult:
     response: Any
     mode: str
     request_count: int
+
+
+def _gemini_error_detail_code(message: Any, status: str) -> str:
+    """Classify a Gemini error without retaining the provider's raw message."""
+
+    lowered = str(message or "").strip().lower()
+    if "thought signature" in lowered or "thoughtsignature" in lowered:
+        return "thought_signature_invalid"
+    if "function response" in lowered:
+        if any(marker in lowered for marker in ("immediately after", "must follow", "preceding function call")):
+            return "function_response_order_invalid"
+        if any(marker in lowered for marker in ("number of", "same number", "count", "missing response")):
+            return "function_response_count_mismatch"
+        if any(marker in lowered for marker in ("does not match", "mismatch", "call id", "function call id", "name")):
+            return "function_response_mismatch"
+    if any(marker in lowered for marker in ("request too large", "payload too large", "request size")):
+        return "request_too_large"
+    if any(marker in lowered for marker in ("context length", "context window", "token limit")):
+        return "context_limit_exceeded"
+    if "schema" in lowered and any(marker in lowered for marker in ("invalid", "unsupported", "reject")):
+        return "tool_schema_rejected"
+    if status == "INVALID_ARGUMENT":
+        return "invalid_argument"
+    return "upstream_rejected"
+
+
+def _gemini_error_diagnostics(response: Any) -> dict[str, str]:
+    try:
+        raw_body = bytes(getattr(response, "content", b"") or b"")
+        if not raw_body or len(raw_body) > _ERROR_DIAGNOSTIC_BODY_LIMIT:
+            payload = {}
+        else:
+            payload = json.loads(raw_body)
+    except Exception:
+        payload = {}
+    error = payload.get("error") if isinstance(payload, dict) else {}
+    error = error if isinstance(error, dict) else {}
+    raw_status = str(error.get("status") or "").strip().upper()
+    status = raw_status if raw_status in _UPSTREAM_STATUS_ALLOWLIST else ""
+    reason = ""
+    details = error.get("details")
+    if isinstance(details, list):
+        for item in details[:8]:
+            if not isinstance(item, dict):
+                continue
+            candidate = str(item.get("reason") or "").strip().upper()
+            if candidate in _UPSTREAM_REASON_ALLOWLIST:
+                reason = candidate
+                break
+    detail_code = _gemini_error_detail_code(error.get("message"), status)
+    return {
+        "upstream_status": status,
+        "upstream_reason": reason,
+        "upstream_detail_code": detail_code if detail_code in _UPSTREAM_DETAIL_CODES else "upstream_rejected",
+    }
+
+
+def safe_upstream_diagnostics(error: BaseException) -> dict[str, str]:
+    """Return only allowlisted provider diagnostics from an exception chain."""
+
+    current: BaseException | None = error
+    seen: set[int] = set()
+    result = {"upstream_status": "", "upstream_reason": "", "upstream_detail_code": ""}
+    while current is not None and id(current) not in seen and len(seen) < 6:
+        seen.add(id(current))
+        status = str(getattr(current, "upstream_status", "") or "").strip().upper()
+        reason = str(getattr(current, "upstream_reason", "") or "").strip().upper()
+        detail_code = str(getattr(current, "upstream_detail_code", "") or "").strip().lower()
+        if not result["upstream_status"] and status in _UPSTREAM_STATUS_ALLOWLIST:
+            result["upstream_status"] = status
+        if not result["upstream_reason"] and reason in _UPSTREAM_REASON_ALLOWLIST:
+            result["upstream_reason"] = reason
+        if not result["upstream_detail_code"] and detail_code in _UPSTREAM_DETAIL_CODES:
+            result["upstream_detail_code"] = detail_code
+        current = current.__cause__ or current.__context__
+    return result
 
 
 def normalize_gemini_auth_mode(value: Any) -> str:
@@ -188,6 +304,7 @@ def raise_for_gemini_status(
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
+        upstream_diagnostics = _gemini_error_diagnostics(exc.response)
         safe_url = sanitize_text(str(exc.request.url))
         safe_request = httpx.Request(exc.request.method, safe_url)
         safe_headers: dict[str, str] = {}
@@ -205,6 +322,8 @@ def raise_for_gemini_status(
         )
         error.auth_mode = normalize_gemini_auth_mode(auth_mode)
         error.request_count = max(1, int(request_count or 1))
+        for key, value in upstream_diagnostics.items():
+            setattr(error, key, value)
         raise error from None
 
 
@@ -221,4 +340,5 @@ __all__ = [
     "normalize_gemini_auth_mode",
     "raise_for_gemini_status",
     "request_with_gemini_auth",
+    "safe_upstream_diagnostics",
 ]

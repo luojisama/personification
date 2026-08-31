@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from .llm_context import current_llm_context, use_single_attempt_retry_policy
+from .gemini_transport import safe_upstream_diagnostics
 from .route_capabilities import DEFAULT_ROUTE_CAPABILITY_REGISTRY, RouteKey
 from .safety_filter import build_safe_reframe_messages, detect_route_safety_issue
 from .tool_schema_compat import classify_schema_rejection, prepare_tools_for_provider
@@ -83,6 +84,9 @@ class RoutedToolCallerError(RuntimeError):
         self.tool_names_hash = str(selected.get("tool_names_hash") or "")[:16]
         self.tool_schema_hash = str(selected.get("tool_schema_hash") or "")[:16]
         self.builtin_search = bool(selected.get("builtin_search", False))
+        self.upstream_status = str(selected.get("upstream_status") or "")[:48]
+        self.upstream_reason = str(selected.get("upstream_reason") or "")[:48]
+        self.upstream_detail_code = str(selected.get("upstream_detail_code") or "")[:64]
         super().__init__("all routed tool callers failed")
 
     @staticmethod
@@ -153,6 +157,10 @@ def summarize_provider_route_attempts(exc: BaseException, *, limit: int = 3) -> 
                 f"code:{code}",
             )
         )
+        upstream_status = _route_trace_atom(attempt.get("upstream_status"), limit=48)
+        upstream_detail = _route_trace_atom(attempt.get("upstream_detail_code"), limit=64)
+        if upstream_status != "-" or upstream_detail != "-":
+            route += f"|upstream:{upstream_status}/{upstream_detail}"
         rendered.append(f"route_{index}={route}")
     return " ".join(rendered)
 
@@ -996,6 +1004,7 @@ class RoutedToolCaller:
         descriptor = self._caller_route_descriptors.get(id(caller), {"caller": type(caller).__name__[:80]})
         shape = dict(request_shape or {})
         schema_rejection = classify_schema_rejection(exc)
+        upstream = safe_upstream_diagnostics(exc)
         wire_tools_count = _exception_wire_tools_count(exc)
         if wire_tools_count is None:
             wire_tools_count = max(0, int(shape.get("tools_count") or 0))
@@ -1013,6 +1022,7 @@ class RoutedToolCaller:
             "exception_type": type(exc).__name__[:80],
             "schema_rejection_code": schema_rejection.reason_code,
             "schema_rejection_field": schema_rejection.field_path,
+            **upstream,
         }
 
     def _prepare_route_tools(

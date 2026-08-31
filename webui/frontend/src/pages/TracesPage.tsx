@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
@@ -26,6 +26,62 @@ function stageTone(status: TraceStage["status"]): "ok" | "warn" | "error" | "unk
   if (status === "running") return "running";
   if (status === "unknown") return "unknown";
   return "info";
+}
+
+type StageFilter = "all" | "issues" | "slow";
+
+export interface TraceDerivedMetrics {
+  issueCount: number;
+  completedToolCount: number;
+  firstErrorIndex: number | null;
+  slowStageIndexes: number[];
+  upstreamStatus: string;
+  upstreamDetailCode: string;
+}
+
+const SAFE_DIAGNOSTIC_ATOM = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function deriveTraceMetrics(trace: TraceDetail): TraceDerivedMetrics {
+  const issueCount = trace.stages.filter((stage) => stage.status === "warn" || stage.status === "error").length;
+  const firstErrorIndex = trace.stages.findIndex((stage) => stage.status === "error");
+  const slowStageIndexes = trace.stages
+    .map((stage, index) => ({ index, duration: stage.duration_ms ?? -1 }))
+    .filter((item) => item.duration >= 0)
+    .sort((left, right) => right.duration - left.duration || left.index - right.index)
+    .slice(0, 3)
+    .map((item) => item.index);
+  const failureDetail = trace.stages.find((stage) => stage.key === "provider_failure")?.summary ?? "";
+  const upstreamMatch = failureDetail.match(/(?:^|\|)upstream:([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)/);
+  const upstreamStatus = upstreamMatch?.[1] && upstreamMatch[1] !== "-" && SAFE_DIAGNOSTIC_ATOM.test(upstreamMatch[1]) ? upstreamMatch[1] : "";
+  const upstreamDetailCode = upstreamMatch?.[2] && upstreamMatch[2] !== "-" && SAFE_DIAGNOSTIC_ATOM.test(upstreamMatch[2]) ? upstreamMatch[2] : "";
+  return {
+    issueCount,
+    completedToolCount: trace.tools.filter((tool) => tool.status === "ok" && tool.detail_code === "result").length,
+    firstErrorIndex: firstErrorIndex >= 0 ? firstErrorIndex : null,
+    slowStageIndexes,
+    upstreamStatus,
+    upstreamDetailCode,
+  };
+}
+
+function traceTriageText(trace: TraceDetail, metrics: TraceDerivedMetrics): string {
+  if (trace.diagnosis_code === "provider_request_rejected") {
+    const firstError = metrics.firstErrorIndex === null ? null : trace.stages[metrics.firstErrorIndex];
+    const failureLocation = firstError?.key === "provider_failure"
+      ? "首个错误为 Provider 调用失败。"
+      : `本轮最终诊断为 Provider 请求被拒绝；首个错误阶段为“${firstError?.label || "未记录"}”。`;
+    const upstream = metrics.upstreamStatus
+      ? `上游分类为 ${metrics.upstreamStatus}${metrics.upstreamDetailCode ? ` / ${metrics.upstreamDetailCode}` : ""}。`
+      : "HTTP 400 的具体上游分类尚未记录。";
+    return `已确认成功返回 ${metrics.completedToolCount} 条工具结果；${failureLocation}${upstream}请结合脱敏 Provider 日志和请求形状继续核对。`;
+  }
+  if (metrics.firstErrorIndex !== null) {
+    return `首个错误出现在“${trace.stages[metrics.firstErrorIndex]?.label || "未知阶段"}”；当前共有 ${metrics.issueCount} 个错误或告警阶段。`;
+  }
+  if (metrics.issueCount > 0) {
+    return `本轮没有错误阶段，但有 ${metrics.issueCount} 个告警阶段需要核对。`;
+  }
+  return "本轮未发现错误或告警阶段，可继续核对最终发送与历史提交状态。";
 }
 
 export function TracesPage() {
@@ -89,7 +145,31 @@ export function TracesPage() {
   );
 }
 
-function TraceEvidence({ trace }: { trace: TraceDetail }) {
+export function TraceEvidence({ trace }: { trace: TraceDetail }) {
+  const [stageFilter, setStageFilter] = useState<StageFilter>("all");
+  const metrics = useMemo(() => deriveTraceMetrics(trace), [trace]);
+  const visibleStages = useMemo(() => trace.stages
+    .map((stage, index) => ({ stage, index }))
+    .filter(({ stage, index }) => {
+      if (stageFilter === "issues") return stage.status === "warn" || stage.status === "error";
+      if (stageFilter === "slow") return metrics.slowStageIndexes.includes(index);
+      return true;
+    }), [metrics.slowStageIndexes, stageFilter, trace.stages]);
+
+  useEffect(() => setStageFilter("all"), [trace.trace_id]);
+
+  function jumpToFirstError() {
+    if (metrics.firstErrorIndex === null) return;
+    setStageFilter("all");
+    window.requestAnimationFrame(() => {
+      const target = document.getElementById(`trace-stage-${metrics.firstErrorIndex}`);
+      if (!target) return;
+      const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+      target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
+      target.focus({ preventScroll: true });
+    });
+  }
+
   return (
     <>
       <Panel className="trace-timeline-pane" eyebrow="TIMELINE / OBSERVABLE" title="阶段时间线">
@@ -107,9 +187,32 @@ function TraceEvidence({ trace }: { trace: TraceDetail }) {
           {trace.media_summary.length > 0 && <ul>{trace.media_summary.map((item, index) => <li key={`${index}:${item}`}>{item}</li>)}</ul>}
         </article>
 
+        <section className="trace-triage" aria-labelledby="trace-triage-title">
+          <div>
+            <span>TRIAGE / FIRST FAILURE</span>
+            <h3 id="trace-triage-title">本轮诊断摘要</h3>
+            <p>{traceTriageText(trace, metrics)}</p>
+          </div>
+          <dl>
+            <div><dt>错误与告警</dt><dd>{metrics.issueCount}</dd></div>
+            <div><dt>成功返回的工具结果</dt><dd>{metrics.completedToolCount}</dd></div>
+            <div><dt>首个错误</dt><dd>{metrics.firstErrorIndex === null ? "无" : `阶段 ${metrics.firstErrorIndex + 1}`}</dd></div>
+          </dl>
+          {metrics.firstErrorIndex !== null && <button type="button" className="button button-quiet" onClick={jumpToFirstError}>跳到首个错误</button>}
+        </section>
+
+        <div className="trace-stage-toolbar">
+          <div className="filter-chips" aria-label="时间线筛选">
+            <button type="button" aria-pressed={stageFilter === "all"} onClick={() => setStageFilter("all")}>全部 {trace.stages.length}</button>
+            <button type="button" aria-pressed={stageFilter === "issues"} onClick={() => setStageFilter("issues")}>问题 {metrics.issueCount}</button>
+            <button type="button" aria-pressed={stageFilter === "slow"} onClick={() => setStageFilter("slow")}>最慢 {metrics.slowStageIndexes.length}</button>
+          </div>
+          <span>筛选只改变展示，不改变原始 Trace。</span>
+        </div>
+
         <ol className="timeline-list">
-          {trace.stages.map((stage, index) => (
-            <li key={`${stage.key}:${index}`} data-status={stage.status}>
+          {visibleStages.map(({ stage, index }) => (
+            <li id={`trace-stage-${index}`} tabIndex={-1} key={`${stage.key}:${index}`} data-status={stage.status}>
               <span className="timeline-node" aria-hidden="true" />
               <div className="timeline-card">
                 <header>
@@ -122,6 +225,7 @@ function TraceEvidence({ trace }: { trace: TraceDetail }) {
             </li>
           ))}
         </ol>
+        {visibleStages.length === 0 && <p className="muted trace-filter-empty">当前筛选下没有阶段。</p>}
       </Panel>
 
       <Panel className="trace-detail-pane" eyebrow="CONTEXT / AUDIT" title="审计详情">

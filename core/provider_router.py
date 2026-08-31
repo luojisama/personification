@@ -1006,6 +1006,8 @@ def _provider_route_attempt(
         if not next_model:
             next_model = str(getattr(current, "next_model", "") or "").strip()
         current = current.__cause__ or current.__context__
+    from .gemini_transport import safe_upstream_diagnostics
+
     api_type = normalize_api_type(provider.get("api_type"))
     return {
         "provider": str(provider.get("name") or "provider")[:80],
@@ -1024,6 +1026,7 @@ def _provider_route_attempt(
         "code": _provider_failure_code(error),
         "retryable": _is_retryable_provider_error(error),
         "exception_type": type(error).__name__[:80],
+        **safe_upstream_diagnostics(error),
     }
 
 

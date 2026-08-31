@@ -92,6 +92,129 @@ def test_gemini_round_trip_preserves_native_content_signature_and_call_id(monkey
     assert "function_declarations" not in second_payload["tools"][0]
 
 
+def test_gemini_two_sequential_tool_round_trips_preserve_third_request(monkeypatch) -> None:  # noqa: ANN001
+    captured: list[dict] = []
+    first_native_content = {
+        "role": "model",
+        "parts": [
+            {"thought": True, "text": "opaque first thought", "thoughtSignature": "sig-search"},
+            {
+                "functionCall": {
+                    "id": "call-search",
+                    "name": "search_plugin_knowledge",
+                    "args": {"query": "minecraft bridge"},
+                },
+                "thoughtSignature": "sig-search-call",
+            },
+        ],
+    }
+    second_native_content = {
+        "role": "model",
+        "parts": [
+            {"thought": True, "text": "opaque second thought", "thoughtSignature": "sig-list"},
+            {
+                "functionCall": {
+                    "id": "call-list",
+                    "name": "list_plugins",
+                    "args": {},
+                },
+                "thoughtSignature": "sig-list-call",
+            },
+        ],
+    }
+    responses = [
+        {"candidates": [{"content": first_native_content}]},
+        {"candidates": [{"content": second_native_content}]},
+        {"candidates": [{"content": {"role": "model", "parts": [{"text": "final"}]}}]},
+    ]
+
+    class _Response:
+        status_code = 200
+
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+
+        def json(self) -> dict:
+            return self._payload
+
+    class _Client:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, _url, headers=None, params=None, json=None):  # noqa: ANN001, ANN201
+            del headers, params
+            captured.append(json_module.loads(json_module.dumps(json or {}, ensure_ascii=False)))
+            return _Response(responses.pop(0))
+
+    monkeypatch.setattr(impl.httpx, "AsyncClient", _Client)
+    caller = impl.GeminiToolCaller(
+        api_key="secret",
+        base_url="https://gateway.example/v1beta",
+        model="gemini-test",
+    )
+    tools = [_tool_schema("search_plugin_knowledge"), _tool_schema("list_plugins")]
+    messages = [{"role": "user", "content": "检查插件知识"}]
+
+    first = asyncio.run(caller.chat_with_tools(messages, tools, False))
+    messages.append(caller.build_assistant_tool_calls_message(first))
+    messages.extend(
+        caller.build_tool_result_messages(
+            first,
+            [(first.tool_calls[0], json_module.dumps({"status": "found"}))],
+        )
+    )
+    second = asyncio.run(caller.chat_with_tools(messages, tools, False))
+    messages.append(caller.build_assistant_tool_calls_message(second))
+    messages.extend(
+        caller.build_tool_result_messages(
+            second,
+            [(second.tool_calls[0], json_module.dumps(["plugin_a", "plugin_b"]))],
+        )
+    )
+    final = asyncio.run(caller.chat_with_tools(messages, tools, False))
+
+    assert final.content == "final"
+    assert len(captured) == 3
+    contents = captured[2]["contents"]
+    assert [item["role"] for item in contents] == ["user", "model", "user", "model", "user"]
+    assert contents[1] == first_native_content
+    assert contents[3] == second_native_content
+    assert contents[2] == {
+        "role": "user",
+        "parts": [
+            {
+                "functionResponse": {
+                    "id": "call-search",
+                    "name": "search_plugin_knowledge",
+                    "response": {"result": '{"status": "found"}'},
+                }
+            }
+        ],
+    }
+    assert contents[4] == {
+        "role": "user",
+        "parts": [
+            {
+                "functionResponse": {
+                    "id": "call-list",
+                    "name": "list_plugins",
+                    "response": {"result": '["plugin_a", "plugin_b"]'},
+                }
+            }
+        ],
+    }
+    assert contents[1]["parts"][0]["thoughtSignature"] == "sig-search"
+    assert contents[1]["parts"][1]["thoughtSignature"] == "sig-search-call"
+    assert contents[3]["parts"][0]["thoughtSignature"] == "sig-list"
+    assert contents[3]["parts"][1]["thoughtSignature"] == "sig-list-call"
+
+
 def test_gemini_runtime_id_is_unique_and_not_sent_as_provider_id() -> None:
     calls = impl._extract_gemini_tool_calls(
         [

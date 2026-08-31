@@ -338,6 +338,8 @@ def test_provider_route_trace_summary_is_allowlisted_and_redacted() -> None:
                 "wire_tools_count": 47,
                 "tool_schema_hash": "abcdef123456",
                 "request_count": 1,
+                "upstream_status": "INVALID_ARGUMENT",
+                "upstream_detail_code": "function_response_mismatch",
                 "api_url": "https://private.example/v1beta?key=secret",
                 "prompt": "raw private prompt",
                 "response_body": "raw private response",
@@ -355,6 +357,7 @@ def test_provider_route_trace_summary_is_allowlisted_and_redacted() -> None:
     assert "schema:abcdef123456" in summary
     assert "requests:1" in summary
     assert "code:provider_request_rejected" in summary
+    assert "upstream:INVALID_ARGUMENT/function_response_mismatch" in summary
     assert "private.example" not in summary
     assert "secret" not in summary
     assert "raw private" not in summary
