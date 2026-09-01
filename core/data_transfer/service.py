@@ -6,6 +6,7 @@ import json
 import math
 import os
 import base64
+import re
 from contextlib import nullcontext
 import sqlite3
 import threading
@@ -25,6 +26,12 @@ from ..avatar_relation_evidence import (
 )
 from ..db import connect_sync, get_db_path
 from ..paths import get_data_transfer_dir
+from ..peer_bot_registry import (
+    COMMAND_RISKS,
+    PEER_BOT_REGISTRY_VERSION,
+    PeerBotRegistryError,
+    validate_command_template,
+)
 from .constants import (
     DATASETS, DEFAULT_DATASETS, EXCLUDED_CATEGORIES, FORMAT, GROUP_CONFIG_FIELDS,
     GROUP_KV_NAMESPACES, MAX_ARCHIVE_BYTES, MAX_COMPRESSION_RATIO,
@@ -43,6 +50,7 @@ class DataTransferError(ValueError):
 
 _SCOPE_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _SCOPE_LOCKS_GUARD = threading.Lock()
+_PEER_BOT_TRANSFER_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,80}")
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -186,9 +194,235 @@ class DataTransferService:
             value = root[group_id]
             if row["namespace"] == "group_config" and isinstance(value, dict):
                 state["group_config"] = {k: value[k] for k in GROUP_CONFIG_FIELDS if k in value}
+            elif row["namespace"] == "peer_bot_registry":
+                projected = self._peer_bot_transfer_document(value)
+                self._validate_peer_bot_transfer_document(projected)
+                state["kv"][row["namespace"]] = projected
             elif row["namespace"] in GROUP_KV_NAMESPACES:
                 state["kv"][row["namespace"]] = value
         return state
+
+    @staticmethod
+    def _peer_bot_transfer_document(value: Any) -> dict[str, Any]:
+        """Project a registry group into the stable, approved-only v1 schema."""
+
+        raw = value if isinstance(value, dict) else {}
+        raw_bots = raw.get("bots") if isinstance(raw.get("bots"), dict) else {}
+        approved_bots = {
+            str(user_id): bot
+            for user_id, bot in raw_bots.items()
+            if str(user_id) and isinstance(bot, dict) and bot.get("status") == "approved"
+        }
+        approved_ids = set(approved_bots)
+        referenced_command_ids = {
+            str(command_id)
+            for bot in approved_bots.values()
+            for command_id in (
+                bot.get("command_ids", [])
+                if isinstance(bot.get("command_ids"), (list, tuple))
+                else []
+            )
+        }
+        raw_commands = raw.get("commands") if isinstance(raw.get("commands"), dict) else {}
+        commands: dict[str, dict[str, Any]] = {}
+        for command_id, command in raw_commands.items():
+            normalized_command_id = str(command_id)
+            if (
+                normalized_command_id not in referenced_command_ids
+                or not isinstance(command, dict)
+                or command.get("status") != "approved"
+            ):
+                continue
+            target_bot_id = str(command.get("target_bot_id", "") or "")
+            if target_bot_id not in approved_ids:
+                continue
+            commands[normalized_command_id] = {
+                "command_id": normalized_command_id,
+                "target_bot_id": target_bot_id,
+                "full_template": command.get("full_template"),
+                "command_head": command.get("command_head"),
+                "parameter_schema": command.get("parameter_schema"),
+                "risk_level": command.get("risk_level"),
+                "status": "approved",
+                "source": "manual",
+                "manual_override": True,
+                "version": command.get("version"),
+                "updated_at": command.get("updated_at"),
+            }
+        bots: dict[str, dict[str, Any]] = {}
+        for user_id in approved_ids:
+            bot = approved_bots[user_id]
+            bots[user_id] = {
+                "user_id": user_id,
+                "nickname": str(bot.get("nickname", "") or "")[:80],
+                "status": "approved",
+                "source": "manual",
+                "manual_override": True,
+                "command_ids": [
+                    command_id
+                    for command_id in bot.get("command_ids", [])
+                    if command_id in commands
+                ],
+                "updated_at": float(bot.get("updated_at", 0.0) or 0.0),
+            }
+        policies = raw.get("policies") if isinstance(raw.get("policies"), dict) else {}
+        return {
+            "schema_version": PEER_BOT_REGISTRY_VERSION,
+            "enabled": bool(raw.get("enabled", False)),
+            "bots": bots,
+            "commands": commands,
+            "policies": {
+                "max_calls_per_turn": 1,
+                "cooldown_seconds": float(policies.get("cooldown_seconds", 10.0) or 10.0),
+                "pending_ttl_seconds": float(policies.get("pending_ttl_seconds", 30.0) or 30.0),
+                "max_chain_depth": 1,
+            },
+            "updated_at": float(raw.get("updated_at", 0.0) or 0.0),
+        }
+
+    @staticmethod
+    def _validate_peer_bot_transfer_document(value: Any) -> None:
+        if not isinstance(value, dict) or set(value) != {
+            "schema_version",
+            "enabled",
+            "bots",
+            "commands",
+            "policies",
+            "updated_at",
+        }:
+            raise DataTransferError("invalid peer bot registry document")
+        if value.get("schema_version") != PEER_BOT_REGISTRY_VERSION:
+            raise DataTransferError("unsupported peer bot registry version")
+        if not isinstance(value.get("enabled"), bool):
+            raise DataTransferError("invalid peer bot registry enabled state")
+        if (
+            not isinstance(value.get("updated_at"), (int, float))
+            or isinstance(value.get("updated_at"), bool)
+            or not math.isfinite(float(value.get("updated_at")))
+            or float(value.get("updated_at")) < 0
+        ):
+            raise DataTransferError("invalid peer bot registry timestamp")
+        policies = value.get("policies")
+        if not isinstance(policies, dict) or set(policies) != {
+            "max_calls_per_turn",
+            "cooldown_seconds",
+            "pending_ttl_seconds",
+            "max_chain_depth",
+        }:
+            raise DataTransferError("invalid peer bot registry policies")
+        if policies.get("max_calls_per_turn") != 1 or policies.get("max_chain_depth") != 1:
+            raise DataTransferError("invalid peer bot loop policy")
+        try:
+            cooldown = float(policies.get("cooldown_seconds"))
+            ttl = float(policies.get("pending_ttl_seconds"))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise DataTransferError("invalid peer bot timing policy") from exc
+        if not math.isfinite(cooldown) or not 0 <= cooldown <= 3600:
+            raise DataTransferError("invalid peer bot cooldown")
+        if not math.isfinite(ttl) or not 1 <= ttl <= 600:
+            raise DataTransferError("invalid peer bot pending ttl")
+
+        bots = value.get("bots")
+        commands = value.get("commands")
+        if not isinstance(bots, dict) or not isinstance(commands, dict):
+            raise DataTransferError("invalid peer bot registry collections")
+        for user_id, bot in bots.items():
+            if (
+                not isinstance(user_id, str)
+                or _PEER_BOT_TRANSFER_ID_RE.fullmatch(user_id) is None
+                or not isinstance(bot, dict)
+            ):
+                raise DataTransferError("invalid peer bot identity")
+            if set(bot) != {
+                "user_id",
+                "nickname",
+                "status",
+                "source",
+                "manual_override",
+                "command_ids",
+                "updated_at",
+            }:
+                raise DataTransferError("invalid peer bot fields")
+            if (
+                bot.get("user_id") != user_id
+                or bot.get("status") != "approved"
+                or bot.get("source") != "manual"
+                or bot.get("manual_override") is not True
+                or not isinstance(bot.get("nickname"), str)
+                or len(bot.get("nickname")) > 80
+                or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in bot.get("nickname"))
+                or not isinstance(bot.get("command_ids"), list)
+                or any(
+                    not isinstance(command_id, str)
+                    or _PEER_BOT_TRANSFER_ID_RE.fullmatch(command_id) is None
+                    for command_id in bot.get("command_ids", [])
+                )
+                or not isinstance(bot.get("updated_at"), (int, float))
+                or isinstance(bot.get("updated_at"), bool)
+                or not math.isfinite(float(bot.get("updated_at")))
+                or float(bot.get("updated_at")) < 0
+            ):
+                raise DataTransferError("invalid approved peer bot")
+        for command_id, command in commands.items():
+            if (
+                not isinstance(command_id, str)
+                or _PEER_BOT_TRANSFER_ID_RE.fullmatch(command_id) is None
+                or not isinstance(command, dict)
+            ):
+                raise DataTransferError("invalid peer bot command identity")
+            if set(command) != {
+                "command_id",
+                "target_bot_id",
+                "full_template",
+                "command_head",
+                "parameter_schema",
+                "risk_level",
+                "status",
+                "source",
+                "manual_override",
+                "version",
+                "updated_at",
+            }:
+                raise DataTransferError("invalid peer bot command fields")
+            target = str(command.get("target_bot_id", "") or "")
+            if (
+                command.get("command_id") != command_id
+                or target not in bots
+                or command.get("status") != "approved"
+                or command.get("source") != "manual"
+                or command.get("manual_override") is not True
+                or command.get("risk_level") not in COMMAND_RISKS
+                or command_id not in bots[target].get("command_ids", [])
+                or not isinstance(command.get("version"), int)
+                or isinstance(command.get("version"), bool)
+                or command.get("version") < 1
+                or not isinstance(command.get("updated_at"), (int, float))
+                or isinstance(command.get("updated_at"), bool)
+                or not math.isfinite(float(command.get("updated_at")))
+                or float(command.get("updated_at")) < 0
+            ):
+                raise DataTransferError("invalid approved peer bot command")
+            try:
+                validated = validate_command_template(
+                    command.get("full_template", ""),
+                    parameter_schema=command.get("parameter_schema"),
+                    max_chars=4000,
+                )
+            except PeerBotRegistryError as exc:
+                raise DataTransferError("invalid peer bot command template") from exc
+            if (
+                validated.full_template != command.get("full_template")
+                or validated.command_head != command.get("command_head")
+                or validated.parameter_schema != command.get("parameter_schema")
+            ):
+                raise DataTransferError("non-canonical peer bot command")
+        referenced = {
+            command_id
+            for bot in bots.values()
+            for command_id in bot.get("command_ids", [])
+        }
+        if referenced != set(commands):
+            raise DataTransferError("peer bot command reference mismatch")
 
     @staticmethod
     def _safe_profile_json(value: Any, *, expected_group_id: str = "") -> dict[str, Any]:
@@ -874,6 +1108,11 @@ class DataTransferService:
                     raise DataTransferError("invalid group state")
                 if set((data.get("group_config") or {})) - GROUP_CONFIG_FIELDS or set((data.get("kv") or {})) - GROUP_KV_NAMESPACES:
                     raise DataTransferError("group state contains forbidden fields")
+                peer_state = (data.get("kv") or {}).get("peer_bot_registry")
+                if peer_state is not None:
+                    if int(manifest.get("version", 0) or 0) < 4:
+                        raise DataTransferError("peer bot registry requires package version 4")
+                    self._validate_peer_bot_transfer_document(peer_state)
                 continue
             if name == "local_user_profiles":
                 if not isinstance(data, list):
@@ -1407,7 +1646,26 @@ class DataTransferService:
             except Exception: root = {}
             if not isinstance(root, dict): root = {}
             if mode == "merge" and isinstance(root.get(group_id), dict) and isinstance(value, dict):
-                root[group_id] = {**root[group_id], **value}
+                existing = root[group_id]
+                if namespace == "peer_bot_registry":
+                    root[group_id] = {
+                        **existing,
+                        **value,
+                        "bots": {
+                            **(existing.get("bots") if isinstance(existing.get("bots"), dict) else {}),
+                            **(value.get("bots") if isinstance(value.get("bots"), dict) else {}),
+                        },
+                        "commands": {
+                            **(existing.get("commands") if isinstance(existing.get("commands"), dict) else {}),
+                            **(value.get("commands") if isinstance(value.get("commands"), dict) else {}),
+                        },
+                        "policies": {
+                            **(existing.get("policies") if isinstance(existing.get("policies"), dict) else {}),
+                            **(value.get("policies") if isinstance(value.get("policies"), dict) else {}),
+                        },
+                    }
+                else:
+                    root[group_id] = {**existing, **value}
             else:
                 root[group_id] = value
             conn.execute("INSERT INTO kv_store(namespace,key,value,updated_at) VALUES(?,'__root__',?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", (namespace, json.dumps(root, ensure_ascii=False), time.time()))

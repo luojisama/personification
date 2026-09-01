@@ -63,8 +63,115 @@ def test_group_safe_export_scope_and_secret_exclusion(transfer) -> None:
         assert manifest["scope"] == {"kind": "group", "group_id": "g1"}
         assert manifest["source"] == {"bot_id": "bot1", "group_id": "g1"}
         assert "auth" in manifest["excluded"] and "qzone" in manifest["excluded"]
-        assert manifest["version"] == 3
+        assert manifest["version"] == 4
         assert "user_policy" in manifest["excluded"]
+
+
+def test_peer_bot_registry_transfer_is_v4_approved_only(transfer) -> None:
+    service, db_path = transfer
+    _seed(db_path)
+    registry_root = {
+        "g1": {
+            "schema_version": 1,
+            "enabled": True,
+            "bots": {
+                "20002": {
+                    "user_id": "20002",
+                    "nickname": "Usagi",
+                    "status": "approved",
+                    "source": "manual",
+                    "manual_override": True,
+                    "command_ids": ["mc_say", "candidate_command"],
+                    "updated_at": 2,
+                },
+                "30003": {
+                    "user_id": "30003",
+                    "nickname": "candidate private observation",
+                    "status": "candidate",
+                    "confidence": 0.99,
+                    "evidence_tags": ["fixed_format"],
+                    "command_ids": [],
+                },
+            },
+            "commands": {
+                "mc_say": {
+                    "command_id": "mc_say",
+                    "target_bot_id": "20002",
+                    "full_template": ".mc say {message}",
+                    "command_head": ".mc say",
+                    "parameter_schema": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "maxLength": 160}},
+                        "required": ["message"],
+                        "additionalProperties": False,
+                    },
+                    "risk_level": "write",
+                    "status": "approved",
+                    "source": "llm_observation",
+                    "manual_override": False,
+                    "version": 1,
+                    "updated_at": 2,
+                },
+                "candidate_command": {
+                    "command_id": "candidate_command",
+                    "target_bot_id": "20002",
+                    "full_template": "/candidate",
+                    "status": "candidate",
+                },
+            },
+            "policies": {
+                "max_calls_per_turn": 1,
+                "cooldown_seconds": 10,
+                "pending_ttl_seconds": 30,
+                "max_chain_depth": 1,
+            },
+            "updated_at": 2,
+        }
+    }
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(namespace,key,value,updated_at) VALUES('peer_bot_registry','__root__',?,2)",
+            (json.dumps(registry_root),),
+        )
+        conn.commit()
+
+    exported = service.create_export(
+        bot_id="bot1",
+        group_id="g1",
+        datasets=["group_state"],
+    )
+    with zipfile.ZipFile(service.export_path(exported["task_id"])) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        group_state = json.loads(archive.read("datasets/group_state.json"))
+
+    assert manifest["version"] == 4
+    transferred = group_state["kv"]["peer_bot_registry"]
+    assert set(transferred["bots"]) == {"20002"}
+    assert set(transferred["commands"]) == {"mc_say"}
+    assert "confidence" not in transferred["bots"]["20002"]
+    assert "evidence_tags" not in transferred["bots"]["20002"]
+    assert "pending_requests" not in transferred
+    assert all(command["status"] == "approved" for command in transferred["commands"].values())
+    assert transferred["commands"]["mc_say"]["source"] == "manual"
+    assert transferred["commands"]["mc_say"]["manual_override"] is True
+    service._validate_peer_bot_transfer_document(transferred)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        service._apply_group_state(
+            conn,
+            "g1",
+            {"group_config": {}, "kv": {"peer_bot_registry": transferred}},
+            "merge",
+        )
+        conn.commit()
+        root = json.loads(
+            conn.execute(
+                "SELECT value FROM kv_store WHERE namespace='peer_bot_registry' AND key='__root__'"
+            ).fetchone()["value"]
+        )
+    assert set(root["g1"]["bots"]) == {"20002", "30003"}
+    assert root["g1"]["bots"]["30003"]["status"] == "candidate"
 
 
 def test_v1_package_remains_import_compatible(transfer) -> None:
@@ -224,7 +331,7 @@ def test_v3_meme_dictionary_transfer_excludes_login_and_author_fingerprints(tran
         payload_bytes = archive.read("datasets/meme_dictionary.json")
         payload = json.loads(payload_bytes)
 
-    assert manifest["version"] == 3
+    assert manifest["version"] == 4
     assert manifest["datasets"] == ["meme_dictionary"]
     rendered = payload_bytes.decode("utf-8")
     assert "刘涛" in rendered
@@ -652,7 +759,7 @@ def test_v3_filters_blocked_users_and_transfers_visual_evidence_without_hashes(
             for name in archive.namelist()
             if name.startswith("datasets/")
         )
-    assert manifest["version"] == 3
+    assert manifest["version"] == 4
     assert len(visual_rows) == 2
     assert all("avatar_hash" not in key for row in visual_rows for key in row)
     assert b"user_policy_state" not in combined

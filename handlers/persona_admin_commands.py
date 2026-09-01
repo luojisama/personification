@@ -50,6 +50,7 @@ from ..core.model_router import (
     resolve_model_role,
 )
 from ..core.provider_router import get_provider_failure_snapshot, normalize_api_type, parse_api_pool_config
+from ..core.peer_bot_registry import PeerBotRegistryError
 from ..core.runtime_config import get_runtime_load_info
 from ..utils import get_group_config, is_group_whitelisted
 from .runtime_commands import handle_git_update_command as _handle_git_update_command
@@ -98,6 +99,10 @@ _COMMAND_ALIASES = {
     "构建": "template",
     "人设构建": "template",
     "人格构建": "template",
+    "peerbot": "peer_bot",
+    "peer-bot": "peer_bot",
+    "群bot": "peer_bot",
+    "群机器人": "peer_bot",
 }
 _SUBCOMMAND_ALIASES = {
     "list": "list",
@@ -272,6 +277,7 @@ def _root_help_text() -> str:
         "- 拟人 定时 状态：查看定时任务注册状态、下次运行时间和功能开关。",
         "- 拟人 空间 状态|测试 <QQ号/@用户>：查看空间任务状态，或对指定好友空间执行一次测试互动扫描。",
         "- 拟人 表情包 整理|清理|回滚：整理表情包库（去重/去低质量）、清理过期 trash、回滚最近一次整理。",
+        "- 拟人 群Bot 列表|发现|确认|忽略|启用|停用|命令|循环复位：管理当前群的外部 Bot 协作。",
         "- 拟人 人设构建 <作品名> <角色名>：从百科/联网资料生成角色人设模板，输出聊天记录并附带文件。",
         "",
         "旧命令兼容（仍可用，下面直接说明用途）：",
@@ -898,6 +904,25 @@ async def dispatch_persona_admin_command(
         await matcher.finish(await handle_sticker_command(bundle, event=event, tokens=rest))
         return
 
+    if command == "peer_bot":
+        group_id = str(getattr(event, "group_id", "") or "").strip()
+        if not group_id:
+            await matcher.finish("群Bot 管理命令只能在目标群内使用。")
+        if not can_manage_sensitive_action(
+            event=event,
+            superusers=bundle.superusers,
+            allow_group_admin=True,
+            target_group_id=group_id,
+        ):
+            await matcher.finish(_admin_error())
+        await matcher.finish(
+            await handle_peer_bot_command(
+                bundle,
+                group_id=group_id,
+                tokens=rest,
+            )
+        )
+
     if command == "lore":
         if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):
             await matcher.finish(_admin_error())
@@ -921,6 +946,153 @@ async def dispatch_persona_admin_command(
         return
 
     await matcher.finish("未识别的子命令。可用“拟人 帮助”或”/persona help”查看帮助。")
+
+
+def _peer_bot_usage() -> str:
+    return (
+        "用法：\n"
+        "- 拟人 群Bot 列表\n"
+        "- 拟人 群Bot 发现\n"
+        "- 拟人 群Bot 确认 <QQ号>\n"
+        "- 拟人 群Bot 忽略 <QQ号>\n"
+        "- 拟人 群Bot 启用|停用\n"
+        "- 拟人 群Bot 命令 添加 <QQ号> <read|write|admin|dangerous> <完整命令模板>\n"
+        "- 拟人 群Bot 命令 确认 <QQ号> <命令ID>\n"
+        "- 拟人 群Bot 命令 删除 <QQ号> <命令ID>\n"
+        "- 拟人 群Bot 循环复位"
+    )
+
+
+def _format_peer_bot_list(registry: Any, tracker: Any, group_id: str) -> str:
+    group = registry.get_group(group_id)
+    bots = registry.list_group_bots(group_id)
+    lines = [
+        f"本群 Peer Bot：{'已启用' if group.get('enabled') else '已停用'}",
+        (
+            "策略：单回合 1 次 / 深度 1 / "
+            f"冷却 {group.get('policies', {}).get('cooldown_seconds', 10)} 秒 / "
+            f"等待 {group.get('policies', {}).get('pending_ttl_seconds', 30)} 秒"
+        ),
+    ]
+    if not bots:
+        lines.append("暂无 Bot 候选或管理员配置。")
+    commands = group.get("commands", {})
+    for bot in bots:
+        lines.append(
+            f"- {bot.get('nickname') or '未命名'} ({bot.get('user_id')}): "
+            f"{bot.get('status')} / 置信度 {float(bot.get('confidence', 0) or 0):.2f} / "
+            f"来源 {bot.get('source', 'unknown')}"
+        )
+        for command_id in bot.get("command_ids", []):
+            command = commands.get(command_id)
+            if not isinstance(command, dict):
+                continue
+            lines.append(
+                f"  · {command_id}: {command.get('full_template')} "
+                f"[{command.get('risk_level')}/{command.get('status')}]"
+            )
+    if tracker is not None:
+        snapshot = tracker.snapshot(group_id=group_id)
+        lines.append(f"进程内等待：{snapshot.get('pending_count', 0)}；冷却项：{snapshot.get('cooldown_count', 0)}")
+    lines.append("候选不会自动获得调用权限；admin/dangerous 模板即使确认也不会被 Agent 调用。")
+    return "\n".join(lines)
+
+
+async def handle_peer_bot_command(
+    bundle: Any,
+    *,
+    group_id: str,
+    tokens: list[str],
+) -> str:
+    registry = getattr(bundle, "peer_bot_registry", None)
+    observer = getattr(bundle, "peer_bot_observer", None)
+    tracker = getattr(bundle, "peer_bot_tracker", None)
+    if registry is None:
+        return "Peer Bot 注册表当前不可用。"
+    action = str(tokens[0] if tokens else "列表").strip().lower()
+    try:
+        if action in {"列表", "list"}:
+            return _format_peer_bot_list(registry, tracker, group_id)
+        if action in {"发现", "discover"}:
+            if observer is None:
+                return "Peer Bot 观察器当前不可用。"
+            results = await observer.flush_group(group_id)
+            return (
+                f"已评估本群 {len(results)} 个已缓冲观察微批；只会产生待确认候选。\n"
+                + _format_peer_bot_list(registry, tracker, group_id)
+            )
+        if action in {"启用", "enable"}:
+            registry.set_settings(group_id, enabled=True)
+            return "已启用本群 Peer Bot 协作；仍只允许管理员确认过的 Bot 和命令。"
+        if action in {"停用", "disable"}:
+            registry.set_settings(group_id, enabled=False)
+            return "已停用本群 Peer Bot 协作。"
+        if action in {"循环复位", "reset-loop", "reset"}:
+            if tracker is None:
+                return "Peer Bot 循环保护当前不可用。"
+            snapshot = tracker.reset_loop(group_id=group_id)
+            return f"已复位本群进程内循环保护；pending={snapshot.get('pending_count', 0)}，不会自动重发。"
+        if action in {"确认", "approve", "忽略", "reject"}:
+            if len(tokens) != 2 or not str(tokens[1]).isdigit():
+                return _peer_bot_usage()
+            normalized_action = "approve" if action in {"确认", "approve"} else "reject"
+            bot_state = registry.set_bot_status(
+                group_id,
+                user_id=str(tokens[1]),
+                action=normalized_action,
+            )
+            return f"已将 {tokens[1]} 标记为 {bot_state.get('status') if bot_state else 'candidate'}。"
+        if action not in {"命令", "command", "commands"} or len(tokens) < 2:
+            return _peer_bot_usage()
+
+        command_action = str(tokens[1]).strip().lower()
+        if command_action in {"添加", "add"}:
+            if len(tokens) < 5 or not str(tokens[2]).isdigit():
+                return _peer_bot_usage()
+            risk_level = str(tokens[3]).strip().lower()
+            full_template = " ".join(tokens[4:]).strip()
+            command = registry.upsert_command(
+                group_id,
+                target_bot_id=str(tokens[2]),
+                full_template=full_template,
+                parameter_schema=None,
+                risk_level=risk_level,
+                status="candidate",
+                source="manual",
+                manual_override=True,
+            )
+            return (
+                f"已添加待确认命令 {command.get('command_id')}：{command.get('full_template')} "
+                f"[{command.get('risk_level')}]。请再执行“拟人 群Bot 命令 确认 {tokens[2]} {command.get('command_id')}”。"
+            )
+        if command_action in {"确认", "approve", "删除", "delete", "remove"}:
+            if len(tokens) != 4 or not str(tokens[2]).isdigit():
+                return _peer_bot_usage()
+            if command_action in {"确认", "approve"}:
+                command = registry.set_command_status(
+                    group_id,
+                    target_bot_id=str(tokens[2]),
+                    command_id=str(tokens[3]),
+                    action="approve",
+                )
+                return f"命令 {command.get('command_id')} 已确认；风险等级 {command.get('risk_level')}。"
+            deleted = registry.delete_command(
+                group_id,
+                target_bot_id=str(tokens[2]),
+                command_id=str(tokens[3]),
+            )
+            return "命令已删除。" if deleted else "目标命令不存在，无需删除。"
+        return _peer_bot_usage()
+    except PeerBotRegistryError as exc:
+        return f"Peer Bot 管理失败：{str(exc)}"
+    except Exception as exc:
+        logger = getattr(bundle, "logger", None)
+        if logger is not None:
+            try:
+                logger.warning(f"拟人插件：Peer Bot 管理命令异常: {type(exc).__name__}")
+            except Exception:
+                pass
+        return "Peer Bot 管理失败：peer_bot_admin_operation_failed"
 
 
 def render_help(bundle: Any, *, event: Any, tokens: list[str]) -> str:

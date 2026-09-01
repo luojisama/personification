@@ -98,13 +98,14 @@ async function openGroup(gid) {
     state.selectedGroup = gid;
     state.groupRawChat = null;
     state.groupAliasDrafts = {};
-    const [personas, style, knowledge, memes, agentState, schedule] = await Promise.all([
+    const [personas, style, knowledge, memes, agentState, schedule, peerBots] = await Promise.all([
       api("/groups/" + encodeURIComponent(gid) + "/personas"),
       api("/groups/" + encodeURIComponent(gid) + "/style"),
       api("/groups/" + encodeURIComponent(gid) + "/knowledge").catch(() => ({knowledge: [], autobuild_status: null})),
       api("/groups/" + encodeURIComponent(gid) + "/memes").catch(() => ({memes: []})),
       api("/groups/" + encodeURIComponent(gid) + "/agent-state").catch(() => null),
       api("/groups/" + encodeURIComponent(gid) + "/schedule").catch(() => null),
+      api("/groups/" + encodeURIComponent(gid) + "/peer-bots").catch(() => null),
     ]);
     state.groupPersonas = personas.profiles;
     state.groupFavorability = personas.group_favorability || null;
@@ -114,6 +115,9 @@ async function openGroup(gid) {
     state.groupMemes = memes.memes || [];
     state.groupAgentState = agentState;
     state.groupSchedule = schedule;
+    state.groupPeerBots = peerBots;
+    state.groupPeerCommandDraft = null;
+    state.groupPeerDryRun = "";
     render();
   } catch (e) { alertFlash("err", e.message); }
 }
@@ -150,6 +154,7 @@ async function refreshGroupDetailLight() {
   state.groupFavorability = personas.group_favorability || state.groupFavorability;
   state.groupAgentState = agentState;
 }
+
 
 async function saveGroupMemberAliases(uid) {
   const gid = state.selectedGroup;
@@ -458,6 +463,7 @@ function renderGroupDetail() {
     ${renderAdminOperations("group","群管理操作诊断")}
     ${renderFavorabilityCard(state.groupFavorability, "群好感度")}
     ${renderGroupAgentState()}
+    ${renderGroupPeerBots()}
     ${renderGroupScheduleCard()}
     ${renderGroupStyle(style)}
     ${renderGroupKnowledgeCard()}

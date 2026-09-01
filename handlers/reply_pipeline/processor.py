@@ -469,18 +469,14 @@ def _should_regenerate_for_banter(
     return str(message_intent or "").strip() == "banter"
 
 
-def _policy_direct_closure_text(policy_decision: dict[str, Any]) -> str:
-    return "这个话题我不参与，我们换个话题吧。"
-
-
-async def _send_policy_direct_closure(
-    bot: Any,
+async def _record_policy_direct_closure_silence(
+    _bot: Any,
     event: Any,
     state: Dict[str, Any],
     deps: ReplyProcessorDeps,
     policy_decision: dict[str, Any],
 ) -> None:
-    """Send the one-shot policy closure without entering Agent/history/memory."""
+    """Convert legacy direct-closure state into an observable silent turn."""
     runtime = deps.runtime
     trace_mod = None
     trace_id = ""
@@ -513,66 +509,22 @@ async def _send_policy_direct_closure(
         trace_mod = None
         trace_id = ""
 
-    if reason_code == "classifier_unavailable":
-        if trace_mod is not None and trace_id:
-            trace_mod.record_stage(
-                trace_id=trace_id,
-                key="policy_no_reply",
-                label="策略分类器不可用",
-                status="warn",
-                detail="fail_closed=true outbound=false history=false memory=false",
-            )
-            trace_mod.finish_trace(
-                trace_id=trace_id,
-                outcome="no_reply",
-                diagnosis_code="policy_classifier_unavailable",
-                detail={"reason": "classifier_unavailable"},
-            )
-        return
-
-    try:
-        result = await _dispatch_reply_part(
-            bot=bot,
-            event=event,
-            payload=_policy_direct_closure_text(policy_decision),
-            ledger=getattr(runtime, "qq_outbound_ledger", None),
-            surface="policy_direct_closure",
-            reply_trace_id=trace_id,
-        )
-    except Exception as exc:
-        logger = getattr(runtime, "logger", None)
-        if logger is not None:
-            logger.warning(
-                f"[user_policy] direct closure send failed: {type(exc).__name__}"
-            )
-        if trace_mod is not None and trace_id:
-            trace_mod.record_stage(
-                trace_id=trace_id,
-                key="policy_closure_send",
-                label="策略提示发送",
-                status="error",
-                detail=f"type={type(exc).__name__}",
-            )
-            trace_mod.finish_trace(
-                trace_id=trace_id,
-                outcome="failed",
-                diagnosis_code="policy_closure_send_failed",
-            )
-        return
-
-    sent = not isinstance(result, SendReceipt) or result.status == "sent"
     if trace_mod is not None and trace_id:
         trace_mod.record_stage(
             trace_id=trace_id,
-            key="policy_closure_send",
-            label="策略提示发送",
-            status="ok" if sent else "error",
-            detail="固定非模型提示已发送" if sent else f"ledger_status={result.status}",
+            key="policy_no_reply",
+            label="策略静默出口",
+            status="warn",
+            detail=(
+                "compat_direct_closure=true outbound=false history=false memory=false "
+                f"reason={reason_code}"
+            ),
         )
         trace_mod.finish_trace(
             trace_id=trace_id,
-            outcome="ok" if sent else "failed",
-            diagnosis_code="policy_direct_closure" if sent else "outbound_send_failed",
+            outcome="no_reply",
+            diagnosis_code="policy_direct_closure_silenced",
+            detail={"silent": True, "compatibility": "direct_closure"},
         )
 
 
@@ -585,8 +537,13 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
     policy_decision = state.get("user_policy_decision")
     if isinstance(policy_decision, dict) and policy_decision.get("disposition") != "allow":
         if policy_decision.get("disposition") == QQ_POLICY_DIRECT_CLOSURE:
-            if user_policy_gate is None or await user_policy_gate.allows_current(event):
-                await _send_policy_direct_closure(bot, event, state, deps, policy_decision)
+            await _record_policy_direct_closure_silence(
+                bot,
+                event,
+                state,
+                deps,
+                policy_decision,
+            )
         return
     if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
         return

@@ -101,6 +101,7 @@ def test_admin_pages_are_split_and_browser_metrics_stay_local_and_bounded() -> N
         "app-qzone.js",
         "app-identity-policy.js",
         "app-persona-builder.js",
+        "app-group-peer-bots.js",
         "app-groups.js",
     )
 

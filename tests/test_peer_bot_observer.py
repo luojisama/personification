@@ -79,6 +79,35 @@ def test_assessment_parser_is_strict_and_bounded() -> None:
             "command_suggestions": [],
         }
     ) is None
+    assert observer_module.parse_peer_bot_assessment(
+        {
+            "classification": "bot",
+            "confidence": 0.8,
+            "evidence_tags": ["fixed_format"],
+            "command_suggestions": [],
+            "reason": "raw chat quote",
+        }
+    ) is None
+    assert observer_module.parse_peer_bot_assessment(
+        {
+            "classification": "bot",
+            "confidence": 0.8,
+            "evidence_tags": ["explicit_command_reply"],
+            "command_suggestions": [
+                {
+                    "full_template": "/draw",
+                    "parameter_schema": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                    "risk_level": "read",
+                    "reason": "raw chat quote",
+                }
+            ],
+        }
+    ) is None
 
 
 class _Sender:

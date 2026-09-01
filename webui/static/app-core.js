@@ -49,7 +49,7 @@ let state = {
 };
 
 const VIEW_ASSETS = {
-  dashboard:["app-dashboard.js"],health:["app-admin-common.js","app-health-qq.js"],qzone:["app-admin-common.js","app-qzone.js"],personas:["app-admin-common.js","app-identity-policy.js"],groups:["app-admin-common.js","app-groups.js"],group_switch:["app-admin-common.js","app-groups.js"],persona_prompt:["app-tools.js"],persona_builder:["app-admin-common.js","app-persona-builder.js"],qq:["app-health-qq.js"],user_policy:["app-admin-common.js","app-identity-policy.js"],outbound:["app-admin-common.js","app-identity-policy.js"],
+  dashboard:["app-dashboard.js"],health:["app-admin-common.js","app-health-qq.js"],qzone:["app-admin-common.js","app-qzone.js"],personas:["app-admin-common.js","app-identity-policy.js"],groups:["app-admin-common.js","app-group-peer-bots.js","app-groups.js"],group_switch:["app-admin-common.js","app-group-peer-bots.js","app-groups.js"],persona_prompt:["app-tools.js"],persona_builder:["app-admin-common.js","app-persona-builder.js"],qq:["app-health-qq.js"],user_policy:["app-admin-common.js","app-identity-policy.js"],outbound:["app-admin-common.js","app-identity-policy.js"],
   config:["app-mcp.js","app-config.js"],memory:"app-content.js",memory_graph:"app-content.js",stickers:"app-content.js",
   skills:"app-tools.js",mcp:"app-mcp.js",tool_creator:"app-tool-creator.js",plugin_knowledge:"app-tools.js",plugin_manager:"app-tools.js",test:"app-tools.js",
   proactive:"app-activity.js",audit:"app-activity.js",logs:"app-activity.js",traces:"app-activity.js",trace_detail:"app-activity.js",

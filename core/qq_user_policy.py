@@ -407,7 +407,7 @@ class QQUserPolicyGate:
         peer_source_kind = str(
             getattr(event, "_personification_peer_bot_source_kind", "") or ""
         ).strip().lower()
-        if peer_source_kind in {"peer_bot_candidate", "peer_bot_reply", "peer_bot_command"}:
+        if peer_source_kind == "peer_bot_command":
             return QQPolicyDecision(
                 user_id=user_id,
                 event_key=event_key,
@@ -426,6 +426,10 @@ class QQUserPolicyGate:
                 ),
                 authorization=authorization,
             )
+        is_peer_bot_inbound = peer_source_kind in {
+            "peer_bot_candidate",
+            "peer_bot_reply",
+        }
 
         text = _event_text(event)
         if not text:
@@ -489,6 +493,26 @@ class QQUserPolicyGate:
                 authorization=authorization,
             )
 
+        if is_peer_bot_inbound:
+            # Peer Bot replies are external, untrusted input.  They must pass
+            # the same content boundary as human chat before a safe rebuttal
+            # can reach the normal Agent/review pipeline, but they must never
+            # create or mutate a human user-policy profile.
+            return QQPolicyDecision(
+                user_id=user_id,
+                event_key=event_key,
+                surface=surface,
+                channel_key=channel_key,
+                direct=direct,
+                disposition=(
+                    QQ_POLICY_SILENT
+                    if assessment.should_quarantine
+                    else QQ_POLICY_ALLOW
+                ),
+                assessment=assessment,
+                authorization=authorization,
+            )
+
         try:
             result = await asyncio.to_thread(
                 self.service.apply_assessment,
@@ -530,7 +554,11 @@ class QQUserPolicyGate:
         if authorization.blocked:
             disposition = QQ_POLICY_SILENT
         elif assessment.should_quarantine:
-            disposition = QQ_POLICY_DIRECT_CLOSURE_CANDIDATE if direct else QQ_POLICY_SILENT
+            # Confirmed and critical violations are intentionally silent on
+            # every QQ surface.  Keep the legacy direct-closure enum and claim
+            # API readable for old state, but never create new closure
+            # candidates or fixed visible refusals.
+            disposition = QQ_POLICY_SILENT
         else:
             disposition = QQ_POLICY_ALLOW
         return QQPolicyDecision(

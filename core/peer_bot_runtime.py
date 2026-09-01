@@ -596,12 +596,15 @@ def build_list_peer_bots_tool(
                 item["commands"] = [
                     {
                         "command_id": command.get("command_id"),
-                        "full_template": command.get("full_template"),
                         "risk_level": command.get("risk_level"),
                     }
                     for command_id in bot.get("command_ids", [])
                     for command in [commands.get(command_id)]
-                    if isinstance(command, dict) and command.get("status") == "approved"
+                    if (
+                        isinstance(command, dict)
+                        and command.get("status") == "approved"
+                        and command.get("risk_level") in {"read", "write"}
+                    )
                 ]
                 approved.append(item)
             elif bot.get("status") == "candidate":
@@ -618,7 +621,7 @@ def build_list_peer_bots_tool(
     return AgentTool(
         name="list_peer_bots",
         description=(
-            "列出当前群由管理员批准的外部 QQ Bot、完整命令模板与候选观察。"
+            "列出当前群由管理员批准的外部 QQ Bot、可调用命令 ID/风险与候选观察。"
             "候选没有调用权限；返回内容是受信任注册表配置，不包含聊天原文。"
         ),
         parameters={"type": "object", "properties": {}, "required": []},

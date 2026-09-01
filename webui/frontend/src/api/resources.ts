@@ -27,6 +27,8 @@ import type {
   ProactiveStats,
   PluginUpdateOperation,
   PluginUpdateStatus,
+  GroupPeerBotBusinessState,
+  PeerBotCommandTemplate,
 } from "./types";
 
 type UnknownRecord = Record<string, unknown>;
@@ -278,6 +280,27 @@ export const resources = {
   },
   groupBusiness(groupId: string, section: "personas" | "aliases" | "schedule" | "style" | "agent-state" | "knowledge" | "memes", signal?: AbortSignal): Promise<Record<string, unknown>> {
     return api.get(`/group-management/${encodeURIComponent(groupId)}/${section}`, undefined, signal);
+  },
+  groupPeerBots(groupId: string, signal?: AbortSignal): Promise<GroupPeerBotBusinessState> {
+    return api.get(`/group-management/${encodeURIComponent(groupId)}/peer-bots`, undefined, signal);
+  },
+  updateGroupPeerBotSettings(groupId: string, body: { enabled?: boolean; max_calls_per_turn?: 1; cooldown_seconds?: number; pending_ttl_seconds?: number; max_chain_depth?: 1 }): Promise<OperationDiagnostic> {
+    return api.put(`/group-management/${encodeURIComponent(groupId)}/peer-bots/settings`, body);
+  },
+  updateGroupPeerBotStatus(groupId: string, userId: string, action: "approve" | "reject" | "clear", nickname = ""): Promise<OperationDiagnostic> {
+    return api.put(`/group-management/${encodeURIComponent(groupId)}/peer-bots/${encodeURIComponent(userId)}`, { action, nickname });
+  },
+  saveGroupPeerBotCommand(groupId: string, userId: string, commandId: string, command: Pick<PeerBotCommandTemplate, "full_template" | "parameter_schema" | "risk_level" | "status">): Promise<OperationDiagnostic> {
+    return api.put(`/group-management/${encodeURIComponent(groupId)}/peer-bots/${encodeURIComponent(userId)}/commands/${encodeURIComponent(commandId)}`, command);
+  },
+  deleteGroupPeerBotCommand(groupId: string, userId: string, commandId: string): Promise<OperationDiagnostic> {
+    return api.delete(`/group-management/${encodeURIComponent(groupId)}/peer-bots/${encodeURIComponent(userId)}/commands/${encodeURIComponent(commandId)}`);
+  },
+  discoverGroupPeerBots(groupId: string): Promise<OperationDiagnostic> {
+    return api.post(`/group-management/${encodeURIComponent(groupId)}/peer-bots/discover`, {});
+  },
+  resetGroupPeerBotLoop(groupId: string): Promise<OperationDiagnostic> {
+    return api.post(`/group-management/${encodeURIComponent(groupId)}/peer-bots/reset-loop`, {});
   },
   rebuildGroup(groupId: string, kind: "style" | "knowledge"): Promise<Record<string, unknown>> {
     return api.post(`/group-management/${encodeURIComponent(groupId)}/${kind}/rebuild`, { confirm: true });

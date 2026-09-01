@@ -240,6 +240,30 @@ def test_admin_and_dangerous_commands_are_always_rejected(risk, tmp_path) -> Non
     assert bot.sent == []
 
 
+def test_list_tool_exposes_only_callable_ids_and_risks_without_templates(tmp_path) -> None:
+    registry, _cfg, command = _approved_registry()
+    registry.upsert_command(
+        "415442985",
+        target_bot_id="10001",
+        full_template="/admin stop",
+        risk_level="admin",
+        status="approved",
+        source="manual",
+        manual_override=True,
+    )
+    tool = runtime_module.build_list_peer_bots_tool(
+        group_id="415442985",
+        registry=registry,
+        tracker=runtime_module.PeerBotRuntimeTracker(),
+    )
+
+    result = json.loads(asyncio.run(tool.handler()))
+
+    commands = result["approved_bots"][0]["commands"]
+    assert commands == [{"command_id": command["command_id"], "risk_level": "write"}]
+    assert "full_template" not in json.dumps(result)
+
+
 def test_single_turn_limit_applies_after_send_begins(tmp_path) -> None:
     registry, cfg, command = _approved_registry()
     bot = _SentBot()

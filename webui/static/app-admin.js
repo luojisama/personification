@@ -38,6 +38,7 @@
     "app-qzone.js",
     "app-identity-policy.js",
     "app-persona-builder.js",
+    "app-group-peer-bots.js",
     "app-groups.js",
   ];
 

@@ -1,6 +1,6 @@
 FORMAT = "personification-data-package"
-VERSION = 3
-SUPPORTED_VERSIONS = frozenset({1, 2, 3})
+VERSION = 4
+SUPPORTED_VERSIONS = frozenset({1, 2, 3, 4})
 
 V1_DATASETS = (
     "group_messages",
@@ -67,6 +67,10 @@ GROUP_KV_NAMESPACES = frozenset({
     "group_member_aliases", "group_mute_state", "group_style_last_run",
     "group_style_daily_count", "group_knowledge_last_run",
     "group_knowledge_daily_count",
+    # Version 4 transfers only the sanitized, group-local approved Peer Bot
+    # registry document. Process-local pending requests and observations are
+    # deliberately not persisted here.
+    "peer_bot_registry",
 })
 
 EXCLUDED_CATEGORIES = (

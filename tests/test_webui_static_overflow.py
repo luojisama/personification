@@ -22,6 +22,7 @@ def _admin_source() -> str:
             "app-qzone.js",
             "app-identity-policy.js",
             "app-persona-builder.js",
+            "app-group-peer-bots.js",
             "app-groups.js",
         )
     )
@@ -78,7 +79,7 @@ def test_every_static_table_uses_a_named_focusable_scroll_region() -> None:
         sources,
     )
 
-    assert table_count == 49
+    assert table_count == 52
     assert len(regions) == table_count
     assert len(re.findall(r'<table\b[^>]*class="[^"]*\bdata-table\b', sources)) == table_count
     assert re.findall(r'<th\b(?![^>]*\bscope="(?:col|row)")', sources) == []

@@ -147,7 +147,7 @@ def test_legacy_permanent_blacklist_skips_classifier(tmp_path) -> None:  # noqa:
     asyncio.run(run())
 
 
-def test_unaddressed_boundary_is_silent_and_direct_closure_is_one_shot(tmp_path) -> None:  # noqa: ANN001
+def test_confirmed_violation_is_silent_even_when_direct(tmp_path) -> None:  # noqa: ANN001
     async def run() -> None:
         gate, _service, classifier = _gate(tmp_path, _assessment("boundary"))
 
@@ -172,9 +172,9 @@ def test_unaddressed_boundary_is_silent_and_direct_closure_is_one_shot(tmp_path)
         )
 
         assert unaddressed.disposition == qq_policy.QQ_POLICY_SILENT
-        assert first_direct.disposition == qq_policy.QQ_POLICY_DIRECT_CLOSURE
+        assert first_direct.disposition == qq_policy.QQ_POLICY_SILENT
         assert repeated_direct.disposition == qq_policy.QQ_POLICY_SILENT
-        assert private_direct.disposition == qq_policy.QQ_POLICY_DIRECT_CLOSURE
+        assert private_direct.disposition == qq_policy.QQ_POLICY_SILENT
         assert classifier.calls == 4
 
     asyncio.run(run())
@@ -239,7 +239,7 @@ def test_bot_self_message_never_enters_user_classifier(tmp_path) -> None:  # noq
     asyncio.run(run())
 
 
-def test_peer_bot_event_never_enters_human_policy_classifier(tmp_path) -> None:  # noqa: ANN001
+def test_peer_bot_boundary_event_is_silent_without_persisting_human_policy(tmp_path) -> None:  # noqa: ANN001
     async def run() -> None:
         gate, service, classifier = _gate(tmp_path, _assessment("boundary"))
         event = _Event(2, "[MC] 外部 Bot 回复", user_id="peer-bot")
@@ -247,9 +247,26 @@ def test_peer_bot_event_never_enters_human_policy_classifier(tmp_path) -> None: 
 
         decision = await gate.evaluate(event, bot_self_id="bot-1")
 
+        assert decision.disposition == qq_policy.QQ_POLICY_SILENT
+        assert decision.assessment.reason_code == "boundary_topic"
+        assert classifier.calls == 1
+        with sqlite3.connect(service.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM user_policy_events").fetchone()[0] == 0
+
+    asyncio.run(run())
+
+
+def test_peer_bot_safe_event_can_reach_agent_without_human_policy_pollution(tmp_path) -> None:  # noqa: ANN001
+    async def run() -> None:
+        gate, service, classifier = _gate(tmp_path, _assessment())
+        event = _Event(3, "[MC] VikiQAQ: 666", user_id="peer-bot")
+        event._personification_peer_bot_source_kind = "peer_bot_reply"
+
+        decision = await gate.evaluate(event, bot_self_id="bot-1")
+
         assert decision.allow_normal_processing is True
-        assert decision.assessment.reason_code == "peer_bot_event"
-        assert classifier.calls == 0
+        assert decision.assessment.reason_code == "ordinary"
+        assert classifier.calls == 1
         with sqlite3.connect(service.db_path) as conn:
             assert conn.execute("SELECT COUNT(*) FROM user_policy_events").fetchone()[0] == 0
 

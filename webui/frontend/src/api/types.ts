@@ -519,3 +519,99 @@ export interface MultimodalRouteSnapshot {
     ffprobe: { available: boolean; version: string; diagnostic_code: string };
   };
 }
+
+export type PeerBotStatus = "candidate" | "approved" | "rejected";
+export type PeerBotSource = "llm_observation" | "onebot_metadata" | "manual";
+export type PeerBotRiskLevel = "read" | "write" | "admin" | "dangerous";
+
+export interface PeerBotRegistryItem {
+  user_id: string;
+  nickname: string;
+  status: PeerBotStatus;
+  confidence: number;
+  source: PeerBotSource;
+  manual_override: boolean;
+  evidence_tags: string[];
+  command_ids: string[];
+  updated_at: number;
+}
+
+export interface PeerBotCommandTemplate {
+  command_id: string;
+  target_bot_id: string;
+  full_template: string;
+  command_head: string;
+  parameter_schema: {
+    type: "object";
+    properties: Record<string, {
+      type: "string" | "integer" | "number" | "boolean";
+      maxLength?: number;
+      minimum?: number;
+      maximum?: number;
+      enum?: Array<string | number | boolean>;
+    }>;
+    required: string[];
+    additionalProperties: false;
+  };
+  risk_level: PeerBotRiskLevel;
+  status: PeerBotStatus;
+  source: PeerBotSource;
+  manual_override: boolean;
+  version: number;
+  updated_at: number;
+}
+
+export interface PeerBotDiscoverySuggestion {
+  user_id: string;
+  nickname: string;
+  confidence: number;
+  source: PeerBotSource;
+  evidence_tags: string[];
+  reason_code: "peer_bot_candidate";
+}
+
+export interface PeerBotInvocationSummary {
+  target_bot_id: string;
+  tracking_id: string;
+  operation_id: string;
+  command_id: string;
+  send_status: "sent" | "failed" | "unknown";
+  status: "pending" | "completed" | "timeout" | "failed";
+  depth: number;
+  reply_message_count: number;
+  elapsed_ms: number;
+  diagnostic_code: string;
+}
+
+export interface PeerBotLoopProtectionState {
+  pending_count: number;
+  recent_count: number;
+  cooldown_count: number;
+  max_chain_depth: 1;
+  diagnostics: Record<string, number>;
+}
+
+export interface GroupPeerBotBusinessState {
+  group_id: string;
+  enabled: boolean;
+  bots: PeerBotRegistryItem[];
+  commands: PeerBotCommandTemplate[];
+  discovery_suggestions: PeerBotDiscoverySuggestion[];
+  max_command_chars: number;
+  policies: {
+    max_calls_per_turn: 1;
+    cooldown_seconds: number;
+    pending_ttl_seconds: number;
+    max_chain_depth: 1;
+  };
+  pending_count: number;
+  loop_protection: PeerBotLoopProtectionState;
+  recent_invocations: PeerBotInvocationSummary[];
+  observer: {
+    enabled: boolean;
+    pending_messages: number;
+    pending_users: number;
+  };
+  updated_at: number;
+  diagnostic_code: string;
+}

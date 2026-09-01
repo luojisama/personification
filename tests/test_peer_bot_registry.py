@@ -202,6 +202,29 @@ def test_invalid_schema_numbers_use_stable_registry_error() -> None:
         )
 
 
+def test_parameter_enum_preserves_scalar_types_and_rejects_mismatch() -> None:
+    numeric = registry_module.validate_command_template(
+        "/roll {count}",
+        parameter_schema={
+            "type": "object",
+            "properties": {"count": {"type": "integer", "enum": [1, 2, 3]}},
+            "required": ["count"],
+            "additionalProperties": False,
+        },
+    )
+    assert numeric.parameter_schema["properties"]["count"]["enum"] == [1, 2, 3]
+    with pytest.raises(registry_module.PeerBotRegistryError, match="invalid_parameter_enum"):
+        registry_module.validate_command_template(
+            "/roll {count}",
+            parameter_schema={
+                "type": "object",
+                "properties": {"count": {"type": "integer", "enum": ["1"]}},
+                "required": ["count"],
+                "additionalProperties": False,
+            },
+        )
+
+
 def test_legacy_ids_still_silence_but_text_patterns_do_not_decide_identity() -> None:
     legacy = awareness_module.detect_other_bot(user_id="10001", extra_bot_ids=["10001"])
     assert legacy.is_other_bot is True and legacy.suggest_silence is True

@@ -77,6 +77,8 @@ def parse_peer_bot_assessment(raw: Any, *, max_command_chars: int = 500) -> Peer
     payload = _response_payload(raw)
     if not isinstance(payload, dict):
         return None
+    if set(payload) != {"classification", "confidence", "evidence_tags", "command_suggestions"}:
+        return None
     classification = str(payload.get("classification", "") or "").strip().lower()
     if classification not in {"bot", "human", "unknown"}:
         return None
@@ -102,6 +104,8 @@ def parse_peer_bot_assessment(raw: Any, *, max_command_chars: int = 500) -> Peer
     suggestions: list[PeerBotCommandSuggestion] = []
     for item in suggestions_raw:
         if not isinstance(item, dict):
+            return None
+        if set(item) != {"full_template", "parameter_schema", "risk_level"}:
             return None
         template = str(item.get("full_template", "") or "").strip()
         if not template:
@@ -323,6 +327,9 @@ class PeerBotObserver:
         if not packets:
             return {"status": "empty"}
 
+        return await self.evaluate_packets(packets)
+
+    def _consume_daily_quota(self) -> bool:
         now = time.time()
         today = time.strftime("%Y-%m-%d", time.localtime(now))
         if today != self._quota_date:
@@ -333,15 +340,45 @@ class PeerBotObserver:
             int(getattr(self.plugin_config, "personification_peer_bot_detector_daily_quota", 200) or 200),
         )
         if quota and self._quota_count >= quota:
+            return False
+        self._quota_count += 1
+        return True
+
+    async def evaluate_packets(
+        self,
+        packets: list[PeerBotObservationPacket],
+    ) -> dict[str, Any]:
+        """Evaluate one explicitly bounded, single-user observation batch."""
+
+        if not packets:
+            return {"status": "empty"}
+        scope = {(packet.group_id, packet.user_id) for packet in packets}
+        if len(scope) != 1:
+            self._stats["failed"] += 1
+            return {"status": "unknown", "diagnostic": "peer_bot_detector_scope_mismatch"}
+        if not self._consume_daily_quota():
             self._stats["skipped"] += 1
             return {"status": "skipped", "diagnostic": "peer_bot_detector_daily_quota"}
-        self._quota_count += 1
         result = await self._evaluate(packets)
         self._stats["evaluated"] += 1
         return result
 
     async def flush_all(self) -> list[dict[str, Any]]:
         return [await self.flush_key(key) for key in list(self._pending)]
+
+    async def flush_group(self, group_id: str) -> list[dict[str, Any]]:
+        """Evaluate only already-buffered observations for one group.
+
+        The management action never scans arbitrary history and never changes
+        authorization.  Successful model results still enter the registry as
+        candidates through the ordinary observer path.
+        """
+
+        gid = str(group_id or "").strip()
+        if not gid:
+            return []
+        keys = [key for key in list(self._pending) if key[0] == gid]
+        return [await self.flush_key(key) for key in keys]
 
     def _build_messages(self, packets: list[PeerBotObservationPacket]) -> list[dict[str, str]]:
         first = packets[0]

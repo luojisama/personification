@@ -68,6 +68,33 @@ def test_reply_processor_rechecks_active_blacklist_before_lifecycle() -> None:
     assert "_reply_lifecycle_started_at" not in state
 
 
+def test_legacy_direct_closure_is_silent_without_outbound_or_lifecycle(monkeypatch) -> None:  # noqa: ANN001
+    entered: list[object] = []
+
+    async def fake_impl(*args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        entered.append((args, kwargs))
+
+    monkeypatch.setattr(processor, "_process_response_logic_impl", fake_impl)
+    deps = SimpleNamespace(
+        runtime=SimpleNamespace(
+            user_policy_gate=_Gate(True),
+            plugin_config=SimpleNamespace(personification_turn_trace_enabled=False),
+            qq_outbound_ledger=object(),
+        )
+    )
+    state = {
+        "user_policy_decision": {
+            "disposition": "direct_closure",
+            "reason_code": "confirmed_violation",
+        }
+    }
+
+    asyncio.run(processor.process_response_logic(object(), object(), state, deps))
+
+    assert entered == []
+    assert "_reply_lifecycle_started_at" not in state
+
+
 def test_record_handler_rechecks_policy_before_any_write() -> None:
     gate = _Gate(False)
     touched: list[str] = []

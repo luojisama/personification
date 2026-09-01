@@ -184,7 +184,31 @@ def _normalize_parameter_schema(schema: Any, placeholders: tuple[str, ...]) -> d
             enum_raw = raw_property.get("enum")
             if not isinstance(enum_raw, (list, tuple)) or not enum_raw or len(enum_raw) > 30:
                 raise PeerBotRegistryError("invalid_parameter_enum")
-            item["enum"] = [_bounded_text(value, 100) for value in enum_raw]
+            enum_values: list[Any] = []
+            for value in enum_raw:
+                if parameter_type == "string":
+                    if not isinstance(value, str):
+                        raise PeerBotRegistryError("invalid_parameter_enum")
+                    normalized_value: Any = _bounded_text(value, 100)
+                elif parameter_type == "integer":
+                    if isinstance(value, bool) or not isinstance(value, int):
+                        raise PeerBotRegistryError("invalid_parameter_enum")
+                    normalized_value = value
+                elif parameter_type == "number":
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                    ):
+                        raise PeerBotRegistryError("invalid_parameter_enum")
+                    normalized_value = value
+                else:
+                    if not isinstance(value, bool):
+                        raise PeerBotRegistryError("invalid_parameter_enum")
+                    normalized_value = value
+                if normalized_value not in enum_values:
+                    enum_values.append(normalized_value)
+            item["enum"] = enum_values
         properties[name] = item
     required_raw = schema.get("required", list(placeholders))
     if not isinstance(required_raw, (list, tuple)):
@@ -268,6 +292,11 @@ class PeerBotRegistry:
                 int(getattr(self.plugin_config, "personification_peer_bot_max_command_chars", 500) or 500),
             ),
         )
+
+    @property
+    def max_command_chars(self) -> int:
+        """Return the effective safe command limit for management clients."""
+        return self._max_command_chars()
 
     def _mutate_group(self, group_id: Any, mutator: Any) -> dict[str, Any]:
         gid = _safe_id(group_id, field="group_id")
