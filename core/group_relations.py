@@ -43,7 +43,10 @@ def summarize_group_relationships(
         if bool(msg.get("is_bot")):
             return False
         source_kind = str(msg.get("source_kind", "") or "").strip().lower()
-        return source_kind not in {"bot", "plugin", "plugin_command", "system"}
+        return source_kind not in {
+            "bot", "plugin", "plugin_command", "system",
+            "peer_bot_candidate", "peer_bot_reply", "peer_bot_command",
+        }
 
     for msg in messages:
         if not isinstance(msg, dict):

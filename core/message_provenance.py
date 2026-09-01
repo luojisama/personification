@@ -8,6 +8,9 @@ _NON_PERSONA_SOURCE_KINDS = frozenset({
     "plugin",
     "plugin_command",
     "system",
+    "peer_bot_candidate",
+    "peer_bot_reply",
+    "peer_bot_command",
 })
 
 
@@ -44,7 +47,20 @@ def is_personification_reply_record(record: Any, bot_self_id: str = "") -> bool:
 
 
 def is_external_plugin_record(record: Any) -> bool:
-    return source_kind_of(record) == "plugin"
+    return source_kind_of(record) in {
+        "plugin",
+        "peer_bot_candidate",
+        "peer_bot_reply",
+        "peer_bot_command",
+    }
+
+
+def is_peer_bot_record(record: Any) -> bool:
+    return source_kind_of(record) in {
+        "peer_bot_candidate",
+        "peer_bot_reply",
+        "peer_bot_command",
+    }
 
 
 def is_human_chat_record(record: Any, bot_self_id: str = "") -> bool:
@@ -64,5 +80,6 @@ __all__ = [
     "is_external_plugin_record",
     "is_human_chat_record",
     "is_personification_reply_record",
+    "is_peer_bot_record",
     "source_kind_of",
 ]

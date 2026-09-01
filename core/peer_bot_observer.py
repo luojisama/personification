@@ -212,6 +212,18 @@ class PeerBotObserver:
             or bool(getattr(event, "_personification_synthetic", False))
         ):
             return False
+        current_source = str(
+            getattr(event, "_personification_peer_bot_source_kind", "") or ""
+        ).strip().lower()
+        if current_source in {"peer_bot_reply", "peer_bot_command"}:
+            return False
+        try:
+            current_group = self.registry.get_group(group_id)
+            current_bot = current_group.get("bots", {}).get(user_id)
+            if isinstance(current_bot, dict) and current_bot.get("status") in {"approved", "rejected"}:
+                return False
+        except Exception:
+            pass
 
         mentioned_user_ids, is_at_bot = extract_mentioned_ids(
             getattr(event, "message", []) or [],

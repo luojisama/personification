@@ -18,6 +18,7 @@ from ...core.chat_intent import (
 )
 from ...core.command_runtime_context import render_command_runtime_prompt
 from ...core.current_group_context_tool import register_current_group_context_tool
+from ...core.peer_bot_runtime import build_peer_bot_context_episodes, register_peer_bot_tools
 from ...core.group_member_avatar_insight import register_group_member_avatar_insight_tool
 from ...core.emotion_state import (
     build_turn_emotion_prompt_block,
@@ -614,6 +615,8 @@ async def process_yaml_response_logic(
     avatar_pair_runtime: Any = None,
     user_policy_gate: Any = None,
     qq_outbound_ledger: QQOutboundLedger | None = None,
+    peer_bot_registry: Any = None,
+    peer_bot_tracker: Any = None,
     reply_trace_id: str = "",
 ) -> None:
     """处理基于 YAML 模板的新版响应逻辑。"""
@@ -981,6 +984,11 @@ async def process_yaml_response_logic(
             bot_self_id=str(getattr(bot, "self_id", "") or ""),
             repeat_clusters=list(repeat_clusters or []),
             excluded_user_ids=excluded_context_user_ids,
+            peer_bot_episodes=build_peer_bot_context_episodes(
+                group_id=group_id,
+                registry=peer_bot_registry,
+                tracker=peer_bot_tracker,
+            ),
         )
         recent_context_hint = render_group_conversation_context(conversation_context)
         relationship_hint = relationship_hint or conversation_context.relationship_hint
@@ -1743,6 +1751,17 @@ async def process_yaml_response_logic(
             ),
         )
         register_current_user_avatar_tool(agent_tool_registry, profile_service, user_id)
+        register_peer_bot_tools(
+            agent_tool_registry,
+            bot=bot,
+            event=event,
+            registry=peer_bot_registry,
+            tracker=peer_bot_tracker,
+            plugin_config=plugin_config,
+            qq_outbound_ledger=qq_outbound_ledger,
+            record_group_msg=record_group_msg,
+            logger=logger,
+        )
         register_current_group_context_tool(
             agent_tool_registry,
             bot=bot,
@@ -3253,6 +3272,8 @@ def build_yaml_response_processor(
     favorability_service: Any = None,
     user_policy_gate: Any = None,
     qq_outbound_ledger: QQOutboundLedger | None = None,
+    peer_bot_registry: Any = None,
+    peer_bot_tracker: Any = None,
 ) -> Callable[..., Awaitable[None]]:
     async def _processor(
         bot: Any,
@@ -3362,6 +3383,14 @@ def build_yaml_response_processor(
             qq_outbound_ledger=runtime_overrides.get(
                 "qq_outbound_ledger",
                 qq_outbound_ledger,
+            ),
+            peer_bot_registry=runtime_overrides.get(
+                "peer_bot_registry",
+                peer_bot_registry,
+            ),
+            peer_bot_tracker=runtime_overrides.get(
+                "peer_bot_tracker",
+                peer_bot_tracker,
             ),
             reply_trace_id=str(runtime_overrides.get("reply_trace_id", "") or ""),
         )

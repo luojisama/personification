@@ -107,6 +107,9 @@ def _load_messages_since(
                 "system",
                 "self_log",
                 "self_reply",
+                "peer_bot_candidate",
+                "peer_bot_reply",
+                "peer_bot_command",
             }:
                 continue
             text = ""

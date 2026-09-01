@@ -237,3 +237,20 @@ def test_bot_self_message_never_enters_user_classifier(tmp_path) -> None:  # noq
         assert classifier.calls == 0
 
     asyncio.run(run())
+
+
+def test_peer_bot_event_never_enters_human_policy_classifier(tmp_path) -> None:  # noqa: ANN001
+    async def run() -> None:
+        gate, service, classifier = _gate(tmp_path, _assessment("boundary"))
+        event = _Event(2, "[MC] 外部 Bot 回复", user_id="peer-bot")
+        event._personification_peer_bot_source_kind = "peer_bot_reply"
+
+        decision = await gate.evaluate(event, bot_self_id="bot-1")
+
+        assert decision.allow_normal_processing is True
+        assert decision.assessment.reason_code == "peer_bot_event"
+        assert classifier.calls == 0
+        with sqlite3.connect(service.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM user_policy_events").fetchone()[0] == 0
+
+    asyncio.run(run())

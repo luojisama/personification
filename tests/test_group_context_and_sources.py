@@ -271,6 +271,49 @@ def test_group_context_renders_plugin_command_source() -> None:
     assert "来源=用户调用其它插件/命令" in text
 
 
+def test_record_and_context_preserve_peer_bot_reply_provenance() -> None:
+    captured: dict[str, object] = {}
+
+    def _record_group_msg(*args, **kwargs):  # noqa: ANN001
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return 1
+
+    event = SimpleNamespace(
+        group_id="123",
+        user_id="peer-1",
+        self_id="bot-1",
+        sender=SimpleNamespace(card="Usagi", nickname="Usagi"),
+        message_id="peer-reply-1",
+        message=None,
+        reply=None,
+        _personification_peer_bot_source_kind="peer_bot_reply",
+        get_plaintext=lambda: "[MC] VikiQAQ: 666",
+    )
+    group_id, should_analyze = event_rules.resolve_record_message(
+        event,
+        get_custom_title=lambda _uid: "",
+        record_group_msg=_record_group_msg,
+    )
+    assert group_id == "123"
+    assert should_analyze is False
+    assert captured["kwargs"]["source_kind"] == "peer_bot_reply"
+    assert captured["kwargs"]["is_bot"] is True
+
+    rendered = group_context.render_group_context_structured(
+        [
+            {
+                "nickname": "Usagi",
+                "user_id": "peer-1",
+                "content": "[MC] VikiQAQ: 666",
+                "source_kind": "peer_bot_reply",
+                "message_id": "peer-reply-1",
+            }
+        ]
+    )
+    assert "来源=群内 Peer Bot 回复" in rendered
+
+
 def test_group_conversation_context_tracks_quote_chain_and_bot_replies() -> None:
     context = group_context.build_group_conversation_context(
         recent_messages=[

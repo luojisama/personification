@@ -15,9 +15,15 @@ async def handle_record_message_event(
     create_scoped_profile_task: Optional[Callable[[str, str], None]] = None,
     favorability_observer: Any = None,
     peer_bot_observer: Any = None,
+    peer_bot_coordinator: Any = None,
 ) -> None:
     if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
         return
+    if peer_bot_coordinator is not None:
+        try:
+            peer_bot_coordinator.classify_event(event)
+        except Exception as exc:
+            logger.debug(f"拟人插件：Peer Bot 来源识别失败: {type(exc).__name__}")
     custom_title_getter = get_custom_title or (lambda _user_id: None)
     group_id, should_auto_analyze = resolve_record_message(
         event,
@@ -25,13 +31,21 @@ async def handle_record_message_event(
         record_group_msg=record_group_msg,
         should_trigger_auto_analyze=should_trigger_auto_analyze,
     )
+    peer_source_kind = str(
+        getattr(event, "_personification_peer_bot_source_kind", "") or ""
+    ).strip().lower()
+    is_peer_bot_event = peer_source_kind in {
+        "peer_bot_candidate",
+        "peer_bot_reply",
+        "peer_bot_command",
+    }
     if group_id:
-        if favorability_observer is not None:
+        if favorability_observer is not None and not is_peer_bot_event:
             try:
                 favorability_observer.enqueue_event(event, source="group_message")
             except Exception as exc:
                 logger.debug(f"拟人插件：排队好感度观察失败: {exc}")
-        if peer_bot_observer is not None:
+        if peer_bot_observer is not None and not is_peer_bot_event:
             try:
                 peer_bot_observer.enqueue_event(event, source="group_message")
             except Exception as exc:
@@ -48,7 +62,7 @@ async def handle_record_message_event(
             pass
     if group_id and create_summary_task is not None:
         create_summary_task(group_id)
-    if group_id and create_scoped_profile_task is not None:
+    if group_id and create_scoped_profile_task is not None and not is_peer_bot_event:
         create_scoped_profile_task(group_id, str(getattr(event, "user_id", "") or ""))
     if group_id and should_auto_analyze:
         logger.info(f"拟人插件：群 {group_id} 消息已满 200 条，已创建后台任务进行风格分析...")

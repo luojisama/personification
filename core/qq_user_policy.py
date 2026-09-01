@@ -181,7 +181,10 @@ class QQUserPolicyGate:
         bot_self_id: str = "",
     ) -> bool:
         source_kind = str(message.get("source_kind", "") or "").strip().lower()
-        if source_kind in {"bot", "bot_reply", "plugin", "plugin_command", "system"}:
+        if source_kind in {
+            "bot", "bot_reply", "plugin", "plugin_command", "system",
+            "peer_bot_candidate", "peer_bot_reply", "peer_bot_command",
+        }:
             return True
         if bool(message.get("is_bot")):
             return True
@@ -396,6 +399,29 @@ class QQUserPolicyGate:
                     severity="none",
                     confidence=1.0,
                     reason_code="bot_self_message",
+                    confirmed=True,
+                ),
+                authorization=authorization,
+            )
+
+        peer_source_kind = str(
+            getattr(event, "_personification_peer_bot_source_kind", "") or ""
+        ).strip().lower()
+        if peer_source_kind in {"peer_bot_candidate", "peer_bot_reply", "peer_bot_command"}:
+            return QQPolicyDecision(
+                user_id=user_id,
+                event_key=event_key,
+                surface=surface,
+                channel_key=channel_key,
+                direct=direct,
+                disposition=QQ_POLICY_ALLOW,
+                assessment=PolicyAssessment(
+                    verdict="allow",
+                    category="none",
+                    intent="ordinary",
+                    severity="none",
+                    confidence=1.0,
+                    reason_code="peer_bot_event",
                     confirmed=True,
                 ),
                 authorization=authorization,

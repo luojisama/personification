@@ -286,7 +286,10 @@ def build_avatar_pair_candidates(
         if not isinstance(item, Mapping):
             continue
         source_kind = str(item.get("source_kind", "") or "").strip().lower()
-        if bool(item.get("is_bot")) or source_kind in {"bot_reply", "assistant", "system", "plugin"}:
+        if bool(item.get("is_bot")) or source_kind in {
+            "bot_reply", "assistant", "system", "plugin",
+            "peer_bot_candidate", "peer_bot_reply", "peer_bot_command",
+        }:
             continue
         ordered.append((_normalize_id(item.get("user_id")), _profile_label(item), "近期成员"))
 

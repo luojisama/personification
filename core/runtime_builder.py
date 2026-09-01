@@ -126,6 +126,7 @@ from .memory_store import init_memory_store
 from .favorability_observer import FavorabilityObserver
 from .peer_bot_observer import PeerBotObserver
 from .peer_bot_registry import PeerBotRegistry
+from .peer_bot_runtime import PeerBotCoordinator, PeerBotRuntimeTracker
 from .evolve_group_relations import apply_relation_signal
 from .time_ctx import init_time_context
 from .builtin_hooks import register_all_builtin_hooks
@@ -355,6 +356,13 @@ def build_plugin_runtime(
         registry=peer_bot_registry,
         plugin_config=plugin_config,
         call_ai_api=lite_call_ai_api,
+        logger=logger,
+    )
+    peer_bot_tracker = PeerBotRuntimeTracker()
+    peer_bot_coordinator = PeerBotCoordinator(
+        registry=peer_bot_registry,
+        tracker=peer_bot_tracker,
+        plugin_config=plugin_config,
         logger=logger,
     )
     attention_service = AttentionParticipationService(
@@ -627,6 +635,8 @@ def build_plugin_runtime(
         favorability_service=favorability_service,
         user_policy_gate=qq_user_policy_gate,
         qq_outbound_ledger=qq_outbound_ledger,
+        peer_bot_registry=peer_bot_registry,
+        peer_bot_tracker=peer_bot_tracker,
     )
 
     get_custom_title = build_custom_title_getter(
@@ -721,6 +731,8 @@ def build_plugin_runtime(
             background_intelligence=background_intelligence,
             user_policy_gate=qq_user_policy_gate,
             qq_outbound_ledger=qq_outbound_ledger,
+            peer_bot_registry=peer_bot_registry,
+            peer_bot_tracker=peer_bot_tracker,
         ),
         types=TypeDeps(
             poke_event_cls=poke_event_cls,
@@ -839,6 +851,8 @@ def build_plugin_runtime(
             favorability_service=favorability_service,
             user_policy_gate=qq_user_policy_gate,
             qq_outbound_ledger=qq_outbound_ledger,
+            peer_bot_registry=peer_bot_registry,
+            peer_bot_tracker=peer_bot_tracker,
         )
         if tool_registry is not None and candidate_registry is not None and registry_version is not None:
             tool_registry.replace_all(candidate_registry.all(), expected_version=registry_version)
@@ -931,4 +945,6 @@ def build_plugin_runtime(
         qq_outbound_ledger=qq_outbound_ledger,
         peer_bot_registry=peer_bot_registry,
         peer_bot_observer=peer_bot_observer,
+        peer_bot_tracker=peer_bot_tracker,
+        peer_bot_coordinator=peer_bot_coordinator,
     )

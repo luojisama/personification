@@ -63,6 +63,7 @@ async def _evaluate_personification_rule(
     personification_rule: Callable[[Event, T_State], Any],
     event: Event,
     state: T_State,
+    peer_bot_coordinator: Any = None,
 ) -> dict[str, Any]:
     # plugin_invoker 用 handle_event 重新分发的合成事件与原事件共享 message_id，
     # 会命中下方的规则结果缓存而绕过 personification_rule 顶部的合成事件短路，
@@ -70,6 +71,11 @@ async def _evaluate_personification_rule(
     if getattr(event, "_personification_synthetic", False):
         state["is_random_chat"] = False
         return {"matched": False, "is_random_chat": False}
+    if peer_bot_coordinator is not None:
+        try:
+            peer_bot_coordinator.classify_event(event)
+        except Exception:
+            pass
     cache_key = _build_rule_cache_key(event)
     now_ts = time.time()
     cached = _RULE_EVAL_CACHE.get(cache_key)
@@ -116,6 +122,7 @@ def register_reply_matchers(
     plugin_config: Any,
     finished_exception_cls: Any = None,
     user_policy_gate: Any = None,
+    peer_bot_coordinator: Any = None,
 ) -> Dict[str, Any]:
     response_timeout_seconds = min(
         600.0,
@@ -141,6 +148,7 @@ def register_reply_matchers(
             personification_rule=personification_rule,
             event=event,
             state=state,
+            peer_bot_coordinator=peer_bot_coordinator,
         )
         return bool(result.get("matched")) and not bool(result.get("is_random_chat"))
 
@@ -149,6 +157,7 @@ def register_reply_matchers(
             personification_rule=personification_rule,
             event=event,
             state=state,
+            peer_bot_coordinator=peer_bot_coordinator,
         )
         return bool(result.get("matched")) and bool(result.get("is_random_chat"))
 

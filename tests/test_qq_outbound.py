@@ -274,6 +274,34 @@ def test_dispatch_exception_stays_unknown_saves_no_raw_exception_and_reraises(tm
     assert "raw-exception-secret" not in "\n".join(str(value) for value in row)
 
 
+def test_dispatch_failure_resolver_can_record_an_explicit_failed_receipt(tmp_path) -> None:  # noqa: ANN001
+    ledger, db_path = _ledger(tmp_path)
+
+    class ExplicitRejection(RuntimeError):
+        retcode = 1404
+
+    async def send():  # noqa: ANN202
+        raise ExplicitRejection("raw provider detail")
+
+    with pytest.raises(ExplicitRejection) as captured:
+        asyncio.run(
+            ledger.dispatch(
+                _context("dispatch-explicit-failure"),
+                "safe preview",
+                send,
+                failure_status_resolver=lambda exc: "failed" if getattr(exc, "retcode", 0) else "unknown",
+            )
+        )
+    attached = getattr(captured.value, "qq_outbound_receipt", None)
+    assert attached is not None and attached.status == "failed"
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT status,error_code FROM qq_outbound_ledger WHERE operation_id=?",
+            ("dispatch-explicit-failure",),
+        ).fetchone()
+    assert row == ("failed", "ExplicitRejection:retcode=1404")
+
+
 def test_invalid_normal_send_result_remains_unknown(tmp_path) -> None:  # noqa: ANN001
     ledger, _db_path = _ledger(tmp_path)
 

@@ -255,10 +255,17 @@ def setup_all_matchers(*, deps: MatcherSetupDeps) -> Dict[str, Any]:
         plugin_config=deps.plugin_config,
         finished_exception_cls=deps.finished_exception_cls,
         user_policy_gate=deps.user_policy_gate,
+        peer_bot_coordinator=getattr(deps.runtime_bundle, "peer_bot_coordinator", None),
     )
     handle_reply = reply_matchers["handle_reply"]
 
     async def _record_msg_rule(event: Event) -> bool:
+        coordinator = getattr(deps.runtime_bundle, "peer_bot_coordinator", None)
+        if coordinator is not None:
+            try:
+                coordinator.classify_event(event)
+            except Exception:
+                pass
         return await deps.record_msg_rule_core(
             event,
             user_policy_gate=deps.user_policy_gate,
@@ -333,6 +340,7 @@ def setup_all_matchers(*, deps: MatcherSetupDeps) -> Dict[str, Any]:
             None,
         ),
         peer_bot_observer=getattr(deps.runtime_bundle, "peer_bot_observer", None),
+        peer_bot_coordinator=getattr(deps.runtime_bundle, "peer_bot_coordinator", None),
     )
 
     whitelist_matchers = register_whitelist_matchers(

@@ -31,6 +31,7 @@ from ...core.group_member_avatar_insight import register_group_member_avatar_ins
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_style_policy import build_reply_style_policy_prompt
 from ...core.reply_completion_contract import apply_agent_result_completion_state
+from ...core.peer_bot_runtime import register_peer_bot_tools
 from ...core.visible_output import guard_visible_text
 from ..reply_commit import (
     acquire_reply_commit,
@@ -869,6 +870,17 @@ async def run_agent_if_enabled(
         executor=executor,
         bot=bot,
         plugin_config=runtime.plugin_config,
+    )
+    register_peer_bot_tools(
+        runtime_registry,
+        bot=bot,
+        event=event,
+        registry=getattr(runtime, "peer_bot_registry", None),
+        tracker=getattr(runtime, "peer_bot_tracker", None),
+        plugin_config=runtime.plugin_config,
+        qq_outbound_ledger=getattr(runtime, "qq_outbound_ledger", None),
+        record_group_msg=getattr(runtime, "record_group_msg", None),
+        logger=runtime.logger,
     )
     try:
         skill_runtime_for_images = SkillRuntime(

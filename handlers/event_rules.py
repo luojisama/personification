@@ -477,8 +477,16 @@ def resolve_record_message(
     if custom_title:
         nickname = custom_title
 
-    is_bot_message = bool(self_id) and user_id == self_id
-    source_kind = "plugin" if is_bot_message else ("plugin_command" if is_command_interaction else "user")
+    peer_source_kind = str(
+        getattr(event, "_personification_peer_bot_source_kind", "") or ""
+    ).strip().lower()
+    is_peer_bot_message = peer_source_kind in {"peer_bot_candidate", "peer_bot_reply"}
+    is_bot_message = (bool(self_id) and user_id == self_id) or is_peer_bot_message
+    source_kind = (
+        peer_source_kind
+        if is_peer_bot_message
+        else ("plugin" if is_bot_message else ("plugin_command" if is_command_interaction else "user"))
+    )
     relation_metadata = build_event_relation_metadata(
         event,
         bot_self_id=self_id,

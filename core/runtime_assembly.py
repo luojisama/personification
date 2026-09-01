@@ -153,6 +153,8 @@ class PluginRuntimeBundle:
     qq_outbound_ledger: Any = None
     peer_bot_registry: Any = None
     peer_bot_observer: Any = None
+    peer_bot_tracker: Any = None
+    peer_bot_coordinator: Any = None
     qzone_social_scan: Any = None
     qzone_inbound_poll: Any = None
     qzone_generate_post: Any = None

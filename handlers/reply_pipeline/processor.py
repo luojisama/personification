@@ -60,6 +60,7 @@ from ...core.group_context import (
     render_plugin_episode_trace_detail,
     render_topic_state_trace_detail,
 )
+from ...core.peer_bot_runtime import build_peer_bot_context_episodes
 from ...core.group_mute import refresh_bot_group_mute_state
 from ...core.group_roles import extract_sender_role
 from ...core.target_inference import (
@@ -431,6 +432,8 @@ class RuntimeDeps:
     background_intelligence: Any = None
     user_policy_gate: Any = None
     qq_outbound_ledger: QQOutboundLedger | None = None
+    peer_bot_registry: Any = None
+    peer_bot_tracker: Any = None
 
 
 @dataclass
@@ -1205,7 +1208,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 text=message_content,
                 extra_bot_ids=extra_bot_ids,
             )
-            if peer_decision.is_other_bot and peer_decision.suggest_silence:
+            peer_source_kind = str(
+                getattr(event, "_personification_peer_bot_source_kind", "") or ""
+            ).strip().lower()
+            if (
+                peer_decision.is_other_bot
+                and peer_decision.suggest_silence
+                and peer_source_kind != "peer_bot_reply"
+            ):
                 runtime.logger.info(
                     f"拟人插件：检测到来自其他机器人/管家的消息，跳过本轮 "
                     f"user={user_id} reason={peer_decision.reason}"
@@ -1670,6 +1680,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             bot_self_id=bot_self_id,
             repeat_clusters=repeat_clusters,
             excluded_user_ids=excluded_context_user_ids,
+            peer_bot_episodes=build_peer_bot_context_episodes(
+                group_id=str(group_id),
+                registry=getattr(runtime, "peer_bot_registry", None),
+                tracker=getattr(runtime, "peer_bot_tracker", None),
+            ),
         )
         recent_context_hint = render_group_conversation_context(conversation_context)
         relationship_hint = conversation_context.relationship_hint

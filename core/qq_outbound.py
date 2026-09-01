@@ -450,6 +450,7 @@ class QQOutboundLedger:
         send: Callable[[], Any],
         *,
         now: float | None = None,
+        failure_status_resolver: Callable[[BaseException], str] | None = None,
     ) -> SendReceipt:
         receipt = await asyncio.to_thread(self.begin, context, content, now=now)
         try:
@@ -457,7 +458,7 @@ class QQOutboundLedger:
             if inspect.isawaitable(result):
                 result = await result
         except asyncio.CancelledError as exc:
-            await asyncio.to_thread(
+            updated = await asyncio.to_thread(
                 self._update_dispatch,
                 receipt,
                 status="unknown",
@@ -465,16 +466,32 @@ class QQOutboundLedger:
                 error_code=_exception_error_code(exc),
                 now=now,
             )
+            try:
+                setattr(exc, "qq_outbound_receipt", updated)
+            except Exception:
+                pass
             raise
         except Exception as exc:
-            await asyncio.to_thread(
+            failure_status = "unknown"
+            if callable(failure_status_resolver):
+                try:
+                    candidate = str(failure_status_resolver(exc) or "").strip().lower()
+                    if candidate in {"failed", "unknown"}:
+                        failure_status = candidate
+                except Exception:
+                    failure_status = "unknown"
+            updated = await asyncio.to_thread(
                 self._update_dispatch,
                 receipt,
-                status="unknown",
+                status=failure_status,
                 message_id=None,
                 error_code=_exception_error_code(exc),
                 now=now,
             )
+            try:
+                setattr(exc, "qq_outbound_receipt", updated)
+            except Exception:
+                pass
             raise
 
         message_id = parse_onebot_message_id(result)
