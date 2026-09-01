@@ -33,6 +33,7 @@ def register_chat_matchers(
     user_policy_gate: Any = None,
     create_scoped_profile_task: Callable[[str, str], None] | None = None,
     favorability_observer: Any = None,
+    peer_bot_observer: Any = None,
 ) -> Dict[str, Any]:
     record_msg_matcher = on_message(rule=Rule(record_msg_rule), priority=999, block=False)
 
@@ -50,6 +51,7 @@ def register_chat_matchers(
             user_policy_gate=user_policy_gate,
             create_scoped_profile_task=create_scoped_profile_task,
             favorability_observer=favorability_observer,
+            peer_bot_observer=peer_bot_observer,
         )
 
     sticker_chat_matcher = on_message(rule=Rule(sticker_chat_rule), priority=101, block=True)

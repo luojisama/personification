@@ -124,6 +124,8 @@ from .memory_curator import MemoryCurator
 from .memory_decay import MemoryDecayScheduler
 from .memory_store import init_memory_store
 from .favorability_observer import FavorabilityObserver
+from .peer_bot_observer import PeerBotObserver
+from .peer_bot_registry import PeerBotRegistry
 from .evolve_group_relations import apply_relation_signal
 from .time_ctx import init_time_context
 from .builtin_hooks import register_all_builtin_hooks
@@ -204,7 +206,7 @@ def build_plugin_runtime(
     message_segment_cls: Any,
     md_to_pic: Any,
 ) -> PluginRuntimeBundle:
-    init_data_store(plugin_config, logger=logger)
+    data_store = init_data_store(plugin_config, logger=logger)
     logger = wrap_plugin_logger(logger, config=plugin_config)
     maybe_prune_plugin_logs(config=plugin_config, force=True)
     init_schedule_config(plugin_config)
@@ -344,6 +346,17 @@ def build_plugin_runtime(
             ),
         )
         favorability_service.set_observer(favorability_observer)
+    peer_bot_registry = PeerBotRegistry(
+        store=data_store,
+        plugin_config=plugin_config,
+        logger=logger,
+    )
+    peer_bot_observer = PeerBotObserver(
+        registry=peer_bot_registry,
+        plugin_config=plugin_config,
+        call_ai_api=lite_call_ai_api,
+        logger=logger,
+    )
     attention_service = AttentionParticipationService(
         call_ai_api=intent_call_ai_api,
         logger=logger,
@@ -845,6 +858,9 @@ def build_plugin_runtime(
             else:
                 observer_call_ai_api = new_lite_tool_caller or new_agent_tool_caller
             favorability_observer.set_call_ai_api(observer_call_ai_api)
+        # PeerBotObserver consumes the plain messages -> text caller contract, not ToolCaller.
+        # This wrapper reads current config dynamically and therefore remains valid after reload.
+        peer_bot_observer.set_call_ai_api(lite_call_ai_api)
         if persona_store is not None:
             try:
                 refreshed_persona_caller = build_routed_tool_caller(
@@ -913,4 +929,6 @@ def build_plugin_runtime(
         user_policy_service=user_policy_service,
         qq_user_policy_gate=qq_user_policy_gate,
         qq_outbound_ledger=qq_outbound_ledger,
+        peer_bot_registry=peer_bot_registry,
+        peer_bot_observer=peer_bot_observer,
     )

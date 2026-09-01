@@ -44,9 +44,23 @@ class Config(BaseModel):
     personification_reverify_after_days: int = 30
     personification_stale_after_days: int = 90
 
-    # 其他机器人 / Q 群管家的 user_id（用于 peer_awareness 检测），
-    # 命中后本轮静默，避免 bot 与管家互相对话。
+    # 旧版已知机器人 / 静默名单。它只提供兼容识别，不授予外部命令调用权限。
     personification_peer_bot_ids: List[str] = []
+
+    # 群内独立 QQ Bot 协作。全局与群级开关都默认关闭；LLM 观察只产生候选，
+    # 管理员批准 Bot 和完整命令模板后 Agent 才能调用。
+    personification_peer_bot_enabled: bool = False
+    personification_peer_bot_detection_enabled: bool = True
+    personification_peer_bot_detector_timeout_seconds: float = 15.0
+    personification_peer_bot_detector_batch_max_messages: int = 8
+    personification_peer_bot_detector_batch_max_chars: int = 1200
+    personification_peer_bot_detector_debounce_seconds: float = 30.0
+    personification_peer_bot_detector_daily_quota: int = 200
+    personification_peer_bot_detector_confidence_threshold: float = 0.70
+    personification_peer_bot_max_calls_per_turn: int = 1
+    personification_peer_bot_cooldown_seconds: float = 10.0
+    personification_peer_bot_pending_ttl_seconds: float = 30.0
+    personification_peer_bot_max_command_chars: int = 500
 
     personification_global_enabled: bool = True
     personification_tts_global_enabled: bool = True

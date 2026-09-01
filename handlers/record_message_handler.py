@@ -14,6 +14,7 @@ async def handle_record_message_event(
     user_policy_gate: Any = None,
     create_scoped_profile_task: Optional[Callable[[str, str], None]] = None,
     favorability_observer: Any = None,
+    peer_bot_observer: Any = None,
 ) -> None:
     if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
         return
@@ -30,6 +31,11 @@ async def handle_record_message_event(
                 favorability_observer.enqueue_event(event, source="group_message")
             except Exception as exc:
                 logger.debug(f"拟人插件：排队好感度观察失败: {exc}")
+        if peer_bot_observer is not None:
+            try:
+                peer_bot_observer.enqueue_event(event, source="group_message")
+            except Exception as exc:
+                logger.debug(f"拟人插件：排队 Peer Bot 观察失败: {type(exc).__name__}")
         try:
             from ..core.group_directory import record_observed_group
 

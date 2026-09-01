@@ -332,6 +332,7 @@ def setup_all_matchers(*, deps: MatcherSetupDeps) -> Dict[str, Any]:
             "observer",
             None,
         ),
+        peer_bot_observer=getattr(deps.runtime_bundle, "peer_bot_observer", None),
     )
 
     whitelist_matchers = register_whitelist_matchers(

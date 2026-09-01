@@ -3,8 +3,8 @@
 1. **其他 NoneBot 插件清单**：从 `nonebot.get_loaded_plugins()` 收集
    插件名 + 一句话描述，注入 responder system prompt，避免 bot 把别人的功能
    说成是自己的。
-2. **其他 bot / Q 群管家识别**：用启发式判断当前消息或最近上文是否来自
-   另一个机器人，命中时建议本轮静默，避免 bot 互相对话。
+2. **旧版其他 Bot 兼容识别**：只认平台已知 ID 和管理员配置 ID。消息内容
+   交给 PeerBotObserver 的 LLM 结构化观察，固定样式或关键词不再形成最终结论。
 
 设计要点：所有公开函数对 import 错误、运行时异常都要 silently degrade，
 不能在缺 NoneBot 上下文时阻塞 responder 启动。
@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -117,48 +116,6 @@ _KNOWN_BOT_USER_IDS: set[str] = {
     "1840000000",  # 公司机器人通用号段（保留）
 }
 
-# 启发式：典型管家/系统通报开头。
-# 注意：检测前会先把 text 用 _strip_decoration() 剥掉前导空白 / emoji /
-# 装饰括号块（如 "【群通知】"），让 ^ 锚点匹配真实开头。
-# Chinese 不使用 \b 词边界（CJK 字符相邻都被认为是 word char，\b 不触发）。
-_BOT_LIKE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^欢迎(?:新成员|新人)"),
-    re.compile(r"^我已加入"),
-    re.compile(r"^(?:今日|本群)(?:精华|榜单|签到)"),
-    re.compile(r"^群积分\s*\+"),
-    re.compile(r"\[Q群管家\]"),
-    re.compile(r"^/(?:help|签到|sign|info|stat)"),
-    re.compile(r"^本群.{0,8}已开启"),
-    re.compile(r"^(?:签到成功|打卡成功)"),
-)
-
-# 去除消息前的装饰：空白和常见 emoji / symbol（用 Unicode block 范围而不是
-# 枚举具体字符，避免源码里嵌入 variation-selector / ZWJ 这类不可见控制符）。
-# Symbol-and-pictograph 块: U+2600-U+27BF（杂项符号 + dingbats），
-# U+1F300-U+1FAFF（emoji 主块）。
-_DECORATION_RE = re.compile(
-    r"^[\s☀-➿\U0001f300-\U0001faff]+"
-)
-
-# 剥离一对前导通知括号（含 ≤14 字内部内容）：【群通知】、[系统]、(notice)、〔提示〕。
-# 但保留 [Q群管家] 这类我们用作匹配标记的串，所以用 negative lookahead 跳过。
-_PREFIX_BRACKET_RE = re.compile(
-    r"^[\[【〔(](?!Q群管家)[^\]】〕)]{0,14}[\]】〕)]\s*"
-)
-
-
-def _strip_decoration(text: str) -> str:
-    cleaned = str(text or "")
-    # 反复剥离 emoji/空白 + 通知括号块，直到稳定。最多 4 轮避免病态输入死循环。
-    for _ in range(4):
-        stripped = _DECORATION_RE.sub("", cleaned)
-        stripped = _PREFIX_BRACKET_RE.sub("", stripped).lstrip()
-        if stripped == cleaned:
-            break
-        cleaned = stripped
-    return cleaned
-
-
 @dataclass(frozen=True)
 class PeerBotDecision:
     is_other_bot: bool
@@ -174,8 +131,8 @@ def detect_other_bot(
 ) -> PeerBotDecision:
     """判断当前消息是否来自另一个机器人 / Q 群管家。
 
-    user_id 为空 / extra_bot_ids 含空串时不会误命中；
-    text 在匹配前会剥离前导装饰（空白 / emoji / 通知括号块）。
+    user_id 为空 / extra_bot_ids 含空串时不会误命中。text 参数仅为兼容旧
+    调用签名；正文固定格式、关键词或命令前缀不再直接决定 Bot 身份。
     """
     uid = str(user_id or "").strip()
     if uid:
@@ -185,11 +142,6 @@ def detect_other_bot(
             extras = {x for x in (str(item or "").strip() for item in extra_bot_ids) if x}
             if uid in extras:
                 return PeerBotDecision(is_other_bot=True, reason="config_bot_uid", suggest_silence=True)
-    snippet = _strip_decoration(text)
-    if snippet:
-        for pat in _BOT_LIKE_PATTERNS:
-            if pat.search(snippet):
-                return PeerBotDecision(is_other_bot=True, reason="bot_like_pattern", suggest_silence=True)
     return PeerBotDecision(is_other_bot=False)
 
 

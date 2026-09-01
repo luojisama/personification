@@ -151,6 +151,8 @@ class PluginRuntimeBundle:
     user_policy_service: Any = None
     qq_user_policy_gate: Any = None
     qq_outbound_ledger: Any = None
+    peer_bot_registry: Any = None
+    peer_bot_observer: Any = None
     qzone_social_scan: Any = None
     qzone_inbound_poll: Any = None
     qzone_generate_post: Any = None
