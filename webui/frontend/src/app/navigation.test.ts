@@ -24,6 +24,7 @@ describe("新版分层导航与行为对齐合同", () => {
     expect(NAVIGATION_LEAVES.every((item) => item.level === 3 && item.path?.split("/").length === 4)).toBe(true);
     expect(navigationContext("/runtime/proactive/recent")?.leaf.label).toBe("最近记录");
     expect(navigationContext("/operations/config/media")?.page.label).toBe("配置中心");
+    expect(navigationContext("/persona/groups/qzone-agent")?.leaf.label).toBe("空间互动");
   });
 
   it("旧版 28 个视图都有独立业务组件和行为合同", () => {

@@ -521,7 +521,7 @@ export interface MultimodalRouteSnapshot {
 }
 
 export type PeerBotStatus = "candidate" | "approved" | "rejected";
-export type PeerBotSource = "llm_observation" | "onebot_metadata" | "manual";
+export type PeerBotSource = "llm_observation" | "onebot_metadata" | "manual" | "auto_learned";
 export type PeerBotRiskLevel = "read" | "write" | "admin" | "dangerous";
 
 export interface PeerBotRegistryItem {
@@ -541,10 +541,16 @@ export interface PeerBotCommandTemplate {
   target_bot_id: string;
   full_template: string;
   command_head: string;
+  command_entry: string;
+  subcommands: string[];
+  argument_template: string;
+  description: string;
+  legacy_mode: boolean;
   parameter_schema: {
     type: "object";
     properties: Record<string, {
       type: "string" | "integer" | "number" | "boolean";
+      description?: string;
       maxLength?: number;
       minimum?: number;
       maximum?: number;
@@ -557,6 +563,9 @@ export interface PeerBotCommandTemplate {
   status: PeerBotStatus;
   source: PeerBotSource;
   manual_override: boolean;
+  auto_approved: boolean;
+  evidence_count: number;
+  protocol_source: string;
   version: number;
   updated_at: number;
 }
@@ -603,6 +612,7 @@ export interface GroupPeerBotBusinessState {
     cooldown_seconds: number;
     pending_ttl_seconds: number;
     max_chain_depth: 1;
+    auto_learn_approved_commands: boolean;
   };
   pending_count: number;
   loop_protection: PeerBotLoopProtectionState;
@@ -614,4 +624,39 @@ export interface GroupPeerBotBusinessState {
   };
   updated_at: number;
   diagnostic_code: string;
+}
+
+export interface GroupMemberOption {
+  user_id: string | number;
+  nickname?: string;
+  card?: string;
+  role?: string;
+}
+
+export interface GroupQzoneAgentSettings {
+  enabled: boolean;
+  group_daily_limit: number;
+  target_daily_limit: number;
+  target_cooldown_seconds: number;
+}
+
+export interface GroupQzoneAgentState {
+  group_id: string;
+  global_enabled: boolean;
+  qzone_enabled: boolean;
+  settings: GroupQzoneAgentSettings;
+  limits: Omit<GroupQzoneAgentSettings, "enabled">;
+  quota: {
+    used_today: number;
+    group_daily_limit: number;
+    target_daily_limit: number;
+  };
+  recent_operations: Array<{
+    operation_id: string;
+    action: "like" | "comment";
+    status: "reserved" | "dispatching" | "succeeded" | "definite_failure" | "unknown";
+    result_code: string;
+    created_at: number;
+    updated_at: number;
+  }>;
 }

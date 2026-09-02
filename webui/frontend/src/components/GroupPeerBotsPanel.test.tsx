@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resources } from "../api/resources";
 import type { GroupPeerBotBusinessState, OperationDiagnostic } from "../api/types";
-import { GroupPeerBotsPanel, renderPeerBotCommandDryRun, validatePeerBotCommandDraft } from "./GroupPeerBotsPanel";
+import { GroupPeerBotsPanel, composePeerBotCommand, renderPeerBotCommandDryRun, validatePeerBotCommandDraft } from "./GroupPeerBotsPanel";
 
 const operation: OperationDiagnostic = {
   ok: true,
@@ -18,6 +18,13 @@ const operation: OperationDiagnostic = {
   warnings: [],
   steps: [],
 };
+
+const EMPTY_TEST_SCHEMA = JSON.stringify({
+  type: "object",
+  properties: {},
+  required: [],
+  additionalProperties: false,
+});
 
 const state: GroupPeerBotBusinessState = {
   group_id: "415442985",
@@ -38,6 +45,11 @@ const state: GroupPeerBotBusinessState = {
     target_bot_id: "20002",
     full_template: ".mc say {message}",
     command_head: ".mc say",
+    command_entry: ".mc",
+    subcommands: ["say"],
+    argument_template: "{message}",
+    description: "向 Minecraft 在线玩家发送聊天消息",
+    legacy_mode: false,
     parameter_schema: {
       type: "object",
       properties: { message: { type: "string", maxLength: 160 } },
@@ -48,6 +60,9 @@ const state: GroupPeerBotBusinessState = {
     status: "candidate",
     source: "llm_observation",
     manual_override: false,
+    auto_approved: false,
+    evidence_count: 1,
+    protocol_source: "llm_observation",
     version: 1,
     updated_at: 1,
   }],
@@ -60,7 +75,7 @@ const state: GroupPeerBotBusinessState = {
     reason_code: "peer_bot_candidate",
   }],
   max_command_chars: 500,
-  policies: { max_calls_per_turn: 1, cooldown_seconds: 10, pending_ttl_seconds: 30, max_chain_depth: 1 },
+  policies: { max_calls_per_turn: 1, cooldown_seconds: 10, pending_ttl_seconds: 30, max_chain_depth: 1, auto_learn_approved_commands: false },
   pending_count: 1,
   loop_protection: { pending_count: 1, recent_count: 1, cooldown_count: 1, max_chain_depth: 1, diagnostics: {} },
   recent_invocations: [{
@@ -105,7 +120,7 @@ describe("GroupPeerBotsPanel", () => {
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: "编辑 / Dry-run" }));
 
-    const template = screen.getByLabelText("完整命令模板");
+    const template = screen.getByLabelText("参数模板（可选）");
     fireEvent.change(template, { target: { value: ".mc say {message" } });
 
     expect(template).toHaveAttribute("aria-invalid", "true");
@@ -134,9 +149,61 @@ describe("GroupPeerBotsPanel", () => {
     await waitFor(() => expect(approve).toHaveBeenCalledWith("415442985", "20002", "approve", "Usagi"));
     await waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(1));
   });
+
+  it("saves structured v2 command fields without sending a QQ command", async () => {
+    vi.spyOn(resources, "groupPeerBots").mockResolvedValue(state);
+    const save = vi.spyOn(resources, "saveGroupPeerBotCommand").mockResolvedValue(operation);
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 / Dry-run" }));
+    fireEvent.change(screen.getByLabelText("用途说明"), { target: { value: "在服务器里发言" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存模板" }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledWith(
+      "415442985",
+      "20002",
+      "mc_say",
+      expect.objectContaining({
+        full_template: ".mc say {message}",
+        command_entry: ".mc",
+        subcommands: ["say"],
+        argument_template: "{message}",
+        description: "在服务器里发言",
+      }),
+    ));
+  });
+
+  it("persists the approved-Bot protocol auto-learning switch", async () => {
+    vi.spyOn(resources, "groupPeerBots").mockResolvedValue(state);
+    const save = vi.spyOn(resources, "updateGroupPeerBotSettings").mockResolvedValue(operation);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderPanel();
+    fireEvent.click(await screen.findByLabelText("自动学习已批准 Bot 的新协议"));
+    fireEvent.click(screen.getByRole("button", { name: "保存群级策略" }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledWith(
+      "415442985",
+      expect.objectContaining({ auto_learn_approved_commands: true }),
+    ));
+    expect(window.confirm).toHaveBeenCalled();
+  });
 });
 
 describe("validatePeerBotCommandDraft", () => {
+  it("composes entry, optional subcommands and argument template", () => {
+    expect(composePeerBotCommand({
+      mode: "structured",
+      target_bot_id: "20002",
+      command_id: "mc_say",
+      full_template: "",
+      command_entry: ".mc",
+      subcommand_1: "say",
+      subcommand_2: "",
+      argument_template: "{message}",
+      parameter_schema_text: EMPTY_TEST_SCHEMA,
+      risk_level: "write",
+      status: "approved",
+    })).toBe(".mc say {message}");
+  });
   it("uses the backend single-brace placeholder contract", () => {
     const valid = validatePeerBotCommandDraft({
       target_bot_id: "20002",

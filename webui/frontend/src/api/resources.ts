@@ -28,6 +28,9 @@ import type {
   PluginUpdateOperation,
   PluginUpdateStatus,
   GroupPeerBotBusinessState,
+  GroupMemberOption,
+  GroupQzoneAgentSettings,
+  GroupQzoneAgentState,
   PeerBotCommandTemplate,
 } from "./types";
 
@@ -284,13 +287,13 @@ export const resources = {
   groupPeerBots(groupId: string, signal?: AbortSignal): Promise<GroupPeerBotBusinessState> {
     return api.get(`/group-management/${encodeURIComponent(groupId)}/peer-bots`, undefined, signal);
   },
-  updateGroupPeerBotSettings(groupId: string, body: { enabled?: boolean; max_calls_per_turn?: 1; cooldown_seconds?: number; pending_ttl_seconds?: number; max_chain_depth?: 1 }): Promise<OperationDiagnostic> {
+  updateGroupPeerBotSettings(groupId: string, body: { enabled?: boolean; max_calls_per_turn?: 1; cooldown_seconds?: number; pending_ttl_seconds?: number; max_chain_depth?: 1; auto_learn_approved_commands?: boolean }): Promise<OperationDiagnostic> {
     return api.put(`/group-management/${encodeURIComponent(groupId)}/peer-bots/settings`, body);
   },
   updateGroupPeerBotStatus(groupId: string, userId: string, action: "approve" | "reject" | "clear", nickname = ""): Promise<OperationDiagnostic> {
     return api.put(`/group-management/${encodeURIComponent(groupId)}/peer-bots/${encodeURIComponent(userId)}`, { action, nickname });
   },
-  saveGroupPeerBotCommand(groupId: string, userId: string, commandId: string, command: Pick<PeerBotCommandTemplate, "full_template" | "parameter_schema" | "risk_level" | "status">): Promise<OperationDiagnostic> {
+  saveGroupPeerBotCommand(groupId: string, userId: string, commandId: string, command: Pick<PeerBotCommandTemplate, "full_template" | "parameter_schema" | "risk_level" | "status"> & Partial<Pick<PeerBotCommandTemplate, "command_entry" | "subcommands" | "argument_template" | "description">>): Promise<OperationDiagnostic> {
     return api.put(`/group-management/${encodeURIComponent(groupId)}/peer-bots/${encodeURIComponent(userId)}/commands/${encodeURIComponent(commandId)}`, command);
   },
   deleteGroupPeerBotCommand(groupId: string, userId: string, commandId: string): Promise<OperationDiagnostic> {
@@ -301,6 +304,15 @@ export const resources = {
   },
   resetGroupPeerBotLoop(groupId: string): Promise<OperationDiagnostic> {
     return api.post(`/group-management/${encodeURIComponent(groupId)}/peer-bots/reset-loop`, {});
+  },
+  groupMembers(groupId: string, botId: string, signal?: AbortSignal): Promise<{ members: GroupMemberOption[]; total: number }> {
+    return api.get(`/qq-management/groups/${encodeURIComponent(groupId)}/members`, { bot_id: botId, limit: 500 }, signal);
+  },
+  groupQzoneAgent(groupId: string, signal?: AbortSignal): Promise<GroupQzoneAgentState> {
+    return api.get(`/group-management/${encodeURIComponent(groupId)}/qzone-agent`, undefined, signal);
+  },
+  updateGroupQzoneAgent(groupId: string, body: Partial<GroupQzoneAgentSettings>): Promise<OperationDiagnostic> {
+    return api.put(`/group-management/${encodeURIComponent(groupId)}/qzone-agent`, body);
   },
   rebuildGroup(groupId: string, kind: "style" | "knowledge"): Promise<Record<string, unknown>> {
     return api.post(`/group-management/${encodeURIComponent(groupId)}/${kind}/rebuild`, { confirm: true });

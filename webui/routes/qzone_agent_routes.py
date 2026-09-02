@@ -30,6 +30,27 @@ def build_qzone_agent_group_router(*, runtime: Any) -> APIRouter:
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         settings = get_group_qzone_agent_settings(group_id)
+        limits = {
+            "group_daily_limit": max(
+                0,
+                int(getattr(runtime.plugin_config, "personification_agent_qzone_group_daily_limit", 3) or 0),
+            ),
+            "target_daily_limit": max(
+                0,
+                int(getattr(runtime.plugin_config, "personification_agent_qzone_target_daily_limit", 1) or 0),
+            ),
+            "target_cooldown_seconds": max(
+                0.0,
+                float(
+                    getattr(
+                        runtime.plugin_config,
+                        "personification_agent_qzone_target_cooldown_seconds",
+                        1800.0,
+                    )
+                    or 0.0
+                ),
+            ),
+        }
         bot_id = _bot_id(runtime)
         operations = {"period_day": "", "count": 0, "operations": []}
         if bot_id:
@@ -49,6 +70,7 @@ def build_qzone_agent_group_router(*, runtime: Any) -> APIRouter:
             ),
             "qzone_enabled": bool(getattr(runtime.plugin_config, "personification_qzone_enabled", False)),
             "settings": settings,
+            "limits": limits,
             "quota": {
                 "used_today": int(operations.get("count", 0) or 0),
                 "group_daily_limit": settings["group_daily_limit"],
@@ -125,11 +147,30 @@ def build_qzone_agent_group_router(*, runtime: Any) -> APIRouter:
                 )
         return {
             "ok": True,
+            "code": "qzone_agent_settings_saved",
+            "phase": "operation_complete",
+            "title": "群空间互动策略已保存",
+            "message": "群级开关、额度和目标冷却已更新。",
+            "retryable": False,
             "group_id": str(group_id),
             "settings": settings,
             "partial": not audit_ok,
             "outcome_unknown": False,
             "warnings": [] if audit_ok else ["配置已保存，但审计记录写入失败。"],
+            "steps": [
+                {
+                    "key": "persist",
+                    "label": "保存群级空间策略",
+                    "status": "ok",
+                    "message": "权威群配置已更新。",
+                },
+                {
+                    "key": "audit",
+                    "label": "记录管理员操作",
+                    "status": "ok" if audit_ok else "warn",
+                    "message": "审计记录已保存。" if audit_ok else "审计写入失败。",
+                },
+            ],
         }
 
     return router
