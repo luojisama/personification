@@ -686,6 +686,30 @@ def test_review_response_text_outputs_segments() -> None:
     assert decision.segments == ("这是绪山真寻。", "她是《别当欧尼酱了！》里的主角。")
 
 
+def test_final_dialogue_gate_returns_only_valid_segment_bound_self_claims() -> None:
+    async def _fake_call(messages, **_kwargs):  # noqa: ANN001
+        assert "每次都额外输出 self_claims" in messages[0]["content"]
+        return (
+            '{"action":"accept","text":"","reason":"合理","flags":[],'
+            '"segments":["我已经写完作业。","晚点再聊。"],"self_claims":['
+            '{"segment_index":0,"subject":"self","category":"completion",'
+            '"fact_key":"homework.status","summary":"我已经写完作业"},'
+            '{"segment_index":1,"subject":"other","category":"activity",'
+            '"fact_key":"friend.status","summary":"我说群友正在睡觉"}]}'
+        )
+
+    decision = asyncio.run(
+        response_review.final_dialogue_gate(
+            _fake_call,
+            candidate_text="我已经写完作业。晚点再聊。",
+            raw_message_text="写完了吗",
+        )
+    )
+    assert len(decision.self_claims) == 1
+    assert decision.self_claims[0].segment_index == 0
+    assert decision.self_claims[0].fact_key == "homework.status"
+
+
 def test_final_dialogue_gate_requires_one_real_rewrite_for_required_duplicate() -> None:
     calls: list[list[dict]] = []
 

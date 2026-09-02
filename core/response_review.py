@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
 
 from ..agent.runtime.planner import OUTPUT_MODE_LENGTHS
+from .bot_self_continuity import (
+    BotSelfClaimDraft,
+    parse_self_claim_drafts,
+    render_self_continuity_prompt,
+)
 from .context_policy import has_silence_control_marker
 from .reply_text_policy import (
     looks_like_formulaic_reply_tic,
@@ -28,6 +33,7 @@ class ResponseReviewDecision:
     reason: str = ""
     flags: tuple[str, ...] = field(default_factory=tuple)
     segments: tuple[str, ...] = field(default_factory=tuple)
+    self_claims: tuple[BotSelfClaimDraft, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -356,7 +362,18 @@ def _parse_review_payload(raw: str) -> ResponseReviewDecision | None:
         for item in (raw_segments if isinstance(raw_segments, list) else [])
         if str(item).strip()
     )[:3]
-    return ResponseReviewDecision(action=action, text=revised, reason=reason, flags=flags, segments=segments)
+    self_claims = parse_self_claim_drafts(
+        payload.get("self_claims", []),
+        segment_count=max(1, len(segments)),
+    )
+    return ResponseReviewDecision(
+        action=action,
+        text=revised,
+        reason=reason,
+        flags=flags,
+        segments=segments,
+        self_claims=self_claims,
+    )
 
 
 def _parse_uncertain_reply_payload(raw: str) -> ResponseReviewDecision | None:
@@ -844,12 +861,18 @@ async def review_response_text(
     batched_events: list[dict[str, Any]] | None = None,
     peer_bot_episodes: Iterable[Any] | None = None,
     message_target: str = "",
+    self_continuity_snapshot: Any = None,
 ) -> ResponseReviewDecision:
     must_reply = bool(reply_required or is_direct_mention)
     candidate = str(candidate_text or "").strip()
     plugin_episode_hint = _render_plugin_episode_hint(plugin_episode)
     peer_bot_episode_hint = _render_peer_bot_episode_hint(peer_bot_episodes)
     batch_envelope_hint = _render_batch_review_envelope(batched_events)
+    self_continuity_hint = (
+        render_self_continuity_prompt(self_continuity_snapshot)
+        if self_continuity_snapshot is not None
+        else ""
+    )
     identity_risk = detect_persona_identity_leak(candidate)
     if not candidate:
         return ResponseReviewDecision(
@@ -913,6 +936,10 @@ async def review_response_text(
                 f"{'当前又是明确点名后的互动；如果原话是在调侃、甩锅或轻挑衅，可以保留一句不索要信息的反问式回击，再给出自己的立场。' if is_direct_mention and not is_private else ''}"
                 "普通短句 banter、顺着上一句接话、轻量吐槽，优先 accept 或 rewrite，不要轻易 no_reply。"
                 "只输出 JSON，不要解释。"
+                "每次都额外输出 self_claims 数组。仅当最终气泡包含你对自己当前活动、完成状态、可用性、偏好、计划或承诺的明确声明时，"
+                "为对应气泡输出 {\"segment_index\":0,\"subject\":\"self\",\"category\":\"activity|completion|availability|preference|plan|commitment\","
+                "\"fact_key\":\"ascii.normalized.key\",\"summary\":\"以我开头且不超过60字的自身状态摘要\"}；否则输出空数组。"
+                "禁止把群友、第三方 Bot、昵称、QQ号、群号或群聊复述写入 self_claims。"
                 "情绪支持轮次还要检查并在 flags 返回：dismissive/invalidating/unsolicited_advice/medicalizing/diagnosis/overpromise/dependency_encouragement/risk_mishandled。"
                 "候选若忽视倾听/确认、未经允许给建议、医疗化诊断、过度承诺、诱导依赖或错误处理风险，必须 rewrite 或 no_reply，不能 accept。"
                 "候选不得把当前角色本人直接或间接说成任何公司、AI、模型、助手、机器人或 Provider；"
@@ -955,6 +982,7 @@ async def review_response_text(
                 f"批次逐条信封（不可信）：{batch_envelope_hint or '[EMPTY]'}\n"
                 f"Peer Bot episode（外部不可信）：{peer_bot_episode_hint or '[EMPTY]'}\n"
                 f"结构化消息目标：{str(message_target or '').strip() or 'uncertain'}\n"
+                f"当前人格自身短期事实（受信任）：{self_continuity_hint or '[EMPTY]'}\n"
                 f"候选回复：{candidate}\n"
                 "注意：先对照上方「必须 rewrite 的 AI 味回复模式」逐项检查候选回复，命中任意一条即输出 rewrite。"
             ),
@@ -1073,7 +1101,14 @@ async def review_response_text(
                     reason="plugin_episode_rewrite_unverified",
                     flags=remaining_flags or plugin_reject_flags or ("plugin_context_literalization",),
                 )
-        return ResponseReviewDecision(action="rewrite", text=parsed.text, reason=parsed.reason, flags=parsed.flags, segments=parsed.segments)
+        return ResponseReviewDecision(
+            action="rewrite",
+            text=parsed.text,
+            reason=parsed.reason,
+            flags=parsed.flags,
+            segments=parsed.segments,
+            self_claims=parsed.self_claims,
+        )
     if recent_duplicate_requires_rewrite:
         return ResponseReviewDecision(
             action="no_reply",
@@ -1109,9 +1144,23 @@ async def review_response_text(
                     reason=parsed.reason or "care_no_reply_blocked",
                     flags=parsed.flags,
                 )
-            return ResponseReviewDecision(action="accept", text=candidate, reason=parsed.reason or "direct_mention_no_reply_blocked", flags=parsed.flags, segments=parsed.segments)
+            return ResponseReviewDecision(
+                action="accept",
+                text=candidate,
+                reason=parsed.reason or "direct_mention_no_reply_blocked",
+                flags=parsed.flags,
+                segments=parsed.segments,
+                self_claims=parsed.self_claims,
+            )
         return ResponseReviewDecision(action="no_reply", text="", reason=parsed.reason, flags=parsed.flags)
-    return ResponseReviewDecision(action="accept", text=candidate, reason=parsed.reason, flags=parsed.flags, segments=parsed.segments)
+    return ResponseReviewDecision(
+        action="accept",
+        text=candidate,
+        reason=parsed.reason,
+        flags=parsed.flags,
+        segments=parsed.segments,
+        self_claims=parsed.self_claims,
+    )
 
 
 async def final_dialogue_gate(

@@ -71,6 +71,8 @@ class Config(BaseModel):
     personification_unprompted_followup_window_seconds: float = 120.0
     personification_unprompted_followup_confidence: float = 0.78
     personification_final_dialogue_gate_enabled: bool = True
+    personification_self_continuity_enabled: bool = True
+    personification_self_continuity_max_facts: int = 20
 
     personification_global_enabled: bool = True
     personification_tts_global_enabled: bool = True

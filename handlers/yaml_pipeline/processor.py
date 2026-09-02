@@ -16,6 +16,12 @@ from ...agent.runtime.tool_catalog import registry_planner_metadata
 from ...core.chat_intent import (
     looks_like_explanatory_output,
 )
+from ...core.bot_self_continuity import (
+    claims_for_segment,
+    deliver_self_consistent_segment,
+    get_bot_self_continuity_store,
+    render_self_continuity_prompt,
+)
 from ...core.command_runtime_context import render_command_runtime_prompt
 from ...core.current_group_context_tool import register_current_group_context_tool
 from ...core.peer_bot_runtime import (
@@ -1365,7 +1371,23 @@ async def process_yaml_response_logic(
     except Exception as exc:
         logger.debug(f"拟人插件 (YAML)：本轮黑话上下文不可用，按无词典提示继续: {type(exc).__name__}")
 
+    self_continuity_enabled = bool(
+        getattr(plugin_config, "personification_self_continuity_enabled", True)
+    )
+    self_continuity_max_facts = int(
+        getattr(plugin_config, "personification_self_continuity_max_facts", 20) or 20
+    )
+    self_continuity_bot_id = str(getattr(bot, "self_id", "") or "")
+    self_continuity_store = get_bot_self_continuity_store()
+    self_continuity_snapshot = self_continuity_store.snapshot(
+        self_continuity_bot_id,
+        max_facts=self_continuity_max_facts,
+    )
     system_prompt = prompt_config.get("system", "")
+    if self_continuity_enabled:
+        self_continuity_prompt = render_self_continuity_prompt(self_continuity_snapshot)
+        if self_continuity_prompt:
+            system_prompt += f"\n\n{self_continuity_prompt}"
     if user_profile_block:
         system_prompt += f"\n\n{user_profile_block}"
     if favorability_context_block:
@@ -2577,6 +2599,9 @@ async def process_yaml_response_logic(
                 else ()
             ),
             message_target=review_message_target,
+            self_continuity_snapshot=(
+                self_continuity_snapshot if self_continuity_enabled else None
+            ),
         )
     elif used_agent and not should_review_agent_reply and not care_review_required and not protected_review_required:
         review_decision = make_passthrough_review_decision(
@@ -2880,6 +2905,9 @@ async def process_yaml_response_logic(
     sent_as_tts = False
     delivery_partial = False
     delivery_unknown = False
+    self_continuity_expected_revision = self_continuity_snapshot.revision
+    self_continuity_segment_index = 0
+    self_continuity_delivered_texts: list[str] = []
 
     def _mark_tts_delivery_unknown() -> None:
         nonlocal delivery_unknown
@@ -2933,22 +2961,85 @@ async def process_yaml_response_logic(
                 persona_tts=persona_tts,
             )
             if tts_decision.action == "voice":
-                sent_as_tts = await tts_service.send_tts(
-                    bot=bot,
-                    event=event,
-                    message_segment_cls=message_segment_cls,
-                    text=assistant_text,
-                    style_hint=tts_decision.style_hint,
-                    user_hint=tts_user_hint,
-                    is_private=is_private_session,
-                    persona_tts=persona_tts,
-                    pause_range=(0.8, 1.5),
-                    on_delivery_started=lambda: mark_reply_delivery_started(reply_commit_state),
-                    on_delivery_confirmed=_confirm_reply_delivery,
-                    on_delivery_unknown=_mark_tts_delivery_unknown,
-                    operation_id=outbound_reply_trace_id,
-                    user_target=user_id,
-                )
+                async def _send_tts_candidate(candidate: str) -> Any:
+                    candidate = guard_visible_text(
+                        candidate,
+                        logger=logger,
+                        surface="yaml_reply_self_continuity",
+                    )
+                    if not candidate:
+                        return SimpleNamespace(status="failed", message_id=None, tts_sent=False)
+                    try:
+                        sent = await tts_service.send_tts(
+                            bot=bot,
+                            event=event,
+                            message_segment_cls=message_segment_cls,
+                            text=candidate,
+                            style_hint=tts_decision.style_hint,
+                            user_hint=tts_user_hint,
+                            is_private=is_private_session,
+                            persona_tts=persona_tts,
+                            pause_range=(0.8, 1.5),
+                            on_delivery_started=lambda: mark_reply_delivery_started(reply_commit_state),
+                            on_delivery_confirmed=_confirm_reply_delivery,
+                            on_delivery_unknown=_mark_tts_delivery_unknown,
+                            operation_id=outbound_reply_trace_id,
+                            user_target=user_id,
+                        )
+                    except Exception as exc:
+                        if bool(reply_commit_state.get("reply_delivery_confirmed", False)):
+                            return SimpleNamespace(status="sent", message_id=None, tts_sent=True)
+                        if is_likely_delivered_send_timeout(exc):
+                            _mark_tts_delivery_unknown()
+                            return SimpleNamespace(status="unknown", message_id=None, tts_sent=True)
+                        raise
+                    status = (
+                        "unknown"
+                        if delivery_unknown
+                        else "sent"
+                        if bool(sent) and bool(reply_commit_state.get("reply_delivery_confirmed", False))
+                        else "failed"
+                    )
+                    return SimpleNamespace(status=status, message_id=None, tts_sent=bool(sent))
+
+                if self_continuity_enabled:
+                    continuity_delivery = await deliver_self_consistent_segment(
+                        store=self_continuity_store,
+                        bot_id=self_continuity_bot_id,
+                        expected_revision=self_continuity_expected_revision,
+                        candidate_text=assistant_text,
+                        claim_drafts=getattr(review_decision, "self_claims", ()),
+                        send=_send_tts_candidate,
+                        call_ai_api=review_call_ai_api or lite_call_ai_api or call_ai_api,
+                        timezone_name=str(
+                            getattr(plugin_config, "personification_timezone", "Asia/Shanghai")
+                            or "Asia/Shanghai"
+                        ),
+                        max_facts=self_continuity_max_facts,
+                    )
+                    self_continuity_expected_revision = continuity_delivery.revision
+                    _trace_stage(
+                        key="self_continuity",
+                        label="跨群自身事实复核",
+                        status=(
+                            "warn"
+                            if continuity_delivery.action in {"rewrite", "silent", "tentative"}
+                            else "ok"
+                        ),
+                        detail=" ".join(
+                            f"{key}={value}"
+                            for key, value in continuity_delivery.trace_fields().items()
+                        ),
+                    )
+                    if continuity_delivery.action == "silent":
+                        return
+                    sent_as_tts = continuity_delivery.sent
+                    if sent_as_tts:
+                        assistant_text = continuity_delivery.text
+                        assistant_history_text = history_text_for_qq_expression(assistant_text)
+                else:
+                    tts_result = await _send_tts_candidate(assistant_text)
+                    sent_as_tts = bool(getattr(tts_result, "tts_sent", False))
         except Exception as e:
             likely_delivered = is_likely_delivered_send_timeout(e)
             if bool(reply_commit_state.get("reply_delivery_confirmed", False)) or likely_delivered:
@@ -2999,27 +3090,79 @@ async def process_yaml_response_logic(
                                 logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                                 _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="分段文本发送前出现更新批次")
                                 return
-                            rendered_seg = await render_qq_expression_message(
-                                seg,
-                                message_segment_cls=message_segment_cls,
-                                bot=bot,
-                                plugin_config=plugin_config,
-                                logger=logger,
-                            )
-                            if not rendered_seg.message:
-                                continue
-                            outgoing = rendered_seg.message
-                            if not sent_message_id and seg_index == 0:
-                                try:
-                                    outgoing = _humanize.prepend_addressing_segments(
-                                        message_segment_cls=message_segment_cls,
-                                        outgoing=outgoing,
-                                        quote_message_id=quote_message_id,
-                                        at_target=at_target,
-                                    )
-                                except Exception:
-                                    outgoing = rendered_seg.message
-                            send_result = await _send_reply(outgoing)
+                            current_continuity_index = self_continuity_segment_index
+
+                            async def _send_text_candidate(candidate: str) -> Any:
+                                candidate = guard_visible_text(
+                                    candidate,
+                                    logger=logger,
+                                    surface="yaml_reply_self_continuity",
+                                )
+                                if not candidate:
+                                    return SimpleNamespace(status="failed", message_id=None)
+                                rendered_candidate = await render_qq_expression_message(
+                                    candidate,
+                                    message_segment_cls=message_segment_cls,
+                                    bot=bot,
+                                    plugin_config=plugin_config,
+                                    logger=logger,
+                                )
+                                if not rendered_candidate.message:
+                                    return SimpleNamespace(status="failed", message_id=None)
+                                outgoing = rendered_candidate.message
+                                if not sent_message_id and current_continuity_index == 0:
+                                    try:
+                                        outgoing = _humanize.prepend_addressing_segments(
+                                            message_segment_cls=message_segment_cls,
+                                            outgoing=outgoing,
+                                            quote_message_id=quote_message_id,
+                                            at_target=at_target,
+                                        )
+                                    except Exception:
+                                        outgoing = rendered_candidate.message
+                                return await _send_reply(outgoing)
+
+                            if self_continuity_enabled:
+                                continuity_delivery = await deliver_self_consistent_segment(
+                                    store=self_continuity_store,
+                                    bot_id=self_continuity_bot_id,
+                                    expected_revision=self_continuity_expected_revision,
+                                    candidate_text=seg,
+                                    claim_drafts=claims_for_segment(
+                                        getattr(review_decision, "self_claims", ()),
+                                        current_continuity_index,
+                                    ),
+                                    send=_send_text_candidate,
+                                    call_ai_api=review_call_ai_api or lite_call_ai_api or call_ai_api,
+                                    timezone_name=str(
+                                        getattr(plugin_config, "personification_timezone", "Asia/Shanghai")
+                                        or "Asia/Shanghai"
+                                    ),
+                                    max_facts=self_continuity_max_facts,
+                                )
+                                self_continuity_expected_revision = continuity_delivery.revision
+                                _trace_stage(
+                                    key="self_continuity",
+                                    label="跨群自身事实复核",
+                                    status=(
+                                        "warn"
+                                        if continuity_delivery.action in {"rewrite", "silent", "tentative"}
+                                        else "ok"
+                                    ),
+                                    detail=" ".join(
+                                        f"{key}={value}"
+                                        for key, value in continuity_delivery.trace_fields().items()
+                                    ),
+                                )
+                                if not continuity_delivery.sent:
+                                    if self_continuity_delivered_texts:
+                                        delivery_partial = True
+                                    return
+                                send_result = continuity_delivery.send_result
+                                self_continuity_delivered_texts.append(continuity_delivery.text)
+                            else:
+                                send_result = await _send_text_candidate(seg)
+                            self_continuity_segment_index += 1
                             if not sent_message_id:
                                 sent_message_id = _message_id_from_send_result(send_result)
                             await asyncio.sleep(random.uniform(0.4, 1.0))
@@ -3071,14 +3214,23 @@ async def process_yaml_response_logic(
                     logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                     _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="普通文本发送前出现更新批次")
                     return
-                rendered_reply = await render_qq_expression_message(
-                    clean_reply,
-                    message_segment_cls=message_segment_cls,
-                    bot=bot,
-                    plugin_config=plugin_config,
-                    logger=logger,
-                )
-                if rendered_reply.message:
+                async def _send_clean_candidate(candidate: str) -> Any:
+                    candidate = guard_visible_text(
+                        candidate,
+                        logger=logger,
+                        surface="yaml_reply_self_continuity",
+                    )
+                    if not candidate:
+                        return SimpleNamespace(status="failed", message_id=None)
+                    rendered_reply = await render_qq_expression_message(
+                        candidate,
+                        message_segment_cls=message_segment_cls,
+                        bot=bot,
+                        plugin_config=plugin_config,
+                        logger=logger,
+                    )
+                    if not rendered_reply.message:
+                        return SimpleNamespace(status="failed", message_id=None)
                     outgoing = rendered_reply.message
                     try:
                         outgoing = _humanize.prepend_addressing_segments(
@@ -3089,7 +3241,55 @@ async def process_yaml_response_logic(
                         )
                     except Exception:
                         outgoing = rendered_reply.message
-                    send_result = await _send_reply(outgoing)
+                    return await _send_reply(outgoing)
+
+                rendered_reply = await render_qq_expression_message(
+                    clean_reply,
+                    message_segment_cls=message_segment_cls,
+                    bot=bot,
+                    plugin_config=plugin_config,
+                    logger=logger,
+                )
+                if rendered_reply.message:
+                    if self_continuity_enabled:
+                        continuity_delivery = await deliver_self_consistent_segment(
+                            store=self_continuity_store,
+                            bot_id=self_continuity_bot_id,
+                            expected_revision=self_continuity_expected_revision,
+                            candidate_text=clean_reply,
+                            claim_drafts=claims_for_segment(
+                                getattr(review_decision, "self_claims", ()),
+                                self_continuity_segment_index,
+                            ),
+                            send=_send_clean_candidate,
+                            call_ai_api=review_call_ai_api or lite_call_ai_api or call_ai_api,
+                            timezone_name=str(
+                                getattr(plugin_config, "personification_timezone", "Asia/Shanghai")
+                                or "Asia/Shanghai"
+                            ),
+                            max_facts=self_continuity_max_facts,
+                        )
+                        self_continuity_expected_revision = continuity_delivery.revision
+                        _trace_stage(
+                            key="self_continuity",
+                            label="跨群自身事实复核",
+                            status=(
+                                "warn"
+                                if continuity_delivery.action in {"rewrite", "silent", "tentative"}
+                                else "ok"
+                            ),
+                            detail=" ".join(
+                                f"{key}={value}"
+                                for key, value in continuity_delivery.trace_fields().items()
+                            ),
+                        )
+                        if not continuity_delivery.sent:
+                            return
+                        send_result = continuity_delivery.send_result
+                        self_continuity_delivered_texts.append(continuity_delivery.text)
+                    else:
+                        send_result = await _send_clean_candidate(clean_reply)
+                    self_continuity_segment_index += 1
                 else:
                     send_result = None
                 if send_result is not None and not sent_message_id:
@@ -3104,6 +3304,10 @@ async def process_yaml_response_logic(
                 if not sent_message_id:
                     sent_message_id = _message_id_from_send_result(send_result)
 
+    if self_continuity_enabled and self_continuity_delivered_texts:
+        assistant_history_text = history_text_for_qq_expression(
+            " ".join(self_continuity_delivered_texts)
+        )
     if not delivery_partial and not delivery_unknown:
         mark_reply_delivery_complete(reply_commit_state)
     if user_policy_gate is not None:

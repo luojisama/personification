@@ -5,6 +5,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
 import httpx
@@ -12,6 +13,12 @@ from nonebot.exception import FinishedException
 
 from ...core.ai_routes import summarize_provider_route_attempts
 from ...core.chat_intent import looks_like_explanatory_output
+from ...core.bot_self_continuity import (
+    claims_for_segment,
+    deliver_self_consistent_segment,
+    get_bot_self_continuity_store,
+    render_self_continuity_prompt,
+)
 from ...core.command_runtime_context import render_command_runtime_prompt
 from ...core.error_utils import log_exception
 from ...core.favorability_turn import (
@@ -1466,6 +1473,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     safe_user_name = f"{safe_user_name}({user_id})"
     msg_prefix = f"[{safe_user_name}]: "
     bot_self_id = str(getattr(bot, "self_id", "") or "")
+    self_continuity_enabled = bool(
+        getattr(runtime.plugin_config, "personification_self_continuity_enabled", True)
+    )
+    self_continuity_max_facts = int(
+        getattr(runtime.plugin_config, "personification_self_continuity_max_facts", 20) or 20
+    )
+    self_continuity_store = get_bot_self_continuity_store()
+    self_continuity_snapshot = self_continuity_store.snapshot(
+        bot_self_id,
+        max_facts=self_continuity_max_facts,
+    )
     incoming_relation_metadata = (
         _build_group_session_relation_metadata(
             event,
@@ -2141,6 +2159,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             get_configured_api_providers=runtime.get_configured_api_providers,
         ),
     )
+    if self_continuity_enabled:
+        self_continuity_prompt = render_self_continuity_prompt(self_continuity_snapshot)
+        if self_continuity_prompt:
+            system_prompt += f"\n\n{self_continuity_prompt}"
     system_prompt += "\n\n" + render_command_runtime_prompt()
     if user_profile_block:
         system_prompt += f"\n\n{user_profile_block}"
@@ -3053,6 +3075,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     else ()
                 ),
                 message_target=str(state.get("message_target", "") or ""),
+                self_continuity_snapshot=(
+                    self_continuity_snapshot if self_continuity_enabled else None
+                ),
             )
         elif agent_direct_output and not protected_review_required:
             review_decision = make_passthrough_review_decision(
@@ -3304,6 +3329,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         sent_as_tts = False
         delivery_partial = False
         delivery_unknown = False
+        self_continuity_expected_revision = self_continuity_snapshot.revision
+        self_continuity_delivered_texts: list[str] = []
 
         def _mark_tts_delivery_unknown() -> None:
             nonlocal delivery_unknown
@@ -3353,23 +3380,99 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     persona_tts=persona_tts,
                 )
                 if tts_decision.action == "voice":
-                    sent_as_tts = await tts_service.send_tts(
-                        bot=bot,
-                        event=event,
-                        message_segment_cls=runtime.message_segment_cls,
-                        text=final_reply,
-                        style_hint=tts_decision.style_hint,
-                        user_hint=tts_user_hint,
-                        is_private=is_private_session,
-                        group_style=group_style,
-                        persona_tts=persona_tts,
-                        pause_range=(1.2, 2.0),
-                        on_delivery_started=lambda: mark_reply_delivery_started(state),
-                        on_delivery_confirmed=_confirm_reply_delivery,
-                        on_delivery_unknown=_mark_tts_delivery_unknown,
-                        operation_id=str(state.get("reply_trace_id", "") or ""),
-                        user_target=user_id,
-                    )
+                    async def _send_tts_candidate(candidate: str) -> Any:
+                        candidate = guard_visible_text(
+                            candidate,
+                            logger=runtime.logger,
+                            surface="normal_reply_self_continuity",
+                        )
+                        if not candidate:
+                            return SimpleNamespace(status="failed", message_id=None, tts_sent=False)
+                        try:
+                            sent = await tts_service.send_tts(
+                                bot=bot,
+                                event=event,
+                                message_segment_cls=runtime.message_segment_cls,
+                                text=candidate,
+                                style_hint=tts_decision.style_hint,
+                                user_hint=tts_user_hint,
+                                is_private=is_private_session,
+                                group_style=group_style,
+                                persona_tts=persona_tts,
+                                pause_range=(1.2, 2.0),
+                                on_delivery_started=lambda: mark_reply_delivery_started(state),
+                                on_delivery_confirmed=_confirm_reply_delivery,
+                                on_delivery_unknown=_mark_tts_delivery_unknown,
+                                operation_id=str(state.get("reply_trace_id", "") or ""),
+                                user_target=user_id,
+                            )
+                        except Exception as exc:
+                            if bool(state.get("reply_delivery_confirmed", False)):
+                                return SimpleNamespace(status="sent", message_id=None, tts_sent=True)
+                            if is_likely_delivered_send_timeout(exc):
+                                _mark_tts_delivery_unknown()
+                                return SimpleNamespace(status="unknown", message_id=None, tts_sent=True)
+                            raise
+                        status = (
+                            "unknown"
+                            if delivery_unknown
+                            else "sent"
+                            if bool(sent) and bool(state.get("reply_delivery_confirmed", False))
+                            else "failed"
+                        )
+                        return SimpleNamespace(status=status, message_id=None, tts_sent=bool(sent))
+
+                    if self_continuity_enabled:
+                        continuity_delivery = await deliver_self_consistent_segment(
+                            store=self_continuity_store,
+                            bot_id=bot_self_id,
+                            expected_revision=self_continuity_expected_revision,
+                            candidate_text=final_reply,
+                            claim_drafts=getattr(review_decision, "self_claims", ()),
+                            send=_send_tts_candidate,
+                            call_ai_api=(
+                                runtime.review_call_ai_api
+                                or runtime.lite_call_ai_api
+                                or runtime.call_ai_api
+                            ),
+                            timezone_name=str(
+                                getattr(runtime.plugin_config, "personification_timezone", "Asia/Shanghai")
+                                or "Asia/Shanghai"
+                            ),
+                            max_facts=self_continuity_max_facts,
+                        )
+                        self_continuity_expected_revision = continuity_delivery.revision
+                        try:
+                            from ...core import reply_turn_trace
+
+                            reply_turn_trace.record_stage(
+                                key="self_continuity",
+                                label="跨群自身事实复核",
+                                status=(
+                                    "warn"
+                                    if continuity_delivery.action in {"rewrite", "silent", "tentative"}
+                                    else "ok"
+                                ),
+                                detail=" ".join(
+                                    f"{key}={value}"
+                                    for key, value in continuity_delivery.trace_fields().items()
+                                ),
+                            )
+                        except Exception:
+                            pass
+                        if continuity_delivery.action == "silent":
+                            return
+                        sent_as_tts = continuity_delivery.sent
+                        if sent_as_tts:
+                            final_reply = continuity_delivery.text
+                            final_visible_reply_text = _build_final_visible_reply_text(
+                                history_text_for_qq_expression(final_reply),
+                                max_chars=max_chars,
+                                sanitize_history_text=session.sanitize_history_text,
+                            )
+                    else:
+                        tts_result = await _send_tts_candidate(final_reply)
+                        sent_as_tts = bool(getattr(tts_result, "tts_sent", False))
             except Exception as e:
                 likely_delivered = is_likely_delivered_send_timeout(e)
                 if bool(state.get("reply_delivery_confirmed", False)) or likely_delivered:
@@ -3497,27 +3600,86 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     if stale_reason:
                         runtime.logger.info(f"拟人插件：{stale_reason}")
                         return
-                    rendered_seg = await render_qq_expression_message(
-                        seg,
-                        message_segment_cls=runtime.message_segment_cls,
-                        bot=bot,
-                        plugin_config=runtime.plugin_config,
-                        logger=runtime.logger,
-                    )
-                    outgoing: Any = rendered_seg.message
-                    if not outgoing:
-                        continue
-                    if i == 0:
+                    async def _send_text_candidate(candidate: str, *, _index: int = i) -> Any:
+                        candidate = guard_visible_text(
+                            candidate,
+                            logger=runtime.logger,
+                            surface="normal_reply_self_continuity",
+                        )
+                        if not candidate:
+                            return SimpleNamespace(status="failed", message_id=None)
+                        rendered_candidate = await render_qq_expression_message(
+                            candidate,
+                            message_segment_cls=runtime.message_segment_cls,
+                            bot=bot,
+                            plugin_config=runtime.plugin_config,
+                            logger=runtime.logger,
+                        )
+                        outgoing: Any = rendered_candidate.message
+                        if not outgoing:
+                            return SimpleNamespace(status="failed", message_id=None)
+                        if _index == 0:
+                            try:
+                                outgoing = _humanize.prepend_addressing_segments(
+                                    message_segment_cls=runtime.message_segment_cls,
+                                    outgoing=outgoing,
+                                    quote_message_id=quote_message_id,
+                                    at_target=at_target,
+                                )
+                            except Exception:
+                                outgoing = rendered_candidate.message
+                        return await _send_reply(outgoing)
+
+                    if self_continuity_enabled:
+                        continuity_delivery = await deliver_self_consistent_segment(
+                            store=self_continuity_store,
+                            bot_id=bot_self_id,
+                            expected_revision=self_continuity_expected_revision,
+                            candidate_text=seg,
+                            claim_drafts=claims_for_segment(
+                                getattr(review_decision, "self_claims", ()),
+                                i,
+                            ),
+                            send=_send_text_candidate,
+                            call_ai_api=(
+                                runtime.review_call_ai_api
+                                or runtime.lite_call_ai_api
+                                or runtime.call_ai_api
+                            ),
+                            timezone_name=str(
+                                getattr(runtime.plugin_config, "personification_timezone", "Asia/Shanghai")
+                                or "Asia/Shanghai"
+                            ),
+                            max_facts=self_continuity_max_facts,
+                        )
+                        self_continuity_expected_revision = continuity_delivery.revision
                         try:
-                            outgoing = _humanize.prepend_addressing_segments(
-                                message_segment_cls=runtime.message_segment_cls,
-                                outgoing=outgoing,
-                                quote_message_id=quote_message_id,
-                                at_target=at_target,
+                            from ...core import reply_turn_trace
+
+                            reply_turn_trace.record_stage(
+                                key="self_continuity",
+                                label="跨群自身事实复核",
+                                status=(
+                                    "warn"
+                                    if continuity_delivery.action in {"rewrite", "silent", "tentative"}
+                                    else "ok"
+                                ),
+                                detail=" ".join(
+                                    f"{key}={value}"
+                                    for key, value in continuity_delivery.trace_fields().items()
+                                ),
                             )
                         except Exception:
-                            outgoing = rendered_seg.message
-                    send_result = await _send_reply(outgoing)
+                            pass
+                        if not continuity_delivery.sent:
+                            if self_continuity_delivered_texts:
+                                delivery_partial = True
+                                break
+                            return
+                        send_result = continuity_delivery.send_result
+                        self_continuity_delivered_texts.append(continuity_delivery.text)
+                    else:
+                        send_result = await _send_text_candidate(seg)
                     if not sent_message_id:
                         sent_message_id = _message_id_from_send_result(send_result)
                     if i < len(segments) - 1 or sticker_segment:
@@ -3529,6 +3691,13 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             )
                         else:
                             await asyncio.sleep(random.uniform(0.8, 1.6))
+
+                if self_continuity_enabled and self_continuity_delivered_texts:
+                    final_visible_reply_text = _build_final_visible_reply_text(
+                        " ".join(self_continuity_delivered_texts),
+                        max_chars=max_chars,
+                        sanitize_history_text=session.sanitize_history_text,
+                    )
 
                 if typo_correction and not _stale_reply_abort_reason(state):
                     await asyncio.sleep(random.uniform(1.0, 2.0))

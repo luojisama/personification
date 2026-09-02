@@ -125,3 +125,16 @@ def test_normal_and_yaml_block_markers_are_silent_without_fixed_refusal() -> Non
     assert 'reply_content = "这个我不能接。"' not in yaml
     assert "当前静默结束本轮" in normal
     assert "当前静默结束本轮" in yaml
+
+
+def test_normal_and_yaml_share_self_continuity_snapshot_gate_and_delivery() -> None:
+    root = Path(__file__).resolve().parents[1]
+    normal = (root / "handlers" / "reply_pipeline" / "processor.py").read_text(encoding="utf-8")
+    yaml = (root / "handlers" / "yaml_pipeline" / "processor.py").read_text(encoding="utf-8")
+
+    for source in (normal, yaml):
+        assert "get_bot_self_continuity_store" in source
+        assert "render_self_continuity_prompt" in source
+        assert "self_continuity_snapshot=" in source
+        assert "deliver_self_consistent_segment(" in source
+        assert "claims_for_segment(" in source
