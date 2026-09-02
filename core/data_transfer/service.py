@@ -204,7 +204,7 @@ class DataTransferService:
 
     @staticmethod
     def _peer_bot_transfer_document(value: Any) -> dict[str, Any]:
-        """Project a registry group into the stable, approved-only v1 schema."""
+        """Project a registry group into the stable, approved-only v2 schema."""
 
         raw = value if isinstance(value, dict) else {}
         raw_bots = raw.get("bots") if isinstance(raw.get("bots"), dict) else {}
@@ -236,16 +236,34 @@ class DataTransferService:
             target_bot_id = str(command.get("target_bot_id", "") or "")
             if target_bot_id not in approved_ids:
                 continue
+            try:
+                normalized_template = validate_command_template(
+                    command.get("full_template", ""),
+                    parameter_schema=command.get("parameter_schema"),
+                    max_chars=4000,
+                )
+            except PeerBotRegistryError:
+                continue
             commands[normalized_command_id] = {
                 "command_id": normalized_command_id,
                 "target_bot_id": target_bot_id,
                 "full_template": command.get("full_template"),
                 "command_head": command.get("command_head"),
-                "parameter_schema": command.get("parameter_schema"),
+                "command_entry": command.get("command_entry", normalized_template.command_entry),
+                "subcommands": list(command.get("subcommands", normalized_template.subcommands) or [])[:2],
+                "argument_template": command.get(
+                    "argument_template", normalized_template.argument_template
+                ),
+                "description": command.get("description", ""),
+                "legacy_mode": bool(command.get("legacy_mode", normalized_template.legacy_mode)),
+                "parameter_schema": normalized_template.parameter_schema,
                 "risk_level": command.get("risk_level"),
                 "status": "approved",
                 "source": "manual",
                 "manual_override": True,
+                "auto_approved": False,
+                "evidence_count": max(0, int(command.get("evidence_count", 0) or 0)),
+                "protocol_source": "manual",
                 "version": command.get("version"),
                 "updated_at": command.get("updated_at"),
             }
@@ -276,6 +294,9 @@ class DataTransferService:
                 "cooldown_seconds": float(policies.get("cooldown_seconds", 10.0) or 10.0),
                 "pending_ttl_seconds": float(policies.get("pending_ttl_seconds", 30.0) or 30.0),
                 "max_chain_depth": 1,
+                "auto_learn_approved_commands": bool(
+                    policies.get("auto_learn_approved_commands", False)
+                ),
             },
             "updated_at": float(raw.get("updated_at", 0.0) or 0.0),
         }
@@ -308,10 +329,13 @@ class DataTransferService:
             "cooldown_seconds",
             "pending_ttl_seconds",
             "max_chain_depth",
+            "auto_learn_approved_commands",
         }:
             raise DataTransferError("invalid peer bot registry policies")
         if policies.get("max_calls_per_turn") != 1 or policies.get("max_chain_depth") != 1:
             raise DataTransferError("invalid peer bot loop policy")
+        if not isinstance(policies.get("auto_learn_approved_commands"), bool):
+            raise DataTransferError("invalid peer bot auto learn policy")
         try:
             cooldown = float(policies.get("cooldown_seconds"))
             ttl = float(policies.get("pending_ttl_seconds"))
@@ -375,11 +399,19 @@ class DataTransferService:
                 "target_bot_id",
                 "full_template",
                 "command_head",
+                "command_entry",
+                "subcommands",
+                "argument_template",
+                "description",
+                "legacy_mode",
                 "parameter_schema",
                 "risk_level",
                 "status",
                 "source",
                 "manual_override",
+                "auto_approved",
+                "evidence_count",
+                "protocol_source",
                 "version",
                 "updated_at",
             }:
@@ -389,8 +421,19 @@ class DataTransferService:
                 command.get("command_id") != command_id
                 or target not in bots
                 or command.get("status") != "approved"
-                or command.get("source") != "manual"
-                or command.get("manual_override") is not True
+                or command.get("source") not in {"manual", "auto_learned"}
+                or not isinstance(command.get("manual_override"), bool)
+                or not isinstance(command.get("auto_approved"), bool)
+                or not isinstance(command.get("evidence_count"), int)
+                or isinstance(command.get("evidence_count"), bool)
+                or not 0 <= command.get("evidence_count") <= 1000
+                or not isinstance(command.get("protocol_source"), str)
+                or len(command.get("protocol_source")) > 40
+                or not isinstance(command.get("description"), str)
+                or len(command.get("description")) > 240
+                or not isinstance(command.get("legacy_mode"), bool)
+                or not isinstance(command.get("subcommands"), list)
+                or len(command.get("subcommands")) > 2
                 or command.get("risk_level") not in COMMAND_RISKS
                 or command_id not in bots[target].get("command_ids", [])
                 or not isinstance(command.get("version"), int)
@@ -405,6 +448,10 @@ class DataTransferService:
             try:
                 validated = validate_command_template(
                     command.get("full_template", ""),
+                    command_entry=command.get("command_entry"),
+                    subcommands=command.get("subcommands"),
+                    argument_template=command.get("argument_template"),
+                    description=command.get("description"),
                     parameter_schema=command.get("parameter_schema"),
                     max_chars=4000,
                 )
@@ -413,6 +460,10 @@ class DataTransferService:
             if (
                 validated.full_template != command.get("full_template")
                 or validated.command_head != command.get("command_head")
+                or validated.command_entry != command.get("command_entry")
+                or list(validated.subcommands) != command.get("subcommands")
+                or validated.argument_template != command.get("argument_template")
+                or validated.description != command.get("description")
                 or validated.parameter_schema != command.get("parameter_schema")
             ):
                 raise DataTransferError("non-canonical peer bot command")
@@ -1112,6 +1163,9 @@ class DataTransferService:
                 if peer_state is not None:
                     if int(manifest.get("version", 0) or 0) < 4:
                         raise DataTransferError("peer bot registry requires package version 4")
+                    if isinstance(peer_state, dict) and int(peer_state.get("schema_version", 0) or 0) == 1:
+                        peer_state = self._peer_bot_transfer_document(peer_state)
+                        data["kv"]["peer_bot_registry"] = peer_state
                     self._validate_peer_bot_transfer_document(peer_state)
                 continue
             if name == "local_user_profiles":

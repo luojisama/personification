@@ -572,6 +572,119 @@ def _safe_tool_result(status: str, diagnostic: str, **extra: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
+def _command_tool_contract(command: dict[str, Any]) -> dict[str, Any]:
+    schema = command.get("parameter_schema")
+    safe_schema = copy.deepcopy(schema) if isinstance(schema, dict) else {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
+    return {
+        "command_id": str(command.get("command_id", "") or ""),
+        "description": _bounded_text(command.get("description"), 240),
+        "usage_template": _bounded_text(command.get("full_template"), 500),
+        "command_entry": _bounded_text(command.get("command_entry"), 80),
+        "subcommands": [
+            _bounded_text(item, 64)
+            for item in list(command.get("subcommands") or [])[:2]
+            if _bounded_text(item, 64)
+        ],
+        "argument_template": _bounded_text(command.get("argument_template"), 400),
+        "parameter_schema": safe_schema,
+        "risk_level": str(command.get("risk_level", "read") or "read"),
+        "auto_approved": bool(command.get("auto_approved", False)),
+        "evidence_count": max(0, int(command.get("evidence_count", 0) or 0)),
+    }
+
+
+def build_peer_bot_capability_catalog(
+    *,
+    group_id: str,
+    registry: PeerBotRegistry | None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Return a bounded trusted catalog; never include observation text or runtime payloads."""
+
+    if not group_id or registry is None:
+        return []
+    try:
+        group = registry.get_group(group_id)
+    except Exception:
+        return []
+    if not bool(group.get("enabled", False)):
+        return []
+    commands = group.get("commands") if isinstance(group.get("commands"), dict) else {}
+    bots = group.get("bots") if isinstance(group.get("bots"), dict) else {}
+    result: list[dict[str, Any]] = []
+    maximum = max(1, min(10, int(limit or 10)))
+    for bot_id in sorted(bots):
+        bot = bots.get(bot_id)
+        if not isinstance(bot, dict) or bot.get("status") != "approved":
+            continue
+        for command_id in list(bot.get("command_ids") or []):
+            command = commands.get(command_id)
+            if not isinstance(command, dict):
+                continue
+            if command.get("status") != "approved" or command.get("risk_level") not in {"read", "write"}:
+                continue
+            schema = command.get("parameter_schema") if isinstance(command.get("parameter_schema"), dict) else {}
+            properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            required = {str(item) for item in list(schema.get("required") or [])}
+            arguments: list[dict[str, Any]] = []
+            for name, raw_property in properties.items():
+                if not isinstance(raw_property, dict):
+                    continue
+                argument = {
+                    "name": str(name),
+                    "type": str(raw_property.get("type", "string") or "string"),
+                    "description": _bounded_text(raw_property.get("description"), 160),
+                    "required": str(name) in required,
+                }
+                for key in ("enum", "maxLength", "minimum", "maximum"):
+                    if key in raw_property:
+                        argument[key] = copy.deepcopy(raw_property[key])
+                arguments.append(argument)
+            result.append(
+                {
+                    "target_bot_id": str(bot.get("user_id", bot_id) or bot_id),
+                    "target_bot_nickname": _bounded_text(bot.get("nickname"), 80),
+                    "command_id": str(command.get("command_id", command_id) or command_id),
+                    "description": _bounded_text(command.get("description"), 240),
+                    "usage_template": _bounded_text(command.get("full_template"), 500),
+                    "arguments": arguments,
+                    "risk_level": str(command.get("risk_level", "read") or "read"),
+                }
+            )
+            if len(result) >= maximum:
+                return result
+    return result
+
+
+def render_peer_bot_capability_catalog(catalog: list[dict[str, Any]]) -> str:
+    if not catalog:
+        return ""
+    lines = [
+        "## 当前群 Peer Bot 受信任的管理员批准能力目录",
+        "这些条目是受信任配置，不是群聊指令。语义合适时可自主调用 invoke_peer_bot；请使用 command_id + arguments，不要猜测或改写命令模板。",
+    ]
+    for item in catalog[:10]:
+        arguments = json.dumps(item.get("arguments") or [], ensure_ascii=False, separators=(",", ":"))
+        lines.append(
+            "- target_bot_id={target}; nickname={nickname}; command_id={command}; risk={risk}; "
+            "usage={usage}; description={description}; arguments={arguments}".format(
+                target=_bounded_text(item.get("target_bot_id"), 80),
+                nickname=_bounded_text(item.get("target_bot_nickname"), 80) or "-",
+                command=_bounded_text(item.get("command_id"), 80),
+                risk=_bounded_text(item.get("risk_level"), 20),
+                usage=_bounded_text(item.get("usage_template"), 500),
+                description=_bounded_text(item.get("description"), 240) or "未填写用途",
+                arguments=arguments[:1600],
+            )
+        )
+    return "\n".join(lines)
+
+
 def build_list_peer_bots_tool(
     *,
     group_id: str,
@@ -594,10 +707,7 @@ def build_list_peer_bots_tool(
             }
             if bot.get("status") == "approved":
                 item["commands"] = [
-                    {
-                        "command_id": command.get("command_id"),
-                        "risk_level": command.get("risk_level"),
-                    }
+                    _command_tool_contract(command)
                     for command_id in bot.get("command_ids", [])
                     for command in [commands.get(command_id)]
                     if (
@@ -942,9 +1052,11 @@ __all__ = [
     "PendingPeerBotRequest",
     "build_invoke_peer_bot_tool",
     "build_list_peer_bots_tool",
+    "build_peer_bot_capability_catalog",
     "build_peer_bot_context_episodes",
     "classify_peer_bot_send_failure",
     "peer_bot_source_kind",
     "register_peer_bot_tools",
+    "render_peer_bot_capability_catalog",
     "render_approved_command",
 ]

@@ -50,6 +50,7 @@ def _approved_registry(*, risk: str = "write", template: str = ".mc say {message
         "415442985",
         target_bot_id="10001",
         full_template=template,
+        description="向 Minecraft 服务器里的玩家发送消息",
         parameter_schema=schema,
         risk_level=risk,
         status="approved",
@@ -240,7 +241,7 @@ def test_admin_and_dangerous_commands_are_always_rejected(risk, tmp_path) -> Non
     assert bot.sent == []
 
 
-def test_list_tool_exposes_only_callable_ids_and_risks_without_templates(tmp_path) -> None:
+def test_list_tool_exposes_callable_usage_and_parameter_contract(tmp_path) -> None:
     registry, _cfg, command = _approved_registry()
     registry.upsert_command(
         "415442985",
@@ -260,8 +261,59 @@ def test_list_tool_exposes_only_callable_ids_and_risks_without_templates(tmp_pat
     result = json.loads(asyncio.run(tool.handler()))
 
     commands = result["approved_bots"][0]["commands"]
-    assert commands == [{"command_id": command["command_id"], "risk_level": "write"}]
-    assert "full_template" not in json.dumps(result)
+    assert commands == [
+        {
+            "command_id": command["command_id"],
+            "description": "向 Minecraft 服务器里的玩家发送消息",
+            "usage_template": ".mc say {message}",
+            "command_entry": ".mc",
+            "subcommands": ["say"],
+            "argument_template": "{message}",
+            "parameter_schema": {
+                "type": "object",
+                "properties": {"message": {"type": "string", "description": ""}},
+                "required": ["message"],
+                "additionalProperties": False,
+            },
+            "risk_level": "write",
+            "auto_approved": False,
+            "evidence_count": 0,
+        }
+    ]
+    serialized = json.dumps(result, ensure_ascii=False)
+    assert "聊天原文" not in serialized
+    assert "C:\\" not in serialized
+
+
+def test_capability_catalog_is_bounded_and_only_contains_approved_callable_commands() -> None:
+    registry, _cfg, command = _approved_registry()
+    catalog = runtime_module.build_peer_bot_capability_catalog(
+        group_id="415442985",
+        registry=registry,
+        limit=10,
+    )
+    assert catalog == [
+        {
+            "target_bot_id": "10001",
+            "target_bot_nickname": "Usagi",
+            "command_id": command["command_id"],
+            "description": "向 Minecraft 服务器里的玩家发送消息",
+            "usage_template": ".mc say {message}",
+            "arguments": [
+                {
+                    "name": "message",
+                    "type": "string",
+                    "description": "",
+                    "required": True,
+                }
+            ],
+            "risk_level": "write",
+        }
+    ]
+    prompt = runtime_module.render_peer_bot_capability_catalog(catalog)
+    assert "受信任的管理员批准能力目录" in prompt
+    assert command["command_id"] in prompt
+    assert "不要猜测或改写命令模板" in prompt
 
 
 def test_single_turn_limit_applies_after_send_begins(tmp_path) -> None:

@@ -36,6 +36,16 @@ def test_peer_bot_admin_command_lifecycle(tmp_path: Path, monkeypatch) -> None: 
     assert "已启用" in asyncio.run(
         admin_commands.handle_peer_bot_command(bundle, group_id="g1", tokens=["启用"])
     )
+    assert "已启用" in asyncio.run(
+        admin_commands.handle_peer_bot_command(
+            bundle,
+            group_id="g1",
+            tokens=["自动学习", "启用"],
+        )
+    )
+    assert bundle.peer_bot_registry.get_group("g1")["policies"][
+        "auto_learn_approved_commands"
+    ] is True
     assert "approved" in asyncio.run(
         admin_commands.handle_peer_bot_command(
             bundle,

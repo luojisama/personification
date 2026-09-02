@@ -19,9 +19,10 @@ async def handle_record_message_event(
 ) -> None:
     if user_policy_gate is not None and not await user_policy_gate.allows_current(event):
         return
+    peer_bot_classification = None
     if peer_bot_coordinator is not None:
         try:
-            peer_bot_coordinator.classify_event(event)
+            peer_bot_classification = peer_bot_coordinator.classify_event(event)
         except Exception as exc:
             logger.debug(f"拟人插件：Peer Bot 来源识别失败: {type(exc).__name__}")
     custom_title_getter = get_custom_title or (lambda _user_id: None)
@@ -40,6 +41,14 @@ async def handle_record_message_event(
         "peer_bot_command",
     }
     if group_id:
+        if peer_bot_observer is not None:
+            try:
+                peer_bot_observer.enqueue_protocol_event(
+                    event,
+                    classification=peer_bot_classification,
+                )
+            except Exception as exc:
+                logger.debug(f"拟人插件：排队 Peer Bot 协议观察失败: {type(exc).__name__}")
         if favorability_observer is not None and not is_peer_bot_event:
             try:
                 favorability_observer.enqueue_event(event, source="group_message")

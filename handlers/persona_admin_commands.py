@@ -956,6 +956,7 @@ def _peer_bot_usage() -> str:
         "- 拟人 群Bot 确认 <QQ号>\n"
         "- 拟人 群Bot 忽略 <QQ号>\n"
         "- 拟人 群Bot 启用|停用\n"
+        "- 拟人 群Bot 自动学习 启用|停用\n"
         "- 拟人 群Bot 命令 添加 <QQ号> <read|write|admin|dangerous> <完整命令模板>\n"
         "- 拟人 群Bot 命令 确认 <QQ号> <命令ID>\n"
         "- 拟人 群Bot 命令 删除 <QQ号> <命令ID>\n"
@@ -1027,6 +1028,17 @@ async def handle_peer_bot_command(
         if action in {"停用", "disable"}:
             registry.set_settings(group_id, enabled=False)
             return "已停用本群 Peer Bot 协作。"
+        if action in {"自动学习", "auto-learn", "autolearn"}:
+            if len(tokens) != 2:
+                return _peer_bot_usage()
+            mode = str(tokens[1]).strip().lower()
+            if mode not in {"启用", "enable", "on", "停用", "disable", "off"}:
+                return _peer_bot_usage()
+            enabled = mode in {"启用", "enable", "on"}
+            registry.set_settings(group_id, auto_learn_approved_commands=enabled)
+            if enabled:
+                return "已启用本群 Peer Bot 协议自动学习；仅批准 Bot 的高置信 read/write 新协议可自动启用。"
+            return "已停用本群 Peer Bot 协议自动学习；已批准命令保持不变。"
         if action in {"循环复位", "reset-loop", "reset"}:
             if tracker is None:
                 return "Peer Bot 循环保护当前不可用。"

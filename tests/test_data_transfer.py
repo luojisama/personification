@@ -154,6 +154,12 @@ def test_peer_bot_registry_transfer_is_v4_approved_only(transfer) -> None:
     assert all(command["status"] == "approved" for command in transferred["commands"].values())
     assert transferred["commands"]["mc_say"]["source"] == "manual"
     assert transferred["commands"]["mc_say"]["manual_override"] is True
+    assert transferred["schema_version"] == 2
+    assert transferred["commands"]["mc_say"]["command_entry"] == ".mc"
+    assert transferred["commands"]["mc_say"]["subcommands"] == ["say"]
+    assert transferred["commands"]["mc_say"]["argument_template"] == "{message}"
+    assert transferred["commands"]["mc_say"]["auto_approved"] is False
+    assert transferred["policies"]["auto_learn_approved_commands"] is False
     service._validate_peer_bot_transfer_document(transferred)
 
     with sqlite3.connect(db_path) as conn:

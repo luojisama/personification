@@ -60,7 +60,11 @@ from ...core.group_context import (
     render_plugin_episode_trace_detail,
     render_topic_state_trace_detail,
 )
-from ...core.peer_bot_runtime import build_peer_bot_context_episodes
+from ...core.peer_bot_runtime import (
+    build_peer_bot_capability_catalog,
+    build_peer_bot_context_episodes,
+    render_peer_bot_capability_catalog,
+)
 from ...core.group_mute import refresh_bot_group_mute_state
 from ...core.group_roles import extract_sender_role
 from ...core.target_inference import (
@@ -1668,6 +1672,15 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 )
         except Exception:
             pass
+    if not is_private_session:
+        peer_bot_capability_prompt = render_peer_bot_capability_catalog(
+            build_peer_bot_capability_catalog(
+                group_id=str(group_id),
+                registry=getattr(runtime, "peer_bot_registry", None),
+            )
+        )
+        if peer_bot_capability_prompt:
+            recent_context_hint = f"{recent_context_hint}\n\n{peer_bot_capability_prompt}".strip()
     avatar_pair_candidates = build_avatar_pair_candidates(
         event=event,
         current_user_id=user_id,

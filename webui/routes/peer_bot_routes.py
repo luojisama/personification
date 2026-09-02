@@ -317,6 +317,7 @@ def build_peer_bot_group_router(*, runtime: Any) -> APIRouter:
             "cooldown_seconds",
             "pending_ttl_seconds",
             "max_chain_depth",
+            "auto_learn_approved_commands",
         }
         if set(body) - allowed:
             _raise_failure(
@@ -334,6 +335,11 @@ def build_peer_bot_group_router(*, runtime: Any) -> APIRouter:
                 cooldown_seconds=body.get("cooldown_seconds"),
                 pending_ttl_seconds=body.get("pending_ttl_seconds"),
                 max_chain_depth=body.get("max_chain_depth"),
+                auto_learn_approved_commands=(
+                    body.get("auto_learn_approved_commands")
+                    if "auto_learn_approved_commands" in body
+                    else None
+                ),
             )
         except PeerBotRegistryError as exc:
             _registry_error(exc, group_id=group_id)
@@ -422,7 +428,16 @@ def build_peer_bot_group_router(*, runtime: Any) -> APIRouter:
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         registry = _registry_or_503(runtime)
-        allowed = {"full_template", "parameter_schema", "risk_level", "status"}
+        allowed = {
+            "full_template",
+            "command_entry",
+            "subcommands",
+            "argument_template",
+            "description",
+            "parameter_schema",
+            "risk_level",
+            "status",
+        }
         if set(body) - allowed:
             _raise_failure(
                 status_code=400,
@@ -445,7 +460,11 @@ def build_peer_bot_group_router(*, runtime: Any) -> APIRouter:
                 group_id,
                 target_bot_id=user_id,
                 command_id=command_id,
-                full_template=body.get("full_template", ""),
+                full_template=body.get("full_template"),
+                command_entry=body.get("command_entry"),
+                subcommands=body.get("subcommands"),
+                argument_template=body.get("argument_template"),
+                description=body.get("description", ""),
                 parameter_schema=body.get("parameter_schema", {}),
                 risk_level=body.get("risk_level", "read"),
                 status=status,

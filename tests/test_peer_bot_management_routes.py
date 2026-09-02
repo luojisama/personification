@@ -107,10 +107,12 @@ def test_peer_bot_management_lifecycle_and_v2_compat(peer_route_runtime) -> None
             "cooldown_seconds": 15,
             "pending_ttl_seconds": 45,
             "max_chain_depth": 1,
+            "auto_learn_approved_commands": True,
         },
     )
     assert settings.status_code == 200, settings.text
     assert settings.json()["settings"]["enabled"] is True
+    assert settings.json()["settings"]["policies"]["auto_learn_approved_commands"] is True
 
     approved = client.put(
         "/personification/api/groups/g1/peer-bots/20002",
@@ -136,9 +138,51 @@ def test_peer_bot_management_lifecycle_and_v2_compat(peer_route_runtime) -> None
     assert command.status_code == 200, command.text
     assert command.json()["command"]["command_head"] == ".mc say"
 
+    structured = client.put(
+        "/personification/api/groups/g1/peer-bots/20002/commands/draw",
+        json={
+            "command_entry": "/抽卡",
+            "subcommands": [],
+            "argument_template": "",
+            "description": "进行一次抽卡",
+            "parameter_schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+            "risk_level": "read",
+            "status": "approved",
+        },
+    )
+    assert structured.status_code == 200, structured.text
+    assert structured.json()["command"]["full_template"] == "/抽卡"
+
+    mismatch = client.put(
+        "/personification/api/groups/g1/peer-bots/20002/commands/mismatch",
+        json={
+            "full_template": ".mc say {message}",
+            "command_entry": ".mc",
+            "subcommands": ["tell"],
+            "argument_template": "{message}",
+            "parameter_schema": {
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+                "additionalProperties": False,
+            },
+            "risk_level": "write",
+            "status": "candidate",
+        },
+    )
+    assert mismatch.status_code == 400
+    assert "structural_mismatch" in mismatch.json()["detail"]["code"]
+
     listed = client.get("/personification/api/groups/g1/peer-bots").json()
     assert listed["bots"][0]["nickname"] == "Usagi"
-    assert listed["commands"][0]["full_template"] == ".mc say {message}"
+    assert next(
+        item for item in listed["commands"] if item["command_id"] == "mc_say"
+    )["full_template"] == ".mc say {message}"
     assert listed["pending_count"] == 0
 
     reset = client.post("/personification/api/groups/g1/peer-bots/reset-loop")

@@ -57,6 +57,9 @@ class Config(BaseModel):
     personification_peer_bot_detector_debounce_seconds: float = 30.0
     personification_peer_bot_detector_daily_quota: int = 200
     personification_peer_bot_detector_confidence_threshold: float = 0.70
+    personification_peer_bot_protocol_learning_enabled: bool = True
+    personification_peer_bot_auto_approve_confidence: float = 0.90
+    personification_peer_bot_fifo_evidence_count: int = 2
     personification_peer_bot_max_calls_per_turn: int = 1
     personification_peer_bot_cooldown_seconds: float = 10.0
     personification_peer_bot_pending_ttl_seconds: float = 30.0

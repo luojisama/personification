@@ -34,6 +34,9 @@ def _config(**overrides):
         "personification_peer_bot_detector_daily_quota": 200,
         "personification_peer_bot_detector_confidence_threshold": 0.70,
         "personification_peer_bot_max_command_chars": 500,
+        "personification_peer_bot_protocol_learning_enabled": True,
+        "personification_peer_bot_auto_approve_confidence": 0.90,
+        "personification_peer_bot_fifo_evidence_count": 2,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -71,6 +74,54 @@ def test_assessment_parser_is_strict_and_bounded() -> None:
     assert observer_module.parse_peer_bot_assessment(
         {"classification": "bot", "confidence": 2, "evidence_tags": [], "command_suggestions": []}
     ) is None
+
+
+def test_protocol_assessment_parser_requires_structured_v2_contract() -> None:
+    parsed = observer_module.parse_peer_bot_protocol_assessment(
+        {
+            "target_bot_id": "10001",
+            "confidence": 0.95,
+            "command_suggestions": [
+                {
+                    "full_template": ".mc say {message}",
+                    "command_entry": ".mc",
+                    "subcommands": ["say"],
+                    "argument_template": "{message}",
+                    "description": "向 Minecraft 服务器里的玩家发送消息",
+                    "parameter_schema": {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string", "description": "发言内容"}
+                        },
+                        "required": ["message"],
+                        "additionalProperties": False,
+                    },
+                    "risk_level": "write",
+                }
+            ],
+        }
+    )
+    assert parsed is not None
+    assert parsed.target_bot_id == "10001"
+    assert parsed.command_suggestions[0].command_entry == ".mc"
+    assert parsed.command_suggestions[0].subcommands == ("say",)
+
+    invalid = {
+        "target_bot_id": "10001",
+        "confidence": 0.95,
+        "command_suggestions": [
+            {
+                "full_template": ".mc say {message}",
+                "command_entry": ".mc",
+                "subcommands": ["tell"],
+                "argument_template": "{message}",
+                "description": "不一致",
+                "parameter_schema": {},
+                "risk_level": "write",
+            }
+        ],
+    }
+    assert observer_module.parse_peer_bot_protocol_assessment(invalid) is None
     assert observer_module.parse_peer_bot_assessment(
         {
             "classification": "bot",
@@ -128,6 +179,36 @@ class _Event:
 
     def get_plaintext(self):
         return "[MC] VikiQAQ fell from a high place"
+
+
+class _ProtocolRequestEvent:
+    self_id = "99999"
+    user_id = "20002"
+    group_id = "415442985"
+    message_id = "request-1"
+    message = []
+    sender = _Sender()
+    reply = None
+
+    def get_plaintext(self):
+        return ".mc say 大家好"
+
+
+class _ReplyRef:
+    message_id = "request-1"
+
+
+class _ProtocolBotReplyEvent:
+    self_id = "99999"
+    user_id = "10001"
+    group_id = "415442985"
+    message_id = "reply-1"
+    message = []
+    sender = _Sender()
+    reply = _ReplyRef()
+
+    def get_plaintext(self):
+        return "[MC] 大家好"
 
 
 def test_observer_creates_candidate_without_authorizing_it() -> None:
@@ -254,3 +335,62 @@ def test_registry_write_failure_isolated_as_unknown() -> None:
 
     result = asyncio.run(run())[0]
     assert result == {"status": "unknown", "diagnostic": "peer_bot_candidate_store_failed"}
+
+
+def test_approved_bot_reply_protocol_episode_can_auto_approve_exact_match() -> None:
+    registry, cfg = _registry()
+    registry.set_settings(
+        "415442985",
+        enabled=True,
+        auto_learn_approved_commands=True,
+    )
+    registry.set_bot_status("415442985", user_id="10001", action="approve", nickname="Usagi")
+
+    async def call_ai(messages, **_kwargs):
+        assert "[不可信群聊数据]" in messages[1]["content"]
+        assert "[不可信外部 Bot 数据]" in messages[1]["content"]
+        return {
+            "target_bot_id": "10001",
+            "confidence": 0.95,
+            "command_suggestions": [
+                {
+                    "full_template": ".mc say {message}",
+                    "command_entry": ".mc",
+                    "subcommands": ["say"],
+                    "argument_template": "{message}",
+                    "description": "向 Minecraft 服务器里的玩家发送消息",
+                    "parameter_schema": {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string", "description": "发言内容"}
+                        },
+                        "required": ["message"],
+                        "additionalProperties": False,
+                    },
+                    "risk_level": "write",
+                }
+            ],
+        }
+
+    observer = observer_module.PeerBotObserver(
+        registry=registry,
+        plugin_config=cfg,
+        call_ai_api=call_ai,
+    )
+
+    async def run():
+        assert observer.enqueue_protocol_event(_ProtocolRequestEvent()) is True
+        classification = SimpleNamespace(bot_status="approved", source_kind="peer_bot_reply")
+        assert observer.enqueue_protocol_event(
+            _ProtocolBotReplyEvent(), classification=classification
+        ) is True
+        await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+    commands = registry.get_group("415442985")["commands"]
+    assert len(commands) == 1
+    command = next(iter(commands.values()))
+    assert command["status"] == "approved"
+    assert command["auto_approved"] is True
+    assert command["evidence_count"] == 1
+    assert observer.snapshot_stats()["protocol_auto_approved"] == 1

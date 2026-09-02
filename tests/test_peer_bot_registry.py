@@ -44,6 +44,7 @@ def test_registry_defaults_are_closed_and_depth_is_fixed() -> None:
         "cooldown_seconds": 10.0,
         "pending_ttl_seconds": 30.0,
         "max_chain_depth": 1,
+        "auto_learn_approved_commands": False,
     }
     with pytest.raises(registry_module.PeerBotRegistryError, match="max_calls_per_turn"):
         registry.set_settings("415442985", max_calls_per_turn=2)
@@ -99,6 +100,115 @@ def test_full_command_templates_are_structural_and_strict() -> None:
     assert validated.placeholders == ("message",)
     assert validated.parameter_schema["properties"]["message"]["maxLength"] == 120
     assert registry_module.validate_command_template("/抽卡").placeholders == ()
+
+
+def test_v2_structured_command_fields_generate_full_template() -> None:
+    validated = registry_module.validate_command_template(
+        full_template=None,
+        command_entry=".mc",
+        subcommands=["say"],
+        argument_template="{message}",
+        description="向 Minecraft 服务器里的玩家发送消息",
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "要发送到服务器的消息",
+                    "maxLength": 120,
+                }
+            },
+            "required": ["message"],
+            "additionalProperties": False,
+        },
+    )
+    assert validated.full_template == ".mc say {message}"
+    assert validated.command_entry == ".mc"
+    assert validated.subcommands == ("say",)
+    assert validated.argument_template == "{message}"
+    assert validated.description == "向 Minecraft 服务器里的玩家发送消息"
+    assert validated.legacy_mode is False
+    assert (
+        validated.parameter_schema["properties"]["message"]["description"]
+        == "要发送到服务器的消息"
+    )
+
+    no_arguments = registry_module.validate_command_template(
+        full_template=None,
+        command_entry="/抽卡",
+        subcommands=[],
+        argument_template="",
+    )
+    assert no_arguments.full_template == "/抽卡"
+    assert no_arguments.placeholders == ()
+
+
+def test_v2_rejects_conflicting_legacy_and_structured_templates() -> None:
+    with pytest.raises(
+        registry_module.PeerBotRegistryError,
+        match="command_template_structural_mismatch",
+    ):
+        registry_module.validate_command_template(
+            ".mc say {message}",
+            command_entry=".mc",
+            subcommands=["tell"],
+            argument_template="{message}",
+        )
+
+    with pytest.raises(registry_module.PeerBotRegistryError, match="subcommands_limit"):
+        registry_module.validate_command_template(
+            full_template=None,
+            command_entry=".mc",
+            subcommands=["one", "two", "three"],
+        )
+
+
+def test_v1_registry_migrates_without_changing_full_template() -> None:
+    store = _Store()
+    store.namespaces[registry_module.PEER_BOT_REGISTRY_NAMESPACE] = {
+        "g1": {
+            "schema_version": 1,
+            "enabled": True,
+            "bots": {
+                "10001": {
+                    "user_id": "10001",
+                    "status": "approved",
+                    "command_ids": ["legacy-command"],
+                }
+            },
+            "commands": {
+                "legacy-command": {
+                    "command_id": "legacy-command",
+                    "target_bot_id": "10001",
+                    "full_template": ".mc say {message}",
+                    "command_head": ".mc say",
+                    "parameter_schema": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string"}},
+                        "required": ["message"],
+                        "additionalProperties": False,
+                    },
+                    "risk_level": "write",
+                    "status": "approved",
+                    "source": "manual",
+                    "manual_override": True,
+                }
+            },
+        }
+    }
+    registry = registry_module.PeerBotRegistry(
+        store=store,
+        plugin_config=SimpleNamespace(personification_peer_bot_max_command_chars=500),
+    )
+    group = registry.get_group("g1")
+    command = group["commands"]["legacy-command"]
+    assert group["schema_version"] == 2
+    assert command["full_template"] == ".mc say {message}"
+    assert command["command_entry"] == ".mc"
+    assert command["subcommands"] == ["say"]
+    assert command["argument_template"] == "{message}"
+    assert command["legacy_mode"] is False
+    assert command["auto_approved"] is False
 
     invalid_templates = [
         ".mc say {message}\n/admin stop",
@@ -187,6 +297,140 @@ def test_llm_observation_cannot_modify_a_manually_approved_command() -> None:
     assert observed["parameter_schema"]["required"] == ["message"]
     assert observed["risk_level"] == "write"
     assert observed["status"] == "approved"
+
+
+def test_protocol_learning_exact_and_fifo_thresholds_are_atomic() -> None:
+    registry = _registry()
+    registry.set_settings("g1", enabled=True, auto_learn_approved_commands=True)
+    registry.set_bot_status("g1", user_id="536596616", action="approve", nickname="Usagi")
+
+    exact = registry.observe_protocol_command(
+        "g1",
+        target_bot_id="536596616",
+        full_template=".mc say {message}",
+        description="向 Minecraft 服务器里的玩家发送消息",
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "发言内容", "maxLength": 120}
+            },
+            "required": ["message"],
+            "additionalProperties": False,
+        },
+        risk_level="write",
+        confidence=0.90,
+        correlation_kind="exact_reply",
+        auto_approve_confidence=0.90,
+        fifo_evidence_count=2,
+    )
+    assert exact["diagnostic_code"] == "peer_bot_protocol_auto_approved"
+    assert exact["command"]["status"] == "approved"
+    assert exact["command"]["auto_approved"] is True
+    assert exact["command"]["evidence_count"] == 1
+
+    first = registry.observe_protocol_command(
+        "g1",
+        target_bot_id="536596616",
+        full_template="/抽卡",
+        description="进行一次抽卡",
+        parameter_schema=None,
+        risk_level="read",
+        confidence=0.92,
+        correlation_kind="fifo",
+        auto_approve_confidence=0.90,
+        fifo_evidence_count=2,
+        episode_key="fifo-episode-1",
+    )
+    assert first["diagnostic_code"] == "peer_bot_protocol_candidate"
+    assert first["command"]["status"] == "candidate"
+    assert first["command"]["evidence_count"] == 1
+    duplicate_first = registry.observe_protocol_command(
+        "g1",
+        target_bot_id="536596616",
+        full_template="/抽卡",
+        description="进行一次抽卡",
+        parameter_schema=None,
+        risk_level="read",
+        confidence=0.99,
+        correlation_kind="fifo",
+        auto_approve_confidence=0.90,
+        fifo_evidence_count=2,
+        episode_key="fifo-episode-1",
+    )
+    assert duplicate_first["command"]["evidence_count"] == 1
+    assert duplicate_first["command"]["status"] == "candidate"
+    second = registry.observe_protocol_command(
+        "g1",
+        target_bot_id="536596616",
+        full_template="/抽卡",
+        description="进行一次抽卡",
+        parameter_schema=None,
+        risk_level="read",
+        confidence=0.92,
+        correlation_kind="fifo",
+        auto_approve_confidence=0.90,
+        fifo_evidence_count=2,
+        episode_key="fifo-episode-2",
+    )
+    assert second["diagnostic_code"] == "peer_bot_protocol_auto_approved"
+    assert second["command"]["evidence_count"] == 2
+
+
+def test_protocol_learning_never_overwrites_manual_or_auto_approves_high_risk() -> None:
+    registry = _registry()
+    registry.set_settings("g1", enabled=True, auto_learn_approved_commands=True)
+    registry.set_bot_status("g1", user_id="10001", action="approve")
+    manual = registry.upsert_command(
+        "g1",
+        target_bot_id="10001",
+        command_entry=".mc",
+        subcommands=["say"],
+        argument_template="{message}",
+        description="管理员定义的用途",
+        parameter_schema=None,
+        risk_level="write",
+        status="approved",
+        source="manual",
+        manual_override=True,
+    )
+    observed = registry.observe_protocol_command(
+        "g1",
+        target_bot_id="10001",
+        full_template=".mc say {message}",
+        description="模型试图替换用途",
+        parameter_schema=None,
+        risk_level="read",
+        confidence=1.0,
+        correlation_kind="exact_reply",
+    )
+    assert observed["diagnostic_code"] == "peer_bot_protocol_observed"
+    assert observed["command"] == manual
+
+    conflict = registry.observe_protocol_command(
+        "g1",
+        target_bot_id="10001",
+        full_template=".mc stop",
+        description="冲突协议",
+        parameter_schema=None,
+        risk_level="write",
+        confidence=1.0,
+        correlation_kind="exact_reply",
+    )
+    assert conflict["diagnostic_code"] == "peer_bot_protocol_conflict"
+    assert conflict["command"]["status"] == "candidate"
+
+    dangerous = registry.observe_protocol_command(
+        "g1",
+        target_bot_id="10001",
+        full_template="/shutdown",
+        description="危险操作",
+        parameter_schema=None,
+        risk_level="dangerous",
+        confidence=1.0,
+        correlation_kind="exact_reply",
+    )
+    assert dangerous["diagnostic_code"] == "peer_bot_protocol_risk_blocked"
+    assert dangerous["command"]["status"] == "candidate"
 
 
 def test_invalid_schema_numbers_use_stable_registry_error() -> None:

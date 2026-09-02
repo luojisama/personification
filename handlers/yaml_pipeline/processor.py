@@ -18,7 +18,12 @@ from ...core.chat_intent import (
 )
 from ...core.command_runtime_context import render_command_runtime_prompt
 from ...core.current_group_context_tool import register_current_group_context_tool
-from ...core.peer_bot_runtime import build_peer_bot_context_episodes, register_peer_bot_tools
+from ...core.peer_bot_runtime import (
+    build_peer_bot_capability_catalog,
+    build_peer_bot_context_episodes,
+    register_peer_bot_tools,
+    render_peer_bot_capability_catalog,
+)
 from ...core.group_member_avatar_insight import register_group_member_avatar_insight_tool
 from ...core.emotion_state import (
     build_turn_emotion_prompt_block,
@@ -1013,6 +1018,15 @@ async def process_yaml_response_logic(
             )
     else:
         recent_window = []
+    if not is_private_session:
+        peer_bot_capability_prompt = render_peer_bot_capability_catalog(
+            build_peer_bot_capability_catalog(
+                group_id=group_id,
+                registry=peer_bot_registry,
+            )
+        )
+        if peer_bot_capability_prompt:
+            recent_context_hint = f"{recent_context_hint}\n\n{peer_bot_capability_prompt}".strip()
     avatar_pair_recent_messages = (
         recent_window
         if recent_window
