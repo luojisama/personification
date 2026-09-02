@@ -382,6 +382,35 @@ DDL_STATEMENTS = (
         WHERE remote_id <> '' AND status = 'succeeded'
     """,
     """
+    CREATE TABLE IF NOT EXISTS qzone_social_operations (
+        operation_id TEXT PRIMARY KEY,
+        bot_id TEXT NOT NULL,
+        group_id TEXT NOT NULL DEFAULT '',
+        target_uin TEXT NOT NULL,
+        feed_id TEXT NOT NULL,
+        action_kind TEXT NOT NULL CHECK (action_kind IN ('like', 'comment')),
+        period_day TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (
+            status IN ('reserved', 'dispatching', 'succeeded', 'definite_failure', 'unknown')
+        ),
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        dispatch_started_at REAL NOT NULL DEFAULT 0,
+        completed_at REAL NOT NULL DEFAULT 0,
+        result_code TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_qzone_social_ops_scope
+        ON qzone_social_operations(bot_id, group_id, target_uin, period_day, status)
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_qzone_social_ops_idempotency
+        ON qzone_social_operations(bot_id, target_uin, feed_id, action_kind, payload_hash)
+        WHERE status IN ('reserved', 'dispatching', 'succeeded', 'unknown')
+    """,
+    """
     CREATE TABLE IF NOT EXISTS qzone_monthly_usage (
         period TEXT PRIMARY KEY,
         confirmed_count INTEGER NOT NULL DEFAULT 0,

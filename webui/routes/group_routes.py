@@ -23,6 +23,7 @@ from ...core.operation_diagnostics import detail, diagnostic, exception_diagnost
 from ..deps import AdminIdentity, get_client_ip, require_admin
 from .favorability_view import serialize_favorability
 from .peer_bot_routes import build_peer_bot_group_router
+from .qzone_agent_routes import build_qzone_agent_group_router
 
 
 class _ModelResponseView:
@@ -457,6 +458,7 @@ _REBUILD_MAX_PER_WINDOW = 3
 def build_group_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/groups", tags=["groups"])
     router.include_router(build_peer_bot_group_router(runtime=runtime))
+    router.include_router(build_qzone_agent_group_router(runtime=runtime))
 
     @router.get("")
     async def list_groups(_: AdminIdentity = Depends(require_admin)) -> dict:

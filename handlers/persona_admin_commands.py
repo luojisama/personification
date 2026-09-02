@@ -51,6 +51,11 @@ from ..core.model_router import (
 )
 from ..core.provider_router import get_provider_failure_snapshot, normalize_api_type, parse_api_pool_config
 from ..core.peer_bot_registry import PeerBotRegistryError
+from ..core.qzone_agent_interaction import (
+    get_group_qzone_agent_settings,
+    set_group_qzone_agent_settings,
+)
+from ..core.qzone_social_operations import QzoneSocialOperationCoordinator
 from ..core.runtime_config import get_runtime_load_info
 from ..utils import get_group_config, is_group_whitelisted
 from .runtime_commands import handle_git_update_command as _handle_git_update_command
@@ -275,7 +280,7 @@ def _root_help_text() -> str:
         "- 拟人 撤回：撤回当前 QQ 会话里最近一次可安全撤回的 Bot 输出。",
         "- 拟人 模型 列表|路由|使用|设置|重置：QQ 内热更新主 provider 和各阶段模型。",
         "- 拟人 定时 状态：查看定时任务注册状态、下次运行时间和功能开关。",
-        "- 拟人 空间 状态|测试 <QQ号/@用户>：查看空间任务状态，或对指定好友空间执行一次测试互动扫描。",
+        "- 拟人 空间 状态|测试 <QQ号/@用户>|群互动 状态|启用|停用：管理空间任务与当前群 Agent 互动。",
         "- 拟人 表情包 整理|清理|回滚：整理表情包库（去重/去低质量）、清理过期 trash、回滚最近一次整理。",
         "- 拟人 群Bot 列表|发现|确认|忽略|启用|停用|命令|循环复位：管理当前群的外部 Bot 协作。",
         "- 拟人 人设构建 <作品名> <角色名>：从百科/联网资料生成角色人设模板，输出聊天记录并附带文件。",
@@ -894,7 +899,14 @@ async def dispatch_persona_admin_command(
         await matcher.finish(handle_scheduler_command(bundle, tokens=rest))
 
     if command == "qzone":
-        if not can_manage_sensitive_action(event=event, superusers=bundle.superusers):
+        group_id = str(getattr(event, "group_id", "") or "").strip()
+        group_interaction = bool(rest and str(rest[0]).strip().lower() in {"群互动", "group-interaction"})
+        if not can_manage_sensitive_action(
+            event=event,
+            superusers=bundle.superusers,
+            allow_group_admin=group_interaction and bool(group_id),
+            target_group_id=group_id if group_interaction else "",
+        ):
             await matcher.finish(_admin_error())
         await matcher.finish(await handle_qzone_command(bundle, event=event, tokens=rest, arg_message=arg_message))
 
@@ -1731,7 +1743,41 @@ async def handle_qzone_command(
     tokens: list[str],
     arg_message: Any = None,
 ) -> str:
-    _ = event
+    group_id = str(getattr(event, "group_id", "") or "").strip()
+    if tokens and str(tokens[0]).strip().lower() in {"群互动", "group-interaction"}:
+        if not group_id:
+            return "空间群互动命令只能在目标群内使用。"
+        sub = str(tokens[1] if len(tokens) > 1 else "状态").strip().lower()
+        if sub in {"启用", "enable", "on"}:
+            settings = set_group_qzone_agent_settings(group_id, {"enabled": True})
+            return (
+                "已启用本群 Agent 空间互动；仍受 QZone 总开关、Agent 全局开关、好友关系、用户授权、"
+                f"每日 {settings['group_daily_limit']} 次和目标冷却限制。"
+            )
+        if sub in {"停用", "disable", "off"}:
+            set_group_qzone_agent_settings(group_id, {"enabled": False})
+            return "已停用本群 Agent 空间互动。"
+        if sub not in {"状态", "status", "list", "get"}:
+            return "用法：拟人 空间 群互动 状态｜启用｜停用"
+        settings = get_group_qzone_agent_settings(group_id)
+        bot_id = str(getattr(event, "self_id", "") or "")
+        snapshot = {"count": 0, "operations": []}
+        if bot_id:
+            try:
+                snapshot = QzoneSocialOperationCoordinator(
+                    timezone_name=str(
+                        getattr(bundle.plugin_config, "personification_timezone", "Asia/Shanghai")
+                        or "Asia/Shanghai"
+                    )
+                ).snapshot(bot_id=bot_id, group_id=group_id)
+            except Exception:
+                pass
+        return (
+            f"本群 Agent 空间互动：{'已启用' if settings['enabled'] else '已停用'}\n"
+            f"今日已占用：{snapshot.get('count', 0)}/{settings['group_daily_limit']}\n"
+            f"每目标每日：{settings['target_daily_limit']}；目标冷却：{int(settings['target_cooldown_seconds'])} 秒\n"
+            "只有成功读取得到的本回合 feed_ref 才能点赞或评论；结果未知不会自动重试。"
+        )
     action = normalize_command_word(tokens[0]) if tokens else "status"
     if action in {"status", "list", "get"}:
         return render_qzone_status(bundle)
@@ -1753,7 +1799,7 @@ async def handle_qzone_command(
             return "空间消息轮询任务未初始化。请确认 personification_qzone_enabled=true 后重启。"
         result = await poller(force=True)
         return _format_qzone_scan_result(result if isinstance(result, dict) else {})
-    return "用法：拟人 空间 状态｜扫描｜测试 <QQ号/@用户>｜消息"
+    return "用法：拟人 空间 状态｜扫描｜测试 <QQ号/@用户>｜消息｜群互动 状态|启用|停用"
 
 
 def handle_config_command(bundle: Any, *, event: Any, tokens: list[str]) -> str:

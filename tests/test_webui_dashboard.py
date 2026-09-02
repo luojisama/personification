@@ -188,6 +188,7 @@ def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
     assert models["gpt-x"]["total_tokens"] == 430
     assert models["gpt-y"]["total_tokens"] == 40
     assert models["gpt-z"]["total_tokens"] == 100
+
     distribution = {row["model"]: row for row in body["model_distribution"]}
     assert distribution["gpt-x"]["relative_width"] == 1.0
     groups = {row["group_id"]: row for row in body["by_group"]}
@@ -227,6 +228,45 @@ def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
     overview_purposes = {row["purpose"]: row for row in body["dashboard_overview"]["purpose_usage"]}
     assert overview_purposes["persona_template_synthesis"]["purpose_label"] == "人设构建：模板生成"
     assert overview_purposes["persona_template_synthesis"]["percent"] > 0
+
+
+def test_qzone_agent_group_settings_v2_route_audits_and_redacts(
+    _runtime_with_data,
+    monkeypatch,
+) -> None:
+    cfg = _runtime_with_data.plugin_config
+    cfg.personification_qzone_enabled = True
+    cfg.personification_agent_qzone_interaction_enabled = True
+    cfg.personification_agent_qzone_group_daily_limit = 3
+    cfg.personification_agent_qzone_target_daily_limit = 1
+    cfg.personification_agent_qzone_target_cooldown_seconds = 1800.0
+    audit_rows: list[dict] = []
+    audit_mod = load_personification_module("plugin.personification.core.webui_audit_log")
+    monkeypatch.setattr(audit_mod, "record", lambda **kwargs: audit_rows.append(kwargs))
+    client = _build_client(_runtime_with_data)
+    _login(client)
+
+    saved = client.put(
+        "/personification/api/v2/group-management/g1/qzone-agent",
+        json={
+            "enabled": True,
+            "group_daily_limit": 2,
+            "target_daily_limit": 1,
+            "target_cooldown_seconds": 1800,
+        },
+    )
+
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["settings"]["enabled"] is True
+    assert saved.json()["partial"] is False
+    assert audit_rows[-1]["action"] == "group_qzone_agent_update"
+    assert audit_rows[-1]["target"] == "g1"
+    state = client.get("/personification/api/groups/g1/qzone-agent")
+    assert state.status_code == 200, state.text
+    rendered = repr(state.json())
+    assert "target_uin" not in rendered
+    assert "feed_id" not in rendered
+    assert "comment_text" not in rendered
 
 
 def test_dashboard_query_bundle_deduplicates_caches_and_invalidates(monkeypatch, tmp_path) -> None:

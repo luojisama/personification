@@ -30,7 +30,7 @@ def _seed(db_path: Path) -> None:
         conn.execute("INSERT INTO conversation_threads VALUES('g1:t1','g1','topic','[]',1,2)")
         conn.execute("INSERT INTO group_relation_edges VALUES('g1','u1','u2','reply',1,2,'m1')")
         conn.execute("INSERT INTO group_style_snapshots(group_id,style_text,created_at) VALUES('g1','style',1)")
-        conn.execute("INSERT INTO kv_store VALUES('group_config','__root__',?,1)", (json.dumps({"g1": {"enabled": True, "custom_prompt": "safe", "api_key": "never"}, "g2": {"custom_prompt": "other"}}),))
+        conn.execute("INSERT INTO kv_store VALUES('group_config','__root__',?,1)", (json.dumps({"g1": {"enabled": True, "custom_prompt": "safe", "api_key": "never", "qzone_agent": {"enabled": True, "group_daily_limit": 2, "target_daily_limit": 1, "target_cooldown_seconds": 3600}}, "g2": {"custom_prompt": "other"}}),))
         conn.execute("INSERT INTO kv_store VALUES('webui_devices','__root__','{\"token\":{}}',1)")
         conn.execute("INSERT INTO kv_store VALUES('proactive_state','__root__','{\"g1\":{\"active\":true}}',1)")
         conn.commit()
@@ -65,6 +65,14 @@ def test_group_safe_export_scope_and_secret_exclusion(transfer) -> None:
         assert "auth" in manifest["excluded"] and "qzone" in manifest["excluded"]
         assert manifest["version"] == 4
         assert "user_policy" in manifest["excluded"]
+        group_state = json.loads(archive.read("datasets/group_state.json"))
+        assert group_state["group_config"]["qzone_agent"] == {
+            "enabled": True,
+            "group_daily_limit": 2,
+            "target_daily_limit": 1,
+            "target_cooldown_seconds": 3600.0,
+        }
+        assert not any("qzone_social_operations" in name for name in names)
 
 
 def test_peer_bot_registry_transfer_is_v4_approved_only(transfer) -> None:

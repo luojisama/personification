@@ -26,6 +26,7 @@ from ...core.prompt_loader import pick_ack_phrase
 from ...core.qq_outbound import QQOutboundLedger, SendReceipt, build_outbound_context
 from ...core.qq_recall import register_qq_recall_tool
 from ...core.qq_expression_tools import register_send_qq_expression_tools
+from ...core.qzone_agent_interaction import register_groupmate_qzone_agent_tools
 from ...core.gemini_profile import build_gemini_route_policy_prompt
 from ...core.group_member_avatar_insight import register_group_member_avatar_insight_tool
 from ...core.reply_text_policy import normalize_visible_reply_text
@@ -882,6 +883,18 @@ async def run_agent_if_enabled(
         qq_outbound_ledger=getattr(runtime, "qq_outbound_ledger", None),
         record_group_msg=getattr(runtime, "record_group_msg", None),
         logger=runtime.logger,
+    )
+    register_groupmate_qzone_agent_tools(
+        runtime_registry,
+        runtime=runtime,
+        bot=bot,
+        event=event,
+        candidates=list(avatar_pair_candidates or []),
+        policy_authorizer=(
+            runtime.user_policy_gate.current_authorization
+            if getattr(runtime, "user_policy_gate", None) is not None
+            else None
+        ),
     )
     try:
         skill_runtime_for_images = SkillRuntime(

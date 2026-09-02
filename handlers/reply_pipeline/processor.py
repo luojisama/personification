@@ -195,6 +195,7 @@ from ...core.qq_expression_library import (
     semantic_text_for_qq_expression_segment,
 )
 from ...core.qq_user_policy import QQ_POLICY_DIRECT_CLOSURE, QQPolicyBlockedDuringTurn
+from ...core.qzone_agent_interaction import render_qzone_agent_episodes
 from ...core.qq_outbound import QQOutboundLedger, SendReceipt
 from ...core.sticker_feedback import (
     build_sticker_feedback_scene_key,
@@ -2163,6 +2164,13 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         self_continuity_prompt = render_self_continuity_prompt(self_continuity_snapshot)
         if self_continuity_prompt:
             system_prompt += f"\n\n{self_continuity_prompt}"
+    if not is_private_session:
+        qzone_episode_prompt = render_qzone_agent_episodes(
+            bot_id=str(getattr(bot, "self_id", "") or ""),
+            group_id=str(group_id),
+        )
+        if qzone_episode_prompt:
+            system_prompt += f"\n\n{qzone_episode_prompt}"
     system_prompt += "\n\n" + render_command_runtime_prompt()
     if user_profile_block:
         system_prompt += f"\n\n{user_profile_block}"

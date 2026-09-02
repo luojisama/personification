@@ -16,6 +16,10 @@ from ..core.emotion_state import describe_user_emotion_memory, load_emotion_stat
 from ..core.image_input import summarize_images_with_vision
 from ..core.qzone_publish import build_qzone_quota, coordinated_qzone_publish
 from ..core.qzone_service import _extract_qzone_comments
+from ..core.qzone_social_operations import (
+    QzoneSocialOperationCoordinator,
+    coordinate_qzone_social_write,
+)
 from ..core.time_ctx import inject_current_time_context
 from ..core.user_policy import PolicyAuthorization
 from ..core.visible_output import guard_visible_text
@@ -2111,10 +2115,20 @@ async def scan_qzone_social_feeds(
                         "allow_visible_reaction",
                         logger=logger,
                     ):
-                        like_ok, like_msg = await qzone_social_service.like_feed(
+                        like_dispatch = await coordinate_qzone_social_write(
+                            coordinator=QzoneSocialOperationCoordinator(),
+                            service=qzone_social_service,
                             feed=feed,
                             bot_id=str(getattr(bot, "self_id", "") or ""),
+                            group_id="__background__",
+                            target_uin=feed_owner_uid,
+                            action="like",
+                            group_daily_limit=1_000_000,
+                            target_daily_limit=1_000_000,
+                            target_cooldown_seconds=0,
                         )
+                        like_ok = like_dispatch.succeeded
+                        like_msg = like_dispatch.diagnostic_code
                         if like_ok:
                             acted = True
                             liked = True
@@ -2147,11 +2161,21 @@ async def scan_qzone_social_feeds(
                             logger=logger,
                         )
                     ):
-                        comment_ok, comment_msg = await qzone_social_service.comment_feed(
+                        comment_dispatch = await coordinate_qzone_social_write(
+                            coordinator=QzoneSocialOperationCoordinator(),
+                            service=qzone_social_service,
                             feed=feed,
                             bot_id=str(getattr(bot, "self_id", "") or ""),
-                            content=comment_text,
+                            group_id="__background__",
+                            target_uin=feed_owner_uid,
+                            action="comment",
+                            comment_text=comment_text,
+                            group_daily_limit=1_000_000,
+                            target_daily_limit=1_000_000,
+                            target_cooldown_seconds=0,
                         )
+                        comment_ok = comment_dispatch.succeeded
+                        comment_msg = comment_dispatch.diagnostic_code
                         if comment_ok:
                             acted = True
                             commented = True

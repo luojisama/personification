@@ -73,6 +73,10 @@ class Config(BaseModel):
     personification_final_dialogue_gate_enabled: bool = True
     personification_self_continuity_enabled: bool = True
     personification_self_continuity_max_facts: int = 20
+    personification_agent_qzone_interaction_enabled: bool = False
+    personification_agent_qzone_group_daily_limit: int = 3
+    personification_agent_qzone_target_daily_limit: int = 1
+    personification_agent_qzone_target_cooldown_seconds: float = 1800.0
 
     personification_global_enabled: bool = True
     personification_tts_global_enabled: bool = True

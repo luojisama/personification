@@ -30,6 +30,10 @@ from ...core.peer_bot_runtime import (
     register_peer_bot_tools,
     render_peer_bot_capability_catalog,
 )
+from ...core.qzone_agent_interaction import (
+    register_groupmate_qzone_agent_tools,
+    render_qzone_agent_episodes,
+)
 from ...core.group_member_avatar_insight import register_group_member_avatar_insight_tool
 from ...core.emotion_state import (
     build_turn_emotion_prompt_block,
@@ -1388,6 +1392,13 @@ async def process_yaml_response_logic(
         self_continuity_prompt = render_self_continuity_prompt(self_continuity_snapshot)
         if self_continuity_prompt:
             system_prompt += f"\n\n{self_continuity_prompt}"
+    if not is_private_session:
+        qzone_episode_prompt = render_qzone_agent_episodes(
+            bot_id=self_continuity_bot_id,
+            group_id=str(group_id),
+        )
+        if qzone_episode_prompt:
+            system_prompt += f"\n\n{qzone_episode_prompt}"
     if user_profile_block:
         system_prompt += f"\n\n{user_profile_block}"
     if favorability_context_block:
@@ -1844,6 +1855,23 @@ async def process_yaml_response_logic(
             qq_outbound_ledger=qq_outbound_ledger,
             record_group_msg=record_group_msg,
             logger=logger,
+        )
+        register_groupmate_qzone_agent_tools(
+            agent_tool_registry,
+            runtime=avatar_pair_runtime
+            or SimpleNamespace(
+                plugin_config=plugin_config,
+                runtime_bundle=SimpleNamespace(qzone_social_service=None),
+                logger=logger,
+            ),
+            bot=bot,
+            event=event,
+            candidates=resolved_avatar_pair_candidates,
+            policy_authorizer=(
+                user_policy_gate.current_authorization
+                if user_policy_gate is not None
+                else None
+            ),
         )
         register_current_group_context_tool(
             agent_tool_registry,

@@ -194,6 +194,10 @@ class DataTransferService:
             value = root[group_id]
             if row["namespace"] == "group_config" and isinstance(value, dict):
                 state["group_config"] = {k: value[k] for k in GROUP_CONFIG_FIELDS if k in value}
+                if "qzone_agent" in state["group_config"]:
+                    state["group_config"]["qzone_agent"] = self._qzone_agent_transfer_settings(
+                        state["group_config"]["qzone_agent"]
+                    )
             elif row["namespace"] == "peer_bot_registry":
                 projected = self._peer_bot_transfer_document(value)
                 self._validate_peer_bot_transfer_document(projected)
@@ -201,6 +205,42 @@ class DataTransferService:
             elif row["namespace"] in GROUP_KV_NAMESPACES:
                 state["kv"][row["namespace"]] = value
         return state
+
+    @staticmethod
+    def _qzone_agent_transfer_settings(value: Any) -> dict[str, Any]:
+        """Validate and normalize only stable group-level QZone Agent policy."""
+
+        if not isinstance(value, dict):
+            raise DataTransferError("invalid qzone agent group settings")
+        allowed = {
+            "enabled",
+            "group_daily_limit",
+            "target_daily_limit",
+            "target_cooldown_seconds",
+        }
+        if set(value) - allowed:
+            raise DataTransferError("qzone agent group settings contain forbidden fields")
+        enabled = value.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise DataTransferError("invalid qzone agent enabled setting")
+        try:
+            group_limit = int(value.get("group_daily_limit", 3))
+            target_limit = int(value.get("target_daily_limit", 1))
+            cooldown = float(value.get("target_cooldown_seconds", 1800.0))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise DataTransferError("invalid qzone agent numeric settings") from exc
+        if isinstance(value.get("group_daily_limit", 3), bool) or not 0 <= group_limit <= 20:
+            raise DataTransferError("invalid qzone agent group daily limit")
+        if isinstance(value.get("target_daily_limit", 1), bool) or not 0 <= target_limit <= 10:
+            raise DataTransferError("invalid qzone agent target daily limit")
+        if not 0.0 <= cooldown <= 86400.0:
+            raise DataTransferError("invalid qzone agent target cooldown")
+        return {
+            "enabled": enabled,
+            "group_daily_limit": group_limit,
+            "target_daily_limit": target_limit,
+            "target_cooldown_seconds": cooldown,
+        }
 
     @staticmethod
     def _peer_bot_transfer_document(value: Any) -> dict[str, Any]:
@@ -1159,6 +1199,11 @@ class DataTransferService:
                     raise DataTransferError("invalid group state")
                 if set((data.get("group_config") or {})) - GROUP_CONFIG_FIELDS or set((data.get("kv") or {})) - GROUP_KV_NAMESPACES:
                     raise DataTransferError("group state contains forbidden fields")
+                qzone_agent = (data.get("group_config") or {}).get("qzone_agent")
+                if qzone_agent is not None:
+                    data["group_config"]["qzone_agent"] = self._qzone_agent_transfer_settings(
+                        qzone_agent
+                    )
                 peer_state = (data.get("kv") or {}).get("peer_bot_registry")
                 if peer_state is not None:
                     if int(manifest.get("version", 0) or 0) < 4:

@@ -60,7 +60,7 @@ PRIMARY_KEYS = {
 
 GROUP_CONFIG_FIELDS = frozenset({
     "enabled", "sticker_enabled", "tts_enabled", "schedule_enabled",
-    "schedule_prompt", "custom_prompt", "allow_group_admin_config",
+    "schedule_prompt", "custom_prompt", "allow_group_admin_config", "qzone_agent",
 })
 
 GROUP_KV_NAMESPACES = frozenset({
