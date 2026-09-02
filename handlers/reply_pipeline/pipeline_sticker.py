@@ -334,6 +334,63 @@ async def build_image_summary_suffix(
     return _internal_media_summary_marker(desc_label, summary_text)
 
 
+async def build_per_media_visual_summaries(
+    *,
+    runtime: Any,
+    image_urls: List[str],
+    media_refs: List[Any],
+    sticker_like: bool = False,
+    maximum: int = 6,
+) -> tuple[str, dict[str, str]]:
+    """Summarize one ref at a time only when URL/ref order is unambiguous."""
+
+    eligible = [
+        item
+        for item in list(media_refs or [])
+        if str(getattr(item, "kind", "") or "") in {"image", "sticker", "gif", "mface"}
+    ]
+    if len(eligible) <= 1 or len(eligible) != len(image_urls):
+        return "", {}
+    cap = max(1, min(6, int(maximum or 6)))
+    summaries: dict[str, str] = {}
+    rendered: list[str] = []
+    pairs: list[tuple[Any, str, str, str, str]] = []
+    for item, image_url in list(zip(eligible, image_urls))[:cap]:
+        media_id = str(getattr(item, "media_id", "") or "").strip()
+        owner_id = str(getattr(item, "owner_user_id", "") or "").strip()
+        message_id = str(getattr(item, "message_id", "") or "").strip()
+        if not media_id or not owner_id or not message_id or not str(image_url or "").strip():
+            continue
+        pairs.append((item, str(image_url), media_id, owner_id, message_id))
+
+    async def _summarize_one(pair: tuple[Any, str, str, str, str]) -> tuple[str, str, str, str]:
+        _item, image_url, media_id, owner_id, message_id = pair
+        raw = await build_image_summary_suffix(
+            runtime=runtime,
+            image_urls=[image_url],
+            sticker_like=sticker_like,
+        )
+        return media_id, owner_id, message_id, str(raw or "").strip()
+
+    results = await asyncio.gather(
+        *(_summarize_one(pair) for pair in pairs),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            continue
+        media_id, owner_id, message_id, summary = result
+        if not summary:
+            continue
+        summaries[media_id] = summary
+        rendered.append(
+            f"[{media_id}|owner_user_id={owner_id}|message_id={message_id}] {summary}"
+        )
+    if not summaries:
+        return "", {}
+    return "\n".join(rendered), summaries
+
+
 async def auto_collect_stickers(
     *,
     runtime: Any,
@@ -1064,6 +1121,7 @@ __all__ = [
     "IncomingStickerCandidate",
     "auto_collect_stickers",
     "build_image_summary_suffix",
+    "build_per_media_visual_summaries",
     "download_safe_image_bytes",
     "extract_gif_from_segment",
     "extract_images_from_segment",

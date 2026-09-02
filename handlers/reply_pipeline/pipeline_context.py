@@ -859,6 +859,7 @@ async def run_agent_if_enabled(
         bot=bot,
         event=event,
         candidates=list(avatar_pair_candidates or []),
+        turn_media_context=list(turn_media_context or []),
         policy_authorizer=(
             runtime.user_policy_gate.current_authorization
             if getattr(runtime, "user_policy_gate", None) is not None

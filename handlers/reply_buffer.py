@@ -857,10 +857,19 @@ def _select_batch_trigger(items: list[dict[str, Any]]) -> tuple[dict[str, Any], 
     for item in reversed(items):
         if item.get("is_reply_to_bot"):
             return item, "reply_to_bot"
-    selected_event = _select_merged_event([item["event"] for item in items])
-    for item in items:
-        if item.get("event") is selected_event:
-            return item, "reply_semantics" if _has_reply_semantics(selected_event) else "latest"
+    for item in reversed(items):
+        state = item.get("state") if isinstance(item.get("state"), dict) else {}
+        try:
+            confidence = float(state.get("message_target_confidence", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            confidence = 0.0
+        if (
+            normalize_message_target_for_review(state.get("message_target")) == "bot"
+            and confidence >= 0.78
+        ):
+            return item, "high_confidence_target_bot"
+    # A human-to-human reply remains represented in its own batch envelope,
+    # but it must not become the delivery trigger for unrelated later arrivals.
     return items[-1], "latest"
 
 

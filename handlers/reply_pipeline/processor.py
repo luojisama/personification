@@ -75,6 +75,7 @@ from ...core.target_inference import (
 )
 from ...core.tts_service import extract_persona_tts_config
 from ...core.turn_media import (
+    attach_per_media_visual_summaries,
     attach_safe_visual_summary,
     build_media_availability,
     cleanup_turn_media_lease,
@@ -103,6 +104,8 @@ from ...core.reply_style_policy import (
 )
 from ...core.role_integrity import detect_persona_identity_leak
 from ...core.response_review import (
+    extract_recent_bot_reply_texts,
+    final_dialogue_gate,
     is_agent_reply_ooc,
     make_passthrough_review_decision,
     needs_uncertain_visible_reply_review,
@@ -242,6 +245,7 @@ from .pipeline_emotion import (
 from .pipeline_sticker import (
     IncomingStickerCandidate,
     build_image_summary_suffix as _build_image_summary_suffix,
+    build_per_media_visual_summaries as _build_per_media_visual_summaries,
     extract_gif_from_segment as _extract_gif_from_segment,
     extract_images_from_segment as _extract_images_from_segment,
     extract_mface_from_segment as _extract_mface_from_segment,
@@ -1709,9 +1713,20 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         else:
             record_counter("sticker.collect_skipped", reason="ambiguous_batch_owner")
             runtime.logger.debug("拟人插件：多用户 batch 的贴图候选无法可靠回绑 owner，本轮跳过自动收藏。")
+    per_media_visual_summaries: dict[str, str] = {}
+
     async def _image_summary_task() -> str:
+        nonlocal per_media_visual_summaries
         if image_input_mode == "disabled" or not tool_image_urls:
             return ""
+        per_media_text, per_media_visual_summaries = await _build_per_media_visual_summaries(
+            runtime=runtime,
+            image_urls=tool_image_urls,
+            media_refs=turn_media_context,
+            sticker_like=False,
+        )
+        if per_media_text:
+            return per_media_text
         return await _build_image_summary_suffix(
             runtime=runtime,
             image_urls=tool_image_urls,
@@ -1756,12 +1771,21 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             runtime.logger.warning(
                 f"拟人插件：视觉摘要超过本轮前置预算 {summary_timeout:.1f}s，继续使用 provenance 进入语义判断。"
             )
-    safe_visual_summary = normalize_safe_visual_summary(image_summary_suffix)
-    turn_media_context = attach_safe_visual_summary(
-        turn_media_context,
-        safe_visual_summary,
-        confidence=0.65,
+    safe_visual_summary = (
+        "" if per_media_visual_summaries else normalize_safe_visual_summary(image_summary_suffix)
     )
+    if per_media_visual_summaries:
+        turn_media_context = attach_per_media_visual_summaries(
+            turn_media_context,
+            per_media_visual_summaries,
+            confidence=0.65,
+        )
+    else:
+        turn_media_context = attach_safe_visual_summary(
+            turn_media_context,
+            safe_visual_summary,
+            confidence=0.65,
+        )
     state["turn_media_context"] = serialize_turn_media(turn_media_context)
     media_grounding = render_turn_media_grounding(
         turn_media_context,
@@ -1787,6 +1811,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 else image_summary_suffix
             )
     recent_bot_replies = prepared_semantics.recent_bot_replies
+    if not is_private_session:
+        try:
+            recent_bot_replies = extract_recent_bot_reply_texts(
+                get_recent_group_msgs(str(group_id), limit=20, expire_hours=2),
+                limit=20,
+            )
+        except Exception:
+            pass
     data_dir = prepared_semantics.data_dir
     inner_state = prepared_semantics.inner_state
     emotion_state = prepared_semantics.emotion_state
@@ -2937,38 +2969,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
         if has_block_marker:
             runtime.logger.warning(
-                f"[BLOCK] 检测到高风险内容标记，当前仅忽略本轮回复: group={group_id} user={user_id}"
+                "[BLOCK] 检测到高风险内容标记，当前静默结束本轮。"
             )
-            notify_superusers = getattr(runtime, "superusers", None) or set()
-            if notify_superusers:
-                notify_msg = (
-                    "拟人插件高风险提示\n"
-                    f"群：{group_id}\n"
-                    f"用户：{user_name}（{user_id}）\n"
-                    f"原始文字：{(raw_message_text or message_text or '')[:60]}\n"
-                    f"处理后内容：{(message_content or '')[:100]}\n"
-                    f"时间：{runtime.get_current_time().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    "处理：已跳过本轮回复，未自动拉黑。"
-                )
-
-                async def _notify_superusers(
-                    _bot: Any = bot,
-                    _superusers: set[str] = notify_superusers,
-                    _msg: str = notify_msg,
-                ) -> None:
-                    for _su in _superusers:
-                        try:
-                            await _bot.send_private_msg(user_id=int(_su), message=_msg)
-                        except Exception as _e:
-                            runtime.logger.warning(f"[BLOCK] 通知管理员 {_su} 失败: {_e}")
-
-                _t = asyncio.create_task(_notify_superusers())
-                _t.add_done_callback(_task_exc_logger("notify_superusers", runtime.logger))
-            if reply_required:
-                reply_content = "这个我不能接。"
-                has_block_marker = False
-            else:
-                return
+            return
 
         if not used_agent and ("[NO_REPLY]" in reply_content or "<NO_REPLY>" in reply_content):
             runtime.logger.info(
@@ -3023,7 +3026,35 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         protected_review_required = bool(
             plugin_episode is not None or detect_persona_identity_leak(reply_content)
         )
-        if agent_direct_output and not protected_review_required:
+        final_gate_enabled = bool(
+            getattr(runtime.plugin_config, "personification_final_dialogue_gate_enabled", True)
+        )
+        if final_gate_enabled:
+            review_decision = await final_dialogue_gate(
+                runtime.review_call_ai_api or runtime.lite_call_ai_api or runtime.call_ai_api,
+                candidate_text=reply_content,
+                raw_message_text=raw_message_text or message_text or message_content,
+                recent_context=recent_context_hint,
+                relationship_hint=relationship_hint,
+                repeat_clusters=repeat_clusters,
+                recent_bot_replies=recent_bot_replies,
+                message_intent=message_intent,
+                is_private=is_private_session,
+                is_random_chat=is_random_chat,
+                is_direct_mention=is_direct_mention,
+                reply_required=reply_required,
+                semantic_frame=semantic_frame,
+                turn_media_context=turn_media_context,
+                plugin_episode=plugin_episode,
+                batched_events=batched_events,
+                peer_bot_episodes=(
+                    conversation_context.peer_bot_episodes
+                    if conversation_context is not None
+                    else ()
+                ),
+                message_target=str(state.get("message_target", "") or ""),
+            )
+        elif agent_direct_output and not protected_review_required:
             review_decision = make_passthrough_review_decision(
                 reply_content,
                 reason="safe_direct_output",

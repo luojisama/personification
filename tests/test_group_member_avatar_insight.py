@@ -131,3 +131,79 @@ def test_normal_and_yaml_paths_register_group_member_avatar_tool() -> None:
     assert "register_group_member_avatar_insight_tool(" in yaml
     assert "policy_authorizer=" in normal
     assert "policy_authorizer=" in yaml
+    assert "turn_media_context=" in normal
+    assert "turn_media_context=" in yaml
+
+
+def test_avatar_asset_match_tool_is_bounded_weak_evidence(monkeypatch) -> None:  # noqa: ANN001
+    class _Adapter:
+        async def get_group_member_info(self, *, group_id, user_id):  # noqa: ANN001
+            return SimpleNamespace(ok=True)
+
+    async def _download(_url: str, **_kwargs):  # noqa: ANN202
+        return SimpleNamespace(content=b"avatar", content_type="image/png")
+
+    async def _analyze(**kwargs):  # noqa: ANN003, ANN202
+        assert len(kwargs["image_refs"]) == 3
+        assert "不进行现实人脸身份识别" in kwargs["prompt"]
+        return (
+            '{"match_result":"possible_asset_match","candidate_label":"群友乙","confidence":0.82}',
+            "route_direct",
+        )
+
+    monkeypatch.setattr(member_avatar, "get_protocol_adapter", lambda *_a, **_k: _Adapter())
+    monkeypatch.setattr(member_avatar, "download_public_image", _download)
+    monkeypatch.setattr(
+        member_avatar,
+        "sanitize_image",
+        lambda content, _mime: (content, "image/png", 128, 128, ".png"),
+    )
+    monkeypatch.setattr(member_avatar, "analyze_images_with_route_or_fallback", _analyze)
+
+    async def _authorize(_user_id: str):
+        return SimpleNamespace(blocked=False, allow_context_read=True)
+
+    tool = member_avatar.build_group_member_avatar_asset_match_tool(
+        runtime=_runtime(),
+        bot=SimpleNamespace(self_id="90001"),
+        event=SimpleNamespace(group_id=20001, user_id=10001),
+        candidates=[
+            {"user_id": "10002", "label": "群友乙"},
+            {"user_id": "10003", "label": "群友丙"},
+        ],
+        turn_media_context=[
+            SimpleNamespace(
+                media_id="media-1",
+                kind="image",
+                ref="data:image/png;base64,AAA",
+            )
+        ],
+        policy_authorizer=_authorize,
+    )
+    assert tool is not None
+    assert tool.parameters["properties"]["media_id"]["enum"] == ["media-1"]
+    payload = json.loads(asyncio.run(tool.handler(media_id="media-1")))
+    assert payload["match_result"] == "possible_asset_match"
+    assert payload["candidate_user_id"] == "10002"
+    assert payload["confidence"] == 0.82
+    assert "不进行现实人脸身份识别" in payload["notice"]
+
+
+def test_avatar_asset_match_candidates_are_capped_at_six() -> None:
+    candidates = [
+        {"user_id": str(10000 + index), "label": f"成员{index}"}
+        for index in range(10)
+    ]
+    tool = member_avatar.build_group_member_avatar_asset_match_tool(
+        runtime=_runtime(),
+        bot=SimpleNamespace(self_id="90001"),
+        event=SimpleNamespace(group_id=20001, user_id=10001),
+        candidates=candidates,
+        turn_media_context=[
+            SimpleNamespace(media_id="media-1", kind="image", ref="https://img.example/a.png")
+        ],
+    )
+    assert tool is not None
+    # Candidate ids stay server-side; the public tool schema only exposes the
+    # bounded media reference and never turns this into arbitrary-user lookup.
+    assert len(member_avatar._candidate_map(candidates)) == 6

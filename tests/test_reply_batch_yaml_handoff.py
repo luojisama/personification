@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
@@ -113,3 +114,14 @@ def test_buffer_failure_trace_uses_existing_trace_id_only(monkeypatch) -> None:
     buffer._record_buffer_failure_trace({"reply_trace_id": "trace-fixed"}, "processing_failure", count=2, generation=3, wait_ms=4)
     buffer._record_buffer_failure_trace({}, "processing_failure", count=2, generation=3, wait_ms=4)
     assert len(stages) == 1 and stages[0]["trace_id"] == "trace-fixed"
+
+
+def test_normal_and_yaml_block_markers_are_silent_without_fixed_refusal() -> None:
+    root = Path(__file__).resolve().parents[1]
+    normal = (root / "handlers" / "reply_pipeline" / "processor.py").read_text(encoding="utf-8")
+    yaml = (root / "handlers" / "yaml_pipeline" / "processor.py").read_text(encoding="utf-8")
+
+    assert 'reply_content = "这个我不能接。"' not in normal
+    assert 'reply_content = "这个我不能接。"' not in yaml
+    assert "当前静默结束本轮" in normal
+    assert "当前静默结束本轮" in yaml

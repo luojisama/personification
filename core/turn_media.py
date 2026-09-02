@@ -1222,14 +1222,47 @@ def attach_safe_visual_summary(
     safe_summary = normalize_safe_visual_summary(summary)
     if not safe_summary:
         return refs
-    scope = "single_media" if len(refs) == 1 else "turn_aggregate"
+    # A turn aggregate is useful background, but assigning the same sentence
+    # to every ref fabricates per-media evidence and can swap owners in a
+    # multi-speaker batch. Keep it outside individual refs unless the mapping
+    # is unambiguous.
+    if len(refs) != 1:
+        return refs
     return [
         replace(
             item,
             safe_summary=safe_summary,
             confidence=max(0.0, min(1.0, float(confidence or 0.0))),
-            summary_scope=scope,
+            summary_scope="single_media",
         )
+        for item in refs
+    ]
+
+
+def attach_per_media_visual_summaries(
+    values: Iterable[TurnMediaRef | dict[str, Any]],
+    summaries: dict[str, Any] | None,
+    *,
+    confidence: float = 0.65,
+) -> list[TurnMediaRef]:
+    refs = coerce_turn_media(values)
+    normalized = {
+        str(media_id): normalize_safe_visual_summary(summary)
+        for media_id, summary in dict(summaries or {}).items()
+        if str(media_id or "").strip() and normalize_safe_visual_summary(summary)
+    }
+    if not normalized:
+        return refs
+    resolved_confidence = max(0.0, min(1.0, float(confidence or 0.0)))
+    return [
+        replace(
+            item,
+            safe_summary=normalized[item.media_id],
+            confidence=resolved_confidence,
+            summary_scope="single_media",
+        )
+        if item.media_id in normalized
+        else item
         for item in refs
     ]
 
@@ -1257,6 +1290,10 @@ def render_turn_media_grounding(
             f"- {item.media_id}: origin={item.origin}; owner_user_id={item.owner_user_id or 'unknown'}; "
             f"message_id={item.message_id or 'unknown'}; kind={item.kind}; identity={identity}"
         )
+        if item.safe_summary and item.summary_scope == "single_media":
+            lines.append(
+                f"  该媒体的安全视觉摘要（confidence={item.confidence:.2f}）：{item.safe_summary}"
+            )
     if safe_summary:
         scope = "single_media" if len(refs) == 1 else "turn_aggregate_do_not_split_by_person"
         summary_confidence = max((item.confidence for item in refs), default=0.65)
@@ -1287,6 +1324,7 @@ __all__ = [
     "ResolvedTurnMediaLease",
     "TurnMediaRef",
     "attach_safe_visual_summary",
+    "attach_per_media_visual_summaries",
     "build_media_availability",
     "cleanup_turn_media_lease",
     "coerce_media_availability",

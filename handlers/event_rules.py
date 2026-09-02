@@ -20,6 +20,8 @@ from ..core.target_inference import (
     MessageTargetDecision,
     TARGET_BOT,
     TARGET_OTHERS,
+    TARGET_UNCLEAR,
+    classify_unprompted_followup,
     infer_message_target,
 )
 
@@ -92,6 +94,11 @@ async def personification_rule(
     get_recent_group_msgs: Optional[Callable[[str, int], list[dict]]] = None,
     user_policy_gate: Any = None,
     favorability_service: Any = None,
+    followup_call_ai_api: Any = None,
+    unprompted_followup_enabled: bool = True,
+    unprompted_followup_window_seconds: float = 120.0,
+    unprompted_followup_confidence: float = 0.78,
+    unprompted_followup_timeout_seconds: float = 6.0,
 ) -> bool:
     # plugin_invoker 代为执行其它插件命令时会用 handle_event 重新分发合成事件，
     # 这里短路，避免合成事件再次进入拟人回复流程造成递归。
@@ -249,7 +256,7 @@ async def personification_rule(
             return effective
         if get_recent_group_msgs is not None:
             try:
-                recent_msgs = get_recent_group_msgs(group_id, 8)
+                recent_msgs = get_recent_group_msgs(group_id, 20)
             except Exception:
                 recent_msgs = []
             target_decision = infer_message_target(
@@ -264,7 +271,37 @@ async def personification_rule(
                 message_target = str(target_decision or "")
                 state["message_target"] = message_target
         else:
+            recent_msgs = []
             message_target = state.get("message_target", "")
+
+        if (
+            message_target == TARGET_UNCLEAR
+            and bool(unprompted_followup_enabled)
+            and get_recent_group_msgs is not None
+        ):
+            assessment = await classify_unprompted_followup(
+                event,
+                bot_self_id=str(getattr(event, "self_id", "") or ""),
+                recent_group_msgs=recent_msgs,
+                call_ai_api=followup_call_ai_api,
+                window_seconds=unprompted_followup_window_seconds,
+                confidence_threshold=unprompted_followup_confidence,
+                timeout_seconds=unprompted_followup_timeout_seconds,
+            )
+            state["unprompted_followup"] = {
+                "target": assessment.target,
+                "confidence": assessment.confidence,
+                "diagnostic_code": assessment.diagnostic_code,
+            }
+            if assessment.should_promote:
+                target_decision = MessageTargetDecision(
+                    TARGET_BOT,
+                    reason="llm_unprompted_followup",
+                    participants=(user_id, str(getattr(event, "self_id", "") or "")),
+                    confidence=assessment.confidence,
+                )
+                state.update(target_decision.trace_fields())
+                message_target = target_decision.target
 
         # Inferred Bot targeting is an explicit conversational cue, not an
         # optional random participation candidate.  It must bypass any signed

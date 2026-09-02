@@ -29,6 +29,11 @@ def build_personification_rule(
     user_policy_gate: Any = None,
     favorability_service: Any = None,
     attention_service: Any = None,
+    followup_call_ai_api: Any = None,
+    unprompted_followup_enabled: bool = True,
+    unprompted_followup_window_seconds: float = 120.0,
+    unprompted_followup_confidence: float = 0.78,
+    unprompted_followup_timeout_seconds: float = 6.0,
 ) -> Callable[[Event, T_State], Awaitable[bool]]:
     async def _rule(event: Event, state: T_State) -> bool:
         legacy_should_reply = await personification_rule_core(
@@ -51,6 +56,11 @@ def build_personification_rule(
             get_recent_group_msgs=get_recent_group_msgs,
             user_policy_gate=user_policy_gate,
             favorability_service=favorability_service,
+            followup_call_ai_api=followup_call_ai_api,
+            unprompted_followup_enabled=unprompted_followup_enabled,
+            unprompted_followup_window_seconds=unprompted_followup_window_seconds,
+            unprompted_followup_confidence=unprompted_followup_confidence,
+            unprompted_followup_timeout_seconds=unprompted_followup_timeout_seconds,
         )
         if attention_service is None or not bool(state.get("attention_admitted", False)):
             return legacy_should_reply

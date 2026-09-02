@@ -22,10 +22,20 @@ class _FakeLogger:
 
 
 class _GroupEvent:
-    def __init__(self, text: str, *, user_id: str = "10001", self_id: str = "bot-1") -> None:
+    def __init__(
+        self,
+        text: str,
+        *,
+        user_id: str = "10001",
+        self_id: str = "bot-1",
+        message_id: str = "current-message",
+        event_time: float | None = None,
+    ) -> None:
         self.user_id = user_id
         self.group_id = "20001"
         self.self_id = self_id
+        self.message_id = message_id
+        self.time = event_time or time.time()
         self.to_me = False
         self.message = []
         self.reply = None
@@ -78,6 +88,130 @@ def _base_kwargs(**overrides):  # noqa: ANN001
     }
     kwargs.update(overrides)
     return kwargs
+
+
+def _same_thread_followup_history(event: _GroupEvent) -> list[dict]:
+    return [
+        {
+            "message_id": "bot-message",
+            "thread_id": "thread-1",
+            "time": event.time - 10,
+            "source_kind": "bot_reply",
+            "is_bot": True,
+            "user_id": event.self_id,
+            "nickname": "真寻",
+            "content": "下矿记得看路呀",
+        },
+        {
+            "message_id": event.message_id,
+            "thread_id": "thread-1",
+            "time": event.time,
+            "source_kind": "user",
+            "is_bot": False,
+            "user_id": event.user_id,
+            "nickname": "群友",
+            "content": event.get_plaintext(),
+        },
+    ]
+
+
+def test_high_confidence_unprompted_followup_bypasses_random_participation(monkeypatch) -> None:  # noqa: ANN001
+    event = _GroupEvent("那要带几组火把？")
+    state: dict = {}
+    calls: list[list[dict]] = []
+
+    async def classify(messages, **_kwargs):  # noqa: ANN001
+        calls.append(messages)
+        return '{"target":"bot","confidence":0.91}'
+
+    monkeypatch.setattr(event_rules.random, "random", lambda: 1.0)
+    result = asyncio.run(
+        event_rules.personification_rule(
+            event,
+            state,
+            **_base_kwargs(
+                probability=0.0,
+                get_recent_group_msgs=lambda _gid, limit: (
+                    _same_thread_followup_history(event) if limit == 20 else []
+                ),
+                followup_call_ai_api=classify,
+            ),
+        )
+    )
+
+    assert result is True
+    assert state["message_target"] == target_inference.TARGET_BOT
+    assert state["message_target_reason"] == "llm_unprompted_followup"
+    assert state["message_target_confidence"] == 0.91
+    assert state["is_random_chat"] is False
+    assert len(calls) == 1
+    assert calls[0][1]["_personification_untrusted"] is True
+
+
+def test_unprompted_followup_works_before_current_message_recorder_runs(monkeypatch) -> None:  # noqa: ANN001
+    event = _GroupEvent("我也觉得")
+    history = _same_thread_followup_history(event)[:-1]
+
+    async def classify(_messages, **_kwargs):  # noqa: ANN001
+        return '{"target":"bot","confidence":0.88}'
+
+    monkeypatch.setattr(event_rules.random, "random", lambda: 1.0)
+    state: dict = {}
+    result = asyncio.run(
+        event_rules.personification_rule(
+            event,
+            state,
+            **_base_kwargs(
+                probability=0.0,
+                get_recent_group_msgs=lambda _gid, _limit: history,
+                followup_call_ai_api=classify,
+            ),
+        )
+    )
+    assert result is True
+    assert state["message_target_reason"] == "llm_unprompted_followup"
+
+
+def test_low_confidence_or_classifier_failure_does_not_expand_reply_scope(monkeypatch) -> None:  # noqa: ANN001
+    event = _GroupEvent("嗯")
+    monkeypatch.setattr(event_rules.random, "random", lambda: 1.0)
+
+    async def low_confidence(_messages, **_kwargs):  # noqa: ANN001
+        return '{"target":"bot","confidence":0.77}'
+
+    low_state: dict = {}
+    low_result = asyncio.run(
+        event_rules.personification_rule(
+            event,
+            low_state,
+            **_base_kwargs(
+                probability=0.0,
+                get_recent_group_msgs=lambda _gid, _limit: _same_thread_followup_history(event),
+                followup_call_ai_api=low_confidence,
+            ),
+        )
+    )
+    assert low_result is False
+    assert low_state["message_target"] == target_inference.TARGET_UNCLEAR
+    assert low_state["unprompted_followup"]["diagnostic_code"] == "unprompted_followup_low_confidence"
+
+    async def invalid(_messages, **_kwargs):  # noqa: ANN001
+        return "not-json"
+
+    failed_state: dict = {}
+    failed_result = asyncio.run(
+        event_rules.personification_rule(
+            event,
+            failed_state,
+            **_base_kwargs(
+                probability=0.0,
+                get_recent_group_msgs=lambda _gid, _limit: _same_thread_followup_history(event),
+                followup_call_ai_api=invalid,
+            ),
+        )
+    )
+    assert failed_result is False
+    assert failed_state["unprompted_followup"]["diagnostic_code"] == "unprompted_followup_classifier_failed"
 
 
 def test_active_followup_does_not_override_structural_target_others(monkeypatch) -> None:  # noqa: ANN001

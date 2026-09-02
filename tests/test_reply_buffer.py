@@ -22,6 +22,59 @@ yaml_processor = load_personification_module(
 )
 
 
+def test_batch_trigger_does_not_let_human_reply_semantics_steal_latest_event() -> None:
+    human_reply = object()
+    latest = object()
+    selected, trigger_type = reply_buffer._select_batch_trigger(
+        [
+            {
+                "event": human_reply,
+                "is_direct_mention": False,
+                "is_reply_to_bot": False,
+                "state": {"message_target": "TARGET_OTHERS"},
+            },
+            {
+                "event": latest,
+                "is_direct_mention": False,
+                "is_reply_to_bot": False,
+                "state": {"message_target": "TARGET_UNCLEAR"},
+            },
+        ]
+    )
+    assert selected["event"] is latest
+    assert trigger_type == "latest"
+
+
+def test_batch_trigger_prioritizes_direct_reply_and_high_confidence_followup() -> None:
+    inferred = {
+        "event": object(),
+        "is_direct_mention": False,
+        "is_reply_to_bot": False,
+        "state": {"message_target": "TARGET_BOT", "message_target_confidence": 0.91},
+    }
+    explicit_reply = {
+        "event": object(),
+        "is_direct_mention": False,
+        "is_reply_to_bot": True,
+        "state": {},
+    }
+    direct_mention = {
+        "event": object(),
+        "is_direct_mention": True,
+        "is_reply_to_bot": False,
+        "state": {},
+    }
+    selected, trigger_type = reply_buffer._select_batch_trigger(
+        [inferred, explicit_reply, direct_mention]
+    )
+    assert selected is direct_mention
+    assert trigger_type == "direct_mention"
+
+    selected, trigger_type = reply_buffer._select_batch_trigger([inferred, {"event": object(), "state": {}}])
+    assert selected is inferred
+    assert trigger_type == "high_confidence_target_bot"
+
+
 @dataclass
 class _TextSeg:
     data: dict[str, str]

@@ -65,6 +65,13 @@ class Config(BaseModel):
     personification_peer_bot_pending_ttl_seconds: float = 30.0
     personification_peer_bot_max_command_chars: int = 500
 
+    # 群聊自然续接与最终回复自洽。无 @ 续接只在同线程近期有人格 Bot 发言时
+    # 交给轻量模型判断；异常或低置信不会扩大 Bot 插话范围。
+    personification_unprompted_followup_enabled: bool = True
+    personification_unprompted_followup_window_seconds: float = 120.0
+    personification_unprompted_followup_confidence: float = 0.78
+    personification_final_dialogue_gate_enabled: bool = True
+
     personification_global_enabled: bool = True
     personification_tts_global_enabled: bool = True
 

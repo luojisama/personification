@@ -231,6 +231,45 @@ def test_visual_grounding_separates_image_subjects_from_chat_participants() -> N
     assert "动漫插画里有多人" in grounding
 
 
+def test_multi_owner_aggregate_summary_is_not_fabricated_as_per_media_evidence() -> None:
+    refs = [
+        *turn_media.extract_turn_media_from_event(_event("u1", "m1", _image("https://img.example/a.png", "a"))),
+        *turn_media.extract_turn_media_from_event(_event("u2", "m2", _image("https://img.example/b.png", "b"))),
+    ]
+    aggregate = turn_media.attach_safe_visual_summary(refs, "一张困倦，一张趴键盘")
+    assert all(not item.safe_summary for item in aggregate)
+
+    grounding = turn_media.render_turn_media_grounding(
+        aggregate,
+        summary="一张困倦，一张趴键盘",
+    )
+    assert "turn_aggregate_do_not_split_by_person" in grounding
+    assert "owner_user_id=u1" in grounding
+    assert "owner_user_id=u2" in grounding
+
+
+def test_per_media_summaries_remain_bound_to_message_and_owner() -> None:
+    refs = [
+        *turn_media.extract_turn_media_from_event(_event("u1", "m1", _image("https://img.example/a.png", "a"))),
+        *turn_media.extract_turn_media_from_event(_event("u2", "m2", _image("https://img.example/b.png", "b"))),
+    ]
+    attached = turn_media.attach_per_media_visual_summaries(
+        refs,
+        {
+            refs[0].media_id: "角色显得很困",
+            refs[1].media_id: "角色趴在键盘上",
+        },
+    )
+    assert attached[0].owner_user_id == "u1"
+    assert attached[0].message_id == "m1"
+    assert attached[0].safe_summary == "角色显得很困"
+    assert attached[1].owner_user_id == "u2"
+    assert attached[1].message_id == "m2"
+    assert attached[1].safe_summary == "角色趴在键盘上"
+    grounding = turn_media.render_turn_media_grounding(attached)
+    assert "该媒体的安全视觉摘要" in grounding
+
+
 def test_record_segment_keeps_audio_provenance_without_eager_conversion() -> None:
     event = _event("speaker", "record-message", _record("opaque-record-token"))
 

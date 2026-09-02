@@ -684,3 +684,76 @@ def test_review_response_text_outputs_segments() -> None:
 
     assert decision.action == "accept"
     assert decision.segments == ("这是绪山真寻。", "她是《别当欧尼酱了！》里的主角。")
+
+
+def test_final_dialogue_gate_requires_one_real_rewrite_for_required_duplicate() -> None:
+    calls: list[list[dict]] = []
+
+    async def _rewrite(messages):  # noqa: ANN001
+        calls.append(messages)
+        assert "本次必须 rewrite" in messages[0]["content"]
+        return (
+            '{"action":"rewrite","text":"火把多带两组，洞里拐弯很容易漏。",'
+            '"reason":"改为回应当前问题","flags":[],"segments":["火把多带两组。","洞里拐弯很容易漏。"]}'
+        )
+
+    decision = asyncio.run(
+        response_review.final_dialogue_gate(
+            _rewrite,
+            candidate_text="下矿记得看路呀",
+            raw_message_text="那火把呢",
+            recent_bot_replies=["下矿记得看路呀"],
+            reply_required=True,
+            batched_events=[
+                {"user_id": "u1", "message_id": "m1", "text": "那火把呢", "is_current_trigger": True}
+            ],
+        )
+    )
+    assert len(calls) == 1
+    assert decision.action == "rewrite"
+    assert decision.text.startswith("火把多带")
+
+
+def test_final_dialogue_gate_silences_when_required_duplicate_rewrite_still_duplicates() -> None:
+    async def _bad_rewrite(_messages):  # noqa: ANN001
+        return (
+            '{"action":"rewrite","text":"下矿记得看路呀",'
+            '"reason":"没有改好","flags":[],"segments":["下矿记得看路呀"]}'
+        )
+
+    decision = asyncio.run(
+        response_review.final_dialogue_gate(
+            _bad_rewrite,
+            candidate_text="下矿记得看路呀",
+            raw_message_text="[表情包]",
+            recent_bot_replies=["下矿记得看路呀"],
+            reply_required=True,
+        )
+    )
+    assert decision.action == "no_reply"
+    assert decision.reason == "recent_duplicate_rewrite_failed"
+
+
+def test_final_dialogue_gate_fail_closes_multi_owner_media_when_reviewer_fails() -> None:
+    async def _failed(_messages):  # noqa: ANN001
+        raise RuntimeError("offline")
+
+    media = [
+        SimpleNamespace(owner_user_id="u1", message_id="m1", summary_scope="single_media"),
+        SimpleNamespace(owner_user_id="u2", message_id="m2", summary_scope="single_media"),
+    ]
+    decision = asyncio.run(
+        response_review.final_dialogue_gate(
+            _failed,
+            candidate_text="你看起来趴在键盘上了",
+            raw_message_text="好困",
+            turn_media_context=media,
+            batched_events=[
+                {"user_id": "u1", "message_id": "m1", "text": "好困"},
+                {"user_id": "u2", "message_id": "m2", "text": "[图片]", "is_current_trigger": True},
+            ],
+            reply_required=True,
+        )
+    )
+    assert decision.action == "no_reply"
+    assert "media_attribution_uncertain" in decision.flags

@@ -582,6 +582,16 @@ def build_plugin_runtime(
         user_policy_gate=qq_user_policy_gate,
         favorability_service=favorability_service,
         attention_service=attention_service,
+        followup_call_ai_api=intent_call_ai_api,
+        unprompted_followup_enabled=bool(
+            getattr(plugin_config, "personification_unprompted_followup_enabled", True)
+        ),
+        unprompted_followup_window_seconds=float(
+            getattr(plugin_config, "personification_unprompted_followup_window_seconds", 120.0) or 120.0
+        ),
+        unprompted_followup_confidence=float(
+            getattr(plugin_config, "personification_unprompted_followup_confidence", 0.78) or 0.78
+        ),
     )
     poke_rule = build_poke_rule(
         poke_rule_core=poke_rule_core,

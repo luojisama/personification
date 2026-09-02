@@ -80,6 +80,7 @@ from ...core.response_review import (
     ReplyArbitrationIntent,
     arbitrate_reply_mode,
     extract_recent_bot_reply_texts,
+    final_dialogue_gate,
     is_agent_reply_ooc,
     make_passthrough_review_decision,
     needs_uncertain_visible_reply_review,
@@ -119,6 +120,7 @@ from ...core.target_inference import TARGET_OTHERS
 from ...core.tts_service import extract_persona_tts_config
 from ...core.visible_output import guard_visible_text
 from ...core.turn_media import (
+    attach_per_media_visual_summaries,
     attach_safe_visual_summary,
     build_media_availability,
     cleanup_turn_media_lease,
@@ -179,7 +181,10 @@ from ..reply_pipeline.pipeline_context import (
     should_use_agent_for_reply as _should_use_agent_for_reply,
     strip_injected_visual_summary as _strip_injected_visual_summary,
 )
-from ..reply_pipeline.pipeline_sticker import build_image_summary_suffix as _shared_build_image_summary_suffix
+from ..reply_pipeline.pipeline_sticker import (
+    build_image_summary_suffix as _shared_build_image_summary_suffix,
+    build_per_media_visual_summaries as _shared_build_per_media_visual_summaries,
+)
 from ...skills.skillpacks.sticker_tool.scripts.impl import (
     build_send_sticker_tool,
     choose_sticker_for_context,
@@ -926,6 +931,13 @@ async def process_yaml_response_logic(
         getattr(plugin_config, "personification_image_input_mode", "auto")
     )
     image_summary_suffix = str(precomputed_image_summary_suffix or "").strip()
+    per_media_visual_summaries: dict[str, str] = {
+        str(item.media_id): str(item.safe_summary)
+        for item in turn_media_refs
+        if str(item.media_id or "").strip()
+        and str(item.safe_summary or "").strip()
+        and str(item.summary_scope or "") == "single_media"
+    }
     if not image_summary_suffix and last_images and image_input_mode != "disabled":
         summary_timeout = media_summary_timeout_seconds(
             response_deadline if isinstance(response_deadline, (int, float)) else None,
@@ -933,28 +945,55 @@ async def process_yaml_response_logic(
         )
         if summary_timeout > 0.05:
             try:
-                image_summary_suffix = await asyncio.wait_for(
-                    _build_image_summary_suffix(
-                        plugin_config=plugin_config,
-                        agent_tool_caller=agent_tool_caller,
-                        get_configured_api_providers=get_configured_api_providers,
-                        vision_caller=vision_caller,
+                runtime_proxy = _build_yaml_runtime_proxy(
+                    plugin_config=plugin_config,
+                    agent_tool_caller=agent_tool_caller,
+                    get_configured_api_providers=get_configured_api_providers,
+                    vision_caller=vision_caller,
+                    logger=logger,
+                )
+
+                async def _summarize_images() -> str:
+                    nonlocal per_media_visual_summaries
+                    per_media_text, per_media_visual_summaries = (
+                        await _shared_build_per_media_visual_summaries(
+                            runtime=runtime_proxy,
+                            image_urls=last_images,
+                            media_refs=turn_media_refs,
+                            sticker_like=False,
+                        )
+                    )
+                    if per_media_text:
+                        return per_media_text
+                    return await _shared_build_image_summary_suffix(
+                        runtime=runtime_proxy,
                         image_urls=last_images,
                         sticker_like=False,
-                        logger=logger,
-                    ),
+                    )
+
+                image_summary_suffix = await asyncio.wait_for(
+                    _summarize_images(),
                     timeout=summary_timeout,
                 )
             except asyncio.TimeoutError:
                 logger.warning(
                     f"拟人插件 (YAML)：视觉摘要超过本轮前置预算 {summary_timeout:.1f}s，继续使用 provenance 进入语义判断。"
                 )
-    safe_visual_summary = normalize_safe_visual_summary(image_summary_suffix)
-    turn_media_refs = attach_safe_visual_summary(
-        turn_media_refs,
-        safe_visual_summary,
-        confidence=0.65,
+    safe_visual_summary = (
+        "" if per_media_visual_summaries else normalize_safe_visual_summary(image_summary_suffix)
     )
+    if per_media_visual_summaries:
+        turn_media_refs = attach_per_media_visual_summaries(
+            turn_media_refs,
+            per_media_visual_summaries,
+            confidence=0.65,
+        )
+    else:
+        turn_media_refs = attach_safe_visual_summary(
+            turn_media_refs,
+            safe_visual_summary,
+            confidence=0.65,
+        )
     media_grounding = render_turn_media_grounding(
         turn_media_refs,
         summary=safe_visual_summary,
@@ -1034,7 +1073,15 @@ async def process_yaml_response_logic(
         if not is_private_session
         else []
     )
-    recent_bot_replies = extract_recent_bot_reply_texts(avatar_pair_recent_messages)
+    recent_bot_replies = extract_recent_bot_reply_texts(avatar_pair_recent_messages, limit=20)
+    if not is_private_session:
+        try:
+            recent_bot_replies = extract_recent_bot_reply_texts(
+                get_recent_group_msgs(group_id, limit=20, expire_hours=2),
+                limit=20,
+            )
+        except Exception:
+            pass
     resolved_avatar_pair_candidates = list(avatar_pair_candidates or []) or build_avatar_pair_candidates(
         event=event,
         current_user_id=user_id,
@@ -1814,6 +1861,7 @@ async def process_yaml_response_logic(
             bot=bot,
             event=event,
             candidates=resolved_avatar_pair_candidates,
+            turn_media_context=turn_media_refs,
             policy_authorizer=(
                 user_policy_gate.current_authorization
                 if user_policy_gate is not None
@@ -2330,36 +2378,9 @@ async def process_yaml_response_logic(
 
     if has_block_marker and not is_fact_like_scene:
         reply_content = reply_content.replace("[BLOCK]", "").strip()
-        logger.warning(f"AI (YAML) 检测到高风险标记，当前仅跳过本轮回复: {group_id} {user_name}({user_id})")
-        notify_superusers = superusers or set()
-        if notify_superusers:
-            notify_msg = (
-                "拟人插件高风险提示\n"
-                f"群：{group_id}\n"
-                f"用户：{user_name}（{user_id}）\n"
-                f"拦截内容：{history_last_text[:80]}\n"
-                f"时间：{get_current_time().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                "处理：已跳过本轮回复，未自动拉黑。"
-            )
-
-            async def _notify_superusers(
-                _bot: Any = bot,
-                _superusers: set[str] = notify_superusers,
-                _msg: str = notify_msg,
-            ) -> None:
-                for _su in _superusers:
-                    try:
-                        await _bot.send_private_msg(user_id=int(_su), message=_msg)
-                    except Exception as _e:
-                        logger.warning(f"[BLOCK] 通知管理员 {_su} 失败: {_e}")
-
-            asyncio.create_task(_notify_superusers())
-        if reply_required:
-            reply_content = "这个我不能接。"
-            parsed = parse_yaml_response(reply_content)
-        else:
-            _trace_no_reply("block_marker", diagnosis_code="blocked", detail="模型返回 BLOCK 控制标记")
-            return
+        logger.warning("AI (YAML) 检测到高风险标记，当前静默结束本轮。")
+        _trace_no_reply("block_marker", diagnosis_code="blocked", detail="模型返回 BLOCK 控制标记")
+        return
     if has_silence_control_marker(reply_content):
         await _commit_pending_actions()
         if _record_pending_action_history_if_any():
@@ -2529,7 +2550,35 @@ async def process_yaml_response_logic(
         resolved_plugin_episode is not None
         or detect_persona_identity_leak(assistant_text)
     )
-    if used_agent and not should_review_agent_reply and not care_review_required and not protected_review_required:
+    final_gate_enabled = bool(
+        getattr(plugin_config, "personification_final_dialogue_gate_enabled", True)
+    )
+    if final_gate_enabled:
+        review_decision = await final_dialogue_gate(
+            review_call_ai_api,
+            candidate_text=assistant_text,
+            raw_message_text=raw_message_text or history_last_text or trigger_reason,
+            recent_context=recent_context_hint,
+            relationship_hint=relationship_hint,
+            repeat_clusters=repeat_clusters,
+            recent_bot_replies=recent_bot_replies,
+            message_intent=message_intent,
+            is_private=is_private_session,
+            is_random_chat=is_random_chat,
+            is_direct_mention=is_direct_mention,
+            reply_required=reply_required,
+            semantic_frame=semantic_frame,
+            turn_media_context=turn_media_refs,
+            plugin_episode=resolved_plugin_episode,
+            batched_events=list(batched_events or []),
+            peer_bot_episodes=(
+                conversation_context.peer_bot_episodes
+                if conversation_context is not None
+                else ()
+            ),
+            message_target=review_message_target,
+        )
+    elif used_agent and not should_review_agent_reply and not care_review_required and not protected_review_required:
         review_decision = make_passthrough_review_decision(
             assistant_text,
             reason="agent_passthrough",
