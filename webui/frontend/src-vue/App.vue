@@ -14,6 +14,7 @@ import "@vue-app/styles/tokens.css";
 import "@vue-app/styles/base.css";
 import "@vue-app/styles/layout.css";
 import "@vue-app/styles/components.css";
+import "@vue-app/styles/pages.css";
 </script>
 
 <style scoped>
