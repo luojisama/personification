@@ -74,6 +74,10 @@ class Config(BaseModel):
     personification_group_followup_referent_window_seconds: float = 120.0
     personification_group_followup_referent_max_candidates: int = 3
     personification_group_followup_referent_confidence: float = 0.80
+    # Provider streaming is deliberately opt-in.  Even in buffered mode no
+    # token delta is exposed to the QQ delivery pipeline.
+    personification_provider_streaming_mode: str = "off"
+    personification_reply_terminal_punctuation_policy: str = "strip_common"
     personification_final_dialogue_gate_enabled: bool = True
     personification_self_continuity_enabled: bool = True
     personification_self_continuity_max_facts: int = 20

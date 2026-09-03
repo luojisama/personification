@@ -38,6 +38,7 @@ def build_agent_status_router(*, runtime: Any) -> APIRouter:
             "stale": snapshot["stale_turns"],
             "outcomes": outcomes,
             "inner_state": snapshot["inner_state"],
+            "provider_streaming": snapshot.get("provider_streaming", {}),
             "metrics": {
                 "event_loop_p95_ms": snapshot["event_loop_p95_ms"],
                 "turn_p95_ms": snapshot["turn_p95_ms"],

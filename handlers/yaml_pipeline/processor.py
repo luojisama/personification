@@ -104,6 +104,7 @@ from ...core.response_review import (
 from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.target_inference import normalize_message_target_for_plan, normalize_message_target_for_review
 from ...core.reply_text_policy import normalize_visible_reply_text
+from ...core.reply_punctuation import apply_terminal_punctuation_policy
 from ...core.reply_completion_contract import (
     apply_agent_result_completion_state,
     resolve_action_only_completion,
@@ -3226,6 +3227,23 @@ async def process_yaml_response_logic(
                             merged_segments = raw_segs
                     if not merged_segments and text.strip():
                         merged_segments = [text]
+                    merged_segments = [
+                        apply_terminal_punctuation_policy(
+                            segment,
+                            policy=getattr(plugin_config, "personification_reply_terminal_punctuation_policy", "strip_common"),
+                        )
+                        for segment in merged_segments
+                    ]
+                    if not is_private_session and any(
+                        match_raw_peer_bot_command_entry(
+                            segment,
+                            group_id=str(group_id),
+                            registry=peer_bot_registry,
+                        )
+                        for segment in merged_segments
+                    ):
+                        reply_commit_state["peer_bot_raw_command_blocked"] = True
+                        return
 
                     for seg_index, seg in enumerate(merged_segments):
                         if seg.strip():
@@ -3236,6 +3254,17 @@ async def process_yaml_response_logic(
                             current_continuity_index = self_continuity_segment_index
 
                             async def _send_text_candidate(candidate: str) -> Any:
+                                candidate = apply_terminal_punctuation_policy(
+                                    candidate,
+                                    policy=getattr(plugin_config, "personification_reply_terminal_punctuation_policy", "strip_common"),
+                                )
+                                if not is_private_session and match_raw_peer_bot_command_entry(
+                                    candidate,
+                                    group_id=str(group_id),
+                                    registry=peer_bot_registry,
+                                ):
+                                    reply_commit_state["peer_bot_raw_command_blocked"] = True
+                                    return SimpleNamespace(status="failed", message_id=None)
                                 candidate = guard_visible_text(
                                     candidate,
                                     logger=logger,
@@ -3305,10 +3334,15 @@ async def process_yaml_response_logic(
                                 self_continuity_delivered_texts.append(continuity_delivery.text)
                             else:
                                 send_result = await _send_text_candidate(seg)
+                            if reply_commit_state.get("peer_bot_raw_command_blocked"):
+                                return
                             self_continuity_segment_index += 1
                             if not sent_message_id:
                                 sent_message_id = _message_id_from_send_result(send_result)
                             await asyncio.sleep(random.uniform(0.4, 1.0))
+
+                if reply_commit_state.get("peer_bot_raw_command_blocked"):
+                    return
 
                 for image_b64 in image_b64_payloads:
                     if _has_newer_batch_now():
@@ -3358,6 +3392,17 @@ async def process_yaml_response_logic(
                     _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="普通文本发送前出现更新批次")
                     return
                 async def _send_clean_candidate(candidate: str) -> Any:
+                    candidate = apply_terminal_punctuation_policy(
+                        candidate,
+                        policy=getattr(plugin_config, "personification_reply_terminal_punctuation_policy", "strip_common"),
+                    )
+                    if not is_private_session and match_raw_peer_bot_command_entry(
+                        candidate,
+                        group_id=str(group_id),
+                        registry=peer_bot_registry,
+                    ):
+                        reply_commit_state["peer_bot_raw_command_blocked"] = True
+                        return SimpleNamespace(status="failed", message_id=None)
                     candidate = guard_visible_text(
                         candidate,
                         logger=logger,
@@ -3437,6 +3482,8 @@ async def process_yaml_response_logic(
                     send_result = None
                 if send_result is not None and not sent_message_id:
                     sent_message_id = _message_id_from_send_result(send_result)
+            if reply_commit_state.get("peer_bot_raw_command_blocked"):
+                return
             for image_b64 in image_b64_payloads:
                 if _has_newer_batch_now():
                     logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")

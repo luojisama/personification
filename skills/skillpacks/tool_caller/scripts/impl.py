@@ -6,18 +6,20 @@ import copy
 import json
 import mimetypes
 import re
+import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import httpx
 
 from plugin.personification.core.image_refs import normalize_image_ref
 from plugin.personification.core.gemini_transport import (
+    gemini_auth_payload,
     is_google_gemini_endpoint,
     raise_for_gemini_status,
     request_with_gemini_auth,
@@ -133,6 +135,510 @@ class ToolCallerResponse:
     wire_tools_count: int | None = None
     provider_history: Any | None = field(default=None, repr=False)
     route_key: str = field(default="", repr=False)
+
+
+@dataclass(frozen=True)
+class ProviderStreamEvent:
+    """Provider-neutral buffered-stream event.
+
+    ``payload`` is intentionally only retained in the caller-local assembler;
+    trace/runtime snapshots use counters and timings, never this payload.
+    """
+
+    type: str
+    payload: dict[str, Any] = field(default_factory=dict, repr=False)
+
+
+class BufferedToolResponseAssembler:
+    """Assemble a complete provider response before any Agent tool can run.
+
+    Providers split a single tool call's id, name and JSON arguments across
+    arbitrary chunks.  The Agent contract remains one complete
+    :class:`ToolCallerResponse`, so callers cannot execute a partial call or
+    send a visible text delta early.
+    """
+
+    def __init__(self, *, model_used: str = "", wire_tools_count: int | None = None) -> None:
+        self.model_used = str(model_used or "")
+        self.wire_tools_count = wire_tools_count
+        self._text_parts: list[str] = []
+        self._tool_parts: dict[str, dict[str, str]] = {}
+        self._tool_order: list[str] = []
+        self._usage: dict[str, Any] = {}
+        self._finish_reason = ""
+        self._provider_history: Any | None = None
+        self._raw_events: list[Any] = []
+        self._completed = False
+        self._error: BaseException | None = None
+        self.chunk_count = 0
+        self.first_chunk_ms: int | None = None
+        self._started_at = time.monotonic()
+
+    def add(self, event: ProviderStreamEvent) -> None:
+        if self._completed:
+            raise RuntimeError("provider_stream_after_completed")
+        if event.type not in {"text_delta", "tool_call_delta", "usage", "completed", "error"}:
+            raise ValueError("provider_stream_event_invalid")
+        self.chunk_count += 1
+        if self.first_chunk_ms is None:
+            self.first_chunk_ms = max(0, int((time.monotonic() - self._started_at) * 1000))
+        payload = dict(event.payload or {})
+        if event.type == "text_delta":
+            self._text_parts.append(str(payload.get("text", "") or ""))
+            return
+        if event.type == "tool_call_delta":
+            raw_key = payload.get("key")
+            if raw_key is None or raw_key == "":
+                raw_key = payload.get("id")
+            if raw_key is None or raw_key == "":
+                raw_key = payload.get("index")
+            if raw_key is None or raw_key == "":
+                raw_key = len(self._tool_order)
+            key = str(raw_key)
+            if key not in self._tool_parts:
+                self._tool_parts[key] = {"id": "", "name": "", "arguments": "", "provider_call_id": ""}
+                self._tool_order.append(key)
+            target = self._tool_parts[key]
+            for field_name in ("id", "name", "provider_call_id"):
+                value = payload.get(field_name)
+                if value:
+                    target[field_name] = str(value)
+            arguments = payload.get("arguments")
+            if arguments is not None:
+                target["arguments"] += str(arguments)
+            return
+        if event.type == "usage":
+            self._usage.update({key: value for key, value in payload.items() if value is not None})
+            return
+        if event.type == "error":
+            error = payload.get("error")
+            self._error = error if isinstance(error, BaseException) else RuntimeError(str(error or "provider_stream_failed"))
+            return
+        self._finish_reason = str(payload.get("finish_reason", "") or "")
+        if "provider_history" in payload:
+            self._provider_history = copy.deepcopy(payload.get("provider_history"))
+        if "raw" in payload:
+            self._raw_events.append(payload.get("raw"))
+        self._completed = True
+
+    def finalize(self) -> ToolCallerResponse:
+        if self._error is not None:
+            raise self._error
+        if not self._completed:
+            raise RuntimeError("provider_stream_incomplete")
+        tool_calls: list[ToolCall] = []
+        for key in self._tool_order:
+            item = self._tool_parts[key]
+            raw_arguments = item["arguments"] or "{}"
+            tool_calls.append(
+                ToolCall(
+                    id=item["id"] or key,
+                    name=item["name"],
+                    arguments=_parse_tool_arguments(raw_arguments),
+                    provider_call_id=item["provider_call_id"],
+                )
+            )
+        return ToolCallerResponse(
+            finish_reason="tool_calls" if tool_calls else (self._finish_reason or "stop"),
+            content="".join(self._text_parts).strip(),
+            tool_calls=tool_calls,
+            raw={"stream": list(self._raw_events)},
+            usage=dict(self._usage),
+            model_used=self.model_used,
+            wire_tools_count=self.wire_tools_count,
+            provider_history=copy.deepcopy(self._provider_history),
+        )
+
+    def snapshot(self, *, mode: str, route_supported: bool) -> dict[str, Any]:
+        return {
+            "mode": str(mode or "off"),
+            "route_supported": bool(route_supported),
+            "first_chunk_ms": self.first_chunk_ms,
+            "total_ms": max(0, int((time.monotonic() - self._started_at) * 1000)),
+            "chunk_count": self.chunk_count,
+        }
+
+
+class _ProviderStreamingTelemetry:
+    def __init__(self) -> None:
+        self._active_calls = 0
+        self._fallback_count = 0
+        self._last: dict[str, Any] = {"mode": "off", "route_supported": False, "first_chunk_ms": None, "total_ms": None, "chunk_count": 0}
+        # Provider callers may be invoked from independent event loops in
+        # worker threads. asyncio.Lock would become loop-affine after
+        # contention, while this projection contains only small counters.
+        self._lock = threading.RLock()
+
+    def started(self, *, mode: str, route_supported: bool) -> None:
+        with self._lock:
+            self._active_calls += 1
+            self._last = {"mode": mode, "route_supported": route_supported, "first_chunk_ms": None, "total_ms": None, "chunk_count": 0}
+
+    def finished(self, snapshot: dict[str, Any], *, fallback: bool = False) -> None:
+        with self._lock:
+            self._active_calls = max(0, self._active_calls - 1)
+            if fallback:
+                self._fallback_count += 1
+            self._last = dict(snapshot)
+
+    def record_fallback(self, snapshot: dict[str, Any]) -> None:
+        """Record a pre-stream fallback without changing another call's active count."""
+        with self._lock:
+            self._fallback_count += 1
+            self._last = dict(snapshot)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {**self._last, "active_calls": self._active_calls, "fallback_count": self._fallback_count}
+
+
+_PROVIDER_STREAMING_TELEMETRY = _ProviderStreamingTelemetry()
+
+_STREAM_SAFETY_BLOCKED_FINISH_REASONS = frozenset({
+    "content_filter", "safety", "blocklist", "prohibited_content",
+    "recitation", "image_safety", "safety_blocked",
+})
+
+
+class ProviderStreamSafetyBlocked(RuntimeError):
+    """A provider explicitly blocked output; partial chunks must not escape."""
+
+
+def _stream_finish_is_safety_blocked(value: Any) -> bool:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized in _STREAM_SAFETY_BLOCKED_FINISH_REASONS
+
+
+def _record_stream_fallback(*, route_supported: bool) -> None:
+    """Record failure before an async iterator/assembler could be created."""
+    _PROVIDER_STREAMING_TELEMETRY.record_fallback(
+        {
+            "mode": "buffered",
+            "route_supported": bool(route_supported),
+            "first_chunk_ms": None,
+            "total_ms": 0,
+            "chunk_count": 0,
+        },
+    )
+
+
+def provider_streaming_route_supported(api_type: Any) -> bool:
+    """Whether the configured route has an implementation, not a provider promise."""
+    return _normalize_api_type(str(api_type or "")) in {
+        "openai", "gemini_official", "anthropic", "openai_codex", "antigravity_cli",
+    }
+
+
+def provider_streaming_snapshot(
+    *,
+    configured_mode: Any | None = None,
+    api_type: Any | None = None,
+) -> dict[str, Any]:
+    """A body-free runtime projection for WebUI/Trace consumers."""
+    snapshot = _PROVIDER_STREAMING_TELEMETRY.snapshot()
+    if configured_mode is not None:
+        snapshot["mode"] = _normalize_provider_streaming_mode(configured_mode)
+    if api_type is not None:
+        snapshot["route_supported"] = bool(
+            snapshot.get("mode") == "buffered" and provider_streaming_route_supported(api_type)
+        )
+    return snapshot
+
+
+def _normalize_provider_streaming_mode(value: Any) -> str:
+    return "buffered" if str(value or "").strip().lower() == "buffered" else "off"
+
+
+async def _assemble_openai_chat_stream(
+    stream: Any,
+    *,
+    model_used: str,
+    wire_tools_count: int,
+) -> ToolCallerResponse:
+    """Consume OpenAI-compatible chat chunks without exposing partial output."""
+    assembler = BufferedToolResponseAssembler(
+        model_used=model_used,
+        wire_tools_count=wire_tools_count,
+    )
+    _PROVIDER_STREAMING_TELEMETRY.started(mode="buffered", route_supported=True)
+    try:
+        async for chunk in stream:
+            raw = _response_to_dict(chunk)
+            choices = list(raw.get("choices") or [])
+            if choices:
+                choice = choices[0] if isinstance(choices[0], dict) else {}
+                delta = choice.get("delta") if isinstance(choice, dict) else {}
+                if isinstance(delta, dict):
+                    content = delta.get("content")
+                    if content:
+                        assembler.add(ProviderStreamEvent("text_delta", {"text": content}))
+                    for tool_delta in list(delta.get("tool_calls") or []):
+                        if not isinstance(tool_delta, dict):
+                            continue
+                        function = tool_delta.get("function") if isinstance(tool_delta.get("function"), dict) else {}
+                        assembler.add(
+                            ProviderStreamEvent(
+                                "tool_call_delta",
+                                {
+                                    "key": tool_delta.get("index", tool_delta.get("id", "")),
+                                    "id": tool_delta.get("id", ""),
+                                    "name": function.get("name", ""),
+                                    "arguments": function.get("arguments", ""),
+                                },
+                            )
+                        )
+                finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else ""
+                if finish_reason:
+                    assembler._finish_reason = str(finish_reason)
+                    if _stream_finish_is_safety_blocked(finish_reason):
+                        raise ProviderStreamSafetyBlocked("provider_stream_safety_blocked")
+            usage = raw.get("usage")
+            if isinstance(usage, dict):
+                assembler.add(ProviderStreamEvent("usage", _extract_usage(raw)))
+            assembler._raw_events.append(raw)
+        assembler.add(ProviderStreamEvent("completed", {"finish_reason": assembler._finish_reason or "stop"}))
+        result = assembler.finalize()
+        _PROVIDER_STREAMING_TELEMETRY.finished(assembler.snapshot(mode="buffered", route_supported=True))
+        return result
+    except asyncio.CancelledError:
+        _PROVIDER_STREAMING_TELEMETRY.finished(
+            assembler.snapshot(mode="buffered", route_supported=True), fallback=False
+        )
+        raise
+    except BaseException:
+        _PROVIDER_STREAMING_TELEMETRY.finished(
+            assembler.snapshot(mode="buffered", route_supported=True), fallback=True
+        )
+        raise
+
+
+async def _assemble_openai_responses_stream(
+    events: Any,
+    *,
+    model_used: str,
+    wire_tools_count: int,
+) -> ToolCallerResponse:
+    """Assemble the official Responses event protocol before tool execution."""
+    assembler = BufferedToolResponseAssembler(model_used=model_used, wire_tools_count=wire_tools_count)
+    output_items: dict[int, dict[str, Any]] = {}
+    used_builtin_search = False
+    _PROVIDER_STREAMING_TELEMETRY.started(mode="buffered", route_supported=True)
+    try:
+        async for event in events:
+            raw = _response_to_dict(event)
+            event_type = str(raw.get("type", "") or "")
+            if event_type == "response.output_text.delta":
+                assembler.add(ProviderStreamEvent("text_delta", {"text": raw.get("delta", "")}))
+            elif event_type == "response.function_call_arguments.delta":
+                assembler.add(ProviderStreamEvent("tool_call_delta", {
+                    "key": raw.get("output_index", raw.get("item_id", "")),
+                    "id": raw.get("call_id", raw.get("item_id", "")),
+                    "name": raw.get("name", ""),
+                    "arguments": raw.get("delta", ""),
+                }))
+            elif event_type == "response.output_item.added":
+                item = raw.get("item") if isinstance(raw.get("item"), dict) else {}
+                if str(item.get("type", "") or "") == "function_call":
+                    assembler.add(ProviderStreamEvent("tool_call_delta", {
+                        "key": raw.get("output_index", item.get("id", "")),
+                        "id": item.get("call_id", item.get("id", "")),
+                        "name": item.get("name", ""),
+                    }))
+            elif event_type == "response.output_item.done":
+                item = raw.get("item") if isinstance(raw.get("item"), dict) else {}
+                if item:
+                    try:
+                        index = int(raw.get("output_index", len(output_items)))
+                    except (TypeError, ValueError):
+                        index = len(output_items)
+                    output_items[index] = copy.deepcopy(item)
+                    if str(item.get("type", "") or "") == "function_call":
+                        known = assembler._tool_parts.get(str(index), {}).get("arguments", "")
+                        assembler.add(ProviderStreamEvent("tool_call_delta", {
+                            "key": index,
+                            "id": item.get("call_id", item.get("id", "")),
+                            "name": item.get("name", ""),
+                            # item.done is authoritative when the gateway did
+                            # not emit argument deltas.
+                            "arguments": "" if known else item.get("arguments", ""),
+                        }))
+            elif event_type == "response.incomplete":
+                raise RuntimeError("provider_stream_incomplete")
+            elif event_type == "response.completed":
+                response = raw.get("response") if isinstance(raw.get("response"), dict) else {}
+                completed_output = list(response.get("output") or [])
+                for index, item in enumerate(completed_output):
+                    if isinstance(item, dict) and index not in output_items:
+                        output_items[index] = copy.deepcopy(item)
+                usage = _extract_usage(response)
+                if usage:
+                    assembler.add(ProviderStreamEvent("usage", usage))
+                assembled_pairs = sorted(output_items.items())
+                assembled_items = [item for _, item in assembled_pairs]
+                # A compact completion response can be the only place a
+                # function's arguments appear.
+                for index, item in assembled_pairs:
+                    if str(item.get("type", "") or "") == "function_call":
+                        key = str(index)
+                        known = assembler._tool_parts.get(key, {}).get("arguments", "")
+                        if not known and item.get("arguments"):
+                            assembler.add(ProviderStreamEvent("tool_call_delta", {
+                                "key": index,
+                                "id": item.get("call_id", item.get("id", "")),
+                                "name": item.get("name", ""),
+                                "arguments": item.get("arguments", ""),
+                            }))
+                assembler.add(ProviderStreamEvent("completed", {
+                    "finish_reason": "stop",
+                    "provider_history": assembled_items,
+                    "raw": response,
+                }))
+            if event_type in {"response.web_search_call.in_progress", "response.web_search_call.completed"}:
+                used_builtin_search = True
+            assembler._raw_events.append(raw)
+        if not assembler._completed:
+            raise RuntimeError("provider_stream_incomplete")
+        result = assembler.finalize()
+        result.used_builtin_search = used_builtin_search or any(
+            str(item.get("type", "") or "") in {"web_search_call", "web_search_result", "server_tool_use"}
+            for item in output_items.values()
+            if isinstance(item, dict)
+        )
+        _PROVIDER_STREAMING_TELEMETRY.finished(assembler.snapshot(mode="buffered", route_supported=True))
+        return result
+    except asyncio.CancelledError:
+        _PROVIDER_STREAMING_TELEMETRY.finished(
+            assembler.snapshot(mode="buffered", route_supported=True), fallback=False
+        )
+        raise
+    except BaseException:
+        _PROVIDER_STREAMING_TELEMETRY.finished(
+            assembler.snapshot(mode="buffered", route_supported=True), fallback=True
+        )
+        raise
+
+
+def assemble_openai_responses_payload(
+    data: dict[str, Any],
+    *,
+    model_used: str,
+    wire_tools_count: int | None = None,
+) -> ToolCallerResponse:
+    """Put an already-consumed Responses/SSE payload through the same boundary."""
+    output = list(data.get("output") or [])
+    assembler = BufferedToolResponseAssembler(model_used=model_used, wire_tools_count=wire_tools_count)
+    used_builtin_search = False
+    for index, item in enumerate(output):
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type", "") or "")
+        if item_type == "message":
+            for block in list(item.get("content") or []):
+                if isinstance(block, dict) and block.get("type") == "output_text":
+                    assembler.add(ProviderStreamEvent("text_delta", {"text": block.get("text", "")}))
+        elif item_type == "function_call":
+            assembler.add(ProviderStreamEvent("tool_call_delta", {
+                "key": index,
+                "id": item.get("call_id", item.get("id", "")),
+                "name": item.get("name", ""),
+                "arguments": item.get("arguments", "{}"),
+            }))
+        elif item_type in {"web_search_call", "web_search_result", "server_tool_use"}:
+            used_builtin_search = True
+    usage = _extract_usage(data)
+    if usage:
+        assembler.add(ProviderStreamEvent("usage", usage))
+    assembler.add(ProviderStreamEvent("completed", {
+        "finish_reason": "stop",
+        "provider_history": copy.deepcopy(output),
+        "raw": data,
+    }))
+    result = assembler.finalize()
+    result.used_builtin_search = used_builtin_search
+    return result
+
+
+def _stream_trace_stage(key: str, *, status: str, detail: str) -> None:
+    """Best-effort trace marker; details intentionally contain no deltas."""
+    try:
+        from plugin.personification.core import reply_turn_trace
+
+        reply_turn_trace.record_stage(
+            key=key,
+            label="Provider 安全缓冲流式",
+            status=status,
+            detail=detail,
+        )
+    except Exception:
+        pass
+
+
+async def _assemble_gemini_sse_stream(
+    response: Any,
+    *,
+    model_used: str,
+    wire_tools_count: int,
+) -> ToolCallerResponse:
+    """Consume native Gemini ``streamGenerateContent`` SSE safely in memory."""
+    assembler = BufferedToolResponseAssembler(model_used=model_used, wire_tools_count=wire_tools_count)
+    provider_parts: list[dict[str, Any]] = []
+    used_builtin_search = False
+    _PROVIDER_STREAMING_TELEMETRY.started(mode="buffered", route_supported=True)
+    try:
+        async for line in response.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            raw = json.loads(line[5:].strip() or "{}")
+            candidates = list(raw.get("candidates") or [])
+            if candidates:
+                candidate = candidates[0] if isinstance(candidates[0], dict) else {}
+                content = candidate.get("content") if isinstance(candidate.get("content"), dict) else {}
+                parts = list(content.get("parts") or [])
+                for part in parts:
+                    if not isinstance(part, dict):
+                        continue
+                    # Preserve the exact model content, including Gemini's
+                    # thoughtSignature, for the next functionResponse turn.
+                    provider_parts.append(copy.deepcopy(part))
+                    if part.get("text"):
+                        assembler.add(ProviderStreamEvent("text_delta", {"text": part["text"]}))
+                    function_call = part.get("functionCall") if isinstance(part.get("functionCall"), dict) else {}
+                    if function_call:
+                        assembler.add(ProviderStreamEvent("tool_call_delta", {
+                            "key": function_call.get("id") or function_call.get("name") or len(assembler._tool_order),
+                            "id": function_call.get("id", ""),
+                            "provider_call_id": function_call.get("id", ""),
+                            "name": function_call.get("name", ""),
+                            "arguments": json.dumps(function_call.get("args") or {}, ensure_ascii=False),
+                        }))
+                assembler._finish_reason = str(candidate.get("finishReason", "") or assembler._finish_reason)
+                if _stream_finish_is_safety_blocked(assembler._finish_reason):
+                    raise ProviderStreamSafetyBlocked("provider_stream_safety_blocked")
+                used_builtin_search = bool(
+                    candidate.get("groundingMetadata") or candidate.get("grounding_metadata")
+                ) or used_builtin_search
+            usage = _extract_usage(raw)
+            if usage:
+                assembler.add(ProviderStreamEvent("usage", usage))
+            assembler._raw_events.append(raw)
+        assembler.add(ProviderStreamEvent("completed", {
+            "finish_reason": assembler._finish_reason or "stop",
+            "provider_history": {"role": "model", "parts": provider_parts},
+        }))
+        result = assembler.finalize()
+        result.used_builtin_search = used_builtin_search
+        _PROVIDER_STREAMING_TELEMETRY.finished(assembler.snapshot(mode="buffered", route_supported=True))
+        return result
+    except asyncio.CancelledError:
+        _PROVIDER_STREAMING_TELEMETRY.finished(
+            assembler.snapshot(mode="buffered", route_supported=True), fallback=False
+        )
+        raise
+    except BaseException:
+        _PROVIDER_STREAMING_TELEMETRY.finished(
+            assembler.snapshot(mode="buffered", route_supported=True), fallback=True
+        )
+        raise
 
 
 _PROVIDER_HISTORY_KEY = "_personification_provider_history"
@@ -1249,6 +1755,7 @@ class OpenAIToolCaller(ToolCaller):
         timeout: float = 60.0,
         supports_reasoning: Optional[bool] = None,
         proxy: str = "",
+        streaming_mode: str = "off",
     ) -> None:
         self.api_key = api_key
         self.base_url = _normalize_openai_base_url(base_url)
@@ -1257,6 +1764,7 @@ class OpenAIToolCaller(ToolCaller):
         self.timeout = timeout
         self._supports_reasoning = supports_reasoning
         self.proxy = (proxy or "").strip()
+        self.streaming_mode = _normalize_provider_streaming_mode(streaming_mode)
 
     async def chat_with_tools(
         self,
@@ -1324,6 +1832,32 @@ class OpenAIToolCaller(ToolCaller):
                         payload["reasoning"] = reasoning
 
                     try:
+                        if self.streaming_mode == "buffered":
+                            stream_created = False
+                            try:
+                                _stream_trace_stage(
+                                    "provider_stream_started",
+                                    status="info",
+                                    detail=f"provider=openai_responses model={str(self.model or '')[:96]} route_supported=true",
+                                )
+                                async with client.responses.stream(**payload) as response_stream:
+                                    stream_created = True
+                                    streamed_response = await _assemble_openai_responses_stream(
+                                        response_stream,
+                                        model_used=str(self.model or ""),
+                                        wire_tools_count=wire_tools_count,
+                                    )
+                                _stream_trace_stage("provider_stream_completed", status="ok", detail="route_supported=true buffered=true")
+                                return streamed_response
+                            except (asyncio.CancelledError, KeyboardInterrupt):
+                                raise
+                            except Exception:
+                                if not stream_created:
+                                    _record_stream_fallback(route_supported=True)
+                                # Gateways frequently advertise Responses but
+                                # omit the event stream contract, especially
+                                # with built-in search. No tool has run yet.
+                                _stream_trace_stage("provider_stream_fallback", status="warn", detail="route_supported=false diagnostic_code=stream_unsupported")
                         response = await client.responses.create(**payload)
                         response_data = _response_to_dict(response)
                         content, tool_calls, used_builtin_search = _parse_openai_responses_output(response_data)
@@ -1416,6 +1950,39 @@ class OpenAIToolCaller(ToolCaller):
                 wire_tools_count = len(list(payload.get("tools") or []))
 
                 try:
+                    if self.streaming_mode == "buffered":
+                        stream_created = False
+                        try:
+                            _stream_trace_stage(
+                                "provider_stream_started",
+                                status="info",
+                                detail=f"provider=openai model={str(self.model or '')[:96]} route_supported=true",
+                            )
+                            provider_stream = await client.chat.completions.create(**payload, stream=True)
+                            stream_created = True
+                            response = await _assemble_openai_chat_stream(
+                                provider_stream,
+                                model_used=str(self.model or ""),
+                                wire_tools_count=wire_tools_count,
+                            )
+                            _stream_trace_stage(
+                                "provider_stream_completed",
+                                status="ok",
+                                detail="route_supported=true buffered=true",
+                            )
+                            return response
+                        except (asyncio.CancelledError, KeyboardInterrupt):
+                            raise
+                        except Exception:
+                            if not stream_created:
+                                _record_stream_fallback(route_supported=True)
+                            # No tool or visible QQ output has happened: falling back
+                            # to the existing complete-response request is safe.
+                            _stream_trace_stage(
+                                "provider_stream_fallback",
+                                status="warn",
+                                detail="route_supported=true diagnostic_code=provider_stream_fallback",
+                            )
                     response = await client.chat.completions.create(**payload)
                 except TypeError as e:
                     error_msg = str(e).lower()
@@ -1498,6 +2065,7 @@ class GeminiToolCaller(ToolCaller):
         thinking_mode: str = "none",
         timeout: float = 200.0,
         auth_mode: str = "auto",
+        streaming_mode: str = "off",
     ) -> None:
         self.api_key = api_key
         self.base_url = _normalize_gemini_base_url(base_url) or "https://generativelanguage.googleapis.com/v1beta"
@@ -1505,6 +2073,7 @@ class GeminiToolCaller(ToolCaller):
         self.thinking_mode = _normalize_thinking_mode(thinking_mode)
         self.timeout = max(5.0, float(timeout or 200.0))
         self.auth_mode = str(auth_mode or "auto")
+        self.streaming_mode = _normalize_provider_streaming_mode(streaming_mode)
 
     async def _chat_with_custom_gemini_endpoint(
         self,
@@ -1540,6 +2109,37 @@ class GeminiToolCaller(ToolCaller):
                 timeout=httpx.Timeout(self.timeout, connect=min(15.0, self.timeout)),
                 follow_redirects=False,
             ) as client:
+                if self.streaming_mode == "buffered":
+                    # Native Gemini stream uses the same generated payload.  A
+                    # failed/unsupported stream falls through to the proven
+                    # complete request below before the Agent sees any result.
+                    assembler_entered = False
+                    try:
+                        stream_url = f"{self.base_url.rstrip('/')}/models/{self.model}:streamGenerateContent?alt=sse"
+                        auth = gemini_auth_payload(self.api_key, self.auth_mode)
+                        _stream_trace_stage("provider_stream_started", status="info", detail=f"provider=gemini model={str(self.model or '')[:96]} route_supported=true")
+                        async with client.stream(
+                            "POST", stream_url,
+                            headers={"Content-Type": "application/json", **auth.headers},
+                            params=auth.params,
+                            json=payload,
+                        ) as stream_response:
+                            raise_for_gemini_status(stream_response, auth_mode=auth.mode, request_count=1)
+                            # The assembler owns started()/finished().  Keep
+                            # this boundary explicit so a setup failure counts
+                            # once without decrementing another active stream.
+                            assembler_entered = True
+                            streamed = await _assemble_gemini_sse_stream(
+                                stream_response, model_used=str(self.model or ""), wire_tools_count=len(declarations)
+                            )
+                        _stream_trace_stage("provider_stream_completed", status="ok", detail="route_supported=true buffered=true")
+                        return streamed
+                    except (asyncio.CancelledError, KeyboardInterrupt):
+                        raise
+                    except Exception:
+                        if not assembler_entered:
+                            _record_stream_fallback(route_supported=True)
+                        _stream_trace_stage("provider_stream_fallback", status="warn", detail="route_supported=true diagnostic_code=provider_stream_fallback")
                 async def _send(auth):  # noqa: ANN001, ANN202
                     return await client.post(
                         url,
@@ -1654,12 +2254,14 @@ class AnthropicToolCaller(ToolCaller):
         model: str,
         thinking_mode: str = "none",
         timeout: float = 120.0,
+        streaming_mode: str = "off",
     ) -> None:
         self.api_key = api_key
         self.base_url = (base_url or "").strip()
         self.model = model
         self.thinking_mode = _normalize_thinking_mode(thinking_mode)
         self.timeout = timeout
+        self.streaming_mode = _normalize_provider_streaming_mode(streaming_mode)
 
     async def chat_with_tools(
         self,
@@ -1710,6 +2312,77 @@ class AnthropicToolCaller(ToolCaller):
             if thinking:
                 payload["thinking"] = thinking
 
+            if self.streaming_mode == "buffered":
+                assembler: BufferedToolResponseAssembler | None = None
+                try:
+                    _stream_trace_stage(
+                        "provider_stream_started", status="info",
+                        detail=f"provider=anthropic model={str(self.model or '')[:96]} route_supported=true",
+                    )
+                    assembler = BufferedToolResponseAssembler(
+                        model_used=str(self.model or ""), wire_tools_count=wire_tools_count
+                    )
+                    _PROVIDER_STREAMING_TELEMETRY.started(mode="buffered", route_supported=True)
+                    async with client.messages.stream(**payload) as stream:
+                        async for event in stream:
+                            event_type = str(_obj_get(event, "type", "") or "")
+                            if event_type == "content_block_start":
+                                block = _obj_get(event, "content_block", {}) or {}
+                                if _obj_get(block, "type", "") == "tool_use":
+                                    assembler.add(ProviderStreamEvent("tool_call_delta", {
+                                        "key": _obj_get(event, "index", _obj_get(block, "id", "")),
+                                        "id": _obj_get(block, "id", ""),
+                                        "name": _obj_get(block, "name", ""),
+                                    }))
+                            elif event_type == "content_block_delta":
+                                delta = _obj_get(event, "delta", {}) or {}
+                                delta_type = _obj_get(delta, "type", "")
+                                if delta_type == "text_delta":
+                                    assembler.add(ProviderStreamEvent("text_delta", {"text": _obj_get(delta, "text", "")}))
+                                elif delta_type == "input_json_delta":
+                                    assembler.add(ProviderStreamEvent("tool_call_delta", {
+                                        "key": _obj_get(event, "index", ""),
+                                        "arguments": _obj_get(delta, "partial_json", ""),
+                                    }))
+                            elif event_type == "message_delta":
+                                delta = _obj_get(event, "delta", {}) or {}
+                                assembler._finish_reason = str(_obj_get(delta, "stop_reason", "") or "")
+                                usage = _obj_get(event, "usage", {}) or {}
+                                if usage:
+                                    assembler.add(ProviderStreamEvent("usage", _extract_usage({"usage": usage})))
+                            assembler._raw_events.append(_response_to_dict(event))
+                        final_message = await stream.get_final_message()
+                    final_data = _response_to_dict(final_message)
+                    final_content = list(final_data.get("content") or [])
+                    final_usage = _extract_usage(final_data)
+                    if final_usage:
+                        assembler.add(ProviderStreamEvent("usage", final_usage))
+                    # The final message is authoritative for thinking blocks,
+                    # signatures, server tool blocks and continuation shape.
+                    assembler.add(ProviderStreamEvent("completed", {
+                        "finish_reason": str(final_data.get("stop_reason", "") or assembler._finish_reason or "stop"),
+                        "provider_history": final_content,
+                        "raw": final_data,
+                    }))
+                    streamed_response = assembler.finalize()
+                    streamed_response.used_builtin_search = _anthropic_used_builtin_search(final_content)
+                    _PROVIDER_STREAMING_TELEMETRY.finished(assembler.snapshot(mode="buffered", route_supported=True))
+                    _stream_trace_stage("provider_stream_completed", status="ok", detail="route_supported=true buffered=true")
+                    return streamed_response
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    if assembler is not None:
+                        _PROVIDER_STREAMING_TELEMETRY.finished(
+                            assembler.snapshot(mode="buffered", route_supported=True), fallback=False
+                        )
+                    raise
+                except Exception:
+                    # The tool loop has not observed a response yet, therefore
+                    # the existing complete request can safely take over.
+                    if assembler is not None:
+                        _PROVIDER_STREAMING_TELEMETRY.finished(
+                            assembler.snapshot(mode="buffered", route_supported=True), fallback=True
+                        )
+                    _stream_trace_stage("provider_stream_fallback", status="warn", detail="route_supported=true diagnostic_code=provider_stream_fallback")
             response = await client.messages.create(**payload)
 
             content_blocks = list(_obj_get(response, "content", []) or [])
@@ -2410,6 +3083,15 @@ class OpenAICodexToolCaller(ToolCaller):
         )
         if isinstance(data, ToolCallerResponse):
             return data
+        if isinstance(data, dict):
+            # Codex's route already consumes its SSE internally. Re-project
+            # the completed output through the shared assembler so it has the
+            # same no-partial-tool contract as native streamed providers.
+            return assemble_openai_responses_payload(
+                data,
+                model_used=str(self.model or ""),
+                wire_tools_count=len(codex_tools),
+            )
         return self._parse_response(data)
 
     @staticmethod
@@ -4183,6 +4865,57 @@ def _parse_antigravity_sse_response(text: str) -> dict[str, Any]:
     return {"response": merged, "stream": events}
 
 
+def assemble_antigravity_sse_response(
+    text: str | dict[str, Any],
+    *,
+    model_used: str = "",
+    wire_tools_count: int | None = None,
+) -> ToolCallerResponse:
+    """Project the already-consumed Antigravity SSE into the common assembler.
+
+    Antigravity's OAuth route currently receives a complete SSE body from its
+    internal endpoint.  This keeps its parse contract while ensuring its tool
+    parts are subject to the same complete-call assembly boundary.
+    """
+    data = _parse_antigravity_sse_response(text) if isinstance(text, str) else dict(text or {})
+    payload = data.get("response") if isinstance(data, dict) else {}
+    candidates = list(payload.get("candidates") or []) if isinstance(payload, dict) else []
+    assembler = BufferedToolResponseAssembler(model_used=model_used, wire_tools_count=wire_tools_count)
+    provider_history: dict[str, Any] | None = None
+    for candidate in candidates[:1]:
+        content = candidate.get("content") if isinstance(candidate, dict) else {}
+        if isinstance(content, dict):
+            provider_history = copy.deepcopy(content)
+        for part in list(content.get("parts") or []) if isinstance(content, dict) else []:
+            if not isinstance(part, dict):
+                continue
+            if part.get("text"):
+                assembler.add(ProviderStreamEvent("text_delta", {"text": part["text"]}))
+            function_call = part.get("functionCall") if isinstance(part.get("functionCall"), dict) else {}
+            if function_call:
+                assembler.add(ProviderStreamEvent("tool_call_delta", {
+                    "key": function_call.get("id") or function_call.get("name") or len(assembler._tool_order),
+                    "id": function_call.get("id", ""),
+                    "provider_call_id": function_call.get("id", ""),
+                    "name": function_call.get("name", ""),
+                    "arguments": json.dumps(function_call.get("args") or {}, ensure_ascii=False),
+                }))
+        assembler._finish_reason = str(candidate.get("finishReason", "") or "")
+    usage = _extract_usage(payload) or _extract_usage(data)
+    if usage:
+        assembler.add(ProviderStreamEvent("usage", usage))
+    assembler.add(ProviderStreamEvent("completed", {
+        "finish_reason": assembler._finish_reason or "stop",
+        "raw": data,
+        "provider_history": provider_history,
+    }))
+    result = assembler.finalize()
+    result.used_builtin_search = bool(
+        candidates and isinstance(candidates[0], dict) and candidates[0].get("groundingMetadata")
+    )
+    return result
+
+
 def _antigravity_is_transient_network_error(exc: Exception) -> bool:
     if isinstance(
         exc,
@@ -4544,6 +5277,17 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                 if selected_model_name and not state_neutral_probe:
                     self._preferred_concrete_model = selected_model_name
 
+            if isinstance(data, dict) and isinstance(data.get("stream"), list):
+                # Antigravity already consumes an SSE body internally. Route
+                # its parsed events through the same completion-only contract
+                # before the Agent tool loop can observe a response.
+                streamed_response = assemble_antigravity_sse_response(
+                    data,
+                    model_used=str(selected_model_name or self.model or self._default_model),
+                    wire_tools_count=wire_tools_count,
+                )
+                return streamed_response
+
             inner_response = data.get("response") if isinstance(data, dict) else None
             if isinstance(inner_response, dict):
                 payload = inner_response
@@ -4764,6 +5508,9 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
     thinking_mode = _normalize_thinking_mode(
         getattr(config, "personification_thinking_mode", "none")
     )
+    streaming_mode = _normalize_provider_streaming_mode(
+        getattr(config, "personification_provider_streaming_mode", "off")
+    )
 
     if api_type == "gemini_official":
         return GeminiToolCaller(
@@ -4773,6 +5520,7 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
             thinking_mode=thinking_mode,
             timeout=provider_timeout,
             auth_mode=gemini_auth_mode,
+            streaming_mode=streaming_mode,
         )
     if api_type == "gemini_cli":
         auth_path = str(getattr(config, "personification_gemini_cli_auth_path", "") or "").strip()
@@ -4804,6 +5552,7 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
             base_url=api_url,
             model=model,
             thinking_mode=thinking_mode,
+            streaming_mode=streaming_mode,
         )
     if api_type == "claude_code":
         auth_path = str(getattr(config, "personification_claude_code_auth_path", "") or "").strip()
@@ -4826,4 +5575,5 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
         thinking_mode=thinking_mode,
         supports_reasoning=supports_reasoning,
         proxy=proxy,
+        streaming_mode=streaming_mode,
     )

@@ -190,6 +190,23 @@ async def build_agent_runtime_snapshot(runtime: Any, bot_id: str = "") -> dict[s
         inner = await load_inner_state(get_personification_data_dir(config))
     except Exception:
         inner = {}
+    try:
+        from ..skills.skillpacks.tool_caller.scripts.impl import provider_streaming_snapshot
+
+        provider_streaming = provider_streaming_snapshot(
+            configured_mode=getattr(config, "personification_provider_streaming_mode", "off"),
+            api_type=getattr(config, "personification_api_type", "openai"),
+        )
+    except Exception:
+        provider_streaming = {
+            "mode": str(getattr(config, "personification_provider_streaming_mode", "off") or "off"),
+            "active_calls": 0,
+            "route_supported": False,
+            "fallback_count": 0,
+            "first_chunk_ms": None,
+            "total_ms": None,
+            "chunk_count": 0,
+        }
     last_active_at = max((float(item.get("updated_at") or 0) for item in recent), default=0.0) or None
     return {
         "bot": selected,
@@ -218,6 +235,7 @@ async def build_agent_runtime_snapshot(runtime: Any, bot_id: str = "") -> dict[s
         "background_tasks": int(tasks.get("total", 0) or 0),
         "background_failures": int(tasks.get("failed_total", 0) or 0),
         "cache_entries": sum(int(item.get("entries", 0) or 0) for item in caches if isinstance(item, dict)),
+        "provider_streaming": provider_streaming,
         "inner_state": {
             "mood": str(inner.get("mood") or ""),
             "energy": str(inner.get("energy") or ""),

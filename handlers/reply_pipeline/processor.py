@@ -125,6 +125,7 @@ from ...core.response_review import (
 )
 from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.reply_text_policy import normalize_visible_reply_text
+from ...core.reply_punctuation import apply_terminal_punctuation_policy
 from ...core.reply_completion_contract import (
     resolve_action_only_completion,
     resolve_sent_reply_completion,
@@ -3604,6 +3605,25 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         segments = expanded
                 if not segments:
                     segments = [final_reply]
+                # Final text bubbles, not TTS/stickers/media, receive the
+                # mechanical terminal policy after review/splitting.
+                segments = [
+                    apply_terminal_punctuation_policy(
+                        segment,
+                        policy=getattr(runtime.plugin_config, "personification_reply_terminal_punctuation_policy", "strip_common"),
+                    )
+                    for segment in segments
+                ]
+                if not is_private_session and any(
+                    match_raw_peer_bot_command_entry(
+                        segment,
+                        group_id=str(group_id),
+                        registry=getattr(runtime, "peer_bot_registry", None),
+                    )
+                    for segment in segments
+                ):
+                    state["peer_bot_raw_command_blocked"] = True
+                    return
 
                 typo_correction: str | None = None
                 if message_intent == "banter" and not looks_like_explanatory_output(final_reply):
@@ -3705,6 +3725,20 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         runtime.logger.info(f"拟人插件：{stale_reason}")
                         return
                     async def _send_text_candidate(candidate: str, *, _index: int = i) -> Any:
+                        candidate = apply_terminal_punctuation_policy(
+                            candidate,
+                            policy=getattr(runtime.plugin_config, "personification_reply_terminal_punctuation_policy", "strip_common"),
+                        )
+                        # Re-check after splitter/OCC rewrite.  Only ordinary
+                        # visible bubbles reach here; invoke_peer_bot dispatches
+                        # through its own Ledger surface instead.
+                        if not is_private_session and match_raw_peer_bot_command_entry(
+                            candidate,
+                            group_id=str(group_id),
+                            registry=getattr(runtime, "peer_bot_registry", None),
+                        ):
+                            state["peer_bot_raw_command_blocked"] = True
+                            return SimpleNamespace(status="failed", message_id=None)
                         candidate = guard_visible_text(
                             candidate,
                             logger=runtime.logger,
@@ -3784,6 +3818,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         self_continuity_delivered_texts.append(continuity_delivery.text)
                     else:
                         send_result = await _send_text_candidate(seg)
+                    if state.get("peer_bot_raw_command_blocked"):
+                        return
                     if not sent_message_id:
                         sent_message_id = _message_id_from_send_result(send_result)
                     if i < len(segments) - 1 or sticker_segment:
@@ -3802,6 +3838,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         max_chars=max_chars,
                         sanitize_history_text=session.sanitize_history_text,
                     )
+
+                if state.get("peer_bot_raw_command_blocked"):
+                    return
 
                 if typo_correction and not _stale_reply_abort_reason(state):
                     await asyncio.sleep(random.uniform(1.0, 2.0))
