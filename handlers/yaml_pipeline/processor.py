@@ -54,6 +54,7 @@ from ...core.group_context import (
     render_plugin_episode_trace_detail,
     render_topic_state_trace_detail,
 )
+from ...core.group_followup_referent import get_group_followup_referent_resolver
 from ...core.metrics import record_counter, record_timing
 from ...core.meme_reply_policy import format_meme_turn_prompt, prepare_meme_turn_context
 from ...core.message_relations import extract_event_message_id, extract_reply_message_id, extract_send_message_id
@@ -144,6 +145,7 @@ from ...core.turn_media import (
     normalize_safe_visual_summary,
     register_turn_media_lease,
     render_turn_media_grounding,
+    serialize_turn_media,
     summarize_media_resolution,
 )
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_YAML
@@ -658,6 +660,25 @@ async def process_yaml_response_logic(
     turn_media_refs = coerce_turn_media(turn_media_context or [])
     if not turn_media_refs:
         turn_media_refs = extract_turn_media_from_event(event, current_origin="current")
+    followup_referent = reply_commit_state.get("group_followup_referent")
+    if not isinstance(followup_referent, dict) and not str(group_id).startswith(private_session_prefix):
+        addressing_target = "bot" if bool(reply_required) and review_message_target == "bot" else "none"
+        resolved_referent = await get_group_followup_referent_resolver().resolve(
+            bot_self_id=str(getattr(bot, "self_id", "") or ""),
+            group_id=str(group_id),
+            event=event,
+            current_media=turn_media_refs,
+            addressing_target=addressing_target,
+            call_ai_api=lite_call_ai_api,
+            enabled=bool(getattr(plugin_config, "personification_group_followup_referent_enabled", True)),
+            window_seconds=getattr(plugin_config, "personification_group_followup_referent_window_seconds", 120.0),
+            max_candidates=getattr(plugin_config, "personification_group_followup_referent_max_candidates", 3),
+            confidence_threshold=getattr(plugin_config, "personification_group_followup_referent_confidence", 0.80),
+        )
+        turn_media_refs = list(resolved_referent.active_media)
+        followup_referent = resolved_referent.context_fields()
+        reply_commit_state["group_followup_referent"] = followup_referent
+        reply_commit_state["turn_media_manifest"] = serialize_turn_media(resolved_referent.media_manifest)
 
     def _has_newer_batch_now() -> bool:
         return bool(has_newer_batch or _batch_ref_has_newer_messages(batch_runtime_ref))
@@ -919,6 +940,14 @@ async def process_yaml_response_logic(
         history_last_text = str(last_msg["content"])
 
     last_images = list(current_image_urls or [])
+    for media_ref in turn_media_refs:
+        if (
+            media_ref.reference_role in {"current", "selected_referent"}
+            and media_ref.kind in {"image", "sticker", "gif", "mface"}
+            and str(media_ref.ref or "").strip()
+            and media_ref.ref not in last_images
+        ):
+            last_images.append(media_ref.ref)
     if isinstance(last_msg["content"], list):
         for item in last_msg["content"]:
             if item["type"] == "image_url":
@@ -1045,6 +1074,8 @@ async def process_yaml_response_logic(
                 registry=peer_bot_registry,
                 tracker=peer_bot_tracker,
             ),
+            followup_referent=followup_referent if isinstance(followup_referent, dict) else None,
+            followup_media_manifest=reply_commit_state.get("turn_media_manifest"),
         )
         recent_context_hint = render_group_conversation_context(conversation_context)
         relationship_hint = relationship_hint or conversation_context.relationship_hint
@@ -2666,6 +2697,8 @@ async def process_yaml_response_logic(
             self_continuity_snapshot=(
                 self_continuity_snapshot if self_continuity_enabled else None
             ),
+            followup_referent=followup_referent if isinstance(followup_referent, dict) else None,
+            followup_media_manifest=reply_commit_state.get("turn_media_manifest"),
         )
     elif used_agent and not should_review_agent_reply and not care_review_required and not protected_review_required:
         review_decision = make_passthrough_review_decision(

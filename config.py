@@ -70,6 +70,10 @@ class Config(BaseModel):
     personification_unprompted_followup_enabled: bool = True
     personification_unprompted_followup_window_seconds: float = 120.0
     personification_unprompted_followup_confidence: float = 0.78
+    personification_group_followup_referent_enabled: bool = True
+    personification_group_followup_referent_window_seconds: float = 120.0
+    personification_group_followup_referent_max_candidates: int = 3
+    personification_group_followup_referent_confidence: float = 0.80
     personification_final_dialogue_gate_enabled: bool = True
     personification_self_continuity_enabled: bool = True
     personification_self_continuity_max_facts: int = 20

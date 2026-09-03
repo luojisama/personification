@@ -11,8 +11,11 @@ from typing import Any, Callable, Dict
 from ..core import metrics
 from ..core.context_cleanup import release_message_buffer_entry_resources
 from ..core.message_relations import extract_mentioned_ids, extract_reply_message_id, extract_reply_sender_id
+from ..core.command_runtime_context import has_runtime_command_prefix
+from ..core.peer_bot_runtime import peer_bot_source_kind
 from ..core.shared_content import normalize_merged_forward, parse_onebot_share_card
 from ..core.target_inference import normalize_message_target_for_review
+from ..core.group_followup_referent import get_group_followup_referent_resolver
 from ..core.turn_deadline import HARD_TURN_TIMEOUT_SECONDS, attach_turn_deadline
 from ..core.turn_media import (
     TurnMediaRef,
@@ -1722,6 +1725,29 @@ async def handle_reply_event(
         state["forward_bundle"] = forward_bundle
         state["forward_content_unavailable"] = bool(forward_bundle.get("unavailable_nodes"))
     event_media = extract_turn_media_from_event(event, current_origin="current")
+    # Keep a process-local, bounded copy for a later group follow-up such as
+    # “@Bot 你觉得我刚发的图怎么样”。  The resolver performs the semantic
+    # choice later; this is deliberately only source/timing/media provenance.
+    if not is_private_session:
+        declared_source_kind = str(
+            state.get("source_kind")
+            or peer_bot_source_kind(event)
+            or getattr(event, "_personification_peer_bot_source_kind", "")
+            or getattr(event, "source_kind", "")
+            or getattr(event, "message_source_kind", "")
+            or "user"
+        ).strip().lower()
+        if has_runtime_command_prefix(event_plain_text):
+            declared_source_kind = "plugin_command"
+        if declared_source_kind in {"peer_bot_reply", "peer_bot_candidate", "peer_bot_command", "bot_reply", "plugin", "plugin_command", "system"}:
+            declared_source_kind = "non_human"
+        get_group_followup_referent_resolver().remember(
+            bot_self_id=str(getattr(bot, "self_id", "") or ""),
+            group_id=str(getattr(event, "group_id", "") or ""),
+            event=event,
+            media=event_media,
+            source_kind=declared_source_kind,
+        )
     if event_media and not event_plain_text:
         _remember_recent_media(
             session_key=session_key,

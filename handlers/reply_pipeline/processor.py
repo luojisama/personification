@@ -67,6 +67,7 @@ from ...core.group_context import (
     render_plugin_episode_trace_detail,
     render_topic_state_trace_detail,
 )
+from ...core.group_followup_referent import get_group_followup_referent_resolver
 from ...core.peer_bot_runtime import (
     build_peer_bot_capability_catalog,
     build_peer_bot_context_episodes,
@@ -1380,22 +1381,23 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         random_chat=bool(is_random_chat),
     )
     recent_group_msgs: List[Dict[str, Any]] = []
-    if isinstance(event, types.group_message_event_cls) and not state.get("message_target"):
+    if isinstance(event, types.group_message_event_cls):
         recent_group_msgs = get_recent_group_msgs(str(group_id), limit=8, expire_hours=0)
         if getattr(runtime, "user_policy_gate", None) is not None:
             recent_group_msgs, _ = await runtime.user_policy_gate.filter_context_messages(
                 recent_group_msgs,
                 bot_self_id=str(getattr(bot, "self_id", "") or ""),
             )
-        target_decision = infer_message_target(
-            event,
-            bot_self_id=str(getattr(bot, "self_id", "") or ""),
-            recent_group_msgs=recent_group_msgs,
-        )
-        if isinstance(target_decision, MessageTargetDecision):
-            state.update(target_decision.trace_fields())
-        else:
-            state["message_target"] = str(target_decision or "")
+        if not state.get("message_target"):
+            target_decision = infer_message_target(
+                event,
+                bot_self_id=str(getattr(bot, "self_id", "") or ""),
+                recent_group_msgs=recent_group_msgs,
+            )
+            if isinstance(target_decision, MessageTargetDecision):
+                state.update(target_decision.trace_fields())
+            else:
+                state["message_target"] = str(target_decision or "")
     try:
         from ...core import reply_turn_trace
 
@@ -1647,7 +1649,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     recent_context_hint = ""
     recent_window: list[dict[str, Any]] = []
     conversation_context = None
-    if not is_private_session and recent_group_msgs:
+    if not is_private_session:
         recent_window = build_group_context_window(
             str(group_id),
             limit=8,
@@ -1661,6 +1663,51 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     bot_self_id=bot_self_id,
                 )
             )
+        addressing_target = "bot" if (
+            is_direct_mention
+            or bool(state.get("is_reply_to_bot"))
+            or str((batch_trigger or {}).get("type", "") or "") in {"direct_mention", "reply_to_bot", "high_confidence_target_bot"}
+        ) else "none"
+        followup_referent = await get_group_followup_referent_resolver().resolve(
+            bot_self_id=bot_self_id,
+            group_id=str(group_id),
+            event=event,
+            current_media=turn_media_context,
+            addressing_target=addressing_target,
+            call_ai_api=runtime.lite_call_ai_api or runtime.review_call_ai_api,
+            enabled=bool(getattr(runtime.plugin_config, "personification_group_followup_referent_enabled", True)),
+            window_seconds=getattr(runtime.plugin_config, "personification_group_followup_referent_window_seconds", 120.0),
+            max_candidates=getattr(runtime.plugin_config, "personification_group_followup_referent_max_candidates", 3),
+            confidence_threshold=getattr(runtime.plugin_config, "personification_group_followup_referent_confidence", 0.80),
+        )
+        turn_media_context = list(followup_referent.active_media)
+        state["turn_media_context"] = serialize_turn_media(turn_media_context)
+        state["turn_media_manifest"] = serialize_turn_media(followup_referent.media_manifest)
+        state["group_followup_referent"] = followup_referent.context_fields()
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.record_stage(
+                key="group_followup_referent",
+                label="跨消息指代",
+                status="ok" if followup_referent.diagnostic_code == "followup_referent_resolved" else "info",
+                detail=(
+                    f"addressing={followup_referent.addressing_target} "
+                    f"referent={followup_referent.semantic_referent} "
+                    f"confidence={followup_referent.confidence:.3f} "
+                    f"candidates={len(followup_referent.candidates)} "
+                    f"active_media={len(followup_referent.active_media)} "
+                    f"code={followup_referent.diagnostic_code}"
+                ),
+                hint="只记录结构化关系、计数和诊断码，不记录正文、用户或媒体标识",
+            )
+        except Exception:
+            pass
+        for media_ref in turn_media_context:
+            if media_ref.reference_role == "selected_referent" and media_ref.ref and media_ref.kind in {"image", "sticker", "gif", "mface"} and media_ref.ref not in image_urls:
+                image_urls.append(media_ref.ref)
+                if media_ref.ref not in tool_image_urls:
+                    tool_image_urls.append(media_ref.ref)
         conversation_context = build_group_conversation_context(
             recent_messages=recent_window,
             trigger_msg_id=str(incoming_relation_metadata.get("message_id", "") or ""),
@@ -1673,6 +1720,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 registry=getattr(runtime, "peer_bot_registry", None),
                 tracker=getattr(runtime, "peer_bot_tracker", None),
             ),
+            followup_referent=followup_referent.context_fields(),
+            followup_media_manifest=state.get("turn_media_manifest"),
         )
         recent_context_hint = render_group_conversation_context(conversation_context)
         relationship_hint = conversation_context.relationship_hint
@@ -3095,6 +3144,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 self_continuity_snapshot=(
                     self_continuity_snapshot if self_continuity_enabled else None
                 ),
+                followup_referent=state.get("group_followup_referent"),
+                followup_media_manifest=state.get("turn_media_manifest"),
             )
         elif agent_direct_output and not protected_review_required:
             review_decision = make_passthrough_review_decision(

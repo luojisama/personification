@@ -20,9 +20,11 @@ from .paths import get_data_dir
 from .safe_media_download import SafeMediaDownloadError, download_public_media_to_path
 
 
-MediaOrigin = Literal["current", "quoted", "batch"]
+MediaOrigin = Literal["current", "quoted", "batch", "antecedent"]
+MediaReferenceRole = Literal["current", "selected_referent", "address_only", "background"]
 
-_ALLOWED_ORIGINS = {"current", "quoted", "batch"}
+_ALLOWED_ORIGINS = {"current", "quoted", "batch", "antecedent"}
+_ALLOWED_REFERENCE_ROLES = {"current", "selected_referent", "address_only", "background"}
 _ALLOWED_KINDS = {"image", "sticker", "gif", "mface", "video", "audio", "unknown"}
 _MEDIA_RESOLUTION_CODES = {
     "onebot_get_file_url",
@@ -210,6 +212,7 @@ class TurnMediaRef:
     summary_scope: str = ""
     group_id: str = ""
     resolution_code: str = ""
+    reference_role: MediaReferenceRole = "current"
 
     def to_dict(self) -> dict[str, Any]:
         ref = _text(self.ref)
@@ -224,6 +227,11 @@ class TurnMediaRef:
             "file_id": _text(self.file_id),
             "group_id": _text(self.group_id),
             "resolution_code": _text(self.resolution_code),
+            "reference_role": (
+                self.reference_role
+                if self.reference_role in _ALLOWED_REFERENCE_ROLES
+                else "current"
+            ),
             "safe_summary": normalize_safe_visual_summary(self.safe_summary),
             "confidence": max(0.0, min(1.0, float(self.confidence or 0.0))),
             "summary_scope": _text(self.summary_scope),
@@ -236,6 +244,11 @@ class TurnMediaRef:
         origin = _text(value.get("origin")).lower()
         if origin not in _ALLOWED_ORIGINS:
             origin = "current"
+        reference_role = _text(value.get("reference_role")).lower()
+        if reference_role not in _ALLOWED_REFERENCE_ROLES:
+            reference_role = (
+                "current" if origin == "current" else "address_only" if origin == "quoted" else "background"
+            )
         kind = _text(value.get("kind")).lower()
         if kind not in _ALLOWED_KINDS:
             kind = "unknown"
@@ -267,6 +280,7 @@ class TurnMediaRef:
             file_id=file_id,
             group_id=_text(value.get("group_id")),
             resolution_code=_text(value.get("resolution_code")),
+            reference_role=reference_role,  # type: ignore[arg-type]
             safe_summary=normalize_safe_visual_summary(value.get("safe_summary")),
             confidence=confidence,
             summary_scope=_text(value.get("summary_scope")),
@@ -411,6 +425,7 @@ def extract_media_from_message(
                 content_hash=content_hash,
                 file_id=file_id,
                 group_id=_text(group_id),
+                reference_role="current" if origin == "current" else "address_only" if origin == "quoted" else "background",
             )
         )
     return refs
@@ -1321,6 +1336,7 @@ def media_summary_timeout_seconds(
 __all__ = [
     "MediaAvailability",
     "MediaOrigin",
+    "MediaReferenceRole",
     "ResolvedTurnMediaLease",
     "TurnMediaRef",
     "attach_safe_visual_summary",
