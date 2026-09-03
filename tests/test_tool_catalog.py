@@ -339,6 +339,51 @@ def test_select_tool_schemas_banter_exposes_builtin_game_slang_research() -> Non
     assert "research_game_slang" in names
 
 
+def test_execute_action_keeps_peer_bot_tools_in_filtered_chat_intents() -> None:
+    registry = tool_registry.ToolRegistry()
+    _register(registry, "list_peer_bots", {"intent_tags": ["peer_bot", "group_context"]})
+    _register(registry, "invoke_peer_bot", {"intent_tags": ["peer_bot", "group_action"]})
+    _register(registry, "send_qq_face", {"intent_tags": ["expression"]})
+    _register(registry, "unrelated_external", {"intent_tags": ["other", "group_action"]})
+
+    for chat_intent, plugin_intent in (
+        ("expression", ""),
+        ("banter", ""),
+        ("plugin_question", "capability"),
+        ("plugin_question", "runtime_capability"),
+    ):
+        names = {
+            tool_catalog.schema_tool_name(schema)
+            for schema in tool_catalog.select_tool_schemas(
+                registry,
+                has_images=False,
+                chat_intent=chat_intent,
+                speech_act="execute_action",
+                plugin_question_intent=plugin_intent,
+            )
+        }
+        assert {"list_peer_bots", "invoke_peer_bot"} <= names
+
+
+def test_non_action_expression_does_not_expose_peer_bot_tools() -> None:
+    registry = tool_registry.ToolRegistry()
+    _register(registry, "list_peer_bots", {"intent_tags": ["peer_bot", "group_context"]})
+    _register(registry, "invoke_peer_bot", {"intent_tags": ["peer_bot", "group_action"]})
+    _register(registry, "send_qq_face", {"intent_tags": ["expression"]})
+
+    names = {
+        tool_catalog.schema_tool_name(schema)
+        for schema in tool_catalog.select_tool_schemas(
+            registry,
+            has_images=False,
+            chat_intent="expression",
+            speech_act="participate",
+        )
+    }
+
+    assert names == {"send_qq_face"}
+
+
 def test_semantic_tool_guidance_requires_lookup_for_unknown_entities() -> None:
     guidance = tool_catalog.semantic_tool_guidance()
 

@@ -928,6 +928,7 @@ async def run_agent(
             registry,
             has_images=has_visual_media,
             chat_intent=runtime_chat_intent,
+            speech_act=str(getattr(turn_plan, "speech_act", "") or ""),
             plugin_question_intent=plugin_query_intent,
         )
         if disclosure_mode == "native":

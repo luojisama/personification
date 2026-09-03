@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, MutableMapping
 
 from ..agent.tool_registry import AgentTool, ToolRegistry
 from .message_relations import extract_reply_message_id
@@ -572,6 +572,105 @@ def _safe_tool_result(status: str, diagnostic: str, **extra: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
+def approved_peer_bot_command_entries(
+    *,
+    group_id: str,
+    registry: PeerBotRegistry | None,
+) -> frozenset[str]:
+    """Return approved protocol entry tokens for a group.
+
+    This is transport parsing, not dialogue intent routing.  The entries are
+    used only to prevent an ordinary persona bubble from bypassing the
+    approved ``invoke_peer_bot`` path.
+    """
+
+    if not str(group_id or "").strip() or registry is None:
+        return frozenset()
+    try:
+        group = registry.get_group(group_id)
+    except Exception:
+        return frozenset()
+    bots = group.get("bots") if isinstance(group.get("bots"), dict) else {}
+    commands = group.get("commands") if isinstance(group.get("commands"), dict) else {}
+    entries: set[str] = set()
+    for command in commands.values():
+        if not isinstance(command, dict) or command.get("status") != "approved":
+            continue
+        target_bot_id = str(command.get("target_bot_id", "") or "").strip()
+        target_bot = bots.get(target_bot_id) if isinstance(bots, dict) else None
+        if not isinstance(target_bot, dict) or target_bot.get("status") != "approved":
+            continue
+        entry = str(command.get("command_entry", "") or "").strip()
+        if not entry:
+            legacy_head = str(
+                command.get("command_head", "")
+                or command.get("full_template", "")
+                or ""
+            ).strip()
+            entry = legacy_head.split(maxsplit=1)[0] if legacy_head else ""
+        if entry and not _CONTROL_RE.search(entry) and not any(char.isspace() for char in entry):
+            entries.add(entry)
+    return frozenset(entries)
+
+
+def match_raw_peer_bot_command_entry(
+    text: Any,
+    *,
+    group_id: str,
+    registry: PeerBotRegistry | None,
+) -> str:
+    """Return the matched approved entry when a visible bubble starts with it."""
+
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    first_token = cleaned.split(maxsplit=1)[0]
+    return (
+        first_token
+        if first_token in approved_peer_bot_command_entries(
+            group_id=group_id,
+            registry=registry,
+        )
+        else ""
+    )
+
+
+def _update_peer_bot_turn_execution(
+    turn_state: MutableMapping[str, Any] | None,
+    *,
+    command_id: str,
+    status: str,
+    diagnostic_code: str,
+    tracking_id: str = "",
+    pending_created: bool = False,
+) -> None:
+    if turn_state is None:
+        return
+    turn_state["peer_bot_execution"] = {
+        "attempted": True,
+        "command_id": str(command_id or "")[:120],
+        "status": str(status or "unknown")[:32],
+        "tracking_id": str(tracking_id or "")[:80],
+        "pending_created": bool(pending_created),
+        "diagnostic_code": str(diagnostic_code or "peer_bot_dispatch_unknown")[:120],
+    }
+    try:
+        from . import reply_turn_trace
+
+        reply_turn_trace.record_stage(
+            key="peer_bot_dispatch",
+            label="Peer Bot 调度",
+            status="ok" if status == "sent" else "warn",
+            detail=(
+                f"status={str(status or 'unknown')[:32]} "
+                f"pending={bool(pending_created)} "
+                f"diagnostic_code={str(diagnostic_code or 'peer_bot_dispatch_unknown')[:120]}"
+            ),
+        )
+    except Exception:
+        pass
+
+
 def _command_tool_contract(command: dict[str, Any]) -> dict[str, Any]:
     schema = command.get("parameter_schema")
     safe_schema = copy.deepcopy(schema) if isinstance(schema, dict) else {
@@ -754,6 +853,7 @@ def build_invoke_peer_bot_tool(
     plugin_config: Any,
     qq_outbound_ledger: QQOutboundLedger | None,
     record_group_msg: Callable[..., Any] | None,
+    turn_state: MutableMapping[str, Any] | None = None,
     logger: Any = None,
 ) -> AgentTool:
     calls = 0
@@ -768,23 +868,33 @@ def build_invoke_peer_bot_tool(
         **_kwargs: Any,
     ) -> str:
         nonlocal calls
+        command_key = str(command_id or "").strip()
+
+        def _reject(diagnostic_code: str) -> str:
+            _update_peer_bot_turn_execution(
+                turn_state,
+                command_id=command_key,
+                status="rejected",
+                diagnostic_code=diagnostic_code,
+            )
+            return _safe_tool_result("rejected", diagnostic_code)
+
         if not bool(getattr(plugin_config, "personification_peer_bot_enabled", False)):
-            return _safe_tool_result("rejected", "peer_bot_global_disabled")
+            return _reject("peer_bot_global_disabled")
         if peer_bot_source_kind(event) in {"peer_bot_reply", "peer_bot_candidate"}:
-            return _safe_tool_result("rejected", "peer_bot_loop_blocked")
+            return _reject("peer_bot_loop_blocked")
         if calls >= 1:
-            return _safe_tool_result("rejected", "peer_bot_turn_limit")
+            return _reject("peer_bot_turn_limit")
         group = registry.get_group(group_id)
         if not bool(group.get("enabled")):
-            return _safe_tool_result("rejected", "peer_bot_group_disabled")
+            return _reject("peer_bot_group_disabled")
         target = str(target_bot_id or "").strip()
-        command_key = str(command_id or "").strip()
         command = registry.get_approved_command(group_id, target, command_key)
         if command is None:
-            return _safe_tool_result("rejected", "peer_bot_command_unapproved")
+            return _reject("peer_bot_command_unapproved")
         risk_level = str(command.get("risk_level", "") or "").strip().lower()
         if risk_level not in {"read", "write"}:
-            return _safe_tool_result("rejected", "peer_bot_command_risk_blocked")
+            return _reject("peer_bot_command_risk_blocked")
         policies = group.get("policies", {}) if isinstance(group.get("policies"), dict) else {}
         cooldown_seconds = _finite_float(
             policies.get(
@@ -799,6 +909,12 @@ def build_invoke_peer_bot_tool(
             cooldown_seconds=cooldown_seconds,
         )
         if remaining > 0:
+            _update_peer_bot_turn_execution(
+                turn_state,
+                command_id=command_key,
+                status="rejected",
+                diagnostic_code="peer_bot_cooldown",
+            )
             return _safe_tool_result(
                 "rejected",
                 "peer_bot_cooldown",
@@ -819,7 +935,7 @@ def build_invoke_peer_bot_tool(
                 max_chars=max_chars,
             )
         except PeerBotRegistryError as exc:
-            return _safe_tool_result("rejected", str(exc)[:80] or "peer_bot_command_invalid")
+            return _reject(str(exc)[:80] or "peer_bot_command_invalid")
         calls += 1
         operation_id = f"peerbot:{uuid.uuid4().hex}"
         tracking_id = "pb_" + hashlib.sha256(operation_id.encode("utf-8")).hexdigest()[:20]
@@ -850,6 +966,14 @@ def build_invoke_peer_bot_tool(
                     ttl_seconds=0,
                     depth=1,
                     diagnostic_code="peer_bot_ledger_unavailable",
+                )
+                _update_peer_bot_turn_execution(
+                    turn_state,
+                    command_id=command_key,
+                    status="unknown",
+                    diagnostic_code="peer_bot_ledger_unavailable",
+                    tracking_id=tracking_id,
+                    pending_created=False,
                 )
                 return _safe_tool_result(
                     "unknown",
@@ -902,6 +1026,15 @@ def build_invoke_peer_bot_tool(
             depth=1,
             diagnostic_code=diagnostic,
         )
+        pending_created = status == "sent" and bool(outbound_message_id)
+        _update_peer_bot_turn_execution(
+            turn_state,
+            command_id=command_key,
+            status=status,
+            diagnostic_code=diagnostic,
+            tracking_id=tracking_id,
+            pending_created=pending_created,
+        )
         if status == "sent" and record_group_msg is not None:
             try:
                 record_group_msg(
@@ -921,7 +1054,7 @@ def build_invoke_peer_bot_tool(
             tracking_id=tracking_id,
             operation_id=operation_id,
             command_id=command_key,
-            pending=status == "sent" and bool(outbound_message_id),
+            pending=pending_created,
         )
 
     return AgentTool(
@@ -982,6 +1115,7 @@ def register_peer_bot_tools(
     plugin_config: Any,
     qq_outbound_ledger: QQOutboundLedger | None,
     record_group_msg: Callable[..., Any] | None,
+    turn_state: MutableMapping[str, Any] | None = None,
     logger: Any = None,
 ) -> None:
     group_id = str(getattr(event, "group_id", "") or "").strip()
@@ -1007,6 +1141,7 @@ def register_peer_bot_tools(
             plugin_config=plugin_config,
             qq_outbound_ledger=qq_outbound_ledger,
             record_group_msg=record_group_msg,
+            turn_state=turn_state,
             logger=logger,
         )
     )
@@ -1050,11 +1185,13 @@ __all__ = [
     "PeerBotEventClassification",
     "PeerBotRuntimeTracker",
     "PendingPeerBotRequest",
+    "approved_peer_bot_command_entries",
     "build_invoke_peer_bot_tool",
     "build_list_peer_bots_tool",
     "build_peer_bot_capability_catalog",
     "build_peer_bot_context_episodes",
     "classify_peer_bot_send_failure",
+    "match_raw_peer_bot_command_entry",
     "peer_bot_source_kind",
     "register_peer_bot_tools",
     "render_peer_bot_capability_catalog",

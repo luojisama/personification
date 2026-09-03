@@ -355,6 +355,7 @@ def select_tool_schemas(
     *,
     has_images: bool,
     chat_intent: str = "",
+    speech_act: str = "",
     plugin_question_intent: str = "",
 ) -> list[dict]:
     schemas = registry.openai_schemas()
@@ -362,6 +363,14 @@ def select_tool_schemas(
         return []
     result_schemas: list[dict]
     effective_chat_intent = str(chat_intent or "").strip()
+    execute_action = str(speech_act or "").strip() == "execute_action"
+
+    def _is_external_group_action(schema: dict) -> bool:
+        if not execute_action:
+            return False
+        tags = _tool_tags(registry, schema_tool_name(schema))
+        return bool(tags & {"peer_bot", "group_action"})
+
     if effective_chat_intent == "banter":
         # 闲聊也可能遇到看不懂的梗/专有名词/外号/分享内容，放行轻量查证工具，
         # 让模型"想查就能查"（不再无图就 return []）；有图时再叠加视觉类工具。
@@ -374,6 +383,7 @@ def select_tool_schemas(
                 or schema_tool_name(schema) in _QQ_EXPRESSION_TOOL_NAMES
                 or "expression" in _tool_tags(registry, schema_tool_name(schema))
                 or "conversation_action" in _tool_tags(registry, schema_tool_name(schema))
+                or _is_external_group_action(schema)
                 or (has_images and _tool_requires_image(registry, schema_tool_name(schema)))
             )
         ]
@@ -385,6 +395,7 @@ def select_tool_schemas(
                 schema_tool_name(schema) in _QQ_EXPRESSION_TOOL_NAMES
                 or "expression" in _tool_tags(registry, schema_tool_name(schema))
                 or "conversation_action" in _tool_tags(registry, schema_tool_name(schema))
+                or _is_external_group_action(schema)
             )
         ]
     elif effective_chat_intent == "image_generation":
@@ -406,7 +417,10 @@ def select_tool_schemas(
             result_schemas = [
                 schema
                 for schema in schemas
-                if _tool_is_safe_runtime_capability(registry, schema_tool_name(schema))
+                if (
+                    _tool_is_safe_runtime_capability(registry, schema_tool_name(schema))
+                    or _is_external_group_action(schema)
+                )
             ]
         else:
             if has_images:
@@ -417,6 +431,7 @@ def select_tool_schemas(
                 if (
                     "plugin_local" in _tool_tags(registry, schema_tool_name(schema))
                     or schema_tool_name(schema) in _PLUGIN_LOCAL_TOOL_NAMES
+                    or _is_external_group_action(schema)
                     or (
                         include_latest
                         and (

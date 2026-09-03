@@ -75,6 +75,11 @@ def apply_agent_result_completion_state(
     state["agent_evidence_unavailable"] = evidence_unavailable
     tool_calls_made = bool(getattr(agent_result, "tool_calls_made", False))
     state["agent_tool_calls"] = tool_calls_made
+    peer_bot_execution = state.get("peer_bot_execution")
+    peer_bot_attempted = bool(
+        isinstance(peer_bot_execution, Mapping)
+        and peer_bot_execution.get("attempted", False)
+    )
     structured_media_evidence_seen = bool(
         int(getattr(agent_result, "available_evidence_fields", 0) or 0) > 0
         and str(getattr(agent_result, "media_delivery", "not_required") or "not_required")
@@ -84,7 +89,9 @@ def apply_agent_result_completion_state(
     # if the final fact-delivery gate cannot form a sendable answer. Preserve
     # that operational fact, while ``media_delivery=incomplete`` still makes
     # the overall completion partial below.
-    if tool_calls_made and structured_media_evidence_seen:
+    if peer_bot_attempted:
+        tool_execution = "used"
+    elif tool_calls_made and structured_media_evidence_seen:
         tool_execution = "ok"
     elif evidence_unavailable:
         tool_execution = "empty"
@@ -122,8 +129,21 @@ def resolve_sent_reply_completion(
     general_tool_execution = str(
         values.get("agent_tool_execution", "not_used") or "not_used"
     )
+    raw_peer_bot_execution = values.get("peer_bot_execution")
+    peer_bot_execution = (
+        dict(raw_peer_bot_execution)
+        if isinstance(raw_peer_bot_execution, Mapping)
+        else {}
+    )
+    peer_bot_attempted = bool(peer_bot_execution.get("attempted", False))
+    peer_bot_status = str(peer_bot_execution.get("status", "") or "")
+    peer_bot_diagnostic = str(
+        peer_bot_execution.get("diagnostic_code", "") or ""
+    )
     tool_execution = (
-        social_tool_execution
+        "used"
+        if peer_bot_attempted
+        else social_tool_execution
         if social_tool_execution != "not_used"
         else general_tool_execution
     )
@@ -159,6 +179,12 @@ def resolve_sent_reply_completion(
     elif coverage_status == "degraded" or tool_execution == "partial":
         outcome = "partial"
         diagnosis_code = "social_coverage_degraded"
+    elif peer_bot_attempted and peer_bot_status in {"failed", "unknown", "rejected"}:
+        outcome = "partial"
+        diagnosis_code = peer_bot_diagnostic or f"peer_bot_dispatch_{peer_bot_status}"
+    elif peer_bot_attempted and peer_bot_status == "sent":
+        outcome = "ok"
+        diagnosis_code = peer_bot_diagnostic or "peer_bot_dispatch_sent"
     else:
         outcome = "ok"
         diagnosis_code = "ok"
@@ -175,7 +201,53 @@ def resolve_sent_reply_completion(
         "evidence_recovered": evidence_recovered,
         "evidence_unavailable": evidence_unavailable,
         "media_delivery": media_delivery,
+        "peer_bot_execution": {
+            "attempted": peer_bot_attempted,
+            "command_id": str(peer_bot_execution.get("command_id", "") or "")[:120],
+            "status": peer_bot_status[:32],
+            "tracking_id": str(peer_bot_execution.get("tracking_id", "") or "")[:80],
+            "pending_created": bool(peer_bot_execution.get("pending_created", False)),
+            "diagnostic_code": peer_bot_diagnostic[:120],
+        },
     }
 
 
-__all__ = ["apply_agent_result_completion_state", "resolve_sent_reply_completion"]
+def resolve_action_only_completion(
+    *,
+    state: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve a turn where an Agent tool acted and no persona text is sent."""
+
+    values = state or {}
+    raw_execution = values.get("peer_bot_execution")
+    execution = dict(raw_execution) if isinstance(raw_execution, Mapping) else {}
+    attempted = bool(execution.get("attempted", False))
+    status = str(execution.get("status", "") or "")[:32]
+    diagnostic = str(execution.get("diagnostic_code", "") or "")[:120]
+    if not attempted:
+        return {
+            "outcome": "ok",
+            "diagnosis_code": "ok",
+            "tool_execution": "ok",
+            "peer_bot_execution": {},
+        }
+    return {
+        "outcome": "ok" if status == "sent" else "failed",
+        "diagnosis_code": diagnostic or f"peer_bot_dispatch_{status or 'unknown'}",
+        "tool_execution": "used",
+        "peer_bot_execution": {
+            "attempted": True,
+            "command_id": str(execution.get("command_id", "") or "")[:120],
+            "status": status,
+            "tracking_id": str(execution.get("tracking_id", "") or "")[:80],
+            "pending_created": bool(execution.get("pending_created", False)),
+            "diagnostic_code": diagnostic,
+        },
+    }
+
+
+__all__ = [
+    "apply_agent_result_completion_state",
+    "resolve_action_only_completion",
+    "resolve_sent_reply_completion",
+]

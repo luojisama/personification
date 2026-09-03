@@ -31,6 +31,7 @@ def test_normal_and_yaml_register_the_same_peer_bot_tools() -> None:
         "plugin_config",
         "qq_outbound_ledger",
         "record_group_msg",
+        "turn_state",
         "logger",
     }
     assert {item.arg for item in normal[0].keywords} == required

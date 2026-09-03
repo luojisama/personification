@@ -149,6 +149,7 @@ def test_invoke_tool_sent_records_ledger_pending_and_group_history(tmp_path) -> 
     tracker = runtime_module.PeerBotRuntimeTracker()
     bot = _SentBot()
     recorded: list[tuple[tuple, dict]] = []
+    turn_state: dict[str, object] = {}
     tool = runtime_module.build_invoke_peer_bot_tool(
         bot=bot,
         event=_Event(),
@@ -157,6 +158,7 @@ def test_invoke_tool_sent_records_ledger_pending_and_group_history(tmp_path) -> 
         plugin_config=cfg,
         qq_outbound_ledger=_ledger(tmp_path),
         record_group_msg=lambda *args, **kwargs: recorded.append((args, kwargs)),
+        turn_state=turn_state,
     )
 
     result = json.loads(
@@ -176,6 +178,52 @@ def test_invoke_tool_sent_records_ledger_pending_and_group_history(tmp_path) -> 
     assert tracker.snapshot(group_id="415442985")["pending_count"] == 1
     assert recorded[0][1]["source_kind"] == "peer_bot_command"
     assert recorded[0][1]["message_id"] == "outbound-1"
+    assert turn_state["peer_bot_execution"] == {
+        "attempted": True,
+        "command_id": command["command_id"],
+        "status": "sent",
+        "tracking_id": result["tracking_id"],
+        "pending_created": True,
+        "diagnostic_code": "peer_bot_dispatch_sent",
+    }
+
+
+def test_raw_command_guard_only_matches_approved_bot_protocol_entries() -> None:
+    registry, _cfg, _command = _approved_registry()
+    registry.upsert_command(
+        "415442985",
+        target_bot_id="10001",
+        full_template="/抽卡",
+        risk_level="read",
+        status="approved",
+        source="manual",
+        manual_override=True,
+    )
+
+    assert runtime_module.approved_peer_bot_command_entries(
+        group_id="415442985",
+        registry=registry,
+    ) == frozenset({".mc", "/抽卡"})
+    assert runtime_module.match_raw_peer_bot_command_entry(
+        ".mc say 大家好",
+        group_id="415442985",
+        registry=registry,
+    ) == ".mc"
+    assert runtime_module.match_raw_peer_bot_command_entry(
+        "/抽卡",
+        group_id="415442985",
+        registry=registry,
+    ) == "/抽卡"
+    assert runtime_module.match_raw_peer_bot_command_entry(
+        "命令格式是 .mc say {message}",
+        group_id="415442985",
+        registry=registry,
+    ) == ""
+    assert runtime_module.match_raw_peer_bot_command_entry(
+        ".mcserver 不是命令",
+        group_id="415442985",
+        registry=registry,
+    ) == ""
 
 
 def test_failed_and_unknown_dispatches_never_create_pending(tmp_path) -> None:
@@ -193,6 +241,7 @@ def test_failed_and_unknown_dispatches_never_create_pending(tmp_path) -> None:
 
     for bot, expected in ((ExplicitFailure(), "failed"), (UnknownFailure(), "unknown")):
         tracker = runtime_module.PeerBotRuntimeTracker()
+        turn_state: dict[str, object] = {}
         tool = runtime_module.build_invoke_peer_bot_tool(
             bot=bot,
             event=_Event(),
@@ -201,6 +250,7 @@ def test_failed_and_unknown_dispatches_never_create_pending(tmp_path) -> None:
             plugin_config=cfg,
             qq_outbound_ledger=_ledger(tmp_path / expected),
             record_group_msg=None,
+            turn_state=turn_state,
         )
         result = json.loads(
             asyncio.run(
@@ -213,6 +263,8 @@ def test_failed_and_unknown_dispatches_never_create_pending(tmp_path) -> None:
         )
         assert result["status"] == expected
         assert tracker.snapshot(group_id="415442985")["pending_count"] == 0
+        assert turn_state["peer_bot_execution"]["status"] == expected
+        assert turn_state["peer_bot_execution"]["pending_created"] is False
 
 
 @pytest.mark.parametrize("risk", ["admin", "dangerous"])

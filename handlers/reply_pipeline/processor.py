@@ -70,6 +70,7 @@ from ...core.group_context import (
 from ...core.peer_bot_runtime import (
     build_peer_bot_capability_catalog,
     build_peer_bot_context_episodes,
+    match_raw_peer_bot_command_entry,
     render_peer_bot_capability_catalog,
 )
 from ...core.group_mute import refresh_bot_group_mute_state
@@ -123,7 +124,10 @@ from ...core.response_review import (
 )
 from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.reply_text_policy import normalize_visible_reply_text
-from ...core.reply_completion_contract import resolve_sent_reply_completion
+from ...core.reply_completion_contract import (
+    resolve_action_only_completion,
+    resolve_sent_reply_completion,
+)
 
 
 def _flush_buffer_trace_diagnostics(state: Dict[str, Any], trace_mod: Any, trace_id: str) -> None:
@@ -2499,10 +2503,15 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             try:
                 from ...core import reply_turn_trace
 
+                completion = resolve_action_only_completion(state=state)
                 reply_turn_trace.finish_trace(
-                    outcome="ok",
-                    diagnosis_code="ok",
-                    detail={"action_only": True},
+                    outcome=completion["outcome"],
+                    diagnosis_code=completion["diagnosis_code"],
+                    detail={
+                        "action_only": True,
+                        "tool_execution": completion["tool_execution"],
+                        "peer_bot_execution": completion["peer_bot_execution"],
+                    },
                 )
             except Exception:
                 pass
@@ -3324,6 +3333,42 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 final_reply = qq_auto_marker
             else:
                 final_reply = f"{final_reply}{qq_auto_marker}".strip()
+        if not is_private_session:
+            raw_command_candidates = [final_reply]
+            raw_command_candidates.extend(
+                str(item or "")
+                for item in list(getattr(review_decision, "segments", ()) or ())
+            )
+            try:
+                raw_command_candidates.extend(runtime.split_text_into_segments(final_reply))
+            except Exception:
+                pass
+            if any(
+                match_raw_peer_bot_command_entry(
+                    item,
+                    group_id=str(group_id),
+                    registry=getattr(runtime, "peer_bot_registry", None),
+                )
+                for item in raw_command_candidates
+            ):
+                state["peer_bot_raw_command_blocked"] = True
+                try:
+                    from ...core import reply_turn_trace
+
+                    reply_turn_trace.record_stage(
+                        key="peer_bot_raw_command_blocked",
+                        label="Peer Bot 裸命令拦截",
+                        status="warn",
+                        detail="blocked=true visible_sent=false diagnostic_code=peer_bot_raw_command_blocked",
+                    )
+                    reply_turn_trace.finish_trace(
+                        outcome="no_reply",
+                        diagnosis_code="peer_bot_raw_command_blocked",
+                        detail={"silent": True, "visible_sent": False},
+                    )
+                except Exception:
+                    pass
+                return
         # session/history 只记录最终对用户生效的文本，避免原始长回复与实际可见内容漂移。
         final_visible_reply_text = _build_final_visible_reply_text(
             # Media placeholders are produced only from confirmed send
@@ -3954,6 +3999,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     "delivery_partial": delivery_partial,
                     "delivery_unknown": delivery_unknown,
                     "tool_execution": completion["tool_execution"],
+                    "peer_bot_execution": completion["peer_bot_execution"],
                     "evidence_delivery": completion["evidence_delivery"],
                     "media_delivery": completion["media_delivery"],
                     "outbound_delivery": completion["outbound_delivery"],

@@ -27,6 +27,7 @@ from ...core.current_group_context_tool import register_current_group_context_to
 from ...core.peer_bot_runtime import (
     build_peer_bot_capability_catalog,
     build_peer_bot_context_episodes,
+    match_raw_peer_bot_command_entry,
     register_peer_bot_tools,
     render_peer_bot_capability_catalog,
 )
@@ -104,6 +105,7 @@ from ...core.target_inference import normalize_message_target_for_plan, normaliz
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_completion_contract import (
     apply_agent_result_completion_state,
+    resolve_action_only_completion,
     resolve_sent_reply_completion,
 )
 from ...core.reply_length_policy import render_reply_length_trace, resolve_reply_length_policy, truncate_reply_text
@@ -1854,6 +1856,7 @@ async def process_yaml_response_logic(
             plugin_config=plugin_config,
             qq_outbound_ledger=qq_outbound_ledger,
             record_group_msg=record_group_msg,
+            turn_state=reply_commit_state,
             logger=logger,
         )
         register_groupmate_qzone_agent_tools(
@@ -2151,6 +2154,31 @@ async def process_yaml_response_logic(
             pending_action_executor = executor
             pending_actions = list(agent_result.pending_actions)
             if agent_result.direct_output:
+                raw_direct_output = str(reply_content or "").strip()
+                if not is_private_session and any(
+                    match_raw_peer_bot_command_entry(
+                        item,
+                        group_id=str(group_id),
+                        registry=peer_bot_registry,
+                    )
+                    for item in [
+                        raw_direct_output,
+                        *re.split(r"(?:\r?\n){2,}", raw_direct_output),
+                    ]
+                ):
+                    reply_commit_state["peer_bot_raw_command_blocked"] = True
+                    _trace_stage(
+                        key="peer_bot_raw_command_blocked",
+                        label="Peer Bot 裸命令拦截",
+                        status="warn",
+                        detail="blocked=true visible_sent=false diagnostic_code=peer_bot_raw_command_blocked",
+                    )
+                    _trace_finish(
+                        outcome="no_reply",
+                        diagnosis_code="peer_bot_raw_command_blocked",
+                        detail={"silent": True, "visible_sent": False},
+                    )
+                    return
                 mark_reply_phase(reply_commit_state, "delivery_commit_wait")
                 await acquire_reply_commit(reply_commit_state)
                 if user_policy_gate is not None:
@@ -2161,7 +2189,6 @@ async def process_yaml_response_logic(
                     _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="直出消息提交前出现更新批次")
                     return
                 await _commit_pending_actions()
-                raw_direct_output = str(reply_content or "").strip()
                 if _looks_like_translation_result(raw_direct_output):
                     try:
                         mark_reply_delivery_started(reply_commit_state)
@@ -2440,7 +2467,16 @@ async def process_yaml_response_logic(
             mark_reply_delivery_complete(reply_commit_state)
             release_reply_commit(reply_commit_state)
             mark_reply_phase(reply_commit_state, "reply_complete")
-            _trace_finish(outcome="ok", diagnosis_code="ok", detail={"action_only": True})
+            action_completion = resolve_action_only_completion(state=reply_commit_state)
+            _trace_finish(
+                outcome=action_completion["outcome"],
+                diagnosis_code=action_completion["diagnosis_code"],
+                detail={
+                    "action_only": True,
+                    "tool_execution": action_completion["tool_execution"],
+                    "peer_bot_execution": action_completion["peer_bot_execution"],
+                },
+            )
             return
         if uncertain_reply_suppress_recovery:
             _trace_no_reply(
@@ -2695,7 +2731,16 @@ async def process_yaml_response_logic(
             mark_reply_delivery_complete(reply_commit_state)
             release_reply_commit(reply_commit_state)
             mark_reply_phase(reply_commit_state, "reply_complete")
-            _trace_finish(outcome="ok", diagnosis_code="ok", detail={"action_only": True})
+            action_completion = resolve_action_only_completion(state=reply_commit_state)
+            _trace_finish(
+                outcome=action_completion["outcome"],
+                diagnosis_code=action_completion["diagnosis_code"],
+                detail={
+                    "action_only": True,
+                    "tool_execution": action_completion["tool_execution"],
+                    "peer_bot_execution": action_completion["peer_bot_execution"],
+                },
+            )
             return
         if suppress_reply_recovery:
             _trace_suppressed_agent_reply(
@@ -2868,6 +2913,43 @@ async def process_yaml_response_logic(
         else:
             assistant_text = f"{assistant_text}{qq_auto_marker}".strip()
             parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
+
+    if not is_private_session:
+        raw_command_candidates = [assistant_text]
+        raw_command_candidates.extend(
+            str(item.get("text", "") or "")
+            for item in list(parsed.get("messages") or [])
+            if isinstance(item, dict)
+        )
+        raw_command_candidates.extend(
+            str(item or "")
+            for item in list(getattr(review_decision, "segments", ()) or ())
+        )
+        try:
+            raw_command_candidates.extend(split_text_into_segments(assistant_text))
+        except Exception:
+            pass
+        if any(
+            match_raw_peer_bot_command_entry(
+                item,
+                group_id=str(group_id),
+                registry=peer_bot_registry,
+            )
+            for item in raw_command_candidates
+        ):
+            reply_commit_state["peer_bot_raw_command_blocked"] = True
+            _trace_stage(
+                key="peer_bot_raw_command_blocked",
+                label="Peer Bot 裸命令拦截",
+                status="warn",
+                detail="blocked=true visible_sent=false diagnostic_code=peer_bot_raw_command_blocked",
+            )
+            _trace_finish(
+                outcome="no_reply",
+                diagnosis_code="peer_bot_raw_command_blocked",
+                detail={"silent": True, "visible_sent": False},
+            )
+            return
 
     assistant_text, history_image_payloads = _extract_image_b64_markers(assistant_text)
     has_generated_image = bool(history_image_payloads)
@@ -3496,6 +3578,7 @@ async def process_yaml_response_logic(
             "delivery_partial": delivery_partial,
             "delivery_unknown": delivery_unknown,
             "tool_execution": completion["tool_execution"],
+            "peer_bot_execution": completion["peer_bot_execution"],
             "evidence_delivery": completion["evidence_delivery"],
             "media_delivery": completion["media_delivery"],
             "outbound_delivery": completion["outbound_delivery"],

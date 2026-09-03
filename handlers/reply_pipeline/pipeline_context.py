@@ -882,6 +882,7 @@ async def run_agent_if_enabled(
         plugin_config=runtime.plugin_config,
         qq_outbound_ledger=getattr(runtime, "qq_outbound_ledger", None),
         record_group_msg=getattr(runtime, "record_group_msg", None),
+        turn_state=commit_state,
         logger=runtime.logger,
     )
     register_groupmate_qzone_agent_tools(

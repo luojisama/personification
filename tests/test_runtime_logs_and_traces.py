@@ -276,6 +276,46 @@ def test_shared_agent_completion_state_marks_successful_general_tool_execution()
     assert state["agent_tool_execution"] == "ok"
 
 
+def test_peer_bot_execution_projects_used_status_and_dispatch_diagnosis() -> None:
+    state: dict[str, object] = {
+        "peer_bot_execution": {
+            "attempted": True,
+            "command_id": "mc_say",
+            "status": "sent",
+            "tracking_id": "pb_safe",
+            "pending_created": True,
+            "diagnostic_code": "peer_bot_dispatch_sent",
+        }
+    }
+    agent_result = SimpleNamespace(
+        quality_context="",
+        tool_calls_made=True,
+        social_evidence=[],
+        social_coverage={},
+        evidence_delivery_required=False,
+        evidence_delivery_status="not_required",
+        evidence_recovered=False,
+        citation_mode="none",
+    )
+
+    completion_contract.apply_agent_result_completion_state(
+        state=state,
+        agent_result=agent_result,
+    )
+    resolved = completion_contract.resolve_sent_reply_completion(
+        state=state,
+        visible_text="已经交给服务器 Bot 了",
+    )
+    action_only = completion_contract.resolve_action_only_completion(state=state)
+
+    assert state["agent_tool_execution"] == "used"
+    assert resolved["tool_execution"] == "used"
+    assert resolved["diagnosis_code"] == "peer_bot_dispatch_sent"
+    assert resolved["peer_bot_execution"]["pending_created"] is True
+    assert action_only["outcome"] == "ok"
+    assert action_only["diagnosis_code"] == "peer_bot_dispatch_sent"
+
+
 def test_normal_and_yaml_share_media_completion_projection() -> None:
     """Both pipelines must expose the exact shared completion state."""
 
