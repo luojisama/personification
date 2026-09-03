@@ -9,13 +9,22 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "dev:vue": "vite -c vite.vue.config.ts",
+    "build:vue": "vue-tsc -p tsconfig.vue.json --noEmit --pretty false && vite build -c vite.vue.config.ts",
+    "preview:vue": "vite preview -c vite.vue.config.ts",
+    "typecheck:vue": "vue-tsc -p tsconfig.vue.json --noEmit --pretty false",
+    "test:vue": "vitest run -c vite.vue.config.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "5.102.2",
+    "@tanstack/vue-query": "5.102.8",
+    "pinia": "4.0.3",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "react-router-dom": "7.18.2"
+    "react-router-dom": "7.18.2",
+    "vue": "3.5.42",
+    "vue-router": "5.3.1"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "7.0.1",
@@ -24,9 +33,12 @@
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
     "@vitejs/plugin-react": "6.1.0",
+    "@vitejs/plugin-vue": "6.0.8",
+    "@vue/test-utils": "2.5.0",
     "jsdom": "30.0.1",
-    "typescript": "7.0.2",
+    "typescript": "5.7.3",
     "vite": "8.2.2",
-    "vitest": "4.1.11"
+    "vitest": "4.1.11",
+    "vue-tsc": "2.2.8"
   }
 }
