@@ -2,6 +2,8 @@ import type { RouteRecordRaw } from "vue-router";
 
 import { FLAT_ROUTE_REDIRECTS } from "@/app/navigation";
 import AgentStatusPage from "@vue-app/pages/AgentStatusPage.vue";
+import CapabilityBusinessPages from "@vue-app/pages/CapabilityBusinessPages.vue";
+import ConfigOperationsPages from "@vue-app/pages/ConfigOperationsPages.vue";
 import FunctionalTestsPage from "@vue-app/pages/FunctionalTestsPage.vue";
 import GroupSwitchesPage from "@vue-app/pages/GroupSwitchesPage.vue";
 import ManagementDataPage from "@vue-app/pages/ManagementDataPage.vue";
@@ -9,8 +11,8 @@ import MemoryPages from "@vue-app/pages/MemoryPages.vue";
 import ModelTestsPage from "@vue-app/pages/ModelTestsPage.vue";
 import NotFoundPage from "@vue-app/pages/NotFoundPage.vue";
 import OverviewPage from "@vue-app/pages/OverviewPage.vue";
+import OperationsBusinessPages from "@vue-app/pages/OperationsBusinessPages.vue";
 import PersonaFeaturePages from "@vue-app/pages/PersonaFeaturePages.vue";
-import PlaceholderPage from "@vue-app/pages/PlaceholderPage.vue";
 import ProactiveDiagnosticsPage from "@vue-app/pages/ProactiveDiagnosticsPage.vue";
 import QzoneCapabilitiesPage from "@vue-app/pages/QzoneCapabilitiesPage.vue";
 import RecoveryPage from "@vue-app/pages/RecoveryPage.vue";
@@ -18,15 +20,6 @@ import RouteCapabilitiesPage from "@vue-app/pages/RouteCapabilitiesPage.vue";
 import SystemDiagnosticsPage from "@vue-app/pages/SystemDiagnosticsPage.vue";
 import TokenStatisticsPage from "@vue-app/pages/TokenStatisticsPage.vue";
 import TracesPage from "@vue-app/pages/TracesPage.vue";
-
-function previewRoute(path: string, name: string, title: string): RouteRecordRaw {
-  return {
-    path,
-    name,
-    component: PlaceholderPage,
-    meta: { title, description: `${title}业务页面正在迁移至 Vue 管理台。` },
-  };
-}
 
 const flatRedirectRoutes: RouteRecordRaw[] = Object.entries(FLAT_ROUTE_REDIRECTS).map(
   ([path, target]) => ({
@@ -65,21 +58,21 @@ export const routes: RouteRecordRaw[] = [
   { path: "/persona/stickers/:section", name: "persona-stickers", component: PersonaFeaturePages, meta: { title: "表情包", mode: "stickers" } },
   { path: "/persona/persona-preview/:section", name: "persona-preview", component: PersonaFeaturePages, meta: { title: "人设预览", mode: "preview" } },
   { path: "/persona/persona-builder/:section", name: "persona-builder", component: PersonaFeaturePages, meta: { title: "人设构建", mode: "builder" } },
-  previewRoute("/capability/skills/:section", "capability-skills", "Skill 管理"),
-  previewRoute("/capability/mcp/:section", "capability-mcp", "MCP 管理"),
-  previewRoute("/capability/tool-creator/:section", "capability-tool-creator", "创建工具"),
-  previewRoute("/capability/plugin-knowledge/:section", "capability-plugin-knowledge", "插件知识库"),
-  previewRoute("/capability/plugins/:section", "capability-plugins", "插件管理"),
-  previewRoute("/operations/config/:section", "operations-config", "配置中心"),
-  previewRoute("/operations/user-policies/:section", "operations-user-policies", "用户策略与黑名单"),
-  previewRoute("/operations/outbound/:section", "operations-outbound", "近期 Bot 消息"),
-  previewRoute("/operations/data-transfer/:section", "operations-data-transfer", "数据迁移"),
-  previewRoute("/operations/audit/:section", "operations-audit", "审计日志"),
-  previewRoute("/operations/logs/:section", "operations-logs", "插件日志"),
-  previewRoute("/operations/qq/:section", "operations-qq", "QQ 管理"),
-  previewRoute("/operations/devices/:section", "operations-devices", "设备管理"),
+  { path: "/capability/skills/:section", name: "capability-skills", component: CapabilityBusinessPages, props: { mode: "skills" }, meta: { title: "Skill 管理" } },
+  { path: "/capability/mcp/:section", name: "capability-mcp", component: CapabilityBusinessPages, props: { mode: "mcp" }, meta: { title: "MCP 管理" } },
+  { path: "/capability/tool-creator/:section", name: "capability-tool-creator", component: CapabilityBusinessPages, props: { mode: "tool-creator" }, meta: { title: "创建工具" } },
+  { path: "/capability/plugin-knowledge/:section", name: "capability-plugin-knowledge", component: CapabilityBusinessPages, props: { mode: "plugin-knowledge" }, meta: { title: "插件知识库" } },
+  { path: "/capability/plugins/:section", name: "capability-plugins", component: CapabilityBusinessPages, props: { mode: "plugins" }, meta: { title: "插件管理" } },
+  { path: "/operations/config/:section", name: "operations-config", component: ConfigOperationsPages, props: { mode: "config" }, meta: { title: "配置中心" } },
+  { path: "/operations/user-policies/:section", name: "operations-user-policies", component: OperationsBusinessPages, props: { mode: "user-policies" }, meta: { title: "用户策略与黑名单" } },
+  { path: "/operations/outbound/:section", name: "operations-outbound", component: OperationsBusinessPages, props: { mode: "outbound" }, meta: { title: "近期 Bot 消息" } },
+  { path: "/operations/data-transfer/:section", name: "operations-data-transfer", component: OperationsBusinessPages, props: { mode: "data-transfer" }, meta: { title: "数据迁移" } },
+  { path: "/operations/audit/:section", name: "operations-audit", component: OperationsBusinessPages, props: { mode: "audit" }, meta: { title: "审计日志" } },
+  { path: "/operations/logs/:section", name: "operations-logs", component: ConfigOperationsPages, props: { mode: "logs" }, meta: { title: "插件日志" } },
+  { path: "/operations/qq/:section", name: "operations-qq", component: OperationsBusinessPages, props: { mode: "qq" }, meta: { title: "QQ 管理" } },
+  { path: "/operations/devices/:section", name: "operations-devices", component: OperationsBusinessPages, props: { mode: "devices" }, meta: { title: "设备管理" } },
   { path: "/operations/systems/:section", name: "operations-systems", component: SystemDiagnosticsPage, meta: { title: "系统诊断" } },
-  previewRoute("/operations/settings/:section", "operations-settings", "设置"),
+  { path: "/operations/settings/:section", name: "operations-settings", component: ConfigOperationsPages, props: { mode: "settings" }, meta: { title: "设置" } },
   ...flatRedirectRoutes,
   {
     path: "/:pathMatch(.*)*",

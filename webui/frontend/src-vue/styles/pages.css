@@ -1160,3 +1160,223 @@ dd {
   gap: var(--space-2);
   margin-top: auto;
 }
+
+
+/* 能力与插件业务页面样式 */
+.stacked-form {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.stacked-form label {
+  display: grid;
+  gap: var(--space-1);
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+
+.stacked-form input,
+.stacked-form textarea {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  color: var(--color-ink);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+}
+
+.detail-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.detail-list div {
+  padding: var(--space-3);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-xs);
+}
+
+.text-link {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--color-signal-ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.selected-source-line {
+  margin-top: var(--space-3);
+}
+
+/* 运营与安全管理通用样式 */
+.page-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.text-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--color-signal);
+  cursor: pointer;
+  text-decoration: underline;
+  font: inherit;
+}
+
+.text-link:hover {
+  color: var(--color-signal-hover, var(--color-signal));
+}
+
+.stacked-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.stacked-form label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+}
+
+.danger-zone {
+  padding: var(--space-3);
+  background: var(--color-error-soft, rgba(255, 77, 79, 0.08));
+  border: 1px solid var(--color-error, #ff4d4f);
+  border-radius: var(--radius-xs);
+}
+
+/* 配置中心、设置与日志管理 */
+.config-save-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.config-layout {
+  display: grid;
+  grid-template-columns: 16rem 1fr;
+  gap: var(--space-4);
+}
+
+.config-category-rail {
+  display: grid;
+  gap: var(--space-1);
+  align-content: start;
+}
+
+.config-category-rail button {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.2rem var(--space-2);
+  padding: var(--space-3);
+  text-align: left;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  color: var(--color-ink);
+}
+
+.config-category-rail button.active {
+  border-color: var(--color-signal);
+  background: var(--color-signal-soft);
+  color: var(--color-signal-ink);
+}
+
+.config-category-rail small {
+  grid-column: 1 / -1;
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+
+.config-main {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.config-search-row {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.search-label input {
+  width: 100%;
+  padding: 0.45rem 0.65rem;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-ink);
+}
+
+.filter-chips button.chip-active {
+  background: var(--color-signal-soft);
+  border-color: var(--color-signal);
+  color: var(--color-signal-ink);
+}
+
+.config-entry-list {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.config-entry {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-xs);
+}
+
+.config-entry.is-dirty {
+  border-left: 3px solid var(--color-signal);
+  background: var(--color-signal-soft);
+}
+
+.config-entry-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.config-badges {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.config-editor-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.config-editor-control input[type="text"],
+.config-editor-control input[type="password"],
+.config-editor-control input[type="number"],
+.config-editor-control select,
+.config-editor-control textarea {
+  flex: 1;
+  padding: 0.45rem 0.65rem;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-ink);
+}
+
+@media (max-width: 900px) {
+  .config-layout {
+    grid-template-columns: 1fr;
+  }
+}
