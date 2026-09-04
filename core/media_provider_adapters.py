@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from .provider_types import is_removed_provider_type
+
 
 MEDIA_PROTOCOL_AUTO = "auto"
 MEDIA_PROTOCOL_NONE = "none"
@@ -93,6 +95,8 @@ def _official_protocol(api_type: str, api_url: str, model: str) -> str:
 
 def resolve_media_provider_adapter(provider: Mapping[str, Any] | None) -> MediaProviderAdapter:
     payload = provider or {}
+    if is_removed_provider_type(payload.get("api_type")):
+        return _adapter(MEDIA_PROTOCOL_NONE, source="provider_type_removed")
     configured = normalize_media_protocol(payload.get("media_protocol", MEDIA_PROTOCOL_AUTO))
     if configured != MEDIA_PROTOCOL_AUTO:
         return _adapter(configured, source="explicit")

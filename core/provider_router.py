@@ -8,6 +8,13 @@ from typing import Any, Dict, List, Optional
 
 from .llm_context import use_single_attempt_retry_policy
 from .message_parts import normalize_message_parts
+from .provider_types import (
+    PROVIDER_TYPE_REMOVED,
+    is_removed_provider_type,
+    normalize_removed_provider_type,
+    removed_provider_migration_hint,
+    removed_provider_tombstone,
+)
 from .safety_filter import build_safe_reframe_messages, detect_route_safety_issue
 from .visual_capabilities import error_indicates_vision_unavailable, heuristic_supports_vision
 
@@ -35,6 +42,7 @@ _CANONICAL_PROVIDER_CODES = {
     "provider_request_rejected",
     "provider_safety_block",
     "provider_timeout",
+    "provider_type_removed",
     "providers_exhausted",
 }
 
@@ -72,7 +80,9 @@ def _tool_caller_impl() -> Any:
 
 
 def normalize_api_type(api_type: Optional[str]) -> str:
-    value = (api_type or "openai").strip().lower().replace("-", "_")
+    value = normalize_removed_provider_type(api_type or "openai")
+    if value == PROVIDER_TYPE_REMOVED:
+        return PROVIDER_TYPE_REMOVED
     if value in {"gemini", "gemini_official"}:
         return "gemini"
     if value in {"openai_codex", "codex"}:
@@ -81,9 +91,7 @@ def normalize_api_type(api_type: Optional[str]) -> str:
         return "gemini_cli"
     if value in {"antigravity_cli", "antigravity", "agy", "agy_cli"}:
         return "antigravity_cli"
-    if value in {"claude_code", "claudecode", "claude_cli"}:
-        return "claude_code"
-    if value not in {"openai", "gemini", "anthropic", "openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}:
+    if value not in {"openai", "gemini", "anthropic", "openai_codex", "gemini_cli", "antigravity_cli"}:
         return "openai"
     return value
 
@@ -182,8 +190,6 @@ def _default_model_for_api_type(api_type: str, model: str = "") -> str:
         return "auto-gemini-3"
     if api_type == "antigravity_cli":
         return "auto-gemini-3"
-    if api_type == "claude_code":
-        return "claude-opus-4-7"
     return ""
 
 
@@ -228,6 +234,56 @@ def _log_active_provider_config_once(
         pass
 
 
+def _raw_api_pool_items(raw_config: Any) -> list[dict[str, Any]]:
+    """Read pool-shaped configuration without normalizing or copying credentials."""
+
+    parsed: Any = raw_config
+    if isinstance(raw_config, str):
+        text = raw_config.strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+            text = text[1:-1].strip()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def _removed_provider_tombstone(*, source: str, index: int | None = None) -> Dict[str, Any]:
+    """Expose only a safe disabled marker for a removed provider route."""
+
+    return removed_provider_tombstone(source=source, index=index)
+
+
+def detect_removed_provider_routes(plugin_config: Any) -> List[Dict[str, Any]]:
+    """Project legacy Claude Code routes as non-secret, non-callable tombstones."""
+
+    routes: List[Dict[str, Any]] = []
+    for index, item in enumerate(
+        _raw_api_pool_items(getattr(plugin_config, "personification_api_pools", None))
+    ):
+        if is_removed_provider_type(item.get("api_type")):
+            routes.append(_removed_provider_tombstone(source="personification_api_pools", index=index))
+    if is_removed_provider_type(getattr(plugin_config, "personification_api_type", "")):
+        routes.append(_removed_provider_tombstone(source="personification_api_type"))
+    return routes
+
+
+def _log_removed_provider_routes(logger: Any, routes: List[Dict[str, Any]]) -> None:
+    if logger is None or not routes:
+        return
+    sources = ",".join(sorted({str(route.get("source") or "unknown") for route in routes}))
+    try:
+        logger.warning(
+            "personification: provider_type_removed disabled legacy provider routes "
+            f"count={len(routes)} sources={sources}; {removed_provider_migration_hint()}"
+        )
+    except Exception:
+        pass
+
+
 def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str, Any]]:
     if not raw_config:
         return []
@@ -254,6 +310,12 @@ def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str,
         if not isinstance(item, dict):
             continue
         api_type = normalize_api_type(item.get("api_type"))
+        if api_type == PROVIDER_TYPE_REMOVED:
+            _log_removed_provider_routes(
+                logger,
+                [_removed_provider_tombstone(source="personification_api_pools", index=index)],
+            )
+            continue
         api_key = str(item.get("api_key", "")).strip()
         api_url = str(item.get("api_url", "")).strip()
         model = _default_model_for_api_type(api_type, str(item.get("model", "")).strip())
@@ -275,7 +337,7 @@ def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str,
             or ""
         ).strip()
 
-        if api_type in {"openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}:
+        if api_type in {"openai_codex", "gemini_cli", "antigravity_cli"}:
             if not model:
                 continue
         elif not api_key or not api_url or not model:
@@ -299,11 +361,26 @@ def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str,
             "supports_native_search": _to_bool(
                 item.get(
                     "supports_native_search",
-                    api_type in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code", "openai", "openai_codex"},
+                    api_type in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "openai", "openai_codex"},
                 ),
-                api_type in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code", "openai", "openai_codex"},
+                api_type in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "openai", "openai_codex"},
             ),
             "supports_reasoning": item.get("supports_reasoning"),
+            "account_mode": (
+                str(item.get("account_mode", "api_key") or "api_key").strip().lower()
+                if str(item.get("account_mode", "api_key") or "api_key").strip().lower()
+                in {"api_key", "subscription_proxy"}
+                else "api_key"
+            ),
+            "subscription_quota_kind": (
+                str(item.get("subscription_quota_kind", "none") or "none").strip().lower()
+                if str(item.get("subscription_quota_kind", "none") or "none").strip().lower()
+                in {"none", "codex_wham_proxy"}
+                else "none"
+            ),
+            "subscription_management_url": str(item.get("subscription_management_url", "") or "").strip(),
+            "subscription_auth_index": str(item.get("subscription_auth_index", "") or "").strip()[:128],
+            "subscription_management_key": str(item.get("subscription_management_key", "") or "").strip(),
         }
         if provider["enabled"]:
             providers.append(provider)
@@ -329,11 +406,13 @@ def _load_env_api_pool_config(logger: Any) -> List[Dict[str, Any]]:
 
 def _has_usable_legacy_primary_config(plugin_config: Any) -> bool:
     legacy_type = normalize_api_type(getattr(plugin_config, "personification_api_type", "openai"))
+    if legacy_type == PROVIDER_TYPE_REMOVED:
+        return False
     model = _default_model_for_api_type(
         legacy_type,
         str(getattr(plugin_config, "personification_model", "") or "").strip(),
     )
-    if legacy_type in {"openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}:
+    if legacy_type in {"openai_codex", "gemini_cli", "antigravity_cli"}:
         return bool(model)
     api_url = str(getattr(plugin_config, "personification_api_url", "") or "").strip()
     api_key = str(getattr(plugin_config, "personification_api_key", "") or "").strip()
@@ -385,6 +464,7 @@ def load_api_pool_config(plugin_config: Any, logger: Any) -> List[Dict[str, Any]
 
 
 def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[str, Any]]:
+    _log_removed_provider_routes(logger, detect_removed_provider_routes(plugin_config))
     providers = load_api_pool_config(plugin_config, logger)
     if providers:
         _log_active_provider_config_once(
@@ -395,7 +475,9 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
         return providers
 
     legacy_type = normalize_api_type(getattr(plugin_config, "personification_api_type", "openai"))
-    if legacy_type in {"openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}:
+    if legacy_type == PROVIDER_TYPE_REMOVED:
+        return []
+    if legacy_type in {"openai_codex", "gemini_cli", "antigravity_cli"}:
         if legacy_type == "openai_codex":
             auth_path = str(getattr(plugin_config, "personification_codex_auth_path", "") or "").strip()
         elif legacy_type == "gemini_cli":
@@ -404,8 +486,6 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
             auth_path = str(getattr(plugin_config, "personification_antigravity_cli_auth_path", "") or "").strip()
             if not auth_path:
                 auth_path = str(getattr(plugin_config, "personification_gemini_cli_auth_path", "") or "").strip()
-        else:
-            auth_path = str(getattr(plugin_config, "personification_claude_code_auth_path", "") or "").strip()
         project = ""
         if legacy_type == "gemini_cli":
             project = str(getattr(plugin_config, "personification_gemini_cli_project", "") or "").strip()
@@ -658,6 +738,12 @@ def _get_thinking_mode(plugin_config: Any) -> str:
 
 def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
     tool_impl = _tool_caller_impl()
+    if normalize_api_type(provider.get("api_type")) == PROVIDER_TYPE_REMOVED:
+        raise ProviderRouteError(
+            PROVIDER_TYPE_REMOVED,
+            f"{PROVIDER_TYPE_REMOVED}: {removed_provider_migration_hint()}",
+            retryable=False,
+        )
     if provider["api_type"] == "openai_codex":
         return tool_impl.OpenAICodexToolCaller(
             model=provider["model"],
@@ -690,14 +776,6 @@ def _build_provider_caller(provider: Dict[str, Any], plugin_config: Any):
             timeout=_provider_timeout(provider),
             proxy=explicit_proxy,
         )
-    if provider["api_type"] == "claude_code":
-        return tool_impl.ClaudeCodeToolCaller(
-            model=provider["model"] or "claude-opus-4-7",
-            auth_path=str(provider.get("auth_path", "") or "").strip(),
-            thinking_mode=_get_thinking_mode(plugin_config),
-            timeout=_provider_timeout(provider),
-        )
-
     thinking_mode = _get_thinking_mode(plugin_config)
     supports_reasoning_raw = provider.get("supports_reasoning")
     supports_reasoning: Optional[bool] = None
@@ -736,7 +814,6 @@ def _should_use_builtin_search(provider: Dict[str, Any], use_builtin_search: boo
         "gemini_cli",
         "antigravity_cli",
         "anthropic",
-        "claude_code",
         "openai",
         "openai_codex",
     }:
@@ -1274,7 +1351,7 @@ async def call_ai_api(
             fallback_provider.setdefault(
                 "supports_native_search",
                 fallback_provider["api_type"]
-                in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code", "openai", "openai_codex"},
+                in {"gemini", "gemini_cli", "antigravity_cli", "anthropic", "openai", "openai_codex"},
             )
             response, fallback_errors, fallback_attempts, fallback_saw_vision_unavailable = await _try_provider_chain(
                 [fallback_provider],

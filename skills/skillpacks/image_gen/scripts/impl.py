@@ -18,6 +18,7 @@ from plugin.personification.core.gemini_transport import (
 )
 from plugin.personification.core.image_refs import normalize_image_refs
 from plugin.personification.core.llm_context import use_single_attempt_retry_policy
+from plugin.personification.core.provider_types import PROVIDER_TYPE_REMOVED, normalize_removed_provider_type
 from plugin.personification.core.safe_image_download import download_public_image
 
 
@@ -95,7 +96,9 @@ def _first_gemini_cli_caller(tool_caller: Any) -> Any:
 
 
 def _normalize_api_type(value: Any) -> str:
-    text = str(value or "").strip().lower().replace("-", "_")
+    text = normalize_removed_provider_type(value)
+    if text == PROVIDER_TYPE_REMOVED:
+        return PROVIDER_TYPE_REMOVED
     if text in {"", "auto", "default"}:
         return "auto"
     if text in {"gemini", "gemini_official", "google"}:
@@ -111,8 +114,16 @@ def _configured_image_route(plugin_config: Any) -> dict[str, str]:
     explicit_key = str(getattr(plugin_config, "personification_image_gen_api_key", "") or "").strip()
     auth_mode = str(getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto").strip()
     main_type = _normalize_api_type(getattr(plugin_config, "personification_api_type", "openai"))
-    main_url = str(getattr(plugin_config, "personification_api_url", "") or "").strip()
-    main_key = str(getattr(plugin_config, "personification_api_key", "") or "").strip()
+    main_url = (
+        ""
+        if main_type == PROVIDER_TYPE_REMOVED
+        else str(getattr(plugin_config, "personification_api_url", "") or "").strip()
+    )
+    main_key = (
+        ""
+        if main_type == PROVIDER_TYPE_REMOVED
+        else str(getattr(plugin_config, "personification_api_key", "") or "").strip()
+    )
     dedicated = any((explicit_type != "auto", explicit_url, explicit_key))
     return {
         "api_type": explicit_type,
@@ -558,6 +569,8 @@ async def generate_image(
     plugin_config = plugin_config or object()
     route = _configured_image_route(plugin_config)
     route_type = route.get("api_type") or "auto"
+    if route_type == PROVIDER_TYPE_REMOVED or route.get("main_api_type") == PROVIDER_TYPE_REMOVED:
+        return {"error": PROVIDER_TYPE_REMOVED}
     reference_mode = str(reference_mode or "auto").strip().lower() or "auto"
     has_references = bool(list(images or []) + list(image_urls or []))
 

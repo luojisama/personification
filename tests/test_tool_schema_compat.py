@@ -37,6 +37,14 @@ def test_profile_resolution_distinguishes_official_and_compatible_routes() -> No
     assert compat.resolve_schema_profile(provider="grok-gateway", api_type="openai").name == "openai_compatible"
 
 
+@pytest.mark.parametrize("api_type", ("claude_code", "claude-code", "ClaudeCode", "claude_cli", "claude-cli"))
+def test_removed_provider_aliases_never_select_anthropic_schema_profile(api_type: str) -> None:
+    profile = compat.resolve_schema_profile(provider="legacy", api_type=api_type)
+
+    assert profile.name == "openai_compatible"
+    assert profile.name != compat.ANTHROPIC_PROFILE.name
+
+
 def test_prepare_tools_records_safe_stable_request_diagnostics() -> None:
     tools = [_tool("weather"), _tool("wiki_lookup")]
 

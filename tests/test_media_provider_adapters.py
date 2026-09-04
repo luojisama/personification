@@ -77,3 +77,18 @@ def test_custom_gemini_gateway_requires_explicit_media_protocol() -> None:
         }
     )
     assert explicit.supports_video is True
+
+
+def test_removed_provider_aliases_are_no_capability_tombstones() -> None:
+    for alias in ("claude_code", "claude-code", "ClaudeCode", "claude_cli", "claude-cli"):
+        adapter = adapters.resolve_media_provider_adapter(
+            {
+                "api_type": alias,
+                "model": "claude-opus-4-7",
+                "media_protocol": "gemini_native",
+            }
+        )
+        assert adapter.source == "provider_type_removed"
+        assert adapter.protocol == "none"
+        assert adapter.supports_audio is False
+        assert adapter.supports_video is False

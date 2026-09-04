@@ -9,6 +9,11 @@ from typing import Any, Iterable, Optional
 
 from .llm_context import current_llm_context, use_single_attempt_retry_policy
 from .gemini_transport import safe_upstream_diagnostics
+from .provider_types import (
+    PROVIDER_TYPE_REMOVED,
+    normalize_removed_provider_type,
+    removed_provider_migration_hint,
+)
 from .route_capabilities import DEFAULT_ROUTE_CAPABILITY_REGISTRY, RouteKey
 from .safety_filter import build_safe_reframe_messages, detect_route_safety_issue
 from .tool_schema_compat import classify_schema_rejection, prepare_tools_for_provider
@@ -28,6 +33,7 @@ _CANONICAL_PROVIDER_CODES = {
     "provider_request_rejected",
     "provider_safety_block",
     "provider_timeout",
+    "provider_type_removed",
     "providers_exhausted",
 }
 _MODEL_UNAVAILABLE_ERROR_CODES = {
@@ -365,7 +371,9 @@ def _safe_request_shape(
 
 
 def _normalize_api_type(api_type: str) -> str:
-    value = str(api_type or "").strip().lower().replace("-", "_")
+    value = normalize_removed_provider_type(api_type)
+    if value == PROVIDER_TYPE_REMOVED:
+        return PROVIDER_TYPE_REMOVED
     if value in {"gemini", "gemini_official"}:
         return "gemini_official"
     if value == "anthropic":
@@ -376,8 +384,6 @@ def _normalize_api_type(api_type: str) -> str:
         return "gemini_cli"
     if value in {"antigravity_cli", "antigravity", "agy", "agy_cli"}:
         return "antigravity_cli"
-    if value in {"claude_code", "claudecode", "claude_cli"}:
-        return "claude_code"
     return "openai"
 
 
@@ -400,6 +406,8 @@ def _provider_signature(provider: dict[str, Any] | None) -> tuple[str, str, str,
 
 def _provider_model_is_compatible(api_type: str, model: str) -> bool:
     normalized_type = _normalize_api_type(api_type)
+    if normalized_type == PROVIDER_TYPE_REMOVED:
+        return False
     normalized_model = str(model or "").strip().lower()
     if not normalized_model:
         return False
@@ -407,7 +415,7 @@ def _provider_model_is_compatible(api_type: str, model: str) -> bool:
         return not normalized_model.startswith(("gemini", "claude"))
     if normalized_type in {"gemini_official", "gemini_cli", "antigravity_cli"}:
         return not normalized_model.startswith(("gpt-", "claude"))
-    if normalized_type in {"anthropic", "claude_code"}:
+    if normalized_type == "anthropic":
         return not normalized_model.startswith(("gpt-", "gemini"))
     return True
 
@@ -415,12 +423,14 @@ def _provider_model_is_compatible(api_type: str, model: str) -> bool:
 def _provider_is_usable(provider: dict[str, Any] | None) -> bool:
     payload = provider or {}
     api_type = _normalize_api_type(str(payload.get("api_type", "") or "openai"))
+    if api_type == PROVIDER_TYPE_REMOVED:
+        return False
     model = str(payload.get("model", "") or "").strip()
     if not model:
         return False
     if not _provider_model_is_compatible(api_type, model):
         return False
-    if api_type in {"openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}:
+    if api_type in {"openai_codex", "gemini_cli", "antigravity_cli"}:
         return True
     return bool(str(payload.get("api_key", "") or "").strip())
 
@@ -523,6 +533,11 @@ def build_single_provider_caller(
     model_override: str = "",
 ) -> ToolCaller:
     """为单个 provider 构建独立 caller（不走路由/回退），用于逐个连通性测试。"""
+    if _normalize_api_type(str((provider or {}).get("api_type", "") or "")) == PROVIDER_TYPE_REMOVED:
+        error = RuntimeError(f"{PROVIDER_TYPE_REMOVED}: {removed_provider_migration_hint()}")
+        error.code = PROVIDER_TYPE_REMOVED
+        error.retryable = False
+        raise error
     return _build_tool_caller(
         _ProviderConfigProxy(
             plugin_config,
@@ -545,12 +560,31 @@ def get_primary_provider_config(plugin_config: Any, logger: Any) -> dict[str, st
             "auth_path": str(primary.get("auth_path", "") or ""),
             "gemini_auth_mode": str(primary.get("gemini_auth_mode", "auto") or "auto"),
         }
+    legacy_api_type = _normalize_api_type(
+        str(getattr(plugin_config, "personification_api_type", "") or "")
+    )
+    if legacy_api_type == PROVIDER_TYPE_REMOVED:
+        # A removed route may still have stale URL/key/model values in an old
+        # configuration file.  Do not carry them into a runtime provider
+        # payload (or any downstream diagnostic) after recognizing its type.
+        return {
+            "api_type": PROVIDER_TYPE_REMOVED,
+            "api_url": "",
+            "api_key": "",
+            "model": "",
+            "auth_path": "",
+            "gemini_auth_mode": "auto",
+        }
     return {
-        "api_type": str(getattr(plugin_config, "personification_api_type", "") or ""),
+        "api_type": legacy_api_type,
         "api_url": str(getattr(plugin_config, "personification_api_url", "") or ""),
         "api_key": str(getattr(plugin_config, "personification_api_key", "") or ""),
         "model": str(getattr(plugin_config, "personification_model", "") or ""),
-        "auth_path": str(getattr(plugin_config, "personification_codex_auth_path", "") or ""),
+        "auth_path": (
+            str(getattr(plugin_config, "personification_codex_auth_path", "") or "")
+            if legacy_api_type == "openai_codex"
+            else ""
+        ),
         "gemini_auth_mode": str(
             getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto"
         ),
@@ -573,6 +607,8 @@ def _build_provider(
 ) -> dict[str, str] | None:
     base = dict(inherit or {})
     resolved_api_type = _normalize_api_type(api_type or base.get("api_type", "") or "openai")
+    if resolved_api_type == PROVIDER_TYPE_REMOVED:
+        return None
     resolved_api_url = str(api_url or base.get("api_url", "") or "").strip()
     resolved_api_key = str(api_key or base.get("api_key", "") or "").strip()
     resolved_model = str(model or base.get("model", "") or "").strip()
@@ -597,8 +633,14 @@ def _resolve_explicit_global_fallback(
     primary_provider: dict[str, str],
 ) -> ProviderResolution | None:
     del primary_provider
+    fallback_api_type = str(
+        getattr(plugin_config, "personification_fallback_api_type", "") or ""
+    )
+    if _normalize_api_type(fallback_api_type) == PROVIDER_TYPE_REMOVED:
+        # Check the type before reading any stale fallback credentials.
+        return None
     explicit_values = (
-        getattr(plugin_config, "personification_fallback_api_type", ""),
+        fallback_api_type,
         getattr(plugin_config, "personification_fallback_api_url", ""),
         getattr(plugin_config, "personification_fallback_api_key", ""),
         getattr(plugin_config, "personification_fallback_model", ""),
@@ -607,7 +649,7 @@ def _resolve_explicit_global_fallback(
     if not _any_values(explicit_values):
         return None
     provider = _build_provider(
-        api_type=str(getattr(plugin_config, "personification_fallback_api_type", "") or ""),
+        api_type=fallback_api_type,
         api_url=str(getattr(plugin_config, "personification_fallback_api_url", "") or ""),
         api_key=str(getattr(plugin_config, "personification_fallback_api_key", "") or ""),
         model=str(getattr(plugin_config, "personification_fallback_model", "") or ""),
@@ -632,19 +674,39 @@ def _collect_legacy_global_fallback_candidates(
         getattr(plugin_config, "personification_gemini_auth_mode", "auto") or "auto"
     )
 
-    vision_provider = str(getattr(plugin_config, "personification_vision_fallback_provider", "") or "")
-    labeler_api_type = str(getattr(plugin_config, "personification_labeler_api_type", "") or "")
-    vision_model = str(getattr(plugin_config, "personification_vision_fallback_model", "") or "")
-    labeler_api_url = str(getattr(plugin_config, "personification_labeler_api_url", "") or "")
-    labeler_api_key = str(getattr(plugin_config, "personification_labeler_api_key", "") or "")
-    labeler_model = str(getattr(plugin_config, "personification_labeler_model", "") or "")
-    legacy_vision_configured = _any_values(
-        (
-            vision_provider,
-            vision_model,
-        )
+    vision_provider = str(
+        getattr(plugin_config, "personification_vision_fallback_provider", "") or ""
     )
-    if bool(getattr(plugin_config, "personification_vision_fallback_enabled", True)) and legacy_vision_configured:
+    labeler_api_type = str(
+        getattr(plugin_config, "personification_labeler_api_type", "") or ""
+    )
+    vision_type_removed = _normalize_api_type(vision_provider) == PROVIDER_TYPE_REMOVED
+    labeler_type_removed = _normalize_api_type(labeler_api_type) == PROVIDER_TYPE_REMOVED
+    labeler_api_url = ""
+    labeler_api_key = ""
+    labeler_model = ""
+    if not labeler_type_removed:
+        labeler_api_url = str(
+            getattr(plugin_config, "personification_labeler_api_url", "") or ""
+        )
+        labeler_api_key = str(
+            getattr(plugin_config, "personification_labeler_api_key", "") or ""
+        )
+        labeler_model = str(
+            getattr(plugin_config, "personification_labeler_model", "") or ""
+        )
+    vision_model = ""
+    if not vision_type_removed and not labeler_type_removed:
+        vision_model = str(
+            getattr(plugin_config, "personification_vision_fallback_model", "") or ""
+        )
+    legacy_vision_configured = _any_values((vision_provider, vision_model))
+    if (
+        not vision_type_removed
+        and not labeler_type_removed
+        and bool(getattr(plugin_config, "personification_vision_fallback_enabled", True))
+        and legacy_vision_configured
+    ):
         legacy_vision = _build_provider(
             api_type=vision_provider or labeler_api_type,
             api_url=labeler_api_url,
@@ -656,8 +718,10 @@ def _collect_legacy_global_fallback_candidates(
         if legacy_vision is not None:
             candidates.append(ProviderResolution(provider=legacy_vision, source="legacy_vision_fallback"))
 
-    labeler_configured = _any_values((labeler_api_url, labeler_api_key)) or (
+    labeler_configured = not labeler_type_removed and (
+        _any_values((labeler_api_url, labeler_api_key)) or (
         _normalize_api_type(labeler_api_type) == "openai_codex" and _any_values((labeler_model,))
+        )
     )
     if labeler_configured:
         labeler = _build_provider(
@@ -671,15 +735,19 @@ def _collect_legacy_global_fallback_candidates(
         if labeler is not None:
             candidates.append(ProviderResolution(provider=labeler, source="legacy_labeler"))
 
-    style_values = (
-        getattr(plugin_config, "personification_style_api_type", ""),
-        getattr(plugin_config, "personification_style_api_url", ""),
-        getattr(plugin_config, "personification_style_api_key", ""),
-        getattr(plugin_config, "personification_style_api_model", ""),
-    )
+    style_api_type = str(getattr(plugin_config, "personification_style_api_type", "") or "")
+    if _normalize_api_type(style_api_type) != PROVIDER_TYPE_REMOVED:
+        style_values = (
+            style_api_type,
+            getattr(plugin_config, "personification_style_api_url", ""),
+            getattr(plugin_config, "personification_style_api_key", ""),
+            getattr(plugin_config, "personification_style_api_model", ""),
+        )
+    else:
+        style_values = ()
     if _any_values(style_values):
         style = _build_provider(
-            api_type=str(getattr(plugin_config, "personification_style_api_type", "") or ""),
+            api_type=style_api_type,
             api_url=str(getattr(plugin_config, "personification_style_api_url", "") or ""),
             api_key=str(getattr(plugin_config, "personification_style_api_key", "") or ""),
             model=str(getattr(plugin_config, "personification_style_api_model", "") or ""),
@@ -689,15 +757,19 @@ def _collect_legacy_global_fallback_candidates(
         if style is not None:
             candidates.append(ProviderResolution(provider=style, source="legacy_style"))
 
-    persona_values = (
-        getattr(plugin_config, "personification_persona_api_type", ""),
-        getattr(plugin_config, "personification_persona_api_url", ""),
-        getattr(plugin_config, "personification_persona_api_key", ""),
-        getattr(plugin_config, "personification_persona_model", ""),
-    )
+    persona_api_type = str(getattr(plugin_config, "personification_persona_api_type", "") or "")
+    if _normalize_api_type(persona_api_type) != PROVIDER_TYPE_REMOVED:
+        persona_values = (
+            persona_api_type,
+            getattr(plugin_config, "personification_persona_api_url", ""),
+            getattr(plugin_config, "personification_persona_api_key", ""),
+            getattr(plugin_config, "personification_persona_api_model", ""),
+        )
+    else:
+        persona_values = ()
     if _any_values(persona_values):
         persona = _build_provider(
-            api_type=str(getattr(plugin_config, "personification_persona_api_type", "") or ""),
+            api_type=persona_api_type,
             api_url=str(getattr(plugin_config, "personification_persona_api_url", "") or ""),
             api_key=str(getattr(plugin_config, "personification_persona_api_key", "") or ""),
             model=str(getattr(plugin_config, "personification_persona_model", "") or ""),
@@ -707,15 +779,19 @@ def _collect_legacy_global_fallback_candidates(
         if persona is not None:
             candidates.append(ProviderResolution(provider=persona, source="legacy_persona"))
 
-    compress_values = (
-        getattr(plugin_config, "personification_compress_api_type", ""),
-        getattr(plugin_config, "personification_compress_api_url", ""),
-        getattr(plugin_config, "personification_compress_api_key", ""),
-        getattr(plugin_config, "personification_compress_model", ""),
-    )
+    compress_api_type = str(getattr(plugin_config, "personification_compress_api_type", "") or "")
+    if _normalize_api_type(compress_api_type) != PROVIDER_TYPE_REMOVED:
+        compress_values = (
+            compress_api_type,
+            getattr(plugin_config, "personification_compress_api_url", ""),
+            getattr(plugin_config, "personification_compress_api_key", ""),
+            getattr(plugin_config, "personification_compress_model", ""),
+        )
+    else:
+        compress_values = ()
     if _any_values(compress_values):
         compress = _build_provider(
-            api_type=str(getattr(plugin_config, "personification_compress_api_type", "") or ""),
+            api_type=compress_api_type,
             api_url=str(getattr(plugin_config, "personification_compress_api_url", "") or ""),
             api_key=str(getattr(plugin_config, "personification_compress_api_key", "") or ""),
             model=str(getattr(plugin_config, "personification_compress_model", "") or ""),
@@ -788,9 +864,14 @@ def resolve_video_fallback_provider(
 ) -> ProviderResolution | None:
     if not bool(getattr(plugin_config, "personification_video_fallback_enabled", True)):
         return None
-    raw_api_type = str(
+    raw_provider_value = str(
         getattr(plugin_config, "personification_video_fallback_provider", "") or ""
-    ).strip().lower().replace("-", "_")
+    )
+    if _normalize_api_type(raw_provider_value) == PROVIDER_TYPE_REMOVED:
+        # Never let a removed video route borrow a global fallback or read its
+        # stale URL/key/auth path.
+        return None
+    raw_api_type = raw_provider_value.strip().lower().replace("-", "_")
     if raw_api_type in {"disabled", "off", "none"}:
         return None
     if raw_api_type in {"qwen", "qwen_omni", "dashscope_omni"}:
@@ -932,8 +1013,6 @@ class _ProviderConfigProxy:
             return self._provider.get("auth_path", "")
         if name == "personification_antigravity_cli_project":
             return self._provider.get("project", "")
-        if name == "personification_claude_code_auth_path":
-            return self._provider.get("auth_path", "")
         if name == "personification_thinking_mode" and self._thinking_mode_override:
             return self._thinking_mode_override
         return getattr(self._original, name)

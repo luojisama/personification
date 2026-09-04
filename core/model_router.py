@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
+from .provider_types import normalize_removed_provider_type
+
 
 MODEL_ROLE_INTENT = "intent"
 MODEL_ROLE_REVIEW = "review"
@@ -97,7 +99,7 @@ def get_model_override_for_role(plugin_config: Any, role: str) -> str:
 
 
 def _normalize_api_type(value: Any) -> str:
-    text = str(value or "").strip().lower().replace("-", "_")
+    text = normalize_removed_provider_type(value)
     if text in {"openai_codex", "codex"}:
         return "openai_codex"
     if text == "gemini_official":

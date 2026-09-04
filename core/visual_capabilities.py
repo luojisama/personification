@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
+from .provider_types import PROVIDER_TYPE_REMOVED, is_removed_provider_type, normalize_removed_provider_type
+
 VISUAL_ROUTE_REPLY_PLAIN = "reply_plain"
 VISUAL_ROUTE_REPLY_YAML = "reply_yaml"
 VISUAL_ROUTE_AGENT = "agent"
@@ -147,7 +149,9 @@ def heuristic_supports_vision(api_type: str, model: str | None = None) -> bool:
     不同账号 / 路由配置下视觉能力差异较大。它的视觉能力**只信任探测结果**，
     探测未通过时这里返回 False，让 provider_router 提前剥离 image parts。
     """
-    api = str(api_type or "").strip().lower().replace("-", "_")
+    api = normalize_removed_provider_type(api_type)
+    if api == PROVIDER_TYPE_REMOVED:
+        return False
     model_text = str(model or "").strip().lower()
     if any(token in model_text for token in ("tts", "asr", "embedding", "embed")):
         return False
@@ -158,7 +162,7 @@ def heuristic_supports_vision(api_type: str, model: str | None = None) -> bool:
     if api == "openai_codex":
         return "codex" in model_text
     # 官方 Anthropic / Gemini API：所有当前模型都支持视觉
-    if api in {"anthropic", "gemini", "gemini_official", "gemini_cli", "claude_code"}:
+    if api in {"anthropic", "gemini", "gemini_official", "gemini_cli"}:
         return True
     # 显式视觉模型关键字
     if "vision" in model_text:
@@ -189,6 +193,8 @@ def _normalize_probe_timeout_seconds(value: Any = None) -> float:
 def heuristic_supports_video(api_type: str, model: str | None = None) -> bool:
     from .media_provider_adapters import resolve_media_provider_adapter
 
+    if is_removed_provider_type(api_type):
+        return False
     return resolve_media_provider_adapter(
         {
             "api_type": str(api_type or ""),
@@ -205,6 +211,8 @@ def provider_supports_vision(
     *,
     route_name: str = "",
 ) -> bool:
+    if is_removed_provider_type(api_type):
+        return False
     if route_name:
         cached = get_visual_capability(route_name, api_type, model)
         if cached is not None:
@@ -218,6 +226,8 @@ def provider_supports_video(
     *,
     route_name: str = "",
 ) -> bool:
+    if is_removed_provider_type(api_type):
+        return False
     if route_name:
         cached = get_video_capability(route_name, api_type, model)
         if cached is not None:
@@ -250,8 +260,6 @@ def _clone_provider_config(original: Any, provider: Dict[str, Any]) -> Any:
                 return self._selected.get("auth_path", "")
             if name == "personification_antigravity_cli_project":
                 return self._selected.get("project", "")
-            if name == "personification_claude_code_auth_path":
-                return self._selected.get("auth_path", "")
             return getattr(self._base, name)
 
     return _ConfigProxy(original, provider)
@@ -267,11 +275,15 @@ def build_primary_route_probe_caller(
     providers = list(get_configured_api_providers() or [])
     if providers:
         primary = providers[0]
+        if is_removed_provider_type(primary.get("api_type", "")):
+            return None, PROVIDER_TYPE_REMOVED, ""
         caller = build_tool_caller(_clone_provider_config(plugin_config, primary))
         return caller, str(primary.get("api_type", "") or ""), str(primary.get("model", "") or "")
 
     api_type = str(getattr(plugin_config, "personification_api_type", "") or "")
     model = str(getattr(plugin_config, "personification_model", "") or "")
+    if is_removed_provider_type(api_type):
+        return None, PROVIDER_TYPE_REMOVED, ""
     if not api_type and not model:
         return None, "", ""
     return build_tool_caller(plugin_config), api_type, model

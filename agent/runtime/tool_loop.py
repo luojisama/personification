@@ -107,7 +107,7 @@ def record_model_response_usage(*, response: Any, tool_caller: Any) -> None:
         caller_cls = type(tool_caller).__name__.lower()
         if "codex" in caller_cls:
             provider_label = "codex"
-        elif "anthropic" in caller_cls or "claudecode" in caller_cls or "claude" in caller_cls:
+        elif "anthropic" in caller_cls:
             provider_label = "anthropic"
         elif "geminicli" in caller_cls:
             provider_label = "gemini"

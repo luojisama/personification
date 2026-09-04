@@ -720,7 +720,6 @@ def test_config_provider_models_cli_routes_return_selectable_candidates(_runtime
     cases = {
         "gemini_cli": "gemini-2.5-flash",
         "antigravity_cli": "gemini-3.5-flash-low",
-        "claude_code": "claude-opus-4-7",
         "openai_codex": "gpt-5.3-codex",
     }
     for api_type, expected in cases.items():
@@ -732,6 +731,34 @@ def test_config_provider_models_cli_routes_return_selectable_candidates(_runtime
         body = res.json()
         assert body["source"] == "local_cache"
         assert expected in {item["id"] for item in body["models"]}
+
+
+def test_config_provider_models_removed_provider_is_safe_tombstone(_runtime_context) -> None:  # noqa: ANN001
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.post(
+        "/personification/api/config/provider-models",
+        json={
+            "provider": {
+                "api_type": "claude_cli",
+                "api_key": "do-not-echo-provider-key",
+                "auth_path": "C:/private/claude-auth.json",
+                "model": "claude-opus-4-7",
+            }
+        },
+    )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert body["api_type"] == "provider_type_removed"
+    assert body["enabled"] is False
+    assert body["diagnostic_code"] == "provider_type_removed"
+    assert body["models"] == []
+    assert "anthropic" in body["migration_hint"]
+    assert "do-not-echo-provider-key" not in serialized
+    assert "C:/private/claude-auth.json" not in serialized
 
 
 def test_config_provider_models_endpoint_normalizes_version_paths() -> None:

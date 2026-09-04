@@ -10,6 +10,7 @@ import httpx
 from plugin.personification.core.gemini_transport import raise_for_gemini_status, request_with_gemini_auth
 from plugin.personification.core.image_refs import normalize_image_ref
 from plugin.personification.core.llm_context import use_single_attempt_retry_policy
+from plugin.personification.core.provider_types import PROVIDER_TYPE_REMOVED
 from plugin.personification.core.time_ctx import build_current_time_context_block
 
 
@@ -60,6 +61,8 @@ def _prompt_with_time_context(prompt: str) -> str:
 
 def _provider_model_is_compatible(api_type: str, model: str) -> bool:
     normalized_type = _normalize_api_type(api_type)
+    if normalized_type == PROVIDER_TYPE_REMOVED:
+        return False
     normalized_model = str(model or "").strip().lower()
     if not normalized_model:
         return False

@@ -71,11 +71,14 @@ class ConfigEntryView(BaseModel):
     min_value: float | None = None
     max_value: float | None = None
     scope: str = "global"
+    # 由后端 ConfigEntry registry 提供；前端不得依据字段名推断控件类型。
+    ui_schema: dict[str, Any] = Field(default_factory=dict)
 
 
 class ConfigEntriesResponse(BaseModel):
     entries: list[ConfigEntryView]
     groups: list[str]
+    removed_provider_routes: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ConfigUpdateRequest(BaseModel):

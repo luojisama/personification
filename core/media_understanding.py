@@ -28,6 +28,7 @@ from .media_provider_adapters import (
 from .message_parts import build_user_message_content
 from .model_router import MODEL_ROLE_STICKER, get_model_override_for_role
 from .llm_context import use_single_attempt_retry_policy
+from .provider_types import PROVIDER_TYPE_REMOVED, normalize_removed_provider_type
 from .visual_capabilities import VISUAL_ROUTE_AGENT, error_indicates_vision_unavailable
 from .video_understanding import prepare_video_storyboard
 
@@ -101,15 +102,15 @@ _GENERIC_REFUSAL_TEXTS = {
 
 
 def _normalize_media_api_type(api_type: str) -> str:
-    value = str(api_type or "").strip().lower().replace("-", "_")
+    value = normalize_removed_provider_type(api_type)
+    if value == PROVIDER_TYPE_REMOVED:
+        return PROVIDER_TYPE_REMOVED
     if value in {"gemini", "gemini_official"}:
         return "gemini_official"
     if value in {"gemini_cli", "geminicli", "antigravity_cli", "antigravity", "agy", "agy_cli"}:
         return "antigravity_cli"
     if value in {"openai_codex", "codex"}:
         return "openai_codex"
-    if value in {"claude_code", "claudecode", "claude_cli"}:
-        return "claude_code"
     if value == "anthropic":
         return "anthropic"
     return "openai"
@@ -130,10 +131,12 @@ def normalize_video_route_mode(value: Any) -> str:
 
 def _is_provider_usable(provider: dict[str, Any]) -> bool:
     api_type = _normalize_media_api_type(str(provider.get("api_type", "") or "openai"))
+    if api_type == PROVIDER_TYPE_REMOVED:
+        return False
     model = str(provider.get("model", "") or "").strip()
     if not model:
         return False
-    if api_type in {"openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}:
+    if api_type in {"openai_codex", "gemini_cli", "antigravity_cli"}:
         return True
     return bool(str(provider.get("api_key", "") or "").strip())
 
@@ -153,7 +156,11 @@ def _primary_provider_candidates(runtime: Any) -> list[dict[str, Any]]:
     getter = getattr(runtime, "get_configured_api_providers", None)
     if callable(getter):
         try:
-            providers = [dict(item) for item in list(getter() or []) if isinstance(item, dict)]
+            providers = [
+                dict(item)
+                for item in list(getter() or [])
+                if isinstance(item, dict) and _normalize_media_api_type(item.get("api_type", "")) != PROVIDER_TYPE_REMOVED
+            ]
         except Exception:
             providers = []
     if providers:
@@ -210,8 +217,6 @@ class _ProviderConfigProxy:
             return self._provider.get("project", "")
         if name == "personification_media_protocol":
             return self._provider.get("media_protocol", "auto")
-        if name == "personification_claude_code_auth_path":
-            return self._provider.get("auth_path", "")
         if name == "personification_thinking_mode":
             return getattr(self._original, name, "none")
         return getattr(self._original, name)
@@ -331,6 +336,17 @@ def get_primary_provider_config(runtime: Any) -> dict[str, str]:
             providers = []
     if providers and isinstance(providers[0], dict):
         primary = providers[0]
+        if _normalize_media_api_type(primary.get("api_type", "")) == PROVIDER_TYPE_REMOVED:
+            return {
+                "api_type": PROVIDER_TYPE_REMOVED,
+                "api_url": "",
+                "api_key": "",
+                "model": "",
+                "auth_path": "",
+                "project": "",
+                "gemini_auth_mode": "auto",
+                "media_protocol": "auto",
+            }
         return {
             "api_type": str(primary.get("api_type", "") or ""),
             "api_url": str(primary.get("api_url", "") or ""),
@@ -344,14 +360,23 @@ def get_primary_provider_config(runtime: Any) -> dict[str, str]:
     plugin_config = getattr(runtime, "plugin_config", None)
     api_type = str(getattr(plugin_config, "personification_api_type", "") or "")
     normalized_type = _normalize_media_api_type(api_type)
+    if normalized_type == PROVIDER_TYPE_REMOVED:
+        return {
+            "api_type": PROVIDER_TYPE_REMOVED,
+            "api_url": "",
+            "api_key": "",
+            "model": "",
+            "auth_path": "",
+            "project": "",
+            "gemini_auth_mode": "auto",
+            "media_protocol": "auto",
+        }
     if normalized_type == "openai_codex":
         auth_path = str(getattr(plugin_config, "personification_codex_auth_path", "") or "")
     elif normalized_type == "gemini_cli":
         auth_path = str(getattr(plugin_config, "personification_gemini_cli_auth_path", "") or "")
     elif normalized_type == "antigravity_cli":
         auth_path = str(getattr(plugin_config, "personification_antigravity_cli_auth_path", "") or "")
-    elif normalized_type == "claude_code":
-        auth_path = str(getattr(plugin_config, "personification_claude_code_auth_path", "") or "")
     else:
         auth_path = ""
     return {

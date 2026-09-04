@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import re
@@ -111,6 +112,8 @@ def test_static_frontend_assets_are_served(_runtime_context) -> None:
     config_js = client.get("/personification/static/app-config.js")
     assert config_js.status_code == 200
     assert "configSearchHaystack" in config_js.text
+    assert "claude_code" not in config_js.text
+    assert "claude_cli" not in config_js.text
 
     auth_js = client.get("/personification/static/app-auth.js")
     assert auth_js.status_code == 200
@@ -246,6 +249,71 @@ def test_config_entries_authenticated_returns_groups(_runtime_context) -> None:
     assert sample["kind"] == "toggle"
     assert sample["required"] is True
     assert sample["group"] == "核心开关"
+
+
+def test_config_entries_project_removed_provider_routes_as_safe_tombstones(_runtime_context) -> None:
+    _runtime_context.plugin_config.personification_api_type = "claude_cli"
+    _runtime_context.plugin_config.personification_api_pools = [
+        {
+            "name": "obsolete-route",
+            "api_type": "claude-code",
+            "api_key": "do-not-echo-config-key",
+            "auth_path": "C:/private/obsolete-auth.json",
+            "model": "claude-opus-4-7",
+        }
+    ]
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.get("/personification/api/config/entries")
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    serialized = json.dumps(body, ensure_ascii=False)
+    api_type_entry = next(
+        item for item in body["entries"] if item["field_name"] == "personification_api_type"
+    )
+    pools_entry = next(
+        item for item in body["entries"] if item["field_name"] == "personification_api_pools"
+    )
+    assert api_type_entry["current"] == "provider_type_removed"
+    assert pools_entry["current"] == [
+        {
+            "api_type": "provider_type_removed",
+            "enabled": False,
+            "diagnostic_code": "provider_type_removed",
+            "migration_hint": pools_entry["current"][0]["migration_hint"],
+            "source": "personification_api_pools",
+            "route_index": 0,
+        }
+    ]
+    assert {route["source"] for route in body["removed_provider_routes"]} == {
+        "personification_api_pools",
+        "personification_api_type",
+    }
+    assert "do-not-echo-config-key" not in serialized
+    assert "C:/private/obsolete-auth.json" not in serialized
+
+    rejected = client.post(
+        "/personification/api/config/value",
+        json={
+            "field_name": "personification_api_pools",
+            "value": [
+                {
+                    "api_type": "claudecode",
+                    "api_key": "do-not-persist-provider-key",
+                    "auth_path": "C:/private/new-obsolete-auth.json",
+                }
+            ],
+        },
+    )
+    assert rejected.status_code == 400, rejected.text
+    rejection = rejected.json()["detail"]
+    rejection_text = json.dumps(rejection, ensure_ascii=False)
+    assert rejection["code"] == "provider_type_removed"
+    assert rejection["removed_routes"][0]["enabled"] is False
+    assert "do-not-persist-provider-key" not in rejection_text
+    assert "C:/private/new-obsolete-auth.json" not in rejection_text
 
 
 def test_config_value_update_writes_env_json_only(_runtime_context, monkeypatch, tmp_path) -> None:

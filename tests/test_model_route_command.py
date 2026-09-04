@@ -64,7 +64,6 @@ class _Bundle:
             personification_gemini_cli_project="",
             personification_antigravity_cli_auth_path="~/.gemini/antigravity-cli/oauth_creds.json",
             personification_antigravity_cli_project="agy-project",
-            personification_claude_code_auth_path="~/.claude/.credentials.json",
         )
         self.save_count = 0
         self.reload_count = 0
@@ -128,6 +127,21 @@ def test_model_route_command_can_create_antigravity_cli_pool() -> None:
     assert pools[0]["auth_path"] == "~/.gemini/antigravity-cli/oauth_creds.json"
     assert pools[0]["project"] == "agy-project"
     assert "antigravity_cli_primary" in result
+
+
+def test_model_route_command_refuses_removed_provider_without_persisting() -> None:
+    bundle = _Bundle()
+    before = bundle.plugin_config.personification_api_pools
+
+    result = admin_commands.handle_model_command(
+        bundle,
+        tokens=["路由", "claude_cli", "claude-opus-4-7"],
+    )
+
+    assert result.startswith("provider_type_removed")
+    assert bundle.plugin_config.personification_api_pools == before
+    assert bundle.save_count == 0
+    assert bundle.reload_count == 0
 
 
 def test_model_status_shows_rate_limit_cooldown() -> None:

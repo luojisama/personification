@@ -23,17 +23,17 @@
       <template v-if="data">
         <section class="metric-rack" aria-label="Token 总览">
           <article>
-            <span>Prompt Token</span>
+            <span>Prompt Token（输入）</span>
             <strong>{{ formatInteger(total.prompt_tokens) }}</strong>
             <small>输入与上下文</small>
           </article>
           <article>
-            <span>Completion Token</span>
+            <span>Completion Token（输出）</span>
             <strong>{{ formatInteger(total.completion_tokens) }}</strong>
             <small>模型可见输出</small>
           </article>
           <article>
-            <span>Total Token</span>
+            <span>Total Token（合计）</span>
             <strong>{{ formatInteger(total.total_tokens) }}</strong>
             <small>{{ formatInteger(total.call_count) }} 次模型调用</small>
           </article>
@@ -72,18 +72,8 @@
           <Panel eyebrow="DISTRIBUTION" title="消耗分布">
             <template #actions>
               <div class="inline-controls">
-                <select v-model="distribution" aria-label="分布维度">
-                  <option value="model">按模型</option>
-                  <option value="provider">按供应商</option>
-                  <option value="purpose">按用途</option>
-                  <option value="group">按群聊</option>
-                </select>
-                <select v-model="sortKey" aria-label="排序字段">
-                  <option value="total_tokens">总 Token</option>
-                  <option value="call_count">调用次数</option>
-                  <option value="prompt_tokens">Prompt</option>
-                  <option value="completion_tokens">Completion</option>
-                </select>
+                <SelectField v-model="distribution" label="分布维度" hide-label :options="distributionOptions" />
+                <SelectField v-model="sortKey" label="排序字段" hide-label :options="sortOptions" />
               </div>
             </template>
 
@@ -114,7 +104,7 @@
             </EmptyState>
           </Panel>
 
-          <Panel eyebrow="BILLING / QUOTA" title="费用与供应商额度">
+          <Panel eyebrow="LOCAL LEDGER" title="本地账本与费用">
             <p class="billing-notice">
               {{ data.billing?.cost_configured ? `${data.billing.currency} ${data.billing.request_cost.toFixed(4)}` : '未配置价格，无法计算费用' }}
             </p>
@@ -123,11 +113,40 @@
               <div v-for="row in data.provider_usage ?? []" :key="row.provider">
                 <span>{{ row.label }}</span>
                 <strong>{{ formatInteger(row.total_tokens) }}</strong>
-                <small>{{ row.unlimited ? '未设置月度额度' : `${(row.usage_ratio * 100).toFixed(1)}% / ${formatInteger(row.monthly_limit)}` }}</small>
+                <small>本地记录，不代表供应商官方额度</small>
               </div>
             </div>
           </Panel>
         </div>
+
+        <Panel v-if="quotaData?.items?.length" eyebrow="SUBSCRIPTION WINDOWS" title="订阅窗口额度">
+          <template #actions>
+            <button type="button" class="ghost-button" :disabled="quotaFetching" @click="forceRefreshQuota">
+              {{ quotaFetching ? '查询中…' : '强制刷新' }}
+            </button>
+          </template>
+          <p class="muted-copy">额度来自已配置订阅代理的只读管理接口；与上方本地 Token 账本相互独立。</p>
+          <div class="quota-list">
+            <article v-for="snapshot in quotaData.items" :key="snapshot.route_fingerprint">
+              <span>{{ snapshot.route_name }}</span>
+              <strong>{{ quotaStatusLabel(snapshot.status) }}</strong>
+              <small>{{ snapshot.diagnostic_code }}</small>
+              <template v-if="snapshot.status === 'available' || snapshot.status === 'stale'">
+                <div v-for="window in snapshot.windows" :key="`${snapshot.route_fingerprint}:${window.limit_window_seconds}`">
+                  <label :for="`quota-${snapshot.route_fingerprint}-${window.limit_window_seconds}`">
+                    {{ quotaWindowLabel(window.window_type, window.limit_window_seconds) }}：已用 {{ window.used_percent.toFixed(1) }}%，剩余 {{ window.remaining_percent.toFixed(1) }}%
+                  </label>
+                  <progress
+                    :id="`quota-${snapshot.route_fingerprint}-${window.limit_window_seconds}`"
+                    :value="window.used_percent"
+                    max="100"
+                  />
+                  <small>重置时间：{{ formatResetAt(window.reset_at) }}</small>
+                </div>
+              </template>
+            </article>
+          </div>
+        </Panel>
       </template>
     </QueryBoundary>
   </div>
@@ -140,12 +159,13 @@ import { storeToRefs } from "pinia";
 import { useQuery } from "@tanstack/vue-query";
 
 import { resources } from "@/api/resources";
-import type { TokenUsageRow } from "@/api/types";
+import type { SubscriptionQuotaStatus, SubscriptionQuotaWindowType, TokenUsageRow } from "@/api/types";
 import { formatInteger } from "@/lib/format";
 import EmptyState from "@vue-app/components/EmptyState.vue";
 import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
+import SelectField from "@vue-app/components/forms/SelectField.vue";
 import { useBotStore } from "@vue-app/stores/bot";
 
 type WindowKey = "24h" | "7d" | "30d" | "all";
@@ -173,11 +193,61 @@ function setWindow(key: WindowKey) {
 
 const distribution = ref<"model" | "provider" | "purpose" | "group">("model");
 const sortKey = ref<SortKey>("total_tokens");
+const distributionOptions = [
+  { value: "model", label: "按模型" },
+  { value: "provider", label: "按供应商" },
+  { value: "purpose", label: "按用途" },
+  { value: "group", label: "按群聊" },
+];
+const sortOptions = [
+  { value: "total_tokens", label: "总 Token" },
+  { value: "call_count", label: "调用次数" },
+  { value: "prompt_tokens", label: "Prompt" },
+  { value: "completion_tokens", label: "Completion" },
+];
 
 const { data, isPending, error } = useQuery({
   queryKey: ["token-metrics", activeWindow, selectedBotId],
   queryFn: ({ signal }) => resources.metrics(activeWindow.value, selectedBotId.value, signal),
 });
+const quotaForce = ref(false);
+const quotaQuery = useQuery({
+  queryKey: ["subscription-quotas"],
+  queryFn: ({ signal }) => resources.subscriptionQuotas(quotaForce.value, signal),
+});
+const quotaData = quotaQuery.data;
+const quotaFetching = quotaQuery.isFetching;
+
+async function forceRefreshQuota() {
+  quotaForce.value = true;
+  try {
+    await quotaQuery.refetch();
+  } finally {
+    quotaForce.value = false;
+  }
+}
+
+function quotaStatusLabel(status: SubscriptionQuotaStatus): string {
+  return ({
+    available: "可用",
+    not_configured: "未配置",
+    auth_failed: "认证失败",
+    upstream_failed: "上游失败",
+    unsupported: "结构不支持",
+    stale: "缓存已过期",
+  })[status];
+}
+
+function quotaWindowLabel(type: SubscriptionQuotaWindowType, seconds: number): string {
+  if (type === "five_hour") return "五小时窗口";
+  if (type === "weekly") return "七天窗口";
+  return `其它窗口（${seconds} 秒）`;
+}
+
+function formatResetAt(value: number | null): string {
+  if (!value) return "未知";
+  return new Date(value * 1000).toLocaleString("zh-CN");
+}
 
 const total = computed(() => data.value?.total ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, call_count: 0 });
 const average = computed(() => (total.value.call_count ? total.value.total_tokens / total.value.call_count : 0));

@@ -19,7 +19,6 @@ _CLI_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("codex", "codex_cli", ("codex", "codex.cmd", "codex.ps1")),
     ("agy", "antigravity_cli", ("agy", "agy.exe")),
     ("gemini", "gemini_cli", ("gemini", "gemini.cmd", "gemini.ps1")),
-    ("claude", "claude_code", ("claude", "claude.cmd", "claude.ps1")),
     ("opencode", "opencode_cli", ("opencode", "opencode.cmd", "opencode.ps1")),
 )
 
@@ -70,12 +69,6 @@ def _candidate_paths(provider_type: str, plugin_config: Any = None) -> tuple[Pat
             _configured_path(plugin_config, "personification_gemini_cli_auth_path"),
             home / ".gemini" / "oauth_creds.json",
             appdata / "gemini" / "oauth_creds.json",
-        ) if path is not None)
-    if provider_type == "claude_code":
-        return tuple(path for path in (
-            _configured_path(plugin_config, "personification_claude_code_auth_path"),
-            home / ".claude" / ".credentials.json",
-            appdata / "Claude" / ".credentials.json",
         ) if path is not None)
     if provider_type == "opencode_cli":
         return (

@@ -1,4 +1,4 @@
-"""Tests for Gemini/Antigravity/Claude Code tool caller routing."""
+"""Tests for CLI routes and removed-provider caller boundaries."""
 from __future__ import annotations
 
 import asyncio
@@ -34,7 +34,6 @@ class _DummyConfig:
     personification_gemini_cli_project: str = ""
     personification_antigravity_cli_auth_path: str = ""
     personification_antigravity_cli_project: str = ""
-    personification_claude_code_auth_path: str = ""
     personification_gemini_auth_mode: str = "auto"
     personification_api_pools: object = None
 
@@ -71,11 +70,11 @@ def test_normalize_api_type_antigravity_cli_aliases() -> None:
     assert provider_router.normalize_api_type("agy_cli") == "antigravity_cli"
 
 
-def test_normalize_api_type_claude_code_aliases() -> None:
-    assert caller_impl._normalize_api_type("claude_code") == "claude_code"
-    assert caller_impl._normalize_api_type("claude-code") == "claude_code"
-    assert caller_impl._normalize_api_type("ClaudeCode") == "claude_code"
-    assert caller_impl._normalize_api_type("claude_cli") == "claude_code"
+@pytest.mark.parametrize("api_type", ("claude_code", "claude-code", "ClaudeCode", "claude_cli", "claude-cli"))
+def test_normalize_api_type_removed_aliases_are_tombstones(api_type: str) -> None:
+    assert caller_impl._normalize_api_type(api_type) == "provider_type_removed"
+    assert provider_router.normalize_api_type(api_type) == "provider_type_removed"
+    assert ai_routes._normalize_api_type(api_type) == "provider_type_removed"
 
 
 def test_normalize_api_type_keeps_existing_routes() -> None:
@@ -713,13 +712,29 @@ def test_build_tool_caller_returns_antigravity_cli_instance() -> None:
     assert caller.project_override == "agy-project"
 
 
-def test_build_tool_caller_returns_claude_code_instance() -> None:
-    cfg = _DummyConfig(
-        personification_api_type="claude_code",
-        personification_model="claude-opus-4-7",
+@pytest.mark.parametrize("api_type", ("claude_code", "claude-code", "ClaudeCode", "claude_cli", "claude-cli"))
+def test_build_tool_caller_rejects_removed_route_before_reading_credentials(api_type: str) -> None:
+    class _TombstoneConfig:
+        personification_api_type = api_type
+
+        def __getattr__(self, name: str):  # noqa: ANN204
+            raise AssertionError(f"removed route unexpectedly read {name}")
+
+    with pytest.raises(caller_impl.ProviderTypeRemovedError) as exc_info:
+        caller_impl.build_tool_caller(_TombstoneConfig())
+    assert exc_info.value.code == "provider_type_removed"
+
+
+def test_build_tool_caller_keeps_standard_anthropic_api_available() -> None:
+    caller = caller_impl.build_tool_caller(
+        _DummyConfig(
+            personification_api_type="anthropic",
+            personification_api_key="anthropic-api-key",
+            personification_api_url="https://api.anthropic.com",
+            personification_model="claude-opus-4-7",
+        )
     )
-    caller = caller_impl.build_tool_caller(cfg)
-    assert isinstance(caller, caller_impl.ClaudeCodeToolCaller)
+    assert isinstance(caller, caller_impl.AnthropicToolCaller)
     assert caller.model == "claude-opus-4-7"
 
 
@@ -747,28 +762,125 @@ def test_provider_router_accepts_cli_legacy_routes_without_api_key(monkeypatch) 
     assert antigravity_providers[0]["auth_path"] == "C:/tmp/agy.json"
     assert antigravity_providers[0]["project"] == "agy-project"
 
-    claude_cfg = _DummyConfig(
-        personification_api_type="claude_code",
-        personification_model="claude-opus-4-7",
-        personification_claude_code_auth_path="C:/tmp/claude.json",
-    )
-    claude_providers = provider_router.get_configured_api_providers(claude_cfg, _Logger())
-    assert claude_providers[0]["api_type"] == "claude_code"
-    assert claude_providers[0]["auth_path"] == "C:/tmp/claude.json"
-
-
-def test_provider_router_accepts_cli_pool_routes_without_api_key() -> None:
+def test_provider_router_skips_removed_pool_route_without_copying_credentials() -> None:
     cfg = _DummyConfig(
         personification_api_pools=(
             '[{"name":"local-gemini","api_type":"gemini_cli","model":"gemini-3.1-pro-preview",'
             '"auth_path":"C:/tmp/gemini.json","project":"cloud-project"},'
-            '{"name":"local-claude","api_type":"claude_code","model":"claude-opus-4-7",'
-            '"auth_path":"C:/tmp/claude.json"}]'
+            '{"name":"removed-route","api_type":"claude_code","model":"claude-opus-4-7",'
+            '"auth_path":"C:/tmp/claude.json","api_key":"do-not-echo"}]'
         )
     )
     providers = provider_router.get_configured_api_providers(cfg, _Logger())
-    assert [item["api_type"] for item in providers] == ["gemini_cli", "claude_code"]
+    assert [item["api_type"] for item in providers] == ["gemini_cli"]
     assert providers[0]["project"] == "cloud-project"
+    tombstones = provider_router.detect_removed_provider_routes(cfg)
+    assert tombstones == [{
+        "api_type": "provider_type_removed",
+        "enabled": False,
+        "diagnostic_code": "provider_type_removed",
+        "migration_hint": tombstones[0]["migration_hint"],
+        "source": "personification_api_pools",
+        "route_index": 1,
+    }]
+    assert "do-not-echo" not in repr(tombstones)
+    assert "C:/tmp/claude.json" not in repr(tombstones)
+
+
+def test_ai_routes_reject_removed_provider_before_building_a_caller() -> None:
+    with pytest.raises(RuntimeError) as exc_info:
+        ai_routes.build_single_provider_caller(
+            _DummyConfig(),
+            {
+                "api_type": "claude_cli",
+                "model": "claude-opus-4-7",
+                "auth_path": "C:/tmp/should-not-be-read.json",
+            },
+        )
+    assert getattr(exc_info.value, "code", "") == "provider_type_removed"
+
+
+def test_removed_legacy_primary_is_not_a_provider_or_fallback_candidate(monkeypatch) -> None:
+    monkeypatch.setattr(provider_router, "_load_env_api_pool_config", lambda _logger: [])
+    cfg = SimpleNamespace(
+        personification_api_pools=None,
+        personification_api_type="claude_code",
+        personification_model="claude-opus-4-7",
+        personification_api_url="https://unused.example/v1",
+        personification_api_key="do-not-copy",
+    )
+
+    class _CollectingLogger:
+        def __init__(self) -> None:
+            self.warnings: list[str] = []
+
+        def info(self, *_args, **_kwargs) -> None:
+            return None
+
+        def warning(self, message: str, *_args, **_kwargs) -> None:
+            self.warnings.append(str(message))
+
+        def error(self, *_args, **_kwargs) -> None:
+            return None
+
+    logger = _CollectingLogger()
+    assert provider_router.get_configured_api_providers(cfg, logger) == []
+    assert provider_router.get_provider_candidates(cfg, logger) == []
+    assert any("provider_type_removed" in message for message in logger.warnings)
+    assert "do-not-copy" not in "\n".join(logger.warnings)
+
+
+@pytest.mark.parametrize("api_type", ("claude_code", "claude-code", "ClaudeCode", "claude_cli", "claude-cli"))
+def test_removed_primary_and_fallback_types_do_not_read_stale_credentials(monkeypatch, api_type: str) -> None:
+    monkeypatch.setattr(provider_router, "_load_env_api_pool_config", lambda _logger: [])
+    monkeypatch.setattr(provider_router, "_read_env_api_pool_raw", lambda: "")
+
+    class _RemovedPrimaryConfig:
+        personification_api_pools = None
+        personification_api_type = api_type
+
+        def __getattr__(self, name: str):  # noqa: ANN204
+            if name in {"personification_api_url", "personification_api_key", "personification_model"}:
+                raise AssertionError(f"removed primary unexpectedly read {name}")
+            return ""
+
+    primary = ai_routes.get_primary_provider_config(_RemovedPrimaryConfig(), _Logger())
+    assert primary == {
+        "api_type": "provider_type_removed",
+        "api_url": "",
+        "api_key": "",
+        "model": "",
+        "auth_path": "",
+        "gemini_auth_mode": "auto",
+    }
+
+    class _RemovedFallbackConfig:
+        personification_api_pools = []
+        personification_api_type = "openai"
+        personification_api_url = ""
+        personification_api_key = ""
+        personification_model = ""
+        personification_fallback_enabled = True
+        personification_fallback_api_type = api_type
+        personification_gemini_auth_mode = "auto"
+
+        def __getattr__(self, name: str):  # noqa: ANN204
+            if name.startswith("personification_fallback_"):
+                raise AssertionError(f"removed fallback unexpectedly read {name}")
+            return ""
+
+    assert ai_routes.resolve_global_fallback_provider(_RemovedFallbackConfig()) is None
+
+    class _RemovedVideoFallbackConfig:
+        personification_video_fallback_enabled = True
+        personification_video_fallback_provider = api_type
+
+        def __getattr__(self, name: str):  # noqa: ANN204
+            if name.startswith("personification_video_fallback_"):
+                raise AssertionError(f"removed video fallback unexpectedly read {name}")
+            return ""
+
+    assert ai_routes.resolve_video_fallback_provider(_RemovedVideoFallbackConfig()) is None
 
 
 def test_provider_router_prefers_multiline_env_pool_when_runtime_value_is_truncated(monkeypatch) -> None:
@@ -959,19 +1071,6 @@ def test_routed_config_proxy_passes_cli_auth_fields_to_tool_caller() -> None:
     assert isinstance(antigravity_caller, caller_impl.AntigravityCliToolCaller)
     assert antigravity_caller.auth_path_override == "C:/tmp/agy.json"
     assert antigravity_caller.project_override == "agy-project"
-
-    claude_proxy = ai_routes._ProviderConfigProxy(
-        base,
-        {
-            "api_type": "claude_code",
-            "model": "claude-opus-4-7",
-            "auth_path": "C:/tmp/claude.json",
-        },
-    )
-    claude_caller = caller_impl.build_tool_caller(claude_proxy)
-    assert isinstance(claude_caller, caller_impl.ClaudeCodeToolCaller)
-    assert claude_caller.auth_path_override == "C:/tmp/claude.json"
-
 
 def test_gemini_cli_resolves_project_from_load_code_assist_before_local_file(monkeypatch) -> None:
     temp_dir = _make_workspace_temp_dir("gemini-project-")

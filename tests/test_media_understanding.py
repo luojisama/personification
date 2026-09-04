@@ -16,6 +16,14 @@ vision_caller = load_personification_module(
 )
 
 
+def test_removed_provider_aliases_cannot_supply_media_routes() -> None:
+    for alias in ("claude_code", "claude-code", "ClaudeCode", "claude_cli", "claude-cli"):
+        assert media_understanding._normalize_media_api_type(alias) == "provider_type_removed"
+        assert media_understanding._is_provider_usable(
+            {"api_type": alias, "api_key": "do-not-use", "model": "claude-opus-4-7"}
+        ) is False
+
+
 def test_structured_empty_video_result_is_not_treated_as_evidence() -> None:
     assert not media_understanding._media_result_has_evidence(
         '{"scene_summary":"","visual_evidence":[],"ambiguity_notes":["vision_unavailable"]}'

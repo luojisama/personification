@@ -1397,7 +1397,7 @@ function defaultApiProvider(index) {
 
 function apiProviderFieldVisible(apiType, field) {
   const type = (apiType || "openai").replaceAll("-", "_");
-  if (["openai_codex", "codex", "claude_code", "claude_cli"].includes(type)) {
+  if (["openai_codex", "codex"].includes(type)) {
     return !["api_url", "api_key", "project"].includes(field);
   }
   if (["gemini_cli", "antigravity_cli", "agy", "agy_cli"].includes(type)) {
@@ -1497,7 +1497,7 @@ function renderApiPoolEditor(e) {
 function renderApiProviderCard(field, provider, index) {
   provider = hydrateApiProviderModelProbe(field, index, provider || {});
   const apiType = provider.api_type || "openai";
-  const choices = ["openai", "openai_codex", "gemini", "gemini_cli", "antigravity_cli", "anthropic", "claude_code"];
+  const choices = ["openai", "openai_codex", "gemini", "gemini_cli", "antigravity_cli", "anthropic"];
   const typeOptions = choices.map(c => `<option value="${escapeAttr(c)}" ${apiType===c?'selected':''}>${escapeHtml(c)}</option>`).join("");
   const fieldHtml = (name, label, type = "text", extra = "") => {
     if (!apiProviderFieldVisible(apiType, name)) return "";

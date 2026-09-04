@@ -15,6 +15,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from ...core import config_registry, env_writer, webui_audit_log
 from ...core.config_search import build_config_search_index
 from ...core.operation_diagnostics import detail, diagnostic, exception_diagnostic, step
+from ...core.provider_types import (
+    PROVIDER_TYPE_REMOVED,
+    is_removed_provider_type,
+    removed_provider_tombstone,
+)
 from ...core.sensitive_data import sanitize_object
 from ..deps import AdminIdentity, require_admin
 
@@ -614,8 +619,6 @@ def _cached_cli_models(runtime: Any, provider: dict[str, Any]) -> list[dict[str,
         _add_model(models, seen, configured_model or "auto-gemini-3", source="gemini_cli_default")
     elif api_type == "antigravity_cli":
         _add_model(models, seen, configured_model or "auto-gemini-3", source="antigravity_cli_default")
-    elif api_type == "claude_code":
-        _add_model(models, seen, configured_model or "claude-opus-4-7", source="claude_code_default")
     return models
 
 
@@ -656,6 +659,7 @@ def _entry_to_view(entry: Any, *, plugin_config: Any) -> ConfigEntryView:
         min_value=entry.min_value,
         max_value=entry.max_value,
         scope=entry.scope,
+        ui_schema=dict(getattr(entry, "ui_schema", None) or {}),
     )
 
 
@@ -670,7 +674,17 @@ def _provider_secret_ref(provider: dict[str, Any], index: int) -> str:
 
 
 def _provider_transport_identity(provider: dict[str, Any]) -> tuple[str, ...]:
-    fields = ("api_type", "api_url", "auth_path", "project", "proxy")
+    fields = (
+        "api_type",
+        "api_url",
+        "auth_path",
+        "project",
+        "proxy",
+        "account_mode",
+        "subscription_quota_kind",
+        "subscription_management_url",
+        "subscription_auth_index",
+    )
     return (
         *(str(provider.get(field) or "").strip() for field in fields),
         str(provider.get("gemini_auth_mode", "auto") or "auto").strip().lower(),
@@ -693,9 +707,51 @@ def _mask_api_pool_config(value: Any) -> Any:
     if not isinstance(value, list) or not isinstance(sanitized, list):
         return sanitized
     for index, (original, masked) in enumerate(zip(value, sanitized)):
+        if isinstance(original, dict) and is_removed_provider_type(original.get("api_type")):
+            sanitized[index] = removed_provider_tombstone(
+                source="personification_api_pools",
+                index=index,
+            )
+            continue
         if isinstance(original, dict) and isinstance(masked, dict):
             masked["_secret_ref"] = _provider_secret_ref(original, index)
     return sanitized
+
+
+def _removed_provider_routes_from_value(field_name: str, value: Any) -> list[dict[str, Any]]:
+    """Detect removed routes before a write can preserve their old credentials."""
+
+    if field_name == "personification_api_type":
+        return (
+            [removed_provider_tombstone(source="personification_api_type")]
+            if is_removed_provider_type(value)
+            else []
+        )
+    if field_name != "personification_api_pools" or not isinstance(value, list):
+        return []
+    return [
+        removed_provider_tombstone(source="personification_api_pools", index=index)
+        for index, item in enumerate(value)
+        if isinstance(item, dict) and is_removed_provider_type(item.get("api_type"))
+    ]
+
+
+def _removed_provider_route_error(routes: list[dict[str, Any]]) -> HTTPException:
+    payload = diagnostic(
+        ok=False,
+        code=PROVIDER_TYPE_REMOVED,
+        phase="request_validation",
+        title="已移除的 Provider 类型",
+        message="Claude Code OAuth CLI Provider 已移除，未保存旧路由或旧凭据。",
+        details=(detail("Provider", PROVIDER_TYPE_REMOVED, "error"),),
+        suggestion="改用标准 anthropic API，并重新填写 API 地址、API Key 与模型。",
+        retryable=False,
+    )
+    payload["removed_routes"] = routes
+    return HTTPException(
+        status_code=400,
+        detail=payload,
+    )
 
 
 def _restore_masked_value(value: Any, existing: Any) -> Any:
@@ -740,7 +796,19 @@ def _restore_masked_config_secrets(field_name: str, value: Any, plugin_config: A
         if current is None:
             raise ValueError("masked provider secret reference is invalid")
         for field, old_value in zip(
-            ("api_type", "api_url", "auth_path", "project", "proxy", "gemini_auth_mode", "media_protocol"),
+            (
+                "api_type",
+                "api_url",
+                "auth_path",
+                "project",
+                "proxy",
+                "account_mode",
+                "subscription_quota_kind",
+                "subscription_management_url",
+                "subscription_auth_index",
+                "gemini_auth_mode",
+                "media_protocol",
+            ),
             _provider_transport_identity(current),
         ):
             new_value = candidate.get(
@@ -783,16 +851,47 @@ def build_config_router(*, runtime) -> APIRouter:
                         view.sources[source_name] = _MASKED_CONFIG_VALUE
                 continue
             raw_current = view.current
+            raw_default = view.default
+            raw_sources = dict(view.sources)
             view.current = sanitize_object(raw_current)
             if view.field_name == "personification_api_pools":
                 view.current = _mask_api_pool_config(raw_current)
-            view.default = sanitize_object(view.default)
+            elif view.field_name == "personification_api_type" and is_removed_provider_type(raw_current):
+                view.current = PROVIDER_TYPE_REMOVED
+            view.default = sanitize_object(raw_default)
             view.sources = {
                 source_name: sanitize_object(source_value)
-                for source_name, source_value in view.sources.items()
+                for source_name, source_value in raw_sources.items()
             }
+            if view.field_name == "personification_api_pools":
+                # Source snapshots can contain the same stale nested route as
+                # current.  Replace it with the same safe tombstone rather
+                # than relying on generic secret masking (which could leave an
+                # auth-path-like field visible).
+                view.default = _mask_api_pool_config(raw_default)
+                view.sources = {
+                    source_name: _mask_api_pool_config(source_value)
+                    for source_name, source_value in raw_sources.items()
+                }
+            if view.field_name == "personification_api_type":
+                if is_removed_provider_type(raw_default):
+                    view.default = PROVIDER_TYPE_REMOVED
+                view.sources = {
+                    source_name: (
+                        PROVIDER_TYPE_REMOVED
+                        if is_removed_provider_type(raw_sources.get(source_name))
+                        else source_value
+                    )
+                    for source_name, source_value in view.sources.items()
+                }
         groups = sorted({view.group for view in entries})
-        return ConfigEntriesResponse(entries=entries, groups=groups)
+        from ...core.provider_router import detect_removed_provider_routes
+
+        return ConfigEntriesResponse(
+            entries=entries,
+            groups=groups,
+            removed_provider_routes=detect_removed_provider_routes(runtime.plugin_config),
+        )
 
     @router.get("/recommended-defaults")
     async def recommended_defaults(_: AdminIdentity = Depends(require_admin)) -> dict:
@@ -960,6 +1059,9 @@ def build_config_router(*, runtime) -> APIRouter:
             )
         try:
             normalized = entry.normalize_value(payload.value)
+            removed_routes = _removed_provider_routes_from_value(field_name, normalized)
+            if removed_routes:
+                raise _removed_provider_route_error(removed_routes)
             normalized = _restore_masked_config_secrets(
                 field_name,
                 normalized,
@@ -979,6 +1081,9 @@ def build_config_router(*, runtime) -> APIRouter:
                     retryable=True,
                 ),
             )
+        removed_routes = _removed_provider_routes_from_value(field_name, normalized)
+        if removed_routes:
+            raise _removed_provider_route_error(removed_routes)
         try:
             result = env_writer.write_both(field_name, normalized, runtime.plugin_config)
             if not isinstance(result, dict):
@@ -1340,6 +1445,22 @@ def build_config_router(*, runtime) -> APIRouter:
                     retryable=True,
                 ),
             )
+        if is_removed_provider_type(provider.get("api_type")):
+            result = removed_provider_tombstone(source="provider_model_probe")
+            result.update({"source": "removed", "manual_allowed": False, "models": []})
+            return _attach_diagnostic(
+                result,
+                diagnostic(
+                    ok=False,
+                    code=PROVIDER_TYPE_REMOVED,
+                    phase="request_validation",
+                    title="已移除的 Provider 类型",
+                    message="Claude Code OAuth CLI Provider 已移除，未发起模型探测。",
+                    details=(detail("Provider", PROVIDER_TYPE_REMOVED, "error"),),
+                    suggestion="改用标准 anthropic API，并重新填写 API 地址、API Key 与模型。",
+                    retryable=False,
+                ),
+            )
         try:
             provider = _restore_masked_config_secrets(
                 "personification_api_pools",
@@ -1360,7 +1481,22 @@ def build_config_router(*, runtime) -> APIRouter:
                 ),
             )
         api_type = normalize_api_type(provider.get("api_type"))
-        cli_types = {"openai_codex", "gemini_cli", "antigravity_cli", "claude_code"}
+        if api_type == PROVIDER_TYPE_REMOVED:
+            result = removed_provider_tombstone(source="provider_model_probe")
+            result.update({"source": "removed", "manual_allowed": False, "models": []})
+            return _attach_diagnostic(
+                result,
+                diagnostic(
+                    ok=False,
+                    code=PROVIDER_TYPE_REMOVED,
+                    phase="request_validation",
+                    title="已移除的 Provider 类型",
+                    message="Claude Code OAuth CLI Provider 已移除，未发起模型探测。",
+                    suggestion="改用标准 anthropic API，并重新填写 API 地址、API Key 与模型。",
+                    retryable=False,
+                ),
+            )
+        cli_types = {"openai_codex", "gemini_cli", "antigravity_cli"}
         if api_type in cli_types:
             cached = _cached_cli_models(runtime, provider)
             result = {

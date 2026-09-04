@@ -27,6 +27,11 @@ from plugin.personification.core.gemini_transport import (
 from plugin.personification.core.llm_context import current_llm_context, use_single_attempt_retry_policy
 from plugin.personification.core.message_parts import extract_text_from_parts, normalize_message_parts
 from plugin.personification.core.media_refs import normalize_audio_ref, normalize_video_ref
+from plugin.personification.core.provider_types import (
+    PROVIDER_TYPE_REMOVED,
+    normalize_removed_provider_type,
+    removed_provider_migration_hint,
+)
 from plugin.personification.core.time_ctx import build_current_time_context_block, inject_current_time_context
 
 
@@ -765,6 +770,16 @@ class ProviderModelCandidateUnavailable(httpx.HTTPStatusError):
         self.next_model = str(next_model or "")
 
 
+class ProviderTypeRemovedError(RuntimeError):
+    """Raised before a removed OAuth/CLI route can inspect credentials or call upstream."""
+
+    code = PROVIDER_TYPE_REMOVED
+    retryable = False
+
+    def __init__(self) -> None:
+        super().__init__(f"{PROVIDER_TYPE_REMOVED}: {removed_provider_migration_hint()}")
+
+
 def _obj_get(value: Any, key: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(key, default)
@@ -772,7 +787,9 @@ def _obj_get(value: Any, key: str, default: Any = None) -> Any:
 
 
 def _normalize_api_type(api_type: Optional[str]) -> str:
-    value = (api_type or "openai").strip().lower()
+    value = normalize_removed_provider_type(api_type or "openai")
+    if value == PROVIDER_TYPE_REMOVED:
+        return PROVIDER_TYPE_REMOVED
     if value in {"gemini", "gemini_official"}:
         return "gemini_official"
     if value in {"gemini_cli", "gemini-cli", "geminicli"}:
@@ -781,8 +798,6 @@ def _normalize_api_type(api_type: Optional[str]) -> str:
         return "antigravity_cli"
     if value == "anthropic":
         return "anthropic"
-    if value in {"claude_code", "claude-code", "claudecode", "claude_cli", "claude-cli"}:
-        return "claude_code"
     if value in {"openai_codex", "codex"}:
         return "openai_codex"
     return "openai"
@@ -3443,10 +3458,10 @@ class OpenAICodexToolCaller(ToolCaller):
 
 
 # ============================================================================
-# Gemini CLI / Antigravity CLI / Claude Code 本地凭证调用
+# Gemini CLI / Antigravity CLI 本地凭证调用
 # ============================================================================
 #
-# 复用 gemini-cli / antigravity-cli / claude-code 在本机保存的 OAuth token，直接 HTTP 调用云端，
+# 复用 gemini-cli / antigravity-cli 在本机保存的 OAuth token，直接 HTTP 调用云端，
 # 不再要求用户单独配 API key。token 过期由对应 cli 自身的下次启动负责刷新；
 # 这里失败时会抛出明确的错误提示让用户重新登录 cli。
 
@@ -3465,10 +3480,6 @@ _GEMINI_CLI_CLIENT_METADATA = {
     "platform": "PLATFORM_UNSPECIFIED",
     "pluginType": "GEMINI",
 }
-_CLAUDE_CODE_API_ENDPOINT = "https://api.anthropic.com/v1/messages"
-_CLAUDE_CODE_OAUTH_BETA = "oauth-2025-04-20"
-
-
 def _find_gemini_cli_auth_file(override_path: str = "") -> _Path | None:
     return _find_gemini_cli_auth_file_with_log(override_path)[0]
 
@@ -5321,181 +5332,10 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
             raise
 
 
-def _find_claude_code_auth_file(override_path: str = "") -> _Path | None:
-    if override_path:
-        p = _expand_user_path(override_path)
-        if p.exists():
-            return p
-    candidates = [
-        _os.environ.get("CLAUDE_CODE_HOME", ""),
-        _os.environ.get("CLAUDE_HOME", ""),
-    ]
-    for base in candidates:
-        if base:
-            p = _expand_user_path(base) / ".credentials.json"
-            if p.exists():
-                return p
-    for fallback in [
-        "~/.claude/.credentials.json",
-        "~/AppData/Roaming/claude/.credentials.json",
-        "~/.config/claude/.credentials.json",
-    ]:
-        p = _expand_user_path(fallback)
-        if p.exists():
-            return p
-    return None
-
-
-def _load_claude_code_auth(auth_path: _Path) -> dict:
-    try:
-        return json.loads(auth_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise RuntimeError(f"读取 claude-code .credentials.json 失败: {exc}") from exc
-
-
-def _get_claude_code_access_token(auth: dict) -> str:
-    nested = auth.get("claudeAiOauth") if isinstance(auth, dict) else None
-    if isinstance(nested, dict):
-        token = str(nested.get("accessToken", "") or "").strip()
-        if token:
-            return token
-    for key in ("accessToken", "access_token"):
-        token = str(auth.get(key, "") or "").strip()
-        if token:
-            return token
-    return ""
-
-
-class ClaudeCodeToolCaller(AnthropicToolCaller):
-    """复用 claude-code 本地 OAuth 凭证调用 Anthropic Messages API。"""
-
-    def __init__(
-        self,
-        *,
-        model: str,
-        auth_path: str = "",
-        thinking_mode: str = "none",
-        timeout: float = 120.0,
-    ) -> None:
-        super().__init__(
-            api_key="",
-            base_url="",
-            model=(model or "claude-opus-4-7").strip() or "claude-opus-4-7",
-            thinking_mode=thinking_mode,
-            timeout=timeout,
-        )
-        self.auth_path_override = auth_path
-
-    def _get_access_token(self) -> str:
-        auth_file = _find_claude_code_auth_file(self.auth_path_override)
-        if auth_file is None:
-            raise RuntimeError(
-                "未找到 claude-code .credentials.json。"
-                "请先运行 `claude login` 完成 Anthropic OAuth 登录，"
-                "或在配置中设置 personification_claude_code_auth_path。"
-            )
-        auth = _load_claude_code_auth(auth_file)
-        token = _get_claude_code_access_token(auth)
-        if not token:
-            raise RuntimeError(
-                "claude-code .credentials.json 中 accessToken 为空，请重新执行 `claude login`。"
-            )
-        return token
-
-    async def chat_with_tools(
-        self,
-        messages: List[dict],
-        tools: List[dict],
-        use_builtin_search: bool,
-    ) -> ToolCallerResponse:
-        from anthropic import AsyncAnthropic
-
-        messages = inject_current_time_context(messages)
-        contains_image_input = _messages_contain_images(messages)
-        wire_tools_count = 0
-        try:
-            access_token = self._get_access_token()
-            system_instruction, anthropic_messages = _convert_messages_to_anthropic(messages)
-            filtered_tools = [
-                tool
-                for tool in tools
-                if not (
-                    use_builtin_search
-                    and str(_obj_get(_obj_get(tool, "function", {}), "name", "") or "") == "web_search"
-                )
-            ]
-            tool_payload = [_convert_openai_tool_to_anthropic(tool) for tool in filtered_tools]
-            wire_tools_count = len(filtered_tools)
-            if use_builtin_search:
-                tool_payload.append(dict(ANTHROPIC_BUILTIN_SEARCH_TOOL))
-
-            client_kwargs: Dict[str, Any] = {
-                "auth_token": access_token,
-                "timeout": self.timeout,
-                "default_headers": {"anthropic-beta": _CLAUDE_CODE_OAUTH_BETA},
-            }
-            if use_single_attempt_retry_policy():
-                client_kwargs["max_retries"] = 0
-            client = AsyncAnthropic(**client_kwargs)
-
-            payload: Dict[str, Any] = {
-                "model": self.model,
-                "messages": anthropic_messages,
-                "max_tokens": 1024,
-            }
-            if system_instruction:
-                payload["system"] = system_instruction
-            if tool_payload:
-                payload["tools"] = tool_payload
-            thinking = _maybe_anthropic_thinking(self.thinking_mode)
-            if thinking:
-                payload["thinking"] = thinking
-
-            response = await client.messages.create(**payload)
-
-            content_blocks = list(_obj_get(response, "content", []) or [])
-            response_data = _response_to_dict(response)
-            text_parts: List[str] = []
-            tool_calls: List[ToolCall] = []
-            for block in content_blocks:
-                block_type = _obj_get(block, "type", "")
-                if block_type == "text":
-                    text_parts.append(str(_obj_get(block, "text", "")))
-                elif block_type == "tool_use":
-                    tool_calls.append(
-                        ToolCall(
-                            id=str(_obj_get(block, "id", "")),
-                            name=str(_obj_get(block, "name", "")),
-                            arguments=_parse_tool_arguments(_obj_get(block, "input", {}) or {}),
-                        )
-                    )
-
-            finish_reason = "tool_calls" if tool_calls else "stop"
-            used_builtin = _anthropic_used_builtin_search(content_blocks)
-            return ToolCallerResponse(
-                finish_reason=finish_reason,
-                content="".join(text_parts).strip(),
-                tool_calls=tool_calls,
-                raw=response,
-                used_builtin_search=used_builtin,
-                usage=_extract_usage(response),
-                model_used=str(getattr(self, "model", "") or ""),
-                wire_tools_count=wire_tools_count,
-                provider_history=(
-                    copy.deepcopy(list(response_data.get("content", []) or []))
-                    if tool_calls
-                    else None
-                ),
-            )
-        except Exception as exc:
-            _attach_wire_tools_count(exc, wire_tools_count)
-            if contains_image_input and _error_indicates_vision_unavailable(exc):
-                return _vision_unavailable_response(exc)
-            raise
-
-
 def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) -> ToolCaller:
     api_type = _normalize_api_type(getattr(config, "personification_api_type", "openai"))
+    if api_type == PROVIDER_TYPE_REMOVED:
+        raise ProviderTypeRemovedError()
     api_key = str(getattr(config, "personification_api_key", "") or "").strip()
     api_url = str(getattr(config, "personification_api_url", "") or "").strip()
     model = str(getattr(config, "personification_model", "") or "").strip()
@@ -5553,13 +5393,6 @@ def build_tool_caller(config: Any, supports_reasoning: Optional[bool] = None) ->
             model=model,
             thinking_mode=thinking_mode,
             streaming_mode=streaming_mode,
-        )
-    if api_type == "claude_code":
-        auth_path = str(getattr(config, "personification_claude_code_auth_path", "") or "").strip()
-        return ClaudeCodeToolCaller(
-            model=model or "claude-opus-4-7",
-            auth_path=auth_path,
-            thinking_mode=thinking_mode,
         )
     if api_type == "openai_codex":
         auth_path = str(getattr(config, "personification_codex_auth_path", "") or "").strip()

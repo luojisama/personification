@@ -15,10 +15,9 @@ _BUILTIN_SEARCH_CALLER_NAMES = frozenset(
         "GeminiToolCaller",
         "AnthropicToolCaller",
         "OpenAICodexToolCaller",
-        # 三个 CLI 协议 caller 内部也已注入对应原生 search 工具（impl.py:3203/3741/4005）
+        # 两个 CLI 协议 caller 内部也已注入对应原生 search 工具。
         "GeminiCliToolCaller",
         "AntigravityCliToolCaller",
-        "ClaudeCodeToolCaller",
     }
 )
 

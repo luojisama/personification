@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 
 from ...core import metrics, token_ledger
+from ...core.subscription_quota import query_subscription_quotas
 from ...core.db import get_db_path
 from ...core.onebot_cache import get_group_name_map
 from ...core.runtime_performance import register_cache_reporter
@@ -22,13 +23,6 @@ _PROVIDER_LABELS = {
     "openai": "OpenAI",
     "gemini": "Gemini/Antigravity CLI",
     "codex": "Codex / ChatGPT",
-}
-
-_QUOTA_FIELDS = {
-    "anthropic": "personification_quota_anthropic_monthly_tokens",
-    "openai": "personification_quota_openai_monthly_tokens",
-    "gemini": "personification_quota_gemini_cli_monthly_tokens",
-    "codex": "personification_quota_codex_monthly_tokens",
 }
 
 _PURPOSE_LABELS = {
@@ -76,16 +70,6 @@ def _reset_dashboard_cache_for_testing() -> None:
         _DASHBOARD_CACHE_EVICTIONS = 0
 
 
-def _resolve_limit(plugin_config, provider: str) -> int:
-    field = _QUOTA_FIELDS.get(provider, "")
-    if not field:
-        return 0
-    try:
-        return max(0, int(getattr(plugin_config, field, 0) or 0))
-    except Exception:
-        return 0
-
-
 def _provider_usage(*, plugin_config, window: str, data: dict[str, Any] | None = None) -> list[dict]:
     data = data if isinstance(data, dict) else token_ledger.query_provider_summary(window)
     rows = list(data.get("providers", []) or [])
@@ -101,7 +85,6 @@ def _provider_usage(*, plugin_config, window: str, data: dict[str, Any] | None =
                 "call_count": 0,
             },
         )
-        limit = _resolve_limit(plugin_config, provider_key) if plugin_config else 0
         used = int(entry.get("total_tokens", 0) or 0)
         items.append(
             {
@@ -111,9 +94,7 @@ def _provider_usage(*, plugin_config, window: str, data: dict[str, Any] | None =
                 "completion_tokens": int(entry.get("completion_tokens", 0) or 0),
                 "total_tokens": used,
                 "call_count": int(entry.get("call_count", 0) or 0),
-                "monthly_limit": limit,
-                "usage_ratio": round(used / limit, 4) if limit > 0 else 0.0,
-                "unlimited": limit == 0,
+                "source": "local_token_ledger",
             }
         )
     for entry in rows:
@@ -128,9 +109,7 @@ def _provider_usage(*, plugin_config, window: str, data: dict[str, Any] | None =
                 "completion_tokens": int(entry.get("completion_tokens", 0) or 0),
                 "total_tokens": int(entry.get("total_tokens", 0) or 0),
                 "call_count": int(entry.get("call_count", 0) or 0),
-                "monthly_limit": 0,
-                "usage_ratio": 0.0,
-                "unlimited": True,
+                "source": "local_token_ledger",
             }
         )
     return items
@@ -149,10 +128,7 @@ def _billing_summary(summary: dict, provider_usage: list[dict]) -> dict:
                 "tokens": int(point.get("total_tokens", 0) or 0),
             }
         )
-    limited = [p for p in provider_usage if int(p.get("monthly_limit", 0) or 0) > 0]
     used_tokens = sum(int(p.get("total_tokens", 0) or 0) for p in provider_usage)
-    limited_used_tokens = sum(int(p.get("total_tokens", 0) or 0) for p in limited)
-    limit_tokens = sum(int(p.get("monthly_limit", 0) or 0) for p in limited)
     return {
         "request_cost": 0.0,
         "credit_deduction": 0.0,
@@ -161,12 +137,10 @@ def _billing_summary(summary: dict, provider_usage: list[dict]) -> dict:
         "series": series,
         "quota": {
             "used_tokens": used_tokens,
-            "limited_used_tokens": limited_used_tokens,
-            "limit_tokens": limit_tokens,
-            "limited_provider_count": len(limited),
-            "unlimited": len(limited) == 0,
+            "source": "local_token_ledger",
+            "official_provider_quota": False,
         },
-        "note": "本地令牌账本当前没有模型单价配置，费用字段显示为 $0.00；额度进度按 provider 月度令牌额度统计。",
+        "note": "这里展示本地 Token 账本，不代表供应商官方额度；只有明确配置的订阅代理会在独立区域显示窗口额度。",
     }
 
 
@@ -373,6 +347,16 @@ def build_metrics_router(*, runtime) -> APIRouter:
             "counters": list(snap.get("counters", []))[:30],
             "timings": list(snap.get("timings", []))[:30],
         }
+
+    @router.get("/subscription-quotas")
+    async def subscription_quotas(
+        force: bool = Query(default=False),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        return await query_subscription_quotas(
+            getattr(runtime, "plugin_config", None),
+            force=force,
+        )
 
     return router
 

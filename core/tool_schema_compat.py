@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
+from .provider_types import PROVIDER_TYPE_REMOVED, normalize_removed_provider_type
+
 
 class SchemaAction(str, Enum):
     KEEP = "keep"
@@ -225,7 +227,7 @@ _COMBINATION_ANNOTATION_KEYS = frozenset(
 
 
 def _normalize_api_type(value: Any) -> str:
-    return str(value or "").strip().lower().replace("-", "_")
+    return normalize_removed_provider_type(value)
 
 
 def resolve_schema_profile(
@@ -244,7 +246,9 @@ def resolve_schema_profile(
 
     provider_name = str(provider or "").strip().lower()
     normalized_type = _normalize_api_type(api_type)
-    if normalized_type in {"anthropic", "claude_code", "claude_cli"} or provider_name == "anthropic":
+    if normalized_type == PROVIDER_TYPE_REMOVED:
+        return OPENAI_COMPATIBLE_PROFILE
+    if normalized_type == "anthropic" or provider_name == "anthropic":
         return ANTHROPIC_PROFILE
     if normalized_type in {
         "gemini",

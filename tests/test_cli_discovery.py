@@ -36,7 +36,10 @@ def test_cli_discovery_returns_only_redacted_status(monkeypatch) -> None:  # noq
     serialized = json.dumps(result, ensure_ascii=False)
 
     assert result["schema_version"] == 1
-    assert len(result["items"]) == 5
+    assert len(result["items"]) == 4
+    assert {item["provider_type"] for item in result["items"]}.isdisjoint(
+        {"claude_code", "claude_cli", "claudecode"}
+    )
     agy = next(item for item in result["items"] if item["provider_type"] == "antigravity_cli")
     assert agy["credential_state"] == "ready"
     assert agy["credential_source"] == "keyring"

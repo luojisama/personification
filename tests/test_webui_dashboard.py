@@ -202,9 +202,10 @@ def test_dashboard_metrics_returns_token_summary(_runtime_with_data) -> None:
     assert _runtime_with_data.info_bot.group_info_calls == 0
     providers = {row["provider"]: row for row in body["provider_usage"]}
     assert providers["openai"]["total_tokens"] == body["total"]["total_tokens"]
-    assert providers["openai"]["monthly_limit"] == 1000
+    assert providers["openai"]["source"] == "local_token_ledger"
+    assert "monthly_limit" not in providers["openai"]
     assert body["billing"]["cost_configured"] is False
-    assert body["billing"]["quota"]["limit_tokens"] == 1000
+    assert body["billing"]["quota"]["official_provider_quota"] is False
     assert body["total_consumption"]["total"]["total_tokens"] == body["total"]["total_tokens"]
     assert body["total_consumption"]["total"]["call_count"] == body["total"]["call_count"]
     assert body["total_consumption"]["first_day"]
@@ -371,7 +372,8 @@ def test_personas_list_and_detail(_runtime_with_data) -> None:
     res2 = client.get("/personification/api/personas/u_alpha")
     assert res2.status_code == 200
     detail = res2.json()
-    assert detail["core_profile"]["profile_text"] == "全局画像 Alpha"
+    assert "profile_text" not in detail["core_profile"]
+    assert isinstance(detail["core_profile"]["structured_fields"], list)
     assert detail["core_profile"]["qq_profile"]["avatar_url"].endswith("nk=u_alpha&s=640")
     assert detail["core_profile"]["qq_profile"]["homepage_url"] == "https://user.qzone.qq.com/u_alpha"
     assert detail["core_profile"]["qq_profile"]["signature"] == "这里是 Alpha 的签名"

@@ -158,7 +158,8 @@ API Key、OAuth credential 和 QQ 空间 Cookie 都是 secret，不要提交到 
 | `openai_codex` | Codex OAuth | 默认查找 `~/.codex/auth.json`，可指定 `personification_codex_auth_path` |
 | `gemini_cli` | Gemini CLI OAuth | 默认查找 Gemini credential，可指定 auth path/project |
 | `antigravity_cli` | Antigravity/Gemini OAuth | 支持独立 proxy、auth path 和 project |
-| `claude_code` | Claude Code OAuth | 默认查找 Claude credential，可指定 `personification_claude_code_auth_path` |
+
+历史 `claude_code`、`claude_cli` 与 `claudecode` Provider 已移除：检测到这些旧值时会以非调用 tombstone `provider_type_removed` 禁用并给出迁移提示，不会读取旧 OAuth CLI 凭据、不会自动迁移或转发请求。需要 Claude 模型时，请改用标准 `anthropic` API 并重新填写 API 地址、API Key 与模型。
 
 Provider pool 每项可设置 `name`、`api_type`、`api_url`、`api_key`、`model`、`auth_path`、`project`、`proxy`、`enabled`、`priority`、`timeout`、`max_retries` 和原生搜索能力。正常聊天支持按优先级 fallback、失败冷却和动态健康排序。
 

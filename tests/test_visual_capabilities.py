@@ -30,7 +30,25 @@ def test_heuristic_supports_vision_native_apis_keep_returning_true() -> None:
     assert visual_capabilities.heuristic_supports_vision("gemini", "gemini-2.0-flash") is True
     assert visual_capabilities.heuristic_supports_vision("gemini_cli", "gemini-3-flash-preview") is True
     assert visual_capabilities.heuristic_supports_vision("antigravity_cli", "gemini-3-flash-preview") is True
-    assert visual_capabilities.heuristic_supports_vision("claude_code", "claude-opus-4-7") is True
+
+
+def test_removed_provider_aliases_have_no_visual_capability_even_if_cached() -> None:
+    for alias in ("claude_code", "claude-code", "ClaudeCode", "claude_cli", "claude-cli"):
+        route_name = f"removed-{alias}"
+        visual_capabilities.set_visual_capability(
+            route_name,
+            alias,
+            "claude-opus-4-7",
+            True,
+            source="test",
+        )
+        assert visual_capabilities.heuristic_supports_vision(alias, "claude-opus-4-7") is False
+        assert visual_capabilities.heuristic_supports_video(alias, "claude-opus-4-7") is False
+        assert visual_capabilities.provider_supports_vision(
+            alias,
+            "claude-opus-4-7",
+            route_name=route_name,
+        ) is False
 
 
 def test_probe_response_matches_expected_color_order() -> None:

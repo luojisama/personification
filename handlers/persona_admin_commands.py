@@ -50,6 +50,7 @@ from ..core.model_router import (
     resolve_model_role,
 )
 from ..core.provider_router import get_provider_failure_snapshot, normalize_api_type, parse_api_pool_config
+from ..core.provider_types import PROVIDER_TYPE_REMOVED, removed_provider_migration_hint
 from ..core.peer_bot_registry import PeerBotRegistryError
 from ..core.qzone_agent_interaction import (
     get_group_qzone_agent_settings,
@@ -1461,8 +1462,6 @@ def _default_route_model(api_type: str, config: Any) -> str:
         return "auto-gemini-3"
     if normalized == "antigravity_cli":
         return "auto-gemini-3"
-    if normalized == "claude_code":
-        return "claude-opus-4-7"
     return str(getattr(config, "personification_model", "") or "").strip()
 
 
@@ -1477,8 +1476,6 @@ def _default_route_auth_path(api_type: str, config: Any) -> str:
             str(getattr(config, "personification_antigravity_cli_auth_path", "") or "").strip()
             or "~/.gemini/antigravity-cli/oauth_creds.json"
         )
-    if normalized == "claude_code":
-        return str(getattr(config, "personification_claude_code_auth_path", "") or "").strip() or "~/.claude/.credentials.json"
     return ""
 
 
@@ -1541,6 +1538,8 @@ def _switch_primary_provider_route(bundle: Any, *, target: str, model: str = "")
     normalized_target = normalize_api_type(raw_target)
     if not raw_target:
         return "用法：拟人 模型 路由 <provider_name|api_type> [model]"
+    if normalized_target == PROVIDER_TYPE_REMOVED:
+        return f"{PROVIDER_TYPE_REMOVED}：{removed_provider_migration_hint()}"
     if normalized_target == "openai" and raw_target.lower() not in {"openai", "openai_official"}:
         normalized_target = ""
 
@@ -1555,7 +1554,7 @@ def _switch_primary_provider_route(bundle: Any, *, target: str, model: str = "")
         if not normalized_target:
             names = [str(item.get("name", "") or "").strip() for item in existing if item.get("name")]
             hint = "、".join(names[:8]) if names else "无"
-            return f"没找到这个 provider：{raw_target}\n可用 provider：{hint}\n也可以直接写 api_type：antigravity_cli、gemini_cli、claude_code、openai_codex。"
+            return f"没找到这个 provider：{raw_target}\n可用 provider：{hint}\n也可以直接写 api_type：antigravity_cli、gemini_cli、openai_codex。"
         selected = _new_route_provider(normalized_target, model, bundle.plugin_config)
         existing.insert(0, selected)
         selected_index = 0
