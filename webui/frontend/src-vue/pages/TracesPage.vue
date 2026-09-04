@@ -6,15 +6,15 @@
       description="只展示可审计决策摘要、状态机、阶段预算和脱敏工具证据；不请求、不存储也不渲染模型隐藏思维链。"
     >
       <template #actions>
-        <div class="search-field">
-          <input
-            v-model="search"
-            type="search"
-            placeholder="搜索 Trace、用户或诊断码"
-            aria-label="搜索 Trace、用户或诊断码"
-            @input="page = 1"
-          />
-        </div>
+        <TextField
+          v-model="search"
+          class="search-field"
+          label="搜索 Trace、用户或诊断码"
+          hide-label
+          type="search"
+          placeholder="搜索 Trace、用户或诊断码"
+          @update:model-value="page = 1"
+        />
       </template>
     </PageHeader>
 
@@ -232,6 +232,7 @@ import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
 import { deriveTraceMetrics, outcomeTone, stageStatusLabel, stageTone, traceTriageText, type StageFilter } from "./tracesPageMetrics";
 
 const route = useRoute();

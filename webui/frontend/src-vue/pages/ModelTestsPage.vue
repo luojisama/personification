@@ -17,16 +17,15 @@
 
     <div class="overview-grid">
       <Panel eyebrow="PROVIDER / CHAT" title="单路由与全路由对照">
-        <label class="stacked-field">
-          <span>测试消息</span>
-          <textarea
-            v-model="prompt"
-            rows="4"
-            :aria-invalid="!prompt.trim()"
-            aria-describedby="prompt-desc"
-          />
-        </label>
-        <span id="prompt-desc" class="muted-copy">测试消息将发送至对应 Provider 路由，产生真实 API 消耗。</span>
+        <TextareaField
+          class="stacked-field"
+          id="model-test-prompt"
+          v-model="prompt"
+          label="测试消息"
+          description="测试消息将发送至对应 Provider 路由，产生真实 API 消耗。"
+          :error="prompt.trim() ? '' : '测试消息不能为空。'"
+          :rows="4"
+        />
         <div class="dossier-actions">
           <button
             class="button button-secondary"
@@ -278,6 +277,7 @@ import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import TextareaField from "@vue-app/components/forms/TextareaField.vue";
 
 type UnknownRecord = Record<string, unknown>;
 

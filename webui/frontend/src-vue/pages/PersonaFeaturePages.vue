@@ -60,11 +60,11 @@
                 aria-label="选择表情包文件"
                 @change="onFileSelected"
               />
-              <input
+              <TextField
                 v-model="uploadDescription"
-                type="text"
+                label="表情包描述"
+                hide-label
                 placeholder="表情包描述（可选）"
-                aria-label="表情包描述"
               />
               <button
                 type="submit"
@@ -82,14 +82,14 @@
       <!-- 表情包目录检索与展示 -->
       <Panel eyebrow="PERSONA / STICKER CATALOG" title="表情包目录">
         <template #actions>
-          <div class="search-field">
-            <input
-              v-model="stickerSearch"
-              type="search"
-              placeholder="搜索表情包文件名或描述…"
-              aria-label="搜索表情包"
-            />
-          </div>
+          <TextField
+            v-model="stickerSearch"
+            class="search-field"
+            label="搜索表情包"
+            hide-label
+            type="search"
+            placeholder="搜索表情包文件名或描述…"
+          />
         </template>
 
         <QueryBoundary
@@ -174,18 +174,9 @@
       <!-- 编辑表情包元数据对话抽屉/面板 -->
       <Panel v-if="editingSticker" eyebrow="PERSONA / EDIT METADATA" :title="`编辑表情: ${editingSticker.filename}`">
         <form class="sticker-edit-form" @submit.prevent="handleSaveStickerEdit">
-          <div class="stacked-field">
-            <label for="edit-desc">描述文本</label>
-            <input id="edit-desc" v-model="editForm.description" type="text" />
-          </div>
-          <div class="stacked-field">
-            <label for="edit-mood">情绪标签（英文逗号分隔）</label>
-            <input id="edit-mood" v-model="editForm.mood_tags" type="text" placeholder="happy, excited" />
-          </div>
-          <div class="stacked-field">
-            <label for="edit-scene">场景标签（英文逗号分隔）</label>
-            <input id="edit-scene" v-model="editForm.scene_tags" type="text" placeholder="greeting, victory" />
-          </div>
+          <TextField id="edit-desc" v-model="editForm.description" class="stacked-field" label="描述文本" />
+          <TextField id="edit-mood" v-model="editForm.mood_tags" class="stacked-field" label="情绪标签（英文逗号分隔）" placeholder="happy, excited" />
+          <TextField id="edit-scene" v-model="editForm.scene_tags" class="stacked-field" label="场景标签（英文逗号分隔）" placeholder="greeting, victory" />
           <div class="inline-controls">
             <button type="submit" class="button button-primary" :disabled="updateMutation.isPending.value">
               {{ updateMutation.isPending.value ? "保存中…" : "保存修改" }}
@@ -286,17 +277,17 @@
       >
         <form class="builder-task-form" @submit.prevent="handleCreateBuildTask">
           <div class="inline-controls filter-control-row">
-            <input
+            <TextField
               v-model="workTitle"
-              type="text"
+              label="作品名称"
+              hide-label
               placeholder="作品名称"
-              aria-label="作品名称"
             />
-            <input
+            <TextField
               v-model="characterName"
-              type="text"
+              label="角色名称"
+              hide-label
               placeholder="角色名称"
-              aria-label="角色名称"
             />
             <button
               type="submit"
@@ -425,6 +416,7 @@ import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
 
 const route = useRoute();
 const router = useRouter();

@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia } from "pinia";
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 import { createMemoryHistory, createRouter } from "vue-router";
 
 import OperationsBusinessPages from "../pages/OperationsBusinessPages.vue";
 import { resources } from "@/api/resources";
+import { useBotStore } from "@vue-app/stores/bot";
 
 vi.mock("@/api/resources", () => ({
   resources: {
@@ -40,6 +41,26 @@ vi.mock("@/api/resources", () => ({
     dryRunImport: vi.fn().mockResolvedValue({ plan_token: "ptok_999" }),
     applyImport: vi.fn().mockResolvedValue({ journal_id: "jrn_777" }),
     rollbackImport: vi.fn().mockResolvedValue({ ok: true }),
+    groupsFiltered: vi.fn().mockResolvedValue({
+      items: [{
+        group_id: "30001",
+        group_name: "迁移测试群",
+        avatar_url: null,
+        enabled: true,
+        membership_state: "confirmed",
+        bot_ids: ["20001"],
+        bot_self_ids: ["20001"],
+        sources: [],
+        member_count: null,
+        last_active_at: null,
+        freshness: 1,
+        cache_only: false,
+      }],
+      page: 1,
+      page_size: 100,
+      total: 1,
+      total_pages: 1,
+    }),
   },
 }));
 
@@ -95,9 +116,11 @@ describe("OperationsBusinessPages.vue", () => {
     expect(resources.outboundRecent).toHaveBeenCalled();
   });
 
-  it("renders Data Transfer page and handles stage forms", async () => {
-    const { pinia, queryClient, router } = createTestSetup("/operations/data-transfer/export", "data-transfer");
+  it("uses the current Bot group selector for data transfer targets", async () => {
+    const { pinia, queryClient, router } = createTestSetup("/operations/data-transfer/export?group_id=30001", "data-transfer");
     await router.isReady();
+    useBotStore(pinia).setBotId("20001");
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     const wrapper = mount(OperationsBusinessPages, {
       props: { mode: "data-transfer" },
@@ -105,8 +128,18 @@ describe("OperationsBusinessPages.vue", () => {
         plugins: [pinia, [VueQueryPlugin, { queryClient }], router],
       },
     });
+    await flushPromises();
 
     expect(wrapper.text()).toContain("数据迁移");
+    expect(wrapper.text()).toContain("目标群");
+    expect(wrapper.text()).not.toContain("群 ID");
     expect(wrapper.find("button.button-primary").text()).toBe("创建导出");
+    await wrapper.find("button.button-primary").trigger("click");
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(resources.createStateExport).toHaveBeenCalledWith({
+      bot_id: "20001",
+      group_id: "30001",
+      datasets: [],
+    });
   });
 });

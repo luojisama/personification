@@ -9,12 +9,13 @@
       >
         <template #actions>
           <div class="search-field">
-            <input
+            <TextField
               v-model="skillSearch"
+              label="搜索 Skill 名称或描述"
+              hide-label
               type="search"
               placeholder="搜索 Skill 名称或描述"
-              aria-label="搜索 Skill 名称或描述"
-              @input="skillPage = 1"
+              @update:model-value="skillPage = 1"
             />
           </div>
         </template>
@@ -145,11 +146,12 @@
       >
         <template v-if="currentSection === 'registry'" #actions>
           <div class="search-field">
-            <input
+            <TextField
               v-model="mcpSearch"
+              label="搜索 MCP Registry"
+              hide-label
               type="search"
               placeholder="搜索 MCP Registry"
-              aria-label="搜索 MCP Registry"
             />
           </div>
         </template>
@@ -273,18 +275,14 @@
         title="创建声明式工具任务"
       >
         <div class="stacked-form">
-          <label>
-            建议名称
-            <input v-model="toolSuggestedName" placeholder="例如：weather_query" />
-          </label>
-          <label>
-            需求
-            <textarea
-              v-model="toolRequest"
-              rows="4"
-              placeholder="描述工具的功能、输入参数和预期调用方式"
-            />
-          </label>
+          <TextField v-model="toolSuggestedName" label="建议名称" placeholder="例如：weather_query" />
+          <TextareaField
+            id="tool-creator-request"
+            v-model="toolRequest"
+            label="需求"
+            :rows="4"
+            placeholder="描述工具的功能、输入参数和预期调用方式"
+          />
           <div>
             <button
               class="button button-primary"
@@ -414,12 +412,13 @@
       >
         <template #actions>
           <div class="search-field">
-            <input
+            <TextField
               v-model="knowledgeSearch"
+              label="搜索插件名、命令或能力"
+              hide-label
               type="search"
               placeholder="搜索插件名、命令或能力"
-              aria-label="搜索插件名、命令或能力"
-              @input="knowledgePage = 1"
+              @update:model-value="knowledgePage = 1"
             />
           </div>
         </template>
@@ -630,9 +629,10 @@
             <code>UPDATE</code>；只做 fetch 与本地 <code>merge --ff-only</code>，不会自动重启 Bot。
           </p>
           <div class="stacked-form">
-            <input
+            <TextField
               v-model="pluginConfirmation"
-              aria-label="插件更新确认"
+              label="插件更新确认"
+              hide-label
               placeholder="输入 UPDATE 确认执行"
             />
             <div>
@@ -712,6 +712,8 @@ import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
+import TextareaField from "@vue-app/components/forms/TextareaField.vue";
 
 type BusinessRecord = Record<string, unknown>;
 type Mode = "skills" | "mcp" | "tool-creator" | "plugin-knowledge" | "plugins";

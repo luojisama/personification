@@ -6,14 +6,13 @@
       description="队列保存失败的入站消息摘要，并使用当前上下文重新生成。发送结果未知或部分送达时只进入人工核对区，绝不自动重放。"
     >
       <template #actions>
-        <label class="select-field">
-          <span>状态</span>
-          <select :value="status" @change="onStatusChange">
-            <option v-for="filter in FILTERS" :key="filter.value" :value="filter.value">
-              {{ filter.label }}
-            </option>
-          </select>
-        </label>
+        <SelectField
+          :model-value="status"
+          class="select-field"
+          label="状态"
+          :options="FILTERS"
+          @update:model-value="onStatusChange"
+        />
       </template>
     </PageHeader>
 
@@ -109,6 +108,7 @@ import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import SelectField from "@vue-app/components/forms/SelectField.vue";
 
 const FILTERS = [
   { value: "", label: "全部" },
@@ -197,13 +197,12 @@ function setPage(newPage: number) {
   void router.replace({ query: { ...route.query, page: newPage > 1 ? newPage : undefined } });
 }
 
-function onStatusChange(event: Event) {
-  const target = event.target as HTMLSelectElement;
-  status.value = target.value;
+function onStatusChange(value: string) {
+  status.value = value;
   page.value = 1;
   void router.replace({
     name: "runtime-recovery",
-    params: { ...route.params, section: target.value || "queue" },
+    params: { ...route.params, section: value || "queue" },
     query: { ...route.query, page: undefined },
   });
 }

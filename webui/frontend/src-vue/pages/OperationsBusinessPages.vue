@@ -7,13 +7,7 @@
       description="策略状态、来源、revision 和证据分开展示；修改前必须绑定目标 QQ 与当前 revision。"
     >
       <template #actions>
-        <select v-model="policyTier" aria-label="策略等级筛选">
-          <option value="">全部等级</option>
-          <option value="allow">允许</option>
-          <option value="blocked">阻止</option>
-          <option value="manual_allow">手工允许</option>
-          <option value="manual_block">手工阻止</option>
-        </select>
+        <SelectField v-model="policyTier" :options="policyTierOptions" label="策略等级筛选" hide-label />
       </template>
     </PageHeader>
 
@@ -89,16 +83,19 @@
         </QueryBoundary>
 
         <div v-if="currentSection === 'edit'" class="inline-controls filter-control-row">
-          <select v-model="policyMode" aria-label="手工策略">
-            <option value="inherit">继承自动策略</option>
-            <option value="allow">手工允许</option>
-            <option value="block">手工阻止</option>
-          </select>
-          <input
-            v-model.number="policyRevision"
-            type="number"
-            min="0"
-            aria-label="期望 revision"
+          <SelectField
+            :model-value="policyMode"
+            :options="policyModeOptions"
+            label="手工策略"
+            hide-label
+            @update:model-value="updatePolicyMode"
+          />
+          <NumberField
+            :model-value="policyRevision"
+            label="期望 revision"
+            hide-label
+            :min="0"
+            @update:model-value="updatePolicyRevision"
           />
           <button
             type="button"
@@ -176,7 +173,7 @@
       <div v-if="currentSection === 'detail'" class="danger-zone" style="margin-top: var(--space-4);">
         <p>要撤回，输入 <code>RECALL {{ textAt(selectedOutbound, 'operation_id') }}</code>。结果未知时界面不会再次提交。</p>
         <div class="inline-controls filter-control-row">
-          <input v-model="outboundConfirmation" aria-label="撤回确认串" placeholder="输入精确确认串" />
+          <TextField v-model="outboundConfirmation" label="撤回确认串" hide-label placeholder="输入精确确认串" />
           <button
             type="button"
             class="button button-danger"
@@ -209,14 +206,16 @@
       :title="currentSection === 'export' ? '导出群安全状态包' : currentSection === 'inspect' ? '上传与验包' : currentSection === 'apply' ? '应用已预演计划' : 'Journal 与回滚'"
     >
       <div class="stacked-form">
-        <label>
-          Bot ID
-          <input v-model="transferBotId" placeholder="例如：2948572183" />
-        </label>
-        <label>
-          群 ID
-          <input v-model="transferGroupId" placeholder="例如：918237465" />
-        </label>
+        <div class="form-field">
+          <span>目标 Bot</span>
+          <code v-if="transferBotId">{{ transferBotId }}</code>
+          <span v-else class="form-description">请先在页面顶部选择 Bot。</span>
+        </div>
+        <CurrentGroupSelect
+          label="目标群"
+          description="使用当前 Bot 的已确认或已配置群；选择会同步到地址栏。"
+          required
+        />
 
         <!-- Export 阶段 -->
         <div v-if="currentSection === 'export'" style="margin-top: var(--space-2);">
@@ -244,10 +243,7 @@
           >
             上传并安全验包
           </button>
-          <label>
-            Task ID
-            <input v-model="transferTaskId" placeholder="上传后生成的 Task ID" />
-          </label>
+          <TextField v-model="transferTaskId" label="Task ID" placeholder="上传后生成的 Task ID" />
           <button
             type="button"
             class="button button-secondary"
@@ -260,16 +256,10 @@
 
         <!-- Apply 阶段 -->
         <template v-if="currentSection === 'apply'">
-          <label>
-            Task ID
-            <input v-model="transferTaskId" placeholder="Task ID" />
-          </label>
-          <label>
-            Plan Token
-            <input v-model="transferPlanToken" placeholder="Dry-run 返回的 Plan Token" />
-          </label>
+          <TextField v-model="transferTaskId" label="Task ID" placeholder="Task ID" />
+          <TextField v-model="transferPlanToken" label="Plan Token" placeholder="Dry-run 返回的 Plan Token" />
           <p>输入 <code>APPLY {{ transferTaskId }}</code> 才能应用。</p>
-          <input v-model="transferConfirmation" aria-label="应用导入确认串" placeholder="APPLY <Task ID>" />
+          <TextField v-model="transferConfirmation" label="应用导入确认串" placeholder="APPLY <Task ID>" />
           <button
             type="button"
             class="button button-danger"
@@ -282,12 +272,9 @@
 
         <!-- Journal / 回滚 阶段 -->
         <template v-if="currentSection === 'journal'">
-          <label>
-            Journal ID
-            <input v-model="transferJournalId" placeholder="导入成功的 Journal ID" />
-          </label>
+          <TextField v-model="transferJournalId" label="Journal ID" placeholder="导入成功的 Journal ID" />
           <p>输入 <code>ROLLBACK {{ transferJournalId }}</code> 才能回滚。</p>
-          <input v-model="transferConfirmation" aria-label="回滚确认串" placeholder="ROLLBACK <Journal ID>" />
+          <TextField v-model="transferConfirmation" label="回滚确认串" placeholder="ROLLBACK <Journal ID>" />
           <button
             type="button"
             class="button button-danger"
@@ -322,16 +309,7 @@
       description="游标式读取管理员操作、目标、结果和脱敏详情；完整请求体、密钥和 Cookie 不进入此页面。"
     >
       <template #actions>
-        <select v-model="auditActionFilter" aria-label="审计动作筛选">
-          <option value="">全部动作</option>
-          <option
-            v-for="row in auditActionRows"
-            :key="textAt(row, 'key')"
-            :value="textAt(row, 'key')"
-          >
-            {{ textAt(row, "label", "key") }}
-          </option>
-        </select>
+        <SelectField v-model="auditActionFilter" :options="auditActionOptions" label="审计动作筛选" hide-label />
       </template>
     </PageHeader>
 
@@ -392,7 +370,7 @@
     >
       <template v-if="currentSection !== 'accounts' && currentSection !== 'profile'" #actions>
         <div class="search-field">
-          <input v-model="qqSearch" placeholder="搜索 ID 或名称" aria-label="搜索 ID 或名称" />
+          <TextField v-model="qqSearch" label="搜索 ID 或名称" hide-label placeholder="搜索 ID 或名称" type="search" />
         </div>
       </template>
     </PageHeader>
@@ -410,10 +388,7 @@
       </QueryBoundary>
 
       <div v-if="currentSection === 'profile'" class="stacked-form" style="margin-top: var(--space-4);">
-        <label>
-          新昵称
-          <input v-model="qqNickname" placeholder="输入新昵称" />
-        </label>
+        <TextField v-model="qqNickname" label="新昵称" placeholder="输入新昵称" />
         <button
           type="button"
           class="button button-primary"
@@ -423,10 +398,13 @@
           修改昵称
         </button>
 
-        <label style="margin-top: var(--space-3);">
-          新签名
-          <textarea v-model="qqSignature" rows="3" placeholder="输入新个性签名" />
-        </label>
+        <TextareaField
+          id="qq-new-signature"
+          v-model="qqSignature"
+          label="新签名"
+          :rows="3"
+          placeholder="输入新个性签名"
+        />
         <button
           type="button"
           class="button button-primary"
@@ -481,7 +459,7 @@
     <Panel v-if="qqTargetId" eyebrow="QQ / EXTERNAL WRITE" title="外部写操作二次核对">
       <p>目标：<code>{{ qqTargetId }}</code>。请输入目标 ID 才能继续；提交后如果结果未知，页面不会自动再次调用。</p>
       <div class="inline-controls filter-control-row">
-        <input v-model="qqConfirmation" aria-label="QQ 操作目标确认" placeholder="输入目标 ID" />
+        <TextField v-model="qqConfirmation" label="QQ 操作目标确认" hide-label placeholder="输入目标 ID" />
         <button
           type="button"
           class="button button-danger"
@@ -553,7 +531,7 @@
     <Panel v-if="deviceTargetId" eyebrow="DEVICES / CONFIRM" title="核对设备目标">
       <p>请输入设备 ID <code>{{ deviceTargetId }}</code>。</p>
       <div class="inline-controls filter-control-row">
-        <input v-model="deviceConfirmation" aria-label="设备目标核对" placeholder="输入设备 ID" />
+        <TextField v-model="deviceConfirmation" label="设备目标核对" hide-label placeholder="输入设备 ID" />
         <button
           type="button"
           class="button button-danger"
@@ -587,6 +565,14 @@ import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import CurrentGroupSelect from "@vue-app/components/CurrentGroupSelect.vue";
+import NumberField from "@vue-app/components/forms/NumberField.vue";
+import SelectField from "@vue-app/components/forms/SelectField.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
+import TextareaField from "@vue-app/components/forms/TextareaField.vue";
+import { groupIdFromQuery } from "@vue-app/composables/currentGroup";
+import { useBotStore } from "@vue-app/stores/bot";
+import { useCurrentGroupStore } from "@vue-app/stores/currentGroup";
 
 type BusinessRecord = Record<string, unknown>;
 
@@ -601,6 +587,8 @@ const props = withDefaults(
 
 const route = useRoute();
 const client = useQueryClient();
+const botStore = useBotStore();
+const currentGroupStore = useCurrentGroupStore();
 
 const activeMode = computed(() => props.mode || (route.meta.mode as typeof props.mode) || "user-policies");
 const currentSection = computed(() => String(route.params.section || (activeMode.value === "audit" ? "records" : activeMode.value === "qq" ? "accounts" : activeMode.value === "devices" ? "current" : activeMode.value === "data-transfer" ? "export" : "list")));
@@ -649,6 +637,18 @@ const policyTier = ref("");
 const policyUserId = ref("");
 const policyMode = ref<"block" | "allow" | "inherit">("inherit");
 const policyRevision = ref(0);
+const policyTierOptions = [
+  { value: "", label: "全部等级" },
+  { value: "allow", label: "允许" },
+  { value: "blocked", label: "阻止" },
+  { value: "manual_allow", label: "手工允许" },
+  { value: "manual_block", label: "手工阻止" },
+];
+const policyModeOptions = [
+  { value: "inherit", label: "继承自动策略" },
+  { value: "allow", label: "手工允许" },
+  { value: "block", label: "手工阻止" },
+];
 
 const policyStatesQuery = useQuery({
   queryKey: computed(() => ["user-policies", policyTier.value]),
@@ -683,6 +683,16 @@ const policyUpdateDiagnostic = computed(() =>
 function selectPolicyTarget(userId: string, rev: number) {
   policyUserId.value = userId;
   policyRevision.value = rev;
+}
+
+function updatePolicyMode(value: string) {
+  if (value === "block" || value === "allow" || value === "inherit") {
+    policyMode.value = value;
+  }
+}
+
+function updatePolicyRevision(value: number | null) {
+  if (value !== null && value >= 0) policyRevision.value = value;
 }
 
 function confirmSavePolicy() {
@@ -728,8 +738,10 @@ function executeOutboundRecall() {
 }
 
 /* ==================== 3. 数据迁移 ==================== */
-const transferBotId = ref("");
-const transferGroupId = ref("");
+const transferBotId = computed(() => String(botStore.selectedBotId || "").trim());
+const transferGroupId = computed(() =>
+  groupIdFromQuery(route.query.group_id) || currentGroupStore.groupIdFor(transferBotId.value),
+);
 const transferTaskId = ref("");
 const transferJournalId = ref("");
 const transferPlanToken = ref("");
@@ -830,6 +842,12 @@ const auditRecordsQuery = useQuery({
 });
 
 const auditActionRows = computed(() => recordsAt(auditActionsQuery.data.value, "actions"));
+const auditActionOptions = computed(() => [
+  { value: "", label: "全部动作" },
+  ...auditActionRows.value
+    .map((row) => ({ value: textAt(row, "key"), label: textAt(row, "label", "key") }))
+    .filter((row) => Boolean(row.value)),
+]);
 const auditRows = computed(() => recordsAt(auditRecordsQuery.data.value, "entries", "items"));
 
 /* ==================== 5. QQ 管理 ==================== */
