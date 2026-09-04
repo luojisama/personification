@@ -19,14 +19,8 @@
       </table>
     </div>
     <div class="form-grid">
-      <label>
-        成员 QQ
-        <input :value="memberId" @input="$emit('update:memberId', ($event.target as HTMLInputElement).value)" />
-      </label>
-      <label>
-        称呼（逗号分隔）
-        <input :value="aliasText" @input="$emit('update:aliasText', ($event.target as HTMLInputElement).value)" />
-      </label>
+      <TextField :model-value="memberId" label="成员 QQ" inputmode="numeric" @update:model-value="$emit('update:memberId', $event)" />
+      <TextField :model-value="aliasText" label="称呼（逗号分隔）" @update:model-value="$emit('update:aliasText', $event)" />
     </div>
     <div class="inline-controls">
       <button class="button" type="button" :disabled="!memberId || !aliasText || pending" @click="$emit('save')">
@@ -41,6 +35,7 @@
 
 <script setup lang="ts">
 import Panel from "@vue-app/components/Panel.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
 import { type JsonRecord, text } from "./managementHelpers";
 
 withDefaults(

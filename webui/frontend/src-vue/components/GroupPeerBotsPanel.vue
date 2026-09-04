@@ -5,42 +5,34 @@
         <div class="summary-grid">
           <Panel eyebrow="PEER BOT / POLICY" title="协作与循环保护">
             <div class="form-grid peer-bot-settings-grid">
-              <label class="checkbox-label">
-                <input
-                  type="checkbox"
-                  :checked="enabled"
-                  @change="(event) => { enabled = (event.target as HTMLInputElement).checked; settingsDirty = true; }"
-                />
-                启用本群外部 Bot 调用
-              </label>
-              <label class="checkbox-label">
-                <input
-                  type="checkbox"
-                  :checked="autoLearn"
-                  @change="(event) => { autoLearn = (event.target as HTMLInputElement).checked; settingsDirty = true; }"
-                />
-                自动学习已批准 Bot 的新协议
-              </label>
-              <label>
-                冷却秒数
-                <input
-                  type="number"
-                  min="0"
-                  max="3600"
-                  :value="cooldown"
-                  @input="(event) => { cooldown = (event.target as HTMLInputElement).value; settingsDirty = true; }"
-                />
-              </label>
-              <label>
-                回复等待 TTL
-                <input
-                  type="number"
-                  min="1"
-                  max="600"
-                  :value="ttl"
-                  @input="(event) => { ttl = (event.target as HTMLInputElement).value; settingsDirty = true; }"
-                />
-              </label>
+              <SwitchField
+                id="peer-bot-enabled"
+                :model-value="enabled"
+                label="启用本群外部 Bot 调用"
+                @update:model-value="updateSettings({ enabled: $event })"
+              />
+              <SwitchField
+                id="peer-bot-auto-learn"
+                :model-value="autoLearn"
+                label="自动学习已批准 Bot 的新协议"
+                @update:model-value="updateSettings({ autoLearn: $event })"
+              />
+              <NumberField
+                id="peer-bot-cooldown"
+                :model-value="numberOrNull(cooldown)"
+                label="冷却秒数"
+                :min="0"
+                :max="3600"
+                @update:model-value="updateSettings({ cooldown: stringifyNumber($event) })"
+              />
+              <NumberField
+                id="peer-bot-ttl"
+                :model-value="numberOrNull(ttl)"
+                label="回复等待 TTL"
+                :min="1"
+                :max="600"
+                @update:model-value="updateSettings({ ttl: stringifyNumber($event) })"
+              />
             </div>
             <p class="muted-copy">
               自动学习只作用于已批准 Bot 的高置信 read/write 协议；不会覆盖管理员模板，admin/dangerous 永不自动批准。
@@ -240,144 +232,107 @@
             <h3>模板编辑器</h3>
             <div class="form-grid">
               <div class="member-selector form-span">
-                <label>
-                  搜索当前群成员
-                  <input
-                    type="search"
-                    v-model="memberSearch"
-                    placeholder="QQ 号、群名片或昵称"
-                  />
-                </label>
-                <label>
-                  目标 Bot
-                  <select
-                    v-model="draft.target_bot_id"
-                    :aria-invalid="validation.field === 'target_bot_id'"
-                    :aria-describedby="validation.error ? 'peer-command-help peer-command-error' : 'peer-command-help'"
-                  >
-                    <option value="">选择当前群成员</option>
-                    <option
-                      v-for="member in memberOptions"
-                      :key="String(member.user_id)"
-                      :value="String(member.user_id)"
-                    >
-                      {{ member.card || member.nickname || "未命名成员" }}（{{ String(member.user_id) }}）
-                    </option>
-                  </select>
-                </label>
+                <TextField
+                  id="peer-bot-member-search"
+                  v-model="memberSearch"
+                  label="搜索当前群成员"
+                  type="search"
+                  placeholder="QQ 号、群名片或昵称"
+                />
+                <SelectField
+                  id="peer-bot-target"
+                  v-model="draft.target_bot_id"
+                  label="目标 Bot"
+                  :options="memberSelectOptions"
+                  placeholder="选择当前群成员"
+                  :error="validation.field === 'target_bot_id' ? validation.error : ''"
+                  aria-describedby="peer-command-help"
+                />
                 <p v-if="membersQuery.isError.value" class="muted-copy">
                   实时成员目录暂不可用；仍可选择注册表中已有的 Bot。
                 </p>
               </div>
-              <label>
-                命令 ID
-                <input
-                  v-model="draft.command_id"
-                  :aria-invalid="validation.field === 'command_id'"
-                  :aria-describedby="validation.error ? 'peer-command-help peer-command-error' : 'peer-command-help'"
-                />
-              </label>
-              <label>
-                风险等级
-                <select v-model="draft.risk_level">
-                  <option value="read">read（只读）</option>
-                  <option value="write">write（写入）</option>
-                  <option value="admin">admin（Agent 永不调用）</option>
-                  <option value="dangerous">dangerous（Agent 永不调用）</option>
-                </select>
-              </label>
-              <label>
-                审核状态
-                <select v-model="draft.status">
-                  <option value="candidate">candidate</option>
-                  <option value="approved">approved</option>
-                  <option value="rejected">rejected</option>
-                </select>
-              </label>
+              <TextField
+                id="peer-bot-command-id"
+                v-model="draft.command_id"
+                label="命令 ID"
+                :error="validation.field === 'command_id' ? validation.error : ''"
+                aria-describedby="peer-command-help"
+              />
+              <SelectField
+                id="peer-bot-risk-level"
+                v-model="draft.risk_level"
+                label="风险等级"
+                :options="riskLevelOptions"
+              />
+              <SelectField
+                id="peer-bot-status"
+                v-model="draft.status"
+                label="审核状态"
+                :options="statusOptions"
+              />
               <fieldset class="peer-command-mode form-span">
                 <legend>编辑模式</legend>
-                <label class="checkbox-label">
-                  <input
-                    type="radio"
-                    name="peer-command-mode"
-                    :checked="(draft.mode ?? 'legacy') === 'structured'"
-                    @change="switchEditMode('structured')"
-                  />
-                  结构化协议 v2
-                </label>
-                <label class="checkbox-label">
-                  <input
-                    type="radio"
-                    name="peer-command-mode"
-                    :checked="(draft.mode ?? 'legacy') === 'legacy'"
-                    @change="switchEditMode('legacy')"
-                  />
-                  legacy 完整模板
-                </label>
+                <SelectField
+                  id="peer-bot-edit-mode"
+                  :model-value="draft.mode ?? 'legacy'"
+                  label="编辑模式"
+                  hide-label
+                  :options="editModeOptions"
+                  @update:model-value="switchEditMode($event as 'structured' | 'legacy')"
+                />
               </fieldset>
               <template v-if="(draft.mode ?? 'legacy') === 'structured'">
-                <label>
-                  命令入口
-                  <input
-                    v-model="draft.command_entry"
-                    placeholder=".mc 或 /抽卡"
-                    :aria-invalid="validation.field === 'command_entry'"
-                    :aria-describedby="validation.error ? 'peer-command-help peer-command-error' : 'peer-command-help'"
-                  />
-                </label>
-                <label>
-                  一级子命令（可选）
-                  <input
-                    v-model="draft.subcommand_1"
-                    placeholder="say"
-                  />
-                </label>
-                <label>
-                  二级子命令（可选）
-                  <input
-                    v-model="draft.subcommand_2"
-                  />
-                </label>
-                <label>
-                  参数模板（可选）
-                  <input
-                    v-model="draft.argument_template"
-                    placeholder="{message}"
-                    :aria-invalid="validation.field === 'argument_template'"
-                    :aria-describedby="validation.error ? 'peer-command-help peer-command-error' : 'peer-command-help'"
-                  />
-                </label>
-                <label class="form-span">
-                  用途说明
-                  <input
-                    v-model="draft.description"
-                    placeholder="例如：向 Minecraft 在线玩家发送聊天消息"
-                  />
-                </label>
-              </template>
-              <label v-else class="form-span">
-                完整命令模板
-                <textarea
-                  rows="3"
-                  v-model="draft.full_template"
-                  placeholder=".mc say {message} 或 /抽卡"
-                  :aria-invalid="validation.field === 'full_template'"
-                  :aria-describedby="validation.error ? 'peer-command-help peer-command-error' : 'peer-command-help'"
+                <TextField
+                  id="peer-bot-command-entry"
+                  v-model="draft.command_entry"
+                  label="命令入口"
+                  placeholder=".mc 或 /抽卡"
+                  :error="validation.field === 'command_entry' ? validation.error : ''"
+                  aria-describedby="peer-command-help"
                 />
-              </label>
+                <TextField id="peer-bot-subcommand-1" v-model="draft.subcommand_1" label="一级子命令（可选）" placeholder="say" />
+                <TextField id="peer-bot-subcommand-2" v-model="draft.subcommand_2" label="二级子命令（可选）" />
+                <TextField
+                  id="peer-bot-argument-template"
+                  v-model="draft.argument_template"
+                  label="参数模板（可选）"
+                  placeholder="{message}"
+                  :error="validation.field === 'argument_template' ? validation.error : ''"
+                  aria-describedby="peer-command-help"
+                />
+                <TextField
+                  id="peer-bot-description"
+                  v-model="draft.description"
+                  class="form-span"
+                  label="用途说明"
+                  placeholder="例如：向 Minecraft 在线玩家发送聊天消息"
+                />
+              </template>
+              <TextareaField
+                v-else
+                class="form-span"
+                id="peer-bot-full-template"
+                v-model="draft.full_template"
+                label="完整命令模板"
+                :error="validation.field === 'full_template' ? validation.error : ''"
+                description="入口必填，子命令可留空；占位符使用单花括号。"
+                :rows="3"
+                placeholder=".mc say {message} 或 /抽卡"
+              />
               <label class="form-span">
                 完整命令预览
                 <output class="peer-full-command-preview">{{ composedPreview }}</output>
               </label>
-              <label class="form-span">
-                高级参数 schema
-                <textarea
-                  rows="9"
-                  v-model="draft.parameter_schema_text"
-                  :aria-invalid="validation.field === 'parameter_schema'"
-                  :aria-describedby="validation.error ? 'peer-command-help peer-command-error' : 'peer-command-help'"
-                />
-              </label>
+              <TextareaField
+                class="form-span"
+                id="peer-bot-parameter-schema"
+                v-model="draft.parameter_schema_text"
+                label="高级参数 schema"
+                :error="validation.field === 'parameter_schema' ? validation.error : ''"
+                description="参数 description 会进入 Agent 能力目录。"
+                :rows="9"
+              />
             </div>
             <p id="peer-command-help" class="muted-copy">
               入口必填，子命令可留空；占位符使用单花括号，例如 <code>{message}</code>。参数 description 会进入 Agent 能力目录。
@@ -386,10 +341,7 @@
               {{ validation.error }}
             </p>
             <div class="peer-bot-dry-run">
-              <label>
-                Dry-run 参数（JSON）
-                <textarea rows="3" v-model="argumentsText" />
-              </label>
+              <TextareaField id="peer-bot-dry-run-arguments" v-model="argumentsText" label="Dry-run 参数（JSON）" :rows="3" />
               <div class="inline-controls">
                 <button class="button button-secondary" type="button" @click="generateSimpleSchema">
                   按占位符生成简单参数
@@ -487,6 +439,11 @@ import DiagnosticPanel from "./DiagnosticPanel.vue";
 import Panel from "./Panel.vue";
 import QueryBoundary from "./QueryBoundary.vue";
 import StateBadge from "./StateBadge.vue";
+import NumberField from "./forms/NumberField.vue";
+import SelectField from "./forms/SelectField.vue";
+import SwitchField from "./forms/SwitchField.vue";
+import TextareaField from "./forms/TextareaField.vue";
+import TextField from "./forms/TextField.vue";
 import {
   botTone,
   commandDraft,
@@ -593,6 +550,43 @@ const memberOptions = computed(() => {
     );
   });
 });
+
+const memberSelectOptions = computed(() => memberOptions.value.map((member) => ({
+  value: String(member.user_id),
+  label: `${member.card || member.nickname || "未命名成员"}（${String(member.user_id)}）`,
+})));
+const riskLevelOptions = [
+  { value: "read", label: "read（只读）" },
+  { value: "write", label: "write（写入）" },
+  { value: "admin", label: "admin（Agent 永不调用）" },
+  { value: "dangerous", label: "dangerous（Agent 永不调用）" },
+];
+const statusOptions = [
+  { value: "candidate", label: "candidate" },
+  { value: "approved", label: "approved" },
+  { value: "rejected", label: "rejected" },
+];
+const editModeOptions = [
+  { value: "structured", label: "结构化协议 v2" },
+  { value: "legacy", label: "legacy 完整模板" },
+];
+
+function updateSettings(patch: Partial<{ enabled: boolean; autoLearn: boolean; cooldown: string; ttl: string }>): void {
+  if (patch.enabled !== undefined) enabled.value = patch.enabled;
+  if (patch.autoLearn !== undefined) autoLearn.value = patch.autoLearn;
+  if (patch.cooldown !== undefined) cooldown.value = patch.cooldown;
+  if (patch.ttl !== undefined) ttl.value = patch.ttl;
+  settingsDirty.value = true;
+}
+
+function numberOrNull(value: string): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function stringifyNumber(value: number | null): string {
+  return value === null ? "" : String(value);
+}
 
 const mutation = useMutation({
   mutationFn: async (action: { kind: string; [key: string]: unknown }) => {

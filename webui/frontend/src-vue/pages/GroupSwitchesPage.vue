@@ -6,24 +6,27 @@
       description="按页读取本地群目录，明确显示群头像、群号、群名、配置来源与启用状态。未确认群候选默认不进入列表。"
     >
       <template #actions>
-        <div class="search-field">
-          <input
-            v-model="searchDraft"
-            placeholder="搜索群号或群名"
-            aria-label="搜索群号或群名"
-            @input="handleSearchInput"
-          />
-        </div>
+        <TextField
+          v-model="searchDraft"
+          class="search-field"
+          label="搜索群号或群名"
+          hide-label
+          type="search"
+          placeholder="搜索群号或群名"
+          @update:model-value="handleSearchInput"
+        />
       </template>
     </PageHeader>
 
     <Panel eyebrow="FILTER / GROUP SWITCHES" title="开关筛选">
       <div class="inline-controls filter-control-row">
-        <select :value="enabled" aria-label="按启用状态筛选" @change="onEnabledChange">
-          <option value="">全部状态</option>
-          <option value="true">仅已启用</option>
-          <option value="false">仅已停用</option>
-        </select>
+        <SelectField
+          :model-value="enabled"
+          label="按启用状态筛选"
+          hide-label
+          :options="enabledOptions"
+          @update:model-value="onEnabledChange"
+        />
         <StateBadge tone="unknown">当前 Bot {{ botStore.selectedBotId || "全部" }}</StateBadge>
         <span v-if="query.data.value">
           启用 {{ query.data.value.enabled_total }} / 停用 {{ query.data.value.disabled_total }}
@@ -129,6 +132,8 @@ import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import SelectField from "@vue-app/components/forms/SelectField.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
 import { useBotStore } from "@vue-app/stores/bot";
 
 const route = useRoute();
@@ -139,6 +144,11 @@ const queryClient = useQueryClient();
 const page = computed(() => Math.max(1, Number(route.query.page ?? 1) || 1));
 const search = computed(() => String(route.query.search ?? ""));
 const enabled = computed(() => String(route.query.enabled ?? ""));
+const enabledOptions = [
+  { value: "", label: "全部状态" },
+  { value: "true", label: "仅已启用" },
+  { value: "false", label: "仅已停用" },
+];
 
 const searchDraft = ref(search.value);
 watch(search, (next) => { searchDraft.value = next; });
@@ -152,8 +162,7 @@ function handleSearchInput() {
   }, 300);
 }
 
-function onEnabledChange(event: Event) {
-  const value = (event.target as HTMLSelectElement).value;
+function onEnabledChange(value: string) {
   router.replace({ query: { ...route.query, enabled: value || undefined, page: "1" } });
 }
 

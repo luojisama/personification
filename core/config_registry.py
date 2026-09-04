@@ -253,6 +253,9 @@ class ConfigEntry:
     secret: bool = False
     advanced: bool = False
     example: str = ""
+    # 管理端表单必须使用 registry 明确给出的 UI schema；不能由前端根据
+    # field_name / value_type 猜测复杂配置的编辑控件。
+    ui_schema: dict[str, Any] | None = None
 
     def normalize_value(self, raw: Any) -> Any:
         if isinstance(raw, bool) and self.value_type == "bool":
@@ -395,6 +398,300 @@ _SECRET_FIELD_HINTS: tuple[str, ...] = ("_api_key", "_token", "_secret", "auth_p
 _OBJECT_LIST_KEYS: frozenset[str] = frozenset({
     "api_pools", "skill_sources",
 })
+
+_UI_CONTROL_KINDS: frozenset[str] = frozenset(
+    {
+        "switch",
+        "select",
+        "number",
+        "text",
+        "textarea",
+        "string_list",
+        "key_value",
+        "provider_list",
+        "level_table",
+        "behavior_band_table",
+        "json_advanced",
+    }
+)
+
+_MODEL_ROLE_OPTIONS: tuple[dict[str, str], ...] = (
+    {"value": "intent", "label": "意图判断", "description": "用于意图与轻量语义判断。"},
+    {"value": "review", "label": "回复审阅", "description": "用于最终回复审阅与改写。"},
+    {"value": "agent", "label": "Agent", "description": "用于主 Agent 工具循环。"},
+    {"value": "sticker", "label": "表情包", "description": "用于表情包语义选择。"},
+)
+
+_OPTION_LABELS: dict[str, str] = {
+    "auto": "自动",
+    "off": "关闭",
+    "on": "开启",
+    "true": "开启",
+    "false": "关闭",
+    "none": "无",
+    "disabled": "已禁用",
+    "enabled": "已启用",
+    "shadow": "影子观测",
+    "apply": "实际应用",
+    "balanced": "均衡",
+    "conservative": "保守",
+    "all": "全部",
+}
+
+
+def _ui_option(value: Any, *, label: str = "", description: str = "") -> dict[str, str]:
+    raw = str(value)
+    return {
+        "value": raw,
+        "label": label or _OPTION_LABELS.get(raw.lower(), raw),
+        "description": description,
+    }
+
+
+def _ui_field(
+    key: str,
+    label: str,
+    control_kind: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    if control_kind not in _UI_CONTROL_KINDS:
+        raise ValueError(f"unsupported config UI control kind: {control_kind}")
+    return {"key": key, "label": label, "control_kind": control_kind, **extra}
+
+
+def _ui_unit(field_name: str) -> str:
+    name = str(field_name or "").lower()
+    if "_max_command_chars" in name or name.endswith("_chars"):
+        return "字符"
+    if name.endswith("_bytes"):
+        return "字节"
+    if name.endswith("_hours"):
+        return "小时"
+    if name.endswith("_minutes"):
+        return "分钟"
+    if name.endswith("_days"):
+        return "天"
+    if "timeout" in name or name.endswith("_seconds"):
+        return "秒"
+    return ""
+
+
+def _number_ui_schema(entry: ConfigEntry) -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        "control_kind": "number",
+        "step": 1 if entry.value_type == "int" else 0.01,
+    }
+    if entry.min_value is not None:
+        schema["min"] = entry.min_value
+    if entry.max_value is not None:
+        schema["max"] = entry.max_value
+    unit = _ui_unit(entry.field_name)
+    if unit:
+        schema["unit"] = unit
+    return schema
+
+
+def _provider_list_ui_schema() -> dict[str, Any]:
+    return {
+        "control_kind": "provider_list",
+        "placeholder": "添加一个 Provider；敏感值不会回显。",
+        "sensitive_fields": [
+            "api_key",
+            "auth_path",
+            "headers",
+            "proxy",
+            "access_token",
+            "refresh_token",
+            "client_secret",
+            "subscription_management_key",
+        ],
+        "allow_advanced_json": True,
+        "item_schema": {
+            "type": "object",
+            "fields": [
+                _ui_field("name", "名称", "text", required=True, placeholder="例如 primary"),
+                _ui_field(
+                    "api_type",
+                    "API 类型",
+                    "select",
+                    required=True,
+                    options=[
+                        _ui_option("openai", label="OpenAI 兼容"),
+                        _ui_option("anthropic", label="Anthropic"),
+                        _ui_option("gemini", label="Gemini"),
+                        _ui_option("openai_codex", label="OpenAI Codex"),
+                        _ui_option("gemini_cli", label="Gemini CLI"),
+                        _ui_option("antigravity_cli", label="Antigravity CLI"),
+                    ],
+                ),
+                _ui_field("api_url", "API 地址", "text", placeholder="https://…/v1"),
+                _ui_field("api_key", "API Key", "text", sensitive=True),
+                _ui_field("model", "模型", "text", required=True, placeholder="例如 gpt-4o-mini"),
+                _ui_field("timeout", "超时", "number", min=1, step=1, unit="秒"),
+                _ui_field("max_retries", "总尝试次数", "number", min=1, step=1),
+                _ui_field("priority", "优先级", "number", step=1),
+                _ui_field("enabled", "启用", "switch"),
+                _ui_field(
+                    "account_mode",
+                    "账号模式",
+                    "select",
+                    options=[
+                        _ui_option("api_key", label="API Key"),
+                        _ui_option("subscription_proxy", label="订阅代理"),
+                    ],
+                ),
+                _ui_field(
+                    "subscription_quota_kind",
+                    "订阅额度类型",
+                    "select",
+                    options=[
+                        _ui_option("none", label="不查询"),
+                        _ui_option("codex_wham_proxy", label="Codex 窗口额度"),
+                    ],
+                ),
+                _ui_field("subscription_management_url", "管理接口地址", "text", placeholder="https://…"),
+                _ui_field("subscription_auth_index", "认证索引", "text"),
+                _ui_field("subscription_management_key", "管理密钥", "text", sensitive=True),
+            ],
+        },
+    }
+
+
+def _model_overrides_ui_schema() -> dict[str, Any]:
+    return {
+        "control_kind": "key_value",
+        "options": [dict(option) for option in _MODEL_ROLE_OPTIONS],
+        "placeholder": "选择模型角色后填写模型名称。",
+        "allow_advanced_json": True,
+        "item_schema": {
+            "type": "object",
+            "fields": [
+                _ui_field(
+                    "key",
+                    "模型角色",
+                    "select",
+                    required=True,
+                    options=[dict(option) for option in _MODEL_ROLE_OPTIONS],
+                ),
+                _ui_field("value", "模型名称", "text", required=True),
+            ],
+        },
+    }
+
+
+def _favorability_levels_ui_schema() -> dict[str, Any]:
+    return {
+        "control_kind": "level_table",
+        "placeholder": "添加等级名称与最低分值。",
+        "allow_advanced_json": True,
+        "item_schema": {
+            "type": "object",
+            "fields": [
+                _ui_field("name", "等级名称", "text", required=True),
+                _ui_field("threshold", "最低分值", "number", required=True, min=-100, max=100, step=0.1),
+            ],
+        },
+    }
+
+
+def _favorability_behavior_bands_ui_schema() -> dict[str, Any]:
+    return {
+        "control_kind": "behavior_band_table",
+        "placeholder": "添加分值区间及对应行为策略。",
+        "allow_advanced_json": True,
+        "item_schema": {
+            "type": "object",
+            "fields": [
+                _ui_field("band", "分值区间", "text", required=True, placeholder="例如 20-49"),
+                _ui_field("warmth", "温度", "text"),
+                _ui_field("address_mode", "称呼方式", "text"),
+                _ui_field("reply_length", "回复长度", "text"),
+                _ui_field("initiative_bias", "主动性偏置", "number", min=-0.2, max=0.2, step=0.01),
+                _ui_field("random_reply_add", "随机回复增量", "number", min=-0.2, max=0.2, step=0.01),
+                _ui_field("group_idle_add", "群闲增量", "number", min=-0.2, max=0.2, step=0.01),
+                _ui_field("sticker_tts_hint", "表情与语音提示", "text"),
+            ],
+        },
+    }
+
+
+def _known_key_value_ui_schema(entry: ConfigEntry) -> dict[str, Any] | None:
+    field_name = entry.field_name
+    if field_name == "personification_favorability_attitudes":
+        return {
+            "control_kind": "key_value",
+            "placeholder": "等级名称与对应态度说明。",
+            "item_schema": {"type": "object", "fields": [_ui_field("key", "等级名称", "text"), _ui_field("value", "态度说明", "textarea")]},
+        }
+    if field_name == "personification_favorability_event_deltas":
+        return {
+            "control_kind": "key_value",
+            "placeholder": "事件代码与分值变化。",
+            "item_schema": {"type": "object", "fields": [_ui_field("key", "事件代码", "text"), _ui_field("value", "分值变化", "number", step=0.01)]},
+        }
+    if field_name == "personification_video_custom_frame_budgets":
+        return {
+            "control_kind": "key_value",
+            "placeholder": "视频时长秒数与抽帧预算。",
+            "item_schema": {"type": "object", "fields": [_ui_field("key", "视频时长（秒）", "number", min=1, step=1), _ui_field("value", "抽帧数", "number", min=1, step=1)]},
+        }
+    return None
+
+
+def _build_ui_schema(entry: ConfigEntry, *, secret: bool) -> dict[str, Any]:
+    """Return the registry-owned edit contract for one configuration field."""
+
+    field_name = entry.field_name
+    if field_name == "personification_api_pools":
+        return _provider_list_ui_schema()
+    if field_name == "personification_model_overrides":
+        return _model_overrides_ui_schema()
+    if field_name == "personification_favorability_levels":
+        return _favorability_levels_ui_schema()
+    if field_name == "personification_favorability_behavior_bands":
+        return _favorability_behavior_bands_ui_schema()
+
+    if entry.value_type == "bool":
+        return {"control_kind": "switch"}
+    if secret:
+        return {
+            "control_kind": "text",
+            "placeholder": "敏感值不会回显。",
+            "sensitive_fields": ["value"],
+        }
+    if entry.choices:
+        return {
+            "control_kind": "select",
+            "options": [_ui_option(value) for value in entry.choices],
+        }
+    if entry.value_type in {"int", "float"}:
+        return _number_ui_schema(entry)
+    if entry.value_type == "list":
+        if entry.key in _OBJECT_LIST_KEYS:
+            return {
+                "control_kind": "json_advanced",
+                "placeholder": entry.example or "请输入 JSON 数组。",
+                "allow_advanced_json": True,
+            }
+        item_label = "Peer Bot QQ ID" if field_name == "personification_peer_bot_ids" else "列表项"
+        item_placeholder = "例如 2854196310" if field_name == "personification_peer_bot_ids" else "输入一项后添加"
+        return {
+            "control_kind": "string_list",
+            "placeholder": item_placeholder,
+            "item_schema": {"type": "string", "label": item_label, "placeholder": item_placeholder},
+        }
+    if entry.value_type == "dict":
+        known = _known_key_value_ui_schema(entry)
+        if known is not None:
+            return known
+        return {
+            "control_kind": "json_advanced",
+            "placeholder": entry.example or "请输入 JSON 对象。",
+            "allow_advanced_json": True,
+        }
+    if any(token in field_name for token in ("_prompt", "_system", "_description", "_template")):
+        return {"control_kind": "textarea", "placeholder": entry.example or "输入文本。"}
+    return {"control_kind": "text", "placeholder": entry.example or "输入文本。"}
 
 
 def _infer_group(key: str) -> str:
@@ -639,6 +936,7 @@ def _enrich_entry(entry: ConfigEntry) -> ConfigEntry:
         advanced=entry.advanced or _infer_advanced(entry.field_name),
         description=description,
         example=example,
+        ui_schema=dict(entry.ui_schema) if entry.ui_schema is not None else _build_ui_schema(entry, secret=secret),
     )
 
 

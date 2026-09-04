@@ -176,7 +176,7 @@ describe("GroupPeerBotsPanel.vue", () => {
     await argumentInput!.setValue(".mc say {message");
 
     expect(argumentInput!.attributes("aria-invalid")).toBe("true");
-    expect(argumentInput!.attributes("aria-describedby")).toBe("peer-command-help peer-command-error");
+    expect(argumentInput!.attributes("aria-describedby")).toBe("peer-bot-argument-template-error");
 
     const alert = wrapper.find('[role="alert"]');
     expect(alert.exists()).toBe(true);
@@ -266,9 +266,7 @@ describe("GroupPeerBotsPanel.vue", () => {
     const wrapper = mountPanel();
     await flushPromises();
 
-    const autoLearnLabel = wrapper.findAll("label.checkbox-label").find((l) => l.text().includes("自动学习已批准 Bot 的新协议"));
-    expect(autoLearnLabel).toBeDefined();
-    const autoLearnInput = autoLearnLabel!.find("input[type='checkbox']");
+    const autoLearnInput = wrapper.get<HTMLInputElement>("#peer-bot-auto-learn");
     await autoLearnInput.setValue(true);
 
     const savePolicyButton = wrapper.findAll("button").find((b) => b.text().includes("保存群级策略"));
