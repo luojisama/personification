@@ -1,35 +1,40 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="minimal">
+<html lang="zh-CN" data-theme="minimal" data-color-mode="system" data-effective-scheme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" content="#eceae3" />
+    <meta name="theme-color" content="#f8fafc" />
     <meta
       name="description"
       content="Personification 拟人插件管理员事件取证台"
     />
     <script>
       (() => {
-        const key = "personification.console.theme";
-        const allowed = new Set(["minimal", "schale", "prts"]);
+        const allowedThemes = new Set(["minimal", "schale", "prts"]);
+        const allowedModes = new Set(["system", "light", "dark"]);
         let theme = "minimal";
+        let mode = "system";
         try {
-          const stored = window.localStorage.getItem(key);
-          if (stored && allowed.has(stored)) theme = stored;
-        } catch (_) {
-          /* 本地存储不可用时使用可预测的默认主题。 */
-        }
+          const savedTheme = localStorage.getItem("personification.console.theme");
+          const savedMode = localStorage.getItem("personification.console.color-mode");
+          if (savedTheme && allowedThemes.has(savedTheme)) theme = savedTheme;
+          if (savedMode && allowedModes.has(savedMode)) mode = savedMode;
+        } catch (_) {}
+        const systemDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
+        const scheme = theme === "schale" ? "light" : theme === "prts" ? "dark" : mode === "system" ? (systemDark ? "dark" : "light") : mode;
         document.documentElement.dataset.theme = theme;
-        document.documentElement.style.colorScheme = theme === "prts" ? "dark" : "light";
+        document.documentElement.dataset.colorMode = mode;
+        document.documentElement.dataset.effectiveScheme = scheme;
+        document.documentElement.style.colorScheme = scheme;
       })();
     </script>
     <title>Personification · 事件取证台</title>
-    <script type="module" crossorigin src="/personification/frontend/assets/index-Bw3mFkEZ.js"></script>
-    <link rel="stylesheet" crossorigin href="/personification/frontend/assets/index-CQX6y9-U.css">
+    <script type="module" crossorigin src="/personification/frontend/assets/index-v4B8ZrEJ.js"></script>
+    <link rel="stylesheet" crossorigin href="/personification/frontend/assets/index-cMxKwFUx.css">
   </head>
   <body>
-    <div id="root"></div>
+    <div id="vue-root"></div>
     <noscript>此管理台需要启用 JavaScript。</noscript>
   </body>
 </html>

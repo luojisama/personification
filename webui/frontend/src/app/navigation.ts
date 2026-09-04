@@ -1,4 +1,4 @@
-import type { IconName } from "../components/Icon";
+import type { IconName } from "../types/icon";
 
 export type NavigationGroupId = "runtime" | "persona" | "capability" | "operations";
 

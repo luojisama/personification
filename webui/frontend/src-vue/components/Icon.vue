@@ -21,6 +21,8 @@
 </template>
 
 <script setup lang="ts">
-export type IconName = "overview" | "route" | "trace" | "recovery" | "settings" | "data" | "system" | "signal" | "search" | "refresh" | "chevron" | "check" | "close" | "unknown" | "clock" | "tool" | "shield";
+import type { IconName } from "@/types/icon";
+
+export type { IconName };
 defineProps<{ name: IconName }>();
 </script>

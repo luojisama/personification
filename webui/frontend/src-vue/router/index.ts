@@ -2,7 +2,7 @@ import { createRouter, createWebHistory } from "vue-router";
 
 import { routes } from "./routes";
 
-export const BASE_URL = "/personification/frontend-vue-preview/";
+export const BASE_URL = "/personification/frontend/";
 
 export const router = createRouter({
   history: createWebHistory(BASE_URL),

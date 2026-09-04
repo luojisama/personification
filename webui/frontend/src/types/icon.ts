@@ -1,0 +1,18 @@
+export type IconName =
+  | "overview"
+  | "route"
+  | "trace"
+  | "recovery"
+  | "settings"
+  | "data"
+  | "system"
+  | "signal"
+  | "search"
+  | "refresh"
+  | "chevron"
+  | "check"
+  | "close"
+  | "unknown"
+  | "clock"
+  | "tool"
+  | "shield";

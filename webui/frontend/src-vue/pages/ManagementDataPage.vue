@@ -262,13 +262,15 @@
         <p class="muted-copy">从群列表选择群，或输入群 ID。</p>
       </Panel>
 
-      <!-- 专项区域迁移提示 -->
-      <Panel v-else-if="currentSection === 'peer-bots'" eyebrow="PEER BOTS / MIGRATION" title="Peer Bot 协作">
-        <p class="muted-copy">当前群 <code>{{ detailGroupId }}</code> 的 Peer Bot 专属控制台将在后续阶段完成全面升级，已接入基础群信息管理与开关通道。</p>
-      </Panel>
-      <Panel v-else-if="currentSection === 'qzone-agent'" eyebrow="QZONE / AGENT" title="空间互动">
-        <p class="muted-copy">当前群 <code>{{ detailGroupId }}</code> 的 QQ 空间互动 Agent 控制台已完成路由对接，当前可通过 QQ 空间能力中心进行全局监控。</p>
-      </Panel>
+      <GroupPeerBotsPanel
+        v-else-if="currentSection === 'peer-bots'"
+        :group-id="detailGroupId"
+        :bot-id="botStore.selectedBotId"
+      />
+      <GroupQzoneAgentPanel
+        v-else-if="currentSection === 'qzone-agent'"
+        :group-id="detailGroupId"
+      />
 
       <!-- 基础群详情 -->
       <QueryBoundary v-else :pending="groupDetailQuery.isPending.value" :error="groupDetailQuery.error.value">
@@ -403,6 +405,8 @@ import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
 import { useBotStore } from "@vue-app/stores/bot";
+import GroupPeerBotsPanel from "@vue-app/components/GroupPeerBotsPanel.vue";
+import GroupQzoneAgentPanel from "@vue-app/components/GroupQzoneAgentPanel.vue";
 
 import GroupAliasesPanel from "./subcomponents/GroupAliasesPanel.vue";
 import GroupFavorabilityPanel from "./subcomponents/GroupFavorabilityPanel.vue";

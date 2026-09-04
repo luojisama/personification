@@ -72,14 +72,14 @@
 .dialog-footer { display: flex; gap: var(--space-2); justify-content: flex-end; border-top: 1px solid var(--color-line); }
 
 :root[data-theme="minimal"] .panel, :root[data-theme="minimal"] .chart-surface { box-shadow: none; }
-:root[data-theme="schale"] .panel, :root[data-theme="schale"] .chart-surface, :root[data-theme="schale"] .table-wrap, :root[data-theme="schale"] .dialog { background: rgba(255, 255, 255, .92); border-color: #bde0f2; border-radius: var(--radius-lg); box-shadow: var(--shadow-md); }
+:root[data-theme="schale"] .panel, :root[data-theme="schale"] .chart-surface, :root[data-theme="schale"] .table-wrap, :root[data-theme="schale"] .table-responsive, :root[data-theme="schale"] .dialog { background: rgba(255, 255, 255, .92); border-color: #bde0f2; border-radius: var(--radius-lg); box-shadow: var(--shadow-md); }
 :root[data-theme="schale"] .button { border-radius: var(--radius-full); }
-:root[data-theme="prts"] .panel, :root[data-theme="prts"] .chart-surface, :root[data-theme="prts"] .table-wrap, :root[data-theme="prts"] .dialog { border-color: var(--color-line-strong); border-radius: 0; box-shadow: inset 3px 0 var(--color-signal); }
+:root[data-theme="prts"] .panel, :root[data-theme="prts"] .chart-surface, :root[data-theme="prts"] .table-wrap, :root[data-theme="prts"] .table-responsive, :root[data-theme="prts"] .dialog { border-color: var(--color-line-strong); border-radius: 0; box-shadow: inset 3px 0 var(--color-signal); }
 :root[data-theme="prts"] .panel::before, :root[data-theme="prts"] .chart-surface::before { position: absolute; top: 0; right: 0; width: 2.5rem; height: 3px; content: ""; background: var(--color-signal); }
 :root[data-theme="prts"] .button { border-radius: 0; font-family: var(--font-mono); letter-spacing: .035em; text-transform: uppercase; }
 :root[data-theme="prts"] .button-primary { color: #080808; }
-:root[data-theme="prts"] .forensic-table { font-family: var(--font-mono); font-size: var(--text-xs); }
-:root[data-theme="prts"] .forensic-table th { color: var(--color-signal); border-bottom-color: var(--color-signal); }
+:root[data-theme="prts"] .forensic-table, :root[data-theme="prts"] .data-table { font-family: var(--font-mono); font-size: var(--text-xs); }
+:root[data-theme="prts"] .forensic-table th, :root[data-theme="prts"] .data-table th { color: var(--color-signal); border-bottom-color: var(--color-signal); }
 
 @media (max-width: 760px) {
   .page-heading { display: grid; }

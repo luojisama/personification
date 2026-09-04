@@ -45,6 +45,15 @@ const mockSnapshot: AgentRuntimeSnapshot = {
   background_tasks: 4,
   background_failures: 0,
   cache_entries: 128,
+  provider_streaming: {
+    mode: "buffered",
+    route_supported: true,
+    active_calls: 1,
+    fallback_count: 0,
+    first_chunk_ms: 120,
+    total_ms: 450,
+    chunk_count: 8,
+  },
   inner_state: { mood: "平静", energy: "高", pending_count: 0, updated_at: "12:00:00" },
   recent_traces: [
     {
@@ -92,6 +101,40 @@ describe("AgentStatusPage", () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain("测试 Bot"));
     expect(wrapper.text()).toContain("协议端在线");
     expect(wrapper.text()).toContain("150.0 MB");
+    wrapper.unmount();
+    queryClient.clear();
+  });
+
+  it("正确渲染上游流式缓冲状态与安全交付说明", async () => {
+    const { wrapper, queryClient } = await renderPage();
+    await vi.waitFor(() => expect(wrapper.text()).toContain("上游流式缓冲"));
+    expect(wrapper.text()).toContain("缓冲");
+    expect(wrapper.text()).toContain("当前路由支持");
+    expect(wrapper.text()).toContain("Chunk 数");
+    expect(wrapper.text()).toContain("QQ 端在工具循环和审阅完成后才展示完整气泡");
+    expect(wrapper.html()).not.toContain("content_delta");
+    expect(wrapper.html()).not.toContain("provider_body");
+    wrapper.unmount();
+    queryClient.clear();
+  });
+
+  it("将关闭和不支持状态显示为中文标签", async () => {
+    vi.mocked(resources.agentRuntime).mockResolvedValue({
+      ...mockSnapshot,
+      provider_streaming: {
+        mode: "off",
+        route_supported: false,
+        active_calls: 0,
+        fallback_count: 3,
+        first_chunk_ms: null,
+        total_ms: null,
+        chunk_count: 0,
+      },
+    });
+    const { wrapper, queryClient } = await renderPage();
+    await vi.waitFor(() => expect(wrapper.text()).toContain("上游流式缓冲"));
+    expect(wrapper.text()).toContain("关闭");
+    expect(wrapper.text()).toContain("不支持");
     wrapper.unmount();
     queryClient.clear();
   });

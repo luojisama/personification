@@ -226,6 +226,19 @@ dd {
   color: var(--color-ink-muted);
 }
 
+.agent-identity-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.agent-identity-line > span:last-child {
+  margin-left: auto;
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+}
+
 @media (max-width: 850px) {
   .metric-rack {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -433,6 +446,7 @@ dd {
     grid-template-columns: 1fr;
   }
   .search-field input {
+    min-width: 0;
     width: 100%;
   }
 }
@@ -1379,4 +1393,87 @@ dd {
   .config-layout {
     grid-template-columns: 1fr;
   }
+}
+
+/* Peer Bot 专属控制台 */
+.peer-bot-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.peer-bot-settings-grid {
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+}
+
+.form-span {
+  grid-column: 1 / -1;
+}
+
+.peer-command-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  padding: var(--space-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-xs);
+}
+
+.peer-command-mode legend {
+  padding: 0 var(--space-2);
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+
+.peer-full-command-preview,
+.peer-bot-preview {
+  display: block;
+  padding: var(--space-3);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.peer-bot-editor {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-line);
+}
+
+.peer-bot-editor h3 {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-base);
+}
+
+.peer-bot-dry-run {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--color-line);
+}
+
+.qzone-gate-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.qzone-gate-strip > div {
+  display: flex;
+  flex: 1;
+  min-width: 10rem;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-xs);
 }

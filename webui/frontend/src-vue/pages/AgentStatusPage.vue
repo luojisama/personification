@@ -58,6 +58,33 @@
             </dl>
           </Panel>
 
+          <Panel eyebrow="PROVIDER STREAMING" title="上游流式缓冲">
+            <dl class="safe-settings-view">
+              <div>
+                <dt>流式模式</dt>
+                <dd>
+                  <StateBadge :tone="data.provider_streaming?.mode === 'buffered' ? 'ok' : 'unknown'">
+                    {{ streamingModeLabel(data.provider_streaming?.mode) }}
+                  </StateBadge>
+                </dd>
+              </div>
+              <div>
+                <dt>当前路由支持</dt>
+                <dd>
+                  <StateBadge :tone="routeSupportTone(data.provider_streaming?.route_supported)">
+                    {{ routeSupportLabel(data.provider_streaming?.route_supported) }}
+                  </StateBadge>
+                </dd>
+              </div>
+              <div><dt>活跃调用</dt><dd>{{ data.provider_streaming?.active_calls ?? 0 }}</dd></div>
+              <div><dt>回退次数</dt><dd>{{ data.provider_streaming?.fallback_count ?? 0 }}</dd></div>
+              <div><dt>首块延迟</dt><dd>{{ formatDuration(data.provider_streaming?.first_chunk_ms) }}</dd></div>
+              <div><dt>总耗时</dt><dd>{{ formatDuration(data.provider_streaming?.total_ms) }}</dd></div>
+              <div><dt>Chunk 数</dt><dd>{{ data.provider_streaming?.chunk_count ?? 0 }}</dd></div>
+              <div><dt>交付保证</dt><dd>缓冲模式仅在内存组装完整内容，QQ 端在工具循环和审阅完成后才展示完整气泡</dd></div>
+            </dl>
+          </Panel>
+
           <Panel class="wide-panel" eyebrow="RECENT TURNS" title="最近回合">
             <div class="trace-table-wrap">
               <table class="forensic-table">
@@ -123,5 +150,23 @@ const { data, isPending, error, refetch } = useQuery({
 
 function bytes(value: number | null | undefined): string {
   return value == null ? "暂不可用" : `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function streamingModeLabel(mode?: string): string {
+  if (mode === "buffered") return "缓冲";
+  if (mode === "off" || !mode) return "关闭";
+  return `未知模式（${mode}）`;
+}
+
+function routeSupportTone(supported?: boolean | string | null): "ok" | "warn" | "unknown" {
+  if (supported === true || supported === "supported") return "ok";
+  if (supported === false || supported === "unsupported") return "warn";
+  return "unknown";
+}
+
+function routeSupportLabel(supported?: boolean | string | null): string {
+  if (supported === true || supported === "supported") return "支持";
+  if (supported === false || supported === "unsupported") return "不支持";
+  return "未知";
 }
 </script>

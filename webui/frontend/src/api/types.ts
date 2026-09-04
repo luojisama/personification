@@ -388,6 +388,16 @@ export interface BotIdentity {
   last_seen_at: number | string | null;
 }
 
+export interface ProviderStreamingSnapshot {
+  mode?: "off" | "buffered" | string;
+  route_supported?: boolean | "supported" | "unsupported" | "unknown" | null;
+  active_calls?: number;
+  fallback_count?: number;
+  first_chunk_ms?: number | null;
+  total_ms?: number | null;
+  chunk_count?: number;
+}
+
 export interface AgentRuntimeSnapshot {
   bot: BotIdentity;
   connected_bots: BotIdentity[];
@@ -415,6 +425,7 @@ export interface AgentRuntimeSnapshot {
   background_tasks: number;
   background_failures: number;
   cache_entries: number;
+  provider_streaming?: ProviderStreamingSnapshot;
   inner_state: { mood: string; energy: string; pending_count: number; updated_at: string };
   recent_traces: Array<{
     trace_id: string;

@@ -34,7 +34,6 @@ env/
 
 data/
 skill_cache/
-webui/frontend_vue_preview_dist/
 
 # Coding-agent local workspaces and caches
 .agents/

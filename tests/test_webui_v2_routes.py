@@ -108,7 +108,7 @@ def test_whole_backup_router_exposes_step_up_and_fail_closed_restore_routes() ->
     } <= paths
 
 
-def test_react_production_build_is_served_with_spa_fallback() -> None:
+def test_frontend_production_build_is_served_with_spa_fallback() -> None:
     index = webui_app._serve_frontend_asset("")
     nested = webui_app._serve_frontend_asset("traces/example")
     assert str(index.path).replace("\\", "/").endswith("frontend_dist/index.html")

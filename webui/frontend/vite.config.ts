@@ -1,9 +1,16 @@
-import { configDefaults, defineConfig } from "vitest/config";
-import react from "@vitejs/plugin-react";
+import { fileURLToPath, URL } from "node:url";
+import { defineConfig } from "vitest/config";
+import vue from "@vitejs/plugin-vue";
 
 export default defineConfig({
   base: "/personification/frontend/",
-  plugins: [react()],
+  plugins: [vue()],
+  resolve: {
+    alias: {
+      "@vue-app": fileURLToPath(new URL("./src-vue", import.meta.url)),
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+    },
+  },
   build: {
     outDir: "../frontend_dist",
     assetsDir: "assets",
@@ -19,8 +26,8 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
-    setupFiles: ["./src/test/setup.ts"],
-    exclude: [...configDefaults.exclude, "src-vue/**", "vue-preview/**"],
+    setupFiles: [fileURLToPath(new URL("./src-vue/test/setup.ts", import.meta.url))],
+    include: ["src/**/*.{test,spec}.ts", "src-vue/**/*.{test,spec}.ts"],
     restoreMocks: true,
     clearMocks: true,
     css: true,

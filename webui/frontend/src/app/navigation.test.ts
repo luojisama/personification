@@ -1,10 +1,12 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { FEATURE_PARITY_CONTRACTS } from "./parityContracts";
 import { FLAT_ROUTE_REDIRECTS, LEGACY_VIEW_MAPPINGS, NAVIGATION_GROUPS, NAVIGATION_ITEMS, NAVIGATION_LEAVES, navigationContext } from "./navigation";
+import { BASE_URL } from "@vue-app/router";
+import { routes } from "@vue-app/router/routes";
 
 const OLD_VIEWS = [
   "agent_status", "data_transfer", "dashboard", "config", "personas", "groups", "group_switch", "memory",
@@ -51,37 +53,55 @@ describe("新版分层导航与行为对齐合同", () => {
     expect(FLAT_ROUTE_REDIRECTS).not.toHaveProperty("/catalog");
   });
 
-  it("生产 Router 不再引用通用 JSON 扁平化与旧接口资源", () => {
-    const root = resolve(process.cwd(), "src");
-    const routerSource = readFileSync(resolve(root, "app/router.tsx"), "utf8");
-    const resourcesSource = readFileSync(resolve(root, "api/resources.ts"), "utf8");
-    const configSource = readFileSync(resolve(root, "pages/ConfigCenterPage.tsx"), "utf8");
-    expect(routerSource).not.toContain("FeatureWorkbenchPage");
-    expect(routerSource).not.toContain("RuntimeCatalogPage");
-    expect(routerSource).not.toContain("ManagementDataPage");
-    expect(routerSource).toContain("errorElement: <RouteErrorPage />");
-    expect(routerSource).toContain("frontend_chunk_load_failed");
-    expect(resourcesSource).not.toContain("resources.legacy");
-    expect(resourcesSource).not.toContain("configAll(");
-    expect(configSource).not.toContain("JSON.stringify");
-    expect(configSource).toContain("StructuredListInput");
-    expect(configSource).toContain("StructuredObjectInput");
+  it("Vue 官方路由覆盖全部行为合同并保留旧深链", () => {
+    expect(BASE_URL).toBe("/personification/frontend/");
+    const routeCovers = (path: string) => routes.some((route) => {
+      const pattern = route.path
+        .split("/")
+        .map((segment) => segment.startsWith(":") ? "[^/]+" : segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("/");
+      return new RegExp(`^${pattern}$`).test(path);
+    });
     for (const contract of FEATURE_PARITY_CONTRACTS) {
-      expect(routerSource, `${contract.legacy_view_id} must use ${contract.component}`).toContain(contract.component);
+      expect(routeCovers(contract.route), `${contract.legacy_view_id} route ${contract.route}`).toBe(true);
     }
+    expect(routeCovers("/traces/example")).toBe(true);
   });
 
-  it("Trace 详情链接保持在分层路由内并兼容旧深链", () => {
-    const root = resolve(process.cwd(), "src");
-    const routerSource = readFileSync(resolve(root, "app/router.tsx"), "utf8");
-    const tracePage = readFileSync(resolve(root, "pages/TracesPage.tsx"), "utf8");
-    const overviewPage = readFileSync(resolve(root, "pages/OverviewPage.tsx"), "utf8");
-    const agentPage = readFileSync(resolve(root, "pages/AgentStatusPage.tsx"), "utf8");
-    for (const source of [tracePage, overviewPage, agentPage]) {
-      expect(source).not.toContain("`/traces/${");
-      expect(source).toContain("/runtime/traces/timeline/");
+  it("正式源码不再保留旧框架专属文件、依赖或挂载入口", () => {
+    const projectRoot = resolve(process.cwd());
+    const scanFiles = (directory: string): string[] => {
+      if (!existsSync(directory)) return [];
+      return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+        const fullPath = resolve(directory, entry.name);
+        return entry.isDirectory() ? scanFiles(fullPath) : [fullPath];
+      });
+    };
+    const sourceFiles = [...scanFiles(resolve(projectRoot, "src")), ...scanFiles(resolve(projectRoot, "src-vue"))];
+    const legacyExtension = ".t" + "sx";
+    expect(sourceFiles.some((file) => file.endsWith(legacyExtension))).toBe(false);
+
+    const forbiddenSpecifiers = [
+      "rea" + "ct",
+      "rea" + "ct-dom",
+      "rea" + "ct-router-dom",
+      "@tanstack/rea" + "ct-query",
+    ];
+    for (const file of sourceFiles.filter((item) => /\.(ts|vue)$/.test(item))) {
+      const source = readFileSync(file, "utf8");
+      for (const specifier of forbiddenSpecifiers) {
+        expect(source).not.toContain(`from "${specifier}"`);
+      }
     }
-    expect(routerSource).toContain('path: "traces/:traceId"');
-    expect(routerSource).toContain("LegacyTraceRedirect");
+
+    const packageJson = JSON.parse(readFileSync(resolve(projectRoot, "package.json"), "utf8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const dependencyNames = Object.keys({ ...packageJson.dependencies, ...packageJson.devDependencies });
+    for (const specifier of forbiddenSpecifiers) {
+      expect(dependencyNames).not.toContain(specifier);
+    }
+    expect(readFileSync(resolve(projectRoot, "index.html"), "utf8")).toContain("/src-vue/main.ts");
   });
 });
