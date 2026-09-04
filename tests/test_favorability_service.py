@@ -139,13 +139,13 @@ def test_positive_events_update_legacy_counters_and_daily_caps(monkeypatch) -> N
     group_second = service.apply_group_good_atmosphere("9988", now=now)
     group_profile = service.get_user_data("group_9988")
 
-    assert group_first["delta"] == 0.1
-    assert group_second["delta"] == 0.0
+    assert group_first["delta"] == 0.05
+    assert group_second["delta"] == 0.05
     assert group_profile["daily_fav_count"] == 0.1
     assert group_profile["daily_positive_count"] == 0.1
 
 
-def test_reply_interaction_event_uses_shared_daily_positive_cap(monkeypatch) -> None:  # noqa: ANN001
+def test_reply_interaction_compatibility_event_no_longer_adds_score(monkeypatch) -> None:  # noqa: ANN001
     store = _FakeStore()
     monkeypatch.setattr(favorability, "get_data_store", lambda: store)
     service = favorability.FavorabilityService(
@@ -160,13 +160,190 @@ def test_reply_interaction_event_uses_shared_daily_positive_cap(monkeypatch) -> 
     second = service.apply_user_reply_interaction("10001", now=now, group_id="200", is_random_chat=True)
     profile = service.get_user_data("10001")
 
-    assert first["delta"] == 0.03
-    assert second["delta"] == 0.02
+    assert first["delta"] == 0.0
+    assert second["delta"] == 0.0
     assert second["status"] == "applied"
-    assert profile["favorability"] == 20.05
-    assert profile["daily_positive_count"] == 0.05
+    assert profile["favorability"] == 20.0
+    assert profile["daily_positive_count"] == 0.0
     assert profile["favorability_events"][-1]["type"] == "user_reply_interaction"
     assert profile["favorability_events"][-1]["metadata"]["is_random_chat"] is True
+
+
+def test_quality_daily_v2_uses_shared_cap_thresholds_and_idempotency(monkeypatch) -> None:  # noqa: ANN001
+    store = _FakeStore()
+    monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    service = favorability.FavorabilityService(
+        plugin_config=_config(
+            personification_favorability_growth_model="quality_daily_v2",
+            personification_favorability_user_daily_growth_cap=0.23,
+            personification_favorability_group_daily_growth_cap=0.23,
+            personification_favorability_progress_confidence=0.75,
+            personification_favorability_milestone_confidence=0.90,
+            personification_favorability_quality_deltas={
+                "meaningful": 0.08,
+                "resonant": 0.15,
+                "milestone": 0.23,
+            },
+        )
+    )
+    now = datetime(2026, 9, 4, 8, 0, tzinfo=timezone.utc)
+
+    low = service.apply_relationship_progress(
+        "10001", quality="meaningful", confidence=0.74, is_private=True, event_id="low", now=now
+    )
+    meaningful = service.apply_relationship_progress(
+        "10001", quality="meaningful", confidence=0.75, is_private=True, event_id="one", now=now
+    )
+    duplicate = service.apply_relationship_progress(
+        "10001", quality="meaningful", confidence=0.99, is_private=True, event_id="one", now=now
+    )
+    resonant = service.apply_relationship_progress(
+        "10001", quality="resonant", confidence=0.91, is_private=True, event_id="two", now=now
+    )
+    capped = service.apply_relationship_progress(
+        "10001", quality="milestone", confidence=0.90, is_private=True, event_id="three", now=now
+    )
+    profile = service.peek_user_data("10001")
+
+    assert low["status"] == "skipped_low_confidence"
+    assert meaningful["delta"] == 0.08
+    assert duplicate["status"] == "duplicate"
+    assert resonant["delta"] == 0.15
+    assert capped["status"] == "capped"
+    assert profile is not None
+    assert profile["favorability"] == 0.23
+    assert profile["daily_positive_count"] == 0.23
+    assert profile["last_progress_quality"] == "milestone"
+
+
+def test_quality_daily_v2_prefers_existing_group_user_scope_without_double_credit(monkeypatch) -> None:  # noqa: ANN001
+    store = _FakeStore()
+    monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    service = favorability.FavorabilityService(
+        plugin_config=_config(
+            personification_favorability_growth_model="quality_daily_v2",
+            personification_favorability_user_daily_growth_cap=0.23,
+            personification_favorability_group_daily_growth_cap=0.23,
+            personification_favorability_progress_confidence=0.75,
+            personification_favorability_milestone_confidence=0.90,
+            personification_favorability_quality_deltas=favorability.DEFAULT_FAVORABILITY_QUALITY_DELTAS.copy(),
+        )
+    )
+    service.set_score("10001", 10, actor="test")
+    service.update_user_data("group_user_20001_10001", favorability=20, scope="group_user", group_id="20001")
+
+    result = service.apply_relationship_progress(
+        "10001",
+        quality="meaningful",
+        confidence=0.9,
+        is_private=False,
+        group_id="20001",
+        event_id="group-turn",
+    )
+
+    assert result["delta"] == 0.08
+    assert service.peek_user_data("10001")["favorability"] == 10
+    assert service.peek_user_data("group_user_20001_10001")["favorability"] == 20.08
+
+
+def test_quality_daily_v2_reaches_seventy_after_about_305_active_days(monkeypatch) -> None:  # noqa: ANN001
+    store = _FakeStore()
+    monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    service = favorability.FavorabilityService(
+        plugin_config=_config(
+            personification_favorability_growth_model="quality_daily_v2",
+            personification_favorability_user_daily_growth_cap=0.23,
+            personification_favorability_group_daily_growth_cap=0.23,
+            personification_favorability_progress_confidence=0.75,
+            personification_favorability_milestone_confidence=0.90,
+            personification_favorability_quality_deltas=favorability.DEFAULT_FAVORABILITY_QUALITY_DELTAS.copy(),
+        )
+    )
+    first_day = datetime(2026, 1, 1, 8, 0, tzinfo=timezone.utc)
+
+    for day in range(304):
+        result = service.apply_relationship_progress(
+            "10001",
+            quality="milestone",
+            confidence=0.95,
+            is_private=True,
+            event_id=f"active-day-{day + 1}",
+            now=first_day + timedelta(days=day),
+        )
+        assert result["delta"] == 0.23
+
+    assert service.peek_user_data("10001")["favorability"] == 69.92
+
+    day_305 = service.apply_relationship_progress(
+        "10001",
+        quality="milestone",
+        confidence=0.95,
+        is_private=True,
+        event_id="active-day-305",
+        now=first_day + timedelta(days=304),
+    )
+
+    assert day_305["delta"] == 0.23
+    assert service.peek_user_data("10001")["favorability"] == 70.15
+
+
+def test_quality_daily_v2_observer_apply_shares_cap_and_shadow_never_posts(monkeypatch) -> None:  # noqa: ANN001
+    store = _FakeStore()
+    monkeypatch.setattr(favorability, "get_data_store", lambda: store)
+    config = _config(
+        personification_favorability_growth_model="quality_daily_v2",
+        personification_favorability_user_daily_growth_cap=0.23,
+        personification_favorability_group_daily_growth_cap=0.23,
+        personification_favorability_progress_confidence=0.75,
+        personification_favorability_milestone_confidence=0.90,
+        personification_favorability_quality_deltas=favorability.DEFAULT_FAVORABILITY_QUALITY_DELTAS.copy(),
+        personification_favorability_observer_mode="apply",
+        personification_favorability_observer_confidence_threshold=0.65,
+        personification_favorability_observer_delta_cap=1.5,
+    )
+    service = favorability.FavorabilityService(plugin_config=config)
+    now = datetime(2026, 9, 4, 8, 0, tzinfo=timezone.utc)
+    service.apply_relationship_progress(
+        "10001",
+        quality="resonant",
+        confidence=0.9,
+        is_private=True,
+        event_id="reply-progress",
+        now=now,
+    )
+    assessment = SimpleNamespace(
+        decision="increase",
+        requested_delta=1.5,
+        confidence=0.9,
+        behavior_tags=(),
+        evidence_summary="bounded",
+        reason="bounded",
+    )
+
+    applied = service.apply_observer_assessment(
+        user_id="10001",
+        is_private=True,
+        assessment=assessment,
+        observation_id="observer-apply",
+        now=now,
+    )
+
+    assert applied["delta"] == 0.08
+    assert applied["capped"] is True
+    assert service.peek_user_data("10001")["favorability"] == 0.23
+
+    config.personification_favorability_observer_mode = "shadow"
+    projected = service.apply_observer_assessment(
+        user_id="10001",
+        is_private=True,
+        assessment=assessment,
+        observation_id="observer-shadow",
+        now=now + timedelta(days=1),
+    )
+
+    assert projected["status"] == "projected"
+    assert projected["delta"] == 0.0
+    assert service.peek_user_data("10001")["favorability"] == 0.23
 
 
 def test_negative_event_blacklist_clamps_by_daily_cap(monkeypatch) -> None:  # noqa: ANN001
@@ -547,7 +724,7 @@ def test_peek_and_snapshot_are_pure_local_reads(monkeypatch) -> None:  # noqa: A
     profile = service.peek_user_data("10001")
     snapshot = service.snapshot_profiles()
 
-    assert profile is not None and profile["schema_version"] == 5
+    assert profile is not None and profile["schema_version"] == 6
     assert snapshot["10001"]["favorability"] == 7.0
     assert service.peek_user_data("missing") is None
     assert store.payload == before
@@ -780,12 +957,12 @@ def test_v4_upgrade_preserves_nonnegative_event_and_custom_levels(monkeypatch) -
     service = favorability.FavorabilityService(plugin_config=_config(personification_favorability_levels={"熟人": 10, "挚友": 90}))
     profile = service.peek_user_data("u")
     levels = favorability.normalize_favorability_levels({"熟人": 10, "挚友": 90})
-    assert profile["schema_version"] == 5 and profile["favorability"] == 12 and profile["favorability_events"][0]["new"] == 12
+    assert profile["schema_version"] == 6 and profile["favorability"] == 12 and profile["favorability_events"][0]["new"] == 12
     assert all(levels[name] == threshold for name, threshold in {"熟人": 10, "挚友": 90}.items())
     assert all(name in levels for name in ("极度厌恶", "厌恶", "反感", "疏远", "警惕"))
 
 
-def test_load_data_persists_v5_meta_without_external_import(monkeypatch) -> None:
+def test_load_data_persists_v6_meta_without_external_import(monkeypatch) -> None:
     store = _FakeStore(); monkeypatch.setattr(favorability, "get_data_store", lambda: store)
     store.payload = {
         "__favorability_store_meta__": {"schema_version": 4},
@@ -796,15 +973,15 @@ def test_load_data_persists_v5_meta_without_external_import(monkeypatch) -> None
     assert data["u"]["favorability"] == 12
     assert data["u"]["favorability_events"][0]["old"] == 10
     assert data["u"]["favorability_events"][0]["new"] == 12
-    assert store.payload["__favorability_store_meta__"]["schema_version"] == 5
-    assert store.payload["u"]["schema_version"] == 5
+    assert store.payload["__favorability_store_meta__"]["schema_version"] == 6
+    assert store.payload["u"]["schema_version"] == 6
 
 
-def test_load_data_marks_empty_store_as_schema_v5(monkeypatch) -> None:
+def test_load_data_marks_empty_store_as_schema_v6(monkeypatch) -> None:
     store = _FakeStore(); monkeypatch.setattr(favorability, "get_data_store", lambda: store)
     service = favorability.FavorabilityService(plugin_config=_config())
     assert service.load_data() == {}
-    assert store.payload["__favorability_store_meta__"]["schema_version"] == 5
+    assert store.payload["__favorability_store_meta__"]["schema_version"] == 6
 
 
 def test_cross_zero_clamps_caps_and_event_idempotency(monkeypatch) -> None:

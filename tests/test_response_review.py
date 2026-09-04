@@ -781,3 +781,81 @@ def test_final_dialogue_gate_fail_closes_multi_owner_media_when_reviewer_fails()
     )
     assert decision.action == "no_reply"
     assert "media_attribution_uncertain" in decision.flags
+
+
+def test_final_dialogue_gate_blocks_explicit_relationship_score_when_reviewer_fails() -> None:
+    async def _failed(_messages):  # noqa: ANN001
+        raise RuntimeError("offline")
+
+    decision = asyncio.run(
+        response_review.final_dialogue_gate(
+            _failed,
+            candidate_text="你对我的好感度是 70，所以我会更偏心你。",
+            raw_message_text="你怎么看我",
+            relationship_hint="关系阶段：信赖；不得透露内部关系分数。",
+            reply_required=True,
+        )
+    )
+
+    assert decision.action == "no_reply"
+    assert decision.flags == ("score_leak",)
+
+
+def test_final_dialogue_gate_rechecks_relationship_rewrite_once() -> None:
+    calls = 0
+
+    async def _review(messages):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            assert "fabricated_shared_history" in messages[0]["content"]
+            return (
+                '{"action":"rewrite","text":"这件事我愿意继续听你说。",'
+                '"reason":"移除伪造经历","flags":["fabricated_shared_history"]}'
+            )
+        assert "关系表达改写的最终复核器" in messages[0]["content"]
+        return '{"action":"accept","text":"","reason":"边界成立","flags":[]}'
+
+    decision = asyncio.run(
+        response_review.final_dialogue_gate(
+            _review,
+            candidate_text="还记得我们上次一起去过那里。",
+            raw_message_text="最近有点累",
+            relationship_hint="只能引用已经证实的共同经历。",
+        )
+    )
+
+    assert calls == 2
+    assert decision.action == "rewrite"
+    assert decision.text == "这件事我愿意继续听你说。"
+
+
+def test_final_dialogue_gate_silences_failed_relationship_rewrite() -> None:
+    calls = 0
+
+    async def _review(_messages):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return (
+                '{"action":"rewrite","text":"我们一直都是最亲密的人。",'
+                '"reason":"仍过度熟悉","flags":["overfamiliar"]}'
+            )
+        return (
+            '{"action":"no_reply","text":"","reason":"仍不成立",'
+            '"flags":["overfamiliar","fabricated_shared_history"]}'
+        )
+
+    decision = asyncio.run(
+        response_review.final_dialogue_gate(
+            _review,
+            candidate_text="我们一直是最好的朋友。",
+            raw_message_text="在吗",
+            relationship_hint="关系阶段：初见。",
+            reply_required=True,
+        )
+    )
+
+    assert calls == 2
+    assert decision.action == "no_reply"
+    assert "overfamiliar" in decision.flags

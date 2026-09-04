@@ -19,6 +19,7 @@ from .core.favorability import (
     DEFAULT_FAVORABILITY_BEHAVIOR_BANDS,
     DEFAULT_FAVORABILITY_EVENT_DELTAS,
     DEFAULT_FAVORABILITY_LEVELS,
+    DEFAULT_FAVORABILITY_QUALITY_DELTAS,
 )
 
 
@@ -515,6 +516,12 @@ class Config(BaseModel):
     personification_favorability_daily_positive_cap: float = 5.0
     personification_favorability_group_daily_positive_cap: float = 10.0
     personification_favorability_daily_negative_cap: float = 30.0
+    personification_favorability_growth_model: str = "quality_daily_v2"
+    personification_favorability_user_daily_growth_cap: float = 0.23
+    personification_favorability_group_daily_growth_cap: float = 0.23
+    personification_favorability_progress_confidence: float = 0.75
+    personification_favorability_milestone_confidence: float = 0.90
+    personification_favorability_quality_deltas: Dict[str, float] = DEFAULT_FAVORABILITY_QUALITY_DELTAS.copy()
     personification_favorability_event_log_limit: int = 50
     personification_favorability_decay_enabled: bool = False
     personification_favorability_decay_idle_days: int = 14
@@ -696,11 +703,6 @@ class Config(BaseModel):
     personification_antigravity_cli_auth_path: str = ""
     # Antigravity/Gemini companion project；留空时先自动解析，再兼容 gemini-cli/gcloud 配置。
     personification_antigravity_cli_project: str = ""
-
-    # claude-code OAuth 配置
-    # personification_api_type = "claude_code" 时生效
-    # 留空则按 ~/.claude/.credentials.json、$CLAUDE_CONFIG_DIR 等顺序查找
-    personification_claude_code_auth_path: str = ""
 
     def model_post_init(self, __context: Any) -> None:
         fields_set = getattr(self, "__pydantic_fields_set__", set())

@@ -15,15 +15,23 @@ except ImportError:  # pragma: no cover
 
 
 DEFAULT_FAVORABILITY_EVENT_DELTAS: dict[str, float] = {
-    "group_good_atmosphere": 0.20,
-    "user_interesting_chat": 0.12,
-    "user_reply_interaction": 0.03,
+    "group_good_atmosphere": 0.05,
+    "user_interesting_chat": 0.08,
+    # v6 不再把“成功回复”本身视为关系进展；保留事件名只为兼容旧配置和账本。
+    "user_reply_interaction": 0.0,
     "user_perm_blacklist": -30.0,
     "user_perm_blacklist_removed": 0.0,
     "manual_adjust": 0.0,
     "daily_decay": -0.20,
     "user_behavior_observed": 0.0,
 }
+
+DEFAULT_FAVORABILITY_QUALITY_DELTAS: dict[str, float] = {
+    "meaningful": 0.08,
+    "resonant": 0.15,
+    "milestone": 0.23,
+}
+VALID_RELATIONSHIP_PROGRESS = frozenset({"none", *DEFAULT_FAVORABILITY_QUALITY_DELTAS})
 
 DEFAULT_FAVORABILITY_BEHAVIOR_BANDS: dict[str, dict[str, Any]] = {
     "-100--80": {"warmth": "boundary", "address_mode": "formal", "reply_length": "short", "initiative_bias": -0.20, "random_reply_add": -0.20, "group_idle_add": -0.20, "sticker_tts_hint": "none"},
@@ -116,7 +124,7 @@ DEFAULT_FAVORABILITY_ATTITUDES: dict[str, str] = {
 
 _STORE_NAME = "favorability_profiles"
 _STORE_META_KEY = "__favorability_store_meta__"
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 _EXTERNAL_MIGRATION_VERSION = 1
 _RECENT_EVENT_IDS_LIMIT = 256
 _GROUP_BASELINE_SCORE = 35.0
@@ -340,8 +348,11 @@ def normalize_favorability_profile(
         "last_favorability_decay_date",
         "custom_title",
         "nickname",
+        "last_progress_quality",
     ):
         profile[key] = str(profile.get(key, "") or "").strip()
+    if profile["last_progress_quality"] not in VALID_RELATIONSHIP_PROGRESS:
+        profile["last_progress_quality"] = "none"
     for key in ("blacklist_count",):
         profile[key] = max(0, _safe_int(profile.get(key, 0) or 0, 0))
     for key in (
@@ -958,6 +969,21 @@ class FavorabilityService:
                 return None
             return max(0.0, configured_cap)
         if delta > 0:
+            growth_model = str(
+                getattr(
+                    self.plugin_config,
+                    "personification_favorability_growth_model",
+                    "legacy",
+                )
+                or "legacy"
+            ).strip().lower()
+            if growth_model == "quality_daily_v2":
+                field_name = (
+                    "personification_favorability_group_daily_growth_cap"
+                    if _is_group_key(user_id) or str(event_type).startswith("group_")
+                    else "personification_favorability_user_daily_growth_cap"
+                )
+                return max(0.0, _safe_float(getattr(self.plugin_config, field_name, 0.23), 0.23))
             if _is_group_key(user_id) or str(event_type).startswith("group_"):
                 return max(
                     0.0,
@@ -1867,6 +1893,92 @@ class FavorabilityService:
             event_id=event_id,
         )
 
+    def apply_relationship_progress(
+        self,
+        user_id: str,
+        *,
+        quality: str,
+        confidence: float,
+        now: Any = None,
+        group_id: str = "",
+        is_private: bool,
+        reason: str = "统一语义帧判定本轮存在有效关系进展",
+        event_id: str = "",
+    ) -> dict[str, Any]:
+        """Apply one validated v2 relationship-progress event.
+
+        The semantic model proposes the quality. This service only validates the
+        bounded enum, confidence, scope, idempotency and shared daily budget.
+        """
+        uid = str(user_id or "").strip()
+        gid = "" if is_private else str(group_id or "").strip()
+        normalized_quality = str(quality or "none").strip().lower()
+        if not uid or normalized_quality not in VALID_RELATIONSHIP_PROGRESS:
+            return {"applied": False, "status": "invalid", "delta": 0.0, "requested_delta": 0.0}
+        if normalized_quality == "none":
+            return {"applied": False, "status": "no_progress", "delta": 0.0, "requested_delta": 0.0}
+        normalized_confidence = max(0.0, min(1.0, _safe_float(confidence, 0.0)))
+        configured_threshold = (
+            "personification_favorability_milestone_confidence"
+            if normalized_quality == "milestone"
+            else "personification_favorability_progress_confidence"
+        )
+        default_threshold = 0.90 if normalized_quality == "milestone" else 0.75
+        threshold = max(
+            0.0,
+            min(1.0, _safe_float(getattr(self.plugin_config, configured_threshold, default_threshold), default_threshold)),
+        )
+        configured_deltas = getattr(
+            self.plugin_config,
+            "personification_favorability_quality_deltas",
+            DEFAULT_FAVORABILITY_QUALITY_DELTAS,
+        )
+        raw_deltas = configured_deltas if isinstance(configured_deltas, dict) else {}
+        requested_delta = max(
+            0.0,
+            min(
+                0.23,
+                _safe_float(
+                    raw_deltas.get(normalized_quality, DEFAULT_FAVORABILITY_QUALITY_DELTAS[normalized_quality]),
+                    DEFAULT_FAVORABILITY_QUALITY_DELTAS[normalized_quality],
+                ),
+            ),
+        )
+        if normalized_confidence < threshold:
+            return {
+                "applied": False,
+                "status": "skipped_low_confidence",
+                "delta": 0.0,
+                "requested_delta": round(requested_delta, 2),
+                "quality": normalized_quality,
+                "confidence": round(normalized_confidence, 3),
+            }
+
+        scope_key = uid
+        scope = "global"
+        if gid:
+            group_scope_key = favorability_scope_key(uid, gid, scope="group_user")
+            if self.peek_user_data(group_scope_key) is not None:
+                scope_key = group_scope_key
+                scope = "group_user"
+        return self.apply_event(
+            scope_key,
+            f"relationship_progress_{normalized_quality}",
+            delta=requested_delta,
+            reason=reason,
+            group_id=gid,
+            now=now,
+            patch={"last_progress_quality": normalized_quality},
+            metadata={
+                "source": "semantic_frame",
+                "mode": "quality_daily_v2",
+                "scope": scope,
+                "confidence": round(normalized_confidence, 3),
+                "relationship_progress": normalized_quality,
+            },
+            event_id=event_id,
+        )
+
     def apply_user_reply_interaction(
         self,
         user_id: str,
@@ -2059,6 +2171,7 @@ __all__ = [
     "DEFAULT_FAVORABILITY_BEHAVIOR_BANDS",
     "DEFAULT_FAVORABILITY_EVENT_DELTAS",
     "DEFAULT_FAVORABILITY_LEVELS",
+    "DEFAULT_FAVORABILITY_QUALITY_DELTAS",
     "ExternalFavorabilityAdapter",
     "FavorabilityService",
     "build_external_sign_in_adapter",

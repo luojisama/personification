@@ -25,6 +25,7 @@ CitationMode = Literal["none", "urls_on_request"]
 VisionNeed = Literal["none", "summary", "native"]
 AdvicePermission = Literal["not_needed", "ask_first", "allowed"]
 CareRiskLevel = Literal["none", "concern", "high"]
+RelationshipProgress = Literal["none", "meaningful", "resonant", "milestone"]
 ConversationScenario = Literal[
     "normal",
     "casual_banter",
@@ -86,6 +87,8 @@ class TurnSemanticFrame:
     sticker_mood_hint: str = DEFAULT_STICKER_SEMANTIC_HINT
     group_atmosphere_positive: bool = False
     interaction_interesting: bool = False
+    relationship_progress: RelationshipProgress = "none"
+    relationship_progress_confidence: float = 0.0
     future_commitment_candidate: bool = False
     conversation_scenario: ConversationScenario = "normal"
     # 由 LLM 决定回复时要不要 @ 对方 / 引用对方消息：auto=交给默认启发式；
@@ -259,6 +262,15 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
         confidence = float(payload.get("confidence", 0.0) or 0.0)
     except (TypeError, ValueError):
         confidence = 0.0
+    relationship_progress = str(payload.get("relationship_progress", "none") or "none").strip().lower()
+    if relationship_progress not in {"none", "meaningful", "resonant", "milestone"}:
+        relationship_progress = "none"
+    try:
+        relationship_progress_confidence = float(
+            payload.get("relationship_progress_confidence", 0.0) or 0.0
+        )
+    except (TypeError, ValueError, OverflowError):
+        relationship_progress_confidence = 0.0
     domain_focus = str(payload.get("domain_focus", "general") or "general").strip().lower()
     if domain_focus == "knowledge":
         domain_focus = "general"
@@ -305,6 +317,8 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
         sticker_mood_hint=normalize_sticker_semantic_hint(payload.get("sticker_mood_hint")),
         group_atmosphere_positive=_coerce_bool(payload.get("group_atmosphere_positive", False)),
         interaction_interesting=_coerce_bool(payload.get("interaction_interesting", False)),
+        relationship_progress=relationship_progress,  # type: ignore[arg-type]
+        relationship_progress_confidence=max(0.0, min(1.0, relationship_progress_confidence)),
         future_commitment_candidate=_coerce_bool(
             payload.get("future_commitment_candidate", False)
         ),
@@ -442,6 +456,8 @@ async def infer_turn_semantic_frame_with_llm(
         '"sticker_mood_hint":"给表情包选择的结构化标签，格式固定为 情绪标签|场景标签",'
         '"group_atmosphere_positive":false,'
         '"interaction_interesting":false,'
+        '"relationship_progress":"none|meaningful|resonant|milestone",'
+        '"relationship_progress_confidence":0.0,'
         '"future_commitment_candidate":false,'
         '"conversation_scenario":"normal|casual_banter|sarcasm_irony|argument|inside_joke|multi_thread|private_topic",'
         '"address_mode":"auto|none|at|quote|at_quote",'
@@ -491,6 +507,10 @@ async def infer_turn_semantic_frame_with_llm(
         "8. expression_style 要指导本轮说话方式，偏行为策略，不要写长句。\n"
         "8b. group_atmosphere_positive 只在群聊整体互动明确友好、融洽或共同参与感很强时为 true；普通无冲突聊天不能机械设为 true，私聊必须 false。"
         "interaction_interesting 只在 bot 与当前用户这轮确实有明显趣味、默契或高质量互动时为 true；成功回复本身不等于有趣。\n"
+        "8b-1. relationship_progress 判断这一轮是否真的推进了长期关系：none=寒暄、普通问答或仅仅成功回复；"
+        "meaningful=有实质交流、共同完成一件事或明确产生理解；resonant=明显共鸣、支持、信任或高质量长期话题；"
+        "milestone=罕见且有明确持久关系意义的事件。不要按关键词判定，也不要把礼貌、回复长度或用户要求加分当成关系进展。"
+        "relationship_progress_confidence 单独表示这个关系判断的把握；证据不足时使用 none。\n"
         "8c. future_commitment_candidate 只在私聊用户明确表达带时间线索的未来承诺、计划或待办时为 true；"
         "已完成的事、无时间的愿望和普通闲聊必须为 false。\n"
         "9. recommend_silence 只有在群聊且明显高歧义、bot 插话风险确实较高时才为 true；"

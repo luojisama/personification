@@ -20,13 +20,9 @@ class _Service:
         self.calls.append(("group", args, kwargs))
         return {"status": "applied", "delta": 0.2}
 
-    def apply_user_interesting_chat(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
-        self.calls.append(("interesting", args, kwargs))
-        return {"status": "applied", "delta": 0.12}
-
-    def apply_user_reply_interaction(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
-        self.calls.append(("reply", args, kwargs))
-        return {"status": "applied", "delta": 0.03}
+    def apply_relationship_progress(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        self.calls.append(("progress", args, kwargs))
+        return {"status": "applied", "delta": 0.08}
 
 
 def test_semantic_signals_require_confidence_and_keep_private_group_signal_off() -> None:
@@ -64,7 +60,12 @@ def test_legacy_markers_are_compatibility_only_and_never_remain_visible() -> Non
 
 def test_commit_turn_uses_distinct_idempotency_keys_and_skips_group_in_private() -> None:
     service = _Service()
-    signals = favorability_turn.FavorabilityTurnSignals(True, True)
+    signals = favorability_turn.FavorabilityTurnSignals(
+        True,
+        True,
+        relationship_progress="meaningful",
+        relationship_progress_confidence=0.9,
+    )
 
     results = favorability_turn.commit_favorability_turn(
         service=service,
@@ -77,12 +78,11 @@ def test_commit_turn_uses_distinct_idempotency_keys_and_skips_group_in_private()
         turn_id="turn-1",
     )
 
-    assert len(results) == 3
-    assert [call[0] for call in service.calls] == ["group", "interesting", "reply"]
+    assert len(results) == 2
+    assert [call[0] for call in service.calls] == ["group", "progress"]
     assert [call[2]["event_id"] for call in service.calls] == [
         "turn-1:group-atmosphere",
-        "turn-1:interesting",
-        "turn-1:reply",
+        "turn-1:relationship-progress",
     ]
 
     service.calls.clear()
@@ -96,8 +96,25 @@ def test_commit_turn_uses_distinct_idempotency_keys_and_skips_group_in_private()
         signals=signals,
         turn_id="turn-2",
     )
-    assert [call[0] for call in service.calls] == ["interesting", "reply"]
+    assert [call[0] for call in service.calls] == ["progress"]
     assert service.calls[-1][2]["group_id"] == ""
+
+
+def test_ordinary_confirmed_reply_has_no_relationship_gain() -> None:
+    service = _Service()
+    for index in range(100):
+        results = favorability_turn.commit_favorability_turn(
+            service=service,
+            user_id="10001",
+            group_id="20001",
+            is_private=False,
+            is_direct=True,
+            is_random_chat=False,
+            signals=favorability_turn.FavorabilityTurnSignals(),
+            turn_id=f"ordinary-{index}",
+        )
+        assert results == []
+    assert service.calls == []
 
 
 def test_turn_id_is_stable_and_does_not_embed_raw_identifiers() -> None:
@@ -143,6 +160,8 @@ def test_context_block_keeps_relationship_policy_shared() -> None:
     assert "当前关系表达边界" in block
     assert "保持礼貌和边界感" in block
     assert "群里整体比较融洽" in block
+    assert "好感分数" in block
+    assert "50-74" not in block
 
 
 def test_enabled_gate_reads_service_state_dynamically() -> None:

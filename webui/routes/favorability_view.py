@@ -14,6 +14,9 @@ _EVENT_LABELS: dict[str, str] = {
     "daily_decay": "每日关系衰减",
     "user_behavior_observed": "模型观察用户表现",
     "baseline_migration": "默认基线迁移",
+    "relationship_progress_meaningful": "有效关系进展",
+    "relationship_progress_resonant": "深度关系共鸣",
+    "relationship_progress_milestone": "重要关系里程碑",
 }
 
 _STATUS_LABELS: dict[str, str] = {
@@ -190,6 +193,39 @@ def serialize_favorability(
     negative_date = str(profile.get("daily_negative_date", "") or "")
     group_daily_date = str(profile.get("last_update", "") or "")
     interesting_date = str(profile.get("last_interesting_date", "") or "")
+    growth_model = str(
+        getattr(service.plugin_config, "personification_favorability_growth_model", "quality_daily_v2")
+        or "quality_daily_v2"
+    ).strip().lower()
+    daily_growth_cap = max(
+        0.0,
+        _safe_float(
+            getattr(
+                service.plugin_config,
+                (
+                    "personification_favorability_group_daily_growth_cap"
+                    if scope == "group"
+                    else "personification_favorability_user_daily_growth_cap"
+                ),
+                0.23,
+            ),
+            0.23,
+        ),
+    )
+    today_positive = round(
+        _safe_float(profile.get("daily_positive_count", 0.0), 0.0)
+        if positive_date == today
+        else 0.0,
+        2,
+    )
+    remaining_today = round(max(0.0, daily_growth_cap - today_positive), 2)
+    estimated_active_days_to_70 = (
+        0
+        if score >= 70
+        else math.ceil((70.0 - score) / daily_growth_cap)
+        if daily_growth_cap > 0
+        else None
+    )
     return {
         "available": True,
         "enabled": enabled,
@@ -202,12 +238,15 @@ def serialize_favorability(
         "score_min": -100,
         "score_max": 100,
         "level": level,
+        "growth_model": growth_model,
+        "today_positive": today_positive,
+        "daily_growth_cap": round(daily_growth_cap, 2),
+        "remaining_today": remaining_today,
+        "last_progress_quality": str(profile.get("last_progress_quality", "none") or "none"),
+        "estimated_active_days_to_70": estimated_active_days_to_70,
         "is_perm_blacklisted": bool(profile.get("is_perm_blacklisted", False)),
         "blacklist_count": _safe_int(profile.get("blacklist_count", 0), 0),
-        "daily_positive_count": round(
-            _safe_float(profile.get("daily_positive_count", 0.0), 0.0) if positive_date == today else 0.0,
-            2,
-        ),
+        "daily_positive_count": today_positive,
         "daily_negative_count": round(
             _safe_float(profile.get("daily_negative_count", 0.0), 0.0) if negative_date == today else 0.0,
             2,

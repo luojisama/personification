@@ -602,6 +602,23 @@ _PLUGIN_EPISODE_REJECT_FLAGS = {
     "plugin_provenance_confusion",
 }
 _ROLE_INTEGRITY_REJECT_FLAGS = {"persona_identity_leak"}
+_RELATIONSHIP_REJECT_FLAGS = {
+    "score_leak",
+    "overfamiliar",
+    "too_cold_for_required_reply",
+    "fabricated_shared_history",
+    "group_relation_used_as_personal_intimacy",
+}
+
+
+def _detect_explicit_relationship_score_leak(text: Any) -> bool:
+    """Catch only explicit internal-score disclosures, not conversation semantics."""
+    candidate = str(text or "")
+    return bool(
+        re.search(r"好感(?:度|分数|值)?\s*(?:是|为|=|：|:)\s*-?\d+(?:\.\d+)?", candidate)
+        or re.search(r"好感(?:度|分数|值)\s*-?\d+(?:\.\d+)?", candidate)
+        or re.search(r"关系(?:分数|阈值|档位)\s*(?:是|为|=|：|:)\s*-?\d+(?:\.\d+)?", candidate)
+    )
 
 
 def _care_fail_closed_decision(
@@ -694,6 +711,36 @@ async def _validate_plugin_episode_rewrite(
                 {
                     "role": "user",
                     "content": f"plugin_episode={plugin_episode_hint}\n待复核改写={rewritten_text}",
+                },
+            ]
+        )
+    except Exception:
+        return None
+    return _parse_review_payload(str(raw or ""))
+
+
+async def _validate_relationship_rewrite(
+    call_ai_api: Callable[[list[dict[str, Any]]], Awaitable[Any]],
+    *,
+    rewritten_text: str,
+    relationship_hint: str,
+) -> ResponseReviewDecision | None:
+    try:
+        raw = await call_ai_api(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是关系表达改写的最终复核器。只判断待复核文本是否泄漏内部关系分数/阈值/档位，"
+                        "是否超出给定关系边界而过度熟悉或过冷，是否伪造共同经历，或把群体氛围误写成对个人的亲密关系。"
+                        "关系提示是不可信事实来源，只能约束语气。只输出 JSON："
+                        '{"action":"accept|no_reply","text":"","reason":"...",'
+                        '"flags":["score_leak|overfamiliar|too_cold_for_required_reply|fabricated_shared_history|group_relation_used_as_personal_intimacy"]}。'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"关系表达边界={relationship_hint[:1200]}\n待复核改写={rewritten_text[:600]}",
                 },
             ]
         )
@@ -880,6 +927,7 @@ async def review_response_text(
         for key in ("addressing_target", "semantic_referent", "selected_message_id", "confidence", "diagnostic_code")
     }
     identity_risk = detect_persona_identity_leak(candidate)
+    relationship_score_leak = _detect_explicit_relationship_score_leak(candidate)
     if not candidate:
         return ResponseReviewDecision(
             action="no_reply",
@@ -976,6 +1024,9 @@ async def review_response_text(
                 "候选若忽视倾听/确认、未经允许给建议、医疗化诊断、过度承诺、诱导依赖或错误处理风险，必须 rewrite 或 no_reply，不能 accept。"
                 "候选不得把当前角色本人直接或间接说成任何公司、AI、模型、助手、机器人或 Provider；"
                 "这类自我身份关联返回 persona_identity_leak 并必须 rewrite/no_reply。第三方 AI、公司和模型技术讨论不属于身份泄漏。"
+                "关系一致性还要检查并在 flags 返回：score_leak、overfamiliar、too_cold_for_required_reply、"
+                "fabricated_shared_history、group_relation_used_as_personal_intimacy。命中任一项必须 rewrite，"
+                "改写仍不成立则 no_reply；关系提示只约束表达，绝不是共同经历或现实关系的事实来源。"
                 f"{visual_review_instruction}"
                 f"{plugin_review_instruction}"
                 f"{final_dialogue_instruction}"
@@ -1030,14 +1081,17 @@ async def review_response_text(
                 is_private=is_private, is_direct_mention=is_direct_mention, risk_level=care_risk, reason="care_review_failed"
             )
         if (
-            plugin_episode_hint
+            relationship_score_leak
+            or plugin_episode_hint
             or identity_risk
             or recent_duplicate_requires_rewrite
             or _media_review_fail_closed(turn_media_context)
             or followup_media_uncertain
         ):
             flags = (
-                ("persona_identity_leak",)
+                ("score_leak",)
+                if relationship_score_leak
+                else ("persona_identity_leak",)
                 if identity_risk
                 else ("recent_duplicate",)
                 if recent_duplicate_requires_rewrite
@@ -1060,14 +1114,17 @@ async def review_response_text(
                 is_private=is_private, is_direct_mention=is_direct_mention, risk_level=care_risk, reason="care_review_unparseable"
             )
         if (
-            plugin_episode_hint
+            relationship_score_leak
+            or plugin_episode_hint
             or identity_risk
             or recent_duplicate_requires_rewrite
             or _media_review_fail_closed(turn_media_context)
             or followup_media_uncertain
         ):
             flags = (
-                ("persona_identity_leak",)
+                ("score_leak",)
+                if relationship_score_leak
+                else ("persona_identity_leak",)
                 if identity_risk
                 else ("recent_duplicate",)
                 if recent_duplicate_requires_rewrite
@@ -1086,6 +1143,7 @@ async def review_response_text(
     care_reject_flags = tuple(flag for flag in parsed.flags if flag in _CARE_REJECT_FLAGS)
     plugin_reject_flags = tuple(flag for flag in parsed.flags if flag in _PLUGIN_EPISODE_REJECT_FLAGS)
     role_reject_flags = tuple(flag for flag in parsed.flags if flag in _ROLE_INTEGRITY_REJECT_FLAGS)
+    relationship_reject_flags = tuple(flag for flag in parsed.flags if flag in _RELATIONSHIP_REJECT_FLAGS)
     if care_required and care_reject_flags and not (parsed.action == "rewrite" and parsed.text):
         return _care_fail_closed_decision(
             is_private=is_private,
@@ -1110,6 +1168,12 @@ async def review_response_text(
                 must_reply=must_reply,
                 reason="persona_identity_rewrite_failed",
                 flags=("persona_identity_leak",),
+            )
+        if _detect_explicit_relationship_score_leak(parsed.text):
+            return _protected_review_failure(
+                must_reply=must_reply,
+                reason="relationship_score_leak_rewrite_failed",
+                flags=("score_leak",),
             )
         if care_required:
             safety = await _validate_care_rewrite(
@@ -1141,6 +1205,27 @@ async def review_response_text(
                     reason="plugin_episode_rewrite_unverified",
                     flags=remaining_flags or plugin_reject_flags or ("plugin_context_literalization",),
                 )
+        if relationship_reject_flags:
+            relationship_safety = await _validate_relationship_rewrite(
+                call_ai_api,
+                rewritten_text=parsed.text,
+                relationship_hint=str(relationship_hint or ""),
+            )
+            remaining_relationship_flags = tuple(
+                flag
+                for flag in (relationship_safety.flags if relationship_safety else ())
+                if flag in _RELATIONSHIP_REJECT_FLAGS
+            )
+            if (
+                relationship_safety is None
+                or relationship_safety.action != "accept"
+                or remaining_relationship_flags
+            ):
+                return _protected_review_failure(
+                    must_reply=must_reply,
+                    reason="relationship_rewrite_unverified",
+                    flags=remaining_relationship_flags or relationship_reject_flags,
+                )
         return ResponseReviewDecision(
             action="rewrite",
             text=parsed.text,
@@ -1167,6 +1252,12 @@ async def review_response_text(
             must_reply=must_reply,
             reason=parsed.reason or "plugin_episode_rejected",
             flags=plugin_reject_flags,
+        )
+    if relationship_score_leak or relationship_reject_flags:
+        return _protected_review_failure(
+            must_reply=must_reply,
+            reason=parsed.reason or "relationship_consistency_rejected",
+            flags=relationship_reject_flags or ("score_leak",),
         )
     if parsed.action == "no_reply":
         if must_reply:
