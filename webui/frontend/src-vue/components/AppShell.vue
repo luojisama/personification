@@ -13,14 +13,14 @@
           <strong>{{ selectedBot?.nickname || "拟人插件" }}</strong>
           <small>{{ selectedBot?.bot_id ? `QQ ${selectedBot.bot_id}` : "事件取证台" }}</small>
         </div>
-        <select v-if="bots.length > 1 && !railCollapsed" class="bot-selector" aria-label="选择 Bot" :value="selectedBot?.bot_id ?? ''" @change="onBotChange">
-          <option v-for="bot in bots" :key="bot.bot_id" :value="bot.bot_id">{{ bot.nickname }} · {{ bot.bot_id }}</option>
-        </select>
+        <div v-if="bots.length > 1 && !railCollapsed" class="bot-selector">
+          <SearchableSelect v-model="selectedBotId" label="选择 Bot" :options="botOptions" hide-label />
+        </div>
       </div>
 
       <div class="global-page-search rail-expandable">
         <Icon name="search" />
-        <input v-model="searchQuery" placeholder="搜索页面或功能" aria-label="搜索页面或功能" @keydown.esc="searchQuery = ''" />
+        <TextField v-model="searchQuery" label="搜索页面或功能" type="search" placeholder="搜索页面或功能" hide-label @keydown.esc="searchQuery = ''" />
         <div v-if="searchResults.length" class="page-search-results" role="listbox" aria-label="页面搜索结果">
           <button v-for="item in searchResults" :key="item.id" type="button" role="option" @click="visit(item.path || '/runtime/overview/summary')">
             <Icon :name="item.icon" />
@@ -30,19 +30,41 @@
         </div>
       </div>
 
-      <nav class="primary-nav" aria-label="一级分类">
+      <nav class="visual-section-nav" aria-label="导航分区">
         <button
-          v-for="group in NAVIGATION_GROUPS"
-          :key="group.id"
+          v-for="section in NAVIGATION_SECTIONS"
+          :key="section.id"
           type="button"
-          :class="{ active: currentContext?.group.id === group.id }"
-          :aria-current="currentContext?.group.id === group.id ? 'page' : undefined"
-          :title="railCollapsed ? group.label : undefined"
-          @click="visitGroup(group.id, group.path)"
+          :class="{ active: currentContext?.section.id === section.id }"
+          :aria-pressed="currentContext?.section.id === section.id"
+          :title="railCollapsed ? section.label : undefined"
+          @click="visitSection(section.id)"
         >
-          <Icon :name="group.icon" />
-          <span class="nav-label rail-expandable">{{ group.label }}</span>
+          <Icon :name="section.icon" />
+          <span class="section-label">{{ section.label }}</span>
         </button>
+      </nav>
+
+      <div class="mobile-section-selector">
+        <SelectField
+          :model-value="currentSectionId"
+          label="选择导航分区"
+          :options="sectionOptions"
+          @update:model-value="visitSection"
+        />
+      </div>
+
+      <nav v-if="currentSection" class="section-page-nav" :aria-label="`${currentSection.label}页面`">
+        <RouterLink
+          v-for="item in currentSection.children"
+          :key="item.id"
+          :to="item.path || '/runtime/overview/summary'"
+          :class="{ active: currentContext?.page.id === item.id }"
+          :aria-current="currentContext?.page.id === item.id ? 'page' : undefined"
+        >
+          <Icon :name="item.icon" />
+          <span class="nav-label rail-expandable">{{ item.label }}</span>
+        </RouterLink>
       </nav>
 
       <div class="rail-foot">
@@ -66,11 +88,11 @@
       </header>
 
       <div v-if="currentContext" class="workspace-navigation">
-        <nav class="secondary-navigation" :aria-label="`${currentContext.group.label}二级导航`">
-          <RouterLink v-for="item in currentContext.group.children" :key="item.id" :to="item.path || '#'" :class="{ active: currentContext.page.id === item.id }">{{ item.label }}</RouterLink>
+        <nav class="secondary-navigation" :aria-label="`${currentContext.section.label}页面导航`">
+          <RouterLink v-for="item in currentContext.section.children" :key="item.id" :to="item.path || '#'" :class="{ active: currentContext.page.id === item.id }">{{ item.label }}</RouterLink>
         </nav>
         <nav class="tertiary-navigation" :aria-label="`${currentContext.page.label}三级导航`">
-          <span class="workspace-breadcrumb">{{ currentContext.group.label }} / {{ currentContext.page.label }}</span>
+          <span class="workspace-breadcrumb">{{ currentContext.section.label }} / {{ currentContext.page.label }}</span>
           <RouterLink
             v-for="item in currentContext.page.children"
             :key="item.id"
@@ -94,9 +116,12 @@ import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { resources } from "@/api/resources";
 import type { BotIdentity } from "@/api/types";
-import { NAVIGATION_GROUPS, NAVIGATION_ITEMS, NAVIGATION_LEAVES, navigationContext, type NavigationNode } from "@/app/navigation";
+import { NAVIGATION_GROUPS, NAVIGATION_ITEMS, NAVIGATION_LEAVES, NAVIGATION_SECTIONS, navigationContext, navigationSectionForPage, type NavigationNode } from "@/app/navigation";
 import Icon from "@vue-app/components/Icon.vue";
 import IdentityAvatar from "@vue-app/components/IdentityAvatar.vue";
+import SearchableSelect from "@vue-app/components/forms/SearchableSelect.vue";
+import SelectField from "@vue-app/components/forms/SelectField.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
 import ThemeSwitcher from "@vue-app/components/ThemeSwitcher.vue";
 import { useRuntimeEvents } from "@vue-app/realtime/runtimeEvents";
@@ -121,7 +146,19 @@ const railCollapsed = computed(() => uiStore.sidebarCollapsed);
 const botsQuery = useQuery({ queryKey: ["bots"], queryFn: ({ signal }) => resources.bots(signal), staleTime: 30_000 });
 const bots = computed<BotIdentity[]>(() => botsQuery.data.value?.items ?? []);
 const selectedBot = computed(() => resolveSelectedBot(bots.value, botStore.selectedBotId));
+const selectedBotId = computed({
+  get: () => selectedBot.value?.bot_id ?? botStore.selectedBotId,
+  set: (botId: string) => botStore.setBotId(botId),
+});
+const botOptions = computed(() => bots.value.map((bot) => ({
+  value: bot.bot_id,
+  label: `${bot.nickname} · ${bot.bot_id}`,
+  description: bot.online ? "在线" : "未连接",
+})));
 const currentContext = computed(() => navigationContext(route.path));
+const currentSection = computed(() => currentContext.value?.section ?? null);
+const currentSectionId = computed(() => currentSection.value?.id ?? "runtime-overview");
+const sectionOptions = NAVIGATION_SECTIONS.map((section) => ({ value: section.id, label: section.label }));
 
 watch([bots, () => botStore.selectedBotId], ([currentBots, selectedId]) => {
   const resolved = resolveSelectedBot(currentBots, selectedId);
@@ -130,17 +167,19 @@ watch([bots, () => botStore.selectedBotId], ([currentBots, selectedId]) => {
 
 watch(() => currentContext.value?.leaf.path, (leafPath) => {
   const groupId = currentContext.value?.group.id;
-  if (!leafPath || !groupId) return;
-  try { window.localStorage.setItem(`personification.nav.last.${groupId}`, leafPath); } catch { /* 页面路径记忆失败不影响导航 */ }
+  const sectionId = currentContext.value?.section.id;
+  if (!leafPath || !groupId || !sectionId) return;
+  try {
+    window.localStorage.setItem(`personification.nav.last.${groupId}`, leafPath);
+    window.localStorage.setItem(`personification.nav.last-section.${sectionId}`, leafPath);
+  } catch {
+    /* 页面路径记忆失败不影响导航 */
+  }
 });
 
 watch(() => route.fullPath, () => {
   drawerOpen.value = false;
 });
-
-function onBotChange(event: Event): void {
-  botStore.setBotId((event.target as HTMLSelectElement).value);
-}
 
 function toggleRail(): void {
   uiStore.toggleSidebar();
@@ -153,10 +192,13 @@ function visit(path: string): void {
   void router.push(path);
 }
 
-function visitGroup(groupId: string, fallback: string | null): void {
+function visitSection(sectionId: string): void {
+  const section = NAVIGATION_SECTIONS.find((item) => item.id === sectionId);
+  if (!section) return;
   let remembered = "";
-  try { remembered = window.localStorage.getItem(`personification.nav.last.${groupId}`) ?? ""; } catch { /* 使用默认入口 */ }
-  visit(remembered || fallback || "/runtime/overview/summary");
+  try { remembered = window.localStorage.getItem(`personification.nav.last-section.${section.id}`) ?? ""; } catch { /* 使用默认入口 */ }
+  const rememberedContext = remembered ? navigationContext(remembered) : null;
+  visit(rememberedContext?.section.id === section.id ? remembered : section.default_path || "/runtime/overview/summary");
 }
 
 function compactSearchText(value: string): string {
@@ -176,7 +218,8 @@ function navigationSearchText(item: NavigationNode): string {
   const parent = NAVIGATION_ITEMS.find((candidate) => candidate.children.some((child) => child.id === item.id));
   const page = parent ?? item;
   const group = NAVIGATION_GROUPS.find((candidate) => candidate.id === page.parent_id);
-  return [group?.label ?? "", page.label, item.label, ...page.aliases, ...item.aliases].join(" ");
+  const section = navigationSectionForPage(page);
+  return [section?.label ?? "", ...(section?.aliases ?? []), group?.label ?? "", page.label, item.label, ...page.aliases, ...item.aliases].join(" ");
 }
 
 const searchResults = computed(() => {

@@ -1,4 +1,4 @@
-import type { CapabilitySource, CapabilityState, RecoveryStatus, TraceOutcome } from "../api/types";
+import type { CapabilitySource, CapabilityState, RecoveryStatus, TraceOutcome, VerificationState } from "../api/types";
 
 export function capabilityStateLabel(state: CapabilityState): string {
   return state === "supported" ? "支持" : state === "unsupported" ? "不支持" : "未知";
@@ -14,6 +14,17 @@ export function capabilitySourceLabel(source: CapabilitySource): string {
     heuristic: "保守推断",
   };
   return labels[source];
+}
+
+export function verificationStateLabel(state: VerificationState): string {
+  const labels: Record<VerificationState, string> = {
+    verified: "已验证",
+    not_run: "未运行",
+    probe_unavailable: "探针不可用",
+    inconclusive: "结果不确定",
+    stale: "证据已过期",
+  };
+  return labels[state];
 }
 
 export function traceOutcomeLabel(outcome: TraceOutcome): string {

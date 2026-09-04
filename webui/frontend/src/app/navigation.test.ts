@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { FEATURE_PARITY_CONTRACTS } from "./parityContracts";
-import { FLAT_ROUTE_REDIRECTS, LEGACY_VIEW_MAPPINGS, NAVIGATION_GROUPS, NAVIGATION_ITEMS, NAVIGATION_LEAVES, navigationContext } from "./navigation";
+import { FLAT_ROUTE_REDIRECTS, LEGACY_VIEW_MAPPINGS, NAVIGATION_GROUPS, NAVIGATION_ITEMS, NAVIGATION_LEAVES, NAVIGATION_SECTIONS, navigationContext } from "./navigation";
 import { BASE_URL } from "@vue-app/router";
 import { routes } from "@vue-app/router/routes";
 
@@ -15,10 +15,65 @@ const OLD_VIEWS = [
   "devices", "user_policy", "outbound",
 ];
 
+const EXISTING_NAMED_ROUTE_PATHS: Readonly<Record<string, string>> = {
+  "runtime-overview-summary": "/runtime/overview/summary",
+  "runtime-agent": "/runtime/agent/:section",
+  "runtime-tokens": "/runtime/tokens/:window",
+  "runtime-health": "/runtime/health/:section",
+  "runtime-model-tests": "/runtime/model-tests/:section",
+  "runtime-routes": "/runtime/routes/:section",
+  "runtime-proactive": "/runtime/proactive/:section",
+  "runtime-traces-index": "/runtime/traces/index",
+  "runtime-traces-timeline": "/runtime/traces/timeline",
+  "runtime-traces-detail": "/runtime/traces/timeline/:traceId",
+  "runtime-recovery": "/runtime/recovery/:section",
+  "runtime-qzone": "/runtime/qzone/:section",
+  "persona-personas": "/persona/personas/:section",
+  "persona-groups": "/persona/groups/:section",
+  "persona-group-switches": "/persona/group-switches/list",
+  "persona-memories": "/persona/memories/:section",
+  "persona-memory-palace": "/persona/memory-palace/:section",
+  "persona-stickers": "/persona/stickers/:section",
+  "persona-preview": "/persona/persona-preview/:section",
+  "persona-builder": "/persona/persona-builder/:section",
+  "capability-skills": "/capability/skills/:section",
+  "capability-mcp": "/capability/mcp/:section",
+  "capability-tool-creator": "/capability/tool-creator/:section",
+  "capability-plugin-knowledge": "/capability/plugin-knowledge/:section",
+  "capability-plugins": "/capability/plugins/:section",
+  "operations-config": "/operations/config/:section",
+  "operations-user-policies": "/operations/user-policies/:section",
+  "operations-outbound": "/operations/outbound/:section",
+  "operations-data-transfer": "/operations/data-transfer/:section",
+  "operations-audit": "/operations/audit/:section",
+  "operations-logs": "/operations/logs/:section",
+  "operations-qq": "/operations/qq/:section",
+  "operations-devices": "/operations/devices/:section",
+  "operations-systems": "/operations/systems/:section",
+  "operations-settings": "/operations/settings/:section",
+};
+
 describe("新版分层导航与行为对齐合同", () => {
-  it("左侧只保留运行、拟人与记忆、能力、运维四个一级分类", () => {
+  it("稳定 URL 命名空间仍由运行、拟人与记忆、能力、运维四个逻辑组承载", () => {
     expect(NAVIGATION_GROUPS.map((group) => group.label)).toEqual(["运行", "拟人与记忆", "能力", "运维"]);
     expect(NAVIGATION_GROUPS.every((group) => group.level === 1 && group.parent_id === null)).toBe(true);
+  });
+
+  it("七个独立视觉分区完整覆盖页面，且不成为 URL 命名空间", () => {
+    expect(NAVIGATION_SECTIONS.map((section) => section.label)).toEqual([
+      "运行概览", "调试与恢复", "画像与群聊", "记忆与表达", "能力与插件", "QQ 与社交", "系统与数据",
+    ]);
+    const visualPageIds = NAVIGATION_SECTIONS.flatMap((section) => section.page_ids);
+    expect(new Set(visualPageIds).size).toBe(NAVIGATION_ITEMS.length);
+    expect(visualPageIds.sort()).toEqual(NAVIGATION_ITEMS.map((item) => item.id).sort());
+    for (const section of NAVIGATION_SECTIONS) {
+      expect(section.children).toHaveLength(section.page_ids.length);
+      expect(section.children.every((page) => page.path?.startsWith("/runtime/") || page.path?.startsWith("/persona/") || page.path?.startsWith("/capability/") || page.path?.startsWith("/operations/"))).toBe(true);
+      expect(section.children.some((page) => page.path?.startsWith(`/${section.id}/`))).toBe(false);
+    }
+    expect(navigationContext("/runtime/qzone/capabilities")?.section.id).toBe("qq-social");
+    expect(navigationContext("/operations/qq/accounts")?.section.id).toBe("qq-social");
+    expect(navigationContext("/operations/data-transfer/export")?.section.id).toBe("system-data");
   });
 
   it("二级页面和三级功能形成可深链的递归导航树", () => {
@@ -66,6 +121,12 @@ describe("新版分层导航与行为对齐合同", () => {
       expect(routeCovers(contract.route), `${contract.legacy_view_id} route ${contract.route}`).toBe(true);
     }
     expect(routeCovers("/traces/example")).toBe(true);
+  });
+
+  it("视觉导航重组不修改既有命名路由路径", () => {
+    for (const [name, path] of Object.entries(EXISTING_NAMED_ROUTE_PATHS)) {
+      expect(routes.find((route) => route.name === name)?.path, name).toBe(path);
+    }
   });
 
   it("正式源码不再保留旧框架专属文件、依赖或挂载入口", () => {

@@ -2,6 +2,22 @@ import type { IconName } from "../types/icon";
 
 export type NavigationGroupId = "runtime" | "persona" | "capability" | "operations";
 
+/**
+ * Visual sections deliberately do not participate in URL construction.
+ *
+ * `NavigationGroupId` remains the stable route namespace that backs old deep
+ * links.  A section is an administrator-facing way to find related pages
+ * across those namespaces, so changing this list must never change a route.
+ */
+export type NavigationSectionId =
+  | "runtime-overview"
+  | "debug-recovery"
+  | "profiles-groups"
+  | "memory-expression"
+  | "capabilities-plugins"
+  | "qq-social"
+  | "system-data";
+
 export interface NavigationNode {
   id: string;
   level: number;
@@ -14,6 +30,25 @@ export interface NavigationNode {
   legacy_view_id: string | null;
   data_source: string | null;
   children: NavigationNode[];
+}
+
+export interface NavigationSection {
+  id: NavigationSectionId;
+  label: string;
+  aliases: string[];
+  icon: IconName;
+  /** Existing page-node IDs, not URL path segments. */
+  page_ids: string[];
+  /** References to the canonical route-backed navigation nodes. */
+  children: NavigationNode[];
+  default_path: string | null;
+}
+
+export interface NavigationContext {
+  group: NavigationNode;
+  section: NavigationSection;
+  page: NavigationNode;
+  leaf: NavigationNode;
 }
 
 type LeafInput = { id: string; label: string; slug: string; aliases?: string[] };
@@ -115,11 +150,107 @@ export const NAVIGATION_ITEMS = NAVIGATION_TREE.flatMap((item) => item.children)
 export const NAVIGATION_LEAVES = NAVIGATION_ITEMS.flatMap((item) => item.children);
 export const LEGACY_VIEW_MAPPINGS = NAVIGATION_ITEMS.filter((item) => item.legacy_view_id);
 
-export function navigationContext(pathname: string): { group: NavigationNode; page: NavigationNode; leaf: NavigationNode } | null {
+type NavigationSectionInput = Omit<NavigationSection, "children" | "default_path">;
+
+/**
+ * The visual hierarchy is intentionally separate from `NAVIGATION_TREE`.
+ * Several sections span the legacy route namespaces (for example QQ Space is
+ * under `/runtime`, while QQ management is under `/operations`).
+ */
+const NAVIGATION_SECTION_INPUTS: NavigationSectionInput[] = [
+  {
+    id: "runtime-overview",
+    label: "运行概览",
+    aliases: ["运行", "总览", "实时状态", "Token"],
+    icon: "overview",
+    page_ids: ["runtime.overview", "runtime.agent", "runtime.tokens"],
+  },
+  {
+    id: "debug-recovery",
+    label: "调试与恢复",
+    aliases: ["体检", "模型测试", "路由", "Trace", "恢复"],
+    icon: "recovery",
+    page_ids: ["runtime.health", "runtime.model-tests", "runtime.routes", "runtime.proactive", "runtime.traces", "runtime.recovery"],
+  },
+  {
+    id: "profiles-groups",
+    label: "画像与群聊",
+    aliases: ["用户画像", "群信息", "群开关"],
+    icon: "data",
+    page_ids: ["persona.personas", "persona.groups", "persona.group-switches"],
+  },
+  {
+    id: "memory-expression",
+    label: "记忆与表达",
+    aliases: ["记忆", "表情", "人设", "Prompt"],
+    icon: "trace",
+    page_ids: ["persona.memories", "persona.memory-palace", "persona.stickers", "persona.persona-preview", "persona.persona-builder"],
+  },
+  {
+    id: "capabilities-plugins",
+    label: "能力与插件",
+    aliases: ["Skill", "MCP", "工具", "插件"],
+    icon: "tool",
+    page_ids: ["capability.skills", "capability.mcp", "capability.tool-creator", "capability.plugin-knowledge", "capability.plugins"],
+  },
+  {
+    id: "qq-social",
+    label: "QQ 与社交",
+    aliases: ["QQ 空间", "Bot 消息", "QQ 管理", "用户策略"],
+    icon: "signal",
+    page_ids: ["runtime.qzone", "operations.user-policies", "operations.outbound", "operations.qq"],
+  },
+  {
+    id: "system-data",
+    label: "系统与数据",
+    aliases: ["配置", "迁移", "审计", "日志", "设备", "系统", "设置"],
+    icon: "system",
+    page_ids: ["operations.config", "operations.data-transfer", "operations.audit", "operations.logs", "operations.devices", "operations.systems", "operations.settings"],
+  },
+];
+
+const NAVIGATION_ITEM_BY_ID = new Map(NAVIGATION_ITEMS.map((item) => [item.id, item]));
+
+function sectionPages(section: NavigationSectionInput): NavigationNode[] {
+  return section.page_ids.map((pageId) => {
+    const pageNode = NAVIGATION_ITEM_BY_ID.get(pageId);
+    if (!pageNode) throw new Error(`未知视觉导航页面：${pageId}`);
+    return pageNode;
+  });
+}
+
+export const NAVIGATION_SECTIONS: NavigationSection[] = NAVIGATION_SECTION_INPUTS.map((section) => {
+  const children = sectionPages(section);
+  return {
+    ...section,
+    children,
+    default_path: children[0]?.path ?? null,
+  };
+});
+
+const SECTION_BY_PAGE_ID = new Map<string, NavigationSection>();
+for (const section of NAVIGATION_SECTIONS) {
+  for (const pageId of section.page_ids) {
+    if (SECTION_BY_PAGE_ID.has(pageId)) throw new Error(`视觉导航页面重复归类：${pageId}`);
+    SECTION_BY_PAGE_ID.set(pageId, section);
+  }
+}
+if (SECTION_BY_PAGE_ID.size !== NAVIGATION_ITEMS.length) {
+  throw new Error("视觉导航必须覆盖全部页面且每页仅属于一个分区");
+}
+
+export function navigationSectionForPage(page: NavigationNode): NavigationSection | null {
+  return SECTION_BY_PAGE_ID.get(page.id) ?? null;
+}
+
+export function navigationContext(pathname: string): NavigationContext | null {
   for (const groupNode of NAVIGATION_TREE) {
     for (const pageNode of groupNode.children) {
       const leaf = pageNode.children.find((item) => pathname === item.path || pathname.startsWith(`${item.path}/`));
-      if (leaf) return { group: groupNode, page: pageNode, leaf };
+      if (leaf) {
+        const section = navigationSectionForPage(pageNode);
+        if (section) return { group: groupNode, section, page: pageNode, leaf };
+      }
     }
   }
   return null;

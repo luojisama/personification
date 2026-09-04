@@ -44,6 +44,8 @@ describe("AppShell", () => {
       routes: [
         { path: "/runtime/overview/summary", component: { template: "<div />" } },
         { path: "/runtime/agent/status", component: { template: "<div />" } },
+        { path: "/runtime/tokens/24h", component: { template: "<div />" } },
+        { path: "/runtime/health/catalog", component: { template: "<div />" } },
       ],
     });
     await router.push("/runtime/overview/summary");
@@ -73,7 +75,10 @@ describe("AppShell", () => {
   it("无真实网络即可选择 Bot、搜索页面和控制移动抽屉", async () => {
     const { wrapper, queryClient } = await renderShell();
     await vi.waitFor(() => expect(wrapper.find(".bot-selector").exists()).toBe(true));
-    await wrapper.get(".bot-selector").setValue("10002");
+    const botInput = wrapper.get(".bot-selector .searchable-select-input");
+    await botInput.trigger("focus");
+    await botInput.trigger("keydown", { key: "ArrowDown" });
+    await botInput.trigger("keydown", { key: "Enter" });
     expect(useBotStore().selectedBotId).toBe("10002");
 
     await wrapper.get(".global-page-search input").setValue("告警");
@@ -83,6 +88,23 @@ describe("AppShell", () => {
     expect(wrapper.get(".evidence-rail").classes()).toContain("is-open");
     await wrapper.get(".drawer-scrim").trigger("click");
     expect(wrapper.get(".evidence-rail").classes()).not.toContain("is-open");
+    wrapper.unmount();
+    queryClient.clear();
+  });
+
+  it("在窄屏使用原生键盘分区选择器，并且顶部只列出当前视觉分区页面", async () => {
+    const { wrapper, router, queryClient } = await renderShell();
+    const selector = wrapper.get(".mobile-section-selector select");
+    expect(selector.element.tagName).toBe("SELECT");
+    expect(wrapper.get(".mobile-section-selector label[for]").text()).toBe("选择导航分区");
+
+    await selector.trigger("keydown", { key: "ArrowDown" });
+    await selector.setValue("debug-recovery");
+    await vi.waitFor(() => expect(router.currentRoute.value.path).toBe("/runtime/health/catalog"));
+
+    const topLinks = wrapper.findAll(".secondary-navigation a").map((item) => item.text());
+    expect(topLinks).toEqual(["功能体检", "模型测试", "路由能力", "主动诊断", "消息 Trace", "恢复队列"]);
+    expect(topLinks).not.toContain("总览");
     wrapper.unmount();
     queryClient.clear();
   });
