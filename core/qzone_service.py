@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-from .config_manager import _restrict_sensitive_file_permissions
+from .qzone_credentials import QzoneCredentialStore
 from .qzone_capability_matrix import DEFAULT_QZONE_CAPABILITY_MATRIX
 from .runtime_events import publish_runtime_event
 
@@ -23,7 +23,6 @@ _AUTH_STATE_LOCK = threading.Lock()
 _AUTH_STATES: dict[str, dict[str, Any]] = {}
 _AUTH_REFRESH_CACHE_SECONDS = 300
 _AUTH_FAILURE_COOLDOWN_SECONDS = 15 * 60
-_COOKIE_FILE_LOCK = threading.Lock()
 _QZONE_CAPABILITY_NAMES = (
     "qzone.cookie_export",
     "qzone.web_read",
@@ -58,6 +57,11 @@ def _qzone_auth_key(bot_id: Any) -> str:
     return str(bot_id or "").strip() or "__default__"
 
 
+def _safe_qzone_reason(value: Any, default: str = "observed") -> str:
+    reason = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(value or "")[:96]).strip("_")
+    return reason or default
+
+
 def _qzone_auth_state_locked(bot_id: Any) -> dict[str, Any]:
     key = _qzone_auth_key(bot_id)
     state = _AUTH_STATES.get(key)
@@ -87,11 +91,7 @@ def _set_qzone_capability(
         auth_state = _qzone_auth_state_locked(bot_id)
         auth_state["capabilities"][name] = {
             "state": normalized_state,
-            "reason_code": re.sub(
-                r"[^A-Za-z0-9_.:-]+",
-                "_",
-                str(reason_code or "")[:64],
-            ).strip("_") or "observed",
+            "reason_code": _safe_qzone_reason(reason_code),
             "updated_at": time.time(),
         }
 
@@ -132,12 +132,53 @@ def _observe_qzone_action(
     )
 
 
+def _get_qzone_auth_status_with_config(bot_id: Any, plugin_config: Any) -> dict[str, Any]:
+    """Call the status projection while preserving legacy test/service shims."""
+
+    try:
+        return get_qzone_auth_status(bot_id, plugin_config=plugin_config)
+    except TypeError as exc:
+        if "plugin_config" not in str(exc):
+            raise
+        return get_qzone_auth_status(bot_id)
+
+
 def get_qzone_capability_status(
     bot_id: Any = "",
     *,
     enabled: bool = True,
+    plugin_config: Any = None,
 ) -> dict[str, Any]:
-    auth = get_qzone_auth_status(bot_id)
+    exact_bot_id = str(bot_id or "").strip()
+    if not exact_bot_id:
+        auth = _get_qzone_auth_status_with_config("", plugin_config)
+        by_bot = {
+            key: get_qzone_capability_status(
+                key,
+                enabled=enabled,
+                plugin_config=plugin_config,
+            )
+            for key in sorted((auth.get("by_bot") or {}).keys())
+        }
+        aggregate_capabilities = {
+            name: {
+                "state": "disabled" if not enabled else "unknown",
+                "reason_code": "aggregate_requires_bot_id",
+                "updated_at": 0.0,
+            }
+            for name in _QZONE_CAPABILITY_NAMES
+        }
+        return {
+            **aggregate_capabilities,
+            "aggregate": True,
+            "bot_count": int(auth.get("bot_count", 0) or 0),
+            "configured_bot_count": int(auth.get("configured_bot_count", 0) or 0),
+            "by_bot": by_bot,
+            "read_only": False,
+            "write_available": False,
+        }
+
+    auth = _get_qzone_auth_status_with_config(exact_bot_id, plugin_config)
     raw = auth.get("capabilities") if isinstance(auth, dict) else None
     raw = raw if isinstance(raw, dict) else _new_qzone_capabilities()
     capabilities: dict[str, dict[str, Any]] = {}
@@ -196,30 +237,94 @@ class QzoneImageUploadError(RuntimeError):
         super().__init__(self.result_code)
 
 
-def get_qzone_auth_status(bot_id: Any = "") -> dict[str, Any]:
+def _credential_metadata(plugin_config: Any, bot_id: str) -> dict[str, Any]:
+    if plugin_config is None:
+        return {
+            "configured": False,
+            "source": "",
+            "updated_at": 0.0,
+            "identity_verification": "unknown",
+        }
+    try:
+        return QzoneCredentialStore(plugin_config).describe(bot_id)
+    except (OSError, RuntimeError, ValueError):
+        return {
+            "configured": False,
+            "source": "",
+            "updated_at": 0.0,
+            "identity_verification": "unknown",
+            "error_code": "qzone_credential_store_unavailable",
+        }
+
+
+def _auth_status_for_bot(bot_id: str, *, plugin_config: Any = None) -> dict[str, Any]:
     with _AUTH_STATE_LOCK:
-        key = _qzone_auth_key(bot_id)
-        if key != "__default__":
-            state = dict(_AUTH_STATES.get(key) or _new_qzone_auth_state())
-        elif "__default__" in _AUTH_STATES:
-            state = dict(_AUTH_STATES["__default__"])
-        elif len(_AUTH_STATES) == 1:
-            state = dict(next(iter(_AUTH_STATES.values())))
-        elif _AUTH_STATES:
-            state = dict(max(
-                _AUTH_STATES.values(),
-                key=lambda item: max(
-                    float(item.get("last_refresh_at", 0) or 0),
-                    float(item.get("last_failure_at", 0) or 0),
-                ),
-            ))
-        else:
-            state = _new_qzone_auth_state()
+        source = _AUTH_STATES.get(bot_id) or _new_qzone_auth_state()
+        state = {
+            **source,
+            "capabilities": {
+                name: dict(value) if isinstance(value, dict) else dict(default)
+                for name, default in _new_qzone_capabilities().items()
+                for value in [(source.get("capabilities") or {}).get(name, default)]
+            },
+        }
     state["cooldown_remaining_seconds"] = max(0, int(float(state.get("cooldown_until", 0) or 0) - time.time()))
     capabilities = state.get("capabilities")
     if not isinstance(capabilities, dict):
         state["capabilities"] = _new_qzone_capabilities()
+    credential = _credential_metadata(plugin_config, bot_id)
+    state.update({
+        "bot_id": bot_id,
+        "credential_configured": bool(credential.get("configured")),
+        "credential_source": str(credential.get("source") or "")[:32],
+        "credential_updated_at": float(credential.get("updated_at") or 0.0),
+        "credential_identity_verification": str(
+            credential.get("identity_verification") or "unknown"
+        )[:32],
+    })
+    if credential.get("error_code"):
+        state["credential_error_code"] = str(credential["error_code"])
     return state
+
+
+def get_qzone_auth_status(bot_id: Any = "", *, plugin_config: Any = None) -> dict[str, Any]:
+    """Return an exact Bot state, or an explicit non-actionable aggregate.
+
+    An omitted Bot ID must never reuse another Bot's healthy state.  Consumers
+    that need to act must supply an exact value and reject the aggregate.
+    """
+
+    exact_bot_id = str(bot_id or "").strip()
+    if exact_bot_id:
+        return _auth_status_for_bot(exact_bot_id, plugin_config=plugin_config)
+
+    with _AUTH_STATE_LOCK:
+        bot_ids = {key for key in _AUTH_STATES if key != "__default__"}
+    if plugin_config is not None:
+        try:
+            bot_ids.update(QzoneCredentialStore(plugin_config).bot_ids())
+        except (OSError, RuntimeError, ValueError):
+            pass
+    by_bot = {
+        key: _auth_status_for_bot(key, plugin_config=plugin_config)
+        for key in sorted(bot_ids)
+    }
+    return {
+        "status": "aggregate",
+        "aggregate": True,
+        "bot_count": len(by_bot),
+        "configured_bot_count": sum(
+            1 for state in by_bot.values() if bool(state.get("credential_configured"))
+        ),
+        "healthy_bot_count": sum(
+            1 for state in by_bot.values() if state.get("status") == "healthy"
+        ),
+        "refreshing_bot_count": sum(
+            1 for state in by_bot.values() if bool(state.get("refreshing"))
+        ),
+        "by_bot": by_bot,
+        "cooldown_remaining_seconds": 0,
+    }
 
 
 def _set_qzone_auth_failure(
@@ -236,7 +341,7 @@ def _set_qzone_auth_failure(
         state.update({
             "status": next_status,
             "last_failure_at": now,
-            "last_error": str(message or "")[:240],
+            "last_error": _safe_qzone_reason(message, "refresh_failed"),
             "cooldown_until": (
                 now + _AUTH_FAILURE_COOLDOWN_SECONDS
                 if next_status in {"login_required", "risk_blocked"}
@@ -274,7 +379,9 @@ def _get_g_tk(p_skey: str) -> int:
     return hash_val & 0x7FFFFFFF
 
 
-def _get_cookie_from_config(plugin_config: Any) -> str:
+def _get_legacy_qzone_cookie(plugin_config: Any) -> str:
+    """Read the deprecated configuration field only for one-shot migration."""
+
     for attr in ("personification_qzone_cookie", "qzone_cookie"):
         value = str(getattr(plugin_config, attr, "") or "").strip().strip('"').strip("'")
         if value:
@@ -282,34 +389,13 @@ def _get_cookie_from_config(plugin_config: Any) -> str:
     return ""
 
 
-def _persist_cookie_to_env(cookie: str, logger: Any) -> None:
-    cookie_line = f"personification_qzone_cookie={json.dumps(str(cookie or ''), ensure_ascii=False)}\n"
-    for env_path in (Path(".env.prod"), Path(".env")):
-        if not env_path.exists():
-            continue
-        try:
-            with _COOKIE_FILE_LOCK:
-                lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
-                new_lines = []
-                found = False
-                for line in lines:
-                    if line.strip().startswith("personification_qzone_cookie="):
-                        new_lines.append(cookie_line)
-                        found = True
-                    else:
-                        new_lines.append(line)
-                if not found:
-                    if new_lines and not new_lines[-1].endswith(("\n", "\r\n")):
-                        new_lines[-1] = new_lines[-1] + "\n"
-                    new_lines.append(cookie_line)
-                temporary = env_path.with_name(f".{env_path.name}.qzone.tmp")
-                temporary.write_text("".join(new_lines), encoding="utf-8")
-                _restrict_sensitive_file_permissions(temporary)
-                temporary.replace(env_path)
-                _restrict_sensitive_file_permissions(env_path)
-            return
-        except Exception as e:
-            logger.error(f"拟人插件：保存 Qzone Cookie 到 {env_path} 失败: {e}")
+def _get_qzone_cookie(plugin_config: Any, bot_id: Any) -> str:
+    """Return a credential only for the exact Bot ID; never fall back."""
+
+    try:
+        return QzoneCredentialStore(plugin_config).get(bot_id)
+    except (OSError, RuntimeError, ValueError):
+        return ""
 
 
 def _parse_qzone_cookie(cookie: str) -> dict[str, str]:
@@ -327,13 +413,24 @@ def _parse_qzone_cookie(cookie: str) -> dict[str, str]:
 def _normalize_qzone_cookie(cookie: str) -> tuple[str, str, str]:
     values = _parse_qzone_cookie(cookie)
     p_skey = values.get("p_skey", "").strip()
-    raw_uin = values.get("uin") or values.get("p_uin") or ""
-    match = re.fullmatch(r"[o0]*(\d+)", raw_uin.strip())
+    raw_uins = [
+        str(values.get(name) or "").strip()
+        for name in ("uin", "p_uin")
+        if str(values.get(name) or "").strip()
+    ]
+    normalized_uins: list[str] = []
+    for raw_uin in raw_uins:
+        match = re.fullmatch(r"[o0]*(\d+)", raw_uin)
+        if match is None:
+            raise ValueError("missing_uin")
+        normalized_uins.append(match.group(1))
     if not p_skey:
         raise ValueError("missing_p_skey")
-    if match is None:
+    if not normalized_uins:
         raise ValueError("missing_uin")
-    qq = match.group(1)
+    if len(set(normalized_uins)) != 1:
+        raise ValueError("mixed_uin")
+    qq = normalized_uins[0]
     preferred = ("uin", "p_uin", "skey", "p_skey")
     ordered = [name for name in preferred if values.get(name)]
     ordered.extend(name for name in values if name not in ordered and name not in {"qrsig", "pt_login_sig"})
@@ -363,7 +460,11 @@ async def _probe_qzone_cookie(cookie: str, qq: str, p_skey: str) -> tuple[bool, 
         "format": "jsonp",
     }
     try:
-        async with httpx.AsyncClient(timeout=12.0, follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=12.0,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
             response = await client.get(url, params=params, headers=_qzone_headers(ctx, referer_uin=qq))
     except Exception:
         return False, "probe_failed"
@@ -397,7 +498,12 @@ async def install_qzone_cookie(
     logger: Any,
     source: str,
     probe: Callable[[str, str, str], Awaitable[tuple[bool, str]]] | None = None,
+    credential_store: QzoneCredentialStore | None = None,
 ) -> tuple[bool, str]:
+    _ = logger
+    expected_bot_id = str(expected_bot_id or "").strip()
+    if not expected_bot_id:
+        return False, "qzone_credential_bot_id_missing"
     try:
         normalized, qq, p_skey = _normalize_qzone_cookie(cookie)
     except ValueError as exc:
@@ -420,8 +526,21 @@ async def install_qzone_cookie(
             status="risk_blocked" if reason == "risk_blocked" else "",
         )
         return False, reason
-    plugin_config.personification_qzone_cookie = normalized
-    _persist_cookie_to_env(normalized, logger)
+    store = credential_store or QzoneCredentialStore(plugin_config)
+    try:
+        store.replace(
+            bot_id=expected_bot_id,
+            cookie=normalized,
+            source=source,
+            identity_verified=True,
+        )
+    except (OSError, RuntimeError, ValueError):
+        _set_qzone_auth_failure(
+            "qzone_credential_store_write_failed",
+            bot_id=expected_bot_id,
+            status="credential_store_write_failed",
+        )
+        return False, "qzone_credential_store_write_failed"
     now = time.time()
     with _AUTH_STATE_LOCK:
         state = _qzone_auth_state_locked(expected_bot_id)
@@ -449,6 +568,49 @@ async def install_qzone_cookie(
                 "updated_at": now,
             }
     return True, "ok"
+
+
+async def migrate_legacy_qzone_cookie(
+    *,
+    plugin_config: Any,
+    connected_bot_ids: Any,
+    logger: Any,
+    probe: Callable[[str, str, str], Awaitable[tuple[bool, str]]] | None = None,
+    credential_store: QzoneCredentialStore | None = None,
+) -> tuple[bool, str]:
+    """Migrate the deprecated config field only when a single Bot proves ownership."""
+
+    try:
+        bot_ids = tuple(sorted({str(item or "").strip() for item in connected_bot_ids if str(item or "").strip()}))
+    except TypeError:
+        return False, "legacy_cookie_migration_bot_scope_unknown"
+    if len(bot_ids) != 1:
+        return False, "legacy_cookie_migration_requires_single_connected_bot"
+    bot_id = bot_ids[0]
+    store = credential_store or QzoneCredentialStore(plugin_config)
+    try:
+        if store.describe(bot_id).get("configured"):
+            return False, "legacy_cookie_migration_not_needed"
+    except (OSError, RuntimeError, ValueError):
+        return False, "qzone_credential_store_unavailable"
+    legacy_cookie = _get_legacy_qzone_cookie(plugin_config)
+    if not legacy_cookie:
+        return False, "legacy_cookie_migration_absent"
+    try:
+        _normalized, legacy_uin, _p_skey = _normalize_qzone_cookie(legacy_cookie)
+    except ValueError as exc:
+        return False, f"legacy_cookie_migration_{str(exc)}"
+    if legacy_uin != bot_id:
+        return False, "legacy_cookie_migration_account_mismatch"
+    return await install_qzone_cookie(
+        cookie=legacy_cookie,
+        expected_bot_id=bot_id,
+        plugin_config=plugin_config,
+        logger=logger,
+        source="legacy_config",
+        probe=probe,
+        credential_store=store,
+    )
 
 
 _IMAGE_B64_RE = re.compile(r"\[IMAGE_B64\]([A-Za-z0-9+/=\r\n]+)\[/IMAGE_B64\]")
@@ -503,24 +665,24 @@ def _format_cookie_for_qzone(cookie: str, qq: str, p_skey: str) -> str:
 
 
 def _resolve_qzone_context(plugin_config: Any, bot_id: str) -> tuple[bool, str, dict[str, Any]]:
-    auth = get_qzone_auth_status(bot_id)
+    expected_bot_id = str(bot_id or "").strip()
+    if not expected_bot_id:
+        return False, "未指定精确 Qzone Bot", {}
+    auth = get_qzone_auth_status(expected_bot_id, plugin_config=plugin_config)
     if auth.get("cooldown_remaining_seconds", 0) > 0:
         return False, "Qzone 认证处于冷却期，请刷新 Cookie 后重试", {}
-    cookie = _get_cookie_from_config(plugin_config)
+    cookie = _get_qzone_cookie(plugin_config, expected_bot_id)
     if not cookie:
-        return False, "未配置 Qzone Cookie", {}
-    pskey_match = re.search(r"p_skey=([^; ]+)", cookie)
-    if not pskey_match:
-        return False, "Cookie 缺少 p_skey 字段", {}
-    p_skey = pskey_match.group(1)
-    uin_match = re.search(r"uin=[o0]*(\d+)", cookie)
-    qq = uin_match.group(1) if uin_match else str(bot_id)
-    expected_bot_id = str(bot_id or "").strip()
-    if expected_bot_id and qq != expected_bot_id:
+        return False, "未配置当前 Bot 的 Qzone 凭据", {}
+    try:
+        normalized_cookie, qq, p_skey = _normalize_qzone_cookie(cookie)
+    except ValueError:
+        return False, "Qzone 凭据格式无效", {}
+    if qq != expected_bot_id:
         return False, "Qzone Cookie 与目标 Bot 不匹配", {}
-    formatted_cookie = _format_cookie_for_qzone(cookie, qq, p_skey)
+    formatted_cookie = _format_cookie_for_qzone(normalized_cookie, qq, p_skey)
     return True, "", {
-        "cookie": cookie,
+        "cookie": normalized_cookie,
         "formatted_cookie": formatted_cookie,
         "p_skey": p_skey,
         "qq": qq,
@@ -983,6 +1145,387 @@ def _qzone_payload_result_code(payload: dict[str, Any]) -> str:
         if key in payload:
             return f"{key}_{payload.get(key)}"[:64]
     return ""
+
+
+_QZONE_READ_ONLY_DIAGNOSTIC_STAGES = (
+    "bot_online",
+    "cookie_export",
+    "identity_match",
+    "login_page_check",
+    "self_feed_read",
+    "target_feed_read",
+    "normalization_commit",
+)
+
+
+def _mask_qzone_identifier(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "未提供"
+    if len(text) <= 4:
+        return "***"
+    return f"{text[:2]}***{text[-2:]}"
+
+
+def _diagnostic_stage(
+    key: str,
+    *,
+    status: str = "skipped",
+    code: str = "qzone_read_only_diagnostics_not_reached",
+    elapsed_ms: int = 0,
+    count: int | None = None,
+) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "key": key,
+        "status": status,
+        "code": _safe_qzone_reason(code, "qzone_read_only_diagnostics_failed"),
+        "elapsed_ms": max(0, int(elapsed_ms)),
+    }
+    if count is not None:
+        value["count"] = max(0, int(count))
+    return value
+
+
+async def _export_qzone_cookie_from_bot(
+    *,
+    bot: Any,
+    plugin_config: Any,
+    logger: Any,
+) -> tuple[bool, str, str]:
+    """Read a Cookie from OneBot without logging or persisting its value."""
+
+    bot_id = str(getattr(bot, "self_id", "") or "").strip()
+    if not bot_id:
+        return False, "qzone_cookie_export_bot_id_missing", ""
+    try:
+        from .protocol_adapter import get_protocol_adapter
+
+        result = await get_protocol_adapter(bot, plugin_config, logger).export_cookies(
+            domain="qzone.qq.com"
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        code = _safe_qzone_reason(f"qzone_cookie_export_exception_{type(exc).__name__}")
+        _set_qzone_capability(bot_id, "qzone.cookie_export", "degraded", code)
+        return False, code, ""
+    if not result.ok:
+        state = (
+            "unavailable"
+            if result.status in {"unavailable", "definite_failure"}
+            else "degraded"
+            if result.status == "degraded"
+            else "unknown"
+        )
+        code = _safe_qzone_reason(result.code, "qzone_cookie_export_failed")
+        _set_qzone_capability(bot_id, "qzone.cookie_export", state, code)
+        return False, code, ""
+    response_data = result.data if isinstance(result.data, dict) else {}
+    cookie = str(response_data.get("cookies", "") or "").strip()
+    if not cookie:
+        _set_qzone_capability(bot_id, "qzone.cookie_export", "degraded", "onebot_cookie_empty")
+        return False, "onebot_cookie_empty", ""
+    _set_qzone_capability(
+        bot_id,
+        "qzone.cookie_export",
+        "available",
+        "onebot_cookie_export_succeeded",
+    )
+    return True, "onebot_cookie_export_succeeded", cookie
+
+
+async def _read_qzone_feed_probe(
+    *,
+    cookie: str,
+    qq: str,
+    p_skey: str,
+    target_uin: str,
+) -> tuple[bool, str, int]:
+    """Read and normalize one feed page, returning only a safe item count."""
+
+    normalized_cookie, normalized_qq, normalized_p_skey = _normalize_qzone_cookie(cookie)
+    if normalized_qq != qq or normalized_p_skey != p_skey:
+        return False, "qzone_read_identity_inconsistent", 0
+    target = str(target_uin or "").strip()
+    if not target:
+        return False, "qzone_read_target_missing", 0
+    ctx = {
+        "cookie": normalized_cookie,
+        "formatted_cookie": _format_cookie_for_qzone(normalized_cookie, normalized_qq, normalized_p_skey),
+        "p_skey": normalized_p_skey,
+        "qq": normalized_qq,
+        "g_tk": _get_g_tk(normalized_p_skey),
+    }
+    url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
+    params = {
+        "uin": target,
+        "ftype": "0",
+        "sort": "0",
+        "pos": "0",
+        "num": "1",
+        "replynum": "0",
+        "g_tk": str(ctx["g_tk"]),
+        "callback": "_Callback",
+        "code_version": "1",
+        "format": "jsonp",
+    }
+    try:
+        async with httpx.AsyncClient(
+            timeout=12.0,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            response = await client.get(url, params=params, headers=_qzone_headers(ctx, referer_uin=target))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        return False, _safe_qzone_reason(f"qzone_feed_read_transport_{type(exc).__name__}"), 0
+    if response.status_code != 200:
+        return False, (
+            "qzone_feed_read_auth_blocked"
+            if response.status_code in {401, 403}
+            else _safe_qzone_reason(f"qzone_feed_read_http_{response.status_code}")
+        ), 0
+    page_kind = _qzone_response_page_kind(response.text)
+    if page_kind == "auth":
+        return False, "qzone_feed_read_login_required", 0
+    if page_kind == "risk":
+        return False, "qzone_feed_read_risk_blocked", 0
+    if page_kind == "html":
+        return False, "qzone_feed_read_html_response", 0
+    payload = _parse_qzone_jsonp(response.text)
+    if not payload:
+        return False, "qzone_feed_read_payload_invalid", 0
+    for field in ("code", "ret", "subcode"):
+        if field not in payload:
+            continue
+        try:
+            if int(payload.get(field) or 0) != 0:
+                return False, "qzone_feed_read_rejected", 0
+        except (TypeError, ValueError):
+            return False, "qzone_feed_read_payload_invalid", 0
+    normalized_count = sum(
+        1
+        for item in _extract_msglist_payload(payload)
+        if _normalize_qzone_feed(item, target_uin=target) is not None
+    )
+    return True, "qzone_feed_read_ok", normalized_count
+
+
+async def run_qzone_read_only_diagnostics(
+    *,
+    bot: Any,
+    plugin_config: Any,
+    logger: Any,
+    target_user_id: str = "",
+) -> dict[str, Any]:
+    """Perform the fixed, side-effect-free QZone diagnostic sequence.
+
+    This function makes only OneBot Cookie-export and QZone GET requests.  It
+    never calls publishing, reaction, comment, forwarding, Agent, scheduler, or
+    operation-replay code.  Candidate credentials replace an old stored value
+    only after every requested read check succeeds.
+    """
+
+    stages = [_diagnostic_stage(key) for key in _QZONE_READ_ONLY_DIAGNOSTIC_STAGES]
+
+    def record(
+        key: str,
+        *,
+        status: str,
+        code: str,
+        started_at: float,
+        count: int | None = None,
+    ) -> None:
+        index = _QZONE_READ_ONLY_DIAGNOSTIC_STAGES.index(key)
+        stages[index] = _diagnostic_stage(
+            key,
+            status=status,
+            code=code,
+            elapsed_ms=round((time.monotonic() - started_at) * 1000),
+            count=count,
+        )
+
+    target = str(target_user_id or "").strip()
+    target_summary = {
+        "provided": bool(target),
+        "summary": _mask_qzone_identifier(target) if target else "未提供",
+    }
+    bot_started = time.monotonic()
+    bot_id = str(getattr(bot, "self_id", "") or "").strip() if bot is not None else ""
+    if not bot_id:
+        record(
+            "bot_online",
+            status="error",
+            code="qzone_read_only_bot_unavailable",
+            started_at=bot_started,
+        )
+        return {
+            "ok": False,
+            "code": "qzone_read_only_diagnostics_failed",
+            "failure_code": "qzone_read_only_bot_unavailable",
+            "stages": stages,
+            "target": target_summary,
+        }
+    record("bot_online", status="ok", code="qzone_read_only_bot_online", started_at=bot_started)
+
+    export_started = time.monotonic()
+    exported, export_code, raw_cookie = await _export_qzone_cookie_from_bot(
+        bot=bot,
+        plugin_config=plugin_config,
+        logger=logger,
+    )
+    if not exported:
+        record("cookie_export", status="error", code=export_code, started_at=export_started)
+        return {
+            "ok": False,
+            "code": "qzone_read_only_diagnostics_failed",
+            "failure_code": export_code,
+            "stages": stages,
+            "target": target_summary,
+        }
+    record("cookie_export", status="ok", code=export_code, started_at=export_started)
+
+    identity_started = time.monotonic()
+    try:
+        normalized_cookie, cookie_uin, p_skey = _normalize_qzone_cookie(raw_cookie)
+    except ValueError as exc:
+        identity_code = _safe_qzone_reason(f"qzone_read_only_identity_{str(exc)}")
+        record("identity_match", status="error", code=identity_code, started_at=identity_started)
+        return {
+            "ok": False,
+            "code": "qzone_read_only_diagnostics_failed",
+            "failure_code": identity_code,
+            "stages": stages,
+            "target": target_summary,
+        }
+    if cookie_uin != bot_id:
+        identity_code = "qzone_read_only_identity_mismatch"
+        record("identity_match", status="error", code=identity_code, started_at=identity_started)
+        return {
+            "ok": False,
+            "code": "qzone_read_only_diagnostics_failed",
+            "failure_code": identity_code,
+            "stages": stages,
+            "target": target_summary,
+        }
+    record("identity_match", status="ok", code="qzone_read_only_identity_matched", started_at=identity_started)
+
+    login_started = time.monotonic()
+    login_ok, login_reason = await _probe_qzone_cookie(normalized_cookie, cookie_uin, p_skey)
+    login_code = {
+        "ok": "qzone_read_only_login_page_clear",
+        "auth_blocked": "qzone_read_only_login_required",
+        "risk_blocked": "qzone_read_only_risk_blocked",
+    }.get(login_reason, "qzone_read_only_login_page_check_failed")
+    if not login_ok:
+        record("login_page_check", status="error", code=login_code, started_at=login_started)
+        _set_qzone_auth_failure(
+            login_code,
+            bot_id=bot_id,
+            status="risk_blocked" if login_reason == "risk_blocked" else "login_required" if login_reason == "auth_blocked" else "refresh_failed",
+        )
+        return {
+            "ok": False,
+            "code": "qzone_read_only_diagnostics_failed",
+            "failure_code": login_code,
+            "stages": stages,
+            "target": target_summary,
+        }
+    record("login_page_check", status="ok", code=login_code, started_at=login_started)
+
+    self_started = time.monotonic()
+    self_ok, self_code, self_count = await _read_qzone_feed_probe(
+        cookie=normalized_cookie,
+        qq=cookie_uin,
+        p_skey=p_skey,
+        target_uin=bot_id,
+    )
+    if not self_ok:
+        record("self_feed_read", status="error", code=self_code, started_at=self_started)
+        _set_qzone_capability(bot_id, "qzone.web_read", "degraded", self_code)
+        return {
+            "ok": False,
+            "code": "qzone_read_only_diagnostics_failed",
+            "failure_code": self_code,
+            "stages": stages,
+            "target": target_summary,
+        }
+    record("self_feed_read", status="ok", code=self_code, started_at=self_started, count=self_count)
+
+    if not target:
+        stages[_QZONE_READ_ONLY_DIAGNOSTIC_STAGES.index("target_feed_read")] = _diagnostic_stage(
+            "target_feed_read",
+            status="skipped",
+            code="qzone_read_only_target_not_requested",
+        )
+    elif not re.fullmatch(r"\d{1,32}", target):
+        target_started = time.monotonic()
+        target_code = "qzone_read_only_target_invalid"
+        record("target_feed_read", status="error", code=target_code, started_at=target_started)
+        return {
+            "ok": False,
+            "code": "qzone_read_only_diagnostics_failed",
+            "failure_code": target_code,
+            "stages": stages,
+            "target": target_summary,
+        }
+    else:
+        target_started = time.monotonic()
+        target_ok, target_code, target_count = await _read_qzone_feed_probe(
+            cookie=normalized_cookie,
+            qq=cookie_uin,
+            p_skey=p_skey,
+            target_uin=target,
+        )
+        if not target_ok:
+            record("target_feed_read", status="error", code=target_code, started_at=target_started)
+            _set_qzone_capability(bot_id, "qzone.web_read", "degraded", target_code)
+            return {
+                "ok": False,
+                "code": "qzone_read_only_diagnostics_failed",
+                "failure_code": target_code,
+                "stages": stages,
+                "target": target_summary,
+            }
+        record("target_feed_read", status="ok", code=target_code, started_at=target_started, count=target_count)
+
+    commit_started = time.monotonic()
+
+    async def _verified_self_feed_probe(_cookie: str, _qq: str, _p_skey: str) -> tuple[bool, str]:
+        return True, "ok"
+
+    installed, install_code = await install_qzone_cookie(
+        cookie=normalized_cookie,
+        expected_bot_id=bot_id,
+        plugin_config=plugin_config,
+        logger=logger,
+        source="read_only_diagnostics",
+        probe=_verified_self_feed_probe,
+    )
+    if not installed:
+        commit_code = _safe_qzone_reason(f"qzone_read_only_commit_{install_code}")
+        record("normalization_commit", status="error", code=commit_code, started_at=commit_started)
+        return {
+            "ok": False,
+            "code": "qzone_read_only_diagnostics_failed",
+            "failure_code": commit_code,
+            "stages": stages,
+            "target": target_summary,
+        }
+    _set_qzone_capability(bot_id, "qzone.web_read", "available", "qzone_read_only_diagnostics_succeeded")
+    record(
+        "normalization_commit",
+        status="ok",
+        code="qzone_read_only_diagnostics_succeeded",
+        started_at=commit_started,
+    )
+    return {
+        "ok": True,
+        "code": "qzone_read_only_diagnostics_succeeded",
+        "stages": stages,
+        "target": target_summary,
+    }
 
 
 def _qzone_payload_remote_result(payload: dict[str, Any]) -> tuple[str, float]:
@@ -1992,16 +2535,23 @@ def build_qzone_services(
     logger: Any,
 ) -> tuple[bool, Callable[[str, str], Awaitable[QzoneWriteResult]], Callable[..., Awaitable[tuple[bool, str]]]]:
     qzone_enabled = bool(getattr(plugin_config, "personification_qzone_enabled", False))
-    async def update_qzone_cookie(bot: Any, *, force: bool = False) -> tuple[bool, str]:
+    async def update_qzone_cookie(
+        bot: Any,
+        *,
+        force: bool = False,
+        connected_bot_ids: Any = None,
+    ) -> tuple[bool, str]:
         """自动获取并刷新 Qzone Cookie，供定时任务或手动命令调用。"""
         if not qzone_enabled:
             return False, "Qzone 功能未启用"
         bot_id = str(getattr(bot, "self_id", "") or "").strip()
+        if not bot_id:
+            return False, "qzone_cookie_refresh_bot_id_missing"
         now = time.time()
         with _AUTH_STATE_LOCK:
             auth_state = _qzone_auth_state_locked(bot_id)
             if auth_state["refreshing"]:
-                return False, "Qzone Cookie 正在刷新"
+                return False, "qzone_cookie_refresh_in_progress"
             if (
                 not force
                 and auth_state["status"] == "healthy"
@@ -2012,39 +2562,26 @@ def build_qzone_services(
             auth_state["refreshing"] = True
             auth_state["last_refresh_at"] = now
         try:
-            from .protocol_adapter import get_protocol_adapter
-
-            cookie_result = await get_protocol_adapter(bot, plugin_config, logger).export_cookies(
-                domain="qzone.qq.com"
-            )
-            if not cookie_result.ok:
-                _set_qzone_capability(
-                    bot_id,
-                    "qzone.cookie_export",
-                    (
-                        "unavailable"
-                        if cookie_result.status in {"unavailable", "definite_failure"}
-                        else "degraded"
-                        if cookie_result.status == "degraded"
-                        else "unknown"
-                    ),
-                    cookie_result.code,
+            if connected_bot_ids is not None:
+                migrated, migration_code = await migrate_legacy_qzone_cookie(
+                    plugin_config=plugin_config,
+                    connected_bot_ids=connected_bot_ids,
+                    logger=logger,
                 )
-                _set_qzone_auth_failure(cookie_result.code, bot_id=bot_id)
-                return False, cookie_result.code
-            _set_qzone_capability(
-                bot_id,
-                "qzone.cookie_export",
-                "available",
-                "onebot_cookie_export_succeeded",
+                if migrated:
+                    return True, "legacy_cookie_migrated"
+                # All no-op/unsafe migration codes intentionally fall through to
+                # a fresh per-Bot OneBot export.  The legacy value is never used
+                # as a runtime fallback.
+                _ = migration_code
+            exported, export_code, cookie = await _export_qzone_cookie_from_bot(
+                bot=bot,
+                plugin_config=plugin_config,
+                logger=logger,
             )
-            cookies_resp = cookie_result.data if isinstance(cookie_result.data, dict) else {}
-            cookie = str(cookies_resp.get("cookies", "") or "").strip()
-            if not cookie:
-                _set_qzone_auth_failure("自动获取 Cookie 失败，返回结果为空", bot_id=bot_id)
-                return False, "自动获取 Cookie 失败，返回结果为空"
-            if "uin=" not in cookie:
-                cookie = f"uin=o{bot_id}; {cookie}"
+            if not exported:
+                _set_qzone_auth_failure(export_code, bot_id=bot_id)
+                return False, export_code
             return await install_qzone_cookie(
                 cookie=cookie,
                 expected_bot_id=bot_id,
@@ -2059,8 +2596,9 @@ def build_qzone_services(
                 "degraded",
                 f"exception_{type(e).__name__}",
             )
-            _set_qzone_auth_failure(e, bot_id=bot_id)
-            return False, str(e)
+            reason = f"qzone_cookie_refresh_exception_{type(e).__name__}"
+            _set_qzone_auth_failure(reason, bot_id=bot_id)
+            return False, _safe_qzone_reason(reason, "qzone_cookie_refresh_exception")
         finally:
             with _AUTH_STATE_LOCK:
                 _qzone_auth_state_locked(bot_id)["refreshing"] = False
@@ -2092,7 +2630,7 @@ def build_qzone_services(
                 f"preflight_web_write_{write_state}",
                 detail={"read_only": True, "web_write_state": write_state},
             )
-        cookie = _get_cookie_from_config(plugin_config)
+        cookie = _get_qzone_cookie(plugin_config, bot_id)
         if not cookie:
             _observe_qzone_action(
                 bot_id,

@@ -32,7 +32,7 @@ from .routes.qq_routes import build_qq_router
 from .routes.plugin_knowledge_routes import build_plugin_knowledge_router
 from .routes.plugin_manager_routes import build_plugin_manager_router
 from .routes.quota_routes import build_quota_router
-from .routes.qzone_routes import build_qzone_router
+from .routes.qzone_routes import build_qzone_router, build_qzone_v2_router
 from .routes.skill_routes import build_skill_router
 from .routes.sticker_routes import build_sticker_router
 from .routes.test_routes import build_test_router
@@ -114,6 +114,7 @@ def build_router() -> APIRouter:
     router.include_router(build_proactive_router(runtime=runtime))
     router.include_router(build_quota_router(runtime=runtime))
     router.include_router(build_qzone_router(runtime=runtime))
+    router.include_router(build_qzone_v2_router(runtime=runtime))
     router.include_router(build_plugin_knowledge_router(runtime=runtime))
     router.include_router(build_plugin_manager_router(runtime=runtime))
     router.include_router(build_health_router(runtime=runtime))

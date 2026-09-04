@@ -805,7 +805,13 @@ def test_qzone_status_and_operations_are_observable_without_cookie_leak(_runtime
     cfg.personification_qzone_enabled = True
     cfg.personification_qzone_social_enabled = True
     cfg.personification_qzone_inbound_enabled = True
-    cfg.personification_qzone_cookie = "uin=o10000; p_skey=must-not-leak;"
+    cfg.personification_qzone_cookie = ""
+    qzone_service.QzoneCredentialStore(cfg).replace(
+        bot_id="10000",
+        cookie="uin=o10000; p_skey=must-not-leak;",
+        source="test",
+        identity_verified=True,
+    )
     calls = []
 
     class Bot:

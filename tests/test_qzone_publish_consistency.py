@@ -48,6 +48,20 @@ def _init_store(tmp_path, monkeypatch, state: dict | None = None) -> None:  # no
         data_store.get_data_store().save_sync("qzone_post_state", state)
 
 
+def _build_publish_with_credential(tmp_path, cookie: str):  # noqa: ANN001, ANN202
+    config = SimpleNamespace(
+        personification_data_dir=str(tmp_path),
+        personification_qzone_enabled=True,
+        personification_qzone_cookie="",
+    )
+    qzone_service.QzoneCredentialStore(config).replace(
+        bot_id="10001",
+        cookie=cookie,
+        source="test",
+    )
+    return qzone_service.build_qzone_services(config, _Logger())
+
+
 def test_v1_operation_and_monthly_usage_migration_is_conservative(tmp_path) -> None:
     db_path = tmp_path / "personification.db"
     with sqlite3.connect(db_path) as conn:
@@ -458,7 +472,7 @@ def test_monthly_limit_zero_remains_zero(tmp_path, monkeypatch) -> None:  # noqa
         (SimpleNamespace(status_code=503, text="down"), "unknown"),
     ],
 )
-def test_publish_service_returns_structured_write_classification(monkeypatch, response, expected) -> None:  # noqa: ANN001
+def test_publish_service_returns_structured_write_classification(monkeypatch, response, expected, tmp_path) -> None:  # noqa: ANN001
     class _Client:
         def __init__(self, **_kwargs) -> None:  # noqa: ANN003
             return None
@@ -473,12 +487,9 @@ def test_publish_service_returns_structured_write_classification(monkeypatch, re
             return response
 
     monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
-    _, publish, _ = qzone_service.build_qzone_services(
-        SimpleNamespace(
-            personification_qzone_enabled=True,
-            personification_qzone_cookie="uin=o10001; skey=sk; p_skey=ps;",
-        ),
-        _Logger(),
+    _, publish, _ = _build_publish_with_credential(
+        tmp_path,
+        "uin=o10001; skey=sk; p_skey=ps;",
     )
     result = asyncio.run(
         publish("结构化正文", "10001", allow_unknown_write=True)
@@ -513,7 +524,7 @@ def test_unverified_write_is_read_only_until_explicit_manual_attempt() -> None:
     assert capability["write_available"] is False
 
 
-def test_qzone_gif_image_keeps_real_type_and_publishes_complete_media_fields(monkeypatch) -> None:  # noqa: ANN001
+def test_qzone_gif_image_keeps_real_type_and_publishes_complete_media_fields(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     marker = "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
     calls: list[dict] = []
 
@@ -551,12 +562,9 @@ def test_qzone_gif_image_keeps_real_type_and_publishes_complete_media_fields(mon
             return _Response('{"code":0,"tid":"remote-with-image"}')
 
     monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
-    _, publish, _ = qzone_service.build_qzone_services(
-        SimpleNamespace(
-            personification_qzone_enabled=True,
-            personification_qzone_cookie="uin=o10001; p_uin=o10001; skey=sk; p_skey=ps; pt4_token=pt;",
-        ),
-        _Logger(),
+    _, publish, _ = _build_publish_with_credential(
+        tmp_path,
+        "uin=o10001; p_uin=o10001; skey=sk; p_skey=ps; pt4_token=pt;",
     )
 
     result = asyncio.run(
@@ -595,7 +603,7 @@ def test_qzone_gif_image_keeps_real_type_and_publishes_complete_media_fields(mon
     assert posted["data"]["richval"] == ",album-1,lloc-1,sloc-1,1,32,32,,32,32"
 
 
-def test_qzone_image_upload_failure_stops_before_publish(monkeypatch) -> None:  # noqa: ANN001
+def test_qzone_image_upload_failure_stops_before_publish(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     marker = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     request_count = 0
 
@@ -615,12 +623,9 @@ def test_qzone_image_upload_failure_stops_before_publish(monkeypatch) -> None:  
             return SimpleNamespace(status_code=200, text='{"ret":-1,"message":"raw secret"}')
 
     monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
-    _, publish, _ = qzone_service.build_qzone_services(
-        SimpleNamespace(
-            personification_qzone_enabled=True,
-            personification_qzone_cookie="uin=o10001; skey=sk; p_skey=ps;",
-        ),
-        _Logger(),
+    _, publish, _ = _build_publish_with_credential(
+        tmp_path,
+        "uin=o10001; skey=sk; p_skey=ps;",
     )
 
     result = asyncio.run(
@@ -638,7 +643,7 @@ def test_qzone_image_upload_failure_stops_before_publish(monkeypatch) -> None:  
     assert request_count == 1
 
 
-def test_publish_network_interruption_after_post_is_unknown(monkeypatch) -> None:  # noqa: ANN001
+def test_publish_network_interruption_after_post_is_unknown(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     class _Client:
         def __init__(self, **_kwargs) -> None:  # noqa: ANN003
             return None
@@ -653,12 +658,9 @@ def test_publish_network_interruption_after_post_is_unknown(monkeypatch) -> None
             raise qzone_service.httpx.ReadError("response lost")
 
     monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
-    _, publish, _ = qzone_service.build_qzone_services(
-        SimpleNamespace(
-            personification_qzone_enabled=True,
-            personification_qzone_cookie="uin=o10001; p_skey=ps;",
-        ),
-        _Logger(),
+    _, publish, _ = _build_publish_with_credential(
+        tmp_path,
+        "uin=o10001; p_skey=ps;",
     )
 
     result = asyncio.run(

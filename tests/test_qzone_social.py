@@ -70,6 +70,20 @@ class _Logger:
         return None
 
 
+def _service_with_credential(tmp_path) -> object:  # noqa: ANN001
+    config = SimpleNamespace(
+        personification_data_dir=str(tmp_path),
+        personification_qzone_enabled=True,
+        personification_qzone_cookie="uin=o99999; skey=sk; p_uin=o99999; p_skey=ps;",
+    )
+    qzone_service.QzoneCredentialStore(config).replace(
+        bot_id="99999",
+        cookie="uin=o99999; skey=sk; p_uin=o99999; p_skey=ps;",
+        source="test",
+    )
+    return qzone_service.QzoneSocialService(config, _Logger())
+
+
 def _policy_authorization(*, allowed: bool):  # noqa: ANN202
     return qzone_flow.PolicyAuthorization(
         blocked=not allowed,
@@ -149,7 +163,7 @@ def test_qzone_reply_content_does_not_double_prefix() -> None:
     assert text == "回复 白咲零: 已经收到了"
 
 
-def test_qzone_comment_feed_uses_threaded_subreply_payload(monkeypatch) -> None:  # noqa: ANN001
+def test_qzone_comment_feed_uses_threaded_subreply_payload(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     calls: list[dict[str, object]] = []
 
     class _Response:
@@ -171,13 +185,7 @@ def test_qzone_comment_feed_uses_threaded_subreply_payload(monkeypatch) -> None:
             return _Response()
 
     monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
-    service = qzone_service.QzoneSocialService(
-        SimpleNamespace(
-            personification_qzone_enabled=True,
-            personification_qzone_cookie="uin=o99999; skey=sk; p_uin=o99999; p_skey=ps;",
-        ),
-        _Logger(),
-    )
+    service = _service_with_credential(tmp_path)
 
     ok, msg = asyncio.run(
         service.comment_feed(
@@ -208,7 +216,7 @@ def test_qzone_comment_feed_uses_threaded_subreply_payload(monkeypatch) -> None:
     assert data["content"] == "测试收到"
 
 
-def test_qzone_comment_feed_falls_back_to_top_level_rich_mention(monkeypatch) -> None:  # noqa: ANN001
+def test_qzone_comment_feed_falls_back_to_top_level_rich_mention(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     calls: list[dict[str, object]] = []
 
     class _Response:
@@ -234,13 +242,7 @@ def test_qzone_comment_feed_falls_back_to_top_level_rich_mention(monkeypatch) ->
             return _Response('{"code":0}')
 
     monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
-    service = qzone_service.QzoneSocialService(
-        SimpleNamespace(
-            personification_qzone_enabled=True,
-            personification_qzone_cookie="uin=o99999; skey=sk; p_uin=o99999; p_skey=ps;",
-        ),
-        _Logger(),
-    )
+    service = _service_with_credential(tmp_path)
 
     ok, msg = asyncio.run(
         service.comment_feed(
@@ -266,7 +268,7 @@ def test_qzone_comment_feed_falls_back_to_top_level_rich_mention(monkeypatch) ->
     assert calls[1]["data"]["content"] == "@{uin:20001,nick:白咲零,who:1} 测试收到"
 
 
-def test_qzone_forward_feed_uses_forward_endpoint(monkeypatch) -> None:  # noqa: ANN001
+def test_qzone_forward_feed_uses_forward_endpoint(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     calls: list[dict[str, object]] = []
 
     class _Response:
@@ -288,13 +290,7 @@ def test_qzone_forward_feed_uses_forward_endpoint(monkeypatch) -> None:  # noqa:
             return _Response()
 
     monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
-    service = qzone_service.QzoneSocialService(
-        SimpleNamespace(
-            personification_qzone_enabled=True,
-            personification_qzone_cookie="uin=o99999; skey=sk; p_uin=o99999; p_skey=ps;",
-        ),
-        _Logger(),
-    )
+    service = _service_with_credential(tmp_path)
 
     ok, msg = asyncio.run(
         service.forward_feed(
@@ -318,7 +314,7 @@ def test_qzone_forward_feed_uses_forward_endpoint(monkeypatch) -> None:  # noqa:
     assert calls[0]["data"]["con"] == "这句有点东西"
 
 
-def test_qzone_forward_timeout_does_not_try_fallback_endpoint(monkeypatch) -> None:  # noqa: ANN001
+def test_qzone_forward_timeout_does_not_try_fallback_endpoint(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     calls = []
 
     class _Client:
@@ -336,13 +332,7 @@ def test_qzone_forward_timeout_does_not_try_fallback_endpoint(monkeypatch) -> No
             raise qzone_service.httpx.TimeoutException("response lost")
 
     monkeypatch.setattr(qzone_service.httpx, "AsyncClient", _Client)
-    service = qzone_service.QzoneSocialService(
-        SimpleNamespace(
-            personification_qzone_enabled=True,
-            personification_qzone_cookie="uin=o99999; skey=sk; p_uin=o99999; p_skey=ps;",
-        ),
-        _Logger(),
-    )
+    service = _service_with_credential(tmp_path)
     ok, msg = asyncio.run(service.forward_feed(
         feed={"feed_id": "feed1", "owner_uin": "20001", "topic_id": "20001_feed1__1"},
         bot_id="99999",
@@ -358,10 +348,11 @@ def test_qzone_risk_page_with_success_literal_is_rejected_without_login_misclass
     ok, msg = qzone_service._qzone_payload_success(
         {"script": "value"},
         '\ufeff<html><script>window.fake={"code":0}</script>验证码</html>',
+        bot_id="99999",
     )
     assert ok is False
     assert "安全验证" in msg
-    assert qzone_service.get_qzone_auth_status()["status"] == "risk_blocked"
+    assert qzone_service.get_qzone_auth_status("99999")["status"] == "risk_blocked"
 
 
 def test_qzone_scan_busy_is_structured_skip() -> None:

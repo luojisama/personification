@@ -136,6 +136,11 @@ _SECRET_QUERY_KEYS = frozenset(
     }
 )
 _REAUTH_KEY_MARKERS: tuple[tuple[str, str], ...] = (
+    # QZone login state is account/device bound and deliberately stays on the
+    # Bot server.  Even an encrypted portable-secret package must require a
+    # fresh server-side export or QR login instead of copying this Cookie.
+    ("personificationqzonecookie", "device_bound_login"),
+    ("qzonecookie", "device_bound_login"),
     ("oskeyring", "os_keyring"),
     ("keyring", "os_keyring"),
     ("chromiumprofile", "chromium_profile"),

@@ -254,6 +254,7 @@ def test_split_state_and_secrets_recursively_separates_nested_values(backup_mod)
         ],
         "browser_profile": "D:/private/profile",
         "os_keyring": {"service": "personification"},
+        "personification_qzone_cookie": "uin=o123; p_skey=server-only;",
     }
     original = copy.deepcopy(source)
 
@@ -272,6 +273,10 @@ def test_split_state_and_secrets_recursively_separates_nested_values(backup_mod)
     assert "device_bound_login" in split.reauth_required
     assert "browser_profile" not in split.state
     assert "browser_profile" not in split.secrets
+    assert "personification_qzone_cookie" not in split.state
+    assert "personification_qzone_cookie" not in split.secrets
+    assert "server-only" not in rendered_state
+    assert "server-only" not in rendered_secrets
 
 
 def test_state_package_manifest_and_default_exclusions(backup_mod) -> None:

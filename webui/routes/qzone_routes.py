@@ -168,7 +168,7 @@ def _safe_publish_operation(operation: Any) -> dict[str, Any]:
     }
 
 
-def _build_status(runtime) -> dict[str, Any]:
+def _build_status(runtime, *, bot_id: str = "") -> dict[str, Any]:
     from ...core.data_store import get_data_store
     from ...core.qzone_service import get_qzone_auth_status, get_qzone_capability_status
     from ...core.qzone_publish import list_qzone_publish_operations
@@ -219,28 +219,56 @@ def _build_status(runtime) -> dict[str, Any]:
             "next_run_at": job.next_run_time.timestamp() if job is not None and getattr(job, "next_run_time", None) else 0,
         }
 
-    def _safe_auth(bot_id: str = "") -> dict[str, Any]:
-        value = sanitize_object(get_qzone_auth_status(bot_id))
+    requested_bot_id = str(bot_id or "").strip()
+
+    def _safe_auth(exact_bot_id: str = "") -> dict[str, Any]:
+        # Keep the route tolerant of explicitly injected legacy status shims.
+        # Production always receives the configuration so credential metadata is
+        # projected from the isolated store; the narrow fallback prevents a
+        # test/downgrade shim that predates the keyword from turning the whole
+        # status page into a 500 response.
+        try:
+            raw_auth = get_qzone_auth_status(exact_bot_id, plugin_config=cfg)
+        except TypeError as exc:
+            if "plugin_config" not in str(exc):
+                raise
+            raw_auth = get_qzone_auth_status(exact_bot_id)
+        value = sanitize_object(raw_auth)
         auth_value = value if isinstance(value, dict) else {}
         if auth_value.get("last_error"):
             auth_value["last_error"] = _HIDDEN_LAST_ERROR
+        raw_by_bot = auth_value.get("by_bot")
+        if isinstance(raw_by_bot, dict):
+            auth_value["by_bot"] = {
+                str(key): _safe_auth(str(key))
+                for key in raw_by_bot
+                if str(key).strip()
+            }
         return auth_value
 
-    auth_by_bot = {
-        str(getattr(bot, "self_id", key) or key): _safe_auth(str(getattr(bot, "self_id", key) or key))
-        for key, bot in bot_items
-    }
-    auth = next(iter(auth_by_bot.values()), _safe_auth())
+    aggregate_auth = _safe_auth()
+    auth_by_bot = dict(aggregate_auth.get("by_bot") or {})
+    for key, bot in bot_items:
+        current_bot_id = str(getattr(bot, "self_id", key) or key).strip()
+        if current_bot_id:
+            auth_by_bot[current_bot_id] = _safe_auth(current_bot_id)
+    auth = _safe_auth(requested_bot_id) if requested_bot_id else aggregate_auth
     capabilities_by_bot = {
-        str(getattr(bot, "self_id", key) or key): get_qzone_capability_status(
-            str(getattr(bot, "self_id", key) or key),
+        current_bot_id: get_qzone_capability_status(
+            current_bot_id,
             enabled=enabled,
+            plugin_config=cfg,
         )
-        for key, bot in bot_items
+        for current_bot_id in sorted(auth_by_bot)
     }
-    capabilities = next(
-        iter(capabilities_by_bot.values()),
-        get_qzone_capability_status("", enabled=enabled),
+    capabilities = (
+        get_qzone_capability_status(
+            requested_bot_id,
+            enabled=enabled,
+            plugin_config=cfg,
+        )
+        if requested_bot_id
+        else get_qzone_capability_status("", enabled=enabled, plugin_config=cfg)
     )
     payload = {
         "enabled": enabled,
@@ -252,7 +280,14 @@ def _build_status(runtime) -> dict[str, Any]:
         "capabilities": capabilities,
         "capabilities_by_bot": capabilities_by_bot,
         "bots": [{"bot_id": str(getattr(bot, "self_id", key) or key)} for key, bot in bot_items],
-        "cookie_configured": bool(str(getattr(cfg, "personification_qzone_cookie", "") or "").strip()),
+        "scope": "exact_bot" if requested_bot_id else "aggregate",
+        "selected_bot_id": requested_bot_id,
+        "cookie_configured": (
+            bool(auth.get("credential_configured"))
+            if requested_bot_id
+            else bool(auth.get("configured_bot_count", 0))
+        ),
+        "credential_source": str(auth.get("credential_source") or "")[:32],
         "auth": auth,
         "auth_by_bot": auth_by_bot,
         "scan": get_qzone_scan_status(),
@@ -310,14 +345,225 @@ def _build_status(runtime) -> dict[str, Any]:
     return _attach_diagnostic(payload, report)
 
 
+_READ_ONLY_STAGE_LABELS = {
+    "bot_online": "确认目标 Bot 在线",
+    "cookie_export": "服务端导出 Cookie",
+    "identity_match": "核验 Cookie 身份",
+    "login_page_check": "检查登录页面",
+    "self_feed_read": "读取本人动态",
+    "target_feed_read": "读取指定目标动态",
+    "normalization_commit": "归一化并提交安全状态",
+}
+
+
+def _get_exact_bot(runtime: Any, bot_id: Any) -> Any | None:
+    expected = str(bot_id or "").strip()
+    if not expected:
+        return None
+    bot = _get_bot(runtime, expected)
+    if bot is None or str(getattr(bot, "self_id", "") or "").strip() != expected:
+        return None
+    return bot
+
+
+def _safe_read_only_stages(value: Any) -> list[dict[str, Any]]:
+    raw_items = value if isinstance(value, list) else []
+    result: list[dict[str, Any]] = []
+    for expected_key in _READ_ONLY_STAGE_LABELS:
+        raw = next(
+            (
+                item
+                for item in raw_items
+                if isinstance(item, dict) and str(item.get("key") or "") == expected_key
+            ),
+            {},
+        )
+        status = str(raw.get("status") or "skipped").lower()
+        if status not in {"ok", "warn", "error", "skipped"}:
+            status = "error"
+        code = sanitize_text(raw.get("code") or "qzone_read_only_diagnostics_invalid", limit=96)
+        item = {
+            "key": expected_key,
+            "status": status,
+            "code": code,
+            "elapsed_ms": max(0, int(raw.get("elapsed_ms") or 0)),
+        }
+        if "count" in raw:
+            item["count"] = max(0, int(raw.get("count") or 0))
+        result.append(item)
+    return result
+
+
+def _read_only_suggestion(failure_code: str) -> str:
+    if failure_code == "qzone_read_only_bot_unavailable":
+        return "确认选中的 Bot 已连接后重试；不会改用其它 Bot。"
+    if "identity" in failure_code:
+        return "确认服务端导出的 Cookie 与所选 Bot 的 QQ 完全一致，再通过服务端刷新或扫码恢复。"
+    if "login" in failure_code or "auth_blocked" in failure_code or "risk" in failure_code:
+        return "请使用绑定 Bot 的手机 QQ 扫码恢复登录，避免在浏览器粘贴 Cookie。"
+    if "credential_store" in failure_code or "commit" in failure_code:
+        return "检查服务端运行数据目录权限和凭据文件状态后重试；旧有效凭据未被本次失败覆盖。"
+    return "根据稳定诊断码检查服务端 OneBot 连接或 QZone 只读访问后重试。"
+
+
+async def _run_read_only_diagnostics_endpoint(
+    *,
+    runtime: Any,
+    request: Request,
+    body: dict,
+    admin: AdminIdentity,
+) -> dict[str, Any]:
+    if body.get("confirm_external_read") is not True:
+        report = diagnostic(
+            ok=False,
+            code="qzone_read_only_confirmation_required",
+            phase="read_only_confirmation",
+            title="需要明确确认外部只读访问",
+            message="该诊断会从服务端读取 QZone 数据；未确认时不会导出 Cookie 或发起任何外部请求。",
+            steps=(step("external_read_confirmation", "确认外部只读访问", "error", "缺少 confirm_external_read=true。"),),
+            suggestion="确认只执行 Cookie 导出和 QZone 读取后，重新提交明确确认。",
+            retryable=False,
+        )
+        raise _http_diagnostic(400, report)
+
+    bot_id = str(body.get("bot_id") or "").strip()
+    bot = _get_exact_bot(runtime, bot_id)
+    if bot is None:
+        report = diagnostic(
+            ok=False,
+            code="qzone_read_only_bot_required",
+            phase="bot_online",
+            title="必须选择已连接的精确 Bot",
+            message="诊断不会回退到唯一、默认或最近使用的其它 Bot。",
+            steps=(step("bot_online", "确认目标 Bot 在线", "error", "指定 Bot 未连接或 ID 为空。"),),
+            suggestion="从当前连接列表选择一个精确 Bot ID 后重试。",
+            retryable=True,
+        )
+        raise _http_diagnostic(503, report)
+
+    target_user_id = str(body.get("target_user_id") or "").strip()
+    try:
+        from ...core.qzone_service import run_qzone_read_only_diagnostics
+
+        result = await run_qzone_read_only_diagnostics(
+            bot=bot,
+            plugin_config=getattr(runtime, "plugin_config", None),
+            logger=getattr(runtime, "logger", None),
+            target_user_id=target_user_id,
+        )
+    except Exception as exc:
+        report = _exception_report(
+            runtime,
+            exc,
+            code="qzone_read_only_diagnostics_exception",
+            phase="read_only_diagnostics",
+            title="QZone 只读诊断异常中断",
+            message="服务器未能完成只读诊断；没有执行任何 QZone 写操作。",
+            suggestion="根据 Trace ID 检查服务端依赖和网络状态后重试。",
+            steps=(step("read_only_diagnostics", "执行只读诊断", "error", "诊断调用异常中断。"),),
+        )
+        raise _http_diagnostic(500, report) from exc
+
+    stages = _safe_read_only_stages(result.get("stages"))
+    ok = bool(result.get("ok"))
+    failure_code = sanitize_text(result.get("failure_code") or "", limit=96)
+    result_code = sanitize_text(
+        result.get("code") or ("qzone_read_only_diagnostics_succeeded" if ok else "qzone_read_only_diagnostics_failed"),
+        limit=96,
+    )
+    target = result.get("target") if isinstance(result.get("target"), dict) else {}
+    safe_target = {
+        "provided": bool(target.get("provided")),
+        "summary": sanitize_text(target.get("summary") or "未提供", limit=32),
+    }
+    report = diagnostic(
+        ok=ok,
+        code=result_code,
+        phase="read_only_diagnostics",
+        title="QZone 只读诊断完成" if ok else "QZone 只读诊断未通过",
+        message=(
+            "已完成服务端 Cookie 导出、身份核验和只读动态检查；未调用点赞、评论、发布或转发。"
+            if ok
+            else "诊断在失败阶段停止；未调用点赞、评论、发布或转发。"
+        ),
+        details=(
+            detail("脱敏目标", safe_target["summary"], "info"),
+            detail("完成阶段", sum(1 for item in stages if item["status"] == "ok"), "ok" if ok else "warn"),
+        ),
+        steps=tuple(
+            step(
+                item["key"],
+                _READ_ONLY_STAGE_LABELS[item["key"]],
+                item["status"],
+                f"稳定诊断码：{item['code']}",
+                details=(
+                    detail("耗时", f"{item['elapsed_ms']} ms", "info"),
+                    *(
+                        (detail("归一化数量", item["count"], "info"),)
+                        if "count" in item
+                        else ()
+                    ),
+                ),
+            )
+            for item in stages
+        ),
+        suggestion="无需进一步操作。" if ok else _read_only_suggestion(failure_code),
+        retryable=not ok,
+    )
+    webui_audit_log.record(
+        action="qzone_read_only_diagnostics",
+        qq=admin.qq,
+        device_id=admin.device_id,
+        target=safe_target["summary"],
+        ip_hash=get_client_ip(request),
+        detail={
+            "code": result_code,
+            "failure_code": failure_code,
+            "target_provided": safe_target["provided"],
+            "completed_stage_count": sum(1 for item in stages if item["status"] == "ok"),
+        },
+        outcome="ok" if ok else "failed",
+    )
+    return _attach_diagnostic(
+        {
+            "ok": ok,
+            "code": result_code,
+            "failure_code": failure_code,
+            "stages": stages,
+            "target": safe_target,
+        },
+        report,
+    )
+
+
+def _register_read_only_diagnostics_route(router: APIRouter, *, runtime: Any) -> None:
+    @router.post("/diagnostics/read-only")
+    async def read_only_diagnostics(
+        request: Request,
+        body: dict = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        return await _run_read_only_diagnostics_endpoint(
+            runtime=runtime,
+            request=request,
+            body=body,
+            admin=admin,
+        )
+
+
 def build_qzone_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/qzone", tags=["qzone"])
+    _register_read_only_diagnostics_route(router, runtime=runtime)
 
     @router.get("/status")
-    async def status(response: Response, _: AdminIdentity = Depends(require_admin)) -> dict:
+    async def status(
+        response: Response,
+        bot_id: str = "",
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
         response.headers["Cache-Control"] = "no-store, private"
         try:
-            return _build_status(runtime)
+            return _build_status(runtime, bot_id=bot_id)
         except Exception as exc:
             report = _exception_report(
                 runtime,
@@ -1490,6 +1736,13 @@ def build_qzone_router(*, runtime) -> APIRouter:
         body: dict = Body(default_factory=dict),
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
+        """Install an exact Bot credential only over HTTPS or local loopback.
+
+        `install_qzone_cookie` owns the sensitive validation chain: strict
+        format and full UIN agreement, exact Bot identity, a read-only probe,
+        then atomic replacement of that Bot's server-local secret.  This route
+        deliberately projects stable codes only and never records the input.
+        """
         from ...core.qzone_service import install_qzone_cookie
 
         require_https_or_loopback(
@@ -1507,27 +1760,30 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 title="Cookie 输入无效",
                 message="Cookie 为空或超过允许的 16 KiB。",
                 steps=(step("validate_input", "校验 Cookie 输入", "error", "输入长度不符合要求。"),),
-                suggestion="粘贴目标 Bot 的完整 QZone Cookie 后重试。",
+                suggestion="优先使用服务端 OneBot Cookie 导出；必要时粘贴目标 Bot 的完整 QZone Cookie 后重试。",
                 retryable=False,
             )
             raise _http_diagnostic(400, report)
-        bot = _get_bot(runtime, str(body.get("bot_id") or ""))
+
+        requested_bot_id = str(body.get("bot_id") or "").strip()
+        bot = _get_exact_bot(runtime, requested_bot_id)
         if bot is None:
             report = diagnostic(
                 ok=False,
-                code="qzone_cookie_import_bot_unavailable",
+                code="qzone_cookie_import_bot_required",
                 phase="cookie_validation",
-                title="目标 Bot 未连接",
-                message="没有找到可用于校验 Cookie 身份的已连接 Bot。",
+                title="必须选择已连接的精确 Bot",
+                message="Cookie 安装不会回退到唯一、默认或最近使用的其它 Bot。",
                 steps=(
                     step("validate_input", "校验 Cookie 输入", "ok", "输入长度符合要求。"),
-                    step("select_bot", "选择目标 Bot", "error", "目标 Bot 当前不可用。"),
+                    step("select_bot", "选择精确目标 Bot", "error", "指定 Bot 未连接或 ID 为空。"),
                 ),
-                suggestion="等待目标 Bot 连接后重新粘贴 Cookie。",
+                suggestion="优先通过该 Bot 的服务端导出刷新；手工导入时请选择当前连接的精确 Bot ID。",
                 retryable=True,
             )
             raise _http_diagnostic(503, report)
-        bot_id = str(getattr(bot, "self_id", "") or "")
+
+        bot_id = str(getattr(bot, "self_id", "") or "").strip()
         try:
             ok, reason = await install_qzone_cookie(
                 cookie=cookie,
@@ -1543,13 +1799,13 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 code="qzone_cookie_import_exception",
                 phase="cookie_install",
                 title="Cookie 验证安装异常",
-                message="服务器未能完成 Cookie 身份验证和安装。",
-                suggestion="请根据 Trace ID 检查认证探测和配置持久化状态后重试。",
+                message="服务器未能完成 Cookie 身份验证和只读探测。",
+                suggestion="优先使用服务端 OneBot 导出或扫码恢复登录；如仍失败，请根据 Trace ID 检查服务端状态。",
                 steps=(
                     step("validate_input", "校验 Cookie 输入", "ok", "输入长度符合要求。"),
-                    step("select_bot", "选择目标 Bot", "ok", "目标 Bot 已连接。"),
+                    step("select_bot", "选择精确目标 Bot", "ok", "目标 Bot 已连接。"),
                     step("verify_cookie", "验证 Cookie", "error", "认证验证异常中断。"),
-                    step("install_cookie", "安装 Cookie", "skipped", "未确认安装。"),
+                    step("install_cookie", "原子替换凭据", "skipped", "未确认安装。"),
                 ),
             )
             webui_audit_log.record(
@@ -1562,23 +1818,30 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 outcome="failed",
             )
             raise _http_diagnostic(500, report) from exc
+
         reason_code = str(reason or "")
         messages = {
             "missing_p_skey": "Cookie 缺少 p_skey",
             "missing_uin": "Cookie 缺少有效 uin",
+            "mixed_uin": "Cookie 中的 QQ 身份不一致",
             "account_mismatch": "Cookie QQ 与当前 Bot QQ 不一致",
             "auth_blocked": "Cookie 已失效或仍被腾讯认证拦截",
+            "risk_blocked": "QZone 只读探测受风控拦截",
             "probe_failed": "暂时无法验证 Cookie，请稍后重试",
+            "qzone_credential_store_write_failed": "凭据安全存储写入失败",
         }
-        message = "QZone Cookie 已验证并安装" if ok else messages.get(reason_code, "Cookie 验证失败")
         failure_codes = {
             "missing_p_skey": "qzone_cookie_missing_p_skey",
             "missing_uin": "qzone_cookie_missing_uin",
+            "mixed_uin": "qzone_cookie_mixed_uin",
             "account_mismatch": "qzone_cookie_account_mismatch",
             "auth_blocked": "qzone_cookie_auth_blocked",
+            "risk_blocked": "qzone_cookie_risk_blocked",
             "probe_failed": "qzone_cookie_probe_failed",
+            "qzone_credential_store_write_failed": "qzone_cookie_store_write_failed",
         }
         safe_reason = reason_code if reason_code in failure_codes else "validation_failed"
+        message = "QZone Cookie 已验证并安装" if ok else messages.get(reason_code, "Cookie 验证失败")
         webui_audit_log.record(
             action="qzone_cookie_import",
             qq=admin.qq,
@@ -1594,12 +1857,12 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 code="qzone_cookie_installed",
                 phase="cookie_install",
                 title="QZone Cookie 已安装",
-                message="Cookie 身份、目标 Bot 和只读 QZone 探测均已验证。",
+                message="Cookie 格式、身份、目标 Bot 和只读 QZone 探测均已验证。",
                 steps=(
                     step("validate_input", "校验 Cookie 输入", "ok", "输入长度符合要求。"),
-                    step("select_bot", "选择目标 Bot", "ok", "目标 Bot 已连接。"),
-                    step("verify_cookie", "验证 Cookie", "ok", "账号身份和 QZone 认证探测已通过。"),
-                    step("install_cookie", "安装 Cookie", "ok", "运行时配置已更新。"),
+                    step("select_bot", "选择精确目标 Bot", "ok", "目标 Bot 已连接。"),
+                    step("verify_cookie", "验证 Cookie", "ok", "账号身份和 QZone 只读探测已通过。"),
+                    step("install_cookie", "原子替换凭据", "ok", "仅该 Bot 的服务端安全凭据已更新。"),
                 ),
                 retryable=False,
             )
@@ -1613,12 +1876,12 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 details=(detail("安全原因码", safe_reason, "error"),),
                 steps=(
                     step("validate_input", "校验 Cookie 输入", "ok", "输入长度符合要求。"),
-                    step("select_bot", "选择目标 Bot", "ok", "目标 Bot 已连接。"),
+                    step("select_bot", "选择精确目标 Bot", "ok", "目标 Bot 已连接。"),
                     step("verify_cookie", "验证 Cookie", "error", "Cookie 未通过账号或只读认证探测。"),
-                    step("install_cookie", "安装 Cookie", "skipped", "无效凭证未写入配置。"),
+                    step("install_cookie", "原子替换凭据", "skipped", "旧有效凭据未被本次失败覆盖。"),
                 ),
-                suggestion="按安全原因码修正凭证，或改用手机 QQ 扫码恢复登录。",
-                retryable=reason_code == "probe_failed",
+                suggestion="优先使用服务端 OneBot 导出或手机 QQ 扫码恢复登录；可按安全原因码修正手工凭据。",
+                retryable=reason_code in {"probe_failed", "risk_blocked"},
             )
         return _attach_diagnostic(
             {"ok": bool(ok), "status": "installed" if ok else "failed", "message": message},
@@ -1768,4 +2031,12 @@ def build_qzone_router(*, runtime) -> APIRouter:
         )
         return _attach_diagnostic(result, report)
 
+    return router
+
+
+def build_qzone_v2_router(*, runtime) -> APIRouter:
+    """Expose the confirmed diagnostic at the stable v2 path without aliases."""
+
+    router = APIRouter(prefix="/api/v2/qzone", tags=["qzone"])
+    _register_read_only_diagnostics_route(router, runtime=runtime)
     return router

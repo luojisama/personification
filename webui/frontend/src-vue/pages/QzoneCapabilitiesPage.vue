@@ -65,6 +65,10 @@
               <dd>{{ statusQuery.data.value.enabled ? '启用' : '停用' }}</dd>
               <dt>Cookie</dt>
               <dd>{{ statusQuery.data.value.cookie_configured ? '已配置（不回传原值）' : '未配置' }}</dd>
+              <dt>凭据来源</dt>
+              <dd><code>{{ formatValue(statusQuery.data.value.credential_source, '未配置') }}</code></dd>
+              <dt>身份匹配</dt>
+              <dd>{{ identityVerificationText }}</dd>
               <dt>认证状态</dt>
               <dd>{{ formatValue(authRecord.state ?? authRecord.status, 'unknown') }}</dd>
               <dt>只读模式</dt>
@@ -85,6 +89,38 @@
           </Panel>
         </div>
       </QueryBoundary>
+
+      <Panel v-if="botCredentialRows.length" eyebrow="AUTH / BOT ISOLATION" title="按 Bot 隔离的凭据与能力">
+        <div class="trace-table-wrap">
+          <table class="forensic-table">
+            <thead>
+              <tr>
+                <th>Bot</th>
+                <th>凭据</th>
+                <th>来源</th>
+                <th>身份</th>
+                <th>导出</th>
+                <th>读取</th>
+                <th>写入</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in botCredentialRows" :key="row.botId">
+                <td><code>{{ row.botId }}</code></td>
+                <td>{{ row.configured ? '已配置' : '未配置' }}</td>
+                <td><code>{{ row.source || '—' }}</code></td>
+                <td>{{ row.identity }}</td>
+                <td><code>{{ row.cookieExport }}</code></td>
+                <td><code>{{ row.webRead }}</code></td>
+                <td><code>{{ row.webWrite }}</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="muted-copy">
+          空 Bot ID 仅显示聚合，不能触发认证、读取或写入；所有操作必须选择上表中的精确 Bot。
+        </p>
+      </Panel>
 
       <Panel eyebrow="AUTH / LOGIN RECOVERY" title="扫码恢复">
         <div class="inline-controls">
@@ -134,26 +170,31 @@
 
       <Panel eyebrow="AUTH / MANUAL COOKIE" title="手工安装 Cookie">
         <p class="muted-copy">
-          秘密只在本次请求中提交，接口不会回显或写入审计详情。{{
-            isSecureTransport ? '当前连接允许提交。' : '当前是远程 HTTP，前后端均会拒绝提交；请先部署 HTTPS。'
-          }}
+          优先使用服务端 OneBot 导出或绑定 Bot 的手机 QQ 扫码。手工导入只允许 HTTPS 或本机 loopback，且只会安装到所选精确 Bot；接口不会回显或写入审计详情。
         </p>
-        <textarea
-          v-model="cookieInput"
-          rows="4"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="粘贴目标 Bot 的 QZone Cookie"
-          :disabled="!isSecureTransport"
-        />
-        <button
-          class="button"
-          type="button"
-          :disabled="!isSecureTransport || !selectedBotId || !cookieInput || authMutation.isPending.value"
-          @click="submitCookie"
-        >
-          验证并安装
-        </button>
+        <template v-if="isSecureTransport">
+          <TextareaField
+            v-model="cookieInput"
+            label="所选 Bot 的 QZone Cookie"
+            id="qzone-cookie-input"
+            description="仅在必要时粘贴；提交后页面不会回显或记录原值。"
+            :rows="4"
+            autocomplete="off"
+            :spellcheck="false"
+            placeholder="仅在必要时粘贴所选 Bot 的 QZone Cookie"
+          />
+          <button
+            class="button"
+            type="button"
+            :disabled="!selectedBotId || !cookieInput || authMutation.isPending.value"
+            @click="submitCookie"
+          >
+            验证并安装
+          </button>
+        </template>
+        <p v-else class="muted-copy">
+          当前是远程 HTTP：浏览器 Cookie 输入已禁用，服务端也会拒绝该请求。请部署 HTTPS，或改用协议端导出/扫码恢复。
+        </p>
       </Panel>
 
       <DiagnosticPanel
@@ -197,9 +238,30 @@
 
       <Panel eyebrow="EXTERNAL READ / CONFIRM" title="授权范围内读取">
         <p>下列操作会访问 QQ 空间公开或已授权数据并可能消耗网络请求，不会执行点赞、评论或发布。</p>
+        <TextField
+          v-model="readOnlyTargetUserId"
+          label="可选目标 QQ（仅用于只读探针）"
+          inputmode="numeric"
+          autocomplete="off"
+          placeholder="留空只读取所选 Bot 的本人动态"
+        />
+        <SwitchField
+          v-model="readOnlyConfirmed"
+          label="我确认仅执行服务端 Cookie 导出与 QZone 外部只读访问"
+          on-label="已确认"
+          off-label="未确认"
+        />
         <div class="inline-controls">
           <button
             class="button"
+            type="button"
+            :disabled="!selectedBotId || !readOnlyConfirmed || readOnlyMutation.isPending.value"
+            @click="runReadOnlyDiagnostics"
+          >
+            运行 7 阶段只读诊断
+          </button>
+          <button
+            class="button button-secondary"
             type="button"
             :disabled="!selectedBotId || candidatesQuery.isFetching.value"
             @click="fetchCandidates"
@@ -223,6 +285,32 @@
             轮询留言
           </button>
         </div>
+      </Panel>
+
+      <Panel v-if="readOnlyStages.length" eyebrow="READ / LAST DIAGNOSTIC" title="最近只读诊断阶段">
+        <div class="trace-table-wrap">
+          <table class="forensic-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>状态</th>
+                <th>稳定码</th>
+                <th>耗时</th>
+                <th>数量</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in readOnlyStages" :key="item.key">
+                <td><code>{{ item.key }}</code></td>
+                <td>{{ item.status }}</td>
+                <td><code>{{ item.code }}</code></td>
+                <td>{{ item.elapsed_ms }} ms</td>
+                <td>{{ formatValue(item.count, '—') }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-if="lastReadOnlySuggestion" class="muted-copy">建议：{{ lastReadOnlySuggestion }}</p>
       </Panel>
 
       <DiagnosticPanel
@@ -282,10 +370,12 @@
           <dt>动作</dt>
           <dd>生成并发布一条 QZone 说说</dd>
         </dl>
-        <label>
-          输入目标 Bot QQ 以确认
-          <input v-model="confirmationInput" :disabled="!isSecureTransport" />
-        </label>
+        <TextField
+          v-model="confirmationInput"
+          label="输入目标 Bot QQ 以确认"
+          :disabled="!isSecureTransport"
+          inputmode="numeric"
+        />
         <button
           class="button button-danger"
           type="button"
@@ -358,7 +448,7 @@
       </Panel>
 
       <Panel eyebrow="VERIFY / SINGLE OPERATION" title="单个结果核对">
-        <input v-model="historyOperationId" placeholder="Operation ID" />
+        <TextField v-model="historyOperationId" label="Operation ID" placeholder="Operation ID" />
         <dl v-if="singleOperationRecord" class="compact-kv">
           <dt>状态</dt>
           <dd>{{ formatValue(singleOperationRecord.status) }}</dd>
@@ -407,7 +497,7 @@ import { computed, ref } from "vue";
 import { useMutation, useQuery } from "@tanstack/vue-query";
 import { useRoute } from "vue-router";
 
-import { API_BASE } from "@/api/client";
+import { API_BASE, api } from "@/api/client";
 import { diagnosticFromError, safeDiagnostic } from "@/api/diagnostics";
 import { resources } from "@/api/resources";
 import type { OperationDiagnostic } from "@/api/types";
@@ -418,9 +508,22 @@ import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import SwitchField from "@vue-app/components/forms/SwitchField.vue";
+import TextareaField from "@vue-app/components/forms/TextareaField.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
 import { useBotStore } from "@vue-app/stores/bot";
 
 type JsonRecord = Record<string, unknown>;
+
+type BotCredentialRow = {
+  botId: string;
+  configured: boolean;
+  source: string;
+  identity: string;
+  cookieExport: string;
+  webRead: string;
+  webWrite: string;
+};
 
 const ACTIONS: Record<string, string> = {
   login_state: "登录态",
@@ -503,12 +606,46 @@ const capabilityRows = computed(() => asRecords(capabilitiesQuery.data.value?.it
 // Status Query (used in Auth, Feeds, History)
 const statusQuery = useQuery({
   queryKey: computed(() => ["qzone-status", selectedBotId.value]),
-  queryFn: ({ signal }) => resources.qzoneGet("status", {}, signal),
+  queryFn: ({ signal }) => resources.qzoneGet("status", { bot_id: selectedBotId.value }, signal),
   enabled: computed(() => ["auth", "feeds", "history"].includes(section.value)),
 });
 const authRecord = computed(() => asRecord(statusQuery.data.value?.auth));
 const quotaRecord = computed(() => asRecord(statusQuery.data.value?.quota));
 const reconciliationRecord = computed(() => asRecord(statusQuery.data.value?.reconciliation));
+const identityVerificationText = computed(() => {
+  if (authRecord.value.credential_configured !== true) return "未配置"
+  return authRecord.value.credential_identity_verification === "verified" ? "安装时已验证" : "未记录，需要只读诊断确认"
+});
+
+function capabilityState(capabilities: JsonRecord, name: string): string {
+  return formatValue(asRecord(capabilities[name]).state, "unknown");
+}
+
+const botCredentialRows = computed<BotCredentialRow[]>(() => {
+  const authByBot = asRecord(statusQuery.data.value?.auth_by_bot);
+  const capabilitiesByBot = asRecord(statusQuery.data.value?.capabilities_by_bot);
+  return Object.entries(authByBot)
+    .filter(([botId]) => Boolean(botId))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([botId, rawAuth]) => {
+      const auth = asRecord(rawAuth);
+      const capabilities = asRecord(capabilitiesByBot[botId]);
+      const configured = auth.credential_configured === true;
+      return {
+        botId,
+        configured,
+        source: formatValue(auth.credential_source, ""),
+        identity: !configured
+          ? "未配置"
+          : auth.credential_identity_verification === "verified"
+            ? "安装时已验证"
+            : "未记录",
+        cookieExport: capabilityState(capabilities, "qzone.cookie_export"),
+        webRead: capabilityState(capabilities, "qzone.web_read"),
+        webWrite: capabilityState(capabilities, "qzone.web_write"),
+      };
+    });
+});
 
 // Auth state & mutation
 const sessionId = ref("");
@@ -576,6 +713,41 @@ const scanMutation = useMutation({
     recordDiagnostic(diagnosticFromError(error));
   },
 });
+
+const readOnlyTargetUserId = ref("");
+const readOnlyConfirmed = ref(false);
+const lastReadOnlyResult = ref<JsonRecord>({});
+const readOnlyStages = computed(() => asRecords(lastReadOnlyResult.value.stages).map((stage) => ({
+  key: formatValue(stage.key, "unknown"),
+  status: formatValue(stage.status, "unknown"),
+  code: formatValue(stage.code, "qzone_read_only_diagnostics_invalid"),
+  elapsed_ms: Math.max(0, Number(stage.elapsed_ms) || 0),
+  count: stage.count,
+})));
+const lastReadOnlySuggestion = computed(() => formatValue(lastReadOnlyResult.value.suggestion, ""));
+
+const readOnlyMutation = useMutation({
+  mutationFn: (): Promise<JsonRecord> =>
+    api.post<JsonRecord>("/qzone/diagnostics/read-only", {
+      bot_id: selectedBotId.value,
+      target_user_id: readOnlyTargetUserId.value.trim(),
+      confirm_external_read: true,
+    }),
+  onSuccess: (result) => {
+    lastReadOnlyResult.value = asRecord(result);
+    recordDiagnostic(safeDiagnostic(asRecord(result.diagnostic)));
+    void statusQuery.refetch();
+  },
+  onError: (error) => {
+    recordDiagnostic(diagnosticFromError(error));
+  },
+});
+
+function runReadOnlyDiagnostics() {
+  if (selectedBotId.value && readOnlyConfirmed.value) {
+    readOnlyMutation.mutate();
+  }
+}
 
 function fetchCandidates() {
   if (window.confirm(`确认读取 Bot ${selectedBotId.value} 的本人动态，用于生成对账候选？`)) {

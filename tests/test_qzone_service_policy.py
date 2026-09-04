@@ -25,13 +25,20 @@ class _Logger:
     error = _record
 
 
-def _config():  # noqa: ANN202
-    return SimpleNamespace(
+def _config(tmp_path):  # noqa: ANN001, ANN202
+    config = SimpleNamespace(
+        personification_data_dir=str(tmp_path),
         personification_qzone_enabled=True,
         personification_qzone_cookie=(
             f"uin=o{BOT_ID}; skey=sk; p_uin=o{BOT_ID}; p_skey=ps;"
         ),
     )
+    qzone_service.QzoneCredentialStore(config).replace(
+        bot_id=BOT_ID,
+        cookie=f"uin=o{BOT_ID}; skey=sk; p_uin=o{BOT_ID}; p_skey=ps;",
+        source="test",
+    )
+    return config
 
 
 def _authorization(**overrides):  # noqa: ANN003, ANN202
@@ -89,7 +96,7 @@ def _install_recording_client(monkeypatch):  # noqa: ANN001, ANN202
     return calls
 
 
-def test_blocked_sinks_do_not_call_qzone_api(monkeypatch) -> None:  # noqa: ANN001
+def test_blocked_sinks_do_not_call_qzone_api(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     calls = _install_recording_client(monkeypatch)
 
     async def deny(_user_id: str):  # noqa: ANN202
@@ -100,7 +107,7 @@ def test_blocked_sinks_do_not_call_qzone_api(monkeypatch) -> None:  # noqa: ANN0
             allow_reply=False,
         )
 
-    service = qzone_service.QzoneSocialService(_config(), _Logger(), deny)
+    service = qzone_service.QzoneSocialService(_config(tmp_path), _Logger(), deny)
 
     async def run():  # noqa: ANN202
         fetch_result = await service.fetch_user_feeds(target_uin=OWNER_ID, bot_id=BOT_ID)
@@ -122,7 +129,7 @@ def test_blocked_sinks_do_not_call_qzone_api(monkeypatch) -> None:  # noqa: ANN0
     assert calls == []
 
 
-def test_comment_reply_requires_actor_allow_reply(monkeypatch) -> None:  # noqa: ANN001
+def test_comment_reply_requires_actor_allow_reply(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     calls = _install_recording_client(monkeypatch)
     authorized_users: list[str] = []
 
@@ -132,7 +139,7 @@ def test_comment_reply_requires_actor_allow_reply(monkeypatch) -> None:  # noqa:
             return _authorization(allow_reply=False)
         return _authorization()
 
-    service = qzone_service.QzoneSocialService(_config(), _Logger(), authorize)
+    service = qzone_service.QzoneSocialService(_config(tmp_path), _Logger(), authorize)
     result = asyncio.run(
         service.comment_feed(
             feed=_feed(),
@@ -147,7 +154,7 @@ def test_comment_reply_requires_actor_allow_reply(monkeypatch) -> None:  # noqa:
     assert calls == []
 
 
-def test_authorizer_exception_fails_closed_without_raw_error(monkeypatch) -> None:  # noqa: ANN001
+def test_authorizer_exception_fails_closed_without_raw_error(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     calls = _install_recording_client(monkeypatch)
     logger = _Logger()
     raw_error = "private-policy-store-detail"
@@ -155,7 +162,7 @@ def test_authorizer_exception_fails_closed_without_raw_error(monkeypatch) -> Non
     async def fail(_user_id: str):  # noqa: ANN202
         raise RuntimeError(raw_error)
 
-    service = qzone_service.QzoneSocialService(_config(), logger, fail)
+    service = qzone_service.QzoneSocialService(_config(tmp_path), logger, fail)
     result = asyncio.run(service.like_feed(feed=_feed(), bot_id=BOT_ID))
 
     assert result == (False, "policy_blocked")
@@ -163,7 +170,7 @@ def test_authorizer_exception_fails_closed_without_raw_error(monkeypatch) -> Non
     assert all(raw_error not in message for message in logger.messages)
 
 
-def test_bot_self_fetch_bypasses_user_policy(monkeypatch) -> None:  # noqa: ANN001
+def test_bot_self_fetch_bypasses_user_policy(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     calls = _install_recording_client(monkeypatch)
     authorized_users: list[str] = []
 
@@ -171,7 +178,7 @@ def test_bot_self_fetch_bypasses_user_policy(monkeypatch) -> None:  # noqa: ANN0
         authorized_users.append(user_id)
         return _authorization(allow_context_read=False, allow_qzone=False)
 
-    service = qzone_service.QzoneSocialService(_config(), _Logger(), deny)
+    service = qzone_service.QzoneSocialService(_config(tmp_path), _Logger(), deny)
     ok, message, feeds = asyncio.run(
         service.fetch_user_feeds(target_uin=BOT_ID, bot_id=BOT_ID)
     )
@@ -182,7 +189,7 @@ def test_bot_self_fetch_bypasses_user_policy(monkeypatch) -> None:  # noqa: ANN0
     assert [method for method, _url in calls] == ["get"]
 
 
-def test_bot_self_feed_actions_bypass_user_policy(monkeypatch) -> None:  # noqa: ANN001
+def test_bot_self_feed_actions_bypass_user_policy(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     calls = _install_recording_client(monkeypatch)
     authorized_users: list[str] = []
 
@@ -194,7 +201,7 @@ def test_bot_self_feed_actions_bypass_user_policy(monkeypatch) -> None:  # noqa:
             allow_reply=False,
         )
 
-    service = qzone_service.QzoneSocialService(_config(), _Logger(), deny)
+    service = qzone_service.QzoneSocialService(_config(tmp_path), _Logger(), deny)
 
     async def run():  # noqa: ANN202
         feed = _feed(owner=BOT_ID)
@@ -216,7 +223,7 @@ def test_bot_self_feed_actions_bypass_user_policy(monkeypatch) -> None:  # noqa:
     assert [method for method, _url in calls] == ["post", "post", "post"]
 
 
-def test_allowed_policy_reaches_each_qzone_api(monkeypatch) -> None:  # noqa: ANN001
+def test_allowed_policy_reaches_each_qzone_api(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     calls = _install_recording_client(monkeypatch)
     authorized_users: list[str] = []
 
@@ -225,7 +232,7 @@ def test_allowed_policy_reaches_each_qzone_api(monkeypatch) -> None:  # noqa: AN
         return _authorization()
 
     service = qzone_service.build_qzone_social_service(
-        _config(),
+        _config(tmp_path),
         _Logger(),
         user_policy_authorizer=allow,
     )

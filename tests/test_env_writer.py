@@ -11,6 +11,7 @@ from ._loader import load_personification_module
 env_writer = load_personification_module("plugin.personification.core.env_writer")
 runtime_config = load_personification_module("plugin.personification.core.runtime_config")
 qzone_service = load_personification_module("plugin.personification.core.qzone_service")
+qzone_credentials = load_personification_module("plugin.personification.core.qzone_credentials")
 
 
 def _make_plugin_config(tmp_path: Path, **extra) -> SimpleNamespace:
@@ -71,24 +72,31 @@ def test_write_dotenv_restricts_source_and_backup_permissions(tmp_path: Path, mo
     assert backups and backups[0] in restricted
 
 
-def test_qzone_cookie_persist_restricts_env_permissions(tmp_path: Path, monkeypatch) -> None:
+def test_qzone_credential_store_restricts_temp_before_atomic_replace(tmp_path: Path, monkeypatch) -> None:
     env_file = tmp_path / ".env.prod"
     env_file.write_text("personification_qzone_cookie=old\n", encoding="utf-8")
     restricted: list[Path] = []
 
-    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        qzone_service,
-        "_restrict_sensitive_file_permissions",
+        qzone_credentials,
+        "_restrict_secret_file_permissions",
         lambda path: restricted.append(Path(path).resolve()),
     )
 
-    qzone_service._persist_cookie_to_env(
-        "uin=o10001; p_skey=secret;",
-        SimpleNamespace(error=lambda *_a, **_k: None),
+    config = SimpleNamespace(personification_data_dir=str(tmp_path))
+    store = qzone_credentials.QzoneCredentialStore(config)
+    store.replace(
+        bot_id="10001",
+        cookie="uin=o10001; p_skey=secret;",
+        source="test",
+        identity_verified=True,
     )
 
-    assert env_file.resolve() in restricted
+    assert len(restricted) == 1
+    assert restricted[0].parent == store.path.parent.resolve()
+    assert restricted[0].name.endswith(".tmp")
+    assert store.get("10001") == "uin=o10001; p_skey=secret;"
+    assert env_file.read_text(encoding="utf-8") == "personification_qzone_cookie=old\n"
 
 
 def test_write_dotenv_appends_when_key_missing(tmp_path: Path) -> None:

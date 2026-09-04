@@ -26,59 +26,39 @@
             </div>
             <p class="muted-copy">三个开关全部开启后，Agent 才能读取当前群友空间并执行受控点赞或评论。这里不提供在线试发按钮。</p>
             <div class="form-grid qzone-agent-settings">
-              <label class="checkbox-label">
-                <input
-                  type="checkbox"
-                  :checked="draft.enabled"
-                  @change="update({ enabled: ($event.target as HTMLInputElement).checked })"
-                />
-                启用本群空间互动
-              </label>
-              <label>
-                本群每日写入上限
-                <input
-                  :aria-invalid="Boolean(fieldErrors.group)"
-                  :aria-describedby="fieldErrors.group ? 'qzone-agent-group-limit-error' : undefined"
-                  type="number"
-                  min="0"
-                  :max="data.limits.group_daily_limit"
-                  :value="draft.groupDailyLimit"
-                  @input="update({ groupDailyLimit: ($event.target as HTMLInputElement).value })"
-                />
-                <span v-if="fieldErrors.group" id="qzone-agent-group-limit-error" class="state-error" role="alert">
-                  {{ fieldErrors.group }}
-                </span>
-              </label>
-              <label>
-                同一目标每日上限
-                <input
-                  :aria-invalid="Boolean(fieldErrors.target)"
-                  :aria-describedby="fieldErrors.target ? 'qzone-agent-target-limit-error' : undefined"
-                  type="number"
-                  min="0"
-                  :max="data.limits.target_daily_limit"
-                  :value="draft.targetDailyLimit"
-                  @input="update({ targetDailyLimit: ($event.target as HTMLInputElement).value })"
-                />
-                <span v-if="fieldErrors.target" id="qzone-agent-target-limit-error" class="state-error" role="alert">
-                  {{ fieldErrors.target }}
-                </span>
-              </label>
-              <label>
-                同一目标冷却（秒）
-                <input
-                  :aria-invalid="Boolean(fieldErrors.cooldown)"
-                  :aria-describedby="fieldErrors.cooldown ? 'qzone-agent-cooldown-error' : undefined"
-                  type="number"
-                  :min="data.limits.target_cooldown_seconds"
-                  max="86400"
-                  :value="draft.targetCooldownSeconds"
-                  @input="update({ targetCooldownSeconds: ($event.target as HTMLInputElement).value })"
-                />
-                <span v-if="fieldErrors.cooldown" id="qzone-agent-cooldown-error" class="state-error" role="alert">
-                  {{ fieldErrors.cooldown }}
-                </span>
-              </label>
+              <SwitchField
+                id="qzone-agent-enabled"
+                :model-value="draft.enabled"
+                label="启用本群空间互动"
+                @update:model-value="update({ enabled: $event })"
+              />
+              <NumberField
+                id="qzone-agent-group-limit"
+                :model-value="numberOrNull(draft.groupDailyLimit)"
+                label="本群每日写入上限"
+                :min="0"
+                :max="data.limits.group_daily_limit"
+                :error="fieldErrors.group"
+                @update:model-value="update({ groupDailyLimit: stringifyNumber($event) })"
+              />
+              <NumberField
+                id="qzone-agent-target-limit"
+                :model-value="numberOrNull(draft.targetDailyLimit)"
+                label="同一目标每日上限"
+                :min="0"
+                :max="data.limits.target_daily_limit"
+                :error="fieldErrors.target"
+                @update:model-value="update({ targetDailyLimit: stringifyNumber($event) })"
+              />
+              <NumberField
+                id="qzone-agent-cooldown"
+                :model-value="numberOrNull(draft.targetCooldownSeconds)"
+                label="同一目标冷却（秒）"
+                :min="data.limits.target_cooldown_seconds"
+                :max="86400"
+                :error="fieldErrors.cooldown"
+                @update:model-value="update({ targetCooldownSeconds: stringifyNumber($event) })"
+              />
             </div>
             <div class="inline-controls">
               <button
@@ -159,6 +139,8 @@ import DiagnosticPanel from "@vue-app/components/DiagnosticPanel.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import NumberField from "@vue-app/components/forms/NumberField.vue";
+import SwitchField from "@vue-app/components/forms/SwitchField.vue";
 
 interface QzoneSettingsDraft {
   enabled: boolean;
@@ -250,6 +232,15 @@ function save() {
 function update(patch: Partial<QzoneSettingsDraft>) {
   draft.value = { ...draft.value, ...patch };
   dirty.value = true;
+}
+
+function numberOrNull(value: string): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function stringifyNumber(value: number | null): string {
+  return value === null ? "" : String(value);
 }
 
 function operationTone(status: string): "ok" | "warn" | "error" | "running" | "unknown" {

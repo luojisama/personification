@@ -162,10 +162,11 @@ def test_qzone_login_manager_rejects_cross_admin_session_replacement() -> None:
     asyncio.run(scenario())
 
 
-def test_install_qzone_cookie_validates_identity_and_persists_only_after_probe(monkeypatch) -> None:  # noqa: ANN001
-    persisted: list[str] = []
-    config = SimpleNamespace(personification_qzone_cookie="old-cookie")
-    monkeypatch.setattr(qzone_service, "_persist_cookie_to_env", lambda cookie, _logger: persisted.append(cookie))
+def test_install_qzone_cookie_validates_identity_and_persists_only_after_probe(tmp_path) -> None:  # noqa: ANN001
+    config = SimpleNamespace(
+        personification_data_dir=str(tmp_path),
+        personification_qzone_cookie="old-cookie",
+    )
 
     async def probe(_cookie: str, qq: str, p_skey: str) -> tuple[bool, str]:
         assert qq == "99999"
@@ -183,8 +184,10 @@ def test_install_qzone_cookie_validates_identity_and_persists_only_after_probe(m
         )
     )
     assert (ok, message) == (True, "ok")
-    assert persisted == ["uin=o99999; p_uin=o99999; skey=s-key; p_skey=p-secret;"]
-    assert config.personification_qzone_cookie == persisted[0]
+    store = qzone_service.QzoneCredentialStore(config)
+    assert store.get("99999") == "uin=o99999; p_uin=o99999; skey=s-key; p_skey=p-secret;"
+    assert store.describe("99999")["source"] == "manual"
+    assert config.personification_qzone_cookie == "old-cookie"
     assert qzone_service.get_qzone_auth_status("99999")["status"] == "healthy"
     assert qzone_service.get_qzone_auth_status("10000")["status"] == "unknown"
     capabilities = qzone_service.get_qzone_capability_status("99999", enabled=True)
@@ -203,12 +206,11 @@ def test_install_qzone_cookie_validates_identity_and_persists_only_after_probe(m
         )
     )
     assert mismatch == (False, "account_mismatch")
-    assert persisted == ["uin=o99999; p_uin=o99999; skey=s-key; p_skey=p-secret;"]
+    assert store.get("99999") == "uin=o99999; p_uin=o99999; skey=s-key; p_skey=p-secret;"
 
 
-def test_cookie_recovery_reopens_only_auth_degraded_write_for_manual_probe(monkeypatch) -> None:  # noqa: ANN001
-    config = SimpleNamespace(personification_qzone_cookie="")
-    monkeypatch.setattr(qzone_service, "_persist_cookie_to_env", lambda *_args: None)
+def test_cookie_recovery_reopens_only_auth_degraded_write_for_manual_probe(tmp_path) -> None:  # noqa: ANN001
+    config = SimpleNamespace(personification_data_dir=str(tmp_path), personification_qzone_cookie="")
 
     async def probe(_cookie: str, _qq: str, _p_skey: str) -> tuple[bool, str]:
         return True, "ok"

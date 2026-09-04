@@ -83,7 +83,7 @@ def test_qzone_status_sanitizes_all_last_errors_and_adds_diagnostic(_runtime_con
     _install_runtime(_runtime_context, bundle=SimpleNamespace(qzone_publish_available=True))
     client = _admin_client(_runtime_context)
 
-    response = client.get("/personification/api/qzone/status")
+    response = client.get("/personification/api/qzone/status?bot_id=10000")
 
     assert response.status_code == 200
     body = response.json()
@@ -123,7 +123,7 @@ def test_qzone_status_exposes_per_bot_read_only_capabilities_without_credentials
     _install_runtime(_runtime_context, bundle=SimpleNamespace(qzone_publish_available=True))
     client = _admin_client(_runtime_context)
 
-    response = client.get("/personification/api/qzone/status")
+    response = client.get("/personification/api/qzone/status?bot_id=10000")
 
     assert response.status_code == 200
     body = response.json()
@@ -775,6 +775,67 @@ def test_qzone_cookie_import_diagnostics_never_echo_unknown_reason_or_exception(
     _assert_safe_report(crashed_response.json()["detail"], code="qzone_cookie_import_exception", phase="cookie_install")
     assert "manual-input-secret" not in crashed_response.text
     assert "raw-cookie-runtime-secret" not in crashed_response.text
+
+
+def test_qzone_cookie_import_requires_https_outside_loopback_before_secret_install(
+    _runtime_context,
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    secret = "uin=o10000; p_skey=https-boundary-secret;"
+    calls: list[dict] = []
+
+    async def install(**kwargs):  # noqa: ANN003, ANN201
+        calls.append(kwargs)
+        return True, "ok"
+
+    monkeypatch.setattr(qzone_service, "install_qzone_cookie", install)
+    _install_runtime(_runtime_context, bundle=SimpleNamespace())
+    app = FastAPI()
+    app.include_router(_runtime_context.app_module.build_router())
+    client = TestClient(app, client=("198.51.100.9", 50001))
+    _login_as_admin(client, _runtime_context)
+    csrf = client.cookies.get("personification_webui_csrf", "")
+    if csrf:
+        client.headers["X-Personification-CSRF"] = csrf
+
+    response = client.post(
+        "/personification/api/qzone/auth/cookie",
+        json={"bot_id": "10000", "cookie": secret},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "qzone_cookie_https_required"
+    assert calls == []
+    assert "https-boundary-secret" not in response.text
+
+
+def test_qzone_cookie_import_requires_exact_connected_bot(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+    calls: list[dict] = []
+
+    async def install(**kwargs):  # noqa: ANN003, ANN201
+        calls.append(kwargs)
+        return True, "ok"
+
+    monkeypatch.setattr(qzone_service, "install_qzone_cookie", install)
+    _install_runtime(_runtime_context, bundle=SimpleNamespace())
+    client = _admin_client(_runtime_context)
+
+    response = client.post(
+        "/personification/api/qzone/auth/cookie",
+        json={"cookie": "uin=o10000; p_skey=exact-bot-secret;"},
+    )
+
+    assert response.status_code == 503
+    _assert_safe_report(
+        response.json()["detail"],
+        code="qzone_cookie_import_bot_required",
+        phase="cookie_validation",
+    )
+    assert calls == []
+    assert "exact-bot-secret" not in response.text
 
 
 def test_qzone_scan_diagnostics_sanitize_failures_and_exceptions(_runtime_context) -> None:
