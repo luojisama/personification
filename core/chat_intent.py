@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ VisionNeed = Literal["none", "summary", "native"]
 AdvicePermission = Literal["not_needed", "ask_first", "allowed"]
 CareRiskLevel = Literal["none", "concern", "high"]
 RelationshipProgress = Literal["none", "meaningful", "resonant", "milestone"]
+ReplyShape = Literal["auto", "micro", "fragment", "sentence", "compact"]
 ConversationScenario = Literal[
     "normal",
     "casual_banter",
@@ -39,6 +41,7 @@ _VALID_SCENARIOS: set[str] = {
     "normal", "casual_banter", "sarcasm_irony", "argument",
     "inside_joke", "multi_thread", "private_topic",
 }
+_VALID_REPLY_SHAPES: set[str] = {"auto", "micro", "fragment", "sentence", "compact"}
 
 
 @dataclass
@@ -83,6 +86,9 @@ class TurnSemanticFrame:
     # 并把 user/group 作用域绑定到当前可信会话，不能由用户文本指定任意对象。
     emotion_updates: list[dict[str, Any]] = field(default_factory=list)
     expression_style: str = "自然简短"
+    # 由语义模型决定这一拍的可见表达颗粒。它只约束形状，不是字符数下限；
+    # auto 表示交给最终回复模型在 micro/fragment/sentence/compact 中现场选择。
+    reply_shape: ReplyShape = "auto"
     tts_style_hint: str = "自然"
     sticker_mood_hint: str = DEFAULT_STICKER_SEMANTIC_HINT
     group_atmosphere_positive: bool = False
@@ -260,7 +266,9 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
         emotion_intensity = "medium"
     try:
         confidence = float(payload.get("confidence", 0.0) or 0.0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        confidence = 0.0
+    if not math.isfinite(confidence):
         confidence = 0.0
     relationship_progress = str(payload.get("relationship_progress", "none") or "none").strip().lower()
     if relationship_progress not in {"none", "meaningful", "resonant", "milestone"}:
@@ -270,6 +278,8 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
             payload.get("relationship_progress_confidence", 0.0) or 0.0
         )
     except (TypeError, ValueError, OverflowError):
+        relationship_progress_confidence = 0.0
+    if not math.isfinite(relationship_progress_confidence):
         relationship_progress_confidence = 0.0
     domain_focus = str(payload.get("domain_focus", "general") or "general").strip().lower()
     if domain_focus == "knowledge":
@@ -313,6 +323,7 @@ def _parse_turn_semantic_frame_payload(payload: Any) -> TurnSemanticFrame | None
         emotion_intensity=emotion_intensity,  # type: ignore[arg-type]
         emotion_updates=_parse_emotion_updates(payload.get("emotion_updates")),
         expression_style=str(payload.get("expression_style", "") or "").strip() or "自然简短",
+        reply_shape=_parse_reply_shape(payload.get("reply_shape")),
         tts_style_hint=str(payload.get("tts_style_hint", "") or "").strip() or "自然",
         sticker_mood_hint=normalize_sticker_semantic_hint(payload.get("sticker_mood_hint")),
         group_atmosphere_positive=_coerce_bool(payload.get("group_atmosphere_positive", False)),
@@ -360,6 +371,11 @@ def _parse_emotion_updates(value: Any) -> list[dict[str, Any]]:
 def _parse_scenario(value: Any) -> ConversationScenario:
     normalized = str(value or "normal").strip().lower()
     return normalized if normalized in _VALID_SCENARIOS else "normal"  # type: ignore[return-value]
+
+
+def _parse_reply_shape(value: Any) -> ReplyShape:
+    normalized = str(value or "auto").strip().lower()
+    return normalized if normalized in _VALID_REPLY_SHAPES else "auto"  # type: ignore[return-value]
 
 
 _VALID_ADDRESS_MODES = {"auto", "none", "at", "quote", "at_quote"}
@@ -452,6 +468,7 @@ async def infer_turn_semantic_frame_with_llm(
         '"emotion_intensity":"low|medium|high",'
         '"emotion_updates":[{"scope":"global|user|group","vad":{"valence":0.0,"arousal":0.5,"dominance":0.0},"category":"平静|开心|疲惫|困倦|烦躁|低落|期待|紧张|放松|无语|好奇","confidence":0.0,"appraisal":{"reason":"短摘要","goal":"短摘要","certainty":"短摘要","controllability":"短摘要"},"action_tendency":"approach|avoid|support|observe"}],'
         '"expression_style":"一句短中文，描述本轮该如何表达",'
+        '"reply_shape":"auto|micro|fragment|sentence|compact",'
         '"tts_style_hint":"给 TTS 的简短风格词",'
         '"sticker_mood_hint":"给表情包选择的结构化标签，格式固定为 情绪标签|场景标签",'
         '"group_atmosphere_positive":false,'
@@ -504,7 +521,10 @@ async def infer_turn_semantic_frame_with_llm(
         "7a. emotion_updates 最多各包含一条 global、user、group 更新；只描述 bot 自身的即时状态、对当前用户的互动姿态和当前群氛围。"
         "连续值和类别必须基于完整语境判断，不能按关键词词典映射；不要推断用户的心理疾病、人格、政治立场或其他敏感属性。"
         "没有足够依据时返回空数组。action_tendency 只表达倾向，不能改变权限、发送策略或回复概率。\n"
-        "8. expression_style 要指导本轮说话方式，偏行为策略，不要写长句。\n"
+        "8. expression_style 要指导本轮说话方式，偏行为策略，不要写长句。"
+        "reply_shape 决定这一拍的表达颗粒：micro=一到几个符号/表情或极短感叹，fragment=几个字的口语碎片，"
+        "sentence=一小句话，compact=任务确有需要时的一到数个紧凑句，auto=交给最终回复模型现场选择。"
+        "它不是字数配额，不得为了凑成完整句或靠近上限而扩写；普通闲聊应允许在这些形状之间自然变化。\n"
         "8b. group_atmosphere_positive 只在群聊整体互动明确友好、融洽或共同参与感很强时为 true；普通无冲突聊天不能机械设为 true，私聊必须 false。"
         "interaction_interesting 只在 bot 与当前用户这轮确实有明显趣味、默契或高质量互动时为 true；成功回复本身不等于有趣。\n"
         "8b-1. relationship_progress 判断这一轮是否真的推进了长期关系：none=寒暄、普通问答或仅仅成功回复；"
@@ -637,6 +657,7 @@ __all__ = [
     "DomainFocus",
     "IntentDecision",
     "PluginQuestionIntent",
+    "ReplyShape",
     "TurnSemanticFrame",
     "infer_intent_decision_with_llm",
     "infer_turn_semantic_frame_with_llm",

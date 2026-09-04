@@ -31,7 +31,12 @@ def test_parse_persona_response_json_and_apply_style_signals() -> None:
 
 def test_persona_responder_instruction_is_inserted_into_system_message() -> None:
     messages = [{"role": "system", "content": "base"}, {"role": "user", "content": "hi"}]
-    frame = SimpleNamespace(output_mode="structured_help", session_goal="帮用户找资料", bot_emotion="有点好奇")
+    frame = SimpleNamespace(
+        output_mode="structured_help",
+        reply_shape="compact",
+        session_goal="帮用户找资料",
+        bot_emotion="有点好奇",
+    )
 
     updated = responder.with_persona_responder_instruction(
         messages,
@@ -45,6 +50,10 @@ def test_persona_responder_instruction_is_inserted_into_system_message() -> None
     assert "PersonaResponder JSON 输出要求" in updated[0]["content"]
     assert "作者旁白/角色方向" in updated[0]["content"]
     assert "output_mode=structured_help" in updated[0]["content"]
+    assert '"reply_shape":"compact"' in updated[0]["content"]
+    assert "不设最低字数" in updated[0]["content"]
+    assert "字附近" not in updated[0]["content"]
+    assert "0-300" not in updated[0]["content"]
     assert "直呼/提及时禁止输出 [NO_REPLY]" in updated[0]["content"]
     assert "帮用户找资料" in updated[0]["content"]
     assert "最近经常一起聊游戏" in updated[0]["content"]

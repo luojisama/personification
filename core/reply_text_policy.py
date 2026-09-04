@@ -79,6 +79,13 @@ def _normalize_formulaic_reply_tics(text: str) -> str:
     cleaned = _OBSERVER_STATUS_TIC_RE.sub("", cleaned)
     cleaned = _LEADING_FORMULAIC_TIC_RE.sub("", cleaned)
 
+    # A punctuation-only reply can be an intentional model-led micro reaction
+    # (for example "？" or "！！").  Formulaic-opening cleanup must not turn it
+    # into an empty reply merely because every visible character is punctuation.
+    punctuation_only = cleaned.strip()
+    if punctuation_only and re.fullmatch(r"[，,、。！？!?；;…~～]+", punctuation_only):
+        return punctuation_only
+
     def _replace_taiba(match: re.Match[str]) -> str:
         prefix = str(match.group("prefix") or "")
         core = _polish_formulaic_core(str(match.group("core") or ""))

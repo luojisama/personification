@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -119,6 +120,9 @@ def test_reply_turn_trace_records_and_finishes(_db_tmp) -> None:
     assert row["outcome"] == "ok"
     assert row["diagnosis_code"] == "ok"
     assert row["detail"]["reply_chars"] == 2
+    assert row["detail"]["source"] == "unit"
+    assert row["detail"]["started_at"] > 0
+    assert row["detail"]["finished_at"] >= row["detail"]["started_at"]
     assert row["stages"][0]["key"] == "ingress"
     assert "abc" not in row["stages"][0]["detail"]
 
@@ -134,6 +138,172 @@ def test_reply_turn_trace_records_and_finishes(_db_tmp) -> None:
     )
     assert total >= 1
     assert page and page[0]["trace_id"] == trace_id
+
+
+def test_reply_turn_trace_keeps_json_valid_when_many_stages_are_recorded(_db_tmp) -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    trace_id = traces.start_trace(detail={"source": "large-stage-test"})
+
+    for index in range(12):
+        traces.record_stage(
+            trace_id=trace_id,
+            key=f"stage_{index}",
+            detail=(f"stage={index} " + "x" * 980),
+            hint="y" * 480,
+        )
+    traces.finish_trace(trace_id=trace_id, outcome="ok", detail={"reply_chars": 1})
+
+    row = traces.get_trace(trace_id)
+    assert row is not None
+    assert len(row["stages"]) == 12
+    assert row["stages"][0]["key"] == "stage_0"
+    assert row["stages"][-1]["key"] == "stage_11"
+    assert row["detail"]["source"] == "large-stage-test"
+
+
+def test_reply_turn_trace_retains_message_boundaries_with_a_content_free_truncation_marker(_db_tmp) -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    trace_id = traces.start_trace(detail={"source": "stage-boundary-test"})
+    traces.record_stage(
+        trace_id=trace_id,
+        key="incoming_message",
+        detail="safe inbound summary",
+    )
+    for index in range(100):
+        traces.record_stage(
+            trace_id=trace_id,
+            key=f"intermediate_{index}",
+            detail=f"discardable-body-{index}",
+        )
+    traces.record_stage(
+        trace_id=trace_id,
+        key="outgoing_message",
+        detail="safe outbound summary",
+    )
+
+    row = traces.get_trace(trace_id)
+    assert row is not None
+    stages = row["stages"]
+    marker = next(stage for stage in stages if stage["key"] == "trace_truncated")
+    incoming_index = next(index for index, stage in enumerate(stages) if stage["key"] == "incoming_message")
+    outgoing_index = next(index for index, stage in enumerate(stages) if stage["key"] == "outgoing_message")
+
+    assert marker["discarded_count"] > 0
+    assert marker["detail"].startswith("discarded_count=")
+    assert "discardable-body" not in marker["detail"]
+    assert incoming_index < outgoing_index
+    assert stages[incoming_index]["detail"] == "safe inbound summary"
+    assert stages[outgoing_index]["detail"] == "safe outbound summary"
+
+
+def test_reply_turn_trace_safe_json_and_confidence_reject_non_finite_numbers() -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+
+    rendered = traces._safe_json(
+        {
+            "nan": float("nan"),
+            "positive_infinity": float("inf"),
+            "nested": [float("-inf"), 0.75],
+        },
+        limit=512,
+    )
+
+    assert "NaN" not in rendered and "Infinity" not in rendered
+    assert json.loads(rendered) == {
+        "nan": None,
+        "positive_infinity": None,
+        "nested": [None, 0.75],
+    }
+    assert traces._confidence_band(float("nan")) == ""
+    assert traces._confidence_band(float("inf")) == ""
+
+
+def test_reply_turn_trace_repeated_start_and_finish_merge_detail(_db_tmp) -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    trace_id = traces.start_trace(
+        trace_id="merge-trace",
+        session_type="group",
+        group_id="123",
+        user_id="456",
+        detail={"source": "entry", "incoming_text": "api_key=do-not-store-me"},
+    )
+    first_started_at = traces.get_trace(trace_id)["detail"]["started_at"]
+    traces.start_trace(
+        trace_id=trace_id,
+        session_type="   ",
+        group_id="",
+        user_id="\t",
+        detail={"message_id": "m-1"},
+    )
+    traces.finish_trace(trace_id=trace_id, outcome="no_reply", detail={"reason": "policy"})
+
+    detail = traces.get_trace(trace_id)["detail"]
+    assert detail["source"] == "entry"
+    assert detail["message_id"] == "m-1"
+    assert detail["reason"] == "policy"
+    assert detail["started_at"] == first_started_at
+    assert detail["finished_at"] >= first_started_at
+    assert "do-not-store-me" not in detail["incoming_text"]
+    row = traces.get_trace(trace_id)
+    assert row["session_type"] == "group"
+    assert row["group_id"] == "123"
+    assert row["user_id"] == "456"
+
+
+def test_reply_turn_trace_search_is_literal_and_metadata_only(_db_tmp) -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    traces.start_trace(
+        trace_id="literal-search-1",
+        group_id="100%_done",
+        detail={"incoming_text": "message-body-only-marker"},
+    )
+    traces.start_trace(trace_id="literal-search-2", group_id="100XXdone")
+
+    rows, total = traces.query_page(limit=10, search="%_")
+    body_rows, body_total = traces.query_page(limit=10, search="message-body-only-marker")
+
+    assert total == 1
+    assert [row["trace_id"] for row in rows] == ["literal-search-1"]
+    assert body_total == 0
+    assert body_rows == []
+
+
+def test_discarded_agent_candidate_resets_completion_projection() -> None:
+    completion_contract = load_personification_module(
+        "plugin.personification.core.reply_completion_contract"
+    )
+    state = {
+        "agent_evidence_delivery_required": True,
+        "agent_evidence_delivery_status": "incomplete",
+        "agent_media_delivery": "incomplete",
+        "agent_tool_calls": True,
+        "agent_tool_execution": "ok",
+        "agent_social_evidence": [{"url": "https://example.invalid"}],
+        "peer_bot_execution": {"attempted": False},
+        "delivery_started": True,
+        "delivery_confirmed": True,
+        "delivery_receipt": {"message_id": "already-sent"},
+    }
+
+    completion_contract.reset_agent_result_completion_state(
+        state=state,
+        default_citation_mode="urls_on_request",
+    )
+    resolved = completion_contract.resolve_sent_reply_completion(
+        state=state,
+        visible_text="基础模型的新回复",
+    )
+
+    assert state["agent_social_evidence"] == []
+    assert state["agent_tool_calls"] is False
+    assert state["agent_evidence_delivery_required"] is False
+    assert state["agent_media_delivery"] == "not_required"
+    assert state["agent_citation_mode"] == "urls_on_request"
+    assert state["delivery_started"] is True
+    assert state["delivery_confirmed"] is True
+    assert state["delivery_receipt"] == {"message_id": "already-sent"}
+    assert state["peer_bot_execution"] == {"attempted": False}
+    assert resolved["outcome"] == "ok"
 
 
 @pytest.mark.parametrize(
@@ -569,6 +739,43 @@ def test_reply_turn_trace_builds_agent_inspection_summary(_db_tmp) -> None:
     assert next(item for item in view["items"] if item["key"] == "addressing_plan")["duration_ms"] == 0
     assert inspection["tools"][0]["tool"] == "resolve_acg_entity"
     assert inspection["questions"][0] == "大鸟居明日香_动画_剧情"
+
+
+def test_reply_turn_trace_inspection_projects_yaml_low_cardinality_fields(_db_tmp) -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    trace_id = traces.start_trace(session_type="group", group_id="123", user_id="456")
+    traces.record_stage(
+        trace_id=trace_id,
+        key="yaml_turn_plan",
+        label="YAML 回合计划",
+        status="ok",
+        detail=(
+            "action=silence intent=banter reply_shape=compact silence=true "
+            "emotion=有点无奈 relationship_progress=meaningful "
+            "relationship_progress_confidence=0.85 scenario=inside_joke"
+        ),
+    )
+    traces.record_stage(
+        trace_id=trace_id,
+        key="yaml_addressing_plan",
+        label="YAML 发送指向",
+        status="info",
+        detail="address_mode=quote quote=true at=false source=private-note target=123456",
+    )
+
+    inspection = traces.build_process_view(traces.get_trace(trace_id))["agent_inspection"]
+
+    assert inspection["understanding"] == {
+        "action": "silence",
+        "intent": "banter",
+        "reply_shape": "compact",
+        "silence": "true",
+        "emotion": "set",
+        "relationship_progress": "meaningful",
+        "conversation_scenario": "inside_joke",
+        "relationship_confidence": "high",
+    }
+    assert inspection["addressing"] == {"address_mode": "quote", "quote": "true", "at": "false"}
 
 
 def test_process_view_does_not_attribute_wait_time_to_zero_duration_markers() -> None:

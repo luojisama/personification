@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
 
-from ..agent.runtime.planner import OUTPUT_MODE_LENGTHS
+from ..agent.runtime.planner import render_output_mode_length_guidance
 from .bot_self_continuity import (
     BotSelfClaimDraft,
     parse_self_claim_drafts,
@@ -97,6 +98,14 @@ def needs_uncertain_visible_reply_review(
     )
 
 
+def _safe_confidence(value: Any) -> float:
+    try:
+        parsed = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if math.isfinite(parsed) else 0.0
+
+
 def _render_uncertain_turn_plan(turn_plan: Any) -> str:
     if turn_plan is None:
         return "{}"
@@ -107,8 +116,15 @@ def _render_uncertain_turn_plan(turn_plan: Any) -> str:
             "ambiguity_level": str(getattr(turn_plan, "ambiguity_level", "") or ""),
             "message_target": str(getattr(turn_plan, "message_target", "") or ""),
             "output_mode": str(getattr(turn_plan, "output_mode", "") or ""),
+            "reply_shape": str(getattr(turn_plan, "reply_shape", "auto") or "auto"),
             "research_need": str(getattr(turn_plan, "research_need", "") or ""),
             "session_goal": str(getattr(turn_plan, "session_goal", "") or ""),
+            "conversation_scenario": str(getattr(turn_plan, "conversation_scenario", "") or ""),
+            "address_mode": str(getattr(turn_plan, "address_mode", "") or ""),
+            "relationship_progress": str(getattr(turn_plan, "relationship_progress", "") or ""),
+            "relationship_progress_confidence": _safe_confidence(
+                getattr(turn_plan, "relationship_progress_confidence", 0.0)
+            ),
         },
         ensure_ascii=False,
     )
@@ -215,7 +231,14 @@ def _render_semantic_frame_hint(semantic_frame: Any) -> str:
             "user_attitude": str(getattr(semantic_frame, "user_attitude", "") or ""),
             "bot_emotion": str(getattr(semantic_frame, "bot_emotion", "") or ""),
             "expression_style": str(getattr(semantic_frame, "expression_style", "") or ""),
+            "reply_shape": str(getattr(semantic_frame, "reply_shape", "auto") or "auto"),
             "emotion_intensity": str(getattr(semantic_frame, "emotion_intensity", "") or ""),
+            "conversation_scenario": str(getattr(semantic_frame, "conversation_scenario", "") or ""),
+            "address_mode": str(getattr(semantic_frame, "address_mode", "") or ""),
+            "relationship_progress": str(getattr(semantic_frame, "relationship_progress", "") or ""),
+            "relationship_progress_confidence": _safe_confidence(
+                getattr(semantic_frame, "relationship_progress_confidence", 0.0)
+            ),
             "domain_focus": str(getattr(semantic_frame, "domain_focus", "") or ""),
             "evidence_policy": str(getattr(semantic_frame, "evidence_policy", "") or ""),
             "requires_emotional_care": bool(getattr(semantic_frame, "requires_emotional_care", False)),
@@ -229,8 +252,8 @@ def _render_semantic_frame_hint(semantic_frame: Any) -> str:
 
 def _output_mode_hint(semantic_frame: Any) -> str:
     output_mode = str(getattr(semantic_frame, "output_mode", "") or "").strip() or "chat_short"
-    min_chars, max_chars = OUTPUT_MODE_LENGTHS.get(output_mode, OUTPUT_MODE_LENGTHS["chat_short"])
-    return f"output_mode={output_mode}, 建议长度={min_chars}-{max_chars}字"
+    reply_shape = str(getattr(semantic_frame, "reply_shape", "auto") or "auto").strip()
+    return render_output_mode_length_guidance(output_mode, reply_shape=reply_shape)
 
 
 def _normalize_reply_fingerprint(text: str) -> str:
@@ -941,6 +964,13 @@ async def review_response_text(
         return ResponseReviewDecision(action="no_reply", text="", reason="recent_duplicate")
     semantic_hint = _render_semantic_frame_hint(semantic_frame)
     output_mode_hint = _output_mode_hint(semantic_frame)
+    reply_shape = str(getattr(semantic_frame, "reply_shape", "auto") or "auto").strip().lower()
+    micro_shape_instruction = (
+        "本轮语义规划选择了 micro/fragment：一个完成当下社交动作的符号、emoji、颜文字或极短口语碎片可以直接 accept；"
+        "不得仅因字少、不是完整句、没有展开新事实或没有推进话题而 rewrite。仍应按语义拒绝模板口号、原话复述、证据逃避和对象错配。"
+        if reply_shape in {"micro", "fragment"}
+        else ""
+    )
     care_required = bool(
         getattr(semantic_frame, "requires_emotional_care", False)
         or getattr(getattr(semantic_frame, "emotional_support", None), "needed", False)
@@ -1031,13 +1061,14 @@ async def review_response_text(
                 f"{plugin_review_instruction}"
                 f"{final_dialogue_instruction}"
                 f"{duplicate_review_instruction}"
-                "\n## 必须 rewrite 的 AI 味回复模式（重点检查）\n1. 「回声评论」：把用户说的话原样重复后加“太真实了/太直球了/太 X 了吧/真的假的”等感叹——必须改写为不重复原话的短句接话。\n2. 候选回复中超过 3 个连续字与用户原话重叠，且没有新增信息或立场——必须 rewrite。\n3. 候选只是在用感叹词复述用户语义，没有新事实、延续话题、转向或明确态度——必须 rewrite。\n4. 「安抚式客服腔」：以“别这么说/已经很够用了/不要这样想/你很棒的”开头——改写为自然接话。\n5. 「旁白式观察」：类似“真去做了啊/真的行动了/居然真的 XX 了”的旁白——改写为参与式短句。\n6. 「梗分析腔」：用“像是把 X 玩成 Y 了/意思就是/可以理解成”解释梗结构——改写为直接接梗。\n7. 「营业感叹腔」：用“(也)太……了吧/……爆了/绝了/谁懂啊/笑死/绷不住了/yyds”这类口号式感叹收尾或起势——改写成平铺直叙的接话，去掉感叹营业腔和网络流行语，不喊口号。\n8. 「固定起手口癖」：用“等下，/等一下，”开头，或反复用“这也/这也太/你这也/这听着也”评价用户、图片、表情、剧情——必须换一种自然说法，不要保留这个开头或句式。\n改写原则：去掉对用户发言的复述和分析，按 output_mode 的长度要求输出；改写后不得引入新的回声模式、营业感叹腔或固定起手口癖。"
+                f"{micro_shape_instruction}"
+                "\n## 必须 rewrite 的 AI 味回复模式（重点检查）\n1. 「回声评论」：把用户说的话原样重复后加“太真实了/太直球了/太 X 了吧/真的假的”等感叹——必须改写为不重复原话的短句接话。\n2. 候选回复中超过 3 个连续字与用户原话重叠，且没有新增信息或立场——必须 rewrite。\n3. 候选只是在用模板感叹词复述用户语义，没有形成具体社交动作——必须 rewrite；但 reply_shape=micro/fragment 时，不得把有意的纯符号、emoji、颜文字或极短反应仅因没有展开新事实而判错。\n4. 「安抚式客服腔」：以“别这么说/已经很够用了/不要这样想/你很棒的”开头——改写为自然接话。\n5. 「旁白式观察」：类似“真去做了啊/真的行动了/居然真的 XX 了”的旁白——改写为参与式短句。\n6. 「梗分析腔」：用“像是把 X 玩成 Y 了/意思就是/可以理解成”解释梗结构——改写为直接接梗。\n7. 「营业感叹腔」：用“(也)太……了吧/……爆了/绝了/谁懂啊/笑死/绷不住了/yyds”这类口号式感叹收尾或起势——改写成平铺直叙的接话，去掉感叹营业腔和网络流行语，不喊口号。\n8. 「固定起手口癖」：用“等下，/等一下，”开头，或反复用“这也/这也太/你这也/这听着也”评价用户、图片、表情、剧情——必须换一种自然说法，不要保留这个开头或句式。\n改写原则：去掉对用户发言的复述和分析，按 output_mode 的长度要求输出；改写后不得引入新的回声模式、营业感叹腔或固定起手口癖。"
                 "\n9. 出现 markdown 格式、标题、项目符号列表、编号列表、代码块、链接列表时，必须改成纯文本短句。"
                 "\n10. 出现 Step 1/Step 2、步骤 1/步骤 2 这类内部推理、审查清单或草稿过程时，必须 rewrite，只保留最终要对用户说的一句。"
                 "\n11. 「自我行动宣告」：类似“我先潜水/围观/看看情况/先看看情况/等会再说/蹲一下/路过”的句子是在宣告 bot 自己的观察姿态，"
                 "不是在参与当前话题；如果不是直呼 bot 的消息，优先 no_reply，必须回应时改成一句具体的参与式反应。"
-                "\n12. 「附和感叹/转述聊天」：候选只是说“确实/太真实了/真的假的/有点东西”这类空泛反应，"
-                "或只是把当前原话、最近上下文换一种说法复述，没有自己的态度、具体追问或话题推进——必须 rewrite。"
+                "\n12. 「附和感叹/转述聊天」：候选只是套用“确实/太真实了/真的假的/有点东西”这类模板反应，"
+                "或只是把当前原话、最近上下文换一种说法复述——必须 rewrite；micro/fragment 的自然短反应不因长度本身或没有展开话题而命中。"
                 "\n13. 「空证据状态播报」：候选如果没有回答、没有具体态度、没有可执行下一步，"
                 "只是换一种口吻说明自己无法确认、没有理解、来源不明或查证没有结果，返回 empty_evidence_self_report，"
                 "非强交互必须 no_reply；强交互只能改成索取一个明确且对方能提供的必要条件。"
@@ -1313,18 +1344,16 @@ async def rewrite_agent_reply_ooc(
     avoid_questions: bool = False,
     allow_rhetorical_banter: bool = False,
     rewrite_reason: str = "",
+    reply_shape: str = "auto",
     max_chars_override: int = 0,
 ) -> str:
     if tool_caller is None:
         return ""
-    min_chars, max_chars = OUTPUT_MODE_LENGTHS.get(output_mode, OUTPUT_MODE_LENGTHS["chat_short"])
-    try:
-        configured_max = max(0, int(max_chars_override or 0))
-    except (TypeError, ValueError):
-        configured_max = 0
-    if configured_max > 0:
-        max_chars = configured_max
-        min_chars = min(min_chars, max_chars)
+    length_guidance = render_output_mode_length_guidance(
+        output_mode,
+        reply_shape=reply_shape,
+        max_chars_override=max_chars_override,
+    )
     messages: list[dict[str, Any]] = []
     persona_hint = str(persona_system or "").strip()
     if persona_hint:
@@ -1340,7 +1369,7 @@ async def rewrite_agent_reply_ooc(
             "role": "system",
             "content": (
                 "下面这句话听起来像 AI 助手而不像普通群友。"
-                f"把它用你自己的口吻重说一次，{min_chars}-{max_chars} 字以内。"
+                f"把它用你自己的口吻重说一次。{length_guidance}"
                 f"{evidence_instruction}"
                 "去掉【搜索/查询/结果/链接/来源】类表述和 URL，也去掉“我先看看情况/等会再说/先围观/蹲一下”这类观望或延后宣告。"
                 f"{'当前是群聊，不要用追问、澄清问句或征询式结尾索要信息；改成参与讨论、闲聊推进、保守短反应，或没有可说的新东西时输出 [SILENCE]。' if avoid_questions else '改成参与讨论、闲聊推进或一个具体追问；没有可说的新东西时输出 [SILENCE]。'}"

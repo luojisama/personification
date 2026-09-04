@@ -179,13 +179,16 @@ def _deserialize_session_row(row: Any) -> Dict[str, Any]:
         metadata = {}
     if not isinstance(metadata, dict):
         metadata = {}
+    # The database columns are the authoritative message envelope.  Legacy
+    # imports or malformed metadata must not shadow the real speaker/content,
+    # timestamp, primary key, or summary marker.
     return {
+        **metadata,
         "id": row["id"],
         "role": row["role"],
         "content": content,
         "timestamp": float(row["timestamp"] or 0),
         "is_summary": bool(row["is_summary"]),
-        **metadata,
     }
 
 
@@ -430,7 +433,12 @@ def append_session_message(
 
     sanitized_content = sanitize_message_content(content)
     timestamp = time.time()
-    safe_metadata = {key: value for key, value in metadata.items() if value is not None}
+    reserved_envelope_keys = {"id", "role", "content", "timestamp", "is_summary"}
+    safe_metadata = {
+        key: value
+        for key, value in metadata.items()
+        if value is not None and key not in reserved_envelope_keys
+    }
     with connect_sync() as conn:
         conn.execute(
             """

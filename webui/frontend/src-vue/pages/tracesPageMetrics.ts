@@ -17,6 +17,7 @@ export function outcomeTone(outcome: TraceDetail["outcome"]): "ok" | "warn" | "e
   if (outcome === "ok") return "ok";
   if (outcome === "failed") return "error";
   if (outcome === "unknown" || outcome === "partial") return "unknown";
+  if (outcome === "no_reply" || outcome === "finished" || outcome === "silent") return "warn";
   return "warn";
 }
 
@@ -61,6 +62,18 @@ export function deriveTraceMetrics(trace: TraceDetail): TraceDerivedMetrics {
 }
 
 export function traceTriageText(trace: TraceDetail, metrics: TraceDerivedMetrics): string {
+  if (trace.outcome === "unknown" || trace.outcome === "finished") {
+    return "本轮最终结果无法确认；请结合发送状态和诊断码核对，确认前不要重试可能已经开始的发送。";
+  }
+  if (trace.outcome === "no_reply" || trace.outcome === "silent") {
+    return `本轮没有发送可见回复；诊断码为 ${trace.diagnosis_code || "no_reply"}，可沿时间线核对静默或提前终止原因。`;
+  }
+  if (trace.outcome === "partial" && metrics.firstErrorIndex === null) {
+    return `本轮仅部分完成；诊断码为 ${trace.diagnosis_code || "partial"}，即使没有错误阶段也需要核对交付与历史状态。`;
+  }
+  if (trace.outcome === "failed" && metrics.firstErrorIndex === null) {
+    return `本轮失败但没有记录明确错误阶段；诊断码为 ${trace.diagnosis_code || "failed"}，请继续核对发送与 Provider 日志。`;
+  }
   if (trace.diagnosis_code === "provider_request_rejected") {
     const firstError = metrics.firstErrorIndex === null ? null : trace.stages[metrics.firstErrorIndex];
     const failureLocation = firstError?.key === "provider_failure"

@@ -63,6 +63,37 @@ def test_agent_prompting_includes_directed_exchange_behavior() -> None:
     assert "轻松调侃时允许一句不索要信息的反击式反问" in combined
 
 
+def test_agent_prompting_preserves_model_led_micro_shape_without_minimum() -> None:
+    messages: list[dict] = []
+
+    prompting.append_agent_system_prompts(
+        messages=messages,
+        runtime_chat_intent="banter",
+        plugin_query_intent="",
+        intent_decision=SimpleNamespace(ambiguity_level="low"),
+        rewritten_query=SimpleNamespace(
+            primary_query="",
+            query_candidates=[],
+            context_clues=[],
+            search_plan=[],
+        ),
+        turn_plan=SimpleNamespace(
+            speech_act="participate",
+            output_mode="chat_short",
+            reply_shape="micro",
+            session_goal="自然反应",
+        ),
+        user_images=[],
+        direct_image_input=False,
+        is_group=True,
+    )
+
+    combined = "\n".join(str(item.get("content", "")) for item in messages)
+    assert "本轮采用 micro" in combined
+    assert "不设最低字数" in combined
+    assert "0-" not in combined
+
+
 def test_agent_prompting_reuses_attached_meme_turn_context() -> None:
     messages: list[dict] = []
     turn_plan = SimpleNamespace(

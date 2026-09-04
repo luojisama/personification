@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 pipeline_emotion = load_personification_module("plugin.personification.handlers.reply_pipeline.pipeline_emotion")
 target_inference = load_personification_module("plugin.personification.core.target_inference")
+planner = load_personification_module("plugin.personification.agent.runtime.planner")
 
 
 class _SleepingToolCaller:
@@ -21,6 +24,46 @@ class _JsonToolCaller:
 
     async def chat_with_tools(self, *args, **kwargs):  # noqa: ANN001, ARG002
         return SimpleNamespace(content=self.content)
+
+
+def test_attach_turn_plan_projects_all_downstream_semantic_fields() -> None:
+    frame = SimpleNamespace()
+    plan = planner.TurnPlan(
+        message_target="bot",
+        citation_mode="urls_on_request",
+        reply_shape="fragment",
+        sticker_appropriate=False,
+        meta_question=True,
+        emotion_updates=[{"scope": "user", "category": "期待"}],
+        relationship_progress="meaningful",
+        relationship_progress_confidence=0.75,
+        conversation_scenario="inside_joke",
+        address_mode="quote",
+    )
+
+    pipeline_emotion.attach_turn_plan_to_semantic_frame(frame, plan)
+
+    assert frame.turn_plan is plan
+    assert frame.message_target == "bot"
+    assert frame.citation_mode == "urls_on_request"
+    assert frame.reply_shape == "fragment"
+    assert frame.sticker_appropriate is False
+    assert frame.meta_question is True
+    assert frame.emotion_updates == [{"scope": "user", "category": "期待"}]
+    assert frame.relationship_progress == "meaningful"
+    assert frame.relationship_progress_confidence == 0.75
+    assert frame.conversation_scenario == "inside_joke"
+    assert frame.address_mode == "quote"
+
+
+@pytest.mark.parametrize("unsafe", ("NaN", "Infinity", "-Infinity", float("nan"), float("inf")))
+def test_attach_turn_plan_keeps_relationship_confidence_finite(unsafe) -> None:  # noqa: ANN001
+    frame = SimpleNamespace()
+    plan = planner.TurnPlan(relationship_progress_confidence=unsafe)
+
+    pipeline_emotion.attach_turn_plan_to_semantic_frame(frame, plan)
+
+    assert frame.relationship_progress_confidence == 0.0
 
 
 def test_should_speak_in_random_chat_solo_speaker_returns_true(monkeypatch) -> None:  # noqa: ANN001

@@ -153,14 +153,71 @@ def semantic_frame_timeout_hint(timeout_s: float) -> str:
     )
 
 
-def attach_turn_plan_to_semantic_frame(semantic_frame: Any, turn_plan: Any) -> None:
+def _unit_interval_float(value: Any, default: float = 0.0) -> float:
+    """Keep untrusted model-derived confidence finite before projection."""
+
     try:
-        semantic_frame.turn_plan = turn_plan
-        semantic_frame.output_mode = turn_plan.output_mode
-        semantic_frame.speech_act = turn_plan.speech_act
-        semantic_frame.session_goal = turn_plan.session_goal
-    except Exception:
-        pass
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return max(0.0, min(1.0, number))
+
+
+def attach_turn_plan_to_semantic_frame(semantic_frame: Any, turn_plan: Any) -> None:
+    # Keep the explicit planner/semantic-frame seam lossless.  This whitelist
+    # intentionally excludes free-form model attributes while covering every
+    # field owned by TurnPlan that downstream response/emotion/address stages
+    # consume.
+    updates = {
+        "turn_plan": turn_plan,
+        "output_mode": getattr(turn_plan, "output_mode", "chat_short"),
+        "speech_act": getattr(turn_plan, "speech_act", "participate"),
+        "session_goal": getattr(turn_plan, "session_goal", ""),
+        "message_target": getattr(turn_plan, "message_target", "uncertain"),
+        "citation_mode": getattr(turn_plan, "citation_mode", "none"),
+        "media_only_turn": bool(getattr(turn_plan, "media_only_turn", False)),
+        "recommend_silence": getattr(turn_plan, "reply_action", "reply") == "silence",
+        "requires_emotional_care": bool(
+            getattr(getattr(turn_plan, "emotional_support", None), "needed", False)
+        ),
+        "emotional_support": getattr(turn_plan, "emotional_support", None),
+        "sticker_appropriate": bool(getattr(turn_plan, "sticker_appropriate", True)),
+        "meta_question": bool(getattr(turn_plan, "meta_question", False)),
+        "domain_focus": getattr(turn_plan, "domain_focus", "general"),
+        "evidence_policy": getattr(turn_plan, "evidence_policy", "none"),
+        "vision_need": getattr(turn_plan, "vision_need", "none"),
+        "media_reason_code": getattr(turn_plan, "media_reason_code", "media_not_needed"),
+        "user_attitude": getattr(turn_plan, "user_attitude", "日常交流"),
+        "bot_emotion": getattr(turn_plan, "bot_emotion", "平静"),
+        "emotion_intensity": getattr(turn_plan, "emotion_intensity", "medium"),
+        "emotion_updates": list(getattr(turn_plan, "emotion_updates", []) or []),
+        "expression_style": getattr(turn_plan, "expression_style", "自然简短"),
+        "reply_shape": getattr(turn_plan, "reply_shape", "auto"),
+        "tts_style_hint": getattr(turn_plan, "tts_style_hint", "自然"),
+        "sticker_mood_hint": getattr(turn_plan, "sticker_mood_hint", ""),
+        "group_atmosphere_positive": bool(
+            getattr(turn_plan, "group_atmosphere_positive", False)
+        ),
+        "interaction_interesting": bool(
+            getattr(turn_plan, "interaction_interesting", False)
+        ),
+        "relationship_progress": getattr(turn_plan, "relationship_progress", "none"),
+        "relationship_progress_confidence": _unit_interval_float(
+            getattr(turn_plan, "relationship_progress_confidence", 0.0)
+        ),
+        "future_commitment_candidate": bool(
+            getattr(turn_plan, "future_commitment_candidate", False)
+        ),
+        "conversation_scenario": getattr(turn_plan, "conversation_scenario", "normal"),
+        "address_mode": getattr(turn_plan, "address_mode", "auto"),
+    }
+    for name, value in updates.items():
+        try:
+            setattr(semantic_frame, name, value)
+        except Exception:
+            continue
 
 
 def _mark_fallback_reason(value: Any, reason: str) -> None:

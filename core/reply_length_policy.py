@@ -183,11 +183,15 @@ def render_reply_length_prompt_hint(policy: ReplyLengthPolicy) -> str:
     if policy.mode == "evidence":
         limit = f"{policy.max_chars} 字" if policy.max_chars > 0 else "不设字数硬上限"
         return (
-            f"当前是工具/检索/视觉证据回复档位，最终可见正文允许在 {limit} 内完整说明证据。"
+            f"当前是工具/检索/视觉证据回复档位，只设 {limit} 上限、不设最低或目标字数；完整说明必要证据即可。"
             "视觉事实必须写进正文，不要只放隐藏块；只输出纯文本，禁止 Markdown 标题、列表、XML 或内部状态标签。"
         )
     limit = f"{policy.max_chars} 字" if policy.max_chars > 0 else "不设字数硬上限"
-    return f"当前是日常交流档位，回复保持自然短句，最终可见正文控制在 {limit} 内；禁止 Markdown、XML 或内部状态标签。"
+    return (
+        f"当前是日常交流档位，只设 {limit} 上限、不设最低或目标字数；"
+        "由本轮语气自然决定是几个符号、几个字的碎片还是一小句话，不要为了完整句式或凑长度扩写；"
+        "禁止 Markdown、XML 或内部状态标签。"
+    )
 
 
 def truncate_reply_text(text: str, max_chars: int) -> str:

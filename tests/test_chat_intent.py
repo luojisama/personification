@@ -71,6 +71,7 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
                 {"scope": "unknown", "category": "平静"},
             ],
             "expression_style": "直接一点",
+            "reply_shape": "micro",
             "tts_style_hint": "自然",
             "sticker_mood_hint": "淡定|表达疑惑",
             "group_atmosphere_positive": True,
@@ -93,6 +94,7 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
     assert valid.emotional_support.risk_level == "concern"
     assert valid.group_atmosphere_positive is True
     assert valid.interaction_interesting is True
+    assert valid.reply_shape == "micro"
     assert valid.future_commitment_candidate is True
     assert valid.emotion_updates == [
         {
@@ -104,6 +106,30 @@ def test_parse_turn_semantic_frame_payload_handles_valid_and_invalid_dicts() -> 
         }
     ]
     assert invalid is None
+
+
+def test_semantic_frame_invalid_reply_shape_falls_back_to_auto() -> None:
+    frame = chat_intent._parse_turn_semantic_frame_payload(
+        {"chat_intent": "banter", "reply_shape": "fixed_20_chars"}
+    )
+
+    assert frame is not None
+    assert frame.reply_shape == "auto"
+
+
+def test_semantic_frame_rejects_non_finite_confidences() -> None:
+    for unsafe in ("NaN", "Infinity", "-Infinity", float("nan"), float("inf")):
+        frame = chat_intent._parse_turn_semantic_frame_payload(
+            {
+                "chat_intent": "banter",
+                "confidence": unsafe,
+                "relationship_progress_confidence": unsafe,
+            }
+        )
+
+        assert frame is not None
+        assert frame.confidence == 0.0
+        assert frame.relationship_progress_confidence == 0.0
 
 
 def test_low_confidence_undirected_random_group_frame_recommends_silence() -> None:

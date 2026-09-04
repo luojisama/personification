@@ -50,17 +50,18 @@ function finiteNumber(value: unknown): number | null {
 }
 
 function traceOutcome(value: unknown): TraceListItem["outcome"] {
-  return value === "ok" || value === "silent" || value === "failed" || value === "partial"
+  return value === "ok" ||
+    value === "silent" ||
+    value === "no_reply" ||
+    value === "finished" ||
+    value === "failed" ||
+    value === "partial"
     ? value
     : "unknown";
 }
 
-export function sanitizeTraceDetail(raw: unknown): TraceDetail {
+export function sanitizeTraceListItem(raw: unknown): TraceListItem {
   const source = isRecord(raw) ? raw : {};
-  const decision = isRecord(source.decision) ? source.decision : {};
-  const rawStages = Array.isArray(source.stages) ? source.stages : [];
-  const rawTools = Array.isArray(source.tools) ? source.tools : [];
-
   return {
     trace_id: text(source.trace_id),
     started_at: text(source.started_at),
@@ -74,6 +75,18 @@ export function sanitizeTraceDetail(raw: unknown): TraceDetail {
     diagnosis_code: text(source.diagnosis_code, "trace_unclassified"),
     input_summary: text(source.input_summary).slice(0, 2_000),
     elapsed_ms: finiteNumber(source.elapsed_ms),
+  };
+}
+
+export function sanitizeTraceDetail(raw: unknown): TraceDetail {
+  const source = isRecord(raw) ? raw : {};
+  const summary = sanitizeTraceListItem(source);
+  const decision = isRecord(source.decision) ? source.decision : {};
+  const rawStages = Array.isArray(source.stages) ? source.stages : [];
+  const rawTools = Array.isArray(source.tools) ? source.tools : [];
+
+  return {
+    ...summary,
     bot_id: text(source.bot_id),
     media_summary: Array.isArray(source.media_summary)
       ? source.media_summary.map((item) => text(item).slice(0, 240)).filter(Boolean).slice(0, 20)
@@ -128,6 +141,21 @@ export function sanitizeTraceDetail(raw: unknown): TraceDetail {
     recovery_ids: Array.isArray(source.recovery_ids)
       ? source.recovery_ids.filter((item): item is number => typeof item === "number").slice(0, 100)
       : [],
+  };
+}
+
+export function sanitizeTracePage(raw: unknown): Page<TraceListItem> {
+  const source = isRecord(raw) ? raw : {};
+  const page = finiteNumber(source.page);
+  const pageSize = finiteNumber(source.page_size);
+  const total = finiteNumber(source.total);
+  const totalPages = finiteNumber(source.total_pages);
+  return {
+    items: Array.isArray(source.items) ? source.items.map(sanitizeTraceListItem) : [],
+    page: page !== null && page >= 1 ? Math.trunc(page) : 1,
+    page_size: pageSize !== null && pageSize >= 1 ? Math.trunc(pageSize) : 20,
+    total: total !== null && total >= 0 ? Math.trunc(total) : 0,
+    total_pages: totalPages !== null && totalPages >= 0 ? Math.trunc(totalPages) : 0,
   };
 }
 
@@ -186,8 +214,9 @@ export const resources = {
       signal,
     );
   },
-  traces(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<Page<TraceListItem>> {
-    return api.get("/traces", { page, page_size: pageSize, search }, signal);
+  async traces(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<Page<TraceListItem>> {
+    const raw = await api.get<unknown>("/traces", { page, page_size: pageSize, search }, signal);
+    return sanitizeTracePage(raw);
   },
   async trace(traceId: string, signal?: AbortSignal): Promise<TraceDetail> {
     const raw = await api.get<unknown>(`/traces/${encodeURIComponent(traceId)}`, undefined, signal);

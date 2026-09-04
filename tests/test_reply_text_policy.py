@@ -59,6 +59,11 @@ def test_normalize_visible_reply_text_reduces_formulaic_opening_tics() -> None:
     assert reply_text_policy.normalize_visible_reply_text("我先围观一下，别急着吵") == "别急着吵"
 
 
+def test_normalize_visible_reply_text_preserves_punctuation_only_micro_replies() -> None:
+    for value in ("？", "？？", "！", "！！", "……", "🙂", "（？）"):
+        assert reply_text_policy.normalize_visible_reply_text(value) == value
+
+
 def test_looks_like_formulaic_reply_tic_detects_repeated_reply_templates() -> None:
     assert reply_text_policy.looks_like_formulaic_reply_tic("等下，这什么表情")
     assert reply_text_policy.looks_like_formulaic_reply_tic("被雷炸了，这也太刺激了吧")

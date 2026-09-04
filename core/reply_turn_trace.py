@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import math
 import re
 import time
 import uuid
@@ -9,6 +10,7 @@ from typing import Any
 
 from .db import connect_sync
 from .plugin_runtime_logs import sanitize_text
+from .sensitive_data import sanitize_object
 
 
 _CURRENT_TRACE_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -17,8 +19,63 @@ _CURRENT_TRACE_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 _ELAPSED_RE = re.compile(r"(?:elapsed_ms=|耗时\s*)(\d{1,9})(?:\s*ms)?", re.I)
 _SIGNAL_KEY_RE = re.compile(
-    r"(?:^|\s)(action|speech_act|output|intent|ambiguity|tool|budget|suggested_steps|actual_steps|suggested_seconds|actual_seconds|topic_thread|topic_speaker|reply_to_bot|bot_in_thread|parallel_threads|participants|reason|source|flags|revision|chars|address_mode|quote|at|target|query|finish|media_only|media_grounding|available_evidence_fields|grounded_evidence_fields|grounded_anchor_count|recovery_method|media_delivery)=([^\s]+)"
+    r"(?:^|\s)(action|reply_action|speech_act|output|intent|ambiguity|tool|arg_keys|result_len|evidence|media_routes|budget|suggested_steps|actual_steps|suggested_seconds|actual_seconds|topic_thread|topic_speaker|reply_to_bot|bot_in_thread|parallel_threads|participants|reason|source|flags|revision|chars|address_mode|quote|at|target|query|finish|silence|recommend_silence|emotion|bot_emotion|emotion_intensity|reply_shape|relationship_progress|relationship_progress_confidence|conversation_scenario|scenario|media_only|media_grounding|available_evidence_fields|grounded_evidence_fields|grounded_anchor_count|recovery_method|media_delivery)=([^\s]+)"
 )
+_TRACE_TRUNCATION_KEY = "trace_truncated"
+_CRITICAL_STAGE_KEYS = frozenset({"incoming_message", "outgoing_message"})
+_MAX_STAGES = 80
+_SEMANTIC_ENUMS: dict[str, frozenset[str]] = {
+    "action": frozenset({"reply", "silence", "ask_clarify"}),
+    "intent": frozenset(
+        {"banter", "explanation", "lookup", "plugin_question", "image_generation", "expression"}
+    ),
+    "ambiguity": frozenset({"low", "medium", "high"}),
+    "speech_act": frozenset(
+        {"participate", "answer", "ask_followup", "clarify", "tease", "execute_action", "source_summary", "silence"}
+    ),
+    "output": frozenset(
+        {"chat_short", "chat_answer", "structured_help", "source_summary", "qzone_reply"}
+    ),
+    "reply_shape": frozenset({"auto", "micro", "fragment", "sentence", "compact"}),
+    "relationship_progress": frozenset({"none", "meaningful", "resonant", "milestone"}),
+    "conversation_scenario": frozenset(
+        {"normal", "casual_banter", "sarcasm_irony", "argument", "inside_joke", "multi_thread", "private_topic"}
+    ),
+    "address_mode": frozenset({"auto", "none", "at", "quote", "at_quote"}),
+    "emotion_intensity": frozenset({"low", "medium", "high"}),
+}
+_SAFE_TOOL_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,39}\Z")
+_SAFE_TOOL_RESULT_TOKEN_RE = re.compile(r"[A-Za-z0-9_.:,@|=\-]{1,180}\Z")
+
+
+def _trace_truncation_marker(*, discarded_count: int, clipped_fields: bool) -> dict[str, Any]:
+    """Return a content-free marker for bounded Trace persistence."""
+
+    discarded = max(0, int(discarded_count or 0))
+    return {
+        "key": _TRACE_TRUNCATION_KEY,
+        "label": "Trace 记录截断",
+        "status": "warn",
+        "detail": f"discarded_count={discarded} clipped_fields={str(bool(clipped_fields)).lower()}",
+        "discarded_count": discarded,
+        "clipped_fields": bool(clipped_fields),
+    }
+
+
+def _split_truncation_marker(values: list[Any]) -> tuple[list[Any], int, bool]:
+    items: list[Any] = []
+    discarded_count = 0
+    clipped_fields = False
+    for item in values:
+        if isinstance(item, dict) and str(item.get("key") or "") == _TRACE_TRUNCATION_KEY:
+            try:
+                discarded_count += max(0, int(item.get("discarded_count") or 0))
+            except (TypeError, ValueError):
+                pass
+            clipped_fields = clipped_fields or bool(item.get("clipped_fields"))
+            continue
+        items.append(item)
+    return items, discarded_count, clipped_fields
 
 
 def new_trace_id() -> str:
@@ -37,12 +94,125 @@ def reset_current_trace_id(token: contextvars.Token[str]) -> None:
     _CURRENT_TRACE_ID.reset(token)
 
 
-def _safe_json(value: Any, *, limit: int = 8000) -> str:
+def _trace_identity(value: Any, *, limit: int) -> str:
+    """Normalize optional identity fields without letting blank retries erase history."""
+
+    return str(value or "").strip()[:limit]
+
+
+def _clip_json_strings(value: Any, *, string_limit: int) -> Any:
+    if isinstance(value, str):
+        return value[: max(0, int(string_limit))]
+    if isinstance(value, list):
+        return [_clip_json_strings(item, string_limit=string_limit) for item in value]
+    if isinstance(value, tuple):
+        return [_clip_json_strings(item, string_limit=string_limit) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key)[:128]: _clip_json_strings(item, string_limit=string_limit)
+            for key, item in value.items()
+        }
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    return sanitize_text(value)[: max(0, int(string_limit))]
+
+
+def _safe_stage_list_json(values: list[Any], *, cap: int) -> str:
+    original_items, previous_discarded, _previous_clipped = _split_truncation_marker(values)
+    string_limit = min(1000, max(16, cap // 8))
+    clipped_items = original_items
+    while string_limit >= 16:
+        clipped_items = _clip_json_strings(original_items, string_limit=string_limit)
+        marker = _trace_truncation_marker(
+            discarded_count=previous_discarded,
+            clipped_fields=True,
+        )
+        rendered = json.dumps([marker, *clipped_items], ensure_ascii=False, separators=(",", ":"))
+        if len(rendered) <= cap:
+            return rendered
+        string_limit //= 2
+
+    candidates = list(enumerate(clipped_items))
+    selected: set[int] = set()
+
+    def _render(indices: set[int]) -> str:
+        discarded = previous_discarded + len(candidates) - len(indices)
+        marker = _trace_truncation_marker(
+            discarded_count=discarded,
+            clipped_fields=True,
+        )
+        ordered_items = [item for index, item in candidates if index in indices]
+        return json.dumps([marker, *ordered_items], ensure_ascii=False, separators=(",", ":"))
+
+    critical_indices = [
+        index
+        for index, item in candidates
+        if isinstance(item, dict) and str(item.get("key") or "") in _CRITICAL_STAGE_KEYS
+    ]
+    recent_indices = [index for index, _item in reversed(candidates) if index not in critical_indices]
+    for index in [*critical_indices, *recent_indices]:
+        candidate = {*selected, index}
+        if len(_render(candidate)) <= cap:
+            selected = candidate
+    rendered = _render(selected)
+    if len(rendered) <= cap:
+        return rendered
+    # Only an unrealistically small custom cap can miss the compact marker.
+    # Returning an empty list is still structurally valid and fail-closed.
+    return "[]"
+
+
+def _safe_json(value: Any, *, limit: int = 128000) -> str:
+    """Serialize to valid JSON within a character budget.
+
+    Slicing an already serialized string can corrupt its closing quote/bracket;
+    the next stage append would then parse the whole trace as empty.  We instead
+    clip values structurally and, only as a final fallback, keep a bounded set
+    of complete list/dict entries.
+    """
+
+    cap = max(32, int(limit or 0))
+    # Python's encoder accepts NaN/Infinity by default, while browser
+    # JSON.parse correctly rejects them.  Normalize every scalar first so a
+    # malformed model/legacy value cannot corrupt the Vue Trace endpoint.
+    value = _clip_json_strings(value, string_limit=max(cap, 1_000_000))
     try:
-        payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        payload = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
     except Exception:
         payload = json.dumps({"value": sanitize_text(value)}, ensure_ascii=False, separators=(",", ":"))
-    return payload[:limit]
+    if len(payload) <= cap:
+        return payload
+
+    if isinstance(value, list):
+        return _safe_stage_list_json(value, cap=cap)
+
+    string_limit = min(1000, max(16, cap // 8))
+    clipped: Any = value
+    while string_limit >= 16:
+        clipped = _clip_json_strings(value, string_limit=string_limit)
+        payload = json.dumps(clipped, ensure_ascii=False, separators=(",", ":"))
+        if len(payload) <= cap:
+            return payload
+        string_limit //= 2
+
+    if isinstance(clipped, dict):
+        kept_dict: dict[str, Any] = {}
+        for key, item in clipped.items():
+            candidate = {**kept_dict, str(key): item}
+            rendered = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
+            if len(rendered) <= cap:
+                kept_dict[str(key)] = item
+        return json.dumps(kept_dict, ensure_ascii=False, separators=(",", ":"))
+
+    fallback = json.dumps(_clip_json_strings(value, string_limit=max(1, cap // 4)), ensure_ascii=False)
+    return fallback if len(fallback) <= cap else "null"
 
 
 def _load_stages(conn: Any, trace_id: str) -> list[dict[str, Any]]:
@@ -59,6 +229,30 @@ def _load_stages(conn: Any, trace_id: str) -> list[dict[str, Any]]:
     return loaded if isinstance(loaded, list) else []
 
 
+def _load_detail(conn: Any, trace_id: str) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT detail FROM reply_turn_traces WHERE trace_id=?",
+        (trace_id,),
+    ).fetchone()
+    if not row:
+        return {}
+    try:
+        loaded = json.loads(row["detail"] or "{}")
+    except Exception:
+        loaded = {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _merge_detail(
+    existing: dict[str, Any] | None,
+    incoming: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(existing or {})
+    merged.update(dict(incoming or {}))
+    sanitized = sanitize_object(merged)
+    return sanitized if isinstance(sanitized, dict) else {}
+
+
 def start_trace(
     *,
     trace_id: str = "",
@@ -68,9 +262,30 @@ def start_trace(
     detail: dict[str, Any] | None = None,
 ) -> str:
     trace = str(trace_id or "").strip() or new_trace_id()
-    payload = dict(detail or {})
+    now = time.time()
+    effective_session_type = _trace_identity(session_type, limit=24)
+    effective_group_id = _trace_identity(group_id, limit=32)
+    effective_user_id = _trace_identity(user_id, limit=32)
     try:
         with connect_sync() as conn:
+            existing_row = conn.execute(
+                "SELECT session_type, group_id, user_id FROM reply_turn_traces WHERE trace_id=?",
+                (trace,),
+            ).fetchone()
+            if existing_row:
+                effective_session_type = effective_session_type or _trace_identity(
+                    existing_row["session_type"], limit=24
+                )
+                effective_group_id = effective_group_id or _trace_identity(
+                    existing_row["group_id"], limit=32
+                )
+                effective_user_id = effective_user_id or _trace_identity(
+                    existing_row["user_id"], limit=32
+                )
+            payload = _merge_detail(_load_detail(conn, trace), detail)
+            # ``ts`` remains the last-activity timestamp used for ordering;
+            # preserve the actual start separately across repeated start calls.
+            payload.setdefault("started_at", now)
             conn.execute(
                 """
                 INSERT INTO reply_turn_traces(
@@ -87,10 +302,10 @@ def start_trace(
                 """,
                 (
                     trace,
-                    time.time(),
-                    str(session_type or "")[:24],
-                    str(group_id or "")[:32],
-                    str(user_id or "")[:32],
+                    now,
+                    effective_session_type,
+                    effective_group_id,
+                    effective_user_id,
                     _safe_json(payload, limit=4000),
                 ),
             )
@@ -104,9 +319,9 @@ def start_trace(
             "turn.started",
             trace_id=trace,
             payload={
-                "session_type": str(session_type or "")[:24],
-                "group_id": str(group_id or "")[:32],
-                "user_id": str(user_id or "")[:32],
+                "session_type": effective_session_type,
+                "group_id": effective_group_id,
+                "user_id": effective_user_id,
             },
         )
     except Exception:
@@ -143,9 +358,36 @@ def record_stage(
     try:
         with connect_sync() as conn:
             stages = _load_stages(conn, trace)
-            stages.append(stage)
-            if len(stages) > 80:
-                stages = stages[-80:]
+            previous_stages, previous_discarded, previous_clipped = _split_truncation_marker(stages)
+            previous_stages.append(stage)
+            if len(previous_stages) > _MAX_STAGES:
+                indexed_stages = list(enumerate(previous_stages))
+                critical_indices = [
+                    index
+                    for index, item in indexed_stages
+                    if isinstance(item, dict)
+                    and str(item.get("key") or "") in _CRITICAL_STAGE_KEYS
+                ]
+                selected_indices = set(critical_indices)
+                for index, _item in reversed(indexed_stages):
+                    if index in selected_indices:
+                        continue
+                    selected_indices.add(index)
+                    if len(selected_indices) >= _MAX_STAGES:
+                        break
+                previous_discarded += len(previous_stages) - len(selected_indices)
+                previous_stages = [
+                    item for index, item in indexed_stages if index in selected_indices
+                ]
+            stages = previous_stages
+            if previous_discarded or previous_clipped:
+                stages = [
+                    _trace_truncation_marker(
+                        discarded_count=previous_discarded,
+                        clipped_fields=previous_clipped,
+                    ),
+                    *stages,
+                ]
             conn.execute(
                 """
                 UPDATE reply_turn_traces
@@ -184,8 +426,11 @@ def finish_trace(
     trace = str(trace_id or current_trace_id() or "").strip()
     if not trace:
         return
+    now = time.time()
     try:
         with connect_sync() as conn:
+            merged_detail = _merge_detail(_load_detail(conn, trace), detail)
+            merged_detail["finished_at"] = now
             conn.execute(
                 """
                 UPDATE reply_turn_traces
@@ -193,10 +438,10 @@ def finish_trace(
                 WHERE trace_id=?
                 """,
                 (
-                    time.time(),
+                    now,
                     str(outcome or "")[:32],
                     str(diagnosis_code or "")[:64],
-                    _safe_json(detail or {}, limit=4000),
+                    _safe_json(merged_detail, limit=4000),
                     trace,
                 ),
             )
@@ -278,6 +523,7 @@ def query_page(
     session_type: str = "",
     group_id: str = "",
     user_id: str = "",
+    search: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
     clauses = ["1=1"]
     params: list[Any] = []
@@ -290,6 +536,26 @@ def query_page(
     if user_id:
         clauses.append("user_id = ?")
         params.append(str(user_id)[:32])
+    search_text = str(search or "").strip()[:160]
+    if search_text:
+        # Escape LIKE metacharacters so the WebUI search box performs a literal
+        # text search instead of accidentally widening to every trace.
+        escaped = (
+            search_text.replace("^", "^^").replace("%", "^%").replace("_", "^_")
+        )
+        pattern = f"%{escaped}%"
+        searchable_columns = (
+            "trace_id",
+            "session_type",
+            "group_id",
+            "user_id",
+            "outcome",
+            "diagnosis_code",
+        )
+        clauses.append(
+            "(" + " OR ".join(f"{column} LIKE ? ESCAPE '^'" for column in searchable_columns) + ")"
+        )
+        params.extend([pattern] * len(searchable_columns))
     where = " AND ".join(clauses)
     with connect_sync() as conn:
         total_row = conn.execute(
@@ -339,6 +605,14 @@ def _elapsed_from_detail(detail: Any) -> int | None:
         return None
 
 
+def _finite_stage_timestamp(value: Any) -> float:
+    try:
+        timestamp = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return timestamp if timestamp > 0 and math.isfinite(timestamp) else 0.0
+
+
 def _signals_from_detail(detail: Any) -> dict[str, str]:
     signals: dict[str, str] = {}
     for match in _SIGNAL_KEY_RE.finditer(str(detail or "")):
@@ -361,6 +635,76 @@ def _append_unique(values: list[str], value: Any, *, limit: int = 80, max_items:
         values.append(text)
 
 
+def _is_semantic_inspection_stage(key: str) -> bool:
+    normalized = str(key or "").strip().lower()
+    if normalized.startswith("yaml_"):
+        normalized = normalized[5:]
+    return bool(
+        normalized in {"agent_intent", "agent_result"}
+        or normalized.startswith("semantic_frame")
+        or normalized.startswith("turn_plan")
+    )
+
+
+def _enum_signal(signals: dict[str, Any], name: str, *aliases: str) -> str:
+    allowed = _SEMANTIC_ENUMS.get(name, frozenset())
+    for source_name in (name, *aliases):
+        normalized = str(signals.get(source_name) or "").strip().lower()
+        if normalized in allowed:
+            return normalized
+    return ""
+
+
+def _boolean_signal(signals: dict[str, Any], *names: str) -> str:
+    for name in names:
+        normalized = str(signals.get(name) or "").strip().lower()
+        if normalized in {"true", "false"}:
+            return normalized
+    return ""
+
+
+def _confidence_band(value: Any) -> str:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        return ""
+    if confidence < 0.5:
+        return "low"
+    if confidence < 0.8:
+        return "medium"
+    return "high"
+
+
+def _tool_argument_summary(signals: dict[str, Any]) -> str:
+    raw = str(signals.get("arg_keys") or "").strip()
+    if not raw or raw == "-":
+        return ""
+    keys: list[str] = []
+    for item in raw.split(","):
+        key = item.strip()
+        if _SAFE_TOOL_KEY_RE.fullmatch(key) and key not in keys:
+            keys.append(key)
+        if len(keys) >= 12:
+            break
+    return f"arg_keys={','.join(keys)}" if keys else ""
+
+
+def _tool_result_summary(signals: dict[str, Any]) -> str:
+    parts: list[str] = []
+    result_len = str(signals.get("result_len") or "").strip()
+    if result_len.isdigit():
+        parts.append(f"result_len={min(int(result_len), 999999999)}")
+    evidence = str(signals.get("evidence") or "").strip().lower()
+    if evidence in {"opaque", "structured", "empty"}:
+        parts.append(f"evidence={evidence}")
+    media_routes = str(signals.get("media_routes") or "").strip()
+    if _SAFE_TOOL_RESULT_TOKEN_RE.fullmatch(media_routes):
+        parts.append(f"media_routes={media_routes}")
+    return " ".join(parts)[:500]
+
+
 def _build_agent_inspection(items: list[dict[str, Any]]) -> dict[str, Any]:
     understanding: dict[str, str] = {}
     addressing: dict[str, str] = {}
@@ -372,14 +716,54 @@ def _build_agent_inspection(items: list[dict[str, Any]]) -> dict[str, Any]:
         key = str(item.get("key") or "")
         detail = str(item.get("detail") or "")
         signals = item.get("signals") if isinstance(item.get("signals"), dict) else {}
-        if key in {"semantic_frame", "agent_intent", "agent_result"}:
-            for name in ("intent", "ambiguity", "speech_act", "output"):
-                if signals.get(name) and name not in understanding:
-                    understanding[name] = str(signals[name])
-        if key == "addressing_plan":
-            for name in ("address_mode", "source", "quote", "at", "target"):
-                if signals.get(name):
-                    addressing[name] = str(signals[name])
+        if _is_semantic_inspection_stage(key):
+            semantic_values = {
+                "action": _enum_signal(signals, "action", "reply_action"),
+                "intent": _enum_signal(signals, "intent"),
+                "ambiguity": _enum_signal(signals, "ambiguity"),
+                "speech_act": _enum_signal(signals, "speech_act"),
+                "output": _enum_signal(signals, "output"),
+                "reply_shape": _enum_signal(signals, "reply_shape"),
+                "relationship_progress": _enum_signal(signals, "relationship_progress"),
+                "conversation_scenario": _enum_signal(
+                    signals, "conversation_scenario", "scenario"
+                ),
+                "address_mode": _enum_signal(signals, "address_mode"),
+            }
+            silence = _boolean_signal(signals, "silence", "recommend_silence")
+            if silence:
+                semantic_values["silence"] = silence
+            emotion_intensity = _enum_signal(signals, "emotion_intensity")
+            if emotion_intensity:
+                semantic_values["emotion"] = emotion_intensity
+            elif signals.get("emotion") or signals.get("bot_emotion"):
+                # The model-owned emotion description is free text.  Expose
+                # only its presence rather than copying it into the WebUI.
+                semantic_values["emotion"] = "set"
+            relationship_confidence = _confidence_band(
+                signals.get("relationship_progress_confidence")
+            )
+            if relationship_confidence:
+                semantic_values["relationship_confidence"] = relationship_confidence
+            for name, value in semantic_values.items():
+                if value and name not in understanding:
+                    understanding[name] = value
+            if "action" not in understanding and silence == "true":
+                understanding["action"] = "silence"
+        normalized_key = key.lower()
+        if normalized_key.startswith("yaml_"):
+            normalized_key = normalized_key[5:]
+        if normalized_key == "addressing_plan":
+            # Trace text is untrusted.  Only expose finite, protocol-shaped
+            # addressing values; sources and target identifiers can otherwise
+            # turn this summary into a free-text data leak.
+            address_mode = _enum_signal(signals, "address_mode")
+            if address_mode:
+                addressing["address_mode"] = address_mode
+            for name in ("quote", "at"):
+                value = _boolean_signal(signals, name)
+                if value:
+                    addressing[name] = value
         if key in {"agent_tool_call", "agent_tool_result"} or item.get("category") == "tool":
             tool_name = str(signals.get("tool") or "")
             if not tool_name:
@@ -389,10 +773,11 @@ def _build_agent_inspection(items: list[dict[str, Any]]) -> dict[str, Any]:
                 "stage": "result" if "result" in key else "call",
                 "tool": _compact_value(tool_name or item.get("label") or key, limit=48),
                 "status": str(item.get("status") or ""),
-                "detail": _compact_value(detail, limit=180),
+                "argument_summary": _tool_argument_summary(signals) if "result" not in key else "",
+                "result_summary": _tool_result_summary(signals) if "result" in key else "",
                 "duration_ms": item.get("duration_ms"),
             }
-            if entry["tool"] or entry["detail"]:
+            if entry["tool"] or entry["argument_summary"] or entry["result_summary"]:
                 tools.append(entry)
         if key in {"agent_query_rewrite", "agent_budget", "semantic_frame"}:
             for name in ("query", "reason"):
@@ -429,10 +814,7 @@ def build_process_view(trace: dict[str, Any] | None, *, logs: list[dict[str, Any
     stages = [stage for stage in raw_stages if isinstance(stage, dict)]
     base_ts = 0.0
     for stage in stages:
-        try:
-            ts = float(stage.get("ts") or 0)
-        except Exception:
-            ts = 0.0
+        ts = _finite_stage_timestamp(stage.get("ts"))
         if ts > 0:
             base_ts = ts
             break
@@ -441,16 +823,10 @@ def build_process_view(trace: dict[str, Any] | None, *, logs: list[dict[str, Any
     status_counts: dict[str, int] = {}
     category_counts: dict[str, int] = {}
     for index, stage in enumerate(stages):
-        try:
-            ts = float(stage.get("ts") or 0)
-        except Exception:
-            ts = 0.0
+        ts = _finite_stage_timestamp(stage.get("ts"))
         next_ts = 0.0
         if index + 1 < len(stages):
-            try:
-                next_ts = float(stages[index + 1].get("ts") or 0)
-            except Exception:
-                next_ts = 0.0
+            next_ts = _finite_stage_timestamp(stages[index + 1].get("ts"))
         detail = sanitize_text(stage.get("detail", ""))[:1000]
         hint = sanitize_text(stage.get("hint", ""))[:500]
         status = str(stage.get("status") or "info")[:16]
@@ -458,7 +834,7 @@ def build_process_view(trace: dict[str, Any] | None, *, logs: list[dict[str, Any
         try:
             explicit_elapsed_ms = stage.get("elapsed_ms")
             elapsed_ms = max(0, int(explicit_elapsed_ms)) if explicit_elapsed_ms is not None else None
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             elapsed_ms = None
         if elapsed_ms is None:
             elapsed_ms = _elapsed_from_detail(detail)

@@ -16,6 +16,10 @@ from ..core.peer_bot_runtime import peer_bot_source_kind
 from ..core.shared_content import normalize_merged_forward, parse_onebot_share_card
 from ..core.target_inference import normalize_message_target_for_review
 from ..core.group_followup_referent import get_group_followup_referent_resolver
+from ..core.interrupted_reply import (
+    attach_interrupted_reply_context,
+    request_cooperative_reply_interruption,
+)
 from ..core.turn_deadline import HARD_TURN_TIMEOUT_SECONDS, attach_turn_deadline
 from ..core.turn_media import (
     TurnMediaRef,
@@ -335,12 +339,28 @@ def _record_reply_admission_timeout(
     try:
         from ..core import reply_turn_trace
 
+        group_id = str(getattr(event, "group_id", "") or "")
+        user_id = str(getattr(event, "user_id", "") or "")
+        try:
+            incoming_text = str(event.get_plaintext() or "")[:2000]
+        except Exception:
+            incoming_text = str(
+                state.get("raw_message_text")
+                or getattr(event, "raw_message", "")
+                or ""
+            )[:2000]
+
         trace_id = reply_turn_trace.start_trace(
             trace_id=str(state.get("reply_trace_id", "") or ""),
-            session_type="group" if getattr(event, "group_id", None) else "private",
-            group_id="",
-            user_id="",
-            detail={"source": "reply_admission", "mode": mode},
+            session_type="group" if group_id else "private",
+            group_id=group_id,
+            user_id=user_id,
+            detail={
+                "source": "reply_admission",
+                "mode": mode,
+                "message_id": str(getattr(event, "message_id", "") or ""),
+                "incoming_text": incoming_text,
+            },
         )
         state["reply_trace_id"] = trace_id
         reply_turn_trace.record_stage(
@@ -937,6 +957,11 @@ def _new_entry(delay: float) -> dict[str, Any]:
         "active_generation_token": 0,
         "superseded_generation": 0,
         "newer_batch_for_current": False,
+        # Generation-scoped cooperative interruption is distinct from stale
+        # pre-send cancellation.  Draft bodies live in the dedicated core
+        # contract and never enter diagnostics.
+        "interrupt_requested_generation": 0,
+        "interrupted_outgoing_drafts": None,
         # Delayed until an actual turn starts.  Values are deliberately
         # aggregate-only: no session key, sender, message id or message body.
         "buffer_diagnostics": [],
@@ -1295,6 +1320,7 @@ async def run_buffer_timer(
     current_generation = int(entry["current_generation"])
     entry["active_generation_token"] = current_generation
     entry["newer_batch_for_current"] = False
+    entry["interrupt_requested_generation"] = 0
     entry["items"] = []
     entry["batch_started_at"] = 0.0
 
@@ -1349,6 +1375,13 @@ async def run_buffer_timer(
         "entry": entry,
         "generation": current_generation,
     }
+    interrupted_context = attach_interrupted_reply_context(state, entry)
+    if interrupted_context is not None:
+        _note_buffer_diagnostic(
+            entry,
+            "consume_interrupted_drafts",
+            count=len(interrupted_context.get("segments") or []),
+        )
     state["turn_generation_id"] = _next_turn_generation(key)
     entry["current_trigger_type"] = trigger_type
     entry["current_is_random_chat"] = bool(state.get("is_random_chat", False))
@@ -1828,6 +1861,8 @@ async def handle_reply_event(
                 if not float(entry.get("pending_started_at", 0.0) or 0.0):
                     entry["pending_started_at"] = received_monotonic_at
                 entry["last_item_at"] = received_monotonic_at
+                if request_cooperative_reply_interruption(entry):
+                    _note_buffer_diagnostic(entry, "interrupt_after_confirmed", count=1)
                 return
         direct_state = dict(state)
         direct_state["batch_session_key"] = session_key
@@ -2026,6 +2061,8 @@ async def handle_reply_event(
         if not float(entry.get("pending_started_at", 0.0) or 0.0):
             entry["pending_started_at"] = now_ts
         entry["last_item_at"] = now_ts
+        if request_cooperative_reply_interruption(entry):
+            _note_buffer_diagnostic(entry, "interrupt_after_confirmed", count=1)
         if immediate_flush:
             entry["pending_ready"] = True
         dynamic_base_wait = max(

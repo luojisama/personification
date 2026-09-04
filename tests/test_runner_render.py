@@ -1258,11 +1258,48 @@ def test_run_agent_returns_no_reply_when_time_budget_is_exhausted() -> None:
     assert caller.calls == []
 
 
-def test_run_agent_marks_quality_timeout_as_operational_failure(monkeypatch) -> None:  # noqa: ANN001
-    async def _timeout(*_args, **_kwargs):  # noqa: ANN001
+def test_run_agent_quality_timeout_preserves_candidate_provenance(monkeypatch) -> None:  # noqa: ANN001
+    pending_actions = [{"action": "keep-pending"}]
+    quality_checks = [{"check": "media", "status": "passed"}]
+    evidence_envelope = {
+        "type": "personification_evidence_envelope",
+        "allowed_claims": ["画面里有一只猫"],
+    }
+    social_evidence = [{"canonical_url": "https://example.invalid/source"}]
+    social_coverage = {"returned_count": 1, "source_group_count": 1}
+    candidate_snapshot: dict[str, object] = {}
+
+    async def _timeout(candidate, *_args, **_kwargs):  # noqa: ANN001
+        candidate.pending_actions = pending_actions
+        candidate.direct_output = True
+        candidate.bypass_length_limits = True
+        candidate.quality_checks = quality_checks
+        candidate.suppress_reply_recovery = True
+        candidate.quality_context = "media_grounded"
+        candidate.evidence_envelope = evidence_envelope
+        candidate.social_evidence = social_evidence
+        candidate.social_coverage = social_coverage
+        candidate.evidence_delivery_required = True
+        candidate.evidence_delivery_status = "recovered"
+        candidate.evidence_recovered = True
+        candidate.citation_mode = "urls_on_request"
+        candidate.tool_calls_made = True
+        candidate.media_only = True
+        candidate.media_grounding = "sufficient"
+        candidate.available_evidence_fields = 7
+        candidate.grounded_evidence_fields = 5
+        candidate.grounded_anchor_count = 3
+        candidate.media_recovery_method = "model_rewrite"
+        candidate.media_delivery = "complete"
+        candidate_snapshot.update(vars(candidate))
         raise asyncio.TimeoutError
 
     monkeypatch.setattr(runner, "finalize_agent_reply_quality", _timeout)
+    monkeypatch.setattr(
+        runner,
+        "finalize_social_evidence_delivery",
+        lambda result, **_kwargs: result,
+    )
     caller = _FakeToolCaller([
         tool_impl.ToolCallerResponse(
             finish_reason="stop",
@@ -1292,6 +1329,16 @@ def test_run_agent_marks_quality_timeout_as_operational_failure(monkeypatch) -> 
 
     assert result.text == "[NO_REPLY]"
     assert result.failure_code == "agent_quality_timeout"
+    assert vars(result) == {
+        **candidate_snapshot,
+        "text": "[NO_REPLY]",
+        "failure_code": "agent_quality_timeout",
+    }
+    assert result.pending_actions is pending_actions
+    assert result.quality_checks is quality_checks
+    assert result.evidence_envelope is evidence_envelope
+    assert result.social_evidence is social_evidence
+    assert result.social_coverage is social_coverage
 
 
 def test_run_agent_skips_query_rewrite_for_direct_native_image_answer(monkeypatch) -> None:  # noqa: ANN001

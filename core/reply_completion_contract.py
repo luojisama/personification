@@ -3,6 +3,43 @@ from __future__ import annotations
 from typing import Any, Mapping, MutableMapping
 
 
+def reset_agent_result_completion_state(
+    *,
+    state: MutableMapping[str, Any],
+    default_citation_mode: str = "none",
+) -> None:
+    """Clear a discarded Agent candidate before a non-Agent regeneration.
+
+    An Agent result may have populated evidence/media/tool completion fields
+    before a required-reply recovery switches to the ordinary model.  Those
+    fields describe the discarded candidate and must not classify the later
+    reply as if it had delivered that evidence.
+    """
+
+    state.update(
+        {
+            "agent_social_evidence": [],
+            "agent_social_coverage": {},
+            "agent_evidence_delivery_required": False,
+            "agent_evidence_delivery_status": "not_required",
+            "agent_evidence_recovered": False,
+            "agent_media_only": False,
+            "agent_media_grounding": "not_required",
+            "agent_available_evidence_fields": 0,
+            "agent_grounded_evidence_fields": 0,
+            "agent_grounded_anchor_count": 0,
+            "agent_media_recovery_method": "not_needed",
+            "agent_media_delivery": "not_required",
+            "agent_citation_mode": str(default_citation_mode or "none"),
+            "agent_social_coverage_status": "",
+            "agent_social_tool_execution": "not_used",
+            "agent_evidence_unavailable": False,
+            "agent_tool_calls": False,
+            "agent_tool_execution": "not_used",
+        }
+    )
+
+
 def apply_agent_result_completion_state(
     *,
     state: MutableMapping[str, Any],
@@ -248,6 +285,7 @@ def resolve_action_only_completion(
 
 __all__ = [
     "apply_agent_result_completion_state",
+    "reset_agent_result_completion_state",
     "resolve_action_only_completion",
     "resolve_sent_reply_completion",
 ]

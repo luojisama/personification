@@ -9,10 +9,10 @@
         <TextField
           v-model="search"
           class="search-field"
-          label="搜索 Trace、用户或诊断码"
+          label="搜索 Trace ID、会话、QQ、状态或诊断码"
           hide-label
           type="search"
-          placeholder="搜索 Trace、用户或诊断码"
+          placeholder="搜索 Trace ID、会话、QQ、状态或诊断码"
           @update:model-value="page = 1"
         />
       </template>
@@ -80,7 +80,7 @@
             </div>
 
             <article class="message-evidence">
-              <span>当前批次 · 安全摘要</span>
+              <span>收到的消息 · 安全摘要</span>
               <p>{{ detailQuery.data.value.input_summary || "消息内容未进入可见 Trace。" }}</p>
               <ul v-if="detailQuery.data.value.media_summary.length > 0">
                 <li v-for="(media, idx) in detailQuery.data.value.media_summary" :key="`${idx}:${media}`">{{ media }}</li>
@@ -195,8 +195,8 @@
               <h3>最终可见回复</h3>
               <blockquote>{{ detailQuery.data.value.final_reply || "本轮没有发送可见回复。" }}</blockquote>
               <dl class="audit-grid">
-                <div><dt>发送结果</dt><dd>{{ detailQuery.data.value.send_status }}</dd></div>
-                <div><dt>历史提交</dt><dd>{{ detailQuery.data.value.history_status }}</dd></div>
+                <div><dt>发送结果</dt><dd>{{ traceDeliveryStatusLabel(detailQuery.data.value.send_status) }}</dd></div>
+                <div><dt>历史提交</dt><dd>{{ traceHistoryStatusLabel(detailQuery.data.value.history_status) }}</dd></div>
               </dl>
             </section>
 
@@ -220,14 +220,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useQuery } from "@tanstack/vue-query";
 
 import { resources } from "@/api/resources";
 import type { TraceStage } from "@/api/types";
 import { formatDateTime, formatDuration, shortId } from "@/lib/format";
-import { sessionTypeLabel, traceOutcomeLabel } from "@/lib/labels";
+import {
+  sessionTypeLabel,
+  traceDeliveryStatusLabel,
+  traceHistoryStatusLabel,
+  traceOutcomeLabel,
+} from "@/lib/labels";
 import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
@@ -240,13 +245,26 @@ const router = useRouter();
 
 const page = ref(1);
 const search = ref("");
+const debouncedSearch = ref("");
 const stageFilter = ref<StageFilter>("all");
+let searchTimer: number | undefined;
 
 const currentTraceId = computed(() => (typeof route.params.traceId === "string" ? route.params.traceId : ""));
 
 const listQuery = useQuery({
-  queryKey: computed(() => ["traces", page.value, search.value]),
-  queryFn: ({ signal }) => resources.traces(page.value, 20, search.value, signal),
+  queryKey: computed(() => ["traces", page.value, debouncedSearch.value]),
+  queryFn: ({ signal }) => resources.traces(page.value, 20, debouncedSearch.value, signal),
+});
+
+watch(search, (value) => {
+  if (searchTimer !== undefined) window.clearTimeout(searchTimer);
+  searchTimer = window.setTimeout(() => {
+    debouncedSearch.value = value.trim();
+  }, 250);
+});
+
+onBeforeUnmount(() => {
+  if (searchTimer !== undefined) window.clearTimeout(searchTimer);
 });
 
 const detailQuery = useQuery({

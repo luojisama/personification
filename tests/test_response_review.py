@@ -186,7 +186,31 @@ def test_output_mode_hint_uses_turn_plan_lengths() -> None:
     hint = response_review._output_mode_hint(SimpleNamespace(output_mode="structured_help"))
 
     assert "structured_help" in hint
-    assert "80-300" in hint
+    assert "300 字上限" in hint
+    assert "80-300" not in hint
+    assert "最低字数" in hint
+
+
+def test_review_accepts_model_led_micro_reply_without_length_pressure() -> None:
+    async def _fake_call(messages):  # noqa: ANN001
+        prompt = messages[0]["content"]
+        assert "micro/fragment" in prompt
+        assert "不得仅因字少、不是完整句" in prompt
+        assert '"reply_shape": "micro"' in messages[1]["content"]
+        return '{"action":"accept","text":"","reason":"micro reaction","segments":["？"]}'
+
+    decision = asyncio.run(
+        response_review.review_response_text(
+            _fake_call,
+            candidate_text="？",
+            raw_message_text="你也听到了吧",
+            semantic_frame=SimpleNamespace(output_mode="chat_short", reply_shape="micro"),
+            is_direct_mention=True,
+        )
+    )
+
+    assert decision.action == "accept"
+    assert decision.segments == ("？",)
 
 
 def test_uncertain_visible_reply_silences_undirected_empty_evidence_without_model_call() -> None:

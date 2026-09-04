@@ -1413,10 +1413,18 @@ def test_waiting_group_batch_merges_direct_cue_and_fires_immediately_in_order() 
 
 
 @pytest.mark.parametrize(
-    "delivery_flag",
-    ["reply_delivery_started", "reply_delivery_confirmed", "reply_delivery_complete", "delivery_unknown"],
+    ("delivery_flag", "interruption_expected"),
+    [
+        ("reply_delivery_started", False),
+        ("reply_delivery_confirmed", True),
+        ("reply_delivery_complete", False),
+        ("delivery_unknown", False),
+    ],
 )
-def test_direct_cue_after_delivery_state_waits_for_next_generation(delivery_flag: str) -> None:
+def test_direct_cue_after_delivery_state_waits_for_next_generation(
+    delivery_flag: str,
+    interruption_expected: bool,
+) -> None:
     async def run() -> None:
         controller = reply_buffer.ReplyConcurrencyController(session_limit=2, global_limit=2)
         msg_buffer: dict[str, dict[str, Any]] = {}
@@ -1477,6 +1485,7 @@ def test_direct_cue_after_delivery_state_waits_for_next_generation(delivery_flag
         await reply_buffer.handle_reply_event(_Bot(), _MentionEvent(2, "direct"), {}, **common)
         assert not cancelled
         assert msg_buffer[key]["pending_items"]
+        assert bool(msg_buffer[key]["interrupt_requested_generation"]) is interruption_expected
         assert pipeline_context.stale_reply_abort_reason(active_state) == ""
         assert not yaml_processor._batch_ref_has_newer_messages(active_state["batch_runtime_ref"])
         release.set()

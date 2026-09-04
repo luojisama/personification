@@ -102,6 +102,20 @@ def test_trace_contains_only_stable_length_metadata() -> None:
     assert "opaque-reference" not in trace
 
 
+def test_prompt_hint_uses_ceiling_without_padding_target() -> None:
+    chat = policy.render_reply_length_prompt_hint(
+        policy.ReplyLengthPolicy("chat", 60, "light_chat_without_evidence")
+    )
+    evidence = policy.render_reply_length_prompt_hint(
+        policy.ReplyLengthPolicy("evidence", 600, "tool_intent")
+    )
+
+    assert "不设最低或目标字数" in chat
+    assert "几个符号" in chat
+    assert "凑长度" in chat
+    assert "不设最低或目标字数" in evidence
+
+
 def test_truncate_reply_text_prefers_punctuation_and_counts_one_turn() -> None:
     text = "第一句完整。第二句也很长，后面还有很多细节不能全部发送。"
 

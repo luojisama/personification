@@ -62,6 +62,76 @@ def test_v2_router_exposes_paged_trace_recovery_capability_and_sse_routes() -> N
     } <= paths
 
 
+def test_v2_trace_projection_recovers_safe_message_io_and_real_timing() -> None:
+    trace = {
+        "trace_id": "trace-message-fallback",
+        "ts": 103.0,
+        "session_type": "group",
+        "group_id": "20001",
+        "user_id": "10001",
+        "outcome": "no_reply",
+        "diagnosis_code": "policy_silence",
+        "detail": {},
+        "stages": [
+            {"ts": 100.0, "key": "incoming_message", "status": "info", "detail": "收到的消息"},
+            {"ts": 102.0, "key": "outgoing_message", "status": "ok", "detail": "实际回复"},
+        ],
+    }
+
+    summary = v2_routes._trace_summary(trace)
+    detail = v2_routes._trace_detail(trace)
+
+    assert summary["input_summary"] == "收到的消息"
+    assert detail["input_summary"] == "收到的消息"
+    assert detail["final_reply"] == "实际回复"
+    assert summary["started_at"] == "1970-01-01T00:01:40+00:00"
+    assert summary["finished_at"] == "1970-01-01T00:01:43+00:00"
+    assert summary["elapsed_ms"] == 3000
+
+
+def test_v2_trace_projection_sanitizes_legacy_message_and_bad_timestamp() -> None:
+    trace = {
+        "trace_id": "trace-legacy-sensitive",
+        "ts": 0,
+        "outcome": "no_reply",
+        "detail": {"incoming_text": "api_key=do-not-show-me"},
+        "stages": [{"ts": "bad-ts", "key": "incoming_message", "detail": "fallback"}],
+    }
+
+    summary = v2_routes._trace_summary(trace)
+
+    assert "do-not-show-me" not in summary["input_summary"]
+    assert "***" in summary["input_summary"]
+    assert summary["started_at"] is None
+    assert summary["elapsed_ms"] is None
+    assert v2_routes._iso(float("nan")) is None
+    assert v2_routes._iso(float("inf")) is None
+
+    non_finite = v2_routes._trace_summary(
+        {
+            **trace,
+            "ts": float("nan"),
+            "stages": [
+                {"ts": float("inf"), "key": "incoming_message", "detail": "fallback"}
+            ],
+        }
+    )
+    assert non_finite["ts"] == 0.0
+    assert non_finite["started_at"] is None
+
+    legacy_media = v2_routes._trace_detail(
+        {
+            **trace,
+            "detail": {
+                "incoming_text": "普通消息",
+                "outgoing_text": "[IMAGE_URL]https://example.invalid/private.png[/IMAGE_URL]",
+            },
+        }
+    )
+    assert legacy_media["final_reply"] == ""
+    assert "private.png" not in str(legacy_media)
+
+
 def test_functional_test_catalog_keeps_three_risk_levels_and_eighteen_categories() -> None:
     catalog = list(v2_routes._FUNCTIONAL_TEST_CATALOG)
     assert len(catalog) == 18

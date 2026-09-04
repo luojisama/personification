@@ -63,6 +63,35 @@ def test_reply_paths_commit_ordered_history_before_releasing_delivery_gate() -> 
     assert yaml_delivery < yaml_history < yaml_release < yaml_emotion
 
 
+def test_reply_paths_never_seed_or_append_unconfirmed_assistant_history() -> None:
+    root = Path(__file__).resolve().parents[1]
+    normal = (root / "handlers" / "reply_pipeline" / "processor.py").read_text(
+        encoding="utf-8"
+    )
+    yaml = (root / "handlers" / "yaml_pipeline" / "processor.py").read_text(
+        encoding="utf-8"
+    )
+
+    # YAML used to seed history from the model candidate before any send
+    # receipt existed.  Both pipelines now append only a non-empty projection
+    # built from confirmed text/media/sticker parts.
+    yaml_candidate = yaml.index(
+        "assistant_text, history_image_payloads = _extract_image_b64_markers(assistant_text)"
+    )
+    yaml_delivery = yaml.index(
+        'mark_reply_phase(reply_commit_state, "delivery_history_commit")'
+    )
+    assert 'assistant_history_text = ""' in yaml[yaml_candidate:yaml_delivery]
+
+    normal_history = normal.index("confirmed_history_text = build_confirmed_outbound_history(")
+    normal_append = normal.index("session.append_session_message(", normal_history)
+    assert "if confirmed_history_text:" in normal[normal_history:normal_append]
+
+    yaml_history = yaml.index("confirmed_history_text = build_confirmed_outbound_history(")
+    yaml_append = yaml.index("append_session_message(", yaml_history)
+    assert "if confirmed_history_text:" in yaml[yaml_history:yaml_append]
+
+
 def test_pending_action_paths_mark_delivery_phase_before_execution() -> None:
     root = Path(__file__).resolve().parents[1]
     normal = (root / "handlers" / "reply_pipeline" / "processor.py").read_text(encoding="utf-8")

@@ -8,7 +8,7 @@ from ...core.reply_style_policy import (
     build_directed_exchange_policy_prompt,
     build_empty_evidence_output_policy_prompt,
 )
-from .planner import OUTPUT_MODE_LENGTHS, extract_json_payload
+from .planner import extract_json_payload, render_output_mode_length_guidance
 
 
 ALLOWED_INFO_ADDED = {"tone_only", "new_fact", "continue_topic", "redirect", "refuse"}
@@ -135,7 +135,7 @@ def _build_persona_responder_instruction(
     reply_length_hint: str = "",
 ) -> str:
     output_mode = str(getattr(semantic_frame, "output_mode", "") or "").strip() or "chat_short"
-    min_chars, max_chars = OUTPUT_MODE_LENGTHS.get(output_mode, OUTPUT_MODE_LENGTHS["chat_short"])
+    reply_shape = str(getattr(semantic_frame, "reply_shape", "auto") or "auto").strip()
     if is_direct_mention:
         no_reply_rule = "直呼/提及时禁止输出 [NO_REPLY]。"
     elif reply_required:
@@ -158,6 +158,7 @@ def _build_persona_responder_instruction(
         "current_attitude": user_attitude or "按当前语境自然判断",
         "current_emotion": bot_emotion or "平静",
         "expression_style": expression_style or "自然口语",
+        "reply_shape": reply_shape,
         "recent_bot_replies": recent_replies,
     }
     instruction = (
@@ -183,7 +184,7 @@ def _build_persona_responder_instruction(
             separators=(",", ":"),
         )
         + "\n"
-        f"reply_text 按 output_mode={output_mode} 控制在 {min_chars}-{max_chars} 字附近。"
+        + render_output_mode_length_guidance(output_mode, reply_shape=reply_shape)
         + (f"\n{reply_length_hint}" if reply_length_hint else "")
         + "如果只是在复述用户语义，把 info_added 标为 tone_only；如果复用了用户原话连续片段，把 echoed_user_phrase 标为 true。"
         f"{no_reply_rule}\n"

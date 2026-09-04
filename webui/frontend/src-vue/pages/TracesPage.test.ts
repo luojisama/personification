@@ -61,4 +61,22 @@ describe("Vue Traces metrics & triage logic", () => {
     expect(metrics.upstreamStatus).toBe("");
     expect(metrics.upstreamDetailCode).toBe("");
   });
+
+  it("does not describe no-reply or unknown outcomes as successful", () => {
+    const noReply: TraceDetail = {
+      ...trace,
+      outcome: "no_reply",
+      diagnosis_code: "policy_silence",
+      stages: [],
+    };
+    const unknown: TraceDetail = {
+      ...trace,
+      outcome: "unknown",
+      diagnosis_code: "delivery_unknown",
+      stages: [],
+    };
+
+    expect(traceTriageText(noReply, deriveTraceMetrics(noReply))).toContain("没有发送可见回复");
+    expect(traceTriageText(unknown, deriveTraceMetrics(unknown))).toContain("最终结果无法确认");
+  });
 });

@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import asyncio
 
+import pytest
+
 from ._loader import load_personification_module
 
 planner = load_personification_module("plugin.personification.agent.runtime.planner")
@@ -139,9 +141,19 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
             "bot_emotion": "关切",
             "emotion_intensity": "high",
             "expression_style": "先听再回应",
+            "reply_shape": "fragment",
+            "emotion_updates": [{"scope": "user", "category": "关切"}],
+            "sticker_appropriate": False,
+            "meta_question": True,
+            "tts_style_hint": "轻声",
+            "sticker_mood_hint": "感动|表达关心",
             "group_atmosphere_positive": True,
             "interaction_interesting": True,
+            "relationship_progress": "meaningful",
+            "relationship_progress_confidence": 1.4,
             "future_commitment_candidate": True,
+            "conversation_scenario": "private_topic",
+            "address_mode": "quote",
             "confidence": 1.8,
             "reason": "test",
         }
@@ -156,13 +168,38 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
     assert plan.qzone_continue is True
     assert plan.tool_intent == ["lookup_web", "memory"]
     assert plan.confidence == 1.0
-    assert plan.length_bounds == (80, 240)
+    assert plan.length_bounds == (0, 240)
     assert plan.domain_focus == "technology"
     assert plan.evidence_policy == "strict"
     assert plan.emotional_support.advice_permission == "ask_first"
+    assert plan.reply_shape == "fragment"
+    assert plan.emotion_updates == [{"scope": "user", "category": "关切"}]
+    assert plan.sticker_appropriate is False
+    assert plan.meta_question is True
+    assert plan.tts_style_hint == "轻声"
+    assert plan.sticker_mood_hint == "感动|表达关心"
     assert plan.group_atmosphere_positive is True
     assert plan.interaction_interesting is True
+    assert plan.relationship_progress == "meaningful"
+    assert plan.relationship_progress_confidence == 1.0
     assert plan.future_commitment_candidate is True
+    assert plan.conversation_scenario == "private_topic"
+    assert plan.address_mode == "quote"
+
+
+@pytest.mark.parametrize("unsafe", ("NaN", "Infinity", "-Infinity", float("nan"), float("inf")))
+def test_parse_turn_plan_payload_rejects_non_finite_confidences(unsafe) -> None:  # noqa: ANN001
+    plan = planner.parse_turn_plan_payload(
+        {
+            "reply_action": "reply",
+            "confidence": unsafe,
+            "relationship_progress_confidence": unsafe,
+        }
+    )
+
+    assert plan is not None
+    assert plan.confidence == 0.0
+    assert plan.relationship_progress_confidence == 0.0
 
 
 def test_turn_plan_to_semantic_frame_maps_lookup_plugin() -> None:
@@ -218,10 +255,20 @@ def test_turn_plan_semantic_frame_round_trip_preserves_care_and_emotion() -> Non
         user_attitude="脆弱地求助",
         bot_emotion="认真关切",
         emotion_intensity="high",
+        emotion_updates=[{"scope": "user", "category": "认真关切"}],
         expression_style="先倾听确认",
+        reply_shape="micro",
+        tts_style_hint="轻声",
+        sticker_mood_hint="感动|表达关心",
+        sticker_appropriate=False,
+        meta_question=True,
         group_atmosphere_positive=True,
         interaction_interesting=True,
+        relationship_progress="resonant",
+        relationship_progress_confidence=0.88,
         future_commitment_candidate=True,
+        conversation_scenario="private_topic",
+        address_mode="quote",
     )
 
     frame = planner.turn_plan_to_semantic_frame(plan)
@@ -233,10 +280,33 @@ def test_turn_plan_semantic_frame_round_trip_preserves_care_and_emotion() -> Non
     assert restored.emotional_support == plan.emotional_support
     assert restored.user_attitude == "脆弱地求助"
     assert restored.bot_emotion == "认真关切"
+    assert restored.emotion_updates == [{"scope": "user", "category": "认真关切"}]
+    assert restored.reply_shape == "micro"
+    assert restored.tts_style_hint == "轻声"
+    assert restored.sticker_mood_hint == "感动|表达关心"
+    assert restored.sticker_appropriate is False
+    assert restored.meta_question is True
     assert frame.group_atmosphere_positive is True
     assert restored.group_atmosphere_positive is True
     assert restored.interaction_interesting is True
+    assert restored.relationship_progress == "resonant"
+    assert restored.relationship_progress_confidence == 0.88
     assert restored.future_commitment_candidate is True
+    assert restored.conversation_scenario == "private_topic"
+    assert restored.address_mode == "quote"
+
+
+def test_output_mode_guidance_has_no_minimum_or_zero_range() -> None:
+    guidance = planner.render_output_mode_length_guidance(
+        "chat_short",
+        reply_shape="micro",
+    )
+
+    assert "不设最低字数" in guidance
+    assert "micro" in guidance
+    assert "几个可见符号" in guidance
+    assert "0-" not in guidance
+    assert "字附近" not in guidance
 
 
 def test_legacy_turn_plan_derives_plugin_and_realtime_domains_when_new_field_missing() -> None:

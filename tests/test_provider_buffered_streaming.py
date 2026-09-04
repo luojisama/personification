@@ -288,6 +288,8 @@ def test_precreate_stream_fallback_does_not_decrement_another_active_call() -> N
         ("（你好！）", "（你好！）"),
         ("你好。  ", "你好  "),
         ("你好。", "你好。"),
+        ("！", "！"),
+        ("！！", "！！"),
     ],
 )
 def test_terminal_punctuation_boundaries(value: str, expected: str) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import shutil
 import subprocess
 import time
@@ -27,6 +28,7 @@ from ...core.runtime_events import publish_runtime_event
 from ...core.subscription_quota import query_subscription_quotas
 from ...core import proactive_diagnostics, webui_audit_log
 from ...core.visible_output import guard_visible_text
+from ...core.sensitive_data import sanitize_text
 from ..deps import AdminIdentity, get_client_ip, require_admin
 from ..v2_services import (
     apply_config_patch,
@@ -186,11 +188,14 @@ _ROUTE_PROBE_CATALOG: dict[str, dict[str, Any]] = {
 def _iso(value: Any) -> str | None:
     try:
         timestamp = float(value or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    if timestamp <= 0:
+    if timestamp <= 0 or not math.isfinite(timestamp):
         return None
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+    try:
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _recovery_summary(item: RecoveryItem) -> dict[str, Any]:
@@ -235,14 +240,80 @@ def _recovery_summary(item: RecoveryItem) -> dict[str, Any]:
     }
 
 
+def _trace_stage_detail(trace: dict[str, Any], key: str, *, limit: int) -> str:
+    stages = trace.get("stages") if isinstance(trace.get("stages"), list) else []
+    for stage in reversed(stages):
+        if not isinstance(stage, dict) or str(stage.get("key") or "") != key:
+            continue
+        value = str(stage.get("detail") or "")
+        if value:
+            return value[:limit]
+    return ""
+
+
+def _trace_visible_message(
+    trace: dict[str, Any],
+    *,
+    detail_key: str,
+    stage_key: str,
+    surface: str,
+    allow_direct_media: bool,
+    limit: int,
+) -> str:
+    detail = trace.get("detail") if isinstance(trace.get("detail"), dict) else {}
+    raw = detail.get(detail_key) or _trace_stage_detail(trace, stage_key, limit=limit)
+    return guard_visible_text(
+        sanitize_text(raw, limit=limit),
+        surface=surface,
+        allow_direct_media=allow_direct_media,
+        enforce_role_integrity=False if detail_key == "incoming_text" else True,
+    )[:limit]
+
+
+def _finite_trace_timestamp(value: Any) -> float:
+    try:
+        timestamp = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return timestamp if timestamp > 0 and math.isfinite(timestamp) else 0.0
+
+
+def _trace_timestamps(trace: dict[str, Any]) -> tuple[float, float | None]:
+    detail = trace.get("detail") if isinstance(trace.get("detail"), dict) else {}
+    stages = trace.get("stages") if isinstance(trace.get("stages"), list) else []
+    first_stage_ts = 0.0
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        first_stage_ts = _finite_trace_timestamp(stage.get("ts"))
+        if first_stage_ts > 0:
+            break
+    started_at = _finite_trace_timestamp(detail.get("started_at"))
+    if started_at <= 0:
+        started_at = first_stage_ts or _finite_trace_timestamp(trace.get("ts"))
+    finished_at = _finite_trace_timestamp(detail.get("finished_at"))
+    if finished_at <= 0 and trace.get("outcome"):
+        finished_at = _finite_trace_timestamp(trace.get("ts"))
+    return started_at, (finished_at if finished_at > 0 else None)
+
+
 def _trace_summary(trace: dict[str, Any]) -> dict[str, Any]:
     process = reply_turn_trace.build_process_view(trace, logs=[])
     summary = process.get("summary") if isinstance(process, dict) else {}
+    started_at, finished_at = _trace_timestamps(trace)
+    input_summary = _trace_visible_message(
+        trace,
+        detail_key="incoming_text",
+        stage_key="incoming_message",
+        surface="webui_v2_trace_input",
+        allow_direct_media=False,
+        limit=2000,
+    )
     return {
         "trace_id": str(trace.get("trace_id") or ""),
-        "ts": float(trace.get("ts") or 0),
-        "started_at": _iso(trace.get("ts")),
-        "finished_at": _iso(trace.get("ts")) if trace.get("outcome") else None,
+        "ts": _finite_trace_timestamp(trace.get("ts")),
+        "started_at": _iso(started_at),
+        "finished_at": _iso(finished_at),
         "session_type": str(trace.get("session_type") or ""),
         "group_id": str(trace.get("group_id") or ""),
         "user_id": str(trace.get("user_id") or ""),
@@ -253,14 +324,11 @@ def _trace_summary(trace: dict[str, Any]) -> dict[str, Any]:
         "error_count": int(summary.get("error_count") or 0),
         "user_name": str(trace.get("user_id") or "未知用户"),
         "avatar_url": None,
-        "input_summary": "",
-        "elapsed_ms": next(
-            (
-                int(item.get("duration_ms"))
-                for item in reversed(process.get("items") or [])
-                if isinstance(item, dict) and isinstance(item.get("duration_ms"), int)
-            ),
-            None,
+        "input_summary": input_summary,
+        "elapsed_ms": (
+            int(max(0.0, finished_at - started_at) * 1000)
+            if finished_at is not None and started_at > 0
+            else None
         ),
     }
 
@@ -273,16 +341,24 @@ def _trace_detail(trace: dict[str, Any]) -> dict[str, Any]:
     understanding = inspection.get("understanding") if isinstance(inspection.get("understanding"), dict) else {}
     tools = inspection.get("tools") if isinstance(inspection.get("tools"), list) else []
     raw_detail = trace.get("detail") if isinstance(trace.get("detail"), dict) else {}
-    incoming = guard_visible_text(
-        raw_detail.get("incoming_text", ""),
+    incoming = _trace_visible_message(
+        trace,
+        detail_key="incoming_text",
+        stage_key="incoming_message",
         surface="webui_v2_trace_input",
         allow_direct_media=False,
-        enforce_role_integrity=False,
+        limit=2000,
     )
-    outgoing = guard_visible_text(
-        raw_detail.get("outgoing_text", ""),
+    outgoing = _trace_visible_message(
+        trace,
+        detail_key="outgoing_text",
+        stage_key="outgoing_message",
         surface="webui_v2_trace_output",
-        allow_direct_media=True,
+        # New traces persist confirmed media as semantic placeholders.  Old
+        # records may still contain a direct IMAGE_URL/IMAGE_B64 envelope;
+        # never copy that payload into the administrative JSON response.
+        allow_direct_media=False,
+        limit=6000,
     )
     base["input_summary"] = incoming[:2000]
     status_map = {
@@ -322,8 +398,8 @@ def _trace_detail(trace: dict[str, Any]) -> dict[str, Any]:
                 "namespace": "runtime",
                 "status": str(tool.get("status") or "unknown")[:32],
                 "duration_ms": tool.get("duration_ms") if isinstance(tool.get("duration_ms"), int) else None,
-                "argument_summary": "",
-                "result_summary": str(tool.get("detail") or "")[:1000],
+                "argument_summary": str(tool.get("argument_summary") or "")[:500],
+                "result_summary": str(tool.get("result_summary") or "")[:1000],
                 "schema_hash": "",
                 "detail_code": str(tool.get("stage") or "tool_unclassified")[:96],
             }
@@ -2613,6 +2689,7 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         session_type: str = Query(default=""),
         group_id: str = Query(default=""),
         user_id: str = Query(default=""),
+        search: str = Query(default="", max_length=160),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         params = normalize_pagination(page=page, page_size=page_size)
@@ -2623,6 +2700,7 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             session_type=session_type,
             group_id=group_id,
             user_id=user_id,
+            search=search,
         )
         return build_page(
             [_trace_summary(row) for row in rows],

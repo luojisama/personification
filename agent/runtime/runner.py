@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable, List
 
 from ..query_rewriter import (
@@ -393,13 +393,10 @@ async def run_agent(
             ):
                 finalized = result
             else:
-                finalized = AgentResult(
+                finalized = replace(
+                    result,
                     text="[NO_REPLY]",
-                    pending_actions=list(getattr(result, "pending_actions", []) or []),
                     failure_code="agent_quality_timeout",
-                    social_evidence=list(result.social_evidence),
-                    social_coverage=dict(result.social_coverage),
-                    evidence_delivery_required=bool(result.evidence_delivery_required),
                 )
         return finalize_social_evidence_delivery(
             finalized,

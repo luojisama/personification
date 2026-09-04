@@ -119,7 +119,7 @@ export interface RouteCapabilityItem {
   updated_at?: string | null;
 }
 
-export type TraceOutcome = "ok" | "silent" | "failed" | "unknown" | "partial";
+export type TraceOutcome = "ok" | "silent" | "no_reply" | "finished" | "failed" | "unknown" | "partial";
 
 export interface TraceListItem {
   trace_id: string;

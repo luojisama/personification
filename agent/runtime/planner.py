@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from ...core.reply_style_policy import build_context_continuity_policy_prompt, build_group_no_question_policy_prompt
-from ...core.chat_intent import EmotionalSupport, _parse_emotional_support
+from ...core.chat_intent import (
+    ConversationScenario,
+    EmotionalSupport,
+    RelationshipProgress,
+    ReplyShape,
+    _parse_address_mode,
+    _parse_emotion_updates,
+    _parse_emotional_support,
+    _parse_reply_shape,
+    _parse_scenario,
+)
+from ...core.sticker_semantics import (
+    DEFAULT_STICKER_SEMANTIC_HINT,
+    default_sticker_semantic_hint,
+    normalize_sticker_semantic_hint,
+)
 from ...core.turn_media import MediaAvailability, coerce_media_availability
 
 
@@ -58,6 +74,7 @@ ALLOWED_MESSAGE_TARGETS = {"bot", "someone_else", "external_plugin", "broadcast"
 ALLOWED_DOMAIN_FOCUS = {"general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"}
 ALLOWED_EVIDENCE_POLICIES = {"none", "light", "standard", "strict"}
 ALLOWED_CITATION_MODES = {"none", "urls_on_request"}
+ALLOWED_RELATIONSHIP_PROGRESS = {"none", "meaningful", "resonant", "milestone"}
 
 
 def _normalize_domain_focus(value: Any, fallback: str = "general") -> DomainFocus:
@@ -68,12 +85,50 @@ def _normalize_domain_focus(value: Any, fallback: str = "general") -> DomainFocu
 
 
 OUTPUT_MODE_LENGTHS: dict[str, tuple[int, int]] = {
-    "chat_short": (8, 40),
-    "chat_answer": (30, 120),
-    "structured_help": (80, 300),
-    "source_summary": (80, 240),
-    "qzone_reply": (10, 80),
+    # The first item is deliberately zero: it is not a generation target or a
+    # minimum that the model should pad towards.  The second item remains the
+    # output-mode ceiling used by prompts/review; the final transport ceiling
+    # is still resolved centrally by core.reply_length_policy.
+    "chat_short": (0, 60),
+    "chat_answer": (0, 120),
+    "structured_help": (0, 300),
+    "source_summary": (0, 240),
+    "qzone_reply": (0, 60),
 }
+
+
+def render_output_mode_length_guidance(
+    output_mode: str,
+    *,
+    reply_shape: str = "auto",
+    max_chars_override: int = 0,
+) -> str:
+    """Describe a ceiling without turning it into a fixed-size target."""
+
+    mode = str(output_mode or "").strip() or "chat_short"
+    _, default_max = OUTPUT_MODE_LENGTHS.get(mode, OUTPUT_MODE_LENGTHS["chat_short"])
+    try:
+        override = max(0, int(max_chars_override or 0))
+    except (TypeError, ValueError):
+        override = 0
+    max_chars = override or default_max
+    if mode in {"chat_short", "qzone_reply"}:
+        shape = _parse_reply_shape(reply_shape)
+        shape_guidance = {
+            "micro": "本轮采用 micro：可以只发一到几个可见符号、表情或极短感叹，不要补成完整句。",
+            "fragment": "本轮采用 fragment：用几个字的自然口语碎片，不要补背景或解释。",
+            "sentence": "本轮采用 sentence：只写一小句自然口语。",
+            "compact": "本轮采用 compact：只在内容确有需要时写一到数个紧凑句。",
+            "auto": "本轮采用 auto：由最终回复模型按现场语气在几个符号、几个字的碎片、一小句或紧凑短答之间自然选择。",
+        }[shape]
+        return (
+            f"output_mode={mode} 只设 {max_chars} 字上限，不设最低字数，也不是目标字数。"
+            f"{shape_guidance}不要为了凑长度补解释。"
+        )
+    return (
+        f"output_mode={mode} 只设 {max_chars} 字上限，不设最低字数。"
+        "以刚好完整承担本轮任务为准，不要为了靠近上限扩写。"
+    )
 
 
 @dataclass
@@ -100,13 +155,23 @@ class TurnPlan:
     evidence_policy: EvidencePolicy = "none"
     citation_mode: CitationMode = "none"
     emotional_support: EmotionalSupport = field(default_factory=EmotionalSupport)
+    sticker_appropriate: bool = True
+    meta_question: bool = False
     user_attitude: str = "日常交流"
     bot_emotion: str = "平静"
     emotion_intensity: str = "medium"
+    emotion_updates: list[dict[str, Any]] = field(default_factory=list)
     expression_style: str = "自然简短"
+    reply_shape: ReplyShape = "auto"
+    tts_style_hint: str = "自然"
+    sticker_mood_hint: str = DEFAULT_STICKER_SEMANTIC_HINT
     group_atmosphere_positive: bool = False
     interaction_interesting: bool = False
+    relationship_progress: RelationshipProgress = "none"
+    relationship_progress_confidence: float = 0.0
     future_commitment_candidate: bool = False
+    conversation_scenario: ConversationScenario = "normal"
+    address_mode: str = "auto"
 
     @property
     def length_bounds(self) -> tuple[int, int]:
@@ -134,9 +199,10 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
         return default
+    return number if math.isfinite(number) else default
 
 
 def _enum_value(value: Any, allowed: set[str], default: str) -> str:
@@ -245,15 +311,32 @@ def parse_turn_plan_payload(payload: Any) -> TurnPlan | None:
         evidence_policy=_enum_value(payload.get("evidence_policy"), ALLOWED_EVIDENCE_POLICIES, "none"),  # type: ignore[arg-type]
         citation_mode=_enum_value(payload.get("citation_mode"), ALLOWED_CITATION_MODES, "none"),  # type: ignore[arg-type]
         emotional_support=_parse_emotional_support(payload.get("emotional_support")),
+        sticker_appropriate=_coerce_bool(payload.get("sticker_appropriate", True), True),
+        meta_question=_coerce_bool(payload.get("meta_question", False)),
         user_attitude=str(payload.get("user_attitude", "") or "").strip()[:80] or "日常交流",
         bot_emotion=str(payload.get("bot_emotion", "") or "").strip()[:80] or "平静",
         emotion_intensity=_enum_value(payload.get("emotion_intensity"), {"low", "medium", "high"}, "medium"),
+        emotion_updates=_parse_emotion_updates(payload.get("emotion_updates")),
         expression_style=str(payload.get("expression_style", "") or "").strip()[:80] or "自然简短",
+        reply_shape=_parse_reply_shape(payload.get("reply_shape")),
+        tts_style_hint=str(payload.get("tts_style_hint", "") or "").strip()[:80] or "自然",
+        sticker_mood_hint=normalize_sticker_semantic_hint(payload.get("sticker_mood_hint")),
         group_atmosphere_positive=_coerce_bool(payload.get("group_atmosphere_positive"), False),
         interaction_interesting=_coerce_bool(payload.get("interaction_interesting"), False),
+        relationship_progress=_enum_value(
+            payload.get("relationship_progress"),
+            ALLOWED_RELATIONSHIP_PROGRESS,
+            "none",
+        ),  # type: ignore[arg-type]
+        relationship_progress_confidence=max(
+            0.0,
+            min(1.0, _coerce_float(payload.get("relationship_progress_confidence"), 0.0)),
+        ),
         future_commitment_candidate=_coerce_bool(
             payload.get("future_commitment_candidate"), False
         ),
+        conversation_scenario=_parse_scenario(payload.get("conversation_scenario")),
+        address_mode=_parse_address_mode(payload.get("address_mode")),
     )
 
 
@@ -463,9 +546,15 @@ async def plan_turn_with_llm(
         '"evidence_policy":"none|light|standard|strict",'
         '"citation_mode":"none|urls_on_request",'
         '"emotional_support":{"needed":false,"listen":false,"validate":false,"advice_permission":"not_needed|ask_first|allowed","risk_level":"none|concern|high"},'
+        '"sticker_appropriate":true,"meta_question":false,'
         '"user_attitude":"一句短中文", "bot_emotion":"一句短中文", "emotion_intensity":"low|medium|high", "expression_style":"一句短中文",'
+        '"reply_shape":"auto|micro|fragment|sentence|compact",'
+        '"emotion_updates":[{"scope":"global|user|group","vad":{"valence":0.0,"arousal":0.5,"dominance":0.0},"category":"短标签","confidence":0.0,"appraisal":{"reason":"短摘要","goal":"短摘要","certainty":"短摘要","controllability":"短摘要"},"action_tendency":"approach|avoid|support|observe"}],'
+        '"tts_style_hint":"短风格词","sticker_mood_hint":"情绪标签|场景标签",'
         '"group_atmosphere_positive":false,"interaction_interesting":false,'
-        '"future_commitment_candidate":false,'
+        '"relationship_progress":"none|meaningful|resonant|milestone","relationship_progress_confidence":0.0,'
+        '"future_commitment_candidate":false,"conversation_scenario":"normal|casual_banter|sarcasm_irony|argument|inside_joke|multi_thread|private_topic",'
+        '"address_mode":"auto|none|at|quote|at_quote",'
         '"confidence":0.0,'
         '"reason":"极短中文原因"}\n'
         "判别要求：\n"
@@ -482,11 +571,19 @@ async def plan_turn_with_llm(
         "插件输出不是人格 bot 的发言。若选择参与，默认 reply + tease/participate + chat_short + evidence_policy=none，"
         "围绕插件结果接梗；不要因结果里的专业名词切成百科解释，也不要声称结果是自己刚说、刚查或刚抽到的。"
         "只有最新消息明确另起独立事实问题时才用 answer/lookup。\n"
-        "4. user_attitude、bot_emotion、emotion_intensity 和 expression_style 要结合上下文规划；TTS 和表情仍由下游决定。\n"
+        "4. user_attitude、bot_emotion、emotion_intensity、emotion_updates、expression_style、TTS 与表情提示要结合完整上下文规划。"
+        "reply_shape 结构化决定这一拍的表达颗粒：micro=一到几个符号/表情或极短感叹，fragment=几个字的口语碎片，"
+        "sentence=一小句话，compact=确有任务需要时的一到数个紧凑句，auto=交给最终回复模型现场选择。"
+        "它不是字数配额；不要给每一轮套固定长度，也不要为了凑成完整句或靠近上限补解释。\n"
         "4b. group_atmosphere_positive 只在群聊整体互动明确友好融洽时为 true，私聊必须 false；"
         "interaction_interesting 只在 bot 与当前用户确实出现明显趣味、默契或高质量互动时为 true，普通成功回复不能机械加分。\n"
+        "4b-1. relationship_progress 判断是否真的推进长期关系；普通寒暄、普通问答和成功回复本身必须是 none。"
+        "只有实质理解/共同完成事情、明显共鸣信任或罕见里程碑才逐级使用 meaningful/resonant/milestone，"
+        "并用独立 confidence 表示把握。emotion_updates 最多各一条 global/user/group，证据不足返回空数组。\n"
         "4c. future_commitment_candidate 只在私聊用户明确表达带时间线索的未来承诺、计划或待办时为 true；"
         "已完成事件、无时间的愿望和普通闲聊必须为 false。\n"
+        "4d. conversation_scenario 描述当前互动形态；address_mode 依据本轮真实指向决定，不能按消息词面机械选择。"
+        "sticker_appropriate、tts_style_hint 与 sticker_mood_hint 只是表达规划，不得改变是否回复、权限或事实边界。\n"
         "5. 工具意图只给候选方向，不要因为工具存在就强行使用。\n"
         "5-0. vision_need 决定可见回复是否依赖本轮媒体证据：无关时为 none，需要 vision_analyze 摘要时为 summary；"
         "只有系统 grounding 明确声明当前主路由已验证原生支持时才为 native。"
@@ -627,7 +724,11 @@ def turn_plan_from_semantic_frame(
         ambiguity_level=ambiguity,  # type: ignore[arg-type]
         confidence=confidence,
         reason=str(getattr(frame, "reason", "") or "semantic_frame_adapter").strip()[:80],
-        message_target=_enum_value(message_target, ALLOWED_MESSAGE_TARGETS, "uncertain"),  # type: ignore[arg-type]
+        message_target=_enum_value(
+            message_target or getattr(frame, "message_target", ""),
+            ALLOWED_MESSAGE_TARGETS,
+            "uncertain",
+        ),  # type: ignore[arg-type]
         session_goal="沿用旧语义帧",
         domain_focus=_normalize_domain_focus(getattr(frame, "domain_focus", None), legacy_domain),
         evidence_policy=_enum_value(getattr(frame, "evidence_policy", "none"), ALLOWED_EVIDENCE_POLICIES, "none"),  # type: ignore[arg-type]
@@ -636,21 +737,47 @@ def turn_plan_from_semantic_frame(
             getattr(frame, "emotional_support", None),
             legacy_needed=bool(getattr(frame, "requires_emotional_care", False)),
         ),
+        sticker_appropriate=bool(getattr(frame, "sticker_appropriate", True)),
+        meta_question=bool(getattr(frame, "meta_question", False)),
         user_attitude=str(getattr(frame, "user_attitude", "") or "日常交流"),
         bot_emotion=str(getattr(frame, "bot_emotion", "") or "平静"),
         emotion_intensity=_enum_value(getattr(frame, "emotion_intensity", "medium"), {"low", "medium", "high"}, "medium"),
+        emotion_updates=_parse_emotion_updates(getattr(frame, "emotion_updates", None)),
         expression_style=str(getattr(frame, "expression_style", "") or "自然简短"),
+        reply_shape=_parse_reply_shape(getattr(frame, "reply_shape", "auto")),
+        tts_style_hint=str(getattr(frame, "tts_style_hint", "") or "自然"),
+        sticker_mood_hint=normalize_sticker_semantic_hint(
+            getattr(frame, "sticker_mood_hint", None)
+        ),
         group_atmosphere_positive=bool(getattr(frame, "group_atmosphere_positive", False)),
         interaction_interesting=bool(getattr(frame, "interaction_interesting", False)),
+        relationship_progress=_enum_value(
+            getattr(frame, "relationship_progress", "none"),
+            ALLOWED_RELATIONSHIP_PROGRESS,
+            "none",
+        ),  # type: ignore[arg-type]
+        relationship_progress_confidence=max(
+            0.0,
+            min(
+                1.0,
+                _coerce_float(
+                    getattr(frame, "relationship_progress_confidence", 0.0),
+                    0.0,
+                ),
+            ),
+        ),
         future_commitment_candidate=bool(
             getattr(frame, "future_commitment_candidate", False)
         ),
+        conversation_scenario=_parse_scenario(
+            getattr(frame, "conversation_scenario", "normal")
+        ),
+        address_mode=_parse_address_mode(getattr(frame, "address_mode", "auto")),
     )
 
 
 def turn_plan_to_semantic_frame(plan: TurnPlan) -> Any:
     from ...core.chat_intent import TurnSemanticFrame
-    from ...core.sticker_semantics import default_sticker_semantic_hint
 
     tool_intents = set(plan.tool_intent or [])
     chat_intent = "banter"
@@ -675,8 +802,8 @@ def turn_plan_to_semantic_frame(plan: TurnPlan) -> Any:
         ambiguity_level=plan.ambiguity_level,
         recommend_silence=plan.reply_action == "silence",
         requires_emotional_care=plan.emotional_support.needed,
-        sticker_appropriate=plan.output_mode in {"chat_short", "qzone_reply"} and plan.reply_action == "reply",
-        meta_question=False,
+        sticker_appropriate=bool(plan.sticker_appropriate),
+        meta_question=bool(plan.meta_question),
         domain_focus=plan.domain_focus,
         evidence_policy=plan.evidence_policy,
         vision_need=plan.vision_need,
@@ -685,12 +812,27 @@ def turn_plan_to_semantic_frame(plan: TurnPlan) -> Any:
         user_attitude=plan.user_attitude,
         bot_emotion=plan.bot_emotion,
         emotion_intensity=plan.emotion_intensity,
+        emotion_updates=_parse_emotion_updates(plan.emotion_updates),
         expression_style=plan.expression_style,
+        reply_shape=_parse_reply_shape(plan.reply_shape),
         group_atmosphere_positive=plan.group_atmosphere_positive,
         interaction_interesting=plan.interaction_interesting,
+        relationship_progress=plan.relationship_progress,
+        relationship_progress_confidence=max(
+            0.0, min(1.0, _coerce_float(plan.relationship_progress_confidence, 0.0))
+        ),
         future_commitment_candidate=plan.future_commitment_candidate,
-        tts_style_hint="自然",
-        sticker_mood_hint=default_sticker_semantic_hint(chat_intent, is_random_chat=plan.reply_action == "silence"),
+        conversation_scenario=_parse_scenario(plan.conversation_scenario),
+        address_mode=_parse_address_mode(plan.address_mode),
+        tts_style_hint=str(plan.tts_style_hint or "自然"),
+        sticker_mood_hint=(
+            normalize_sticker_semantic_hint(plan.sticker_mood_hint)
+            if str(plan.sticker_mood_hint or "").strip()
+            else default_sticker_semantic_hint(
+                chat_intent,
+                is_random_chat=plan.reply_action == "silence",
+            )
+        ),
         confidence=plan.confidence,
         reason=plan.reason,
     )
@@ -718,6 +860,7 @@ __all__ = [
     "normalize_plan_text",
     "parse_turn_plan_payload",
     "plan_turn_with_llm",
+    "render_output_mode_length_guidance",
     "turn_plan_from_semantic_frame",
     "turn_plan_to_semantic_frame",
 ]

@@ -20,6 +20,7 @@ from ...core.reply_style_policy import (
 from ...core.reply_length_policy import render_reply_length_prompt_hint, resolve_reply_length_policy
 from ...core.turn_media import render_turn_media_grounding
 from ...core.bot_avatar_context import render_bot_avatar_vision_prompt
+from .planner import render_output_mode_length_guidance
 from .tool_selection import _semantic_tool_guidance
 
 
@@ -109,6 +110,17 @@ def append_agent_system_prompts(
         media_context=turn_media_context,
     )
     messages.append({"role": "system", "content": render_reply_length_prompt_hint(length_policy)})
+    if turn_plan is not None and length_policy.mode != "bypass":
+        messages.append(
+            {
+                "role": "system",
+                "content": render_output_mode_length_guidance(
+                    str(getattr(turn_plan, "output_mode", "") or "chat_short"),
+                    reply_shape=str(getattr(turn_plan, "reply_shape", "auto") or "auto"),
+                    max_chars_override=length_policy.max_chars,
+                ),
+            }
+        )
     messages.append(
         {
             "role": "system",

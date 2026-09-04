@@ -105,8 +105,13 @@ from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.target_inference import normalize_message_target_for_plan, normalize_message_target_for_review
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_punctuation import apply_terminal_punctuation_policy
+from ...core.interrupted_reply import (
+    finalize_cooperative_reply_interruption,
+    render_interrupted_reply_system_contract,
+)
 from ...core.reply_completion_contract import (
     apply_agent_result_completion_state,
+    reset_agent_result_completion_state,
     resolve_action_only_completion,
     resolve_sent_reply_completion,
 )
@@ -1716,6 +1721,10 @@ async def process_yaml_response_logic(
             "除非对方明确要求说明/识别/翻译图片，最终回复不要讲解、复述或总结画面细节。"
         )
 
+    interrupted_reply_contract = render_interrupted_reply_system_contract(reply_commit_state)
+    if interrupted_reply_contract:
+        system_prompt += f"\n\n{interrupted_reply_contract}"
+
     image_guard_prompt = build_direct_visual_identity_guard()
     if text_model_images:
         user_content = build_user_message_content(
@@ -2150,6 +2159,12 @@ async def process_yaml_response_logic(
                 reply_content = ""
                 used_agent = False
                 agent_result = None
+                reset_agent_result_completion_state(
+                    state=reply_commit_state,
+                    default_citation_mode=str(
+                        getattr(turn_plan, "citation_mode", "none") or "none"
+                    ),
+                )
         if agent_result is not None:
             reply_content, legacy_favorability_signals = extract_legacy_favorability_markers(reply_content)
             favorability_signals.merge(legacy_favorability_signals)
@@ -2159,6 +2174,7 @@ async def process_yaml_response_logic(
                     original_text=reply_content,
                     persona_system=system_prompt,
                     output_mode=str(getattr(semantic_frame, "output_mode", "chat_short") or "chat_short"),
+                    reply_shape=str(getattr(semantic_frame, "reply_shape", "auto") or "auto"),
                     avoid_questions=not is_private_session,
                     allow_rhetorical_banter=bool(
                         is_direct_mention
@@ -2987,7 +3003,10 @@ async def process_yaml_response_logic(
 
     assistant_text, history_image_payloads = _extract_image_b64_markers(assistant_text)
     has_generated_image = bool(history_image_payloads)
-    assistant_history_text = history_text_for_qq_expression(assistant_text)
+    # A reviewed/model candidate is still only a proposal at this point.
+    # Populate assistant history exclusively from confirmed send receipts
+    # below; otherwise a known transport failure could become fake history.
+    assistant_history_text = ""
 
     sticker_dir = resolve_sticker_dir(getattr(plugin_config, "personification_sticker_path", None))
     chosen_sticker_paths: list[Path | None] = []
@@ -3052,10 +3071,13 @@ async def process_yaml_response_logic(
     self_continuity_expected_revision = self_continuity_snapshot.revision
     self_continuity_segment_index = 0
     self_continuity_delivered_texts: list[str] = []
+    confirmed_text_segments: list[str] = []
+    interrupted_after_confirmed_segment = False
 
     def _mark_tts_delivery_unknown() -> None:
         nonlocal delivery_unknown
         delivery_unknown = True
+        reply_commit_state["delivery_unknown"] = True
     sent_message_id = ""
     address_plan = _humanize.decide_addressing(
         plugin_config=plugin_config,
@@ -3178,12 +3200,24 @@ async def process_yaml_response_logic(
                     if continuity_delivery.action == "silent":
                         return
                     sent_as_tts = continuity_delivery.sent
-                    if sent_as_tts:
+                    if (
+                        sent_as_tts
+                        and continuity_delivery.status == "sent"
+                        and not delivery_unknown
+                    ):
                         assistant_text = continuity_delivery.text
                         assistant_history_text = history_text_for_qq_expression(assistant_text)
+                        confirmed_text_segments.append(assistant_text)
                 else:
                     tts_result = await _send_tts_candidate(assistant_text)
                     sent_as_tts = bool(getattr(tts_result, "tts_sent", False))
+                    if (
+                        sent_as_tts
+                        and str(getattr(tts_result, "status", "") or "").strip().lower()
+                        == "sent"
+                        and not delivery_unknown
+                    ):
+                        confirmed_text_segments.append(assistant_text)
         except Exception as e:
             likely_delivered = is_likely_delivered_send_timeout(e)
             if bool(reply_commit_state.get("reply_delivery_confirmed", False)) or likely_delivered:
@@ -3197,7 +3231,7 @@ async def process_yaml_response_logic(
     if not sent_as_tts:
         clean_reply = ""
         if parsed["messages"]:
-            for msg in parsed["messages"]:
+            for message_index, msg in enumerate(parsed["messages"]):
                 text, image_b64_payloads = _extract_image_b64_markers(msg["text"])
                 sticker_url = msg["sticker"]
                 if text:
@@ -3247,6 +3281,35 @@ async def process_yaml_response_logic(
 
                     for seg_index, seg in enumerate(merged_segments):
                         if seg.strip():
+                            remaining_drafts = list(merged_segments[seg_index:])
+                            remaining_drafts.extend(
+                                str(item.get("text", "") or "")
+                                for item in parsed["messages"][message_index + 1 :]
+                                if isinstance(item, dict)
+                            )
+                            interruption = finalize_cooperative_reply_interruption(
+                                reply_commit_state,
+                                remaining_drafts,
+                                delivery_unknown=delivery_unknown,
+                            )
+                            if interruption is not None:
+                                interrupted_after_confirmed_segment = True
+                                logger.info(
+                                    "拟人插件 (YAML)：已在确认发送后的下一段边界结束旧回复，"
+                                    f"draft_count={interruption['draft_count']} "
+                                    f"draft_chars={interruption['draft_chars']}"
+                                )
+                                _trace_stage(
+                                    key="cooperative_interruption",
+                                    label="新消息协作打断",
+                                    status="info",
+                                    detail=(
+                                        "terminal_reason=interrupted_after_confirmed_segment "
+                                        f"draft_count={interruption['draft_count']} "
+                                        f"draft_chars={interruption['draft_chars']}"
+                                    ),
+                                )
+                                break
                             if _has_newer_batch_now():
                                 logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                                 _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="分段文本发送前出现更新批次")
@@ -3327,13 +3390,36 @@ async def process_yaml_response_logic(
                                     ),
                                 )
                                 if not continuity_delivery.sent:
-                                    if self_continuity_delivered_texts:
+                                    if confirmed_text_segments:
                                         delivery_partial = True
+                                        break
                                     return
                                 send_result = continuity_delivery.send_result
+                                if continuity_delivery.status == "unknown":
+                                    delivery_unknown = True
+                                    reply_commit_state["delivery_unknown"] = True
+                                    break
+                                if continuity_delivery.status != "sent":
+                                    if confirmed_text_segments:
+                                        delivery_partial = True
+                                        break
+                                    return
                                 self_continuity_delivered_texts.append(continuity_delivery.text)
+                                confirmed_text_segments.append(continuity_delivery.text)
                             else:
                                 send_result = await _send_text_candidate(seg)
+                                result_status = str(getattr(send_result, "status", "") or "").strip().lower()
+                                if result_status == "unknown":
+                                    delivery_unknown = True
+                                    reply_commit_state["delivery_unknown"] = True
+                                    break
+                                if is_confirmed_send_result(send_result):
+                                    confirmed_text_segments.append(seg)
+                                elif confirmed_text_segments:
+                                    delivery_partial = True
+                                    break
+                                else:
+                                    return
                             if reply_commit_state.get("peer_bot_raw_command_blocked"):
                                 return
                             self_continuity_segment_index += 1
@@ -3341,22 +3427,69 @@ async def process_yaml_response_logic(
                                 sent_message_id = _message_id_from_send_result(send_result)
                             await asyncio.sleep(random.uniform(0.4, 1.0))
 
+                    if interrupted_after_confirmed_segment or delivery_partial or delivery_unknown:
+                        break
+
                 if reply_commit_state.get("peer_bot_raw_command_blocked"):
                     return
 
-                for image_b64 in image_b64_payloads:
+                if not interrupted_after_confirmed_segment:
+                    interruption = finalize_cooperative_reply_interruption(
+                        reply_commit_state,
+                        (),
+                        delivery_unknown=delivery_unknown,
+                    )
+                    if interruption is not None:
+                        interrupted_after_confirmed_segment = True
+                for image_b64 in (
+                    ()
+                    if interrupted_after_confirmed_segment or delivery_partial or delivery_unknown
+                    else image_b64_payloads
+                ):
+                    interruption = finalize_cooperative_reply_interruption(
+                        reply_commit_state,
+                        (),
+                        delivery_unknown=delivery_unknown,
+                    )
+                    if interruption is not None:
+                        interrupted_after_confirmed_segment = True
+                        break
                     if _has_newer_batch_now():
                         logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                         _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="图片发送前出现更新批次")
                         return
                     send_result = await _send_reply(message_segment_cls.image(f"base64://{image_b64}"))
-                    confirmed_image_parts += int(is_confirmed_send_result(send_result))
+                    result_status = str(getattr(send_result, "status", "") or "").strip().lower()
+                    if result_status == "unknown":
+                        delivery_unknown = True
+                        reply_commit_state["delivery_unknown"] = True
+                        break
+                    image_confirmed = is_confirmed_send_result(send_result)
+                    confirmed_image_parts += int(image_confirmed)
+                    if not image_confirmed:
+                        delivery_partial = bool(
+                            reply_commit_state.get("reply_delivery_confirmed", False)
+                        )
+                        break
                     if not sent_message_id:
                         sent_message_id = _message_id_from_send_result(send_result)
                     await asyncio.sleep(random.uniform(0.4, 1.0))
 
                 chosen_sticker_path = chosen_sticker_paths.pop(0) if chosen_sticker_paths else None
-                if chosen_sticker_path is not None:
+                if (
+                    chosen_sticker_path is not None
+                    and not interrupted_after_confirmed_segment
+                    and not delivery_partial
+                    and not delivery_unknown
+                ):
+                    interruption = finalize_cooperative_reply_interruption(
+                        reply_commit_state,
+                        (),
+                        delivery_unknown=delivery_unknown,
+                    )
+                    if interruption is not None:
+                        interrupted_after_confirmed_segment = True
+                if chosen_sticker_path is not None and not interrupted_after_confirmed_segment:
                     try:
                         if _has_newer_batch_now():
                             logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
@@ -3365,6 +3498,13 @@ async def process_yaml_response_logic(
                         send_result = await _send_reply(
                             message_segment_cls.image(f"file:///{chosen_sticker_path.absolute()}")
                         )
+                        result_status = str(
+                            getattr(send_result, "status", "") or ""
+                        ).strip().lower()
+                        if result_status == "unknown":
+                            delivery_unknown = True
+                            reply_commit_state["delivery_unknown"] = True
+                            break
                         if not sent_message_id:
                             sent_message_id = _message_id_from_send_result(send_result)
                         if is_confirmed_send_result(send_result):
@@ -3377,8 +3517,14 @@ async def process_yaml_response_logic(
                                 ),
                                 chosen_sticker_path.stem,
                             )
+                        else:
+                            delivery_partial = bool(
+                                reply_commit_state.get("reply_delivery_confirmed", False)
+                            )
                     except Exception as e:
                         logger.error(f"发送表情包失败: {e}")
+                if interrupted_after_confirmed_segment or delivery_partial or delivery_unknown:
+                    break
         else:
             clean_reply = reply_content
             for tag in ["status", "think", "action", "output", "message"]:
@@ -3475,8 +3621,29 @@ async def process_yaml_response_logic(
                             return
                         send_result = continuity_delivery.send_result
                         self_continuity_delivered_texts.append(continuity_delivery.text)
+                        if continuity_delivery.status == "unknown":
+                            delivery_unknown = True
+                            reply_commit_state["delivery_unknown"] = True
+                        elif continuity_delivery.status == "sent":
+                            confirmed_text_segments.append(continuity_delivery.text)
+                        else:
+                            delivery_partial = bool(
+                                reply_commit_state.get("reply_delivery_confirmed", False)
+                            )
                     else:
                         send_result = await _send_clean_candidate(clean_reply)
+                        result_status = str(
+                            getattr(send_result, "status", "") or ""
+                        ).strip().lower()
+                        if result_status == "unknown":
+                            delivery_unknown = True
+                            reply_commit_state["delivery_unknown"] = True
+                        elif is_confirmed_send_result(send_result):
+                            confirmed_text_segments.append(clean_reply)
+                        else:
+                            delivery_partial = bool(
+                                reply_commit_state.get("reply_delivery_confirmed", False)
+                            )
                     self_continuity_segment_index += 1
                 else:
                     send_result = None
@@ -3484,20 +3651,53 @@ async def process_yaml_response_logic(
                     sent_message_id = _message_id_from_send_result(send_result)
             if reply_commit_state.get("peer_bot_raw_command_blocked"):
                 return
-            for image_b64 in image_b64_payloads:
+            if not interrupted_after_confirmed_segment:
+                interruption = finalize_cooperative_reply_interruption(
+                    reply_commit_state,
+                    (),
+                    delivery_unknown=delivery_unknown,
+                )
+                if interruption is not None:
+                    interrupted_after_confirmed_segment = True
+            for image_b64 in (
+                ()
+                if interrupted_after_confirmed_segment or delivery_partial or delivery_unknown
+                else image_b64_payloads
+            ):
+                interruption = finalize_cooperative_reply_interruption(
+                    reply_commit_state,
+                    (),
+                    delivery_unknown=delivery_unknown,
+                )
+                if interruption is not None:
+                    interrupted_after_confirmed_segment = True
+                    break
                 if _has_newer_batch_now():
                     logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                     _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="生成图片发送前出现更新批次")
                     return
                 send_result = await _send_reply(message_segment_cls.image(f"base64://{image_b64}"))
-                confirmed_image_parts += int(is_confirmed_send_result(send_result))
+                result_status = str(getattr(send_result, "status", "") or "").strip().lower()
+                if result_status == "unknown":
+                    delivery_unknown = True
+                    reply_commit_state["delivery_unknown"] = True
+                    break
+                image_confirmed = is_confirmed_send_result(send_result)
+                confirmed_image_parts += int(image_confirmed)
+                if not image_confirmed:
+                    delivery_partial = bool(
+                        reply_commit_state.get("reply_delivery_confirmed", False)
+                    )
+                    break
                 if not sent_message_id:
                     sent_message_id = _message_id_from_send_result(send_result)
 
-    if self_continuity_enabled and self_continuity_delivered_texts:
+    if confirmed_text_segments:
         assistant_history_text = history_text_for_qq_expression(
-            " ".join(self_continuity_delivered_texts)
+            " ".join(confirmed_text_segments)
         )
+    elif delivery_partial or delivery_unknown:
+        assistant_history_text = ""
     if not delivery_partial and not delivery_unknown:
         mark_reply_delivery_complete(reply_commit_state)
     if user_policy_gate is not None:
@@ -3514,36 +3714,37 @@ async def process_yaml_response_logic(
         ],
         image_confirmed=confirmed_image_parts > 0,
     )
-    append_session_message(
-        session_id,
-        "assistant",
-        confirmed_history_text,
-        legacy_session_id=legacy_session_id,
-        scene="reply",
-        sticker_sent=", ".join(delivered_sticker_names) if delivered_sticker_names else None,
-        speaker=str(getattr(bot, "self_id", "") or "bot"),
-        user_id=str(getattr(bot, "self_id", "") or "") or None,
-        source_kind="bot_reply",
-        group_id=None if is_private_session else group_id,
-        message_id=sent_message_id or None,
-        reply_to_msg_id=str(getattr(event, "message_id", "") or "") or None,
-        reply_to_user_id=None if is_private_session else user_id,
-        mentioned_ids=[str(at_target)] if at_target else [],
-        is_at_bot=False,
-    )
-    if not is_private_session and record_group_msg is not None:
-        record_group_msg(
-            group_id,
-            str(getattr(bot, "self_id", "") or "bot"),
+    if confirmed_history_text:
+        append_session_message(
+            session_id,
+            "assistant",
             confirmed_history_text,
-            is_bot=True,
-            user_id=str(getattr(bot, "self_id", "") or ""),
+            legacy_session_id=legacy_session_id,
+            scene="reply",
+            sticker_sent=", ".join(delivered_sticker_names) if delivered_sticker_names else None,
+            speaker=str(getattr(bot, "self_id", "") or "bot"),
+            user_id=str(getattr(bot, "self_id", "") or "") or None,
+            source_kind="bot_reply",
+            group_id=None if is_private_session else group_id,
             message_id=sent_message_id or None,
             reply_to_msg_id=str(getattr(event, "message_id", "") or "") or None,
-            reply_to_user_id=user_id,
+            reply_to_user_id=None if is_private_session else user_id,
             mentioned_ids=[str(at_target)] if at_target else [],
-            source_kind="bot_reply",
+            is_at_bot=False,
         )
+        if not is_private_session and record_group_msg is not None:
+            record_group_msg(
+                group_id,
+                str(getattr(bot, "self_id", "") or "bot"),
+                confirmed_history_text,
+                is_bot=True,
+                user_id=str(getattr(bot, "self_id", "") or ""),
+                message_id=sent_message_id or None,
+                reply_to_msg_id=str(getattr(event, "message_id", "") or "") or None,
+                reply_to_user_id=user_id,
+                mentioned_ids=[str(at_target)] if at_target else [],
+                source_kind="bot_reply",
+            )
     release_reply_commit(reply_commit_state)
     delivery_elapsed_ms = int((time.monotonic() - delivery_started_at) * 1000)
     mark_reply_phase(reply_commit_state, "post_send_bookkeeping")
@@ -3561,8 +3762,12 @@ async def process_yaml_response_logic(
     _trace_stage(
         key="outgoing_message",
         label="发送消息",
-        status="ok",
-        detail=str(assistant_history_text or "")[:500],
+        status=(
+            "ok"
+            if confirmed_history_text and not delivery_partial and not delivery_unknown
+            else "warn"
+        ),
+        detail=str(confirmed_history_text or "")[:500],
         elapsed_ms=0,
     )
     for sticker_name in delivered_sticker_names:
@@ -3570,18 +3775,19 @@ async def process_yaml_response_logic(
             await record_sticker_sent(sticker_name)
         except Exception as e:
             logger.debug(f"[sticker] YAML sent feedback update failed: {e}")
-    try:
-        await update_emotion_state_after_turn(
-            data_dir,
-            user_id=user_id,
-            group_id="" if is_private_session else group_id,
-            semantic_frame=semantic_frame,
-            assistant_text=assistant_history_text,
-            is_private=is_private_session,
-            plugin_config=plugin_config,
-        )
-    except Exception as e:
-        logger.debug(f"[emotion] YAML update after reply failed: {e}")
+    if confirmed_history_text:
+        try:
+            await update_emotion_state_after_turn(
+                data_dir,
+                user_id=user_id,
+                group_id="" if is_private_session else group_id,
+                semantic_frame=semantic_frame,
+                assistant_text=assistant_history_text,
+                is_private=is_private_session,
+                plugin_config=plugin_config,
+            )
+        except Exception as e:
+            logger.debug(f"[emotion] YAML update after reply failed: {e}")
     schedule_inner_state_update_after_reply(
         inner_state_updater=inner_state_updater,
         logger=logger,
@@ -3592,7 +3798,7 @@ async def process_yaml_response_logic(
         is_private=is_private_session,
         semantic_frame=semantic_frame,
     )
-    if memory_curator is not None:
+    if confirmed_history_text and memory_curator is not None:
         memory_group_id = "" if is_private_session else group_id
         if hasattr(memory_curator, "schedule_turn_capture"):
             memory_curator.schedule_turn_capture(
@@ -3611,12 +3817,13 @@ async def process_yaml_response_logic(
                 group_id=memory_group_id,
                 topic_tags=[group_id] if not is_private_session else [],
             )
-    record_counter(
-        "yaml_reply.success_total",
-        scene="private" if is_private_session else "group",
-        via="tts" if sent_as_tts else "text",
-        sticker=bool(stickers_sent),
-    )
+    if confirmed_history_text:
+        record_counter(
+            "yaml_reply.success_total",
+            scene="private" if is_private_session else "group",
+            via="tts" if sent_as_tts else "text",
+            sticker=bool(stickers_sent),
+        )
     bookkeeping_elapsed_ms = int((time.monotonic() - bookkeeping_started_at) * 1000)
     mark_reply_phase(reply_commit_state, "reply_complete")
     record_timing(
@@ -3632,7 +3839,7 @@ async def process_yaml_response_logic(
     )
     completion = resolve_sent_reply_completion(
         state=reply_commit_state,
-        visible_text=assistant_history_text,
+        visible_text=confirmed_history_text,
         delivery_partial=delivery_partial,
         delivery_unknown=delivery_unknown,
     )
@@ -3641,7 +3848,7 @@ async def process_yaml_response_logic(
         label="YAML 回复完成",
         status="ok" if completion["outcome"] == "ok" else "warn",
         detail=(
-            f"chars={len(assistant_history_text)} tts={bool(sent_as_tts)} "
+            f"chars={len(confirmed_history_text)} tts={bool(sent_as_tts)} "
             f"sticker={bool(stickers_sent)} tool_execution={completion['tool_execution']} "
             f"evidence_delivery={completion['evidence_delivery']} "
             f"media_delivery={completion['media_delivery']} "
@@ -3652,7 +3859,7 @@ async def process_yaml_response_logic(
         outcome=completion["outcome"],
         diagnosis_code=completion["diagnosis_code"],
         detail={
-            "reply_chars": len(assistant_history_text),
+            "reply_chars": len(confirmed_history_text),
             "tts": bool(sent_as_tts),
             "sticker": bool(stickers_sent),
             "delivery_partial": delivery_partial,
@@ -3671,7 +3878,7 @@ async def process_yaml_response_logic(
             "grounded_anchor_count": int(reply_commit_state.get("agent_grounded_anchor_count", 0) or 0),
             "recovery_method": str(reply_commit_state.get("agent_media_recovery_method", "not_needed") or "not_needed"),
             "incoming_text": str(raw_message_text or history_last_text or trigger_reason or "")[:500],
-            "outgoing_text": str(assistant_history_text or "")[:500],
+            "outgoing_text": str(confirmed_history_text or "")[:500],
         },
     )
 

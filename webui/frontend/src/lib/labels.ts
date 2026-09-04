@@ -31,11 +31,38 @@ export function traceOutcomeLabel(outcome: TraceOutcome): string {
   const labels: Record<TraceOutcome, string> = {
     ok: "已完成",
     silent: "保持沉默",
+    no_reply: "未发送可见回复",
+    finished: "流程提前结束",
     failed: "失败",
     unknown: "结果未知",
     partial: "部分完成",
   };
   return labels[outcome];
+}
+
+export function traceDeliveryStatusLabel(value: string): string {
+  const labels: Record<string, string> = {
+    confirmed: "已确认送达",
+    unconfirmed: "发送结果未知，请勿直接重试",
+    partial: "部分送达",
+    not_started: "尚未开始发送",
+    ok: "已完成",
+    no_reply: "未发送可见回复",
+    failed: "发送失败",
+    unknown: "结果未知",
+  };
+  return labels[value] ?? `未知状态（${value || "unknown"}）`;
+}
+
+export function traceHistoryStatusLabel(value: string): string {
+  const labels: Record<string, string> = {
+    committed: "已提交",
+    confirmed: "已确认提交",
+    skipped: "未提交",
+    partial: "部分提交",
+    unknown: "状态未知",
+  };
+  return labels[value] ?? `未知状态（${value || "unknown"}）`;
 }
 
 export function recoveryStatusLabel(status: RecoveryStatus): string {

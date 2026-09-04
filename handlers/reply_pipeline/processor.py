@@ -126,7 +126,12 @@ from ...core.response_review import (
 from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.reply_text_policy import normalize_visible_reply_text
 from ...core.reply_punctuation import apply_terminal_punctuation_policy
+from ...core.interrupted_reply import (
+    finalize_cooperative_reply_interruption,
+    render_interrupted_reply_system_contract,
+)
 from ...core.reply_completion_contract import (
+    reset_agent_result_completion_state,
     resolve_action_only_completion,
     resolve_sent_reply_completion,
 )
@@ -621,6 +626,14 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
             session_type = "group" if hasattr(event, "group_id") else "private"
             group_id = str(getattr(event, "group_id", "") or "")
             user_id = str(getattr(event, "user_id", "") or "")
+            try:
+                trace_incoming_text = str(event.get_plaintext() or "")[:2000]
+            except Exception:
+                trace_incoming_text = str(
+                    state.get("raw_message_text")
+                    or getattr(event, "raw_message", "")
+                    or ""
+                )[:2000]
             trace_id = trace_mod.start_trace(
                 trace_id=trace_id,
                 session_type=session_type,
@@ -629,6 +642,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                 detail={
                     "source": "reply_pipeline",
                     "message_id": str(getattr(event, "message_id", "") or ""),
+                    "incoming_text": trace_incoming_text,
                     "policy_disposition": policy_disposition,
                     "policy_reason_code": policy_reason_code,
                     "attention_tier": (state.get("attention_decision") or {}).get("tier")
@@ -2376,6 +2390,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 "不要写成完整段落或书面文。"
             )
 
+    interrupted_reply_contract = render_interrupted_reply_system_contract(state)
+    if interrupted_reply_contract:
+        system_prompt += f"\n\n{interrupted_reply_contract}"
+
     available_stickers: List[str] = []
     group_config = persona.get_group_config(str(group_id))
     if group_config.get("sticker_enabled", True):
@@ -2814,6 +2832,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             runtime.logger.warning("拟人插件：强交互 Agent 返回静默，改走基础模型恢复。")
             reply_content = ""
             used_agent = False
+            reset_agent_result_completion_state(
+                state=state,
+                default_citation_mode=str(
+                    getattr(turn_plan, "citation_mode", "none") or "none"
+                ),
+            )
         if used_agent and reply_content in ("[NO_REPLY]", "<NO_REPLY>"):
             runtime.logger.info("拟人插件：Agent 返回 NO_REPLY，保持沉默。")
             try:
@@ -2934,6 +2958,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 original_text=reply_content,
                 persona_system=system_prompt,
                 output_mode=str(getattr(semantic_frame, "output_mode", "chat_short") or "chat_short"),
+                reply_shape=str(getattr(semantic_frame, "reply_shape", "auto") or "auto"),
                 avoid_questions=not is_private_session,
                 allow_rhetorical_banter=bool(
                     is_direct_mention
@@ -3436,10 +3461,13 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         delivery_unknown = False
         self_continuity_expected_revision = self_continuity_snapshot.revision
         self_continuity_delivered_texts: list[str] = []
+        confirmed_text_segments: list[str] = []
+        interrupted_after_confirmed_segment = False
 
         def _mark_tts_delivery_unknown() -> None:
             nonlocal delivery_unknown
             delivery_unknown = True
+            state["delivery_unknown"] = True
         tts_service = getattr(runtime, "tts_service", None)
         stale_reason = _stale_reply_abort_reason(state)
         if stale_reason:
@@ -3720,6 +3748,34 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 for i, seg in enumerate(segments):
                     if not seg.strip():
                         continue
+                    interruption = finalize_cooperative_reply_interruption(
+                        state,
+                        segments[i:],
+                        delivery_unknown=delivery_unknown,
+                    )
+                    if interruption is not None:
+                        interrupted_after_confirmed_segment = True
+                        runtime.logger.info(
+                            "拟人插件：已在确认发送后的下一段边界结束旧回复，"
+                            f"draft_count={interruption['draft_count']} "
+                            f"draft_chars={interruption['draft_chars']}"
+                        )
+                        try:
+                            from ...core import reply_turn_trace
+
+                            reply_turn_trace.record_stage(
+                                key="cooperative_interruption",
+                                label="新消息协作打断",
+                                status="info",
+                                detail=(
+                                    "terminal_reason=interrupted_after_confirmed_segment "
+                                    f"draft_count={interruption['draft_count']} "
+                                    f"draft_chars={interruption['draft_chars']}"
+                                ),
+                            )
+                        except Exception:
+                            pass
+                        break
                     stale_reason = _stale_reply_abort_reason(state)
                     if stale_reason:
                         runtime.logger.info(f"拟人插件：{stale_reason}")
@@ -3810,14 +3866,36 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         except Exception:
                             pass
                         if not continuity_delivery.sent:
-                            if self_continuity_delivered_texts:
+                            if confirmed_text_segments:
                                 delivery_partial = True
                                 break
                             return
                         send_result = continuity_delivery.send_result
+                        if continuity_delivery.status == "unknown":
+                            delivery_unknown = True
+                            state["delivery_unknown"] = True
+                            break
+                        if continuity_delivery.status != "sent":
+                            if confirmed_text_segments:
+                                delivery_partial = True
+                                break
+                            return
                         self_continuity_delivered_texts.append(continuity_delivery.text)
+                        confirmed_text_segments.append(continuity_delivery.text)
                     else:
                         send_result = await _send_text_candidate(seg)
+                        result_status = str(getattr(send_result, "status", "") or "").strip().lower()
+                        if result_status == "unknown":
+                            delivery_unknown = True
+                            state["delivery_unknown"] = True
+                            break
+                        if is_confirmed_send_result(send_result):
+                            confirmed_text_segments.append(seg)
+                        elif confirmed_text_segments:
+                            delivery_partial = True
+                            break
+                        else:
+                            return
                     if state.get("peer_bot_raw_command_blocked"):
                         return
                     if not sent_message_id:
@@ -3832,44 +3910,124 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         else:
                             await asyncio.sleep(random.uniform(0.8, 1.6))
 
-                if self_continuity_enabled and self_continuity_delivered_texts:
+                if confirmed_text_segments:
                     final_visible_reply_text = _build_final_visible_reply_text(
-                        " ".join(self_continuity_delivered_texts),
+                        history_text_for_qq_expression(" ".join(confirmed_text_segments)),
                         max_chars=max_chars,
                         sanitize_history_text=session.sanitize_history_text,
                     )
+                elif delivery_partial or delivery_unknown:
+                    final_visible_reply_text = ""
 
                 if state.get("peer_bot_raw_command_blocked"):
                     return
 
-                if typo_correction and not _stale_reply_abort_reason(state):
+                if (
+                    typo_correction
+                    and not interrupted_after_confirmed_segment
+                    and not _stale_reply_abort_reason(state)
+                ):
                     await asyncio.sleep(random.uniform(1.0, 2.0))
+                    interruption = finalize_cooperative_reply_interruption(
+                        state,
+                        (),
+                        delivery_unknown=delivery_unknown,
+                    )
+                    if interruption is not None:
+                        interrupted_after_confirmed_segment = True
                     try:
-                        await _send_reply(typo_correction)
+                        if not interrupted_after_confirmed_segment:
+                            typo_result = await _send_reply(typo_correction)
+                            if str(getattr(typo_result, "status", "") or "").strip().lower() == "unknown":
+                                delivery_unknown = True
+                                state["delivery_unknown"] = True
                     except Exception as exc:
                         runtime.logger.debug(f"[humanize] 修正消息发送失败: {exc}")
 
+            # A voice transport with an unknown receipt is never a confirmed
+            # visible/history projection.  Do not retain the pre-send text
+            # candidate merely because the TTS branch bypasses text segments.
+            if sent_as_tts and (
+                delivery_unknown
+                or not bool(state.get("reply_delivery_confirmed", False))
+            ):
+                final_visible_reply_text = ""
+
         confirmed_image_parts = 0
         confirmed_sticker_parts = 0
-        for image_b64 in image_b64_payloads:
+        if not interrupted_after_confirmed_segment:
+            interruption = finalize_cooperative_reply_interruption(
+                state,
+                (),
+                delivery_unknown=delivery_unknown,
+            )
+            if interruption is not None:
+                interrupted_after_confirmed_segment = True
+        for image_b64 in (
+            ()
+            if interrupted_after_confirmed_segment or delivery_partial or delivery_unknown
+            else image_b64_payloads
+        ):
+            interruption = finalize_cooperative_reply_interruption(
+                state,
+                (),
+                delivery_unknown=delivery_unknown,
+            )
+            if interruption is not None:
+                interrupted_after_confirmed_segment = True
+                break
             stale_reason = _stale_reply_abort_reason(state)
             if stale_reason:
                 runtime.logger.info(f"拟人插件：{stale_reason}")
                 return
             send_result = await _send_reply(runtime.message_segment_cls.image(f"base64://{image_b64}"))
-            confirmed_image_parts += int(is_confirmed_send_result(send_result))
+            result_status = str(getattr(send_result, "status", "") or "").strip().lower()
+            if result_status == "unknown":
+                delivery_unknown = True
+                state["delivery_unknown"] = True
+                break
+            image_confirmed = is_confirmed_send_result(send_result)
+            confirmed_image_parts += int(image_confirmed)
+            if not image_confirmed:
+                delivery_partial = bool(state.get("reply_delivery_confirmed", False))
+                break
             if not sent_message_id:
                 sent_message_id = _message_id_from_send_result(send_result)
             if sticker_segment:
                 await asyncio.sleep(random.uniform(0.8, 1.6))
 
-        if sticker_segment:
+        if (
+            sticker_segment
+            and not interrupted_after_confirmed_segment
+            and not delivery_partial
+            and not delivery_unknown
+        ):
+            interruption = finalize_cooperative_reply_interruption(
+                state,
+                (),
+                delivery_unknown=delivery_unknown,
+            )
+            if interruption is not None:
+                interrupted_after_confirmed_segment = True
+        if (
+            sticker_segment
+            and not interrupted_after_confirmed_segment
+            and not delivery_partial
+            and not delivery_unknown
+        ):
             stale_reason = _stale_reply_abort_reason(state)
             if stale_reason:
                 runtime.logger.info(f"拟人插件：{stale_reason}")
                 return
             send_result = await _send_reply(sticker_segment)
-            confirmed_sticker_parts += int(is_confirmed_send_result(send_result))
+            result_status = str(getattr(send_result, "status", "") or "").strip().lower()
+            if result_status == "unknown":
+                delivery_unknown = True
+                state["delivery_unknown"] = True
+            sticker_confirmed = is_confirmed_send_result(send_result)
+            confirmed_sticker_parts += int(sticker_confirmed)
+            if not sticker_confirmed and result_status != "unknown":
+                delivery_partial = bool(state.get("reply_delivery_confirmed", False))
             if not sent_message_id:
                 sent_message_id = _message_id_from_send_result(send_result)
             if sticker_name and is_confirmed_send_result(send_result):
@@ -3916,25 +4074,26 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     "is_at_bot": False,
                 }
             )
-        session.append_session_message(
-            session_id,
-            "assistant",
-            confirmed_history_text,
-            legacy_session_id=legacy_session_id,
-            **assistant_metadata,
-        )
-        if isinstance(event, types.group_message_event_cls):
-            runtime.record_group_msg(
-                str(event.group_id),
-                bot_nickname,
+        if confirmed_history_text:
+            session.append_session_message(
+                session_id,
+                "assistant",
                 confirmed_history_text,
-                is_bot=True,
-                user_id=bot_self_id,
-                message_id=sent_message_id or None,
-                reply_to_msg_id=incoming_relation_metadata.get("message_id"),
-                reply_to_user_id=user_id,
-                source_kind="bot_reply",
+                legacy_session_id=legacy_session_id,
+                **assistant_metadata,
             )
+            if isinstance(event, types.group_message_event_cls):
+                runtime.record_group_msg(
+                    str(event.group_id),
+                    bot_nickname,
+                    confirmed_history_text,
+                    is_bot=True,
+                    user_id=bot_self_id,
+                    message_id=sent_message_id or None,
+                    reply_to_msg_id=incoming_relation_metadata.get("message_id"),
+                    reply_to_user_id=user_id,
+                    source_kind="bot_reply",
+                )
         release_reply_commit(state)
         delivery_elapsed_ms = int((time.monotonic() - delivery_started_at) * 1000)
         mark_reply_phase(state, "post_send_bookkeeping")
@@ -3955,23 +4114,28 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             reply_turn_trace.record_stage(
                 key="outgoing_message",
                 label="发送消息",
-                status="ok",
-                detail=str(final_visible_reply_text or "")[:500],
+                status=(
+                    "ok"
+                    if confirmed_history_text and not delivery_partial and not delivery_unknown
+                    else "warn"
+                ),
+                detail=str(confirmed_history_text or "")[:500],
                 elapsed_ms=0,
             )
         except Exception:
             pass
         if sticker_name and confirmed_sticker_parts > 0:
             await record_sticker_sent(sticker_name)
-        await persist_reply_emotion_state(
-            runtime=runtime,
-            data_dir=data_dir,
-            user_id=user_id,
-            group_id=str(group_id),
-            semantic_frame=semantic_frame,
-            assistant_text=final_visible_reply_text,
-            is_private=is_private_session,
-        )
+        if confirmed_history_text:
+            await persist_reply_emotion_state(
+                runtime=runtime,
+                data_dir=data_dir,
+                user_id=user_id,
+                group_id=str(group_id),
+                semantic_frame=semantic_frame,
+                assistant_text=final_visible_reply_text,
+                is_private=is_private_session,
+            )
         schedule_inner_state_update_after_reply(
             runtime=runtime,
             user_text=raw_message_text or message_text or message_content,
@@ -3983,7 +4147,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             task_exc_logger=_task_exc_logger,
         )
 
-        if not is_private_session and bool(getattr(runtime.plugin_config, "personification_relation_evolution_enabled", False)):
+        if (
+            confirmed_history_text
+            and not is_private_session
+            and bool(
+                getattr(
+                    runtime.plugin_config,
+                    "personification_relation_evolution_enabled",
+                    False,
+                )
+            )
+        ):
             async def _spawn_relation_evolution() -> None:
                 try:
                     from ...core.evolve_group_relations import evolve_group_relations, list_group_relations
@@ -4007,7 +4181,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     pass
             asyncio.create_task(_spawn_relation_evolution())
 
-        if getattr(runtime, "memory_curator", None) is not None:
+        if confirmed_history_text and getattr(runtime, "memory_curator", None) is not None:
             memory_group_id = "" if is_private_session else str(group_id)
             if hasattr(runtime.memory_curator, "schedule_turn_capture"):
                 runtime.memory_curator.schedule_turn_capture(
@@ -4039,12 +4213,13 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 )
             except Exception as e:
                 runtime.logger.debug(f"[reply_processor] update_group_chat_active failed: {e}")
-        record_counter(
-            "reply_processor.success_total",
-            scene="private" if is_private_session else "group",
-            via="tts" if sent_as_tts else "text",
-            sticker=bool(sticker_name),
-        )
+        if confirmed_history_text:
+            record_counter(
+                "reply_processor.success_total",
+                scene="private" if is_private_session else "group",
+                via="tts" if sent_as_tts else "text",
+                sticker=bool(sticker_name),
+            )
         bookkeeping_elapsed_ms = int((time.monotonic() - bookkeeping_started_at) * 1000)
         mark_reply_phase(state, "reply_complete")
         record_timing(
@@ -4063,7 +4238,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             )
             completion = resolve_sent_reply_completion(
                 state=state,
-                visible_text=final_visible_reply_text,
+                visible_text=confirmed_history_text,
                 delivery_partial=delivery_partial,
                 delivery_unknown=delivery_unknown,
             )
@@ -4072,7 +4247,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 label="回复完成",
                 status="ok" if completion["outcome"] == "ok" else "warn",
                 detail=(
-                    f"chars={len(final_visible_reply_text)} tts={bool(sent_as_tts)} "
+                    f"chars={len(confirmed_history_text)} tts={bool(sent_as_tts)} "
                     f"sticker={bool(sticker_name)} tool_execution={completion['tool_execution']} "
                     f"evidence_delivery={completion['evidence_delivery']} "
                     f"media_delivery={completion['media_delivery']} "
@@ -4083,11 +4258,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 outcome=completion["outcome"],
                 diagnosis_code=completion["diagnosis_code"],
                 detail={
-                    "reply_chars": len(final_visible_reply_text),
+                    "reply_chars": len(confirmed_history_text),
                     "tts": bool(sent_as_tts),
                     "sticker": bool(sticker_name),
                     "delivery_partial": delivery_partial,
                     "delivery_unknown": delivery_unknown,
+                    "terminal_reason": str(state.get("terminal_reason", "") or ""),
                     "tool_execution": completion["tool_execution"],
                     "peer_bot_execution": completion["peer_bot_execution"],
                     "evidence_delivery": completion["evidence_delivery"],
@@ -4102,7 +4278,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     "grounded_anchor_count": int(state.get("agent_grounded_anchor_count", 0) or 0),
                     "recovery_method": str(state.get("agent_media_recovery_method", "not_needed") or "not_needed"),
                     "incoming_text": str(raw_message_text or message_text or message_content or "")[:500],
-                    "outgoing_text": str(final_visible_reply_text or "")[:500],
+                    "outgoing_text": str(confirmed_history_text or "")[:500],
                 },
             )
         except Exception:

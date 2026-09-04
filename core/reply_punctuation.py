@@ -37,6 +37,11 @@ def apply_terminal_punctuation_policy(text: Any, *, policy: Any = "strip_common"
     terminal = value[tail - 1]
     if terminal in _CLOSING_TERMINALS or terminal not in _STRIPPABLE_TERMINALS:
         return value
+    # Preserve an intentional punctuation-only micro reply.  The policy still
+    # strips a common terminal from ordinary text bubbles exactly as before.
+    visible = value[:tail].strip()
+    if visible and all(char in "，,、。！？!?；;…~～" for char in visible):
+        return value
     return value[: tail - 1] + value[tail:]
 
 
